@@ -4,12 +4,12 @@
 use aya_ebpf::{
     EbpfContext,
     bindings::{__sk_buff, TC_ACT_OK, TC_ACT_SHOT},
+    btf_maps::{Array, PerCpuArray},
     cty::c_void,
     helpers::{
         bpf_csum_diff, bpf_get_prandom_u32, bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop,
     },
     macros::{btf_map, classifier},
-    btf_maps::{Array, PerCpuArray},
     programs::TcContext,
 };
 use ebpf_common::scrub::{
@@ -20,12 +20,10 @@ use ebpf_common::scrub::{
     SCRUB_METRIC_TTL_FIXED, ScrubFlags,
 };
 use ebpf_helpers::increment_metric;
-use ebpf_helpers::net::{
-    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP,
-    VLAN_HDR_LEN, VlanHdr,
-};
+use ebpf_helpers::net::{IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP};
+use ebpf_helpers::pktmeta;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
-use network_types::{eth::EthHdr, ip::Ipv4Hdr};
+use network_types::ip::Ipv4Hdr;
 
 // ── Constants ───────────────────────────────────────────────────────
 // Network constants and header structs imported from ebpf_helpers.
@@ -105,25 +103,13 @@ fn try_tc_scrub(ctx: &mut TcContext) -> Result<i32, ()> {
         _ => return Ok(TC_ACT_OK),
     };
 
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
-    let mut l3_offset = EthHdr::LEN;
+    // The parse the chain already holds, or this program's own if it is
+    // first. Scrubbing rewrites fields in place and moves no header, so
+    // what it leaves in the control block stays true.
+    let meta = pktmeta::resolve(ctx)?;
+    let l3_offset = meta.l3();
 
-    // 802.1Q VLAN tag
-    if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
-        let vhdr: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
-        ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
-        l3_offset += VLAN_HDR_LEN;
-
-        // QinQ: parse second VLAN tag if present
-        if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
-            let vhdr2: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
-            ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
-            l3_offset += VLAN_HDR_LEN;
-        }
-    }
-
-    if ether_type == ETH_P_IP {
+    if meta.is_ipv4() {
         // Fragment drop: refuse any IPv4 fragment (MF set or non-zero offset)
         // before normalization. Reassembly evasion relies on fragments, so a
         // scrubbing gateway can drop them outright when configured to.
@@ -138,7 +124,7 @@ fn try_tc_scrub(ctx: &mut TcContext) -> Result<i32, ()> {
         }
         scrub_ipv4(ctx, &cfg, l3_offset)?;
         increment_metric(SCRUB_METRIC_PACKETS);
-    } else if ether_type == ETH_P_IPV6 {
+    } else if meta.is_ipv6() {
         scrub_ipv6(ctx, &cfg, l3_offset)?;
         increment_metric(SCRUB_METRIC_PACKETS);
     }

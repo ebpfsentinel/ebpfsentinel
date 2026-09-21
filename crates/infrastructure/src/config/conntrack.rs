@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::common::ConfigError;
+
 /// TCP connection tracking settings (eBPF-side).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnTrackSectionConfig {
@@ -41,6 +43,56 @@ pub struct ConnTrackSectionConfig {
     /// seconds (0 = until the agent restarts).
     #[serde(default = "default_overload_ttl_secs")]
     pub overload_ttl_secs: u32,
+
+    /// Capacity of the kernel connection table the `DDoS` guard keeps, in
+    /// connections tracked at once. Per CPU, least recently seen connection
+    /// evicted when full. Applies at the next agent start. Read only under
+    /// `ddos.connection_tracking`: the top-level `conntrack` section shares
+    /// this struct but keeps no table of its own, so it refuses the key.
+    #[serde(default)]
+    pub max_entries: Option<u32>,
+}
+
+/// Smallest and largest `ddos.connection_tracking.max_entries`.
+pub const DDOS_CONNTRACK_MIN_ENTRIES: u32 = 1_024;
+pub const DDOS_CONNTRACK_MAX_ENTRIES: u32 = 4_194_304;
+/// The connection table's capacity when the configuration names none.
+pub const DDOS_CONNTRACK_DEFAULT_ENTRIES: u32 = 65_536;
+
+impl ConnTrackSectionConfig {
+    /// The capacity the `DDoS` connection table is created with.
+    #[must_use]
+    pub fn capacity(&self) -> u32 {
+        self.max_entries.unwrap_or(DDOS_CONNTRACK_DEFAULT_ENTRIES)
+    }
+
+    /// Bounds on an explicit connection table capacity.
+    pub(super) fn validate_capacity(&self) -> Result<(), ConfigError> {
+        if let Some(n) = self.max_entries
+            && !(DDOS_CONNTRACK_MIN_ENTRIES..=DDOS_CONNTRACK_MAX_ENTRIES).contains(&n)
+        {
+            return Err(ConfigError::Validation {
+                field: "ddos.connection_tracking.max_entries".to_string(),
+                message: format!(
+                    "must be between {DDOS_CONNTRACK_MIN_ENTRIES} and {DDOS_CONNTRACK_MAX_ENTRIES}"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// The top-level `conntrack` section sizes no table, so a capacity
+    /// written there is a key that would be read by nothing.
+    pub(super) fn refuse_capacity(&self) -> Result<(), ConfigError> {
+        if self.max_entries.is_some() {
+            return Err(ConfigError::Validation {
+                field: "conntrack.max_entries".to_string(),
+                message: "the connection table is sized by ddos.connection_tracking.max_entries"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 fn default_half_open_threshold() -> u32 {
@@ -75,6 +127,7 @@ impl Default for ConnTrackSectionConfig {
             max_src_conn_rate: 0,
             conn_rate_window_secs: default_conn_rate_window_secs(),
             overload_ttl_secs: default_overload_ttl_secs(),
+            max_entries: None,
         }
     }
 }

@@ -168,8 +168,11 @@ pub struct LeakyBucketValue {
     pub last_update_ns: u64,
 }
 
-/// Maximum bucket map entries (single consolidated map replacing 4 per-algorithm maps).
-pub const MAX_RL_BUCKET_ENTRIES: u32 = 262_144;
+/// Bucket map capacity the object is declared with (single consolidated map
+/// replacing 4 per-algorithm maps). The loader re-sizes it from
+/// `ratelimit.max_buckets` at every agent start; the map is per CPU, so each
+/// slot is paid once per online CPU.
+pub const MAX_RL_BUCKET_ENTRIES: u32 = 65_536;
 
 /// Consolidated bucket union for all rate-limit algorithms.
 ///

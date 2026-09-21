@@ -4549,8 +4549,11 @@ pub fn try_load_tc_nat(
     let mut egress_loader =
         EbpfLoader::load_with_pin_path(&egress_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
 
+    // Egress hook: the SNAT rewrite has to see the packet after routing, on
+    // the device it leaves by. Attached on ingress it only ever met the
+    // forwarded half of a flow and never a locally originated one.
     for iface in &config.agent.interfaces {
-        attach_tc_auto(
+        attach_tc_egress_auto(
             &mut egress_loader,
             "tc_nat_egress",
             iface,

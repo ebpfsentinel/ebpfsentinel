@@ -18,8 +18,13 @@ pub const THREAT_TYPE_C2: u8 = 2;
 pub const THREAT_TYPE_SCANNER: u8 = 3;
 pub const THREAT_TYPE_SPAM: u8 = 4;
 
-/// Max entries for the THREATINTEL_IOCS HashMap (NFR22: 1M+ IOCs).
-pub const THREATINTEL_MAX_ENTRIES: u32 = 1_048_576;
+/// Capacity the IOC tables and their bloom filters are declared with.
+///
+/// This is the object's default only: the loader sizes the four tables from
+/// `threatintel.max_entries`, or from the enabled feeds' `max_iocs` when it is
+/// absent, at every agent start (`adapters::ebpf::map_sizing`). A million
+/// slots here cost 168 MB of locked memory on an agent with no feed at all.
+pub const THREATINTEL_MAX_ENTRIES: u32 = 65_536;
 
 /// Metric indices for THREATINTEL_METRICS PerCpuArray.
 pub const THREATINTEL_METRIC_MATCHED: u32 = 0;
@@ -135,8 +140,8 @@ mod tests {
 
     #[test]
     #[allow(clippy::assertions_on_constants)]
-    fn max_entries_is_one_million() {
-        assert!(THREATINTEL_MAX_ENTRIES >= 1_000_000);
+    fn default_capacity_is_a_power_of_two() {
+        assert!(THREATINTEL_MAX_ENTRIES.is_power_of_two());
     }
 
     #[test]

@@ -9,6 +9,15 @@ pub const DDOS_ACTION_SYNCOOKIE: u8 = 10;
 pub const DDOS_ACTION_DROP: u8 = 11;
 pub const DDOS_ACTION_PASS: u8 = 12;
 
+/// Capacity each per-source guard table (SYN rate, ICMP rate, amplification
+/// rate, half-open counts, RST/FIN/ACK flood counters) is declared with. The
+/// loader re-sizes the five from `ddos.max_tracked_sources` at every agent
+/// start; each is per CPU.
+pub const MAX_DDOS_TRACKED_SOURCES: u32 = 16_384;
+/// Capacity the DDoS connection table is declared with; re-sized from
+/// `ddos.connection_tracking.max_entries` at every agent start, per CPU.
+pub const MAX_DDOS_CONN_TABLE_ENTRIES: u32 = 65_536;
+
 // ── SYN Protection Config ────────────────────────────────────────
 
 /// Configuration flags for DDoS SYN protection.

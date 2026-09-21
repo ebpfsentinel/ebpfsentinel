@@ -35,6 +35,21 @@ pub struct RateLimitSectionConfig {
     /// Each tier maps country codes to a rate limit config loaded into eBPF LPM Trie maps.
     #[serde(default)]
     pub country_tiers: Vec<CountryTierConfigYaml>,
+
+    /// Capacity of the kernel bucket table, in sources tracked at once. The
+    /// table is per CPU, so it costs this many slots on every online CPU and
+    /// evicts the least recently seen source when full. Applies at the next
+    /// agent start.
+    #[serde(default = "default_ratelimit_max_buckets")]
+    pub max_buckets: u32,
+}
+
+/// Smallest and largest `ratelimit.max_buckets`.
+pub const RATELIMIT_MIN_BUCKETS: u32 = 1_024;
+pub const RATELIMIT_MAX_BUCKETS: u32 = 4_194_304;
+
+fn default_ratelimit_max_buckets() -> u32 {
+    65_536
 }
 
 fn default_ratelimit_rate() -> u64 {
@@ -56,6 +71,7 @@ impl Default for RateLimitSectionConfig {
             default_algorithm: default_ratelimit_algorithm(),
             rules: Vec::new(),
             country_tiers: Vec::new(),
+            max_buckets: default_ratelimit_max_buckets(),
         }
     }
 }
@@ -65,6 +81,19 @@ impl RateLimitSectionConfig {
     ///
     /// The config map holds one entry per source address, so a second rule on
     /// the same host would overwrite the first with nothing to show for it.
+    /// Bounds on the bucket table capacity.
+    pub(super) fn validate_capacity(&self) -> Result<(), ConfigError> {
+        if !(RATELIMIT_MIN_BUCKETS..=RATELIMIT_MAX_BUCKETS).contains(&self.max_buckets) {
+            return Err(ConfigError::Validation {
+                field: "ratelimit.max_buckets".to_string(),
+                message: format!(
+                    "must be between {RATELIMIT_MIN_BUCKETS} and {RATELIMIT_MAX_BUCKETS}"
+                ),
+            });
+        }
+        Ok(())
+    }
+
     pub(super) fn validate_rules(&self) -> Result<(), ConfigError> {
         let mut seen: HashMap<u32, &str> = HashMap::new();
 
@@ -391,6 +420,19 @@ mod tests {
         assert_eq!(cfg.default_algorithm, "token_bucket");
         assert!(cfg.rules.is_empty());
         assert!(cfg.country_tiers.is_empty());
+        assert_eq!(cfg.max_buckets, 65_536);
+    }
+
+    #[test]
+    fn max_buckets_is_bounded() {
+        let mut cfg = RateLimitSectionConfig::default();
+        assert!(cfg.validate_capacity().is_ok());
+        cfg.max_buckets = 512;
+        assert!(cfg.validate_capacity().is_err());
+        cfg.max_buckets = RATELIMIT_MAX_BUCKETS + 1;
+        assert!(cfg.validate_capacity().is_err());
+        cfg.max_buckets = RATELIMIT_MAX_BUCKETS;
+        assert!(cfg.validate_capacity().is_ok());
     }
 
     // ── Helpers ──────────────────────────────────────────────────────

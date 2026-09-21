@@ -1167,6 +1167,13 @@ fn map_create_attr(name: &str, def: &aya_obj::Map, btf_fd: Option<RawFd>) -> Map
         attr.value_size = size;
     }
 
+    // A kernel-filled table takes its capacity from the configuration rather
+    // than from the object (see `map_sizing`); everything else keeps what the
+    // object declared.
+    if let Some(n) = super::map_sizing::override_for(name, attr.map_type) {
+        attr.max_entries = n;
+    }
+
     // BTF-defined maps carry key/value BTF type ids - except a set of map types
     // the kernel rejects BTF for (mirrors libbpf issue #355 / aya).
     //
@@ -1443,6 +1450,7 @@ fn create_object_maps(
         // name so distinct maps never collide on the pinned path.
         let pin = format!("{}/{}", pin_path.trim_end_matches('/'), name);
         if let Some(fd) = obj_get(&pin) {
+            report_pinned_capacity_drift(name, map_type, &fd);
             out.insert(name.clone(), (fd, map_type));
             continue;
         }
@@ -1458,6 +1466,39 @@ fn create_object_maps(
         };
     }
     Ok(out)
+}
+
+/// Say when a pinned map is reused at a capacity the plan no longer asks for.
+///
+/// A pin outlives the process that created it, and `BPF_MAP_CREATE` is the
+/// only moment a capacity is chosen, so a table sized by a configuration
+/// that has since changed keeps its old size until the agent restarts with
+/// the pin directory cleared. That is reported here rather than silently
+/// accepted, because the operator who raised `threatintel.max_entries` and
+/// saw the same eviction count would otherwise have nothing to go on.
+fn report_pinned_capacity_drift(name: &str, map_type: u32, fd: &OwnedFd) {
+    let Some(wanted) = super::map_sizing::override_for(name, map_type) else {
+        return;
+    };
+    let Ok(dup) = fd.try_clone() else {
+        return;
+    };
+    let Ok(data) = MapData::from_fd(dup) else {
+        return;
+    };
+    let Ok(info) = data.info() else {
+        return;
+    };
+    let actual = info.max_entries();
+    if actual != wanted {
+        tracing::warn!(
+            map = name,
+            pinned_max_entries = actual,
+            configured_max_entries = wanted,
+            "pinned map keeps the capacity it was created with; the configured \
+             size applies at the next agent start"
+        );
+    }
 }
 
 /// Load every program in an object, falling back to a neutralized load when the

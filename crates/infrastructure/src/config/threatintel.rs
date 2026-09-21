@@ -22,6 +22,63 @@ pub struct ThreatIntelConfig {
     /// Positive boosts IOC confidence, negative reduces it. Clamped 0-100.
     #[serde(default)]
     pub country_confidence_boost: Option<HashMap<String, i8>>,
+
+    /// Capacity of the kernel IOC tables (IPv4 and IPv6 each, plus their
+    /// bloom filters), in entries. Absent, it is derived from the enabled
+    /// feeds' `max_iocs` (see [`ThreatIntelConfig::capacity`]). Applies at
+    /// the next agent start: a pinned map keeps the size it was created with.
+    #[serde(default)]
+    pub max_entries: Option<u32>,
+}
+
+/// Smallest capacity the IOC tables are ever created with.
+pub const THREATINTEL_MIN_CAPACITY: u32 = 4_096;
+/// Largest capacity `threatintel.max_entries` may ask for.
+pub const THREATINTEL_MAX_CAPACITY: u32 = 4_194_304;
+
+impl ThreatIntelConfig {
+    /// The capacity the kernel IOC tables are created with.
+    ///
+    /// `max_entries` when set; otherwise the enabled feeds' `max_iocs` added
+    /// up, rounded up to a power of two so the hash table is not created at
+    /// a size it fills to the last slot, held above
+    /// [`THREATINTEL_MIN_CAPACITY`] and below [`THREATINTEL_MAX_CAPACITY`]. A
+    /// configuration with no feed gets the floor rather than a million slots
+    /// that hold nothing.
+    #[must_use]
+    pub fn capacity(&self) -> u32 {
+        if let Some(n) = self.max_entries {
+            return n;
+        }
+        let wanted: u64 = self
+            .feeds
+            .iter()
+            .filter(|f| f.enabled)
+            .map(|f| f.max_iocs as u64)
+            .sum();
+        let wanted = wanted.clamp(
+            u64::from(THREATINTEL_MIN_CAPACITY),
+            u64::from(THREATINTEL_MAX_CAPACITY),
+        );
+        let rounded = wanted.next_power_of_two();
+        u32::try_from(rounded.min(u64::from(THREATINTEL_MAX_CAPACITY)))
+            .unwrap_or(THREATINTEL_MAX_CAPACITY)
+    }
+
+    /// Bounds on an explicit `max_entries`.
+    pub fn validate_capacity(&self) -> Result<(), ConfigError> {
+        if let Some(n) = self.max_entries
+            && !(THREATINTEL_MIN_CAPACITY..=THREATINTEL_MAX_CAPACITY).contains(&n)
+        {
+            return Err(ConfigError::Validation {
+                field: "threatintel.max_entries".to_string(),
+                message: format!(
+                    "must be between {THREATINTEL_MIN_CAPACITY} and {THREATINTEL_MAX_CAPACITY}"
+                ),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl Default for ThreatIntelConfig {
@@ -31,6 +88,7 @@ impl Default for ThreatIntelConfig {
             mode: "alert".to_string(),
             feeds: Vec::new(),
             country_confidence_boost: None,
+            max_entries: None,
         }
     }
 }
@@ -220,6 +278,57 @@ mod tests {
         assert!(cfg.enabled);
         assert_eq!(cfg.mode, "alert");
         assert!(cfg.feeds.is_empty());
+        assert!(cfg.max_entries.is_none());
+    }
+
+    // ── capacity ─────────────────────────────────────────────────────
+
+    #[test]
+    fn capacity_with_no_feed_is_the_floor() {
+        assert_eq!(
+            ThreatIntelConfig::default().capacity(),
+            THREATINTEL_MIN_CAPACITY
+        );
+    }
+
+    #[test]
+    fn capacity_sums_enabled_feeds_and_rounds_up_to_a_power_of_two() {
+        let mut cfg = ThreatIntelConfig::default();
+        let mut a = valid_feed();
+        a.max_iocs = 300_000;
+        let mut b = valid_feed();
+        b.id = "feed2".to_string();
+        b.max_iocs = 300_000;
+        let mut off = valid_feed();
+        off.id = "feed3".to_string();
+        off.enabled = false;
+        off.max_iocs = 5_000_000;
+        cfg.feeds = vec![a, b, off];
+        // 600_000 rounds up to 2^20; the disabled feed is not counted.
+        assert_eq!(cfg.capacity(), 1_048_576);
+    }
+
+    #[test]
+    fn capacity_is_capped() {
+        let mut cfg = ThreatIntelConfig::default();
+        let mut a = valid_feed();
+        a.max_iocs = 100_000_000;
+        cfg.feeds = vec![a];
+        assert_eq!(cfg.capacity(), THREATINTEL_MAX_CAPACITY);
+    }
+
+    #[test]
+    fn explicit_max_entries_wins_and_is_bounded() {
+        let mut cfg = ThreatIntelConfig {
+            max_entries: Some(8_192),
+            ..Default::default()
+        };
+        assert_eq!(cfg.capacity(), 8_192);
+        assert!(cfg.validate_capacity().is_ok());
+        cfg.max_entries = Some(100);
+        assert!(cfg.validate_capacity().is_err());
+        cfg.max_entries = Some(THREATINTEL_MAX_CAPACITY + 1);
+        assert!(cfg.validate_capacity().is_err());
     }
 
     // ── Helpers ──────────────────────────────────────────────────────

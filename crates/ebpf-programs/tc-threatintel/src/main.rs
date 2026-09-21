@@ -10,22 +10,21 @@ use aya_ebpf::{
 };
 use ebpf_common::{
     config_flags::ConfigFlags,
-    event::{EVENT_TYPE_THREATINTEL, FLAG_IPV6, FLAG_VLAN, PacketEvent},
+    event::{EVENT_TYPE_THREATINTEL, PacketEvent},
     threatintel::{
         THREATINTEL_ACTION_DROP, THREATINTEL_MAX_ENTRIES, THREATINTEL_METRIC_DROPPED,
         THREATINTEL_METRIC_ERRORS, THREATINTEL_METRIC_EVENTS_DROPPED, THREATINTEL_METRIC_MATCHED,
         THREATINTEL_METRIC_TOTAL_SEEN, ThreatIntelKey, ThreatIntelKeyV6, ThreatIntelValue,
     },
 };
-use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::net::{
-    ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
-    ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
+    IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4, u16_from_be_bytes,
+    u32_from_be_bytes,
 };
+use ebpf_helpers::pktmeta;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{emit_packet_event, increment_metric};
 use network_types::{
-    eth::EthHdr,
     ip::{IpProto, Ipv4Hdr},
     tcp::TcpHdr,
     udp::UdpHdr,
@@ -116,24 +115,15 @@ fn try_tc_threatintel(ctx: &TcContext) -> Result<i32, ()> {
         }
     }
 
-    // Parse Ethernet header
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
-    let mut l3_offset = EthHdr::LEN;
-    let mut pkt_flags: u8 = 0;
+    // The parse the chain already holds, or this program's own if it is
+    // first.
+    let meta = pktmeta::resolve(ctx)?;
+    let pkt_flags = meta.event_flags();
 
-    // 802.1Q / 802.1ad tags. The outer tag is the one carried onward: on a
-    // QinQ frame that is the service provider's tag, which is what a policy
-    // is written against, and the inner customer tag is left in the frame.
-    let (vlan_id, vlan_tagged) = parse_vlan_tags!(ctx, ether_type, l3_offset);
-    if vlan_tagged {
-        pkt_flags |= FLAG_VLAN;
-    }
-
-    if ether_type == ETH_P_IP {
-        process_threatintel_v4(ctx, l3_offset, vlan_id, pkt_flags)
-    } else if ether_type == ETH_P_IPV6 {
-        process_threatintel_v6(ctx, l3_offset, vlan_id, pkt_flags | FLAG_IPV6)
+    if meta.is_ipv4() {
+        process_threatintel_v4(ctx, meta.l3(), meta.vlan_id, pkt_flags)
+    } else if meta.is_ipv6() {
+        process_threatintel_v6(ctx, meta.l3(), meta.vlan_id, pkt_flags)
     } else {
         Ok(TC_ACT_OK)
     }

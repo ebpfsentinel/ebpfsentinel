@@ -18,13 +18,13 @@ use ebpf_common::conntrack::{
 };
 use ebpf_helpers::kfuncs::{BpfCtOpts, CtTuple, with_skb_ct_lookup};
 use ebpf_helpers::net::{
-    ETH_P_8021AD, ETH_P_8021Q, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_ICMP,
-    PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, VLAN_HDR_LEN, VlanHdr, ipv6_addr_to_u32x4,
+    IPV6_HDR_LEN, Ipv6Hdr, PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4,
     u16_from_be_bytes, u32_from_be_bytes,
 };
+use ebpf_helpers::pktmeta;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{copy_16b_asm, increment_metric};
-use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
+use network_types::{ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -77,27 +77,14 @@ fn increment_metric(index: u32) {
 
 #[inline(always)]
 fn try_tc_conntrack(ctx: &TcContext, skb_raw: *mut core::ffi::c_void) -> Result<i32, ()> {
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
-    let mut l3_offset = EthHdr::LEN;
+    // The parse the chain already holds, or this program's own if it is
+    // first.
+    let meta = pktmeta::resolve(ctx)?;
 
-    // 802.1Q VLAN tag
-    if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
-        let vhdr: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
-        ether_type = u16::from_be(unsafe { (*vhdr).ether_type });
-        l3_offset += VLAN_HDR_LEN;
-
-        if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
-            let vhdr2: *const VlanHdr = unsafe { ptr_at(ctx, l3_offset)? };
-            ether_type = u16::from_be(unsafe { (*vhdr2).ether_type });
-            l3_offset += VLAN_HDR_LEN;
-        }
-    }
-
-    if ether_type == ETH_P_IP {
-        process_conntrack_v4(ctx, skb_raw, l3_offset)
-    } else if ether_type == ETH_P_IPV6 {
-        process_conntrack_v6(ctx, skb_raw, l3_offset)
+    if meta.is_ipv4() {
+        process_conntrack_v4(ctx, skb_raw, meta.l3())
+    } else if meta.is_ipv6() {
+        process_conntrack_v6(ctx, skb_raw, meta.l3())
     } else {
         Ok(TC_ACT_OK)
     }
@@ -149,10 +136,13 @@ fn process_conntrack_v4(
             )
         }
         PROTO_ICMP => {
-            let icmp_type_ptr: *const u8 = unsafe { ptr_at(ctx, l4_offset)? };
-            let icmp_code_ptr: *const u8 = unsafe { ptr_at(ctx, l4_offset + 1)? };
-            (unsafe { *icmp_type_ptr } as u16, unsafe { *icmp_code_ptr }
-                as u16)
+            // One two-byte window rather than two one-byte reads: with the
+            // offset coming off the chain handoff the verifier sees a fully
+            // variable pointer, and a one-byte bound check compiles to
+            // `ptr >= end`, a form it grants no range from.
+            let icmp: *const [u8; 2] = unsafe { ptr_at(ctx, l4_offset)? };
+            let icmp = unsafe { *icmp };
+            (u16::from(icmp[0]), u16::from(icmp[1]))
         }
         _ => return Ok(TC_ACT_OK),
     };
@@ -201,10 +191,13 @@ fn process_conntrack_v6(
             )
         }
         PROTO_ICMPV6 => {
-            let icmp_type_ptr: *const u8 = unsafe { ptr_at(ctx, l4_offset)? };
-            let icmp_code_ptr: *const u8 = unsafe { ptr_at(ctx, l4_offset + 1)? };
-            (unsafe { *icmp_type_ptr } as u16, unsafe { *icmp_code_ptr }
-                as u16)
+            // One two-byte window rather than two one-byte reads: with the
+            // offset coming off the chain handoff the verifier sees a fully
+            // variable pointer, and a one-byte bound check compiles to
+            // `ptr >= end`, a form it grants no range from.
+            let icmp: *const [u8; 2] = unsafe { ptr_at(ctx, l4_offset)? };
+            let icmp = unsafe { *icmp };
+            (u16::from(icmp[0]), u16::from(icmp[1]))
         }
         _ => return Ok(TC_ACT_OK),
     };

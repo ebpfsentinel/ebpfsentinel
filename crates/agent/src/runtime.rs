@@ -541,6 +541,21 @@ pub async fn load_ebpf_programs(
         "activate: pins from the previous generation",
     );
 
+    // The kernel-filled tables take their capacity from the configuration at
+    // create time, so the plan has to be in force before the first object is
+    // loaded. The process keeps the first plan it was given: a later
+    // configuration that sizes them differently is reported, and applies
+    // when the agent next starts.
+    let sizing = adapters::ebpf::map_sizing::MapSizing::from_config(config);
+    match adapters::ebpf::map_sizing::install(&sizing) {
+        Ok(()) => info!(plan = %sizing.describe(), "eBPF table capacities"),
+        Err(in_force) => warn!(
+            in_force = %in_force.describe(),
+            configured = %sizing.describe(),
+            "eBPF table capacities changed in the configuration; they apply at the next agent start"
+        ),
+    }
+
     let mut ebpf_state = EbpfState::new();
     // Every task spawned below outlives the loaders unless something stops
     // it, and each one holds a map taken out of this generation. Hand them

@@ -3,13 +3,13 @@
 
 use aya_ebpf::{
     bindings::TC_ACT_OK,
+    btf_maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, lpm_trie::Key},
     cty::c_void,
     helpers::{
         bpf_ktime_get_boot_ns, bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop,
         bpf_skb_store_bytes,
     },
     macros::{btf_map, classifier},
-    btf_maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, lpm_trie::Key},
     programs::TcContext,
 };
 
@@ -30,14 +30,13 @@ use ebpf_helpers::increment_metric;
 use ebpf_helpers::kfuncs::{
     BpfCtOpts, CtBuilder, CtTuple, NfInetAddr, NfNatManipType, skb_get_xfrm_info,
 };
-use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::net::{
-    ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_ICMPV6,
-    PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4, ipv6_mask_match,
+    IPV6_HDR_LEN, Ipv6Hdr, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4, ipv6_mask_match,
     ones_complement_add, prefix_to_mask, u16_from_be_bytes, u32_from_be_bytes, u32x4_to_bytes,
 };
+use ebpf_helpers::pktmeta;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
-use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
+use network_types::{ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
 
 // ── Constants ───────────────────────────────────────────────────────
 // Network constants and header structs imported from ebpf_helpers.
@@ -57,6 +56,11 @@ const IPV6_DST_OFFSET: usize = 24;
 
 /// BPF_F_RECOMPUTE_CSUM flag (unused for raw csum replace).
 const BPF_F_RECOMPUTE_CSUM: u64 = 1;
+/// `bpf_l4_csum_replace` flag: the field being replaced is part of the
+/// L4 pseudo-header. Without it a locally originated skb (CHECKSUM_PARTIAL,
+/// the checksum completed by the NIC) keeps its stale pseudo-header sum in
+/// the field and leaves the host with a bad checksum.
+const BPF_F_PSEUDO_HDR: u64 = 0x10;
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -79,7 +83,8 @@ static NAT_DNAT_RULE_COUNT_V6: Array<u32, 1> = Array::new();
 /// Fast-path: exact-match DNAT HashMap (proto, dst_ip, dst_port) → NAT action.
 /// Checked before the Array+bpf_loop scan for O(1) lookup.
 #[btf_map]
-static NAT_HASH_DNAT: HashMap<NatHashKeyExact, NatHashValue, { MAX_NAT_HASH_EXACT as usize }> = HashMap::new();
+static NAT_HASH_DNAT: HashMap<NatHashKeyExact, NatHashValue, { MAX_NAT_HASH_EXACT as usize }> =
+    HashMap::new();
 
 // CT_TABLE_V4/V6 shadow maps removed - kernel netfilter is the
 // authoritative CT source. NAT info delegated via bpf_ct_set_nat_info
@@ -100,7 +105,8 @@ static NAT_HAIRPIN_CONFIG: Array<HairpinConfig, 1> = Array::new();
 /// Hairpin NAT conntrack table (LRU): maps post-hairpin 5-tuple to original
 /// client info so return traffic can be un-SNATed and un-DNATed.
 #[btf_map]
-static NAT_HAIRPIN_CT: LruHashMap<ConnKey, HairpinCtValue, { MAX_HAIRPIN_CT as usize }> = LruHashMap::new();
+static NAT_HAIRPIN_CT: LruHashMap<ConnKey, HairpinCtValue, { MAX_HAIRPIN_CT as usize }> =
+    LruHashMap::new();
 
 /// Per-CPU NAT metrics.
 #[btf_map]
@@ -123,11 +129,26 @@ static TENANT_IFINDEX_MAP: HashMap<u32, u32, 1024> = HashMap::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv4).
 #[btf_map]
-static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32, { MAX_TENANT_SUBNET_LPM_ENTRIES as usize }> = LpmTrie::new();
+static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32, { MAX_TENANT_SUBNET_LPM_ENTRIES as usize }> =
+    LpmTrie::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv6).
 #[btf_map]
-static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32, { MAX_TENANT_SUBNET_V6_LPM_ENTRIES as usize }> = LpmTrie::new();
+static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32, { MAX_TENANT_SUBNET_V6_LPM_ENTRIES as usize }> =
+    LpmTrie::new();
+
+/// The tenant, resolved once per chain: read back if a classifier before
+/// this one left it in the control block, resolved and left for the ones
+/// behind it otherwise.
+#[inline(always)]
+fn chain_tenant(ctx: &TcContext, resolve: impl FnOnce() -> u32) -> u32 {
+    if let Some(t) = pktmeta::read_cb(ctx).and_then(|m| m.tenant()) {
+        return t;
+    }
+    let t = resolve();
+    pktmeta::write_tenant(ctx, t);
+    t
+}
 
 // ── Entry point ─────────────────────────────────────────────────────
 
@@ -382,19 +403,14 @@ unsafe extern "C" fn scan_dnat_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
 
 #[inline(always)]
 fn try_nat_ingress(ctx: &TcContext) -> Result<i32, ()> {
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
-    let mut l3_offset = EthHdr::LEN;
+    // The parse the chain already holds, or this program's own if it is
+    // first.
+    let meta = pktmeta::resolve(ctx)?;
 
-    // 802.1Q / 802.1ad tags. The outer tag is the one carried onward: on a
-    // QinQ frame that is the service provider's tag, which is what a policy
-    // is written against, and the inner customer tag is left in the frame.
-    let (vlan_id, _) = parse_vlan_tags!(ctx, ether_type, l3_offset);
-
-    if ether_type == ETH_P_IP {
-        process_dnat_v4(ctx, l3_offset, vlan_id)
-    } else if ether_type == ETH_P_IPV6 {
-        process_dnat_v6(ctx, l3_offset, vlan_id)
+    if meta.is_ipv4() {
+        process_dnat_v4(ctx, meta.l3(), meta.vlan_id)
+    } else if meta.is_ipv6() {
+        process_dnat_v6(ctx, meta.l3(), meta.vlan_id)
     } else {
         Ok(TC_ACT_OK)
     }
@@ -496,7 +512,9 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
 
     let iface_groups = get_iface_groups(ctx);
     let ifindex = unsafe { (*ctx.skb.skb).ifindex };
-    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) };
+    let tenant_id = chain_tenant(ctx, || unsafe {
+        resolve_tenant_id(ifindex, vlan_id, src_ip)
+    });
 
     // Read IPsec xfrm interface metadata from the incoming packet.
     // Non-zero xfrm_if_id means the packet arrived through an xfrmi
@@ -670,7 +688,9 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
 
     let iface_groups = get_iface_groups(ctx);
     let ifindex = unsafe { (*ctx.skb.skb).ifindex };
-    let tenant_id = unsafe { resolve_tenant_id_v6(ifindex, vlan_id, &src_addr) };
+    let tenant_id = chain_tenant(ctx, || unsafe {
+        resolve_tenant_id_v6(ifindex, vlan_id, &src_addr)
+    });
     let xfrm_if_id = unsafe { skb_get_xfrm_info(ctx.skb.skb as *mut _) }
         .map(|info| info.if_id)
         .unwrap_or(0);
@@ -748,6 +768,10 @@ fn rewrite_dst_ip(
     old_ip: u32,
     new_ip: u32,
 ) -> Result<(), ()> {
+    // The packet is about to change under the programs behind this one;
+    // drop the parse left in the control block so they read the rewritten
+    // headers rather than the arriving ones.
+    pktmeta::invalidate(ctx);
     if old_ip == new_ip {
         return Ok(());
     }
@@ -798,7 +822,7 @@ fn rewrite_dst_ip(
             l4_csum_off,
             u32::from_be_bytes(old_be) as u64,
             u32::from_be_bytes(new_be) as u64,
-            4, // BPF_F_PSEUDO_HDR is 0x10, but 4 = size of the field
+            4 | BPF_F_PSEUDO_HDR,
         )
     };
     if ret != 0 {
@@ -822,6 +846,10 @@ fn rewrite_src_ip(
     old_ip: u32,
     new_ip: u32,
 ) -> Result<(), ()> {
+    // The packet is about to change under the programs behind this one;
+    // drop the parse left in the control block so they read the rewritten
+    // headers rather than the arriving ones.
+    pktmeta::invalidate(ctx);
     if old_ip == new_ip {
         return Ok(());
     }
@@ -872,7 +900,7 @@ fn rewrite_src_ip(
             l4_csum_off,
             u32::from_be_bytes(old_be) as u64,
             u32::from_be_bytes(new_be) as u64,
-            4,
+            4 | BPF_F_PSEUDO_HDR,
         )
     };
     if ret != 0 {
@@ -895,6 +923,10 @@ fn rewrite_dst_ip_v6(
     old_addr: &[u32; 4],
     new_addr: &[u32; 4],
 ) -> Result<(), ()> {
+    // The packet is about to change under the programs behind this one;
+    // drop the parse left in the control block so they read the rewritten
+    // headers rather than the arriving ones.
+    pktmeta::invalidate(ctx);
     if old_addr == new_addr {
         return Ok(());
     }
@@ -928,7 +960,7 @@ fn rewrite_dst_ip_v6(
                     l4_csum_off,
                     old_w as u64,
                     new_w as u64,
-                    4,
+                    4 | BPF_F_PSEUDO_HDR,
                 )
             };
             if ret != 0 {
@@ -950,6 +982,10 @@ fn rewrite_dst_port(
     old_port: u16,
     new_port: u16,
 ) -> Result<(), ()> {
+    // The packet is about to change under the programs behind this one;
+    // drop the parse left in the control block so they read the rewritten
+    // headers rather than the arriving ones.
+    pktmeta::invalidate(ctx);
     if old_port == new_port {
         return Ok(());
     }
@@ -1063,6 +1099,10 @@ fn apply_nptv6_dst(
     dst_addr: &[u32; 4],
     rule: &NptV6RuleEntry,
 ) -> Result<(), ()> {
+    // The packet is about to change under the programs behind this one;
+    // drop the parse left in the control block so they read the rewritten
+    // headers rather than the arriving ones.
+    pktmeta::invalidate(ctx);
     let mask = prefix_to_mask(rule.prefix_len);
 
     // Build new address: internal_prefix | (dst_addr & ~mask).

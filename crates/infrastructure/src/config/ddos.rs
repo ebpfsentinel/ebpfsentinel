@@ -12,7 +12,7 @@ use super::conntrack::ConnTrackSectionConfig;
 /// Maximum number of `DDoS` policies.
 pub(super) const MAX_DDOS_POLICIES: usize = 100;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DdosConfig {
     #[serde(default)]
@@ -37,6 +37,53 @@ pub struct DdosConfig {
     /// Detection policies (userspace domain engine).
     #[serde(default)]
     pub policies: Vec<DdosPolicyConfig>,
+
+    /// Capacity of each per-source kernel table the guards keep (SYN rate,
+    /// ICMP rate, amplification rate, half-open counts and RST/FIN/ACK flood
+    /// counters), in sources tracked at once. Each table is per CPU, so it
+    /// costs this many slots on every online CPU and evicts the least
+    /// recently seen source when full. Applies at the next agent start.
+    #[serde(default = "default_max_tracked_sources")]
+    pub max_tracked_sources: u32,
+}
+
+/// Smallest and largest `ddos.max_tracked_sources`.
+pub const DDOS_MIN_TRACKED_SOURCES: u32 = 1_024;
+pub const DDOS_MAX_TRACKED_SOURCES: u32 = 1_048_576;
+
+fn default_max_tracked_sources() -> u32 {
+    16_384
+}
+
+impl Default for DdosConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            syn_protection: SynProtectionConfig::default(),
+            icmp_protection: IcmpProtectionConfig::default(),
+            amplification_protection: AmpProtectionConfig::default(),
+            connection_tracking: ConnTrackSectionConfig::default(),
+            policies: Vec::new(),
+            max_tracked_sources: default_max_tracked_sources(),
+        }
+    }
+}
+
+impl DdosConfig {
+    /// Bounds on the per-source table capacity.
+    pub(super) fn validate_capacity(&self) -> Result<(), ConfigError> {
+        if !(DDOS_MIN_TRACKED_SOURCES..=DDOS_MAX_TRACKED_SOURCES)
+            .contains(&self.max_tracked_sources)
+        {
+            return Err(ConfigError::Validation {
+                field: "ddos.max_tracked_sources".to_string(),
+                message: format!(
+                    "must be between {DDOS_MIN_TRACKED_SOURCES} and {DDOS_MAX_TRACKED_SOURCES}"
+                ),
+            });
+        }
+        self.connection_tracking.validate_capacity()
+    }
 }
 
 // ── SYN Protection ──────────────────────────────────────────────────
@@ -376,5 +423,22 @@ mod tests {
         assert!(!cfg.amplification_protection.enabled);
         assert!(!cfg.connection_tracking.enabled);
         assert!(cfg.policies.is_empty());
+        assert_eq!(cfg.max_tracked_sources, 16_384);
+        assert_eq!(cfg.connection_tracking.capacity(), 65_536);
+    }
+
+    #[test]
+    fn tracked_sources_and_conn_table_are_bounded() {
+        let mut cfg = DdosConfig::default();
+        assert!(cfg.validate_capacity().is_ok());
+        cfg.max_tracked_sources = 100;
+        assert!(cfg.validate_capacity().is_err());
+        cfg.max_tracked_sources = DDOS_MAX_TRACKED_SOURCES;
+        assert!(cfg.validate_capacity().is_ok());
+        cfg.connection_tracking.max_entries = Some(100);
+        assert!(cfg.validate_capacity().is_err());
+        cfg.connection_tracking.max_entries = Some(8_192);
+        assert!(cfg.validate_capacity().is_ok());
+        assert_eq!(cfg.connection_tracking.capacity(), 8_192);
     }
 }

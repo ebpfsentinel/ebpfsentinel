@@ -3,12 +3,12 @@
 
 use aya_ebpf::{
     bindings::xdp_action,
-    helpers::{bpf_check_mtu, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns},
-    macros::{btf_map, xdp},
     btf_maps::{
         Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, ProgramArray, RingBuf,
         lpm_trie::Key,
     },
+    helpers::{bpf_check_mtu, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns},
+    macros::{btf_map, xdp},
     programs::XdpContext,
 };
 // bpf_ktime_get_coarse_ns: ~10x faster than bpf_ktime_get_boot_ns by reading
@@ -32,27 +32,27 @@ use ebpf_common::{
         DDOS_METRIC_SYNCOOKIE_INVALID, DDOS_METRIC_SYNCOOKIE_VALID, DdosConnTrackConfig,
         DdosConnTrackKey, DdosConnTrackValue, DdosSynConfig, EVENT_TYPE_DDOS_AMP,
         EVENT_TYPE_DDOS_CONNTRACK, EVENT_TYPE_DDOS_ICMP, EVENT_TYPE_DDOS_SYN, FLOOD_TYPE_ACK,
-        FLOOD_TYPE_FIN, FLOOD_TYPE_RST, FloodCounterKey, IcmpConfig, SynRateState, SyncookieCtx,
+        FLOOD_TYPE_FIN, FLOOD_TYPE_RST, FloodCounterKey, IcmpConfig, MAX_DDOS_CONN_TABLE_ENTRIES,
+        MAX_DDOS_TRACKED_SOURCES, SynRateState, SyncookieCtx,
     },
     event::{EVENT_TYPE_RATELIMIT, FLAG_IPV6, FLAG_VLAN, PacketEvent},
     ratelimit::{
         ALGO_FIXED_WINDOW, ALGO_LEAKY_BUCKET, ALGO_SLIDING_WINDOW, ALGO_TOKEN_BUCKET,
         FixedWindowValue, LeakyBucketValue, MAX_RL_BUCKET_ENTRIES, MAX_RL_LPM_ENTRIES,
-        RATELIMIT_METRIC_COUNT, RATELIMIT_METRIC_ERRORS, RATELIMIT_METRIC_EVENTS_DROPPED,
-        RATELIMIT_METRIC_MTU_EXCEEDED, RATELIMIT_METRIC_PASSED, RATELIMIT_METRIC_THROTTLED,
-        RATELIMIT_METRIC_THROTTLED_PASSED, RATELIMIT_METRIC_TOTAL_SEEN,
-        MAX_RL_TIERS, RATELIMIT_ACTION_PASS, RateLimitBucketUnion, RateLimitConfig, RateLimitKey,
-        RateLimitTierValue, RateLimitValue, SLIDING_WINDOW_NUM_SLOTS, SlidingWindowValue,
+        MAX_RL_TIERS, RATELIMIT_ACTION_PASS, RATELIMIT_METRIC_COUNT, RATELIMIT_METRIC_ERRORS,
+        RATELIMIT_METRIC_EVENTS_DROPPED, RATELIMIT_METRIC_MTU_EXCEEDED, RATELIMIT_METRIC_PASSED,
+        RATELIMIT_METRIC_THROTTLED, RATELIMIT_METRIC_THROTTLED_PASSED, RATELIMIT_METRIC_TOTAL_SEEN,
+        RateLimitBucketUnion, RateLimitConfig, RateLimitKey, RateLimitTierValue, RateLimitValue,
+        SLIDING_WINDOW_NUM_SLOTS, SlidingWindowValue,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
 use ebpf_helpers::kfuncs::{xdp_rx_hash, xdp_rx_timestamp};
-use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::net::{
-    ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_ICMP,
-    PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4,
-    u32_from_be_bytes,
+    ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP,
+    ipv6_addr_to_u32x4, u32_from_be_bytes,
 };
+use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{increment_metric, ringbuf_has_backpressure};
 use network_types::{eth::EthHdr, ip::Ipv4Hdr};
@@ -131,7 +131,11 @@ static RATELIMIT_CONFIG: HashMap<RateLimitKey, RateLimitConfig, 10240> = HashMap
 /// against a multi-flow source must divide the intended rate by the CPU count.
 /// Replaces 4 separate per-algorithm maps with a single discriminated union.
 #[btf_map]
-static RL_BUCKETS: LruPerCpuHashMap<RateLimitKey, RateLimitBucketUnion, { MAX_RL_BUCKET_ENTRIES as usize }> = LruPerCpuHashMap::new();
+static RL_BUCKETS: LruPerCpuHashMap<
+    RateLimitKey,
+    RateLimitBucketUnion,
+    { MAX_RL_BUCKET_ENTRIES as usize },
+> = LruPerCpuHashMap::new();
 
 /// Per-CPU counters. Index: 0=passed, 1=throttled, 2=errors, 3=events_dropped, 4=total_seen.
 #[btf_map]
@@ -147,11 +151,13 @@ static EVENTS: RingBuf<PacketEvent, { 256 * 4096 }> = RingBuf::new();
 /// IPv4 source LPM Trie for country-tier rate limiting.
 /// Maps CIDR prefixes to tier IDs.
 #[btf_map]
-static RL_LPM_SRC_V4: LpmTrie<[u8; 4], RateLimitTierValue, { MAX_RL_LPM_ENTRIES as usize }> = LpmTrie::new();
+static RL_LPM_SRC_V4: LpmTrie<[u8; 4], RateLimitTierValue, { MAX_RL_LPM_ENTRIES as usize }> =
+    LpmTrie::new();
 
 /// IPv6 source LPM Trie for country-tier rate limiting.
 #[btf_map]
-static RL_LPM_SRC_V6: LpmTrie<[u8; 16], RateLimitTierValue, { MAX_RL_LPM_ENTRIES as usize }> = LpmTrie::new();
+static RL_LPM_SRC_V6: LpmTrie<[u8; 16], RateLimitTierValue, { MAX_RL_LPM_ENTRIES as usize }> =
+    LpmTrie::new();
 
 /// Tier configuration array. Index = tier_id (0-15).
 #[btf_map]
@@ -165,7 +171,11 @@ static DDOS_SYN_CONFIG: Array<DdosSynConfig, 1> = Array::new();
 
 /// Per-source SYN rate tracking for threshold mode (per-CPU LRU).
 #[btf_map]
-static SYN_RATE_TRACKER: LruPerCpuHashMap<RateLimitKey, SynRateState, 65536> = LruPerCpuHashMap::new();
+static SYN_RATE_TRACKER: LruPerCpuHashMap<
+    RateLimitKey,
+    SynRateState,
+    { MAX_DDOS_TRACKED_SOURCES as usize },
+> = LruPerCpuHashMap::new();
 
 /// ICMP flood protection configuration (single entry, index 0).
 #[btf_map]
@@ -173,7 +183,11 @@ static ICMP_CONFIG: Array<IcmpConfig, 1> = Array::new();
 
 /// Per-source ICMP rate tracking (per-CPU LRU, fixed window).
 #[btf_map]
-static ICMP_RATE_BUCKETS: LruPerCpuHashMap<RateLimitKey, FixedWindowValue, 65536> = LruPerCpuHashMap::new();
+static ICMP_RATE_BUCKETS: LruPerCpuHashMap<
+    RateLimitKey,
+    FixedWindowValue,
+    { MAX_DDOS_TRACKED_SOURCES as usize },
+> = LruPerCpuHashMap::new();
 
 /// UDP amplification protection config per service port.
 #[btf_map]
@@ -182,7 +196,11 @@ static AMP_PROTECT_CONFIG: HashMap<AmpProtectKey, AmpProtectConfig, 64> = HashMa
 /// Per-source-per-port UDP amplification rate tracking.
 /// Key is a hash of (src_ip, src_port) packed as u64.
 #[btf_map]
-static AMP_RATE_BUCKETS: LruPerCpuHashMap<u64, FixedWindowValue, 65536> = LruPerCpuHashMap::new();
+static AMP_RATE_BUCKETS: LruPerCpuHashMap<
+    u64,
+    FixedWindowValue,
+    { MAX_DDOS_TRACKED_SOURCES as usize },
+> = LruPerCpuHashMap::new();
 
 /// DDoS-specific per-CPU metrics (see `DDOS_METRIC_*` constants).
 #[btf_map]
@@ -215,17 +233,26 @@ static CONNTRACK_CONFIG: Array<DdosConnTrackConfig, 1> = Array::new();
 /// Lightweight connection tracking table (per-CPU LRU).
 /// Tracks TCP connections with 3 states: NEW, ESTABLISHED, CLOSING.
 #[btf_map]
-static CONN_TABLE: LruPerCpuHashMap<DdosConnTrackKey, DdosConnTrackValue, 131072> = LruPerCpuHashMap::new();
+static CONN_TABLE: LruPerCpuHashMap<
+    DdosConnTrackKey,
+    DdosConnTrackValue,
+    { MAX_DDOS_CONN_TABLE_ENTRIES as usize },
+> = LruPerCpuHashMap::new();
 
 /// Per-source half-open connection counter (per-CPU LRU).
 /// Counts SYNs without matching ACKs per source IP.
 #[btf_map]
-static HALF_OPEN_COUNTERS: LruPerCpuHashMap<u32, u64, 65536> = LruPerCpuHashMap::new();
+static HALF_OPEN_COUNTERS: LruPerCpuHashMap<u32, u64, { MAX_DDOS_TRACKED_SOURCES as usize }> =
+    LruPerCpuHashMap::new();
 
 /// Per-source per-flood-type rate counter (per-CPU LRU, fixed window).
 /// Tracks RST/FIN/ACK flood rates.
 #[btf_map]
-static FLOOD_COUNTERS: LruPerCpuHashMap<FloodCounterKey, FixedWindowValue, 65536> = LruPerCpuHashMap::new();
+static FLOOD_COUNTERS: LruPerCpuHashMap<
+    FloodCounterKey,
+    FixedWindowValue,
+    { MAX_DDOS_TRACKED_SOURCES as usize },
+> = LruPerCpuHashMap::new();
 
 // ── Metric indices ──────────────────────────────────────────────────
 
@@ -265,11 +292,13 @@ static TENANT_IFINDEX_MAP: HashMap<u32, u32, 1024> = HashMap::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv4).
 #[btf_map]
-static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32, { MAX_TENANT_SUBNET_LPM_ENTRIES as usize }> = LpmTrie::new();
+static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32, { MAX_TENANT_SUBNET_LPM_ENTRIES as usize }> =
+    LpmTrie::new();
 
 /// LPM trie for subnet-based tenant resolution (IPv6).
 #[btf_map]
-static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32, { MAX_TENANT_SUBNET_V6_LPM_ENTRIES as usize }> = LpmTrie::new();
+static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32, { MAX_TENANT_SUBNET_V6_LPM_ENTRIES as usize }> =
+    LpmTrie::new();
 
 /// Increment a DDoS-specific per-CPU metric counter.
 #[inline(always)]

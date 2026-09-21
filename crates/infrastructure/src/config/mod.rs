@@ -75,7 +75,9 @@ pub use ratelimit::{RateLimitRuleConfig, RateLimitSectionConfig};
 pub use response::{DEFAULT_MAX_RESPONSE_TTL_SECS, MAX_RESPONSE_TTL_CEILING_SECS, ResponseConfig};
 pub use routing::{GatewayConfig, HealthCheckConfig, RoutingConfig};
 pub use telemetry::{DISABLE_ENV as TELEMETRY_DISABLE_ENV, TelemetryConfig};
-pub use threatintel::{ThreatIntelConfig, ThreatIntelFeedConfig};
+pub use threatintel::{
+    THREATINTEL_MAX_CAPACITY, THREATINTEL_MIN_CAPACITY, ThreatIntelConfig, ThreatIntelFeedConfig,
+};
 pub use zone::{ZoneEntryConfig, ZonePairConfig, ZoneSectionConfig};
 
 use std::collections::{HashMap, HashSet};
@@ -509,10 +511,11 @@ impl AgentConfig {
             rule_cfg.validate_ips(idx)?;
         }
 
-        // Validate threat intel feeds
+        // Validate threat intel feeds and the table they load into
         for (idx, feed_cfg) in self.threatintel.feeds.iter().enumerate() {
             feed_cfg.validate(idx)?;
         }
+        self.threatintel.validate_capacity()?;
 
         // Validate DLP patterns
         for (idx, pattern_cfg) in self.dlp.patterns.iter().enumerate() {
@@ -552,16 +555,19 @@ impl AgentConfig {
             }
         }
 
-        // Validate ratelimit rules
+        // Validate ratelimit rules and the bucket table
         self.ratelimit.validate_rules()?;
+        self.ratelimit.validate_capacity()?;
 
         // Validate ratelimit country tiers
         for (idx, tier_cfg) in self.ratelimit.country_tiers.iter().enumerate() {
             tier_cfg.validate(idx)?;
         }
 
-        // Validate DDoS policies
+        // Validate DDoS policies and the per-source tables
         check_limit("ddos.policies", self.ddos.policies.len(), MAX_DDOS_POLICIES)?;
+        self.ddos.validate_capacity()?;
+        self.conntrack.refuse_capacity()?;
         for (idx, policy_cfg) in self.ddos.policies.iter().enumerate() {
             policy_cfg.validate(idx)?;
         }
@@ -4260,6 +4266,33 @@ conntrack:
         // from_yaml validates, so the refusal lands before anything holds a
         // configuration carrying a ceiling nothing is measured against.
         assert!(AgentConfig::from_yaml(yaml).is_err());
+    }
+
+    #[test]
+    fn conntrack_section_refuses_a_table_capacity_it_does_not_size() {
+        // The kernel connection table belongs to the DDoS guard: the same key
+        // under ddos.connection_tracking sizes it, under conntrack it would
+        // be read by nothing.
+        let refused = r"
+agent:
+  interfaces: [eth0]
+conntrack:
+  enabled: true
+  max_entries: 8192
+";
+        let err = AgentConfig::from_yaml(refused).unwrap_err().to_string();
+        assert!(err.contains("conntrack.max_entries"), "{err}");
+
+        let sized = r"
+agent:
+  interfaces: [eth0]
+ddos:
+  connection_tracking:
+    max_entries: 8192
+";
+        let cfg = AgentConfig::from_yaml(sized).unwrap();
+        assert_eq!(cfg.ddos.connection_tracking.capacity(), 8_192);
+        assert_eq!(cfg.conntrack.capacity(), 65_536);
     }
 
     #[test]

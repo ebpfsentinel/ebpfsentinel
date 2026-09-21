@@ -15,16 +15,15 @@ use ebpf_common::dns::{
     DNS_METRIC_EVENTS_DROPPED, DNS_METRIC_EVENTS_EMITTED, DNS_METRIC_PACKETS_INSPECTED,
     DNS_METRIC_TOTAL_SEEN, DNS_SMALL_PAYLOAD, DnsEvent, DnsEventBuf, DnsEventSmall,
 };
-use ebpf_common::event::{FLAG_IPV6, FLAG_TCP, FLAG_VLAN};
-use ebpf_helpers::parse_vlan_tags;
+use ebpf_common::event::FLAG_TCP;
 use ebpf_helpers::net::{
-    ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
-    ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
+    IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4, u16_from_be_bytes,
+    u32_from_be_bytes,
 };
+use ebpf_helpers::pktmeta;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{increment_metric, opaque_usize};
 use network_types::{
-    eth::EthHdr,
     ip::{IpProto, Ipv4Hdr},
     tcp::TcpHdr,
     udp::UdpHdr,
@@ -72,24 +71,19 @@ pub fn tc_dns(ctx: TcContext) -> i32 {
 
 #[inline(always)]
 fn try_tc_dns(ctx: &TcContext) -> Result<i32, ()> {
-    // Parse Ethernet header
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
-    let mut l3_offset = EthHdr::LEN;
-    let mut flags: u8 = 0;
-
-    // 802.1Q / 802.1ad tags. The outer tag is the one carried onward: on a
-    // QinQ frame that is the service provider's tag, which is what a policy
-    // is written against, and the inner customer tag is left in the frame.
-    let (vlan_id, vlan_tagged) = parse_vlan_tags!(ctx, ether_type, l3_offset);
-    if vlan_tagged {
-        flags |= FLAG_VLAN;
+    // The parse the chain already holds, or this program's own if it is
+    // first. Only port 53 is looked at, and the ports are in it, so any
+    // other packet leaves without a header being touched.
+    let meta = pktmeta::resolve(ctx)?;
+    if meta.src_port != DNS_PORT && meta.dst_port != DNS_PORT {
+        return Ok(TC_ACT_OK);
     }
+    let flags = meta.event_flags();
 
-    if ether_type == ETH_P_IP {
-        process_dns_v4(ctx, l3_offset, vlan_id, flags)
-    } else if ether_type == ETH_P_IPV6 {
-        process_dns_v6(ctx, l3_offset, vlan_id, flags | FLAG_IPV6)
+    if meta.is_ipv4() {
+        process_dns_v4(ctx, meta.l3(), meta.vlan_id, flags)
+    } else if meta.is_ipv6() {
+        process_dns_v6(ctx, meta.l3(), meta.vlan_id, flags)
     } else {
         Ok(TC_ACT_OK)
     }

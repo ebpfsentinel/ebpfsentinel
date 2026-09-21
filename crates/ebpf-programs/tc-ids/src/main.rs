@@ -18,8 +18,8 @@ use aya_ebpf_bindings::helpers::{
 use ebpf_common::{
     config_flags::ConfigFlags,
     event::{
-        EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, FLAG_VLAN, MAX_L7_PAYLOAD, MAX_L7_PORTS,
-        PacketEvent, SMALL_L7_PAYLOAD,
+        EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, MAX_L7_PAYLOAD, MAX_L7_PORTS, PacketEvent,
+        SMALL_L7_PAYLOAD,
     },
     ids::{
         IDS_ACTION_DROP, IDS_METRIC_CGROUP_ATTRIBUTED, IDS_METRIC_CGROUP_TENANT_RESOLVED,
@@ -33,14 +33,13 @@ use ebpf_helpers::kfuncs::{
     BpfCtOpts, CtTuple, kill_flow_via_skb_ct, skb_get_fou_encap, skb_packet_size,
 };
 use ebpf_helpers::net::{
-    ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4,
-    u16_from_be_bytes, u32_from_be_bytes,
+    IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4, u16_from_be_bytes,
+    u32_from_be_bytes,
 };
-use ebpf_helpers::parse_vlan_tags;
+use ebpf_helpers::pktmeta;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{emit_packet_event, increment_metric, opaque_usize, ringbuf_has_backpressure};
 use network_types::{
-    eth::EthHdr,
     ip::{IpProto, Ipv4Hdr},
     tcp::TcpHdr,
     udp::UdpHdr,
@@ -382,24 +381,15 @@ pub fn tc_ids(ctx: TcContext) -> i32 {
 
 #[inline(always)]
 fn try_tc_ids(ctx: &TcContext) -> Result<i32, ()> {
-    // Parse Ethernet header
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
-    let mut l3_offset = EthHdr::LEN;
-    let mut flags: u8 = 0;
+    // The parse the chain already holds, or this program's own if it is
+    // first.
+    let meta = pktmeta::resolve(ctx)?;
+    let flags = meta.event_flags();
 
-    // 802.1Q / 802.1ad tags. The outer tag is the one carried onward: on a
-    // QinQ frame that is the service provider's tag, which is what a policy
-    // is written against, and the inner customer tag is left in the frame.
-    let (vlan_id, vlan_tagged) = parse_vlan_tags!(ctx, ether_type, l3_offset);
-    if vlan_tagged {
-        flags |= FLAG_VLAN;
-    }
-
-    if ether_type == ETH_P_IP {
-        process_ids_v4(ctx, l3_offset, vlan_id, flags)
-    } else if ether_type == ETH_P_IPV6 {
-        process_ids_v6(ctx, l3_offset, vlan_id, flags | FLAG_IPV6)
+    if meta.is_ipv4() {
+        process_ids_v4(ctx, meta.l3(), meta.vlan_id, flags)
+    } else if meta.is_ipv6() {
+        process_ids_v6(ctx, meta.l3(), meta.vlan_id, flags)
     } else {
         Ok(TC_ACT_OK)
     }
@@ -580,13 +570,22 @@ fn process_ids_pattern(_ctx: &TcContext, flow: &FlowMeta, protocol: u8) -> Resul
     let flags = flow.flags;
     let vlan_id = flow.vlan_id;
 
-    // Resolve the packet's tenant once; rule lookup is tenant-scoped with a
-    // fall back to the global (tenant 0) rule.
-    let ifindex = unsafe { (*_ctx.skb.skb).ifindex };
-    let tenant_id = if (flags & FLAG_IPV6) != 0 {
-        unsafe { resolve_tenant_id_v6(ifindex, vlan_id, src_addr) }
-    } else {
-        unsafe { resolve_tenant_id(ifindex, vlan_id, src_addr[0]) }
+    // Resolve the packet's tenant once per chain rather than once per
+    // program: a classifier before this one may have left it, and what this
+    // one resolves is left for the ones behind it. Rule lookup is
+    // tenant-scoped with a fall back to the global (tenant 0) rule.
+    let tenant_id = match pktmeta::read_cb(_ctx).and_then(|m| m.tenant()) {
+        Some(t) => t,
+        None => {
+            let ifindex = unsafe { (*_ctx.skb.skb).ifindex };
+            let t = if (flags & FLAG_IPV6) != 0 {
+                unsafe { resolve_tenant_id_v6(ifindex, vlan_id, src_addr) }
+            } else {
+                unsafe { resolve_tenant_id(ifindex, vlan_id, src_addr[0]) }
+            };
+            pktmeta::write_tenant(_ctx, t);
+            t
+        }
     };
 
     // Match on destination port first (the request leg), then fall back to

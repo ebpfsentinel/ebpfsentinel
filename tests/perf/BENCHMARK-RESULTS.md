@@ -179,10 +179,12 @@ bucket is walked on every packet and never drops.
   retransmits per window with the agent, 70 000 to 100 000 without), so the
   two rows measure whichever side ran out of CPU first and their difference
   is noise. The 1 and 2.5 Gbps rows are the comparable ones.
-- The loaded maps lock 365 MB (`bytes_memlock` over every map). That is kernel
-  memory, not RSS, and it is charged to the cgroup that created the maps, so a
-  container limit has to hold both: the chart's 512 Mi limit leaves about
-  90 MB over the agent and the fixture's maps.
+- The loaded maps locked 365 MB on this build (`bytes_memlock` over every
+  map). That is kernel memory, not RSS, and it is charged to the cgroup that
+  created the maps, so a container limit has to hold both: the chart's 512 Mi
+  limit left about 90 MB over the agent and the fixture's maps. The tables
+  are sized from the configuration since 2026-09-21 and the same fixture
+  locks 99 MB; the memory section below has the figures.
 
 ### Per-packet cost under a pktgen flood (2026-09-20)
 
@@ -227,6 +229,72 @@ above prices it per byte on four flows.
   fires, so the process does metrics and heartbeats. The 3 MB over the TCP
   pass is the peak over the window rather than the value at rest.
 
+### Per-packet cost after the tc chain fix (2026-09-21)
+
+The 2026-09-20 pass above found two things in the tc chain that were not
+traffic: `tc_nat_egress` had been attached on TCX ingress since the attach
+helper was written, so SNAT ran on every inbound packet and the chain counted
+seven programs per packet, and every classifier re-parsed the Ethernet, VLAN,
+IP and transport headers the one before it had already parsed. Both are
+fixed: `tc_nat_egress` is on egress, and the first classifier to see an skb
+writes the offsets, protocol, ports and tenant into the five `skb->cb` words
+the kernel carries from one TCX program to the next, with a check word over
+the skb length and interface indexes so a stale control block is re-parsed
+rather than trusted. The kernel-filled tables were also cut to what the
+configuration asks for, which is the memory section below.
+
+Measured as an A/B on the same VM in one session, the old build and the new
+one back to back under the same host load (one-minute load 4.3 to 5.2 on the
+20-core host, so both columns carry the same inflation and neither is
+comparable with the 2026-09-20 absolutes, which were taken on a quieter host):
+
+| Build | Target   | rx kpps | eBPF runs per packet | ns per packet in eBPF | of which `xdp_firewall` | of which tc chain | Maps |
+| ----- | -------- | ------- | -------------------- | --------------------- | ----------------------- | ----------------- | ---- |
+| old   | 25 kpps  | 25      | 7.0                  | 3 326                 | 1 892                   | 1 434             | 365 MB |
+| new   | 25 kpps  | 25      | 6.0                  | 2 998                 | 1 799                   | 1 199             | 99 MB |
+| old   | uncapped | 54      | 7.0                  | 2 486                 | 1 363                   | 1 123             | 365 MB |
+| new   | uncapped | 54      | 6.0                  | 2 550                 | 1 496                   | 1 054             | 99 MB |
+
+- The per-packet gain is the `tc_nat_egress` run that no longer happens on
+  ingress: 186 to 234 ns a packet, 7 to 10 % of the eBPF time. It now runs on
+  the locally originated packets only, a few dozen per window, cold, at about
+  1.1 µs each, which is nothing against the flood.
+- The once-per-chain parse is worth less than the noise on this lane. Per
+  program, `tc_ids`, `tc_conntrack`, `tc_nat_ingress`, `tc_threatintel` and
+  `tc_dns` each moved by under 10 % in either direction, and so did
+  `xdp_firewall`, which the change did not touch: parsing four headers out of
+  a linear skb was never where the time went, the map lookups are. The
+  handoff is kept for what it buys structurally - one parser to get right,
+  offsets every classifier agrees on, the tenant resolved once - not for a
+  figure this lane cannot see.
+- `xdp_firewall` stays at about 60 % of the per-packet time and it is the
+  next thing to look at, not the tc chain.
+- The full three-profile pass of the same day is in
+  `ebpfsentinel-enterprise/tests/perf/results/2026-09-21-pktgen-64/`. It
+  reads 6.0 runs a packet and 99 MB of maps for both agents, and per-run
+  figures 1.5 to 1.7 times the 2026-09-20 ones with the host's one-minute
+  load at 3.5 to 7.4 during the windows; the uncapped OSS cell is marked
+  `(host busy)`. Those absolutes are the host's, which is what the A/B above
+  is for.
+
+### Memory footprint (2026-09-21)
+
+Same measurement as the section below, re-taken on kernel 7.0.0-28-generic after the eBPF tables stopped being sized by compile-time constants and started being sized from the configuration at load. Resident size is the agent's own processes (agent plus warden, `VmRSS` once the datapath is up and before any traffic); map memory is `bytes_memlock` summed over the loaded maps, preallocated at load and the same at idle and under flood.
+
+| Configuration | eBPF programs | RSS (MB) | Map memory (MB) |
+|---|---|---|---|
+| No feature enabled | 15 | 28 | 0.3 |
+| Firewall only | 17 | 43 | 27 |
+| Rate limiting only | 17 | 43 | 46 |
+| Threat intelligence only | 16 | 42 | 12 |
+| Full benchmark fixture | 24 | 58 | 99 |
+
+Resident size did not move: the change is entirely in the tables. Threat intelligence went from 180 MB to 12 MB because its two IOC hashes and two Bloom filters were a fixed million entries each whatever the feeds carried, and are now `threatintel.max_entries`, derived from the feeds with a floor of 4,096. Rate limiting went from 160 MB to 46 MB on `ratelimit.max_buckets`, and the DDoS tables on `ddos.max_tracked_sources`. Nothing was made smaller than it needs to be: the defaults are what the fixture asks for, and an estate that wants the old capacity writes it in the configuration.
+
+The total splits in two on this 4 vCPU guest: about 43 MB is in per-CPU tables and scales with the CPU count at roughly 11 MB a CPU, and about 56 MB does not. The same fixture on 16 vCPU therefore locks about 230 MB rather than 99 MB, which is the figure to size a node against. Against the 512Mi limit the chart sets, 58 MB resident plus 99 MB of maps leaves about 355 MB on four CPUs and about 225 MB on sixteen, where the previous build left about 90 MB on four and did not fit on sixteen at all.
+
+The per-packet effect of the same change, measured against the previous build under identical host load, is in the section above.
+
 ### Memory footprint (2026-09-20)
 
 Resident size of the agent's own processes (agent plus warden, `VmRSS` once the datapath is up and before any traffic) on kernel 7.0.0-28-generic, taken from the benchmark fixture with every section but the named one turned off. Map memory is `bytes_memlock` summed over the loaded maps: it is charged to the cgroup that created them, preallocated at load, and the same at idle and under flood, which is why it sits beside the resident size rather than inside it.
@@ -239,7 +307,7 @@ Resident size of the agent's own processes (agent plus warden, `VmRSS` once the 
 | Threat intelligence only | 16 | 42 | 180 |
 | Full benchmark fixture | 24 | 58 | 365 |
 
-The two big map holders are the threat intelligence IOC tables and the rate-limit buckets, both LRU hashes sized for their worst case at load; the conntrack table is 24 MB. Under the held-rate windows above the resident size stayed at 58 MB from idle to 5 Gbps, so what an operator sizes for is the map memory: with the fixture as it is, 58 MB resident plus 365 MB of maps against the 512Mi limit the chart sets leaves about 90 MB, and a feature that widens a map is a change to that limit.
+The two big map holders are the threat intelligence IOC tables and the rate-limit buckets, both LRU hashes sized for their worst case at load; the conntrack table is 24 MB. Under the held-rate windows above the resident size stayed at 58 MB from idle to 5 Gbps, so what an operator sizes for is the map memory: with the fixture as it is, 58 MB resident plus 365 MB of maps against the 512Mi limit the chart sets leaves about 90 MB, and a feature that widens a map is a change to that limit. The map column of this table is superseded by the section above: every table it reports was sized by a compile-time constant, and they are sized from the configuration since 2026-09-21.
 
 What changed on 2026-09-20: from 2026-04-16 the agent's resident size on this fixture was 360 to 408 MB, and the enterprise agent's about 430 MB, against the 6.5 MB the previous section reports for 2026-03-22. The cause was the conntrack offset resolution, which shelled out to `bpftool btf dump -j` for the whole vmlinux BTF and parsed the result as JSON; the parsed document was dropped but the allocator kept the arenas it had grown. The two struct members are now read from the BTF the kfunc loader already parses, and the figures in the table are what that build measures. The `RSS (MB)` columns of the 2026-03-22 matrix below are from a build that did not carry the regression and are consistent with this table's order of magnitude, not with its exact values.
 

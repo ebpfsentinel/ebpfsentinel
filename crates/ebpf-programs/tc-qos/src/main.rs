@@ -12,7 +12,7 @@ use aya_ebpf::{
 use aya_ebpf_bindings::bindings::_bindgen_ty_28::BPF_SKB_TSTAMP_DELIVERY_MONO;
 use aya_ebpf_bindings::helpers::{bpf_skb_ecn_set_ce, bpf_skb_set_tstamp};
 use ebpf_common::{
-    event::{EVENT_TYPE_QOS, FLAG_IPV6, FLAG_VLAN, PacketEvent},
+    event::{EVENT_TYPE_QOS, FLAG_IPV6, PacketEvent},
     qos::{
         QOS_METRIC_COUNT, QOS_METRIC_DELAYED, QOS_METRIC_DROPPED_LOSS, QOS_METRIC_DROPPED_QUEUE,
         QOS_METRIC_ERRORS, QOS_METRIC_EVENTS_DROPPED, QOS_METRIC_SHAPED, QOS_METRIC_TOTAL_SEEN,
@@ -21,15 +21,14 @@ use ebpf_common::{
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
-use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::net::{
-    ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
-    ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
+    IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4, u16_from_be_bytes,
+    u32_from_be_bytes,
 };
+use ebpf_helpers::pktmeta;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{emit_packet_event, increment_metric};
 use network_types::{
-    eth::EthHdr,
     ip::{IpProto, Ipv4Hdr},
     tcp::TcpHdr,
     udp::UdpHdr,
@@ -233,24 +232,15 @@ fn dispatch(ctx: &TcContext, is_ingress: bool) -> i32 {
 
 #[inline(always)]
 fn try_tc_qos(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
-    // Parse Ethernet header
-    let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
-    let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
-    let mut l3_offset = EthHdr::LEN;
-    let mut flags: u8 = 0;
+    // The parse the chain already holds, or this program's own if it is
+    // first.
+    let meta = pktmeta::resolve(ctx)?;
+    let flags = meta.event_flags();
 
-    // 802.1Q / 802.1ad tags. The outer tag is the one carried onward: on a
-    // QinQ frame that is the service provider's tag, which is what a policy
-    // is written against, and the inner customer tag is left in the frame.
-    let (vlan_id, vlan_tagged) = parse_vlan_tags!(ctx, ether_type, l3_offset);
-    if vlan_tagged {
-        flags |= FLAG_VLAN;
-    }
-
-    if ether_type == ETH_P_IP {
-        process_qos_v4(ctx, l3_offset, vlan_id, flags, is_ingress)
-    } else if ether_type == ETH_P_IPV6 {
-        process_qos_v6(ctx, l3_offset, vlan_id, flags | FLAG_IPV6, is_ingress)
+    if meta.is_ipv4() {
+        process_qos_v4(ctx, meta.l3(), meta.vlan_id, flags, is_ingress)
+    } else if meta.is_ipv6() {
+        process_qos_v6(ctx, meta.l3(), meta.vlan_id, flags, is_ingress)
     } else {
         Ok(TC_ACT_OK)
     }
@@ -436,7 +426,8 @@ fn classify_in_vlan(
     // Same ladder with the DSCP left open. Skipped when the packet is unmarked,
     // because every key it would build has already been tried above.
     if dscp != 0
-        && let Some(val) = classify_at_dscp(src_ip, dst_ip, src_port, dst_port, protocol, 0, vlan_id)
+        && let Some(val) =
+            classify_at_dscp(src_ip, dst_ip, src_port, dst_port, protocol, 0, vlan_id)
     {
         return Some(val);
     }
@@ -563,12 +554,21 @@ fn apply_qos(
         return Ok(TC_ACT_OK); // group mismatch -> pass
     }
 
-    // Check tenant isolation for the classifier.
-    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
-    let tenant_id = if (flags & FLAG_IPV6) != 0 {
-        unsafe { resolve_tenant_id_v6(ifindex, vlan_id, src_addr) }
-    } else {
-        unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) }
+    // Check tenant isolation for the classifier. The tenant is resolved
+    // once per chain: read back if a program before this one left it,
+    // left for the ones behind it otherwise.
+    let tenant_id = match pktmeta::read_cb(ctx).and_then(|m| m.tenant()) {
+        Some(t) => t,
+        None => {
+            let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+            let t = if (flags & FLAG_IPV6) != 0 {
+                unsafe { resolve_tenant_id_v6(ifindex, vlan_id, src_addr) }
+            } else {
+                unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) }
+            };
+            pktmeta::write_tenant(ctx, t);
+            t
+        }
     };
     if classifier_val.tenant_id != 0 && classifier_val.tenant_id != tenant_id {
         return Ok(TC_ACT_OK); // tenant mismatch -> pass
@@ -644,7 +644,10 @@ fn apply_qos(
                 // bucket to the brim, which is where a fresh pipe should start.
                 let elapsed_ns = now_ns.saturating_sub(state.last_refill_ns);
                 let new_tokens = elapsed_ns / pipe_cfg.ns_per_byte;
-                state.tokens = state.tokens.saturating_add(new_tokens).min(pipe_cfg.burst_bytes);
+                state.tokens = state
+                    .tokens
+                    .saturating_add(new_tokens)
+                    .min(pipe_cfg.burst_bytes);
                 state.last_refill_ns = now_ns;
 
                 // Check if we can consume tokens

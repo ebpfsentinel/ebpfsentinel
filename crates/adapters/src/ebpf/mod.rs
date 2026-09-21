@@ -25,6 +25,7 @@ pub mod loader;
 pub mod lpm_coordinator;
 pub mod map_fill;
 pub mod map_manager;
+pub mod map_sizing;
 pub mod map_store;
 pub mod metrics_reader;
 pub mod nat_map_manager;
