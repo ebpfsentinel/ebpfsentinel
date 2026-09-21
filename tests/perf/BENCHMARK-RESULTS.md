@@ -337,6 +337,53 @@ measurable by it. The runs are
 `-sized/` and `-sized-repeat/`, with the reasoning in `analysis.md` beside the
 first two.
 
+### Gating inside the firewall, and measuring it against itself (2026-09-21)
+
+The pass above gated the lookups one program made on behalf of another and left
+`xdp_firewall` at about 55 % of the per-packet time, doing the same thing inside
+itself: four prefix tries, two hash fast paths, the zone map, the three tenant
+sources and the overload probe were read on every packet whether or not anything
+had been loaded into them, and the rule scan ran with a rule count of zero.
+
+They are now gated on one single-entry map, `FW_EMPTY_FEATURES`, holding one bit
+per table. The sense is inverted - a bit **set** means the table is empty, skip
+the lookup - so a map nobody wrote, and an object loaded by an older userspace,
+both read zero and every lookup happens exactly as it did before. A stale bit can
+only be slower, never wrong. Where a setter is additive the bit closes only until
+the first write and never again, because an empty slice removes nothing and
+cannot mean the table emptied; where a setter replaces, the lookup is opened
+before the mutation and the recomputed answer published after it succeeded.
+
+Measured against itself, with `BPF_PROG_TEST_RUN` on the loaded program, one
+64-byte UDP frame, two million repeats, the mask flipped between runs on the same
+load of the same object:
+
+| `FW_EMPTY_FEATURES` | ns a run |
+| ------------------- | -------- |
+| as the loader published it | 113, 111, 111 |
+| zero, every lookup runs | 145, 142, 144 |
+| published value again | 114, 108, 111 |
+
+About 33 ns a packet, 23 % of the program, repeatable to 3 ns. The middle row is
+the code as it was before this change, running in the same kernel a second
+earlier. It is a floor rather than an estimate: a test run has everything it
+touches in cache, and a miss in a cold trie under real traffic costs more.
+
+On the lane's own fixture the published mask is 247, every bit but the port hash,
+which the fixture's one port rule keeps open. Seven tables are read by nobody.
+
+**What this lane can and cannot resolve.** The pktgen lane reads 15 to 20 % a
+packet better than the run before it, and that is not this change: the no-agent
+baseline uncapped reads 94 kpps against 86 and 87, and every program in the chain
+fell with the firewall, including the five this change does not touch. The
+firewall against the rest of the chain it sits in reads 1.31, 1.23, 1.22 and now
+1.20, which moves the right way in both profiles and by less than two runs of
+identical binaries differ from each other. A program-level gate is now below this
+lane's floor: the next one is measured with `BPF_PROG_TEST_RUN` first, and taken
+to the lane only to prove nothing regressed. The run is
+`ebpfsentinel-enterprise/tests/perf/results/2026-09-21-pktgen-64-fwgated/`, with
+the reasoning in `analysis.md` beside it.
+
 ### Memory footprint (2026-09-21)
 
 Same measurement as the section below, re-taken on kernel 7.0.0-28-generic after the eBPF tables stopped carrying the capacity of their worst case. Resident size is the agent's own processes (agent plus warden, `VmRSS` once the datapath is up and before any traffic); map memory is `bytes_memlock` summed over the loaded maps, preallocated at load and the same at idle and under flood.

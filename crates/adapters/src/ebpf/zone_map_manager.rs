@@ -12,6 +12,7 @@ use ebpf_common::zone::{ZONE_POLICY_ALLOW, ZONE_POLICY_DENY, zone_pair_key};
 use ports::secondary::zone_map_port::ZoneMapPort;
 use tracing::info;
 
+use crate::ebpf::feature_gates::{self, Feature};
 use crate::ebpf::map_store::MapStore;
 use crate::net::iface_mac::resolve_ifindex;
 
@@ -45,6 +46,9 @@ impl ZoneMapManager {
             HashMap::try_from(ebpf.take_map("ZONE_POLICY_MAP").ok_or_else(|| {
                 anyhow::anyhow!("map 'ZONE_POLICY_MAP' not found in eBPF object")
             })?)?;
+        // The map has just been created by this load and this manager is its
+        // only writer, so no interface is in a zone until `sync` says one is.
+        feature_gates::publish(Feature::Zones, true);
         info!("zone maps acquired");
         Ok(Self {
             zones,
@@ -101,6 +105,9 @@ fn policy_byte(policy: ZonePolicy) -> u8 {
 
 impl ZoneMapPort for ZoneMapManager {
     fn sync(&mut self, config: &ZoneConfig) -> Result<(), DomainError> {
+        // The rewrite below can fail at any insert, so say the map may hold
+        // something for the whole of it and state the real answer at the end.
+        feature_gates::publish(Feature::Zones, false);
         self.clear()?;
 
         let mut interfaces = 0u32;
@@ -175,6 +182,9 @@ impl ZoneMapPort for ZoneMapManager {
             policies += 1;
         }
 
+        // Zoning is decided per ingress interface: with none mapped, neither
+        // the zone's own default nor an inter-zone policy can be reached.
+        feature_gates::publish(Feature::Zones, interfaces == 0);
         info!(
             zones = config.zones.len(),
             interfaces, policies, "zone maps programmed"

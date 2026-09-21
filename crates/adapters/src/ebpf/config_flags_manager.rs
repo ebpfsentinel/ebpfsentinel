@@ -1,3 +1,4 @@
+use crate::ebpf::feature_gates::{self, Feature};
 use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, HashMap, MapData};
 use ebpf_common::config_flags::ConfigFlags;
@@ -239,6 +240,9 @@ pub struct InterfaceGroupsManager {
 impl InterfaceGroupsManager {
     /// Create a new, empty `InterfaceGroupsManager`.
     pub fn new() -> Self {
+        // Nothing is in the map until this manager puts it there, and the
+        // datapath reads every rule as floating while that holds.
+        feature_gates::publish(Feature::InterfaceGroups, true);
         Self { maps: Vec::new() }
     }
 
@@ -274,6 +278,15 @@ impl InterfaceGroupsManager {
         &mut self,
         memberships: &[(u32, u32)],
     ) -> Result<(), anyhow::Error> {
+        if memberships.iter().any(|&(_, groups)| groups != 0) {
+            // The setters are additive - an empty slice removes nothing - so the
+            // only safe reading of "this map holds no entry" is that nothing has
+            // been put in it yet: once a write happens the lookup stays open for
+            // the life of this manager. A deployment that stops using the feature
+            // keeps paying for the lookup until the next load, which is the slower
+            // half of the trade and the only one safe to get wrong.
+            feature_gates::publish(Feature::InterfaceGroups, false);
+        }
         for map in &mut self.maps {
             for &(ifindex, groups) in memberships {
                 if groups == 0 {
@@ -305,5 +318,45 @@ impl InterfaceGroupsManager {
 impl Default for InterfaceGroupsManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fresh_manager_says_no_interface_carries_a_group() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
+        let mgr = InterfaceGroupsManager::new();
+        assert_eq!(mgr.map_count(), 0);
+        assert!(feature_gates::is_empty(Feature::InterfaceGroups));
+    }
+
+    #[test]
+    fn a_membership_of_zero_writes_nothing_and_leaves_the_gate_shut() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
+        let mut mgr = InterfaceGroupsManager::new();
+        // A zero bitmask removes the entry rather than adding one, so the map
+        // still holds nothing and the datapath still has nothing to read.
+        assert!(mgr.set_interface_groups(&[(2, 0)]).is_ok());
+        assert!(feature_gates::is_empty(Feature::InterfaceGroups));
+    }
+
+    #[test]
+    fn a_group_written_keeps_the_lookup_open_for_good() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
+        let mut mgr = InterfaceGroupsManager::new();
+        assert!(mgr.set_interface_groups(&[(2, 0b11)]).is_ok());
+        assert!(!feature_gates::is_empty(Feature::InterfaceGroups));
+
+        assert!(mgr.set_interface_groups(&[(2, 0)]).is_ok());
+        assert!(!feature_gates::is_empty(Feature::InterfaceGroups));
     }
 }

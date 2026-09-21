@@ -3821,6 +3821,13 @@ pub fn try_load_xdp_firewall(
         }
     }
 
+    if zone_map_manager.is_none() {
+        // Nothing will ever assign an interface to a zone on this run, either
+        // because zoning is off or because the maps could not be taken, so the
+        // datapath reaches the same verdict without reading them.
+        adapters::ebpf::feature_gates::publish(adapters::ebpf::FirewallFeature::Zones, true);
+    }
+
     // Populate DDOS_CPUMAP with all online CPUs for DDoS CPU steering.
     adapters::ebpf::cpumap::populate_cpumap(loader.ebpf_mut(), "DDOS_CPUMAP");
 

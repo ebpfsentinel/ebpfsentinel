@@ -10,6 +10,7 @@ pub mod dlp_event_reader;
 pub mod dns_event_reader;
 pub mod ebpf_map_write_adapter;
 pub mod event_reader;
+pub mod feature_gates;
 pub mod geoip_lpm_manager;
 pub mod helper_probe;
 pub mod ids_map_manager;
@@ -68,6 +69,7 @@ pub use dlp_event_reader::DlpEventReader;
 pub use dns_event_reader::DnsEventReader;
 pub use ebpf_map_write_adapter::EbpfMapWriteAdapter;
 pub use event_reader::EventReader;
+pub use feature_gates::Feature as FirewallFeature;
 pub use geoip_lpm_manager::GeoIpLpmManager;
 pub use helper_probe::{
     HelperReport, HelperSupport, MissingHelper, ProbeStatus, ProbeType,

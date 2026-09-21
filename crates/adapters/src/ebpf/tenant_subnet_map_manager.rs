@@ -1,5 +1,6 @@
 use std::net::Ipv6Addr;
 
+use crate::ebpf::feature_gates::{self, Feature};
 use crate::ebpf::map_store::MapStore;
 use aya::maps::MapData;
 use aya::maps::lpm_trie::{Key, LpmTrie};
@@ -20,6 +21,7 @@ pub struct TenantSubnetMapManager {
 impl TenantSubnetMapManager {
     /// Create a new, empty `TenantSubnetMapManager`.
     pub fn new() -> Self {
+        feature_gates::publish(Feature::TenantSubnet, true);
         Self {
             maps: Vec::new(),
             v6_maps: Vec::new(),
@@ -69,6 +71,15 @@ impl TenantSubnetMapManager {
     ///
     /// Each map is updated with every entry (existing entries are overwritten).
     pub fn set_tenant_subnets(&mut self, entries: &[(u32, u8, u32)]) -> Result<(), anyhow::Error> {
+        if !entries.is_empty() {
+            // The setters are additive - an empty slice removes nothing - so the
+            // only safe reading of "this map holds no entry" is that nothing has
+            // been put in it yet: once a write happens the lookup stays open for
+            // the life of this manager. A deployment that stops using the feature
+            // keeps paying for the lookup until the next load, which is the slower
+            // half of the trade and the only one safe to get wrong.
+            feature_gates::publish(Feature::TenantSubnet, false);
+        }
         for map in &mut self.maps {
             for &(ip_nbo, prefix_len, tenant_id) in entries {
                 let key = Key::new(u32::from(prefix_len), ip_nbo.to_be_bytes());
@@ -98,6 +109,9 @@ impl TenantSubnetMapManager {
         &mut self,
         entries: &[(Ipv6Addr, u8, u32)],
     ) -> Result<(), anyhow::Error> {
+        if !entries.is_empty() {
+            feature_gates::publish(Feature::TenantSubnet, false);
+        }
         for map in &mut self.v6_maps {
             for &(addr, prefix_len, tenant_id) in entries {
                 let key = Key::new(u32::from(prefix_len), addr.octets());
@@ -138,6 +152,9 @@ mod tests {
 
     #[test]
     fn new_creates_empty_manager() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
         let mgr = TenantSubnetMapManager::new();
         assert_eq!(mgr.map_count(), 0);
         assert_eq!(mgr.v6_map_count(), 0);
@@ -145,6 +162,9 @@ mod tests {
 
     #[test]
     fn default_creates_empty_manager() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
         let mgr = TenantSubnetMapManager::default();
         assert_eq!(mgr.map_count(), 0);
         assert_eq!(mgr.v6_map_count(), 0);
@@ -152,6 +172,9 @@ mod tests {
 
     #[test]
     fn set_tenant_subnets_empty_entries_is_noop() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
         let mut mgr = TenantSubnetMapManager::new();
         let result = mgr.set_tenant_subnets(&[]);
         assert!(result.is_ok());
@@ -159,6 +182,9 @@ mod tests {
 
     #[test]
     fn set_tenant_subnets_no_maps_succeeds() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
         let mut mgr = TenantSubnetMapManager::new();
         // Non-empty entries but no maps -- loop body never executes.
         let result = mgr.set_tenant_subnets(&[(0x0A01_0000, 16, 1), (0xC0A8_0000, 24, 2)]);
@@ -167,6 +193,9 @@ mod tests {
 
     #[test]
     fn set_tenant_subnets_v6_empty_entries_is_noop() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
         let mut mgr = TenantSubnetMapManager::new();
         let result = mgr.set_tenant_subnets_v6(&[]);
         assert!(result.is_ok());
@@ -174,11 +203,39 @@ mod tests {
 
     #[test]
     fn set_tenant_subnets_v6_no_maps_succeeds() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
         let mut mgr = TenantSubnetMapManager::new();
         // Non-empty entries but no V6 maps -- loop body never executes.
         let addr1: Ipv6Addr = "2001:db8::".parse().unwrap();
         let addr2: Ipv6Addr = "fd00::".parse().unwrap();
         let result = mgr.set_tenant_subnets_v6(&[(addr1, 32, 1), (addr2, 48, 2)]);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn a_fresh_manager_says_both_tables_are_empty() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
+        let mgr = TenantSubnetMapManager::new();
+        drop(mgr);
+        assert!(feature_gates::is_empty(Feature::TenantSubnet));
+    }
+
+    #[test]
+    fn a_subnet_of_either_family_keeps_the_lookup_open() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
+        let mut mgr = TenantSubnetMapManager::new();
+        assert!(mgr.set_tenant_subnets(&[(0x0A01_0000, 16, 1)]).is_ok());
+        assert!(!feature_gates::is_empty(Feature::TenantSubnet));
+
+        feature_gates::reset();
+        let addr: Ipv6Addr = "2001:db8::".parse().expect("literal address");
+        assert!(mgr.set_tenant_subnets_v6(&[(addr, 32, 1)]).is_ok());
+        assert!(!feature_gates::is_empty(Feature::TenantSubnet));
     }
 }

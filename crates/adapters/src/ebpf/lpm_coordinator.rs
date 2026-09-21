@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use crate::ebpf::feature_gates::{self, Feature};
 use crate::ebpf::map_store::MapStore;
 use aya::maps::MapData;
 use aya::maps::lpm_trie::{Key, LpmTrie};
@@ -80,6 +81,11 @@ impl LpmCoordinator {
                 .ok_or_else(|| anyhow::anyhow!("map 'FW_LPM_DST_V6' not found"))?,
         )?;
 
+        // The four tries were just created by this load, so nothing is in them
+        // and the datapath can reach the same verdict without reading them.
+        feature_gates::publish(Feature::LpmV4, true);
+        feature_gates::publish(Feature::LpmV6, true);
+
         info!("LPM Coordinator acquired 4 LPM Trie maps from xdp-firewall");
         Ok(Self {
             inner: Mutex::new(Inner {
@@ -106,6 +112,8 @@ impl LpmCoordinatorPort for LpmCoordinator {
             .inner
             .lock()
             .map_err(|e| DomainError::EngineError(format!("LPM coordinator lock poisoned: {e}")))?;
+
+        open_lookups();
 
         // Remove old entries for this source
         remove_source_entries_inner(&mut inner, source);
@@ -151,6 +159,7 @@ impl LpmCoordinatorPort for LpmCoordinator {
         }
 
         inner.entries_by_source.insert(source.to_string(), tracked);
+        republish(&inner);
 
         info!(
             source,
@@ -173,6 +182,8 @@ impl LpmCoordinatorPort for LpmCoordinator {
             .inner
             .lock()
             .map_err(|e| DomainError::EngineError(format!("LPM coordinator lock poisoned: {e}")))?;
+
+        open_lookups();
 
         let inner = &mut *inner;
         for entry in src_v4 {
@@ -202,6 +213,8 @@ impl LpmCoordinatorPort for LpmCoordinator {
                 direction: Direction::Src,
             });
         }
+
+        republish(inner);
 
         info!(
             source,
@@ -240,6 +253,8 @@ impl LpmCoordinatorPort for LpmCoordinator {
             });
         }
 
+        republish(&inner);
+
         info!(
             source,
             src_v4 = src_v4.len(),
@@ -256,10 +271,38 @@ impl LpmCoordinatorPort for LpmCoordinator {
             .map_err(|e| DomainError::EngineError(format!("LPM coordinator lock poisoned: {e}")))?;
 
         remove_source_entries_inner(&mut inner, source);
+        republish(&inner);
 
         info!(source, "LPM coordinator removed all entries for source");
         Ok(())
     }
+}
+
+/// Tell the datapath both families are worth looking up.
+///
+/// Called before a mutation rather than after it, so a write that fails
+/// half-way leaves the datapath reading tries it did not have to read, which
+/// is slower and never wrong.
+fn open_lookups() {
+    feature_gates::publish(Feature::LpmV4, false);
+    feature_gates::publish(Feature::LpmV6, false);
+}
+
+/// Recompute, from what every source is tracking, whether either family holds
+/// a prefix, and tell the datapath.
+fn republish(inner: &Inner) {
+    let mut v4 = false;
+    let mut v6 = false;
+    for entries in inner.entries_by_source.values() {
+        for entry in entries {
+            match entry {
+                TrackedEntry::V4 { .. } => v4 = true,
+                TrackedEntry::V6 { .. } => v6 = true,
+            }
+        }
+    }
+    feature_gates::publish(Feature::LpmV4, !v4);
+    feature_gates::publish(Feature::LpmV6, !v6);
 }
 
 /// Remove all tracked entries for a source from the kernel maps.

@@ -1,3 +1,4 @@
+use crate::ebpf::feature_gates::{self, Feature};
 use crate::ebpf::map_store::MapStore;
 use aya::maps::{HashMap, MapData};
 use tracing::info;
@@ -15,6 +16,7 @@ pub struct TenantVlanMapManager {
 impl TenantVlanMapManager {
     /// Create a new, empty `TenantVlanMapManager`.
     pub fn new() -> Self {
+        feature_gates::publish(Feature::TenantVlan, true);
         Self { maps: Vec::new() }
     }
 
@@ -43,6 +45,15 @@ impl TenantVlanMapManager {
     /// The `vlan_id` is stored as `u32` to match the eBPF map key type,
     /// even though VLAN IDs are 12-bit values (0-4095).
     pub fn set_tenant_vlans(&mut self, entries: &[(u16, u32)]) -> Result<(), anyhow::Error> {
+        if !entries.is_empty() {
+            // The setters are additive - an empty slice removes nothing - so the
+            // only safe reading of "this map holds no entry" is that nothing has
+            // been put in it yet: once a write happens the lookup stays open for
+            // the life of this manager. A deployment that stops using the feature
+            // keeps paying for the lookup until the next load, which is the slower
+            // half of the trade and the only one safe to get wrong.
+            feature_gates::publish(Feature::TenantVlan, false);
+        }
         for map in &mut self.maps {
             for &(vlan_id, tenant_id) in entries {
                 map.insert(u32::from(vlan_id), tenant_id, 0)
@@ -77,18 +88,27 @@ mod tests {
 
     #[test]
     fn new_creates_empty_manager() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
         let mgr = TenantVlanMapManager::new();
         assert_eq!(mgr.map_count(), 0);
     }
 
     #[test]
     fn default_creates_empty_manager() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
         let mgr = TenantVlanMapManager::default();
         assert_eq!(mgr.map_count(), 0);
     }
 
     #[test]
     fn set_tenant_vlans_empty_entries_is_noop() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
         let mut mgr = TenantVlanMapManager::new();
         // No maps registered, empty entries - should succeed without error.
         let result = mgr.set_tenant_vlans(&[]);
@@ -97,9 +117,36 @@ mod tests {
 
     #[test]
     fn set_tenant_vlans_no_maps_succeeds() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
         let mut mgr = TenantVlanMapManager::new();
         // Non-empty entries but no maps - loop body never executes.
         let result = mgr.set_tenant_vlans(&[(100, 1), (200, 2)]);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn a_fresh_manager_says_the_table_is_empty() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
+        let mgr = TenantVlanMapManager::new();
+        drop(mgr);
+        assert!(feature_gates::is_empty(Feature::TenantVlan));
+    }
+
+    #[test]
+    fn a_vlan_written_keeps_the_lookup_open_for_good() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
+        let mut mgr = TenantVlanMapManager::new();
+        assert!(mgr.set_tenant_vlans(&[(100, 1)]).is_ok());
+        assert!(!feature_gates::is_empty(Feature::TenantVlan));
+
+        // An empty slice removes nothing, so it cannot mean the table emptied.
+        assert!(mgr.set_tenant_vlans(&[]).is_ok());
+        assert!(!feature_gates::is_empty(Feature::TenantVlan));
     }
 }

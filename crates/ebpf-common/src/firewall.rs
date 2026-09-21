@@ -405,6 +405,34 @@ unsafe impl aya::Pod for FwHashKeyPort {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for FwHashValue {}
 
+// ── FW_EMPTY_FEATURES: what userspace has loaded nothing into ──────
+
+// A bit set in `FW_EMPTY_FEATURES` means the tables behind that feature hold
+// no entry, so the datapath reaches the same verdict without looking them up.
+//
+// The sense is inverted on purpose: zero means nothing has been published, so
+// an unwritten map, or an object loaded by a userspace that never heard of
+// this map, reads 0 and every lookup still happens. A stale value can only be
+// slower, never wrong.
+
+/// The two v4 LPM tries (source and destination) hold no prefix.
+pub const FW_EMPTY_LPM_V4: u32 = 1 << 0;
+/// The two v6 LPM tries (source and destination) hold no prefix.
+pub const FW_EMPTY_LPM_V6: u32 = 1 << 1;
+/// The 5-tuple exact-match fast path holds no rule.
+pub const FW_EMPTY_HASH_5TUPLE: u32 = 1 << 2;
+/// The destination-port fast path holds no rule.
+pub const FW_EMPTY_HASH_PORT: u32 = 1 << 3;
+/// No interface is assigned to a zone, so the default policy needs no zone.
+pub const FW_EMPTY_ZONES: u32 = 1 << 4;
+/// No tenant is mapped by VLAN, interface or subnet, so every packet is tenant 0.
+pub const FW_EMPTY_TENANTS: u32 = 1 << 5;
+/// No interface carries a group bitmask, so every packet matches group 0.
+pub const FW_EMPTY_IFACE_GROUPS: u32 = 1 << 6;
+/// Neither per-source connection limit is configured, so nothing writes the
+/// overload set and probing it can only miss.
+pub const FW_EMPTY_SRC_LIMITS: u32 = 1 << 7;
+
 #[cfg(test)]
 mod tests {
     use super::*;

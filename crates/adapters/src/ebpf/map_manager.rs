@@ -1,3 +1,4 @@
+use crate::ebpf::feature_gates::{self, Feature};
 use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, HashMap, MapData};
 use domain::common::error::DomainError;
@@ -85,6 +86,21 @@ impl FirewallMapManager {
         let ct_gate = ebpf
             .take_map("FW_CT_GATE")
             .and_then(|m| Array::try_from(m).ok());
+
+        // The datapath's empty-feature mask. This manager adopts it because it
+        // is the one that owns the firewall's own configuration maps; the
+        // other six publishers reach it through the module. The maps behind
+        // the two fast paths have just been created by this load, so nothing
+        // is in them until `load_v4_rules` says otherwise - and a fast path
+        // this object does not carry is one nothing can ever write to.
+        if let Some(map) = ebpf
+            .take_map("FW_EMPTY_FEATURES")
+            .and_then(|m| Array::try_from(m).ok())
+        {
+            feature_gates::publish(Feature::Hash5Tuple, true);
+            feature_gates::publish(Feature::HashPort, true);
+            feature_gates::adopt(map);
+        }
 
         if hash_5tuple.is_some() {
             info!("FW_HASH_5TUPLE fast-path map acquired");
@@ -186,6 +202,12 @@ fn has_extended_match(rule: &FirewallRuleEntry) -> bool {
 impl FirewallArrayMapPort for FirewallMapManager {
     #[allow(clippy::cast_possible_truncation)] // count ≤ MAX_FIREWALL_RULES (4096)
     fn load_v4_rules(&mut self, rules: &[FirewallRuleEntry]) -> Result<(), DomainError> {
+        // Say both fast paths may hold something before touching them, so a
+        // load that fails part way leaves the datapath reading them rather
+        // than skipping entries it has just written.
+        feature_gates::publish(Feature::Hash5Tuple, false);
+        feature_gates::publish(Feature::HashPort, false);
+
         // Flush fast-path HashMaps before reload to remove stale entries.
         self.clear_hash_maps();
 
@@ -281,6 +303,8 @@ impl FirewallArrayMapPort for FirewallMapManager {
             .map_err(|e| DomainError::EngineError(format!("set V4 count={count} failed: {e}")))?;
 
         self.cached_v4_count = count + hash_5tuple_count as usize + hash_port_count as usize;
+        feature_gates::publish(Feature::Hash5Tuple, hash_5tuple_count == 0);
+        feature_gates::publish(Feature::HashPort, hash_port_count == 0);
         self.v4_needs_ct = rules
             .iter()
             .any(|r| rule_reads_ct(r.match_flags, r.max_states));

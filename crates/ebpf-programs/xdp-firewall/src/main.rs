@@ -32,7 +32,9 @@ use ebpf_common::{
     },
     firewall::{
         ACTION_DROP, ACTION_LOG, ACTION_PASS, ACTION_REJECT, CT_MATCH_ESTABLISHED,
-        CT_MATCH_INVALID, CT_MATCH_NEW, CT_MATCH_RELATED, DEFAULT_POLICY_DROP, FirewallRuleEntry,
+        CT_MATCH_INVALID, CT_MATCH_NEW, CT_MATCH_RELATED, DEFAULT_POLICY_DROP, FW_EMPTY_HASH_5TUPLE,
+        FW_EMPTY_HASH_PORT, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_LPM_V4, FW_EMPTY_LPM_V6,
+        FW_EMPTY_SRC_LIMITS, FW_EMPTY_TENANTS, FW_EMPTY_ZONES, FirewallRuleEntry,
         FirewallRuleEntryV6, FwHashKey5Tuple, FwHashKeyPort, FwHashValue, ICMP_WILDCARD,
         IpSetKeyV4, LpmValue, MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT, MATCH_DST_SET,
         MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT, MATCH_SRC_SET, MATCH2_DSCP, MATCH2_DST_MAC,
@@ -130,6 +132,19 @@ static FIREWALL_DEFAULT_POLICY: Array<u8, 1> = Array::new();
 /// and a stale object can only be slower, never wrong.
 #[btf_map]
 static FW_CT_GATE: Array<u8, 1> = Array::new();
+
+/// Which of this program's optional tables userspace has loaded nothing into.
+///
+/// Every feature below the fast paths costs a map lookup that a deployment not
+/// using it pays on every packet and that can only miss: no interface in a
+/// zone, no tenant mapped, no CIDR rule, no exact-match rule, no per-source
+/// connection ceiling. Userspace knows what it wrote, so it publishes a bit
+/// per empty feature here and the lookup is skipped. The sense is inverted on
+/// purpose: an unwritten map, or an object loaded by a userspace that never
+/// heard of it, reads 0 and every lookup still happens, so a stale value can
+/// only be slower, never wrong.
+#[btf_map]
+static FW_EMPTY_FEATURES: Array<u32, 1> = Array::new();
 
 /// Security zones: ingress `ifindex` → `zone_id`. Written by userspace from
 /// `ZoneConfig`; absent or 0 means the interface belongs to no zone.
@@ -330,11 +345,38 @@ fn ringbuf_has_backpressure() -> bool {
     ringbuf_has_backpressure!(EVENTS)
 }
 
+// ── Empty-feature gates ──────────────────────────────────────────────
+
+/// The bitmask of features userspace has loaded nothing into.
+///
+/// An `Array` lookup is inlined by the verifier, so reading this costs a few
+/// instructions against the tens of nanoseconds a hash or LPM miss costs.
+/// Absent or unwritten reads as zero, which is every gate open.
+#[inline(always)]
+fn empty_features() -> u32 {
+    match FW_EMPTY_FEATURES.get(0) {
+        Some(&mask) => mask,
+        None => 0,
+    }
+}
+
+/// Whether the tables behind `bit` are known to be empty.
+#[inline(always)]
+fn feature_empty(gates: u32, bit: u32) -> bool {
+    (gates & bit) != 0
+}
+
 // ── Interface group helpers ──────────────────────────────────────────
 
 /// Get the interface group membership for the current packet's ingress interface.
+///
+/// With no interface assigned to a group, every rule is floating and the
+/// lookup can only miss, so the gate answers 0 without touching the map.
 #[inline(always)]
 fn get_iface_groups(ctx: &XdpContext) -> u32 {
+    if feature_empty(empty_features(), FW_EMPTY_IFACE_GROUPS) {
+        return 0;
+    }
     let ifindex = ctx.ingress_ifindex() as u32;
     match unsafe { INTERFACE_GROUPS.get(&ifindex) } {
         Some(&groups) => groups,
@@ -372,6 +414,11 @@ fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
 /// ```
 #[inline(always)]
 unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
+    // With no tenant mapped by VLAN, interface or subnet, all three lookups
+    // can only miss and every packet belongs to tenant 0.
+    if feature_empty(empty_features(), FW_EMPTY_TENANTS) {
+        return 0;
+    }
     unsafe {
         // Priority 1: VLAN-based (if packet has VLAN tag)
         if vlan_id != 0 {
@@ -400,6 +447,9 @@ unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32) -> u32 {
 /// Priority: VLAN-based > interface-based > subnet V6 (LPM) > default (0).
 #[inline(always)]
 unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4]) -> u32 {
+    if feature_empty(empty_features(), FW_EMPTY_TENANTS) {
+        return 0;
+    }
     unsafe {
         // Priority 1: VLAN-based (if packet has VLAN tag)
         if vlan_id != 0 {
@@ -710,6 +760,11 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
 /// Resolve the security zone of the packet's ingress interface.
 #[inline(always)]
 fn zone_for_ingress(ctx: &XdpContext) -> u8 {
+    // No interface is in a zone, so the lookup can only miss and the two
+    // zone policies below it have nothing to resolve against.
+    if feature_empty(empty_features(), FW_EMPTY_ZONES) {
+        return ZONE_NONE;
+    }
     let ifindex = ctx.ingress_ifindex() as u32;
     match unsafe { ZONE_MAP.get(&ifindex) } {
         Some(&zone) => zone,
@@ -1071,22 +1126,31 @@ fn process_firewall_v4(
         (*pkt_ctx).l4_offset = l4_offset as u16;
     }
 
+    // What userspace has loaded nothing into, read once for this packet.
+    let gates = empty_features();
+
     // Phase 0: Overload blacklist fast-path check.
     // If source IP is in the overload set (set_id=255), drop immediately -
     // unless the mark it was written for has run out, in which case the set
     // entry is the stale half of a decision the counter has already let go of
     // and leaving it there would make an overload TTL a ban.
-    let overload_key = IpSetKeyV4 {
-        set_id: OVERLOAD_SET_ID as u16,
-        _pad: [0; 2],
-        addr: src_ip,
-    };
-    if unsafe { FW_IPSET_V4.get(&overload_key) }.is_some() {
-        if overload_still_stands(SrcCounterKey::from_v4(src_ip)) {
-            increment_metric(METRIC_DROPPED);
-            return Ok(xdp_action::XDP_DROP);
+    //
+    // Only check_connection_limits writes that set, and it writes nothing
+    // unless a per-source ceiling is configured, so with neither configured
+    // the probe can only miss.
+    if !feature_empty(gates, FW_EMPTY_SRC_LIMITS) {
+        let overload_key = IpSetKeyV4 {
+            set_id: OVERLOAD_SET_ID as u16,
+            _pad: [0; 2],
+            addr: src_ip,
+        };
+        if unsafe { FW_IPSET_V4.get(&overload_key) }.is_some() {
+            if overload_still_stands(SrcCounterKey::from_v4(src_ip)) {
+                increment_metric(METRIC_DROPPED);
+                return Ok(xdp_action::XDP_DROP);
+            }
+            let _ = FW_IPSET_V4.remove(&overload_key);
         }
-        let _ = FW_IPSET_V4.remove(&overload_key);
     }
 
     // Phase 0: Conntrack lookup.
@@ -1110,60 +1174,66 @@ fn process_firewall_v4(
 
     // Phase 1: LPM Trie lookup - O(log n) for CIDR-only rules.
     // Keys use network byte order for correct prefix matching.
-    let src_key = Key::new(32, src_ip.to_be_bytes());
-    if let Some(val) = FW_LPM_SRC_V4.get(&src_key) {
-        return apply_fast_path_action(
-            ctx,
-            ctx_raw,
-            val.action,
-            ct_state,
-            SrcCounterKey::from_v4(src_ip),
-        );
-    }
-    let dst_key = Key::new(32, dst_ip.to_be_bytes());
-    if let Some(val) = FW_LPM_DST_V4.get(&dst_key) {
-        return apply_fast_path_action(
-            ctx,
-            ctx_raw,
-            val.action,
-            ct_state,
-            SrcCounterKey::from_v4(src_ip),
-        );
+    if !feature_empty(gates, FW_EMPTY_LPM_V4) {
+        let src_key = Key::new(32, src_ip.to_be_bytes());
+        if let Some(val) = FW_LPM_SRC_V4.get(&src_key) {
+            return apply_fast_path_action(
+                ctx,
+                ctx_raw,
+                val.action,
+                ct_state,
+                SrcCounterKey::from_v4(src_ip),
+            );
+        }
+        let dst_key = Key::new(32, dst_ip.to_be_bytes());
+        if let Some(val) = FW_LPM_DST_V4.get(&dst_key) {
+            return apply_fast_path_action(
+                ctx,
+                ctx_raw,
+                val.action,
+                ct_state,
+                SrcCounterKey::from_v4(src_ip),
+            );
+        }
     }
 
     // Phase 1b: 5-tuple exact-match HashMap lookup - O(1).
-    let hash_key_5t = FwHashKey5Tuple {
-        src_ip,
-        dst_ip,
-        src_port,
-        dst_port,
-        protocol: protocol as u8,
-        _pad: [0; 3],
-    };
-    if let Some(val) = unsafe { FW_HASH_5TUPLE.get(&hash_key_5t) } {
-        return apply_fast_path_action(
-            ctx,
-            ctx_raw,
-            val.action,
-            ct_state,
-            SrcCounterKey::from_v4(src_ip),
-        );
+    if !feature_empty(gates, FW_EMPTY_HASH_5TUPLE) {
+        let hash_key_5t = FwHashKey5Tuple {
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            protocol: protocol as u8,
+            _pad: [0; 3],
+        };
+        if let Some(val) = unsafe { FW_HASH_5TUPLE.get(&hash_key_5t) } {
+            return apply_fast_path_action(
+                ctx,
+                ctx_raw,
+                val.action,
+                ct_state,
+                SrcCounterKey::from_v4(src_ip),
+            );
+        }
     }
 
     // Phase 1c: protocol+port HashMap lookup - O(1).
-    let hash_key_port = FwHashKeyPort {
-        dst_port,
-        protocol: protocol as u8,
-        _pad: 0,
-    };
-    if let Some(val) = unsafe { FW_HASH_PORT.get(&hash_key_port) } {
-        return apply_fast_path_action(
-            ctx,
-            ctx_raw,
-            val.action,
-            ct_state,
-            SrcCounterKey::from_v4(src_ip),
-        );
+    if !feature_empty(gates, FW_EMPTY_HASH_PORT) {
+        let hash_key_port = FwHashKeyPort {
+            dst_port,
+            protocol: protocol as u8,
+            _pad: 0,
+        };
+        if let Some(val) = unsafe { FW_HASH_PORT.get(&hash_key_port) } {
+            return apply_fast_path_action(
+                ctx,
+                ctx_raw,
+                val.action,
+                ct_state,
+                SrcCounterKey::from_v4(src_ip),
+            );
+        }
     }
 
     // Phase 2: Linear scan for complex rules (port ranges, VLAN, MAC, CT state).
@@ -1184,44 +1254,53 @@ fn process_firewall_v4(
     // The scan context is on the stack (not a PerCpuArray map value) because
     // kernel 6.17+ requires the bpf_loop callback_ctx (R3) to be a stack
     // frame pointer, not a map_value pointer.
-    let iface_groups = get_iface_groups(ctx);
-    let ifindex = ctx.ingress_ifindex() as u32;
-    let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) };
+    // With no rule of this family loaded there is nothing to walk, and the
+    // helper call, the interface-group read and the tenant resolution under
+    // it are all paid for a scan that would return on its first callback.
+    let (matched_action, matched_rule_idx, matched_max_states): (i32, i32, u16) = if count == 0 {
+        (-1, -1, 0)
+    } else {
+        let iface_groups = get_iface_groups(ctx);
+        let ifindex = ctx.ingress_ifindex() as u32;
+        let tenant_id = unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) };
 
-    let mut scan_ctx = RuleScanCtx {
-        count,
-        src_ip,
-        dst_ip,
-        src_port,
-        dst_port,
-        protocol: protocol as u8,
-        vlan_id,
-        ct_state,
-        tcp_flags,
-        icmp_type,
-        icmp_code,
-        dscp,
-        src_mac: [0; 6],
-        dst_mac: [0; 6],
-        matched_action: -1,
-        matched_rule_idx: -1,
-        matched_max_states: 0,
-        iface_groups,
-        tenant_id,
+        let mut scan_ctx = RuleScanCtx {
+            count,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            protocol: protocol as u8,
+            vlan_id,
+            ct_state,
+            tcp_flags,
+            icmp_type,
+            icmp_code,
+            dscp,
+            src_mac: [0; 6],
+            dst_mac: [0; 6],
+            matched_action: -1,
+            matched_rule_idx: -1,
+            matched_max_states: 0,
+            iface_groups,
+            tenant_id,
+        };
+        scan_ctx.src_mac = src_mac;
+        scan_ctx.dst_mac = dst_mac;
+        unsafe {
+            bpf_loop(
+                MAX_FIREWALL_RULES,
+                scan_rule_v4 as *mut c_void,
+                &mut scan_ctx as *mut RuleScanCtx as *mut c_void,
+                0,
+            );
+        }
+        (
+            scan_ctx.matched_action,
+            scan_ctx.matched_rule_idx,
+            scan_ctx.matched_max_states,
+        )
     };
-    scan_ctx.src_mac = src_mac;
-    scan_ctx.dst_mac = dst_mac;
-    unsafe {
-        bpf_loop(
-            MAX_FIREWALL_RULES,
-            scan_rule_v4 as *mut c_void,
-            &mut scan_ctx as *mut RuleScanCtx as *mut c_void,
-            0,
-        );
-    }
-    let matched_action = scan_ctx.matched_action;
-    let matched_rule_idx = scan_ctx.matched_rule_idx;
-    let matched_max_states = scan_ctx.matched_max_states;
 
     if matched_action >= 0 {
         let action = matched_action as u8;
@@ -1815,7 +1894,11 @@ fn process_firewall_v6(
 
     // Phase 1: LPM Trie lookup - O(log n) for CIDR-only rules.
     // Read raw bytes from off-stack PKT_CTX.
-    let lpm_action = lpm_lookup_v6(pkt_ctx);
+    let lpm_action = if feature_empty(empty_features(), FW_EMPTY_LPM_V6) {
+        -1
+    } else {
+        lpm_lookup_v6(pkt_ctx)
+    };
     if lpm_action >= 0 {
         return apply_fast_path_action(
             ctx,
@@ -1841,44 +1924,53 @@ fn process_firewall_v6(
     // Scan V6 rules via bpf_loop (kernel 5.17+).
     // Stack-allocated context (kernel 6.17+ requires bpf_loop callback_ctx
     // to be a stack frame pointer, not a map_value pointer).
-    let iface_groups = get_iface_groups(ctx);
-    let ifindex = ctx.ingress_ifindex() as u32;
-    let tenant_id = unsafe { resolve_tenant_id_v6(ifindex, vlan_id, &src_addr) };
+    // With no rule of this family loaded there is nothing to walk, and the
+    // helper call, the interface-group read and the tenant resolution under
+    // it are all paid for a scan that would return on its first callback.
+    let (matched_action, matched_rule_idx, matched_max_states): (i32, i32, u16) = if count == 0 {
+        (-1, -1, 0)
+    } else {
+        let iface_groups = get_iface_groups(ctx);
+        let ifindex = ctx.ingress_ifindex() as u32;
+        let tenant_id = unsafe { resolve_tenant_id_v6(ifindex, vlan_id, &src_addr) };
 
-    let mut scan_ctx = RuleScanCtxV6 {
-        count,
-        src_addr,
-        dst_addr,
-        src_port,
-        dst_port,
-        protocol: next_hdr,
-        vlan_id,
-        ct_state,
-        tcp_flags,
-        icmp_type,
-        icmp_code,
-        dscp,
-        src_mac: [0; 6],
-        dst_mac: [0; 6],
-        matched_action: -1,
-        matched_rule_idx: -1,
-        matched_max_states: 0,
-        iface_groups,
-        tenant_id,
+        let mut scan_ctx = RuleScanCtxV6 {
+            count,
+            src_addr,
+            dst_addr,
+            src_port,
+            dst_port,
+            protocol: next_hdr,
+            vlan_id,
+            ct_state,
+            tcp_flags,
+            icmp_type,
+            icmp_code,
+            dscp,
+            src_mac: [0; 6],
+            dst_mac: [0; 6],
+            matched_action: -1,
+            matched_rule_idx: -1,
+            matched_max_states: 0,
+            iface_groups,
+            tenant_id,
+        };
+        scan_ctx.src_mac = src_mac;
+        scan_ctx.dst_mac = dst_mac;
+        unsafe {
+            bpf_loop(
+                MAX_FIREWALL_RULES,
+                scan_rule_v6 as *mut c_void,
+                &mut scan_ctx as *mut RuleScanCtxV6 as *mut c_void,
+                0,
+            );
+        }
+        (
+            scan_ctx.matched_action,
+            scan_ctx.matched_rule_idx,
+            scan_ctx.matched_max_states,
+        )
     };
-    scan_ctx.src_mac = src_mac;
-    scan_ctx.dst_mac = dst_mac;
-    unsafe {
-        bpf_loop(
-            MAX_FIREWALL_RULES,
-            scan_rule_v6 as *mut c_void,
-            &mut scan_ctx as *mut RuleScanCtxV6 as *mut c_void,
-            0,
-        );
-    }
-    let matched_action = scan_ctx.matched_action;
-    let matched_rule_idx = scan_ctx.matched_rule_idx;
-    let matched_max_states = scan_ctx.matched_max_states;
 
     if matched_action >= 0 {
         let action = matched_action as u8;

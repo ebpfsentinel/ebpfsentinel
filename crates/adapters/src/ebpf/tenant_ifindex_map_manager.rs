@@ -1,3 +1,4 @@
+use crate::ebpf::feature_gates::{self, Feature};
 use crate::ebpf::map_store::MapStore;
 use aya::maps::{HashMap, MapData};
 use tracing::info;
@@ -17,6 +18,7 @@ pub struct TenantIfindexMapManager {
 impl TenantIfindexMapManager {
     /// Create a new, empty `TenantIfindexMapManager`.
     pub fn new() -> Self {
+        feature_gates::publish(Feature::TenantIfindex, true);
         Self { maps: Vec::new() }
     }
 
@@ -43,6 +45,15 @@ impl TenantIfindexMapManager {
     /// map receives every pair, overwriting whatever an earlier call left
     /// behind for the same ifindex.
     pub fn set_tenant_interfaces(&mut self, entries: &[(u32, u32)]) -> Result<(), anyhow::Error> {
+        if !entries.is_empty() {
+            // The setters are additive - an empty slice removes nothing - so the
+            // only safe reading of "this map holds no entry" is that nothing has
+            // been put in it yet: once a write happens the lookup stays open for
+            // the life of this manager. A deployment that stops using the feature
+            // keeps paying for the lookup until the next load, which is the slower
+            // half of the trade and the only one safe to get wrong.
+            feature_gates::publish(Feature::TenantIfindex, false);
+        }
         for map in &mut self.maps {
             for &(ifindex, tenant_id) in entries {
                 map.insert(ifindex, tenant_id, 0)
@@ -94,31 +105,69 @@ mod tests {
 
     #[test]
     fn new_creates_empty_manager() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
         let mgr = TenantIfindexMapManager::new();
         assert_eq!(mgr.map_count(), 0);
     }
 
     #[test]
     fn default_creates_empty_manager() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
         let mgr = TenantIfindexMapManager::default();
         assert_eq!(mgr.map_count(), 0);
     }
 
     #[test]
     fn set_tenant_interfaces_empty_entries_is_noop() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
         let mut mgr = TenantIfindexMapManager::new();
         assert!(mgr.set_tenant_interfaces(&[]).is_ok());
     }
 
     #[test]
     fn set_tenant_interfaces_without_maps_succeeds() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
         let mut mgr = TenantIfindexMapManager::new();
         assert!(mgr.set_tenant_interfaces(&[(2, 1), (3, 2)]).is_ok());
     }
 
     #[test]
     fn removing_an_interface_without_maps_succeeds() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
         let mut mgr = TenantIfindexMapManager::new();
         assert!(mgr.remove_interface(2).is_ok());
+    }
+
+    #[test]
+    fn a_fresh_manager_says_the_table_is_empty() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
+        let mgr = TenantIfindexMapManager::new();
+        drop(mgr);
+        assert!(feature_gates::is_empty(Feature::TenantIfindex));
+    }
+
+    #[test]
+    fn an_interface_written_keeps_the_lookup_open_for_good() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
+        let mut mgr = TenantIfindexMapManager::new();
+        assert!(mgr.set_tenant_interfaces(&[(2, 1)]).is_ok());
+        assert!(!feature_gates::is_empty(Feature::TenantIfindex));
+
+        assert!(mgr.set_tenant_interfaces(&[]).is_ok());
+        assert!(!feature_gates::is_empty(Feature::TenantIfindex));
     }
 }
