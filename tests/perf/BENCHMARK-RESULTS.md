@@ -201,20 +201,21 @@ the program costs when userspace has told it the tables behind it are empty.
 
 | program | hook | gates open | gates set | saved |
 |---|---|---:|---:|---:|
-| `tc_qos_ingress` | TC | 221 ns | 5 ns | 98% |
-| `tc_qos` | TC | 220 ns | 5 ns | 98% |
+| `tc_qos_ingress` | TC | 213 ns | 5 ns | 98% |
+| `tc_qos` | TC | 207 ns | 5 ns | 98% |
 | `xdp_firewall` | XDP | 46 ns | 18 ns | 61% |
-| `xdp_ratelimit` | XDP | 38 ns | 25 ns | 34% |
-| `tc_ids` | TC | 29 ns | 10 ns | 66% |
-| `xdp_firewall_reject` | XDP | 23 ns | 23 ns | 0% |
-| `xdp_loadbalancer` | XDP | 14 ns | 15 ns | 0% |
-| `xdp_ratelimit_syncookie` | XDP | 11 ns | 13 ns | 0% |
+| `xdp_ratelimit` | XDP | 39 ns | 25 ns | 36% |
+| `tc_ids` | TC | 27 ns | 10 ns | 63% |
+| `xdp_firewall_reject` | XDP | 22 ns | 22 ns | 0% |
+| `xdp_loadbalancer` | XDP | 14 ns | 15 ns | noise |
+| `xdp_ratelimit_syncookie` | XDP | 13 ns | 15 ns | noise |
 | `tc_nat_ingress` | TC | 8 ns | 8 ns | 0% |
+| `xdp_vip_announcer` | XDP | 8 ns | 9 ns | noise |
 | `tc_nat_egress` | TC | 7 ns | 7 ns | 0% |
-| `tc_dns`, `tc_conntrack` | TC | 6 ns | 6 ns | 0% |
-| `tc_threatintel`, `tc_scrub` | TC | 5 ns | 5 ns | 0% |
-| `xdp_vip_announcer`, `xdp_pass` | XDP | 4 ns | 9 ns | noise |
-| **sum** | | **647 ns** | **169 ns** | |
+| `tc_conntrack` | TC | 6 ns | 6 ns | 0% |
+| `xdp_pass` | XDP | 6 ns | 11 ns | noise |
+| `tc_dns`, `tc_threatintel`, `tc_scrub` | TC | 5 ns | 5 ns | 0% |
+| **sum** | | **631 ns** | **171 ns** | |
 
 The shaper is the most expensive program in the tree, ahead of the firewall by
 a factor of five, which the live lane could not show because it sits on the
@@ -225,18 +226,21 @@ lookups and a marked one thirty. An estate loading no shaping rule pays none of
 it, and one loading rules pays only the shapes it wrote them in: userspace
 publishes which of the nine shapes hold nothing, per scope, and the ladder
 skips those, plus the whole first pass where no rule names a marking. The
-220 ns above is the ladder with nothing published, which is the state of a
+207 ns above is the ladder with nothing published, which is the state of a
 program nobody has loaded a rule set into; what a given rule set costs is a
-measurement this table does not carry.
+measurement this table does not carry. The shape mask therefore moves no
+figure here, and the run above is the one that says so: it was taken after the
+change and reads the same as the run before it, inside the spread.
 
 Four cautions, because these numbers are not the live lane's and do not
 replace them:
 
 1. A tight loop on a warm cache with no DMA and no NIC. The floor is about
-   4 ns, which is the loop itself, so every row at 5 or 6 ns is at the floor
-   and has nothing left to give. The two rows marked noise read slower with
-   their gates set although they read no gate at all, which is the same floor
-   seen from below.
+   5 ns, which is the loop itself, so every row at 5 or 6 ns is at the floor
+   and has nothing left to give. The four rows marked noise read slower with
+   their gates set although two of them read no gate at all, which is the same
+   floor seen from below: the run-to-run spread down there is a few
+   nanoseconds and the column difference is inside it.
 2. No rule is loaded. The left column is a lookup that misses, not one that
    matches, so it is a lower bound on what a configured estate pays.
 3. No configuration is loaded either, so `tc_conntrack`, `tc_dns`, `tc_scrub`
