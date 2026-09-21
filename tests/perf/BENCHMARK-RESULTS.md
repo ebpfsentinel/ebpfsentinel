@@ -222,7 +222,12 @@ other hook. Its classification ladder walks a rule shape at a time from the
 exact five-tuple down to the catch-all, twice, once scoped to the packet's VLAN
 and once for the rules naming none, so an unmarked packet costs sixteen hash
 lookups and a marked one thirty. An estate loading no shaping rule pays none of
-it.
+it, and one loading rules pays only the shapes it wrote them in: userspace
+publishes which of the nine shapes hold nothing, per scope, and the ladder
+skips those, plus the whole first pass where no rule names a marking. The
+220 ns above is the ladder with nothing published, which is the state of a
+program nobody has loaded a rule set into; what a given rule set costs is a
+measurement this table does not carry.
 
 Four cautions, because these numbers are not the live lane's and do not
 replace them:

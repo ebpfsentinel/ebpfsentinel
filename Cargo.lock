@@ -4625,6 +4625,7 @@ dependencies = [
  "aya",
  "aya-obj",
  "clap",
+ "ebpf-common",
  "ebpfsentinel-agent",
  "k8s-openapi",
  "libc",

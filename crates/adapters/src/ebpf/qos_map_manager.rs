@@ -4,8 +4,9 @@ use aya::maps::{Array, HashMap, MapData};
 use domain::common::error::DomainError;
 use domain::qos::entity::{QosClassifier, QosDirection, QosPipe, QosQueue};
 use ebpf_common::qos::{
-    QOS_DIR_BOTH, QOS_DIR_EGRESS, QOS_DIR_INGRESS, QosClassifierKey, QosClassifierValue,
-    QosPipeConfig, QosQueueConfig, VLAN_ANY,
+    QOS_DIR_BOTH, QOS_DIR_EGRESS, QOS_DIR_INGRESS, QOS_SCOPE_STRIDE, QOS_SHAPE_NO_DSCP,
+    QOS_SHAPES_ALL_EMPTY, QosClassifierKey, QosClassifierValue, QosPipeConfig, QosQueueConfig,
+    VLAN_ANY, qos_shape_of,
 };
 use ports::secondary::qos_map_port::QosMapPort;
 use tracing::info;
@@ -18,6 +19,12 @@ pub struct QosMapManager {
     pipe_config: Array<MapData, QosPipeConfig>,
     queue_config: Array<MapData, QosQueueConfig>,
     classifiers: HashMap<MapData, QosClassifierKey, QosClassifierValue>,
+    /// Which classifier shapes the shaper may skip.
+    ///
+    /// Optional because only `tc-qos` declares it: a build or a deployment
+    /// where the map is absent publishes nothing, the program reads zero and
+    /// its ladder walks every step, which is what it did before this existed.
+    empty_shapes: Option<Array<MapData, u32>>,
 }
 
 impl QosMapManager {
@@ -42,16 +49,43 @@ impl QosMapManager {
         let classifiers = HashMap::try_from(cls_map)?;
         info!("QOS_CLASSIFIERS map acquired");
 
+        let empty_shapes = ebpf
+            .take_map("QOS_EMPTY_SHAPES")
+            .and_then(|map| Array::try_from(map).ok());
+        if empty_shapes.is_some() {
+            info!("QOS_EMPTY_SHAPES map acquired");
+        }
+
         // The map is pinned, so it survives a restart: the answer has to be
         // counted rather than assumed. An empty set closes the shaper's whole
-        // classification ladder, which is the widest lookup in the chain.
+        // classification ladder, which is the widest lookup in the chain, and
+        // the shapes below cut what is left of it when the set is not empty.
         feature_gates::publish(Feature::QosClassifiers, classifiers.keys().next().is_none());
 
-        Ok(Self {
+        let mask = shapes_mask(classifiers.keys().filter_map(Result::ok));
+
+        let mut manager = Self {
             pipe_config,
             queue_config,
             classifiers,
-        })
+            empty_shapes,
+        };
+        manager.publish_shapes(mask);
+
+        Ok(manager)
+    }
+
+    /// Write the shape mask where the shaper reads it.
+    ///
+    /// Failure costs lookups rather than rules, in either direction: the
+    /// program reads whatever was last written, and every value it can read is
+    /// a value that walks at least the steps the table needs.
+    fn publish_shapes(&mut self, mask: u32) {
+        if let Some(shapes) = self.empty_shapes.as_mut()
+            && let Err(e) = shapes.set(0, mask, 0)
+        {
+            info!(error = %e, "QOS_EMPTY_SHAPES publish failed, shaper walks every shape");
+        }
     }
 
     /// Convert a domain `QosPipe` to a `QosPipeConfig` eBPF struct.
@@ -171,8 +205,10 @@ impl QosMapManager {
     ) -> Result<(), anyhow::Error> {
         // Open the ladder before the first insert, so a rule is never loaded
         // behind a gate still saying the table is empty. A load that fails
-        // half way leaves it open, which costs lookups and never a rule.
+        // half way leaves it open, which costs lookups and never a rule. The
+        // shape mask is opened the same way and for the same reason.
         feature_gates::publish(Feature::QosClassifiers, false);
+        self.publish_shapes(0);
 
         // Clear existing entries first
         let keys: Vec<QosClassifierKey> = self.classifiers.keys().filter_map(Result::ok).collect();
@@ -183,6 +219,7 @@ impl QosMapManager {
         }
 
         let mut loaded = 0usize;
+        let mut written: Vec<QosClassifierKey> = Vec::new();
         for index in winning_classifier_indices(classifiers, queues) {
             let cls = &classifiers[index];
             let queue_index = queues
@@ -193,12 +230,18 @@ impl QosMapManager {
             self.classifiers
                 .insert(key, value, 0)
                 .map_err(|e| anyhow::anyhow!("QOS_CLASSIFIERS insert failed: {e}"))?;
+            written.push(key);
             loaded += 1;
         }
         // A rule set can win nothing - every classifier pointing at a queue
         // that does not exist - so the gate follows what was actually written
         // rather than what was handed in.
         feature_gates::publish(Feature::QosClassifiers, loaded == 0);
+        // Same rule for the shapes: what was written rather than what was
+        // handed in, since the two differ whenever a key collapsed onto
+        // another or a rule lost the tie on priority.
+        let mask = shapes_mask(written.into_iter());
+        self.publish_shapes(mask);
         info!(
             count = classifiers.len(),
             "QoS classifiers loaded into eBPF map"
@@ -246,6 +289,7 @@ impl QosMapManager {
                 .map_err(|e| anyhow::anyhow!("QOS_CLASSIFIERS clear failed: {e}"))?;
         }
         feature_gates::publish(Feature::QosClassifiers, true);
+        self.publish_shapes(QOS_SHAPES_ALL_EMPTY);
         Ok(())
     }
 
@@ -295,6 +339,44 @@ impl QosMapPort for QosMapManager {
     fn classifier_count(&self) -> Result<usize, DomainError> {
         Ok(self.classifier_count_raw())
     }
+}
+
+/// Which classifier shapes hold no rule, from the keys actually in the map.
+///
+/// The shaper's ladder probes one key shape per step and has no way of knowing
+/// which of them a rule was ever written in, so it walks all of them. This is
+/// the answer, in the inverted sense the data plane reads: a set bit is a shape
+/// holding nothing, and zero is the safe value because it walks everything.
+///
+/// A key [`qos_shape_of`] does not recognise collapses the whole mask to zero.
+/// Such a key is one no step of the ladder ever builds, so the rule is already
+/// unreachable, and a mask claiming its shape is empty would be a true
+/// statement about a shape and a misleading one about the rule. Publishing
+/// nothing leaves the ladder exactly as it was.
+fn shapes_mask(keys: impl Iterator<Item = QosClassifierKey>) -> u32 {
+    let mut mask = QOS_SHAPES_ALL_EMPTY;
+    for key in keys {
+        let Some(shape) = qos_shape_of(
+            key.src_ip,
+            key.dst_ip,
+            key.src_port,
+            key.dst_port,
+            key.protocol,
+            key.dscp,
+        ) else {
+            return 0;
+        };
+        let scope_shift = if key.vlan_id == VLAN_ANY {
+            QOS_SCOPE_STRIDE
+        } else {
+            0
+        };
+        mask &= !(1u32 << (shape + scope_shift));
+        if key.dscp != 0 {
+            mask &= !(1u32 << (QOS_SHAPE_NO_DSCP + scope_shift));
+        }
+    }
+    mask
 }
 
 /// Pick which classifiers actually reach the eBPF map, in load order.
@@ -360,6 +442,95 @@ fn parse_ip_to_u32(s: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ebpf_common::qos::{
+        QOS_SCOPE_SHAPES_EMPTY, QOS_SHAPE_CATCHALL, QOS_SHAPE_DPORT, QOS_SHAPE_DSCP,
+        QOS_SHAPE_FULL, qos_shape_bit_any, qos_shape_bit_vlan,
+    };
+
+    fn key(
+        src_ip: u32,
+        dst_ip: u32,
+        src_port: u16,
+        dst_port: u16,
+        protocol: u8,
+        dscp: u8,
+        vlan_id: u16,
+    ) -> QosClassifierKey {
+        QosClassifierKey {
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            protocol,
+            dscp,
+            vlan_id,
+        }
+    }
+
+    #[test]
+    fn an_empty_table_closes_every_shape() {
+        assert_eq!(shapes_mask(std::iter::empty()), QOS_SHAPES_ALL_EMPTY);
+    }
+
+    #[test]
+    fn a_rule_opens_its_own_shape_and_nothing_else() {
+        let mask = shapes_mask([key(0, 0, 0, 443, 6, 0, VLAN_ANY)].into_iter());
+
+        // The shape it was written in, in the scope it belongs to.
+        assert_eq!(mask & qos_shape_bit_any(QOS_SHAPE_DPORT), 0);
+        // The same shape in the other scope stays closed.
+        assert_ne!(mask & qos_shape_bit_vlan(QOS_SHAPE_DPORT), 0);
+        // And so does every other shape of its own scope.
+        assert_ne!(mask & qos_shape_bit_any(QOS_SHAPE_FULL), 0);
+        assert_ne!(mask & qos_shape_bit_any(QOS_SHAPE_CATCHALL), 0);
+        // It names no marking, so the first pass of the ladder stays cut.
+        assert_ne!(mask & qos_shape_bit_any(QOS_SHAPE_NO_DSCP), 0);
+    }
+
+    #[test]
+    fn a_rule_naming_a_marking_opens_the_first_pass_of_its_scope() {
+        let mask = shapes_mask([key(0, 0, 0, 0, 0, 46, 10)].into_iter());
+
+        assert_eq!(mask & qos_shape_bit_vlan(QOS_SHAPE_DSCP), 0);
+        assert_eq!(mask & qos_shape_bit_vlan(QOS_SHAPE_NO_DSCP), 0);
+        // The VLAN-agnostic scope heard nothing about a marking.
+        assert_ne!(mask & qos_shape_bit_any(QOS_SHAPE_NO_DSCP), 0);
+    }
+
+    #[test]
+    fn a_rule_naming_a_vlan_lands_in_the_vlan_scope() {
+        let mask = shapes_mask([key(0, 0, 0, 0, 0, 0, 0)].into_iter());
+
+        // VLAN 0 is a VLAN: only VLAN_ANY means the other scope.
+        assert_eq!(mask & qos_shape_bit_vlan(QOS_SHAPE_CATCHALL), 0);
+        assert_ne!(mask & qos_shape_bit_any(QOS_SHAPE_CATCHALL), 0);
+    }
+
+    #[test]
+    fn a_key_the_ladder_never_builds_opens_everything() {
+        // A rule naming a source host and no destination host: every step of
+        // the ladder carrying a host carries both, so the key is unreachable
+        // and the mask says nothing rather than closing a shape around it.
+        let mask = shapes_mask(
+            [
+                key(0x0A00_0001, 0, 0, 0, 6, 0, VLAN_ANY),
+                key(0, 0, 0, 443, 6, 0, VLAN_ANY),
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(mask, 0);
+    }
+
+    #[test]
+    fn a_scope_nothing_was_written_in_is_closed_whole() {
+        let mask = shapes_mask([key(0, 0, 0, 443, 6, 0, 10)].into_iter());
+
+        let any = (mask >> QOS_SCOPE_STRIDE) & QOS_SCOPE_SHAPES_EMPTY;
+        assert_eq!(any, QOS_SCOPE_SHAPES_EMPTY);
+        let in_vlan = mask & QOS_SCOPE_SHAPES_EMPTY;
+        assert_ne!(in_vlan, QOS_SCOPE_SHAPES_EMPTY);
+    }
 
     #[test]
     fn parse_ip_to_u32_valid() {

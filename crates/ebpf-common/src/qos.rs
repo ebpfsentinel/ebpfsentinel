@@ -208,10 +208,196 @@ unsafe impl aya::Pod for QosFlowState {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for QosPipeState {}
 
+// ── Classifier shapes ────────────────────────────────────────────────
+
+// Which classifier shapes hold no rule, one bit each.
+//
+// The shaper's classification ladder is the widest lookup in the datapath: a
+// classifier encodes "any" as a zero, so a rule is found by rebuilding its key
+// from the packet with the fields it left open zeroed out, and the ladder has
+// to walk every shape a rule could have been written in. That is eight hash
+// lookups per VLAN scope for an unmarked packet and fifteen for a marked one,
+// and it walks both scopes, so sixteen and thirty. An estate shaping on
+// destination port alone pays twenty-nine misses for one hit.
+//
+// Userspace knows which shapes were actually loaded, so it publishes them and
+// the datapath walks only those. The sense is inverted exactly as
+// `FW_EMPTY_FEATURES` is: a bit *set* means that shape holds nothing, so a map
+// that was never written reads zero and every step of the ladder still runs.
+// A stale mask can only be slower, never wrong.
+//
+// The bits are laid out as two scopes of [`QOS_SCOPE_STRIDE`], the rules
+// naming a VLAN first and the rules naming none second, because the ladder
+// walks the two in that order and a scope whose every bit is set is a scope it
+// can skip whole.
+/// Shape: source and destination host, both ports.
+pub const QOS_SHAPE_FULL: u32 = 0;
+/// Shape: both hosts, destination port.
+pub const QOS_SHAPE_HOSTS_DPORT: u32 = 1;
+/// Shape: both hosts, no port.
+pub const QOS_SHAPE_HOSTS: u32 = 2;
+/// Shape: both ports, any host.
+pub const QOS_SHAPE_PORTS: u32 = 3;
+/// Shape: destination port, any host.
+pub const QOS_SHAPE_DPORT: u32 = 4;
+/// Shape: source port, any host.
+pub const QOS_SHAPE_SPORT: u32 = 5;
+/// Shape: a DSCP marking and nothing else.
+pub const QOS_SHAPE_DSCP: u32 = 6;
+/// Shape: a protocol and nothing else.
+pub const QOS_SHAPE_PROTO: u32 = 7;
+/// Shape: the catch-all that names nothing.
+pub const QOS_SHAPE_CATCHALL: u32 = 8;
+
+/// How many shapes the ladder walks in one scope.
+pub const QOS_SHAPE_COUNT: u32 = 9;
+
+/// Bit saying no rule in this scope names a DSCP.
+///
+/// Not a shape: it cuts the whole first pass of the ladder rather than one of
+/// its steps. Every one of the six host and port shapes is probed twice, once
+/// at the packet's own DSCP and once with the DSCP left open, and when no rule
+/// names a DSCP the first pass can only miss.
+pub const QOS_SHAPE_NO_DSCP: u32 = 9;
+
+/// Bits one scope occupies.
+pub const QOS_SCOPE_STRIDE: u32 = 10;
+
+/// Every bit one scope occupies, the DSCP bit included.
+pub const QOS_SCOPE_MASK: u32 = (1u32 << QOS_SCOPE_STRIDE) - 1;
+
+/// The shape bits of one scope, which is the mask of a scope holding nothing.
+///
+/// [`QOS_SHAPE_NO_DSCP`] is deliberately left out: it says something about the
+/// rules a scope holds rather than that it holds none, so a scope carrying it
+/// alone is a scope full of rules that name no marking.
+pub const QOS_SCOPE_SHAPES_EMPTY: u32 = (1u32 << QOS_SHAPE_COUNT) - 1;
+
+/// The bit for `shape` in the scope of rules naming a VLAN.
+#[must_use]
+pub const fn qos_shape_bit_vlan(shape: u32) -> u32 {
+    1u32 << shape
+}
+
+/// The bit for `shape` in the scope of rules naming no VLAN.
+#[must_use]
+pub const fn qos_shape_bit_any(shape: u32) -> u32 {
+    1u32 << (shape + QOS_SCOPE_STRIDE)
+}
+
+/// Every bit of both scopes, which is the mask of a table holding nothing.
+pub const QOS_SHAPES_ALL_EMPTY: u32 =
+    ((1u32 << QOS_SCOPE_STRIDE) - 1) | (((1u32 << QOS_SCOPE_STRIDE) - 1) << QOS_SCOPE_STRIDE);
+
+/// Which shape a classifier key has, where the ladder probes it at all.
+///
+/// `None` is a key no step of the ladder ever builds, so a rule holding it is
+/// unreachable today and publishing anything about it would be a claim about a
+/// shape that is never looked up. The caller treats it as "this set is not
+/// understood" and publishes an empty mask, which leaves the ladder walking
+/// every step exactly as it does now.
+#[must_use]
+pub const fn qos_shape_of(
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    dscp: u8,
+) -> Option<u32> {
+    match (src_ip != 0, dst_ip != 0) {
+        // Both hosts named: the ladder probes three of the four port shapes.
+        // A rule naming a source port and no destination port is not one of
+        // them.
+        (true, true) => match (src_port != 0, dst_port != 0) {
+            (true, true) => Some(QOS_SHAPE_FULL),
+            (false, true) => Some(QOS_SHAPE_HOSTS_DPORT),
+            (false, false) => Some(QOS_SHAPE_HOSTS),
+            (true, false) => None,
+        },
+        // One host named and not the other. Every step of the ladder that
+        // carries a host carries both, taken from the packet, so such a key is
+        // never built.
+        (true, false) | (false, true) => None,
+        (false, false) => match (src_port != 0, dst_port != 0) {
+            (true, true) => Some(QOS_SHAPE_PORTS),
+            (false, true) => Some(QOS_SHAPE_DPORT),
+            (true, false) => Some(QOS_SHAPE_SPORT),
+            // Nothing but a protocol, a marking, or neither. A rule naming
+            // both a protocol and a marking and nothing else is not probed:
+            // the ladder's two bottom steps each leave the other field open.
+            (false, false) => match (protocol != 0, dscp != 0) {
+                (false, true) => Some(QOS_SHAPE_DSCP),
+                (true, false) => Some(QOS_SHAPE_PROTO),
+                (false, false) => Some(QOS_SHAPE_CATCHALL),
+                (true, true) => None,
+            },
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::mem;
+
+    #[test]
+    fn every_shape_has_a_bit_of_its_own_in_each_scope() {
+        let mut seen = 0u32;
+        for shape in 0..=QOS_SHAPE_NO_DSCP {
+            let vlan = qos_shape_bit_vlan(shape);
+            let any = qos_shape_bit_any(shape);
+            assert_eq!(seen & vlan, 0, "shape {shape} reuses a VLAN-scope bit");
+            assert_eq!(seen & any, 0, "shape {shape} reuses a VLAN-agnostic bit");
+            seen |= vlan | any;
+        }
+        assert_eq!(seen, QOS_SHAPES_ALL_EMPTY);
+    }
+
+    #[test]
+    fn the_shape_count_leaves_room_for_the_dscp_bit() {
+        const {
+            assert!(QOS_SHAPE_NO_DSCP >= QOS_SHAPE_COUNT);
+            assert!(QOS_SHAPE_NO_DSCP < QOS_SCOPE_STRIDE);
+        }
+    }
+
+    #[test]
+    fn a_key_the_ladder_builds_has_a_shape() {
+        // One per step of the ladder, in the order it walks them.
+        assert_eq!(qos_shape_of(1, 2, 3, 4, 6, 0), Some(QOS_SHAPE_FULL));
+        assert_eq!(qos_shape_of(1, 2, 0, 4, 6, 0), Some(QOS_SHAPE_HOSTS_DPORT));
+        assert_eq!(qos_shape_of(1, 2, 0, 0, 6, 0), Some(QOS_SHAPE_HOSTS));
+        assert_eq!(qos_shape_of(0, 0, 3, 4, 6, 0), Some(QOS_SHAPE_PORTS));
+        assert_eq!(qos_shape_of(0, 0, 0, 4, 6, 0), Some(QOS_SHAPE_DPORT));
+        assert_eq!(qos_shape_of(0, 0, 3, 0, 6, 0), Some(QOS_SHAPE_SPORT));
+        assert_eq!(qos_shape_of(0, 0, 0, 0, 0, 46), Some(QOS_SHAPE_DSCP));
+        assert_eq!(qos_shape_of(0, 0, 0, 0, 6, 0), Some(QOS_SHAPE_PROTO));
+        assert_eq!(qos_shape_of(0, 0, 0, 0, 0, 0), Some(QOS_SHAPE_CATCHALL));
+    }
+
+    #[test]
+    fn a_key_the_ladder_never_builds_has_none() {
+        // A source port with both hosts and no destination port: the ladder
+        // wildcards the source port before the destination one and never the
+        // other way round.
+        assert_eq!(qos_shape_of(1, 2, 3, 0, 6, 0), None);
+        // One host and not the other: every step carrying a host carries both.
+        assert_eq!(qos_shape_of(1, 0, 0, 0, 6, 0), None);
+        assert_eq!(qos_shape_of(0, 2, 0, 0, 6, 0), None);
+        // A protocol and a marking and nothing else: the two bottom steps each
+        // leave the other field open.
+        assert_eq!(qos_shape_of(0, 0, 0, 0, 6, 46), None);
+    }
+
+    #[test]
+    fn the_shape_ignores_the_marking_wherever_a_host_or_a_port_is_named() {
+        // The six host and port shapes are probed at the packet's DSCP and
+        // again with it left open, so a rule naming one is the same shape
+        // whether or not it names a marking.
+        assert_eq!(qos_shape_of(1, 2, 3, 4, 6, 46), Some(QOS_SHAPE_FULL));
+        assert_eq!(qos_shape_of(0, 0, 0, 4, 6, 46), Some(QOS_SHAPE_DPORT));
+    }
 
     // ── Size tests ───────────────────────────────────────────────────
 

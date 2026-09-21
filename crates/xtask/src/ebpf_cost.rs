@@ -7,10 +7,12 @@
 //! hands it a packet directly and reports the average time of a run, so each
 //! program answers for itself.
 //!
-//! Every program is measured twice: once with nothing published in
-//! `FW_EMPTY_FEATURES`, which is what an estate carrying rules pays, and once
-//! with every gate bit set, which is what an estate carrying none pays. The
-//! second figure is the one the emptiness gates exist to move.
+//! Every program is measured twice: once with nothing published in the
+//! emptiness arrays, which is what an estate carrying rules pays, and once with
+//! every bit of them set, which is what an estate carrying none pays. The
+//! second figure is the one the emptiness gates exist to move. There are two
+//! such arrays: `FW_EMPTY_FEATURES`, one bit per table, and `QOS_EMPTY_SHAPES`,
+//! one bit per key shape of the shaper's classification ladder.
 //!
 //! Two things this does not measure. The kernel calls the program with no
 //! driver around it, so the per-packet cost of the hook itself - the XDP entry,
@@ -22,6 +24,7 @@
 
 #![allow(unsafe_code)] // Raw bpf(BPF_PROG_TEST_RUN) - aya types no program here.
 
+use ebpf_common::qos::QOS_SHAPES_ALL_EMPTY;
 use std::mem;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::path::{Path, PathBuf};
@@ -107,6 +110,14 @@ pub fn run() -> Result<()> {
             .remove("FW_EMPTY_FEATURES")
             .and_then(|map| Array::<MapData, u32>::try_from(map).ok());
 
+        // The shaper's second mask, which says which classifier shapes hold no
+        // rule. Published beside the gate bits rather than on its own: the two
+        // answer the same question, one per table and one per shape of the one
+        // table whose lookup is a ladder.
+        let mut shapes = maps
+            .remove("QOS_EMPTY_SHAPES")
+            .and_then(|map| Array::<MapData, u32>::try_from(map).ok());
+
         for program in &programs {
             let kind = match prog_kind(program.prog_type) {
                 Some(k) => k,
@@ -126,8 +137,10 @@ pub fn run() -> Result<()> {
 
             let ungated = measure(program, &packet)?;
             publish_gates(gates.as_mut(), ALL_EMPTY);
+            publish_gates(shapes.as_mut(), QOS_SHAPES_ALL_EMPTY);
             let gated = measure(program, &packet)?;
             publish_gates(gates.as_mut(), 0);
+            publish_gates(shapes.as_mut(), 0);
 
             costs.push(Cost {
                 object,
@@ -145,7 +158,7 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-/// Write one mask into `FW_EMPTY_FEATURES`, where the object declares it.
+/// Write one mask into an emptiness array, where the object declares it.
 ///
 /// A program that does not read the map is unaffected, which is why the
 /// absence is silent rather than an error.

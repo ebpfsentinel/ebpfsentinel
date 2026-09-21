@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 clap = { workspace = true }
 adapters = { workspace = true }
+ebpf-common = { workspace = true, features = ["userspace"] }
 aya = { workspace = true }
 aya-obj = { workspace = true }
 libc = { workspace = true }

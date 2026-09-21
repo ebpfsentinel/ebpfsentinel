@@ -17,8 +17,11 @@ use ebpf_common::{
     qos::{
         QOS_METRIC_COUNT, QOS_METRIC_DELAYED, QOS_METRIC_DROPPED_LOSS, QOS_METRIC_DROPPED_QUEUE,
         QOS_METRIC_ERRORS, QOS_METRIC_EVENTS_DROPPED, QOS_METRIC_SHAPED, QOS_METRIC_TOTAL_SEEN,
-        QosClassifierKey, QosClassifierValue, QosFlowState, QosPipeConfig, QosPipeState,
-        QosQueueConfig, VLAN_ANY, qos_direction_matches,
+        QOS_SCOPE_MASK, QOS_SCOPE_SHAPES_EMPTY, QOS_SCOPE_STRIDE, QOS_SHAPE_CATCHALL,
+        QOS_SHAPE_DPORT, QOS_SHAPE_DSCP, QOS_SHAPE_FULL, QOS_SHAPE_HOSTS, QOS_SHAPE_HOSTS_DPORT,
+        QOS_SHAPE_NO_DSCP, QOS_SHAPE_PORTS, QOS_SHAPE_PROTO, QOS_SHAPE_SPORT, QosClassifierKey,
+        QosClassifierValue, QosFlowState, QosPipeConfig, QosPipeState, QosQueueConfig, VLAN_ANY,
+        qos_direction_matches,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
@@ -63,6 +66,19 @@ static QOS_CLASSIFIERS: HashMap<QosClassifierKey, QosClassifierValue, 1024> = Ha
 #[btf_map]
 static FW_EMPTY_FEATURES: Array<u32, 1> = Array::new();
 
+/// Which classifier shapes hold no rule, one bit each.
+///
+/// The classification ladder rebuilds a key from the packet once per shape a
+/// rule could have been written in, which is sixteen lookups for an unmarked
+/// packet and thirty for a marked one, whatever the table actually holds.
+/// Userspace knows which shapes were loaded and publishes them here, so the
+/// ladder walks those and skips the rest. Same inverted sense as
+/// `FW_EMPTY_FEATURES`: a set bit means that shape holds nothing, zero means
+/// nothing was published and every step stays in place, and a stale value can
+/// only cost time rather than a rule.
+#[btf_map]
+static QOS_EMPTY_SHAPES: Array<u32, 1> = Array::new();
+
 /// Read the published emptiness mask, or zero when nothing was published.
 #[inline(always)]
 fn empty_features() -> u32 {
@@ -76,6 +92,21 @@ fn empty_features() -> u32 {
 #[inline(always)]
 fn feature_empty(gates: u32, bit: u32) -> bool {
     (gates & bit) != 0
+}
+
+/// Read the published shape mask, or zero when nothing was published.
+#[inline(always)]
+fn empty_shapes() -> u32 {
+    match QOS_EMPTY_SHAPES.get(0) {
+        Some(&mask) => mask,
+        None => 0,
+    }
+}
+
+/// Whether one shape of one scope is known to hold nothing.
+#[inline(always)]
+fn shape_empty(scope: u32, shape: u32) -> bool {
+    (scope & (1u32 << shape)) != 0
 }
 
 /// Per-pipe token bucket. Index = pipe_id (0-63).
@@ -426,11 +457,33 @@ fn classify(
     dscp: u8,
     vlan_id: u16,
 ) -> Option<QosClassifierValue> {
-    if let Some(val) = classify_in_vlan(src_ip, dst_ip, src_port, dst_port, protocol, dscp, vlan_id)
+    // One read of the published mask for both scopes. The scope naming a VLAN
+    // occupies the low bits and the one naming none the high bits, in the order
+    // the ladder walks them.
+    let shapes = empty_shapes();
+
+    let in_vlan = shapes & QOS_SCOPE_MASK;
+    if !scope_empty(in_vlan)
+        && let Some(val) = classify_in_vlan(
+            src_ip, dst_ip, src_port, dst_port, protocol, dscp, vlan_id, in_vlan,
+        )
     {
         return Some(val);
     }
-    classify_in_vlan(src_ip, dst_ip, src_port, dst_port, protocol, dscp, VLAN_ANY)
+
+    let any_vlan = (shapes >> QOS_SCOPE_STRIDE) & QOS_SCOPE_MASK;
+    if scope_empty(any_vlan) {
+        return None;
+    }
+    classify_in_vlan(
+        src_ip, dst_ip, src_port, dst_port, protocol, dscp, VLAN_ANY, any_vlan,
+    )
+}
+
+/// Whether one scope holds no rule at all, so the whole ladder can be skipped.
+#[inline(always)]
+fn scope_empty(scope: u32) -> bool {
+    (scope & QOS_SCOPE_SHAPES_EMPTY) == QOS_SCOPE_SHAPES_EMPTY
 }
 
 /// Progressive wildcard lookups within one VLAN scope.
@@ -451,31 +504,44 @@ fn classify_in_vlan(
     protocol: u8,
     dscp: u8,
     vlan_id: u16,
+    scope: u32,
 ) -> Option<QosClassifierValue> {
-    if let Some(val) = classify_at_dscp(src_ip, dst_ip, src_port, dst_port, protocol, dscp, vlan_id)
+    // Whether the packet's own marking is worth a pass of its own: it has to
+    // carry one, and some rule in this scope has to name one. Where neither
+    // holds, the single pass below with the DSCP left open is the whole ladder.
+    let marked = dscp != 0 && !shape_empty(scope, QOS_SHAPE_NO_DSCP);
+
+    if marked
+        && let Some(val) = classify_at_dscp(
+            src_ip, dst_ip, src_port, dst_port, protocol, dscp, vlan_id, scope,
+        )
     {
         return Some(val);
     }
 
-    // Same ladder with the DSCP left open. Skipped when the packet is unmarked,
-    // because every key it would build has already been tried above.
-    if dscp != 0
-        && let Some(val) =
-            classify_at_dscp(src_ip, dst_ip, src_port, dst_port, protocol, 0, vlan_id)
-    {
+    // Same ladder with the DSCP left open.
+    if let Some(val) = classify_at_dscp(
+        src_ip, dst_ip, src_port, dst_port, protocol, 0, vlan_id, scope,
+    ) {
         return Some(val);
     }
 
     // Rules that name neither a host nor a port: a DSCP-only marking rule, a
     // protocol-wide rule, and the wildcard that puts everything left over
     // under a pipe.
-    if dscp != 0
+    if marked
+        && !shape_empty(scope, QOS_SHAPE_DSCP)
         && let Some(val) = lookup(0, 0, 0, 0, 0, dscp, vlan_id)
     {
         return Some(val);
     }
-    if let Some(val) = lookup(0, 0, 0, 0, protocol, 0, vlan_id) {
+    if !shape_empty(scope, QOS_SHAPE_PROTO)
+        && let Some(val) = lookup(0, 0, 0, 0, protocol, 0, vlan_id)
+    {
         return Some(val);
+    }
+    if shape_empty(scope, QOS_SHAPE_CATCHALL) {
+        return None;
     }
     lookup(0, 0, 0, 0, 0, 0, vlan_id)
 }
@@ -491,28 +557,42 @@ fn classify_at_dscp(
     protocol: u8,
     dscp: u8,
     vlan_id: u16,
+    scope: u32,
 ) -> Option<QosClassifierValue> {
     // 1. Exact 5-tuple.
-    if let Some(val) = lookup(src_ip, dst_ip, src_port, dst_port, protocol, dscp, vlan_id) {
+    if !shape_empty(scope, QOS_SHAPE_FULL)
+        && let Some(val) = lookup(src_ip, dst_ip, src_port, dst_port, protocol, dscp, vlan_id)
+    {
         return Some(val);
     }
     // 2. Wildcard src_port - the ephemeral side of a connection is never named.
-    if let Some(val) = lookup(src_ip, dst_ip, 0, dst_port, protocol, dscp, vlan_id) {
+    if !shape_empty(scope, QOS_SHAPE_HOSTS_DPORT)
+        && let Some(val) = lookup(src_ip, dst_ip, 0, dst_port, protocol, dscp, vlan_id)
+    {
         return Some(val);
     }
     // 3. Wildcard both ports - a host-to-host rule.
-    if let Some(val) = lookup(src_ip, dst_ip, 0, 0, protocol, dscp, vlan_id) {
+    if !shape_empty(scope, QOS_SHAPE_HOSTS)
+        && let Some(val) = lookup(src_ip, dst_ip, 0, 0, protocol, dscp, vlan_id)
+    {
         return Some(val);
     }
     // 4. Wildcard IPs, exact ports - a port pair that applies to any host.
-    if let Some(val) = lookup(0, 0, src_port, dst_port, protocol, dscp, vlan_id) {
+    if !shape_empty(scope, QOS_SHAPE_PORTS)
+        && let Some(val) = lookup(0, 0, src_port, dst_port, protocol, dscp, vlan_id)
+    {
         return Some(val);
     }
     // 5. By destination port, any host (shape all traffic to TCP/443).
-    if let Some(val) = lookup(0, 0, 0, dst_port, protocol, dscp, vlan_id) {
+    if !shape_empty(scope, QOS_SHAPE_DPORT)
+        && let Some(val) = lookup(0, 0, 0, dst_port, protocol, dscp, vlan_id)
+    {
         return Some(val);
     }
     // 6. By source port, any host.
+    if shape_empty(scope, QOS_SHAPE_SPORT) {
+        return None;
+    }
     lookup(0, 0, src_port, 0, protocol, dscp, vlan_id)
 }
 
