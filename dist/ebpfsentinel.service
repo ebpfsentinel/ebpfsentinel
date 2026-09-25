@@ -26,6 +26,9 @@ Environment=EBPFSENTINEL_WARDEN_SOCK=/run/ebpfsentinel/warden.sock
 # broker to bind its socket before starting.
 ExecStartPre=/bin/sh -c 'for _ in $(seq 1 100); do [ -S /run/ebpfsentinel/warden.sock ] && exit 0; sleep 0.1; done; echo "warden socket not ready" >&2; exit 1'
 ExecStart=/usr/local/bin/ebpfsentinel-agent --config /etc/ebpfsentinel/config.yaml
+# `systemctl reload ebpfsentinel` re-reads the config file; the agent handles
+# SIGHUP exactly like a file change or POST /api/v1/config/reload.
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
 
