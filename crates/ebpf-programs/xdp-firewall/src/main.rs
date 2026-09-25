@@ -5,7 +5,7 @@
 use aya_ebpf::{
     bindings::xdp_action,
     btf_maps::{
-        Array, CpuMap, HashMap, PerCpuArray, ProgramArray, RingBuf,
+        Array, HashMap, PerCpuArray, ProgramArray, RingBuf,
         lpm_trie::{Key, LpmTrie},
     },
     cty::c_void,
@@ -320,13 +320,6 @@ static CT_CONFIG: Array<ConnTrackConfig, 1> = Array::new();
 /// Tracks how many active connections were admitted by each rule.
 #[btf_map]
 static FW_RULE_STATE_COUNT: Array<u32, { MAX_FIREWALL_RULES as usize }> = Array::new();
-
-/// CpuMap for DDoS CPU steering. When populated by userspace, dropped
-/// packets are redirected to dedicated CPUs for rate-limited analysis
-/// instead of being silently discarded. Falls back to XDP_DROP when
-/// the map is empty (default behavior, no userspace wiring needed).
-#[btf_map]
-static DDOS_CPUMAP: CpuMap<128> = CpuMap::new();
 
 // ── Metric indices ──────────────────────────────────────────────────
 
@@ -2205,14 +2198,6 @@ fn apply_action(ctx_raw: *mut core::ffi::c_void, action: u8) -> Result<u32, ()> 
                 unsafe { kill_flow_via_xdp_ct(ctx_raw, tuple, &mut opts) };
             }
 
-            // Try CpuMap redirect for DDoS CPU steering. When userspace has
-            // populated DDOS_CPUMAP, dropped packets are redirected to
-            // dedicated CPUs for rate-limited analysis instead of being
-            // discarded. Falls back to XDP_DROP when the map is empty.
-            let cpu = unsafe { bpf_get_smp_processor_id() };
-            if DDOS_CPUMAP.redirect(cpu, 0).is_ok() {
-                return Ok(xdp_action::XDP_REDIRECT);
-            }
             Ok(xdp_action::XDP_DROP)
         }
         ACTION_REJECT => {

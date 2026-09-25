@@ -3873,9 +3873,6 @@ pub fn try_load_xdp_firewall(
         adapters::ebpf::feature_gates::publish(adapters::ebpf::FirewallFeature::Zones, true);
     }
 
-    // Populate DDOS_CPUMAP with all online CPUs for DDoS CPU steering.
-    adapters::ebpf::cpumap::populate_cpumap(loader.ebpf_mut(), "DDOS_CPUMAP");
-
     let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "FIREWALL_METRICS").ok();
 
     let reader = EventReader::new(loader.ebpf_mut())?;
@@ -3929,7 +3926,7 @@ pub type XdpRatelimitResult = (
 
 /// Load the xdp-ratelimit-syncookie program and wire it as a tail-call target.
 ///
-/// Shared maps: `SYNCOOKIE_CTX`, `SYNCOOKIE_SECRET`, `DDOS_METRICS`.
+/// Shared maps: `SYNCOOKIE_CTX`, `DDOS_METRICS`.
 /// Loaded but NOT attached - invoked via tail-call from xdp-ratelimit (`RL_PROG_ARRAY` slot 0).
 pub fn try_load_xdp_ratelimit_syncookie(
     ebpf_dir: &str,

@@ -244,7 +244,6 @@ pub const REQUIREMENTS: &[ObjectRequirements] = &[
             BPF_FUNC_ktime_get_boot_ns,
             BPF_FUNC_loop,
             BPF_FUNC_probe_read_kernel,
-            BPF_FUNC_redirect_map,
             BPF_FUNC_tail_call,
         ],
         true,

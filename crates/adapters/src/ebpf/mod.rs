@@ -4,7 +4,6 @@ pub mod bpf_token;
 // has #[allow(unsafe_code)] at the top.
 pub mod config_flags_manager;
 pub mod conntrack_map_manager;
-pub mod cpumap;
 pub mod dlp_attach;
 pub mod dlp_event_reader;
 pub mod dns_event_reader;

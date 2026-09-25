@@ -566,7 +566,7 @@ impl EbpfLoader {
 
     // TODO(W1-S3): BPF_MAP_FREEZE for read-only config maps.
     //
-    // After populating static config maps at startup (e.g. SYNCOOKIE_SECRET, AMP_PROTECT_CONFIG,
+    // After populating static config maps at startup (e.g. AMP_PROTECT_CONFIG,
     // RL_TIER_CONFIG), call `BPF_MAP_FREEZE` via `libc::syscall(SYS_bpf, BPF_MAP_FREEZE, ...)` to
     // prevent any subsequent writes - this hardens against userspace-side map tampering after init.
     //
