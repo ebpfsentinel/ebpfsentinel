@@ -33,7 +33,7 @@ impl RedbAlertStore {
 
     /// Open with a custom max alerts limit (useful for testing).
     pub fn open_with_max(path: &Path, max_alerts: usize) -> Result<Self, AlertError> {
-        let db = Database::create(path)
+        let db = super::create_database(path)
             .map_err(|e| AlertError::StoreFailed(format!("redb open failed: {e}")))?;
 
         // Ensure the table exists.

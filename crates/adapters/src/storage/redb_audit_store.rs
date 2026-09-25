@@ -29,7 +29,7 @@ pub struct RedbAuditStore {
 impl RedbAuditStore {
     /// Open (or create) a redb database at `path`.
     pub fn open(path: &Path, max_entries: usize) -> Result<Self, AuditError> {
-        let db = Database::create(path)
+        let db = super::create_database(path)
             .map_err(|e| AuditError::WriteFailed(format!("redb open failed: {e}")))?;
 
         // Ensure the table exists.

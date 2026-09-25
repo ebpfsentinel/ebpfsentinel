@@ -24,7 +24,7 @@ pub struct RedbRuleChangeStore {
 impl RedbRuleChangeStore {
     /// Open (or create) a redb database at `path` for rule change history.
     pub fn open(path: &Path) -> Result<Self, AuditError> {
-        let db = Database::create(path)
+        let db = super::create_database(path)
             .map_err(|e| AuditError::WriteFailed(format!("redb open failed: {e}")))?;
 
         // Ensure the table exists.

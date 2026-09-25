@@ -36,7 +36,7 @@ pub struct RedbFingerprintStore {
 
 impl RedbFingerprintStore {
     pub fn open(path: &Path) -> Result<Self, redb::Error> {
-        let db = Database::create(path)?;
+        let db = super::create_database(path)?;
         let txn = db.begin_write()?;
         {
             let _ = txn.open_table(JA4_TABLE)?;

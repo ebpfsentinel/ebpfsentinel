@@ -146,6 +146,14 @@ pub fn run_capture(
         attach_filter(fd, prog.get_instructions())?;
         true
     };
+    // A state directory mounted empty has no `captures/` in it yet.
+    if let Some(parent) = std::path::Path::new(output_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("pcap directory create failed: {e}"))?;
+    }
     let mut savefile = dead
         .savefile(output_path)
         .map_err(|e| format!("pcap file create failed: {e}"))?;
