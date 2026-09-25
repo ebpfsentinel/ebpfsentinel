@@ -77,8 +77,9 @@ helpers! {
     BPF_FUNC_skb_cgroup_id => "bpf_skb_cgroup_id",
     BPF_FUNC_skb_ecn_set_ce => "bpf_skb_ecn_set_ce",
     BPF_FUNC_skb_set_tstamp => "bpf_skb_set_tstamp",
-    BPF_FUNC_xdp_adjust_meta => "bpf_xdp_adjust_meta",
     BPF_FUNC_xdp_adjust_tail => "bpf_xdp_adjust_tail",
+    BPF_FUNC_tail_call => "bpf_tail_call",
+    BPF_FUNC_redirect_map => "bpf_redirect_map",
     BPF_FUNC_ringbuf_reserve => "bpf_ringbuf_reserve",
     BPF_FUNC_ringbuf_submit => "bpf_ringbuf_submit",
     BPF_FUNC_ringbuf_discard => "bpf_ringbuf_discard",
@@ -124,12 +125,14 @@ impl fmt::Display for ProbeType {
 
 /// Helpers every object needs regardless of what else it calls: a map lookup
 /// (all of them read at least one configuration map) and, for the ones that
-/// emit events, the ring-buffer trio.
+/// emit events, the ring-buffer helpers - including the backlog query every
+/// producer makes before it reserves or when it picks its wakeup flag.
 const BASE: &[Helper] = &[BPF_FUNC_map_lookup_elem];
 const RINGBUF: &[Helper] = &[
     BPF_FUNC_ringbuf_reserve,
     BPF_FUNC_ringbuf_submit,
     BPF_FUNC_ringbuf_discard,
+    BPF_FUNC_ringbuf_query,
 ];
 
 /// What one compiled object needs from the kernel.
@@ -212,8 +215,9 @@ const HELPER_UNIVERSE: &[Helper] = &[
     BPF_FUNC_skb_cgroup_id,
     BPF_FUNC_skb_ecn_set_ce,
     BPF_FUNC_skb_set_tstamp,
-    BPF_FUNC_xdp_adjust_meta,
     BPF_FUNC_xdp_adjust_tail,
+    BPF_FUNC_tail_call,
+    BPF_FUNC_redirect_map,
     BPF_FUNC_ringbuf_reserve,
     BPF_FUNC_ringbuf_submit,
     BPF_FUNC_ringbuf_discard,
@@ -240,7 +244,8 @@ pub const REQUIREMENTS: &[ObjectRequirements] = &[
             BPF_FUNC_ktime_get_boot_ns,
             BPF_FUNC_loop,
             BPF_FUNC_probe_read_kernel,
-            BPF_FUNC_xdp_adjust_meta,
+            BPF_FUNC_redirect_map,
+            BPF_FUNC_tail_call,
         ],
         true,
     ),
@@ -256,6 +261,7 @@ pub const REQUIREMENTS: &[ObjectRequirements] = &[
             BPF_FUNC_get_smp_processor_id,
             BPF_FUNC_ktime_get_boot_ns,
             BPF_FUNC_ktime_get_coarse_ns,
+            BPF_FUNC_tail_call,
             BPF_FUNC_tcp_raw_check_syncookie_ipv4,
             BPF_FUNC_tcp_raw_check_syncookie_ipv6,
         ],
@@ -276,6 +282,7 @@ pub const REQUIREMENTS: &[ObjectRequirements] = &[
             BPF_FUNC_check_mtu,
             BPF_FUNC_get_smp_processor_id,
             BPF_FUNC_ktime_get_boot_ns,
+            BPF_FUNC_redirect_map,
         ],
         true,
     ),
@@ -300,13 +307,21 @@ pub const REQUIREMENTS: &[ObjectRequirements] = &[
         &[
             BPF_FUNC_get_current_cgroup_id,
             BPF_FUNC_ktime_get_boot_ns,
-            BPF_FUNC_ringbuf_query,
             BPF_FUNC_skb_load_bytes,
         ],
         true,
     ),
     tc("tc-conntrack", &[BPF_FUNC_probe_read_kernel], false),
-    tc("tc-threatintel", &[], true),
+    tc(
+        "tc-threatintel",
+        &[
+            BPF_FUNC_get_current_cgroup_id,
+            BPF_FUNC_get_smp_processor_id,
+            BPF_FUNC_get_socket_cookie,
+            BPF_FUNC_ktime_get_boot_ns,
+        ],
+        true,
+    ),
     tc(
         "tc-nat-ingress",
         &[
@@ -330,7 +345,10 @@ pub const REQUIREMENTS: &[ObjectRequirements] = &[
     tc(
         "tc-qos",
         &[
+            BPF_FUNC_get_current_cgroup_id,
             BPF_FUNC_get_prandom_u32,
+            BPF_FUNC_get_smp_processor_id,
+            BPF_FUNC_get_socket_cookie,
             BPF_FUNC_ktime_get_boot_ns,
             BPF_FUNC_skb_ecn_set_ce,
             BPF_FUNC_skb_set_tstamp,
@@ -345,6 +363,8 @@ pub const REQUIREMENTS: &[ObjectRequirements] = &[
             BPF_FUNC_l3_csum_replace,
             BPF_FUNC_l4_csum_replace,
             BPF_FUNC_loop,
+            BPF_FUNC_skb_load_bytes,
+            BPF_FUNC_skb_store_bytes,
         ],
         false,
     ),
@@ -641,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn ringbuf_objects_require_the_ringbuf_trio() {
+    fn ringbuf_objects_require_the_ringbuf_helpers() {
         let dns = REQUIREMENTS
             .iter()
             .find(|r| r.object == "tc-dns")
@@ -807,6 +827,59 @@ mod tests {
         out
     }
 
+    /// Helpers a source reaches without spelling `bpf_*(`: through the
+    /// `ebpf_helpers` entry points, whose bodies call them, and through aya's
+    /// map and context methods, which wrap them. Without this the source grep
+    /// sees a program that emits events calling no helper at all.
+    fn indirect_calls_in(src: &str) -> HashSet<String> {
+        let code: String = src
+            .lines()
+            .map(|line| line.split_once("//").map_or(line, |(c, _)| c))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut out = HashSet::new();
+        let mut add = |names: &[&str]| out.extend(names.iter().map(|n| (*n).to_string()));
+
+        if code.contains("avail_data(") || code.contains("ringbuf_has_backpressure!") {
+            add(&["bpf_ringbuf_query"]);
+        }
+        if code.contains(".tail_call(") {
+            add(&["bpf_tail_call"]);
+        }
+        if code.contains(".redirect(") {
+            add(&["bpf_redirect_map"]);
+        }
+        if code.contains("ctx.load(") {
+            add(&["bpf_skb_load_bytes"]);
+        }
+        if code.contains("ctx.store(") {
+            add(&["bpf_skb_store_bytes"]);
+        }
+
+        // `emit_packet_event!` has three arms: the bare one stamps time and
+        // CPU, `; tc ctx` adds the socket cookie and the task's cgroup, and
+        // `; tc ctx, cgroup id` takes the cgroup from the caller instead.
+        let mut rest = code.as_str();
+        while let Some(at) = rest.find("emit_packet_event!(") {
+            let tail = &rest[at..];
+            let end = tail.find(");").unwrap_or(tail.len());
+            let args = &tail[..end];
+            add(&[
+                "bpf_ringbuf_query",
+                "bpf_ktime_get_boot_ns",
+                "bpf_get_smp_processor_id",
+            ]);
+            if args.contains("; tc") {
+                add(&["bpf_get_socket_cookie"]);
+                if !args.contains(", cgroup ") {
+                    add(&["bpf_get_current_cgroup_id"]);
+                }
+            }
+            rest = &tail[end..];
+        }
+        out
+    }
+
     fn program_sources(object: &str) -> Vec<String> {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../ebpf-programs")
@@ -845,7 +918,15 @@ mod tests {
             let mut called = HashSet::new();
             for src in &sources {
                 called.extend(calls_in(src));
+                called.extend(indirect_calls_in(src));
             }
+
+            let emits = sources.iter().any(|src| src.contains("RingBuf"));
+            assert_eq!(
+                req.uses_ringbuf, emits,
+                "{} ring-buffer flag disagrees with its sources",
+                req.object
+            );
 
             for name in &called {
                 let name = name.as_str();
@@ -864,6 +945,17 @@ mod tests {
                     req.object
                 );
             }
+
+            // The other direction: a helper listed and never called makes the
+            // probe fail an object on a kernel that would have loaded it.
+            for helper in req.own {
+                assert!(
+                    called.contains(helper.name),
+                    "{} lists {} but none of its sources reaches it",
+                    req.object,
+                    helper.name
+                );
+            }
         }
     }
 
@@ -878,6 +970,25 @@ let s = my_bpf_loop(x); // not a helper call
         assert!(calls.contains("bpf_ktime_get_boot_ns"));
         assert!(!calls.contains("bpf_redirect_map"));
         assert!(!calls.contains("bpf_loop"));
+    }
+
+    #[test]
+    fn indirect_extraction_follows_the_event_macro_arms() {
+        let bare = indirect_calls_in("emit_packet_event!(EV, M, D, a, b, c, d, e, f, g, h, i, j);");
+        assert!(bare.contains("bpf_ktime_get_boot_ns"));
+        assert!(bare.contains("bpf_ringbuf_query"));
+        assert!(!bare.contains("bpf_get_socket_cookie"));
+
+        let tc = indirect_calls_in("emit_packet_event!(EV, M, D,\n a, b; tc ctx);");
+        assert!(tc.contains("bpf_get_socket_cookie"));
+        assert!(tc.contains("bpf_get_current_cgroup_id"));
+
+        let given = indirect_calls_in("emit_packet_event!(EV, M, D, a; tc ctx, cgroup id);");
+        assert!(given.contains("bpf_get_socket_cookie"));
+        assert!(!given.contains("bpf_get_current_cgroup_id"));
+
+        let commented = indirect_calls_in("// ctx.store(0, &x, 0)\nlet y = 1;");
+        assert!(commented.is_empty());
     }
 
     #[test]
