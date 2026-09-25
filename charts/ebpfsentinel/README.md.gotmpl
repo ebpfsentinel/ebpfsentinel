@@ -149,6 +149,20 @@ helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --versi
   --set 'daemonset.extraVolumeMounts[0].readOnly=true'
 ```
 
+### State kept across rollouts
+
+The alert, audit and rule-history stores, packet captures, downloaded GeoIP databases and the telemetry installation identifier live under `/var/lib/ebpfsentinel`. By default that is an `emptyDir`: it survives a container restart but not the pod being replaced, so every rollout starts with empty stores and a new installation identifier. To keep it, prepare the directory on every node and point the chart at it:
+
+```bash
+# on every node - fsGroup is not applied to a host path
+install -d -o 65534 -g 65534 -m 0700 /var/lib/ebpfsentinel
+
+helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --version <version> \
+  --namespace ebpfsentinel --create-namespace \
+  --set agent.interfaces='{eth0}' \
+  --set daemonset.state.hostPath=/var/lib/ebpfsentinel
+```
+
 ### Auto-response and auto-capture
 
 `auto_response`, `auto_capture`, `aliases` and `interface_groups` are rendered verbatim into the matching sections of `config.yaml`:

@@ -197,6 +197,18 @@ daemonset:
   podAnnotations: {}
   # -- Extra environment variables
   extraEnv: []
+  # Agent state at /var/lib/ebpfsentinel: the alert, audit and rule-history
+  # stores, packet captures, downloaded GeoIP databases and the telemetry
+  # installation identifier.
+  state:
+    # -- Node directory holding the agent state. Empty keeps it in an emptyDir,
+    # which survives a container restart but not the pod being replaced, so the
+    # stores start empty and the installation identifier is drawn again after
+    # every rollout. Set a path (e.g. /var/lib/ebpfsentinel) to keep it across
+    # rollouts; the directory must be owned by uid/gid 65534 on every node
+    # (`install -d -o 65534 -g 65534 -m 0700 /var/lib/ebpfsentinel`), since
+    # fsGroup is not applied to a host path.
+    hostPath: ""
   # -- Extra volume mounts (e.g., GeoIP database, TLS certs)
   extraVolumeMounts: []
   # -- Extra volumes

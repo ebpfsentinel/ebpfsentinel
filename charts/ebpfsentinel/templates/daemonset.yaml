@@ -178,6 +178,10 @@ spec:
               # resolves every node process's libssl for cross-container TLS DLP.
               mountPath: /host/proc
               readOnly: true
+            - name: state
+              # Stores, captures, GeoIP databases and the telemetry installation
+              # identifier. The agent creates what it needs under it.
+              mountPath: /var/lib/ebpfsentinel
             {{- with .Values.daemonset.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -218,6 +222,18 @@ spec:
         - name: host-proc
           hostPath:
             path: /proc
+        - name: state
+          {{- if .Values.daemonset.state.hostPath }}
+          # Survives the pod being replaced. The node directory must be owned by
+          # uid/gid 65534: fsGroup is not applied to a host path.
+          hostPath:
+            path: {{ .Values.daemonset.state.hostPath | quote }}
+            type: DirectoryOrCreate
+          {{- else }}
+          # Survives a container restart, not the pod being replaced. fsGroup
+          # makes it writable by the agent.
+          emptyDir: {}
+          {{- end }}
         {{- with .Values.daemonset.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
