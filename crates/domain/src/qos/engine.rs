@@ -42,6 +42,7 @@ impl QosEngine {
         if self.pipes.iter().any(|p| p.id == pipe.id) {
             return Err(QosError::DuplicatePipe { id: pipe.id }.into());
         }
+        pipe.validate()?;
         if self.pipes.len() >= MAX_PIPES {
             return Err(QosError::InvalidPipe("maximum pipe count reached".to_string()).into());
         }
@@ -67,6 +68,7 @@ impl QosEngine {
         }
         // Check for duplicates
         for (i, pipe) in pipes.iter().enumerate() {
+            pipe.validate()?;
             if pipes[i + 1..].iter().any(|p| p.id == pipe.id) {
                 return Err(QosError::DuplicatePipe {
                     id: pipe.id.clone(),
@@ -230,6 +232,43 @@ mod tests {
         let mut engine = QosEngine::new();
         assert!(engine.add_pipe(make_pipe("p-1")).is_ok());
         assert_eq!(engine.pipes().len(), 1);
+    }
+
+    #[test]
+    fn add_pipe_rejects_rate_limit_without_burst() {
+        let mut engine = QosEngine::new();
+        let mut pipe = make_pipe("p-1");
+        pipe.burst_bytes = 0;
+        assert!(engine.add_pipe(pipe).is_err());
+        assert!(engine.pipes().is_empty());
+    }
+
+    #[test]
+    fn add_pipe_accepts_unlimited_pipe_without_burst() {
+        let mut engine = QosEngine::new();
+        let mut pipe = make_pipe("p-1");
+        pipe.rate_bps = 0;
+        pipe.burst_bytes = 0;
+        pipe.delay_ms = 50;
+        assert!(engine.add_pipe(pipe).is_ok());
+    }
+
+    #[test]
+    fn add_pipe_rejects_loss_out_of_range() {
+        let mut engine = QosEngine::new();
+        let mut pipe = make_pipe("p-1");
+        pipe.loss_pct = 100.5;
+        assert!(engine.add_pipe(pipe).is_err());
+    }
+
+    #[test]
+    fn reload_pipes_rejects_invalid_pipe() {
+        let mut engine = QosEngine::new();
+        engine.add_pipe(make_pipe("p-0")).unwrap();
+        let mut bad = make_pipe("p-2");
+        bad.burst_bytes = 0;
+        assert!(engine.reload_pipes(vec![make_pipe("p-1"), bad]).is_err());
+        assert_eq!(engine.pipes()[0].id, "p-0");
     }
 
     #[test]

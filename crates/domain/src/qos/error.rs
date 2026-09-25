@@ -40,14 +40,11 @@ pub enum QosError {
         queue_id: String,
     },
 
-    #[error("invalid bandwidth: must be > 0")]
-    InvalidBandwidth,
-
     #[error("invalid loss percentage: must be 0.0..=100.0, got {0}")]
     InvalidLossPct(f32),
 
-    #[error("invalid weight: must be 1..=100, got {0}")]
-    InvalidWeight(u16),
+    #[error("invalid burst for pipe {id}: a rate-limited pipe needs a burst above 0 bytes")]
+    InvalidBurst { id: String },
 }
 
 impl From<QosError> for DomainError {
@@ -64,9 +61,8 @@ impl From<QosError> for DomainError {
             | QosError::InvalidClassifier(msg) => Self::InvalidRule(msg),
             QosError::OrphanedQueue { .. }
             | QosError::OrphanedClassifier { .. }
-            | QosError::InvalidBandwidth
             | QosError::InvalidLossPct(_)
-            | QosError::InvalidWeight(_) => Self::InvalidRule(e.to_string()),
+            | QosError::InvalidBurst { .. } => Self::InvalidRule(e.to_string()),
         }
     }
 }
@@ -168,20 +164,17 @@ mod tests {
     }
 
     #[test]
-    fn invalid_bandwidth_to_domain_error() {
-        let e: DomainError = QosError::InvalidBandwidth.into();
-        assert!(matches!(e, DomainError::InvalidRule(_)));
-    }
-
-    #[test]
     fn invalid_loss_pct_to_domain_error() {
         let e: DomainError = QosError::InvalidLossPct(101.0).into();
         assert!(matches!(e, DomainError::InvalidRule(_)));
     }
 
     #[test]
-    fn invalid_weight_to_domain_error() {
-        let e: DomainError = QosError::InvalidWeight(0).into();
+    fn invalid_burst_to_domain_error() {
+        let e: DomainError = QosError::InvalidBurst {
+            id: "p-1".to_string(),
+        }
+        .into();
         assert!(matches!(e, DomainError::InvalidRule(_)));
     }
 }

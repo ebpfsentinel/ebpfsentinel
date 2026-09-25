@@ -409,11 +409,12 @@ impl QosPipeConfig {
             });
         }
 
-        parse_bandwidth(&self.bandwidth).map_err(|msg| ConfigError::InvalidValue {
-            field: format!("{prefix}.bandwidth"),
-            value: self.bandwidth.clone(),
-            expected: msg,
-        })?;
+        let rate_bps =
+            parse_bandwidth(&self.bandwidth).map_err(|msg| ConfigError::InvalidValue {
+                field: format!("{prefix}.bandwidth"),
+                value: self.bandwidth.clone(),
+                expected: msg,
+            })?;
 
         if !(0.0..=100.0).contains(&self.loss) {
             return Err(ConfigError::Validation {
@@ -422,11 +423,17 @@ impl QosPipeConfig {
             });
         }
 
-        parse_bytes(&self.burst).map_err(|msg| ConfigError::InvalidValue {
+        let burst_bytes = parse_bytes(&self.burst).map_err(|msg| ConfigError::InvalidValue {
             field: format!("{prefix}.burst"),
             value: self.burst.clone(),
             expected: msg,
         })?;
+        if rate_bps > 0 && burst_bytes == 0 {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.burst"),
+                message: "a rate-limited pipe needs a burst above 0 bytes".to_string(),
+            });
+        }
 
         parse_direction(&self.direction).map_err(|msg| ConfigError::InvalidValue {
             field: format!("{prefix}.direction"),
@@ -750,8 +757,6 @@ mod tests {
         assert!(parse_direction("sideways").is_err());
     }
 
-    // ── Scheduler parsing ───────────────────────────────────────────
-
     // ── Pipe validation ─────────────────────────────────────────────
 
     fn valid_pipe_yaml() -> QosPipeConfig {
@@ -807,6 +812,21 @@ direction: egress
         let mut pipe = valid_pipe_yaml();
         pipe.burst = "lots".to_string();
         assert!(pipe.validate(0).is_err());
+    }
+
+    #[test]
+    fn pipe_validate_zero_burst_on_rate_limited_pipe() {
+        let mut pipe = valid_pipe_yaml();
+        pipe.burst = "0b".to_string();
+        assert!(pipe.validate(0).is_err());
+    }
+
+    #[test]
+    fn pipe_validate_zero_burst_on_unlimited_pipe() {
+        let mut pipe = valid_pipe_yaml();
+        pipe.bandwidth = "0bps".to_string();
+        pipe.burst = "0b".to_string();
+        pipe.validate(0).unwrap();
     }
 
     #[test]

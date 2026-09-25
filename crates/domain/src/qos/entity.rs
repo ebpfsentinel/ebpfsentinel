@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::error::QosError;
+
 /// Direction for `QoS` shaping: ingress, egress, or both.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -52,6 +54,25 @@ pub struct QosPipe {
     /// tenant.
     #[serde(default)]
     pub tenant_id: u32,
+}
+
+impl QosPipe {
+    /// Reject a pipe the shaper could not honour.
+    ///
+    /// The kernel caps the token bucket at `burst_bytes`, so a rate-limited
+    /// pipe with no burst never holds a token and drops every packet. A pipe
+    /// with `rate_bps == 0` is unlimited and needs no bucket.
+    pub fn validate(&self) -> Result<(), QosError> {
+        if !(0.0..=100.0).contains(&self.loss_pct) {
+            return Err(QosError::InvalidLossPct(self.loss_pct));
+        }
+        if self.rate_bps > 0 && self.burst_bytes == 0 {
+            return Err(QosError::InvalidBurst {
+                id: self.id.clone(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// A `QoS` queue - the indirection classifiers point at to reach a pipe.

@@ -5,7 +5,7 @@ use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
     btf_maps::{Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
-    helpers::{bpf_get_prandom_u32, bpf_ktime_get_boot_ns},
+    helpers::{bpf_get_prandom_u32, bpf_ktime_get_boot_ns, bpf_ktime_get_ns},
     macros::{btf_map, classifier},
     programs::TcContext,
 };
@@ -37,10 +37,6 @@ use network_types::{
     tcp::TcpHdr,
     udp::UdpHdr,
 };
-
-// NOTE: BPF_MAP_TYPE_QUEUE with bpf_map_push/pop_elem (v4.20) enables
-// proper packet queuing for QoS scheduling. Current implementation uses
-// token bucket + EDT timestamps without explicit queuing.
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -797,35 +793,36 @@ fn apply_qos(
     }
 
     // Step 5: EDT (Earliest Departure Time) pacing via bpf_skb_set_tstamp.
-    // Sets skb->tstamp = max(now, prev_edt) + delay_ns so the kernel queuing
-    // discipline (fq) spaces packets according to the configured delay.
+    // Sets skb->tstamp = max(now + delay_ns, prev_edt): every packet leaves
+    // delay_ns after it was seen, and never ahead of the flow's previous
+    // packet, so fq keeps the flow in order without the delay compounding.
+    // BPF_SKB_TSTAMP_DELIVERY_MONO reads the timestamp as CLOCK_MONOTONIC,
+    // which is bpf_ktime_get_ns; the boot clock drifts from it after suspend.
     if pipe_cfg.delay_ns > 0 {
-        let now_ns_edt = unsafe { bpf_ktime_get_boot_ns() };
+        let now_ns_edt = unsafe { bpf_ktime_get_ns() };
         let fh_edt = flow_hash(src_ip, dst_ip, src_port, dst_port, protocol);
+        let target = now_ns_edt.saturating_add(pipe_cfg.delay_ns);
 
         let edt = match QOS_FLOW_STATE.get_ptr_mut(&fh_edt) {
             Some(state_ptr) => {
                 let state = unsafe { &mut *state_ptr };
-                let base = if state.last_edt_ns > now_ns_edt {
+                let departure = if state.last_edt_ns > target {
                     state.last_edt_ns
                 } else {
-                    now_ns_edt
+                    target
                 };
-                let departure = base.saturating_add(pipe_cfg.delay_ns);
                 state.last_edt_ns = departure;
                 departure
             }
             None => {
-                // No flow state yet (delay-only pipe without bandwidth shaping).
-                let departure = now_ns_edt.saturating_add(pipe_cfg.delay_ns);
                 let new_state = QosFlowState {
-                    last_edt_ns: departure,
+                    last_edt_ns: target,
                     pipe_id: pipe_id as u8,
                     queue_id: queue_id as u8,
                     _padding: [0; 6],
                 };
                 let _ = QOS_FLOW_STATE.insert(&fh_edt, &new_state, 0);
-                departure
+                target
             }
         };
 

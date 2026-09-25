@@ -81,8 +81,10 @@ pub struct QosMatchRuleResponse {
 #[derive(Deserialize, ToSchema)]
 pub struct CreateQosPipeRequest {
     pub id: String,
+    /// Bandwidth limit in bits per second; `0` leaves the pipe unlimited.
     pub rate_bps: u64,
-    #[serde(default)]
+    /// Token bucket depth in bytes. Must be above 0 on a rate-limited pipe.
+    #[serde(default = "default_burst_bytes")]
     pub burst_bytes: u64,
     /// Which hook the pipe shapes: `ingress`, `egress` or `both`.
     #[serde(default = "default_direction")]
@@ -93,6 +95,11 @@ pub struct CreateQosPipeRequest {
     /// Random packet loss, 0.0 to 100.0.
     #[serde(default)]
     pub loss_pct: f32,
+}
+
+/// Same 64 KiB default as the `burst` key of the configuration file.
+fn default_burst_bytes() -> u64 {
+    65_536
 }
 
 fn default_direction() -> String {
