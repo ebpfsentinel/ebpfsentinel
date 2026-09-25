@@ -469,6 +469,22 @@ pub async fn apply_config_file(
         }
     };
 
+    let dlp_patterns = match config.dlp_patterns() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid DLP patterns");
+            return None;
+        }
+    };
+
+    let dlp_mode = match config.dlp_mode() {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid DLP mode");
+            return None;
+        }
+    };
+
     let rl_policies = match config.ratelimit_policies() {
         Ok(p) => p,
         Err(e) => {
@@ -709,13 +725,10 @@ pub async fn apply_config_file(
 
     // Phase 6b½: DLP reload
     //
-    // Only toggle enabled/disabled, keep alert mode and built-in patterns.
+    // The same patterns and mode startup loads, so a reload keeps a
+    // configured `block` mode and the patterns the file re-tunes.
     if let Err(e) = reload_service
-        .reload_dlp(
-            domain::dlp::entity::default_patterns(),
-            domain::common::entity::DomainMode::Alert,
-            config.dlp.enabled,
-        )
+        .reload_dlp(dlp_patterns, dlp_mode, config.dlp.enabled)
         .await
     {
         tracing::warn!(error = %e, "DLP config reload failed at application level");
@@ -958,5 +971,40 @@ mod tests {
 
         cancel.cancel();
         handle.await.expect("loop stops on cancel");
+    }
+
+    #[tokio::test]
+    async fn a_reload_keeps_the_dlp_patterns_the_file_re_tunes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        let yaml = "agent:\n  interfaces: [lo]\ndlp:\n  enabled: true\n  patterns:\n    \
+                    - id: dlp-pci-visa\n      name: Visa re-tuned\n      \
+                    regex: '4[0-9]{15}'\n      severity: low\n      data_type: pci\n";
+        std::fs::write(&path, yaml).unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+
+        let config = AgentConfig::load(&path).unwrap();
+        let services = crate::runtime::build_services(&config).unwrap();
+        let visa_name = |services: &crate::runtime::ServiceHandles| {
+            services
+                .dlp_svc
+                .load()
+                .list_patterns()
+                .iter()
+                .find(|p| p.id.0 == "dlp-pci-visa")
+                .map(|p| p.name.clone())
+        };
+        assert_eq!(visa_name(&services).as_deref(), Some("Visa re-tuned"));
+
+        let reload_service = services.config_reload_service();
+        let applied = apply_config_file(path.to_str().unwrap(), &reload_service, None).await;
+
+        assert!(applied.is_some());
+        assert_eq!(
+            visa_name(&services).as_deref(),
+            Some("Visa re-tuned"),
+            "a reload must load the patterns startup loads, not the built-in set alone"
+        );
     }
 }
