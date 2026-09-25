@@ -303,11 +303,12 @@ impl EbpfLoader {
         ))
     }
 
-    /// Attach a TC (Traffic Control) classifier program to the given interface.
+    /// Attach a TC (Traffic Control) classifier program to the ingress hook
+    /// of the given interface.
     ///
-    /// On kernel >= 6.6, uses TCX (link-based attach with priority ordering,
-    /// no qdisc needed). On older kernels, falls back to clsact qdisc +
-    /// netlink attach. Aya handles the detection automatically.
+    /// Uses a TCX link only (kernel >= 6.6, no qdisc); there is no clsact
+    /// fallback. The link is appended at the tail of the interface's TCX
+    /// chain, so programs run in the order they were attached.
     pub fn attach_tc_program(
         &mut self,
         program_name: &str,

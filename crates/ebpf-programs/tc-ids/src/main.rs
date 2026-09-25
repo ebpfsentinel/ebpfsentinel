@@ -695,7 +695,7 @@ fn process_ids_pattern(
                 bpf_clone_redirect(
                     _ctx.skb.skb as *mut _,
                     target_ifindex,
-                    0, // flags: 0 = redirect ingress
+                    0, // flags: 0 = transmit on the target's egress (BPF_F_INGRESS unset)
                 );
             }
         }
