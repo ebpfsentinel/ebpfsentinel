@@ -2589,6 +2589,9 @@ pub async fn run(
         // The kernel metrics loop reads the manager's list, so a program
         // enabled by a reload is counted and one disabled stops being read.
         mgr.metrics_readers = Arc::new(RwLock::new(metrics_readers));
+        // The status endpoint reads the same map the manager updates, so a
+        // program a reload loads or unloads is reported as it now is.
+        mgr.program_status = Arc::clone(&ebpf_program_status);
         // Move map holder fields into the manager
         mgr.config_flags = ebpf_map_holder.config_flags;
         mgr.l7_ports = ebpf_map_holder.l7_ports;

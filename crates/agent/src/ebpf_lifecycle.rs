@@ -52,6 +52,9 @@ pub struct EbpfProgramManager {
     pub tenant_cgroup: TenantCgroupMapManager,
     /// Shared metrics readers - the kernel metrics loop reads from this.
     pub metrics_readers: Arc<RwLock<Vec<MetricsReader>>>,
+    /// Load state per published program name, as `/api/v1/ebpf/status` and
+    /// the anonymous heartbeat read it.
+    pub program_status: Arc<RwLock<HashMap<String, bool>>>,
 }
 
 impl EbpfProgramManager {
@@ -73,7 +76,20 @@ impl EbpfProgramManager {
             tenant_subnet: TenantSubnetMapManager::new(),
             tenant_cgroup: TenantCgroupMapManager::new(),
             metrics_readers: Arc::new(RwLock::new(Vec::new())),
+            program_status: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Record a program's load state everywhere it is published: the
+    /// Prometheus gauge and the map the status endpoint reads.
+    async fn set_status(&self, program: &str, loaded: bool) {
+        self.services
+            .metrics
+            .set_ebpf_program_status(program, loaded);
+        self.program_status
+            .write()
+            .await
+            .insert(adapters::ebpf::published_program_name(program), loaded);
     }
 
     /// Get a clone of the shared metrics readers handle (for the kernel metrics loop).
@@ -182,12 +198,8 @@ impl EbpfProgramManager {
                 self.services.nat_svc.write().await.clear_map_port();
                 // The egress half shares the ingress half's lifecycle.
                 self.programs.remove("tc_nat_egress");
-                self.services
-                    .metrics
-                    .set_ebpf_program_status("tc_nat_ingress", false);
-                self.services
-                    .metrics
-                    .set_ebpf_program_status("tc_nat_egress", false);
+                self.set_status("tc_nat_ingress", false).await;
+                self.set_status("tc_nat_egress", false).await;
             }
             _ => {}
         }
@@ -195,7 +207,10 @@ impl EbpfProgramManager {
         // Drop the loader - this detaches the eBPF program from interfaces
         drop(handle);
 
-        self.services.metrics.set_ebpf_program_status(name, false);
+        // tc-nat is published as its two halves, set above.
+        if name != "tc_nat" {
+            self.set_status(name, false).await;
+        }
         info!(program = name, "eBPF program disabled and detached");
         Ok(())
     }
@@ -272,9 +287,7 @@ impl EbpfProgramManager {
         self.tenant_subnet.add_v6_map(loader.ebpf_mut());
         self.tenant_cgroup.add_map(loader.ebpf_mut());
 
-        self.services
-            .metrics
-            .set_ebpf_program_status("tc_ids", true);
+        self.set_status("tc_ids", true).await;
 
         self.programs.insert(
             "tc_ids".to_string(),
@@ -315,9 +328,7 @@ impl EbpfProgramManager {
         self.tenant_vlan.add_map(loader.ebpf_mut());
         self.tenant_ifindex.add_map(loader.ebpf_mut());
 
-        self.services
-            .metrics
-            .set_ebpf_program_status("tc_threatintel", true);
+        self.set_status("tc_threatintel", true).await;
 
         self.programs.insert(
             "tc_threatintel".to_string(),
@@ -351,9 +362,7 @@ impl EbpfProgramManager {
         self.tenant_vlan.add_map(loader.ebpf_mut());
         self.tenant_ifindex.add_map(loader.ebpf_mut());
 
-        self.services
-            .metrics
-            .set_ebpf_program_status("tc_dns", true);
+        self.set_status("tc_dns", true).await;
 
         self.programs.insert(
             "tc_dns".to_string(),
@@ -394,9 +403,7 @@ impl EbpfProgramManager {
         self.tenant_vlan.add_map(loader.ebpf_mut());
         self.tenant_ifindex.add_map(loader.ebpf_mut());
 
-        self.services
-            .metrics
-            .set_ebpf_program_status("tc_conntrack", true);
+        self.set_status("tc_conntrack", true).await;
 
         self.programs.insert(
             "tc_conntrack".to_string(),
@@ -438,12 +445,8 @@ impl EbpfProgramManager {
         self.tenant_subnet.add_map(egress_loader.ebpf_mut());
         self.tenant_subnet.add_v6_map(egress_loader.ebpf_mut());
 
-        self.services
-            .metrics
-            .set_ebpf_program_status("tc_nat_ingress", true);
-        self.services
-            .metrics
-            .set_ebpf_program_status("tc_nat_egress", true);
+        self.set_status("tc_nat_ingress", true).await;
+        self.set_status("tc_nat_egress", true).await;
 
         // NAT uses two loaders - store ingress as the primary handle, egress as a second.
         let cancel = CancellationToken::new();
@@ -480,9 +483,7 @@ impl EbpfProgramManager {
         self.tenant_vlan.add_map(loader.ebpf_mut());
         self.tenant_ifindex.add_map(loader.ebpf_mut());
 
-        self.services
-            .metrics
-            .set_ebpf_program_status("tc_scrub", true);
+        self.set_status("tc_scrub", true).await;
 
         self.programs.insert(
             "tc_scrub".to_string(),
@@ -530,9 +531,7 @@ impl EbpfProgramManager {
         self.tenant_vlan.add_map(loader.ebpf_mut());
         self.tenant_ifindex.add_map(loader.ebpf_mut());
 
-        self.services
-            .metrics
-            .set_ebpf_program_status("uprobe_dlp", true);
+        self.set_status("uprobe_dlp", true).await;
 
         self.programs.insert(
             "uprobe_dlp".to_string(),
@@ -751,9 +750,7 @@ impl EbpfProgramManager {
                     );
                 }
 
-                self.services
-                    .metrics
-                    .set_ebpf_program_status("xdp_firewall", true);
+                self.set_status("xdp_firewall", true).await;
 
                 self.programs.insert(
                     "xdp_firewall".to_string(),
@@ -811,9 +808,7 @@ impl EbpfProgramManager {
                     );
                 }
 
-                self.services
-                    .metrics
-                    .set_ebpf_program_status("xdp_ratelimit", true);
+                self.set_status("xdp_ratelimit", true).await;
 
                 self.programs.insert(
                     "xdp_ratelimit".to_string(),
@@ -851,9 +846,7 @@ impl EbpfProgramManager {
                 self.tenant_vlan.add_map(loader.ebpf_mut());
                 self.tenant_ifindex.add_map(loader.ebpf_mut());
 
-                self.services
-                    .metrics
-                    .set_ebpf_program_status("xdp_loadbalancer", true);
+                self.set_status("xdp_loadbalancer", true).await;
 
                 self.programs.insert(
                     "xdp_loadbalancer".to_string(),
@@ -895,9 +888,7 @@ impl EbpfProgramManager {
                 }
                 self.services.firewall_svc.write().await.clear_map_port();
                 self.drop_metrics_readers("xdp_firewall").await;
-                self.services
-                    .metrics
-                    .set_ebpf_program_status("xdp_firewall", false);
+                self.set_status("xdp_firewall", false).await;
             }
             "xdp_ratelimit" => {
                 self.programs.remove("xdp_ratelimit_syncookie");
@@ -909,9 +900,7 @@ impl EbpfProgramManager {
                 }
                 self.services.rl_svc.write().await.clear_map_port();
                 self.drop_metrics_readers("xdp_ratelimit").await;
-                self.services
-                    .metrics
-                    .set_ebpf_program_status("xdp_ratelimit", false);
+                self.set_status("xdp_ratelimit", false).await;
             }
             "xdp_loadbalancer" => {
                 if let Some(handle) = self.programs.remove("xdp_loadbalancer") {
@@ -922,9 +911,7 @@ impl EbpfProgramManager {
                 }
                 self.services.lb_svc.write().await.clear_map_port();
                 self.drop_metrics_readers("xdp_loadbalancer").await;
-                self.services
-                    .metrics
-                    .set_ebpf_program_status("xdp_loadbalancer", false);
+                self.set_status("xdp_loadbalancer", false).await;
             }
             _ => {}
         }
