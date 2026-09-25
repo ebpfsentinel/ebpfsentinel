@@ -7942,6 +7942,7 @@
           "burst_bytes": {
             "type": "integer",
             "format": "int64",
+            "description": "Token bucket depth in bytes. Must be above 0 on a rate-limited pipe.",
             "minimum": 0
           },
           "delay_ms": {
@@ -7965,6 +7966,7 @@
           "rate_bps": {
             "type": "integer",
             "format": "int64",
+            "description": "Bandwidth limit in bits per second; `0` leaves the pipe unlimited.",
             "minimum": 0
           }
         }
