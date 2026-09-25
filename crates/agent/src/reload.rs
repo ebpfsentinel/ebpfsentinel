@@ -266,6 +266,177 @@ async fn perform_reload(
         }
     };
 
+    // Every other conversion that can reject the file runs here, before
+    // anything is applied, so a rejected reload leaves the running
+    // configuration whole rather than half of it swapped.
+    let ids_rules = match config.ids_rules() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid IDS rules");
+            return;
+        }
+    };
+
+    let ids_mode = match config.ids_mode() {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid IDS mode");
+            return;
+        }
+    };
+
+    let ids_sampling = match config.ids_sampling() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid IDS sampling");
+            return;
+        }
+    };
+
+    let l7_rules = match config.l7_rules() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid L7 rules");
+            return;
+        }
+    };
+
+    let rl_policies = match config.ratelimit_policies() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid ratelimit policies");
+            return;
+        }
+    };
+
+    let ddos_policies = match config.ddos_policies() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid DDoS policies");
+            return;
+        }
+    };
+
+    let dnat_rules = match config.nat_dnat_rules() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid NAT DNAT rules");
+            return;
+        }
+    };
+
+    let snat_rules = match config.nat_snat_rules() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid NAT SNAT rules");
+            return;
+        }
+    };
+
+    let nptv6_rules = match config.nat_nptv6_rules() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid NAT NPTv6 rules");
+            return;
+        }
+    };
+
+    let aliases = match config.aliases() {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid aliases");
+            return;
+        }
+    };
+
+    let lb_services = match config.lb_services() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid LB services");
+            return;
+        }
+    };
+
+    let vip_announce = match config.lb_announce() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid VIP announce config");
+            return;
+        }
+    };
+
+    let qos_pipes = match config.qos_pipes() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid QoS pipes");
+            return;
+        }
+    };
+
+    let qos_queues = match config.qos_queues() {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid QoS queues");
+            return;
+        }
+    };
+
+    let qos_classifiers = match config.qos_classifiers() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid QoS classifiers");
+            return;
+        }
+    };
+
+    let ips_rules = match config.ips_rules() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid IPS rules");
+            return;
+        }
+    };
+
+    let ips_mode = match config.ips_mode() {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid IPS mode");
+            return;
+        }
+    };
+
+    let ips_whitelist = match config.ips_whitelist() {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid IPS whitelist");
+            return;
+        }
+    };
+
+    let ips_sampling = match config.ips_sampling() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid IPS sampling");
+            return;
+        }
+    };
+
+    let ti_feeds = match config.threatintel_feeds() {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid threat intel feeds");
+            return;
+        }
+    };
+
+    let ti_mode = match config.threatintel_mode() {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid threat intel mode");
+            return;
+        }
+    };
+
     // Apply firewall reload. The interface bits go first: they are what an
     // interface-scoped rule in the new set is narrowed with.
     reload_service
@@ -328,29 +499,6 @@ async fn perform_reload(
     }
 
     // Phase 4: IDS reload
-    let ids_rules = match config.ids_rules() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid IDS rules");
-            return;
-        }
-    };
-
-    let ids_mode = match config.ids_mode() {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid IDS mode");
-            return;
-        }
-    };
-
-    let ids_sampling = match config.ids_sampling() {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid IDS sampling");
-            return;
-        }
-    };
 
     if let Err(e) = reload_service
         .reload_ids(ids_rules, config.ids.enabled, ids_mode, ids_sampling)
@@ -360,26 +508,12 @@ async fn perform_reload(
     }
 
     // Phase 5: L7 reload
-    let l7_rules = match config.l7_rules() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid L7 rules");
-            return;
-        }
-    };
 
     if let Err(e) = reload_service.reload_l7(l7_rules, config.l7.enabled).await {
         tracing::warn!(error = %e, "L7 config reload failed at application level");
     }
 
     // Phase 6: Ratelimit reload
-    let rl_policies = match config.ratelimit_policies() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid ratelimit policies");
-            return;
-        }
-    };
 
     if let Err(e) = reload_service
         .reload_ratelimit(rl_policies, config.ratelimit.enabled)
@@ -397,13 +531,6 @@ async fn perform_reload(
     }
 
     // Phase 6b: DDoS reload
-    let ddos_policies = match config.ddos_policies() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid DDoS policies");
-            return;
-        }
-    };
 
     if let Err(e) = reload_service
         .reload_ddos(ddos_policies, config.ddos.enabled)
@@ -436,27 +563,6 @@ async fn perform_reload(
     }
 
     // Phase 6d: NAT reload
-    let dnat_rules = match config.nat_dnat_rules() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid NAT DNAT rules");
-            return;
-        }
-    };
-    let snat_rules = match config.nat_snat_rules() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid NAT SNAT rules");
-            return;
-        }
-    };
-    let nptv6_rules = match config.nat_nptv6_rules() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid NAT NPTv6 rules");
-            return;
-        }
-    };
     let hairpin_cfg = match config.nat_hairpin_parsed() {
         Ok((subnet, mask, snat_ip)) => Some(ebpf_common::nat::HairpinConfig {
             internal_subnet: subnet,
@@ -484,13 +590,6 @@ async fn perform_reload(
     }
 
     // Phase 6e: Alias reload
-    let aliases = match config.aliases() {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid aliases");
-            return;
-        }
-    };
     if let Err(e) = reload_service.reload_aliases(aliases).await {
         tracing::warn!(error = %e, "alias config reload failed at application level");
     }
@@ -519,13 +618,6 @@ async fn perform_reload(
     }
 
     // Phase 6f½: Load Balancer reload
-    let lb_services = match config.lb_services() {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid LB services");
-            return;
-        }
-    };
     if let Err(e) = reload_service
         .reload_loadbalancer(lb_services, config.loadbalancer.enabled)
         .await
@@ -534,39 +626,11 @@ async fn perform_reload(
     }
 
     // Phase 6f⅔: L2 VIP announcer reload
-    let vip_announce = match config.lb_announce() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid VIP announce config");
-            return;
-        }
-    };
     if let Err(e) = reload_service.reload_vip_announcer(vip_announce).await {
         tracing::warn!(error = %e, "VIP announcer config reload failed at application level");
     }
 
     // Phase 6f¾: QoS reload
-    let qos_pipes = match config.qos_pipes() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid QoS pipes");
-            return;
-        }
-    };
-    let qos_queues = match config.qos_queues() {
-        Ok(q) => q,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid QoS queues");
-            return;
-        }
-    };
-    let qos_classifiers = match config.qos_classifiers() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid QoS classifiers");
-            return;
-        }
-    };
     if let Err(e) = reload_service
         .reload_qos(qos_pipes, qos_queues, qos_classifiers, config.qos.enabled)
         .await
@@ -575,34 +639,6 @@ async fn perform_reload(
     }
 
     // Phase 6g: IPS reload
-    let ips_rules = match config.ips_rules() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid IPS rules");
-            return;
-        }
-    };
-    let ips_mode = match config.ips_mode() {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid IPS mode");
-            return;
-        }
-    };
-    let ips_whitelist = match config.ips_whitelist() {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid IPS whitelist");
-            return;
-        }
-    };
-    let ips_sampling = match config.ips_sampling() {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid IPS sampling");
-            return;
-        }
-    };
     let ips_policy = config.ips_policy();
     if let Err(e) = reload_service
         .reload_ips(
@@ -620,20 +656,6 @@ async fn perform_reload(
     }
 
     // Phase 6h: Threat Intel reload
-    let ti_feeds = match config.threatintel_feeds() {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid threat intel feeds");
-            return;
-        }
-    };
-    let ti_mode = match config.threatintel_mode() {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid threat intel mode");
-            return;
-        }
-    };
     let ti_country_boost = config
         .threatintel
         .country_confidence_boost
