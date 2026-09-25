@@ -6,7 +6,9 @@ use domain::common::error::DomainError;
 use domain::ids::engine::IdsEngine;
 use domain::ids::entity::{IdsRule, SamplingMode, ThresholdConfig};
 use ebpf_common::event::PacketEvent;
-use ebpf_common::ids::{IDS_ACTION_ALERT, IdsPatternKey};
+use ebpf_common::ids::{
+    IDS_ACTION_ALERT, IDS_SAMPLING_NONE, IDS_SAMPLING_RANDOM, IdsPatternKey, IdsSamplingConfig,
+};
 use ports::secondary::geoip_port::GeoIpPort;
 use ports::secondary::ids_map_port::IdsMapPort;
 use ports::secondary::metrics_port::MetricsPort;
@@ -93,6 +95,7 @@ impl IdsAppService {
     pub fn set_map_port(&mut self, port: Box<dyn IdsMapPort + Send>) {
         self.map_port = Some(Arc::new(Mutex::new(port)));
         self.sync_ebpf_maps();
+        self.sync_sampling();
     }
 
     /// Clear the eBPF map port (program unloaded).
@@ -197,8 +200,39 @@ impl IdsAppService {
     }
 
     /// Set the sampling mode for event processing.
+    ///
+    /// Random sampling is drawn by the kernel classifier, so the mode is
+    /// written to its sampling map as well; every other mode clears it, and
+    /// the kernel then emits every match for userspace to select from.
     pub fn set_sampling(&mut self, mode: SamplingMode) {
         self.engine.set_sampling(mode);
+        self.sync_sampling();
+    }
+
+    /// Write the current sampling mode to the kernel classifier's map.
+    fn sync_sampling(&self) {
+        let Some(ref map_port) = self.map_port else {
+            return;
+        };
+        let Ok(mut map) = map_port.lock() else {
+            tracing::warn!("IDS map port lock poisoned, skipping sampling sync");
+            return;
+        };
+        let config = match self.engine.sampling().kernel_rate_threshold() {
+            Some(rate_threshold) => IdsSamplingConfig {
+                mode: IDS_SAMPLING_RANDOM,
+                _padding: [0; 3],
+                rate_threshold,
+            },
+            None => IdsSamplingConfig {
+                mode: IDS_SAMPLING_NONE,
+                _padding: [0; 3],
+                rate_threshold: u32::MAX,
+            },
+        };
+        if let Err(e) = map.set_sampling_config(&config) {
+            tracing::warn!("failed to sync IDS sampling to the eBPF map: {e}");
+        }
     }
 
     /// Evaluate a packet event against loaded IDS rules.
@@ -839,5 +873,60 @@ mod tests {
         svc.record_flow_killed_via_ct();
         svc.record_flow_killed_via_ct();
         assert_eq!(metrics.ct_dying.load(Ordering::SeqCst), 2);
+    }
+
+    /// Keeps the last sampling configuration written, shared with the test.
+    struct SamplingRecorder(Arc<Mutex<Option<IdsSamplingConfig>>>);
+
+    impl IdsMapPort for SamplingRecorder {
+        fn insert_pattern(
+            &mut self,
+            _key: &IdsPatternKey,
+            _value: &ebpf_common::ids::IdsPatternValue,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn remove_pattern(&mut self, _key: &IdsPatternKey) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn clear_patterns(&mut self) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn pattern_count(&self) -> Result<usize, DomainError> {
+            Ok(0)
+        }
+        fn set_sampling_config(&mut self, config: &IdsSamplingConfig) -> Result<(), DomainError> {
+            *self.0.lock().unwrap() = Some(*config);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn random_sampling_is_written_to_the_kernel_map() {
+        let written = Arc::new(Mutex::new(None));
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(SamplingRecorder(Arc::clone(&written))));
+        assert_eq!(written.lock().unwrap().unwrap().mode, IDS_SAMPLING_NONE);
+
+        svc.set_sampling(SamplingMode::Random { rate: 0.5 });
+        let config = written.lock().unwrap().unwrap();
+        assert_eq!(config.mode, IDS_SAMPLING_RANDOM);
+        assert_eq!(config.rate_threshold, u32::MAX / 2);
+
+        svc.set_sampling(SamplingMode::Hash { rate: 0.5 });
+        let config = written.lock().unwrap().unwrap();
+        assert_eq!(config.mode, IDS_SAMPLING_NONE);
+        assert_eq!(config.rate_threshold, u32::MAX);
+    }
+
+    #[test]
+    fn a_map_wired_after_the_sampling_receives_it() {
+        let written = Arc::new(Mutex::new(None));
+        let mut svc = make_service();
+        svc.set_sampling(SamplingMode::Random { rate: 1.0 });
+        svc.set_map_port(Box::new(SamplingRecorder(Arc::clone(&written))));
+        let config = written.lock().unwrap().unwrap();
+        assert_eq!(config.mode, IDS_SAMPLING_RANDOM);
+        assert_eq!(config.rate_threshold, u32::MAX);
     }
 }

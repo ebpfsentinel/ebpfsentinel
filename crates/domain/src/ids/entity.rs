@@ -28,12 +28,14 @@ pub enum SamplingMode {
     /// Process all events (default).
     #[default]
     None,
-    /// Rate-based sampling of the address pair (0.0-1.0).
+    /// Per-packet random sampling (0.0-1.0), drawn by the kernel classifier.
     ///
-    /// Deterministic despite the name: the kernel draws a random number per
-    /// packet, this side selects on a hash of `src_ip` and `dst_ip` so that a
-    /// source the counters already saw keeps being counted. It differs from
-    /// [`SamplingMode::Hash`] only in the mixing.
+    /// The classifier compares `bpf_get_prandom_u32()` against
+    /// [`SamplingMode::kernel_rate_threshold`] before it emits a match, so an
+    /// event reaching userspace has already been drawn and
+    /// [`SamplingMode::should_process_kernel_event`] passes it. What the kernel
+    /// does not sample - a captured payload and the IPS blacklist counter -
+    /// selects on a hash of `src_ip` and `dst_ip` at the same rate.
     Random { rate: f64 },
     /// Deterministic per-flow sampling: hash of `src_ip` ^ `dst_ip` determines selection.
     Hash { rate: f64 },
@@ -47,6 +49,38 @@ pub enum SamplingMode {
 }
 
 impl SamplingMode {
+    /// The threshold the kernel classifier compares `bpf_get_prandom_u32()`
+    /// against, for the one mode it draws itself. A packet is emitted when the
+    /// draw is at or below it, so `u32::MAX` emits everything and `0` almost
+    /// nothing. `None` for every other mode: the kernel then emits every match.
+    pub fn kernel_rate_threshold(&self) -> Option<u32> {
+        match self {
+            Self::Random { rate } => {
+                let rate = rate.clamp(0.0, 1.0);
+                // clamped to 0.0..=1.0, so the product is within 0..=u32::MAX
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let threshold = (rate * f64::from(u32::MAX)) as u32;
+                Some(threshold)
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns `true` if a match the kernel classifier emitted should be
+    /// processed. In [`SamplingMode::Random`] the kernel already drew for this
+    /// packet, so drawing again here would sample at the square of the rate.
+    pub fn should_process_kernel_event(
+        &self,
+        src_ip: u32,
+        dst_ip: u32,
+        src_country: Option<&str>,
+    ) -> bool {
+        match self {
+            Self::Random { .. } => true,
+            _ => self.should_process_with_country(src_ip, dst_ip, src_country),
+        }
+    }
+
     /// Returns `true` if this event should be processed (not sampled out).
     pub fn should_process(&self, src_ip: u32, dst_ip: u32) -> bool {
         self.should_process_with_country(src_ip, dst_ip, None)
@@ -645,6 +679,54 @@ mod tests {
         let mode = SamplingMode::Random { rate: 1.0 };
         for i in 0..100u32 {
             assert!(mode.should_process(i, i + 1));
+        }
+    }
+
+    #[test]
+    fn sampling_random_threshold_spans_the_draw() {
+        assert_eq!(
+            SamplingMode::Random { rate: 0.0 }.kernel_rate_threshold(),
+            Some(0)
+        );
+        assert_eq!(
+            SamplingMode::Random { rate: 1.0 }.kernel_rate_threshold(),
+            Some(u32::MAX)
+        );
+        assert_eq!(
+            SamplingMode::Random { rate: 0.5 }.kernel_rate_threshold(),
+            Some(u32::MAX / 2)
+        );
+    }
+
+    #[test]
+    fn sampling_threshold_is_random_only() {
+        assert_eq!(SamplingMode::None.kernel_rate_threshold(), None);
+        assert_eq!(
+            SamplingMode::Hash { rate: 0.5 }.kernel_rate_threshold(),
+            None
+        );
+        let country = SamplingMode::CountryBased {
+            high_risk_countries: vec!["KP".to_string()],
+            high_risk_rate: 1.0,
+            default_rate: 0.1,
+        };
+        assert_eq!(country.kernel_rate_threshold(), None);
+    }
+
+    #[test]
+    fn sampling_random_passes_kernel_events_it_already_drew() {
+        let mode = SamplingMode::Random { rate: 0.0 };
+        for i in 0..100u32 {
+            assert!(mode.should_process_kernel_event(i, i + 1, None));
+            assert!(!mode.should_process_with_country(i, i + 1, None));
+        }
+    }
+
+    #[test]
+    fn sampling_hash_still_selects_kernel_events() {
+        let mode = SamplingMode::Hash { rate: 0.0 };
+        for i in 0..100u32 {
+            assert!(!mode.should_process_kernel_event(i, i + 1, None));
         }
     }
 

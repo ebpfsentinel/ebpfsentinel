@@ -239,7 +239,8 @@ impl IdsEngine {
     /// The kernel names a single rule per event because a map slot holds one
     /// rule, so a rule that shares a port with the slot's owner never reaches
     /// the classifier. The pipeline replays those rules through this entry
-    /// point; the sampling decision is a pure function of the addresses, so
+    /// point; the sampling decision is a pure function of the addresses, or
+    /// for random sampling was already taken by the kernel for this packet, so
     /// evaluating several rules for one packet keeps the same verdict.
     pub fn evaluate_index_with_context<'a>(
         &'a self,
@@ -250,7 +251,7 @@ impl IdsEngine {
     ) -> Option<(usize, &'a IdsRule, Option<String>)> {
         if !self
             .sampling
-            .should_process_with_country(event.src_ip(), event.dst_ip(), src_country)
+            .should_process_kernel_event(event.src_ip(), event.dst_ip(), src_country)
         {
             return None;
         }
@@ -288,9 +289,9 @@ impl IdsEngine {
     /// rules, returning the first rule whose pattern matches.
     ///
     /// `event` is the header of the captured segment: its ports select the
-    /// rules that apply, and its addresses feed the same sampling decision
-    /// the port-only path makes, so a sampled-out flow stays sampled out
-    /// whichever way its rules match.
+    /// rules that apply, and its addresses feed the sampling decision. Payload
+    /// capture is not sampled in the kernel, so random sampling selects here on
+    /// the address pair at the configured rate rather than passing the segment.
     ///
     /// Only TCP carries a captured payload, so `udp` and `icmp` rules never
     /// match here even when they name a matching port.
