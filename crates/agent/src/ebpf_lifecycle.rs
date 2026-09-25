@@ -58,9 +58,9 @@ pub struct EbpfProgramManager {
     /// Load state per published program name, as `/api/v1/ebpf/status` and
     /// the anonymous heartbeat read it.
     pub program_status: Arc<RwLock<HashMap<String, bool>>>,
-    /// Alias resolution the anti-DDoS service needs to install a country block,
-    /// handed to it again when a firewall loaded by a reload brings new LPM
-    /// tries.
+    /// Alias resolution the anti-DDoS service and the country tiers of the
+    /// rate limiter resolve countries through, handed to them when a reload
+    /// loads the program whose LPM tries they write.
     pub alias_resolver: Option<Arc<dyn AliasResolutionPort>>,
     /// VIP announcer service, configured when a firewall loaded by a reload
     /// is the first to carry the ARP path it is reached through.
@@ -940,7 +940,7 @@ impl EbpfProgramManager {
             }
             "xdp_ratelimit" => {
                 let fw_active = self.is_loaded("xdp_firewall");
-                let (mut loader, rl_mgr_opt, _rl_lpm_opt, rl_rdrs, reader) =
+                let (mut loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs, reader) =
                     startup::try_load_xdp_ratelimit(&self.ebpf_dir, config, fw_active)?;
 
                 let cancel = CancellationToken::new();
@@ -950,11 +950,32 @@ impl EbpfProgramManager {
                 let jh = tokio::spawn(async move { reader.run(tx, c, obs).await });
 
                 if let Some(rl_mgr) = rl_mgr_opt {
-                    self.services
-                        .rl_svc
-                        .write()
-                        .await
-                        .set_map_port(Box::new(rl_mgr));
+                    let mut svc = self.services.rl_svc.write().await;
+                    svc.set_defaults(
+                        config.ratelimit.default_rate,
+                        config.ratelimit.default_burst,
+                        startup::parse_algorithm_byte(&config.ratelimit.default_algorithm),
+                    );
+                    svc.set_map_port(Box::new(rl_mgr));
+                }
+                if let Some(rl_lpm) = rl_lpm_opt {
+                    // The country tiers resolve through aliases into the
+                    // program's LPM tries; the reload that enabled the program
+                    // pushed them while it had nowhere to write.
+                    let mut svc = self.services.rl_svc.write().await;
+                    svc.set_lpm_port(Box::new(rl_lpm));
+                    if let Some(resolver) = &self.alias_resolver {
+                        svc.set_alias_resolution(Arc::clone(resolver));
+                    }
+                    match config.ratelimit_country_tiers() {
+                        Ok(tiers) if !tiers.is_empty() => {
+                            if let Err(e) = svc.reload_country_tiers(&tiers) {
+                                warn!("country tier load after ratelimit enable failed: {e}");
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => warn!("country tiers unreadable: {e}"),
+                    }
                 }
                 {
                     let mut lock = self.metrics_readers.write().await;

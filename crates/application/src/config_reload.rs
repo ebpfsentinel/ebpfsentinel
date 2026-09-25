@@ -920,16 +920,23 @@ impl ConfigReloadService {
     }
 
     /// Reload rate limit policies atomically with enabled awareness.
+    ///
+    /// `defaults` is the rate, burst and algorithm byte applied to traffic no
+    /// policy matches; they are written with the policies, so a changed
+    /// default reaches the datapath on the same reload.
     pub async fn reload_ratelimit(
         &self,
         policies: Vec<RateLimitPolicy>,
         enabled: bool,
+        defaults: (u64, u64, u8),
     ) -> Result<(), anyhow::Error> {
         let _guard = self.reload_locks.ratelimit.lock().await;
 
         let mut svc = self.ratelimit_service.write().await;
 
         svc.set_enabled(enabled);
+        let (rate, burst, algorithm) = defaults;
+        svc.set_defaults(rate, burst, algorithm);
 
         let effective_policies = if enabled { policies } else { Vec::new() };
         let policy_count = effective_policies.len();
@@ -2011,11 +2018,89 @@ mod tests {
         );
 
         let policies = vec![make_rl_policy("rl-001", 1000, 2000)];
-        reload.reload_ratelimit(policies, true).await.unwrap();
+        reload
+            .reload_ratelimit(policies, true, (0, 0, 0))
+            .await
+            .unwrap();
 
         let svc = rl_svc.read().await;
         assert_eq!(svc.policy_count(), 1);
         assert_eq!(metrics.success_count.load(Ordering::Relaxed), 1);
+    }
+
+    /// Records the defaults each full sync writes.
+    struct DefaultsRecorder(Arc<std::sync::Mutex<Vec<(u64, u64, u8)>>>);
+
+    impl ports::secondary::ratelimit_map_port::RateLimitMapPort for DefaultsRecorder {
+        fn load_policies(
+            &mut self,
+            _policies: &[RateLimitPolicy],
+            default_rate: u64,
+            default_burst: u64,
+            default_algorithm: u8,
+        ) -> Result<(), domain::common::error::DomainError> {
+            self.0
+                .lock()
+                .expect("lock")
+                .push((default_rate, default_burst, default_algorithm));
+            Ok(())
+        }
+
+        fn upsert_tenant_config(
+            &mut self,
+            _key: ebpf_common::ratelimit::RateLimitKey,
+            _config: ebpf_common::ratelimit::RateLimitConfig,
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+
+        fn remove_tenant_config(
+            &mut self,
+            _key: ebpf_common::ratelimit::RateLimitKey,
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+
+        fn clear_config(&mut self) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+
+        fn config_count(&self) -> Result<usize, domain::common::error::DomainError> {
+            Ok(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn ratelimit_reload_writes_the_new_defaults() {
+        let (fw_svc, ids_svc, ips_svc, l7_svc, rl_svc, ddos_svc, ti_svc, audit_svc, metrics) =
+            make_services();
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        rl_svc
+            .write()
+            .await
+            .set_map_port(Box::new(DefaultsRecorder(Arc::clone(&written))));
+        let reload = ConfigReloadService::new(
+            Arc::clone(&fw_svc),
+            Arc::clone(&ids_svc),
+            Arc::clone(&ips_svc),
+            Arc::clone(&l7_svc),
+            Arc::clone(&rl_svc),
+            Arc::clone(&ddos_svc),
+            Arc::clone(&ti_svc),
+            Arc::clone(&audit_svc),
+            metrics.clone(),
+        );
+
+        reload
+            .reload_ratelimit(
+                vec![make_rl_policy("rl-001", 1000, 2000)],
+                true,
+                (500, 900, 2),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(written.lock().expect("lock").last(), Some(&(500, 900, 2)));
     }
 
     #[tokio::test]
@@ -2035,13 +2120,13 @@ mod tests {
         );
 
         reload
-            .reload_ratelimit(vec![make_rl_policy("rl-001", 1000, 2000)], true)
+            .reload_ratelimit(vec![make_rl_policy("rl-001", 1000, 2000)], true, (0, 0, 0))
             .await
             .unwrap();
         assert_eq!(rl_svc.read().await.policy_count(), 1);
 
         reload
-            .reload_ratelimit(vec![make_rl_policy("rl-001", 1000, 2000)], false)
+            .reload_ratelimit(vec![make_rl_policy("rl-001", 1000, 2000)], false, (0, 0, 0))
             .await
             .unwrap();
         assert_eq!(rl_svc.read().await.policy_count(), 0);
@@ -2068,7 +2153,7 @@ mod tests {
             make_rl_policy("rl-001", 1000, 2000),
             make_rl_policy("rl-001", 500, 1000),
         ];
-        let result = reload.reload_ratelimit(policies, true).await;
+        let result = reload.reload_ratelimit(policies, true, (0, 0, 0)).await;
 
         assert!(result.is_err());
         assert_eq!(metrics.failure_count.load(Ordering::Relaxed), 1);

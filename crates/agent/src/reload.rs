@@ -701,7 +701,15 @@ pub async fn apply_config_file(
     // Phase 6: Ratelimit reload
 
     if let Err(e) = reload_service
-        .reload_ratelimit(rl_policies, config.ratelimit.enabled)
+        .reload_ratelimit(
+            rl_policies,
+            config.ratelimit.enabled,
+            (
+                config.ratelimit.default_rate,
+                config.ratelimit.default_burst,
+                crate::startup::parse_algorithm_byte(&config.ratelimit.default_algorithm),
+            ),
+        )
         .await
     {
         tracing::warn!(error = %e, "ratelimit config reload failed at application level");
