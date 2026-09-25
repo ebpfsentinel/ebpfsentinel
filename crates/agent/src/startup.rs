@@ -3786,13 +3786,22 @@ pub fn firewall_interface_scope(config: &AgentConfig) -> InterfaceScopeBits {
     }
 }
 
-/// The anti-lockout settings `firewall.anti_lockout` configures.
+/// The anti-lockout settings `firewall.anti_lockout` configures, with the
+/// agent's own REST and gRPC ports always among the ports kept open: an
+/// agent moved off the default ports must not be able to lock its own API
+/// out because the list was not edited to follow it.
 pub fn firewall_anti_lockout(config: &AgentConfig) -> AntiLockoutSettings {
     let anti_lockout = &config.firewall.anti_lockout;
+    let mut ports = anti_lockout.ports.clone();
+    for port in [config.agent.http_port, config.agent.grpc_port] {
+        if !ports.contains(&port) {
+            ports.push(port);
+        }
+    }
     AntiLockoutSettings {
         enabled: anti_lockout.enabled,
         interfaces: anti_lockout.interfaces.clone(),
-        ports: anti_lockout.ports.clone(),
+        ports,
     }
 }
 
@@ -4903,4 +4912,27 @@ fn attach_tc_egress_auto(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_agent_api_ports_are_always_kept_open() {
+        let yaml = "agent:\n  interfaces: [eth0]\n  http_port: 9443\n  grpc_port: 9444\nfirewall:\n  anti_lockout:\n    ports: [22, 9443]\n";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(firewall_anti_lockout(&config).ports, [22, 9443, 9444]);
+    }
+
+    #[test]
+    fn the_default_keeps_ssh_and_the_default_api_ports() {
+        let config = AgentConfig::from_yaml("agent:\n  interfaces: [eth0]\n").unwrap();
+        let settings = firewall_anti_lockout(&config);
+        assert!(settings.enabled);
+        assert_eq!(
+            settings.ports,
+            [22, config.agent.http_port, config.agent.grpc_port]
+        );
+    }
 }

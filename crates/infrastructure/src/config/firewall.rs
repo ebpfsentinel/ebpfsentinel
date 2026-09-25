@@ -86,13 +86,14 @@ pub struct AntiLockoutConfig {
     /// Management interfaces (e.g. `["eth0"]`).
     #[serde(default)]
     pub interfaces: Vec<String>,
-    /// Management ports (e.g. `[22, 8080, 50051]`).
+    /// Management ports beyond the agent's own API ports, which are always
+    /// kept open (e.g. `[22]`).
     #[serde(default = "default_anti_lockout_ports")]
     pub ports: Vec<u16>,
 }
 
 fn default_anti_lockout_ports() -> Vec<u16> {
-    vec![22, 8080, 50051]
+    vec![22]
 }
 
 impl Default for AntiLockoutConfig {

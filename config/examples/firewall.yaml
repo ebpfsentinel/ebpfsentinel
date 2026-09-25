@@ -494,7 +494,7 @@ firewall:
   anti_lockout:
     enabled: true
     interfaces: [eth0]
-    ports: [22, 8080, 50051]    # SSH, REST API, gRPC
+    ports: [22]    # SSH; agent.http_port and agent.grpc_port are always added
 
   # ── Packet Scrubbing ───────────────────────────────────────────
   #
