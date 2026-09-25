@@ -86,6 +86,28 @@ impl IpNetwork {
         matches!(self, Self::V6 { .. })
     }
 
+    /// Check whether every address of `other` falls within this network.
+    /// Networks of different families never contain each other.
+    pub fn contains_network(&self, other: &Self) -> bool {
+        match (*self, *other) {
+            (
+                Self::V4 { addr, prefix_len },
+                Self::V4 {
+                    addr: inner,
+                    prefix_len: inner_len,
+                },
+            ) => inner_len >= prefix_len && cidr_match_v4(addr, prefix_len, inner),
+            (
+                Self::V6 { addr, prefix_len },
+                Self::V6 {
+                    addr: inner,
+                    prefix_len: inner_len,
+                },
+            ) => inner_len >= prefix_len && cidr_match_v6(&addr, prefix_len, &inner),
+            _ => false,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), FirewallError> {
         match *self {
             Self::V4 { prefix_len, .. } => {
@@ -378,7 +400,7 @@ impl Scope {
     }
 
     /// Kubernetes namespace: 1 to 63 characters, lowercase alphanumeric plus `-`.
-    fn check_namespace_name(name: &str) -> Result<(), FirewallError> {
+    pub fn check_namespace_name(name: &str) -> Result<(), FirewallError> {
         if name.is_empty() || name.len() > Self::MAX_NAMESPACE_NAME_LENGTH {
             return Err(FirewallError::InvalidScope {
                 reason: format!(
@@ -506,6 +528,30 @@ impl FirewallRule {
     pub fn is_v6(&self) -> bool {
         self.src_ip.as_ref().is_some_and(IpNetwork::is_v6)
             || self.dst_ip.as_ref().is_some_and(IpNetwork::is_v6)
+    }
+
+    /// Returns `true` if the rule can only match traffic with at least one
+    /// end inside `networks`.
+    ///
+    /// A side counts only when it is a literal address: a negated side
+    /// matches everything outside it, and an alias side is resolved later
+    /// from a set the rule's author does not own, so neither bounds what
+    /// the rule reaches.
+    pub fn stays_within(&self, networks: &[IpNetwork]) -> bool {
+        let bounded = |ip: Option<&IpNetwork>, negated: bool, alias: Option<&String>| {
+            !negated
+                && alias.is_none()
+                && ip.is_some_and(|ip| networks.iter().any(|net| net.contains_network(ip)))
+        };
+        bounded(
+            self.src_ip.as_ref(),
+            self.negate_src,
+            self.src_alias.as_ref(),
+        ) || bounded(
+            self.dst_ip.as_ref(),
+            self.negate_dst,
+            self.dst_alias.as_ref(),
+        )
     }
 
     /// Validate all fields of this rule.
@@ -1631,5 +1677,65 @@ mod tests {
         assert_eq!(entry.dst_port_start, 443);
         assert_eq!(entry.dst_port_end, 443);
         assert_eq!(entry.protocol, 6);
+    }
+
+    // ── Namespace containment ──────────────────────────────────────
+
+    fn v4(addr: u32, prefix_len: u8) -> IpNetwork {
+        IpNetwork::V4 { addr, prefix_len }
+    }
+
+    #[test]
+    fn a_network_contains_only_the_narrower_networks_inside_it() {
+        let ten_one = v4(0x0A01_0000, 16); // 10.1.0.0/16
+        assert!(ten_one.contains_network(&v4(0x0A01_0200, 24)));
+        assert!(ten_one.contains_network(&ten_one));
+        assert!(!ten_one.contains_network(&v4(0x0A00_0000, 8)));
+        assert!(!ten_one.contains_network(&v4(0x0A02_0000, 24)));
+
+        let mut prefix = [0u8; 16];
+        prefix[0] = 0xfd;
+        let v6 = IpNetwork::V6 {
+            addr: prefix,
+            prefix_len: 8,
+        };
+        let mut host = prefix;
+        host[15] = 7;
+        assert!(v6.contains_network(&IpNetwork::V6 {
+            addr: host,
+            prefix_len: 128
+        }));
+        assert!(!v6.contains_network(&ten_one));
+        assert!(!ten_one.contains_network(&v6));
+    }
+
+    #[test]
+    fn a_rule_stays_within_a_namespace_through_either_literal_side() {
+        let nets = [v4(0x0A01_0000, 16)];
+        let mut rule = make_rule("r", 10);
+        assert!(!rule.stays_within(&nets), "a rule matching any address");
+
+        rule.dst_ip = Some(v4(0x0A01_0005, 32));
+        assert!(rule.stays_within(&nets));
+
+        rule.dst_ip = None;
+        rule.src_ip = Some(v4(0x0A01_0100, 24));
+        assert!(rule.stays_within(&nets));
+
+        rule.src_ip = Some(v4(0x0B00_0000, 8));
+        assert!(!rule.stays_within(&nets));
+    }
+
+    #[test]
+    fn a_negated_or_aliased_side_does_not_bound_a_rule() {
+        let nets = [v4(0x0A01_0000, 16)];
+        let mut rule = make_rule("r", 10);
+        rule.dst_ip = Some(v4(0x0A01_0005, 32));
+        rule.negate_dst = true;
+        assert!(!rule.stays_within(&nets));
+
+        rule.negate_dst = false;
+        rule.dst_alias = Some("anything".to_string());
+        assert!(!rule.stays_within(&nets));
     }
 }

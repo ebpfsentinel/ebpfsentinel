@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
-use super::middleware::rbac::require_namespace_write;
+use super::middleware::rbac::{require_namespace_traffic, require_namespace_write};
 use super::state::AppState;
 use super::validation::{
     MAX_ID_LENGTH, MAX_PATTERN_LENGTH, MAX_SHORT_STRING_LENGTH, validate_string_length,
@@ -509,6 +509,17 @@ pub async fn create_rule(
         require_namespace_write(claims, &scope)?;
     }
     let rule = req.into_domain_rule()?;
+    if let Some(Extension(ref claims)) = claims {
+        let namespaces = state
+            .config
+            .read()
+            .await
+            .namespace_networks()
+            .map_err(|e| ApiError::Internal {
+                message: e.to_string(),
+            })?;
+        require_namespace_traffic(claims, &rule, &namespaces)?;
+    }
     let response = RuleResponse::from(&rule);
     let rule_id = rule.id.0.clone();
     let after_json = serde_json::to_string(&rule).ok();

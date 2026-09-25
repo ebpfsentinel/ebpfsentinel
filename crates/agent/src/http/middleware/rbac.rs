@@ -1,6 +1,9 @@
 use domain::auth::entity::JwtClaims;
+use std::collections::HashMap;
+use std::hash::BuildHasher;
+
 use domain::auth::rbac::Role;
-use domain::firewall::entity::Scope;
+use domain::firewall::entity::{FirewallRule, IpNetwork, Scope};
 
 use crate::http::error::ApiError;
 
@@ -51,6 +54,46 @@ pub fn require_namespace_write(claims: &JwtClaims, scope: &Scope) -> Result<(), 
                 })
             }
         }
+    }
+}
+
+/// Require an Operator's namespace-scoped rule to stay inside the CIDRs
+/// that namespace is declared with under `namespaces`.
+///
+/// A namespace scope is an owner label, not a place in the kernel, so
+/// without this bound an operator holding one namespace could write a rule
+/// that drops traffic for the whole node. Admin is not bound, and a scope
+/// other than a namespace is left to [`require_namespace_write`].
+pub fn require_namespace_traffic<S: BuildHasher>(
+    claims: &JwtClaims,
+    rule: &FirewallRule,
+    namespaces: &HashMap<String, Vec<IpNetwork>, S>,
+) -> Result<(), ApiError> {
+    if claims.role() == Role::Admin {
+        return Ok(());
+    }
+    let Scope::Namespace(ns) = &rule.scope else {
+        return Ok(());
+    };
+    let Some(networks) = namespaces.get(ns) else {
+        return Err(ApiError::Forbidden {
+            code: "NAMESPACE_TRAFFIC_FORBIDDEN",
+            message: format!(
+                "namespace '{ns}' declares no CIDR under namespaces, so an operator rule \
+                 cannot be bounded to it"
+            ),
+        });
+    };
+    if rule.stays_within(networks) {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden {
+            code: "NAMESPACE_TRAFFIC_FORBIDDEN",
+            message: format!(
+                "the rule must match a source or destination address inside the CIDRs of \
+                 namespace '{ns}', without negation or alias"
+            ),
+        })
     }
 }
 
@@ -183,5 +226,103 @@ mod tests {
         assert!(require_namespace_write(&claims, &Scope::Global).is_err());
         assert!(require_namespace_write(&claims, &Scope::Namespace("prod".to_string())).is_err());
         assert!(require_namespace_write(&claims, &Scope::Interface("eth0".to_string())).is_err());
+    }
+
+    // ── require_namespace_traffic ─────────────────────────────────────
+
+    fn prod_networks() -> HashMap<String, Vec<IpNetwork>> {
+        HashMap::from([(
+            "prod".to_string(),
+            vec![IpNetwork::V4 {
+                addr: 0x0A01_0000, // 10.1.0.0/16
+                prefix_len: 16,
+            }],
+        )])
+    }
+
+    fn prod_rule(dst: Option<IpNetwork>, namespace: &str) -> FirewallRule {
+        FirewallRule {
+            id: domain::common::entity::RuleId("r".to_string()),
+            priority: 10,
+            action: domain::firewall::entity::FirewallAction::Deny,
+            protocol: domain::common::entity::Protocol::Any,
+            src_ip: None,
+            dst_ip: dst,
+            src_port: None,
+            dst_port: None,
+            scope: Scope::Namespace(namespace.to_string()),
+            enabled: true,
+            vlan_id: None,
+            src_alias: None,
+            dst_alias: None,
+            src_port_alias: None,
+            dst_port_alias: None,
+            src_mac_alias: None,
+            dst_mac_alias: None,
+            ct_states: None,
+            tcp_flags: None,
+            icmp_type: None,
+            icmp_code: None,
+            negate_src: false,
+            negate_dst: false,
+            dscp_match: None,
+            dscp_mark: None,
+            max_states: None,
+            src_mac: None,
+            dst_mac: None,
+            schedule: None,
+            system: false,
+            route_action: None,
+            group_mask: 0,
+            tenant_id: 0,
+        }
+    }
+
+    const INSIDE: IpNetwork = IpNetwork::V4 {
+        addr: 0x0A01_0005,
+        prefix_len: 32,
+    };
+
+    #[test]
+    fn operator_rule_inside_its_namespace_cidrs_is_allowed() {
+        let claims = make_claims(Some("operator"), Some(vec!["prod"]));
+        let rule = prod_rule(Some(INSIDE), "prod");
+        assert!(require_namespace_traffic(&claims, &rule, &prod_networks()).is_ok());
+    }
+
+    #[test]
+    fn operator_rule_reaching_past_its_namespace_is_refused() {
+        let claims = make_claims(Some("operator"), Some(vec!["prod"]));
+        for dst in [
+            None,
+            Some(IpNetwork::V4 {
+                addr: 0x0A00_0000,
+                prefix_len: 8,
+            }),
+        ] {
+            let rule = prod_rule(dst, "prod");
+            let err = require_namespace_traffic(&claims, &rule, &prod_networks()).unwrap_err();
+            assert!(matches!(
+                err,
+                ApiError::Forbidden {
+                    code: "NAMESPACE_TRAFFIC_FORBIDDEN",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn operator_rule_in_an_undeclared_namespace_is_refused() {
+        let claims = make_claims(Some("operator"), Some(vec!["staging"]));
+        let rule = prod_rule(Some(INSIDE), "staging");
+        assert!(require_namespace_traffic(&claims, &rule, &prod_networks()).is_err());
+    }
+
+    #[test]
+    fn admin_is_not_bound_to_namespace_cidrs() {
+        let claims = make_claims(Some("admin"), None);
+        let rule = prod_rule(None, "staging");
+        assert!(require_namespace_traffic(&claims, &rule, &HashMap::new()).is_ok());
     }
 }

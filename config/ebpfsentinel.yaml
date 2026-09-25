@@ -138,6 +138,14 @@ agent:
 #   dmz:
 #     interfaces: [eth3]
 
+# ── Namespaces ────────────────────────────────────────────────────
+# Addresses each namespace's workloads use. An operator whose token holds a
+# namespace may only write firewall rules scoped to it whose source or
+# destination sits inside these CIDRs; admin is not bound.
+# namespaces:
+#   prod:
+#     cidrs: ["10.1.0.0/16", "fd00:1::/64"]
+
 firewall:
   enabled: true
 

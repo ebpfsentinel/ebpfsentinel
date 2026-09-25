@@ -89,7 +89,7 @@ use domain::common::entity::DomainMode;
 use domain::conntrack::entity::ConnTrackSettings;
 use domain::ddos::entity::DdosPolicy;
 use domain::dlp::entity::DlpPattern;
-use domain::firewall::entity::FirewallRule;
+use domain::firewall::entity::{FirewallRule, IpNetwork, Scope};
 use domain::ids::entity::{IdsRule, SamplingMode};
 use domain::ips::entity::{IpsPolicy, WhitelistEntry};
 use domain::l7::entity::L7Rule;
@@ -188,6 +188,12 @@ pub struct AgentConfig {
     #[serde(default)]
     pub interface_groups: HashMap<String, InterfaceGroupConfig>,
 
+    /// Namespaces this agent serves, each bound to the addresses its
+    /// workloads use. An operator holding a namespace may only write
+    /// firewall rules whose match stays inside that namespace's CIDRs.
+    #[serde(default)]
+    pub namespaces: HashMap<String, NamespaceConfig>,
+
     /// Simple auto-response: automatic block/throttle on high-severity alerts.
     /// Limited to 3 policies. Enterprise adds unlimited policies, MITRE matching,
     /// SOAR webhooks, cooldowns, and full audit trail.
@@ -245,6 +251,14 @@ const GROUP_FLAG_INVERT: u32 = 0x8000_0000;
 pub struct InterfaceGroupConfig {
     /// List of interface names in this group.
     pub interfaces: Vec<String>,
+}
+
+/// A namespace and the addresses its traffic uses.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamespaceConfig {
+    /// CIDRs owned by this namespace, IPv4 or IPv6.
+    pub cidrs: Vec<String>,
 }
 
 impl AgentConfig {
@@ -830,6 +844,8 @@ impl AgentConfig {
             }
         }
 
+        self.namespace_networks()?;
+
         // Validate auto-response policies
         if self.auto_response.enabled
             && self.auto_response.policies.len() > MAX_AUTO_RESPONSE_POLICIES
@@ -1337,6 +1353,39 @@ impl AgentConfig {
             *membership.entry(iface).or_insert(0) |= bit;
         }
         membership
+    }
+
+    /// The CIDRs each declared namespace owns, parsed.
+    ///
+    /// A namespace name follows the same rule as a `namespace:` scope, and a
+    /// namespace with no CIDR is refused: it would bind operators to nothing.
+    pub fn namespace_networks(&self) -> Result<HashMap<String, Vec<IpNetwork>>, ConfigError> {
+        let mut networks = HashMap::with_capacity(self.namespaces.len());
+        for (name, namespace) in &self.namespaces {
+            let field = format!("namespaces.{name}");
+            Scope::check_namespace_name(name).map_err(|e| ConfigError::Validation {
+                field: field.clone(),
+                message: e.to_string(),
+            })?;
+            if namespace.cidrs.is_empty() {
+                return Err(ConfigError::Validation {
+                    field: format!("{field}.cidrs"),
+                    message: "a namespace needs at least one CIDR".to_string(),
+                });
+            }
+            let parsed = namespace
+                .cidrs
+                .iter()
+                .map(|cidr| {
+                    parse_cidr(cidr).map_err(|e| ConfigError::Validation {
+                        field: format!("{field}.cidrs"),
+                        message: e.to_string(),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            networks.insert(name.clone(), parsed);
+        }
+        Ok(networks)
     }
 
     /// Compute per-interface group membership bitmask.
@@ -4426,6 +4475,47 @@ nat:
         let err = AgentConfig::from_yaml(yaml).unwrap_err();
         assert!(matches!(err, ConfigError::Validation { ref field, .. }
             if field == "agent.api_rate_limit.write_per_second"));
+    }
+
+    #[test]
+    fn a_namespace_is_read_with_its_cidrs() {
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+namespaces:
+  prod:
+    cidrs: ["10.1.0.0/16", "fd00:1::/64"]
+"#;
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let networks = config.namespace_networks().unwrap();
+        let prod = &networks["prod"];
+        assert_eq!(prod.len(), 2);
+        assert!(matches!(prod[0], IpNetwork::V4 { prefix_len: 16, .. }));
+        assert!(prod[1].is_v6());
+    }
+
+    #[test]
+    fn a_namespace_that_cannot_bind_anything_is_refused() {
+        for (yaml, field) in [
+            (
+                "agent:\n  interfaces: [eth0]\nnamespaces:\n  prod:\n    cidrs: []\n",
+                "namespaces.prod.cidrs",
+            ),
+            (
+                "agent:\n  interfaces: [eth0]\nnamespaces:\n  prod:\n    cidrs: [\"10.1.0.0/40\"]\n",
+                "namespaces.prod.cidrs",
+            ),
+            (
+                "agent:\n  interfaces: [eth0]\nnamespaces:\n  Prod:\n    cidrs: [\"10.1.0.0/16\"]\n",
+                "namespaces.Prod",
+            ),
+        ] {
+            let err = AgentConfig::from_yaml(yaml).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::Validation { field: ref f, .. } if f == field),
+                "{yaml}: {err:?}"
+            );
+        }
     }
 
     #[test]

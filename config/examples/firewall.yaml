@@ -42,6 +42,15 @@ interface_groups:
   dmz:
     interfaces: [eth3]
 
+# ── Namespaces ────────────────────────────────────────────────────
+# Addresses each namespace's workloads use. An operator whose token holds a
+# namespace may only write rules scoped to it whose source or destination
+# sits inside these CIDRs.
+
+namespaces:
+  prod:
+    cidrs: ["10.1.0.0/16", "fd00:1::/64"]
+
 # ── Top-level Aliases ──────────────────────────────────────────────
 # Aliases defined at the top level are shared across all domains:
 # firewall, L7, NAT, rate-limit, and IPS.
