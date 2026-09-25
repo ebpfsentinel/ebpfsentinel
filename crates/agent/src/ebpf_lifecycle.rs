@@ -35,8 +35,9 @@ pub struct EbpfProgramManager {
     event_tx: mpsc::Sender<AgentEvent>,
     services: Arc<ServiceHandles>,
     ebpf_dir: String,
-    /// Cross-program config flags managers (from tc-ids, tc-threatintel).
-    pub config_flags: Vec<ConfigFlagsManager>,
+    /// Config flags managers, each with the program whose map it holds
+    /// (tc-ids, tc-threatintel), so unloading a program releases its own.
+    pub config_flags: Vec<(&'static str, ConfigFlagsManager)>,
     /// L7 ports manager (from tc-ids).
     pub l7_ports: Option<L7PortsManager>,
     /// Cross-program interface groups manager.
@@ -104,6 +105,13 @@ impl EbpfProgramManager {
             source,
             Arc::clone(&self.services.metrics) as Arc<dyn MetricsPort>,
         )
+    }
+
+    /// Hold the `CONFIG_FLAGS` manager of a program just loaded, in place of
+    /// any manager left from an earlier load of the same program.
+    fn set_config_flags(&mut self, program: &'static str, manager: ConfigFlagsManager) {
+        self.config_flags.retain(|(owner, _)| *owner != program);
+        self.config_flags.push((program, manager));
     }
 
     /// Take over a program startup loaded, with the token its readers run under.
@@ -178,6 +186,7 @@ impl EbpfProgramManager {
             jh.abort();
         }
         self.drop_metrics_readers(name).await;
+        self.config_flags.retain(|(program, _)| *program != name);
 
         // Clear map ports from services
         match name {
@@ -264,7 +273,7 @@ impl EbpfProgramManager {
             self.l7_ports = Some(l7_mgr);
         }
         if let Some(cfg_mgr) = cfg_mgr_opt {
-            self.config_flags.push(cfg_mgr);
+            self.set_config_flags("tc_ids", cfg_mgr);
         }
         if let Some(rdr) = ids_rdr {
             self.metrics_readers.write().await.push(rdr);
@@ -309,7 +318,7 @@ impl EbpfProgramManager {
             self.services.ti_svc.store(Arc::new(svc));
         }
         if let Some(cfg_mgr) = cfg_mgr_opt {
-            self.config_flags.push(cfg_mgr);
+            self.set_config_flags("tc_threatintel", cfg_mgr);
         }
         if let Some(rdr) = ti_rdr {
             self.metrics_readers.write().await.push(rdr);

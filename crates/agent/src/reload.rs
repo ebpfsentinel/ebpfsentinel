@@ -27,7 +27,8 @@ pub enum AuthProviderHandle {
 /// managers before they are moved into the [`EbpfProgramManager`].
 pub struct EbpfMapHolder {
     pub l7_ports: Option<L7PortsManager>,
-    pub config_flags: Vec<ConfigFlagsManager>,
+    /// `CONFIG_FLAGS` managers, each with the program whose map it holds.
+    pub config_flags: Vec<(&'static str, ConfigFlagsManager)>,
     pub iface_groups: Option<InterfaceGroupsManager>,
 }
 
@@ -349,7 +350,7 @@ async fn perform_reload(
 /// A manager that is absent is a program that is not loaded, and is skipped.
 pub fn sync_kernel_maps(
     l7_ports: Option<&mut L7PortsManager>,
-    config_flags: &mut [ConfigFlagsManager],
+    config_flags: &mut [(&'static str, ConfigFlagsManager)],
     iface_groups: Option<&mut InterfaceGroupsManager>,
     config: &AgentConfig,
 ) {
@@ -363,7 +364,7 @@ pub fn sync_kernel_maps(
     }
 
     let flags = crate::startup::build_config_flags(config);
-    for cfg_mgr in config_flags.iter_mut() {
+    for (_, cfg_mgr) in config_flags.iter_mut() {
         if let Err(e) = cfg_mgr.set_flags(&flags) {
             tracing::warn!(error = %e, "CONFIG_FLAGS reload failed");
         }

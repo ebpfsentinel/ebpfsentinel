@@ -2068,7 +2068,7 @@ pub async fn run(
                         ebpf_map_holder.l7_ports = Some(l7_mgr);
                     }
                     if let Some(cfg_mgr) = cfg_mgr_opt {
-                        ebpf_map_holder.config_flags.push(cfg_mgr);
+                        ebpf_map_holder.config_flags.push(("tc_ids", cfg_mgr));
                     }
                     if let Some(rdr) = ids_rdr {
                         metrics_readers.push(rdr);
@@ -2127,7 +2127,9 @@ pub async fn run(
                             }
                         }
                         if let Some(cfg_mgr) = cfg_mgr_opt {
-                            ebpf_map_holder.config_flags.push(cfg_mgr);
+                            ebpf_map_holder
+                                .config_flags
+                                .push(("tc_threatintel", cfg_mgr));
                         }
                         managed.push(("tc_threatintel", loader, ti_cancel.clone()));
                         metrics.set_ebpf_program_status("tc_threatintel", true);

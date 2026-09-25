@@ -744,7 +744,7 @@ pub async fn load_ebpf_programs(
                     ebpf_map_holder.l7_ports = Some(l7_mgr);
                 }
                 if let Some(cfg_mgr) = cfg_mgr_opt {
-                    ebpf_map_holder.config_flags.push(cfg_mgr);
+                    ebpf_map_holder.config_flags.push(("tc_ids", cfg_mgr));
                 }
                 if let Some(rdr) = ids_rdr {
                     metrics_readers.push(rdr);
@@ -794,7 +794,9 @@ pub async fn load_ebpf_programs(
                     services.ti_svc.store(Arc::new(svc));
                 }
                 if let Some(cfg_mgr) = cfg_mgr_opt {
-                    ebpf_map_holder.config_flags.push(cfg_mgr);
+                    ebpf_map_holder
+                        .config_flags
+                        .push(("tc_threatintel", cfg_mgr));
                 }
                 tenant_vlan_mgr.add_map(loader.ebpf_mut());
                 tenant_ifindex_mgr.add_map(loader.ebpf_mut());
