@@ -1,0 +1,17 @@
+# cargo-audit configuration - https://github.com/rustsec/rustsec/tree/main/cargo-audit
+#
+# An entry here is a decision that was taken, not a warning that was left
+# standing.
+#
+# RUSTSEC-2026-0310 - an advisory against `domain`, the DNS library NLnet Labs
+# publishes on crates.io. This workspace carries a path crate of its own named
+# `domain` (the pure business-logic layer) and cargo-audit matches advisories by
+# name and version without looking at the source, so it reports ours. Nothing
+# here depends on the crates.io `domain`, and `cargo deny check advisories`,
+# which does compare sources, passes. A dependency that ever pulled the real
+# crate in would show a registry source in Cargo.lock and must remove this entry.
+
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0310",
+]
