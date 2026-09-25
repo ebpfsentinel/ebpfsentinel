@@ -360,7 +360,7 @@ vm_start_agent() {
         cd "$VAGRANT_DIR" && vagrant ssh -c "sudo bash -c 'EBPF_PROGRAM_DIR=/usr/local/lib/ebpfsentinel /home/vagrant/ebpfsentinel/target/release/ebpfsentinel-agent --config ${config_path} >/tmp/ebpfsentinel-host-perf-agent.log 2>&1 & echo \$! > /tmp/ebpfsentinel-host-perf-agent.pid'" -- -q
     else
         vm_ssh "docker rm -f ebpfsentinel-host-perf 2>/dev/null || true" >/dev/null 2>&1
-        vm_ssh "docker run -d --name ebpfsentinel-host-perf --network host --privileged -v ${config_path}:/etc/ebpfsentinel/config.yaml:ro -v /tmp/ebpfsentinel-host-perf-data:/data -v /sys/fs/bpf:/sys/fs/bpf -v /sys/kernel/debug:/sys/kernel/debug:ro ebpfsentinel:latest --config /etc/ebpfsentinel/config.yaml" >/dev/null
+        vm_ssh "docker run -d --name ebpfsentinel-host-perf --network host --privileged -v ${config_path}:/etc/ebpfsentinel/config.yaml:ro -v /tmp/ebpfsentinel-host-perf-data:/var/lib/ebpfsentinel/data -v /sys/fs/bpf:/sys/fs/bpf -v /sys/kernel/debug:/sys/kernel/debug:ro ebpfsentinel:latest --config /etc/ebpfsentinel/config.yaml" >/dev/null
     fi
 
     # Wait for agent health from host

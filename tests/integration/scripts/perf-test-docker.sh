@@ -390,7 +390,7 @@ services:
       - /tmp:size=64m
     volumes:
       - ${config_path}:/etc/ebpfsentinel/config.yaml:ro
-      - ${DATA_DIR}:/data
+      - ${DATA_DIR}:/var/lib/ebpfsentinel/data
       - /sys/fs/bpf:/sys/fs/bpf
       - /sys/kernel/debug:/sys/kernel/debug:ro
     command: ["--config", "/etc/ebpfsentinel/config.yaml"]

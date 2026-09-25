@@ -131,8 +131,10 @@ services:
       - /proc:/host/proc:ro
       # The warden's control socket (read-only - the agent only connects).
       - warden-sock:/run/ebpfsentinel:ro
-      # Persistent data: audit logs, alerts, rule change history (redb)
-      - ebpfsentinel-data:/data
+      # Persistent state: the redb stores (audit, alerts, rule change history)
+      # under data/, GeoIP databases and the telemetry installation identifier.
+      # A new volume is seeded from the image, which owns it as 65534.
+      - ebpfsentinel-state:/var/lib/ebpfsentinel
       # Packet captures (POST /api/v1/captures/manual)
       - ebpfsentinel-captures:/var/lib/ebpfsentinel/captures
       # The agent mounts its delegated bpffs here; a container's /sys is
@@ -168,7 +170,7 @@ services:
         max-file: "3"
 
 volumes:
-  ebpfsentinel-data:
+  ebpfsentinel-state:
     driver: local
   ebpfsentinel-captures:
     driver: local

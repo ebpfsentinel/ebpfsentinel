@@ -81,7 +81,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --target "${MUSL_TARGET}" \
         --bin ebpfsentinel-agent && \
     cp "/build/target/${MUSL_TARGET}/release/ebpfsentinel-agent" /build/ebpfsentinel-agent && \
-    mkdir -p /build/captures-dir && \
+    mkdir -p /build/state/captures /build/state/data && \
     mkdir -p /build/etc/ebpfsentinel && \
     cp config/ebpfsentinel.yaml /build/etc/ebpfsentinel/config.yaml && \
     chmod 0755 /build/etc/ebpfsentinel && \
@@ -115,8 +115,16 @@ COPY ebpf-out/ /usr/local/lib/ebpfsentinel/
 # Kubernetes).
 COPY --from=agent-builder /build/etc/ebpfsentinel /etc/ebpfsentinel
 
-# distroless has no shell - create the directory in the builder stage and COPY it.
-COPY --from=agent-builder /build/captures-dir /var/lib/ebpfsentinel/captures
+# State directory, owned by the uid the agent runs as in every shipped container
+# deployment (65534): captures, the redb stores, GeoIP databases and the
+# telemetry installation identifier are all written under it. distroless has no
+# shell, so the tree is made in the builder stage and copied with its owner.
+COPY --from=agent-builder --chown=65534:65534 /build/state /var/lib/ebpfsentinel
+
+# The default audit, alert and rule-history stores are the relative
+# `data/*.redb`, so they land in /var/lib/ebpfsentinel/data - the same place the
+# systemd unit puts them.
+WORKDIR /var/lib/ebpfsentinel
 
 ENV EBPF_PROGRAM_DIR=/usr/local/lib/ebpfsentinel
 
