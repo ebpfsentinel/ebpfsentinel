@@ -93,14 +93,18 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     // ── Firewall ─────────────────────────────────────────────────
     let firewall_mode = config.firewall_mode()?;
     let domain_rules = config.firewall_rules()?;
-    let mut engine = FirewallEngine::new();
-    engine.reload(domain_rules)?;
-    let rule_count = engine.rules().len();
-    metrics.set_rules_loaded("firewall", rule_count as u64);
-    let mut svc =
-        FirewallAppService::new(engine, None, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
+    // The rules go in through the service rather than straight into the
+    // engine, because the service is what adds the anti-lockout rules.
+    let mut svc = FirewallAppService::new(
+        FirewallEngine::new(),
+        None,
+        Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+    );
     svc.set_mode(firewall_mode);
     svc.set_interface_scope(startup::firewall_interface_scope(config));
+    svc.set_anti_lockout(startup::firewall_anti_lockout(config));
+    svc.reload_rules(domain_rules)?;
+    let rule_count = svc.list_rules().len();
     let firewall_svc = Arc::new(RwLock::new(svc));
     info!(
         rule_count,

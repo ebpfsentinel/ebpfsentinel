@@ -271,6 +271,9 @@ async fn perform_reload(
     reload_service
         .set_firewall_interface_scope(crate::startup::firewall_interface_scope(&config))
         .await;
+    reload_service
+        .set_firewall_anti_lockout(crate::startup::firewall_anti_lockout(&config))
+        .await;
     if let Err(e) = reload_service
         .reload(rules, config.firewall.enabled, mode)
         .await

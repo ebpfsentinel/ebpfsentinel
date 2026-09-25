@@ -846,6 +846,22 @@ impl AgentConfig {
 
         self.namespace_networks()?;
 
+        let anti_lockout = &self.firewall.anti_lockout;
+        for iface in &anti_lockout.interfaces {
+            if !self.agent.interfaces.contains(iface) {
+                return Err(ConfigError::Validation {
+                    field: "firewall.anti_lockout.interfaces".to_string(),
+                    message: format!("interface '{iface}' is not in agent.interfaces"),
+                });
+            }
+        }
+        if anti_lockout.ports.contains(&0) {
+            return Err(ConfigError::Validation {
+                field: "firewall.anti_lockout.ports".to_string(),
+                message: "port 0 is not a management port".to_string(),
+            });
+        }
+
         // Validate auto-response policies
         if self.auto_response.enabled
             && self.auto_response.policies.len() > MAX_AUTO_RESPONSE_POLICIES
@@ -4508,6 +4524,32 @@ namespaces:
             (
                 "agent:\n  interfaces: [eth0]\nnamespaces:\n  Prod:\n    cidrs: [\"10.1.0.0/16\"]\n",
                 "namespaces.Prod",
+            ),
+        ] {
+            let err = AgentConfig::from_yaml(yaml).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::Validation { field: ref f, .. } if f == field),
+                "{yaml}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_anti_lockout_block_is_read_and_checked_against_the_agent() {
+        let yaml = "agent:\n  interfaces: [eth0, eth1]\nfirewall:\n  anti_lockout:\n    interfaces: [eth1]\n    ports: [2222]\n";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert!(config.firewall.anti_lockout.enabled);
+        assert_eq!(config.firewall.anti_lockout.interfaces, ["eth1"]);
+        assert_eq!(config.firewall.anti_lockout.ports, [2222]);
+
+        for (yaml, field) in [
+            (
+                "agent:\n  interfaces: [eth0]\nfirewall:\n  anti_lockout:\n    interfaces: [eth9]\n",
+                "firewall.anti_lockout.interfaces",
+            ),
+            (
+                "agent:\n  interfaces: [eth0]\nfirewall:\n  anti_lockout:\n    ports: [0]\n",
+                "firewall.anti_lockout.ports",
             ),
         ] {
             let err = AgentConfig::from_yaml(yaml).unwrap_err();

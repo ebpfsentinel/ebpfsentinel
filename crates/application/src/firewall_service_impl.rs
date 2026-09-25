@@ -331,8 +331,16 @@ impl FirewallAppService {
         Ok(())
     }
 
-    /// Set anti-lockout configuration.
-    pub fn set_anti_lockout(&mut self, settings: AntiLockoutSettings) {
+    /// Set anti-lockout configuration. The rules it produces are installed
+    /// by the next [`Self::reload_rules`].
+    ///
+    /// While the deny-all posture is in force anti-lockout stays on, and the
+    /// configured switch is recorded as the one to restore when it is lifted.
+    pub fn set_anti_lockout(&mut self, mut settings: AntiLockoutSettings) {
+        if let Some(snapshot) = self.deny_all.as_mut() {
+            snapshot.anti_lockout_enabled = settings.enabled;
+            settings.enabled = true;
+        }
         self.anti_lockout = settings;
     }
 
@@ -929,6 +937,40 @@ mod tests {
                 .iter()
                 .all(|r| r.action != FirewallAction::Allow)
         );
+    }
+
+    #[test]
+    fn anti_lockout_turned_off_during_the_posture_stays_on_until_it_is_lifted() {
+        let mut svc = make_service();
+        svc.enter_deny_all().unwrap();
+        svc.set_anti_lockout(AntiLockoutSettings {
+            enabled: false,
+            interfaces: Vec::new(),
+            ports: vec![2222],
+        });
+        svc.reload_rules(Vec::new()).unwrap();
+        assert!(
+            svc.list_rules()
+                .iter()
+                .any(|r| r.id.0 == "anti-lockout-2222"),
+            "the posture keeps the management port open"
+        );
+
+        svc.exit_deny_all().unwrap();
+        assert!(!svc.list_rules().iter().any(|r| r.system));
+    }
+
+    #[test]
+    fn reloading_installs_the_configured_anti_lockout_ports() {
+        let mut svc = make_service();
+        svc.set_anti_lockout(AntiLockoutSettings {
+            enabled: true,
+            interfaces: Vec::new(),
+            ports: vec![2222],
+        });
+        svc.reload_rules(Vec::new()).unwrap();
+        let ids: Vec<_> = svc.list_rules().iter().map(|r| r.id.0.as_str()).collect();
+        assert_eq!(ids, ["anti-lockout-2222"]);
     }
 
     #[test]

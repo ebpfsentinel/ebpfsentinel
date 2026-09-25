@@ -33,7 +33,9 @@ use application::dlp_service_impl::DlpAppService;
 use application::dns_blocklist_service_impl::DnsBlocklistAppService;
 use application::dns_cache_service_impl::DnsCacheAppService;
 use application::domain_reputation_service_impl::DomainReputationAppService;
-use application::firewall_service_impl::{FirewallAppService, InterfaceScopeBits};
+use application::firewall_service_impl::{
+    AntiLockoutSettings, FirewallAppService, InterfaceScopeBits,
+};
 use application::ids_service_impl::IdsAppService;
 use application::ips_service_impl::{IpsAppService, IpsBlacklistAdapter};
 use application::l7_service_impl::L7AppService;
@@ -238,14 +240,6 @@ pub async fn run(
     // ── 3. Convert and load firewall rules ──────────────────────────
     let firewall_mode = config.firewall_mode()?;
     let domain_rules = config.firewall_rules()?;
-    let mut engine = FirewallEngine::new();
-    engine.reload(domain_rules)?;
-    info!(
-        rule_count = engine.rules().len(),
-        default_policy = ?config.firewall.default_policy,
-        mode = firewall_mode.as_str(),
-        "firewall engine initialized"
-    );
 
     // ── 3b. Convert and load IDS rules ──────────────────────────────
     let ids_mode = config.ids_mode()?;
@@ -263,15 +257,27 @@ pub async fn run(
 
     // ── 4. Initialize metrics ─────────────────────────────────────
     let metrics = Arc::new(AgentMetrics::new());
-    metrics.set_rules_loaded("firewall", engine.rules().len() as u64);
     metrics.set_rules_loaded("ids", ids_engine.rule_count() as u64);
 
     // ── 5. Build shared application state ─────────────────────────
     let ebpf_loaded = Arc::new(AtomicBool::new(false));
-    let mut svc =
-        FirewallAppService::new(engine, None, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
+    // The rules go in through the service rather than straight into the
+    // engine, because the service is what adds the anti-lockout rules.
+    let mut svc = FirewallAppService::new(
+        FirewallEngine::new(),
+        None,
+        Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+    );
     svc.set_mode(firewall_mode);
     svc.set_interface_scope(firewall_interface_scope(&config));
+    svc.set_anti_lockout(firewall_anti_lockout(&config));
+    svc.reload_rules(domain_rules)?;
+    info!(
+        rule_count = svc.list_rules().len(),
+        default_policy = ?config.firewall.default_policy,
+        mode = firewall_mode.as_str(),
+        "firewall engine initialized"
+    );
     // Wire kernel-conntrack teardown so a deny rule added mid-flow evicts
     // already-established connections (the XDP drop runs before netfilter and
     // cannot remove an existing conntrack entry on its own).
@@ -3777,6 +3783,16 @@ pub fn firewall_interface_scope(config: &AgentConfig) -> InterfaceScopeBits {
     InterfaceScopeBits {
         bits: config.interface_scope_bits(),
         membership: config.kernel_interface_membership(),
+    }
+}
+
+/// The anti-lockout settings `firewall.anti_lockout` configures.
+pub fn firewall_anti_lockout(config: &AgentConfig) -> AntiLockoutSettings {
+    let anti_lockout = &config.firewall.anti_lockout;
+    AntiLockoutSettings {
+        enabled: anti_lockout.enabled,
+        interfaces: anti_lockout.interfaces.clone(),
+        ports: anti_lockout.ports.clone(),
     }
 }
 

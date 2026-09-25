@@ -538,6 +538,19 @@ impl ConfigReloadService {
             .set_interface_scope(scope);
     }
 
+    /// Publish the anti-lockout settings ahead of a firewall reload, which is
+    /// what installs the rules they produce.
+    pub async fn set_firewall_anti_lockout(
+        &self,
+        settings: crate::firewall_service_impl::AntiLockoutSettings,
+    ) {
+        let _guard = self.reload_locks.firewall.lock().await;
+        self.firewall_service
+            .write()
+            .await
+            .set_anti_lockout(settings);
+    }
+
     /// Reload firewall rules atomically with mode and enabled awareness.
     ///
     /// Acquires a serialization lock to ensure only one reload runs at a time.
