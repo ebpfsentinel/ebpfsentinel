@@ -66,6 +66,19 @@ impl DdosEngine {
         )
     }
 
+    /// Countries whose block is in force, sorted.
+    pub fn blocked_countries(&self) -> Vec<String> {
+        let mut countries: Vec<String> = self
+            .blocked_countries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect();
+        countries.sort();
+        countries
+    }
+
     /// Process a `DDoS` event from the eBPF pipeline.
     /// Returns `true` if an attack state changed (for alerting).
     pub fn process_event(&self, event: &DdosEvent) -> bool {
@@ -614,6 +627,8 @@ mod tests {
         engine.maybe_emit_block_country(0);
 
         let enforcements = engine.take_pending_enforcements();
+        // Draining the queue does not lift the block.
+        assert_eq!(engine.blocked_countries(), vec!["RU".to_string()]);
         assert_eq!(enforcements.len(), 1);
         assert_eq!(
             enforcements[0],

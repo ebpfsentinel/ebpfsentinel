@@ -153,9 +153,26 @@ impl DdosAppService {
         tracing::info!(enabled, "DDoS service toggled");
     }
 
+    /// Install again every country block in force.
+    ///
+    /// A firewall loaded again starts with empty LPM tries, so a block the
+    /// engine still holds has to be written into the new ones.
+    pub fn reinstall_country_blocks(&self) {
+        let blocks = self
+            .engine
+            .blocked_countries()
+            .into_iter()
+            .map(|country_code| DdosEnforcementAction::BlockCountry { country_code })
+            .collect();
+        self.apply_enforcements(blocks);
+    }
+
     /// Drain and apply pending enforcement actions from the engine.
     fn apply_pending_enforcements(&self) {
-        let enforcements = self.engine.take_pending_enforcements();
+        self.apply_enforcements(self.engine.take_pending_enforcements());
+    }
+
+    fn apply_enforcements(&self, enforcements: Vec<DdosEnforcementAction>) {
         if enforcements.is_empty() {
             return;
         }

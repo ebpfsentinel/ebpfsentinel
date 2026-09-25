@@ -1611,6 +1611,11 @@ pub async fn run(
     let (mut ct_ok, mut nat_ok, mut scrub_ok, mut lb_ok) = (false, false, false, false);
     let mut qos_ok = false;
     let mut vip_announcer_ok = false;
+    // What the startup firewall handed over, for the reload path to keep.
+    let mut fw_lpm_coordinator: Option<
+        Arc<dyn ports::secondary::lpm_coordinator_port::LpmCoordinatorPort>,
+    > = None;
+    let mut fw_ipset_wired = false;
     let mut fw_loader: Option<EbpfLoader> = None;
     // Loaders the lifecycle manager takes over once it exists, each with the
     // token its readers run under, so a reload that disables one program
@@ -1679,7 +1684,9 @@ pub async fn run(
                         zone_svc.write().await.set_map_port(Box::new(mgr));
                     }
                     if let Some((passed, dropped)) = zone_rdrs {
-                        let zm_cancel = cancel_token.clone();
+                        // Stops with this load: a reload that unloads the
+                        // firewall starts a loop of its own over the new maps.
+                        let zm_cancel = fw_cancel.clone();
                         let zm_metrics = Arc::clone(&metrics) as Arc<dyn MetricsPort>;
                         let zm_svc = Arc::clone(&zone_svc);
                         info!("per-zone datapath counters exported");
@@ -1899,6 +1906,7 @@ pub async fn run(
                         svc.set_lpm_coordinator(Arc::clone(&coordinator));
                         ips_svc.store(Arc::new(svc));
                     }
+                    fw_lpm_coordinator = Some(coordinator);
                     info!("LPM coordinator wired to alias, DDoS, IPS services");
                 }
                 Err(e) => {
@@ -1912,6 +1920,7 @@ pub async fn run(
             && let Ok(ipset_mgr) = IpSetMapManager::new(loader.ebpf_mut())
         {
             alias_svc.write().await.set_ipset_port(Box::new(ipset_mgr));
+            fw_ipset_wired = true;
             info!("alias IP set map wired from xdp-firewall");
         }
 
@@ -2593,6 +2602,15 @@ pub async fn run(
         // The status endpoint reads the same map the manager updates, so a
         // program a reload loads or unloads is reported as it now is.
         mgr.program_status = Arc::clone(&ebpf_program_status);
+        // A firewall a reload loads needs both to put back what the startup
+        // load wired: country blocks resolve through aliases, and the VIP
+        // announcer is reached through the firewall's ARP path.
+        mgr.alias_resolver = Some(Arc::clone(&alias_resolver));
+        mgr.vip_svc = Some(Arc::clone(&vip_svc));
+        // The firewall's shared maps are pinned: a firewall a reload loads
+        // again reuses them, so the managers handed over here stay valid.
+        mgr.lpm_coordinator = fw_lpm_coordinator;
+        mgr.ipset_wired = fw_ipset_wired;
         // Move map holder fields into the manager
         mgr.config_flags = ebpf_map_holder.config_flags;
         mgr.l7_ports = ebpf_map_holder.l7_ports;

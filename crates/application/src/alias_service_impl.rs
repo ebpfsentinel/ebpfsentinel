@@ -27,6 +27,9 @@ pub struct AliasAppService {
     set_id_map: HashMap<String, u8>,
     /// Next free set id, or `None` once all 255 have been handed out.
     next_set_id: Option<u8>,
+    /// Content last pushed for each external alias, kept so a kernel set
+    /// created by a firewall loaded again can be filled without a new push.
+    external_ips: HashMap<String, Vec<IpNetwork>>,
 }
 
 impl AliasAppService {
@@ -39,6 +42,7 @@ impl AliasAppService {
             metrics,
             set_id_map: HashMap::new(),
             next_set_id: Some(1),
+            external_ips: HashMap::new(),
         }
     }
 
@@ -48,7 +52,21 @@ impl AliasAppService {
     }
 
     /// Set the eBPF IP set map port.
-    pub fn set_ipset_port(&mut self, port: Box<dyn IpSetMapPort + Send>) {
+    ///
+    /// The sets are empty when a firewall has just been loaded, so the
+    /// content last pushed for every external alias is written into them.
+    /// Dynamic aliases are filled by the next [`Self::refresh_dynamic`].
+    pub fn set_ipset_port(&mut self, mut port: Box<dyn IpSetMapPort + Send>) {
+        let mut external: Vec<(&String, &Vec<IpNetwork>)> = self.external_ips.iter().collect();
+        external.sort_by_key(|(name, _)| *name);
+        for (name, ips) in external {
+            let Some(&set_id) = self.set_id_map.get(name) else {
+                continue;
+            };
+            if let Err(e) = port.load_ipset_v4(set_id, &ipset_host_addrs(name, ips)) {
+                tracing::warn!(alias = %name, "failed to load external IP set: {e}");
+            }
+        }
         self.ipset_port = Some(port);
     }
 
@@ -62,6 +80,14 @@ impl AliasAppService {
         self.resolver
             .load(aliases)
             .map_err(|e| DomainError::InvalidRule(e.to_string()))?;
+        // Content pushed for an alias that is no longer external is not
+        // written into a set again.
+        let resolver = &self.resolver;
+        self.external_ips.retain(|name, _| {
+            resolver.get(name).is_some_and(|alias| {
+                matches!(alias.kind, domain::alias::entity::AliasKind::External)
+            })
+        });
         self.update_metrics();
         Ok(())
     }
@@ -119,6 +145,8 @@ impl AliasAppService {
                 tracing::warn!(alias = alias_name, "failed to load external IP set: {e}");
             }
         }
+        self.external_ips
+            .insert(alias_name.to_string(), ips.to_vec());
 
         self.update_metrics();
         Ok(())
@@ -641,6 +669,33 @@ mod tests {
             .expect("interface group alias gets a set id");
         let loaded = recorder.loaded.lock().unwrap().clone();
         assert_eq!(loaded, vec![(set_id, vec![0x0A00_0001, 0x0A00_0002])]);
+    }
+
+    #[test]
+    fn a_new_ip_set_port_receives_the_external_content_last_pushed() {
+        let mut svc = make_service();
+        svc.reload_aliases(vec![Alias {
+            id: AliasId("feed".to_string()),
+            kind: AliasKind::External,
+            description: None,
+        }])
+        .unwrap();
+        svc.set_ipset_port(Box::new(RecordingIpSet::default()));
+        svc.set_external_ips(
+            "feed",
+            &[IpNetwork::V4 {
+                addr: 0xC000_0201,
+                prefix_len: 32,
+            }],
+        )
+        .unwrap();
+
+        let reloaded = RecordingIpSet::default();
+        svc.set_ipset_port(Box::new(reloaded.clone()));
+
+        let set_id = svc.assigned_set_id("feed").expect("external alias set id");
+        let loaded = reloaded.loaded.lock().unwrap().clone();
+        assert_eq!(loaded, vec![(set_id, vec![0xC000_0201])]);
     }
 
     #[test]

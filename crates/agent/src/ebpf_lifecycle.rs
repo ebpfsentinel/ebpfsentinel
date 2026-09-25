@@ -9,6 +9,8 @@ use adapters::ebpf::{
 };
 use application::packet_pipeline::AgentEvent;
 use infrastructure::config::AgentConfig;
+use ports::secondary::alias_resolution_port::AliasResolutionPort;
+use ports::secondary::lpm_coordinator_port::LpmCoordinatorPort;
 use ports::secondary::metrics_port::{FirewallMetrics, MetricsPort};
 use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
@@ -56,6 +58,21 @@ pub struct EbpfProgramManager {
     /// Load state per published program name, as `/api/v1/ebpf/status` and
     /// the anonymous heartbeat read it.
     pub program_status: Arc<RwLock<HashMap<String, bool>>>,
+    /// Alias resolution the anti-DDoS service needs to install a country block,
+    /// handed to it again when a firewall loaded by a reload brings new LPM
+    /// tries.
+    pub alias_resolver: Option<Arc<dyn AliasResolutionPort>>,
+    /// VIP announcer service, configured when a firewall loaded by a reload
+    /// is the first to carry the ARP path it is reached through.
+    pub vip_svc: Option<Arc<RwLock<application::vip_announcer_service_impl::VipAnnouncerService>>>,
+    /// Coordinator over the firewall LPM tries, once a firewall load has
+    /// handed them over. The tries are pinned, so a firewall loaded again
+    /// reuses the same kernel objects and this coordinator, with the entries
+    /// it tracks, stays valid.
+    pub lpm_coordinator: Option<Arc<dyn LpmCoordinatorPort>>,
+    /// Whether a firewall load has handed the pinned IP set map to the alias
+    /// service.
+    pub ipset_wired: bool,
 }
 
 impl EbpfProgramManager {
@@ -78,6 +95,10 @@ impl EbpfProgramManager {
             tenant_cgroup: TenantCgroupMapManager::new(),
             metrics_readers: Arc::new(RwLock::new(Vec::new())),
             program_status: Arc::new(RwLock::new(HashMap::new())),
+            alias_resolver: None,
+            vip_svc: None,
+            lpm_coordinator: None,
+            ipset_wired: false,
         }
     }
 
@@ -688,6 +709,138 @@ impl EbpfProgramManager {
         true
     }
 
+    /// Hand the firewall's shared maps to the services that write them, the
+    /// first time a firewall is loaded.
+    ///
+    /// The LPM tries and the IP set map are pinned, so when a firewall was
+    /// already loaded once the services still hold managers over the same
+    /// kernel objects and nothing changes hands. When the agent started with
+    /// the firewall off, nothing was ever handed over: the IPS service
+    /// replays its blacklist, the anti-DDoS service its country blocks and
+    /// the alias service its external sets, all of which they kept while the
+    /// datapath had nowhere to put them.
+    async fn wire_firewall_consumers(&mut self, loader: &mut EbpfLoader) {
+        if self.lpm_coordinator.is_none() {
+            match adapters::ebpf::LpmCoordinator::new(loader.ebpf_mut()) {
+                Ok(coordinator) => {
+                    let coordinator: Arc<dyn LpmCoordinatorPort> = Arc::new(coordinator);
+                    self.services
+                        .alias_svc
+                        .write()
+                        .await
+                        .set_lpm_coordinator(Arc::clone(&coordinator));
+                    {
+                        let mut svc = (**self.services.ddos_svc.load()).clone();
+                        svc.set_lpm_coordinator(Arc::clone(&coordinator));
+                        if let Some(resolver) = &self.alias_resolver {
+                            svc.set_alias_resolution(Arc::clone(resolver));
+                        }
+                        svc.reinstall_country_blocks();
+                        self.services.ddos_svc.store(Arc::new(svc));
+                    }
+                    {
+                        let mut svc = (**self.services.ips_svc.load()).clone();
+                        svc.set_lpm_coordinator(Arc::clone(&coordinator));
+                        self.services.ips_svc.store(Arc::new(svc));
+                    }
+                    self.lpm_coordinator = Some(coordinator);
+                }
+                Err(e) => warn!("LPM coordinator maps not available (non-fatal): {e}"),
+            }
+        }
+
+        if !self.ipset_wired
+            && let Ok(ipset_mgr) = adapters::ebpf::IpSetMapManager::new(loader.ebpf_mut())
+        {
+            self.services
+                .alias_svc
+                .write()
+                .await
+                .set_ipset_port(Box::new(ipset_mgr));
+            self.ipset_wired = true;
+        }
+
+        let mut aliases = self.services.alias_svc.write().await;
+        if let Err(e) = aliases.refresh_dynamic() {
+            warn!("dynamic alias refresh after firewall load failed: {e}");
+        }
+        let bindings = application::firewall_aliases::collect_bindings(&aliases);
+        drop(aliases);
+        self.services
+            .firewall_svc
+            .write()
+            .await
+            .set_alias_bindings(bindings);
+    }
+
+    /// Load the VIP announcer behind the firewall when announcing is on and
+    /// no firewall carried it yet. Once loaded it outlives any firewall
+    /// reload, so [`Self::rewire_xdp_chain`] finds it and wires slot 3.
+    async fn ensure_vip_announcer(&mut self, config: &AgentConfig) {
+        if self.is_loaded("xdp_vip_announcer") {
+            return;
+        }
+        let Some(vip_svc) = self.vip_svc.clone() else {
+            return;
+        };
+        let announce = match config.lb_announce() {
+            Ok(announce) => announce,
+            Err(e) => {
+                warn!("VIP announce configuration unreadable: {e}");
+                return;
+            }
+        };
+        if announce.role == domain::loadbalancer::vip::AnnounceRole::Disabled {
+            return;
+        }
+        let (vip_loader, vip_mgr, binding_mgr) =
+            match startup::try_load_xdp_vip_announcer(&self.ebpf_dir) {
+                Ok(loaded) => loaded,
+                Err(e) => {
+                    warn!("xdp-vip-announcer load failed (VIP announce disabled): {e}");
+                    return;
+                }
+            };
+        {
+            let mut svc = vip_svc.write().await;
+            // Binding port first: set_map_port triggers the reconcile that
+            // also writes SELF_OWNED_BINDINGS.
+            svc.set_binding_port(Box::new(binding_mgr));
+            if let Err(e) = svc.set_map_port(Box::new(vip_mgr)) {
+                warn!("vip announcer map port wiring failed: {e}");
+            }
+            if let Err(e) = svc.configure(announce) {
+                warn!("vip announcer configure failed: {e}");
+            }
+        }
+        let cancel = CancellationToken::new();
+        let c = cancel.clone();
+        let jh = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(15));
+            loop {
+                tokio::select! {
+                    () = c.cancelled() => break,
+                    _ = tick.tick() => {
+                        if let Err(e) = vip_svc.read().await.refresh_metrics() {
+                            warn!("vip announcer metrics refresh failed: {e}");
+                        }
+                    }
+                }
+            }
+        });
+        self.programs.insert(
+            "xdp_vip_announcer".to_string(),
+            ProgramHandle {
+                name: "xdp_vip_announcer".to_string(),
+                loader: vip_loader,
+                reader_cancel: cancel,
+                reader_handles: vec![jh],
+            },
+        );
+        self.set_status("xdp_vip_announcer", true).await;
+        info!("xdp-vip-announcer enabled via hot-reload");
+    }
+
     /// Enable an XDP program and rewire the chain.
     #[allow(clippy::too_many_lines)]
     pub async fn enable_xdp_program(
@@ -701,7 +854,7 @@ impl EbpfProgramManager {
 
         match name {
             "xdp_firewall" => {
-                let (mut loader, map_manager, metrics_rdr, reader, zone_mgr, _zone_rdrs) =
+                let (mut loader, map_manager, metrics_rdr, reader, zone_mgr, zone_rdrs) =
                     startup::try_load_xdp_firewall(&self.ebpf_dir, config)?;
 
                 let cancel = CancellationToken::new();
@@ -709,6 +862,25 @@ impl EbpfProgramManager {
                 let c = cancel.clone();
                 let obs = self.ringbuf_observer("xdp-firewall");
                 let jh = tokio::spawn(async move { reader.run(tx, c, obs).await });
+                let mut handles = vec![jh];
+                if let Some((passed, dropped)) = zone_rdrs {
+                    // The zone counters live in the maps of this load, so the
+                    // loop reading them stops with it.
+                    let zones = Arc::clone(&self.services.zone_svc);
+                    let metrics = Arc::clone(&self.services.metrics) as Arc<dyn MetricsPort>;
+                    let c = cancel.clone();
+                    handles.push(tokio::spawn(async move {
+                        crate::ebpf_metrics::run_zone_metrics_loop(
+                            passed,
+                            dropped,
+                            zones,
+                            metrics,
+                            Duration::from_secs(10),
+                            c,
+                        )
+                        .await;
+                    }));
+                }
 
                 self.services
                     .firewall_svc
@@ -749,6 +921,9 @@ impl EbpfProgramManager {
                     );
                 }
 
+                self.wire_firewall_consumers(&mut loader).await;
+                self.ensure_vip_announcer(config).await;
+
                 self.set_status("xdp_firewall", true).await;
 
                 self.programs.insert(
@@ -757,7 +932,7 @@ impl EbpfProgramManager {
                         name: "xdp_firewall".to_string(),
                         loader,
                         reader_cancel: cancel,
-                        reader_handles: vec![jh],
+                        reader_handles: handles,
                     },
                 );
 

@@ -268,7 +268,9 @@ const UNZONED: &str = "unzoned";
 /// Deltas are derived exactly as in [`run_kernel_metrics_loop`]: the kernel
 /// counter is absolute, so the exposed counter tracks it regardless of the
 /// poll cadence, and a value that dropped (map recreated on reload) is taken
-/// as the new delta.
+/// as the new delta. The counters are pinned, so a firewall loaded again by a
+/// reload finds them where the previous load left them: the first pass only
+/// records where they stand, and what they held before is not counted twice.
 pub async fn run_zone_metrics_loop(
     passed: MetricsReader,
     dropped: MetricsReader,
@@ -278,8 +280,7 @@ pub async fn run_zone_metrics_loop(
     cancel: CancellationToken,
 ) {
     let mut ticker = tokio::time::interval(interval);
-    ticker.tick().await; // counters are 0 at startup
-
+    let mut baseline = true;
     let mut last: HashMap<(u32, &'static str), u64> = HashMap::new();
 
     loop {
@@ -306,7 +307,7 @@ pub async fn run_zone_metrics_loop(
                         let key = (*zone_id, action);
                         let prev = last.get(&key).copied().unwrap_or(0);
                         let delta = if value >= prev { value - prev } else { value };
-                        if delta > 0 {
+                        if delta > 0 && !baseline {
                             metrics.record_zone_packets_by(zone_name, action, delta);
                         }
                         last.insert(key, value);
@@ -322,6 +323,7 @@ pub async fn run_zone_metrics_loop(
                 }
             }
         }
+        baseline = false;
     }
 }
 

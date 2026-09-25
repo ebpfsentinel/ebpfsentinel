@@ -54,8 +54,22 @@ impl IpsAppService {
     }
 
     /// Set the LPM coordinator for kernel-side /24 subnet enforcement.
+    ///
+    /// The tries are empty when a firewall has just been loaded, so every
+    /// blacklist entry still in force is installed in them.
     pub fn set_lpm_coordinator(&mut self, coordinator: Arc<dyn LpmCoordinatorPort>) {
         self.lpm_coordinator = Some(coordinator);
+        let in_force: Vec<EnforcementAction> = self
+            .engine
+            .blacklist_entries()
+            .into_values()
+            .filter(|entry| !entry.is_expired())
+            .map(|entry| EnforcementAction::BlacklistIp {
+                ip: entry.ip,
+                ttl: entry.ttl.saturating_sub(entry.added_at.elapsed()),
+            })
+            .collect();
+        self.apply_enforcements(&in_force);
     }
 
     pub fn mode(&self) -> DomainMode {
@@ -640,6 +654,20 @@ mod tests {
 
         assert!(svc.is_blacklisted(ip));
         assert!(coordinator.inserted.lock().expect("lock").is_empty());
+    }
+
+    #[test]
+    fn a_new_coordinator_receives_the_blacklist_in_force() {
+        let (mut svc, _) = service_with_coordinator();
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        svc.add_to_blacklist(ip, "manual".to_string(), Duration::from_mins(5))
+            .expect("blacklist accepted");
+
+        let reloaded = Arc::new(RecordingCoordinator::default());
+        svc.set_lpm_coordinator(Arc::clone(&reloaded) as Arc<dyn LpmCoordinatorPort>);
+
+        let inserted = reloaded.inserted.lock().expect("lock");
+        assert_eq!(*inserted, vec![(32, [203, 0, 113, 7])]);
     }
 
     #[test]
