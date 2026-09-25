@@ -720,8 +720,8 @@ impl EventDispatcher {
             // and the lookup is a cgroupfs walk on a cache miss.
             alert.container = self.resolve_container_by_id(event.cgroup_id);
 
-            // Block-mode IDS verdicts mark the matching conntrack
-            // entry `IPS_DYING` via `bpf_ct_change_status` on the
+            // Block-mode IDS verdicts collapse the matching conntrack
+            // entry's timeout via `bpf_ct_change_timeout` on the
             // kernel side (tc-ids program). Record the verdict on
             // the userspace counter so the enforcement rate is
             // observable alongside the alert-mode rate.

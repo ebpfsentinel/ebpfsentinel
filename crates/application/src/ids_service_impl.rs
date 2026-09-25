@@ -444,8 +444,9 @@ impl IdsAppService {
     }
 
     /// Record that the IDS verdict terminated a live flow via the
-    /// kernel netfilter conntrack path (`bpf_ct_change_status` with
-    /// the `IPS_DYING` bit). The actual kernel-side kill happens in
+    /// kernel netfilter conntrack path (`bpf_ct_change_timeout`
+    /// collapsing the entry's timeout, since the kernel refuses
+    /// `IPS_DYING` from a BPF program). The actual kernel-side kill happens in
     /// the tc-ids eBPF program; this hook increments the paired
     /// Prometheus counter so operators can observe the enforcement
     /// rate of block-mode policies.
