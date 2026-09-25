@@ -75,6 +75,39 @@ pub struct ServiceHandles {
     pub ebpf_loaded: Arc<AtomicBool>,
 }
 
+impl ServiceHandles {
+    /// The reload service over these handles, for a caller that owns the
+    /// services but not the standalone startup path.
+    ///
+    /// It carries every service the handles hold. The L2 VIP announcer is not
+    /// one of them: nothing built here announces a VIP, so there is no state
+    /// for a reload to replace.
+    #[must_use]
+    pub fn config_reload_service(&self) -> application::config_reload::ConfigReloadService {
+        let mut reload_service = application::config_reload::ConfigReloadService::new(
+            Arc::clone(&self.firewall_svc),
+            Arc::clone(&self.ids_svc),
+            Arc::clone(&self.ips_svc),
+            Arc::clone(&self.l7_svc),
+            Arc::clone(&self.rl_svc),
+            Arc::clone(&self.ddos_svc),
+            Arc::clone(&self.ti_svc),
+            Arc::clone(&self.audit_svc),
+            Arc::clone(&self.metrics) as Arc<dyn MetricsPort>,
+        );
+        reload_service.set_conntrack_service(Arc::clone(&self.conntrack_svc));
+        reload_service.set_dlp_service(Arc::clone(&self.dlp_svc));
+        reload_service.set_nat_service(Arc::clone(&self.nat_svc));
+        reload_service.set_alias_service(Arc::clone(&self.alias_svc));
+        reload_service.set_routing_service(Arc::clone(&self.routing_svc));
+        reload_service.set_loadbalancer_service(Arc::clone(&self.lb_svc));
+        reload_service.set_qos_service(Arc::clone(&self.qos_svc));
+        reload_service.set_zone_service(Arc::clone(&self.zone_svc));
+        reload_service.set_schedule_service(Arc::clone(&self.schedule_svc));
+        reload_service
+    }
+}
+
 /// Build all domain engines and application services from config.
 ///
 /// This creates the services in their initial state (rules loaded, modes set)

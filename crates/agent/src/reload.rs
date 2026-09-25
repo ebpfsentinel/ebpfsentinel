@@ -140,11 +140,66 @@ pub fn spawn_reload_task(
     reload_service: Arc<ConfigReloadService>,
     auth_handle: Option<AuthProviderHandle>,
     cancel_token: CancellationToken,
-    mut api_trigger: mpsc::Receiver<()>,
+    api_trigger: mpsc::Receiver<()>,
     shared_config: Arc<RwLock<AgentConfig>>,
     ebpf_manager: Arc<Mutex<EbpfProgramManager>>,
     reload_complete: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
+    let auth_handle = auth_handle.map(Arc::new);
+    let path = config_path.clone();
+    spawn_reload_loop(
+        config_path,
+        cancel_token,
+        api_trigger,
+        reload_complete,
+        move || {
+            let path = path.clone();
+            let reload_service = Arc::clone(&reload_service);
+            let auth_handle = auth_handle.clone();
+            let shared_config = Arc::clone(&shared_config);
+            let ebpf_manager = Arc::clone(&ebpf_manager);
+            async move {
+                perform_reload(
+                    &path,
+                    &reload_service,
+                    auth_handle.as_deref(),
+                    &shared_config,
+                    &ebpf_manager,
+                )
+                .await;
+            }
+        },
+    )
+}
+
+/// Run `on_reload` every time the configuration should be read again.
+///
+/// Three triggers, one action: a change to the file (debounced, so one save
+/// is one reload), SIGHUP, and a message on `api_trigger`. What a reload
+/// does is the caller's: the standalone agent also loads and unloads
+/// programs, a caller whose datapath is owned elsewhere only re-applies the
+/// rules and the kernel maps. A closed `api_trigger` disables that trigger
+/// rather than spinning, so a caller with no reload route passes a receiver
+/// whose sender it dropped.
+///
+/// `reload_complete` is notified after each reload, for a caller blocked on
+/// one it asked for.
+///
+/// # Panics
+///
+/// Panics if the SIGHUP handler cannot be installed, which only happens when
+/// the process has no signal driver at all.
+pub fn spawn_reload_loop<F, Fut>(
+    config_path: String,
+    cancel_token: CancellationToken,
+    mut api_trigger: mpsc::Receiver<()>,
+    reload_complete: Arc<Notify>,
+    mut on_reload: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
     // Receiver for operational SIGHUP-driven reloads. The default
     // (process-terminating) disposition is already overridden earlier in
     // startup (before the HTTP server advertises readiness); a SIGHUP racing
@@ -178,7 +233,7 @@ pub fn spawn_reload_task(
                     _ = sighup.recv() => {
                         tracing::info!("SIGHUP received, reloading configuration");
                     }
-                    _ = api_trigger.recv() => {
+                    Some(()) = api_trigger.recv() => {
                         tracing::info!("API reload trigger received, reloading configuration");
                     }
                 }
@@ -194,7 +249,7 @@ pub fn spawn_reload_task(
                     _ = notify_rx.recv() => {
                         from_watcher = true;
                     }
-                    _ = api_trigger.recv() => {
+                    Some(()) = api_trigger.recv() => {
                         tracing::info!("API reload trigger received, reloading configuration");
                     }
                 }
@@ -213,15 +268,7 @@ pub fn spawn_reload_task(
                 tracing::info!("config file change detected, reloading");
             }
 
-            // 2-phase validation: serde (phase 1) then domain (phase 2)
-            perform_reload(
-                &config_path,
-                &reload_service,
-                auth_handle.as_ref(),
-                &shared_config,
-                &ebpf_manager,
-            )
-            .await;
+            on_reload().await;
 
             // Wake any caller (e.g. the API reload handler) blocked waiting for
             // this reload to be applied to the shared config.
@@ -230,8 +277,8 @@ pub fn spawn_reload_task(
     })
 }
 
-/// Perform a single config reload: load YAML, convert to domain rules, apply.
-#[allow(clippy::too_many_lines, clippy::similar_names)] // reload is inherently sequential with many phases
+/// Perform a single standalone reload: the rules, the kernel maps, the
+/// program set, then the configuration the ops endpoints read.
 async fn perform_reload(
     config_path: &str,
     reload_service: &ConfigReloadService,
@@ -239,12 +286,133 @@ async fn perform_reload(
     shared_config: &RwLock<AgentConfig>,
     ebpf_manager: &Mutex<EbpfProgramManager>,
 ) {
+    let Some(config) = apply_config_file(config_path, reload_service, auth_handle).await else {
+        return;
+    };
+
+    // Re-sync eBPF kernel maps (L7_PORTS, CONFIG_FLAGS, INTERFACE_GROUPS)
+    {
+        let mut guard = ebpf_manager.lock().await;
+        let mgr: &mut EbpfProgramManager = &mut guard;
+        sync_kernel_maps(
+            mgr.l7_ports.as_mut(),
+            &mut mgr.config_flags,
+            Some(&mut mgr.iface_groups),
+            &config,
+        );
+    }
+
+    // eBPF program lifecycle - load/unload programs based on enabled flags
+    {
+        let mut mgr = ebpf_manager.lock().await;
+
+        // Category A: independent TC/uprobe programs
+        for (program_name, config_enabled) in program_config_map(&config) {
+            let currently_loaded = mgr.is_loaded(program_name);
+            match (currently_loaded, config_enabled) {
+                (false, true) => {
+                    if let Err(e) = mgr.enable_program(program_name, &config).await {
+                        tracing::warn!(
+                            program = program_name,
+                            error = %e,
+                            "eBPF program hot-load failed"
+                        );
+                    }
+                }
+                (true, false) => {
+                    if let Err(e) = mgr.disable_program(program_name).await {
+                        tracing::warn!(
+                            program = program_name,
+                            error = %e,
+                            "eBPF program hot-unload failed"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Category B: XDP chain programs, which may move the root.
+        if mgr.reconcile_xdp(&config).await {
+            tracing::info!("XDP chain topology changed, tail-calls rewired");
+        }
+    }
+
+    // Update shared config for ops endpoints
+    *shared_config.write().await = config;
+}
+
+/// Write the kernel maps that are read straight off the configuration rather
+/// than through a service: the L7 capture ports, each program's
+/// `CONFIG_FLAGS`, and the interface group membership.
+///
+/// A manager that is absent is a program that is not loaded, and is skipped.
+pub fn sync_kernel_maps(
+    l7_ports: Option<&mut L7PortsManager>,
+    config_flags: &mut [ConfigFlagsManager],
+    iface_groups: Option<&mut InterfaceGroupsManager>,
+    config: &AgentConfig,
+) {
+    if let Some(l7_mgr) = l7_ports {
+        let ports = config.l7_ports();
+        if let Err(e) = l7_mgr.set_ports(&ports) {
+            tracing::warn!(error = %e, "L7_PORTS reload failed");
+        } else {
+            tracing::debug!(port_count = ports.len(), "L7_PORTS reloaded");
+        }
+    }
+
+    let flags = crate::startup::build_config_flags(config);
+    for cfg_mgr in config_flags.iter_mut() {
+        if let Err(e) = cfg_mgr.set_flags(&flags) {
+            tracing::warn!(error = %e, "CONFIG_FLAGS reload failed");
+        }
+    }
+
+    if let Some(groups) = iface_groups {
+        let membership = config.kernel_interface_membership();
+        let memberships: Vec<(u32, u32)> = config
+            .agent
+            .interfaces
+            .iter()
+            .filter_map(|iface| {
+                let ifindex = crate::startup::get_ifindex(iface).ok()?;
+                let groups = membership.get(iface).copied().unwrap_or(0);
+                Some((ifindex, groups))
+            })
+            .collect();
+        if let Err(e) = groups.set_interface_groups(&memberships) {
+            tracing::warn!(error = %e, "INTERFACE_GROUPS reload failed");
+        } else if !memberships.is_empty() {
+            tracing::debug!(
+                iface_count = memberships.len(),
+                map_count = groups.map_count(),
+                "INTERFACE_GROUPS reloaded"
+            );
+        }
+    }
+}
+
+/// Read the configuration file and apply it to the services.
+///
+/// Every conversion that can reject the file runs before anything is
+/// applied, so a rejected file leaves the running rules whole and returns
+/// `None`. On success the rules of every service are replaced and the auth
+/// keys rotated, and the parsed configuration is returned for the caller to
+/// apply to whatever datapath it owns: this touches no kernel map that is
+/// written straight off the configuration, and loads or unloads no program.
+#[allow(clippy::too_many_lines, clippy::similar_names)] // reload is inherently sequential with many phases
+pub async fn apply_config_file(
+    config_path: &str,
+    reload_service: &ConfigReloadService,
+    auth_handle: Option<&AuthProviderHandle>,
+) -> Option<AgentConfig> {
     // Phase 1: serde deserialization
     let config = match AgentConfig::load(Path::new(config_path)) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid YAML");
-            return;
+            return None;
         }
     };
 
@@ -253,7 +421,7 @@ async fn perform_reload(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid rules");
-            return;
+            return None;
         }
     };
 
@@ -262,7 +430,7 @@ async fn perform_reload(
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid firewall mode");
-            return;
+            return None;
         }
     };
 
@@ -273,7 +441,7 @@ async fn perform_reload(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid IDS rules");
-            return;
+            return None;
         }
     };
 
@@ -281,7 +449,7 @@ async fn perform_reload(
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid IDS mode");
-            return;
+            return None;
         }
     };
 
@@ -289,7 +457,7 @@ async fn perform_reload(
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid IDS sampling");
-            return;
+            return None;
         }
     };
 
@@ -297,7 +465,7 @@ async fn perform_reload(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid L7 rules");
-            return;
+            return None;
         }
     };
 
@@ -305,7 +473,7 @@ async fn perform_reload(
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid ratelimit policies");
-            return;
+            return None;
         }
     };
 
@@ -313,7 +481,7 @@ async fn perform_reload(
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid DDoS policies");
-            return;
+            return None;
         }
     };
 
@@ -321,7 +489,7 @@ async fn perform_reload(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid NAT DNAT rules");
-            return;
+            return None;
         }
     };
 
@@ -329,7 +497,7 @@ async fn perform_reload(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid NAT SNAT rules");
-            return;
+            return None;
         }
     };
 
@@ -337,7 +505,7 @@ async fn perform_reload(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid NAT NPTv6 rules");
-            return;
+            return None;
         }
     };
 
@@ -345,7 +513,7 @@ async fn perform_reload(
         Ok(a) => a,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid aliases");
-            return;
+            return None;
         }
     };
 
@@ -353,7 +521,7 @@ async fn perform_reload(
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid LB services");
-            return;
+            return None;
         }
     };
 
@@ -361,7 +529,7 @@ async fn perform_reload(
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid VIP announce config");
-            return;
+            return None;
         }
     };
 
@@ -369,7 +537,7 @@ async fn perform_reload(
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid QoS pipes");
-            return;
+            return None;
         }
     };
 
@@ -377,7 +545,7 @@ async fn perform_reload(
         Ok(q) => q,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid QoS queues");
-            return;
+            return None;
         }
     };
 
@@ -385,7 +553,7 @@ async fn perform_reload(
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid QoS classifiers");
-            return;
+            return None;
         }
     };
 
@@ -393,7 +561,7 @@ async fn perform_reload(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid IPS rules");
-            return;
+            return None;
         }
     };
 
@@ -401,7 +569,7 @@ async fn perform_reload(
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid IPS mode");
-            return;
+            return None;
         }
     };
 
@@ -409,7 +577,7 @@ async fn perform_reload(
         Ok(w) => w,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid IPS whitelist");
-            return;
+            return None;
         }
     };
 
@@ -417,7 +585,7 @@ async fn perform_reload(
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid IPS sampling");
-            return;
+            return None;
         }
     };
 
@@ -425,7 +593,7 @@ async fn perform_reload(
         Ok(f) => f,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid threat intel feeds");
-            return;
+            return None;
         }
     };
 
@@ -433,7 +601,7 @@ async fn perform_reload(
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid threat intel mode");
-            return;
+            return None;
         }
     };
 
@@ -673,43 +841,6 @@ async fn perform_reload(
         tracing::warn!(error = %e, "threat intel config reload failed");
     }
 
-    // Phase 6i: Re-sync eBPF kernel maps (L7_PORTS, CONFIG_FLAGS, INTERFACE_GROUPS)
-    {
-        let mut mgr = ebpf_manager.lock().await;
-
-        if let Some(ref mut l7_mgr) = mgr.l7_ports {
-            let ports = config.l7_ports();
-            if let Err(e) = l7_mgr.set_ports(&ports) {
-                tracing::warn!(error = %e, "L7_PORTS reload failed");
-            } else {
-                tracing::debug!(port_count = ports.len(), "L7_PORTS reloaded");
-            }
-        }
-
-        mgr.sync_config_flags(&config);
-
-        let membership = config.kernel_interface_membership();
-        let memberships: Vec<(u32, u32)> = config
-            .agent
-            .interfaces
-            .iter()
-            .filter_map(|iface| {
-                let ifindex = crate::startup::get_ifindex(iface).ok()?;
-                let groups = membership.get(iface).copied().unwrap_or(0);
-                Some((ifindex, groups))
-            })
-            .collect();
-        if let Err(e) = mgr.iface_groups.set_interface_groups(&memberships) {
-            tracing::warn!(error = %e, "INTERFACE_GROUPS reload failed");
-        } else if !memberships.is_empty() {
-            tracing::debug!(
-                iface_count = memberships.len(),
-                map_count = mgr.iface_groups.map_count(),
-                "INTERFACE_GROUPS reloaded"
-            );
-        }
-    }
-
     // Phase 7: Auth key/JWKS rotation
     if let Some(handle) = auth_handle {
         match handle {
@@ -769,42 +900,63 @@ async fn perform_reload(
         }
     }
 
-    // Phase 9: eBPF program lifecycle - load/unload programs based on enabled flags
-    {
-        let mut mgr = ebpf_manager.lock().await;
+    Some(config)
+}
 
-        // 9a. Category A: independent TC/uprobe programs
-        for (program_name, config_enabled) in program_config_map(&config) {
-            let currently_loaded = mgr.is_loaded(program_name);
-            match (currently_loaded, config_enabled) {
-                (false, true) => {
-                    if let Err(e) = mgr.enable_program(program_name, &config).await {
-                        tracing::warn!(
-                            program = program_name,
-                            error = %e,
-                            "eBPF program hot-load failed"
-                        );
-                    }
-                }
-                (true, false) => {
-                    if let Err(e) = mgr.disable_program(program_name).await {
-                        tracing::warn!(
-                            program = program_name,
-                            error = %e,
-                            "eBPF program hot-unload failed"
-                        );
-                    }
-                }
-                _ => {}
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    fn counting_loop(
+        api_trigger: mpsc::Receiver<()>,
+        cancel: CancellationToken,
+        reload_complete: Arc<Notify>,
+    ) -> (Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let dir = std::env::temp_dir().join(format!("reload-loop-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("agent.yaml").to_string_lossy().into_owned();
+        let count = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&count);
+        let handle = spawn_reload_loop(path, cancel, api_trigger, reload_complete, move || {
+            let seen = Arc::clone(&seen);
+            async move {
+                seen.fetch_add(1, Ordering::SeqCst);
             }
-        }
-
-        // 9b. Category B: XDP chain programs, which may move the root.
-        if mgr.reconcile_xdp(&config).await {
-            tracing::info!("XDP chain topology changed, tail-calls rewired");
-        }
+        });
+        (count, handle)
     }
 
-    // Phase 10: Update shared config for ops endpoints
-    *shared_config.write().await = config;
+    #[tokio::test]
+    async fn an_api_trigger_runs_the_reload_once() {
+        let (tx, rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let done = Arc::new(Notify::new());
+        let (count, handle) = counting_loop(rx, cancel.clone(), Arc::clone(&done));
+
+        let applied = done.notified();
+        tx.send(()).await.expect("loop is listening");
+        tokio::time::timeout(Duration::from_secs(5), applied)
+            .await
+            .expect("reload completes");
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+
+        cancel.cancel();
+        handle.await.expect("loop stops on cancel");
+    }
+
+    #[tokio::test]
+    async fn a_closed_api_trigger_is_not_a_reload() {
+        let (tx, rx) = mpsc::channel::<()>(1);
+        drop(tx);
+        let cancel = CancellationToken::new();
+        let (count, handle) = counting_loop(rx, cancel.clone(), Arc::new(Notify::new()));
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+
+        cancel.cancel();
+        handle.await.expect("loop stops on cancel");
+    }
 }

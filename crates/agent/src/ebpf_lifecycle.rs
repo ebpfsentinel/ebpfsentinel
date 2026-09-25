@@ -215,16 +215,6 @@ impl EbpfProgramManager {
         Ok(())
     }
 
-    /// Re-sync `CONFIG_FLAGS` eBPF maps from the current config.
-    pub fn sync_config_flags(&mut self, config: &AgentConfig) {
-        let flags = startup::build_config_flags(config);
-        for cfg_mgr in &mut self.config_flags {
-            if let Err(e) = cfg_mgr.set_flags(&flags) {
-                warn!(error = %e, "CONFIG_FLAGS reload failed");
-            }
-        }
-    }
-
     /// Detach all programs (shutdown).
     pub async fn detach_all(&mut self) {
         let names: Vec<String> = self.programs.keys().cloned().collect();
