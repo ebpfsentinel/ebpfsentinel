@@ -266,7 +266,11 @@ async fn perform_reload(
         }
     };
 
-    // Apply firewall reload
+    // Apply firewall reload. The interface bits go first: they are what an
+    // interface-scoped rule in the new set is narrowed with.
+    reload_service
+        .set_firewall_interface_scope(crate::startup::firewall_interface_scope(&config))
+        .await;
     if let Err(e) = reload_service
         .reload(rules, config.firewall.enabled, mode)
         .await
@@ -659,7 +663,7 @@ async fn perform_reload(
 
         mgr.sync_config_flags(&config);
 
-        let membership = config.interface_membership();
+        let membership = config.kernel_interface_membership();
         let memberships: Vec<(u32, u32)> = config
             .agent
             .interfaces

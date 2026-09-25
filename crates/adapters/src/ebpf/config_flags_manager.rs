@@ -282,11 +282,9 @@ impl InterfaceGroupsManager {
     /// Each map is updated with every pair (existing entries are overwritten).
     ///
     /// A bitmask of 0 means the interface belongs to no group, which the
-    /// datapath already reads as the default for a key it cannot find. The
-    /// entry is therefore removed rather than stored: the same map also backs
-    /// interface-based tenant resolution, where a stored 0 is not equivalent to
-    /// an absent key - it resolves the packet to tenant 0 and short-circuits
-    /// the subnet and cgroup lookups that would have found the real tenant.
+    /// datapath already reads as the default for a key it cannot find, so the
+    /// entry is removed rather than stored and the map holds only interfaces
+    /// something narrows by.
     pub fn set_interface_groups(
         &mut self,
         memberships: &[(u32, u32)],

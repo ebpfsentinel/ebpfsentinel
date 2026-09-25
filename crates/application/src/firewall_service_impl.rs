@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use domain::common::entity::Protocol;
@@ -9,6 +10,7 @@ use domain::firewall::error::FirewallError;
 
 use domain::firewall::entity::IpNetwork;
 use ebpf_common::firewall::{DEFAULT_POLICY_DROP, DEFAULT_POLICY_PASS};
+use ebpf_common::interface_group::group_matches;
 
 use crate::firewall_aliases::AliasBindings;
 use ports::secondary::conntrack_kill_port::ConnTrackKillPort;
@@ -53,6 +55,74 @@ impl Default for AntiLockoutSettings {
     }
 }
 
+/// Where each monitored interface sits in the kernel's interface groups.
+///
+/// The datapath learns a packet's interface only through the group bits that
+/// interface carries, so a rule scoped to one interface reaches the kernel as a
+/// rule scoped to a group holding that interface and nothing else.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InterfaceScopeBits {
+    /// The bit standing for each interface alone.
+    pub bits: HashMap<String, u32>,
+    /// Every group bit each interface carries in the kernel, its own included.
+    pub membership: HashMap<String, u32>,
+}
+
+/// What an interface scope becomes in the kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KernelScope {
+    /// Install the rule with this group mask.
+    Mask(u32),
+    /// The rule's own interface groups exclude the interface it is scoped to,
+    /// so it can match nothing and is left out of the arrays.
+    Never,
+    /// The interface has no group bit, so the kernel cannot be told to narrow
+    /// the rule to it.
+    Unplaceable,
+}
+
+impl InterfaceScopeBits {
+    /// The group mask the kernel should match a rule with.
+    ///
+    /// A global or namespace rule keeps the groups it was written with. A rule
+    /// scoped to an interface is narrowed to that interface's own bit, once the
+    /// groups it was written with are known to admit the interface: both limits
+    /// hold at once, and the interface bit is the narrower of the two.
+    fn kernel_scope(&self, rule: &FirewallRule) -> KernelScope {
+        let Scope::Interface(name) = &rule.scope else {
+            return KernelScope::Mask(rule.group_mask);
+        };
+        let Some(&bit) = self.bits.get(name) else {
+            return KernelScope::Unplaceable;
+        };
+        let membership = self.membership.get(name).copied().unwrap_or(bit);
+        if group_matches(rule.group_mask, membership) {
+            KernelScope::Mask(bit)
+        } else {
+            KernelScope::Never
+        }
+    }
+
+    /// Refuse a rule scoped to an interface the kernel cannot narrow it to.
+    ///
+    /// Installing it anyway would put it on every interface, which for a deny
+    /// is an outage and for an allow is a hole.
+    pub fn check(&self, rule: &FirewallRule) -> Result<(), FirewallError> {
+        if self.kernel_scope(rule) == KernelScope::Unplaceable
+            && let Scope::Interface(name) = &rule.scope
+        {
+            return Err(FirewallError::InvalidScope {
+                reason: format!(
+                    "interface '{name}' is not one the agent attaches to, or every interface \
+                     group bit is already taken; list it in agent.interfaces and keep \
+                     interface_groups plus interfaces within 31"
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Application-level firewall service.
 ///
 /// Orchestrates the domain engine, optional eBPF map sync, and metrics updates.
@@ -71,6 +141,8 @@ pub struct FirewallAppService {
     /// What the aliases named by rules resolve to. Refreshed by whoever owns
     /// the alias service; the rules themselves keep their alias references.
     alias_bindings: AliasBindings,
+    /// How an interface scope is written into the kernel.
+    interface_scope: InterfaceScopeBits,
     /// The catch-all byte the datapath falls back to for a packet no rule
     /// matched. Held here as well as in the map because the deny-all posture
     /// overwrites it and has to put the configured one back.
@@ -94,6 +166,7 @@ impl FirewallAppService {
             enabled: true,
             anti_lockout: AntiLockoutSettings::default(),
             alias_bindings: AliasBindings::default(),
+            interface_scope: InterfaceScopeBits::default(),
             default_policy: DEFAULT_POLICY_PASS,
             deny_all: None,
         }
@@ -107,6 +180,17 @@ impl FirewallAppService {
         self.alias_bindings = bindings;
         self.sync_ebpf_maps();
         tracing::debug!(aliases = count, "firewall alias bindings refreshed");
+    }
+
+    /// Publish the group bit each monitored interface carries and re-project
+    /// the rules, so a rule scoped to one interface matches on that interface
+    /// only.
+    pub fn set_interface_scope(&mut self, scope: InterfaceScopeBits) {
+        if self.interface_scope == scope {
+            return;
+        }
+        self.interface_scope = scope;
+        self.sync_ebpf_maps();
     }
 
     /// Return the current operating mode.
@@ -137,6 +221,9 @@ impl FirewallAppService {
     /// into the service so that dynamic rule changes are synced.
     pub fn set_map_port(&mut self, port: Box<dyn FirewallArrayMapPort + Send>) {
         self.map_port = Some(port);
+        // The arrays are empty when a program is loaded, and this service is
+        // the only writer that knows what each rule becomes in the kernel.
+        self.sync_ebpf_maps();
     }
 
     /// Clear the eBPF map port (program unloaded).
@@ -209,6 +296,7 @@ impl FirewallAppService {
         // Snapshot the fields the conntrack teardown needs before the rule is
         // moved into the engine, so we don't have to look it back up afterwards.
         let kill_snapshot = rule.clone();
+        self.interface_scope.check(&rule)?;
         self.engine.add_rule(rule)?;
         self.sync_ebpf_maps();
         // Tear down any already-established flow the new rule now denies.
@@ -568,7 +656,7 @@ impl FirewallAppService {
 
         for rule in rules {
             // In alert mode: override deny/reject -> log (observe without blocking)
-            let effective_rule = if self.mode == DomainMode::Alert
+            let mut effective_rule = if self.mode == DomainMode::Alert
                 && (rule.action == FirewallAction::Deny || rule.action == FirewallAction::Reject)
             {
                 let mut alert_rule = rule.clone();
@@ -577,6 +665,36 @@ impl FirewallAppService {
             } else {
                 rule.clone()
             };
+
+            // The kernel narrows by group bit, never by interface name.
+            match self.interface_scope.kernel_scope(&effective_rule) {
+                KernelScope::Mask(mask) => effective_rule.group_mask = mask,
+                KernelScope::Never => {
+                    tracing::debug!(
+                        component = "firewall",
+                        rule = %effective_rule.id.0,
+                        "rule not installed: its interface groups exclude the interface it is scoped to"
+                    );
+                    continue;
+                }
+                // An anti-lockout rule keeps the node reachable, so one that
+                // cannot be narrowed is installed wider rather than dropped.
+                KernelScope::Unplaceable if effective_rule.system => {
+                    tracing::warn!(
+                        component = "firewall",
+                        rule = %effective_rule.id.0,
+                        "system rule scoped to an interface with no group bit, installed on every interface"
+                    );
+                }
+                KernelScope::Unplaceable => {
+                    tracing::warn!(
+                        component = "firewall",
+                        rule = %effective_rule.id.0,
+                        "rule not installed: its interface has no group bit, so the kernel cannot narrow it"
+                    );
+                    continue;
+                }
+            }
 
             // Alias references name something the kernel cannot look up, so
             // they are resolved into set ids or literal criteria here.
@@ -965,5 +1083,140 @@ mod tests {
         svc.add_rule(make_rule("fw-001", 10)).unwrap();
         svc.remove_rule(&RuleId("fw-001".to_string())).unwrap();
         // No panic - graceful degraded mode
+    }
+
+    /// eth0 carries a named group (bit 0) and its own bit (bit 1); eth1 only
+    /// its own bit (bit 2).
+    fn two_interfaces() -> InterfaceScopeBits {
+        InterfaceScopeBits {
+            bits: [("eth0".to_string(), 0b010), ("eth1".to_string(), 0b100)]
+                .into_iter()
+                .collect(),
+            membership: [("eth0".to_string(), 0b011), ("eth1".to_string(), 0b100)]
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn scoped(id: &str, iface: &str, group_mask: u32) -> FirewallRule {
+        let mut rule = make_rule(id, 10);
+        rule.scope = Scope::Interface(iface.to_string());
+        rule.group_mask = group_mask;
+        rule
+    }
+
+    #[test]
+    fn an_interface_scope_reaches_the_kernel_as_that_interface_bit() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_interface_scope(two_interfaces());
+        svc.set_map_port(Box::new(map.clone()));
+
+        svc.add_rule(scoped("deny-eth1", "eth1", 0)).unwrap();
+        svc.add_rule(make_rule("deny-all", 20)).unwrap();
+
+        let v4 = map.v4.lock().unwrap();
+        assert_eq!(v4.len(), 2);
+        // Without the bit the kernel would install the rule on every
+        // interface, since it never sees the interface name.
+        assert_eq!(v4[0].group_mask, 0b100);
+        assert_eq!(v4[1].group_mask, 0);
+        drop(v4);
+        // What the API reads back is what the operator wrote.
+        assert_eq!(svc.list_rules()[0].group_mask, 0);
+    }
+
+    #[test]
+    fn an_interface_scope_narrows_a_rule_that_also_names_a_group() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_interface_scope(two_interfaces());
+        svc.set_map_port(Box::new(map.clone()));
+
+        // eth0 is in group bit 0, so both limits hold and eth0 is the narrower.
+        svc.add_rule(scoped("in-group", "eth0", 0b001)).unwrap();
+        // eth1 is not in group bit 0, so the rule can match nothing.
+        svc.add_rule(scoped("out-of-group", "eth1", 0b001)).unwrap();
+        // An inverted group excluding eth1 admits eth0.
+        svc.add_rule(scoped("inverted", "eth0", 0x8000_0004))
+            .unwrap();
+
+        let masks: Vec<u32> = map
+            .v4
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.group_mask)
+            .collect();
+        assert_eq!(masks, vec![0b010, 0b010]);
+    }
+
+    #[test]
+    fn a_rule_scoped_to_an_interface_with_no_bit_is_refused() {
+        let mut svc = make_service();
+        svc.set_interface_scope(two_interfaces());
+
+        let err = svc.add_rule(scoped("deny-eth9", "eth9", 0)).unwrap_err();
+        assert!(err.to_string().contains("eth9"), "{err}");
+        assert!(svc.list_rules().is_empty());
+    }
+
+    #[test]
+    fn a_reloaded_rule_whose_interface_has_no_bit_stays_out_of_the_kernel() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_interface_scope(two_interfaces());
+        svc.set_map_port(Box::new(map.clone()));
+
+        svc.reload_rules(vec![scoped("deny-eth9", "eth9", 0)])
+            .unwrap();
+
+        assert!(map.v4.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_anti_lockout_rule_with_no_bit_is_installed_wider_rather_than_dropped() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_anti_lockout(AntiLockoutSettings {
+            enabled: true,
+            interfaces: vec!["mgmt0".to_string()],
+            ports: vec![22],
+        });
+        svc.set_interface_scope(two_interfaces());
+        svc.set_map_port(Box::new(map.clone()));
+
+        svc.reload_rules(Vec::new()).unwrap();
+
+        let v4 = map.v4.lock().unwrap();
+        assert_eq!(v4.len(), 1);
+        assert_eq!(v4[0].group_mask, 0);
+    }
+
+    #[test]
+    fn handing_over_the_map_writes_the_rules_already_held() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.add_rule(make_rule("deny-all", 20)).unwrap();
+
+        svc.set_map_port(Box::new(map.clone()));
+
+        assert_eq!(map.v4.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn new_interface_bits_re_project_the_rules_already_installed() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_interface_scope(two_interfaces());
+        svc.set_map_port(Box::new(map.clone()));
+        svc.add_rule(scoped("deny-eth1", "eth1", 0)).unwrap();
+
+        let mut moved = two_interfaces();
+        moved.bits.insert("eth1".to_string(), 0b1000);
+        moved.membership.insert("eth1".to_string(), 0b1000);
+        svc.set_interface_scope(moved);
+
+        assert_eq!(map.v4.lock().unwrap()[0].group_mask, 0b1000);
     }
 }

@@ -33,7 +33,7 @@ use application::dlp_service_impl::DlpAppService;
 use application::dns_blocklist_service_impl::DnsBlocklistAppService;
 use application::dns_cache_service_impl::DnsCacheAppService;
 use application::domain_reputation_service_impl::DomainReputationAppService;
-use application::firewall_service_impl::FirewallAppService;
+use application::firewall_service_impl::{FirewallAppService, InterfaceScopeBits};
 use application::ids_service_impl::IdsAppService;
 use application::ips_service_impl::{IpsAppService, IpsBlacklistAdapter};
 use application::l7_service_impl::L7AppService;
@@ -50,7 +50,6 @@ use domain::alert::engine::AlertRouter;
 use domain::alert::entity::Alert;
 use domain::dlp::engine::DlpEngine;
 use domain::firewall::engine::FirewallEngine;
-use domain::firewall::entity::FirewallRule;
 use domain::ids::engine::IdsEngine;
 use domain::ips::engine::IpsEngine;
 use domain::l7::engine::L7Engine;
@@ -240,7 +239,7 @@ pub async fn run(
     let firewall_mode = config.firewall_mode()?;
     let domain_rules = config.firewall_rules()?;
     let mut engine = FirewallEngine::new();
-    engine.reload(domain_rules.clone())?;
+    engine.reload(domain_rules)?;
     info!(
         rule_count = engine.rules().len(),
         default_policy = ?config.firewall.default_policy,
@@ -272,6 +271,7 @@ pub async fn run(
     let mut svc =
         FirewallAppService::new(engine, None, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     svc.set_mode(firewall_mode);
+    svc.set_interface_scope(firewall_interface_scope(&config));
     // Wire kernel-conntrack teardown so a deny rule added mid-flow evicts
     // already-established connections (the XDP drop runs before netfilter and
     // cannot remove an existing conntrack entry on its own).
@@ -1626,7 +1626,7 @@ pub async fn run(
 
         // 10a. XDP Firewall
         fw_ok = if config.firewall.enabled {
-            match try_load_xdp_firewall(&ebpf_dir, &config, &domain_rules) {
+            match try_load_xdp_firewall(&ebpf_dir, &config) {
                 Ok((loader, map_manager, fw_metrics_rdr, reader, zone_mgr, zone_rdrs)) => {
                     let event_tx_clone = event_tx.clone();
                     let rb_obs = RingBufObserver::new(
@@ -2382,7 +2382,7 @@ pub async fn run(
 
         // ── 10z. Populate INTERFACE_GROUPS maps across all loaded programs ──
         {
-            let membership = config.interface_membership();
+            let membership = config.kernel_interface_membership();
             let memberships: Vec<(u32, u32)> = config
                 .agent
                 .interfaces
@@ -3769,10 +3769,20 @@ pub fn firewall_policy_byte(policy: infrastructure::config::DefaultPolicy) -> u8
     }
 }
 
+/// The group bit each monitored interface carries in the kernel, for the
+/// firewall service to narrow an interface-scoped rule with. It is read from
+/// the same two tables the `INTERFACE_GROUPS` maps are written from, so the
+/// bit a rule is installed with is the bit its interface was given.
+pub fn firewall_interface_scope(config: &AgentConfig) -> InterfaceScopeBits {
+    InterfaceScopeBits {
+        bits: config.interface_scope_bits(),
+        membership: config.kernel_interface_membership(),
+    }
+}
+
 pub fn try_load_xdp_firewall(
     ebpf_dir: &str,
     config: &AgentConfig,
-    domain_rules: &[FirewallRule],
 ) -> anyhow::Result<XdpFirewallLoad> {
     let program_bytes = read_ebpf_program(ebpf_dir, "xdp-firewall")?;
     let mut loader = EbpfLoader::load_with_pin_path_dev_bound(
@@ -3799,20 +3809,11 @@ pub fn try_load_xdp_firewall(
 
     map_manager.set_default_policy(firewall_policy_byte(config.firewall.default_policy))?;
 
-    let mut v4_entries = Vec::new();
-    let mut v6_entries = Vec::new();
-    for rule in domain_rules {
-        if !rule.enabled {
-            continue;
-        }
-        if rule.is_v6() {
-            v6_entries.push(rule.to_ebpf_entry_v6());
-        } else {
-            v4_entries.push(rule.to_ebpf_entry());
-        }
-    }
-    map_manager.load_v4_rules(&v4_entries)?;
-    map_manager.load_v6_rules(&v6_entries)?;
+    // The rule arrays are written by the firewall service when it is handed
+    // this manager, not here: a rule is only what the kernel should see once
+    // its aliases are resolved and its interface scope is turned into a group
+    // bit, and writing the configured rules raw would install an alias rule
+    // unrestricted and an interface-scoped rule on every interface.
 
     let mut zone_metrics_readers: Option<ZoneMetricsSource> = None;
     let mut zone_map_manager: Option<ZoneMapManager> = None;

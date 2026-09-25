@@ -525,6 +525,19 @@ impl ConfigReloadService {
         Ok(())
     }
 
+    /// Publish the group bit each monitored interface carries, ahead of a
+    /// firewall reload whose rules may be scoped to those interfaces.
+    pub async fn set_firewall_interface_scope(
+        &self,
+        scope: crate::firewall_service_impl::InterfaceScopeBits,
+    ) {
+        let _guard = self.reload_locks.firewall.lock().await;
+        self.firewall_service
+            .write()
+            .await
+            .set_interface_scope(scope);
+    }
+
     /// Reload firewall rules atomically with mode and enabled awareness.
     ///
     /// Acquires a serialization lock to ensure only one reload runs at a time.

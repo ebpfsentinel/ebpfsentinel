@@ -961,10 +961,28 @@ impl AgentConfig {
     /// Convert all firewall rule configs to domain rules.
     pub fn firewall_rules(&self) -> Result<Vec<FirewallRule>, ConfigError> {
         let group_bits = self.interface_group_bitmasks();
+        let scope_bits = self.interface_scope_bits();
         self.firewall
             .rules
             .iter()
-            .map(|r| r.to_domain_rule(&group_bits))
+            .map(|r| {
+                let rule = r.to_domain_rule(&group_bits)?;
+                // The kernel narrows a rule to an interface through that
+                // interface's group bit, so a rule scoped to an interface
+                // without one would be installed on every interface.
+                if let domain::firewall::entity::Scope::Interface(ref iface) = rule.scope
+                    && !scope_bits.contains_key(iface)
+                {
+                    return Err(ConfigError::Validation {
+                        field: format!("firewall.rules.{}.scope", rule.id.0),
+                        message: format!(
+                            "interface '{iface}' is not in agent.interfaces, or interface_groups \
+                             and agent.interfaces together exceed {MAX_INTERFACE_GROUPS}"
+                        ),
+                    });
+                }
+                Ok(rule)
+            })
             .collect()
     }
 
@@ -1283,6 +1301,42 @@ impl AgentConfig {
             .enumerate()
             .map(|(i, name)| (name, 1u32 << i))
             .collect()
+    }
+
+    /// The group bit each monitored interface is given for `scope: interface`.
+    ///
+    /// The kernel knows a packet's interface only through the groups that
+    /// interface belongs to, so a rule scoped to one interface is written as a
+    /// rule scoped to a group holding nothing else. Those groups take the bits
+    /// the named groups leave free, in the order `agent.interfaces` lists the
+    /// interfaces; an interface past the last free bit gets none, and a rule
+    /// scoped to it is refused by validation rather than installed wider.
+    pub fn interface_scope_bits(&self) -> HashMap<String, u32> {
+        let named = u32::try_from(self.interface_groups.len()).unwrap_or(MAX_INTERFACE_GROUPS);
+        let mut bits = HashMap::new();
+        let mut position = named;
+        for iface in &self.agent.interfaces {
+            if position >= MAX_INTERFACE_GROUPS {
+                break;
+            }
+            if bits.contains_key(iface) {
+                continue;
+            }
+            bits.insert(iface.clone(), 1u32 << position);
+            position += 1;
+        }
+        bits
+    }
+
+    /// What each monitored interface is written into the kernel's
+    /// `INTERFACE_GROUPS` map as: the named groups it belongs to plus its own
+    /// scope bit from [`Self::interface_scope_bits`].
+    pub fn kernel_interface_membership(&self) -> HashMap<String, u32> {
+        let mut membership = self.interface_membership();
+        for (iface, bit) in self.interface_scope_bits() {
+            *membership.entry(iface).or_insert(0) |= bit;
+        }
+        membership
     }
 
     /// Compute per-interface group membership bitmask.
@@ -4442,6 +4496,63 @@ interface_groups:
         assert_eq!(bits["dmz"], 1);
         assert_eq!(bits["lan"], 2);
         assert_eq!(bits["wan"], 4);
+    }
+
+    #[test]
+    fn every_monitored_interface_gets_a_scope_bit_after_the_named_groups() {
+        let yaml = r"
+agent:
+  interfaces: [eth0, eth1, eth2]
+interface_groups:
+  dmz:
+    interfaces: [eth2]
+  lan:
+    interfaces: [eth0, eth1]
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let bits = config.interface_scope_bits();
+        // dmz and lan hold bits 0 and 1, so the interfaces take 2, 3 and 4.
+        assert_eq!(bits["eth0"], 1 << 2);
+        assert_eq!(bits["eth1"], 1 << 3);
+        assert_eq!(bits["eth2"], 1 << 4);
+
+        let membership = config.kernel_interface_membership();
+        let groups = config.interface_group_bitmasks();
+        assert_eq!(membership["eth0"], groups["lan"] | 1 << 2);
+        assert_eq!(membership["eth2"], groups["dmz"] | 1 << 4);
+        // The named-group view is unchanged.
+        assert_eq!(config.interface_membership()["eth0"], groups["lan"]);
+    }
+
+    #[test]
+    fn an_interface_past_the_last_free_bit_gets_no_scope_bit() {
+        let interfaces: Vec<String> = (0..33).map(|i| format!("veth{i}")).collect();
+        let yaml = format!("agent:\n  interfaces: [{}]\n", interfaces.join(", "));
+        let config = AgentConfig::from_yaml(&yaml).unwrap();
+        let bits = config.interface_scope_bits();
+        assert_eq!(bits.len(), 31);
+        assert_eq!(bits["veth30"], 1 << 30);
+        assert!(!bits.contains_key("veth31"));
+    }
+
+    #[test]
+    fn a_rule_scoped_to_an_interface_the_agent_does_not_watch_is_refused() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+firewall:
+  rules:
+    - id: deny-eth9
+      priority: 10
+      action: deny
+      scope: { interface: eth9 }
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let err = config.firewall_rules().unwrap_err().to_string();
+        assert!(err.contains("eth9"), "{err}");
+
+        let ok = AgentConfig::from_yaml(&yaml.replace("eth9", "eth0")).unwrap();
+        assert_eq!(ok.firewall_rules().unwrap().len(), 1);
     }
 
     #[test]

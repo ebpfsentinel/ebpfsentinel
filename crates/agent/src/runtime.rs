@@ -100,6 +100,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     let mut svc =
         FirewallAppService::new(engine, None, Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     svc.set_mode(firewall_mode);
+    svc.set_interface_scope(startup::firewall_interface_scope(config));
     let firewall_svc = Arc::new(RwLock::new(svc));
     info!(
         rule_count,
@@ -574,12 +575,10 @@ pub async fn load_ebpf_programs(
 
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(4096);
 
-    let domain_rules = config.firewall_rules().unwrap_or_default();
-
     // ── XDP Firewall ────────────────────────────────────────────
     let mut fw_loader: Option<EbpfLoader> = None;
     let fw_ok = if config.firewall.enabled {
-        match startup::try_load_xdp_firewall(&ebpf_dir, config, &domain_rules) {
+        match startup::try_load_xdp_firewall(&ebpf_dir, config) {
             Ok((loader, map_manager, fw_metrics_rdr, reader, zone_mgr, _zone_rdrs)) => {
                 let event_tx_clone = event_tx.clone();
                 let rb_obs = RingBufObserver::new(
@@ -975,7 +974,7 @@ pub async fn load_ebpf_programs(
 
     // ── Populate interface groups across all programs ────────────
     {
-        let membership = config.interface_membership();
+        let membership = config.kernel_interface_membership();
         let memberships: Vec<(u32, u32)> = config
             .agent
             .interfaces

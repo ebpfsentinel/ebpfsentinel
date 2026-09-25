@@ -317,7 +317,9 @@ impl PortRange {
 pub enum Scope {
     /// Applies to all interfaces, owned by nobody in particular.
     Global,
-    /// Applies to a specific network interface (standalone mode).
+    /// Applies to one network interface. The datapath never sees the name:
+    /// the interface is given a group bit of its own and the rule is installed
+    /// narrowed to it.
     Interface(String),
     /// Owned by an eBPFsentinel namespace. It names who may write the rule
     /// (an operator's `namespaces` claim) and does not narrow the traffic:
