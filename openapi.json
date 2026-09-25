@@ -10625,12 +10625,6 @@
           "protocol": {
             "type": "string"
           },
-          "route_action": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "schedule": {
             "type": [
               "string",

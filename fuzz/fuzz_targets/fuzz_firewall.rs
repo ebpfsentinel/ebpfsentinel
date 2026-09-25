@@ -122,7 +122,6 @@ fuzz_target!(|data: &[u8]| {
             dst_mac: None,
             schedule: None,
             system: false,
-            route_action: None,
             group_mask: 0,
             tenant_id,
         };

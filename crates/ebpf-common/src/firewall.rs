@@ -122,17 +122,6 @@ pub const DSCP_MARK_NONE: u8 = 0xFF;
 /// as the wildcard.
 pub const VLAN_ANY: u16 = 0xFFFF;
 
-// ── Route action constants ──────────────────────────────────────────
-
-/// No routing action (normal pass/drop/log behaviour).
-pub const ROUTE_ACTION_NONE: u8 = 0;
-/// Force route to a specific gateway/interface.
-pub const ROUTE_ACTION_ROUTE_TO: u8 = 1;
-/// Store ingress interface in conntrack for reply routing.
-pub const ROUTE_ACTION_REPLY_TO: u8 = 2;
-/// Mirror packet to another interface.
-pub const ROUTE_ACTION_DUP_TO: u8 = 3;
-
 // ── Conntrack state match bitmask (for ct_state_mask field) ─────────
 
 /// Bitmask: match packets in NEW state.
@@ -273,10 +262,8 @@ pub struct FirewallRuleEntry {
     pub dst_mac: [u8; 6],
     /// DSCP value to mark on matched packets (0xFF = no marking).
     pub dscp_mark: u8,
-    /// Routing action (`ROUTE_ACTION_*`): 0=none, 1=route-to, 2=reply-to, 3=dup-to.
-    pub route_action: u8,
-    /// Target interface index for route-to / dup-to (0 = none).
-    pub route_ifindex: u16,
+    /// Unused, kept zero so the fields after it keep their offsets.
+    pub _reserved: [u8; 3],
     /// Interface group bitmask (0 = floating/all interfaces).
     /// Bits 0-30: group membership, bit 31: invert flag.
     pub group_mask: u32,
@@ -342,10 +329,8 @@ pub struct FirewallRuleEntryV6 {
     pub dst_mac: [u8; 6],
     /// DSCP value to mark on matched packets (0xFF = no marking).
     pub dscp_mark: u8,
-    /// Routing action (`ROUTE_ACTION_*`): 0=none, 1=route-to, 2=reply-to, 3=dup-to.
-    pub route_action: u8,
-    /// Target interface index for route-to / dup-to (0 = none).
-    pub route_ifindex: u16,
+    /// Unused, kept zero so the fields after it keep their offsets.
+    pub _reserved: [u8; 3],
     /// Interface group bitmask (0 = floating/all interfaces).
     /// Bits 0-30: group membership, bit 31: invert flag.
     pub group_mask: u32,
@@ -521,8 +506,7 @@ mod tests {
         assert_eq!(mem::offset_of!(FirewallRuleEntry, src_mac), 40);
         assert_eq!(mem::offset_of!(FirewallRuleEntry, dst_mac), 46);
         assert_eq!(mem::offset_of!(FirewallRuleEntry, dscp_mark), 52);
-        assert_eq!(mem::offset_of!(FirewallRuleEntry, route_action), 53);
-        assert_eq!(mem::offset_of!(FirewallRuleEntry, route_ifindex), 54);
+        assert_eq!(mem::offset_of!(FirewallRuleEntry, _reserved), 53);
         assert_eq!(mem::offset_of!(FirewallRuleEntry, group_mask), 56);
         assert_eq!(mem::offset_of!(FirewallRuleEntry, tenant_id), 60);
     }
@@ -567,8 +551,7 @@ mod tests {
         assert_eq!(mem::offset_of!(FirewallRuleEntryV6, src_mac), 88);
         assert_eq!(mem::offset_of!(FirewallRuleEntryV6, dst_mac), 94);
         assert_eq!(mem::offset_of!(FirewallRuleEntryV6, dscp_mark), 100);
-        assert_eq!(mem::offset_of!(FirewallRuleEntryV6, route_action), 101);
-        assert_eq!(mem::offset_of!(FirewallRuleEntryV6, route_ifindex), 102);
+        assert_eq!(mem::offset_of!(FirewallRuleEntryV6, _reserved), 101);
         assert_eq!(mem::offset_of!(FirewallRuleEntryV6, group_mask), 104);
         assert_eq!(mem::offset_of!(FirewallRuleEntryV6, tenant_id), 108);
     }

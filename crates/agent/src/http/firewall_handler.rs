@@ -113,8 +113,6 @@ pub struct RuleResponse {
     pub schedule: Option<String>,
     #[serde(skip_serializing_if = "is_false")]
     pub system: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub route_action: Option<String>,
     /// ISO-3166 country codes this rule matches, resolved from a `GeoIP`
     /// alias referenced by `src_alias`/`dst_alias`. Set only when the
     /// referenced alias is a `GeoIP` kind.
@@ -259,7 +257,6 @@ impl CreateRuleRequest {
             dst_mac,
             schedule: None,
             system: false,
-            route_action: None,
             group_mask: 0,
             tenant_id: 0,
         })
@@ -369,18 +366,6 @@ fn format_mac(mac: domain::firewall::entity::MacAddress) -> String {
     )
 }
 
-fn format_route_action(ra: domain::firewall::entity::RouteAction) -> String {
-    match ra {
-        domain::firewall::entity::RouteAction::RouteTo { ifindex } => {
-            format!("route-to:{ifindex}")
-        }
-        domain::firewall::entity::RouteAction::ReplyTo => "reply-to".to_string(),
-        domain::firewall::entity::RouteAction::DupTo { ifindex } => {
-            format!("dup-to:{ifindex}")
-        }
-    }
-}
-
 fn format_scope(scope: &Scope) -> String {
     match scope {
         Scope::Global => "global".to_string(),
@@ -423,7 +408,6 @@ impl From<&FirewallRule> for RuleResponse {
             dst_mac: rule.dst_mac.map(format_mac),
             schedule: rule.schedule.clone(),
             system: rule.system,
-            route_action: rule.route_action.map(format_route_action),
             country_codes: None,
             interfaces: Vec::new(),
         }
@@ -839,7 +823,6 @@ mod tests {
             dst_mac: None,
             schedule: None,
             system: false,
-            route_action: None,
             group_mask: 0,
             tenant_id: 0,
         };

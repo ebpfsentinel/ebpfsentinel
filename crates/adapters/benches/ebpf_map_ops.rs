@@ -94,7 +94,6 @@ fn make_firewall_rule(i: usize) -> FirewallRule {
         dst_mac: None,
         schedule: None,
         system: false,
-        route_action: None,
         group_mask: 0,
         tenant_id: 0,
     }

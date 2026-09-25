@@ -399,8 +399,7 @@ mod tests {
             src_mac: [0; 6],
             dst_mac: [0; 6],
             dscp_mark: DSCP_MARK_NONE,
-            route_action: 0,
-            route_ifindex: 0,
+            _reserved: [0; 3],
             group_mask: 0,
             tenant_id: 0,
         }

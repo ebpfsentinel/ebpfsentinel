@@ -480,7 +480,6 @@ impl FirewallRuleConfig {
             dst_mac,
             schedule: self.schedule.clone(),
             system: false,
-            route_action: None,
             group_mask: super::parse_group_mask(&self.interfaces, group_bits).map_err(
                 |message| ConfigError::Validation {
                     field: "firewall.rules.interfaces".to_string(),

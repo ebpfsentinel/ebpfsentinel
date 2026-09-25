@@ -7,7 +7,7 @@ use ebpf_common::firewall::{
     ICMP_WILDCARD, MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT, MATCH_DST_SET, MATCH_PROTO,
     MATCH_SRC_IP, MATCH_SRC_PORT, MATCH_SRC_SET, MATCH2_DSCP, MATCH2_DST_MAC, MATCH2_ICMP_CODE,
     MATCH2_ICMP_TYPE, MATCH2_NEGATE_DST, MATCH2_NEGATE_SRC, MATCH2_SRC_MAC, MATCH2_TCP_FLAGS,
-    ROUTE_ACTION_DUP_TO, ROUTE_ACTION_NONE, ROUTE_ACTION_REPLY_TO, ROUTE_ACTION_ROUTE_TO, VLAN_ANY,
+    VLAN_ANY,
 };
 
 use super::error::FirewallError;
@@ -21,19 +21,6 @@ pub enum FirewallAction {
     Log,
     /// Reject: drop the packet and send TCP RST (for TCP) or ICMP Unreachable (for UDP).
     Reject,
-}
-
-// ── Routing actions ────────────────────────────────────────────────
-
-/// Policy routing action attached to a firewall rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RouteAction {
-    /// Force route to a specific interface (by ifindex).
-    RouteTo { ifindex: u16 },
-    /// Store ingress interface for stateful reply routing.
-    ReplyTo,
-    /// Mirror (duplicate) packet to another interface.
-    DupTo { ifindex: u16 },
 }
 
 // ── IP Network ──────────────────────────────────────────────────────
@@ -498,9 +485,6 @@ pub struct FirewallRule {
     /// System-generated rule flag (anti-lockout, etc). Cannot be deleted via API.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub system: bool,
-    /// Policy routing action (route-to, reply-to, dup-to).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub route_action: Option<RouteAction>,
     /// Interface group bitmask for multi-interface rule scoping.
     /// 0 = floating (applies to all interfaces). Bit 31 = invert.
     #[serde(default)]
@@ -781,8 +765,7 @@ impl FirewallRule {
             src_mac,
             dst_mac,
             dscp_mark: self.dscp_mark.unwrap_or(DSCP_MARK_NONE),
-            route_action: route_action_to_u8(self.route_action),
-            route_ifindex: route_action_ifindex(self.route_action),
+            _reserved: [0; 3],
             group_mask: self.group_mask,
             tenant_id: self.tenant_id,
         }
@@ -928,8 +911,7 @@ impl FirewallRule {
             src_mac,
             dst_mac,
             dscp_mark: self.dscp_mark.unwrap_or(DSCP_MARK_NONE),
-            route_action: route_action_to_u8(self.route_action),
-            route_ifindex: route_action_ifindex(self.route_action),
+            _reserved: [0; 3],
             group_mask: self.group_mask,
             tenant_id: self.tenant_id,
         }
@@ -943,24 +925,6 @@ fn action_to_u8(action: FirewallAction) -> u8 {
         FirewallAction::Deny => ACTION_DROP,
         FirewallAction::Log => ACTION_LOG,
         FirewallAction::Reject => ACTION_REJECT,
-    }
-}
-
-/// Map an optional `RouteAction` to the eBPF route action constant.
-fn route_action_to_u8(ra: Option<RouteAction>) -> u8 {
-    match ra {
-        None => ROUTE_ACTION_NONE,
-        Some(RouteAction::RouteTo { .. }) => ROUTE_ACTION_ROUTE_TO,
-        Some(RouteAction::ReplyTo) => ROUTE_ACTION_REPLY_TO,
-        Some(RouteAction::DupTo { .. }) => ROUTE_ACTION_DUP_TO,
-    }
-}
-
-/// Extract the target ifindex from a `RouteAction` (0 if none).
-fn route_action_ifindex(ra: Option<RouteAction>) -> u16 {
-    match ra {
-        Some(RouteAction::RouteTo { ifindex } | RouteAction::DupTo { ifindex }) => ifindex,
-        _ => 0,
     }
 }
 
@@ -1299,7 +1263,6 @@ mod tests {
             dst_mac: None,
             schedule: None,
             system: false,
-            route_action: None,
             group_mask: 0,
             tenant_id: 0,
         }

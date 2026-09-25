@@ -683,7 +683,6 @@ impl FirewallAppService {
             dst_mac: None,
             schedule: None,
             system: true,
-            route_action: None,
             group_mask: 0,
             tenant_id: 0,
         }
@@ -744,7 +743,6 @@ impl FirewallAppService {
             dst_mac: None,
             schedule: None,
             system: true,
-            route_action: None,
             group_mask: 0,
             tenant_id: 0,
         })
@@ -835,7 +833,6 @@ impl FirewallAppService {
                     dst_mac: None,
                     schedule: None,
                     system: true,
-                    route_action: None,
                     group_mask: 0,
                     tenant_id: 0,
                 };
@@ -997,7 +994,6 @@ mod tests {
             dst_mac: None,
             schedule: None,
             system: false,
-            route_action: None,
             group_mask: 0,
             tenant_id: 0,
         }
