@@ -75,11 +75,14 @@ if [[ -d "${SCRIPT_DIR}/ebpf" ]]; then
 fi
 
 # ── Install configuration ─────────────────────────────────────────
+#
+# The agent refuses a world-readable config file (it may carry API keys and
+# alert credentials), so the file is installed 0640 rather than 0644.
 
 mkdir -p "${INSTALL_ETC}"
 if [[ ! -f "${INSTALL_ETC}/config.yaml" ]]; then
   echo "Installing default configuration to ${INSTALL_ETC}/config.yaml..."
-  install -Dm644 "${SCRIPT_DIR}/ebpfsentinel.yaml" "${INSTALL_ETC}/config.yaml"
+  install -Dm640 "${SCRIPT_DIR}/ebpfsentinel.yaml" "${INSTALL_ETC}/config.yaml"
 else
   echo "Configuration already exists at ${INSTALL_ETC}/config.yaml, skipping."
 fi
