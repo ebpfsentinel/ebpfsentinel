@@ -21,6 +21,10 @@ use ebpf_common::{
         MAX_MAGLEV_SERVICES, MaglevLookup, lb_fnv1a_u32, lb_service_index,
     },
 };
+use aya_ebpf_bindings::bindings::{
+    BPF_FIB_LKUP_RET_NO_NEIGH, BPF_FIB_LKUP_RET_SUCCESS, bpf_fib_lookup as BpfFibLookupParams,
+};
+use aya_ebpf_bindings::helpers::{bpf_fib_lookup, bpf_redirect};
 use ebpf_helpers::kfuncs::{xdp_rx_hash, xdp_rx_timestamp};
 use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::ringbuf::{avail_data, submit_flags};
@@ -41,13 +45,9 @@ use network_types::{
 // ── Constants ───────────────────────────────────────────────────────
 // Network constants and header structs imported from ebpf_helpers.
 
-// NOTE: bpf_skb_get/set_tunnel_key (v4.3, TC context) enables tunnel
-// encapsulation metadata for VXLAN/GRE backends. XDP-level tunneling
-// requires bpf_skb_adjust_room + manual header construction.
-
-// NOTE: bpf_sk_select_reuseport (v4.19) enables socket-level load
-// balancing via SO_REUSEPORT. Alternative to XDP-level DNAT for
-// localhost services. Requires BPF_PROG_TYPE_SK_REUSEPORT program.
+/// Address family for the FIB lookup.
+const FIB_AF_INET: u8 = 2;
+const FIB_AF_INET6: u8 = 10;
 
 /// Maximum backends per service (verifier bound for iteration).
 const MAX_BACKENDS_PER_SVC: usize = LB_MAX_BACKENDS_V2 as usize;
@@ -86,9 +86,9 @@ static LB_MAGLEV: HashMap<u32, MaglevLookup, { MAX_MAGLEV_SERVICES as usize }> =
 static LB_METRICS: PerCpuArray<u64, { LB_METRIC_COUNT as usize }> = PerCpuArray::new();
 
 /// DevMap for high-performance XDP redirect to backend interfaces.
-/// Userspace populates this with backend ifindex values. When an entry
-/// exists for the selected backend, `redirect` is used instead of XDP_TX.
-/// Falls back to MAC swap + XDP_TX when the DevMap entry is absent.
+/// Userspace populates this with backend ifindex values. A DNAT packet
+/// whose next hop leaves by another interface is redirected through the
+/// entry for its backend, or through `bpf_redirect` when none exists.
 #[btf_map]
 static LB_DEVMAP: DevMap<256> = DevMap::new();
 
@@ -98,6 +98,12 @@ static LB_DEVMAP: DevMap<256> = DevMap::new();
 /// entry makes the data plane fall back to the DNAT path unchanged.
 #[btf_map]
 static LB_BACKEND_MAC: HashMap<u32, BackendMac, { MAX_LB_BACKEND_MAC as usize }> = HashMap::new();
+
+/// Per-CPU scratch for the FIB lookup parameters. A 64-byte struct zeroed on
+/// the stack costs the verifier an unrolled memset on every path; a scratch
+/// map costs one lookup.
+#[btf_map]
+static FIB_PARAMS: PerCpuArray<BpfFibLookupParams, 1> = PerCpuArray::new();
 
 /// Kernel->userspace event ring buffer, 1 MiB: about 7,500 packet events
 /// before backpressure refuses new ones (sizing in `ebpf_helpers::ringbuf`).
@@ -276,25 +282,10 @@ fn process_v4(
         return Ok(xdp_action::XDP_DROP);
     }
 
-    // Try DevMap redirect first (wire-speed forwarding to backend interface).
-    // If userspace has populated LB_DEVMAP[backend_id] with the backend's
-    // ifindex, redirect directly. Otherwise fall back to MAC swap + XDP_TX.
-    if LB_DEVMAP.redirect(backend_id, 0).is_ok() {
-        return Ok(xdp_action::XDP_REDIRECT);
-    }
-
-    // Fallback: MAC swap + XDP_TX (same-subnet backends behind a gateway).
-    // Use copy_mac_asm! to prevent LLVM memcpy outlining with packet pointers.
-    let ethhdr_mut: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
-    let mut tmp_mac = [0u8; 6];
-    unsafe {
-        let p = ethhdr_mut as *mut u8;
-        copy_mac_asm!(tmp_mac.as_mut_ptr(), p); // tmp = dst
-        copy_mac_asm!(p, p.add(6)); // dst = src
-        copy_mac_asm!(p.add(6), tmp_mac.as_ptr()); // src = tmp
-    }
-
-    Ok(xdp_action::XDP_TX)
+    // Route the rewritten packet: the next hop towards the backend decides
+    // both MACs and the interface it leaves by.
+    let dst = [u32::from_ne_bytes(new_dst_ip.to_be_bytes()), 0, 0, 0];
+    forward_to_backend(ctx, backend_id, FIB_AF_INET, src_addr, dst, protocol)
 }
 
 // ── IPv6 Processing ─────────────────────────────────────────────────
@@ -441,21 +432,24 @@ fn process_v6(
         return Ok(xdp_action::XDP_DROP);
     }
 
-    // DevMap redirect first, MAC swap + XDP_TX fallback
-    if LB_DEVMAP.redirect(backend_id, 0).is_ok() {
-        return Ok(xdp_action::XDP_REDIRECT);
-    }
-
-    let ethhdr_mut: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
-    let mut tmp_mac = [0u8; 6];
+    // Route the rewritten packet from the addresses now in the header, so
+    // the lookup sees the backend rather than the VIP.
+    let ipv6hdr_now: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
+    let mut src_bytes = [0u8; 16];
+    let mut dst_bytes = [0u8; 16];
     unsafe {
-        let p = ethhdr_mut as *mut u8;
-        copy_mac_asm!(tmp_mac.as_mut_ptr(), p);
-        copy_mac_asm!(p, p.add(6));
-        copy_mac_asm!(p.add(6), tmp_mac.as_ptr());
+        let base = ipv6hdr_now as *const u8;
+        copy_16b_asm!(src_bytes.as_mut_ptr(), base.add(8));
+        copy_16b_asm!(dst_bytes.as_mut_ptr(), base.add(24));
     }
-
-    Ok(xdp_action::XDP_TX)
+    forward_to_backend(
+        ctx,
+        backend_id,
+        FIB_AF_INET6,
+        wire_words(&src_bytes),
+        wire_words(&dst_bytes),
+        next_hdr,
+    )
 }
 
 // ── L2 DSR Forwarding ───────────────────────────────────────────────
@@ -485,11 +479,17 @@ fn try_dsr_forward(
     // Resolve backend MAC; absent → caller falls back to DNAT.
     let mac = unsafe { LB_BACKEND_MAC.get(&backend_id) }?.mac;
 
-    // Rewrite ONLY eth.dst. dst IP = VIP, L3/L4 checksums untouched.
-    // copy_mac_asm! prevents LLVM memcpy outlining with packet pointers.
+    // Rewrite only the Ethernet header. dst IP = VIP, L3/L4 checksums
+    // untouched. The frame was addressed to this interface, so its old
+    // destination is our own MAC and becomes the source: leaving the
+    // client router's MAC there would teach the switch that the router
+    // sits behind this port. copy_mac_asm! prevents LLVM memcpy outlining
+    // with packet pointers.
     let ethhdr_mut: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0).ok()? };
     unsafe {
-        copy_mac_asm!(ethhdr_mut as *mut u8, mac.as_ptr());
+        let p = ethhdr_mut as *mut u8;
+        copy_mac_asm!(p.add(6), p);
+        copy_mac_asm!(p, mac.as_ptr());
     }
 
     increment_metric(LB_METRIC_PACKETS_FORWARDED);
@@ -522,6 +522,113 @@ fn try_dsr_forward(
         return Some(xdp_action::XDP_REDIRECT);
     }
     Some(xdp_action::XDP_TX)
+}
+
+// ── DNAT Forwarding ─────────────────────────────────────────────────
+
+/// Send a DNAT-rewritten packet to its backend.
+///
+/// The destination IP now names the backend, but the Ethernet header
+/// still carries the frame that reached us: our own MAC as destination
+/// and the client-side router as source. `bpf_fib_lookup` with neighbour
+/// resolution answers the three things the rewrite needs - the interface
+/// the backend is reached by, the next hop's MAC and the MAC of that
+/// interface - so both addresses are written before the packet leaves.
+///
+/// - Next hop on the ingress interface: `XDP_TX`.
+/// - Next hop elsewhere: the backend's `LB_DEVMAP` entry, or
+///   `bpf_redirect` to the interface the FIB named.
+/// - Route known but neighbour not yet resolved: `XDP_PASS`, so the stack
+///   forwards this packet and resolves the neighbour for the next one.
+/// - No route: the frame is bounced back to the router it came from
+///   (MAC swap + `XDP_TX`), which only reaches a backend that router can
+///   route to.
+///
+/// `src`/`dst` carry the addresses in wire order: word 0 alone for IPv4,
+/// all four for IPv6. The scratch buffer is per-CPU and reused, so every
+/// field the kernel reads is written on each call.
+#[inline(always)]
+fn forward_to_backend(
+    ctx: &XdpContext,
+    backend_id: u32,
+    family: u8,
+    src: [u32; 4],
+    dst: [u32; 4],
+    l4_protocol: u8,
+) -> Result<u32, ()> {
+    let params = FIB_PARAMS.get_ptr_mut(0).ok_or(())?;
+    let ingress = ctx.ingress_ifindex() as u32;
+
+    unsafe {
+        (*params).family = family;
+        (*params).l4_protocol = l4_protocol;
+        (*params).sport = 0;
+        (*params).dport = 0;
+        // tot_len 0: the MTU was already checked by bpf_check_mtu.
+        (*params).__bindgen_anon_1.tot_len = 0;
+        // The kernel writes rt_metric back into this union: clear all four
+        // bytes so a stale metric is not read as this packet's tos/flowinfo.
+        (*params).__bindgen_anon_2.flowinfo = 0;
+        if family == FIB_AF_INET6 {
+            (*params).__bindgen_anon_3.ipv6_src = src;
+            (*params).__bindgen_anon_4.ipv6_dst = dst;
+        } else {
+            (*params).__bindgen_anon_3.ipv4_src = src[0];
+            (*params).__bindgen_anon_4.ipv4_dst = dst[0];
+        }
+        (*params).ifindex = ingress;
+    }
+
+    let rc = unsafe {
+        bpf_fib_lookup(
+            ctx.ctx.cast::<core::ffi::c_void>(),
+            params,
+            core::mem::size_of::<BpfFibLookupParams>() as i32,
+            0,
+        )
+    };
+
+    let ethhdr_mut: *mut EthHdr = unsafe { ptr_at_mut(ctx, 0)? };
+    let p = ethhdr_mut as *mut u8;
+
+    if rc == BPF_FIB_LKUP_RET_SUCCESS as i64 {
+        let egress = unsafe { (*params).ifindex };
+        unsafe {
+            copy_mac_asm!(p, (*params).dmac.as_ptr());
+            copy_mac_asm!(p.add(6), (*params).smac.as_ptr());
+        }
+        if egress == ingress {
+            return Ok(xdp_action::XDP_TX);
+        }
+        if LB_DEVMAP.redirect(backend_id, 0).is_ok() {
+            return Ok(xdp_action::XDP_REDIRECT);
+        }
+        return Ok(unsafe { bpf_redirect(egress, 0) } as u32);
+    }
+
+    if rc == BPF_FIB_LKUP_RET_NO_NEIGH as i64 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    let mut tmp_mac = [0u8; 6];
+    unsafe {
+        copy_mac_asm!(tmp_mac.as_mut_ptr(), p); // tmp = dst
+        copy_mac_asm!(p, p.add(6)); // dst = src
+        copy_mac_asm!(p.add(6), tmp_mac.as_ptr()); // src = tmp
+    }
+    Ok(xdp_action::XDP_TX)
+}
+
+/// Reinterpret 16 header bytes as four words with their wire byte order
+/// preserved - what `bpf_fib_lookup` expects for `ipv6_src`/`ipv6_dst`.
+#[inline(always)]
+fn wire_words(bytes: &[u8; 16]) -> [u32; 4] {
+    [
+        u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        u32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+        u32::from_ne_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+        u32::from_ne_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+    ]
 }
 
 // ── Backend Selection ───────────────────────────────────────────────
