@@ -768,7 +768,11 @@ impl FirewallAppService {
 
     /// Generate anti-lockout rules based on current config.
     ///
-    /// Creates one PASS rule per (port, interface) tuple at priority 0 (highest).
+    /// Creates two PASS rules per (port, interface) tuple at priority 0
+    /// (highest), one per address family: a rule naming no address is loaded
+    /// into the v4 array only, so without a twin naming `::/0` the port would
+    /// stay open over IPv4 and close over IPv6 behind any v6 deny, the
+    /// deny-all posture's included.
     /// These rules are marked with `system: true` so they cannot be deleted via API.
     fn generate_anti_lockout_rules(&self) -> Vec<FirewallRule> {
         if !self.anti_lockout.enabled {
@@ -797,7 +801,7 @@ impl FirewallAppService {
                     Some(name) => format!("anti-lockout-{name}-{port}"),
                     None => format!("anti-lockout-{port}"),
                 };
-                rules.push(FirewallRule {
+                let v4 = FirewallRule {
                     id: RuleId(id_suffix),
                     enabled: true,
                     priority: 0,
@@ -834,7 +838,17 @@ impl FirewallAppService {
                     route_action: None,
                     group_mask: 0,
                     tenant_id: 0,
-                });
+                };
+                let v6 = FirewallRule {
+                    id: RuleId(format!("{}-v6", v4.id.0)),
+                    dst_ip: Some(IpNetwork::V6 {
+                        addr: [0u8; 16],
+                        prefix_len: 0,
+                    }),
+                    ..v4.clone()
+                };
+                rules.push(v4);
+                rules.push(v6);
             }
         }
         rules
@@ -1155,6 +1169,29 @@ mod tests {
     }
 
     #[test]
+    fn the_posture_keeps_the_management_ports_open_over_ipv6_too() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(map.clone()));
+        svc.set_anti_lockout(AntiLockoutSettings {
+            enabled: true,
+            interfaces: Vec::new(),
+            ports: vec![22],
+        });
+
+        svc.enter_deny_all().unwrap();
+
+        // Each array holds the pass for port 22 and the deny of its family,
+        // so a v6 management session is not closed by the v6 deny.
+        assert_eq!(map.v4.lock().unwrap().len(), 2);
+        assert_eq!(map.v6.lock().unwrap().len(), 2);
+        let v6: Vec<&FirewallRule> = svc.list_rules().iter().filter(|r| r.is_v6()).collect();
+        assert_eq!(v6[0].id.0, "anti-lockout-22-v6");
+        assert_eq!(v6[0].action, FirewallAction::Allow);
+        assert_eq!(v6[1].id.0, DENY_ALL_RULE_ID_V6);
+    }
+
+    #[test]
     fn reloading_installs_the_configured_anti_lockout_ports() {
         let mut svc = make_service();
         svc.set_anti_lockout(AntiLockoutSettings {
@@ -1164,7 +1201,7 @@ mod tests {
         });
         svc.reload_rules(Vec::new()).unwrap();
         let ids: Vec<_> = svc.list_rules().iter().map(|r| r.id.0.as_str()).collect();
-        assert_eq!(ids, ["anti-lockout-2222"]);
+        assert_eq!(ids, ["anti-lockout-2222", "anti-lockout-2222-v6"]);
     }
 
     #[test]
