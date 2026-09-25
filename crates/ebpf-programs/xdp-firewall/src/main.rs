@@ -215,7 +215,8 @@ static CT_STATE_SCRATCH: PerCpuArray<u32, 1> = PerCpuArray::new();
 // a malformed ICMP from offset 0 for every packet.
 static PKT_CTX: PerCpuArray<PacketCtx, 1> = PerCpuArray::new();
 
-/// Shared kernel->userspace event ring buffer (1 MB).
+/// Kernel->userspace event ring buffer, 1 MiB: about 7,500 packet events
+/// before backpressure refuses new ones (sizing in `ebpf_helpers::ringbuf`).
 #[btf_map]
 static EVENTS: RingBuf<PacketEvent, { 256 * 4096 }> = RingBuf::new();
 

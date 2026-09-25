@@ -95,12 +95,10 @@ static IDS_SRC_PATTERNS: HashMap<IdsPatternKey, IdsPatternValue, 10240> = HashMa
 #[btf_map]
 static IDS_METRICS: PerCpuArray<u64, { IDS_METRIC_COUNT as usize }> = PerCpuArray::new();
 
-/// Shared kernel→userspace event ring buffer (4 MB).
-///
-/// Bumped from 1 MiB to 4 MiB alongside the L7 payload capture bump to
-/// 2048 B - larger events would otherwise cause frequent backpressure
-/// drops. The extra 3 MiB of kernel memory is acceptable on any
-/// modern deployment.
+/// Kernel->userspace event ring buffer, 4 MiB: about 1,460 L7 records of
+/// 2,152 bytes before backpressure refuses new ones. Four times the packet
+/// rings because an L7 record carries up to 2 KiB of payload, and at 1 MiB
+/// the ring would hold about 365 of them (sizing in `ebpf_helpers::ringbuf`).
 #[btf_map]
 static EVENTS: RingBuf<PacketEvent, { 1024 * 4096 }> = RingBuf::new();
 
@@ -244,14 +242,10 @@ const METRIC_CGROUP_ATTRIBUTED: u32 = IDS_METRIC_CGROUP_ATTRIBUTED;
 /// entry to tear down is dropped all the same and confirms nothing.
 const METRIC_CT_KILL_CONFIRMED: u32 = IDS_METRIC_CT_KILL_CONFIRMED;
 
-/// 75% threshold for the 4 MiB EVENTS ring buffer. Must stay in sync
-/// with the `RingBuf::with_byte_size` call above.
-const IDS_EVENTS_BACKPRESSURE_THRESHOLD: u64 = (1024 * 4096) * 3 / 4;
-
 /// Returns `true` if the EVENTS RingBuf has backpressure (>75% full).
 #[inline(always)]
 fn ringbuf_has_backpressure() -> bool {
-    ringbuf_has_backpressure!(EVENTS, IDS_EVENTS_BACKPRESSURE_THRESHOLD)
+    ringbuf_has_backpressure!(EVENTS)
 }
 
 /// Returns `true` if the event should be sampled out (i.e., skipped).

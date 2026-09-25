@@ -41,7 +41,7 @@ macro_rules! emit_packet_event {
      $protocol:expr, $event_type:expr, $action:expr, $rule_id:expr,
      $flags:expr, $vlan_id:expr ; tc $ctx:expr, cgroup $cgroup_id:expr) => {{
         let backlog = $crate::ringbuf::avail_data(&$ringbuf);
-        if backlog > $crate::ringbuf::DEFAULT_BACKPRESSURE_THRESHOLD {
+        if backlog > $crate::ringbuf::backpressure_threshold(&$ringbuf) {
             $crate::increment_metric!($metrics, $metric_dropped);
             return;
         }
@@ -80,7 +80,7 @@ macro_rules! emit_packet_event {
      $protocol:expr, $event_type:expr, $action:expr, $rule_id:expr,
      $flags:expr, $vlan_id:expr ; tc $ctx:expr) => {{
         let backlog = $crate::ringbuf::avail_data(&$ringbuf);
-        if backlog > $crate::ringbuf::DEFAULT_BACKPRESSURE_THRESHOLD {
+        if backlog > $crate::ringbuf::backpressure_threshold(&$ringbuf) {
             $crate::increment_metric!($metrics, $metric_dropped);
             return;
         }
@@ -128,7 +128,7 @@ macro_rules! emit_packet_event {
      $protocol:expr, $event_type:expr, $action:expr, $rule_id:expr,
      $flags:expr, $vlan_id:expr) => {{
         let backlog = $crate::ringbuf::avail_data(&$ringbuf);
-        if backlog > $crate::ringbuf::DEFAULT_BACKPRESSURE_THRESHOLD {
+        if backlog > $crate::ringbuf::backpressure_threshold(&$ringbuf) {
             $crate::increment_metric!($metrics, $metric_dropped);
             return;
         }

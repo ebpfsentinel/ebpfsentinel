@@ -72,7 +72,8 @@ static THREATINTEL_BLOOM_V6: BloomFilter<ThreatIntelKeyV6, { THREATINTEL_MAX_ENT
 #[btf_map]
 static THREATINTEL_METRICS: PerCpuArray<u64, 5> = PerCpuArray::new();
 
-/// Shared kernel→userspace event ring buffer (1 MB).
+/// Kernel->userspace event ring buffer, 1 MiB: about 7,500 packet events
+/// before backpressure refuses new ones (sizing in `ebpf_helpers::ringbuf`).
 #[btf_map]
 static EVENTS: RingBuf<PacketEvent, { 256 * 4096 }> = RingBuf::new();
 

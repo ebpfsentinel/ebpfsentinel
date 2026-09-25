@@ -35,7 +35,8 @@ const DNS_PORT: u16 = 53;
 
 // ── Maps ────────────────────────────────────────────────────────────
 
-/// Dedicated DNS kernel→userspace event ring buffer (256 KB).
+/// Dedicated DNS kernel->userspace event ring buffer, 256 KiB: about 335
+/// full records before backpressure refuses new ones.
 /// Separate from the main EVENTS RingBuf to avoid DNS volume flooding
 /// security events and to allow independent polling cadence.
 ///
@@ -226,13 +227,10 @@ fn increment_metric(index: u32) {
     increment_metric!(DNS_METRICS, index);
 }
 
-/// DNS backpressure threshold: 75% of 256 KB DNS ring buffer.
-const DNS_BACKPRESSURE_THRESHOLD: u64 = 64 * 4096 * 3 / 4;
-
 /// Returns `true` if the DNS_EVENTS RingBuf has backpressure (>75% full).
 #[inline(always)]
 fn dns_ringbuf_has_backpressure() -> bool {
-    ebpf_helpers::ringbuf_has_backpressure!(DNS_EVENTS, DNS_BACKPRESSURE_THRESHOLD)
+    ebpf_helpers::ringbuf_has_backpressure!(DNS_EVENTS)
 }
 
 /// Header fields shared by both event tiers, gathered once so the two

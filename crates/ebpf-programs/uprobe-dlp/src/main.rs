@@ -46,7 +46,9 @@ use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 
 // ── Maps ────────────────────────────────────────────────────────────
 
-/// Kernel→userspace event ring buffer (4 MB) for DLP events.
+/// Kernel->userspace DLP event ring buffer, 4 MiB: about 1,010 full events
+/// of 4,136 bytes, or 14,000 small ones. Emission is refused only when a
+/// reserve fails (sizing in `ebpf_helpers::ringbuf`).
 #[btf_map]
 static EVENTS: RingBuf<DlpEvent, { 1024 * 4096 }> = RingBuf::new();
 

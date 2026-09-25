@@ -127,7 +127,8 @@ static QOS_FLOW_STATE: LruPerCpuHashMap<u32, QosFlowState, 65536> = LruPerCpuHas
 #[btf_map]
 static QOS_METRICS: PerCpuArray<u64, { QOS_METRIC_COUNT as usize }> = PerCpuArray::new();
 
-/// Shared kernel->userspace event ring buffer (1 MB).
+/// Kernel->userspace event ring buffer, 1 MiB: about 7,500 packet events
+/// before backpressure refuses new ones (sizing in `ebpf_helpers::ringbuf`).
 #[btf_map]
 static EVENTS: RingBuf<PacketEvent, { 256 * 4096 }> = RingBuf::new();
 

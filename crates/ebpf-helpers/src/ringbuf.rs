@@ -4,6 +4,32 @@
 //! whether the ring buffer is more than 75% full, allowing callers to
 //! skip event emission under backpressure, and [`submit_flags`] decides
 //! whether a commit wakes the reader.
+//!
+//! The 75% line is read off the ring's own type by
+//! [`backpressure_threshold`], so a ring is resized in its declaration and
+//! nowhere else: a threshold written out beside it is a second figure that
+//! goes stale the day the first one changes.
+//!
+//! # Sizing
+//!
+//! A ring is sized in records, not in bytes: what it has to hold is what
+//! arrives while the reader is not running, beyond the [`WAKEUP_THRESHOLD`]
+//! at which it is woken. Every record carries an 8-byte ring header.
+//!
+//! | Ring | Size | Largest record | Records before refusal |
+//! |------|------|----------------|------------------------|
+//! | packet events (firewall, ratelimit, loadbalancer, qos, threatintel) | 1 MiB | 104 B | about 7,500 |
+//! | tc-ids, L7 payload of 2 KiB | 4 MiB | 2,152 B | about 1,460 |
+//! | uprobe-dlp, 4 KiB excerpt | 4 MiB | 4,136 B | about 1,010, reserve fails only when full |
+//! | tc-dns | 256 KiB | 584 B | about 335 |
+//!
+//! The two 4 MiB rings are large because their records are: at 1 MiB,
+//! tc-ids would hold about 365 L7 records, a few milliseconds of a noisy
+//! segment. Ring memory is allocated once per ring rather than once per CPU,
+//! 13.25 MiB across all eight, so it scales with neither the host's cores
+//! nor the configuration and is not where the agent's memory goes.
+
+use aya_ebpf::btf_maps::RingBuf;
 
 /// `BPF_RB_AVAIL_DATA` flag for `bpf_ringbuf_query`.
 pub const BPF_RB_AVAIL_DATA: u64 = 0;
@@ -22,11 +48,21 @@ pub const BPF_RB_FORCE_WAKEUP: u64 = 2;
 /// adds is bounded by that tick rather than by this figure.
 pub const WAKEUP_THRESHOLD: u64 = 64 * 1024;
 
-/// Default ring buffer size used by most programs (1 MB).
-pub const DEFAULT_RINGBUF_SIZE: u64 = 256 * 4096;
-
-/// Default backpressure threshold (75% of 1 MB ring buffer).
-pub const DEFAULT_BACKPRESSURE_THRESHOLD: u64 = DEFAULT_RINGBUF_SIZE * 3 / 4;
+/// Unconsumed bytes above which `ringbuf` refuses new records: 75% of its
+/// size.
+///
+/// Evaluated at compile time from the ring's declared size, so it costs
+/// nothing on the packet path and cannot disagree with the declaration.
+/// The quarter left free is what keeps a burst from filling the ring to the
+/// last byte, where a large record fails to reserve while a small one still
+/// fits and the loss stops being attributable to backpressure.
+#[inline(always)]
+#[must_use]
+pub const fn backpressure_threshold<T, const MAX_ENTRIES: usize, const FLAGS: usize>(
+    _ringbuf: &RingBuf<T, MAX_ENTRIES, FLAGS>,
+) -> u64 {
+    (MAX_ENTRIES as u64) * 3 / 4
+}
 
 /// Returns `true` if the given `RingBuf` has backpressure (>75% full).
 ///
@@ -42,21 +78,11 @@ pub const DEFAULT_BACKPRESSURE_THRESHOLD: u64 = DEFAULT_RINGBUF_SIZE * 3 / 4;
 ///     return; // skip emission
 /// }
 /// ```
-///
-/// You can also pass a custom threshold:
-///
-/// ```ignore
-/// if ringbuf_has_backpressure!(EVENTS, MY_THRESHOLD) {
-///     return;
-/// }
-/// ```
 #[macro_export]
 macro_rules! ringbuf_has_backpressure {
     ($ringbuf:expr) => {
-        $crate::ringbuf::avail_data(&$ringbuf) > $crate::ringbuf::DEFAULT_BACKPRESSURE_THRESHOLD
-    };
-    ($ringbuf:expr, $threshold:expr) => {
-        $crate::ringbuf::avail_data(&$ringbuf) > $threshold
+        $crate::ringbuf::avail_data(&$ringbuf)
+            > $crate::ringbuf::backpressure_threshold(&$ringbuf)
     };
 }
 

@@ -16,7 +16,7 @@ use tracing::{debug, error, info};
 /// tc-dns producer keeps the kernel's default wakeup, because a DNS answer
 /// has to reach the domain cache before the connection it resolved for, so
 /// there is no periodic drain here. DNS events
-/// consist of a 48-byte `DnsEvent` header followed by a variable-length
+/// consist of a 64-byte `DnsEvent` header followed by a variable-length
 /// DNS payload (up to 512 bytes).
 pub struct DnsEventReader {
     ring_buf: AsyncFd<RingBuf<MapData>>,
@@ -82,7 +82,7 @@ impl DnsEventReader {
                 let bytes: &[u8] = &item;
                 let header_size = std::mem::size_of::<DnsEvent>();
                 if bytes.len() >= header_size {
-                    // SAFETY: DnsEvent is #[repr(C)] with known layout (48 bytes).
+                    // SAFETY: DnsEvent is #[repr(C)] with known layout (64 bytes).
                     // The kernel writes this exact layout. We verify the length above.
                     let header =
                         unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<DnsEvent>()) };
