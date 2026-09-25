@@ -160,22 +160,57 @@ fn iface_to_ifindex(iface: &str) -> Result<u32, NetkitError> {
         })
 }
 
+/// Which side of a netkit pair a hot-plugged program runs on.
+///
+/// The kernel runs `BPF_NETKIT_PRIMARY` programs on the primary's transmit
+/// path, which is the traffic entering the pod, and `BPF_NETKIT_PEER` programs
+/// on the peer's, which is the traffic leaving it. The agent's ingress chain
+/// takes the first and its egress chain the second, the same mapping
+/// [`super::loader::EbpfLoader::attach_tc_via_netkit`] uses for a configured
+/// interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetkitSide {
+    /// Traffic entering the pod: the agent's TC ingress chain.
+    Ingress,
+    /// Traffic leaving the pod: the agent's TC egress chain.
+    Egress,
+}
+
+impl NetkitSide {
+    fn attach_type(self) -> u32 {
+        match self {
+            Self::Ingress => BPF_NETKIT_PRIMARY,
+            Self::Egress => BPF_NETKIT_PEER,
+        }
+    }
+}
+
 /// Registry of loaded TC program FDs for netkit hot-plug attachment.
 ///
 /// When a new netkit device appears at runtime (e.g. Kubernetes pod
 /// creation), the watcher callback uses this registry to attach all
 /// configured TC programs to the new interface without restarting
-/// the agent.
+/// the agent. Programs attach in registration order, which is the order
+/// they run in on each side, so the caller registers them in chain order.
+///
+/// The links are held per device and dropped when the device goes away:
+/// the kernel detaches a link whose device was unregistered, but the link
+/// object and its fd live until the fd is closed, so holding them for the
+/// life of the agent would leak one fd per program per pod ever scheduled.
 ///
 /// Safety: the stored `RawFd` values are valid as long as the
 /// `EbpfState` that owns the underlying `EbpfLoader` instances is
 /// alive. The agent shutdown sequence cancels the watcher before
 /// dropping `EbpfState`.
 pub struct NetkitHotPlugRegistry {
-    /// `(program_name, program_fd)` for each loaded TC program.
-    programs: Vec<(String, std::os::fd::RawFd)>,
-    /// Link FDs for hot-plugged attachments. Dropping detaches.
-    links: std::sync::Mutex<Vec<OwnedFd>>,
+    /// `(program_name, program_fd, side)` for each loaded TC program, in
+    /// the order it runs on its side.
+    programs: Vec<(String, std::os::fd::RawFd, NetkitSide)>,
+    /// Interfaces the agent already attached through its configuration.
+    /// A second attach would run the whole chain twice on every packet.
+    configured: std::collections::HashSet<String>,
+    /// Link FDs for hot-plugged attachments, per interface. Dropping detaches.
+    links: std::sync::Mutex<std::collections::HashMap<String, Vec<OwnedFd>>>,
 }
 
 impl Default for NetkitHotPlugRegistry {
@@ -189,19 +224,28 @@ impl NetkitHotPlugRegistry {
     pub fn new() -> Self {
         Self {
             programs: Vec::new(),
-            links: std::sync::Mutex::new(Vec::new()),
+            configured: std::collections::HashSet::new(),
+            links: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
-    /// Register a loaded TC program for hot-plug attachment.
-    pub fn register(&mut self, program_name: String, fd: std::os::fd::RawFd) {
-        self.programs.push((program_name, fd));
+    /// Register a loaded TC program for hot-plug attachment on `side`.
+    pub fn register(&mut self, program_name: String, fd: std::os::fd::RawFd, side: NetkitSide) {
+        self.programs.push((program_name, fd, side));
+    }
+
+    /// Leave `iface` alone: the agent attached it from its configuration.
+    pub fn skip_configured(&mut self, iface: impl Into<String>) {
+        self.configured.insert(iface.into());
     }
 
     /// Attach all registered programs to a netkit interface.
     /// Logs pod context from the namespace scan for correlation.
     /// Logs warnings on individual failures but continues.
     pub fn attach_all(&self, iface: &str, new_pods: &[super::netkit_discovery::PodContext]) {
+        if self.configured.contains(iface) {
+            return;
+        }
         for ctx in new_pods {
             info!(
                 iface,
@@ -211,21 +255,37 @@ impl NetkitHotPlugRegistry {
             );
         }
 
-        for (name, fd) in &self.programs {
-            match netkit_attach_by_name(*fd, iface, BPF_NETKIT_PRIMARY) {
+        let mut attached = Vec::new();
+        for (name, fd, side) in &self.programs {
+            match netkit_attach_by_name(*fd, iface, side.attach_type()) {
                 Ok(link_fd) => {
-                    info!(program = %name, iface, "hot-plug: TC program attached via netkit");
-                    if let Ok(mut links) = self.links.lock() {
-                        links.push(link_fd);
-                    }
+                    info!(program = %name, iface, ?side, "hot-plug: TC program attached via netkit");
+                    attached.push(link_fd);
                 }
                 Err(e) => {
                     tracing::warn!(
-                        program = %name, iface, error = %e,
+                        program = %name, iface, ?side, error = %e,
                         "hot-plug: failed to attach TC program via netkit"
                     );
                 }
             }
+        }
+        if let Ok(mut links) = self.links.lock() {
+            // A device recreated under the same name replaces the old set.
+            links.insert(iface.to_string(), attached);
+        }
+    }
+
+    /// Drop the links held for an interface that has gone away.
+    pub fn detach(&self, iface: &str) {
+        if let Ok(mut links) = self.links.lock()
+            && let Some(dropped) = links.remove(iface)
+        {
+            info!(
+                iface,
+                links = dropped.len(),
+                "hot-plug: netkit device removed, links released"
+            );
         }
     }
 
@@ -236,7 +296,9 @@ impl NetkitHotPlugRegistry {
 
     /// Number of active hot-plugged links.
     pub fn link_count(&self) -> usize {
-        self.links.lock().map_or(0, |l| l.len())
+        self.links
+            .lock()
+            .map_or(0, |l| l.values().map(Vec::len).sum())
     }
 }
 
@@ -306,8 +368,8 @@ mod tests {
     #[test]
     fn hotplug_registry_registers_programs() {
         let mut reg = NetkitHotPlugRegistry::new();
-        reg.register("tc_ids".to_string(), 42);
-        reg.register("tc_dns".to_string(), 43);
+        reg.register("tc_ids".to_string(), 42, NetkitSide::Ingress);
+        reg.register("tc_qos".to_string(), 43, NetkitSide::Egress);
         assert_eq!(reg.program_count(), 2);
     }
 
@@ -315,9 +377,33 @@ mod tests {
     fn hotplug_attach_all_on_non_netkit_device_warns() {
         let mut reg = NetkitHotPlugRegistry::new();
         // fd -1 is invalid - attach will fail gracefully.
-        reg.register("tc_ids".to_string(), -1);
+        reg.register("tc_ids".to_string(), -1, NetkitSide::Ingress);
         // Should not panic, just log warnings.
         reg.attach_all("lo", &[]);
         assert_eq!(reg.link_count(), 0);
+    }
+
+    #[test]
+    fn sides_map_to_the_netkit_attach_types() {
+        // Primary runs on the way into the pod, peer on the way out.
+        assert_eq!(NetkitSide::Ingress.attach_type(), BPF_NETKIT_PRIMARY);
+        assert_eq!(NetkitSide::Egress.attach_type(), BPF_NETKIT_PEER);
+    }
+
+    #[test]
+    fn detach_of_an_unknown_device_is_a_no_op() {
+        let reg = NetkitHotPlugRegistry::new();
+        reg.detach("nk-gone");
+        assert_eq!(reg.link_count(), 0);
+    }
+
+    #[test]
+    fn a_configured_interface_is_not_attached_twice() {
+        let mut reg = NetkitHotPlugRegistry::new();
+        reg.register("tc_ids".to_string(), -1, NetkitSide::Ingress);
+        reg.skip_configured("lo");
+        reg.attach_all("lo", &[]);
+        // Skipped before any attach was tried, so no entry was recorded.
+        assert!(reg.links.lock().unwrap().is_empty());
     }
 }

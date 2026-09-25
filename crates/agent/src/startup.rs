@@ -2462,25 +2462,40 @@ pub async fn run(
 
     // ── Build netkit hot-plug registry + spawn watcher ─────────
     if config.agent.attach_mode != infrastructure::config::AttachMode::Tc && ebpf_capable {
-        let tc_program_names = [
-            ("tc_ids", ids_ok),
-            ("tc_threatintel", ti_ok),
-            ("tc_dns", dns_ok),
-            ("tc_conntrack", ct_ok),
-            ("tc_nat_ingress", nat_ok),
-            ("tc_nat_egress", nat_ok),
-            ("tc_scrub", scrub_ok),
-            ("tc_qos", qos_ok),
+        use adapters::ebpf::netkit::NetkitSide;
+
+        // Each side in the order the chain runs on a configured interface:
+        // programs on one netkit side run in the order they were attached.
+        let ids_egress = config.ids.inspect_egress || config.container.resolver.enabled;
+        let tc_programs = [
+            ("tc_ids", ids_ok, NetkitSide::Ingress),
+            ("tc_threatintel", ti_ok, NetkitSide::Ingress),
+            ("tc_dns", dns_ok, NetkitSide::Ingress),
+            ("tc_conntrack", ct_ok, NetkitSide::Ingress),
+            ("tc_nat_ingress", nat_ok, NetkitSide::Ingress),
+            ("tc_scrub", scrub_ok, NetkitSide::Ingress),
+            ("tc_qos_ingress", qos_ok, NetkitSide::Ingress),
+            ("tc_ids", ids_ok && ids_egress, NetkitSide::Egress),
+            ("tc_nat_egress", nat_ok, NetkitSide::Egress),
+            ("tc_qos", qos_ok, NetkitSide::Egress),
         ];
 
         let mut registry = adapters::ebpf::netkit::NetkitHotPlugRegistry::new();
 
-        for loader in &ebpf_state.loaders {
-            for &(name, ok) in &tc_program_names {
-                if ok && let Some(fd) = loader.program_fd(name) {
-                    registry.register(name.to_string(), fd);
-                }
+        for &(name, ok, side) in &tc_programs {
+            if !ok {
+                continue;
             }
+            if let Some(fd) = ebpf_state
+                .loaders
+                .iter()
+                .find_map(|loader| loader.program_fd(name))
+            {
+                registry.register(name.to_string(), fd, side);
+            }
+        }
+        for iface in &config.agent.interfaces {
+            registry.skip_configured(iface.clone());
         }
 
         let registered = registry.program_count();
@@ -2488,10 +2503,14 @@ pub async fn run(
             let registry = Arc::new(registry);
             let nk_cancel = cancel_token.clone();
             let nk_registry = Arc::clone(&registry);
+            let nk_released = Arc::clone(&registry);
             tokio::spawn(async move {
                 adapters::ebpf::netkit_discovery::watch_netkit_devices(
                     Box::new(move |iface, new_pods| {
                         nk_registry.attach_all(iface, new_pods);
+                    }),
+                    Box::new(move |iface| {
+                        nk_released.detach(iface);
                     }),
                     std::time::Duration::from_secs(5),
                     nk_cancel,
