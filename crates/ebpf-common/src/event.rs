@@ -56,7 +56,8 @@ pub const fn is_tcp(flags: u8) -> bool {
 }
 
 /// Packet event emitted from eBPF programs to userspace via RingBuf.
-/// All eBPF programs share this event format through the EVENTS RingBuf.
+/// Every program that reports packets uses this format, each through its own
+/// `EVENTS` RingBuf rather than one ring shared across programs.
 ///
 /// Addresses are stored as `[u32; 4]`:
 /// - IPv4: `[v4_addr, 0, 0, 0]`
