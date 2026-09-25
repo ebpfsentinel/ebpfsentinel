@@ -34,6 +34,8 @@ use domain::l7::engine::L7Engine;
 use domain::ratelimit::engine::RateLimitEngine;
 use domain::threatintel::engine::ThreatIntelEngine;
 use infrastructure::config::AgentConfig;
+use ports::secondary::alias_resolution_port::AliasResolutionPort;
+use ports::secondary::lpm_coordinator_port::LpmCoordinatorPort;
 use ports::secondary::metrics_port::{FirewallMetrics, MetricsPort};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -63,6 +65,7 @@ pub struct ServiceHandles {
     pub qos_svc: Arc<RwLock<application::qos_service_impl::QosAppService>>,
     pub zone_svc: Arc<RwLock<ZoneAppService>>,
     pub alias_svc: Arc<RwLock<AliasAppService>>,
+    pub alias_resolver: Arc<dyn AliasResolutionPort>,
     pub routing_svc: Arc<RwLock<RoutingAppService>>,
     pub schedule_svc: Arc<RwLock<ScheduleService>>,
     pub audit_svc: Arc<AuditAppService>,
@@ -300,8 +303,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     // ── Alias ────────────────────────────────────────────────────
     let mut alias_svc = AliasAppService::new(Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     let alias_resolver = adapters::alias::alias_resolution_adapter::AliasResolutionAdapter::new();
-    let alias_resolver: Arc<dyn ports::secondary::alias_resolution_port::AliasResolutionPort> =
-        Arc::new(alias_resolver);
+    let alias_resolver: Arc<dyn AliasResolutionPort> = Arc::new(alias_resolver);
     alias_svc.set_resolution_port(Arc::clone(&alias_resolver));
     let aliases = config.aliases()?;
     if !aliases.is_empty()
@@ -474,6 +476,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         qos_svc,
         zone_svc,
         alias_svc,
+        alias_resolver,
         routing_svc,
         schedule_svc,
         audit_svc,
@@ -552,6 +555,56 @@ pub struct EbpfLoadResult {
     pub ids_mirror_mgr: Option<IdsMirrorMapManager>,
 }
 
+/// Hand the firewall's shared maps to the services that write into them.
+///
+/// The pins were wiped before this load, so every map here is new and the
+/// services still hold managers over the previous generation's. A fresh
+/// coordinator is correct for the same reason: the tries it tracks start
+/// empty, and each service puts back what it kept - the IPS its blacklist,
+/// the anti-DDoS service its country blocks, the alias service its external
+/// sets - before the resolved aliases are handed to the firewall.
+async fn wire_firewall_consumers(services: &ServiceHandles, loader: &mut EbpfLoader) {
+    match adapters::ebpf::LpmCoordinator::new(loader.ebpf_mut()) {
+        Ok(coordinator) => {
+            let coordinator: Arc<dyn LpmCoordinatorPort> = Arc::new(coordinator);
+            services
+                .alias_svc
+                .write()
+                .await
+                .set_lpm_coordinator(Arc::clone(&coordinator));
+            let mut ddos = (**services.ddos_svc.load()).clone();
+            ddos.set_lpm_coordinator(Arc::clone(&coordinator));
+            ddos.set_alias_resolution(Arc::clone(&services.alias_resolver));
+            ddos.reinstall_country_blocks();
+            services.ddos_svc.store(Arc::new(ddos));
+            let mut ips = (**services.ips_svc.load()).clone();
+            ips.set_lpm_coordinator(coordinator);
+            services.ips_svc.store(Arc::new(ips));
+        }
+        Err(e) => warn!("LPM coordinator maps not available (non-fatal): {e}"),
+    }
+
+    if let Ok(ipset_mgr) = adapters::ebpf::IpSetMapManager::new(loader.ebpf_mut()) {
+        services
+            .alias_svc
+            .write()
+            .await
+            .set_ipset_port(Box::new(ipset_mgr));
+    }
+
+    let mut aliases = services.alias_svc.write().await;
+    if let Err(e) = aliases.refresh_dynamic() {
+        warn!("dynamic alias refresh after firewall load failed: {e}");
+    }
+    let bindings = application::firewall_aliases::collect_bindings(&aliases);
+    drop(aliases);
+    services
+        .firewall_svc
+        .write()
+        .await
+        .set_alias_bindings(bindings);
+}
+
 /// Load and attach all eBPF programs, wiring map managers to services.
 ///
 /// Returns an [`EbpfLoadResult`] whose `state` field must be kept alive
@@ -616,7 +669,7 @@ pub async fn load_ebpf_programs(
     let mut fw_loader: Option<EbpfLoader> = None;
     let fw_ok = if config.firewall.enabled {
         match startup::try_load_xdp_firewall(&ebpf_dir, config) {
-            Ok((loader, map_manager, fw_metrics_rdr, reader, zone_mgr, _zone_rdrs)) => {
+            Ok((mut loader, map_manager, fw_metrics_rdr, reader, zone_mgr, zone_rdrs)) => {
                 let event_tx_clone = event_tx.clone();
                 let rb_obs = RingBufObserver::new(
                     "xdp-firewall",
@@ -641,6 +694,24 @@ pub async fn load_ebpf_programs(
                     // Zoning decides nothing until the maps carry it.
                     services.zone_svc.write().await.set_map_port(Box::new(mgr));
                 }
+                drop(svc);
+                if let Some((passed, dropped)) = zone_rdrs {
+                    let zones = Arc::clone(&services.zone_svc);
+                    let metrics = Arc::clone(&services.metrics) as Arc<dyn MetricsPort>;
+                    let c = readers.clone();
+                    tokio::spawn(async move {
+                        crate::ebpf_metrics::run_zone_metrics_loop(
+                            passed,
+                            dropped,
+                            zones,
+                            metrics,
+                            std::time::Duration::from_secs(10),
+                            c,
+                        )
+                        .await;
+                    });
+                }
+                wire_firewall_consumers(services, &mut loader).await;
                 services
                     .metrics
                     .set_ebpf_program_status("xdp_firewall", true);
@@ -664,7 +735,7 @@ pub async fn load_ebpf_programs(
     // ── XDP Rate Limiter ────────────────────────────────────────
     let rl_ok = if config.ratelimit.enabled {
         match startup::try_load_xdp_ratelimit(&ebpf_dir, config, fw_ok) {
-            Ok((mut rl_loader, rl_mgr_opt, _rl_lpm_opt, rl_rdrs, reader)) => {
+            Ok((mut rl_loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs, reader)) => {
                 let event_tx_clone = event_tx.clone();
                 let rb_obs = RingBufObserver::new(
                     "xdp-ratelimit",
@@ -685,6 +756,22 @@ pub async fn load_ebpf_programs(
                         default_algo,
                     );
                     svc.set_map_port(Box::new(rl_mgr));
+                }
+                if let Some(rl_lpm) = rl_lpm_opt {
+                    // The pins were wiped before this load, so the country
+                    // tiers go into maps that start empty.
+                    let mut svc = services.rl_svc.write().await;
+                    svc.set_lpm_port(Box::new(rl_lpm));
+                    svc.set_alias_resolution(Arc::clone(&services.alias_resolver));
+                    match config.ratelimit_country_tiers() {
+                        Ok(tiers) if !tiers.is_empty() => {
+                            if let Err(e) = svc.reload_country_tiers(&tiers) {
+                                warn!("country tier load failed (non-fatal): {e}");
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => warn!("country tiers unreadable: {e}"),
+                    }
                 }
                 // Wire tail-call: firewall → ratelimit
                 if let Some(ref mut fw) = fw_loader

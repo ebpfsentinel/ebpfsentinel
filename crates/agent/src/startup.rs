@@ -2581,6 +2581,7 @@ pub async fn run(
                 qos_svc: Arc::clone(&qos_svc),
                 zone_svc: Arc::clone(&zone_svc),
                 alias_svc: Arc::clone(&alias_svc),
+                alias_resolver: Arc::clone(&alias_resolver),
                 routing_svc: Arc::clone(&routing_svc),
                 schedule_svc: Arc::clone(&schedule_svc),
                 audit_svc: Arc::clone(&audit_svc),
@@ -2605,7 +2606,6 @@ pub async fn run(
         // A firewall a reload loads needs both to put back what the startup
         // load wired: country blocks resolve through aliases, and the VIP
         // announcer is reached through the firewall's ARP path.
-        mgr.alias_resolver = Some(Arc::clone(&alias_resolver));
         mgr.vip_svc = Some(Arc::clone(&vip_svc));
         // The firewall's shared maps are pinned: a firewall a reload loads
         // again reuses them, so the managers handed over here stay valid.

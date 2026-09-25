@@ -9,7 +9,6 @@ use adapters::ebpf::{
 };
 use application::packet_pipeline::AgentEvent;
 use infrastructure::config::AgentConfig;
-use ports::secondary::alias_resolution_port::AliasResolutionPort;
 use ports::secondary::lpm_coordinator_port::LpmCoordinatorPort;
 use ports::secondary::metrics_port::{FirewallMetrics, MetricsPort};
 use tokio::sync::{RwLock, mpsc};
@@ -58,10 +57,6 @@ pub struct EbpfProgramManager {
     /// Load state per published program name, as `/api/v1/ebpf/status` and
     /// the anonymous heartbeat read it.
     pub program_status: Arc<RwLock<HashMap<String, bool>>>,
-    /// Alias resolution the anti-DDoS service and the country tiers of the
-    /// rate limiter resolve countries through, handed to them when a reload
-    /// loads the program whose LPM tries they write.
-    pub alias_resolver: Option<Arc<dyn AliasResolutionPort>>,
     /// VIP announcer service, configured when a firewall loaded by a reload
     /// is the first to carry the ARP path it is reached through.
     pub vip_svc: Option<Arc<RwLock<application::vip_announcer_service_impl::VipAnnouncerService>>>,
@@ -95,7 +90,6 @@ impl EbpfProgramManager {
             tenant_cgroup: TenantCgroupMapManager::new(),
             metrics_readers: Arc::new(RwLock::new(Vec::new())),
             program_status: Arc::new(RwLock::new(HashMap::new())),
-            alias_resolver: None,
             vip_svc: None,
             lpm_coordinator: None,
             ipset_wired: false,
@@ -732,9 +726,7 @@ impl EbpfProgramManager {
                     {
                         let mut svc = (**self.services.ddos_svc.load()).clone();
                         svc.set_lpm_coordinator(Arc::clone(&coordinator));
-                        if let Some(resolver) = &self.alias_resolver {
-                            svc.set_alias_resolution(Arc::clone(resolver));
-                        }
+                        svc.set_alias_resolution(Arc::clone(&self.services.alias_resolver));
                         svc.reinstall_country_blocks();
                         self.services.ddos_svc.store(Arc::new(svc));
                     }
@@ -964,9 +956,7 @@ impl EbpfProgramManager {
                     // pushed them while it had nowhere to write.
                     let mut svc = self.services.rl_svc.write().await;
                     svc.set_lpm_port(Box::new(rl_lpm));
-                    if let Some(resolver) = &self.alias_resolver {
-                        svc.set_alias_resolution(Arc::clone(resolver));
-                    }
+                    svc.set_alias_resolution(Arc::clone(&self.services.alias_resolver));
                     match config.ratelimit_country_tiers() {
                         Ok(tiers) if !tiers.is_empty() => {
                             if let Err(e) = svc.reload_country_tiers(&tiers) {
