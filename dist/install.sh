@@ -91,6 +91,9 @@ fi
 
 mkdir -p "${INSTALL_VAR}"
 mkdir -p "${INSTALL_VAR}/captures"
+# The redb stores do not create their directory; the unit runs from
+# ${INSTALL_VAR}, so the default `data/*.redb` paths need this one.
+mkdir -p "${INSTALL_VAR}/data"
 
 # ── Install systemd units ─────────────────────────────────────────
 #

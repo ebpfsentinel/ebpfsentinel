@@ -25,6 +25,10 @@ Environment=EBPFSENTINEL_WARDEN_SOCK=/run/ebpfsentinel/warden.sock
 # The agent's bootstrap connects to the warden once (no retry), so wait for the
 # broker to bind its socket before starting.
 ExecStartPre=/bin/sh -c 'for _ in $(seq 1 100); do [ -S /run/ebpfsentinel/warden.sock ] && exit 0; sleep 0.1; done; echo "warden socket not ready" >&2; exit 1'
+# Relative paths in the config resolve here, so the default audit, alert and
+# rule-history stores (`data/*.redb`) land under /var/lib/ebpfsentinel/data
+# rather than in a /data directory at the root of the host.
+WorkingDirectory=/var/lib/ebpfsentinel
 ExecStart=/usr/local/bin/ebpfsentinel-agent --config /etc/ebpfsentinel/config.yaml
 # `systemctl reload ebpfsentinel` re-reads the config file; the agent handles
 # SIGHUP exactly like a file change or POST /api/v1/config/reload.
