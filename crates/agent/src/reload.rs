@@ -762,9 +762,9 @@ async fn perform_reload(
                 }
             }
             AuthProviderHandle::ApiKeyOnly => {
-                // API keys are reloaded from config - no separate rotation needed.
-                // A full config reload (phases 1-6) already picks up new YAML values.
-                tracing::debug!("API key auth: no key rotation required");
+                // The key table is hashed once at startup; a key added,
+                // removed or changed in the file takes effect at the next start.
+                tracing::debug!("API key auth: keys apply at the next start");
             }
         }
     }
