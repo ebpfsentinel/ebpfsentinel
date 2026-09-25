@@ -31,6 +31,11 @@ pub const DENY_ALL_RULE_ID_V6: &str = "fail-closed-deny-all-v6";
 /// recomputed: the rules an operator loaded, the mode the deployment chose, and
 /// whether anti-lockout was on. Recomputing any of them from configuration
 /// would lose every change made through the API since boot.
+///
+/// It is also where every change made while the posture is in force lands: a
+/// configuration reload, a mode change or a rule added through the API is
+/// written here and takes effect when the posture is lifted, because applying
+/// it to the datapath would reopen a node the cluster believes is closed.
 struct DenyAllSnapshot {
     rules: Vec<FirewallRule>,
     mode: DomainMode,
@@ -50,7 +55,7 @@ impl Default for AntiLockoutSettings {
         Self {
             enabled: true,
             interfaces: Vec::new(),
-            ports: vec![22, 8080, 50051],
+            ports: vec![22],
         }
     }
 }
@@ -200,8 +205,14 @@ impl FirewallAppService {
 
     /// Set the operating mode. Call `reload_rules` after changing the mode
     /// to re-apply rules with the new mode semantics.
+    ///
+    /// While the deny-all posture is in force the node stays in block mode,
+    /// and the mode is recorded as the one to restore when it is lifted.
     pub fn set_mode(&mut self, mode: DomainMode) {
-        self.mode = mode;
+        match self.deny_all.as_mut() {
+            Some(snapshot) => snapshot.mode = mode,
+            None => self.mode = mode,
+        }
     }
 
     /// Return whether the firewall is enabled.
@@ -291,7 +302,17 @@ impl FirewallAppService {
     }
 
     /// Add a firewall rule. Syncs to eBPF maps and updates metrics.
+    ///
+    /// While the deny-all posture is in force the rule is checked as it would
+    /// be now and kept for when the posture is lifted, rather than installed.
     pub fn add_rule(&mut self, rule: FirewallRule) -> Result<(), DomainError> {
+        if self.deny_all.is_some() {
+            self.interface_scope.check(&rule)?;
+            let mut staged = self.staged_rules().to_vec();
+            staged.push(rule);
+            return self.stage_rules(staged);
+        }
+
         let rule_id = rule.id.0.clone();
         // Snapshot the fields the conntrack teardown needs before the rule is
         // moved into the engine, so we don't have to look it back up afterwards.
@@ -320,6 +341,19 @@ impl FirewallAppService {
                 id: id.0.clone(),
             }));
         }
+        if let Some(snapshot) = self.deny_all.as_mut() {
+            let pos = snapshot
+                .rules
+                .iter()
+                .position(|r| r.id == *id)
+                .ok_or_else(|| FirewallError::RuleNotFound { id: id.to_string() })?;
+            snapshot.rules.remove(pos);
+            tracing::info!(
+                id = id.0,
+                "firewall rule removed, effective when the deny-all posture is lifted"
+            );
+            return Ok(());
+        }
         self.engine.remove_rule(id)?;
         self.sync_ebpf_maps();
         self.update_metrics();
@@ -345,7 +379,43 @@ impl FirewallAppService {
     }
 
     /// Reload all rules atomically. Injects anti-lockout rules if enabled.
+    ///
+    /// While the deny-all posture is in force the rules are checked and kept
+    /// for when it is lifted, and the posture is installed again so that any
+    /// anti-lockout change made alongside them still reaches the datapath.
     pub fn reload_rules(&mut self, rules: Vec<FirewallRule>) -> Result<(), DomainError> {
+        if self.deny_all.is_some() {
+            self.stage_rules(rules)?;
+            return self.install_rules(Self::deny_all_rules());
+        }
+        self.install_rules(rules)
+    }
+
+    /// The rules the deny-all posture will put back, or none outside it.
+    fn staged_rules(&self) -> &[FirewallRule] {
+        self.deny_all.as_ref().map_or(&[], |s| s.rules.as_slice())
+    }
+
+    /// Check `rules` exactly as an install would and record them as the set
+    /// the deny-all posture restores. A set the engine would refuse is
+    /// refused now rather than when the posture is lifted, where nobody is
+    /// waiting for the error.
+    fn stage_rules(&mut self, rules: Vec<FirewallRule>) -> Result<(), DomainError> {
+        let mut candidate = self.generate_anti_lockout_rules();
+        candidate.extend(rules.iter().cloned());
+        FirewallEngine::new().reload(candidate)?;
+        if let Some(snapshot) = self.deny_all.as_mut() {
+            tracing::info!(
+                rules = rules.len(),
+                "firewall rules kept for when the deny-all posture is lifted"
+            );
+            snapshot.rules = rules;
+        }
+        Ok(())
+    }
+
+    /// Install `rules` behind the anti-lockout rules, whatever the posture.
+    fn install_rules(&mut self, rules: Vec<FirewallRule>) -> Result<(), DomainError> {
         let mut all_rules = self.generate_anti_lockout_rules();
         let user_count = rules.len();
         all_rules.extend(rules);
@@ -458,7 +528,7 @@ impl FirewallAppService {
         self.mode = DomainMode::Block;
         self.anti_lockout.enabled = true;
 
-        let result = self.reload_rules(Self::deny_all_rules());
+        let result = self.install_rules(Self::deny_all_rules());
         if let Err(ref e) = result {
             tracing::error!(error = %e, "failed to install the deny-all posture");
         }
@@ -485,7 +555,7 @@ impl FirewallAppService {
 
         self.mode = snapshot.mode;
         self.anti_lockout.enabled = snapshot.anti_lockout_enabled;
-        let result = self.reload_rules(snapshot.rules);
+        let result = self.install_rules(snapshot.rules);
         if let Err(ref e) = result {
             tracing::error!(error = %e, "failed to lift the deny-all posture");
         }
@@ -1004,6 +1074,69 @@ mod tests {
 
         let restored: Vec<&str> = svc.list_rules().iter().map(|r| r.id.0.as_str()).collect();
         assert_eq!(restored, vec!["allow-web"]);
+    }
+
+    fn ids(svc: &FirewallAppService) -> Vec<&str> {
+        svc.list_rules().iter().map(|r| r.id.0.as_str()).collect()
+    }
+
+    #[test]
+    fn a_reload_during_the_posture_is_kept_for_when_it_is_lifted() {
+        let map = RecordingMap::default();
+        let mut svc = make_service_without_management_ports();
+        svc.set_map_port(Box::new(map.clone()));
+        svc.add_rule(make_rule("allow-web", 10)).unwrap();
+        svc.enter_deny_all().unwrap();
+
+        // A configuration reload arrives while the cluster holds the node closed.
+        svc.set_mode(DomainMode::Alert);
+        svc.reload_rules(vec![make_rule("allow-db", 20)]).unwrap();
+
+        assert_eq!(ids(&svc), [DENY_ALL_RULE_ID_V4, DENY_ALL_RULE_ID_V6]);
+        assert_eq!(svc.mode(), DomainMode::Block);
+        assert_eq!(
+            map.v4.lock().unwrap()[0].action,
+            ebpf_common::firewall::ACTION_DROP,
+            "the reload reopened the node"
+        );
+
+        svc.exit_deny_all().unwrap();
+        assert_eq!(ids(&svc), ["allow-db"]);
+        assert_eq!(svc.mode(), DomainMode::Alert);
+    }
+
+    #[test]
+    fn a_reload_the_engine_would_refuse_is_refused_during_the_posture() {
+        let mut svc = make_service();
+        svc.add_rule(make_rule("allow-web", 10)).unwrap();
+        svc.enter_deny_all().unwrap();
+
+        let refused = svc.reload_rules(vec![make_rule("dup", 10), make_rule("dup", 20)]);
+        assert!(refused.is_err());
+
+        svc.exit_deny_all().unwrap();
+        assert_eq!(ids(&svc), ["allow-web"]);
+    }
+
+    #[test]
+    fn rules_added_and_removed_during_the_posture_survive_it() {
+        let mut svc = make_service_without_management_ports();
+        svc.add_rule(make_rule("allow-web", 10)).unwrap();
+        svc.add_rule(make_rule("allow-db", 20)).unwrap();
+        svc.enter_deny_all().unwrap();
+
+        svc.add_rule(make_rule("allow-dns", 30)).unwrap();
+        assert!(svc.add_rule(make_rule("allow-web", 40)).is_err());
+        svc.remove_rule(&RuleId("allow-db".to_string())).unwrap();
+        assert!(svc.remove_rule(&RuleId("nope".to_string())).is_err());
+        assert!(
+            svc.remove_rule(&RuleId(DENY_ALL_RULE_ID_V4.to_string()))
+                .is_err()
+        );
+        assert_eq!(ids(&svc), [DENY_ALL_RULE_ID_V4, DENY_ALL_RULE_ID_V6]);
+
+        svc.exit_deny_all().unwrap();
+        assert_eq!(ids(&svc), ["allow-web", "allow-dns"]);
     }
 
     #[test]
