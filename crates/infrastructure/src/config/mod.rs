@@ -264,9 +264,9 @@ pub struct NamespaceConfig {
 impl AgentConfig {
     /// Load config from a YAML file.
     ///
-    /// On Unix, logs a warning if the config file is world-readable
-    /// (permissions more permissive than 0o640), since config may
-    /// contain sensitive values like auth headers and API keys.
+    /// On Unix, refuses a config file that is world-readable, since config
+    /// may contain sensitive values like auth headers and API keys, and
+    /// does the same for the TLS private key and the JWT public key.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         reject_if_world_readable(path, "config file")?;
         let content = std::fs::read_to_string(path)?;
