@@ -755,8 +755,8 @@ fn increment_metric(index: u32) {
 /// Emit an L7 event: `PacketEvent` header + raw payload bytes from the packet.
 ///
 /// Uses tiered `RingBuf` reservation to minimize bandwidth:
-/// - Packets with <= 128 bytes of TCP payload -> `L7EventSmall` (192 bytes, saves 67%)
-/// - Packets with > 128 bytes -> `L7EventBuf` (576 bytes, full capture)
+/// - Packets with <= 512 bytes of TCP payload -> `L7EventSmall` (608 bytes)
+/// - Packets with > 512 bytes -> `L7EventBuf` (2144 bytes, up to 2048 payload bytes)
 ///
 /// Both tiers use compile-time constant lengths for `bpf_skb_load_bytes`
 /// (required by the eBPF verifier on kernel 6.1+).
@@ -791,7 +791,7 @@ fn emit_l7_event(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize) {
     }
 }
 
-/// Small L7 event (192 bytes): for packets with ≤ 128 bytes TCP payload.
+/// Small L7 event (608 bytes): for packets with at most 512 bytes of TCP payload.
 #[inline(always)]
 fn emit_l7_small(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_avail: usize) {
     // Bound the copy to what the packet actually carries, capped at the
