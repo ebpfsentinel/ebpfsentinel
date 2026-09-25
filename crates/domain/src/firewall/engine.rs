@@ -96,11 +96,14 @@ impl FirewallEngine {
     }
 
     /// Check if the rule's scope matches the packet's interface.
+    ///
+    /// A namespace is who owns the rule, not where traffic flows: one
+    /// interface carries the traffic of several namespaces, so a
+    /// namespace-scoped rule is restricted by its own match fields only.
     fn matches_scope(rule: &FirewallRule, packet: &PacketInfo) -> bool {
         match &rule.scope {
-            Scope::Global => true,
+            Scope::Global | Scope::Namespace(_) => true,
             Scope::Interface(iface) => iface == &packet.interface,
-            Scope::Namespace(ns) => packet.interface.starts_with(ns.as_str()),
         }
     }
 
@@ -583,25 +586,38 @@ mod tests {
     }
 
     #[test]
-    fn scope_namespace_prefix_match() {
-        let mut engine = FirewallEngine::new();
-        let mut rule = make_rule("r1", 1, FirewallAction::Deny);
-        rule.scope = Scope::Namespace("eth".to_string());
-        engine.add_rule(rule).unwrap();
+    fn a_namespace_is_not_read_from_the_interface_name() {
+        // A namespace that happens to prefix the interface name gains nothing,
+        // and one that does not loses nothing: the name is an owner.
+        for ns in ["eth", "prod"] {
+            let mut engine = FirewallEngine::new();
+            let mut rule = make_rule("r1", 1, FirewallAction::Deny);
+            rule.scope = Scope::Namespace(ns.to_string());
+            engine.add_rule(rule).unwrap();
 
-        let pkt = make_packet(); // interface = "eth0"
-        assert_eq!(engine.evaluate(&pkt), Some(FirewallAction::Deny));
+            let pkt = make_packet(); // interface = "eth0"
+            assert_eq!(engine.evaluate(&pkt), Some(FirewallAction::Deny));
+        }
     }
 
     #[test]
-    fn scope_namespace_no_match() {
+    fn several_namespaces_share_one_interface() {
         let mut engine = FirewallEngine::new();
-        let mut rule = make_rule("r1", 1, FirewallAction::Deny);
-        rule.scope = Scope::Namespace("prod-".to_string());
-        engine.add_rule(rule).unwrap();
+        let mut web = make_rule("web", 1, FirewallAction::Deny);
+        web.scope = Scope::Namespace("web".to_string());
+        web.dst_port = Some(PortRange {
+            start: 443,
+            end: 443,
+        });
+        let mut db = make_rule("db", 2, FirewallAction::Allow);
+        db.scope = Scope::Namespace("db".to_string());
+        db.dst_port = Some(PortRange { start: 80, end: 80 });
+        engine.add_rule(web).unwrap();
+        engine.add_rule(db).unwrap();
 
-        let pkt = make_packet(); // interface = "eth0"
-        assert_eq!(engine.evaluate(&pkt), None);
+        // Same interface, the port decides which namespace's rule applies.
+        let pkt = make_packet(); // TCP to port 80 on eth0
+        assert_eq!(engine.evaluate(&pkt), Some(FirewallAction::Allow));
     }
 
     // ── Evaluation: combined criteria ─────────────────────────────

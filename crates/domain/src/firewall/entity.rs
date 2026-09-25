@@ -315,11 +315,13 @@ impl PortRange {
 /// Rule scope for segmentation (FR5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scope {
-    /// Applies to all interfaces/namespaces.
+    /// Applies to all interfaces, owned by nobody in particular.
     Global,
     /// Applies to a specific network interface (standalone mode).
     Interface(String),
-    /// Applies to a specific Kubernetes namespace.
+    /// Owned by an eBPFsentinel namespace. It names who may write the rule
+    /// (an operator's `namespaces` claim) and does not narrow the traffic:
+    /// one interface carries several namespaces.
     Namespace(String),
 }
 
@@ -327,7 +329,7 @@ impl Scope {
     /// Maximum interface name length, `IFNAMSIZ - 1` as the kernel defines it.
     pub const MAX_INTERFACE_NAME_LENGTH: usize = 15;
 
-    /// Maximum Kubernetes namespace length, as RFC 1123 label rules give it.
+    /// Maximum namespace length, as RFC 1123 label rules give it.
     pub const MAX_NAMESPACE_NAME_LENGTH: usize = 63;
 
     /// Parse a scope from the textual form used by both the API and a
