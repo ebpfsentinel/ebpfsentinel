@@ -39,7 +39,7 @@ This chart deploys the **open-source edition**. All 14 security domains are incl
 - **No ML anomaly detection**: rule-based detection only (Enterprise adds ONNX-based streaming ML)
 - **No compliance reporting**: use Prometheus + Grafana (Enterprise generates PCI-DSS, NIS2, DORA reports)
 
-See [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/features/enterprise/overview.md) for the full comparison.
+See [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/main/docs/features/enterprise/overview.md) for the full comparison.
 
 ## Kubernetes Deployment Constraints
 
@@ -86,10 +86,8 @@ For per-pod network policy, use your CNI's native policy engine (e.g., Cilium Ne
 ## Quick Start
 
 ```bash
-helm repo add ebpfsentinel https://charts.ebpfsentinel.io
-helm repo update
-
-helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
+helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel \
+  --version <version> \
   --namespace ebpfsentinel --create-namespace \
   --set agent.interfaces='{eth0}'
 ```
@@ -106,7 +104,7 @@ kubectl -n ebpfsentinel logs -l app.kubernetes.io/name=ebpfsentinel --tail=20
 ### Minimal (firewall + IDS only)
 
 ```bash
-helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
+helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --version <version> \
   --namespace ebpfsentinel --create-namespace \
   --set agent.interfaces='{eth0}'
 ```
@@ -114,7 +112,7 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
 ### Full Network & Security deployment with Prometheus monitoring
 
 ```bash
-helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
+helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --version <version> \
   --namespace ebpfsentinel --create-namespace \
   --set agent.interfaces='{ens192}' \
   --set ddos.enabled=true \
@@ -127,7 +125,7 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
 ### DLP with full node visibility
 
 ```bash
-helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
+helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --version <version> \
   --namespace ebpfsentinel --create-namespace \
   --set agent.interfaces='{eth0}' \
   --set daemonset.hostPID=true \
@@ -137,7 +135,7 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
 ### TLS with post-quantum key exchange
 
 ```bash
-helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
+helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --version <version> \
   --namespace ebpfsentinel --create-namespace \
   --set agent.interfaces='{eth0}' \
   --set agent.tls.enabled=true \
@@ -171,7 +169,7 @@ auto_capture:
 ```
 
 ```bash
-helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
+helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --version <version> \
   --namespace ebpfsentinel --create-namespace \
   --set agent.interfaces='{eth0}' \
   -f response-values.yaml
@@ -180,7 +178,7 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
 ### Kubernetes pod metadata on alerts
 
 ```bash
-helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
+helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --version <version> \
   --namespace ebpfsentinel --create-namespace \
   --set agent.interfaces='{eth0}' \
   --set container.kubernetes.enabled=true
@@ -191,7 +189,7 @@ This creates a ClusterRole with `get`/`list`/`watch` on `pods` and nothing else,
 ### Custom config (bypass values.yaml)
 
 ```bash
-helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
+helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --version <version> \
   --namespace ebpfsentinel --create-namespace \
   --set-file configOverride=my-config.yaml
 ```
