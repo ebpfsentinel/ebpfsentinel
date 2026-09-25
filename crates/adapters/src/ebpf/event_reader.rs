@@ -1,23 +1,46 @@
 #![allow(unsafe_code)] // Required for eBPF RingBuf event parsing (read_unaligned)
 
 use crate::ebpf::map_store::MapStore;
-use crate::ebpf::ringbuf_observer::RingBufObserver;
+use crate::ebpf::ringbuf_observer::{DrainTrigger, RingBufObserver};
 use aya::maps::{MapData, RingBuf};
 use domain::common::agent_event::AgentEvent;
 use ebpf_common::event::{EVENT_TYPE_L7, PacketEvent};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
+use tokio::time::{Duration, Interval, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 /// Reads packet events from the eBPF EVENTS `RingBuf`.
 ///
 /// Uses `AsyncFd` for epoll-based async notification and drains
-/// all available events in batch (never one-at-a-time).
+/// all available events in batch (never one-at-a-time), both when the
+/// kernel wakes it and every [`DRAIN_INTERVAL`] for records submitted
+/// without a wakeup.
 /// Events are sent to a bounded mpsc channel; on backpressure
 /// events are dropped with a debug log.
 pub struct EventReader {
     ring_buf: AsyncFd<RingBuf<MapData>>,
+}
+
+/// How often a reader drains its ring buffer without being woken.
+///
+/// The packet and DLP producers submit with `BPF_RB_NO_WAKEUP` until the
+/// backlog crosses the wakeup threshold, so under a steady trickle the kernel
+/// never wakes the reader at all. This interval is the bound on how long such
+/// a record waits: at most ten milliseconds, against one wakeup per record
+/// under a flood without it.
+pub(crate) const DRAIN_INTERVAL: Duration = Duration::from_millis(10);
+
+/// The periodic drain every batched reader runs beside its wakeup.
+///
+/// `Delay` rather than the default `Burst`: a reader that fell behind drains
+/// everything on the next pass, so catching up on missed ticks would only
+/// run empty passes back to back.
+pub(crate) fn drain_tick() -> Interval {
+    let mut tick = tokio::time::interval(DRAIN_INTERVAL);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    tick
 }
 
 /// Build an epoll-ready ring-buffer reader from a raw ring-buffer map fd.
@@ -75,49 +98,67 @@ impl EventReader {
         observer: RingBufObserver,
     ) {
         let mut async_fd = self.ring_buf;
+        let mut tick = drain_tick();
 
         loop {
-            // Wait for kernel to signal data available, or cancellation
-            let mut guard = tokio::select! {
+            tokio::select! {
                 () = cancel.cancelled() => {
                     info!("event reader cancelled");
                     break;
                 }
                 result = async_fd.readable_mut() => {
                     match result {
-                        Ok(guard) => guard,
+                        Ok(mut guard) => {
+                            let drained = drain(guard.get_inner_mut(), &tx, &observer);
+                            guard.clear_ready();
+                            observer.drain_pass(DrainTrigger::Wakeup, drained);
+                        }
                         Err(e) => {
                             error!("RingBuf readable error: {e}");
                             break;
                         }
                     }
                 }
-            };
-
-            // Batch drain: read all available events. One clock read for the
-            // whole batch, not one per record: the loop is tight enough that a
-            // per-record syscall would cost more than the measurement is worth.
-            let now_ns = observer.now_ns();
-            let rb = guard.get_inner_mut();
-            while let Some(item) = rb.next() {
-                if let Some(mut agent_event) = decode_event(&item) {
-                    observer.accept(now_ns, &mut agent_event);
-                    // Backpressure: drop on full channel
-                    if tx.try_send(agent_event).is_err() {
-                        observer.dropped("channel_full");
-                        debug!("event channel full, dropping event");
-                    }
-                } else {
-                    // A record the kernel committed and userspace could not
-                    // read. Counted, because a silent decode failure is
-                    // indistinguishable from an event that never happened.
-                    observer.dropped("decode_failed");
+                _ = tick.tick() => {
+                    // Records the producer committed without waking us,
+                    // because the backlog never reached the threshold.
+                    let drained = drain(async_fd.get_mut(), &tx, &observer);
+                    observer.drain_pass(DrainTrigger::Tick, drained);
                 }
             }
-
-            guard.clear_ready();
         }
     }
+}
+
+/// Drain every record currently in `rb`, returning how many were read.
+///
+/// One clock read for the whole batch, not one per record: the loop is tight
+/// enough that a per-record syscall would cost more than the measurement is
+/// worth.
+fn drain(
+    rb: &mut RingBuf<MapData>,
+    tx: &mpsc::Sender<AgentEvent>,
+    observer: &RingBufObserver,
+) -> usize {
+    let now_ns = observer.now_ns();
+    let mut drained = 0usize;
+    while let Some(item) = rb.next() {
+        drained += 1;
+        if let Some(mut agent_event) = decode_event(&item) {
+            observer.accept(now_ns, &mut agent_event);
+            // Backpressure: drop on full channel
+            if tx.try_send(agent_event).is_err() {
+                observer.dropped("channel_full");
+                debug!("event channel full, dropping event");
+            }
+        } else {
+            // A record the kernel committed and userspace could not read.
+            // Counted, because a silent decode failure is indistinguishable
+            // from an event that never happened.
+            observer.dropped("decode_failed");
+        }
+    }
+    drained
 }
 
 /// Decode one `RingBuf` record into an [`AgentEvent`].

@@ -73,6 +73,30 @@ pub fn boottime_to_epoch_ns(boot_ns: u64) -> u64 {
     boot_ns.saturating_add(boot_epoch_offset_ns())
 }
 
+/// What started one pass over a ring buffer.
+///
+/// The packet and DLP producers submit without waking the reader until a
+/// batch has built up, so a reader is started either by that wakeup or by its
+/// own periodic drain, which collects whatever never reached the threshold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrainTrigger {
+    /// The kernel woke the reader.
+    Wakeup,
+    /// The reader's own interval came round.
+    Tick,
+}
+
+impl DrainTrigger {
+    /// The label value this trigger is reported under.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Wakeup => "wakeup",
+            Self::Tick => "tick",
+        }
+    }
+}
+
 /// Accounting for one datapath ring buffer, shared by every reader.
 ///
 /// The kernel already counts what it refused to emit, in the `events_dropped`
@@ -160,6 +184,20 @@ impl RingBufObserver {
         set_event_timestamp_ns(event, boottime_to_epoch_ns(event_ts_ns));
     }
 
+    /// Record one pass over the ring buffer that drained `records` records.
+    ///
+    /// A pass that found nothing is not recorded: an idle tick is the
+    /// periodic drain doing its job, and counting it would bury the passes
+    /// that carried records under a hundred empty ones a second.
+    pub fn drain_pass(&self, trigger: DrainTrigger, records: usize) {
+        if records == 0 {
+            return;
+        }
+        if let Some(metrics) = &self.metrics {
+            metrics.record_ringbuf_drain(self.source, trigger.as_str());
+        }
+    }
+
     /// Record a drained record that userspace threw away before the pipeline
     /// saw it.
     pub fn dropped(&self, reason: &str) {
@@ -210,6 +248,7 @@ mod tests {
         drained: Mutex<Vec<String>>,
         dropped: Mutex<Vec<(String, String)>>,
         latencies: Mutex<Vec<(String, f64)>>,
+        drains: Mutex<Vec<(String, String)>>,
     }
 
     impl PacketMetrics for Recorder {}
@@ -240,6 +279,12 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((source.to_string(), reason.to_string()));
+        }
+        fn record_ringbuf_drain(&self, source: &str, trigger: &str) {
+            self.drains
+                .lock()
+                .unwrap()
+                .push((source.to_string(), trigger.to_string()));
         }
         fn observe_ringbuf_latency(&self, source: &str, seconds: f64) {
             self.latencies
@@ -290,12 +335,31 @@ mod tests {
     }
 
     #[test]
+    fn drain_pass_carries_source_and_trigger_and_skips_empty_passes() {
+        let rec = Arc::new(Recorder::default());
+        let obs = RingBufObserver::new("tc-ids", Arc::clone(&rec) as Arc<dyn MetricsPort>);
+
+        obs.drain_pass(DrainTrigger::Wakeup, 630);
+        obs.drain_pass(DrainTrigger::Tick, 0);
+        obs.drain_pass(DrainTrigger::Tick, 3);
+
+        assert_eq!(
+            rec.drains.lock().unwrap().as_slice(),
+            [
+                ("tc-ids".to_string(), "wakeup".to_string()),
+                ("tc-ids".to_string(), "tick".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn disabled_observer_records_nothing_and_skips_the_clock() {
         let obs = RingBufObserver::disabled("xdp-firewall");
         assert_eq!(obs.now_ns(), 0);
         // Must not panic without a metrics sink behind it.
         obs.drained(1, 1);
         obs.dropped("channel_full");
+        obs.drain_pass(DrainTrigger::Tick, 1);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 #![allow(unsafe_code)] // Required for eBPF RingBuf event parsing (read_unaligned)
 
 use crate::ebpf::map_store::MapStore;
-use crate::ebpf::ringbuf_observer::RingBufObserver;
+use crate::ebpf::ringbuf_observer::{DrainTrigger, RingBufObserver};
 use aya::maps::{MapData, RingBuf};
 use domain::common::agent_event::AgentEvent;
 use ebpf_common::dns::DnsEvent;
@@ -12,7 +12,10 @@ use tracing::{debug, error, info};
 
 /// Reads DNS events from the eBPF `DNS_EVENTS` `RingBuf`.
 ///
-/// Uses `AsyncFd` for epoll-based async notification. DNS events
+/// Uses `AsyncFd` for epoll-based async notification, and only that: the
+/// tc-dns producer keeps the kernel's default wakeup, because a DNS answer
+/// has to reach the domain cache before the connection it resolved for, so
+/// there is no periodic drain here. DNS events
 /// consist of a 48-byte `DnsEvent` header followed by a variable-length
 /// DNS payload (up to 512 bytes).
 pub struct DnsEventReader {
@@ -73,7 +76,9 @@ impl DnsEventReader {
             // One clock read per batch, not per record.
             let now_ns = observer.now_ns();
             let rb = guard.get_inner_mut();
+            let mut drained = 0usize;
             while let Some(item) = rb.next() {
+                drained += 1;
                 let bytes: &[u8] = &item;
                 let header_size = std::mem::size_of::<DnsEvent>();
                 if bytes.len() >= header_size {
@@ -107,6 +112,7 @@ impl DnsEventReader {
             }
 
             guard.clear_ready();
+            observer.drain_pass(DrainTrigger::Wakeup, drained);
         }
     }
 }

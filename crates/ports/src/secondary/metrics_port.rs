@@ -243,6 +243,15 @@ pub trait EventMetrics: Send + Sync {
     /// saw it, labelled by the producing program and the reason.
     fn record_ringbuf_event_dropped(&self, _source: &str, _reason: &str) {}
 
+    /// Record one drain pass that found at least one record, labelled by the
+    /// producing program and by what started it: `wakeup` when the kernel
+    /// woke the reader because a batch had built up, `tick` when the reader's
+    /// own periodic drain collected records that never reached that point.
+    ///
+    /// Records drained divided by drain passes is the batch size, which is
+    /// what the wakeup threshold exists to raise.
+    fn record_ringbuf_drain(&self, _source: &str, _trigger: &str) {}
+
     /// Observe the delay between the kernel committing a ring-buffer record
     /// and userspace draining it, in seconds.
     ///

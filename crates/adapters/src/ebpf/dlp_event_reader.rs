@@ -1,7 +1,8 @@
 #![allow(unsafe_code)] // Required for eBPF RingBuf event parsing (read_unaligned)
 
+use crate::ebpf::event_reader::drain_tick;
 use crate::ebpf::map_store::MapStore;
-use crate::ebpf::ringbuf_observer::RingBufObserver;
+use crate::ebpf::ringbuf_observer::{DrainTrigger, RingBufObserver};
 use aya::maps::{MapData, RingBuf};
 use domain::common::agent_event::AgentEvent;
 use ebpf_common::dlp::{DLP_MAX_EXCERPT, DlpEvent};
@@ -57,74 +58,94 @@ impl DlpEventReader {
         observer: RingBufObserver,
     ) {
         let mut async_fd = self.ring_buf;
+        let mut tick = drain_tick();
 
         loop {
-            let mut guard = tokio::select! {
+            tokio::select! {
                 () = cancel.cancelled() => {
                     info!("DLP event reader cancelled");
                     break;
                 }
                 result = async_fd.readable_mut() => {
                     match result {
-                        Ok(guard) => guard,
+                        Ok(mut guard) => {
+                            let drained = drain(guard.get_inner_mut(), &tx, &observer);
+                            guard.clear_ready();
+                            observer.drain_pass(DrainTrigger::Wakeup, drained);
+                        }
                         Err(e) => {
                             error!("DLP RingBuf readable error: {e}");
                             break;
                         }
                     }
                 }
-            };
-
-            // One clock read per batch, not per record.
-            let now_ns = observer.now_ns();
-            let rb = guard.get_inner_mut();
-            // pid(4) + tgid(4) + timestamp_ns(8) + cgroup_id(8) + data_len(4) + direction(1) + padding(3)
-            let header_size = 32_usize;
-            while let Some(item) = rb.next() {
-                let bytes: &[u8] = &item;
-                // Accept both small (288 bytes) and full (4128 bytes) DLP events.
-                // Both share the same header layout; only the excerpt buffer size differs.
-                // We reconstruct a full DlpEvent with zero-padded excerpt for uniform handling.
-                if bytes.len() >= header_size {
-                    let mut event = DlpEvent {
-                        pid: 0,
-                        tgid: 0,
-                        timestamp_ns: 0,
-                        cgroup_id: 0,
-                        data_len: 0,
-                        direction: 0,
-                        _padding: [0; 3],
-                        data_excerpt: [0; DLP_MAX_EXCERPT],
-                    };
-                    // SAFETY: header fields are at known offsets, verified by length check.
-                    // Both DlpEvent and DlpEventSmall share identical header layout (32 bytes).
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            bytes.as_ptr(),
-                            core::ptr::addr_of_mut!(event).cast::<u8>(),
-                            header_size.min(bytes.len()),
-                        );
-                    }
-                    // Copy available excerpt data (may be 256 or 4096 bytes)
-                    let excerpt_bytes = &bytes[header_size..];
-                    let copy_len = excerpt_bytes.len().min(DLP_MAX_EXCERPT);
-                    event.data_excerpt[..copy_len].copy_from_slice(&excerpt_bytes[..copy_len]);
-
-                    let mut event = AgentEvent::Dlp(Box::new(event));
-                    observer.accept(now_ns, &mut event);
-                    if tx.try_send(event).is_err() {
-                        observer.dropped("channel_full");
-                        debug!("DLP event channel full, dropping event");
-                    }
-                } else {
-                    // Shorter than the 32-byte header both event shapes share.
-                    // Counted rather than skipped: an unreadable record is a
-                    // loss, and silence would hide it.
-                    observer.dropped("truncated_record");
+                _ = tick.tick() => {
+                    // Records the producer committed without waking us,
+                    // because the backlog never reached the threshold.
+                    let drained = drain(async_fd.get_mut(), &tx, &observer);
+                    observer.drain_pass(DrainTrigger::Tick, drained);
                 }
             }
-
-            guard.clear_ready();
         }
     }
+}
+
+/// Drain every record currently in `rb`, returning how many were read.
+///
+/// One clock read per batch, not per record.
+fn drain(
+    rb: &mut RingBuf<MapData>,
+    tx: &mpsc::Sender<AgentEvent>,
+    observer: &RingBufObserver,
+) -> usize {
+    let now_ns = observer.now_ns();
+    let mut drained = 0usize;
+    // pid(4) + tgid(4) + timestamp_ns(8) + cgroup_id(8) + data_len(4) + direction(1) + padding(3)
+    let header_size = 32_usize;
+    while let Some(item) = rb.next() {
+        drained += 1;
+        let bytes: &[u8] = &item;
+        // Accept both small (288 bytes) and full (4128 bytes) DLP events.
+        // Both share the same header layout; only the excerpt buffer size differs.
+        // We reconstruct a full DlpEvent with zero-padded excerpt for uniform handling.
+        if bytes.len() >= header_size {
+            let mut event = DlpEvent {
+                pid: 0,
+                tgid: 0,
+                timestamp_ns: 0,
+                cgroup_id: 0,
+                data_len: 0,
+                direction: 0,
+                _padding: [0; 3],
+                data_excerpt: [0; DLP_MAX_EXCERPT],
+            };
+            // SAFETY: header fields are at known offsets, verified by length check.
+            // Both DlpEvent and DlpEventSmall share identical header layout (32 bytes).
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    core::ptr::addr_of_mut!(event).cast::<u8>(),
+                    header_size.min(bytes.len()),
+                );
+            }
+            // Copy available excerpt data (may be 256 or 4096 bytes)
+            let excerpt_bytes = &bytes[header_size..];
+            let copy_len = excerpt_bytes.len().min(DLP_MAX_EXCERPT);
+            event.data_excerpt[..copy_len].copy_from_slice(&excerpt_bytes[..copy_len]);
+
+            let mut event = AgentEvent::Dlp(Box::new(event));
+            observer.accept(now_ns, &mut event);
+            if tx.try_send(event).is_err() {
+                observer.dropped("channel_full");
+                debug!("DLP event channel full, dropping event");
+            }
+        } else {
+            // Shorter than the 32-byte header both event shapes share.
+            // Counted rather than skipped: an unreadable record is a
+            // loss, and silence would hide it.
+            observer.dropped("truncated_record");
+        }
+    }
+
+    drained
 }

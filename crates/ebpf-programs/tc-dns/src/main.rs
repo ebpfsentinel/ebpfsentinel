@@ -38,6 +38,12 @@ const DNS_PORT: u16 = 53;
 /// Dedicated DNS kernel→userspace event ring buffer (256 KB).
 /// Separate from the main EVENTS RingBuf to avoid DNS volume flooding
 /// security events and to allow independent polling cadence.
+///
+/// Its commits keep the kernel's default wakeup rather than batching behind
+/// a threshold like the other rings: a response feeds the domain-to-address
+/// cache that domain rules enforce against, and the client connects within
+/// a round trip of reading it, so a record left waiting for a drain tick is
+/// a first connection the rule never saw.
 #[btf_map]
 static DNS_EVENTS: RingBuf<DnsEventBuf, { 64 * 4096 }> = RingBuf::new();
 

@@ -27,6 +27,9 @@
 /// ```
 ///
 /// Without the `; tc $ctx` suffix, `socket_cookie` is set to 0 (XDP mode).
+///
+/// The commit wakes the reader only once a batch has built up (see
+/// [`crate::ringbuf::submit_flags`]); the reader drains the rest on its tick.
 #[macro_export]
 macro_rules! emit_packet_event {
     // TC variant with an explicit cgroup id. Used when the caller resolved
@@ -37,7 +40,8 @@ macro_rules! emit_packet_event {
      $src_addr:expr, $dst_addr:expr, $src_port:expr, $dst_port:expr,
      $protocol:expr, $event_type:expr, $action:expr, $rule_id:expr,
      $flags:expr, $vlan_id:expr ; tc $ctx:expr, cgroup $cgroup_id:expr) => {{
-        if $crate::ringbuf_has_backpressure!($ringbuf) {
+        let backlog = $crate::ringbuf::avail_data(&$ringbuf);
+        if backlog > $crate::ringbuf::DEFAULT_BACKPRESSURE_THRESHOLD {
             $crate::increment_metric!($metrics, $metric_dropped);
             return;
         }
@@ -64,7 +68,7 @@ macro_rules! emit_packet_event {
                 (*ptr).rss_hash_type = 0;
                 (*ptr).rx_hw_timestamp_ns = 0;
             }
-            entry.submit(0);
+            entry.submit($crate::ringbuf::submit_flags(backlog));
         } else {
             $crate::increment_metric!($metrics, $metric_dropped);
         }
@@ -75,7 +79,8 @@ macro_rules! emit_packet_event {
      $src_addr:expr, $dst_addr:expr, $src_port:expr, $dst_port:expr,
      $protocol:expr, $event_type:expr, $action:expr, $rule_id:expr,
      $flags:expr, $vlan_id:expr ; tc $ctx:expr) => {{
-        if $crate::ringbuf_has_backpressure!($ringbuf) {
+        let backlog = $crate::ringbuf::avail_data(&$ringbuf);
+        if backlog > $crate::ringbuf::DEFAULT_BACKPRESSURE_THRESHOLD {
             $crate::increment_metric!($metrics, $metric_dropped);
             return;
         }
@@ -111,7 +116,7 @@ macro_rules! emit_packet_event {
                 (*ptr).rss_hash_type = 0;
                 (*ptr).rx_hw_timestamp_ns = 0;
             }
-            entry.submit(0);
+            entry.submit($crate::ringbuf::submit_flags(backlog));
         } else {
             $crate::increment_metric!($metrics, $metric_dropped);
         }
@@ -122,7 +127,8 @@ macro_rules! emit_packet_event {
      $src_addr:expr, $dst_addr:expr, $src_port:expr, $dst_port:expr,
      $protocol:expr, $event_type:expr, $action:expr, $rule_id:expr,
      $flags:expr, $vlan_id:expr) => {{
-        if $crate::ringbuf_has_backpressure!($ringbuf) {
+        let backlog = $crate::ringbuf::avail_data(&$ringbuf);
+        if backlog > $crate::ringbuf::DEFAULT_BACKPRESSURE_THRESHOLD {
             $crate::increment_metric!($metrics, $metric_dropped);
             return;
         }
@@ -153,7 +159,7 @@ macro_rules! emit_packet_event {
                 (*ptr).rss_hash_type = 0;
                 (*ptr).rx_hw_timestamp_ns = 0;
             }
-            entry.submit(0);
+            entry.submit($crate::ringbuf::submit_flags(backlog));
         } else {
             $crate::increment_metric!($metrics, $metric_dropped);
         }

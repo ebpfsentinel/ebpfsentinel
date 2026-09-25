@@ -35,6 +35,12 @@ pub struct RingBufLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct RingBufDrainLabels {
+    pub source: String,
+    pub trigger: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct RingBufDropLabels {
     pub source: String,
     pub reason: String,
@@ -261,6 +267,9 @@ pub struct AgentMetrics {
     /// Without this a committed-then-discarded record is indistinguishable
     /// from one the kernel never emitted.
     pub ringbuf_events_dropped_total: Family<RingBufDropLabels, Counter>,
+    /// Drain passes that found records, by what started them. Against
+    /// `ringbuf_events_total` this is the batch size a wakeup delivers.
+    pub ringbuf_drains_total: Family<RingBufDrainLabels, Counter>,
     /// Delay between the kernel committing a record and userspace draining
     /// it. Both ends read `CLOCK_BOOTTIME`, so the timestamps are comparable.
     pub ringbuf_latency_seconds: Family<RingBufLabels, Histogram>,
@@ -702,6 +711,13 @@ impl AgentMetrics {
             ringbuf_events_dropped_total.clone(),
         );
 
+        let ringbuf_drains_total = Family::<RingBufDrainLabels, Counter>::default();
+        registry.register(
+            "ringbuf_drains",
+            "Ring-buffer drain passes that found records, per producing program and trigger",
+            ringbuf_drains_total.clone(),
+        );
+
         // A record that sat in the ring for a whole second is a different
         // failure from one drained in microseconds, so the range spans both.
         let ringbuf_latency_seconds =
@@ -817,6 +833,7 @@ impl AgentMetrics {
             worker_processing_duration,
             ringbuf_events_total,
             ringbuf_events_dropped_total,
+            ringbuf_drains_total,
             ringbuf_latency_seconds,
             container_resolver_cache_hits_total,
             container_resolver_cache_misses_total,
@@ -1214,6 +1231,15 @@ impl EventMetrics for AgentMetrics {
             .get_or_create(&RingBufDropLabels {
                 source: source.to_string(),
                 reason: reason.to_string(),
+            })
+            .inc();
+    }
+
+    fn record_ringbuf_drain(&self, source: &str, trigger: &str) {
+        self.ringbuf_drains_total
+            .get_or_create(&RingBufDrainLabels {
+                source: source.to_string(),
+                trigger: trigger.to_string(),
             })
             .inc();
     }
@@ -1841,6 +1867,7 @@ mod tests {
         ("packets", "counter"),
         ("ringbuf_events", "counter"),
         ("ringbuf_events_dropped", "counter"),
+        ("ringbuf_drains", "counter"),
         ("ringbuf_latency_seconds", "histogram"),
         ("routing_failovers", "counter"),
         ("routing_gateway_status", "gauge"),
@@ -1950,6 +1977,12 @@ mod tests {
             .get_or_create(&RingBufDropLabels {
                 source: "tc-ids".into(),
                 reason: "parse".into(),
+            })
+            .inc();
+        m.ringbuf_drains_total
+            .get_or_create(&RingBufDrainLabels {
+                source: "tc-ids".into(),
+                trigger: "wakeup".into(),
             })
             .inc();
     }

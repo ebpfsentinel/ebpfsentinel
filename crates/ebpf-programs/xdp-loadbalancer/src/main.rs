@@ -23,6 +23,7 @@ use ebpf_common::{
 };
 use ebpf_helpers::kfuncs::{xdp_rx_hash, xdp_rx_timestamp};
 use ebpf_helpers::parse_vlan_tags;
+use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 use ebpf_helpers::net::{
     ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
     ipv6_addr_to_u32x4, u32x4_to_ipv6_bytes,
@@ -854,7 +855,7 @@ fn emit_event(
         (*ptr).rss_hash = rss_h;
         (*ptr).rss_hash_type = rss_t;
         (*ptr).rx_hw_timestamp_ns = xdp_rx_timestamp(ctx_raw.cast_const()).unwrap_or(0);
-        event.submit(0);
+        event.submit(submit_flags(avail_data(&EVENTS)));
     }
 }
 

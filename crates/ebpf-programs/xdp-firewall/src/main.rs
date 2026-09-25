@@ -50,6 +50,7 @@ use ebpf_helpers::kfuncs::{
     BpfCtOpts, CtTuple, bpf_xfrm_state_opts, kill_flow_via_xdp_ct, with_xdp_ct_lookup,
     with_xdp_xfrm_state, xdp_frame_size, xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag,
 };
+use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 use ebpf_helpers::net::{
     ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, IcmpHdr, Ipv6Hdr, PROTO_ICMPV6, PROTO_TCP,
     PROTO_UDP, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
@@ -2301,7 +2302,7 @@ fn emit_event(ctx_raw: *mut core::ffi::c_void, action: u8) {
             (*ptr).rss_hash_type = rss_hash_type;
             (*ptr).rx_hw_timestamp_ns = rx_hw_ts;
         }
-        entry.submit(0);
+        entry.submit(submit_flags(avail_data(&EVENTS)));
     } else {
         increment_metric(METRIC_EVENTS_DROPPED);
     }

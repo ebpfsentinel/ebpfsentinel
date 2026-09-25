@@ -16,6 +16,7 @@ use ebpf_common::dlp::{
     DLP_METRIC_WRITE_EVENTS, DLP_SMALL_EXCERPT, DlpEvent, DlpEventSmall, SslReadArgs,
 };
 use ebpf_helpers::increment_metric;
+use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 
 // ── Per-connection DLP context via SK_STORAGE (kernel 5.2+) ─────────
 //
@@ -236,7 +237,7 @@ fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
                 );
             }
         }
-        entry.submit(0);
+        entry.submit(submit_flags(avail_data(&EVENTS)));
     } else {
         increment_metric(DLP_METRIC_EVENTS_DROPPED);
     }
@@ -279,7 +280,7 @@ fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8) {
                 );
             }
         }
-        entry.submit(0);
+        entry.submit(submit_flags(avail_data(&EVENTS)));
     } else {
         increment_metric(DLP_METRIC_EVENTS_DROPPED);
     }

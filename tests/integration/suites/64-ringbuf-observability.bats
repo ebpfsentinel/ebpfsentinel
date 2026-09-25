@@ -5,9 +5,11 @@
 # Three questions this suite answers with numbers rather than assumption:
 #
 #   1. Is a single isolated record observed immediately, or only when the
-#      10-second kernel-metrics poll happens to run? The reader is
-#      epoll-driven, so "immediately" is the only acceptable answer, and a
-#      regression here would be invisible under sustained load.
+#      10-second kernel-metrics poll happens to run? The packet producers
+#      submit without waking the reader until a batch has built up, so an
+#      isolated record is collected by the reader's own 10ms drain; either
+#      way "immediately" is the only acceptable answer, and a regression
+#      here would be invisible under sustained load.
 #   2. What is the commit-to-observe latency at a low event rate? The agent
 #      measures it itself: both ends read CLOCK_BOOTTIME, so
 #      ringbuf_latency_seconds is a real queueing delay, not an estimate.
@@ -161,10 +163,27 @@ ringbuf_dropped() {
         'BEGIN {printf "%.3f", ((sa - sb) / o) * 1000}')"
     echo "commit-to-observe latency: ${observed} records, mean ${mean_ms} ms"
 
-    # A record drained by an epoll-woken reader lands in single-digit
-    # milliseconds. A whole second means it waited for something.
+    # A record drained by the reader's 10ms periodic drain lands in
+    # low double-digit milliseconds at worst. A whole second means it waited for something.
     [ "$(awk -v m="$mean_ms" 'BEGIN {print (m < 1000) ? 1 : 0}')" -eq 1 ] || {
         echo "mean latency ${mean_ms} ms - the reader is not being woken promptly" >&2
+        return 1
+    }
+}
+
+# A record below the wakeup threshold is committed without waking the
+# reader, so at this rate it is the periodic drain, not the kernel, that
+# collects it. If this series never moves, the reader is only reacting to
+# wakeups and an isolated record would wait for the next burst.
+@test "a low-rate record is collected by the periodic drain" {
+    local ticks
+    ticks="$(_scrape | grep "^ebpfsentinel_ringbuf_drains_total{" |
+        grep "source=\"xdp-firewall\"" | grep "trigger=\"tick\"" |
+        awk '{s += $2} END {print s + 0}')"
+    echo "ringbuf_drains_total{source=\"xdp-firewall\",trigger=\"tick\"} = ${ticks}"
+
+    [ "$(awk -v t="$ticks" 'BEGIN {print (t > 0) ? 1 : 0}')" -eq 1 ] || {
+        echo "no drain pass started by the tick after the low-rate probes" >&2
         return 1
     }
 }

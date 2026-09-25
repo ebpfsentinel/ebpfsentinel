@@ -36,6 +36,7 @@ use ebpf_common::{
 use ebpf_helpers::kfuncs::{
     BpfCtOpts, CtTuple, kill_flow_via_skb_ct, skb_get_fou_encap, skb_packet_size,
 };
+use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 use ebpf_helpers::net::{
     IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4, u16_from_be_bytes,
     u32_from_be_bytes,
@@ -845,7 +846,7 @@ fn emit_l7_small(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_ava
             entry.discard(0);
             increment_metric(METRIC_ERRORS);
         } else {
-            entry.submit(0);
+            entry.submit(submit_flags(avail_data(&EVENTS)));
         }
     } else {
         increment_metric(METRIC_EVENTS_DROPPED);
@@ -903,7 +904,7 @@ fn emit_l7_full(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_avai
             entry.discard(0);
             increment_metric(METRIC_ERRORS);
         } else {
-            entry.submit(0);
+            entry.submit(submit_flags(avail_data(&EVENTS)));
         }
     } else {
         increment_metric(METRIC_EVENTS_DROPPED);
