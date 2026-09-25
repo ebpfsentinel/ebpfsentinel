@@ -3,9 +3,9 @@ use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, HashMap, MapData};
 use domain::common::error::DomainError;
 use ebpf_common::firewall::{
-    ACTION_PASS, FirewallRuleEntry, FirewallRuleEntryV6, FwHashKey5Tuple, FwHashKeyPort,
-    FwHashValue, MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT, MATCH_PROTO, MATCH_SRC_IP,
-    MATCH_SRC_PORT, MAX_FIREWALL_RULES, VLAN_ANY,
+    ACTION_PASS, DSCP_MARK_NONE, FirewallRuleEntry, FirewallRuleEntryV6, FwHashKey5Tuple,
+    FwHashKeyPort, FwHashValue, MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT, MATCH_PROTO,
+    MATCH_SRC_IP, MATCH_SRC_PORT, MAX_FIREWALL_RULES, VLAN_ANY,
 };
 use ports::secondary::ebpf_map_port::FirewallArrayMapPort;
 use tracing::info;
@@ -188,6 +188,8 @@ fn rule_reads_ct(match_flags: u8, max_states: u16) -> bool {
 /// A per-rule state ceiling goes the same way: the datapath counts those
 /// against a rule index, and a fast-path hit answers with an action and no
 /// index, so a ceiling served from there would be a number nothing enforces.
+/// A DSCP mark is read off the matched rule by index for the same reason, so a
+/// marking rule on the fast path would pass its traffic unmarked.
 fn has_extended_match(rule: &FirewallRuleEntry) -> bool {
     rule.match_flags2 != 0
         || rule.vlan_id != VLAN_ANY
@@ -197,6 +199,7 @@ fn has_extended_match(rule: &FirewallRuleEntry) -> bool {
         || rule.src_set_id != 0
         || rule.dst_set_id != 0
         || rule.max_states != 0
+        || rule.dscp_mark != DSCP_MARK_NONE
 }
 
 impl FirewallArrayMapPort for FirewallMapManager {
@@ -395,7 +398,7 @@ mod tests {
             max_states: 0,
             src_mac: [0; 6],
             dst_mac: [0; 6],
-            dscp_mark: 0xFF,
+            dscp_mark: DSCP_MARK_NONE,
             route_action: 0,
             route_ifindex: 0,
             group_mask: 0,
@@ -447,6 +450,15 @@ mod tests {
         rule.max_states = 128;
         // The ceiling is counted per rule index, and the fast path has none to
         // count against, so serving the verdict from there drops the ceiling.
+        assert!(has_extended_match(&rule));
+    }
+
+    #[test]
+    fn a_rule_carrying_a_dscp_mark_is_demoted_too() {
+        let mut rule = fast_path_candidate();
+        rule.dscp_mark = 46;
+        // The mark is read off the matched rule index, which a fast-path hit
+        // does not have, so the traffic would pass unmarked.
         assert!(has_extended_match(&rule));
     }
 }

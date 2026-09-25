@@ -109,6 +109,9 @@ pub const MATCH2_DST_MAC: u8 = 0x80;
 /// Wildcard value for ICMP type/code: skip comparison.
 pub const ICMP_WILDCARD: u8 = 0xFF;
 
+/// `dscp_mark` value meaning "leave the DSCP as it arrived".
+pub const DSCP_MARK_NONE: u8 = 0xFF;
+
 /// Wildcard value for a VLAN filter: match tagged and untagged alike.
 ///
 /// 802.1Q leaves VID 0 meaning "no VLAN, priority only", which the parsers

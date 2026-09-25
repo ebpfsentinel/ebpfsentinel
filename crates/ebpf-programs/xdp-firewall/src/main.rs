@@ -32,7 +32,7 @@ use ebpf_common::{
         ACTION_DROP, ACTION_LOG, ACTION_PASS, ACTION_REJECT, CT_MATCH_ESTABLISHED,
         CT_MATCH_INVALID, CT_MATCH_NEW, CT_MATCH_RELATED, DEFAULT_POLICY_DROP, FW_EMPTY_HASH_5TUPLE,
         FW_EMPTY_HASH_PORT, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_LPM_V4, FW_EMPTY_LPM_V6,
-        FW_EMPTY_SRC_LIMITS, FW_EMPTY_TENANTS, FW_EMPTY_ZONES, FirewallRuleEntry,
+        DSCP_MARK_NONE, FW_EMPTY_SRC_LIMITS, FW_EMPTY_TENANTS, FW_EMPTY_ZONES, FirewallRuleEntry,
         FirewallRuleEntryV6, FwHashKey5Tuple, FwHashKeyPort, FwHashValue, ICMP_WILDCARD,
         IpSetKeyV4, LpmValue, MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT, MATCH_DST_SET,
         MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT, MATCH_SRC_SET, MATCH2_DSCP, MATCH2_DST_MAC,
@@ -56,7 +56,7 @@ use ebpf_helpers::net::{
     PROTO_UDP, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
 };
 use ebpf_helpers::parse_vlan_tags;
-use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
 use ebpf_helpers::{copy_mac_asm, increment_metric, ringbuf_has_backpressure};
 use network_types::{
     eth::EthHdr,
@@ -1320,6 +1320,14 @@ fn process_firewall_v4(
                 return Ok(xdp_action::XDP_DROP);
             }
         }
+        if action == ACTION_PASS || action == ACTION_LOG {
+            let mark = FIREWALL_RULES
+                .get(matched_rule_idx as u32)
+                .map_or(DSCP_MARK_NONE, |r| r.dscp_mark);
+            if mark != DSCP_MARK_NONE {
+                mark_dscp_v4(ctx, l3_offset, mark)?;
+            }
+        }
         return apply_action(ctx_raw, action);
     }
 
@@ -1995,6 +2003,14 @@ fn process_firewall_v6(
                 return Ok(xdp_action::XDP_DROP);
             }
         }
+        if action == ACTION_PASS || action == ACTION_LOG {
+            let mark = FIREWALL_RULES_V6
+                .get(matched_rule_idx as u32)
+                .map_or(DSCP_MARK_NONE, |r| r.dscp_mark);
+            if mark != DSCP_MARK_NONE {
+                mark_dscp_v6(ctx, l3_offset, mark)?;
+            }
+        }
         return apply_action(ctx_raw, action);
     }
 
@@ -2154,6 +2170,52 @@ fn apply_fast_path_action(
         return Ok(xdp_action::XDP_DROP);
     }
     apply_action(ctx_raw, action)
+}
+
+/// Rewrite the DSCP of a passed IPv4 packet, keeping its two ECN bits.
+///
+/// The TOS byte shares a 16-bit word with version/IHL, so the header checksum
+/// is patched incrementally over that one word (RFC 1624) rather than
+/// recomputed. The TCP/UDP checksums cover no TOS and stay valid.
+#[inline(always)]
+fn mark_dscp_v4(ctx: &XdpContext, l3_offset: usize, dscp: u8) -> Result<(), ()> {
+    let hdr = unsafe { ptr_at_mut::<[u8; 20]>(ctx, l3_offset)? } as *mut u8;
+    unsafe {
+        let ver_ihl = *hdr;
+        let old_tos = *hdr.add(1);
+        let new_tos = ((dscp & 0x3F) << 2) | (old_tos & 0x03);
+        if new_tos == old_tos {
+            return Ok(());
+        }
+        let old_word = u16::from_be_bytes([ver_ihl, old_tos]) as u32;
+        let new_word = u16::from_be_bytes([ver_ihl, new_tos]) as u32;
+        let csum = u16::from_be_bytes([*hdr.add(10), *hdr.add(11)]) as u32;
+        let mut sum = (!csum & 0xFFFF) + (!old_word & 0xFFFF) + new_word;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        let out = (!(sum as u16)).to_be_bytes();
+        *hdr.add(1) = new_tos;
+        *hdr.add(10) = out[0];
+        *hdr.add(11) = out[1];
+    }
+    Ok(())
+}
+
+/// Rewrite the DSCP of a passed IPv6 packet, keeping ECN and the flow label.
+///
+/// The traffic class straddles the first two bytes: its top four bits sit
+/// under the version nibble, its low four bits (two of DSCP, then ECN) above
+/// the flow label. IPv6 has no header checksum, and the transport pseudo-header
+/// carries no traffic class.
+#[inline(always)]
+fn mark_dscp_v6(ctx: &XdpContext, l3_offset: usize, dscp: u8) -> Result<(), ()> {
+    let hdr = unsafe { ptr_at_mut::<[u8; 40]>(ctx, l3_offset)? } as *mut u8;
+    let dscp = dscp & 0x3F;
+    unsafe {
+        *hdr = (*hdr & 0xF0) | (dscp >> 2);
+        *hdr.add(1) = ((dscp & 0x03) << 6) | (*hdr.add(1) & 0x3F);
+    }
+    Ok(())
 }
 
 /// Apply firewall action (shared by IPv4 and IPv6 paths).
