@@ -501,6 +501,21 @@ pub async fn run(
         if let Err(e) = nat_svc.reload_nptv6_rules(nptv6_rules) {
             warn!("NAT NPTv6 rules reload failed (non-fatal): {e}");
         }
+        match config.nat_hairpin_parsed() {
+            Ok((subnet, mask, snat_ip)) => {
+                let hp = ebpf_common::nat::HairpinConfig {
+                    internal_subnet: subnet,
+                    internal_mask: mask,
+                    hairpin_snat_ip: snat_ip,
+                    enabled: u8::from(config.nat.hairpin.enabled),
+                    _pad: [0; 3],
+                };
+                if let Err(e) = nat_svc.load_hairpin_config(&hp) {
+                    warn!("hairpin NAT config load failed: {e}");
+                }
+            }
+            Err(e) => warn!("hairpin NAT config invalid, not loaded: {e}"),
+        }
     }
     let nat_svc = Arc::new(RwLock::new(nat_svc));
     info!(enabled = config.nat.enabled, "NAT service initialized");
@@ -2226,28 +2241,9 @@ pub async fn run(
                 Ok((mut ingress_loader, mut egress_loader, nat_mgr, nat_rdrs)) => {
                     metrics_readers.extend(nat_rdrs);
                     {
-                        let mut svc = nat_svc.write().await;
-                        svc.set_map_port(Box::new(nat_mgr));
-                        // Re-sync rules to eBPF maps now that maps are wired
-                        let dnat = config.nat_dnat_rules().unwrap_or_default();
-                        let snat = config.nat_snat_rules().unwrap_or_default();
-                        let nptv6 = config.nat_nptv6_rules().unwrap_or_default();
-                        let _ = svc.reload_dnat_rules(dnat);
-                        let _ = svc.reload_snat_rules(snat);
-                        let _ = svc.reload_nptv6_rules(nptv6);
-                        // Load hairpin NAT config
-                        if let Ok((subnet, mask, snat_ip)) = config.nat_hairpin_parsed() {
-                            let hp = ebpf_common::nat::HairpinConfig {
-                                internal_subnet: subnet,
-                                internal_mask: mask,
-                                hairpin_snat_ip: snat_ip,
-                                enabled: u8::from(config.nat.hairpin.enabled),
-                                _pad: [0; 3],
-                            };
-                            if let Err(e) = svc.load_hairpin_config(&hp) {
-                                tracing::warn!("hairpin NAT config load failed: {e}");
-                            }
-                        }
+                        // Pushes the rules the service holds, which are
+                        // alias-expanded, and the hairpin configuration.
+                        nat_svc.write().await.set_map_port(Box::new(nat_mgr));
                     }
                     iface_groups_mgr.add_map(ingress_loader.ebpf_mut());
                     iface_groups_mgr.add_map(egress_loader.ebpf_mut());

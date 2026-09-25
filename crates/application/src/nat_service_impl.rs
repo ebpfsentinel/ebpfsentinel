@@ -17,6 +17,7 @@ pub struct NatAppService {
     map_port: Option<Box<dyn NatMapPort + Send>>,
     metrics: Arc<dyn MetricsPort>,
     enabled: bool,
+    hairpin: Option<ebpf_common::nat::HairpinConfig>,
 }
 
 impl NatAppService {
@@ -28,6 +29,7 @@ impl NatAppService {
             map_port: None,
             metrics,
             enabled: false,
+            hairpin: None,
         }
     }
 
@@ -49,8 +51,22 @@ impl NatAppService {
     }
 
     /// Set the eBPF map port for kernel map synchronisation.
+    ///
+    /// The maps of a freshly loaded program are empty, so the rules and the
+    /// hairpin configuration this service already holds are pushed at once:
+    /// these are the rules after alias expansion, which a caller re-reading
+    /// the configuration file would not have.
     pub fn set_map_port(&mut self, port: Box<dyn NatMapPort + Send>) {
         self.map_port = Some(port);
+        self.sync_ebpf_dnat();
+        self.sync_ebpf_snat();
+        self.sync_ebpf_nptv6();
+        if let Some(hp) = self.hairpin
+            && let Some(ref mut port) = self.map_port
+            && let Err(e) = port.load_hairpin_config(&hp)
+        {
+            tracing::warn!("failed to load hairpin NAT config into eBPF: {e}");
+        }
     }
 
     /// Clear the eBPF map port (program unloaded).
@@ -145,6 +161,7 @@ impl NatAppService {
         &mut self,
         config: &ebpf_common::nat::HairpinConfig,
     ) -> Result<(), DomainError> {
+        self.hairpin = Some(*config);
         let Some(ref mut port) = self.map_port else {
             return Ok(());
         };
@@ -980,5 +997,91 @@ mod tests {
         svc.reload_snat_rules(vec![make_snat_rule("s1")]).unwrap();
         svc.reload_nptv6_rules(vec![make_nptv6_rule("n1")]).unwrap();
         assert_eq!(svc.rule_count(), 2);
+    }
+
+    #[derive(Default)]
+    struct Pushed {
+        dnat: usize,
+        snat: usize,
+        nptv6: usize,
+        hairpin: Option<ebpf_common::nat::HairpinConfig>,
+    }
+
+    struct RecordingPort(Arc<std::sync::Mutex<Pushed>>);
+
+    impl NatMapPort for RecordingPort {
+        fn load_dnat_rules(
+            &mut self,
+            rules: &[ebpf_common::nat::NatRuleEntry],
+        ) -> Result<(), DomainError> {
+            self.0.lock().unwrap().dnat = rules.len();
+            Ok(())
+        }
+        fn load_snat_rules(
+            &mut self,
+            rules: &[ebpf_common::nat::NatRuleEntry],
+        ) -> Result<(), DomainError> {
+            self.0.lock().unwrap().snat = rules.len();
+            Ok(())
+        }
+        fn load_dnat_rules_v6(
+            &mut self,
+            _rules: &[ebpf_common::nat::NatRuleEntryV6],
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn load_snat_rules_v6(
+            &mut self,
+            _rules: &[ebpf_common::nat::NatRuleEntryV6],
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn load_nptv6_rules(
+            &mut self,
+            rules: &[ebpf_common::nat::NptV6RuleEntry],
+        ) -> Result<(), DomainError> {
+            self.0.lock().unwrap().nptv6 = rules.len();
+            Ok(())
+        }
+        fn load_hairpin_config(
+            &mut self,
+            config: &ebpf_common::nat::HairpinConfig,
+        ) -> Result<(), DomainError> {
+            self.0.lock().unwrap().hairpin = Some(*config);
+            Ok(())
+        }
+        fn set_enabled(&mut self, _enabled: bool) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn rule_count(&self) -> Result<usize, DomainError> {
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn a_map_port_set_late_receives_the_rules_already_held() {
+        let mut svc = make_service();
+        svc.set_enabled(true);
+        svc.reload_dnat_rules(vec![make_dnat_rule("d1")]).unwrap();
+        svc.reload_snat_rules(vec![make_snat_rule("s1"), make_snat_rule("s2")])
+            .unwrap();
+        svc.reload_nptv6_rules(vec![make_nptv6_rule("n1")]).unwrap();
+        let hp = ebpf_common::nat::HairpinConfig {
+            internal_subnet: 0x0A00_0000,
+            internal_mask: 0xFF00_0000,
+            hairpin_snat_ip: 0x0A00_0001,
+            enabled: 1,
+            _pad: [0; 3],
+        };
+        svc.load_hairpin_config(&hp).unwrap();
+
+        let pushed = Arc::new(std::sync::Mutex::new(Pushed::default()));
+        svc.set_map_port(Box::new(RecordingPort(Arc::clone(&pushed))));
+
+        let pushed = pushed.lock().unwrap();
+        assert_eq!(pushed.dnat, 1);
+        assert_eq!(pushed.snat, 2);
+        assert_eq!(pushed.nptv6, 1);
+        assert_eq!(pushed.hairpin, Some(hp));
     }
 }
