@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -52,10 +52,6 @@ pub struct EbpfProgramManager {
     pub tenant_cgroup: TenantCgroupMapManager,
     /// Shared metrics readers - the kernel metrics loop reads from this.
     pub metrics_readers: Arc<RwLock<Vec<MetricsReader>>>,
-    /// Programs loaded during startup (loaders kept alive in `EbpfState`).
-    /// These are tracked by name so `is_loaded()` returns true without
-    /// needing a `ProgramHandle`.
-    startup_loaded: HashSet<String>,
 }
 
 impl EbpfProgramManager {
@@ -77,7 +73,6 @@ impl EbpfProgramManager {
             tenant_subnet: TenantSubnetMapManager::new(),
             tenant_cgroup: TenantCgroupMapManager::new(),
             metrics_readers: Arc::new(RwLock::new(Vec::new())),
-            startup_loaded: HashSet::new(),
         }
     }
 
@@ -95,56 +90,35 @@ impl EbpfProgramManager {
         )
     }
 
-    /// Register a pre-loaded program (used during startup to migrate from legacy path).
-    pub fn register_program(&mut self, name: String, loader: EbpfLoader) {
+    /// Take over a program startup loaded, with the token its readers run under.
+    pub fn register_program(&mut self, name: &str, loader: EbpfLoader, cancel: CancellationToken) {
         let handle = ProgramHandle {
-            name: name.clone(),
+            name: name.to_string(),
             loader,
-            reader_cancel: CancellationToken::new(),
+            reader_cancel: cancel,
             reader_handles: Vec::new(),
         };
-        self.programs.insert(name, handle);
+        self.programs.insert(name.to_string(), handle);
     }
 
-    /// Mark a program as loaded at startup (without transferring a loader).
-    ///
-    /// Used for programs loaded by the legacy startup path whose loaders are
-    /// kept alive separately in `EbpfState`. Prevents Phase 9 from trying to
-    /// re-load them.
-    /// Mark a program as loaded during startup (loader kept alive in `EbpfState`).
-    pub fn mark_startup_loaded(&mut self, name: &str) {
-        self.startup_loaded.insert(name.to_string());
-    }
-
-    /// Add metrics readers (used during startup migration).
-    pub async fn add_metrics_readers(&self, readers: Vec<MetricsReader>) {
-        let mut lock = self.metrics_readers.write().await;
-        lock.extend(readers);
-    }
-
-    /// Check if a program is currently loaded (either via hot-reload or startup).
+    /// Check if a program is currently loaded.
     pub fn is_loaded(&self, name: &str) -> bool {
-        self.programs.contains_key(name) || self.startup_loaded.contains(name)
+        self.programs.contains_key(name)
     }
 
-    /// Return the load status of all known programs.
-    pub fn program_status(&self) -> HashMap<String, bool> {
-        let all_programs = [
-            "xdp_firewall",
-            "xdp_ratelimit",
-            "xdp_loadbalancer",
-            "tc_ids",
-            "tc_threatintel",
-            "tc_dns",
-            "tc_conntrack",
-            "tc_nat",
-            "tc_scrub",
-            "uprobe_dlp",
-        ];
-        all_programs
-            .iter()
-            .map(|&name| (name.to_string(), self.programs.contains_key(name)))
-            .collect()
+    /// Stop reading the kernel counters of a program being unloaded.
+    ///
+    /// Counter maps are pinned by name, so a program loaded again shares the
+    /// same map: a reader left behind would count every packet twice.
+    async fn drop_metrics_readers(&self, program: &str) {
+        let maps = metrics_maps(program);
+        if maps.is_empty() {
+            return;
+        }
+        self.metrics_readers
+            .write()
+            .await
+            .retain(|r| !maps.contains(&r.map_name()));
     }
 
     /// Enable a Category A (independent TC/uprobe) program by name.
@@ -187,6 +161,7 @@ impl EbpfProgramManager {
         for jh in &handle.reader_handles {
             jh.abort();
         }
+        self.drop_metrics_readers(name).await;
 
         // Clear map ports from services
         match name {
@@ -205,6 +180,14 @@ impl EbpfProgramManager {
             }
             "tc_nat" => {
                 self.services.nat_svc.write().await.clear_map_port();
+                // The egress half shares the ingress half's lifecycle.
+                self.programs.remove("tc_nat_egress");
+                self.services
+                    .metrics
+                    .set_ebpf_program_status("tc_nat_ingress", false);
+                self.services
+                    .metrics
+                    .set_ebpf_program_status("tc_nat_egress", false);
             }
             _ => {}
         }
@@ -249,11 +232,6 @@ impl EbpfProgramManager {
         adapters::ebpf::clear_attach_blocks();
         adapters::ebpf::clear_map_fills();
         info!("all eBPF programs detached");
-    }
-
-    /// Get the mutable loader for a program (needed for tail-call wiring).
-    pub fn loader_mut(&mut self, name: &str) -> Option<&mut EbpfLoader> {
-        self.programs.get_mut(name).map(|h| &mut h.loader)
     }
 
     // ── Per-program enable implementations ─────────────────────────
@@ -647,7 +625,69 @@ impl EbpfProgramManager {
             let _ = rl.loader.clear_tail_call_target("RL_PROG_ARRAY", 1);
         }
 
+        // Wire firewall → VIP announcer (slot 3). The announcer outlives a
+        // firewall reload, so a firewall loaded again finds it here.
+        if fw_loaded && let Some(vip) = self.programs.get("xdp_vip_announcer") {
+            let vip_fd = vip.loader.program_raw_fd("xdp_vip_announcer")?;
+            if let Some(fw) = self.programs.get_mut("xdp_firewall") {
+                fw.loader.set_tail_call_raw("XDP_PROG_ARRAY", 3, vip_fd)?;
+                info!("XDP chain: firewall → vip-announcer wired (slot 3)");
+            }
+        }
+
         Ok(())
+    }
+
+    /// Bring the loaded XDP programs in line with the configuration.
+    ///
+    /// Only the root of the chain is attached to the interfaces; the others
+    /// are loaded as tail-call targets. When the root stays the same, the
+    /// programs removed are detached and the ones added are loaded behind it.
+    /// When the root changes, a program loaded as a target would have to be
+    /// attached and the old root detached, so the chain is rebuilt: every XDP
+    /// program is unloaded and the wanted ones loaded again, root first. The
+    /// lookup maps are pinned, so the rules survive the rebuild; traffic
+    /// crosses the interfaces unfiltered for as long as it takes.
+    ///
+    /// Returns whether anything changed.
+    pub async fn reconcile_xdp(&mut self, config: &AgentConfig) -> bool {
+        let wanted: Vec<&'static str> = xdp_config_map(config)
+            .into_iter()
+            .filter_map(|(name, enabled)| enabled.then_some(name))
+            .collect();
+        let loaded: Vec<&'static str> = XDP_CHAIN
+            .iter()
+            .copied()
+            .filter(|name| self.is_loaded(name))
+            .collect();
+        if wanted == loaded {
+            return false;
+        }
+
+        let (to_disable, to_enable) = plan_xdp(&wanted, &loaded);
+        if let (Some(from), Some(to)) = (loaded.first(), wanted.first())
+            && from != to
+        {
+            info!(
+                from = *from,
+                to = *to,
+                "XDP chain root changes, rebuilding the chain"
+            );
+        }
+
+        // Leaves first, so no attached program tail-calls into one going away.
+        for name in to_disable.iter().rev() {
+            if let Err(e) = self.disable_xdp_program(name, config).await {
+                warn!(program = name, "XDP program disable failed: {e}");
+            }
+        }
+        // Root first, so the programs behind it load as targets.
+        for name in &to_enable {
+            if let Err(e) = self.enable_xdp_program(name, config).await {
+                warn!(program = name, "XDP program enable failed: {e}");
+            }
+        }
+        true
     }
 
     /// Enable an XDP program and rewire the chain.
@@ -854,6 +894,7 @@ impl EbpfProgramManager {
                     }
                 }
                 self.services.firewall_svc.write().await.clear_map_port();
+                self.drop_metrics_readers("xdp_firewall").await;
                 self.services
                     .metrics
                     .set_ebpf_program_status("xdp_firewall", false);
@@ -867,6 +908,7 @@ impl EbpfProgramManager {
                     }
                 }
                 self.services.rl_svc.write().await.clear_map_port();
+                self.drop_metrics_readers("xdp_ratelimit").await;
                 self.services
                     .metrics
                     .set_ebpf_program_status("xdp_ratelimit", false);
@@ -879,6 +921,7 @@ impl EbpfProgramManager {
                     }
                 }
                 self.services.lb_svc.write().await.clear_map_port();
+                self.drop_metrics_readers("xdp_loadbalancer").await;
                 self.services
                     .metrics
                     .set_ebpf_program_status("xdp_loadbalancer", false);
@@ -900,7 +943,8 @@ impl EbpfProgramManager {
 /// XDP chain programs are handled by [`xdp_config_map`].
 pub fn program_config_map(config: &AgentConfig) -> Vec<(&'static str, bool)> {
     vec![
-        ("tc_ids", config.ids.enabled),
+        // tc-ids is also the vehicle of L7 capture.
+        ("tc_ids", config.ids.enabled || config.l7.enabled),
         ("tc_threatintel", config.threatintel.enabled),
         ("tc_dns", config.dns.enabled),
         ("tc_conntrack", config.conntrack.enabled),
@@ -910,11 +954,85 @@ pub fn program_config_map(config: &AgentConfig) -> Vec<(&'static str, bool)> {
     ]
 }
 
-/// Build the XDP program config map.
+/// The XDP programs that can be the root of the chain, in chain order.
+const XDP_CHAIN: [&str; 3] = ["xdp_firewall", "xdp_ratelimit", "xdp_loadbalancer"];
+
+/// What to unload and what to load, both in chain order, to go from the XDP
+/// programs `loaded` to the ones `wanted`. The same root keeps the programs
+/// both lists share; a different root unloads everything and loads again.
+fn plan_xdp(wanted: &[&'static str], loaded: &[&'static str]) -> XdpPlan {
+    if wanted.first() == loaded.first() {
+        (
+            loaded
+                .iter()
+                .copied()
+                .filter(|n| !wanted.contains(n))
+                .collect(),
+            wanted
+                .iter()
+                .copied()
+                .filter(|n| !loaded.contains(n))
+                .collect(),
+        )
+    } else {
+        (loaded.to_vec(), wanted.to_vec())
+    }
+}
+
+type XdpPlan = (Vec<&'static str>, Vec<&'static str>);
+
+/// The kernel counter maps a program's metrics readers read.
+fn metrics_maps(program: &str) -> &'static [&'static str] {
+    match program {
+        "xdp_firewall" => &["FIREWALL_METRICS"],
+        "xdp_ratelimit" => &["RATELIMIT_METRICS", "DDOS_METRICS"],
+        "xdp_loadbalancer" => &["LB_METRICS"],
+        "tc_ids" => &["IDS_METRICS"],
+        "tc_threatintel" => &["THREATINTEL_METRICS"],
+        "tc_dns" => &["DNS_METRICS"],
+        "tc_conntrack" => &["CT_METRICS"],
+        "tc_nat" => &["NAT_METRICS"],
+        "tc_scrub" => &["SCRUB_METRICS"],
+        "uprobe_dlp" => &["DLP_METRICS"],
+        _ => &[],
+    }
+}
+
+/// Build the XDP program config map, in chain order.
 pub fn xdp_config_map(config: &AgentConfig) -> Vec<(&'static str, bool)> {
     vec![
         ("xdp_firewall", config.firewall.enabled),
         ("xdp_ratelimit", config.ratelimit.enabled),
         ("xdp_loadbalancer", config.loadbalancer.enabled),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_xdp;
+
+    const FW: &str = "xdp_firewall";
+    const RL: &str = "xdp_ratelimit";
+    const LB: &str = "xdp_loadbalancer";
+
+    #[test]
+    fn the_same_root_keeps_what_both_chains_share() {
+        assert_eq!(plan_xdp(&[FW, LB], &[FW, RL]), (vec![RL], vec![LB]));
+        assert_eq!(plan_xdp(&[FW, RL, LB], &[FW]), (vec![], vec![RL, LB]));
+    }
+
+    #[test]
+    fn a_new_root_rebuilds_the_chain() {
+        assert_eq!(
+            plan_xdp(&[RL, LB], &[FW, RL, LB]),
+            (vec![FW, RL, LB], vec![RL, LB])
+        );
+        assert_eq!(plan_xdp(&[FW, LB], &[LB]), (vec![LB], vec![FW, LB]));
+    }
+
+    #[test]
+    fn an_empty_side_only_loads_or_only_unloads() {
+        assert_eq!(plan_xdp(&[RL], &[]), (vec![], vec![RL]));
+        assert_eq!(plan_xdp(&[], &[FW, RL]), (vec![FW, RL], vec![]));
+    }
 }

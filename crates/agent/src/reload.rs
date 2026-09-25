@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use adapters::ebpf::{ConfigFlagsManager, InterfaceGroupsManager, L7PortsManager};
 
-use crate::ebpf_lifecycle::{EbpfProgramManager, program_config_map, xdp_config_map};
+use crate::ebpf_lifecycle::{EbpfProgramManager, program_config_map};
 
 /// Typed handle so the reload task knows which auth provider variant to refresh.
 pub enum AuthProviderHandle {
@@ -799,38 +799,8 @@ async fn perform_reload(
             }
         }
 
-        // 9b. Category B: XDP chain programs
-        let mut xdp_changed = false;
-        for (program_name, config_enabled) in xdp_config_map(&config) {
-            let currently_loaded = mgr.is_loaded(program_name);
-            match (currently_loaded, config_enabled) {
-                (false, true) => {
-                    if let Err(e) = mgr.enable_xdp_program(program_name, &config).await {
-                        tracing::warn!(
-                            program = program_name,
-                            error = %e,
-                            "XDP program hot-load failed"
-                        );
-                    } else {
-                        xdp_changed = true;
-                    }
-                }
-                (true, false) => {
-                    if let Err(e) = mgr.disable_xdp_program(program_name, &config).await {
-                        tracing::warn!(
-                            program = program_name,
-                            error = %e,
-                            "XDP program hot-unload failed"
-                        );
-                    } else {
-                        xdp_changed = true;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if xdp_changed {
+        // 9b. Category B: XDP chain programs, which may move the root.
+        if mgr.reconcile_xdp(&config).await {
             tracing::info!("XDP chain topology changed, tail-calls rewired");
         }
     }

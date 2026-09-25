@@ -1613,6 +1613,18 @@ pub async fn run(
     let mut qos_ok = false;
     let mut vip_announcer_ok = false;
     let mut fw_loader: Option<EbpfLoader> = None;
+    // Loaders the lifecycle manager takes over once it exists, each with the
+    // token its readers run under, so a reload that disables one program
+    // detaches that program and stops only its readers.
+    let mut managed: Vec<(&'static str, EbpfLoader, CancellationToken)> = Vec::new();
+    let fw_cancel = readers.child_token();
+    let rl_cancel = readers.child_token();
+    let lb_cancel = readers.child_token();
+    let ids_cancel = readers.child_token();
+    let ti_cancel = readers.child_token();
+    let dns_cancel = readers.child_token();
+    let dlp_cancel = readers.child_token();
+    let ct_cancel = readers.child_token();
 
     if ebpf_capable {
         // Pins from a previous generation cannot be inspected - the kernel
@@ -1654,7 +1666,7 @@ pub async fn run(
                         "xdp-firewall",
                         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                     );
-                    let task_cancel_1 = readers.clone();
+                    let task_cancel_1 = fw_cancel.clone();
                     tokio::spawn(async move {
                         reader.run(event_tx_clone, task_cancel_1, rb_obs).await;
                     });
@@ -1714,7 +1726,7 @@ pub async fn run(
                         "xdp-ratelimit",
                         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                     );
-                    let task_cancel_2 = readers.clone();
+                    let task_cancel_2 = rl_cancel.clone();
                     tokio::spawn(async move {
                         reader.run(event_tx_clone, task_cancel_2, rb_obs).await;
                     });
@@ -1765,7 +1777,11 @@ pub async fn run(
                     // Wire tail-call: ratelimit → syncookie (slot 0). Best-effort.
                     match try_load_xdp_ratelimit_syncookie(&ebpf_dir, &mut rl_loader) {
                         Ok(sc_loader) => {
-                            ebpf_state.add_loader(sc_loader);
+                            managed.push((
+                                "xdp_ratelimit_syncookie",
+                                sc_loader,
+                                readers.child_token(),
+                            ));
                             info!("XDP tail-call: ratelimit → syncookie wired (slot 0)");
                         }
                         Err(e) => {
@@ -1787,7 +1803,7 @@ pub async fn run(
                                     "xdp-loadbalancer",
                                     Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                                 );
-                                let task_cancel_3 = readers.clone();
+                                let task_cancel_3 = lb_cancel.clone();
                                 tokio::spawn(async move {
                                     lb_reader.run(event_tx_clone, task_cancel_3, rb_obs).await;
                                 });
@@ -1815,7 +1831,11 @@ pub async fn run(
                                 {
                                     let _ = fw.set_tail_call_raw("XDP_PROG_ARRAY", 2, lb_fd);
                                 }
-                                ebpf_state.add_loader(lb_loader_early);
+                                managed.push((
+                                    "xdp_loadbalancer",
+                                    lb_loader_early,
+                                    lb_cancel.clone(),
+                                ));
                                 metrics.set_ebpf_program_status("xdp_loadbalancer", true);
                                 info!("eBPF xdp-loadbalancer active (via ratelimit chain)");
                                 lb_pre_loaded = true;
@@ -1825,7 +1845,7 @@ pub async fn run(
                             }
                         }
                     }
-                    ebpf_state.add_loader(rl_loader);
+                    managed.push(("xdp_ratelimit", rl_loader, rl_cancel.clone()));
                     metrics.set_ebpf_program_status("xdp_ratelimit", true);
                     info!("eBPF xdp-ratelimit active");
                     true
@@ -1847,7 +1867,7 @@ pub async fn run(
         if let Some(ref mut fw) = fw_loader {
             match try_load_xdp_firewall_reject(&ebpf_dir, fw) {
                 Ok(reject_loader) => {
-                    ebpf_state.add_loader(reject_loader);
+                    managed.push(("xdp_firewall_reject", reject_loader, readers.child_token()));
                     info!("XDP tail-call: firewall → reject wired (slot 1)");
                 }
                 Err(e) => {
@@ -1932,7 +1952,7 @@ pub async fn run(
                         "xdp-loadbalancer",
                         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                     );
-                    let task_cancel_4 = readers.clone();
+                    let task_cancel_4 = lb_cancel.clone();
                     tokio::spawn(async move {
                         lb_reader.run(event_tx_clone, task_cancel_4, rb_obs).await;
                     });
@@ -1947,7 +1967,7 @@ pub async fn run(
                             info!("XDP tail-call: firewall → loadbalancer wired (FW slot 2)");
                         }
                     }
-                    ebpf_state.add_loader(lb_loader);
+                    managed.push(("xdp_loadbalancer", lb_loader, lb_cancel.clone()));
                     metrics.set_ebpf_program_status("xdp_loadbalancer", true);
                     lb_pre_loaded = true;
                     info!("eBPF xdp-loadbalancer active (via firewall chain)");
@@ -1987,7 +2007,7 @@ pub async fn run(
                             warn!("vip announcer configure failed: {e}");
                         }
                     }
-                    ebpf_state.add_loader(vip_loader);
+                    managed.push(("xdp_vip_announcer", vip_loader, readers.child_token()));
                     // Mirror the kernel per-VIP forged-reply counters into
                     // Prometheus on a slow cadence (cumulative gauge).
                     let vip_metrics_svc = Arc::clone(&vip_svc);
@@ -2019,7 +2039,7 @@ pub async fn run(
 
         // Move firewall loader into eBPF state (after tail-call wiring)
         if let Some(loader) = fw_loader {
-            ebpf_state.add_loader(loader);
+            managed.push(("xdp_firewall", loader, fw_cancel.clone()));
         }
 
         // 10c. TC IDS - also the L7 capture vehicle (TLS ClientHello / HTTP
@@ -2034,7 +2054,7 @@ pub async fn run(
                         "tc-ids",
                         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                     );
-                    let task_cancel_5 = readers.clone();
+                    let task_cancel_5 = ids_cancel.clone();
                     tokio::spawn(async move {
                         reader.run(event_tx_clone, task_cancel_5, rb_obs).await;
                     });
@@ -2055,7 +2075,7 @@ pub async fn run(
                         metrics_readers.push(rdr);
                     }
                     iface_groups_mgr.add_map(loader.ebpf_mut());
-                    ebpf_state.add_loader(loader);
+                    managed.push(("tc_ids", loader, ids_cancel.clone()));
                     metrics.set_ebpf_program_status("tc_ids", true);
                     info!("eBPF tc-ids active");
                     true
@@ -2081,7 +2101,7 @@ pub async fn run(
                             "tc-threatintel",
                             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                         );
-                        let task_cancel_6 = readers.clone();
+                        let task_cancel_6 = ti_cancel.clone();
                         tokio::spawn(async move {
                             reader.run(event_tx_clone, task_cancel_6, rb_obs).await;
                         });
@@ -2110,7 +2130,7 @@ pub async fn run(
                         if let Some(cfg_mgr) = cfg_mgr_opt {
                             ebpf_map_holder.config_flags.push(cfg_mgr);
                         }
-                        ebpf_state.add_loader(loader);
+                        managed.push(("tc_threatintel", loader, ti_cancel.clone()));
                         metrics.set_ebpf_program_status("tc_threatintel", true);
                         info!("eBPF tc-threatintel active");
                         true
@@ -2135,14 +2155,14 @@ pub async fn run(
                         "tc-dns",
                         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                     );
-                    let task_cancel_7 = readers.clone();
+                    let task_cancel_7 = dns_cancel.clone();
                     tokio::spawn(async move {
                         reader.run(event_tx_clone, task_cancel_7, rb_obs).await;
                     });
                     if let Some(rdr) = dns_rdr {
                         metrics_readers.push(rdr);
                     }
-                    ebpf_state.add_loader(loader);
+                    managed.push(("tc_dns", loader, dns_cancel.clone()));
                     metrics.set_ebpf_program_status("tc_dns", true);
                     info!("eBPF tc-dns active");
                     true
@@ -2169,13 +2189,13 @@ pub async fn run(
                         "uprobe-dlp",
                         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                     );
-                    let task_cancel_8 = readers.clone();
+                    let task_cancel_8 = dlp_cancel.clone();
                     tokio::spawn(async move {
                         reader.run(event_tx_clone, task_cancel_8, rb_obs).await;
                     });
                     // Lifecycle watcher: attach SSL uprobes to containers as they
                     // appear and detach them on teardown.
-                    let task_cancel_9 = readers.clone();
+                    let task_cancel_9 = dlp_cancel.clone();
                     tokio::spawn(async move {
                         attacher
                             .watch(adapters::ebpf::DLP_ATTACH_POLL_INTERVAL, task_cancel_9)
@@ -2184,7 +2204,7 @@ pub async fn run(
                     if let Some(rdr) = dlp_rdr {
                         metrics_readers.push(rdr);
                     }
-                    ebpf_state.add_loader(loader);
+                    managed.push(("uprobe_dlp", loader, dlp_cancel.clone()));
                     metrics.set_ebpf_program_status("uprobe_dlp", true);
                     info!("eBPF uprobe-dlp active");
                     true
@@ -2210,7 +2230,7 @@ pub async fn run(
                             "tc-conntrack",
                             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                         );
-                        let task_cancel_10 = readers.clone();
+                        let task_cancel_10 = ct_cancel.clone();
                         tokio::spawn(async move {
                             reader.run(event_tx_clone, task_cancel_10, rb_obs).await;
                         });
@@ -2219,7 +2239,7 @@ pub async fn run(
                     if let Some(rdr) = ct_rdr {
                         metrics_readers.push(rdr);
                     }
-                    ebpf_state.add_loader(loader);
+                    managed.push(("tc_conntrack", loader, ct_cancel.clone()));
                     metrics.set_ebpf_program_status("tc_conntrack", true);
                     info!("eBPF tc-conntrack active");
                     true
@@ -2247,8 +2267,11 @@ pub async fn run(
                     }
                     iface_groups_mgr.add_map(ingress_loader.ebpf_mut());
                     iface_groups_mgr.add_map(egress_loader.ebpf_mut());
-                    ebpf_state.add_loader(ingress_loader);
-                    ebpf_state.add_loader(egress_loader);
+                    // Ingress and egress are one program to the lifecycle
+                    // manager: disabling "tc_nat" removes both.
+                    let nat_cancel = readers.child_token();
+                    managed.push(("tc_nat", ingress_loader, nat_cancel.clone()));
+                    managed.push(("tc_nat_egress", egress_loader, nat_cancel));
                     metrics.set_ebpf_program_status("tc_nat_ingress", true);
                     metrics.set_ebpf_program_status("tc_nat_egress", true);
                     info!("eBPF tc-nat-ingress + tc-nat-egress active");
@@ -2274,7 +2297,7 @@ pub async fn run(
                     if let Some(rdr) = scrub_rdr {
                         metrics_readers.push(rdr);
                     }
-                    ebpf_state.add_loader(loader);
+                    managed.push(("tc_scrub", loader, readers.child_token()));
                     metrics.set_ebpf_program_status("tc_scrub", true);
                     info!("eBPF tc-scrub active");
                     true
@@ -2357,7 +2380,7 @@ pub async fn run(
                         "xdp-loadbalancer",
                         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
                     );
-                    let task_cancel_12 = readers.clone();
+                    let task_cancel_12 = lb_cancel.clone();
                     tokio::spawn(async move {
                         lb_reader.run(event_tx_clone, task_cancel_12, rb_obs).await;
                     });
@@ -2366,7 +2389,7 @@ pub async fn run(
                         metrics_readers.push(rdr);
                     }
                     // FW→LB wiring (slot 2) already done during pre-load or not needed.
-                    ebpf_state.add_loader(lb_loader);
+                    managed.push(("xdp_loadbalancer", lb_loader, lb_cancel.clone()));
                     metrics.set_ebpf_program_status("xdp_loadbalancer", true);
                     info!("eBPF xdp-loadbalancer active");
                     true
@@ -2557,44 +2580,15 @@ pub async fn run(
             }),
             ebpf_dir.clone(),
         );
-        // Mark startup-loaded programs so hot-reload doesn't try to re-load them.
-        // The actual loaders are kept alive in ebpf_state (moved below).
-        if fw_ok {
-            mgr.mark_startup_loaded("xdp_firewall");
+        // Every program with a lifecycle is handed over with its loader, so a
+        // reload can detach it and move the XDP root. tc-qos has none: it is
+        // loaded here or not at all, and its loader stays in `ebpf_state`.
+        for (name, loader, cancel) in managed {
+            mgr.register_program(name, loader, cancel);
         }
-        if rl_ok {
-            mgr.mark_startup_loaded("xdp_ratelimit");
-        }
-        if ids_ok {
-            mgr.mark_startup_loaded("tc_ids");
-        }
-        if ti_ok {
-            mgr.mark_startup_loaded("tc_threatintel");
-        }
-        if dns_ok {
-            mgr.mark_startup_loaded("tc_dns");
-        }
-        if dlp_ok {
-            mgr.mark_startup_loaded("uprobe_dlp");
-        }
-        if ct_ok {
-            mgr.mark_startup_loaded("tc_conntrack");
-        }
-        if nat_ok {
-            mgr.mark_startup_loaded("tc_nat");
-        }
-        if scrub_ok {
-            mgr.mark_startup_loaded("tc_scrub");
-        }
-        if qos_ok {
-            mgr.mark_startup_loaded("tc_qos");
-        }
-        if lb_ok {
-            mgr.mark_startup_loaded("xdp_loadbalancer");
-        }
-        if vip_announcer_ok {
-            mgr.mark_startup_loaded("xdp_vip_announcer");
-        }
+        // The kernel metrics loop reads the manager's list, so a program
+        // enabled by a reload is counted and one disabled stops being read.
+        mgr.metrics_readers = Arc::new(RwLock::new(metrics_readers));
         // Move map holder fields into the manager
         mgr.config_flags = ebpf_map_holder.config_flags;
         mgr.l7_ports = ebpf_map_holder.l7_ports;
@@ -3229,15 +3223,20 @@ pub async fn run(
     };
 
     // ── 11c½. Spawn eBPF kernel metrics reader (periodic, every 10s) ──
-    if !metrics_readers.is_empty() {
-        info!(
-            reader_count = metrics_readers.len(),
-            maps = ?metrics_readers.iter().map(MetricsReader::map_name).collect::<Vec<_>>(),
-            "eBPF kernel metrics reader starting"
-        );
+    // Wherever eBPF can load at all, even with nothing loaded yet: a reload
+    // may enable a program, and its readers join the list this loop reads.
+    if ebpf_capable {
+        let shared_readers = ebpf_manager.lock().await.shared_metrics_readers();
+        {
+            let current = shared_readers.read().await;
+            info!(
+                reader_count = current.len(),
+                maps = ?current.iter().map(MetricsReader::map_name).collect::<Vec<_>>(),
+                "eBPF kernel metrics reader starting"
+            );
+        }
         let kr_cancel = cancel_token.clone();
         let kr_metrics = Arc::clone(&metrics) as Arc<dyn MetricsPort>;
-        let shared_readers = Arc::new(RwLock::new(metrics_readers));
         tokio::spawn(async move {
             crate::ebpf_metrics::run_kernel_metrics_loop(
                 shared_readers,
