@@ -993,7 +993,9 @@ mod tests {
         std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
             .unwrap();
 
-        let config = AgentConfig::load(&path).unwrap();
+        let mut config = AgentConfig::load(&path).unwrap();
+        // The audit stores land in the test's directory, not under the crate.
+        config.audit.storage_path = dir.path().join("audit.redb").display().to_string();
         let services = crate::runtime::build_services(&config).unwrap();
         let visa_name = |services: &crate::runtime::ServiceHandles| {
             services
