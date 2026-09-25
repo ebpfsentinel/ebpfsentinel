@@ -1511,11 +1511,10 @@ pub async fn run(
     // false sense of coverage, so we refuse to boot.
     //
     // eBPF is loaded EXCLUSIVELY through a BPF token (kernel 6.9+). The
-    // agent never loads programs with CAP_BPF / CAP_NET_ADMIN: a
-    // privileged setup step (systemd ExecStartPre, a Kubernetes init
-    // container, or ebpfsentinel-token-setup.sh) must have mounted the
-    // delegated bpffs before the agent started, and the agent - which
-    // may run fully unprivileged - creates the token against it. If the
+    // agent never loads programs with CAP_BPF / CAP_NET_ADMIN: the
+    // self-bootstrap has had the warden delegate a bpffs and mounted it
+    // before this runtime started, and the agent - which may run fully
+    // unprivileged - creates the token against it. If the
     // token cannot be created the agent stays up in API-only mode
     // (REST/gRPC live, no eBPF attach); there is deliberately no
     // capability-based fallback.
@@ -1566,9 +1565,9 @@ pub async fn run(
         Err(e) => {
             error!(
                 error = %e,
-                "BPF token unavailable - running in API-only mode (no eBPF). In the rootless \
-                 split the warden must mount + delegate the bpffs; in the all-in-one layout a \
-                 privileged setup (ebpfsentinel-token-setup.sh / init container) must mount it."
+                "BPF token unavailable - running in API-only mode (no eBPF). The warden \
+                 delegates the bpffs: start the agent with EBPFSENTINEL_WARDEN_SOCK pointing \
+                 at a running warden."
             );
             None
         }

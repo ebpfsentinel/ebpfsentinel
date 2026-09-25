@@ -1708,10 +1708,9 @@ pub struct AgentInfo {
     /// BPF token delegation settings (kernel 6.9+). eBPF is loaded
     /// **exclusively** through a BPF token created against the delegated
     /// bpffs at `bpffs_path`; there is no capability-based loading path.
-    /// A privileged setup step (systemd `ExecStartPre`, a Kubernetes
-    /// init container, or `ebpfsentinel-token-setup.sh`) must mount the
-    /// delegated bpffs before the agent starts. The agent process itself
-    /// needs no `CAP_BPF` / `CAP_SYS_ADMIN`.
+    /// The agent's self-bootstrap mounts that bpffs after the warden has
+    /// delegated it, so the path must match the one the bootstrap mounts
+    /// at. The agent process itself needs no `CAP_BPF` / `CAP_SYS_ADMIN`.
     #[serde(default)]
     pub bpf_token: BpfTokenConfig,
 

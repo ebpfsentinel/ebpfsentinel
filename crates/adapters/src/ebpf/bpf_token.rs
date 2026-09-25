@@ -85,7 +85,7 @@ pub enum BpfTokenError {
 /// programs, and attach types is **not** part of the syscall; it is
 /// configured through the bpffs *mount* options (`delegate_cmds`,
 /// `delegate_maps`, `delegate_progs`, `delegate_attachs`) when the
-/// delegated bpffs is mounted (see `ebpfsentinel-token-setup.sh`).
+/// delegated bpffs is created, which the warden does for the agent.
 #[derive(Debug, Clone, Copy)]
 pub struct TokenCreateAttr {
     pub flags: u32,

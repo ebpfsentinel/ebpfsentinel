@@ -3,17 +3,17 @@
 //! eBPF is loaded **exclusively** through a kernel 6.9+ BPF token
 //! (`BPF_TOKEN_CREATE`) created against a delegated bpffs mount. There
 //! is no capability-based loading path: the agent never loads eBPF with
-//! `CAP_BPF` / `CAP_NET_ADMIN` / `CAP_SYS_ADMIN`. A privileged setup
-//! component (systemd `ExecStartPre`, a Kubernetes init container, or
-//! the `ebpfsentinel-token-setup.sh` helper) mounts the delegated
-//! bpffs; the agent process - which may be fully unprivileged - opens
-//! it and creates the token.
+//! `CAP_BPF` / `CAP_NET_ADMIN` / `CAP_SYS_ADMIN`. Before the runtime
+//! starts, the agent's self-bootstrap has the privileged warden stamp the
+//! `delegate_*` options on a bpffs owned by the agent's own user namespace
+//! and mounts it; the agent process - which may be fully unprivileged -
+//! opens it and creates the token.
 //!
 //! [`bootstrap`] probes the kernel, creates the token, and returns a
 //! [`BpfLoadingHandle`] owning the token + bpffs fds (pinned for the
-//! process lifetime). Any failure is fatal by design: an old kernel or
-//! a missing delegated bpffs means eBPF cannot be loaded at all, and
-//! there is deliberately no fallback to process capabilities.
+//! process lifetime). Any failure means eBPF cannot be loaded at all:
+//! the caller keeps the API up with no program attached, and there is
+//! deliberately no fallback to process capabilities.
 
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
@@ -59,8 +59,8 @@ impl std::fmt::Debug for BpfLoadingHandle {
     }
 }
 
-/// Errors returned when the token cannot be created. Every variant is
-/// fatal: the agent cannot load eBPF without a token.
+/// Errors returned when the token cannot be created. With any of them the
+/// agent loads no eBPF: there is no loading path without a token.
 #[derive(Debug, thiserror::Error)]
 pub enum BootstrapError {
     #[error("kernel probe failed: {0}")]
@@ -73,10 +73,9 @@ pub enum BootstrapError {
     KernelTooOld { major: u32, minor: u32 },
 
     #[error(
-        "BPF token creation failed against `{bpffs}`: {source}. A privileged setup \
-         step (systemd ExecStartPre, a Kubernetes init container, or \
-         ebpfsentinel-token-setup.sh) must mount the delegated bpffs before the \
-         agent starts."
+        "BPF token creation failed against `{bpffs}`: {source}. The bpffs must be \
+         delegated by the warden and mounted by the agent's self-bootstrap before \
+         the agent starts: point EBPFSENTINEL_WARDEN_SOCK at a running warden."
     )]
     TokenCreate {
         bpffs: String,
