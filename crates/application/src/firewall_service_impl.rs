@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use domain::common::entity::Protocol;
@@ -40,6 +41,9 @@ struct DenyAllSnapshot {
     rules: Vec<FirewallRule>,
     mode: DomainMode,
     anti_lockout_enabled: bool,
+    /// The peer rules installed above the catch-all denies for as long as
+    /// the posture lasts, so they survive a reload made during it.
+    peer_rules: Vec<FirewallRule>,
 }
 
 /// Anti-lockout configuration (mirrors infrastructure config).
@@ -386,7 +390,8 @@ impl FirewallAppService {
     pub fn reload_rules(&mut self, rules: Vec<FirewallRule>) -> Result<(), DomainError> {
         if self.deny_all.is_some() {
             self.stage_rules(rules)?;
-            return self.install_rules(Self::deny_all_rules());
+            let posture = self.posture_rules();
+            return self.install_rules(posture);
         }
         self.install_rules(rules)
     }
@@ -509,6 +514,29 @@ impl FirewallAppService {
     /// a cluster that reports the same degradation twice does not overwrite the
     /// snapshot with the deny-all rules themselves.
     pub fn enter_deny_all(&mut self) -> Result<(), DomainError> {
+        self.enter_deny_all_keeping(&[], 0)
+    }
+
+    /// Install the deny-all posture while keeping this node reachable from, and
+    /// able to reach, the `peers` it has to hear from to lift it again.
+    ///
+    /// A node closed by a cluster decides to reopen from what its peers tell
+    /// it, and the catch-all deny matches every connection state, so without
+    /// an exemption it drops the answers to its own calls and every call a
+    /// peer makes to it: it never hears that the cluster came back and stays
+    /// closed until somebody restarts it. Each peer therefore keeps two TCP
+    /// paths and no third: what it sends from the address and port this node
+    /// dials, which is the answer to this node's calls, and what it sends from
+    /// its address to `listen_port`, which is its own calls. `listen_port` 0
+    /// keeps only the first.
+    ///
+    /// The peers are addresses rather than names because nothing is resolved
+    /// once the posture is in force.
+    pub fn enter_deny_all_keeping(
+        &mut self,
+        peers: &[SocketAddr],
+        listen_port: u16,
+    ) -> Result<(), DomainError> {
         if self.deny_all.is_some() {
             return Ok(());
         }
@@ -523,12 +551,14 @@ impl FirewallAppService {
                 .collect(),
             mode: self.mode,
             anti_lockout_enabled: self.anti_lockout.enabled,
+            peer_rules: Self::peer_rules(peers, listen_port),
         });
 
         self.mode = DomainMode::Block;
         self.anti_lockout.enabled = true;
 
-        let result = self.install_rules(Self::deny_all_rules());
+        let posture = self.posture_rules();
+        let result = self.install_rules(posture);
         if let Err(ref e) = result {
             tracing::error!(error = %e, "failed to install the deny-all posture");
         }
@@ -536,7 +566,8 @@ impl FirewallAppService {
 
         tracing::warn!(
             anti_lockout_ports = ?self.anti_lockout.ports,
-            "firewall deny-all posture installed: only the anti-lockout ports remain reachable"
+            peers = ?peers,
+            "firewall deny-all posture installed: only the anti-lockout ports and the peers remain reachable"
         );
         result
     }
@@ -563,6 +594,99 @@ impl FirewallAppService {
 
         tracing::info!("firewall deny-all posture lifted");
         result
+    }
+
+    /// What the posture puts in the datapath: the peer rules it was entered
+    /// with, then the two catch-all denies below them.
+    fn posture_rules(&self) -> Vec<FirewallRule> {
+        let mut rules = self
+            .deny_all
+            .as_ref()
+            .map(|s| s.peer_rules.clone())
+            .unwrap_or_default();
+        rules.extend(Self::deny_all_rules());
+        rules
+    }
+
+    /// The allow rules keeping `peers` reachable through the posture.
+    ///
+    /// Priority 0 and `system`, like the anti-lockout rules, so they sit above
+    /// the catch-all denies and the API cannot delete them. A rule naming an
+    /// address lands in the array of that address family, so a v6 peer is
+    /// exempted in the v6 array where the v6 deny sits.
+    fn peer_rules(peers: &[SocketAddr], listen_port: u16) -> Vec<FirewallRule> {
+        let mut rules = Vec::new();
+        let mut ids = std::collections::HashSet::new();
+        for peer in peers {
+            let host = Self::host_network(peer.ip());
+            let label = peer.ip().to_string().replace(['.', ':'], "-");
+            let answers = format!("fail-closed-peer-{label}-{}", peer.port());
+            if ids.insert(answers.clone()) {
+                rules.push(Self::peer_rule(answers, host, Some(peer.port()), None));
+            }
+            let calls = format!("fail-closed-peer-{label}-in");
+            if listen_port != 0 && ids.insert(calls.clone()) {
+                rules.push(Self::peer_rule(calls, host, None, Some(listen_port)));
+            }
+        }
+        rules
+    }
+
+    fn host_network(ip: IpAddr) -> IpNetwork {
+        match ip {
+            IpAddr::V4(v4) => IpNetwork::V4 {
+                addr: u32::from(v4),
+                prefix_len: 32,
+            },
+            IpAddr::V6(v6) => IpNetwork::V6 {
+                addr: v6.octets(),
+                prefix_len: 128,
+            },
+        }
+    }
+
+    fn peer_rule(
+        id: String,
+        src_ip: IpNetwork,
+        src_port: Option<u16>,
+        dst_port: Option<u16>,
+    ) -> FirewallRule {
+        let port = |p: u16| PortRange { start: p, end: p };
+        FirewallRule {
+            id: RuleId(id),
+            enabled: true,
+            priority: 0,
+            action: FirewallAction::Allow,
+            protocol: Protocol::Tcp,
+            src_ip: Some(src_ip),
+            dst_ip: None,
+            src_port: src_port.map(port),
+            src_port_alias: None,
+            dst_port: dst_port.map(port),
+            dst_port_alias: None,
+            src_mac_alias: None,
+            dst_mac_alias: None,
+            vlan_id: None,
+            scope: Scope::Global,
+            ct_states: None,
+            src_alias: None,
+            dst_alias: None,
+            tcp_flags: None,
+            icmp_type: None,
+            icmp_code: None,
+            negate_src: false,
+            negate_dst: false,
+            dscp_match: None,
+            dscp_mark: None,
+            max_states: None,
+            src_mac: None,
+            dst_mac: None,
+            schedule: None,
+            system: true,
+            route_action: None,
+            group_mask: 0,
+            tenant_id: 0,
+        }
     }
 
     /// The two catch-all denies the posture installs.
@@ -1116,6 +1240,112 @@ mod tests {
 
         svc.exit_deny_all().unwrap();
         assert_eq!(ids(&svc), ["allow-web"]);
+    }
+
+    fn peers() -> Vec<SocketAddr> {
+        vec![
+            "10.0.0.2:9443".parse().unwrap(),
+            "[fd00::2]:9443".parse().unwrap(),
+        ]
+    }
+
+    #[test]
+    fn the_posture_keeps_the_peers_it_was_entered_with() {
+        let map = RecordingMap::default();
+        let mut svc = make_service_without_management_ports();
+        svc.set_map_port(Box::new(map.clone()));
+
+        svc.enter_deny_all_keeping(&peers(), 9443).unwrap();
+
+        assert_eq!(
+            ids(&svc),
+            vec![
+                "fail-closed-peer-10-0-0-2-9443",
+                "fail-closed-peer-10-0-0-2-in",
+                "fail-closed-peer-fd00--2-9443",
+                "fail-closed-peer-fd00--2-in",
+                DENY_ALL_RULE_ID_V4,
+                DENY_ALL_RULE_ID_V6,
+            ]
+        );
+        // Each peer is exempted in the array of its own family, above the
+        // deny of that family.
+        assert_eq!(map.v4.lock().unwrap().len(), 3);
+        assert_eq!(map.v6.lock().unwrap().len(), 3);
+
+        let answers = &svc.list_rules()[0];
+        assert_eq!(answers.action, FirewallAction::Allow);
+        assert_eq!(answers.protocol, Protocol::Tcp);
+        assert!(answers.system);
+        assert_eq!(
+            answers.src_ip,
+            Some(IpNetwork::V4 {
+                addr: u32::from(std::net::Ipv4Addr::new(10, 0, 0, 2)),
+                prefix_len: 32,
+            })
+        );
+        assert_eq!(
+            answers.src_port.map(|p| (p.start, p.end)),
+            Some((9443, 9443))
+        );
+        assert!(answers.dst_port.is_none());
+
+        let calls = &svc.list_rules()[1];
+        assert!(calls.src_port.is_none());
+        assert_eq!(calls.dst_port.map(|p| (p.start, p.end)), Some((9443, 9443)));
+    }
+
+    #[test]
+    fn a_peer_named_twice_is_let_in_once() {
+        let mut svc = make_service_without_management_ports();
+        let twice: Vec<SocketAddr> = vec![
+            "10.0.0.2:9443".parse().unwrap(),
+            "10.0.0.2:9444".parse().unwrap(),
+            "10.0.0.2:9443".parse().unwrap(),
+        ];
+
+        svc.enter_deny_all_keeping(&twice, 9443).unwrap();
+
+        assert_eq!(
+            ids(&svc),
+            vec![
+                "fail-closed-peer-10-0-0-2-9443",
+                "fail-closed-peer-10-0-0-2-in",
+                "fail-closed-peer-10-0-0-2-9444",
+                DENY_ALL_RULE_ID_V4,
+                DENY_ALL_RULE_ID_V6,
+            ]
+        );
+    }
+
+    #[test]
+    fn no_listen_port_keeps_only_the_answers() {
+        let mut svc = make_service_without_management_ports();
+
+        svc.enter_deny_all_keeping(&peers()[..1], 0).unwrap();
+
+        assert_eq!(
+            ids(&svc),
+            vec![
+                "fail-closed-peer-10-0-0-2-9443",
+                DENY_ALL_RULE_ID_V4,
+                DENY_ALL_RULE_ID_V6,
+            ]
+        );
+    }
+
+    #[test]
+    fn the_peers_stay_reachable_across_a_reload_and_leave_with_the_posture() {
+        let mut svc = make_service_without_management_ports();
+        svc.add_rule(make_rule("allow-web", 10)).unwrap();
+        svc.enter_deny_all_keeping(&peers(), 9443).unwrap();
+
+        svc.reload_rules(vec![make_rule("allow-db", 20)]).unwrap();
+        assert!(ids(&svc).contains(&"fail-closed-peer-10-0-0-2-in"));
+        assert!(!ids(&svc).contains(&"allow-db"));
+
+        svc.exit_deny_all().unwrap();
+        assert_eq!(ids(&svc), vec!["allow-db"]);
     }
 
     #[test]
