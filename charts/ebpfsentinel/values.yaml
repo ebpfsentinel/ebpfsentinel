@@ -289,6 +289,18 @@ qos:
   # -- Enable QoS / traffic shaping
   enabled: false
 
+# -- Container awareness
+container:
+  kubernetes:
+    # -- Enable the Kubernetes pod metadata enricher: alerts carry the pod name,
+    # namespace and labels of the container that produced them. Turning it on
+    # creates a ClusterRole with get/list/watch on `pods`, binds it to the
+    # ServiceAccount and mounts the ServiceAccount token into the pod, which is
+    # otherwise left unmounted.
+    enabled: false
+    # -- Optional label selector (`key=value` pairs) narrowing the pod watcher
+    labelFilter: []
+
 # -- Pod disruption budget (protects against voluntary evictions)
 podDisruptionBudget:
   # -- Create a PodDisruptionBudget
@@ -342,7 +354,7 @@ auto_capture:
 aliases: {}
   # trusted-networks:
   #   type: ip_set
-  #   addresses: ["10.0.0.0/8", "172.16.0.0/12"]
+  #   values: ["10.0.0.0/8", "172.16.0.0/12"]
 
 # -- Interface groups for multi-interface rule scoping (max 31 groups)
 interface_groups: {}

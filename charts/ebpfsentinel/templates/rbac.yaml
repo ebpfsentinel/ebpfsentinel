@@ -1,0 +1,37 @@
+{{- if .Values.container.kubernetes.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ebpfsentinel.fullname" . }}-pod-reader
+  labels:
+    {{- include "ebpfsentinel.labels" . | nindent 4 }}
+  {{- with (include "ebpfsentinel.annotations" .) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+rules:
+  # The Kubernetes enricher watches the pods on its own node and reads
+  # nothing else.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "ebpfsentinel.fullname" . }}-pod-reader
+  labels:
+    {{- include "ebpfsentinel.labels" . | nindent 4 }}
+  {{- with (include "ebpfsentinel.annotations" .) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "ebpfsentinel.fullname" . }}-pod-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ebpfsentinel.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

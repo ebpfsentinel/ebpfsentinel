@@ -153,14 +153,40 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
 
 ### Auto-response and auto-capture
 
+`auto_response`, `auto_capture`, `aliases` and `interface_groups` are rendered verbatim into the matching sections of `config.yaml`:
+
+```yaml
+# response-values.yaml
+auto_response:
+  enabled: true
+  policies:
+    - name: block-critical
+      min_severity: critical
+      action: block
+      ttl_secs: 3600
+auto_capture:
+  enabled: true
+  min_severity: high
+  duration_secs: 30
+```
+
 ```bash
 helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
   --namespace ebpfsentinel --create-namespace \
   --set agent.interfaces='{eth0}' \
-  --set auto_response.enabled=true \
-  --set auto_capture.enabled=true \
-  --set-file configOverride=my-response-config.yaml
+  -f response-values.yaml
 ```
+
+### Kubernetes pod metadata on alerts
+
+```bash
+helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
+  --namespace ebpfsentinel --create-namespace \
+  --set agent.interfaces='{eth0}' \
+  --set container.kubernetes.enabled=true
+```
+
+This creates a ClusterRole with `get`/`list`/`watch` on `pods` and nothing else, binds it to the chart's ServiceAccount and mounts that account's token into the pod. With the enricher off the token is not mounted at all.
 
 ### Custom config (bypass values.yaml)
 

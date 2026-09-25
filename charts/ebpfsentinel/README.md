@@ -153,14 +153,40 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
 
 ### Auto-response and auto-capture
 
+`auto_response`, `auto_capture`, `aliases` and `interface_groups` are rendered verbatim into the matching sections of `config.yaml`:
+
+```yaml
+# response-values.yaml
+auto_response:
+  enabled: true
+  policies:
+    - name: block-critical
+      min_severity: critical
+      action: block
+      ttl_secs: 3600
+auto_capture:
+  enabled: true
+  min_severity: high
+  duration_secs: 30
+```
+
 ```bash
 helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
   --namespace ebpfsentinel --create-namespace \
   --set agent.interfaces='{eth0}' \
-  --set auto_response.enabled=true \
-  --set auto_capture.enabled=true \
-  --set-file configOverride=my-response-config.yaml
+  -f response-values.yaml
 ```
+
+### Kubernetes pod metadata on alerts
+
+```bash
+helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
+  --namespace ebpfsentinel --create-namespace \
+  --set agent.interfaces='{eth0}' \
+  --set container.kubernetes.enabled=true
+```
+
+This creates a ClusterRole with `get`/`list`/`watch` on `pods` and nothing else, binds it to the chart's ServiceAccount and mounts that account's token into the pod. With the enricher off the token is not mounted at all.
 
 ### Custom config (bypass values.yaml)
 
@@ -203,6 +229,9 @@ helm install ebpfsentinel ebpfsentinel/ebpfsentinel \
 | commonLabels | object | `{}` | Labels added to all resources |
 | configOverride | string | `""` | Override the entire config.yaml content. When set, all agent.* and domain toggles above are ignored. |
 | conntrack.enabled | bool | `false` | Enable connection tracking |
+| container | object | `{"kubernetes":{"enabled":false,"labelFilter":[]}}` | Container awareness |
+| container.kubernetes.enabled | bool | `false` | Enable the Kubernetes pod metadata enricher: alerts carry the pod name, namespace and labels of the container that produced them. Turning it on creates a ClusterRole with get/list/watch on `pods`, binds it to the ServiceAccount and mounts the ServiceAccount token into the pod, which is otherwise left unmounted. |
+| container.kubernetes.labelFilter | list | `[]` | Optional label selector (`key=value` pairs) narrowing the pod watcher |
 | daemonset | object | `{"affinity":{},"bpfToken":{"bpffsEmptyDir":false,"bpffsPath":"/sys/fs/bpf/ebpfsentinel"},"extraContainers":[],"extraEnv":[],"extraVolumeMounts":[],"extraVolumes":[],"hostPID":true,"initContainers":[],"minReadySeconds":0,"nodeSelector":{},"podAnnotations":{},"podLabels":{},"priorityClassName":"","resources":{"limits":{"cpu":"1000m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}},"revisionHistoryLimit":10,"securityContext":{"allowPrivilegeEscalation":true,"appArmorProfile":{"type":"Unconfined"},"capabilities":{"drop":["ALL"]},"runAsGroup":65534,"runAsUser":65534,"seccompProfile":{"type":"Unconfined"}},"terminationGracePeriodSeconds":30,"tolerations":[{"operator":"Exists"}],"updateStrategy":{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"},"warden":{"resources":{"limits":{"cpu":"1000m","memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}},"securityContext":{"allowPrivilegeEscalation":true,"appArmorProfile":{"type":"Unconfined"},"capabilities":{"add":["SYS_ADMIN","NET_ADMIN","NET_RAW","SYS_PTRACE","BPF","PERFMON"],"drop":["ALL"]},"runAsUser":0,"seccompProfile":{"type":"Unconfined"}}}}` | DaemonSet configuration |
 | daemonset.affinity | object | `{}` | Affinity rules |
 | daemonset.bpfToken | object | `{"bpffsEmptyDir":false,"bpffsPath":"/sys/fs/bpf/ebpfsentinel"}` | BPF token delegation. eBPF is loaded EXCLUSIVELY through a BPF token (kernel 6.9+), a user-namespace feature. The pod runs the warden broker as a native sidecar; the agent self-unshares a user namespace, has the warden delegate a bpffs at `bpffsPath`, and loads its own eBPF through the token - holding no host capabilities. There is no capability-based loading path. `bpffsPath` drives BOTH the `EBPFSENTINEL_BPFFS` env (DaemonSet, the agent's mount target) and the agent's `bpf_token.bpffs_path` (ConfigMap) - keep them in sync via this one value; they must point at the same mount. |

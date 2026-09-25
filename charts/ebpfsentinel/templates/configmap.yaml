@@ -24,6 +24,15 @@ data:
       log_level: {{ .Values.agent.logLevel }}
       log_format: {{ .Values.agent.logFormat }}
       swagger_ui: {{ .Values.agent.swaggerUi }}
+      grpc_reflection: {{ .Values.agent.grpcReflection }}
+      {{- if .Values.agent.tls.enabled }}
+      tls:
+        enabled: true
+        cert_path: {{ .Values.agent.tls.certPath | quote }}
+        key_path: {{ .Values.agent.tls.keyPath | quote }}
+        pq_mode: {{ .Values.agent.tls.pqMode }}
+        allow_tls12: {{ .Values.agent.tls.allowTls12 }}
+      {{- end }}
       xdp_mode: {{ .Values.agent.xdpMode }}
       event_workers: {{ .Values.agent.eventWorkers }}
       bpf_token:
@@ -73,4 +82,28 @@ data:
       enabled: {{ .Values.zones.enabled }}
     qos:
       enabled: {{ .Values.qos.enabled }}
+    {{- if .Values.container.kubernetes.enabled }}
+    container:
+      kubernetes:
+        enabled: true
+        {{- with .Values.container.kubernetes.labelFilter }}
+        label_filter: {{ . | toJson }}
+        {{- end }}
+    {{- end }}
+    {{- with .Values.auto_response }}
+    auto_response:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.auto_capture }}
+    auto_capture:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.aliases }}
+    aliases:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.interface_groups }}
+    interface_groups:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
     {{- end }}

@@ -41,7 +41,9 @@ spec:
       hostPID: {{ .Values.daemonset.hostPID }}
       dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: {{ include "ebpfsentinel.serviceAccountName" . }}
-      automountServiceAccountToken: false
+      # Only the Kubernetes enricher talks to the API server, so the token is
+      # mounted only when it is on.
+      automountServiceAccountToken: {{ .Values.container.kubernetes.enabled }}
       securityContext:
         # The agent drops to uid/gid 65534 before self-mapping its user namespace
         # (it cannot map namespace-0 to real root under a stock container
@@ -109,6 +111,12 @@ spec:
             # neighbouring containers' libssl through this mounted host /proc.
             - name: EBPFSENTINEL_HOST_PROC
               value: /host/proc
+            # Scopes the Kubernetes enricher's pod watcher to this node and
+            # names the node on exported alerts.
+            - name: EBPFSENTINEL_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
             {{- with .Values.daemonset.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
