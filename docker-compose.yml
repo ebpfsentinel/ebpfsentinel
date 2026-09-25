@@ -8,8 +8,9 @@
 # Two containers share a socket volume:
 #   - warden : the privileged broker (lean image, no agent stack). Holds
 #     CAP_SYS_ADMIN/NET_ADMIN/NET_RAW for bpffs delegation, conntrack, routes,
-#     ARP and the pcap pool. Serves the typed warden-proto RPC over an AF_UNIX
-#     socket.
+#     ARP and the pcap pool, plus CAP_SYS_PTRACE/BPF/PERFMON to attach the DLP
+#     uprobe inside neighbour containers. Serves the typed warden-proto RPC over
+#     an AF_UNIX socket.
 #   - agent  : runs non-root (uid 65534) with every capability dropped. It
 #     self-unshares a user namespace, has the warden delegate a bpffs, and loads
 #     its own eBPF through a BPF token (never CAP_BPF). The host-netns ops it
