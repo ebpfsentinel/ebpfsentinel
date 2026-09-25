@@ -68,7 +68,7 @@ static NAT_SNAT_RULES_V6: Array<NatRuleEntryV6, { MAX_NAT_RULES_V6 as usize }> =
 static NAT_SNAT_RULE_COUNT_V6: Array<u32, 1> = Array::new();
 
 // CT_TABLE_V4/V6 shadow maps removed - kernel netfilter is the sole
-// CT source. NAT info delegated via bpf_ct_set_nat_info (e30-5). The
+// CT source. NAT info delegated via bpf_ct_set_nat_info. The
 // exact-match hash fast-path and the port allocation table went with them:
 // no userspace code in either repository ever wrote either one, so every
 // packet paid a hash probe that could not hit and the agent locked a

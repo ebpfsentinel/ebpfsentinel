@@ -77,8 +77,8 @@ static NAT_DNAT_RULES_V6: Array<NatRuleEntryV6, { MAX_NAT_RULES_V6 as usize }> =
 static NAT_DNAT_RULE_COUNT_V6: Array<u32, 1> = Array::new();
 
 // CT_TABLE_V4/V6 shadow maps removed - kernel netfilter is the
-// authoritative CT source. NAT info delegated via bpf_ct_set_nat_info
-// (e30-5). The exact-match hash fast-path is gone with them: no userspace
+// authoritative CT source. NAT info delegated via bpf_ct_set_nat_info.
+// The exact-match hash fast-path is gone with them: no userspace
 // code in either repository ever wrote it, so every packet paid a hash probe
 // that could not hit. The rule scan is the only DNAT path.
 
@@ -326,7 +326,10 @@ unsafe extern "C" fn scan_dnat_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
             ) {
                 let new_dst_ip = match rule.nat_type {
                     NAT_TYPE_DNAT | NAT_TYPE_ONETOONE => rule.nat_addr,
-                    NAT_TYPE_REDIRECT => lctx.src_ip,
+                    // A redirect keeps the address the packet was sent to and
+                    // moves only the port, so it lands on a local socket. The
+                    // source address would send the flow back to the client.
+                    NAT_TYPE_REDIRECT => lctx.dst_ip,
                     _ => return 0, // Unknown NAT type, continue scanning
                 };
                 lctx.new_dst_ip = new_dst_ip;
@@ -373,7 +376,7 @@ unsafe extern "C" fn scan_dnat_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
             ) {
                 let new_dst_addr = match rule.nat_type {
                     NAT_TYPE_DNAT | NAT_TYPE_ONETOONE => rule.nat_addr,
-                    NAT_TYPE_REDIRECT => lctx.src_addr,
+                    NAT_TYPE_REDIRECT => lctx.dst_addr,
                     _ => return 0,
                 };
                 lctx.new_dst_addr = new_dst_addr;
@@ -570,9 +573,10 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         // post-DNAT destination are on the internal subnet, we must SNAT
         // the source to the firewall's internal IP. Otherwise the server
         // would reply directly to the client (asymmetric routing) and
-        // the client would drop the unexpected source.
+        // the client would drop the unexpected source. A redirect terminates
+        // on this host, so there is no second leg to hairpin.
         if let Some(hcfg) = NAT_HAIRPIN_CONFIG.get(0) {
-            if hcfg.enabled != 0 {
+            if hcfg.enabled != 0 && scan_ctx.nat_type != NAT_TYPE_REDIRECT {
                 // IPs are already in host byte order (u32_from_be_bytes above).
                 // Config stores host-byte-order values, so compare directly.
                 if (src_ip & hcfg.internal_mask) == hcfg.internal_subnet
