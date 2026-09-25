@@ -18,32 +18,6 @@ use ebpf_common::dlp::{
 use ebpf_helpers::increment_metric;
 use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 
-// ── Per-connection DLP context via SK_STORAGE (kernel 5.2+) ─────────
-//
-// BPF_MAP_TYPE_SK_STORAGE attaches arbitrary data to a socket, surviving
-// across multiple uprobe invocations on the same connection.
-//
-// Use case: track cumulative data exfiltration across multiple SSL_write
-// calls on the same socket. Currently each uprobe invocation is stateless.
-//
-// Architecture:
-//   #[map]
-//   static DLP_SK_STORAGE: SkStorage<DlpConnectionContext> = SkStorage::new(0);
-//
-//   struct DlpConnectionContext {
-//       total_bytes_inspected: u64,
-//       pattern_match_count: u32,
-//       data_categories_seen: u32,  // bitmask of PCI/PII/credentials
-//       first_seen_ns: u64,
-//   }
-//
-// On each SSL_write uprobe:
-//   1. bpf_sk_storage_get(&DLP_SK_STORAGE, sk, NULL, BPF_SK_STORAGE_GET_F_CREATE)
-//   2. Update cumulative stats
-//   3. Alert if thresholds exceeded (e.g., >100KB PII data on one connection)
-//
-// NOTE(future): SK_STORAGE for per-connection DLP context - requires aya kfunc support.
-
 // ── Maps ────────────────────────────────────────────────────────────
 
 /// Kernel->userspace DLP event ring buffer, 4 MiB: about 1,010 full events
