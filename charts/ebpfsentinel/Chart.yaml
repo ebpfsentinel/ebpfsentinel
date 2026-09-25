@@ -4,6 +4,8 @@ description: eBPF-native Network & Security platform for Linux
 type: application
 version: 0.1.0
 appVersion: "0.0.0-dev"
+# Native sidecars (restartPolicy: Always on an init container) are on by default from 1.29.
+kubeVersion: ">=1.29.0-0"
 home: https://github.com/ebpfsentinel/ebpfsentinel
 sources:
   - https://github.com/ebpfsentinel/ebpfsentinel

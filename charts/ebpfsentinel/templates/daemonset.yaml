@@ -58,7 +58,7 @@ spec:
       priorityClassName: {{ .Values.daemonset.priorityClassName | quote }}
       {{- end }}
       # The warden runs as a NATIVE SIDECAR (init container with
-      # restartPolicy: Always, Kubernetes 1.28+): it starts before the agent and
+      # restartPolicy: Always, Kubernetes 1.29+): it starts before the agent and
       # runs for the pod's life, holding the host capabilities and brokering
       # kernel ops over the shared socket. The agent loads its own eBPF.
       initContainers:
