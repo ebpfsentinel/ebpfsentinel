@@ -811,6 +811,9 @@ fn egress_ifindex(
         (*params).sport = 0;
         (*params).dport = 0;
         (*params).__bindgen_anon_1.tot_len = tot_len;
+        // The kernel writes rt_metric back into this union: clear all four
+        // bytes so a stale metric is not read as this packet's tos/flowinfo.
+        (*params).__bindgen_anon_2.flowinfo = 0;
         if family == FIB_AF_INET6 {
             (*params).__bindgen_anon_3.ipv6_src = src;
             (*params).__bindgen_anon_4.ipv6_dst = dst;
