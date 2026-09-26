@@ -538,6 +538,7 @@ make vagrant-ssh-attacker
 3. The **attacker VM** generates an SSH key and copies it to the agent VM via `sshpass`
 4. Tests run on the attacker VM with `EBPF_2VM_MODE=true`, which causes `ebpf_helpers.bash` to source `vm_helpers.bash`
 5. `vm_helpers.bash` overrides `start_ebpf_agent` (SSH to agent VM), `create_test_netns` (no-op), and packet helpers (send directly over the network instead of through a netns)
+6. Attack traffic goes to the agent's private address (192.168.56.10, `eth1`, where the datapath is attached), while SSH, scp and readings that must survive a blacklist go to its management address (`eth0`, `AGENT_CTL_IP`). The runners resolve that address from the Vagrant host, so a suite that gets the attacker blacklisted keeps its control session; without it the helpers fall back to the private address
 
 ### Docker Image Push
 

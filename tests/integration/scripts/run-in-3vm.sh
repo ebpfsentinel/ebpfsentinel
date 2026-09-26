@@ -328,11 +328,20 @@ echo "  Suites: $(echo "$REMOTE_SUITES" | wc -w | tr -d ' ')"
 echo ""
 
 cd "$VAGRANT_DIR"
+# The agent's management address, resolved from here because this host reaches
+# it whatever the datapath has decided about the attacker. The suites drive the
+# agent through it (see AGENT_CTL_IP in lib/vm_helpers.bash); an empty answer
+# leaves them on the private address.
+AGENT_CTL_IP="$(VAGRANT_3VM=1 vagrant ssh agent -c "ip -4 -o addr show eth0" 2>/dev/null |
+    awk '{ sub(/\/.*/, "", $4); print $4; exit }' | tr -d '\r')" || AGENT_CTL_IP=""
+echo "  Agent control address: ${AGENT_CTL_IP:-192.168.56.10 (eth0 not resolved)}"
+
 VAGRANT_3VM=1 vagrant ssh attacker -c \
     "cd /home/vagrant/ebpfsentinel/tests/integration && \
      export EBPF_3VM_MODE=true && \
      export EBPF_2VM_MODE=true && \
      export AGENT_VM_IP=192.168.56.10 && \
+     export AGENT_CTL_IP=${AGENT_CTL_IP:-192.168.56.10} && \
      export AGENT_BACKEND_IP=192.168.57.10 && \
      export ATTACKER_VM_IP=192.168.56.20 && \
      export BACKEND_VM_IP=192.168.57.30 && \

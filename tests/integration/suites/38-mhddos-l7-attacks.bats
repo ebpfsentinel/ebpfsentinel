@@ -13,7 +13,7 @@
 #   2. drives 30 s of MHDDoS traffic of one method (10 threads)
 #   3. asserts (a) the metric grew, (b) the attacker IP is blacklisted,
 #      (c) at least one alert carries a MITRE T1498/T1499 tag,
-#      (d) API p99 stays under 500 ms during the attack window.
+#      (d) API p99 stays under P99_BUDGET_MS during the attack window.
 #
 # MHDDoS exits non-zero whenever the agent successfully drops or rate-
 # limits its connection attempts; we never assert on its exit code.
@@ -62,7 +62,8 @@ setup_file() {
     ATTACKER_IP="$(attacker_ip)"
     export ATTACK_DURATION="${ATTACK_DURATION:-30}"
     export ATTACK_THREADS="${ATTACK_THREADS:-10}"
-    # The p99 probe targets /healthz on the same API port the flood hits. XDP
+    # The p99 probe targets /healthz on the API the flood hits, over the
+    # agent's control address rather than from the flood source. XDP
     # rate-limiting drops the bulk of the flood at the NIC, but accepted L7
     # connections still load the shared control plane on a 2-vCPU test VM. The
     # meaningful guarantee is that the control plane stays responsive (well
@@ -98,10 +99,11 @@ teardown() {
 
 # _agent_api_get <path> - GET a path on the agent over its own loopback.
 #
-# The hop that carries the reading is still the wire the flood just came down,
-# so the call is given a deadline of its own: a session the datapath has stopped
-# answering costs ten seconds and is retried rather than holding the poll below
-# open for as long as ssh is willing to wait.
+# The runners hand the suite the agent's management address as the SSH target,
+# which the datapath is not attached to. Without it the hop is the wire the
+# flood just came down, so the call is given a deadline of its own: a session
+# the datapath has stopped answering costs ten seconds and is retried rather
+# than holding the poll below open for as long as ssh is willing to wait.
 _agent_api_get() {
     local path="${1:?usage: _agent_api_get <path>}"
     timeout 10 $AGENT_SSH_CMD -- curl -sf --max-time 5 \
@@ -207,9 +209,14 @@ _run_attack_and_assert() {
     # Background MHDDoS, foreground latency probes.
     run_mhddos_background "$method" "$ATTACK_DURATION" "$ATTACK_THREADS" "$path"
 
-    # Mid-attack: assert API control plane stays responsive.
+    # Mid-attack: assert API control plane stays responsive. The probe is not
+    # sent from here over the private network: the flood gets this host
+    # blacklisted within seconds and every probe it sends there is dropped
+    # before the API sees it, so what it would time is the curl deadline. It
+    # goes to the same API over the control address, which the datapath is
+    # not attached to, and so measures what the flood costs the agent.
     sleep 5
-    assert_api_p99_below "$P99_BUDGET_MS" 50
+    BASE_URL="${AGENT_CTL_URL:-$BASE_URL}" assert_api_p99_below "$P99_BUDGET_MS" 50
 
     # Wait for the flood to wind down.
     wait "${MHDDOS_PID:-0}" 2>/dev/null || true

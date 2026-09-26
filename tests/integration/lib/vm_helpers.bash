@@ -15,6 +15,16 @@ VM_HELPERS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_VM_IP="${AGENT_VM_IP:-192.168.56.10}"
 ATTACKER_VM_IP="${ATTACKER_VM_IP:-192.168.56.20}"
 AGENT_SSH_KEY="${AGENT_SSH_KEY:-${HOME}/.ssh/agent_key}"
+# The address this host drives the agent through: SSH, scp and the readings
+# the suites take from the agent's own API. It is the agent's management NIC
+# (eth0) rather than the private network, because the agent is attached to
+# eth1 and the attack suites exist to get this host blacklisted there - and a
+# blacklist entry is a host route dropped before any rule is asked, so the
+# anti-lockout allow on port 22 cannot keep the control session alive. The
+# runners resolve it from the Vagrant host, which reaches every VM whatever
+# the datapath decided; without it the private address is used and a blocked
+# host loses its control session for as long as the entry stands.
+AGENT_CTL_IP="${AGENT_CTL_IP:-${AGENT_VM_IP}}"
 # ConnectTimeout bounds the handshake and nothing after it. The attack suites
 # exist to make the agent block this host, and what they block is every packet
 # on the wire, including the one carrying a reply to a session that was already
@@ -23,13 +33,16 @@ AGENT_SSH_KEY="${AGENT_SSH_KEY:-${HOME}/.ssh/agent_key}"
 # keepalives give the session its own deadline: three unanswered probes five
 # seconds apart and ssh gives up, so a blocked runner loses fifteen seconds
 # instead of the run. BatchMode keeps a prompt from taking the place of a hang.
-AGENT_SSH_CMD="ssh -i ${AGENT_SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes vagrant@${AGENT_VM_IP}"
+AGENT_SSH_CMD="ssh -i ${AGENT_SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes vagrant@${AGENT_CTL_IP}"
 
 # Override host/URL to point at agent VM
 AGENT_HOST="${AGENT_VM_IP}"
 BASE_URL="http://${AGENT_VM_IP}:${AGENT_HTTP_PORT}"
 TLS_URL="https://${AGENT_VM_IP}:${AGENT_TLS_PORT}"
 GRPC_ADDR="${AGENT_VM_IP}:${AGENT_GRPC_PORT}"
+# The agent's API over the control path, for a reading that must not depend on
+# what the datapath decided about this host.
+AGENT_CTL_URL="http://${AGENT_CTL_IP}:${AGENT_HTTP_PORT}"
 
 # The agent's interface on the private network
 EBPF_AGENT_INTERFACE="eth1"
@@ -118,7 +131,7 @@ _agent_scp() {
     scp -i "${AGENT_SSH_KEY}" \
         -o StrictHostKeyChecking=no \
         -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes \
-        "$local_path" "vagrant@${AGENT_VM_IP}:${remote_path}"
+        "$local_path" "vagrant@${AGENT_CTL_IP}:${remote_path}"
 }
 
 # _agent_push_config <local_path> <remote_path>
@@ -152,7 +165,7 @@ require_root() {
 # checking for local binary/Docker image
 require_ebpf_env() {
     if ! _agent_ssh true 2>/dev/null; then
-        env_skip "cannot SSH to agent VM at ${AGENT_VM_IP} (EBPF_2VM_MODE)"
+        env_skip "cannot SSH to agent VM at ${AGENT_CTL_IP} (EBPF_2VM_MODE)"
     fi
     # Verify the agent binary exists on the remote host
     if ! _agent_ssh test -x /usr/local/bin/ebpfsentinel-agent 2>/dev/null; then
@@ -797,7 +810,7 @@ stop_capture() {
     case "$vm" in
         agent)
             sshrun=("_agent_ssh_sudo")
-            scpsrc="vagrant@${AGENT_VM_IP}:${pcap}"
+            scpsrc="vagrant@${AGENT_CTL_IP}:${pcap}"
             scpkey="${AGENT_SSH_KEY}"
             ;;
         backend)
