@@ -12,6 +12,12 @@ agent:
   grpc_port: 50051
   metrics_port: 9090
 
+# An operator rule scoped to a namespace must stay inside that namespace's
+# CIDRs, so the namespace the operator token holds is declared here.
+namespaces:
+  prod:
+    cidrs: ["10.1.0.0/16"]
+
 firewall:
   enabled: true
   mode: alert

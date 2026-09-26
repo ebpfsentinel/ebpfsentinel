@@ -118,7 +118,7 @@ get_token() {
 }
 
 @test "operator can create rule in own namespace (namespace:prod)" {
-    local rule='{"id":"it-rbac-op-001","priority":100,"action":"deny","protocol":"tcp","scope":"namespace:prod"}'
+    local rule='{"id":"it-rbac-op-001","priority":100,"action":"deny","protocol":"tcp","dst_ip":"10.1.0.5/32","scope":"namespace:prod"}'
     local body
     body="$(api_post /api/v1/firewall/rules "$rule" -H "Authorization: Bearer $(get_token operator)")"
     _load_http_status
@@ -126,6 +126,12 @@ get_token() {
 
     # Cleanup
     api_delete /api/v1/firewall/rules/it-rbac-op-001 -H "Authorization: Bearer $(get_token admin)" >/dev/null
+}
+
+@test "operator cannot write own-namespace rule outside its CIDRs (403)" {
+    local rule='{"id":"it-rbac-op-003","priority":100,"action":"deny","protocol":"tcp","dst_ip":"10.2.0.5/32","scope":"namespace:prod"}'
+    api_post /api/v1/firewall/rules "$rule" -H "Authorization: Bearer $(get_token operator)" >/dev/null
+    assert_http_status "403" "$HTTP_STATUS"
 }
 
 @test "operator cannot create rule in other namespace (namespace:finance returns 403)" {
