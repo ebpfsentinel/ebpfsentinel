@@ -524,11 +524,14 @@ get_blacklist_count() {
 }
 
 # get_metrics_value <metric_name> [label_filter]
+# Reads from BASE_URL like every other API reading, so a suite that points its
+# readings at the management address (because its attack gets the attacker
+# blacklisted on the private one) reads its counters there too.
 get_metrics_value() {
     local metric="${1:?usage: get_metrics_value <metric_name>}"
     local label_filter="${2:-}"
 
-    local metrics_url="http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics"
+    local metrics_url="${BASE_URL}/metrics"
     local body
     body="$(curl -sf --max-time "$HTTP_TIMEOUT" "$metrics_url" 2>/dev/null)" || return 1
 

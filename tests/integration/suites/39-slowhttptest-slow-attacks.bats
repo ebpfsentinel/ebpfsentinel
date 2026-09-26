@@ -19,6 +19,17 @@
 load '../lib/ebpf_helpers'
 load '../lib/slowhttp_helpers'
 
+# The attack goes to the agent's private address (run_slowhttp targets
+# AGENT_VM_IP), and each variant exists to get this host blacklisted there. A
+# blacklist entry drops every packet this host sends to that address, API
+# included, so every reading below - the alert counter, the blacklist itself -
+# is taken over the agent's management address instead, which the datapath is
+# not attached to. This runs after the helpers are loaded, for every test,
+# because loading them sets BASE_URL back to the private address.
+if [ -n "${AGENT_CTL_URL:-}" ]; then
+    BASE_URL="${AGENT_CTL_URL}"
+fi
+
 setup_file() {
     require_root
     require_kernel 6 9
@@ -69,6 +80,13 @@ teardown_file() {
 
 teardown() {
     stop_slowhttp 2>/dev/null || true
+    # Each variant blacklists this host for five minutes, and the next variant
+    # sent from a blacklisted host is dropped before it reaches the timeout it
+    # is meant to trip. Clear the entry so every variant starts from a source
+    # nothing has been decided about.
+    if [ -n "${ATTACKER_IP:-}" ]; then
+        api_delete "/api/v1/ips/blacklist/${ATTACKER_IP}" >/dev/null 2>&1 || true
+    fi
 }
 
 # _run_slow_and_assert <mode> <metric> [label_filter]
