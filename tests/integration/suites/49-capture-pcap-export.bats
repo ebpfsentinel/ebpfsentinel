@@ -87,19 +87,18 @@ _drive_traffic_to_port() {
 _pull_remote_pcap() {
     local remote="${1:?usage: _pull_remote_pcap <remote_path> <local>}"
     local local_dest="${2:?usage: _pull_remote_pcap <remote_path> <local>}"
-    # The agent runs as root, so the pcap lands root-owned 0600 and an
-    # unprivileged reader cannot open it. Relax to world-readable first
-    # (test artefact in a throwaway VM dir).
-    _agent_ssh_sudo chmod 0644 "${remote}" >/dev/null 2>&1 || true
-
     # Local lane: the pcap is already on this host, so a copy is all it
     # takes. Only the 2-VM lane needs to pull it over the network.
     if [ -z "${AGENT_VM_IP:-}" ] || [ ! -r "${AGENT_SSH_KEY:-/nonexistent}" ]; then
         cp "${remote}" "${local_dest}" 2>/dev/null
         return $?
     fi
-    scp -i "${AGENT_SSH_KEY}" -o StrictHostKeyChecking=no \
-        "vagrant@${AGENT_VM_IP}:${remote}" "${local_dest}" >/dev/null 2>&1
+    # The agent runs as root under a restrictive umask and creates the
+    # capture directory itself, so both the directory and the pcap are
+    # root-only and the login user cannot even traverse to the file. Relaxing
+    # the file's mode is not enough for scp; read it as root and stream it
+    # back over the session instead.
+    _agent_ssh_sudo cat "${remote}" > "${local_dest}" 2>/dev/null
 }
 
 # ── REST: create + collect + parse ──────────────────────────────────
@@ -143,7 +142,7 @@ _pull_remote_pcap() {
     # Pull the pcap back to the test host and verify tcpdump can parse it.
     local local_pcap="${DATA_DIR}/${id}.pcap"
     _pull_remote_pcap "${remote_path}" "${local_pcap}" || {
-        echo "scp failed for ${remote_path}" >&2
+        echo "could not pull ${remote_path} from the agent" >&2
         return 1
     }
     [ -s "${local_pcap}" ] || {
@@ -216,7 +215,7 @@ _pull_remote_pcap() {
 
     local local_pcap="${DATA_DIR}/${id}.pcap"
     _pull_remote_pcap "${remote_path}" "${local_pcap}" || {
-        echo "scp failed for ${remote_path}" >&2
+        echo "could not pull ${remote_path} from the agent" >&2
         return 1
     }
     [ -s "${local_pcap}" ]
