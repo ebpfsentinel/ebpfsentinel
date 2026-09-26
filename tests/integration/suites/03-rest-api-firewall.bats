@@ -25,11 +25,25 @@ teardown_file() {
 
 # ── Tests ──────────────────────────────────────────────────────────
 
-@test "list rules is initially empty" {
+@test "list rules holds no user rule initially" {
     local body
     body="$(api_get /api/v1/firewall/rules)"
     assert_http_status "200" "$HTTP_STATUS"
-    assert_json_array_length "$body" '.' '0'
+    assert_json_array_length "$body" 'map(select(.system != true))' '0'
+}
+
+@test "anti-lockout keeps SSH and the agent's API ports as system rules" {
+    local body
+    body="$(api_get /api/v1/firewall/rules)"
+    assert_http_status "200" "$HTTP_STATUS"
+    local port
+    for port in 22 8080 50051; do
+        echo "$body" | jq -e --arg p "$port" \
+            'any(.[]; .system == true and .action == "allow" and .dst_port == $p)' >/dev/null || {
+            echo "no anti-lockout system rule for port $port" >&2
+            return 1
+        }
+    done
 }
 
 @test "POST creates a firewall rule and returns 201" {
@@ -46,7 +60,7 @@ teardown_file() {
     assert_http_status "200" "$HTTP_STATUS"
 
     local rule_id
-    rule_id="$(echo "$body" | jq -r '.[0].id')"
+    rule_id="$(echo "$body" | jq -r 'map(select(.system != true)) | .[0].id')"
     [ "$rule_id" = "it-fw-001" ]
 }
 
@@ -72,9 +86,9 @@ teardown_file() {
     assert_http_status "404" "$HTTP_STATUS"
 }
 
-@test "list is empty after deletion" {
+@test "list holds no user rule after deletion" {
     local body
     body="$(api_get /api/v1/firewall/rules)"
     assert_http_status "200" "$HTTP_STATUS"
-    assert_json_array_length "$body" '.' '0'
+    assert_json_array_length "$body" 'map(select(.system != true))' '0'
 }
