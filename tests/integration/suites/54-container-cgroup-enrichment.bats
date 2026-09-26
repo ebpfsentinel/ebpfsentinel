@@ -104,6 +104,57 @@ _tenant_cgroup_map_id() {
         jq -r 'first(.[] | select((.name // "") | startswith("TENANT_CGROUP")) | .id) // empty'
 }
 
+# The datapath skips the whole tenant lookup chain while userspace says every
+# tenant source is empty: bit FW_EMPTY_TENANTS of FW_EMPTY_FEATURES, one array
+# shared by pin across the programs that resolve a tenant. The owner of a
+# tenant map clears that bit before it inserts, and an entry written here by
+# hand bypasses the owner, so the suite clears it the same way - otherwise the
+# lookup never runs and a removal test passes without asserting anything.
+FW_EMPTY_TENANTS_BIT=$((1 << 5))
+
+# Id of the FW_EMPTY_FEATURES array tc-ids reads (the name surfaces truncated).
+_tenant_gate_map_id() {
+    local id
+    for id in $(bpftool -j prog show 2>/dev/null |
+        jq -r '.[] | select(.name == "tc_ids") | .map_ids[]?' | sort -u); do
+        bpftool -j map show id "${id}" 2>/dev/null |
+            jq -r 'select((.name // "") | startswith("FW_EMPTY_FEAT")) | .id'
+    done | head -1
+}
+
+# Current mask, whether bpftool decoded it through BTF or printed raw bytes.
+_tenant_gate_mask() {
+    bpftool -j map lookup id "$1" key hex 00 00 00 00 2>/dev/null | jq -r '
+        def hex: ascii_downcase | ltrimstr("0x") | explode
+            | reduce .[] as $c (0; . * 16 + (if $c >= 97 then $c - 87 else $c - 48 end));
+        (.formatted.value // .value)
+        | if type == "number" then .
+          else (to_entries | map((.value | hex) * pow(256; .key)) | add | floor) end'
+}
+
+_tenant_gate_write() {
+    # shellcheck disable=SC2046  # the hex bytes must expand to separate args
+    bpftool map update id "$1" key hex 00 00 00 00 value hex $(_le_hex "$2" 4)
+}
+
+# Clear FW_EMPTY_TENANTS and remember the mask it replaced, for the restore.
+_open_tenant_gate() {
+    TENANT_GATE_MAP_ID="$(_tenant_gate_map_id)"
+    [ -n "${TENANT_GATE_MAP_ID}" ] || return 1
+    TENANT_GATE_SAVED="$(_tenant_gate_mask "${TENANT_GATE_MAP_ID}")"
+    [ -n "${TENANT_GATE_SAVED}" ] || return 1
+    _tenant_gate_write "${TENANT_GATE_MAP_ID}" \
+        $((TENANT_GATE_SAVED & ~FW_EMPTY_TENANTS_BIT))
+}
+
+_restore_tenant_gate() {
+    if [ -n "${TENANT_GATE_MAP_ID:-}" ] && [ -n "${TENANT_GATE_SAVED:-}" ]; then
+        _tenant_gate_write "${TENANT_GATE_MAP_ID}" "${TENANT_GATE_SAVED}" >/dev/null 2>&1 || true
+    fi
+    TENANT_GATE_MAP_ID=""
+    TENANT_GATE_SAVED=""
+}
+
 # Create the probe cgroup and echo its id. The cgroup v2 id the kernel
 # reports to bpf_get_current_cgroup_id is the directory's inode number.
 # Attribution reads the cgroup v2 id of the emitting task. A host running the
@@ -195,6 +246,7 @@ _tenant_cgroup_cleanup() {
         bpftool map delete id "${map_id}" key hex $(_le_hex "${cgroup_id}" 8) >/dev/null 2>&1 || true
     fi
     _remove_probe_cgroup
+    _restore_tenant_gate
 }
 
 # ── Docker availability ─────────────────────────────────────────────
@@ -447,6 +499,11 @@ teardown_file() {
     local before
     before="$(_cgroup_resolved_count)"
 
+    _open_tenant_gate || {
+        echo "FW_EMPTY_FEATURES not found on tc-ids, the tenant lookup cannot be opened" >&2
+        _tenant_cgroup_cleanup "${map_id}" "${cgroup_id}"
+        return 1
+    }
     # shellcheck disable=SC2046
     bpftool map update id "${map_id}" \
         key hex $(_le_hex "${cgroup_id}" 8) \
@@ -497,6 +554,14 @@ teardown_file() {
         return 1
     fi
 
+    # Open the lookup, so the counter staying still means the entry is gone
+    # rather than that the datapath never looked.
+    _open_tenant_gate || {
+        echo "FW_EMPTY_FEATURES not found on tc-ids, the tenant lookup cannot be opened" >&2
+        _remove_probe_cgroup
+        return 1
+    }
+
     # Let any resolution still in flight land before the snapshot.
     sleep 12
     local before
@@ -511,6 +576,7 @@ teardown_file() {
     after="$(_cgroup_resolved_count)"
 
     _remove_probe_cgroup
+    _restore_tenant_gate
 
     if [ "${after%%.*}" -ne "${before%%.*}" ]; then
         echo "tenant resolved from an unmapped cgroup (${before} → ${after})" >&2
