@@ -62,7 +62,9 @@ pub unsafe fn barrier() {
 /// On non-BPF targets it is the identity function.
 #[inline(always)]
 #[must_use]
-pub fn opaque_usize(mut v: usize) -> usize {
+pub fn opaque_usize(v: usize) -> usize {
+    #[cfg(target_arch = "bpf")]
+    let mut v = v;
     #[cfg(target_arch = "bpf")]
     unsafe {
         // Empty template + register operand = libbpf's `barrier_var`. The

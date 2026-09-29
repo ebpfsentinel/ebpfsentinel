@@ -131,8 +131,7 @@ fn check_word(ctx: &TcContext, w: [u32; 4]) -> u32 {
     let skb = ctx.skb.skb;
     // SAFETY: `skb` is the live `__sk_buff` of this invocation; the three
     // fields are readable by a classifier.
-    let (len, ifindex, ingress) =
-        unsafe { ((*skb).len, (*skb).ifindex, (*skb).ingress_ifindex) };
+    let (len, ifindex, ingress) = unsafe { ((*skb).len, (*skb).ifindex, (*skb).ingress_ifindex) };
     w[0] ^ w[1] ^ w[2] ^ w[3] ^ len ^ ifindex.rotate_left(8) ^ ingress.rotate_left(16) ^ CHECK_SALT
 }
 
@@ -230,6 +229,7 @@ pub fn write_tenant(ctx: &TcContext, tenant_id: u32) {
 /// on it once. A truncated frame is `Err`, which every classifier treats
 /// as a pass.
 #[inline(always)]
+#[allow(clippy::result_unit_err)]
 pub fn parse(ctx: &TcContext) -> Result<PktMeta, ()> {
     let mut meta = PktMeta {
         l3_off: 0,
@@ -247,8 +247,8 @@ pub fn parse(ctx: &TcContext) -> Result<PktMeta, ()> {
     let ether_type = u16::from_be_bytes(unsafe { *ether_type_ptr });
 
     // SAFETY: `data()..data_end()` is the readable packet window.
-    let walk = unsafe { walk_vlan_tags(ctx.data(), ctx.data_end(), ether_type, ETH_HLEN) }
-        .ok_or(())?;
+    let walk =
+        unsafe { walk_vlan_tags(ctx.data(), ctx.data_end(), ether_type, ETH_HLEN) }.ok_or(())?;
     if walk.tagged {
         meta.flags |= FLAG_VLAN;
         meta.vlan_id = walk.vlan_id;
@@ -297,6 +297,7 @@ pub fn parse(ctx: &TcContext) -> Result<PktMeta, ()> {
 /// What the chain knows about this packet: read back if a program before
 /// this one parsed it, parsed and left for the next one otherwise.
 #[inline(always)]
+#[allow(clippy::result_unit_err)]
 pub fn resolve(ctx: &TcContext) -> Result<PktMeta, ()> {
     if let Some(meta) = read_cb(ctx) {
         return Ok(meta);

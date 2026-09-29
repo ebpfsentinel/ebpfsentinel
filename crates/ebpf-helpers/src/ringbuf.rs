@@ -81,8 +81,7 @@ pub const fn backpressure_threshold<T, const MAX_ENTRIES: usize, const FLAGS: us
 #[macro_export]
 macro_rules! ringbuf_has_backpressure {
     ($ringbuf:expr) => {
-        $crate::ringbuf::avail_data(&$ringbuf)
-            > $crate::ringbuf::backpressure_threshold(&$ringbuf)
+        $crate::ringbuf::avail_data(&$ringbuf) > $crate::ringbuf::backpressure_threshold(&$ringbuf)
     };
 }
 
