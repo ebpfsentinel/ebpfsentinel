@@ -252,6 +252,15 @@ PY
     NAT_LISTENER_PID=$!
 }
 
+# _ct_insert_failed
+# Sum of netfilter's insert_failed counter across CPUs in the host namespace.
+# The counter runs from boot, so a test compares two readings and never the
+# value itself.
+_ct_insert_failed() {
+    conntrack -S 2>/dev/null \
+        | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^insert_failed=/) { split($i, kv, "="); n += kv[2] } } END { print n + 0 }'
+}
+
 @test "redirect rule delivers a UDP datagram to the translated port and the reply comes back from the original one" {
     require_root
     require_tool python3
@@ -296,10 +305,15 @@ for _ in range(3):
 @test "redirect rule carries a TCP connection to the translated port both ways" {
     require_root
     require_tool python3
+    require_tool conntrack
 
     local out="${DATA_DIR}/redirect-tcp.out"
     local marker="redirect-tcp-$$"
-    local before reverse_before
+    local before reverse_before ct_failed_before
+    # A translated flow that also carries a conntrack entry for its original
+    # tuple collides with the one netfilter creates for the translated tuple,
+    # and TCP drops the packet where UDP resolves the clash.
+    ct_failed_before="$(_ct_insert_failed)"
     before="$(get_metrics_value ebpfsentinel_packets_total "$NAT_DNAT_APPLIED_LABELS")" || true
     reverse_before="$(get_metrics_value ebpfsentinel_packets_total "$NAT_REVERSE_APPLIED_LABELS")" || true
     _nat_echo_listener tcp 18096 "$out"
@@ -325,4 +339,5 @@ c.close()
     [ -n "$after" ]
     after="$(wait_for_metric ebpfsentinel_packets_total "$(( ${reverse_before:-0} + 3 ))" 30 "$NAT_REVERSE_APPLIED_LABELS")"
     [ -n "$after" ]
+    [ "$(_ct_insert_failed)" = "$ct_failed_before" ]
 }
