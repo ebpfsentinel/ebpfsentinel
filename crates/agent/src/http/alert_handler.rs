@@ -23,6 +23,7 @@ use domain::alert::triage::{
 use domain::audit::entity::{AuditAction, AuditComponent};
 use domain::auth::entity::JwtClaims;
 use domain::common::entity::Severity;
+use ports::secondary::alert_store::AlertTriageStore;
 use ports::secondary::metrics_port::{AlertMetrics, MetricsPort};
 
 use super::error::{ApiError, ErrorBody};
@@ -466,17 +467,12 @@ pub async fn list_alerts(
     let offset = params.offset.unwrap_or(0);
 
     let min_severity = params.min_severity.as_deref().and_then(parse_severity);
-    let status = match params.status.as_deref() {
-        None => None,
-        Some(word) => Some(
-            AlertStatus::parse(word).ok_or_else(|| ApiError::BadRequest {
-                code: "INVALID_STATUS",
-                message: format!("unknown status {word}"),
-            })?,
-        ),
-    };
-    let triage_filtered =
-        status.is_some() || params.assignee.is_some() || params.unassigned.is_some();
+    let filter = TriageFilter::from_params(
+        params.status.as_deref(),
+        params.assignee.clone(),
+        params.unassigned,
+    )?;
+    let triage_filtered = filter.is_some();
 
     let triage = match state.alert_triage.as_ref() {
         Some(t) => t.triage_all().map_err(|e| ApiError::Internal {
@@ -508,20 +504,8 @@ pub async fn list_alerts(
         message: format!("alert query failed: {e}"),
     })?;
 
-    if triage_filtered {
-        alerts.retain(|a| {
-            let t = triage.get(&a.id);
-            let held_by = t.and_then(|t| t.assignee.as_deref());
-            status.is_none_or(|s| t.map_or(AlertStatus::Open, |t| t.status) == s)
-                && params
-                    .assignee
-                    .as_deref()
-                    .is_none_or(|name| held_by == Some(name))
-                && params
-                    .unassigned
-                    .is_none_or(|want| held_by.is_none() == want)
-        });
-        alerts = alerts.into_iter().skip(offset).take(limit).collect();
+    if let Some(filter) = &filter {
+        alerts = filter.page(alerts, &triage, offset, limit);
     }
 
     let response_alerts: Vec<AlertResponse> = alerts
@@ -590,6 +574,72 @@ pub async fn get_alert(
     Ok(Json(triaged_response(alert, triage.as_ref())))
 }
 
+/// The triage half of an alert query: which alerts a status, an assignee or
+/// "nobody holds it" keeps. Shared by both editions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriageFilter {
+    status: Option<AlertStatus>,
+    assignee: Option<String>,
+    unassigned: Option<bool>,
+}
+
+impl TriageFilter {
+    /// Read the three query parameters; `None` when none was given, so a
+    /// caller pages in the store as before. An unknown status is refused.
+    pub fn from_params(
+        status: Option<&str>,
+        assignee: Option<String>,
+        unassigned: Option<bool>,
+    ) -> Result<Option<Self>, ApiError> {
+        let status = match status {
+            None => None,
+            Some(word) => Some(
+                AlertStatus::parse(word).ok_or_else(|| ApiError::BadRequest {
+                    code: "INVALID_STATUS",
+                    message: format!("unknown status {word}"),
+                })?,
+            ),
+        };
+        if status.is_none() && assignee.is_none() && unassigned.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            status,
+            assignee,
+            unassigned,
+        }))
+    }
+
+    /// Whether an alert with this triage (none: nobody touched it) is kept.
+    pub fn keeps(&self, triage: Option<&AlertTriage>) -> bool {
+        let held_by = triage.and_then(|t| t.assignee.as_deref());
+        self.status
+            .is_none_or(|s| triage.map_or(AlertStatus::Open, |t| t.status) == s)
+            && self
+                .assignee
+                .as_deref()
+                .is_none_or(|name| held_by == Some(name))
+            && self.unassigned.is_none_or(|want| held_by.is_none() == want)
+    }
+
+    /// Keep what the filter keeps out of every match, then page it: the
+    /// triage lives beside the alerts, so the store cannot page for it.
+    pub fn page(
+        &self,
+        alerts: Vec<Alert>,
+        triage: &std::collections::HashMap<String, AlertTriage>,
+        offset: usize,
+        limit: usize,
+    ) -> Vec<Alert> {
+        alerts
+            .into_iter()
+            .filter(|a| self.keeps(triage.get(&a.id)))
+            .skip(offset)
+            .take(limit)
+            .collect()
+    }
+}
+
 fn now_ns() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -656,9 +706,7 @@ fn triage_detail(id: &str, change: &TriageChange) -> String {
     parts.join(", ")
 }
 
-fn triage_store(
-    state: &AppState,
-) -> Result<&Arc<dyn ports::secondary::alert_store::AlertTriageStore>, ApiError> {
+fn triage_store(state: &AppState) -> Result<&Arc<dyn AlertTriageStore>, ApiError> {
     state
         .alert_triage
         .as_ref()
@@ -698,14 +746,29 @@ pub async fn triage_alert(
     }
     let store = triage_store(&state)?;
     let via = principal(claims.as_ref());
+    let (answer, detail) = apply_triage(store.as_ref(), id, body, &via)?;
+    state
+        .audit_service
+        .record_config_change(AuditAction::AlertTriaged, &detail);
+    Ok(Json(answer))
+}
+
+/// Apply one change to one alert, handing back the answer and the line an
+/// audit trail records it under. Shared by both editions, which serve the
+/// route off the same store.
+pub fn apply_triage(
+    store: &dyn AlertTriageStore,
+    id: String,
+    body: TriageRequest,
+    via: &str,
+) -> Result<(TriageResponse, String), ApiError> {
     let change = triage_change(
         body.status.as_deref(),
         body.assignee,
         body.note,
         body.author,
-        &via,
+        via,
     )?;
-
     let triage = store
         .update_triage(&id, &change, now_ns())
         .map_err(|e| ApiError::Internal {
@@ -715,18 +778,17 @@ pub async fn triage_alert(
             code: "ALERT_NOT_FOUND",
             message: format!("alert {id} not found"),
         })?;
-
-    state
-        .audit_service
-        .record_config_change(AuditAction::AlertTriaged, &triage_detail(&id, &change));
-
-    Ok(Json(TriageResponse {
-        alert_id: id,
-        status: triage.status.as_str().to_string(),
-        assignee: triage.assignee.clone(),
-        notes: triage.notes.iter().map(note_response).collect(),
-        updated_ns: triage.updated_ns,
-    }))
+    let detail = triage_detail(&id, &change);
+    Ok((
+        TriageResponse {
+            alert_id: id,
+            status: triage.status.as_str().to_string(),
+            assignee: triage.assignee.clone(),
+            notes: triage.notes.iter().map(note_response).collect(),
+            updated_ns: triage.updated_ns,
+        },
+        detail,
+    ))
 }
 
 /// `POST /api/v1/alerts/triage` - apply one change to many alerts.
@@ -755,24 +817,41 @@ pub async fn triage_alerts(
         require_write_access(claims)?;
     }
     let store = triage_store(&state)?;
+    let via = principal(claims.as_ref());
+    let (answer, details) = apply_bulk_triage(store.as_ref(), body, &via)?;
+    for detail in &details {
+        state
+            .audit_service
+            .record_config_change(AuditAction::AlertTriaged, detail);
+    }
+    Ok(Json(answer))
+}
+
+/// Apply one change to many alerts, handing back the answer and one audit
+/// line per alert that changed.
+pub fn apply_bulk_triage(
+    store: &dyn AlertTriageStore,
+    body: BulkTriageRequest,
+    via: &str,
+) -> Result<(BulkTriageResponse, Vec<String>), ApiError> {
     if body.ids.is_empty() || body.ids.len() > MAX_BULK {
         return Err(ApiError::BadRequest {
             code: "INVALID_TRIAGE",
             message: format!("name between 1 and {MAX_BULK} alerts"),
         });
     }
-    let via = principal(claims.as_ref());
     let change = triage_change(
         body.status.as_deref(),
         body.assignee,
         body.note,
         body.author,
-        &via,
+        via,
     )?;
 
     let now = now_ns();
     let mut updated = Vec::new();
     let mut missing = Vec::new();
+    let mut details = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for id in body.ids {
         if !seen.insert(id.clone()) {
@@ -784,16 +863,13 @@ pub async fn triage_alerts(
                 message: format!("alert triage failed: {e}"),
             })? {
             Some(_) => {
-                state
-                    .audit_service
-                    .record_config_change(AuditAction::AlertTriaged, &triage_detail(&id, &change));
+                details.push(triage_detail(&id, &change));
                 updated.push(id);
             }
             None => missing.push(id),
         }
     }
-
-    Ok(Json(BulkTriageResponse { updated, missing }))
+    Ok((BulkTriageResponse { updated, missing }, details))
 }
 
 /// `POST /api/v1/alerts/{id}/false-positive` - mark an alert as false positive.
