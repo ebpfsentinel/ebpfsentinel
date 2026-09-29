@@ -1,14 +1,20 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
 use domain::alert::entity::Alert;
 use domain::alert::error::AlertError;
 use domain::alert::query::AlertQuery;
-use ports::secondary::alert_store::AlertStore;
+use domain::alert::triage::{AlertTriage, TriageChange};
+use ports::secondary::alert_store::{AlertStore, AlertTriageStore};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
 /// redb table: key = `alert_id`, value = JSON-serialized `Alert`.
 const ALERT_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("alerts");
+
+/// redb table: key = `alert_id`, value = JSON-serialized `AlertTriage`.
+/// Only an alert somebody touched has a row.
+const TRIAGE_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("alert_triage");
 
 /// Maximum number of alerts to keep. Oldest are evicted when exceeded.
 const DEFAULT_MAX_ALERTS: usize = 50_000;
@@ -43,6 +49,9 @@ impl RedbAlertStore {
         {
             let _table = txn
                 .open_table(ALERT_TABLE)
+                .map_err(|e| AlertError::StoreFailed(format!("redb table create: {e}")))?;
+            let _triage = txn
+                .open_table(TRIAGE_TABLE)
                 .map_err(|e| AlertError::StoreFailed(format!("redb table create: {e}")))?;
         }
         txn.commit()
@@ -102,6 +111,13 @@ impl RedbAlertStore {
                 .map_err(|e| AlertError::StoreFailed(format!("redb evict table: {e}")))?;
             for key in &keys_to_remove {
                 let _ = table.remove(key.as_str());
+            }
+            // An evicted alert takes what people decided about it along.
+            let mut triage = wtxn
+                .open_table(TRIAGE_TABLE)
+                .map_err(|e| AlertError::StoreFailed(format!("redb evict triage: {e}")))?;
+            for key in &keys_to_remove {
+                let _ = triage.remove(key.as_str());
             }
         }
         wtxn.commit()
@@ -237,7 +253,7 @@ impl AlertStore for RedbAlertStore {
         // Apply offset/limit.
         let total = alerts.len();
         let start = query.offset.min(total);
-        let end = (start + query.limit).min(total);
+        let end = start.saturating_add(query.limit).min(total);
 
         Ok(alerts.drain(start..end).collect())
     }
@@ -255,6 +271,79 @@ impl AlertStore for RedbAlertStore {
             .map_err(|e| AlertError::QueryFailed(format!("redb count: {e}")))?;
         #[allow(clippy::cast_possible_truncation)]
         Ok(count as usize)
+    }
+}
+
+impl AlertTriageStore for RedbAlertStore {
+    fn triage_all(&self) -> Result<HashMap<String, AlertTriage>, AlertError> {
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| AlertError::QueryFailed(format!("redb read txn: {e}")))?;
+        let table = txn
+            .open_table(TRIAGE_TABLE)
+            .map_err(|e| AlertError::QueryFailed(format!("redb read triage: {e}")))?;
+        let held = table
+            .iter()
+            .map_err(|e| AlertError::QueryFailed(format!("redb iter: {e}")))?
+            .filter_map(Result::ok)
+            .filter_map(|(k, v)| {
+                let triage: AlertTriage = serde_json::from_slice(v.value()).ok()?;
+                Some((k.value().to_string(), triage))
+            })
+            .collect();
+        Ok(held)
+    }
+
+    fn update_triage(
+        &self,
+        id: &str,
+        change: &TriageChange,
+        now_ns: u64,
+    ) -> Result<Option<AlertTriage>, AlertError> {
+        change.validate()?;
+        let _lock = self
+            .write_lock
+            .lock()
+            .map_err(|e| AlertError::StoreFailed(format!("lock poisoned: {e}")))?;
+
+        let wtxn = self
+            .db
+            .begin_write()
+            .map_err(|e| AlertError::StoreFailed(format!("redb write txn: {e}")))?;
+        let updated = {
+            let alerts = wtxn
+                .open_table(ALERT_TABLE)
+                .map_err(|e| AlertError::StoreFailed(format!("redb write table: {e}")))?;
+            let exists = alerts
+                .get(id)
+                .map_err(|e| AlertError::QueryFailed(format!("redb get: {e}")))?
+                .is_some();
+            if !exists {
+                return Ok(None);
+            }
+            let mut table = wtxn
+                .open_table(TRIAGE_TABLE)
+                .map_err(|e| AlertError::StoreFailed(format!("redb write triage: {e}")))?;
+            let mut triage: AlertTriage = match table
+                .get(id)
+                .map_err(|e| AlertError::QueryFailed(format!("redb get: {e}")))?
+            {
+                Some(guard) => serde_json::from_slice(guard.value())
+                    .map_err(|e| AlertError::QueryFailed(format!("deserialize: {e}")))?,
+                None => AlertTriage::default(),
+            };
+            triage.apply(change, now_ns)?;
+            let value = serde_json::to_vec(&triage)
+                .map_err(|e| AlertError::StoreFailed(format!("serialize: {e}")))?;
+            table
+                .insert(id, value.as_slice())
+                .map_err(|e| AlertError::StoreFailed(format!("redb insert: {e}")))?;
+            triage
+        };
+        wtxn.commit()
+            .map_err(|e| AlertError::StoreFailed(format!("redb write commit: {e}")))?;
+        Ok(Some(updated))
     }
 }
 
@@ -500,5 +589,78 @@ mod tests {
             .store_alert(&make_alert("a2", "ids", Severity::High, "ids-002", 200))
             .unwrap();
         assert_eq!(store.alert_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn triage_is_kept_beside_the_alert_and_read_back() {
+        use domain::alert::triage::{AlertNote, AlertStatus, AssigneeChange};
+        let (store, _tmp) = make_store(100);
+        store
+            .store_alert(&make_alert("a1", "ids", Severity::High, "ids-001", 100))
+            .unwrap();
+        assert!(store.triage_all().unwrap().is_empty());
+
+        let change = TriageChange {
+            status: Some(AlertStatus::Acknowledged),
+            assignee: AssigneeChange::Set("bob".to_string()),
+            note: Some(AlertNote {
+                author: "alice".to_string(),
+                via: "dashboard".to_string(),
+                at_ns: 0,
+                text: "seen".to_string(),
+            }),
+        };
+        let t = store.update_triage("a1", &change, 7).unwrap().unwrap();
+        assert_eq!(t.status, AlertStatus::Acknowledged);
+
+        let all = store.triage_all().unwrap();
+        assert_eq!(all["a1"].assignee.as_deref(), Some("bob"));
+        assert_eq!(all["a1"].notes[0].at_ns, 7);
+        // The detection itself is untouched.
+        assert!(!store.get_alert("a1").unwrap().unwrap().false_positive);
+    }
+
+    #[test]
+    fn triage_refuses_an_unknown_alert_and_an_empty_change() {
+        use domain::alert::triage::AlertStatus;
+        let (store, _tmp) = make_store(100);
+        let change = TriageChange {
+            status: Some(AlertStatus::Resolved),
+            ..TriageChange::default()
+        };
+        assert!(
+            store
+                .update_triage("missing", &change, 1)
+                .unwrap()
+                .is_none()
+        );
+        store
+            .store_alert(&make_alert("a1", "ids", Severity::High, "ids-001", 100))
+            .unwrap();
+        assert!(
+            store
+                .update_triage("a1", &TriageChange::default(), 1)
+                .is_err()
+        );
+        assert!(store.triage_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn eviction_takes_the_triage_along() {
+        use domain::alert::triage::AlertStatus;
+        let (store, _tmp) = make_store(1);
+        store
+            .store_alert(&make_alert("old", "ids", Severity::High, "ids-001", 100))
+            .unwrap();
+        let change = TriageChange {
+            status: Some(AlertStatus::Resolved),
+            ..TriageChange::default()
+        };
+        store.update_triage("old", &change, 1).unwrap();
+        store
+            .store_alert(&make_alert("new", "ids", Severity::High, "ids-001", 200))
+            .unwrap();
+        assert!(store.get_alert("old").unwrap().is_none());
+        assert!(store.triage_all().unwrap().is_empty());
     }
 }

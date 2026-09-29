@@ -85,6 +85,8 @@ use super::zone_handler;
         alert_handler::list_alerts,
         alert_handler::get_alert,
         alert_handler::mark_false_positive,
+        alert_handler::triage_alert,
+        alert_handler::triage_alerts,
         alert_handler::stream_alerts,
         // Audit
         audit_handler::list_audit_logs,
@@ -220,6 +222,11 @@ use super::zone_handler;
         alert_handler::AlertListResponse,
         alert_handler::AlertResponse,
         alert_handler::FalsePositiveResponse,
+        alert_handler::AlertNoteResponse,
+        alert_handler::TriageRequest,
+        alert_handler::BulkTriageRequest,
+        alert_handler::TriageResponse,
+        alert_handler::BulkTriageResponse,
         // Audit
         audit_handler::AuditLogResponse,
         audit_handler::AuditEntryResponse,

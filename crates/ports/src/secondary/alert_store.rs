@@ -1,6 +1,8 @@
 use domain::alert::entity::Alert;
 use domain::alert::error::AlertError;
 use domain::alert::query::AlertQuery;
+use domain::alert::triage::{AlertTriage, TriageChange};
+use std::collections::HashMap;
 
 /// Pluggable alert store for persisting alerts and supporting false-positive
 /// marking and filtered queries.
@@ -25,6 +27,27 @@ pub trait AlertStore: Send + Sync {
 
     /// Total number of stored alerts.
     fn alert_count(&self) -> Result<usize, AlertError>;
+}
+
+/// What operators decided about stored alerts, kept beside the alerts.
+///
+/// Only an alert somebody touched has an entry, so the whole map stays as
+/// small as the work people actually did, and an alert evicted from the
+/// store takes its triage with it.
+pub trait AlertTriageStore: Send + Sync {
+    /// Every triage held, keyed by alert ID.
+    fn triage_all(&self) -> Result<HashMap<String, AlertTriage>, AlertError>;
+
+    /// Apply `change` to one alert at `now_ns`.
+    ///
+    /// Returns the triage as it now stands, or `None` when no alert has
+    /// that ID, so a caller cannot annotate an alert that does not exist.
+    fn update_triage(
+        &self,
+        id: &str,
+        change: &TriageChange,
+        now_ns: u64,
+    ) -> Result<Option<AlertTriage>, AlertError>;
 }
 
 #[cfg(test)]

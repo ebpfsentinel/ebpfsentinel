@@ -30,7 +30,7 @@ use arc_swap::ArcSwap;
 use domain::alert::entity::Alert;
 use domain::conntrack::entity::ConntrackEvent;
 use infrastructure::config::AgentConfig;
-use ports::secondary::alert_store::AlertStore;
+use ports::secondary::alert_store::{AlertStore, AlertTriageStore};
 use ports::secondary::auth_provider::AuthProvider;
 use ports::secondary::geoip_port::GeoIpPort;
 use tokio::sync::{Notify, RwLock, broadcast, mpsc};
@@ -67,6 +67,9 @@ pub struct AppState {
     pub dns_blocklist_service: Option<Arc<DnsBlocklistAppService>>,
     pub domain_reputation_service: Option<Arc<DomainReputationAppService>>,
     pub alert_store: Option<Arc<dyn AlertStore>>,
+    /// What operators decided about stored alerts. `Some` whenever the
+    /// alert store is, since both live in the same database.
+    pub alert_triage: Option<Arc<dyn AlertTriageStore>>,
     pub auth_provider: Option<Arc<dyn AuthProvider>>,
     pub revocation_handle: Option<RevocationHandle>,
     pub metrics_auth_required: bool,
@@ -155,6 +158,7 @@ impl AppState {
             dns_blocklist_service: None,
             domain_reputation_service: None,
             alert_store: None,
+            alert_triage: None,
             auth_provider: None,
             revocation_handle: None,
             metrics_auth_required: false,
@@ -377,6 +381,13 @@ impl AppState {
     #[must_use]
     pub fn with_alert_store(mut self, store: Arc<dyn AlertStore>) -> Self {
         self.alert_store = Some(store);
+        self
+    }
+
+    /// Attach the triage kept beside the alert store.
+    #[must_use]
+    pub fn with_alert_triage(mut self, store: Arc<dyn AlertTriageStore>) -> Self {
+        self.alert_triage = Some(store);
         self
     }
 

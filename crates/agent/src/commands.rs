@@ -470,12 +470,15 @@ pub async fn cmd_alerts_list(
     severity: Option<&str>,
     tactic: Option<&str>,
     technique: Option<&str>,
+    triage: &crate::api_client::TriageFilter,
     limit: u64,
     offset: u64,
     output: OutputFormat,
 ) -> Result<()> {
     let resp = client
-        .list_alerts(component, severity, tactic, technique, limit, offset)
+        .list_alerts(
+            component, severity, tactic, technique, triage, limit, offset,
+        )
         .await?;
 
     if output == OutputFormat::Json {
@@ -566,6 +569,10 @@ pub async fn cmd_alerts_show(client: &ApiClient, id: &str, output: OutputFormat)
     );
     println!("  Protocol:       {}", alert.protocol);
     println!("  False positive: {}", yes_no(alert.false_positive));
+    println!("  Status:         {}", alert.status);
+    if let Some(who) = alert.assignee.as_deref() {
+        println!("  Assignee:       {who}");
+    }
     if let Some(domain) = alert.src_domain.as_deref() {
         println!("  Source domain:  {domain}");
     }
@@ -582,6 +589,43 @@ pub async fn cmd_alerts_show(client: &ApiClient, id: &str, output: OutputFormat)
         println!("  JA4:            {ja4}");
     }
     println!("  Message:        {}", alert.message);
+    for note in &alert.notes {
+        println!("  Note ({}): {}", note.author, note.text);
+    }
+    Ok(())
+}
+
+pub async fn cmd_alerts_triage(
+    client: &ApiClient,
+    ids: &[String],
+    change: crate::api_client::TriageBody,
+    output: OutputFormat,
+) -> Result<()> {
+    if let [id] = ids {
+        let resp = client.triage_alert(id, &change).await?;
+        if output == OutputFormat::Json {
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            return Ok(());
+        }
+        println!(
+            "Alert {}: {}, {}, {} note(s)",
+            resp.alert_id,
+            resp.status,
+            resp.assignee.as_deref().unwrap_or("unassigned"),
+            resp.notes.len()
+        );
+        return Ok(());
+    }
+
+    let resp = client.triage_alerts(ids, &change).await?;
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+    println!("{} alert(s) changed.", resp.updated.len());
+    if !resp.missing.is_empty() {
+        println!("No longer held: {}", resp.missing.join(", "));
+    }
     Ok(())
 }
 
@@ -605,7 +649,17 @@ pub async fn cmd_alerts_mark_fp(client: &ApiClient, id: &str, output: OutputForm
 pub async fn cmd_alerts_stats(client: &ApiClient, limit: u64, output: OutputFormat) -> Result<()> {
     use std::collections::HashMap;
 
-    let resp = client.list_alerts(None, None, None, None, limit, 0).await?;
+    let resp = client
+        .list_alerts(
+            None,
+            None,
+            None,
+            None,
+            &crate::api_client::ANY_TRIAGE,
+            limit,
+            0,
+        )
+        .await?;
     let alerts = &resp.alerts;
 
     // Severity distribution
@@ -1851,7 +1905,15 @@ async fn watch_alerts_by_polling(
 
     // Seed with existing alerts so we only show new ones
     if let Ok(resp) = client
-        .list_alerts(component, severity, None, None, 100, 0)
+        .list_alerts(
+            component,
+            severity,
+            None,
+            None,
+            &crate::api_client::ANY_TRIAGE,
+            100,
+            0,
+        )
         .await
     {
         for a in &resp.alerts {
@@ -1863,7 +1925,15 @@ async fn watch_alerts_by_polling(
         tokio::time::sleep(interval).await;
 
         let resp = match client
-            .list_alerts(component, severity, None, None, 50, 0)
+            .list_alerts(
+                component,
+                severity,
+                None,
+                None,
+                &crate::api_client::ANY_TRIAGE,
+                50,
+                0,
+            )
             .await
         {
             Ok(r) => r,
@@ -2219,7 +2289,15 @@ fn subnet_of(ip: &str) -> String {
 pub async fn cmd_score(client: &ApiClient, alert_limit: u64, output: OutputFormat) -> Result<()> {
     // Fetch all scoring inputs in parallel
     let (alerts_res, ddos_res, blacklist_res, iocs_res, conntrack_res) = tokio::join!(
-        client.list_alerts(None, None, None, None, alert_limit, 0),
+        client.list_alerts(
+            None,
+            None,
+            None,
+            None,
+            &crate::api_client::ANY_TRIAGE,
+            alert_limit,
+            0
+        ),
         client.ddos_status(),
         client.list_ips_blacklist(),
         client.list_iocs(),
@@ -2383,7 +2461,7 @@ pub async fn cmd_status_enhanced(client: &ApiClient, output: OutputFormat) -> Re
     let (status, ebpf, alerts, conntrack, ddos) = tokio::join!(
         client.get_status(),
         client.ebpf_status(),
-        client.list_alerts(None, None, None, None, 5, 0),
+        client.list_alerts(None, None, None, None, &crate::api_client::ANY_TRIAGE, 5, 0),
         client.conntrack_status(),
         client.ddos_status(),
     );
@@ -2487,7 +2565,15 @@ pub async fn cmd_investigate(
 
     // Fetch all data sources in parallel
     let (alerts_res, conns_res, dns_res, blacklist_res, iocs_res) = tokio::join!(
-        client.list_alerts(None, None, None, None, alert_limit, 0),
+        client.list_alerts(
+            None,
+            None,
+            None,
+            None,
+            &crate::api_client::ANY_TRIAGE,
+            alert_limit,
+            0
+        ),
         client.list_connections(2000),
         client.dns_cache(None, Some(&target_str), 0, 50),
         client.list_ips_blacklist(),

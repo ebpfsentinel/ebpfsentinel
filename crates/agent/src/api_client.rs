@@ -207,6 +207,95 @@ pub struct AlertResponse {
     pub dst_geo: Option<String>,
     #[serde(default)]
     pub ja4_fingerprint: Option<String>,
+    /// Where the alert stands in the queue; an older agent sends nothing
+    /// and every alert it holds is open.
+    #[serde(default = "open_status")]
+    pub status: String,
+    #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default)]
+    pub notes: Vec<AlertNoteResponse>,
+}
+
+fn open_status() -> String {
+    "open".to_string()
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct AlertNoteResponse {
+    pub author: String,
+    pub via: String,
+    pub at_ns: u64,
+    pub text: String,
+}
+
+/// Triage filters on an alert listing.
+#[derive(Debug, Default)]
+pub struct TriageFilter {
+    pub status: Option<String>,
+    pub assignee: Option<String>,
+    pub unassigned: bool,
+}
+
+impl TriageFilter {
+    /// No triage filter at all.
+    pub const NONE: Self = Self {
+        status: None,
+        assignee: None,
+        unassigned: false,
+    };
+}
+
+/// A listing with no triage filter, for readers that page the whole queue.
+pub static ANY_TRIAGE: TriageFilter = TriageFilter::NONE;
+
+/// One triage change, as the command line states it.
+#[derive(Debug, Default)]
+pub struct TriageBody {
+    pub status: Option<String>,
+    pub assign: Option<String>,
+    pub unassign: bool,
+    pub note: Option<String>,
+    pub author: Option<String>,
+}
+
+impl TriageBody {
+    /// The request body: `assignee` absent keeps, `null` clears.
+    fn to_json(&self) -> serde_json::Value {
+        let mut body = serde_json::Map::new();
+        if let Some(s) = &self.status {
+            body.insert("status".into(), s.clone().into());
+        }
+        if self.unassign {
+            body.insert("assignee".into(), serde_json::Value::Null);
+        } else if let Some(a) = &self.assign {
+            body.insert("assignee".into(), a.clone().into());
+        }
+        if let Some(n) = &self.note {
+            body.insert("note".into(), n.clone().into());
+        }
+        if let Some(a) = &self.author {
+            body.insert("author".into(), a.clone().into());
+        }
+        serde_json::Value::Object(body)
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct TriageResponse {
+    pub alert_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default)]
+    pub notes: Vec<AlertNoteResponse>,
+    pub updated_ns: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct BulkTriageResponse {
+    pub updated: Vec<String>,
+    pub missing: Vec<String>,
 }
 
 impl AlertResponse {
@@ -1393,6 +1482,7 @@ impl ApiClient {
         severity: Option<&str>,
         tactic: Option<&str>,
         technique: Option<&str>,
+        triage: &TriageFilter,
         limit: u64,
         offset: u64,
     ) -> anyhow::Result<AlertListResponse> {
@@ -1409,6 +1499,15 @@ impl ApiClient {
         }
         if let Some(t) = technique {
             req = req.query(&[("technique", t)]);
+        }
+        if let Some(s) = triage.status.as_deref() {
+            req = req.query(&[("status", s)]);
+        }
+        if let Some(a) = triage.assignee.as_deref() {
+            req = req.query(&[("assignee", a)]);
+        }
+        if triage.unassigned {
+            req = req.query(&[("unassigned", "true")]);
         }
         let resp = req
             .send()
@@ -1436,6 +1535,43 @@ impl ApiClient {
                 reqwest::Method::POST,
                 &format!("/api/v1/alerts/{id}/false-positive"),
             )
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    /// Change one alert's status or assignee, or append a note.
+    pub async fn triage_alert(
+        &self,
+        id: &str,
+        change: &TriageBody,
+    ) -> anyhow::Result<TriageResponse> {
+        let resp = self
+            .request(
+                reqwest::Method::PATCH,
+                &format!("/api/v1/alerts/{id}/triage"),
+            )
+            .json(&change.to_json())
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    /// Apply one change to many alerts.
+    pub async fn triage_alerts(
+        &self,
+        ids: &[String],
+        change: &TriageBody,
+    ) -> anyhow::Result<BulkTriageResponse> {
+        let mut body = change.to_json();
+        if let serde_json::Value::Object(map) = &mut body {
+            map.insert("ids".into(), ids.into());
+        }
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/alerts/triage")
+            .json(&body)
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;
@@ -3184,5 +3320,37 @@ mod tests {
                  same time, so the exemption is stale"
             );
         }
+    }
+
+    #[test]
+    fn a_triage_body_sends_null_only_to_unassign() {
+        let keep = crate::api_client::TriageBody {
+            status: Some("resolved".to_string()),
+            ..crate::api_client::TriageBody::default()
+        }
+        .to_json();
+        assert_eq!(keep, serde_json::json!({ "status": "resolved" }));
+
+        let clear = crate::api_client::TriageBody {
+            unassign: true,
+            note: Some("done".to_string()),
+            ..crate::api_client::TriageBody::default()
+        }
+        .to_json();
+        assert_eq!(
+            clear,
+            serde_json::json!({ "assignee": null, "note": "done" })
+        );
+
+        let set = crate::api_client::TriageBody {
+            assign: Some("bob".to_string()),
+            author: Some("alice".to_string()),
+            ..crate::api_client::TriageBody::default()
+        }
+        .to_json();
+        assert_eq!(
+            set,
+            serde_json::json!({ "assignee": "bob", "author": "alice" })
+        );
     }
 }

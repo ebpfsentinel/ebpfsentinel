@@ -217,6 +217,42 @@
             }
           },
           {
+            "name": "status",
+            "in": "query",
+            "description": "Filter by triage status (\"open\", \"acknowledged\", \"investigating\",\n\"resolved\"). An alert nobody touched is open.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "assignee",
+            "in": "query",
+            "description": "Filter by assignee (exact match).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "unassigned",
+            "in": "query",
+            "description": "`true` keeps only alerts nobody holds.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Maximum entries to return (default 100, max 1000).",
@@ -399,6 +435,85 @@
         ]
       }
     },
+    "/api/v1/alerts/triage": {
+      "post": {
+        "tags": [
+          "Alerts"
+        ],
+        "summary": "`POST /api/v1/alerts/triage` - apply one change to many alerts.",
+        "operationId": "triage_alerts",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkTriageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Which alerts changed and which the store no longer holds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkTriageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No IDs, too many IDs, or an invalid change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Alert store not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/alerts/{id}": {
       "get": {
         "tags": [
@@ -530,6 +645,106 @@
           },
           "404": {
             "description": "Alert not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/alerts/{id}/triage": {
+      "patch": {
+        "tags": [
+          "Alerts"
+        ],
+        "summary": "`PATCH /api/v1/alerts/{id}/triage` - change one alert's status or\nassignee, or append a note to it.",
+        "operationId": "triage_alert",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Alert identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TriageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The alert's triage after the change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown status, empty change, or a value past its ceiling",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Alert not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Alert store not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -6817,6 +7032,34 @@
           }
         }
       },
+      "AlertNoteResponse": {
+        "type": "object",
+        "description": "One note on an alert as the API writes it.",
+        "required": [
+          "author",
+          "via",
+          "at_ns",
+          "text"
+        ],
+        "properties": {
+          "at_ns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "author": {
+            "type": "string",
+            "description": "Who the caller said wrote it."
+          },
+          "text": {
+            "type": "string"
+          },
+          "via": {
+            "type": "string",
+            "description": "The identity the agent authenticated the write under."
+          }
+        }
+      },
       "AlertResponse": {
         "type": "object",
         "required": [
@@ -6833,11 +7076,19 @@
           "protocol",
           "is_ipv6",
           "message",
-          "false_positive"
+          "false_positive",
+          "status"
         ],
         "properties": {
           "action": {
             "type": "string"
+          },
+          "assignee": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who holds it, if anybody."
           },
           "attack_type": {
             "type": [
@@ -6985,6 +7236,13 @@
             ],
             "description": "MITRE ATT&CK technique name."
           },
+          "notes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertNoteResponse"
+            },
+            "description": "What people wrote on it, oldest first."
+          },
           "peak_pps": {
             "type": [
               "integer",
@@ -7050,6 +7308,10 @@
             "format": "int32",
             "minimum": 0
           },
+          "status": {
+            "type": "string",
+            "description": "Where the alert stands in the queue; `open` until somebody moves it."
+          },
           "tgid": {
             "type": [
               "integer",
@@ -7078,6 +7340,15 @@
             ],
             "format": "int64",
             "description": "`DDoS`: total packets in attack.",
+            "minimum": 0
+          },
+          "triage_updated_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the triage last changed (nanoseconds since epoch).",
             "minimum": 0
           }
         }
@@ -7326,6 +7597,69 @@
           },
           "pattern": {
             "type": "string"
+          }
+        }
+      },
+      "BulkTriageRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/alerts/triage` body: one change applied to many alerts.",
+        "required": [
+          "ids"
+        ],
+        "properties": {
+          "assignee": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "author": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "BulkTriageResponse": {
+        "type": "object",
+        "description": "What a bulk change did.",
+        "required": [
+          "updated",
+          "missing"
+        ],
+        "properties": {
+          "missing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Alerts the store no longer holds."
+          },
+          "updated": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Alerts the change was applied to."
           }
         }
       },
@@ -10877,6 +11211,74 @@
             "type": "string"
           },
           "query_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "TriageRequest": {
+        "type": "object",
+        "description": "`PATCH /api/v1/alerts/{id}/triage` body. A field left out stays as it\nwas; `assignee: null` takes the alert off whoever held it.",
+        "properties": {
+          "assignee": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "author": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who is writing, when a console writes on a person's behalf.\nDefaults to the authenticated identity."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A note to append."
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "\"open\", \"acknowledged\", \"investigating\" or \"resolved\"."
+          }
+        }
+      },
+      "TriageResponse": {
+        "type": "object",
+        "description": "The triage of one alert after a change.",
+        "required": [
+          "alert_id",
+          "status",
+          "notes",
+          "updated_ns"
+        ],
+        "properties": {
+          "alert_id": {
+            "type": "string"
+          },
+          "assignee": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertNoteResponse"
+            }
+          },
+          "status": {
+            "type": "string"
+          },
+          "updated_ns": {
             "type": "integer",
             "format": "int64",
             "minimum": 0

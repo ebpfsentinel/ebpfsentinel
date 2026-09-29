@@ -17,6 +17,9 @@ use utoipa::{IntoParams, ToSchema};
 use domain::alert::entity::Alert;
 use domain::alert::filter::{AlertFilter, FilterError, parse_severity as parse_severity_domain};
 use domain::alert::query::AlertQuery;
+use domain::alert::triage::{
+    AlertNote, AlertStatus, AlertTriage, AssigneeChange, MAX_BULK, TriageChange,
+};
 use domain::audit::entity::{AuditAction, AuditComponent};
 use domain::auth::entity::JwtClaims;
 use domain::common::entity::Severity;
@@ -46,6 +49,13 @@ pub struct AlertQueryParams {
     pub tactic: Option<String>,
     /// Filter by MITRE ATT&CK technique ID (e.g. "T1041").
     pub technique: Option<String>,
+    /// Filter by triage status ("open", "acknowledged", "investigating",
+    /// "resolved"). An alert nobody touched is open.
+    pub status: Option<String>,
+    /// Filter by assignee (exact match).
+    pub assignee: Option<String>,
+    /// `true` keeps only alerts nobody holds.
+    pub unassigned: Option<bool>,
     /// Maximum entries to return (default 100, max 1000).
     pub limit: Option<usize>,
     /// Number of entries to skip (default 0).
@@ -151,6 +161,85 @@ pub struct AlertResponse {
     /// Container identity resolved from the event's `cgroup_id` (if any).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<ContainerIdentity>,
+    /// Where the alert stands in the queue; `open` until somebody moves it.
+    pub status: String,
+    /// Who holds it, if anybody.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// What people wrote on it, oldest first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<AlertNoteResponse>,
+    /// When the triage last changed (nanoseconds since epoch).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub triage_updated_ns: Option<u64>,
+}
+
+/// One note on an alert as the API writes it.
+#[derive(Serialize, ToSchema)]
+pub struct AlertNoteResponse {
+    /// Who the caller said wrote it.
+    pub author: String,
+    /// The identity the agent authenticated the write under.
+    pub via: String,
+    pub at_ns: u64,
+    pub text: String,
+}
+
+/// `PATCH /api/v1/alerts/{id}/triage` body. A field left out stays as it
+/// was; `assignee: null` takes the alert off whoever held it.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct TriageRequest {
+    /// "open", "acknowledged", "investigating" or "resolved".
+    pub status: Option<String>,
+    #[serde(default, deserialize_with = "present_or_null")]
+    #[schema(value_type = Option<String>, nullable)]
+    pub assignee: AssigneeChange,
+    /// A note to append.
+    pub note: Option<String>,
+    /// Who is writing, when a console writes on a person's behalf.
+    /// Defaults to the authenticated identity.
+    pub author: Option<String>,
+}
+
+/// `POST /api/v1/alerts/triage` body: one change applied to many alerts.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct BulkTriageRequest {
+    pub ids: Vec<String>,
+    pub status: Option<String>,
+    #[serde(default, deserialize_with = "present_or_null")]
+    #[schema(value_type = Option<String>, nullable)]
+    pub assignee: AssigneeChange,
+    pub note: Option<String>,
+    pub author: Option<String>,
+}
+
+/// The triage of one alert after a change.
+#[derive(Serialize, ToSchema)]
+pub struct TriageResponse {
+    pub alert_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    pub notes: Vec<AlertNoteResponse>,
+    pub updated_ns: u64,
+}
+
+/// What a bulk change did.
+#[derive(Serialize, ToSchema)]
+pub struct BulkTriageResponse {
+    /// Alerts the change was applied to.
+    pub updated: Vec<String>,
+    /// Alerts the store no longer holds.
+    pub missing: Vec<String>,
+}
+
+/// Tell a field sent as `null` apart from a field left out: absent keeps
+/// (the `default`), `null` clears, a name hands the alert over.
+fn present_or_null<'de, D>(de: D) -> Result<AssigneeChange, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(de)?.map_or(AssigneeChange::Clear, AssigneeChange::Set))
 }
 
 /// Container provenance surfaced on an alert.
@@ -283,7 +372,29 @@ fn container_identity(
 /// `"high"` - one queue reading two ways depending on which edition
 /// answered.
 pub fn alert_response(a: Alert) -> AlertResponse {
+    triaged_response(a, None)
+}
+
+fn note_response(n: &AlertNote) -> AlertNoteResponse {
+    AlertNoteResponse {
+        author: n.author.clone(),
+        via: n.via.clone(),
+        at_ns: n.at_ns,
+        text: n.text.clone(),
+    }
+}
+
+/// One stored alert with what operators decided about it.
+pub fn triaged_response(a: Alert, triage: Option<&AlertTriage>) -> AlertResponse {
+    let triage = triage.filter(|t| !t.is_untouched());
     AlertResponse {
+        status: triage
+            .map_or(AlertStatus::Open, |t| t.status)
+            .as_str()
+            .to_string(),
+        assignee: triage.and_then(|t| t.assignee.clone()),
+        notes: triage.map_or_else(Vec::new, |t| t.notes.iter().map(note_response).collect()),
+        triage_updated_ns: triage.map(|t| t.updated_ns),
         id: a.id,
         timestamp_ns: a.timestamp_ns,
         component: a.component,
@@ -355,6 +466,24 @@ pub async fn list_alerts(
     let offset = params.offset.unwrap_or(0);
 
     let min_severity = params.min_severity.as_deref().and_then(parse_severity);
+    let status = match params.status.as_deref() {
+        None => None,
+        Some(word) => Some(
+            AlertStatus::parse(word).ok_or_else(|| ApiError::BadRequest {
+                code: "INVALID_STATUS",
+                message: format!("unknown status {word}"),
+            })?,
+        ),
+    };
+    let triage_filtered =
+        status.is_some() || params.assignee.is_some() || params.unassigned.is_some();
+
+    let triage = match state.alert_triage.as_ref() {
+        Some(t) => t.triage_all().map_err(|e| ApiError::Internal {
+            message: format!("alert triage read failed: {e}"),
+        })?,
+        None => std::collections::HashMap::new(),
+    };
 
     let query = AlertQuery {
         from_ns: params.from,
@@ -365,19 +494,43 @@ pub async fn list_alerts(
         false_positive: params.false_positive,
         tactic: params.tactic,
         technique: params.technique,
-        limit,
-        offset,
+        // The triage lives beside the alerts, so a filter on it is applied
+        // here over every match and paged afterwards.
+        limit: if triage_filtered { usize::MAX } else { limit },
+        offset: if triage_filtered { 0 } else { offset },
     };
 
     let total = store.alert_count().map_err(|e| ApiError::Internal {
         message: format!("alert count failed: {e}"),
     })?;
 
-    let alerts = store.query_alerts(&query).map_err(|e| ApiError::Internal {
+    let mut alerts = store.query_alerts(&query).map_err(|e| ApiError::Internal {
         message: format!("alert query failed: {e}"),
     })?;
 
-    let response_alerts: Vec<AlertResponse> = alerts.into_iter().map(alert_response).collect();
+    if triage_filtered {
+        alerts.retain(|a| {
+            let t = triage.get(&a.id);
+            let held_by = t.and_then(|t| t.assignee.as_deref());
+            status.is_none_or(|s| t.map_or(AlertStatus::Open, |t| t.status) == s)
+                && params
+                    .assignee
+                    .as_deref()
+                    .is_none_or(|name| held_by == Some(name))
+                && params
+                    .unassigned
+                    .is_none_or(|want| held_by.is_none() == want)
+        });
+        alerts = alerts.into_iter().skip(offset).take(limit).collect();
+    }
+
+    let response_alerts: Vec<AlertResponse> = alerts
+        .into_iter()
+        .map(|a| {
+            let t = triage.get(&a.id);
+            triaged_response(a, t)
+        })
+        .collect();
 
     Ok(Json(AlertListResponse {
         alerts: response_alerts,
@@ -424,7 +577,223 @@ pub async fn get_alert(
         message: format!("alert {id} not found"),
     })?;
 
-    Ok(Json(alert_response(alert)))
+    let triage = match state.alert_triage.as_ref() {
+        Some(t) => t
+            .triage_all()
+            .map_err(|e| ApiError::Internal {
+                message: format!("alert triage read failed: {e}"),
+            })?
+            .remove(&id),
+        None => None,
+    };
+
+    Ok(Json(triaged_response(alert, triage.as_ref())))
+}
+
+fn now_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+}
+
+/// Turn a request into a change, naming who wrote it.
+fn triage_change(
+    status: Option<&str>,
+    assignee: AssigneeChange,
+    note: Option<String>,
+    author: Option<String>,
+    via: &str,
+) -> Result<TriageChange, ApiError> {
+    let status = match status {
+        None => None,
+        Some(word) => Some(
+            AlertStatus::parse(word).ok_or_else(|| ApiError::BadRequest {
+                code: "INVALID_STATUS",
+                message: format!("unknown status {word}"),
+            })?,
+        ),
+    };
+    let author = author
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
+        .unwrap_or_else(|| via.to_string());
+    let change = TriageChange {
+        status,
+        assignee,
+        note: note.map(|text| AlertNote {
+            author,
+            via: via.to_string(),
+            at_ns: 0,
+            text,
+        }),
+    };
+    change.validate().map_err(|e| ApiError::BadRequest {
+        code: "INVALID_TRIAGE",
+        message: e.to_string(),
+    })?;
+    Ok(change)
+}
+
+/// The identity a write is recorded under; `local` when the agent runs
+/// without authentication.
+fn principal(claims: Option<&Extension<JwtClaims>>) -> String {
+    claims.map_or_else(|| "local".to_string(), |Extension(c)| c.sub.clone())
+}
+
+fn triage_detail(id: &str, change: &TriageChange) -> String {
+    let mut parts = vec![format!("alert {id}")];
+    if let Some(s) = change.status {
+        parts.push(format!("status {}", s.as_str()));
+    }
+    match &change.assignee {
+        AssigneeChange::Set(name) => parts.push(format!("assigned to {}", name.trim())),
+        AssigneeChange::Clear => parts.push("unassigned".to_string()),
+        AssigneeChange::Keep => {}
+    }
+    if let Some(n) = &change.note {
+        parts.push(format!("note by {} via {}", n.author, n.via));
+    }
+    parts.join(", ")
+}
+
+fn triage_store(
+    state: &AppState,
+) -> Result<&Arc<dyn ports::secondary::alert_store::AlertTriageStore>, ApiError> {
+    state
+        .alert_triage
+        .as_ref()
+        .ok_or(ApiError::ServiceUnavailable {
+            message: "alert store not configured".to_string(),
+        })
+}
+
+/// `PATCH /api/v1/alerts/{id}/triage` - change one alert's status or
+/// assignee, or append a note to it.
+#[utoipa::path(
+    patch, path = "/api/v1/alerts/{id}/triage",
+    tag = "Alerts",
+    params(("id" = String, Path, description = "Alert identifier")),
+    request_body = TriageRequest,
+    responses(
+        (status = 200, description = "The alert's triage after the change", body = TriageResponse),
+        (status = 400, description = "Unknown status, empty change, or a value past its ceiling", body = ErrorBody),
+        (status = 404, description = "Alert not found", body = ErrorBody),
+        (status = 503, description = "Alert store not configured", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn triage_alert(
+    State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
+    Path(id): Path<String>,
+    Json(body): Json<TriageRequest>,
+) -> Result<Json<TriageResponse>, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
+    let store = triage_store(&state)?;
+    let via = principal(claims.as_ref());
+    let change = triage_change(
+        body.status.as_deref(),
+        body.assignee,
+        body.note,
+        body.author,
+        &via,
+    )?;
+
+    let triage = store
+        .update_triage(&id, &change, now_ns())
+        .map_err(|e| ApiError::Internal {
+            message: format!("alert triage failed: {e}"),
+        })?
+        .ok_or(ApiError::NotFound {
+            code: "ALERT_NOT_FOUND",
+            message: format!("alert {id} not found"),
+        })?;
+
+    state
+        .audit_service
+        .record_config_change(AuditAction::AlertTriaged, &triage_detail(&id, &change));
+
+    Ok(Json(TriageResponse {
+        alert_id: id,
+        status: triage.status.as_str().to_string(),
+        assignee: triage.assignee.clone(),
+        notes: triage.notes.iter().map(note_response).collect(),
+        updated_ns: triage.updated_ns,
+    }))
+}
+
+/// `POST /api/v1/alerts/triage` - apply one change to many alerts.
+#[utoipa::path(
+    post, path = "/api/v1/alerts/triage",
+    tag = "Alerts",
+    request_body = BulkTriageRequest,
+    responses(
+        (status = 200, description = "Which alerts changed and which the store no longer holds", body = BulkTriageResponse),
+        (status = 400, description = "No IDs, too many IDs, or an invalid change", body = ErrorBody),
+        (status = 503, description = "Alert store not configured", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn triage_alerts(
+    State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
+    Json(body): Json<BulkTriageRequest>,
+) -> Result<Json<BulkTriageResponse>, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
+    let store = triage_store(&state)?;
+    if body.ids.is_empty() || body.ids.len() > MAX_BULK {
+        return Err(ApiError::BadRequest {
+            code: "INVALID_TRIAGE",
+            message: format!("name between 1 and {MAX_BULK} alerts"),
+        });
+    }
+    let via = principal(claims.as_ref());
+    let change = triage_change(
+        body.status.as_deref(),
+        body.assignee,
+        body.note,
+        body.author,
+        &via,
+    )?;
+
+    let now = now_ns();
+    let mut updated = Vec::new();
+    let mut missing = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for id in body.ids {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        match store
+            .update_triage(&id, &change, now)
+            .map_err(|e| ApiError::Internal {
+                message: format!("alert triage failed: {e}"),
+            })? {
+            Some(_) => {
+                state
+                    .audit_service
+                    .record_config_change(AuditAction::AlertTriaged, &triage_detail(&id, &change));
+                updated.push(id);
+            }
+            None => missing.push(id),
+        }
+    }
+
+    Ok(Json(BulkTriageResponse { updated, missing }))
 }
 
 /// `POST /api/v1/alerts/{id}/false-positive` - mark an alert as false positive.
@@ -948,6 +1317,10 @@ mod tests {
             mitre_tactic: None,
             ja4_fingerprint: None,
             container: None,
+            status: "open".to_string(),
+            assignee: None,
+            notes: Vec::new(),
+            triage_updated_ns: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "test-001");

@@ -82,6 +82,8 @@ pub enum AuditAction {
     PolicyViolation,
     /// An alert was marked as a false positive.
     FalsePositive,
+    /// An operator changed an alert's status, assignee or notes.
+    AlertTriaged,
 }
 
 impl AuditAction {
@@ -97,6 +99,7 @@ impl AuditAction {
             Self::RuleUpdated => "rule_updated",
             Self::PolicyViolation => "policy_violation",
             Self::FalsePositive => "false_positive",
+            Self::AlertTriaged => "alert_triaged",
         }
     }
 }

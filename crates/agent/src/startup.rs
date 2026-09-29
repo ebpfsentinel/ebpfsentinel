@@ -64,7 +64,7 @@ use infrastructure::constants::{
 use infrastructure::logging::init_logging;
 use infrastructure::retry::RetryConfig;
 use ports::secondary::alert_sender::AlertSender;
-use ports::secondary::alert_store::AlertStore;
+use ports::secondary::alert_store::{AlertStore, AlertTriageStore};
 use ports::secondary::audit_sink::AuditSink;
 use ports::secondary::audit_store::AuditStore;
 use ports::secondary::auth_provider::AuthProvider;
@@ -745,7 +745,7 @@ pub async fn run(
 
     // Attach alert store (redb) - graceful degradation on failure
     let alert_store_path = storage_path.with_file_name("alerts.redb");
-    let alert_store: Option<Arc<dyn AlertStore>> = match RedbAlertStore::open(&alert_store_path) {
+    let redb_alerts: Option<Arc<RedbAlertStore>> = match RedbAlertStore::open(&alert_store_path) {
         Ok(store) => {
             info!(path = %alert_store_path.display(), "alert store initialized (redb)");
             Some(Arc::new(store))
@@ -759,6 +759,12 @@ pub async fn run(
             None
         }
     };
+    let alert_store: Option<Arc<dyn AlertStore>> = redb_alerts
+        .as_ref()
+        .map(|s| Arc::clone(s) as Arc<dyn AlertStore>);
+    let alert_triage: Option<Arc<dyn AlertTriageStore>> = redb_alerts
+        .as_ref()
+        .map(|s| Arc::clone(s) as Arc<dyn AlertTriageStore>);
 
     // ── 5f. Initialize auth provider (JWT, OIDC, and/or API keys) ────
     let crate::auth_bootstrap::AuthStack {
@@ -870,6 +876,9 @@ pub async fn run(
     }
     if let Some(ref store) = alert_store {
         app_state = app_state.with_alert_store(Arc::clone(store));
+    }
+    if let Some(triage) = alert_triage {
+        app_state = app_state.with_alert_triage(triage);
     }
     if let Some(provider) = auth_provider {
         app_state = app_state.with_auth_provider(

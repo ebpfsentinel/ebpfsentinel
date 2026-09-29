@@ -202,20 +202,46 @@ async fn run_cli(cli: cli::Cli) -> Result<()> {
                     severity,
                     tactic,
                     technique,
+                    status,
+                    assignee,
+                    unassigned,
                     limit,
                     offset,
                 } => {
+                    let triage = api_client::TriageFilter {
+                        status,
+                        assignee,
+                        unassigned,
+                    };
                     commands::cmd_alerts_list(
                         &client,
                         component.as_deref(),
                         severity.as_deref(),
                         tactic.as_deref(),
                         technique.as_deref(),
+                        &triage,
                         limit,
                         offset,
                         output,
                     )
                     .await
+                }
+                AlertsCommand::Triage {
+                    ids,
+                    status,
+                    assign,
+                    unassign,
+                    note,
+                    author,
+                } => {
+                    let change = api_client::TriageBody {
+                        status,
+                        assign,
+                        unassign,
+                        note,
+                        author,
+                    };
+                    commands::cmd_alerts_triage(&client, &ids, change, output).await
                 }
                 AlertsCommand::Show { id } => commands::cmd_alerts_show(&client, &id, output).await,
                 AlertsCommand::MarkFp { id } => {

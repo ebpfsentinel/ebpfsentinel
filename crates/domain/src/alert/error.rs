@@ -30,6 +30,9 @@ pub enum AlertError {
 
     #[error("alert not found: {0}")]
     NotFound(String),
+
+    #[error("invalid triage: {0}")]
+    InvalidTriage(String),
 }
 
 impl From<AlertError> for DomainError {

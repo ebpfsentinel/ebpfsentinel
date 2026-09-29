@@ -62,7 +62,9 @@ const METRICS_RATE_LIMIT_PER_MINUTE: u64 = 30;
 const METRICS_RATE_LIMIT_BURST: u32 = 10;
 
 use super::agent_handler::{agent_identity, agent_status};
-use super::alert_handler::{get_alert, list_alerts, mark_false_positive, stream_alerts};
+use super::alert_handler::{
+    get_alert, list_alerts, mark_false_positive, stream_alerts, triage_alert, triage_alerts,
+};
 use super::alias_handler::{alias_status, set_external_alias_content};
 use super::audit_handler::{list_audit_logs, rule_history};
 use super::capture_handler::{list_captures, start_capture, stop_capture};
@@ -331,6 +333,8 @@ pub fn build_router(
                 "/api/v1/alerts/{id}/false-positive",
                 post(mark_false_positive),
             )
+            .route("/api/v1/alerts/{id}/triage", patch(triage_alert))
+            .route("/api/v1/alerts/triage", post(triage_alerts))
             .route("/api/v1/threatintel/feeds/refresh", post(refresh_feeds))
             .route("/api/v1/nat/nptv6", post(create_nptv6_rule))
             .route("/api/v1/nat/nptv6/{id}", delete(delete_nptv6_rule))
@@ -1324,5 +1328,191 @@ mod tests {
         assert!(!is_localhost_origin("ftp://localhost"));
         assert!(!is_localhost_origin("localhost"));
         assert!(!is_localhost_origin("http://"));
+    }
+
+    fn triage_alert_literal(id: &str) -> domain::alert::entity::Alert {
+        use domain::alert::entity::Alert;
+        use domain::common::entity::{DomainMode, RuleId, Severity};
+        Alert {
+            id: id.to_string(),
+            timestamp_ns: 1_000,
+            component: "ids".to_string(),
+            severity: Severity::High,
+            rule_id: RuleId("ids-001".to_string()),
+            action: DomainMode::Alert,
+            src_addr: [0xC0A8_0001, 0, 0, 0],
+            dst_addr: [0x0A00_0001, 0, 0, 0],
+            src_port: 12345,
+            dst_port: 80,
+            protocol: 6,
+            is_ipv6: false,
+            message: "test alert".to_string(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: None,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: None,
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
+        }
+    }
+
+    /// A router over a real alert store holding `ids`, with triage wired the
+    /// way startup wires it: one store cast to both ports.
+    fn triage_router(ids: &[&str]) -> (Router, tempfile::NamedTempFile) {
+        use adapters::storage::redb_alert_store::RedbAlertStore;
+        use ports::secondary::alert_store::{AlertStore, AlertTriageStore};
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = Arc::new(RedbAlertStore::open(tmp.path()).unwrap());
+        for id in ids {
+            store.store_alert(&triage_alert_literal(id)).unwrap();
+        }
+        let state = base_test_state()
+            .with_alert_store(Arc::clone(&store) as Arc<dyn AlertStore>)
+            .with_alert_triage(store as Arc<dyn AlertTriageStore>);
+        (
+            build_router(Arc::new(state), false, false, ApiRateLimitConfig::default()),
+            tmp,
+        )
+    }
+
+    async fn json_of(router: &Router, method: &str, uri: &str, body: &str) -> serde_json::Value {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let peer: SocketAddr = "127.0.0.1:40000".parse().unwrap();
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .extension(ConnectInfo(peer))
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn triage_refuses_an_unknown_alert_and_a_change_that_changes_nothing() {
+        let (router, _tmp) = triage_router(&["a1"]);
+        assert_eq!(
+            status_of(
+                &router,
+                "PATCH",
+                "/api/v1/alerts/nope/triage",
+                r#"{"status":"resolved"}"#
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status_of(&router, "PATCH", "/api/v1/alerts/a1/triage", "{}").await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_of(
+                &router,
+                "PATCH",
+                "/api/v1/alerts/a1/triage",
+                r#"{"status":"closed"}"#
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn triage_is_read_back_on_the_alert_and_filters_the_queue() {
+        let (router, _tmp) = triage_router(&["a1", "a2"]);
+        let answer = json_of(
+            &router,
+            "PATCH",
+            "/api/v1/alerts/a1/triage",
+            r#"{"status":"investigating","assignee":"bob","note":"on it","author":"alice"}"#,
+        )
+        .await;
+        assert_eq!(answer["status"], "investigating");
+        assert_eq!(answer["assignee"], "bob");
+        assert_eq!(answer["notes"][0]["author"], "alice");
+        assert_eq!(answer["notes"][0]["via"], "local");
+
+        let alert = json_of(&router, "GET", "/api/v1/alerts/a1", "").await;
+        assert_eq!(alert["status"], "investigating");
+        assert_eq!(alert["notes"][0]["text"], "on it");
+
+        let open = json_of(&router, "GET", "/api/v1/alerts?status=open", "").await;
+        let ids: Vec<&str> = open["alerts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["a2"]);
+
+        let mine = json_of(&router, "GET", "/api/v1/alerts?assignee=bob", "").await;
+        assert_eq!(mine["alerts"].as_array().unwrap().len(), 1);
+        let nobody = json_of(&router, "GET", "/api/v1/alerts?unassigned=true", "").await;
+        assert_eq!(nobody["alerts"][0]["id"], "a2");
+
+        let cleared = json_of(
+            &router,
+            "PATCH",
+            "/api/v1/alerts/a1/triage",
+            r#"{"assignee":null}"#,
+        )
+        .await;
+        assert!(cleared["assignee"].is_null());
+        assert_eq!(cleared["status"], "investigating");
+    }
+
+    #[tokio::test]
+    async fn bulk_triage_says_which_alerts_it_could_not_find() {
+        let (router, _tmp) = triage_router(&["a1", "a2"]);
+        let answer = json_of(
+            &router,
+            "POST",
+            "/api/v1/alerts/triage",
+            r#"{"ids":["a1","a2","a1","ghost"],"status":"resolved"}"#,
+        )
+        .await;
+        assert_eq!(answer["updated"], serde_json::json!(["a1", "a2"]));
+        assert_eq!(answer["missing"], serde_json::json!(["ghost"]));
+        assert_eq!(
+            status_of(
+                &router,
+                "POST",
+                "/api/v1/alerts/triage",
+                r#"{"ids":[],"status":"resolved"}"#
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
     }
 }

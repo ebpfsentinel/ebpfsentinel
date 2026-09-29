@@ -421,12 +421,42 @@ pub enum AlertsCommand {
         /// Filter by MITRE ATT&CK technique ID (e.g. T1041)
         #[arg(long)]
         technique: Option<String>,
+        /// Filter by triage status (open, acknowledged, investigating, resolved)
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by assignee
+        #[arg(long, conflicts_with = "unassigned")]
+        assignee: Option<String>,
+        /// Keep only alerts nobody holds
+        #[arg(long)]
+        unassigned: bool,
         /// Maximum number of results
         #[arg(long, default_value_t = 100)]
         limit: u64,
         /// Offset for pagination
         #[arg(long, default_value_t = 0)]
         offset: u64,
+    },
+    /// Change the status or assignee of one or more alerts, or add a note
+    Triage {
+        /// Alert IDs; one changes that alert, several apply the same change to all
+        #[arg(required = true, num_args = 1..)]
+        ids: Vec<String>,
+        /// New status (open, acknowledged, investigating, resolved)
+        #[arg(long)]
+        status: Option<String>,
+        /// Hand the alerts to somebody
+        #[arg(long, conflicts_with = "unassign")]
+        assign: Option<String>,
+        /// Take the alerts off whoever holds them
+        #[arg(long)]
+        unassign: bool,
+        /// Append a note
+        #[arg(long)]
+        note: Option<String>,
+        /// Who is writing, when not the authenticated identity
+        #[arg(long)]
+        author: Option<String>,
     },
     /// Show one alert by identifier
     Show {
@@ -1192,6 +1222,7 @@ mod tests {
                     technique,
                     limit,
                     offset,
+                    ..
                 } => {
                     assert_eq!(component.as_deref(), Some("ids"));
                     assert_eq!(severity.as_deref(), Some("high"));
@@ -1293,6 +1324,93 @@ mod tests {
             },
             _ => panic!("expected Config command"),
         }
+    }
+
+    #[test]
+    fn cli_alerts_list_with_triage_filters() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "alerts",
+            "list",
+            "--status",
+            "investigating",
+            "--unassigned",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Alerts(args)) => match args.command {
+                AlertsCommand::List {
+                    status, unassigned, ..
+                } => {
+                    assert_eq!(status.as_deref(), Some("investigating"));
+                    assert!(unassigned);
+                }
+                _ => panic!("expected List"),
+            },
+            _ => panic!("expected Alerts command"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "ebpfsentinel-agent",
+                "alerts",
+                "list",
+                "--assignee",
+                "bob",
+                "--unassigned",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cli_alerts_triage() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "alerts",
+            "triage",
+            "a1",
+            "a2",
+            "--status",
+            "resolved",
+            "--unassign",
+            "--note",
+            "benign scanner",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Alerts(args)) => match args.command {
+                AlertsCommand::Triage {
+                    ids,
+                    status,
+                    assign,
+                    unassign,
+                    note,
+                    author,
+                } => {
+                    assert_eq!(ids, ["a1", "a2"]);
+                    assert_eq!(status.as_deref(), Some("resolved"));
+                    assert!(assign.is_none());
+                    assert!(unassign);
+                    assert_eq!(note.as_deref(), Some("benign scanner"));
+                    assert!(author.is_none());
+                }
+                _ => panic!("expected Triage"),
+            },
+            _ => panic!("expected Alerts command"),
+        }
+        assert!(Cli::try_parse_from(["ebpfsentinel-agent", "alerts", "triage"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "ebpfsentinel-agent",
+                "alerts",
+                "triage",
+                "a1",
+                "--assign",
+                "bob",
+                "--unassign",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

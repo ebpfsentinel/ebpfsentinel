@@ -5,3 +5,4 @@ pub mod error;
 pub mod filter;
 pub mod mitre;
 pub mod query;
+pub mod triage;
