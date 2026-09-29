@@ -775,14 +775,11 @@ mod tests {
     /// helper cannot slip through as "probably a kfunc".
     const KFUNCS: &[&str] = &[
         "bpf_ct_change_timeout",
-        "bpf_ct_insert_entry",
         "bpf_ct_opts_layout_is_stable",
         "bpf_ct_release",
-        "bpf_ct_set_nat_info",
         "bpf_dynptr_from_skb",
         "bpf_dynptr_from_xdp",
         "bpf_dynptr_size",
-        "bpf_skb_ct_alloc",
         "bpf_skb_ct_lookup",
         "bpf_skb_get_fou_encap",
         "bpf_skb_get_xfrm_info",
