@@ -24,6 +24,9 @@ pub const MAX_NPTV6_RULES: u32 = 64;
 pub const NAT_METRIC_SNAT_APPLIED: u32 = 0;
 pub const NAT_METRIC_DNAT_APPLIED: u32 = 1;
 pub const NAT_METRIC_MASQ_APPLIED: u32 = 2;
+/// Metric index: a translated flow landed on the reply tuple another flow
+/// already held, so the older flow's replies are no longer translated back.
+/// Port-range SNAT picks a port by hash, and two sources can pick the same one.
 pub const NAT_METRIC_PORT_ALLOC_FAIL: u32 = 3;
 pub const NAT_METRIC_ERRORS: u32 = 4;
 /// Metric index: total packets seen (unconditional, first instruction).
@@ -32,12 +35,12 @@ pub const NAT_METRIC_TOTAL_SEEN: u32 = 5;
 pub const NAT_METRIC_NPTV6_TRANSLATED: u32 = 6;
 /// Metric index: hairpin NAT (NAT reflection) applied.
 pub const NAT_METRIC_HAIRPIN_APPLIED: u32 = 7;
-/// NAT info successfully delegated to kernel netfilter via
-/// `bpf_ct_set_nat_info` kfunc.
-pub const NAT_METRIC_KFUNC_DELEGATED: u32 = 8;
-/// Kernel CT NAT delegation failed (alloc error or insert error);
-/// the manual packet rewrite still applied.
-pub const NAT_METRIC_KFUNC_FALLBACK: u32 = 9;
+/// Metric index: a reply of a translated flow translated back, so the peer
+/// sees the address and port it spoke to.
+pub const NAT_METRIC_REVERSE_APPLIED: u32 = 8;
+/// Metric index: a translated flow whose reply tuple could not be recorded,
+/// so its replies leave untranslated.
+pub const NAT_METRIC_REVERSE_UNTRACKED: u32 = 9;
 /// Packets steered to an IPsec `xfrmi` device via `skb_set_xfrm_info`.
 pub const NAT_METRIC_XFRM_STEERED: u32 = 10;
 /// Packets wrapped with FOU/GUE encapsulation via `skb_set_fou_encap`.
@@ -231,6 +234,61 @@ pub const MAX_HAIRPIN_CT: u32 = 16_384;
 
 // ── Pod impls ────────────────────────────────────────────────────────
 
+/// Reply tuple of a translated IPv4 flow, exactly as the reply appears on
+/// the wire. 16 bytes.
+///
+/// Direction matters: the key is the reply's own source and destination,
+/// never a normalized pair, so a packet of the forward leg can never hit an
+/// entry written for the reply leg of another flow.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NatReverseKeyV4 {
+    pub src_ip: u32,
+    pub dst_ip: u32,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub protocol: u8,
+    pub _pad: [u8; 3],
+}
+
+/// What a reply's translated side is restored to. 8 bytes.
+///
+/// For a DNAT or redirect flow it is the address and port the client sent
+/// to, written back into the reply's source; for an SNAT flow it is the
+/// original source, written back into the reply's destination.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NatReverseValueV4 {
+    pub addr: u32,
+    pub port: u16,
+    pub _pad: u16,
+}
+
+/// IPv6 variant of [`NatReverseKeyV4`]. 40 bytes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NatReverseKeyV6 {
+    pub src_addr: [u32; 4],
+    pub dst_addr: [u32; 4],
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub protocol: u8,
+    pub _pad: [u8; 3],
+}
+
+/// IPv6 variant of [`NatReverseValueV4`]. 20 bytes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NatReverseValueV6 {
+    pub addr: [u32; 4],
+    pub port: u16,
+    pub _pad: u16,
+}
+
+/// Capacity of each reverse translation table: one entry per live
+/// translated flow, evicted least recently used.
+pub const MAX_NAT_REVERSE_ENTRIES: u32 = 65_536;
+
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for NatRuleEntry {}
 #[cfg(feature = "userspace")]
@@ -241,6 +299,14 @@ unsafe impl aya::Pod for NptV6RuleEntry {}
 unsafe impl aya::Pod for HairpinConfig {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for HairpinCtValue {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for NatReverseKeyV4 {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for NatReverseValueV4 {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for NatReverseKeyV6 {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for NatReverseValueV6 {}
 
 // ── Tests ────────────────────────────────────────────────────────────
 
@@ -381,6 +447,34 @@ mod tests {
         assert_eq!(mem::offset_of!(HairpinCtValue, orig_dst_ip), 4);
         assert_eq!(mem::offset_of!(HairpinCtValue, orig_src_port), 8);
         assert_eq!(mem::offset_of!(HairpinCtValue, _pad), 10);
+    }
+
+    #[test]
+    fn nat_reverse_v4_layout() {
+        assert_eq!(mem::size_of::<NatReverseKeyV4>(), 16);
+        assert_eq!(mem::align_of::<NatReverseKeyV4>(), 4);
+        assert_eq!(mem::offset_of!(NatReverseKeyV4, src_ip), 0);
+        assert_eq!(mem::offset_of!(NatReverseKeyV4, dst_ip), 4);
+        assert_eq!(mem::offset_of!(NatReverseKeyV4, src_port), 8);
+        assert_eq!(mem::offset_of!(NatReverseKeyV4, dst_port), 10);
+        assert_eq!(mem::offset_of!(NatReverseKeyV4, protocol), 12);
+        assert_eq!(mem::size_of::<NatReverseValueV4>(), 8);
+        assert_eq!(mem::offset_of!(NatReverseValueV4, addr), 0);
+        assert_eq!(mem::offset_of!(NatReverseValueV4, port), 4);
+    }
+
+    #[test]
+    fn nat_reverse_v6_layout() {
+        assert_eq!(mem::size_of::<NatReverseKeyV6>(), 40);
+        assert_eq!(mem::align_of::<NatReverseKeyV6>(), 4);
+        assert_eq!(mem::offset_of!(NatReverseKeyV6, src_addr), 0);
+        assert_eq!(mem::offset_of!(NatReverseKeyV6, dst_addr), 16);
+        assert_eq!(mem::offset_of!(NatReverseKeyV6, src_port), 32);
+        assert_eq!(mem::offset_of!(NatReverseKeyV6, dst_port), 34);
+        assert_eq!(mem::offset_of!(NatReverseKeyV6, protocol), 36);
+        assert_eq!(mem::size_of::<NatReverseValueV6>(), 20);
+        assert_eq!(mem::offset_of!(NatReverseValueV6, addr), 0);
+        assert_eq!(mem::offset_of!(NatReverseValueV6, port), 16);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 
 use aya_ebpf::{
     bindings::TC_ACT_OK,
-    btf_maps::{Array, HashMap, LpmTrie, PerCpuArray, lpm_trie::Key},
+    btf_maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, lpm_trie::Key},
     cty::c_void,
     helpers::{bpf_l3_csum_replace, bpf_l4_csum_replace, bpf_loop, bpf_skb_store_bytes},
     macros::{btf_map, classifier},
@@ -11,18 +11,19 @@ use aya_ebpf::{
 };
 use ebpf_common::{
     nat::{
-        MAX_NAT_RULES, MAX_NAT_RULES_V6, MAX_NPTV6_RULES, NAT_MATCH_DST_IP, NAT_MATCH_PROTO,
-        NAT_MATCH_SRC_IP, NAT_METRIC_COUNT, NAT_METRIC_ERRORS, NAT_METRIC_FOU_ENCAP,
-        NAT_METRIC_KFUNC_DELEGATED, NAT_METRIC_KFUNC_FALLBACK, NAT_METRIC_MASQ_APPLIED,
-        NAT_METRIC_NPTV6_TRANSLATED, NAT_METRIC_SNAT_APPLIED, NAT_METRIC_TOTAL_SEEN,
-        NAT_METRIC_XFRM_STEERED, NAT_TYPE_MASQUERADE, NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry,
+        MAX_NAT_REVERSE_ENTRIES, MAX_NAT_RULES, MAX_NAT_RULES_V6, MAX_NPTV6_RULES,
+        NAT_MATCH_DST_IP, NAT_MATCH_PROTO, NAT_MATCH_SRC_IP, NAT_METRIC_COUNT, NAT_METRIC_ERRORS,
+        NAT_METRIC_FOU_ENCAP, NAT_METRIC_MASQ_APPLIED, NAT_METRIC_NPTV6_TRANSLATED,
+        NAT_METRIC_PORT_ALLOC_FAIL, NAT_METRIC_REVERSE_APPLIED, NAT_METRIC_REVERSE_UNTRACKED,
+        NAT_METRIC_SNAT_APPLIED, NAT_METRIC_TOTAL_SEEN, NAT_METRIC_XFRM_STEERED,
+        NAT_TYPE_MASQUERADE, NatReverseKeyV4, NatReverseKeyV6, NatReverseValueV4,
+        NatReverseValueV6, NatRuleEntry, NatRuleEntryV6, NptV6RuleEntry,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
 use ebpf_helpers::increment_metric;
 use ebpf_helpers::kfuncs::{
-    BpfCtOpts, BpfFouEncap, BpfXfrmInfo, CtBuilder, CtTuple, FouEncapType, NfInetAddr,
-    NfNatManipType, skb_set_fou_encap, skb_set_xfrm_info,
+    BpfFouEncap, BpfXfrmInfo, FouEncapType, skb_set_fou_encap, skb_set_xfrm_info,
 };
 use ebpf_helpers::net::{
     IPV6_HDR_LEN, Ipv6Hdr, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4, ipv6_mask_match,
@@ -67,12 +68,57 @@ static NAT_SNAT_RULES_V6: Array<NatRuleEntryV6, { MAX_NAT_RULES_V6 as usize }> =
 #[btf_map]
 static NAT_SNAT_RULE_COUNT_V6: Array<u32, 1> = Array::new();
 
-// CT_TABLE_V4/V6 shadow maps removed - kernel netfilter is the sole
-// CT source. NAT info delegated via bpf_ct_set_nat_info. The
-// exact-match hash fast-path and the port allocation table went with them:
-// no userspace code in either repository ever wrote either one, so every
-// packet paid a hash probe that could not hit and the agent locked a
-// 65 536-entry LRU nothing read. The rule scan is the only SNAT path.
+/// Number of active DNAT rules, owned by `tc-nat-ingress` and shared through
+/// its pin. Read here only to know whether a reply of a DNAT flow can
+/// leave, which is what the DNAT reverse lookup below costs.
+#[btf_map]
+static NAT_DNAT_RULE_COUNT: Array<u32, 1> = Array::new();
+
+/// IPv6 variant of [`NAT_DNAT_RULE_COUNT`].
+#[btf_map]
+static NAT_DNAT_RULE_COUNT_V6: Array<u32, 1> = Array::new();
+
+// The translation is ours end to end: this program rewrites the forward
+// leg of an SNAT flow and records its reply tuple, and `tc-nat-ingress`
+// translates the reply back from that record; the reverse holds for DNAT.
+// Netfilter conntrack only ever sees the untranslated side of an SNAT flow,
+// since TC egress runs after POSTROUTING and TC ingress before PREROUTING,
+// so it tracks a flow it never has to translate.
+
+/// Reply tuple of a DNAT or redirect flow -> the address and port the
+/// client sent to. Written by `tc-nat-ingress`, read here; both objects
+/// declare it so they share one pin.
+#[btf_map]
+static NAT_DNAT_REVERSE: LruHashMap<
+    NatReverseKeyV4,
+    NatReverseValueV4,
+    { MAX_NAT_REVERSE_ENTRIES as usize },
+> = LruHashMap::new();
+
+/// IPv6 variant of [`NAT_DNAT_REVERSE`].
+#[btf_map]
+static NAT_DNAT_REVERSE_V6: LruHashMap<
+    NatReverseKeyV6,
+    NatReverseValueV6,
+    { MAX_NAT_REVERSE_ENTRIES as usize },
+> = LruHashMap::new();
+
+/// Reply tuple of an SNAT flow -> the original source. Written here, read
+/// by `tc-nat-ingress`.
+#[btf_map]
+static NAT_SNAT_REVERSE: LruHashMap<
+    NatReverseKeyV4,
+    NatReverseValueV4,
+    { MAX_NAT_REVERSE_ENTRIES as usize },
+> = LruHashMap::new();
+
+/// IPv6 variant of [`NAT_SNAT_REVERSE`].
+#[btf_map]
+static NAT_SNAT_REVERSE_V6: LruHashMap<
+    NatReverseKeyV6,
+    NatReverseValueV6,
+    { MAX_NAT_REVERSE_ENTRIES as usize },
+> = LruHashMap::new();
 
 /// NPTv6 prefix translation rules (RFC 6296).
 #[btf_map]
@@ -408,15 +454,21 @@ fn try_nat_egress(ctx: &TcContext) -> Result<i32, ()> {
 fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i32, ()> {
     // Nothing is loaded, so there is nothing to look up, and the headers this
     // function would parse are read for no reason. Without this gate a packet
-    // on a deployment carrying no SNAT rule still pays for two header reads, an
-    // interface-group lookup, a tenant resolution and a `bpf_loop` setup before
-    // discovering what this array read already knew. The rule array is written
-    // by userspace from the rule set, so a zero count means it is empty.
+    // on a deployment carrying no NAT rule still pays for two header reads, an
+    // LRU probe, an interface-group lookup, a tenant resolution and a
+    // `bpf_loop` setup before discovering what these array reads already
+    // knew. Both counts are written by userspace from the rule set, so a zero
+    // count means the table behind it is empty. DNAT rules count here because
+    // their replies are translated back on this hook.
     let snat_rule_count = match NAT_SNAT_RULE_COUNT.get(0) {
         Some(&c) => c,
         None => 0,
     };
-    if snat_rule_count == 0 {
+    let dnat_rule_count = match NAT_DNAT_RULE_COUNT.get(0) {
+        Some(&c) => c,
+        None => 0,
+    };
+    if snat_rule_count == 0 && dnat_rule_count == 0 {
         return Ok(TC_ACT_OK);
     }
 
@@ -446,10 +498,34 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         _ => return Ok(TC_ACT_OK),
     };
 
+    // Reply of a DNAT or redirect flow: put back as source the address and
+    // port the client sent to, or the client drops a reply from a peer it
+    // never spoke to. A reply is never a new flow, so no SNAT rule applies.
+    if dnat_rule_count != 0 {
+        let reply = NatReverseKeyV4 {
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            protocol,
+            _pad: [0; 3],
+        };
+        if let Some(orig) = unsafe { NAT_DNAT_REVERSE.get(&reply) } {
+            let (orig_ip, orig_port) = (orig.addr, orig.port);
+            rewrite_src_ip(ctx, l3_offset, l4_offset, protocol, src_ip, orig_ip)?;
+            rewrite_src_port(ctx, l4_offset, protocol, src_port, orig_port)?;
+            increment_metric(NAT_METRIC_REVERSE_APPLIED);
+            return Ok(TC_ACT_OK);
+        }
+    }
+
     // Scan SNAT rules for new connections via bpf_loop (kernel 5.17+).
     // The verifier analyzes the callback body only once, avoiding
     // complexity limits for large rule sets.
     let count = snat_rule_count;
+    if count == 0 {
+        return Ok(TC_ACT_OK);
+    }
 
     let iface_groups = get_iface_groups(ctx);
     let ifindex = unsafe { (*ctx.skb.skb).ifindex };
@@ -498,25 +574,28 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
             rewrite_src_port(ctx, l4_offset, protocol, src_port, new_src_port)?;
         }
 
-        // NAT info delegated to kernel CT via kfunc_delegate_nat_v4.
-
         if scan_ctx.nat_type == NAT_TYPE_MASQUERADE {
             increment_metric(NAT_METRIC_MASQ_APPLIED);
         } else {
             increment_metric(NAT_METRIC_SNAT_APPLIED);
         }
 
-        kfunc_delegate_nat_v4(
-            ctx,
-            src_ip,
-            dst_ip,
-            src_port,
-            dst_port,
+        // The peer's reply arrives through `tc-nat-ingress`, which puts the
+        // original source back as its destination before routing.
+        let reply = NatReverseKeyV4 {
+            src_ip: dst_ip,
+            dst_ip: translated_ip,
+            src_port: dst_port,
+            dst_port: new_src_port,
             protocol,
-            translated_ip,
-            new_src_port,
-            NfNatManipType::Src,
-        );
+            _pad: [0; 3],
+        };
+        let orig = NatReverseValueV4 {
+            addr: src_ip,
+            port: src_port,
+            _pad: 0,
+        };
+        track_reverse_v4(&NAT_SNAT_REVERSE, &reply, &orig);
 
         // IPsec steering: push matched traffic through an xfrmi device.
         apply_xfrm_and_fou(ctx, &scan_ctx);
@@ -568,7 +647,11 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         Some(&c) => c,
         None => 0,
     };
-    if snat_v6_count == 0 && nptv6_count == 0 {
+    let dnat_v6_count = match NAT_DNAT_RULE_COUNT_V6.get(0) {
+        Some(&c) => c,
+        None => 0,
+    };
+    if snat_v6_count == 0 && nptv6_count == 0 && dnat_v6_count == 0 {
         return Ok(TC_ACT_OK);
     }
 
@@ -621,11 +704,30 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
         _ => 0u32,
     };
 
+    // Reply of a DNAT or redirect flow, as on IPv4.
+    if dnat_v6_count != 0 {
+        let reply = NatReverseKeyV6 {
+            src_addr,
+            dst_addr,
+            src_port,
+            dst_port,
+            protocol,
+            _pad: [0; 3],
+        };
+        if let Some(orig) = unsafe { NAT_DNAT_REVERSE_V6.get(&reply) } {
+            let (orig_addr, orig_port) = (orig.addr, orig.port);
+            rewrite_src_ip_v6(ctx, ipv6_src_off, l4_csum_off, &src_addr, &orig_addr)?;
+            rewrite_src_port(ctx, l4_offset, protocol, src_port, orig_port)?;
+            increment_metric(NAT_METRIC_REVERSE_APPLIED);
+            return Ok(TC_ACT_OK);
+        }
+    }
+
     // Scan IPv6 SNAT rules via bpf_loop.
-    let count = match NAT_SNAT_RULE_COUNT_V6.get(0) {
-        Some(&c) => c,
-        None => return Ok(TC_ACT_OK),
-    };
+    let count = snat_v6_count;
+    if count == 0 {
+        return Ok(TC_ACT_OK);
+    }
 
     let iface_groups = get_iface_groups(ctx);
     let ifindex = unsafe { (*ctx.skb.skb).ifindex };
@@ -668,25 +770,26 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
             rewrite_src_port(ctx, l4_offset, protocol, src_port, new_src_port)?;
         }
 
-        // NAT info delegated to kernel CT via kfunc_delegate_nat_v6.
-
         if scan_ctx.nat_type == NAT_TYPE_MASQUERADE {
             increment_metric(NAT_METRIC_MASQ_APPLIED);
         } else {
             increment_metric(NAT_METRIC_SNAT_APPLIED);
         }
 
-        kfunc_delegate_nat_v6(
-            ctx,
-            &src_addr,
-            &dst_addr,
-            src_port,
-            dst_port,
+        let reply = NatReverseKeyV6 {
+            src_addr: dst_addr,
+            dst_addr: translated_addr,
+            src_port: dst_port,
+            dst_port: new_src_port,
             protocol,
-            &translated_addr,
-            new_src_port,
-            NfNatManipType::Src,
-        );
+            _pad: [0; 3],
+        };
+        let orig = NatReverseValueV6 {
+            addr: src_addr,
+            port: src_port,
+            _pad: 0,
+        };
+        track_reverse_v6(&NAT_SNAT_REVERSE_V6, &reply, &orig);
     }
 
     Ok(TC_ACT_OK)
@@ -1087,68 +1190,42 @@ fn match_snat_rule_v6(
 
 // ipv6_mask_match, u32x4_to_bytes imported from ebpf_helpers::net
 
-/// Delegate SNAT info to kernel netfilter via `bpf_ct_set_nat_info`
-/// so `conntrack -L` reflects the SNAT mapping.
+/// Record the reply tuple of a translated flow.
+///
+/// Written only when the entry is missing or says something else, so a
+/// flow costs one lookup per packet rather than one update. An entry that
+/// says something else belonged to another flow on the same reply tuple,
+/// which loses its translation back and is counted as such.
 #[inline(always)]
-fn kfunc_delegate_nat_v4(
-    ctx: &TcContext,
-    src_ip: u32,
-    dst_ip: u32,
-    src_port: u16,
-    dst_port: u16,
-    protocol: u8,
-    nat_addr: u32,
-    nat_port: u16,
-    manip: NfNatManipType,
+fn track_reverse_v4(
+    map: &LruHashMap<NatReverseKeyV4, NatReverseValueV4, { MAX_NAT_REVERSE_ENTRIES as usize }>,
+    reply: &NatReverseKeyV4,
+    orig: &NatReverseValueV4,
 ) {
-    let tuple = CtTuple::v4(src_ip, dst_ip, src_port, dst_port);
-    let mut opts = if protocol == PROTO_TCP {
-        BpfCtOpts::tcp()
-    } else {
-        BpfCtOpts::udp()
-    };
-    let builder = unsafe { CtBuilder::from_skb(ctx.skb.skb as *mut _, tuple, &mut opts) };
-    let Some(mut builder) = builder else {
-        increment_metric(NAT_METRIC_KFUNC_FALLBACK);
-        return;
-    };
-    let addr = NfInetAddr::v4(nat_addr);
-    builder.set_nat_info(addr, nat_port, manip);
-    match builder.insert() {
-        Ok(_entry) => increment_metric(NAT_METRIC_KFUNC_DELEGATED),
-        Err(_) => increment_metric(NAT_METRIC_KFUNC_FALLBACK),
+    match unsafe { map.get(reply) } {
+        Some(held) if held == orig => return,
+        Some(_) => increment_metric(NAT_METRIC_PORT_ALLOC_FAIL),
+        None => {}
+    }
+    if map.insert(reply, orig, 0).is_err() {
+        increment_metric(NAT_METRIC_REVERSE_UNTRACKED);
     }
 }
 
-/// IPv6 variant.
+/// IPv6 variant of [`track_reverse_v4`].
 #[inline(always)]
-fn kfunc_delegate_nat_v6(
-    ctx: &TcContext,
-    src_addr: &[u32; 4],
-    dst_addr: &[u32; 4],
-    src_port: u16,
-    dst_port: u16,
-    protocol: u8,
-    nat_addr: &[u32; 4],
-    nat_port: u16,
-    manip: NfNatManipType,
+fn track_reverse_v6(
+    map: &LruHashMap<NatReverseKeyV6, NatReverseValueV6, { MAX_NAT_REVERSE_ENTRIES as usize }>,
+    reply: &NatReverseKeyV6,
+    orig: &NatReverseValueV6,
 ) {
-    let tuple = CtTuple::v6(*src_addr, *dst_addr, src_port, dst_port);
-    let mut opts = if protocol == PROTO_TCP {
-        BpfCtOpts::tcp()
-    } else {
-        BpfCtOpts::udp()
-    };
-    let builder = unsafe { CtBuilder::from_skb(ctx.skb.skb as *mut _, tuple, &mut opts) };
-    let Some(mut builder) = builder else {
-        increment_metric(NAT_METRIC_KFUNC_FALLBACK);
-        return;
-    };
-    let addr = NfInetAddr::v6(*nat_addr);
-    builder.set_nat_info(addr, nat_port, manip);
-    match builder.insert() {
-        Ok(_entry) => increment_metric(NAT_METRIC_KFUNC_DELEGATED),
-        Err(_) => increment_metric(NAT_METRIC_KFUNC_FALLBACK),
+    match unsafe { map.get(reply) } {
+        Some(held) if held == orig => return,
+        Some(_) => increment_metric(NAT_METRIC_PORT_ALLOC_FAIL),
+        None => {}
+    }
+    if map.insert(reply, orig, 0).is_err() {
+        increment_metric(NAT_METRIC_REVERSE_UNTRACKED);
     }
 }
 

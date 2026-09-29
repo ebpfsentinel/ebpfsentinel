@@ -26,7 +26,7 @@ use std::sync::OnceLock;
 
 use aya_obj::generated::bpf_map_type;
 use ebpf_common::conntrack::CT_SRC_COUNTER_MAX;
-use ebpf_common::nat::MAX_HAIRPIN_CT;
+use ebpf_common::nat::{MAX_HAIRPIN_CT, MAX_NAT_REVERSE_ENTRIES};
 use infrastructure::config::AgentConfig;
 
 /// The maps the plan sizes, with the configuration field each one follows.
@@ -49,6 +49,10 @@ pub const SIZED_MAPS: &[(&str, &str)] = &[
     ("CONN_TABLE", "ddos.connection_tracking.max_entries"),
     ("CT_SRC_COUNTERS", "conntrack.max_src_states"),
     ("NAT_HAIRPIN_CT", "nat.hairpin.enabled"),
+    ("NAT_DNAT_REVERSE", "nat.enabled"),
+    ("NAT_DNAT_REVERSE_V6", "nat.enabled"),
+    ("NAT_SNAT_REVERSE", "nat.enabled"),
+    ("NAT_SNAT_REVERSE_V6", "nat.enabled"),
     ("REJECT_RATELIMIT", "firewall.rules[].action"),
 ];
 
@@ -100,6 +104,13 @@ impl MapSizing {
         } else {
             IDLE_TABLE_ENTRIES
         };
+        // The reverse tables hold one entry per translated flow, and nothing
+        // is translated while NAT is off.
+        let nat_reverse = if config.nat.enabled {
+            MAX_NAT_REVERSE_ENTRIES
+        } else {
+            IDLE_TABLE_ENTRIES
+        };
         // The reject throttle is reached only through a rule that forges a
         // refusal. A rule added through the API after the agent started lands
         // in the table this plan created, which is the same rule every sized
@@ -119,6 +130,7 @@ impl MapSizing {
                     "ddos.connection_tracking.max_entries" => conn_table,
                     "conntrack.max_src_states" => src_counters,
                     "nat.hairpin.enabled" => hairpin,
+                    "nat.enabled" => nat_reverse,
                     "firewall.rules[].action" => reject,
                     other => unreachable!("unmapped sizing field {other}"),
                 };
@@ -252,7 +264,24 @@ mod tests {
         let p = plan();
         assert_eq!(p.get("CT_SRC_COUNTERS"), Some(IDLE_TABLE_ENTRIES));
         assert_eq!(p.get("NAT_HAIRPIN_CT"), Some(IDLE_TABLE_ENTRIES));
+        assert_eq!(p.get("NAT_DNAT_REVERSE"), Some(IDLE_TABLE_ENTRIES));
+        assert_eq!(p.get("NAT_SNAT_REVERSE_V6"), Some(IDLE_TABLE_ENTRIES));
         assert_eq!(p.get("REJECT_RATELIMIT"), Some(IDLE_TABLE_ENTRIES));
+    }
+
+    #[test]
+    fn nat_brings_the_reverse_tables_back() {
+        let mut config = default_config();
+        config.nat.enabled = true;
+        let p = MapSizing::from_config(&config);
+        for name in [
+            "NAT_DNAT_REVERSE",
+            "NAT_DNAT_REVERSE_V6",
+            "NAT_SNAT_REVERSE",
+            "NAT_SNAT_REVERSE_V6",
+        ] {
+            assert_eq!(p.get(name), Some(MAX_NAT_REVERSE_ENTRIES), "{name}");
+        }
     }
 
     #[test]
