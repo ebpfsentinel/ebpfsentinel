@@ -109,7 +109,7 @@ Require **root** and **kernel >= 6.9**. Use isolated network namespaces with vet
 | **18-ebpf-conntrack-scenarios**    |     6 | Connection tracking: TC program attachment, connection table population, connection count, flush, metrics                                         |
 | **19-ebpf-dns-scenarios**          |     6 | DNS intelligence: TC program attachment, cache/stats/blocklist API, cache flush, UDP:53 packet observation                                       |
 | **20-ebpf-loadbalancer-scenarios** |     7 | Load balancer: XDP program attachment, service CRUD with eBPF map sync, backend detail, service deletion, metrics                                |
-| **21-ebpf-nat-scenarios**          |     5 | NAT: TC ingress/egress program attachment, status/rules API, conntrack co-dependency, metrics                                                    |
+| **21-ebpf-nat-scenarios**          |    14 | NAT: TC ingress/egress program attachment, status/rules API, conntrack co-dependency, metrics, NPTv6 CRUD, UDP redirect datapath                 |
 | **22-ebpf-ddos-scenarios**         |     8 | DDoS/scrub: TC scrub program attachment, policy loading, ICMP/SYN flood detection, attack history, metrics                                       |
 | **23-ebpf-scrub-scenarios**        |     5 | Packet scrub: program attachment, metrics increment, fragmented packet handling, API access                                                      |
 

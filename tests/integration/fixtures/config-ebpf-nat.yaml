@@ -1,5 +1,8 @@
 # config-ebpf-nat.yaml - NAT eBPF scenario test config
-# Tests: tc-nat-ingress/egress program loading, SNAT/DNAT rule config
+# Tests: tc-nat-ingress/egress program loading, SNAT/DNAT rule config, and a
+# UDP redirect rule driven end to end: a flow to the host on the
+# match port must reach the host on the translated port, destination address
+# unchanged.
 #
 # Network topology:
 #   Host: 10.200.0.1 (veth-ebpf0)
@@ -42,7 +45,13 @@ conntrack:
 nat:
   enabled: true
   snat_rules: []
-  dnat_rules: []
+  dnat_rules:
+    - id: nat-redirect-udp
+      type: redirect
+      translated_port: 18094
+      match_dst: "10.200.0.1/32"
+      match_dst_port: 18093
+      match_protocol: udp
 
 l7:
   enabled: false

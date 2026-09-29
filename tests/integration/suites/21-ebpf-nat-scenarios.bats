@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# 21-ebpf-nat-scenarios.bats - NAT eBPF scenario tests
+# 21-ebpf-nat-scenarios.bats - NAT eBPF scenario tests, API and redirect datapath
 # Requires: root, kernel >= 6.9, bpftool
 
 load '../lib/helpers'
@@ -204,4 +204,61 @@ teardown_file() {
     local is_array
     is_array="$(echo "$body" | jq 'type == "array"' 2>/dev/null)" || true
     [ "$is_array" = "true" ]
+}
+
+# ── Redirect datapath ────────────────────────────────────────────
+#
+# The fixture carries a UDP redirect rule on the host address.
+# Nothing listens on the match port, so a flow reaching the listener on the
+# translated port proves the rule moved the port and kept the destination
+# address: a redirect that rewrote the destination to anything else would
+# leave the host listener with nothing.
+
+NAT_DNAT_APPLIED_LABELS='{interface="NAT_METRICS",action="dnat_applied"}'
+
+# _nat_redirect_listener <port> <outfile>
+# Starts a python3 UDP listener on the host address that writes the first
+# payload it receives to <outfile>. Sets NAT_LISTENER_PID rather than printing
+# it, so the listener stays a child of the test shell and can be waited on;
+# fd 3 is closed so bats does not hang.
+_nat_redirect_listener() {
+    local port="$1" out="$2"
+    python3 - "$EBPF_HOST_IP" "$port" "$out" >/dev/null 2>&1 3>&- <<'PY' &
+import socket, sys
+host, port, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(20)
+s.bind((host, port))
+data, _ = s.recvfrom(2048)
+with open(out, "wb") as f:
+    f.write(data)
+PY
+    NAT_LISTENER_PID=$!
+}
+
+@test "redirect rule delivers a UDP datagram to the translated port on the same address" {
+    require_root
+    require_tool python3
+
+    local out="${DATA_DIR}/redirect-udp.out"
+    local marker="redirect-udp-$$"
+    local before
+    before="$(get_metrics_value ebpfsentinel_packets_total "$NAT_DNAT_APPLIED_LABELS")" || true
+    _nat_redirect_listener 18094 "$out"
+    sleep 1
+
+    ip netns exec "$EBPF_TEST_NS" python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+for _ in range(3):
+    s.sendto(sys.argv[1].encode(), (sys.argv[2], 18093))
+' "$marker" "$EBPF_HOST_IP"
+
+    wait "$NAT_LISTENER_PID" || true
+    [ -f "$out" ]
+    [ "$(cat "$out")" = "$marker" ]
+
+    local after
+    after="$(wait_for_metric ebpfsentinel_packets_total "$(( ${before:-0} + 1 ))" 10 "$NAT_DNAT_APPLIED_LABELS")"
+    [ -n "$after" ]
 }
