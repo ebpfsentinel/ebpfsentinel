@@ -200,10 +200,10 @@ impl AlertSender for WebhookAlertSender {
                 AlertDestination::Webhook { url, headers } => {
                     #[cfg(test)]
                     if !self.skip_url_validation {
-                        validate_webhook_url(url).map_err(&counted)?;
+                        validate_webhook_url(url).map_err(counted)?;
                     }
                     #[cfg(not(test))]
-                    validate_webhook_url(url).map_err(&counted)?;
+                    validate_webhook_url(url).map_err(counted)?;
                     (url.clone(), headers.clone())
                 }
                 _ => {

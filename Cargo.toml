@@ -181,3 +181,6 @@ cast_possible_truncation = "allow"
 # Eponymous bindings like `cgroup1_id` / `cgroup_id` are clearer
 # than disambiguated names in eBPF event tests.
 similar_names = "allow"
+# `assert!(x.is_empty())` reads better than the `assert_eq!(x, [] as [T; 0])`
+# this lint asks for, and a failing test already names the line.
+assert_is_empty = "allow"
