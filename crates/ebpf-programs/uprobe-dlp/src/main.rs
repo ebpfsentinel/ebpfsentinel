@@ -2,18 +2,20 @@
 #![no_main]
 
 use aya_ebpf::{
-    btf_maps::{LruHashMap, PerCpuArray, RingBuf},
+    btf_maps::{Array, LruHashMap, PerCpuArray, RingBuf},
     helpers::{
         bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_ktime_get_boot_ns, generated,
     },
-    macros::{btf_map, uprobe, uretprobe},
+    macros::{btf_map, kprobe, kretprobe, uprobe, uretprobe},
     programs::{ProbeContext, RetProbeContext},
 };
 use core::ffi::c_void;
 use ebpf_common::dlp::{
-    DLP_DIRECTION_READ, DLP_DIRECTION_WRITE, DLP_MAX_EXCERPT, DLP_METRIC_ERRORS,
-    DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_READ_EVENTS, DLP_METRIC_TOTAL_SEEN,
-    DLP_METRIC_WRITE_EVENTS, DLP_SMALL_EXCERPT, DlpEvent, DlpEventSmall, SslReadArgs,
+    DLP_DIRECTION_READ, DLP_DIRECTION_WRITE, DLP_KTLS_SUPPRESS_WINDOW_NS, DLP_MAX_EXCERPT,
+    DLP_METRIC_COUNT, DLP_METRIC_ERRORS, DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_KTLS_EVENTS,
+    DLP_METRIC_KTLS_SUPPRESSED, DLP_METRIC_KTLS_UNREADABLE, DLP_METRIC_READ_EVENTS,
+    DLP_METRIC_TOTAL_SEEN, DLP_METRIC_WRITE_EVENTS, DLP_SMALL_EXCERPT, DlpEvent, DlpEventSmall,
+    KtlsIterOffsets, SslReadArgs,
 };
 use ebpf_helpers::increment_metric;
 use ebpf_helpers::ringbuf::{avail_data, submit_flags};
@@ -39,9 +41,38 @@ static SSL_READ_ARGS: LruHashMap<u64, SslReadArgs, 10240> = LruHashMap::new();
 #[btf_map]
 static GO_READ_ARGS: LruHashMap<[u64; 2], SslReadArgs, 10240> = LruHashMap::new();
 
-/// Per-CPU DLP counters: write_events, read_events, errors, events_dropped, total_seen.
+/// Kernel TLS read context: the destination buffer the message iterator pointed
+/// at when `tls_sw_recvmsg` was entered, for the kretprobe that reads it once
+/// the kernel has decrypted into it.
+///
+/// This is a map of its own rather than a second user of `SSL_READ_ARGS`:
+/// `SSL_read` reaches `tls_sw_recvmsg` inside its own call frame on the same
+/// thread, so sharing one map by `pid_tgid` would have the kernel probe
+/// overwrite the arguments the uprobe saved for its own return.
 #[btf_map]
-static DLP_METRICS: PerCpuArray<u64, 5> = PerCpuArray::new();
+static KTLS_READ_ARGS: LruHashMap<u64, SslReadArgs, 10240> = LruHashMap::new();
+
+/// Last time each thread entered a probed TLS library call, stamped by
+/// `ssl_write` and `ssl_read_entry`.
+///
+/// An OpenSSL build with kernel TLS enabled hands the plaintext to
+/// `tls_sw_sendmsg`, so both the uprobe and the kernel probe see the same
+/// bytes and the scanner would raise two alerts for one leak. The uprobe frame
+/// strictly encloses the kernel call within one syscall, so a stamp younger
+/// than `DLP_KTLS_SUPPRESS_WINDOW_NS` means the plaintext has already been
+/// captured and the kernel probe stands down.
+#[btf_map]
+static DLP_UPROBE_ACTIVE: LruHashMap<u64, u64, 10240> = LruHashMap::new();
+
+/// Byte offsets of the kernel message-iterator fields, resolved from the
+/// running kernel's BTF by userspace. The kernel TLS probes read nothing while
+/// `valid` is zero.
+#[btf_map]
+static KTLS_ITER_OFFSETS: Array<KtlsIterOffsets, 1> = Array::new();
+
+/// Per-CPU DLP counters, one slot per `DLP_METRIC_*` index.
+#[btf_map]
+static DLP_METRICS: PerCpuArray<u64, { DLP_METRIC_COUNT as usize }> = PerCpuArray::new();
 
 // ── Probes ──────────────────────────────────────────────────────────
 
@@ -116,10 +147,51 @@ pub fn go_tls_read_ret(ctx: ProbeContext) {
 
 // ── Implementation ──────────────────────────────────────────────────
 
+/// Intercept `tls_sw_sendmsg(sk, msg, size)` at entry.
+///
+/// This is the kernel TLS send path: the socket does the record framing and
+/// the encryption, so no userspace library holds the plaintext and no uprobe
+/// can see it. The message iterator still points at the caller's plaintext at
+/// entry, which is what makes one probe here cover every process on the host
+/// at once, whatever language or TLS library it was written against.
+///
+/// Hardware crypto offload (`TLS_HW`) is a different path and is not covered:
+/// the plaintext goes to the card, not through `tls_sw_sendmsg`.
+#[kprobe]
+pub fn ktls_sendmsg(ctx: ProbeContext) {
+    increment_metric(DLP_METRIC_TOTAL_SEEN);
+    match try_ktls_sendmsg(&ctx) {
+        Ok(()) => {}
+        Err(()) => increment_metric(DLP_METRIC_ERRORS),
+    }
+}
+
+/// Intercept `tls_sw_recvmsg(sk, msg, len, flags, addr_len)` at entry and save
+/// the destination buffer. At entry it is still empty, so nothing is read here.
+#[kprobe]
+pub fn ktls_recvmsg_entry(ctx: ProbeContext) {
+    increment_metric(DLP_METRIC_TOTAL_SEEN);
+    match try_ktls_recvmsg_entry(&ctx) {
+        Ok(()) => {}
+        Err(()) => increment_metric(DLP_METRIC_ERRORS),
+    }
+}
+
+/// Intercept `tls_sw_recvmsg` return and read the decrypted plaintext out of
+/// the buffer saved at entry, clamped to the byte count the kernel returned.
+#[kretprobe]
+pub fn ktls_recvmsg_ret(ctx: RetProbeContext) {
+    match try_ktls_recvmsg_ret(&ctx) {
+        Ok(()) => {}
+        Err(()) => increment_metric(DLP_METRIC_ERRORS),
+    }
+}
+
 #[inline(always)]
 fn try_ssl_write(ctx: &ProbeContext) -> Result<(), ()> {
     // SSL_write(SSL *ssl, const void *buf, int num)
     //   arg(0) = ssl, arg(1) = buf, arg(2) = num
+    stamp_uprobe_active();
     let buf: *const u8 = ctx.arg(1).ok_or(())?;
     let num: i32 = ctx.arg(2).ok_or(())?;
 
@@ -136,6 +208,7 @@ fn try_ssl_write(ctx: &ProbeContext) -> Result<(), ()> {
 fn try_ssl_read_entry(ctx: &ProbeContext) -> Result<(), ()> {
     // SSL_read(SSL *ssl, void *buf, int num)
     //   arg(0) = ssl, arg(1) = buf, arg(2) = num
+    stamp_uprobe_active();
     let buf: *const u8 = ctx.arg(1).ok_or(())?;
     let num: i32 = ctx.arg(2).ok_or(())?;
 
@@ -286,6 +359,218 @@ fn try_go_tls_read_ret(ctx: &ProbeContext) -> Result<(), ()> {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+/// A plaintext run the kernel TLS probes found behind a message iterator:
+/// a user-space address and the number of bytes readable from it.
+struct KtlsBuf {
+    base: u64,
+    len: u64,
+}
+
+/// Record that this thread is inside a probed TLS library call.
+#[inline(always)]
+fn stamp_uprobe_active() {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let now = unsafe { bpf_ktime_get_boot_ns() };
+    let _ = DLP_UPROBE_ACTIVE.insert(&pid_tgid, &now, 0);
+}
+
+/// Whether a uprobe on the calling library already captured this plaintext.
+#[inline(always)]
+fn uprobe_already_captured() -> bool {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    match DLP_UPROBE_ACTIVE.get_ptr(&pid_tgid) {
+        Some(stamp_ptr) => {
+            let stamp = unsafe { *stamp_ptr };
+            let now = unsafe { bpf_ktime_get_boot_ns() };
+            now >= stamp && now - stamp < DLP_KTLS_SUPPRESS_WINDOW_NS
+        }
+        None => false,
+    }
+}
+
+#[inline(always)]
+fn read_kernel_u64(addr: u64) -> Result<u64, ()> {
+    let mut value: u64 = 0;
+    let rc = unsafe {
+        generated::bpf_probe_read_kernel(
+            &raw mut value as *mut c_void,
+            core::mem::size_of::<u64>() as u32,
+            addr as *const c_void,
+        )
+    };
+    if rc == 0 { Ok(value) } else { Err(()) }
+}
+
+#[inline(always)]
+fn read_kernel_u8(addr: u64) -> Result<u8, ()> {
+    let mut value: u8 = 0;
+    let rc = unsafe {
+        generated::bpf_probe_read_kernel(
+            &raw mut value as *mut c_void,
+            core::mem::size_of::<u8>() as u32,
+            addr as *const c_void,
+        )
+    };
+    if rc == 0 { Ok(value) } else { Err(()) }
+}
+
+/// Resolve the user-space plaintext run a `struct msghdr`'s iterator points at.
+///
+/// `Ok(None)` is an iterator this probe deliberately does not read: a kernel
+/// vector or a page/folio queue, which is what `sendfile` and `splice` produce
+/// and which carries no single user buffer to excerpt. Those are counted as
+/// unreadable rather than treated as an error, because nothing went wrong.
+///
+/// Every field is addressed through the offsets userspace resolved from the
+/// running kernel's BTF. `__ubuf_iovec` and `__iov` share one union slot, so
+/// `iov_union` is read once and interpreted by the iterator kind: the flat user
+/// buffer itself for `ITER_UBUF`, or a kernel pointer to the current `struct
+/// iovec` for `ITER_IOVEC`. `iov_offset` is how much of the run the kernel has
+/// already consumed, so it is added to the base in both cases.
+#[inline(always)]
+fn ktls_iter_buf(msg: u64) -> Result<Option<KtlsBuf>, ()> {
+    let offsets = match KTLS_ITER_OFFSETS.get(0) {
+        Some(o) if o.valid != 0 => o,
+        _ => return Err(()),
+    };
+
+    let iter = msg + u64::from(offsets.msg_iter);
+    let iter_type = read_kernel_u8(iter + u64::from(offsets.iter_type))?;
+    let iov_offset = read_kernel_u64(iter + u64::from(offsets.iov_offset))?;
+    let union_slot = read_kernel_u64(iter + u64::from(offsets.iov_union))?;
+    let count = read_kernel_u64(iter + u64::from(offsets.count))?;
+
+    if iter_type == offsets.iter_ubuf {
+        // `count` is the same field as `__ubuf_iovec.iov_len` and is what is
+        // left to transfer, so it needs no further subtraction.
+        if union_slot == 0 || count == 0 {
+            return Ok(None);
+        }
+        return Ok(Some(KtlsBuf {
+            base: union_slot + iov_offset,
+            len: count,
+        }));
+    }
+
+    if iter_type == offsets.iter_iovec {
+        if union_slot == 0 || count == 0 {
+            return Ok(None);
+        }
+        // Only the segment the iterator currently sits on is excerpted; the
+        // DLP scanner works on a contiguous run and a second segment is a
+        // separate event's worth of bytes.
+        let seg_base = read_kernel_u64(union_slot + u64::from(offsets.iovec_base))?;
+        let seg_len = read_kernel_u64(union_slot + u64::from(offsets.iovec_len))?;
+        if seg_base == 0 || seg_len <= iov_offset {
+            return Ok(None);
+        }
+        let remaining = seg_len - iov_offset;
+        return Ok(Some(KtlsBuf {
+            base: seg_base + iov_offset,
+            len: if remaining < count { remaining } else { count },
+        }));
+    }
+
+    Ok(None)
+}
+
+#[inline(always)]
+fn try_ktls_sendmsg(ctx: &ProbeContext) -> Result<(), ()> {
+    // tls_sw_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
+    //   arg(0) = sk, arg(1) = msg, arg(2) = size
+    if uprobe_already_captured() {
+        increment_metric(DLP_METRIC_KTLS_SUPPRESSED);
+        return Ok(());
+    }
+
+    let msg: u64 = ctx.arg(1).ok_or(())?;
+    if msg == 0 {
+        return Ok(());
+    }
+
+    let buf = match ktls_iter_buf(msg) {
+        Ok(Some(buf)) => buf,
+        // Either the offsets were never pushed or the iterator holds no single
+        // user buffer. Both leave this call unread, and neither is an error.
+        Ok(None) | Err(()) => {
+            increment_metric(DLP_METRIC_KTLS_UNREADABLE);
+            return Ok(());
+        }
+    };
+
+    if buf.len == 0 || buf.len > i32::MAX as u64 {
+        return Ok(());
+    }
+
+    emit_dlp_event(buf.base as *const u8, buf.len as u32, DLP_DIRECTION_WRITE);
+    increment_metric(DLP_METRIC_WRITE_EVENTS);
+    increment_metric(DLP_METRIC_KTLS_EVENTS);
+    Ok(())
+}
+
+#[inline(always)]
+fn try_ktls_recvmsg_entry(ctx: &ProbeContext) -> Result<(), ()> {
+    // tls_sw_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
+    //                int flags, int *addr_len)
+    //   arg(0) = sk, arg(1) = msg
+    if uprobe_already_captured() {
+        increment_metric(DLP_METRIC_KTLS_SUPPRESSED);
+        return Ok(());
+    }
+
+    let msg: u64 = ctx.arg(1).ok_or(())?;
+    if msg == 0 {
+        return Ok(());
+    }
+
+    let buf = match ktls_iter_buf(msg) {
+        Ok(Some(buf)) => buf,
+        // Either the offsets were never pushed or the iterator holds no single
+        // user buffer. Both leave this call unread, and neither is an error.
+        Ok(None) | Err(()) => {
+            increment_metric(DLP_METRIC_KTLS_UNREADABLE);
+            return Ok(());
+        }
+    };
+
+    if buf.len == 0 || buf.len > i32::MAX as u64 {
+        return Ok(());
+    }
+
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let args = SslReadArgs {
+        buf_ptr: buf.base,
+        buf_len: buf.len as u32,
+        _padding: 0,
+    };
+    let _ = KTLS_READ_ARGS.insert(&pid_tgid, &args, 0);
+    Ok(())
+}
+
+#[inline(always)]
+fn try_ktls_recvmsg_ret(ctx: &RetProbeContext) -> Result<(), ()> {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let args_ptr = KTLS_READ_ARGS.get_ptr(&pid_tgid).ok_or(())?;
+    let args = unsafe { *args_ptr };
+    let _ = KTLS_READ_ARGS.remove(&pid_tgid);
+
+    let ret: i32 = ctx.ret();
+    if ret <= 0 {
+        return Ok(());
+    }
+
+    let actual_len = if (ret as u32) < args.buf_len {
+        ret as u32
+    } else {
+        args.buf_len
+    };
+
+    emit_dlp_event(args.buf_ptr as *const u8, actual_len, DLP_DIRECTION_READ);
+    increment_metric(DLP_METRIC_READ_EVENTS);
+    increment_metric(DLP_METRIC_KTLS_EVENTS);
+    Ok(())
+}
 
 /// Emit a `DlpEvent` to the EVENTS `RingBuf`, picking a size tier:
 /// - `data_len <= 256` -> `DlpEventSmall` (280 bytes)

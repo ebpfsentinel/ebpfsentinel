@@ -381,6 +381,7 @@ pub const REQUIREMENTS: &[ObjectRequirements] = &[
             BPF_FUNC_get_current_cgroup_id,
             BPF_FUNC_get_current_pid_tgid,
             BPF_FUNC_ktime_get_boot_ns,
+            BPF_FUNC_probe_read_kernel,
             BPF_FUNC_probe_read_user,
         ],
         uses_ringbuf: true,

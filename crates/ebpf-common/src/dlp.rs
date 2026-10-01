@@ -23,8 +23,68 @@ pub const DLP_METRIC_ERRORS: u32 = 2;
 pub const DLP_METRIC_EVENTS_DROPPED: u32 = 3;
 /// Metric index: total probe invocations (unconditional, first thing in each probe).
 pub const DLP_METRIC_TOTAL_SEEN: u32 = 4;
+/// Metric index: plaintext excerpts taken from a kernel TLS socket.
+pub const DLP_METRIC_KTLS_EVENTS: u32 = 5;
+/// Metric index: kernel TLS calls skipped because a uprobe on the calling
+/// library already captured the same plaintext in the same syscall.
+pub const DLP_METRIC_KTLS_SUPPRESSED: u32 = 6;
+/// Metric index: kernel TLS calls the probe could not read - the BTF offsets
+/// were never pushed, or the message iterator is one of the kinds that carries
+/// no single user buffer (kernel vectors from `sendfile` and `splice`).
+pub const DLP_METRIC_KTLS_UNREADABLE: u32 = 7;
 /// Total number of DLP metric slots (one past the last index).
-pub const DLP_METRIC_COUNT: u32 = 5;
+pub const DLP_METRIC_COUNT: u32 = 8;
+
+/// A kernel TLS call whose plaintext was captured by a uprobe on the calling
+/// library stays suppressed for this long. `SSL_write` and `SSL_read` reach
+/// `tls_sw_sendmsg` / `tls_sw_recvmsg` inside the same syscall, so the window
+/// only has to outlive one call frame; a direct kernel TLS writer that has not
+/// been through a probed library for longer than this is captured normally.
+pub const DLP_KTLS_SUPPRESS_WINDOW_NS: u64 = 100_000_000;
+
+/// Byte offsets of the kernel message-iterator fields the kernel TLS probes
+/// read, resolved from the running kernel's vmlinux BTF by userspace and
+/// pushed into `KTLS_ITER_OFFSETS`.
+///
+/// The Rust `bpfel` target emits no CO-RE relocations, so a kernel struct
+/// member cannot be relocated at load the way a clang-built program's can -
+/// and `struct iov_iter` is exactly the kind of layout that moves between
+/// releases. Resolving the offsets in userspace and handing them to the
+/// program is the same answer the conntrack datapath reached for `nf_conn`.
+///
+/// `__ubuf_iovec` and `__iov` are overlaid in one anonymous union, so a single
+/// offset addresses both: the flat user buffer of an `ITER_UBUF` iterator and
+/// the `struct iovec` pointer of an `ITER_IOVEC` one. `count` is overlaid on
+/// that iovec's `iov_len`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KtlsIterOffsets {
+    /// Byte offset of `msghdr.msg_iter`.
+    pub msg_iter: u32,
+    /// Byte offset of `iov_iter.iter_type`.
+    pub iter_type: u32,
+    /// Byte offset of `iov_iter.iov_offset`.
+    pub iov_offset: u32,
+    /// Byte offset of `iov_iter.__ubuf_iovec`, which `__iov` is overlaid on.
+    pub iov_union: u32,
+    /// Byte offset of `iov_iter.count`.
+    pub count: u32,
+    /// Byte offset of `iovec.iov_base`.
+    pub iovec_base: u32,
+    /// Byte offset of `iovec.iov_len`.
+    pub iovec_len: u32,
+    /// `enum iter_type` discriminant of `ITER_UBUF` on this kernel.
+    pub iter_ubuf: u8,
+    /// `enum iter_type` discriminant of `ITER_IOVEC` on this kernel.
+    pub iter_iovec: u8,
+    /// 1 = offsets resolved and valid, 0 = not yet populated. The probes read
+    /// nothing at all while this is 0, rather than reading at offset zero.
+    pub valid: u8,
+    pub _pad: u8,
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for KtlsIterOffsets {}
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -240,12 +300,43 @@ mod tests {
         assert_eq!(DLP_METRIC_ERRORS, 2);
         assert_eq!(DLP_METRIC_EVENTS_DROPPED, 3);
         assert_eq!(DLP_METRIC_TOTAL_SEEN, 4);
-        assert_eq!(DLP_METRIC_COUNT, 5);
+        assert_eq!(DLP_METRIC_KTLS_EVENTS, 5);
+        assert_eq!(DLP_METRIC_KTLS_SUPPRESSED, 6);
+        assert_eq!(DLP_METRIC_KTLS_UNREADABLE, 7);
+        assert_eq!(DLP_METRIC_COUNT, 8);
     }
 
     #[test]
     fn dlp_metric_count_covers_all() {
         // DLP_METRIC_COUNT must be one past the last index
         const _: () = assert!(DLP_METRIC_TOTAL_SEEN < DLP_METRIC_COUNT);
+        const _: () = assert!(DLP_METRIC_KTLS_UNREADABLE < DLP_METRIC_COUNT);
+    }
+
+    #[test]
+    fn ktls_iter_offsets_is_a_fixed_layout_map_value() {
+        // The program reads this out of an `Array` map, so its size and its
+        // member offsets are part of the kernel/userspace contract.
+        assert_eq!(mem::size_of::<KtlsIterOffsets>(), 32);
+        assert_eq!(mem::align_of::<KtlsIterOffsets>(), 4);
+        assert_eq!(mem::offset_of!(KtlsIterOffsets, msg_iter), 0);
+        assert_eq!(mem::offset_of!(KtlsIterOffsets, count), 16);
+        assert_eq!(mem::offset_of!(KtlsIterOffsets, iovec_len), 24);
+        assert_eq!(mem::offset_of!(KtlsIterOffsets, iter_ubuf), 28);
+        assert_eq!(mem::offset_of!(KtlsIterOffsets, valid), 30);
+    }
+
+    #[test]
+    fn ktls_offsets_default_is_refused_by_the_probe() {
+        // `valid` at zero is what an unresolved kernel leaves behind, and the
+        // probe must read nothing rather than read at offset zero.
+        assert_eq!(KtlsIterOffsets::default().valid, 0);
+    }
+
+    #[test]
+    fn ktls_suppress_window_outlives_one_call_frame() {
+        // Long enough for SSL_write to reach tls_sw_sendmsg, short enough that
+        // a process which stopped going through a probed library is captured.
+        assert_eq!(DLP_KTLS_SUPPRESS_WINDOW_NS, 100_000_000);
     }
 }

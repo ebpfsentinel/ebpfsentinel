@@ -35,8 +35,27 @@ const BPF_BTF_GET_NEXT_ID: u32 = 23;
 const BTF_KIND_FUNC: u32 = 12;
 /// `BTF_KIND_STRUCT` from the same header: the kind member offsets are read off.
 const BTF_KIND_STRUCT: u32 = 4;
+/// `BTF_KIND_UNION`: the other kind an anonymous member can be.
+const BTF_KIND_UNION: u32 = 5;
+/// `BTF_KIND_ENUM`: a 32-bit enumeration, whose enumerator values are read off.
+const BTF_KIND_ENUM: u32 = 6;
+/// `BTF_KIND_ENUM64`: the 64-bit form, laid out differently.
+const BTF_KIND_ENUM64: u32 = 19;
 /// `struct btf_member`: `name_off`, `type`, `offset`, each a `u32`.
 const BTF_MEMBER_SIZE: usize = 12;
+/// `struct btf_enum`: `name_off` and a signed 32-bit `val`.
+const BTF_ENUM_SIZE: usize = 8;
+/// `struct btf_enum64`: `name_off` plus the value in two 32-bit halves.
+const BTF_ENUM64_SIZE: usize = 12;
+
+/// How deep the member walk follows anonymous struct and union members.
+///
+/// An anonymous member has no name of its own, so its members are addressed
+/// from the enclosing struct and a lookup by name has to descend into it -
+/// `iov_iter.count` lives two anonymous levels down. The bound is what stops a
+/// malformed blob whose member type points back at its own struct from
+/// recursing forever; real kernel types nest two or three deep.
+const MAX_ANONYMOUS_MEMBER_DEPTH: u32 = 8;
 
 /// Path to the kernel base (vmlinux) BTF exposed by the kernel.
 const VMLINUX_BTF_PATH: &str = "/sys/kernel/btf/vmlinux";
@@ -89,6 +108,9 @@ pub enum KfuncError {
 
     #[error("struct `{0}` not defined in vmlinux BTF")]
     StructNotFound(String),
+
+    #[error("enum `{0}` not defined in vmlinux BTF")]
+    EnumNotFound(String),
 
     #[error(
         "module `{0}` BTF object fd unavailable: no fd was passed in by a \
@@ -235,51 +257,180 @@ impl BtfBlob {
         Ok(out)
     }
 
+    /// Index every type record by id, so a member's type can be followed.
+    fn type_index(&self) -> Result<Vec<IndexedType>, KfuncError> {
+        let mut out = Vec::with_capacity(self.type_count as usize);
+        for_each_type(&self.data, &self.header, |rec| {
+            out.push(IndexedType {
+                name_off: rec.name_off,
+                kind: rec.kind,
+                vlen: rec.vlen,
+                kind_flag: rec.kind_flag,
+                body: rec.body_off..rec.body_off + rec.body.len(),
+            });
+        })?;
+        Ok(out)
+    }
+
+    /// Position in `index` of the record a member's type id names, or `None`
+    /// when that id belongs to another blob in a split-BTF chain.
+    fn index_of(&self, index: &[IndexedType], type_id: u32) -> Option<usize> {
+        let local = type_id.checked_sub(self.start_id)? as usize;
+        (local < index.len()).then_some(local)
+    }
+
     /// Byte offsets of the named `members` of the first non-empty `STRUCT`
     /// called `struct_name`, in the order asked for. `None` in a slot means
     /// the struct carries no member of that name; `None` overall means no
     /// such struct is defined in this blob.
+    ///
+    /// Anonymous struct and union members are descended into, because C
+    /// addresses their members from the enclosing struct and the kernel uses
+    /// that to overlay layouts: `iov_iter` keeps `__ubuf_iovec` and `count` in
+    /// one anonymous union so a single offset serves two iterator kinds.
     fn struct_member_byte_offsets(
         &self,
         base: Option<&BtfBlob>,
         struct_name: &str,
         members: &[&str],
     ) -> Result<Option<Vec<Option<u32>>>, KfuncError> {
-        let mut found: Option<Vec<Option<u32>>> = None;
+        let index = self.type_index()?;
+        let Some(root) = index.iter().position(|rec| {
+            rec.kind == BTF_KIND_STRUCT
+                && rec.vlen != 0
+                && rec.name_off != 0
+                && self.string_at(rec.name_off, base) == Some(struct_name)
+        }) else {
+            return Ok(None);
+        };
+        let mut offsets = vec![None; members.len()];
+        self.collect_members(base, &index, root, 0, 0, members, &mut offsets);
+        Ok(Some(offsets))
+    }
+
+    /// Match `members` against the records of the composite at `at`, whose
+    /// first bit sits `base_bit_offset` bits into the struct being resolved.
+    #[allow(clippy::too_many_arguments)] // Walk state, threaded rather than boxed.
+    fn collect_members(
+        &self,
+        base: Option<&BtfBlob>,
+        index: &[IndexedType],
+        at: usize,
+        base_bit_offset: u32,
+        depth: u32,
+        members: &[&str],
+        offsets: &mut [Option<u32>],
+    ) {
+        let Some(rec) = index.get(at) else {
+            return;
+        };
+        let Some(body) = self.data.get(rec.body.clone()) else {
+            return;
+        };
+        for member in body.as_chunks::<BTF_MEMBER_SIZE>().0 {
+            let name_off = u32::from_le_bytes([member[0], member[1], member[2], member[3]]);
+            let type_id = u32::from_le_bytes([member[4], member[5], member[6], member[7]]);
+            let offset = u32::from_le_bytes([member[8], member[9], member[10], member[11]]);
+            // With kind_flag set the high byte is the bitfield size and
+            // the low 24 bits the bit offset; without it the whole word
+            // is the bit offset.
+            let bit_offset = base_bit_offset.saturating_add(if rec.kind_flag {
+                offset & 0x00ff_ffff
+            } else {
+                offset
+            });
+
+            if name_off == 0 {
+                if depth < MAX_ANONYMOUS_MEMBER_DEPTH
+                    && let Some(child) = self.index_of(index, type_id)
+                    && matches!(index[child].kind, BTF_KIND_STRUCT | BTF_KIND_UNION)
+                {
+                    self.collect_members(
+                        base,
+                        index,
+                        child,
+                        bit_offset,
+                        depth + 1,
+                        members,
+                        offsets,
+                    );
+                }
+                continue;
+            }
+
+            let Some(name) = self.string_at(name_off, base) else {
+                continue;
+            };
+            for (slot, wanted) in offsets.iter_mut().zip(members) {
+                if slot.is_none() && name == *wanted {
+                    *slot = Some(bit_offset / 8);
+                }
+            }
+        }
+    }
+
+    /// Values of the named enumerators of the first non-empty `ENUM` or
+    /// `ENUM64` called `enum_name`. `None` in a slot means the enumeration
+    /// carries no such name; `None` overall means no such enum in this blob.
+    fn enum_values(
+        &self,
+        base: Option<&BtfBlob>,
+        enum_name: &str,
+        names: &[&str],
+    ) -> Result<Option<Vec<Option<i64>>>, KfuncError> {
+        let mut found: Option<Vec<Option<i64>>> = None;
         for_each_type(&self.data, &self.header, |rec| {
             if found.is_some()
-                || rec.kind != BTF_KIND_STRUCT
+                || !matches!(rec.kind, BTF_KIND_ENUM | BTF_KIND_ENUM64)
                 || rec.vlen == 0
                 || rec.name_off == 0
-                || self.string_at(rec.name_off, base) != Some(struct_name)
+                || self.string_at(rec.name_off, base) != Some(enum_name)
             {
                 return;
             }
-            let mut offsets = vec![None; members.len()];
-            for member in rec.body.as_chunks::<BTF_MEMBER_SIZE>().0 {
-                let name_off = u32::from_le_bytes([member[0], member[1], member[2], member[3]]);
-                let offset = u32::from_le_bytes([member[8], member[9], member[10], member[11]]);
-                // With kind_flag set the high byte is the bitfield size and
-                // the low 24 bits the bit offset; without it the whole word
-                // is the bit offset.
-                let bit_offset = if rec.kind_flag {
-                    offset & 0x00ff_ffff
-                } else {
-                    offset
-                };
+            let mut values = vec![None; names.len()];
+            let mut record = |name_off: u32, value: i64| {
                 let Some(name) = self.string_at(name_off, base) else {
-                    continue;
+                    return;
                 };
-                for (slot, wanted) in offsets.iter_mut().zip(members) {
-                    if name == *wanted {
-                        *slot = Some(bit_offset / 8);
+                for (slot, wanted) in values.iter_mut().zip(names) {
+                    if slot.is_none() && name == *wanted {
+                        *slot = Some(value);
                     }
                 }
+            };
+            if rec.kind == BTF_KIND_ENUM {
+                for entry in rec.body.as_chunks::<BTF_ENUM_SIZE>().0 {
+                    let name_off = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
+                    let raw = i32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
+                    record(name_off, i64::from(raw));
+                }
+            } else {
+                for entry in rec.body.as_chunks::<BTF_ENUM64_SIZE>().0 {
+                    let name_off = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
+                    let lo = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
+                    let hi = u32::from_le_bytes([entry[8], entry[9], entry[10], entry[11]]);
+                    record(
+                        name_off,
+                        (u64::from(hi) << 32 | u64::from(lo)).cast_signed(),
+                    );
+                }
             }
-            found = Some(offsets);
+            found = Some(values);
         })?;
         Ok(found)
     }
+}
+
+/// A type record located by id, for the lookups that have to follow a
+/// member's type rather than only read the member list in front of them.
+struct IndexedType {
+    name_off: u32,
+    kind: u32,
+    vlen: u32,
+    kind_flag: bool,
+    /// Range of the kind-specific trailing bytes inside the blob.
+    body: core::ops::Range<usize>,
 }
 
 /// Byte offsets of the named `members` of `struct_name` in the running
@@ -307,6 +458,30 @@ pub fn vmlinux_struct_member_offsets(
         .ok_or_else(|| KfuncError::StructNotFound(struct_name.to_owned()))
 }
 
+/// Values the running kernel gives the named enumerators of `enum_name`, read
+/// off the same vmlinux BTF blob. One `None` per name the enumeration does not
+/// carry.
+///
+/// This exists because an enumerator is not a stable number. The kernel TLS
+/// probes branch on `enum iter_type`, whose members were reordered when
+/// `ITER_UBUF` was added in front of `ITER_IOVEC`, so a value compiled into
+/// the eBPF program would read the wrong field on half the kernels the agent
+/// supports. A kernel whose BTF cannot answer gets no probe rather than a
+/// wrong read.
+pub fn vmlinux_enum_values(
+    enum_name: &str,
+    names: &[&str],
+) -> Result<Vec<Option<i64>>, KfuncError> {
+    let data = std::fs::read(VMLINUX_BTF_PATH).map_err(|source| KfuncError::ReadVmlinux {
+        path: VMLINUX_BTF_PATH.to_owned(),
+        source,
+    })?;
+    let vmlinux = BtfBlob::parse_base(data)?;
+    vmlinux
+        .enum_values(None, enum_name, names)?
+        .ok_or_else(|| KfuncError::EnumNotFound(enum_name.to_owned()))
+}
+
 /// Count the number of type records a blob defines.
 fn count_types(data: &[u8], header: &BtfHeader) -> Result<u32, KfuncError> {
     let mut n = 0u32;
@@ -324,6 +499,9 @@ struct TypeRecord<'a> {
     /// size in the high byte.
     kind_flag: bool,
     body: &'a [u8],
+    /// Where `body` starts inside the blob, so a record can be indexed by id
+    /// and revisited later without re-walking the stream.
+    body_off: usize,
 }
 
 /// Iterate every `btf_type` record, invoking `f(record)`. Each record is a
@@ -365,6 +543,7 @@ fn for_each_type<F: FnMut(TypeRecord<'_>)>(
             vlen,
             kind_flag,
             body: &data[pos + 12..next],
+            body_off: pos + 12,
         });
         pos = next;
     }
@@ -765,5 +944,113 @@ mod tests {
                 .expect("walk"),
             None
         );
+    }
+
+    #[test]
+    fn struct_member_offsets_descend_anonymous_members() {
+        // The shape `iov_iter` has: a named field, then an anonymous union
+        // holding a named member and a second anonymous struct, so `count`
+        // sits two levels down and is still addressed from the outer struct.
+        // strings: "\0u64\0iov_iter\0iov_offset\0__ubuf_iovec\0count\0"
+        let strings = b"\0u64\0iov_iter\0iov_offset\0__ubuf_iovec\0count\0";
+        let (s_u64, s_iov_iter, s_iov_offset, s_ubuf, s_count) = (1u32, 5u32, 14u32, 25u32, 38u32);
+        let mut types = Vec::new();
+        // type 1: INT u64
+        types.extend_from_slice(&s_u64.to_le_bytes());
+        types.extend_from_slice(&(1u32 << 24).to_le_bytes());
+        types.extend_from_slice(&8u32.to_le_bytes());
+        types.extend_from_slice(&64u32.to_le_bytes());
+        // type 2: anonymous STRUCT with one member `count` at bit 64
+        types.extend_from_slice(&0u32.to_le_bytes());
+        types.extend_from_slice(&((4u32 << 24) | 1).to_le_bytes());
+        types.extend_from_slice(&16u32.to_le_bytes());
+        types.extend_from_slice(&s_count.to_le_bytes());
+        types.extend_from_slice(&1u32.to_le_bytes());
+        types.extend_from_slice(&64u32.to_le_bytes());
+        // type 3: anonymous UNION: `__ubuf_iovec` at bit 0, the anonymous
+        // struct of type 2 overlaid on it at bit 0 as well
+        types.extend_from_slice(&0u32.to_le_bytes());
+        types.extend_from_slice(&((5u32 << 24) | 2).to_le_bytes());
+        types.extend_from_slice(&16u32.to_le_bytes());
+        types.extend_from_slice(&s_ubuf.to_le_bytes());
+        types.extend_from_slice(&1u32.to_le_bytes());
+        types.extend_from_slice(&0u32.to_le_bytes());
+        types.extend_from_slice(&0u32.to_le_bytes());
+        types.extend_from_slice(&2u32.to_le_bytes());
+        types.extend_from_slice(&0u32.to_le_bytes());
+        // type 4: STRUCT iov_iter: `iov_offset` at bit 64, the union at 128
+        types.extend_from_slice(&s_iov_iter.to_le_bytes());
+        types.extend_from_slice(&((4u32 << 24) | 2).to_le_bytes());
+        types.extend_from_slice(&32u32.to_le_bytes());
+        types.extend_from_slice(&s_iov_offset.to_le_bytes());
+        types.extend_from_slice(&1u32.to_le_bytes());
+        types.extend_from_slice(&64u32.to_le_bytes());
+        types.extend_from_slice(&0u32.to_le_bytes());
+        types.extend_from_slice(&3u32.to_le_bytes());
+        types.extend_from_slice(&128u32.to_le_bytes());
+
+        let parsed = BtfBlob::parse_base(blob(&types, strings)).expect("parse");
+        let offsets = parsed
+            .struct_member_byte_offsets(
+                None,
+                "iov_iter",
+                &["iov_offset", "__ubuf_iovec", "count", "absent"],
+            )
+            .expect("walk")
+            .expect("iov_iter defined");
+        // The union sits at byte 16, so `__ubuf_iovec` is 16 and `count`,
+        // eight bytes into the anonymous struct overlaid on it, is 24.
+        assert_eq!(offsets, vec![Some(8), Some(16), Some(24), None]);
+    }
+
+    #[test]
+    fn enum_values_read_off_btf_enumerators() {
+        // strings: "\0iter_type\0ITER_UBUF\0ITER_IOVEC\0"
+        let strings = b"\0iter_type\0ITER_UBUF\0ITER_IOVEC\0";
+        let (s_iter_type, s_ubuf, s_iovec) = (1u32, 11u32, 21u32);
+        let mut types = Vec::new();
+        // type 1: ENUM iter_type with two enumerators
+        types.extend_from_slice(&s_iter_type.to_le_bytes());
+        types.extend_from_slice(&((6u32 << 24) | 2).to_le_bytes());
+        types.extend_from_slice(&4u32.to_le_bytes());
+        types.extend_from_slice(&s_ubuf.to_le_bytes());
+        types.extend_from_slice(&0i32.to_le_bytes());
+        types.extend_from_slice(&s_iovec.to_le_bytes());
+        types.extend_from_slice(&1i32.to_le_bytes());
+
+        let parsed = BtfBlob::parse_base(blob(&types, strings)).expect("parse");
+        let values = parsed
+            .enum_values(None, "iter_type", &["ITER_IOVEC", "ITER_UBUF", "ITER_BVEC"])
+            .expect("walk")
+            .expect("iter_type defined");
+        assert_eq!(values, vec![Some(1), Some(0), None]);
+        assert_eq!(
+            parsed
+                .enum_values(None, "other_enum", &["ITER_UBUF"])
+                .expect("walk"),
+            None
+        );
+    }
+
+    #[test]
+    fn enum64_values_recombine_both_halves() {
+        // strings: "\0wide\0HIGH\0"
+        let strings = b"\0wide\0HIGH\0";
+        let (s_wide, s_high) = (1u32, 6u32);
+        let mut types = Vec::new();
+        // type 1: ENUM64 wide with one enumerator whose value needs 33 bits
+        types.extend_from_slice(&s_wide.to_le_bytes());
+        types.extend_from_slice(&((19u32 << 24) | 1).to_le_bytes());
+        types.extend_from_slice(&8u32.to_le_bytes());
+        types.extend_from_slice(&s_high.to_le_bytes());
+        types.extend_from_slice(&0u32.to_le_bytes()); // val_lo32
+        types.extend_from_slice(&1u32.to_le_bytes()); // val_hi32
+
+        let parsed = BtfBlob::parse_base(blob(&types, strings)).expect("parse");
+        let values = parsed
+            .enum_values(None, "wide", &["HIGH"])
+            .expect("walk")
+            .expect("wide defined");
+        assert_eq!(values, vec![Some(1 << 32)]);
     }
 }

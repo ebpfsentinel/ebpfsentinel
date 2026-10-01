@@ -91,6 +91,12 @@ const BPF_PROG_TYPE_XDP: u32 = 6;
 /// `uprobe_multi` `BPF_LINK_CREATE` - the token-friendly uprobe attach path.
 const BPF_TRACE_UPROBE_MULTI: u32 = 48;
 
+/// `BPF_TRACE_KPROBE_MULTI` (`enum bpf_attach_type`). The kernel refuses a
+/// `kprobe_multi` link whose program was not loaded with this
+/// `expected_attach_type`, so a `#[kprobe]` section cannot share the uprobe
+/// arm above even though both load as `BPF_PROG_TYPE_KPROBE`.
+const BPF_TRACE_KPROBE_MULTI: u32 = 42;
+
 /// `BPF_F_*` prog-load flags.
 const BPF_F_SLEEPABLE: u32 = 1 << 4;
 const BPF_F_XDP_HAS_FRAGS: u32 = 1 << 5;
@@ -600,6 +606,12 @@ fn prog_attrs(section: &ProgramSection) -> (u32, u32, u32) {
         ProgramSection::UProbe { sleepable, .. } | ProgramSection::URetProbe { sleepable, .. } => {
             let flags = if *sleepable { BPF_F_SLEEPABLE } else { 0 };
             (BPF_PROG_TYPE_KPROBE, BPF_TRACE_UPROBE_MULTI, flags)
+        }
+        // k(ret)probe the same way, against the kernel's own symbols: one
+        // program type, a different attach type, entry-vs-return selected by
+        // the link's RETURN flag.
+        ProgramSection::KProbe | ProgramSection::KRetProbe => {
+            (BPF_PROG_TYPE_KPROBE, BPF_TRACE_KPROBE_MULTI, 0)
         }
         _ => (0, 0, 0),
     }

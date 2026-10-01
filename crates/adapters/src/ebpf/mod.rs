@@ -62,7 +62,7 @@ pub use conntrack_map_manager::ConnTrackMapManager;
 pub use dlp_attach::{
     AttachedUprobe, DLP_ATTACH_POLL_INTERVAL, DlpUprobeAttacher, ReconcileOutcome,
     UPROBE_OWNER_EXTENDED_TLS, UPROBE_OWNER_SCAN, UprobeTarget, attached_uprobes,
-    clear_uprobe_inventory,
+    clear_uprobe_inventory, push_ktls_iter_offsets,
 };
 pub use dlp_event_reader::DlpEventReader;
 pub use dns_event_reader::DnsEventReader;

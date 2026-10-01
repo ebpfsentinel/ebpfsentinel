@@ -4399,12 +4399,97 @@ pub fn try_load_uprobe_dlp(
         }
     }
 
+    // Kernel TLS plaintext sits behind a message iterator whose member offsets
+    // the probe cannot resolve itself, so they go in before anything attaches.
+    // A kernel with no `iov_iter` to describe is not a failure of the DLP
+    // module: the uprobes carry on and only the kernel hook stays blind.
+    match resolve_ktls_iter_offsets() {
+        Ok(offsets) => {
+            if let Err(e) = adapters::ebpf::push_ktls_iter_offsets(loader.ebpf_mut(), offsets) {
+                warn!("failed to push kernel TLS iterator offsets to BPF: {e}");
+            } else {
+                info!(
+                    msg_iter = offsets.msg_iter,
+                    count = offsets.count,
+                    "kernel TLS iterator BTF offsets resolved and pushed to BPF"
+                );
+            }
+        }
+        Err(e) => warn!("failed to resolve kernel TLS iterator BTF offsets: {e}"),
+    }
+
     let dlp_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "DLP_METRICS").ok();
 
     let reader = DlpEventReader::new(loader.ebpf_mut())?;
 
     info!("uprobe-dlp armed (discovery + attach run via the lifecycle watcher)");
     Ok((loader, dlp_metrics_rdr, reader, attacher, extended))
+}
+
+/// Resolve everything the kernel TLS probes need to walk a `struct msghdr`
+/// from the running kernel's vmlinux BTF: the offset of the message iterator
+/// inside the header, the iterator's own members, the `iovec` pair a vectored
+/// iterator points at, and the two `enum iter_type` discriminants the probe
+/// compares against.
+///
+/// The discriminants are read rather than written down because their order
+/// changed between 6.4 and 6.5, so a constant compiled in here would describe
+/// the wrong iterator kind on half the kernels this agent runs on.
+///
+/// # Errors
+///
+/// Returns an error if any member or enumerator is missing from the blob. A
+/// partially-resolved layout is refused rather than pushed, because a probe
+/// reading one wrong offset reports plaintext that was never sent.
+fn resolve_ktls_iter_offsets() -> anyhow::Result<ebpf_common::dlp::KtlsIterOffsets> {
+    use adapters::ebpf::kfunc::{vmlinux_enum_values, vmlinux_struct_member_offsets};
+
+    fn member(
+        offsets: &[Option<u32>],
+        type_name: &str,
+        names: &[&str],
+        index: usize,
+    ) -> anyhow::Result<u32> {
+        offsets
+            .get(index)
+            .copied()
+            .flatten()
+            .ok_or_else(|| anyhow::anyhow!("{type_name}.{} not found in BTF", names[index]))
+    }
+
+    const MSGHDR: [&str; 1] = ["msg_iter"];
+    const ITER: [&str; 4] = ["iter_type", "iov_offset", "__ubuf_iovec", "count"];
+    const IOVEC: [&str; 2] = ["iov_base", "iov_len"];
+    const KINDS: [&str; 2] = ["ITER_UBUF", "ITER_IOVEC"];
+
+    let msghdr = vmlinux_struct_member_offsets("msghdr", &MSGHDR)?;
+    let iter = vmlinux_struct_member_offsets("iov_iter", &ITER)?;
+    let iovec = vmlinux_struct_member_offsets("iovec", &IOVEC)?;
+    let kinds = vmlinux_enum_values("iter_type", &KINDS)?;
+
+    let kind = |index: usize| -> anyhow::Result<u8> {
+        let value =
+            kinds.get(index).copied().flatten().ok_or_else(|| {
+                anyhow::anyhow!("enum iter_type::{} not found in BTF", KINDS[index])
+            })?;
+        u8::try_from(value).map_err(|_| {
+            anyhow::anyhow!("enum iter_type::{} is {value}, outside a u8", KINDS[index])
+        })
+    };
+
+    Ok(ebpf_common::dlp::KtlsIterOffsets {
+        msg_iter: member(&msghdr, "msghdr", &MSGHDR, 0)?,
+        iter_type: member(&iter, "iov_iter", &ITER, 0)?,
+        iov_offset: member(&iter, "iov_iter", &ITER, 1)?,
+        iov_union: member(&iter, "iov_iter", &ITER, 2)?,
+        count: member(&iter, "iov_iter", &ITER, 3)?,
+        iovec_base: member(&iovec, "iovec", &IOVEC, 0)?,
+        iovec_len: member(&iovec, "iovec", &IOVEC, 1)?,
+        iter_ubuf: kind(0)?,
+        iter_iovec: kind(1)?,
+        valid: 1,
+        _pad: 0,
+    })
 }
 
 /// Search for a usable SSL/TLS shared library on the system.

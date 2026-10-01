@@ -55,8 +55,62 @@ const SSL_UPROBES: &[(&str, &str, bool)] = &[
 /// same object as [`SSL_UPROBES`] and take their fd slots right after them.
 const GO_TLS_PROGRAMS: [&str; 3] = ["go_tls_write", "go_tls_read_entry", "go_tls_read_ret"];
 
+/// Kernel TLS probe programs: (loader program name, kernel symbol,
+/// `is_kretprobe`). They live in the same object as [`SSL_UPROBES`] and take
+/// their fd slots after the Go set.
+///
+/// These are the only probes here that are not uprobes. A socket with kernel
+/// TLS enabled does the record framing and the encryption itself, so the
+/// plaintext never sits in a userspace library and no uprobe can reach it;
+/// `nginx` with `ssl_conf_command Options KTLS` on OpenSSL 3 is the common
+/// case. Probing the two software kernel TLS entry points covers every process
+/// on the host at once, whatever language it was written in.
+const KTLS_PROGRAMS: [(&str, &str, bool); 3] = [
+    ("ktls_sendmsg", "tls_sw_sendmsg", false),
+    ("ktls_recvmsg_entry", "tls_sw_recvmsg", false),
+    ("ktls_recvmsg_ret", "tls_sw_recvmsg", true),
+];
+
+/// Dedup key of the kernel TLS attachment.
+///
+/// Every other attachment is keyed by the `(dev, ino)` of the file it probes,
+/// and the kernel is not a file. No real mapping has both halves zero, so this
+/// reserves a slot in the same map and keeps the attachment idempotent and
+/// droppable on the same terms as the rest.
+const KTLS_ATTACH_KEY: (u64, u64) = (0, 0);
+
+/// What the inventory calls the kernel TLS attachment, in place of a library
+/// basename and a path. An operator reading the attach set has to be able to
+/// tell a probe on the kernel from a probe on a file.
+const KTLS_ATTACH_TARGET: &str = "kernel";
+
 /// Every uprobe program the attacher holds an fd for.
-const PROGRAM_COUNT: usize = SSL_UPROBES.len() + GO_TLS_PROGRAMS.len();
+const PROGRAM_COUNT: usize = SSL_UPROBES.len() + GO_TLS_PROGRAMS.len() + KTLS_PROGRAMS.len();
+
+/// Push the message-iterator member offsets resolved from the running kernel's
+/// BTF into the `KTLS_ITER_OFFSETS` array the kernel TLS probes read.
+///
+/// The eBPF target emits no CO-RE relocations, so a probe cannot ask the kernel
+/// where `msghdr.msg_iter` or `iov_iter.count` sit; userspace resolves them off
+/// `/sys/kernel/btf/vmlinux` and hands them over. Until this has run the probes
+/// read nothing and count every call unreadable, which is why it happens before
+/// [`DlpUprobeAttacher::attach_ktls`] rather than after.
+///
+/// # Errors
+///
+/// Returns an error if the map is absent - the object was built without the
+/// kernel TLS probes - or if the write fails.
+pub fn push_ktls_iter_offsets(
+    ebpf: &mut dyn crate::ebpf::map_store::MapStore,
+    offsets: ebpf_common::dlp::KtlsIterOffsets,
+) -> anyhow::Result<()> {
+    let map = ebpf
+        .map_mut("KTLS_ITER_OFFSETS")
+        .ok_or_else(|| anyhow::anyhow!("KTLS_ITER_OFFSETS map not found"))?;
+    let mut arr = aya::maps::Array::<_, ebpf_common::dlp::KtlsIterOffsets>::try_from(map)?;
+    arr.set(0, offsets, 0)?;
+    Ok(())
+}
 
 /// A unique SSL library to attach the DLP uprobe set to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,7 +449,8 @@ impl DlpUprobeAttacher {
         let programs = SSL_UPROBES
             .iter()
             .map(|(prog, _, _)| *prog)
-            .chain(GO_TLS_PROGRAMS);
+            .chain(GO_TLS_PROGRAMS)
+            .chain(KTLS_PROGRAMS.iter().map(|(prog, _, _)| *prog));
         for (i, prog) in programs.enumerate() {
             fds[i] = loader.program_fd(prog).ok_or_else(|| {
                 anyhow::anyhow!("DLP uprobe program '{prog}' was not loaded through the BPF token")
@@ -825,6 +880,68 @@ impl DlpUprobeAttacher {
         let (links, probes) = self.create_links(&target, planned, true)?;
         self.attached.insert(
             key,
+            Attachment {
+                links,
+                probes,
+                sticky: true,
+            },
+        );
+        self.publish_inventory();
+        Ok(true)
+    }
+
+    /// Attach the kernel TLS probe set, as a **sticky** attachment.
+    ///
+    /// Takes no path and resolves no offset: a `kprobe_multi` link names a
+    /// kernel symbol and the kernel resolves it from its own ftrace tables.
+    /// It is also the one attachment the warden never brokers, because
+    /// `BPF_LINK_CREATE` is a `bpf(2)` command covered by the delegated
+    /// token's `delegate_attachs`, so the rootless agent issues it itself.
+    ///
+    /// The programs read the plaintext behind the message iterator through
+    /// offsets userspace resolved from the running kernel's BTF, so those must
+    /// already have been pushed into `KTLS_ITER_OFFSETS`; without them the
+    /// probes fire and read nothing, counting every call as unreadable.
+    ///
+    /// Returns whether this call created the attachment, on the same terms as
+    /// [`attach_at_offsets`](Self::attach_at_offsets).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any link fails to attach; a partial set is dropped
+    /// rather than left half-attached. The expected failure is a host where
+    /// the `tls` module has never been used, so neither symbol exists - which
+    /// is not a fault, and is why the caller reports it rather than retrying.
+    pub fn attach_ktls(&mut self) -> anyhow::Result<bool> {
+        if self.attached.contains_key(&KTLS_ATTACH_KEY) {
+            return Ok(false);
+        }
+        let base = SSL_UPROBES.len() + GO_TLS_PROGRAMS.len();
+        let mut links = Vec::with_capacity(KTLS_PROGRAMS.len());
+        let mut probes = Vec::with_capacity(KTLS_PROGRAMS.len());
+        for (i, (program, symbol, is_ret)) in KTLS_PROGRAMS.iter().enumerate() {
+            let link = kfunc_attach::attach_kprobe_by_symbol(
+                program,
+                self.fds[base + i],
+                symbol,
+                *is_ret,
+            )?;
+            links.push(link);
+            probes.push(AttachedUprobe {
+                lib: KTLS_ATTACH_TARGET.to_owned(),
+                path: KTLS_ATTACH_TARGET.to_owned(),
+                dev: KTLS_ATTACH_KEY.0,
+                ino: KTLS_ATTACH_KEY.1,
+                program,
+                symbol: (*symbol).to_owned(),
+                offset: 0,
+                retprobe: *is_ret,
+                brokered: false,
+                sticky: true,
+            });
+        }
+        self.attached.insert(
+            KTLS_ATTACH_KEY,
             Attachment {
                 links,
                 probes,
@@ -1542,5 +1659,49 @@ mod tests {
         let again = attacher.reconcile();
         assert!(again.skipped);
         assert_eq!(attacher.attached_count(), 1);
+    }
+
+    #[test]
+    fn every_program_set_has_an_fd_slot_of_its_own() {
+        // The three sets index one flat fd array by position, so a set added
+        // without extending PROGRAM_COUNT would silently read a neighbour's fd
+        // and attach the wrong program.
+        let ssl: Vec<&str> = SSL_UPROBES.iter().map(|(p, _, _)| *p).collect();
+        let ktls: Vec<&str> = KTLS_PROGRAMS.iter().map(|(p, _, _)| *p).collect();
+        let all: Vec<&str> = ssl
+            .iter()
+            .chain(GO_TLS_PROGRAMS.iter())
+            .chain(ktls.iter())
+            .copied()
+            .collect();
+        assert_eq!(all.len(), PROGRAM_COUNT);
+        let distinct: HashSet<&str> = all.iter().copied().collect();
+        assert_eq!(distinct.len(), PROGRAM_COUNT, "two sets name one program");
+        assert_eq!(
+            SSL_UPROBES.len() + GO_TLS_PROGRAMS.len() + ktls.len(),
+            PROGRAM_COUNT
+        );
+    }
+
+    #[test]
+    fn the_kernel_tls_set_probes_the_software_kernel_tls_path() {
+        // Hardware crypto offload hands the record to the NIC and never calls
+        // these, which is a documented limit rather than something to work
+        // around here; what must not drift is the pair of symbols themselves.
+        let symbols: Vec<&str> = KTLS_PROGRAMS.iter().map(|(_, s, _)| *s).collect();
+        assert_eq!(
+            symbols,
+            vec!["tls_sw_sendmsg", "tls_sw_recvmsg", "tls_sw_recvmsg"]
+        );
+        // Exactly one return probe: the read length is only known on the way out.
+        let returns = KTLS_PROGRAMS.iter().filter(|(_, _, r)| *r).count();
+        assert_eq!(returns, 1);
+    }
+
+    #[test]
+    fn the_kernel_tls_key_can_never_collide_with_a_file() {
+        // A real mapping always has a device, so reserving (0, 0) for the
+        // kernel cannot evict a library's attachment.
+        assert_eq!(KTLS_ATTACH_KEY, (0, 0));
     }
 }

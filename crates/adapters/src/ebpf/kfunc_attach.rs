@@ -105,6 +105,16 @@ pub enum KfuncAttachError {
         errno: i32,
         message: String,
     },
+
+    #[error("kprobe symbol `{symbol}` is not attachable: {message}")]
+    KprobeSymbol { symbol: String, message: String },
+
+    #[error("BPF_LINK_CREATE(kprobe_multi `{symbol}`): errno={errno} {message}")]
+    KprobeLink {
+        symbol: String,
+        errno: i32,
+        message: String,
+    },
 }
 
 /// Resolve a network interface name to its kernel ifindex.
@@ -327,6 +337,103 @@ pub fn attach_uprobe_at_offset(
     info!(
         program,
         target, symbol, probe, "uprobe kfunc program attached (uprobe_multi link)"
+    );
+    Ok(fd)
+}
+
+// ── kprobe attach (kprobe_multi BPF link) ───────────────────────────────
+
+/// `BPF_TRACE_KPROBE_MULTI` from `enum bpf_attach_type`.
+const BPF_TRACE_KPROBE_MULTI: u32 = 42;
+/// `BPF_F_KPROBE_MULTI_RETURN`: the link fires on function return (kretprobe).
+const BPF_F_KPROBE_MULTI_RETURN: u32 = 1;
+
+/// `union bpf_attr` for `BPF_LINK_CREATE` with the `kprobe_multi` member.
+///
+/// Chosen over `perf_event_open` for the same reason the uprobe path is:
+/// `BPF_LINK_CREATE` is a `bpf(2)` command and so is covered by a delegated
+/// BPF token's `delegate_attachs`, while `perf_event_open` is a syscall of its
+/// own that a token cannot authorise. The rootless agent therefore attaches a
+/// kernel probe without `CAP_PERFMON` and without asking the warden.
+///
+/// Field offsets match the kernel UAPI: `prog_fd` (0), `attach_type` (8),
+/// `flags` (12), then the `kprobe_multi` block `{ flags(16), cnt(20),
+/// syms(24), addrs(32), cookies(40) }`.
+#[repr(C)]
+#[derive(Default)]
+struct KprobeMultiLinkAttr {
+    prog_fd: u32,
+    target_fd: u32,
+    attach_type: u32,
+    link_flags: u32,
+    kmulti_flags: u32,
+    cnt: u32,
+    syms: u64,
+    addrs: u64,
+    cookies: u64,
+    _tail: [u64; 2],
+}
+
+/// Attach a raw kprobe program fd to the kernel function `symbol` via a
+/// `kprobe_multi` `BPF_LINK_CREATE`. `is_ret` selects a kretprobe. Returns the
+/// link fd; dropping it detaches.
+///
+/// The symbol is resolved by the kernel from its own ftrace tables, so no
+/// address is computed here and `kallsyms` is not read. A symbol belonging to
+/// a module that is not loaded, or one ftrace cannot hook, comes back as
+/// `ENOENT` / `EINVAL` from the kernel - which is the expected answer for
+/// `tls_sw_sendmsg` on a host where the `tls` module has never been used, and
+/// is why the caller treats a failure here as "no kernel TLS on this host"
+/// rather than as a fault.
+pub fn attach_kprobe_by_symbol(
+    program: &str,
+    prog_fd: RawFd,
+    symbol: &str,
+    is_ret: bool,
+) -> Result<OwnedFd, KfuncAttachError> {
+    let symbol_c = CString::new(symbol).map_err(|e| KfuncAttachError::KprobeSymbol {
+        symbol: symbol.to_owned(),
+        message: e.to_string(),
+    })?;
+    // A single-element array of `const char *`; `cnt = 1`. Both the array and
+    // the string it points at stay alive across the syscall.
+    let syms = [symbol_c.as_ptr()];
+
+    let mut attr = KprobeMultiLinkAttr {
+        #[allow(clippy::cast_sign_loss)]
+        prog_fd: prog_fd as u32,
+        attach_type: BPF_TRACE_KPROBE_MULTI,
+        kmulti_flags: if is_ret { BPF_F_KPROBE_MULTI_RETURN } else { 0 },
+        cnt: 1,
+        syms: syms.as_ptr() as u64,
+        ..Default::default()
+    };
+    // SAFETY: `attr` is a fully-initialised link-create attr of the advertised
+    // size; `syms` points at a live array of one live C string.
+    let rc = unsafe {
+        bpf(
+            BPF_LINK_CREATE,
+            (&raw mut attr).cast(),
+            std::mem::size_of::<KprobeMultiLinkAttr>(),
+        )
+    };
+    if rc < 0 {
+        let err = io::Error::last_os_error();
+        return Err(KfuncAttachError::KprobeLink {
+            symbol: symbol.to_owned(),
+            errno: err.raw_os_error().unwrap_or(0),
+            message: err.to_string(),
+        });
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let raw = rc as RawFd;
+    // SAFETY: rc >= 0 is a valid link fd owned by this process.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+
+    let probe = if is_ret { "kretprobe" } else { "kprobe" };
+    info!(
+        program,
+        symbol, probe, "kfunc program attached (kprobe_multi link)"
     );
     Ok(fd)
 }
