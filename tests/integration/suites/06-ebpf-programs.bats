@@ -112,6 +112,54 @@ teardown_file() {
     fi
 }
 
+@test "a program this configuration does not ask for publishes no status series" {
+    require_root
+
+    # This fixture enables the firewall and nothing else, which is what makes
+    # it the place to assert the gauge's one rule: a series exists only for a
+    # program the agent asked the kernel for, so zero always means the load was
+    # refused. Published as zero instead, a disabled feature would be
+    # indistinguishable from a broken one and the EbpfProgramDown rule in the
+    # chart would fire on every estate that turned a feature off.
+    local metrics_url="http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics"
+    local waited=0 body=""
+    while [ "$waited" -lt 40 ]; do
+        body="$(curl -sf --max-time "$HTTP_TIMEOUT" "$metrics_url" 2>/dev/null)" || true
+        if echo "$body" \
+            | grep -q '^ebpfsentinel_ebpf_program_status{program="xdp-firewall"}'; then
+            break
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+
+    echo "$body" | grep -q '^ebpfsentinel_ebpf_program_status{program="xdp-firewall"} 1'
+
+    # tc-dns is deliberately not in this list: `DnsConfig` defaults to enabled,
+    # so a fixture with no `dns:` section does ask the kernel for that program
+    # and its series reading 1 is the right answer rather than a leak.
+    local off program
+    for program in tc-ids tc-threatintel uprobe-dlp xdp-ratelimit \
+        tc-conntrack tc-nat-ingress tc-nat-egress tc-qos xdp-loadbalancer; do
+        if echo "$body" \
+            | grep -q "^ebpfsentinel_ebpf_program_status{program=\"${program}\"}"; then
+            off="${off} ${program}"
+        fi
+    done
+    if [ -n "${off:-}" ]; then
+        echo "# disabled features publishing a status series:${off}"
+        echo "$body" | grep '^ebpfsentinel_ebpf_program_status'
+        return 1
+    fi
+
+    # The other half of the answer: the status endpoint does report a disabled
+    # program, as false, so nothing is lost by the gauge staying silent.
+    local status
+    status="$(curl -sf --max-time "$HTTP_TIMEOUT" \
+        "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/api/v1/ebpf/status" 2>/dev/null)" || true
+    assert_contains "$status" "tc-ids"
+}
+
 @test "the verifier's refusals are counted rather than left unsaid" {
     require_root
 

@@ -1728,7 +1728,12 @@ pub async fn run(
                 }
             }
         } else {
-            metrics.set_ebpf_program_status("xdp_firewall", false);
+            // Cleared rather than published as zero: zero is a program this
+            // build asked the kernel for and did not get, which is an
+            // incident, and a feature nobody turned on is not one. The status
+            // map below keeps every program, so the endpoint and the
+            // heartbeat still answer for this one.
+            metrics.clear_ebpf_program_status("xdp_firewall");
             false
         };
 
@@ -1872,7 +1877,7 @@ pub async fn run(
                 }
             }
         } else {
-            metrics.set_ebpf_program_status("xdp_ratelimit", false);
+            metrics.clear_ebpf_program_status("xdp_ratelimit");
             false
         };
 
@@ -2051,7 +2056,7 @@ pub async fn run(
                 }
             }
         } else {
-            metrics.set_ebpf_program_status("xdp_vip_announcer", false);
+            metrics.clear_ebpf_program_status("xdp_vip_announcer");
         }
 
         // Move firewall loader into eBPF state (after tail-call wiring)
@@ -2104,7 +2109,7 @@ pub async fn run(
                 }
             }
         } else {
-            metrics.set_ebpf_program_status("tc_ids", false);
+            metrics.clear_ebpf_program_status("tc_ids");
             false
         };
 
@@ -2161,7 +2166,7 @@ pub async fn run(
                     }
                 }
             } else {
-                metrics.set_ebpf_program_status("tc_threatintel", false);
+                metrics.clear_ebpf_program_status("tc_threatintel");
                 false
             };
 
@@ -2193,7 +2198,7 @@ pub async fn run(
                 }
             }
         } else {
-            metrics.set_ebpf_program_status("tc_dns", false);
+            metrics.clear_ebpf_program_status("tc_dns");
             false
         };
 
@@ -2235,7 +2240,7 @@ pub async fn run(
                 }
             }
         } else {
-            metrics.set_ebpf_program_status("uprobe_dlp", false);
+            metrics.clear_ebpf_program_status("uprobe_dlp");
             false
         };
 
@@ -2270,7 +2275,7 @@ pub async fn run(
                 }
             }
         } else {
-            metrics.set_ebpf_program_status("tc_conntrack", false);
+            metrics.clear_ebpf_program_status("tc_conntrack");
             false
         };
 
@@ -2304,8 +2309,8 @@ pub async fn run(
                 }
             }
         } else {
-            metrics.set_ebpf_program_status("tc_nat_ingress", false);
-            metrics.set_ebpf_program_status("tc_nat_egress", false);
+            metrics.clear_ebpf_program_status("tc_nat_ingress");
+            metrics.clear_ebpf_program_status("tc_nat_egress");
             false
         };
 
@@ -2328,7 +2333,7 @@ pub async fn run(
                 }
             }
         } else {
-            metrics.set_ebpf_program_status("tc_scrub", false);
+            metrics.clear_ebpf_program_status("tc_scrub");
             false
         };
 
@@ -2378,7 +2383,7 @@ pub async fn run(
                 }
             }
         } else {
-            metrics.set_ebpf_program_status("tc_qos", false);
+            metrics.clear_ebpf_program_status("tc_qos");
             false
         };
 
@@ -2420,7 +2425,7 @@ pub async fn run(
                 }
             }
         } else {
-            metrics.set_ebpf_program_status("xdp_loadbalancer", false);
+            metrics.clear_ebpf_program_status("xdp_loadbalancer");
             false
         };
 

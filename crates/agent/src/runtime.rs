@@ -728,6 +728,10 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
+        // A reload that turns a feature off would otherwise leave the gauge
+        // frozen at the value the program last had, which reads as a datapath
+        // still running what has just been detached.
+        services.metrics.clear_ebpf_program_status("xdp_firewall");
         false
     };
     program_status.insert("xdp_firewall".to_string(), fw_ok);
@@ -793,6 +797,7 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
+        services.metrics.clear_ebpf_program_status("xdp_ratelimit");
         false
     };
     program_status.insert("xdp_ratelimit".to_string(), rl_ok);
@@ -855,6 +860,7 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
+        services.metrics.clear_ebpf_program_status("tc_ids");
         false
     };
     program_status.insert("tc_ids".to_string(), ids_ok);
@@ -896,6 +902,7 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
+        services.metrics.clear_ebpf_program_status("tc_threatintel");
         false
     };
     program_status.insert("tc_threatintel".to_string(), ti_ok);
@@ -927,6 +934,7 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
+        services.metrics.clear_ebpf_program_status("tc_dns");
         false
     };
     program_status.insert("tc_dns".to_string(), dns_ok);
@@ -967,6 +975,7 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
+        services.metrics.clear_ebpf_program_status("uprobe_dlp");
         false
     };
     program_status.insert("uprobe_dlp".to_string(), dlp_ok);
@@ -1005,6 +1014,7 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
+        services.metrics.clear_ebpf_program_status("tc_conntrack");
         false
     };
     program_status.insert("tc_conntrack".to_string(), ct_ok);
@@ -1039,6 +1049,8 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
+        services.metrics.clear_ebpf_program_status("tc_nat_ingress");
+        services.metrics.clear_ebpf_program_status("tc_nat_egress");
         false
     };
     program_status.insert("tc_nat_ingress".to_string(), nat_ok);
@@ -1062,6 +1074,7 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
+        services.metrics.clear_ebpf_program_status("tc_scrub");
         false
     };
     program_status.insert("tc_scrub".to_string(), scrub_ok);
@@ -1094,6 +1107,9 @@ pub async fn load_ebpf_programs(
             }
         }
     } else {
+        services
+            .metrics
+            .clear_ebpf_program_status("xdp_loadbalancer");
         false
     };
     program_status.insert("xdp_loadbalancer".to_string(), lb_ok);

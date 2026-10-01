@@ -321,7 +321,7 @@ impl AgentMetrics {
         let ebpf_program_status = Family::<ProgramLabels, Gauge>::default();
         registry.register(
             "ebpf_program_status",
-            "eBPF program load status (1=loaded, 0=failed)",
+            "eBPF program load status (1=loaded, 0=load refused); a program this configuration does not ask for has no series",
             ebpf_program_status.clone(),
         );
 
@@ -934,6 +934,15 @@ impl FirewallMetrics for AgentMetrics {
             .set(i64::from(loaded));
     }
 
+    fn clear_ebpf_program_status(&self, program: &str) {
+        // Removed rather than set to zero: zero is this build asking the
+        // kernel for the program and being refused, which is an incident, and
+        // a feature nobody turned on is not one.
+        self.ebpf_program_status.remove(&ProgramLabels {
+            program: crate::ebpf::published_program_name(program),
+        });
+    }
+
     fn set_ebpf_attach_blocked(&self, count: u64) {
         self.ebpf_attach_blocked
             .get_or_create(&Vec::new())
@@ -1448,6 +1457,33 @@ mod tests {
         // documentation and the fleet API all use for the same program.
         assert!(encoded.contains("program=\"xdp-firewall\""));
         assert!(!encoded.contains("program=\"xdp_firewall\""));
+    }
+
+    #[test]
+    fn a_program_the_configuration_leaves_off_has_no_series() {
+        // The whole point of the split: zero means this build asked the kernel
+        // for the program and was refused, so a feature nobody turned on must
+        // not read the same as one that is broken.
+        let metrics = AgentMetrics::new();
+        metrics.set_ebpf_program_status("xdp_firewall", true);
+        metrics.clear_ebpf_program_status("tc_ids");
+
+        let encoded = metrics.encode();
+        assert!(encoded.contains("program=\"xdp-firewall\""));
+        assert!(!encoded.contains("program=\"tc-ids\""));
+    }
+
+    #[test]
+    fn a_program_turned_off_by_a_reload_stops_being_published() {
+        // A reload that disables a loaded program leaves the series behind,
+        // frozen at the last value it was given, which reads as a datapath
+        // still running the thing that has just been detached.
+        let metrics = AgentMetrics::new();
+        metrics.set_ebpf_program_status("tc_qos", true);
+        assert!(metrics.encode().contains("program=\"tc-qos\""));
+
+        metrics.clear_ebpf_program_status("tc_qos");
+        assert!(!metrics.encode().contains("program=\"tc-qos\""));
     }
 
     #[test]

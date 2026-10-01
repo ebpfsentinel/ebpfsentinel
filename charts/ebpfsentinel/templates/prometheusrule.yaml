@@ -72,7 +72,7 @@ spec:
             severity: critical
           annotations:
             summary: "eBPF program {{ "{{ $labels.program }}" }} is not loaded on {{ "{{ $labels.instance }}" }}"
-            description: "Program has been unloaded for more than 1 minute."
+            description: "A program this configuration asks for has not loaded for more than 1 minute. A feature turned off publishes no series here, so this is never a disabled feature."
 
         - alert: EbpfsentinelCircuitBreakerOpen
           expr: ebpfsentinel_alert_sender_circuit_state > 0

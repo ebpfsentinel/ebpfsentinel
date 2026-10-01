@@ -108,6 +108,20 @@ impl EbpfProgramManager {
             .insert(adapters::ebpf::published_program_name(program), loaded);
     }
 
+    /// Record that a program is no longer asked for.
+    ///
+    /// The status map keeps it at false, since the endpoint and the heartbeat
+    /// answer for every program the build has, while the gauge drops the
+    /// series: zero there is a load this agent asked for and did not get, and
+    /// a feature somebody turned off is not that.
+    async fn clear_status(&self, program: &str) {
+        self.services.metrics.clear_ebpf_program_status(program);
+        self.program_status
+            .write()
+            .await
+            .insert(adapters::ebpf::published_program_name(program), false);
+    }
+
     /// Get a clone of the shared metrics readers handle (for the kernel metrics loop).
     pub fn shared_metrics_readers(&self) -> Arc<RwLock<Vec<MetricsReader>>> {
         Arc::clone(&self.metrics_readers)
@@ -222,8 +236,8 @@ impl EbpfProgramManager {
                 self.services.nat_svc.write().await.clear_map_port();
                 // The egress half shares the ingress half's lifecycle.
                 self.programs.remove("tc_nat_egress");
-                self.set_status("tc_nat_ingress", false).await;
-                self.set_status("tc_nat_egress", false).await;
+                self.clear_status("tc_nat_ingress").await;
+                self.clear_status("tc_nat_egress").await;
             }
             _ => {}
         }
@@ -233,7 +247,7 @@ impl EbpfProgramManager {
 
         // tc-nat is published as its two halves, set above.
         if name != "tc_nat" {
-            self.set_status(name, false).await;
+            self.clear_status(name).await;
         }
         info!(program = name, "eBPF program disabled and detached");
         Ok(())
@@ -1073,7 +1087,7 @@ impl EbpfProgramManager {
                 }
                 self.services.firewall_svc.write().await.clear_map_port();
                 self.drop_metrics_readers("xdp_firewall").await;
-                self.set_status("xdp_firewall", false).await;
+                self.clear_status("xdp_firewall").await;
             }
             "xdp_ratelimit" => {
                 self.programs.remove("xdp_ratelimit_syncookie");
@@ -1085,7 +1099,7 @@ impl EbpfProgramManager {
                 }
                 self.services.rl_svc.write().await.clear_map_port();
                 self.drop_metrics_readers("xdp_ratelimit").await;
-                self.set_status("xdp_ratelimit", false).await;
+                self.clear_status("xdp_ratelimit").await;
             }
             "xdp_loadbalancer" => {
                 if let Some(handle) = self.programs.remove("xdp_loadbalancer") {
@@ -1096,7 +1110,7 @@ impl EbpfProgramManager {
                 }
                 self.services.lb_svc.write().await.clear_map_port();
                 self.drop_metrics_readers("xdp_loadbalancer").await;
-                self.set_status("xdp_loadbalancer", false).await;
+                self.clear_status("xdp_loadbalancer").await;
             }
             _ => {}
         }

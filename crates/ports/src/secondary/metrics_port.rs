@@ -30,8 +30,23 @@ pub trait FirewallMetrics: Send + Sync {
     /// Set the number of active rules for a given component.
     fn set_rules_loaded(&self, _component: &str, _count: u64) {}
 
-    /// Set the load status of an eBPF program (true=loaded, false=failed).
+    /// Set the load status of a program this configuration asks for.
+    ///
+    /// Only ever called for a program the agent asked the kernel to load, so
+    /// one means loaded and zero means the load was refused. A program the
+    /// configuration leaves off is not a zero here: it publishes no series at
+    /// all, through `clear_ebpf_program_status`, because a zero that could mean
+    /// either "broken" or "deliberately off" cannot be alerted on without
+    /// knowing the configuration that produced it - and whoever reads the
+    /// metric does not have it.
     fn set_ebpf_program_status(&self, _program: &str, _loaded: bool) {}
+
+    /// Forget the load status of a program this configuration does not ask for.
+    ///
+    /// Called where a feature is off at startup and where one is turned off by
+    /// a reload, so a series left behind by a program that used to be loaded
+    /// goes rather than freezing at its last value.
+    fn clear_ebpf_program_status(&self, _program: &str) {}
 
     /// Set how many programs loaded but could not be attached.
     ///
