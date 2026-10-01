@@ -2,6 +2,7 @@ use regex::Regex;
 
 use crate::common::error::DomainError;
 
+use super::checksum::confirms;
 use super::entity::{DlpMatch, DlpPattern, is_builtin_pattern_id};
 use super::error::DlpError;
 
@@ -127,6 +128,8 @@ impl DlpEngine {
 
     /// Scan a byte slice against all enabled compiled patterns.
     /// Returns all matches with pattern index, byte offset, and byte length.
+    /// A match on a pattern with a check digit is kept only when the matched
+    /// text passes it.
     /// Data is treated as lossy UTF-8 for regex matching.
     pub fn scan_data(&self, data: &[u8]) -> Vec<DlpMatch> {
         let text = String::from_utf8_lossy(data);
@@ -143,6 +146,9 @@ impl DlpEngine {
             }
 
             for m in compiled.find_iter(&text) {
+                if !confirms(&pattern.id.0, m.as_str().as_bytes()) {
+                    continue;
+                }
                 matches.push(DlpMatch {
                     pattern_index: idx,
                     byte_offset: m.start(),
@@ -410,6 +416,30 @@ mod tests {
         let data = b"SSN: 123-45-6789";
         let matches = engine.scan_data(data);
         assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn scan_data_drops_a_national_id_that_fails_its_check_digit() {
+        let mut engine = DlpEngine::new();
+        engine
+            .reload(crate::dlp::entity::default_patterns())
+            .unwrap();
+        let ids = |data: &[u8]| -> Vec<String> {
+            engine
+                .scan_data(data)
+                .iter()
+                .map(|m| engine.patterns()[m.pattern_index].id.0.clone())
+                .collect()
+        };
+
+        assert_eq!(ids(b"nir=1 85 05 78 006 084 91"), ["dlp-pii-fr-nir"]);
+        assert!(ids(b"nir=1 85 05 78 006 084 92").is_empty());
+        assert_eq!(ids(b"cf RSSMRA85T10A562S"), ["dlp-pii-it-cf"]);
+        assert_eq!(ids(b"dni 12345678Z"), ["dlp-pii-es-dni"]);
+        assert!(ids(b"dni 12345678A").is_empty());
+        // Nine separated digits are a phone number until Luhn says otherwise.
+        assert!(ids(b"call 293 456 787").is_empty());
+        assert_eq!(ids(b"sin 293 456 786"), ["dlp-pii-ca-sin"]);
     }
 
     #[test]

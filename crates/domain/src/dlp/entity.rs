@@ -108,10 +108,13 @@ pub fn is_builtin_pattern_id(id: &str) -> bool {
     BUILTIN_PREFIXES.iter().any(|prefix| id.starts_with(prefix))
 }
 
-/// Return the predefined DLP patterns covering FR15:
+/// Return the predefined DLP patterns:
 /// - PCI: Visa, Mastercard, Amex
-/// - PII: Email, SSN
+/// - PII: email, and national identifiers for the United States, France,
+///   the United Kingdom, Spain, Italy, Belgium, Canada, Brazil and India,
+///   each confirmed by its scheme's check digit (see [`super::checksum`])
 /// - Credentials: AWS key, GitHub token, generic password, Bearer token
+#[allow(clippy::too_many_lines)] // one literal per pattern, nothing to factor
 pub fn default_patterns() -> Vec<DlpPattern> {
     vec![
         // ── PCI ──────────────────────────────────────────────────
@@ -165,7 +168,96 @@ pub fn default_patterns() -> Vec<DlpPattern> {
             severity: Severity::Critical,
             mode: DomainMode::Alert,
             data_type: "pii".to_string(),
-            description: "US Social Security Number (XXX-XX-XXXX)".to_string(),
+            description: "US Social Security Number (XXX-XX-XXXX), unissued ranges excluded"
+                .to_string(),
+            enabled: true,
+        },
+        DlpPattern {
+            id: RuleId("dlp-pii-fr-nir".to_string()),
+            name: "French Social Security Number (NIR)".to_string(),
+            regex:
+                r"\b[12] ?\d{2} ?(?:0[1-9]|1[0-2]|[2-9]\d) ?(?:\d{2}|2[AB]) ?\d{3} ?\d{3} ?\d{2}\b"
+                    .to_string(),
+            severity: Severity::Critical,
+            mode: DomainMode::Alert,
+            data_type: "pii".to_string(),
+            description: "French NIR, 15 characters, confirmed by its mod-97 key".to_string(),
+            enabled: true,
+        },
+        DlpPattern {
+            id: RuleId("dlp-pii-uk-nino".to_string()),
+            name: "UK National Insurance Number".to_string(),
+            regex: r"\b[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z] ?\d{2} ?\d{2} ?\d{2} ?[A-D]\b"
+                .to_string(),
+            severity: Severity::Critical,
+            mode: DomainMode::Alert,
+            data_type: "pii".to_string(),
+            description: "UK National Insurance number (AB 12 34 56 C), unissued prefixes excluded"
+                .to_string(),
+            enabled: true,
+        },
+        DlpPattern {
+            id: RuleId("dlp-pii-es-dni".to_string()),
+            name: "Spanish DNI / NIE".to_string(),
+            regex: r"\b(?:\d{8}|[XYZ]\d{7})-?[A-Z]\b".to_string(),
+            severity: Severity::Critical,
+            mode: DomainMode::Alert,
+            data_type: "pii".to_string(),
+            description: "Spanish DNI or NIE, confirmed by its mod-23 check letter".to_string(),
+            enabled: true,
+        },
+        DlpPattern {
+            id: RuleId("dlp-pii-it-cf".to_string()),
+            name: "Italian Codice Fiscale".to_string(),
+            regex: r"\b[A-Z]{6}\d{2}[A-EHLMPR-T]\d{2}[A-Z]\d{3}[A-Z]\b".to_string(),
+            severity: Severity::Critical,
+            mode: DomainMode::Alert,
+            data_type: "pii".to_string(),
+            description: "Italian codice fiscale, confirmed by its check letter".to_string(),
+            enabled: true,
+        },
+        DlpPattern {
+            id: RuleId("dlp-pii-be-nrn".to_string()),
+            name: "Belgian National Register Number".to_string(),
+            regex: r"\b\d{2}\.\d{2}\.\d{2}-\d{3}\.\d{2}\b".to_string(),
+            severity: Severity::Critical,
+            mode: DomainMode::Alert,
+            data_type: "pii".to_string(),
+            description:
+                "Belgian national register number (YY.MM.DD-XXX.CC), confirmed by its mod-97 key"
+                    .to_string(),
+            enabled: true,
+        },
+        DlpPattern {
+            id: RuleId("dlp-pii-ca-sin".to_string()),
+            name: "Canadian Social Insurance Number".to_string(),
+            regex: r"\b\d{3}[ -]\d{3}[ -]\d{3}\b".to_string(),
+            severity: Severity::Critical,
+            mode: DomainMode::Alert,
+            data_type: "pii".to_string(),
+            description: "Canadian SIN (XXX XXX XXX), confirmed by Luhn".to_string(),
+            enabled: true,
+        },
+        DlpPattern {
+            id: RuleId("dlp-pii-br-cpf".to_string()),
+            name: "Brazilian CPF".to_string(),
+            regex: r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b".to_string(),
+            severity: Severity::Critical,
+            mode: DomainMode::Alert,
+            data_type: "pii".to_string(),
+            description: "Brazilian CPF (XXX.XXX.XXX-XX), confirmed by its two check digits"
+                .to_string(),
+            enabled: true,
+        },
+        DlpPattern {
+            id: RuleId("dlp-pii-in-aadhaar".to_string()),
+            name: "Indian Aadhaar Number".to_string(),
+            regex: r"\b[2-9]\d{3} \d{4} \d{4}\b".to_string(),
+            severity: Severity::Critical,
+            mode: DomainMode::Alert,
+            data_type: "pii".to_string(),
+            description: "Indian Aadhaar number (XXXX XXXX XXXX), confirmed by Verhoeff"
+                .to_string(),
             enabled: true,
         },
         // ── Credentials ──────────────────────────────────────────
@@ -358,7 +450,7 @@ mod tests {
     #[test]
     fn default_patterns_count() {
         let patterns = default_patterns();
-        assert_eq!(patterns.len(), 9);
+        assert_eq!(patterns.len(), 17);
     }
 
     #[test]

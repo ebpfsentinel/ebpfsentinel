@@ -18,29 +18,37 @@ dlp:
   enabled: true
 
   # Mode. OSS supports "alert" only (log matches, observe). "block" / "enforce"
-  # (actively cut connections leaking sensitive data) is an Enterprise feature
-  # and is rejected by the OSS config validator.
+  # (actively cut connections leaking sensitive data) needs a licence carrying
+  # advanced-dlp, Professional and above, and is rejected by the OSS config
+  # validator.
   mode: alert
 
   # ── Built-in patterns (OSS) ────────────────────────────────────────
   #
-  # OSS ships a FIXED set of nine built-in patterns. They are always loaded in
+  # OSS ships a FIXED set of seventeen built-in patterns. They are always loaded in
   # alert mode whenever `dlp.enabled: true` - there is nothing to declare here.
   # Inspect the active set at runtime: GET /api/v1/dlp/patterns.
   #
   #   PCI:         dlp-pci-visa, dlp-pci-mastercard, dlp-pci-amex
-  #   PII:         dlp-pii-email, dlp-pii-ssn
+  #   PII:         dlp-pii-email, dlp-pii-ssn, dlp-pii-fr-nir, dlp-pii-uk-nino,
+  #                dlp-pii-es-dni, dlp-pii-it-cf, dlp-pii-be-nrn, dlp-pii-ca-sin,
+  #                dlp-pii-br-cpf, dlp-pii-in-aadhaar
+  #
+  # A national identifier is reported only when its check digit or issuance
+  # rule confirms the match.
   #   Credentials: dlp-cred-aws-key, dlp-cred-github-token,
   #                dlp-cred-password, dlp-cred-bearer
   #
-  # The OSS validator accepts a `patterns:` list only for built-in IDs
-  # (prefixes dlp-pci-*, dlp-pii-*, dlp-cred-*) in alert mode, but the engine
-  # always runs the built-in definitions - listing them here has no effect.
+  # A `patterns:` entry whose id repeats a built-in re-tunes that pattern - a
+  # different regex or severity, or `enabled: false` to switch it off - and the
+  # built-ins it does not name stay as they ship. Any other id is rejected by
+  # the OSS validator.
 
-  # ── Custom patterns - ENTERPRISE ───────────────────────────────────
+  # ── Custom patterns - PROFESSIONAL AND ABOVE ───────────────────────
   #
   # Defining your own regex patterns (any non-built-in ID), per-pattern mode
-  # overrides, and block/enforce enforcement require an Enterprise license.
+  # overrides, and block/enforce enforcement require a licence carrying
+  # advanced-dlp, which every paid tier has from Professional upwards.
   # The block below is rejected by the OSS validator; shown for reference only.
   #
   # patterns:
