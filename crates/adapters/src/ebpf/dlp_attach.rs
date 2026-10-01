@@ -50,6 +50,14 @@ const SSL_UPROBES: &[(&str, &str, bool)] = &[
     ("ssl_read_ret", "SSL_read", true),
 ];
 
+/// Go `crypto/tls` probe programs: write entry, read entry, and the probe that
+/// sits on each return instruction of the read function. They live in the
+/// same object as [`SSL_UPROBES`] and take their fd slots right after them.
+const GO_TLS_PROGRAMS: [&str; 3] = ["go_tls_write", "go_tls_read_entry", "go_tls_read_ret"];
+
+/// Every uprobe program the attacher holds an fd for.
+const PROGRAM_COUNT: usize = SSL_UPROBES.len() + GO_TLS_PROGRAMS.len();
+
 /// A unique SSL library to attach the DLP uprobe set to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UprobeTarget {
@@ -148,12 +156,16 @@ pub struct AttachedUprobe {
 /// One probe resolved and ready to attach: everything the link needs, decided
 /// before any syscall is issued.
 struct PlannedProbe {
-    /// Index into [`SSL_UPROBES`], and so into the program fd array.
+    /// Index into the program fd array: [`SSL_UPROBES`] then [`GO_TLS_PROGRAMS`].
     index: usize,
     program: &'static str,
     symbol: String,
     offset: u64,
+    /// The link is created as a uretprobe.
     retprobe: bool,
+    /// The probe fires when the function returns - through a uretprobe, or
+    /// through a plain uprobe sitting on a return instruction.
+    on_return: bool,
 }
 
 /// Snapshot of every uprobe the process currently holds a link for, per owner.
@@ -337,9 +349,10 @@ pub struct DlpUprobeAttacher {
     /// Proc filesystem root (`/proc`, or `/host/proc` when the host proc is
     /// bind-mounted into the agent container).
     proc_root: PathBuf,
-    /// Raw fds of the DLP uprobe programs, aligned with [`SSL_UPROBES`]. Valid
-    /// for the life of the owning [`EbpfLoader`]; `-1` for a scan-only attacher.
-    fds: [RawFd; SSL_UPROBES.len()],
+    /// Raw fds of the DLP uprobe programs, aligned with [`SSL_UPROBES`] then
+    /// [`GO_TLS_PROGRAMS`]. Valid for the life of the owning [`EbpfLoader`];
+    /// `-1` for a scan-only attacher.
+    fds: [RawFd; PROGRAM_COUNT],
     /// Warden control socket. When set (rootless posture), the privileged
     /// `BPF_LINK_CREATE` is brokered to the warden; when `None`, the agent
     /// attaches directly (bare-metal / single privileged container).
@@ -364,7 +377,7 @@ impl DlpUprobeAttacher {
     pub fn new(proc_root: impl Into<PathBuf>) -> Self {
         Self {
             proc_root: proc_root.into(),
-            fds: [-1; SSL_UPROBES.len()],
+            fds: [-1; PROGRAM_COUNT],
             warden_sock: None,
             attached: HashMap::new(),
             published: false,
@@ -378,8 +391,12 @@ impl DlpUprobeAttacher {
         proc_root: impl Into<PathBuf>,
         loader: &EbpfLoader,
     ) -> anyhow::Result<Self> {
-        let mut fds: [RawFd; SSL_UPROBES.len()] = [-1; SSL_UPROBES.len()];
-        for (i, (prog, _, _)) in SSL_UPROBES.iter().enumerate() {
+        let mut fds: [RawFd; PROGRAM_COUNT] = [-1; PROGRAM_COUNT];
+        let programs = SSL_UPROBES
+            .iter()
+            .map(|(prog, _, _)| *prog)
+            .chain(GO_TLS_PROGRAMS);
+        for (i, prog) in programs.enumerate() {
             fds[i] = loader.program_fd(prog).ok_or_else(|| {
                 anyhow::anyhow!("DLP uprobe program '{prog}' was not loaded through the BPF token")
             })?;
@@ -733,9 +750,89 @@ impl DlpUprobeAttacher {
                 symbol: reported,
                 offset,
                 retprobe: *retprobe,
+                on_return: *retprobe,
             });
         }
         Ok(planned)
+    }
+
+    /// Attach the Go `crypto/tls` probe set to one binary, as a **sticky**
+    /// attachment.
+    ///
+    /// Go cannot take the SSL set: its register ABI hands `(*Conn).Write` and
+    /// `(*Conn).Read` a slice header in registers the C calling convention does
+    /// not use, and a uretprobe rewrites a return address on a goroutine stack
+    /// the runtime moves when it grows, which crashes the process. The read
+    /// result is taken instead by a plain uprobe on every return instruction of
+    /// `Read`, so the caller supplies those offsets alongside the two entries,
+    /// all of them file offsets and all of them authoritative.
+    ///
+    /// Returns whether this call created the attachment, on the same terms as
+    /// [`attach_at_offsets`](Self::attach_at_offsets).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an entry offset is zero, if no return offset is
+    /// given - a read entry with nothing to consume what it saves would capture
+    /// nothing - if the path cannot be stat'ed, or if any link fails to attach;
+    /// a partial set is dropped rather than left half-attached.
+    pub fn attach_go_tls(
+        &mut self,
+        path: &str,
+        write: (&str, u64),
+        read: (&str, u64),
+        read_returns: &[u64],
+    ) -> anyhow::Result<bool> {
+        if write.1 == 0 || read.1 == 0 {
+            anyhow::bail!("Go TLS binary '{path}': an entry offset is unresolved");
+        }
+        if read_returns.is_empty() {
+            anyhow::bail!(
+                "Go TLS binary '{path}': no return instruction found in '{}'",
+                read.0
+            );
+        }
+        let meta =
+            std::fs::metadata(path).map_err(|e| anyhow::anyhow!("stat Go binary '{path}': {e}"))?;
+        let key = (meta.dev(), meta.ino());
+        if self.attached.contains_key(&key) {
+            return Ok(false);
+        }
+        let target = UprobeTarget {
+            attach_path: PathBuf::from(path),
+            lib: path.rsplit('/').next().unwrap_or(path).to_owned(),
+            dev: key.0,
+            ino: key.1,
+            ssl_write_offset: write.1,
+            ssl_read_offset: read.1,
+            preresolved: true,
+            symbol_names: Some((write.0.to_owned(), read.0.to_owned())),
+        };
+        let base = SSL_UPROBES.len();
+        let entry = |index: usize, symbol: &str, offset: u64| PlannedProbe {
+            index: base + index,
+            program: GO_TLS_PROGRAMS[index],
+            symbol: symbol.to_owned(),
+            offset,
+            retprobe: false,
+            on_return: false,
+        };
+        let mut planned = vec![entry(0, write.0, write.1), entry(1, read.0, read.1)];
+        planned.extend(read_returns.iter().map(|&offset| PlannedProbe {
+            on_return: true,
+            ..entry(2, read.0, offset)
+        }));
+        let (links, probes) = self.create_links(&target, planned, true)?;
+        self.attached.insert(
+            key,
+            Attachment {
+                links,
+                probes,
+                sticky: true,
+            },
+        );
+        self.publish_inventory();
+        Ok(true)
     }
 
     /// Attach the full SSL uprobe set (`SSL_write`, `SSL_read` entry + ret) to one
@@ -752,6 +849,22 @@ impl DlpUprobeAttacher {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("non-UTF-8 library path"))?;
         let planned = Self::plan_probes(t, path)?;
+        self.create_links(t, planned, sticky)
+    }
+
+    /// Create one link per planned probe against `t`, through the warden when
+    /// one brokers the attach. A partial failure drops the links already
+    /// created, detaching them.
+    fn create_links(
+        &self,
+        t: &UprobeTarget,
+        planned: Vec<PlannedProbe>,
+        sticky: bool,
+    ) -> anyhow::Result<(Vec<OwnedFd>, Vec<AttachedUprobe>)> {
+        let path = t
+            .attach_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("non-UTF-8 library path"))?;
         let mut links = Vec::with_capacity(planned.len());
         let mut probes = Vec::with_capacity(planned.len());
         for p in planned {
@@ -800,7 +913,7 @@ impl DlpUprobeAttacher {
                 program: p.program,
                 symbol: p.symbol,
                 offset: p.offset,
-                retprobe: p.retprobe,
+                retprobe: p.on_return,
                 brokered: self.warden_sock.is_some(),
                 sticky,
             });
@@ -817,7 +930,8 @@ impl DlpUprobeAttacher {
             .flat_map(|a| a.probes.iter().cloned())
             .collect();
         probes.sort_by(|a, b| {
-            (a.dev, a.ino, &a.symbol, a.retprobe).cmp(&(b.dev, b.ino, &b.symbol, b.retprobe))
+            (a.dev, a.ino, &a.symbol, a.retprobe, a.offset)
+                .cmp(&(b.dev, b.ino, &b.symbol, b.retprobe, b.offset))
         });
         probes
     }
@@ -1205,6 +1319,49 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("stat TLS library"));
+    }
+
+    const GO_WRITE: &str = "crypto/tls.(*Conn).Write";
+    const GO_READ: &str = "crypto/tls.(*Conn).Read";
+
+    #[test]
+    fn a_go_binary_without_return_sites_is_refused_before_any_attach() {
+        // The read entry saves the slice for a return-site probe; with none to
+        // consume it, every read would be lost and the map would fill.
+        let dir = tempfile::tempdir().unwrap();
+        let mut attacher = DlpUprobeAttacher::new(dir.path());
+        let err = attacher
+            .attach_go_tls("/bin/true", (GO_WRITE, 0x10), (GO_READ, 0x20), &[])
+            .unwrap_err();
+        assert!(err.to_string().contains("no return instruction"));
+        assert_eq!(attacher.attached_count(), 0);
+    }
+
+    #[test]
+    fn a_go_binary_with_an_unresolved_entry_is_refused() {
+        // A zero offset would put the probe on the first byte of the file.
+        let dir = tempfile::tempdir().unwrap();
+        let mut attacher = DlpUprobeAttacher::new(dir.path());
+        let err = attacher
+            .attach_go_tls("/bin/true", (GO_WRITE, 0), (GO_READ, 0x20), &[0x40])
+            .unwrap_err();
+        assert!(err.to_string().contains("unresolved"));
+    }
+
+    #[test]
+    fn a_go_binary_that_does_not_exist_fails_on_stat() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut attacher = DlpUprobeAttacher::new(dir.path());
+        let missing = dir.path().join("server");
+        let err = attacher
+            .attach_go_tls(
+                missing.to_str().unwrap(),
+                (GO_WRITE, 0x10),
+                (GO_READ, 0x20),
+                &[0x40],
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("stat Go binary"));
     }
 
     #[test]

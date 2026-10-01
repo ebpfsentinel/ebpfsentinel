@@ -32,6 +32,13 @@ static EVENTS: RingBuf<DlpEvent, { 1024 * 4096 }> = RingBuf::new();
 #[btf_map]
 static SSL_READ_ARGS: LruHashMap<u64, SslReadArgs, 10240> = LruHashMap::new();
 
+/// Go `crypto/tls` read context: the slice saved at `(*Conn).Read` entry for
+/// the probes on its return instructions. Keyed by `(tgid, goroutine)` rather
+/// than by thread, because a goroutine that blocks inside `Read` is resumed on
+/// whichever thread the scheduler picks.
+#[btf_map]
+static GO_READ_ARGS: LruHashMap<[u64; 2], SslReadArgs, 10240> = LruHashMap::new();
+
 /// Per-CPU DLP counters: write_events, read_events, errors, events_dropped, total_seen.
 #[btf_map]
 static DLP_METRICS: PerCpuArray<u64, 5> = PerCpuArray::new();
@@ -66,6 +73,42 @@ pub fn ssl_read_entry(ctx: ProbeContext) {
 #[uretprobe]
 pub fn ssl_read_ret(ctx: RetProbeContext) {
     match try_ssl_read_ret(&ctx) {
+        Ok(()) => {}
+        Err(()) => increment_metric(DLP_METRIC_ERRORS),
+    }
+}
+
+/// Intercept Go `crypto/tls.(*Conn).Write(b []byte)` at entry. The register
+/// ABI passes the receiver and the slice header in the first three integer
+/// registers, so the plaintext pointer and its length are read from there.
+#[uprobe]
+pub fn go_tls_write(ctx: ProbeContext) {
+    increment_metric(DLP_METRIC_TOTAL_SEEN);
+    match try_go_tls_write(&ctx) {
+        Ok(()) => {}
+        Err(()) => increment_metric(DLP_METRIC_ERRORS),
+    }
+}
+
+/// Intercept Go `crypto/tls.(*Conn).Read(b []byte)` at entry and save the
+/// slice for the return-site probes.
+#[uprobe]
+pub fn go_tls_read_entry(ctx: ProbeContext) {
+    increment_metric(DLP_METRIC_TOTAL_SEEN);
+    match try_go_tls_read_entry(&ctx) {
+        Ok(()) => {}
+        Err(()) => increment_metric(DLP_METRIC_ERRORS),
+    }
+}
+
+/// Fires on each return instruction of Go `(*Conn).Read`. A uretprobe cannot
+/// be used on Go: it rewrites the return address on a stack the runtime is
+/// free to move, which crashes the process on the next stack growth. This is
+/// a plain uprobe placed on every `RET` the function holds, where the first
+/// result register carries the byte count.
+#[uprobe]
+pub fn go_tls_read_ret(ctx: ProbeContext) {
+    match try_go_tls_read_ret(&ctx) {
         Ok(()) => {}
         Err(()) => increment_metric(DLP_METRIC_ERRORS),
     }
@@ -136,6 +179,107 @@ fn try_ssl_read_ret(ctx: &RetProbeContext) -> Result<(), ()> {
         args.buf_len
     };
 
+    emit_dlp_event(args.buf_ptr as *const u8, actual_len, DLP_DIRECTION_READ);
+    increment_metric(DLP_METRIC_READ_EVENTS);
+    Ok(())
+}
+
+/// The registers Go's internal register ABI uses for a method taking one
+/// slice: the receiver, the slice data pointer and its length, plus the
+/// register the runtime pins the current goroutine in. The first integer
+/// register also carries the first result at a return instruction.
+struct GoRegs {
+    arg0: u64,
+    arg1: u64,
+    arg2: u64,
+    goroutine: u64,
+}
+
+/// amd64: arguments in RAX, RBX, RCX; the goroutine in R14.
+#[cfg(bpf_target_arch = "x86_64")]
+#[inline(always)]
+fn go_regs(ctx: &ProbeContext) -> Option<GoRegs> {
+    let regs = unsafe { &*ctx.regs };
+    Some(GoRegs {
+        arg0: regs.rax,
+        arg1: regs.rbx,
+        arg2: regs.rcx,
+        goroutine: regs.r14,
+    })
+}
+
+/// arm64: arguments in X0, X1, X2; the goroutine in X28.
+#[cfg(bpf_target_arch = "aarch64")]
+#[inline(always)]
+fn go_regs(ctx: &ProbeContext) -> Option<GoRegs> {
+    let regs = unsafe { &*ctx.regs };
+    Some(GoRegs {
+        arg0: regs.regs[0],
+        arg1: regs.regs[1],
+        arg2: regs.regs[2],
+        goroutine: regs.regs[28],
+    })
+}
+
+/// Go's register ABI is defined for amd64 and arm64 only among the targets
+/// this agent ships; anywhere else the Go probes read nothing.
+#[cfg(not(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64")))]
+#[inline(always)]
+fn go_regs(_ctx: &ProbeContext) -> Option<GoRegs> {
+    None
+}
+
+#[inline(always)]
+fn go_read_key(goroutine: u64) -> [u64; 2] {
+    [bpf_get_current_pid_tgid() >> 32, goroutine]
+}
+
+#[inline(always)]
+fn try_go_tls_write(ctx: &ProbeContext) -> Result<(), ()> {
+    let regs = go_regs(ctx).ok_or(())?;
+    let (buf, len) = (regs.arg1, regs.arg2);
+    if buf == 0 || len == 0 || len > i32::MAX as u64 {
+        return Ok(());
+    }
+    emit_dlp_event(buf as *const u8, len as u32, DLP_DIRECTION_WRITE);
+    increment_metric(DLP_METRIC_WRITE_EVENTS);
+    Ok(())
+}
+
+#[inline(always)]
+fn try_go_tls_read_entry(ctx: &ProbeContext) -> Result<(), ()> {
+    let regs = go_regs(ctx).ok_or(())?;
+    let (buf, len) = (regs.arg1, regs.arg2);
+    if buf == 0 || len == 0 || len > i32::MAX as u64 || regs.goroutine == 0 {
+        return Ok(());
+    }
+    let args = SslReadArgs {
+        buf_ptr: buf,
+        buf_len: len as u32,
+        _padding: 0,
+    };
+    let _ = GO_READ_ARGS.insert(&go_read_key(regs.goroutine), &args, 0);
+    Ok(())
+}
+
+#[inline(always)]
+fn try_go_tls_read_ret(ctx: &ProbeContext) -> Result<(), ()> {
+    let regs = go_regs(ctx).ok_or(())?;
+    let key = go_read_key(regs.goroutine);
+    let args_ptr = GO_READ_ARGS.get_ptr(&key).ok_or(())?;
+    let args = unsafe { *args_ptr };
+    let _ = GO_READ_ARGS.remove(&key);
+
+    // `n int` is the first result; an error return carries n == 0.
+    let ret = regs.arg0 as i64;
+    if ret <= 0 {
+        return Ok(());
+    }
+    let actual_len = if (ret as u64) < u64::from(args.buf_len) {
+        ret as u32
+    } else {
+        args.buf_len
+    };
     emit_dlp_event(args.buf_ptr as *const u8, actual_len, DLP_DIRECTION_READ);
     increment_metric(DLP_METRIC_READ_EVENTS);
     Ok(())
