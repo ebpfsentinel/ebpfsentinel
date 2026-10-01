@@ -16,9 +16,12 @@ name: Integration Tests
 # workflow edit - just a profile entry in the matrix.
 
 on:
-  # pull_request:
-  # push:
-  #   branches: [main]
+  pull_request:
+  push:
+    branches: [main]
+  # Off until a runner labelled [self-hosted, linux, vagrant] is registered:
+  # the nightly jobs bring Vagrant VMs up on it, so on a hosted runner this
+  # schedule would queue a job every night that can never start.
   # schedule:
   #   - cron: "0 2 * * *"
   workflow_dispatch:
@@ -273,13 +276,25 @@ jobs:
       - name: Suite 09 - Docker Deployment
         run: bats --timing tests/integration/suites/09-docker.bats
 
-  # ── PR eBPF (privileged, main/dispatch only) ─────────────────────
+  # ── PR eBPF (privileged, loads the datapath) ─────────────────────
+  #
+  # Runs on the pull request, not only after the merge. A program the verifier
+  # refuses is caught by nothing else in this workflow, and a gate that only
+  # speaks once the change is on main reports a datapath that is already
+  # broken for everybody.
+  #
+  # Whether a hosted runner loads these programs at all is what the strict
+  # skips below answer: a kernel that cannot take them fails the step instead
+  # of excusing itself. If it turns out it cannot, the honest move is to put
+  # this job on the [self-hosted, linux, vagrant] runner the nightly jobs
+  # already use, where the suites were proven, rather than to drop the
+  # strictness and keep a lane that passes by skipping.
   pr-ebpf:
     name: PR eBPF Suite
     runs-on: ubuntu-latest
     timeout-minutes: 60
     needs: [plan, build]
-    if: (needs.plan.outputs.profile == 'pr' || needs.plan.outputs.profile == 'full') && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    if: needs.plan.outputs.profile == 'pr' || needs.plan.outputs.profile == 'full'
     steps:
       - uses: actions/checkout@v7
 

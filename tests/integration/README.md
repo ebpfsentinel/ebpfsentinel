@@ -169,9 +169,11 @@ What scoping cannot remove is a suite written for more than one lane whose indiv
 
 | Trigger | Profile resolved | Jobs that run |
 |---|---|---|
-| `pull_request`, `push` to main | `pr` | `pr-suites`, `pr-docker`, `pr-ebpf` (main + dispatch only) |
-| `schedule` (02:00 UTC) | `nightly` | `nightly-suites` (matrix per suite), `nightly-soak` (8 h), `nightly-triage` on failure |
+| `pull_request`, `push` to main | `pr` | `pr-suites`, `pr-docker`, `pr-ebpf` |
+| `schedule` (02:00 UTC) | `nightly` | `nightly-suites` (matrix per suite), `nightly-soak` (8 h), `nightly-triage` on failure. **Commented out** until a `[self-hosted, linux, vagrant]` runner is registered: these jobs bring Vagrant VMs up on the runner itself |
 | `workflow_dispatch` profile=`pr`/`nightly`/`full` | as input | corresponding jobs (`full` runs both PR and nightly sets) |
+
+**`pr-ebpf` is the only lane that loads the programs into a kernel**, so it runs with `EBPFSENTINEL_STRICT_SKIPS=1` and on the pull request rather than after the merge: a program the verifier refuses is caught nowhere else, and a gate that speaks only on `main` reports a datapath that is already broken for everybody. Whether a hosted runner can load them is what the first strict run answers; if it cannot, the job moves to the self-hosted Vagrant runner the nightly jobs use, where suites 06 and 67 were proven, rather than losing the strictness.
 
 **Budget guard** - the `pr-suites` job records its start epoch and asserts wall-clock ≤ `PR_BUDGET_MINUTES` (default 15) before exiting. Exceeding the budget fails the run rather than silently growing.
 
