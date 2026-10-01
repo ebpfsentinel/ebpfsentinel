@@ -492,7 +492,7 @@ pub async fn cmd_alerts_list(
     }
 
     println!(
-        "{:<16}  {:<10}  {:<8}  {:<10}  {:<6}  {:<18}  {:<18}  {:>5}  {:>5}  {:<3}  {:<20}  {:<20}  {:<30}",
+        "{:<16}  {:<12}  {:<8}  {:<10}  {:<6}  {:<18}  {:<18}  {:>5}  {:>5}  {:<3}  {:<20}  {:<20}  {:<30}",
         "ID",
         "COMPONENT",
         "SEVERITY",
@@ -517,7 +517,7 @@ pub async fn cmd_alerts_list(
         let src_domain = alert.src_domain.as_deref().unwrap_or("-");
         let dst_domain = alert.dst_domain.as_deref().unwrap_or("-");
         println!(
-            "{:<16}  {:<10}  {:<8}  {:<10}  {:<6}  {:<18}  {:<18}  {:>5}  {:>5}  {:<3}  {:<20}  {:<20}  {:<30}",
+            "{:<16}  {:<12}  {:<8}  {:<10}  {:<6}  {:<18}  {:<18}  {:>5}  {:>5}  {:<3}  {:<20}  {:<20}  {:<30}",
             alert.id,
             alert.component,
             alert.severity,
@@ -1821,7 +1821,7 @@ fn print_alert_line(alert: &AlertResponse) {
     };
 
     println!(
-        "  {:<10}  {}  {:<18} -> {:<18}  {}",
+        "  {:<12}  {}  {:<18} -> {:<18}  {}",
         alert.component,
         severity,
         alert.src_ip_str(),
@@ -2530,12 +2530,12 @@ pub async fn cmd_status_enhanced(client: &ApiClient, output: OutputFormat) -> Re
             println!("  (none)");
         } else {
             println!(
-                "  {:<10}  {:<8}  {:<18}  {:<18}  MESSAGE",
+                "  {:<12}  {:<8}  {:<18}  {:<18}  MESSAGE",
                 "COMPONENT", "SEVERITY", "SOURCE", "DESTINATION"
             );
             for a in &al.alerts {
                 println!(
-                    "  {:<10}  {:<8}  {:<18}  {:<18}  {}",
+                    "  {:<12}  {:<8}  {:<18}  {:<18}  {}",
                     a.component,
                     a.severity,
                     a.src_ip_str(),
@@ -2666,12 +2666,12 @@ pub async fn cmd_investigate(
     println!("  Alerts: {} matching", matched_alerts.len());
     if !matched_alerts.is_empty() {
         println!(
-            "  {:<10}  {:<8}  {:<6}  {:<18}  {:<18}  MESSAGE",
+            "  {:<12}  {:<8}  {:<6}  {:<18}  {:<18}  MESSAGE",
             "COMPONENT", "SEVERITY", "ACTION", "SOURCE", "DESTINATION"
         );
         for a in matched_alerts.iter().take(20) {
             println!(
-                "  {:<10}  {:<8}  {:<6}  {:<18}  {:<18}  {}",
+                "  {:<12}  {:<8}  {:<6}  {:<18}  {:<18}  {}",
                 a.component,
                 a.severity,
                 a.action,
