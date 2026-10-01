@@ -653,13 +653,7 @@ fn process_ids_pattern(
     // Kernel-side sampling: skip event emission probabilistically,
     // but always enforce the drop action for IPS mode.
     if !should_skip_by_sampling() {
-        (|| {
-            let cgroup_id = unsafe { resolve_skb_cgroup_id(_ctx) };
-            emit_packet_event!(EVENTS, IDS_METRICS, METRIC_EVENTS_DROPPED,
-                src_addr, dst_addr, src_port, dst_port, protocol,
-                EVENT_TYPE_IDS, pattern.action, pattern.rule_id, flags, vlan_id;
-                tc _ctx, cgroup cgroup_id);
-        })();
+        emit_ids_event(_ctx, flow, protocol, pattern.action, pattern.rule_id);
 
         // Packet mirroring for forensics (enterprise feature, controlled by config map)
         if let Some(mirror_enabled) = IDS_MIRROR_CONFIG.get(1)
@@ -722,6 +716,29 @@ fn process_ids_pattern(
 // ── Helpers ─────────────────────────────────────────────────────────
 
 // ptr_at, skip_ipv6_ext_headers imported from ebpf_helpers::tc
+
+/// Emit the IDS event for a matched packet.
+///
+/// The event macro returns early when the RingBuf is backlogged, so the emit
+/// needs a boundary of its own: a bare `return` inside `process_ids_pattern`
+/// would skip the mirroring and the enforcement that follow it. That boundary
+/// used to be an immediately invoked closure, which is the one body in this
+/// program LLVM declined to inline, and a second frame cost the program its
+/// load outright: the verifier adds the frames of a call chain together and
+/// refuses more than 512 bytes, which the classifier's own 488 plus the
+/// closure's 40 overran, so `tc_ids` loaded nowhere and every IDS alert,
+/// every mirrored frame and every automated response went with it. A named
+/// function keeps the boundary in the source and takes it out of the object.
+#[inline(always)]
+fn emit_ids_event(ctx: &TcContext, flow: &FlowMeta, protocol: u8, action: u8, rule_id: u32) {
+    let cgroup_id = unsafe { resolve_skb_cgroup_id(ctx) };
+    let src_addr = &flow.src_addr;
+    let dst_addr = &flow.dst_addr;
+    emit_packet_event!(EVENTS, IDS_METRICS, METRIC_EVENTS_DROPPED,
+        src_addr, dst_addr, flow.src_port, flow.dst_port, protocol,
+        EVENT_TYPE_IDS, action, rule_id, flow.flags, flow.vlan_id;
+        tc ctx, cgroup cgroup_id);
+}
 
 /// Increment a per-CPU metric counter.
 #[inline(always)]
