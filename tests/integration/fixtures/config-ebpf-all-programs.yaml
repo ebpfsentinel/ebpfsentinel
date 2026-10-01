@@ -1,0 +1,155 @@
+# config-ebpf-all-programs.yaml - every feature that carries a kernel program.
+#
+# Not a scenario fixture: nothing here is tuned to make traffic do anything.
+# Its only job is to make the agent ask the verifier to load every program it
+# has, which is the one configuration under which a program refused at load is
+# visible at all. Every other eBPF fixture turns most features off, so a
+# program broken in the object loads nowhere and no suite notices.
+#
+# A feature added with a program of its own belongs here the day it lands.
+#
+# Network topology (placeholders substituted by prepare_ebpf_config):
+#   Host: __HOST_IP__  (veth-ebpf0 or agent VM eth1)
+#   NS:   __NS_IP__    (veth-ebpf1 or attacker VM)
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  # Not debug: the loader traces every relocation of every program at that
+  # level, and this fixture asks for all of them, so a failing test's log tail
+  # would be relocation noise instead of what the verifier said.
+  log_level: info
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+# xdp-firewall, plus tc-scrub through the scrub block.
+firewall:
+  enabled: true
+  mode: alert
+  default_policy: pass
+  rules: []
+  scrub:
+    enabled: true
+    min_ttl: 64
+    max_mss: 1460
+    random_ip_id: true
+    strip_tcp_timestamps: true
+
+# tc-ids
+ids:
+  enabled: true
+  mode: alert
+  rules: []
+
+ips:
+  enabled: true
+  mode: alert
+  max_blacklist_duration_secs: 3600
+  auto_blacklist_threshold: 3
+  max_blacklist_size: 10000
+  whitelist: []
+  rules: []
+
+# uprobe-dlp
+dlp:
+  enabled: true
+  mode: alert
+  patterns:
+    - id: dlp-pii-ssn
+      name: "US Social Security Number"
+      regex: "\\b\\d{3}-\\d{2}-\\d{4}\\b"
+      severity: critical
+      data_type: pii
+
+# xdp-ratelimit, and its syncookie tail call through the ddos block.
+ratelimit:
+  enabled: true
+  default_rate: 1000
+  default_burst: 2000
+  rules: []
+
+ddos:
+  enabled: true
+  syn_protection:
+    enabled: true
+    threshold_mode: true
+    threshold_pps: 1000000
+  policies: []
+
+# tc-threatintel
+threatintel:
+  enabled: true
+  mode: alert
+  feeds: []
+
+# tc-dns
+dns:
+  enabled: true
+  cache:
+    max_entries: 1000
+    min_ttl_secs: 60
+    purge_interval_secs: 30
+  blocklist:
+    domains: []
+    action: block
+    inject_target: threatintel
+    grace_period_secs: 300
+
+# tc-conntrack
+conntrack:
+  enabled: true
+
+# tc-nat-ingress and tc-nat-egress, which load as a pair.
+nat:
+  enabled: true
+  snat_rules: []
+  dnat_rules: []
+
+# tc-qos. A pipe is needed for the shaper to have anything to attach to, and
+# the rate is high enough that no test traffic is shaped by accident.
+qos:
+  enabled: true
+  scheduler: fifo
+  pipes:
+    - id: pipe-load-gate
+      bandwidth: "1gbps"
+      delay: 0
+      loss: 0.0
+      burst: "256kb"
+      priority: 1
+      direction: both
+      enabled: true
+  queues:
+    - id: queue-load-gate
+      pipe_id: pipe-load-gate
+      enabled: true
+  classifiers: []
+
+# xdp-loadbalancer, plus xdp-vip-announcer through the announce block.
+loadbalancer:
+  enabled: true
+  services: []
+  announce:
+    role: primary
+    interface: __INTERFACE__
+    vips:
+      - name: load-gate-vip
+        addr: 10.200.0.250
+
+l7:
+  enabled: true
+  ports:
+    - 80
+    - 443
+  rules: []
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

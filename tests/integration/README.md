@@ -188,22 +188,22 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
-| `tc-conntrack` | 18, 24, 47 | 3vm | 6.9 | pr | Connection tracking; kernel-CT kill via kill_flow_via_xdp_ct/skb_ct asserted in 47 |
-| `tc-dns` | 19, 45 | 3vm | 6.9 | pr | Passive DNS capture; DoH/DoT detection via ClientHello SNI + dst_port 853 asserted in 45 |
-| `tc-ids` | 12, 25, perf/04, 39, 66 | 2vm | 6.9 | pr | Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in perf/04; slow-attack signatures in 39; what the agent decided to drop against what the kernel confirmed it tore down in 66, driven from both sides of the tc hook so the confirmation is not read as a copy of the drop count |
-| `tc-nat-egress` | 21, 50, perf/06 | 2vm | 6.9 | pr | SNAT (TC egress); NPTv6 (RFC 6296) checksum-neutral prefix swap config + CLI/REST surface asserted in 50 (wire-level swap gated on IPv6 routability); SNAT/masquerade datapath throughput overhead measured in perf/06 |
-| `tc-nat-ingress` | 21, 50, perf/06 | 2vm | 6.9 | pr | DNAT (TC ingress); NPTv6 reverse-prefix translation surface asserted via REST + CLI in 50; DNAT datapath throughput overhead measured in perf/06 |
-| `tc-qos` | 28 | 2vm | 6.9 | pr | Traffic shaping (TC egress) |
-| `tc-scrub` | 23, 40, 46 | 3vm | 6.9 | pr | Packet normalization; spoofed-source amplification drop in 40; byte-level pcap assertions (TTL floor, MSS clamp, DF clear, IP-ID rand) in 46 |
-| `tc-threatintel` | 17, 33 | 2vm | 6.9 | pr | OSINT feed IOC matching (TC) |
-| `uprobe-dlp` | 27, 60, 62, perf/06 | 2vm | 6.9 | pr | SSL/TLS DLP via uprobes; per-container uprobe attach across cgroups in suite 60; TLS-MITM inspection is enterprise-only; uprobe SSL-inspection goodput cost (loopback libssl) measured in perf/06 |
-| `xdp-firewall` | 11, 24, 26, perf/04, 40 | 2vm | 6.9 | pr | L3/L4 stateful firewall (XDP); XDP-drop CPU savings measured in perf/04; amplification ports denied in 40 |
+| `tc-conntrack` | 18, 24, 47, 67 | 3vm | 6.9 | pr | Connection tracking; kernel-CT kill via kill_flow_via_xdp_ct/skb_ct asserted in 47 |
+| `tc-dns` | 19, 45, 67 | 3vm | 6.9 | pr | Passive DNS capture; DoH/DoT detection via ClientHello SNI + dst_port 853 asserted in 45 |
+| `tc-ids` | 12, 25, perf/04, 39, 66, 67 | 2vm | 6.9 | pr | Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in perf/04; slow-attack signatures in 39; what the agent decided to drop against what the kernel confirmed it tore down in 66, driven from both sides of the tc hook so the confirmation is not read as a copy of the drop count |
+| `tc-nat-egress` | 21, 50, perf/06, 67 | 2vm | 6.9 | pr | SNAT (TC egress); NPTv6 (RFC 6296) checksum-neutral prefix swap config + CLI/REST surface asserted in 50 (wire-level swap gated on IPv6 routability); SNAT/masquerade datapath throughput overhead measured in perf/06 |
+| `tc-nat-ingress` | 21, 50, perf/06, 67 | 2vm | 6.9 | pr | DNAT (TC ingress); NPTv6 reverse-prefix translation surface asserted via REST + CLI in 50; DNAT datapath throughput overhead measured in perf/06 |
+| `tc-qos` | 28, 67 | 2vm | 6.9 | pr | Traffic shaping (TC egress) |
+| `tc-scrub` | 23, 40, 46, 67 | 3vm | 6.9 | pr | Packet normalization; spoofed-source amplification drop in 40; byte-level pcap assertions (TTL floor, MSS clamp, DF clear, IP-ID rand) in 46 |
+| `tc-threatintel` | 17, 33, 67 | 2vm | 6.9 | pr | OSINT feed IOC matching (TC) |
+| `uprobe-dlp` | 27, 60, 62, perf/06, 67 | 2vm | 6.9 | pr | SSL/TLS DLP via uprobes; per-container uprobe attach across cgroups in suite 60; TLS-MITM inspection is enterprise-only; uprobe SSL-inspection goodput cost (loopback libssl) measured in perf/06 |
+| `xdp-firewall` | 11, 24, 26, perf/04, 40, 67 | 2vm | 6.9 | pr | L3/L4 stateful firewall (XDP); XDP-drop CPU savings measured in perf/04; amplification ports denied in 40 |
 | `xdp-firewall-reject` | 42 | 2vm | 6.9 | nightly | TCP RST / ICMP forging tail-call; perf/04 wire-validates checksums + src/dst swap + whitelist bypass |
-| `xdp-loadbalancer` | 20, 44 | 2vm | 6.9 | pr | L4 LB + Maglev; suite 44 (3-VM) covers L2 DSR end-to-end and Maglev disruption bound |
+| `xdp-loadbalancer` | 20, 44, 67 | 2vm | 6.9 | pr | L4 LB + Maglev; suite 44 (3-VM) covers L2 DSR end-to-end and Maglev disruption bound |
 | `xdp-pass` | 42, 46 | 2vm | 6.9 | nightly | Test-only XDP_PASS stub attached to the netns side of the veth pair by lib/ebpf_helpers.bash (create_test_netns) so XDP_TX reflections from xdp-firewall-reject reach the namespace; a physical NIC needs no such helper |
-| `xdp-ratelimit` | 14, 15, perf/04 | 2vm | 6.9 | pr | Token bucket + sliding window + leaky bucket; SYN cookie at >1 Mpps in perf/04 |
+| `xdp-ratelimit` | 14, 15, perf/04, 67 | 2vm | 6.9 | pr | Token bucket + sliding window + leaky bucket; SYN cookie at >1 Mpps in perf/04 |
 | `xdp-ratelimit-syncookie` | 43 | 2vm | 6.9 | nightly | SYN cookie forging tail-call; suite 43 asserts TcpExtSyncookiesSent + agent metric grow, legit ncat completes, spoofed flood leaves TcpExtSyncookiesRecv flat |
-| `xdp-vip-announcer` | 37, 44 | 2vm | 6.9 | nightly | L2 VIP announcer / ARP responder; suite 44 (3-VM) drives the responder + gratuitous-ARP + is_self_announced predicate from a real client |
+| `xdp-vip-announcer` | 37, 44, 67 | 2vm | 6.9 | nightly | L2 VIP announcer / ARP responder; suite 44 (3-VM) drives the responder + gratuitous-ARP + is_self_announced predicate from a real client |
 
 #### CLI subcommands (37)
 

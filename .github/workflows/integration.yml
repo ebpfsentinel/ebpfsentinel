@@ -140,6 +140,17 @@ jobs:
             target/release/warden
           retention-days: 7
 
+      # The kernel objects travel separately because only the privileged lane
+      # needs them, and without them that lane finds no eBPF environment and
+      # skips itself whole: the agent loads nothing, the suite says nothing,
+      # and a program the verifier refuses is never noticed.
+      - name: Upload eBPF programs
+        uses: actions/upload-artifact@v7
+        with:
+          name: ebpfsentinel-ebpf-objects
+          path: target/bpfel-unknown-none/release/
+          retention-days: 7
+
   # ── PR-fast: API + Docker bats suites (profile=pr) ───────────────
   pr-suites:
     name: PR Suites (profile=pr)
@@ -279,7 +290,16 @@ jobs:
           path: target/release/
 
       - name: Make agent executable
-        run: chmod +x target/release/ebpfsentinel-agent
+        run: chmod +x target/release/ebpfsentinel-agent target/release/warden
+
+      # Without the objects the suite's own environment check finds no local
+      # eBPF build and skips every test in the file, so the privileged lane
+      # has to carry them.
+      - name: Download eBPF programs
+        uses: actions/download-artifact@v8
+        with:
+          name: ebpfsentinel-ebpf-objects
+          path: target/bpfel-unknown-none/release/
 
       - uses: ./.github/actions/install-bats
 
@@ -287,12 +307,26 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y jq python3-scapy
-          sudo apt-get install -y "linux-tools-$(uname -r)" 2>/dev/null \
+          # The distribution package is built against no particular kernel, so
+          # it is the one that installs on a runner whose `uname -r` has no
+          # matching linux-tools; the per-kernel packages stay as fallbacks for
+          # an image that ships them.
+          sudo apt-get install -y bpftool 2>/dev/null \
+            || sudo apt-get install -y "linux-tools-$(uname -r)" 2>/dev/null \
             || sudo apt-get install -y linux-tools-common linux-tools-generic 2>/dev/null \
             || echo "::warning::bpftool not available - eBPF tests will be skipped"
 
+      # Strict skips here and nowhere else in this workflow: this is the only
+      # lane that loads the programs into a kernel, so a test that excuses
+      # itself is the gate going quiet rather than a feature being absent.
       - name: Suite 06 - eBPF Programs
-        run: sudo bats --timing tests/integration/suites/06-ebpf-programs.bats
+        run: sudo EBPFSENTINEL_STRICT_SKIPS=1 bats --timing tests/integration/suites/06-ebpf-programs.bats
+
+      # The one lane that asks the verifier for every program at once. Suite 06
+      # loads the firewall alone, so a program broken in the object loads
+      # nowhere and nothing here notices.
+      - name: Suite 67 - Every eBPF Program Loads
+        run: sudo EBPFSENTINEL_STRICT_SKIPS=1 bats --timing tests/integration/suites/67-ebpf-every-program-loads.bats
 
       - name: Suite 40 - L2 VIP Announcer
         run: sudo bats --timing tests/integration/suites/37-ebpf-vip-announcer-scenarios.bats

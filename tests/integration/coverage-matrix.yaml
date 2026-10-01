@@ -115,6 +115,9 @@ suite_profiles:
   "64": nightly
   "65": nightly
   "66": nightly
+  # 67 loads every program at once: the only lane where a verifier refusal
+  # is visible, so it runs on every pull request rather than nightly.
+  "67": pr
   "perf/01": nightly
   "perf/02": nightly
   "perf/03": nightly
@@ -127,7 +130,7 @@ coverage:
   # ── eBPF programs (16) ──────────────────────────────────────────
   - kind: ebpf_program
     feature: xdp-firewall
-    suites: ["11", "24", "26", "perf/04", "40"]
+    suites: ["11", "24", "26", "perf/04", "40", "67"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -143,7 +146,7 @@ coverage:
 
   - kind: ebpf_program
     feature: xdp-ratelimit
-    suites: ["14", "15", "perf/04"]
+    suites: ["14", "15", "perf/04", "67"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -159,7 +162,7 @@ coverage:
 
   - kind: ebpf_program
     feature: xdp-loadbalancer
-    suites: ["20", "44"]
+    suites: ["20", "44", "67"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -167,7 +170,7 @@ coverage:
 
   - kind: ebpf_program
     feature: xdp-vip-announcer
-    suites: ["37", "44"]
+    suites: ["37", "44", "67"]
     topology: 2vm
     kernel_min: "6.9"
     profile: nightly
@@ -183,7 +186,7 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-ids
-    suites: ["12", "25", "perf/04", "39", "66"]
+    suites: ["12", "25", "perf/04", "39", "66", "67"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -191,7 +194,7 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-threatintel
-    suites: ["17", "33"]
+    suites: ["17", "33", "67"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -199,7 +202,7 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-conntrack
-    suites: ["18", "24", "47"]
+    suites: ["18", "24", "47", "67"]
     topology: 3vm
     kernel_min: "6.9"
     profile: pr
@@ -207,7 +210,7 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-dns
-    suites: ["19", "45"]
+    suites: ["19", "45", "67"]
     topology: 3vm
     kernel_min: "6.9"
     profile: pr
@@ -215,7 +218,7 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-nat-ingress
-    suites: ["21", "50", "perf/06"]
+    suites: ["21", "50", "perf/06", "67"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -223,7 +226,7 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-nat-egress
-    suites: ["21", "50", "perf/06"]
+    suites: ["21", "50", "perf/06", "67"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -231,7 +234,7 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-qos
-    suites: ["28"]
+    suites: ["28", "67"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
@@ -239,7 +242,7 @@ coverage:
 
   - kind: ebpf_program
     feature: tc-scrub
-    suites: ["23", "40", "46"]
+    suites: ["23", "40", "46", "67"]
     topology: 3vm
     kernel_min: "6.9"
     profile: pr
@@ -247,7 +250,7 @@ coverage:
 
   - kind: ebpf_program
     feature: uprobe-dlp
-    suites: ["27", "60", "62", "perf/06"]
+    suites: ["27", "60", "62", "perf/06", "67"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr

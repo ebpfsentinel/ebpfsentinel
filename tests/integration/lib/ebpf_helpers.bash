@@ -333,8 +333,14 @@ start_ebpf_agent() {
             local staged_ebpf="/tmp/ebpfsentinel-ebpf-staged"
             local sock="/tmp/ebpfsentinel-warden-${EBPF_VETH_HOST:-local}.sock"
             install -m755 "$AGENT_BIN" "$staged_agent" 2>/dev/null
+            # Emptied rather than topped up: the stage outlives the suite, and
+            # `cp -u` kept whatever was there when an object got older or went
+            # away, so a suite could pass on a copy of a program the build no
+            # longer produces. That is the stale-binary trap, and a suite whose
+            # job is to say the objects load has to read this build's objects.
+            rm -rf "$staged_ebpf"
             mkdir -p "$staged_ebpf"
-            find "$EBPF_PROGRAM_DIR" -maxdepth 1 -type f -exec cp -u {} "$staged_ebpf/" \; 2>/dev/null || true
+            find "$EBPF_PROGRAM_DIR" -maxdepth 1 -type f -exec cp {} "$staged_ebpf/" \; 2>/dev/null || true
             chmod 755 "$staged_ebpf"
             chmod a+r "$staged_ebpf"/* 2>/dev/null || true
             rm -f "$sock"
