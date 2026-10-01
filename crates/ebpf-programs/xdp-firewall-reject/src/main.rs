@@ -14,9 +14,9 @@
 
 use aya_ebpf::{
     bindings::xdp_action,
+    btf_maps::{LruHashMap, PerCpuArray},
     helpers::{bpf_ktime_get_boot_ns, bpf_xdp_adjust_tail},
     macros::{btf_map, xdp},
-    btf_maps::{LruHashMap, PerCpuArray},
     programs::XdpContext,
 };
 use ebpf_common::event::FLAG_IPV6;

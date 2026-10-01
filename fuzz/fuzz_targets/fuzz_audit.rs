@@ -50,8 +50,7 @@ fuzz_target!(|data: &[u8]| {
                 let _ = action.as_str();
 
                 let ts = u64::from_le_bytes([
-                    chunk[3], chunk[4], chunk[5], chunk[6],
-                    chunk[7], chunk[8], chunk[9], chunk[10],
+                    chunk[3], chunk[4], chunk[5], chunk[6], chunk[7], chunk[8], chunk[9], chunk[10],
                 ]);
 
                 let src = [u32::from(chunk[12]), 0, 0, 0];
@@ -101,8 +100,7 @@ fuzz_target!(|data: &[u8]| {
                 };
 
                 let ts = u64::from_le_bytes([
-                    chunk[2], chunk[3], chunk[4], chunk[5],
-                    chunk[6], chunk[7], chunk[8], chunk[9],
+                    chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7], chunk[8], chunk[9],
                 ]);
 
                 let entry = AuditEntry::security_decision(
@@ -125,11 +123,31 @@ fuzz_target!(|data: &[u8]| {
             if cursor + 4 <= data.len() {
                 let qb = &data[cursor..cursor + 4];
                 let query = AuditQuery {
-                    from_ns: if qb[0] & 1 != 0 { Some(u64::from(qb[1]) * 1_000_000) } else { None },
-                    to_ns: if qb[0] & 2 != 0 { Some(u64::from(qb[2]) * 1_000_000_000) } else { None },
-                    component: if qb[0] & 4 != 0 { Some(AuditComponent::Firewall) } else { None },
-                    action: if qb[0] & 8 != 0 { Some(AuditAction::Drop) } else { None },
-                    rule_id: if qb[0] & 16 != 0 { Some(format!("rule-{}", qb[3])) } else { None },
+                    from_ns: if qb[0] & 1 != 0 {
+                        Some(u64::from(qb[1]) * 1_000_000)
+                    } else {
+                        None
+                    },
+                    to_ns: if qb[0] & 2 != 0 {
+                        Some(u64::from(qb[2]) * 1_000_000_000)
+                    } else {
+                        None
+                    },
+                    component: if qb[0] & 4 != 0 {
+                        Some(AuditComponent::Firewall)
+                    } else {
+                        None
+                    },
+                    action: if qb[0] & 8 != 0 {
+                        Some(AuditAction::Drop)
+                    } else {
+                        None
+                    },
+                    rule_id: if qb[0] & 16 != 0 {
+                        Some(format!("rule-{}", qb[3]))
+                    } else {
+                        None
+                    },
                     limit: (qb[3] as usize % 100) + 1,
                     offset: 0,
                 };

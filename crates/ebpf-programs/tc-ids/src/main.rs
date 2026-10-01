@@ -17,13 +17,13 @@ use aya_ebpf_bindings::helpers::{
 };
 use ebpf_common::{
     config_flags::ConfigFlags,
-    firewall::{
-        FW_EMPTY_IDS_PATTERNS, FW_EMPTY_IDS_SRC_PATTERNS, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_L7_PORTS,
-        FW_EMPTY_TENANTS,
-    },
     event::{
         EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, MAX_L7_PAYLOAD, MAX_L7_PORTS, PacketEvent,
         SMALL_L7_PAYLOAD,
+    },
+    firewall::{
+        FW_EMPTY_IDS_PATTERNS, FW_EMPTY_IDS_SRC_PATTERNS, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_L7_PORTS,
+        FW_EMPTY_TENANTS,
     },
     ids::{
         IDS_ACTION_DROP, IDS_METRIC_CGROUP_ATTRIBUTED, IDS_METRIC_CGROUP_TENANT_RESOLVED,
@@ -36,12 +36,12 @@ use ebpf_common::{
 use ebpf_helpers::kfuncs::{
     BpfCtOpts, CtTuple, kill_flow_via_skb_ct, skb_get_fou_encap, skb_packet_size,
 };
-use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 use ebpf_helpers::net::{
     IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4, u16_from_be_bytes,
     u32_from_be_bytes,
 };
 use ebpf_helpers::pktmeta;
+use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{emit_packet_event, increment_metric, opaque_usize, ringbuf_has_backpressure};
 use network_types::{

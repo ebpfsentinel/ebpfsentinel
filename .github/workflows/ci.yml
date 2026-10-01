@@ -47,6 +47,15 @@ jobs:
       # The eBPF helper library sits outside the workspace, since the programs
       # build it for the BPF target, so the workspace command never reaches it.
       - run: cargo fmt --check --manifest-path crates/ebpf-helpers/Cargo.toml
+      # Each kernel program is excluded from the workspace for the same reason
+      # and carries its own manifest, so the gate has to walk them. Listing
+      # them here would lose a program the day one is added, which is how seven
+      # of the sixteen drifted unnoticed; the glob cannot.
+      - name: Format check the kernel programs and the fuzz targets
+        run: |
+          for manifest in crates/ebpf-programs/*/Cargo.toml fuzz/Cargo.toml; do
+            cargo fmt --check --manifest-path "$manifest"
+          done
 
   # ── Lint ──────────────────────────────────────────────────────────
   clippy:

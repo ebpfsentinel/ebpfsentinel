@@ -16,9 +16,9 @@
 
 use aya_ebpf::{
     bindings::xdp_action,
+    btf_maps::PerCpuArray,
     helpers::bpf_xdp_adjust_tail,
     macros::{btf_map, xdp},
-    btf_maps::PerCpuArray,
     programs::XdpContext,
 };
 use aya_ebpf_bindings::bindings::{iphdr, ipv6hdr, tcphdr};

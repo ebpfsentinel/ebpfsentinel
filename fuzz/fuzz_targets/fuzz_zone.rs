@@ -86,11 +86,7 @@ fuzz_target!(|data: &[u8]| {
             ZonePolicy::Deny
         };
 
-        zone_policies.push(ZonePair {
-            from,
-            to,
-            policy,
-        });
+        zone_policies.push(ZonePair { from, to, policy });
     }
 
     let config = ZoneConfig {

@@ -9,9 +9,7 @@ use aya_ebpf::{
         lpm_trie::{Key, LpmTrie},
     },
     cty::c_void,
-    helpers::{
-        bpf_check_mtu, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns, bpf_loop,
-    },
+    helpers::{bpf_check_mtu, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns, bpf_loop},
     macros::{btf_map, xdp},
     programs::XdpContext,
 };
@@ -25,14 +23,12 @@ use ebpf_common::{
         IPS_CONFIRMED, IPS_DYING, IPS_EXPECTED, IPS_SEEN_REPLY, NfConnOffsets, OVERLOAD_SET_ID,
         SRC_COUNTER_FLAG_OVERLOADED, SrcCounterKey, SrcStateCounter,
     },
-    event::{
-        EVENT_TYPE_FIREWALL, FLAG_IPV6, FLAG_VLAN, PacketEvent,
-    },
+    event::{EVENT_TYPE_FIREWALL, FLAG_IPV6, FLAG_VLAN, PacketEvent},
     firewall::{
         ACTION_DROP, ACTION_LOG, ACTION_PASS, ACTION_REJECT, CT_MATCH_ESTABLISHED,
-        CT_MATCH_INVALID, CT_MATCH_NEW, CT_MATCH_RELATED, DEFAULT_POLICY_DROP, FW_EMPTY_HASH_5TUPLE,
-        FW_EMPTY_HASH_PORT, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_LPM_V4, FW_EMPTY_LPM_V6,
-        DSCP_MARK_NONE, FW_EMPTY_SRC_LIMITS, FW_EMPTY_TENANTS, FW_EMPTY_ZONES, FirewallRuleEntry,
+        CT_MATCH_INVALID, CT_MATCH_NEW, CT_MATCH_RELATED, DEFAULT_POLICY_DROP, DSCP_MARK_NONE,
+        FW_EMPTY_HASH_5TUPLE, FW_EMPTY_HASH_PORT, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_LPM_V4,
+        FW_EMPTY_LPM_V6, FW_EMPTY_SRC_LIMITS, FW_EMPTY_TENANTS, FW_EMPTY_ZONES, FirewallRuleEntry,
         FirewallRuleEntryV6, FwHashKey5Tuple, FwHashKeyPort, FwHashValue, ICMP_WILDCARD,
         IpSetKeyV4, LpmValue, MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT, MATCH_DST_SET,
         MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT, MATCH_SRC_SET, MATCH2_DSCP, MATCH2_DST_MAC,
@@ -50,12 +46,12 @@ use ebpf_helpers::kfuncs::{
     BpfCtOpts, CtTuple, bpf_xfrm_state_opts, kill_flow_via_xdp_ct, with_xdp_ct_lookup,
     with_xdp_xfrm_state, xdp_frame_size, xdp_rx_hash, xdp_rx_timestamp, xdp_rx_vlan_tag,
 };
-use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 use ebpf_helpers::net::{
     ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, IcmpHdr, Ipv6Hdr, PROTO_ICMPV6, PROTO_TCP,
     PROTO_UDP, ipv6_addr_to_u32x4, u16_from_be_bytes, u32_from_be_bytes,
 };
 use ebpf_helpers::parse_vlan_tags;
+use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
 use ebpf_helpers::{copy_mac_asm, increment_metric, ringbuf_has_backpressure};
 use network_types::{
@@ -2302,7 +2298,6 @@ fn apply_action(ctx_raw: *mut core::ffi::c_void, action: u8) -> Result<u32, ()> 
 fn increment_metric(index: u32) {
     increment_metric!(FIREWALL_METRICS, index);
 }
-
 
 /// Emit a `PacketEvent` to the EVENTS RingBuf. Reads packet metadata
 /// from the `PKT_CTX` per-CPU scratch buffer (must be populated before

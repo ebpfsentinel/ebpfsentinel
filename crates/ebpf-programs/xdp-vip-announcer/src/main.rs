@@ -17,8 +17,8 @@
 
 use aya_ebpf::{
     bindings::xdp_action,
-    macros::{btf_map, xdp},
     btf_maps::{HashMap, PerCpuArray, PerCpuHashMap},
+    macros::{btf_map, xdp},
     programs::XdpContext,
 };
 use ebpf_common::vip::{
@@ -60,7 +60,8 @@ static IFACE_MAC: HashMap<u32, IfaceMac, { MAX_IFACE_MAC as usize }> = HashMap::
 /// to [`IFACE_MAC`] when a VIP has no explicit binding yet. The later
 /// ARP-guard epic reads the same map to ignore our own gratuitous ARP.
 #[btf_map]
-static SELF_OWNED_BINDINGS: HashMap<u32, SelfBinding, { MAX_SELF_BINDINGS as usize }> = HashMap::new();
+static SELF_OWNED_BINDINGS: HashMap<u32, SelfBinding, { MAX_SELF_BINDINGS as usize }> =
+    HashMap::new();
 
 /// Aggregate per-CPU counters (ARP frames seen / replies forged).
 #[btf_map]

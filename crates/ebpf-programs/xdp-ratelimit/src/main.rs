@@ -52,12 +52,12 @@ use ebpf_common::{
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
 use ebpf_helpers::kfuncs::{xdp_rx_hash, xdp_rx_timestamp};
-use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 use ebpf_helpers::net::{
     ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP,
     ipv6_addr_to_u32x4, u32_from_be_bytes,
 };
 use ebpf_helpers::parse_vlan_tags;
+use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{increment_metric, ringbuf_has_backpressure};
 use network_types::{eth::EthHdr, ip::Ipv4Hdr};

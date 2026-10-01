@@ -4,9 +4,7 @@ use libfuzzer_sys::fuzz_target;
 
 use domain::common::entity::RuleId;
 use domain::ddos::engine::DdosEngine;
-use domain::ddos::entity::{
-    DdosAttackType, DdosEvent, DdosMitigationAction, DdosPolicy,
-};
+use domain::ddos::entity::{DdosAttackType, DdosEvent, DdosMitigationAction, DdosPolicy};
 
 // Fuzz the DdosEngine with random policies and events: add/remove policies,
 // process events, tick state machine, exercise lifecycle transitions.
@@ -39,8 +37,7 @@ fuzz_target!(|data: &[u8]| {
         };
 
         let threshold = u64::from_le_bytes([
-            chunk[1], chunk[2], chunk[3], chunk[4],
-            chunk[5], chunk[6], chunk[7], chunk[8],
+            chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7], chunk[8],
         ]);
 
         let action = match chunk[9] % 3 {

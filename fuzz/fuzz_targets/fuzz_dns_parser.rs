@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use libfuzzer_sys::fuzz_target;
 
-use domain::dns::blocklist::{parse_blocklist_feed, BlocklistFeedFormat};
+use domain::dns::blocklist::{BlocklistFeedFormat, parse_blocklist_feed};
 use domain::dns::entity::DomainPattern;
 use domain::dns::parser::parse_dns_packet;
 use domain::dns::reputation::domain_entropy;

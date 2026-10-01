@@ -4,11 +4,15 @@
 
 use aya_ebpf::{
     bindings::xdp_action,
+    btf_maps::{DevMap, HashMap, PerCpuArray, RingBuf},
     helpers::{bpf_check_mtu, bpf_get_smp_processor_id, bpf_ktime_get_boot_ns},
     macros::{btf_map, xdp},
-    btf_maps::{DevMap, HashMap, PerCpuArray, RingBuf},
     programs::XdpContext,
 };
+use aya_ebpf_bindings::bindings::{
+    BPF_FIB_LKUP_RET_NO_NEIGH, BPF_FIB_LKUP_RET_SUCCESS, bpf_fib_lookup as BpfFibLookupParams,
+};
+use aya_ebpf_bindings::helpers::{bpf_fib_lookup, bpf_redirect};
 use ebpf_common::{
     event::{FLAG_IPV6, FLAG_VLAN, PacketEvent},
     loadbalancer::{
@@ -21,17 +25,13 @@ use ebpf_common::{
         MAX_MAGLEV_SERVICES, MaglevLookup, lb_fnv1a_u32, lb_service_index,
     },
 };
-use aya_ebpf_bindings::bindings::{
-    BPF_FIB_LKUP_RET_NO_NEIGH, BPF_FIB_LKUP_RET_SUCCESS, bpf_fib_lookup as BpfFibLookupParams,
-};
-use aya_ebpf_bindings::helpers::{bpf_fib_lookup, bpf_redirect};
 use ebpf_helpers::kfuncs::{xdp_rx_hash, xdp_rx_timestamp};
+use ebpf_helpers::net::{
+    ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4,
+    u32x4_to_ipv6_bytes,
+};
 use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::ringbuf::{avail_data, submit_flags};
-use ebpf_helpers::net::{
-    ETH_P_IP, ETH_P_IPV6, IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP,
-    ipv6_addr_to_u32x4, u32x4_to_ipv6_bytes,
-};
 use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
 use ebpf_helpers::{
     add_metric, copy_16b_asm, copy_mac_asm, increment_metric, opaque_usize,
@@ -64,11 +64,13 @@ struct TcpUdpHdr {
 
 /// Service lookup: (protocol, port) → compact service config (V2).
 #[btf_map]
-static LB_SERVICES: HashMap<LbServiceKey, LbServiceConfigV2, { MAX_LB_SERVICES as usize }> = HashMap::new();
+static LB_SERVICES: HashMap<LbServiceKey, LbServiceConfigV2, { MAX_LB_SERVICES as usize }> =
+    HashMap::new();
 
 /// Global backend pool: backend_id → backend entry.
 #[btf_map]
-static LB_BACKENDS: HashMap<u32, LbBackendEntry, { MAX_LB_BACKENDS_TOTAL as usize }> = HashMap::new();
+static LB_BACKENDS: HashMap<u32, LbBackendEntry, { MAX_LB_BACKENDS_TOTAL as usize }> =
+    HashMap::new();
 
 /// Per-service round-robin state (index 0..4095).
 #[btf_map]
