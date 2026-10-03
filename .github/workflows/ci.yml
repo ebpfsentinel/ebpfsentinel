@@ -159,7 +159,7 @@ jobs:
       - name: Enforce coverage floors
         run: |
           failed=0
-          cargo llvm-cov --package domain --summary-only --fail-under-lines 90 \
+          cargo llvm-cov --package ebpfsentinel-domain --summary-only --fail-under-lines 90 \
             || { echo "::error::Domain line coverage is below the 90% floor"; failed=1; }
           cargo llvm-cov --package application --summary-only --fail-under-lines 80 \
             || { echo "::error::Application line coverage is below the 80% floor"; failed=1; }

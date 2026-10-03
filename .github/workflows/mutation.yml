@@ -28,7 +28,7 @@ jobs:
         run: cargo install cargo-mutants
       - name: Run mutation tests on domain crate
         run: |
-          cargo mutants --package domain \
+          cargo mutants --package ebpfsentinel-domain \
             --file 'crates/domain/src/firewall/engine.rs' \
             --file 'crates/domain/src/ids/engine.rs' \
             --file 'crates/domain/src/dlp/engine.rs' \

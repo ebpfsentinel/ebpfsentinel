@@ -57,7 +57,7 @@ cargo xtask ebpf-build && cargo build --release
 
 ```bash
 cargo test                          # All crates (requires protoc)
-cargo test -p domain                # Domain crate only (930+ tests, no protoc needed)
+cargo test -p ebpfsentinel-domain                # Domain crate only (930+ tests, no protoc needed)
 cargo test -p infrastructure        # Config + infra tests
 cargo test -p adapters              # Adapter tests (requires protoc)
 ```
@@ -102,8 +102,8 @@ make test-k8s
 10 criterion benchmark suites covering all domain engines:
 
 ```bash
-cargo bench -p domain               # Run all benchmarks
-cargo bench -p domain -- firewall   # Filter by name
+cargo bench -p ebpfsentinel-domain               # Run all benchmarks
+cargo bench -p ebpfsentinel-domain -- firewall   # Filter by name
 ```
 
 Benchmark results generate HTML reports in `target/criterion/`. The CI workflow detects regressions on PRs.

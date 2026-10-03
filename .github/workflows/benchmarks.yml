@@ -29,7 +29,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: bench
-      - run: cargo bench --no-run -p domain
+      - run: cargo bench --no-run -p ebpfsentinel-domain
 
   # ── Run domain benchmarks ───────────────────────────────────────────
   bench-domain:
@@ -45,7 +45,7 @@ jobs:
           shared-key: bench
 
       - name: Run benchmarks
-        run: cargo bench -p domain -- --output-format bencher 2>&1 | tee bench-output.txt
+        run: cargo bench -p ebpfsentinel-domain -- --output-format bencher 2>&1 | tee bench-output.txt
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v7

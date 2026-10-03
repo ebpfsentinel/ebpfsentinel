@@ -29,8 +29,8 @@ version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "arc-swap",
- "domain",
  "ebpf-common",
+ "ebpfsentinel-domain",
  "futures-util",
  "ports",
  "serde_json",
@@ -198,7 +198,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "domain"
+name = "ebpf-common"
+version = "0.0.0-dev"
+
+[[package]]
+name = "ebpfsentinel-domain"
 version = "0.0.0-dev"
 dependencies = [
  "ebpf-common",
@@ -210,16 +214,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "ebpf-common"
-version = "0.0.0-dev"
-
-[[package]]
 name = "ebpfsentinel-fuzz"
 version = "0.0.0"
 dependencies = [
  "application",
- "domain",
  "ebpf-common",
+ "ebpfsentinel-domain",
  "infrastructure",
  "libfuzzer-sys",
  "serde_json",
@@ -448,7 +448,7 @@ version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "axum",
- "domain",
+ "ebpfsentinel-domain",
  "regex",
  "serde",
  "serde_json",
@@ -621,8 +621,8 @@ name = "ports"
 version = "0.0.0-dev"
 dependencies = [
  "async-trait",
- "domain",
  "ebpf-common",
+ "ebpfsentinel-domain",
 ]
 
 [[package]]

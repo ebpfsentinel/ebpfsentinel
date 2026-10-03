@@ -1,10 +1,16 @@
 [package]
-name = "domain"
+name = "ebpfsentinel-domain"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# The package carries the project's prefix because cargo-audit matches an
+# advisory by package name and version without looking at the source, and a
+# bare `domain` is also a DNS library on crates.io with advisories of its own.
+# The library keeps the short name every `use domain::` already reads.
+[lib]
+name = "domain"
 
 [dependencies]
 thiserror = { workspace = true }

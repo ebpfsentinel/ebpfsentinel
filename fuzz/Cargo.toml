@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 application = { path = "../crates/application" }
-domain = { path = "../crates/domain" }
+domain = { path = "../crates/domain", package = "ebpfsentinel-domain" }
 ebpf-common = { path = "../crates/ebpf-common" }
 infrastructure = { path = "../crates/infrastructure" }
 serde_json = "1"

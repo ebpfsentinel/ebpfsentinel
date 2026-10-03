@@ -14,8 +14,8 @@ dependencies = [
  "aya-obj",
  "base64 0.23.1",
  "criterion",
- "domain",
  "ebpf-common",
+ "ebpfsentinel-domain",
  "ebpfsentinel-warden-client",
  "flate2",
  "futures-util",
@@ -187,8 +187,8 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "criterion",
- "domain",
  "ebpf-common",
+ "ebpfsentinel-domain",
  "futures-util",
  "ports",
  "serde_json",
@@ -824,21 +824,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "domain"
-version = "0.0.0-dev"
-dependencies = [
- "criterion",
- "ebpf-common",
- "lru",
- "proptest",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "dtoa"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -868,8 +853,8 @@ dependencies = [
  "async-trait",
  "axum",
  "clap",
- "domain",
  "ebpf-common",
+ "ebpfsentinel-domain",
  "ebpfsentinel-warden",
  "governor",
  "http-body-util",
@@ -894,6 +879,21 @@ dependencies = [
  "tracing",
  "utoipa",
  "utoipa-swagger-ui",
+]
+
+[[package]]
+name = "ebpfsentinel-domain"
+version = "0.0.0-dev"
+dependencies = [
+ "criterion",
+ "ebpf-common",
+ "lru",
+ "proptest",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1669,7 +1669,7 @@ version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "axum",
- "domain",
+ "ebpfsentinel-domain",
  "proptest",
  "regex",
  "serde",
@@ -2628,8 +2628,8 @@ name = "ports"
 version = "0.0.0-dev"
 dependencies = [
  "async-trait",
- "domain",
  "ebpf-common",
+ "ebpfsentinel-domain",
 ]
 
 [[package]]
