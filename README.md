@@ -182,11 +182,11 @@ digest; verify before installing with `policy/verify.sh` from the same release.
 
 ### Build from source
 
-The userspace agent builds on **stable**; the eBPF kernel programs need the **nightly** toolchain (driven by `cargo xtask`, `bpfel` target). Install Rust via [rustup](https://rustup.rs):
+The userspace agent builds on **stable**; the eBPF kernel programs need a **nightly** toolchain, pinned to a date in `crates/ebpf-programs/rust-toolchain.toml` and passed to cargo by `cargo xtask` (`bpfel` target). Install Rust via [rustup](https://rustup.rs):
 
 ```bash
 cargo build --release        # agent + warden broker (stable)
-cargo xtask ebpf-build        # eBPF programs (nightly)
+cargo xtask ebpf-build        # eBPF programs (the pinned nightly)
 
 # eBPF loads only through a BPF token (a user-namespace feature). The privileged
 # `warden` broker (bpffs delegation, conntrack, routes, ARP, pcap) runs alongside

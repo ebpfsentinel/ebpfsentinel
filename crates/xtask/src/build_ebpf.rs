@@ -69,6 +69,37 @@ fn encoded_rustflags() -> String {
     parts.join("\x1f")
 }
 
+/// The toolchain file the eBPF crates sit under, read at compile time so the
+/// date cannot be in two places at once.
+const EBPF_TOOLCHAIN_FILE: &str = include_str!("../../ebpf-programs/rust-toolchain.toml");
+
+/// The channel from `crates/ebpf-programs/rust-toolchain.toml`.
+///
+/// Passed as `cargo +<channel>` rather than left to rustup, because the
+/// toolchain file loses to a `RUSTUP_TOOLCHAIN` in the environment and the
+/// release build sets one to the workspace MSRV. An explicit `+` argument wins
+/// over both, so this is the only form that holds in every caller: a shell, a
+/// hosted runner, and a container whose entrypoint exports a toolchain.
+fn ebpf_toolchain() -> Result<&'static str> {
+    for line in EBPF_TOOLCHAIN_FILE.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "channel" {
+            continue;
+        }
+        let channel = value.trim().trim_matches('"');
+        if !channel.is_empty() {
+            return Ok(channel);
+        }
+    }
+    anyhow::bail!(
+        "no `channel` in crates/ebpf-programs/rust-toolchain.toml: that file is where the \
+         nightly date is written, and without it this build would fall back to whatever \
+         nightly happens to be installed"
+    )
+}
+
 pub fn build_all() -> Result<()> {
     let workspace_root = std::env::var("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
@@ -103,12 +134,15 @@ pub fn build_all() -> Result<()> {
     std::fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create output dir {}", output_dir.display()))?;
 
+    let toolchain = ebpf_toolchain()?;
+    println!("eBPF toolchain: {toolchain}");
+
     for program in EBPF_PROGRAMS {
         let program_dir = ebpf_base.join(program);
         println!("Building eBPF program: {program}");
 
         let status = Command::new("cargo")
-            .arg("+nightly")
+            .arg(format!("+{toolchain}"))
             .arg("build")
             .arg("--release")
             .arg("-Z")
@@ -139,4 +173,42 @@ pub fn build_all() -> Result<()> {
 
     println!("All eBPF programs built successfully");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ebpf_toolchain_is_a_dated_nightly() {
+        let channel = ebpf_toolchain().expect("the toolchain file must name a channel");
+        // A bare `nightly` is what this pin replaced: the compiler that
+        // produces the objects the verifier accepts then changes on somebody
+        // else's schedule, and a program that stops loading has no second
+        // compiler to bisect against.
+        assert_ne!(
+            channel, "nightly",
+            "crates/ebpf-programs/rust-toolchain.toml must pin a date, not float on nightly"
+        );
+        assert!(
+            channel.starts_with("nightly-"),
+            "the eBPF objects need `-Z build-std=core`, which only nightly has, so the pin \
+             must be a dated nightly: got {channel}"
+        );
+        // `nightly-YYYY-MM-DD`, which is what rustup installs and what the
+        // workflows read out of this file.
+        let date = channel.trim_start_matches("nightly-");
+        assert_eq!(
+            date.len(),
+            10,
+            "expected nightly-YYYY-MM-DD in the toolchain file, got {channel}"
+        );
+        assert!(
+            date.split('-').count() == 3
+                && date
+                    .split('-')
+                    .all(|p| p.chars().all(|c| c.is_ascii_digit())),
+            "expected nightly-YYYY-MM-DD in the toolchain file, got {channel}"
+        );
+    }
 }

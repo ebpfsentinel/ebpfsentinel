@@ -23,8 +23,27 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: dtolnay/rust-toolchain@nightly
+      # The one place the eBPF nightly date is written is the toolchain file
+      # beside the programs. Reading it here keeps a runner from building the
+      # objects with a compiler nobody pinned.
+      - name: Read the pinned eBPF toolchain
+        id: ebpf-toolchain
+        run: |
+          set -eu
+          file="crates/ebpf-programs/rust-toolchain.toml"
+          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$file")"
+          if [ -z "$channel" ]; then
+            echo "::error::no channel in $file, which is the one place the eBPF nightly date is written"
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "eBPF toolchain: $channel"
+
+      # @master rather than @nightly: the alias tags install their own channel,
+      # and what this needs is the dated one the step above read.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.ebpf-toolchain.outputs.channel }}
           components: rust-src
 
       # Only the userspace workspace is cached. The kernel programs share one

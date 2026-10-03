@@ -26,9 +26,30 @@ runs:
       with:
         components: ${{ inputs.toolchain-components }}
 
-    - uses: dtolnay/rust-toolchain@nightly
+    # The date comes out of the toolchain file rather than being written here:
+    # two places holding one nightly date is how a runner ends up building the
+    # eBPF objects with a compiler the tree never saw.
+    - name: Read the pinned eBPF toolchain
+      id: ebpf-toolchain
+      if: inputs.install-nightly == 'true'
+      shell: bash
+      run: |
+        set -eu
+        file="crates/ebpf-programs/rust-toolchain.toml"
+        channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$file")"
+        if [ -z "$channel" ]; then
+          echo "::error::no channel in $file, which is the one place the eBPF nightly date is written"
+          exit 1
+        fi
+        echo "channel=$channel" >> "$GITHUB_OUTPUT"
+        echo "eBPF toolchain: $channel"
+
+    # @master rather than @nightly: the alias tags install their own channel,
+    # and what this needs is the dated one the step above read.
+    - uses: dtolnay/rust-toolchain@master
       if: inputs.install-nightly == 'true'
       with:
+        toolchain: ${{ steps.ebpf-toolchain.outputs.channel }}
         components: rust-src
 
     - uses: Swatinem/rust-cache@v2

@@ -1,6 +1,15 @@
 name: Install bpf-linker
 description: Install the LLVM bpf-linker links against, then bpf-linker itself
 
+inputs:
+  source-root:
+    # The release build checks this component out under `src/` and uses the
+    # action from there, while a run inside this repository has the tree at the
+    # workspace root. The toolchain file is read relative to this.
+    description: "Path to the ebpfsentinel checkout holding crates/ebpf-programs"
+    required: false
+    default: "."
+
 runs:
   using: composite
   steps:
@@ -15,6 +24,7 @@ runs:
       # moving this too.
       env:
         LLVM_VERSION: "23"
+        SOURCE_ROOT: ${{ inputs.source-root }}
       run: |
         set -euo pipefail
 
@@ -35,5 +45,17 @@ runs:
         # onto the PATH never helped.
         export LLVM_PREFIX="/usr/lib/llvm-${LLVM_VERSION}"
 
-        cargo +nightly install bpf-linker --locked
+        # bpf-linker needs a nightly compiler, and it is built with the same one
+        # the kernel programs are: a bare `+nightly` would have rustup install a
+        # second, undated toolchain beside the pinned one, so a runner would
+        # carry two nightlies and the log would not say which linked what.
+        file="${SOURCE_ROOT}/crates/ebpf-programs/rust-toolchain.toml"
+        channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$file")"
+        if [ -z "$channel" ]; then
+          echo "::error::no channel in $file, which is the one place the eBPF nightly date is written"
+          exit 1
+        fi
+        echo "bpf-linker toolchain: $channel"
+
+        cargo "+${channel}" install bpf-linker --locked
         bpf-linker --version

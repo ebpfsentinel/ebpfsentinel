@@ -6,7 +6,7 @@
 |-------------|---------|---------|
 | Linux kernel | 6.9+ with BTF | eBPF program loading (BPF token delegation, cgroup1 kfunc, XDP metadata kfuncs) |
 | Rust stable | 1.98+ | Userspace crates |
-| Rust nightly | latest | eBPF kernel programs (`bpfel-unknown-none`) |
+| Rust nightly | the date in `crates/ebpf-programs/rust-toolchain.toml` | eBPF kernel programs (`bpfel-unknown-none`) |
 | `bpftool` | any | eBPF program inspection |
 | `iproute2` | any | Network interface management |
 | `protoc` | 3.x+ | gRPC proto compilation |
@@ -21,8 +21,11 @@
 rustup toolchain install stable
 rustup component add rustfmt clippy rust-src
 
-# Nightly (eBPF programs)
-rustup toolchain install nightly --component rust-src
+# Nightly (eBPF programs). The date is pinned in
+# crates/ebpf-programs/rust-toolchain.toml and `cargo xtask ebpf-build` passes
+# it to cargo itself, so rustup installs it on the first build and there is no
+# version to type here. A bare `nightly` is not what builds the objects.
+rustup toolchain install "$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' crates/ebpf-programs/rust-toolchain.toml)" --component rust-src
 ```
 
 ## Building
@@ -37,7 +40,7 @@ cargo build --release               # Release build
 ### eBPF Kernel Programs
 
 ```bash
-cargo xtask ebpf-build              # Builds all eBPF programs with nightly
+cargo xtask ebpf-build              # Builds all eBPF programs with the pinned nightly
 ```
 
 The eBPF programs are built for `bpfel-unknown-none` (little-endian BPF) and output to each program's `target/` directory. The `xtask` crate orchestrates this.

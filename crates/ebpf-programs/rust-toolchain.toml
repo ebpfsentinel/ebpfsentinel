@@ -1,3 +1,18 @@
+# The eBPF objects need `-Z build-std=core`, which is nightly-only, and this is
+# the one place the date is written. A floating `nightly` meant the bytes the
+# verifier accepts changed under us on somebody else's schedule: a codegen
+# change lands, a program stops loading, and nothing in the tree says which
+# compiler produced the object that used to work.
+#
+# `crates/xtask/src/build_ebpf.rs` reads this channel at compile time and passes
+# it as `cargo +<channel>`, because a bare `+nightly` on the command line
+# overrides a toolchain file and a `RUSTUP_TOOLCHAIN` in the environment
+# overrides both. Moving the date is therefore one edit here, and the next
+# `cargo xtask build-ebpf` has rustup install it.
+#
+# Moving it is a deliberate act: build all sixteen objects, load the set into
+# a kernel (suite 67), and keep the old date in the commit message so a
+# regression has two compilers to bisect between.
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-08-28"
 components = ["rust-src"]
