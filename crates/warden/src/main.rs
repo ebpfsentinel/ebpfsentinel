@@ -17,12 +17,14 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
+use std::path::Path;
 use std::process::ExitCode;
 
 use ebpfsentinel_warden::host_ops::LocalHostOps;
 use ebpfsentinel_warden::server::serve_loop;
 use ebpfsentinel_warden::{
-    collect_module_btf_fds, enable_tcp_syncookies, open_pcap_pool, prioritize_and_cap_btf,
+    collect_module_btf_fds, enable_tcp_syncookies, open_pcap_pool, prepare_state_dir,
+    prioritize_and_cap_btf,
 };
 use ebpfsentinel_warden_proto::PROTOCOL_VERSION;
 
@@ -30,19 +32,39 @@ use ebpfsentinel_warden_proto::PROTOCOL_VERSION;
 /// `--uid <n>`.
 const DEFAULT_UID: u32 = 65534;
 
+const USAGE: &str =
+    "usage: warden serve <socket> [--uid <n>]\n       warden prepare-state <dir> [--uid <n>]";
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("serve") => {
             let Some(sock) = args.get(2) else {
-                eprintln!("usage: warden serve <socket> [--uid <n>]");
+                eprintln!("{USAGE}");
                 return ExitCode::from(2);
             };
             let uid = parse_uid(&args).unwrap_or(DEFAULT_UID);
             serve(sock, uid)
         }
+        Some("prepare-state") => {
+            let Some(dir) = args.get(2) else {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            };
+            let uid = parse_uid(&args).unwrap_or(DEFAULT_UID);
+            match prepare_state_dir(Path::new(dir), uid) {
+                Ok(()) => {
+                    eprintln!("[warden] state directory {dir} ready for uid {uid}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("[warden] prepare state directory {dir}: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         _ => {
-            eprintln!("usage: warden serve <socket> [--uid <n>]");
+            eprintln!("{USAGE}");
             ExitCode::from(2)
         }
     }

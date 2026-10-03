@@ -201,14 +201,16 @@ daemonset:
   # stores, packet captures, downloaded GeoIP databases and the telemetry
   # installation identifier.
   state:
-    # -- Node directory holding the agent state. Empty keeps it in an emptyDir,
-    # which survives a container restart but not the pod being replaced, so the
-    # stores start empty and the installation identifier is drawn again after
-    # every rollout. Set a path (e.g. /var/lib/ebpfsentinel) to keep it across
-    # rollouts; the directory must be owned by uid/gid 65534 on every node
-    # (`install -d -o 65534 -g 65534 -m 0700 /var/lib/ebpfsentinel`), since
-    # fsGroup is not applied to a host path.
+    # -- Node directory holding the agent state. Empty means
+    # /var/lib/ebpfsentinel/k8s/<namespace>/<release>, one directory per release.
+    # It is created when missing and handed to uid/gid 65534 with mode 0700 by
+    # the state-dir init container before the agent starts, so the stores and
+    # the installation identifier carry over a rollout.
     hostPath: ""
+    # -- Keep the state in an emptyDir instead: it survives a container restart
+    # but not the pod being replaced, so every rollout starts with empty stores
+    # and a new installation identifier.
+    ephemeral: false
   # -- Extra volume mounts (e.g., GeoIP database, TLS certs)
   extraVolumeMounts: []
   # -- Extra volumes

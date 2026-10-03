@@ -62,6 +62,27 @@ spec:
       # runs for the pod's life, holding the host capabilities and brokering
       # kernel ops over the shared socket. The agent loads its own eBPF.
       initContainers:
+        {{- if not .Values.daemonset.state.ephemeral }}
+        # The kubelet creates a hostPath root-owned and 0755, and fsGroup is never
+        # applied to one, so the agent (uid 65534) could not write its state. The
+        # warden image runs once as root with CHOWN and FOWNER alone, creates the
+        # directory, closes it to 0700 and hands it to the agent's uid.
+        - name: state-dir
+          image: {{ include "ebpfsentinel.wardenImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["prepare-state", "/var/lib/ebpfsentinel", "--uid", "65534"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              add: [CHOWN, FOWNER]
+              drop: [ALL]
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/ebpfsentinel
+        {{- end }}
         - name: warden
           image: {{ include "ebpfsentinel.wardenImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -223,16 +244,17 @@ spec:
           hostPath:
             path: /proc
         - name: state
-          {{- if .Values.daemonset.state.hostPath }}
-          # Survives the pod being replaced. The node directory must be owned by
-          # uid/gid 65534: fsGroup is not applied to a host path.
-          hostPath:
-            path: {{ .Values.daemonset.state.hostPath | quote }}
-            type: DirectoryOrCreate
-          {{- else }}
+          {{- if .Values.daemonset.state.ephemeral }}
           # Survives a container restart, not the pod being replaced. fsGroup
           # makes it writable by the agent.
           emptyDir: {}
+          {{- else }}
+          # Survives the pod being replaced, so the stores and the installation
+          # identifier carry over a rollout. One directory per release unless
+          # the values name one; the state-dir init container owns it to 65534.
+          hostPath:
+            path: {{ .Values.daemonset.state.hostPath | default (printf "/var/lib/ebpfsentinel/k8s/%s/%s" .Release.Namespace .Release.Name) | quote }}
+            type: DirectoryOrCreate
           {{- end }}
         {{- with .Values.daemonset.extraVolumes }}
         {{- toYaml . | nindent 8 }}

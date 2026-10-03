@@ -151,16 +151,13 @@ helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --versi
 
 ### State kept across rollouts
 
-The alert, audit and rule-history stores, packet captures, downloaded GeoIP databases and the telemetry installation identifier live under `/var/lib/ebpfsentinel`. By default that is an `emptyDir`: it survives a container restart but not the pod being replaced, so every rollout starts with empty stores and a new installation identifier. To keep it, prepare the directory on every node and point the chart at it:
+The alert, audit and rule-history stores, packet captures, downloaded GeoIP databases and the telemetry installation identifier live under `/var/lib/ebpfsentinel`. By default that is a node directory, `/var/lib/ebpfsentinel/k8s/<namespace>/<release>`, so all of it carries over a rollout. The kubelet creates a hostPath owned by root and Kubernetes applies no `fsGroup` to one, so a `state-dir` init container runs the warden image once as root, with `CHOWN` and `FOWNER` alone, to create the directory at `0700` owned by uid 65534. Nothing has to be prepared on the node.
 
 ```bash
-# on every node - fsGroup is not applied to a host path
-install -d -o 65534 -g 65534 -m 0700 /var/lib/ebpfsentinel
-
-helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --version <version> \
-  --namespace ebpfsentinel --create-namespace \
-  --set agent.interfaces='{eth0}' \
-  --set daemonset.state.hostPath=/var/lib/ebpfsentinel
+# another node directory
+--set daemonset.state.hostPath=/srv/ebpfsentinel
+# an emptyDir instead: empty stores and a new installation identifier after every rollout
+--set daemonset.state.ephemeral=true
 ```
 
 ### Auto-response and auto-capture

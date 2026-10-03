@@ -612,3 +612,23 @@ pub fn enable_tcp_syncookies() {
         Err(e) => eprintln!("[launch] WARN could not set net.ipv4.tcp_syncookies=2: {e}"),
     }
 }
+
+/// Hand the agent the node directory it keeps its state in.
+///
+/// A `hostPath` volume is created by the kubelet as `root:root 0755` and
+/// `fsGroup` is never applied to one, so the agent, which runs as an
+/// unprivileged uid, could read its state directory and write nothing to it.
+/// This runs once, as root, before the agent starts: it creates the directory
+/// when missing, closes it to everyone but its owner, and gives it to `uid`.
+/// The mode is set before the owner, since once the directory is the agent's
+/// changing it would need `CAP_FOWNER`. Only the directory itself is touched:
+/// what the agent wrote there on an earlier run is already its own.
+pub fn prepare_state_dir(path: &std::path::Path, uid: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path)?;
+    let metadata = std::fs::metadata(path)?;
+    if metadata.permissions().mode() & 0o7777 != 0o700 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    std::os::unix::fs::chown(path, Some(uid), Some(uid))
+}
