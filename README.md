@@ -254,6 +254,8 @@ Full documentation is available at [ebpfsentinel/ebpfsentinel-docs](https://gith
 
 Per-feature configuration examples are in [`config/examples/`](config/examples/).
 
+The changelog is kept with the releases rather than here, so the whole product's history reads in one place: [`ebpfsentinel-release/changelogs/ebpfsentinel.md`](https://github.com/ebpfsentinel/ebpfsentinel-release/blob/main/changelogs/ebpfsentinel.md).
+
 ## Compatibility
 
 - **OS:** Linux only (kernel 6.9+ with BTF)

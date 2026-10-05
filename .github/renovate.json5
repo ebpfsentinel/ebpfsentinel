@@ -1,0 +1,65 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+
+  // Cargo for the workspace and every kernel program manifest outside it, and
+  // the actions the workflows pin. The dated nightly in
+  // crates/ebpf-programs/rust-toolchain.toml is not a dependency Renovate can
+  // read, and is moved by hand with the build it has to be proven against.
+  enabledManagers: ["cargo", "github-actions"],
+
+  extends: [
+    "config:recommended",
+    ":semanticCommitTypeAll(chore)",
+    // One dependency dashboard issue rather than a pull request per finding.
+    // One maintainer reads one list.
+    ":dependencyDashboard",
+  ],
+
+  timezone: "Europe/Paris",
+  // Routine bumps arrive as one Monday batch rather than a trickle.
+  schedule: ["* 0-6 * * 1"],
+  prConcurrentLimit: 5,
+  prHourlyLimit: 0,
+
+  // A known vulnerability is not an upgrade: it skips the Monday window and
+  // the release-age hold. Renovate reads GitHub's alerts rather than scanning,
+  // so Dependency graph and Dependabot alerts must be on in the repository
+  // settings for this to fire.
+  vulnerabilityAlerts: {
+    enabled: true,
+    schedule: ["at any time"],
+    minimumReleaseAge: null,
+    addLabels: ["security"],
+  },
+
+  // The lock file moves with its manifests, and once a week on its own so a
+  // transitive fix does not wait for a direct dependency to release.
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ["* 0-6 * * 1"],
+  },
+
+  packageRules: [
+    {
+      // The userspace loader and the kernel-side crates are released together
+      // and a mismatch between them is a program that fails to load, so they
+      // move in one pull request.
+      groupName: "aya",
+      matchPackageNames: ["aya", "aya-*"],
+    },
+    {
+      groupName: "tonic and prost",
+      matchPackageNames: ["tonic", "tonic-*", "prost", "prost-*"],
+    },
+    {
+      // A major is a migration, not a merge on green.
+      matchUpdateTypes: ["major"],
+      addLabels: ["major"],
+      minimumReleaseAge: "7 days",
+    },
+    {
+      matchManagers: ["cargo"],
+      minimumReleaseAge: "3 days",
+    },
+  ],
+}

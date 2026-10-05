@@ -1,0 +1,10 @@
+# A vulnerability must never land in a public issue, so the form that would
+# take one is replaced by a link to the private advisory flow.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/ebpfsentinel/ebpfsentinel/security/advisories/new
+    about: Private disclosure through GitHub Security Advisories. See SECURITY.md.
+  - name: Documentation
+    url: https://github.com/ebpfsentinel/ebpfsentinel-docs
+    about: Installation, configuration and operations guides.

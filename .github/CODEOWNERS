@@ -1,0 +1,12 @@
+# Who is asked to review a change here.
+#
+# One line, every path: with a single maintainer, a per-path table writes the
+# same handle on every row and reads as a review boundary that does not exist.
+# What this buys is a review request on every pull request from outside,
+# including the ones Renovate opens.
+#
+# The handle must be a user with write access to this repository. GitHub
+# silently ignores a rule whose owner it cannot resolve, so a rename turns this
+# file off rather than failing it.
+
+* @MaximeWewer

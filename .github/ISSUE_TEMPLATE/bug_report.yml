@@ -1,0 +1,55 @@
+name: Bug report
+description: Something the agent does that it should not, or does not do that it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A security vulnerability goes through the private advisory flow linked from the issue chooser, never here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The smallest configuration and traffic that shows it. Redact addresses and secrets.
+      render: yaml
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Agent version
+      description: Output of `ebpfsentinel-agent --version`, or the image tag.
+    validations:
+      required: true
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel and distribution
+      description: Output of `uname -r` and the distribution name. The agent needs 6.9 or later with BTF.
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - Binary on the host
+        - Docker or Podman
+        - Kubernetes (Helm chart)
+        - Kubernetes (operator)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Agent logs around the event. A verifier rejection is most useful in full.
+      render: text
