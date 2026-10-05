@@ -241,7 +241,9 @@ fn sanitize_detail(detail: &str) -> String {
 /// their full representation in the entry's `detail`.
 fn parse_target_ipv4(target: &str) -> ([u32; 4], bool) {
     if let Ok(addr) = target.parse::<std::net::Ipv4Addr>() {
-        ([u32::from(addr).to_be(), 0, 0, 0], false)
+        // The same word every other entry carries, `u32::from` of the
+        // address: swapping it to network order rendered 10.0.0.1 as 1.0.0.10.
+        ([u32::from(addr), 0, 0, 0], false)
     } else {
         ([0; 4], false)
     }
@@ -258,6 +260,14 @@ fn current_timestamp_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_action_carries_the_target_as_every_other_entry_does() {
+        let entry =
+            AuditEntry::response_action(AuditAction::RuleAdded, "192.168.0.1", "r", "blocked");
+        assert_eq!(entry.component, AuditComponent::Responses);
+        assert_eq!(entry.src_addr, [0xC0A8_0001, 0, 0, 0]);
+    }
 
     #[test]
     fn security_decision_creates_valid_entry() {

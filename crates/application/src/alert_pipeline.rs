@@ -896,6 +896,19 @@ impl AlertPipeline {
                         "auto-response: enforced"
                     );
                     self.metrics.record_auto_response(&policy.name);
+                    // The same trail a manual response leaves, so a source cut
+                    // off by a policy is answerable from the audit log alone.
+                    self.audit_service.record_response_action(
+                        AuditAction::RuleAdded,
+                        &src_ip.to_string(),
+                        &policy.name,
+                        &format!(
+                            "auto-response {} on {src_ip} for alert {} (ttl {}s)",
+                            policy.action.as_str(),
+                            alert.id,
+                            policy.ttl_secs
+                        ),
+                    );
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -2140,6 +2153,61 @@ mod tests {
 
         assert!(ips.load().is_blacklisted(IpAddr::from([192, 168, 0, 1])));
         assert_eq!(rl.read().await.policies().len(), 0);
+    }
+
+    struct RecordingAuditSink(std::sync::Mutex<Vec<AuditEntry>>);
+    impl AuditSink for RecordingAuditSink {
+        fn write_entry(&self, entry: &AuditEntry) -> Result<(), AuditError> {
+            self.0.lock().unwrap().push(entry.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_enforced_response_is_audited_under_the_policy_name() {
+        let metrics = Arc::new(TestMetrics::new());
+        let (ips, rl) = make_auto_response_services(&metrics);
+        let sink = Arc::new(RecordingAuditSink(std::sync::Mutex::new(Vec::new())));
+        let router = AlertRouter::new(
+            vec![make_route("all", Severity::Low)],
+            Duration::from_secs(0),
+            Duration::from_mins(5),
+            100,
+        );
+        let mut pipeline = AlertPipeline::new(
+            router,
+            metrics as Arc<dyn MetricsPort>,
+            Arc::new(AuditAppService::new(Arc::clone(&sink) as Arc<dyn AuditSink>)),
+        )
+        .with_auto_response(
+            vec![make_auto_response_policy(
+                domain::response::entity::ResponseActionType::BlockIp,
+                None,
+            )],
+            ips,
+            rl,
+        );
+
+        let alert = make_ids_alert("ids-001", Severity::High);
+        pipeline.process_alert(&alert).await;
+
+        let entries = sink.0.lock().unwrap();
+        let response = entries
+            .iter()
+            .find(|e| e.component == AuditComponent::Responses)
+            .expect("the enforced response is in the audit log");
+        assert_eq!(response.action, AuditAction::RuleAdded);
+        assert_eq!(
+            response.src_addr[0],
+            u32::from(std::net::Ipv4Addr::new(192, 168, 0, 1))
+        );
+        assert_eq!(response.rule_id, "auto");
+        assert!(
+            response.detail.contains("for alert "),
+            "{}",
+            response.detail
+        );
+        assert!(response.detail.contains("block_ip"), "{}", response.detail);
     }
 
     /// Process-level alerts carry no packet and zero their address fields.

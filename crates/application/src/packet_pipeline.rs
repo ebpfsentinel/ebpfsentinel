@@ -1466,8 +1466,10 @@ impl EventDispatcher {
             }
         }
 
+        // Filed under DDoS, the component that decided the drop, so
+        // `audit logs --component ddos` finds it.
         self.audit_service.record_security_decision(
-            AuditComponent::Ratelimit,
+            AuditComponent::Ddos,
             AuditAction::Drop,
             event.timestamp_ns,
             event.src_addr,
@@ -2652,6 +2654,33 @@ mod tests {
 
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "ddos");
+    }
+
+    #[tokio::test]
+    async fn a_ddos_drop_is_audited_under_ddos() {
+        struct Capture(std::sync::Mutex<Vec<AuditComponent>>);
+        impl AuditSink for Capture {
+            fn write_entry(&self, entry: &AuditEntry) -> Result<(), AuditError> {
+                self.0.lock().unwrap().push(entry.component);
+                Ok(())
+            }
+        }
+        let sink = Arc::new(Capture(std::sync::Mutex::new(Vec::new())));
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        let dispatcher = EventDispatcher::new(
+            make_service_with_rules(vec![]),
+            make_l7_service(),
+            make_ti_service(),
+            Arc::new(AuditAppService::new(Arc::clone(&sink) as Arc<dyn AuditSink>)),
+            Arc::new(TestMetrics::new()),
+            alert_tx,
+            None,
+        )
+        .with_ddos_service(make_ddos_service());
+
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_DDOS_SYN, 0));
+
+        assert_eq!(*sink.0.lock().unwrap(), vec![AuditComponent::Ddos]);
     }
 
     // ── Threatintel dispatch tests ───────────────────────────────
