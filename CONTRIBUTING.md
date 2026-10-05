@@ -276,7 +276,7 @@ All CI jobs must pass before merging.
 3. Ensure all checks pass locally:
    ```bash
    cargo fmt --check
-   cargo clippy -- -D warnings
+   cargo clippy --workspace --all-targets -- -D warnings
    cargo test
    cargo deny check
    ```

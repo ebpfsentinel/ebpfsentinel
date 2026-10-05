@@ -1,9 +1,12 @@
 name: CI
 
 on:
-  # This repository is worked on by pushing straight to main, so a pull
-  # request trigger is a gate that never fires. The push is the change.
+  # The push is how the maintainer lands a change; the pull request is how
+  # anybody else proposes one, and on a public repository that is the one
+  # change that has to pass every gate before it is read.
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
@@ -58,16 +61,19 @@ jobs:
           done
 
   # ── Lint ──────────────────────────────────────────────────────────
+  # Forty-five minutes rather than twenty: a toolchain release changes the
+  # cache key, and the cold run that follows took longer than twenty and was
+  # cancelled, which reads as a red build nobody can fix in the code.
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust-build
         with:
           toolchain-components: clippy
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       # The eBPF helper library sits outside the workspace, since the programs
       # build it for the BPF target, so the workspace command never reaches it.
       - run: cargo clippy --manifest-path crates/ebpf-helpers/Cargo.toml --all-targets -- -D warnings
