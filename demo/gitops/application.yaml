@@ -2,6 +2,23 @@
 # rolled out, and a hand edit in the cluster is put back. The chart and the
 # values both come from the one repository, the chart vendored under chart/
 # and never edited, the values in agent.yaml.
+#
+# The core install runs no API server, and the API server is what creates
+# the default project, so it is declared here.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default
+  namespace: argocd
+spec:
+  sourceRepos: ["*"]
+  destinations:
+    - server: "*"
+      namespace: "*"
+  clusterResourceWhitelist:
+    - group: "*"
+      kind: "*"
+---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -9,17 +26,16 @@ metadata:
   namespace: argocd
 spec:
   project: default
-  sources:
-    - repoURL: git://git.gitops.svc.cluster.local/estate.git
-      targetRevision: main
-      path: chart
-      helm:
-        releaseName: ebpfsentinel
-        valueFiles:
-          - $estate/agent.yaml
-    - repoURL: git://git.gitops.svc.cluster.local/estate.git
-      targetRevision: main
-      ref: estate
+  source:
+    repoURL: git://git.gitops.svc.cluster.local/estate.git
+    targetRevision: main
+    path: chart
+    helm:
+      releaseName: ebpfsentinel
+      # Relative to the chart, inside the same repository and so the same
+      # commit: one source, one revision, nothing to fall out of step.
+      valueFiles:
+        - ../agent.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: ebpfsentinel

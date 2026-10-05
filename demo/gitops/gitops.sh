@@ -119,10 +119,10 @@ argocd() {
   say "installing Argo CD (core: no UI, no API server)"
   kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   kubectl apply --server-side -n argocd -f "$RUN/argocd-core.yaml" >/dev/null
-  # Three minutes between two looks at the repository is right for an estate
-  # and long for a demo.
+  # Three minutes between two looks at the repository, plus up to a minute of
+  # jitter, is right for an estate and long for a demo.
   kubectl -n argocd patch configmap argocd-cm --type merge \
-    -p '{"data":{"timeout.reconciliation":"15s"}}' >/dev/null
+    -p '{"data":{"timeout.reconciliation":"15s","timeout.reconciliation.jitter":"0s"}}' >/dev/null
   kubectl -n argocd rollout restart statefulset argocd-application-controller >/dev/null
   kubectl -n argocd rollout status statefulset argocd-application-controller --timeout 5m >/dev/null
   kubectl -n argocd rollout status deployment argocd-repo-server --timeout 5m >/dev/null
