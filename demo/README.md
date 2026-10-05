@@ -17,9 +17,9 @@ were recorded from them.
 - On Ubuntu 24.04 and later, user namespaces allowed for the session:
   `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`. The
   script checks and says so rather than changing it.
-- For the GitOps lab, `git` and `curl`, and about 4 GB of free memory. kind,
-  kubectl and helm are fetched into `gitops/.run/bin` at pinned versions and
-  checked against their published SHA-256.
+- For the GitOps lab, `git` and `curl`. kind, kubectl, helm and the Argo CD
+  manifest are fetched into `gitops/.run/` at pinned versions and checked
+  against their SHA-256; `down` deletes them.
 
 ## Compose lab
 
@@ -54,8 +54,10 @@ git clone git://localhost:9418/estate.git
 A one-node kind cluster running Argo CD (core install) and a git server. The
 repository it serves holds the agent's Helm chart, vendored under `chart/`,
 and its values in `agent.yaml`, seeded from `gitops/estate/`. Argo CD keeps
-the `ebpfsentinel` namespace equal to the repository; `gitops/changes/` holds
-the change the tutorial commits.
+the `ebpfsentinel` namespace equal to the repository, polling it every
+fifteen seconds with no jitter, and reads chart and values from one source so
+both always come from the same commit; `gitops/changes/` holds the change the
+tutorial commits.
 
 `EBPFSENTINEL_TAG` picks the image tag in both labs, `latest` by default.
 `AGENT_CHART`, an absolute path to a checkout's `charts/ebpfsentinel`, points
