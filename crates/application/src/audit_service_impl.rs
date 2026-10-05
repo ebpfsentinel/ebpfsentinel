@@ -210,13 +210,13 @@ impl AuditAppService {
         store.query_entries(query)
     }
 
-    /// Get the total count of stored audit entries.
-    pub fn stored_entry_count(&self) -> Result<usize, AuditError> {
+    /// Count the stored audit entries matching a query's filters.
+    pub fn count_logs(&self, query: &AuditQuery) -> Result<usize, AuditError> {
         let store = self
             .store
             .as_ref()
             .ok_or_else(|| AuditError::StoreUnavailable("no audit store configured".to_string()))?;
-        store.entry_count()
+        store.count_entries(query)
     }
 
     /// Internal: write to both sink and store.

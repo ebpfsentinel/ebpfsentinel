@@ -145,7 +145,7 @@ impl AuditStore for RedbAuditStore {
         // Reverse for newest-first, then apply offset/limit.
         let total = entries.len();
         let start = query.offset.min(total);
-        let end = (start + query.limit).min(total);
+        let end = start.saturating_add(query.limit).min(total);
 
         let mut result: Vec<AuditEntry> = entries.into_iter().rev().collect();
         Ok(result.drain(start..end).collect())
@@ -361,6 +361,29 @@ mod tests {
         // Newest first: 1000, 900, 800, 700, ...
         // offset 2: skip 1000, 900 → 800, 700, 600
         assert_eq!(results[0].timestamp_ns, 800);
+    }
+
+    #[test]
+    fn count_follows_the_filter_and_not_the_page() {
+        let (store, _tmp) = make_store(100);
+        for ts in 1..=10 {
+            let component = if ts % 5 == 0 {
+                AuditComponent::Responses
+            } else {
+                AuditComponent::Firewall
+            };
+            store
+                .store_entry(&make_entry(component, AuditAction::Drop, ts * 100))
+                .unwrap();
+        }
+
+        let q = AuditQuery {
+            component: Some(AuditComponent::Responses),
+            limit: 1,
+            ..Default::default()
+        };
+        assert_eq!(store.query_entries(&q).unwrap().len(), 1);
+        assert_eq!(store.count_entries(&q).unwrap(), 2);
     }
 
     #[test]

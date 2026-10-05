@@ -496,17 +496,20 @@ pub async fn list_alerts(
         offset: if triage_filtered { 0 } else { offset },
     };
 
-    let total = store.alert_count().map_err(|e| ApiError::Internal {
-        message: format!("alert count failed: {e}"),
-    })?;
-
-    let mut alerts = store.query_alerts(&query).map_err(|e| ApiError::Internal {
+    let alerts = store.query_alerts(&query).map_err(|e| ApiError::Internal {
         message: format!("alert query failed: {e}"),
     })?;
 
-    if let Some(filter) = &filter {
-        alerts = filter.page(alerts, &triage, offset, limit);
-    }
+    // The total counts what the filters match, not the whole store, or a
+    // list narrowed to one component reports every component's alerts.
+    let (total, alerts) = if let Some(filter) = &filter {
+        filter.page(alerts, &triage, offset, limit)
+    } else {
+        let total = store.count_alerts(&query).map_err(|e| ApiError::Internal {
+            message: format!("alert count failed: {e}"),
+        })?;
+        (total, alerts)
+    };
 
     let response_alerts: Vec<AlertResponse> = alerts
         .into_iter()
@@ -624,19 +627,20 @@ impl TriageFilter {
 
     /// Keep what the filter keeps out of every match, then page it: the
     /// triage lives beside the alerts, so the store cannot page for it.
+    /// Returns how many were kept before paging, with the page.
     pub fn page(
         &self,
         alerts: Vec<Alert>,
         triage: &std::collections::HashMap<String, AlertTriage>,
         offset: usize,
         limit: usize,
-    ) -> Vec<Alert> {
-        alerts
+    ) -> (usize, Vec<Alert>) {
+        let kept: Vec<Alert> = alerts
             .into_iter()
             .filter(|a| self.keeps(triage.get(&a.id)))
-            .skip(offset)
-            .take(limit)
-            .collect()
+            .collect();
+        let total = kept.len();
+        (total, kept.into_iter().skip(offset).take(limit).collect())
     }
 }
 

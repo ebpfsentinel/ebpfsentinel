@@ -116,7 +116,7 @@ pub async fn list_audit_logs(
         message: format!("audit query failed: {e}"),
     })?;
 
-    let total = svc.stored_entry_count().map_err(|e| ApiError::Internal {
+    let total = svc.count_logs(&query).map_err(|e| ApiError::Internal {
         message: format!("audit count failed: {e}"),
     })?;
 

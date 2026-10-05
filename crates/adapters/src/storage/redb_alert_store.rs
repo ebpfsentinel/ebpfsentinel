@@ -592,6 +592,33 @@ mod tests {
     }
 
     #[test]
+    fn count_follows_the_filter_and_not_the_page() {
+        let (store, _tmp) = make_store(100);
+        for i in 1..=3 {
+            store
+                .store_alert(&make_alert(
+                    &format!("d{i}"),
+                    "ddos",
+                    Severity::Critical,
+                    "ddos-1",
+                    i * 100,
+                ))
+                .unwrap();
+        }
+        store
+            .store_alert(&make_alert("i1", "ids", Severity::High, "ids-001", 400))
+            .unwrap();
+
+        let query = AlertQuery {
+            component: Some("ddos".to_string()),
+            limit: 1,
+            ..AlertQuery::default()
+        };
+        assert_eq!(store.query_alerts(&query).unwrap().len(), 1);
+        assert_eq!(store.count_alerts(&query).unwrap(), 3);
+    }
+
+    #[test]
     fn triage_is_kept_beside_the_alert_and_read_back() {
         use domain::alert::triage::{AlertNote, AlertStatus, AssigneeChange};
         let (store, _tmp) = make_store(100);

@@ -27,6 +27,16 @@ pub trait AlertStore: Send + Sync {
 
     /// Total number of stored alerts.
     fn alert_count(&self) -> Result<usize, AlertError>;
+
+    /// How many stored alerts match the query's filters, ignoring its page.
+    fn count_alerts(&self, query: &AlertQuery) -> Result<usize, AlertError> {
+        let all = AlertQuery {
+            limit: usize::MAX,
+            offset: 0,
+            ..query.clone()
+        };
+        self.query_alerts(&all).map(|alerts| alerts.len())
+    }
 }
 
 /// What operators decided about stored alerts, kept beside the alerts.

@@ -17,6 +17,17 @@ pub trait AuditStore: Send + Sync {
     /// Results are returned in reverse chronological order (newest first).
     fn query_entries(&self, query: &AuditQuery) -> Result<Vec<AuditEntry>, AuditError>;
 
+    /// Number of stored entries matching the query's filters, ignoring its
+    /// limit and offset: the total a paginated listing reports beside a page.
+    fn count_entries(&self, query: &AuditQuery) -> Result<usize, AuditError> {
+        let all = AuditQuery {
+            limit: usize::MAX,
+            offset: 0,
+            ..query.clone()
+        };
+        self.query_entries(&all).map(|entries| entries.len())
+    }
+
     /// Remove entries older than `before_ns` (nanoseconds since epoch).
     ///
     /// Returns the number of entries removed.
