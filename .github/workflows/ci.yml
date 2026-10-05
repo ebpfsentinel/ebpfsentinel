@@ -91,6 +91,55 @@ jobs:
       # build it for the BPF target, so the workspace command never reaches it.
       - run: cargo test --manifest-path crates/ebpf-helpers/Cargo.toml
 
+  # ── Minimum supported Rust version ────────────────────────────────
+  # Every other job builds on `stable`, so the day the workspace leans on
+  # something newer than its declared `rust-version`, nothing would say so.
+  # The version is read from the manifest rather than written here, and
+  # RUSTUP_TOOLCHAIN overrides `rust-toolchain.toml`, which asks for stable.
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Read the declared rust-version
+        id: msrv
+        run: |
+          set -eu
+          version="$(sed -n 's/^rust-version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' Cargo.toml)"
+          if [ -z "$version" ]; then
+            echo "::error file=Cargo.toml::no rust-version in the workspace manifest"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev
+      - name: Check the workspace on the declared minimum
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.version }}
+        run: |
+          cargo check --workspace --all-targets
+          cargo check --manifest-path crates/ebpf-helpers/Cargo.toml --all-targets
+
+  # ── aarch64 ───────────────────────────────────────────────────────
+  # The README names aarch64 as a supported architecture, so the userspace
+  # crates are built and tested on an arm64 runner rather than only
+  # cross-compiled: a test that assumes x86 layout or endianness of a map
+  # value fails here and nowhere else.
+  test-arm64:
+    name: Tests (aarch64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust-build
+      - run: cargo test
+      - run: cargo build --release --bin ebpfsentinel-agent --bin warden
+
   # ── OpenAPI document is current ───────────────────────────────────
   openapi:
     name: OpenAPI

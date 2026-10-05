@@ -258,7 +258,7 @@ Per-feature configuration examples are in [`config/examples/`](config/examples/)
 
 - **OS:** Linux only (kernel 6.9+ with BTF)
 - **Distros:** Debian 13+, Ubuntu 24.04.2+ with the HWE kernel, RHEL / Rocky 10+, Fedora 41+, Alpine 3.21+, Arch, NixOS with `linuxPackages_latest`, Talos 1.9+. Not Debian 12 (6.1), Ubuntu 22.04 (HWE stops at 6.8), Ubuntu 24.04 on its GA kernel (6.8), RHEL 9 (5.14) or Alpine 3.20 (6.6) without a newer kernel
-- **Arch:** x86_64 (primary), aarch64 (cross-tested)
+- **Arch:** x86_64 and aarch64, the userspace tests run on both in CI
 - **Runtime:** Docker, Podman, Kubernetes (DaemonSet), Nomad
 
 See [Compatibility](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/operations/compatibility.md) for the full matrix.
