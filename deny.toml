@@ -5,6 +5,15 @@
 # (raw memory access, BPF helpers).
 
 [graph]
+# Only Linux images are built and shipped, so the graph is resolved for the
+# Linux targets alone, glibc and musl on both architectures; Windows and macOS crates never
+# enter a build and would only add duplicate-version noise.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-unknown-linux-musl" },
+    { triple = "aarch64-unknown-linux-musl" },
+]
 all-features = true
 
 [advisories]
@@ -32,6 +41,27 @@ allow = [
 multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
+# Every entry below is one crate that the dependency graph carries at two or
+# more semver-incompatible versions, each pulled by a different upstream crate
+# mid-migration (syn 2 and 3, rand 0.9 and 0.10, digest 0.10 and 0.11, ...).
+# A lock refresh cannot merge them; only upstream releases can. The list is
+# self-pruning: cargo-deny warns on an entry that no longer matches a duplicate,
+# so it shrinks as upstream catches up, and a duplicate of any crate not named
+# here still warns.
+skip = [
+    "base64",
+    "bitflags",
+    "errno",
+    "foldhash",
+    "getrandom",
+    "hashbrown",
+    "object",
+    "syn",
+    "thiserror",
+    "thiserror-impl",
+    "tower-http",
+    "untrusted",
+]
 
 [sources]
 unknown-registry = "deny"
