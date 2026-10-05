@@ -32,3 +32,9 @@ agent:
 # namespace and loads its own eBPF through the BPF token. The chart's default
 # warden/agent securityContexts (see values.yaml) already set this, so no
 # daemonset override is needed here.
+
+# Conntrack on, so verify can assert the rootless agent reads the kernel table:
+# that read needs CAP_NET_ADMIN in the host network namespace, which only the
+# warden holds.
+conntrack:
+  enabled: true
