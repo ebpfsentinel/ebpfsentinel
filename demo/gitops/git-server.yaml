@@ -1,0 +1,54 @@
+# The repository Argo CD watches, served from inside the cluster so the demo
+# needs no account anywhere. Plain git protocol with pushes allowed: this is a
+# lab, reachable only through `kubectl port-forward`, and it holds nothing but
+# the estate's own manifests.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gitops
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: git
+  namespace: gitops
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: git}
+  template:
+    metadata:
+      labels: {app: git}
+    spec:
+      containers:
+        - name: git
+          image: alpine:3.22
+          command:
+            - sh
+            - -c
+            - |
+              apk add --no-cache git-daemon >/dev/null
+              git init --quiet --bare --initial-branch=main /srv/git/estate.git
+              git -C /srv/git/estate.git config daemon.receivepack true
+              exec git daemon --reuseaddr --export-all --enable=receive-pack \
+                --base-path=/srv/git /srv/git
+          ports:
+            - containerPort: 9418
+          readinessProbe:
+            tcpSocket: {port: 9418}
+            periodSeconds: 2
+          volumeMounts:
+            - {name: repo, mountPath: /srv/git}
+      volumes:
+        - {name: repo, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: git
+  namespace: gitops
+spec:
+  selector: {app: git}
+  ports:
+    - port: 9418
+      targetPort: 9418

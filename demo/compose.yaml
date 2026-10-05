@@ -1,0 +1,113 @@
+# eBPFsentinel demo - one host, one lab network, nothing to sign up for.
+#
+#   sudo ./demo.sh up      # checks the host, then starts everything below
+#   sudo ./demo.sh down    # stops it and removes the lab network
+#
+# What runs:
+#   - warden, agent : the published images, as docker-compose.yml at the
+#                     repository root runs them, watching the lab bridge only
+#   - target        : the protected service, on the host, bound to the
+#                     bridge's own address 172.30.66.1 (HTTP 80, HTTPS 443)
+#   - attacker      : 172.30.66.66, sends the SYN flood
+#   - app           : 172.30.66.20, a workload speaking TLS through OpenSSL
+#
+# The bridge carries a fixed name, esdemo0, because the agent is told which
+# interface to attach to by name. Traffic from attacker and app to the target
+# crosses it, which is where the XDP and TC programs see it.
+
+name: ebpfsentinel-demo
+
+x-lab: &lab
+  build: ./lab
+  image: ebpfsentinel-demo-lab:local
+  restart: unless-stopped
+
+services:
+  warden:
+    image: ghcr.io/ebpfsentinel/ebpfsentinel-warden:${EBPFSENTINEL_TAG:-latest}
+    command: ["serve", "/run/ebpfsentinel/warden.sock", "--uid", "65534"]
+    network_mode: host
+    pid: host
+    cap_drop: [ALL]
+    cap_add: [SYS_ADMIN, NET_ADMIN, NET_RAW, SYS_PTRACE, BPF, PERFMON]
+    security_opt:
+      - apparmor=unconfined
+      - seccomp=unconfined
+    volumes:
+      - warden-sock:/run/ebpfsentinel
+      - /proc:/host/proc:ro
+    restart: unless-stopped
+
+  agent:
+    image: ghcr.io/ebpfsentinel/ebpfsentinel:${EBPFSENTINEL_TAG:-latest}
+    depends_on: [warden, target, attacker, app]
+    command: ["--config", "/etc/ebpfsentinel/config.yaml"]
+    environment:
+      EBPFSENTINEL_WARDEN_SOCK: /run/ebpfsentinel/warden.sock
+      EBPFSENTINEL_HOST_PROC: /host/proc
+    network_mode: host
+    pid: host
+    user: "65534:65534"
+    cap_drop: [ALL]
+    security_opt:
+      - seccomp=../dist/seccomp/ebpfsentinel-agent.json
+      - apparmor=unconfined
+    volumes:
+      # Written by demo.sh: owned by 65534 and mode 0640, which the agent
+      # insists on for a file that may hold secrets.
+      - ./.run/agent.yaml:/etc/ebpfsentinel/config.yaml
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - /proc:/host/proc:ro
+      - warden-sock:/run/ebpfsentinel:ro
+      - agent-state:/var/lib/ebpfsentinel
+      - type: tmpfs
+        target: /sys/fs/bpf
+        tmpfs:
+          mode: 0o1777
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ebpfsentinel-agent", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  target:
+    <<: *lab
+    command: ["python3", "/usr/local/bin/target.py"]
+    network_mode: host
+    depends_on: [attacker, app]
+
+  attacker:
+    <<: *lab
+    command: ["sleep", "infinity"]
+    cap_add: [NET_RAW, NET_ADMIN]
+    networks:
+      lab:
+        ipv4_address: 172.30.66.66
+
+  app:
+    <<: *lab
+    command: ["python3", "/usr/local/bin/workload.py"]
+    # The provider names resolve to the lab target, so a request "to OpenAI"
+    # carries the real name in its TLS ClientHello and never leaves the host.
+    extra_hosts:
+      - "api.openai.com:172.30.66.1"
+      - "api.anthropic.com:172.30.66.1"
+    networks:
+      lab:
+        ipv4_address: 172.30.66.20
+
+networks:
+  lab:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: esdemo0
+    ipam:
+      config:
+        - subnet: 172.30.66.0/24
+          gateway: 172.30.66.1
+
+volumes:
+  warden-sock:
+  agent-state:

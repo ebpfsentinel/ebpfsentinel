@@ -1,0 +1,109 @@
+# eBPFsentinel - demo agent configuration
+#
+# Watches one interface, the lab bridge `esdemo0` that compose.yaml creates,
+# so nothing the demo does touches the host's own uplink. Every scenario in the
+# tutorials reads this file as it stands: DDoS mitigation, DLP over TLS and the
+# shadow-AI rule are all on, and the two automated responses are the ones the
+# tutorials show firing.
+
+agent:
+  interfaces: [esdemo0]
+  # A Linux bridge has no driver-mode XDP, so the kernel attaches in generic
+  # mode. Fine for a demo; a production NIC takes native.
+  xdp_mode: auto
+  bind_address: "127.0.0.1"
+  log_level: info
+  log_format: text
+
+# A lab is not an installation worth counting.
+telemetry:
+  enabled: false
+
+firewall:
+  enabled: true
+  default_policy: pass
+
+ips:
+  enabled: true
+  # A blacklist entry, the automated responses' block included, is only
+  # installed in the datapath in block mode; alert mode records it.
+  mode: block
+
+conntrack:
+  enabled: true
+
+# Every DDoS guard runs inside the rate limiter's XDP program.
+ratelimit:
+  enabled: true
+  # The generic bucket is opened wide so a flood reaches the SYN guard
+  # rather than being dropped as plain excess traffic first.
+  default_rate: 1000000
+  default_burst: 2000000
+
+ddos:
+  enabled: true
+  syn_protection:
+    enabled: true
+    threshold_mode: true
+    threshold_pps: 1000
+  policies:
+    - id: demo-syn-flood
+      attack_type: syn_flood
+      detection_threshold_pps: 2000
+      mitigation_action: block
+      auto_block_duration_secs: 300
+      enabled: true
+
+l7:
+  enabled: true
+  ports: [80, 443]
+  rules:
+    # Shadow AI: a TLS ClientHello naming an AI provider. The deny is
+    # recorded and alerted on; the automated response below is what cuts
+    # the workload off.
+    - id: shadow-ai-openai
+      priority: 10
+      action: deny
+      protocol: tls
+      sni: "*.openai.com"
+    - id: shadow-ai-anthropic
+      priority: 11
+      action: deny
+      protocol: tls
+      sni: "*.anthropic.com"
+
+# Alert mode, the seventeen built-in patterns, read off OpenSSL's SSL_write and
+# SSL_read in every container on the host.
+dlp:
+  enabled: true
+  mode: alert
+
+auto_response:
+  enabled: true
+  policies:
+    - name: contain-ddos
+      min_severity: high
+      components: [ddos]
+      action: block
+      ttl_secs: 300
+    - name: contain-shadow-ai
+      min_severity: medium
+      components: [l7]
+      action: block
+      ttl_secs: 120
+
+audit:
+  enabled: true
+  retention_days: 30
+  storage_path: /var/lib/ebpfsentinel/audit.redb
+
+ids:
+  enabled: false
+threatintel:
+  enabled: false
+dns:
+  enabled: false
+alerting:
+  enabled: false
+auth:
+  enabled: false

@@ -1,0 +1,31 @@
+# Argo CD keeps the ebpfsentinel namespace equal to the repository: a commit is
+# rolled out, and a hand edit in the cluster is put back. The chart and the
+# values both come from the one repository, the chart vendored under chart/
+# and never edited, the values in agent.yaml.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: estate
+  namespace: argocd
+spec:
+  project: default
+  sources:
+    - repoURL: git://git.gitops.svc.cluster.local/estate.git
+      targetRevision: main
+      path: chart
+      helm:
+        releaseName: ebpfsentinel
+        valueFiles:
+          - $estate/agent.yaml
+    - repoURL: git://git.gitops.svc.cluster.local/estate.git
+      targetRevision: main
+      ref: estate
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ebpfsentinel
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
