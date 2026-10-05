@@ -6,8 +6,7 @@ use crate::common::entity::RuleId;
 use crate::common::error::DomainError;
 
 use super::entity::{
-    DdosAttack, DdosEnforcementAction, DdosEvent, DdosMitigationAction, DdosMitigationStatus,
-    DdosPolicy,
+    DdosAttack, DdosEnforcementAction, DdosEvent, DdosMitigationAction, DdosPolicy,
 };
 // Re-export for tests (used in test helpers via `use super::*`)
 #[cfg(test)]
@@ -87,27 +86,18 @@ impl DdosEngine {
 
     /// Process a `DDoS` event with an optional source-country code.
     ///
-    /// When `src_country` matches a key in the policy's `country_thresholds`,
-    /// that per-country value is used instead of `detection_threshold_pps`.
+    /// The country is kept on the attack it opens, and when it matches a key
+    /// in the policy's `country_thresholds` the tick measures the attack
+    /// against that value instead of `detection_threshold_pps`.
     pub fn process_event_with_country(&self, event: &DdosEvent, src_country: Option<&str>) -> bool {
         // Find matching policy for this attack type
-        let policy_idx = self
+        if !self
             .policies
             .iter()
-            .position(|p| p.enabled && p.attack_type == event.attack_type);
-
-        let Some(policy_idx) = policy_idx else {
+            .any(|p| p.enabled && p.attack_type == event.attack_type)
+        {
             return false;
-        };
-
-        let threshold = src_country
-            .and_then(|cc| {
-                self.policies[policy_idx]
-                    .country_thresholds
-                    .as_ref()
-                    .and_then(|ct| ct.get(cc).copied())
-            })
-            .unwrap_or(self.policies[policy_idx].detection_threshold_pps);
+        }
 
         let mut active_attacks = self
             .active_attacks
@@ -120,29 +110,12 @@ impl DdosEngine {
             .position(|a| a.attack_type == event.attack_type && !a.is_expired());
 
         if let Some(idx) = attack_idx {
+            // An event only counts; the status moves once a second in
+            // `tick`, whose counters are seconds. Stepping it here made them
+            // count events, so a flood confirmed or abandoned itself in a
+            // few packets.
             active_attacks[idx].record_event(event.timestamp_ns);
-
-            // Check for state transition
-            let old_status = active_attacks[idx].mitigation_status;
-            active_attacks[idx].update_status(threshold);
-            let new_status = active_attacks[idx].mitigation_status;
-
-            // Emit BlockCountry on transition to Active with Block policy
-            if old_status != DdosMitigationStatus::Active
-                && new_status == DdosMitigationStatus::Active
-            {
-                self.maybe_emit_block_country_locked(&active_attacks, idx);
-            }
-
-            if new_status == DdosMitigationStatus::Expired {
-                let expired = active_attacks.remove(idx);
-                self.total_mitigated.fetch_add(1, Ordering::Relaxed);
-                drop(active_attacks);
-                self.push_history(expired);
-                return true;
-            }
-
-            old_status != new_status
+            false
         } else if active_attacks.len() < MAX_ACTIVE_ATTACKS {
             let id = format!(
                 "ddos-{}",
@@ -165,6 +138,7 @@ impl DdosEngine {
             .unwrap_or_else(PoisonError::into_inner);
 
         let mut expired_indices = Vec::new();
+        let mut activated = Vec::new();
         for (idx, attack) in active_attacks.iter_mut().enumerate() {
             let threshold = self
                 .policies
@@ -183,10 +157,17 @@ impl DdosEngine {
                         .unwrap_or(p.detection_threshold_pps)
                 });
 
+            let was_active = attack.is_active();
+            attack.close_second();
             attack.update_status(threshold);
             if attack.is_expired() {
                 expired_indices.push(idx);
+            } else if !was_active && attack.is_active() {
+                activated.push(idx);
             }
+        }
+        for idx in activated {
+            self.maybe_emit_block_country_locked(&active_attacks, idx);
         }
 
         let mut blocked_countries = self
@@ -729,6 +710,46 @@ mod tests {
         engine.maybe_emit_block_country(0);
         let enforcements = engine.take_pending_enforcements();
         assert!(enforcements.is_empty());
+    }
+
+    #[test]
+    fn a_flood_cut_short_goes_to_history_through_the_tick() {
+        let mut engine = DdosEngine::new();
+        engine
+            .add_policy(make_policy("syn-1", DdosAttackType::SynFlood, 2000))
+            .unwrap();
+        for i in 0..6_000 {
+            engine.process_event(&make_event(DdosAttackType::SynFlood, 1_000_000_000 + i));
+        }
+        engine.tick();
+        let attack = &engine.active_attacks()[0];
+        assert_eq!(attack.peak_pps, 6_000);
+        assert_eq!(attack.mitigation_status, DdosMitigationStatus::Detecting);
+
+        for _ in 0..60 {
+            engine.tick();
+        }
+        assert_eq!(engine.active_attack_count(), 0);
+        assert_eq!(engine.attack_history(10)[0].peak_pps, 6_000);
+    }
+
+    #[test]
+    fn a_sustained_flood_is_confirmed_once_a_second() {
+        let mut engine = DdosEngine::new();
+        engine
+            .add_policy(make_policy("syn-1", DdosAttackType::SynFlood, 2000))
+            .unwrap();
+        for second in 0..3_u64 {
+            for i in 0..20_000 {
+                engine.process_event(&make_event(
+                    DdosAttackType::SynFlood,
+                    second * 1_000_000_000 + i,
+                ));
+            }
+            assert!(!engine.active_attacks()[0].is_active());
+            engine.tick();
+        }
+        assert!(engine.active_attacks()[0].is_active());
     }
 
     #[test]

@@ -364,6 +364,20 @@ pub async fn run(
         "DDoS engine initialized"
     );
 
+    // The engine counts events as they arrive and judges an attack once a
+    // second: confirmed, mitigated, expired. Without this tick an attack
+    // never left the active list and its rate froze at its last event.
+    {
+        let ddos_svc = Arc::clone(&ddos_svc);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                ddos_svc.load().tick();
+            }
+        });
+    }
+
     // ── 5c⅝. Build Load Balancer service ────────────────────────────
     let lb_services_cfg = config.lb_services()?;
     let mut lb_engine = domain::loadbalancer::engine::LbEngine::new();

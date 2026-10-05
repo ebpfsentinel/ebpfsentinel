@@ -81,10 +81,8 @@ pub struct DdosAttack {
     pub consecutive_below: u32,
     /// ISO 3166-1 alpha-2 country code of the attack source (if resolved).
     pub src_country: Option<String>,
-    /// Count for the current 1-second window.
-    window_count: u64,
-    /// Timestamp of the current window start.
-    window_start_ns: u64,
+    /// Events seen since the last tick, folded into the rate once a second.
+    second_count: u64,
 }
 
 /// Kernel-side enforcement action emitted by the `DDoS` engine.
@@ -126,8 +124,7 @@ impl DdosAttack {
             consecutive_above: 0,
             consecutive_below: 0,
             src_country: None,
-            window_count: 1,
-            window_start_ns: now_ns,
+            second_count: 1,
         }
     }
 
@@ -135,23 +132,22 @@ impl DdosAttack {
     pub fn record_event(&mut self, now_ns: u64) {
         self.total_packets += 1;
         self.last_seen_ns = now_ns;
+        self.second_count += 1;
+    }
 
-        // Check if we're in a new 1-second window
-        let elapsed = now_ns.saturating_sub(self.window_start_ns);
-        if elapsed >= NS_PER_SEC {
-            // Compute EWMA of pps
-            let instant_pps = self.window_count;
-            self.current_pps = (EWMA_ALPHA_NUM * instant_pps
-                + (EWMA_ALPHA_DEN - EWMA_ALPHA_NUM) * self.current_pps)
-                / EWMA_ALPHA_DEN;
-            self.peak_pps = self.peak_pps.max(self.current_pps);
-
-            // Reset window
-            self.window_count = 1;
-            self.window_start_ns = now_ns;
-        } else {
-            self.window_count += 1;
-        }
+    /// Fold the second that just ended into the rate. Call it once per
+    /// second from the engine's tick, before `update_status`.
+    ///
+    /// The tick rather than the next event closes the second, because the
+    /// second that matters most is the one after the source was blocked:
+    /// it carries no event, and a rate only an event could update stayed
+    /// at its last value, so a stopped flood read as one still running.
+    pub fn close_second(&mut self) {
+        let seen = std::mem::take(&mut self.second_count);
+        self.current_pps = (EWMA_ALPHA_NUM * seen
+            + (EWMA_ALPHA_DEN - EWMA_ALPHA_NUM) * self.current_pps)
+            / EWMA_ALPHA_DEN;
+        self.peak_pps = self.peak_pps.max(seen);
     }
 
     /// Update mitigation status based on a detection threshold.
@@ -169,6 +165,11 @@ impl DdosAttack {
             DdosMitigationStatus::Detecting => {
                 if self.consecutive_above >= ACTIVE_THRESHOLD_SECS {
                     self.mitigation_status = DdosMitigationStatus::Active;
+                } else if self.consecutive_below >= MITIGATED_THRESHOLD_SECS {
+                    // A candidate that stopped before it was confirmed, most
+                    // often because its source was blocked, goes to history
+                    // rather than sitting in the active list for good.
+                    self.mitigation_status = DdosMitigationStatus::Expired;
                 }
             }
             DdosMitigationStatus::Active => {
@@ -350,6 +351,24 @@ mod tests {
     }
 
     #[test]
+    fn a_candidate_that_goes_quiet_expires_with_its_peak() {
+        let mut attack = DdosAttack::new("atk-q".to_string(), DdosAttackType::SynFlood, 0);
+        // Six thousand events in the first second, then nothing: the
+        // source was blocked before the flood was confirmed.
+        for i in 1..6_000 {
+            attack.record_event(i * 16_000);
+        }
+        attack.close_second();
+        attack.update_status(2_000);
+        assert_eq!(attack.peak_pps, 6_000);
+        for _ in 0..MITIGATED_THRESHOLD_SECS {
+            attack.close_second();
+            attack.update_status(2_000);
+        }
+        assert!(attack.is_expired());
+    }
+
+    #[test]
     fn ddos_attack_rate_tracking() {
         let mut attack = DdosAttack::new("atk-2".to_string(), DdosAttackType::IcmpFlood, 0);
 
@@ -359,9 +378,22 @@ mod tests {
         }
         assert_eq!(attack.total_packets, 1001); // 1 from new + 1000 recorded
 
-        // Cross into new window to trigger EWMA
-        attack.record_event(NS_PER_SEC + 1);
-        assert!(attack.current_pps > 0);
+        attack.close_second();
+        assert_eq!(attack.peak_pps, 1001);
+        assert_eq!(attack.current_pps, 300);
+    }
+
+    #[test]
+    fn a_silent_second_lowers_the_rate() {
+        let mut attack = DdosAttack::new("atk-s".to_string(), DdosAttackType::SynFlood, 0);
+        for i in 1..10_000 {
+            attack.record_event(i);
+        }
+        attack.close_second();
+        let running = attack.current_pps;
+        attack.close_second();
+        assert!(attack.current_pps < running);
+        assert_eq!(attack.peak_pps, 10_000);
     }
 
     #[test]
