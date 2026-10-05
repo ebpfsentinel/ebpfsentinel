@@ -4,14 +4,14 @@
   <img src="./assets/ebpfsentinel-lockup-light.svg" width="600">
 </p>
 
-A unified, kernel-native **Network & Security platform** for Linux - one Rust binary that replaces your firewall, IDS/IPS, DDoS mitigation, DLP, and 10+ more tools, all running in-kernel via eBPF at wire speed. Not an endpoint agent - it enforces security inline, right where your traffic flows.
+A unified, kernel-native **Network & Security platform** for Linux - one Rust agent that replaces your firewall, IDS/IPS, DDoS mitigation, DLP, and 10+ more tools, all running in-kernel via eBPF at about a microsecond of kernel time per packet (see [Performance](#performance)). Not an endpoint agent - it enforces security inline, right where your traffic flows.
 
 ## Why eBPFsentinel
 
-- **One agent, not a stack.** Firewall, IDS/IPS, DDoS, DLP, threat intel, NAT, and QoS normally mean a rack of appliances or a pile of daemons - each with its own config, parser, and packet copy. eBPFsentinel runs them as a single binary sharing one kernel pipeline: less to deploy, less to patch, less attack surface.
+- **One agent, not a stack.** Firewall, IDS/IPS, DDoS, DLP, threat intel, NAT, and QoS normally mean a rack of appliances or a pile of daemons - each with its own config, parser, and packet copy. eBPFsentinel runs them as one agent sharing one kernel pipeline, beside a small privileged broker (the warden) that holds the few operations the kernel will not delegate: less to deploy, less to patch, less attack surface.
 - **In-kernel, at the source.** Programs attach at XDP/TC/uprobe hook points, so traffic is inspected and dropped in the kernel - no packet copy to userspace on the fast path, no sidecar hop. Malicious traffic dies on the wire instead of costing you CPU upstack.
 - **Network placement, not endpoint sprawl.** It runs where traffic flows - host NIC, node boundary - not as an agent on every workload. One enforcement point per node sees east-west and north-south alike, with no per-app instrumentation.
-- **Built for trust.** Pure Rust with `#![forbid(unsafe_code)]` across the domain and application layers and a hexagonal/DDD design. It runs **rootless** via BPF token delegation - zero `CAP_BPF` / `CAP_NET_ADMIN` - and tags every alert with MITRE ATT&CK for your SIEM.
+- **Built for trust.** Pure Rust with `#![forbid(unsafe_code)]` across the domain and application layers and a hexagonal/DDD design. The agent runs **rootless** via BPF token delegation - zero `CAP_BPF` / `CAP_NET_ADMIN` in the agent itself - and tags every alert with MITRE ATT&CK for your SIEM.
 
 ## What it does
 
@@ -83,7 +83,7 @@ A snapshot of the capabilities below - see the [Features guide](https://github.c
 flowchart TB
     subgraph kernel["Linux Kernel (16 eBPF programs)"]
         direction TB
-        subgraph xdp["XDP - wire-speed packet processing"]
+        subgraph xdp["XDP - first hook on the receive path"]
             fw["xdp-firewall\n(stateful L3/L4)"]
             fw_rej["xdp-firewall-reject\n(TCP RST / ICMP)"]
             rl["xdp-ratelimit\n(DDoS / rate limit)"]
@@ -257,11 +257,35 @@ Per-feature configuration examples are in [`config/examples/`](config/examples/)
 ## Compatibility
 
 - **OS:** Linux only (kernel 6.9+ with BTF)
-- **Distros:** Debian 12+, Ubuntu 24.04+ (or 22.04 HWE), RHEL 10+, Fedora 40+, Alpine edge, Arch, NixOS, Talos
+- **Distros:** Debian 13+, Ubuntu 24.04.2+ with the HWE kernel, RHEL / Rocky 10+, Fedora 41+, Alpine 3.21+, Arch, NixOS with `linuxPackages_latest`, Talos 1.9+. Not Debian 12 (6.1), Ubuntu 22.04 (HWE stops at 6.8), Ubuntu 24.04 on its GA kernel (6.8), RHEL 9 (5.14) or Alpine 3.20 (6.6) without a newer kernel
 - **Arch:** x86_64 (primary), aarch64 (cross-tested)
 - **Runtime:** Docker, Podman, Kubernetes (DaemonSet), Nomad
 
 See [Compatibility](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/operations/compatibility.md) for the full matrix.
+
+## Performance
+
+Measured on two VMware guests (4 vCPU, vmxnet3 at 10 Gbps, kernel 7.0) with
+pktgen sending 64-byte UDP frames and every feature enabled: about **1 µs of
+kernel time per received packet**, so about **1 Mpps per core**. The agent's
+RSS is 57 MB and its locked map memory 71 MB on 4 vCPUs, and the map memory
+grows with the CPU count. The per-core figures for higher rates are derived
+from that cost, not measured on a physical NIC. Every number, its method and
+its environment are in [`tests/perf/BENCHMARK-RESULTS.md`](tests/perf/BENCHMARK-RESULTS.md).
+
+## Telemetry
+
+Release builds send an **anonymous heartbeat every 30 minutes**, on by
+default: a random installation identifier drawn from `/dev/urandom`, the
+agent version, and the name and load state of each eBPF program. Nothing
+else - no configuration, rule, address, interface, host name or machine
+fingerprint - and the agent logs a line at boot saying so. Switch it off with
+`telemetry.enabled: false` or `EBPFSENTINEL_TELEMETRY_DISABLE=1` (any value).
+A build from this repository carries no destination and sends nothing. The
+receiving side keeps the source address only for its rate-limit window and
+deletes an installation that has not reported for thirty days. Details and
+the exact bytes on the wire:
+[Telemetry](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/configuration/telemetry.md).
 
 ## OSS vs Enterprise
 
@@ -279,7 +303,7 @@ The **enterprise edition** layers on capabilities for fleets and regulated envir
 | Integration & response | SIEM integration (10 connectors), automated response orchestration (SOAR) |
 | Compliance | Compliance reports (PCI-DSS 4, HIPAA, GDPR, SOC 2, NIS2, DORA, SecNumCloud, HDS) |
 | Licensing & integrity | Ed25519 + ML-DSA-65 dual-signed keys, machine fingerprint binding, air-gap activation, SHA-256 + Ed25519 binary self-verification at startup |
-| Kubernetes operator | CRD-driven deployment & lifecycle management for the agent fleet |
+| Kubernetes operator | The enterprise custom resources (the operator itself is open source, AGPL-3.0, and reconciles the agent and every OSS policy kind without a licence) |
 | Web dashboard | Multi-tenant web UI & control plane (MSSP front-end) |
 
 See [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/features/enterprise/overview.md) for the full list and per-feature detail.
