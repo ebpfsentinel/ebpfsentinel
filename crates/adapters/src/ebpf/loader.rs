@@ -544,7 +544,7 @@ impl EbpfLoader {
     //
     // Requires storing link FDs after initial attachment (currently discarded).
     //
-    // TODO(Wave 7): Store link FDs and implement atomic program replacement.
+    // TODO: store link FDs and implement atomic program replacement.
 
     // ── eBPF program unit testing via BPF_PROG_TEST_RUN (kernel 4.12+) ──
     //
@@ -562,9 +562,9 @@ impl EbpfLoader {
     //
     // aya 0.14.0: Program::test_run() is available.
     //
-    // TODO(Wave 7): Add eBPF unit test suite using test_run with crafted packets.
+    // TODO: add an eBPF unit test suite using test_run with crafted packets.
 
-    // TODO(W1-S3): BPF_MAP_FREEZE for read-only config maps.
+    // TODO: BPF_MAP_FREEZE for read-only config maps.
     //
     // After populating static config maps at startup (e.g. AMP_PROTECT_CONFIG,
     // RL_TIER_CONFIG), call `BPF_MAP_FREEZE` via `libc::syscall(SYS_bpf, BPF_MAP_FREEZE, ...)` to

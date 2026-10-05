@@ -156,7 +156,7 @@ impl ThreatIntelMapManager {
     // directly via libc::syscall(SYS_bpf, BPF_MAP_UPDATE_BATCH, ...) but
     // requires manual struct layout matching the kernel's bpf_attr union.
     //
-    // TODO(Wave 7): Implement raw batch syscall or wait for aya 0.14+ support.
+    // TODO: implement the raw batch syscall or wait for aya support.
 
     /// Atomically reload all IOCs: clear existing, then insert all new IOCs.
     ///

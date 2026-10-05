@@ -100,14 +100,15 @@ fn tracked_files_carry_no_typographic_dash() {
     );
 }
 
-/// A planning identifier: `E12`, `E12.3`, `E20.S5`, `E9.2-2`, `Epic 12`, `Story 4.5`.
+/// A planning identifier: `E12`, `E12.3`, `E20.S5`, `E9.2-2`, `Epic 12`, `Story 4.5`,
+/// `Wave 7`, `W1-S3`.
 ///
 /// The shape is deliberately narrow, because the alternative is a check nobody
 /// can add a line of prose past.
 fn planning_reference(line: &str) -> Option<String> {
     let chars: Vec<char> = line.chars().collect();
 
-    for word in ["Epic", "Story"] {
+    for word in ["Epic", "Story", "Wave"] {
         if let Some(at) = line.find(word) {
             let rest = &line[at + word.len()..];
             let rest = rest.strip_prefix(' ').unwrap_or(rest);
@@ -119,6 +120,10 @@ fn planning_reference(line: &str) -> Option<String> {
                 return Some(format!("{word} {tail}"));
             }
         }
+    }
+
+    if let Some(reference) = wave_step_reference(&chars) {
+        return Some(reference);
     }
 
     let mut index = 0;
@@ -177,6 +182,35 @@ fn planning_reference(line: &str) -> Option<String> {
     None
 }
 
+/// A wave and step pair, `W1-S3`, standing alone as a word.
+fn wave_step_reference(chars: &[char]) -> Option<String> {
+    let digits_from = |at: usize| {
+        chars[at..]
+            .iter()
+            .take_while(|c| c.is_ascii_digit())
+            .count()
+    };
+    let is_word = |c: &char| c.is_ascii_alphanumeric() || *c == '_';
+
+    for index in 0..chars.len() {
+        if chars[index] != 'W' || (index > 0 && is_word(&chars[index - 1])) {
+            continue;
+        }
+        let wave = digits_from(index + 1);
+        let dash = index + 1 + wave;
+        if wave == 0 || chars.get(dash) != Some(&'-') || chars.get(dash + 1) != Some(&'S') {
+            continue;
+        }
+        let step = digits_from(dash + 2);
+        let end = dash + 2 + step;
+        if step > 0 && !chars.get(end).is_some_and(is_word) {
+            return Some(chars[index..end].iter().collect());
+        }
+    }
+
+    None
+}
+
 #[test]
 fn tracked_files_carry_no_planning_reference() {
     let root = workspace_root();
@@ -219,6 +253,8 @@ fn the_reference_shape_is_the_one_this_tree_used() {
         "/// Update an existing custom role (E9.2-2).",
         "# Epic 12 covers the AI surface",
         "Story 4.5 adds tenants",
+        "// TODO(Wave 7): store link FDs",
+        "// TODO(W1-S3): BPF_MAP_FREEZE for read-only config maps.",
     ]
     .into_iter()
     .map(|line| (line, planning_reference(line)))
@@ -226,7 +262,7 @@ fn the_reference_shape_is_the_one_this_tree_used() {
 
     assert_eq!(
         found.values().filter(|r| r.is_some()).count(),
-        6,
+        8,
         "every shape this tree actually used must be caught: {found:#?}"
     );
 
@@ -237,6 +273,9 @@ fn the_reference_shape_is_the_one_this_tree_used() {
         "assert_eq!(status.entries, 12);",
         "let e12 = decode(&buf)?;",
         "// EDNS0 padding is not parsed",
+        "// the W3C trace context header",
+        "let tw1 = W1_S3;",
+        "// a wave of SYN packets",
     ] {
         assert_eq!(
             planning_reference(clean),
