@@ -196,12 +196,25 @@ up() {
   sync
 }
 
+# .run/ can be gone while the cluster is not - a sync that mirrors the checkout
+# deletes it - and `up` reuses a cluster it finds, repository and all, so `down`
+# must not depend on anything under .run/ to find what it tears down.
 down() {
   if [ -f "$RUN/port-forward.pid" ]; then
     kill "$(cat "$RUN/port-forward.pid")" 2>/dev/null || true
+  else
+    pkill -f "kubectl -n gitops port-forward service/git 9418:9418" 2>/dev/null || true
   fi
   if [ -x "$BIN/kind" ]; then
     "$BIN/kind" delete cluster --name "$CLUSTER" || true
+  else
+    local nodes
+    nodes="$(docker ps -aq --filter "label=io.x-k8s.kind.cluster=$CLUSTER" 2>/dev/null || true)"
+    if [ -n "$nodes" ]; then
+      say "deleting the kind cluster's nodes ($RUN is gone, and kind with it)"
+      # shellcheck disable=SC2086 # one container id per word
+      docker rm -f -v $nodes >/dev/null
+    fi
   fi
   rm -rf "$RUN"
 }
