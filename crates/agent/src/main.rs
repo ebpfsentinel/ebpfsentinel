@@ -3,6 +3,7 @@
 mod api_client;
 mod cli;
 mod commands;
+mod table;
 
 use anyhow::Result;
 

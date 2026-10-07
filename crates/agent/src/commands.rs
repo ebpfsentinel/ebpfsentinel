@@ -5,6 +5,7 @@ use crate::api_client::{
     IpsRuleResponse, StreamOpenError,
 };
 use crate::cli::OutputFormat;
+use crate::table::{Align, Table, cells};
 
 // ── Health ──────────────────────────────────────────────────────────────
 
@@ -52,24 +53,22 @@ pub async fn cmd_firewall_list(client: &ApiClient, output: OutputFormat) -> Resu
         return Ok(());
     }
 
-    println!(
-        "{:<16} {:>4}  {:<6}  {:<5}  {:<18}  {:<18}  {:>8}  {:>8}  {:<12}  {:<16}  {:<7}",
-        "ID",
-        "PRI",
-        "ACTION",
-        "PROTO",
-        "SRC IP",
-        "DST IP",
-        "SRC PORT",
-        "DST PORT",
-        "SCOPE",
-        "INTERFACES",
-        "ENABLED"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("PRI", Align::Right),
+        ("ACTION", Align::Left),
+        ("PROTO", Align::Left),
+        ("SRC IP", Align::Left),
+        ("DST IP", Align::Left),
+        ("SRC PORT", Align::Right),
+        ("DST PORT", Align::Right),
+        ("SCOPE", Align::Left),
+        ("INTERFACES", Align::Left),
+        ("ENABLED", Align::Left),
+    ]);
 
     for rule in &rules {
-        println!(
-            "{:<16} {:>4}  {:<6}  {:<5}  {:<18}  {:<18}  {:>8}  {:>8}  {:<12}  {:<16}  {:<7}",
+        table.row(cells![
             rule.id,
             rule.priority,
             rule.action,
@@ -80,9 +79,10 @@ pub async fn cmd_firewall_list(client: &ApiClient, output: OutputFormat) -> Resu
             rule.dst_port.as_deref().unwrap_or("-"),
             rule.scope,
             interface_scope(&rule.interfaces),
-            yes_no(rule.enabled),
-        );
+            yes_no(rule.enabled)
+        ]);
     }
+    table.print();
 
     println!("\n{} rule(s) total.", rules.len());
     Ok(())
@@ -126,23 +126,28 @@ pub async fn cmd_l7_list(client: &ApiClient, output: OutputFormat) -> Result<()>
         return Ok(());
     }
 
-    println!(
-        "{:<16} {:>4}  {:<6}  {:<18}  {:<18}  {:>8}  {:<7}",
-        "ID", "PRI", "ACTION", "SRC IP", "DST IP", "DST PORT", "ENABLED"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("PRI", Align::Right),
+        ("ACTION", Align::Left),
+        ("SRC IP", Align::Left),
+        ("DST IP", Align::Left),
+        ("DST PORT", Align::Right),
+        ("ENABLED", Align::Left),
+    ]);
 
     for rule in &rules {
-        println!(
-            "{:<16} {:>4}  {:<6}  {:<18}  {:<18}  {:>8}  {:<7}",
+        table.row(cells![
             rule.id,
             rule.priority,
             rule.action,
             rule.src_ip.as_deref().unwrap_or("-"),
             rule.dst_ip.as_deref().unwrap_or("-"),
             rule.dst_port.as_deref().unwrap_or("-"),
-            yes_no(rule.enabled),
-        );
+            yes_no(rule.enabled)
+        ]);
     }
+    table.print();
 
     println!("\n{} rule(s) total.", rules.len());
     Ok(())
@@ -186,14 +191,19 @@ pub async fn cmd_ips_list(client: &ApiClient, output: OutputFormat) -> Result<()
         return Ok(());
     }
 
-    println!(
-        "{:<16}  {:<8}  {:<7}  {:<5}  {:<24}  {:<30}  {:<16}  {:<7}",
-        "ID", "SEVERITY", "MODE", "PROTO", "MATCHES", "PATTERN", "INTERFACES", "ENABLED"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("SEVERITY", Align::Left),
+        ("MODE", Align::Left),
+        ("PROTO", Align::Left),
+        ("MATCHES", Align::Left),
+        ("PATTERN", Align::Left),
+        ("INTERFACES", Align::Left),
+        ("ENABLED", Align::Left),
+    ]);
 
     for rule in &rules {
-        println!(
-            "{:<16}  {:<8}  {:<7}  {:<5}  {:<24}  {:<30}  {:<16}  {:<7}",
+        table.row(cells![
             rule.id,
             rule.severity,
             rule.mode,
@@ -201,9 +211,10 @@ pub async fn cmd_ips_list(client: &ApiClient, output: OutputFormat) -> Result<()
             ips_rule_match(rule),
             rule.pattern,
             interface_scope(&rule.interfaces),
-            yes_no(rule.enabled),
-        );
+            yes_no(rule.enabled)
+        ]);
     }
+    table.print();
 
     println!("\n{} rule(s) total.", rules.len());
 
@@ -264,20 +275,22 @@ pub async fn cmd_ips_blacklist(client: &ApiClient, output: OutputFormat) -> Resu
         return Ok(());
     }
 
-    println!(
-        "{:<18}  {:<30}  {:<6}  {:>8}",
-        "IP", "REASON", "AUTO", "TTL (s)"
-    );
+    let mut table = Table::new(&[
+        ("IP", Align::Left),
+        ("REASON", Align::Left),
+        ("AUTO", Align::Left),
+        ("TTL (s)", Align::Right),
+    ]);
 
     for entry in &entries {
-        println!(
-            "{:<18}  {:<30}  {:<6}  {:>8}",
+        table.row(cells![
             entry.ip,
             entry.reason,
             yes_no(entry.auto_generated),
-            entry.ttl_remaining_secs,
-        );
+            entry.ttl_remaining_secs
+        ]);
     }
+    table.print();
 
     println!("\n{} entry(ies) total.", entries.len());
     Ok(())
@@ -296,17 +309,22 @@ pub async fn cmd_ips_domain_blocks(client: &ApiClient, output: OutputFormat) -> 
         return Ok(());
     }
 
-    println!(
-        "{:<18}  {:<25}  {:<15}  {:>8}",
-        "IP", "DOMAIN", "SOURCE", "TTL (s)"
-    );
+    let mut table = Table::new(&[
+        ("IP", Align::Left),
+        ("DOMAIN", Align::Left),
+        ("SOURCE", Align::Left),
+        ("TTL (s)", Align::Right),
+    ]);
 
     for entry in &entries {
-        println!(
-            "{:<18}  {:<25}  {:<15}  {:>8}",
-            entry.ip, entry.domain, entry.source, entry.ttl_remaining_secs,
-        );
+        table.row(cells![
+            entry.ip,
+            entry.domain,
+            entry.source,
+            entry.ttl_remaining_secs
+        ]);
     }
+    table.print();
 
     println!("\n{} entry(ies) total.", entries.len());
     Ok(())
@@ -333,14 +351,19 @@ pub async fn cmd_ratelimit_list(client: &ApiClient, output: OutputFormat) -> Res
         return Ok(());
     }
 
-    println!(
-        "{:<16}  {:<18}  {:>8}  {:>8}  {:<6}  {:<16}  {:<16}  {:<7}",
-        "ID", "SRC IP", "RATE", "BURST", "ACTION", "ALGORITHM", "INTERFACES", "ENABLED"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("SRC IP", Align::Left),
+        ("RATE", Align::Right),
+        ("BURST", Align::Right),
+        ("ACTION", Align::Left),
+        ("ALGORITHM", Align::Left),
+        ("INTERFACES", Align::Left),
+        ("ENABLED", Align::Left),
+    ]);
 
     for rule in &rules {
-        println!(
-            "{:<16}  {:<18}  {:>8}  {:>8}  {:<6}  {:<16}  {:<16}  {:<7}",
+        table.row(cells![
             rule.id,
             rule.src_ip,
             rule.rate,
@@ -348,9 +371,10 @@ pub async fn cmd_ratelimit_list(client: &ApiClient, output: OutputFormat) -> Res
             rule.action,
             rule.algorithm,
             interface_scope(&rule.interfaces),
-            yes_no(rule.enabled),
-        );
+            yes_no(rule.enabled)
+        ]);
     }
+    table.print();
 
     println!("\n{} rule(s) total.", rules.len());
     Ok(())
@@ -410,17 +434,24 @@ pub async fn cmd_threatintel_iocs(client: &ApiClient, output: OutputFormat) -> R
         return Ok(());
     }
 
-    println!(
-        "{:<18}  {:<20}  {:>4}  {:<12}  {:<20}",
-        "IP", "FEED ID", "CONF", "THREAT TYPE", "SOURCE FEED"
-    );
+    let mut table = Table::new(&[
+        ("IP", Align::Left),
+        ("FEED ID", Align::Left),
+        ("CONF", Align::Right),
+        ("THREAT TYPE", Align::Left),
+        ("SOURCE FEED", Align::Left),
+    ]);
 
     for ioc in &iocs {
-        println!(
-            "{:<18}  {:<20}  {:>4}  {:<12}  {:<20}",
-            ioc.ip, ioc.feed_id, ioc.confidence, ioc.threat_type, ioc.source_feed,
-        );
+        table.row(cells![
+            ioc.ip,
+            ioc.feed_id,
+            ioc.confidence,
+            ioc.threat_type,
+            ioc.source_feed
+        ]);
     }
+    table.print();
 
     println!("\n{} IOC(s) total.", iocs.len());
     Ok(())
@@ -439,23 +470,28 @@ pub async fn cmd_threatintel_feeds(client: &ApiClient, output: OutputFormat) -> 
         return Ok(());
     }
 
-    println!(
-        "{:<16}  {:<20}  {:<8}  {:<7}  {:>12}  {:>8}  {:>4}",
-        "ID", "NAME", "FORMAT", "ENABLED", "REFRESH (s)", "MAX IOCs", "CONF"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("NAME", Align::Left),
+        ("FORMAT", Align::Left),
+        ("ENABLED", Align::Left),
+        ("REFRESH (s)", Align::Right),
+        ("MAX IOCs", Align::Right),
+        ("CONF", Align::Right),
+    ]);
 
     for feed in &feeds {
-        println!(
-            "{:<16}  {:<20}  {:<8}  {:<7}  {:>12}  {:>8}  {:>4}",
+        table.row(cells![
             feed.id,
             feed.name,
             feed.format,
             yes_no(feed.enabled),
             feed.refresh_interval_secs,
             feed.max_iocs,
-            feed.min_confidence,
-        );
+            feed.min_confidence
+        ]);
     }
+    table.print();
 
     println!("\n{} feed(s) total.", feeds.len());
     Ok(())
@@ -491,33 +527,27 @@ pub async fn cmd_alerts_list(
         return Ok(());
     }
 
-    println!(
-        "{:<16}  {:<12}  {:<8}  {:<10}  {:<6}  {:<18}  {:<18}  {:>5}  {:>5}  {:<3}  {:<20}  {:<20}  {:<30}",
-        "ID",
-        "COMPONENT",
-        "SEVERITY",
-        "RULE ID",
-        "ACTION",
-        "SRC IP",
-        "DST IP",
-        "SPORT",
-        "DPORT",
-        "FP",
-        "SRC DOMAIN",
-        "DST DOMAIN",
-        "MESSAGE"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("COMPONENT", Align::Left),
+        ("SEVERITY", Align::Left),
+        ("RULE ID", Align::Left),
+        ("ACTION", Align::Left),
+        ("SRC IP", Align::Left),
+        ("DST IP", Align::Left),
+        ("SPORT", Align::Right),
+        ("DPORT", Align::Right),
+        ("FP", Align::Left),
+        ("SRC DOMAIN", Align::Left),
+        ("DST DOMAIN", Align::Left),
+        ("MESSAGE", Align::Left),
+    ]);
 
     for alert in &resp.alerts {
-        let msg = if alert.message.len() > 30 {
-            format!("{}...", &alert.message[..27])
-        } else {
-            alert.message.clone()
-        };
+        let msg = truncate(&alert.message, 48);
         let src_domain = alert.src_domain.as_deref().unwrap_or("-");
         let dst_domain = alert.dst_domain.as_deref().unwrap_or("-");
-        println!(
-            "{:<16}  {:<12}  {:<8}  {:<10}  {:<6}  {:<18}  {:<18}  {:>5}  {:>5}  {:<3}  {:<20}  {:<20}  {:<30}",
+        table.row(cells![
             alert.id,
             alert.component,
             alert.severity,
@@ -528,11 +558,12 @@ pub async fn cmd_alerts_list(
             alert.src_port,
             alert.dst_port,
             if alert.false_positive { "yes" } else { "no" },
-            truncate(src_domain, 20),
-            truncate(dst_domain, 20),
-            msg,
-        );
+            src_domain,
+            dst_domain,
+            msg
+        ]);
     }
+    table.print();
 
     println!(
         "\nShowing {}/{} alert(s) (offset={}).",
@@ -711,29 +742,39 @@ pub async fn cmd_alerts_stats(client: &ApiClient, limit: u64, output: OutputForm
     // Top sources
     let mut src_sorted: Vec<_> = by_src.iter().collect();
     src_sorted.sort_by(|a, b| b.1.cmp(a.1));
-    println!("  Top Sources              Alerts");
-    println!("  {}", "-".repeat(40));
+    let mut table =
+        Table::new(&[("Top Sources", Align::Left), ("Alerts", Align::Right)]).indent("  ");
     for (ip, count) in src_sorted.iter().take(10) {
-        println!("  {:<24} {:>6}", truncate(ip, 24), count);
+        table.row(cells![ip, count]);
     }
+    table.print();
     println!();
 
     // Top rules
     let mut rule_sorted: Vec<_> = by_rule.iter().collect();
     rule_sorted.sort_by_key(|item| std::cmp::Reverse((item.1).1));
-    println!("  Top Rules                Alerts  Severity");
-    println!("  {}", "-".repeat(50));
+    let mut table = Table::new(&[
+        ("Top Rules", Align::Left),
+        ("Alerts", Align::Right),
+        ("Severity", Align::Left),
+    ])
+    .indent("  ");
     for (rule, (severity, count)) in rule_sorted.iter().take(10) {
-        println!("  {:<24} {:>6}  {}", truncate(rule, 24), count, severity);
+        table.row(cells![rule, count, severity]);
     }
+    table.print();
     println!();
 
     // Component distribution
     let mut comp_sorted: Vec<_> = by_component.iter().collect();
     comp_sorted.sort_by(|a, b| b.1.cmp(a.1));
     let max_count = comp_sorted.first().map_or(1, |&(_, &c)| c);
-    println!("  Components               Alerts");
-    println!("  {}", "-".repeat(50));
+    let mut table = Table::new(&[
+        ("Components", Align::Left),
+        ("Alerts", Align::Right),
+        ("", Align::Left),
+    ])
+    .indent("  ");
     for &(comp, &count) in &comp_sorted {
         #[allow(
             clippy::cast_precision_loss,
@@ -742,8 +783,9 @@ pub async fn cmd_alerts_stats(client: &ApiClient, limit: u64, output: OutputForm
         )]
         let bar_len = ((count as f64 / max_count as f64) * 20.0) as usize;
         let bar: String = "\u{2588}".repeat(bar_len);
-        println!("  {comp:<12} {count:>6}  {bar}");
+        table.row(cells![comp, count, bar]);
     }
+    table.print();
     println!();
 
     Ok(())
@@ -764,17 +806,24 @@ pub async fn cmd_mitre_coverage(client: &ApiClient, output: OutputFormat) -> Res
     println!("MITRE ATT&CK Coverage ({})", resp.attack_version);
     println!("Total techniques covered: {}\n", resp.total_techniques);
 
-    println!(
-        "{:<12}  {:<12}  {:<55}  {:<22}  DESCRIPTION",
-        "COMPONENT", "TECHNIQUE", "NAME", "TACTIC"
-    );
+    let mut table = Table::new(&[
+        ("COMPONENT", Align::Left),
+        ("TECHNIQUE", Align::Left),
+        ("NAME", Align::Left),
+        ("TACTIC", Align::Left),
+        ("DESCRIPTION", Align::Left),
+    ]);
 
     for t in &resp.techniques {
-        println!(
-            "{:<12}  {:<12}  {:<55}  {:<22}  {}",
-            t.component, t.technique_id, t.technique_name, t.tactic, t.description,
-        );
+        table.row(cells![
+            t.component,
+            t.technique_id,
+            t.technique_name,
+            t.tactic,
+            t.description
+        ]);
     }
+    table.print();
 
     println!("\n── Coverage by tactic ──");
     for t in &resp.by_tactic {
@@ -834,21 +883,25 @@ pub async fn cmd_capture_list(client: &ApiClient, output: OutputFormat) -> Resul
         println!("No capture sessions.");
         return Ok(());
     }
-    println!(
-        "{:<20}  {:<8}  {:<30}  {:>8}  {:>10}  OUTPUT",
-        "ID", "STATUS", "FILTER", "DURATION", "SIZE"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("STATUS", Align::Left),
+        ("FILTER", Align::Left),
+        ("DURATION", Align::Right),
+        ("SIZE", Align::Right),
+        ("OUTPUT", Align::Left),
+    ]);
     for c in &resp.captures {
-        println!(
-            "{:<20}  {:<8}  {:<30}  {:>7}s  {:>9}B  {}",
+        table.row(cells![
             c.id,
             c.status,
-            truncate(&c.filter, 30),
-            c.duration_secs,
-            c.file_size_bytes,
-            c.output_path,
-        );
+            truncate(&c.filter, 40),
+            format!("{}s", c.duration_secs),
+            format!("{}B", c.file_size_bytes),
+            c.output_path
+        ]);
     }
+    table.print();
     Ok(())
 }
 
@@ -879,16 +932,25 @@ pub async fn cmd_responses_list(client: &ApiClient, output: OutputFormat) -> Res
         println!("No active response actions.");
         return Ok(());
     }
-    println!(
-        "{:<20}  {:<12}  {:<18}  {:>8}  {:>10}  {:<7}",
-        "ID", "ACTION", "TARGET", "TTL", "REMAINING", "REVOKED"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("ACTION", Align::Left),
+        ("TARGET", Align::Left),
+        ("TTL", Align::Right),
+        ("REMAINING", Align::Right),
+        ("REVOKED", Align::Left),
+    ]);
     for a in &resp.actions {
-        println!(
-            "{:<20}  {:<12}  {:<18}  {:>7}s  {:>9}s  {:<7}",
-            a.id, a.action_type, a.target, a.ttl_secs, a.remaining_secs, a.revoked,
-        );
+        table.row(cells![
+            a.id,
+            a.action_type,
+            a.target,
+            format!("{}s", a.ttl_secs),
+            format!("{}s", a.remaining_secs),
+            a.revoked
+        ]);
     }
+    table.print();
     println!("\n{} active action(s).", resp.active_count);
     Ok(())
 }
@@ -975,19 +1037,20 @@ pub async fn cmd_audit_logs(
         return Ok(());
     }
 
-    println!(
-        "{:<12}  {:<14}  {:<18}  {:<18}  {:>5}  {:>5}  {:<10}  {:<30}",
-        "COMPONENT", "ACTION", "SRC IP", "DST IP", "SPORT", "DPORT", "RULE ID", "DETAIL"
-    );
+    let mut table = Table::new(&[
+        ("COMPONENT", Align::Left),
+        ("ACTION", Align::Left),
+        ("SRC IP", Align::Left),
+        ("DST IP", Align::Left),
+        ("SPORT", Align::Right),
+        ("DPORT", Align::Right),
+        ("RULE ID", Align::Left),
+        ("DETAIL", Align::Left),
+    ]);
 
     for entry in &resp.entries {
-        let detail = if entry.detail.len() > 30 {
-            format!("{}...", &entry.detail[..27])
-        } else {
-            entry.detail.clone()
-        };
-        println!(
-            "{:<12}  {:<14}  {:<18}  {:<18}  {:>5}  {:>5}  {:<10}  {:<30}",
+        let detail = truncate(&entry.detail, 48);
+        table.row(cells![
             entry.component,
             entry.action,
             entry.src_ip_str(),
@@ -995,9 +1058,10 @@ pub async fn cmd_audit_logs(
             entry.src_port,
             entry.dst_port,
             entry.rule_id,
-            detail,
-        );
+            detail
+        ]);
     }
+    table.print();
 
     println!(
         "\nShowing {}/{} entry(ies) (offset={}).",
@@ -1022,10 +1086,13 @@ pub async fn cmd_audit_history(client: &ApiClient, id: &str, output: OutputForma
     }
 
     println!("Rule history for: {}", resp.rule_id);
-    println!(
-        "{:>4}  {:<14}  {:<12}  {:<8}  {:<40}",
-        "VER", "ACTION", "COMPONENT", "ACTOR", "AFTER"
-    );
+    let mut table = Table::new(&[
+        ("VER", Align::Right),
+        ("ACTION", Align::Left),
+        ("COMPONENT", Align::Left),
+        ("ACTOR", Align::Left),
+        ("AFTER", Align::Left),
+    ]);
 
     for entry in &resp.entries {
         let after = entry.after.as_deref().unwrap_or("-");
@@ -1034,11 +1101,15 @@ pub async fn cmd_audit_history(client: &ApiClient, id: &str, output: OutputForma
         } else {
             after.to_string()
         };
-        println!(
-            "{:>4}  {:<14}  {:<12}  {:<8}  {:<40}",
-            entry.version, entry.action, entry.component, entry.actor, after_display,
-        );
+        table.row(cells![
+            entry.version,
+            entry.action,
+            entry.component,
+            entry.actor,
+            after_display
+        ]);
     }
+    table.print();
 
     println!("\n{} version(s).", resp.entries.len());
     Ok(())
@@ -1066,27 +1137,25 @@ pub async fn cmd_dns_cache(
         return Ok(());
     }
 
-    println!(
-        "{:<30}  {:<30}  {:>8}  {:>8}  {:<7}",
-        "DOMAIN", "IPs", "TTL (s)", "QUERIES", "BLOCKED"
-    );
+    let mut table = Table::new(&[
+        ("DOMAIN", Align::Left),
+        ("IPs", Align::Left),
+        ("TTL (s)", Align::Right),
+        ("QUERIES", Align::Right),
+        ("BLOCKED", Align::Left),
+    ]);
 
     for entry in &resp.entries {
-        let ips = entry.ips.join(", ");
-        let ips_display = if ips.len() > 30 {
-            format!("{}...", &ips[..27])
-        } else {
-            ips
-        };
-        println!(
-            "{:<30}  {:<30}  {:>8}  {:>8}  {:<7}",
-            truncate(&entry.domain, 30),
+        let ips_display = truncate(&entry.ips.join(", "), 40);
+        table.row(cells![
+            entry.domain,
             ips_display,
             entry.ttl_remaining_secs,
             entry.query_count,
-            yes_no(entry.is_blocked),
-        );
+            yes_no(entry.is_blocked)
+        ]);
     }
+    table.print();
 
     println!(
         "\nPage {}, {} entry(ies) shown.",
@@ -1119,14 +1188,12 @@ pub async fn cmd_dns_stats(client: &ApiClient, output: OutputFormat) -> Result<(
 
     if !stats.top_queried.is_empty() {
         println!("\nTop queried domains:");
-        println!("  {:<30}  {:>8}", "DOMAIN", "QUERIES");
+        let mut table =
+            Table::new(&[("DOMAIN", Align::Left), ("QUERIES", Align::Right)]).indent("  ");
         for entry in &stats.top_queried {
-            println!(
-                "  {:<30}  {:>8}",
-                truncate(&entry.domain, 30),
-                entry.query_count
-            );
+            table.row(cells![entry.domain, entry.query_count]);
         }
+        table.print();
     }
 
     Ok(())
@@ -1145,16 +1212,20 @@ pub async fn cmd_dns_blocklist(client: &ApiClient, output: OutputFormat) -> Resu
         return Ok(());
     }
 
-    println!("{:<30}  {:<8}  {:>8}", "PATTERN", "ACTION", "MATCHES");
+    let mut table = Table::new(&[
+        ("PATTERN", Align::Left),
+        ("ACTION", Align::Left),
+        ("MATCHES", Align::Right),
+    ]);
 
     for rule in &rules {
-        println!(
-            "{:<30}  {:<8}  {:>8}",
-            truncate(&rule.pattern, 30),
+        table.row(cells![
+            truncate(&rule.pattern, 40),
             rule.action,
-            rule.match_count,
-        );
+            rule.match_count
+        ]);
     }
+    table.print();
 
     println!("\n{} rule(s) total.", rules.len());
     Ok(())
@@ -1199,10 +1270,12 @@ pub async fn cmd_domains_reputation(
         return Ok(());
     }
 
-    println!(
-        "{:<30}  {:>6}  {:<30}  {:<7}",
-        "DOMAIN", "SCORE", "FACTORS", "BLOCKED"
-    );
+    let mut table = Table::new(&[
+        ("DOMAIN", Align::Left),
+        ("SCORE", Align::Right),
+        ("FACTORS", Align::Left),
+        ("BLOCKED", Align::Left),
+    ]);
 
     for entry in &resp.entries {
         let factors = if entry.factors.is_empty() {
@@ -1210,14 +1283,14 @@ pub async fn cmd_domains_reputation(
         } else {
             entry.factors.join(", ")
         };
-        println!(
-            "{:<30}  {:>6.3}  {:<30}  {:<7}",
-            truncate(&entry.domain, 30),
-            entry.score,
-            truncate(&factors, 30),
-            yes_no(entry.is_blocked),
-        );
+        table.row(cells![
+            entry.domain,
+            format!("{:.3}", entry.score),
+            truncate(&factors, 40),
+            yes_no(entry.is_blocked)
+        ]);
     }
+    table.print();
 
     println!(
         "\nPage {}, {} entry(ies) shown.",
@@ -1290,14 +1363,19 @@ pub async fn cmd_ddos_attacks(client: &ApiClient, output: OutputFormat) -> Resul
         return Ok(());
     }
 
-    println!(
-        "{:<16}  {:<18}  {:<10}  {:<7}  {:>10}  {:>10}  {:>12}  {:>8}",
-        "ID", "ATTACK TYPE", "STATUS", "COUNTRY", "PEAK PPS", "CUR PPS", "TOTAL PKTS", "SOURCES"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("ATTACK TYPE", Align::Left),
+        ("STATUS", Align::Left),
+        ("COUNTRY", Align::Left),
+        ("PEAK PPS", Align::Right),
+        ("CUR PPS", Align::Right),
+        ("TOTAL PKTS", Align::Right),
+        ("SOURCES", Align::Right),
+    ]);
 
     for a in &attacks {
-        println!(
-            "{:<16}  {:<18}  {:<10}  {:<7}  {:>10}  {:>10}  {:>12}  {:>8}",
+        table.row(cells![
             a.id,
             a.attack_type,
             a.status,
@@ -1305,9 +1383,10 @@ pub async fn cmd_ddos_attacks(client: &ApiClient, output: OutputFormat) -> Resul
             a.peak_pps,
             a.current_pps,
             a.total_packets,
-            a.source_count,
-        );
+            a.source_count
+        ]);
     }
+    table.print();
 
     println!("\n{} active attack(s).", attacks.len());
     Ok(())
@@ -1330,14 +1409,19 @@ pub async fn cmd_ddos_history(
         return Ok(());
     }
 
-    println!(
-        "{:<16}  {:<18}  {:<10}  {:<7}  {:>10}  {:>10}  {:>12}  {:>8}",
-        "ID", "ATTACK TYPE", "STATUS", "COUNTRY", "PEAK PPS", "CUR PPS", "TOTAL PKTS", "SOURCES"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("ATTACK TYPE", Align::Left),
+        ("STATUS", Align::Left),
+        ("COUNTRY", Align::Left),
+        ("PEAK PPS", Align::Right),
+        ("CUR PPS", Align::Right),
+        ("TOTAL PKTS", Align::Right),
+        ("SOURCES", Align::Right),
+    ]);
 
     for a in &attacks {
-        println!(
-            "{:<16}  {:<18}  {:<10}  {:<7}  {:>10}  {:>10}  {:>12}  {:>8}",
+        table.row(cells![
             a.id,
             a.attack_type,
             a.status,
@@ -1345,9 +1429,10 @@ pub async fn cmd_ddos_history(
             a.peak_pps,
             a.current_pps,
             a.total_packets,
-            a.source_count,
-        );
+            a.source_count
+        ]);
     }
+    table.print();
 
     println!("\n{} historical attack(s).", attacks.len());
     Ok(())
@@ -1366,10 +1451,15 @@ pub async fn cmd_ddos_policies(client: &ApiClient, output: OutputFormat) -> Resu
         return Ok(());
     }
 
-    println!(
-        "{:<16}  {:<18}  {:>12}  {:<10}  {:>12}  {:<7}  {:>9}",
-        "ID", "ATTACK TYPE", "THRESH PPS", "ACTION", "BLOCK (s)", "ENABLED", "COUNTRIES"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("ATTACK TYPE", Align::Left),
+        ("THRESH PPS", Align::Right),
+        ("ACTION", Align::Left),
+        ("BLOCK (s)", Align::Right),
+        ("ENABLED", Align::Left),
+        ("COUNTRIES", Align::Right),
+    ]);
 
     for p in &policies {
         // The per-country thresholds are a map: the table says how many
@@ -1379,17 +1469,17 @@ pub async fn cmd_ddos_policies(client: &ApiClient, output: OutputFormat) -> Resu
             .country_thresholds
             .as_ref()
             .map_or(0, std::collections::HashMap::len);
-        println!(
-            "{:<16}  {:<18}  {:>12}  {:<10}  {:>12}  {:<7}  {:>9}",
+        table.row(cells![
             p.id,
             p.attack_type,
             p.detection_threshold_pps,
             p.mitigation_action,
             p.auto_block_duration_secs,
             yes_no(p.enabled),
-            countries,
-        );
+            countries
+        ]);
     }
+    table.print();
 
     println!("\n{} policy(ies) total.", policies.len());
     Ok(())
@@ -1449,25 +1539,32 @@ pub async fn cmd_lb_services(client: &ApiClient, output: OutputFormat) -> Result
 
     // MODE decides whether the reply leaves through the balancer at all, and
     // PROBED says whether the statuses on the detail screen were measured.
-    println!(
-        "{:<16}  {:<20}  {:<8}  {:>6}  {:<14}  {:<6}  {:>8}  {:<7}  {:<7}",
-        "ID", "NAME", "PROTO", "PORT", "ALGORITHM", "MODE", "BACKENDS", "PROBED", "ENABLED"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("NAME", Align::Left),
+        ("PROTO", Align::Left),
+        ("PORT", Align::Right),
+        ("ALGORITHM", Align::Left),
+        ("MODE", Align::Left),
+        ("BACKENDS", Align::Right),
+        ("PROBED", Align::Left),
+        ("ENABLED", Align::Left),
+    ]);
 
     for svc in &services {
-        println!(
-            "{:<16}  {:<20}  {:<8}  {:>6}  {:<14}  {:<6}  {:>8}  {:<7}  {:<7}",
+        table.row(cells![
             svc.id,
-            truncate(&svc.name, 20),
+            svc.name,
             svc.protocol,
             svc.listen_port,
             svc.algorithm,
             svc.mode,
             svc.backend_count,
             yes_no(svc.health_checked),
-            yes_no(svc.enabled),
-        );
+            yes_no(svc.enabled)
+        ]);
     }
+    table.print();
 
     println!("\n{} service(s) total.", services.len());
     Ok(())
@@ -1504,13 +1601,21 @@ pub async fn cmd_lb_service(client: &ApiClient, id: &str, output: OutputFormat) 
     if svc.backends.is_empty() {
         println!("\n  No backends.");
     } else {
-        println!(
-            "\n  {:<12}  {:<18}  {:>6}  {:>6}  {:<8}  {:<9}  {:<7}  {:>6}  {:<7}",
-            "BACKEND", "ADDR", "PORT", "WEIGHT", "SAME-SEG", "STATUS", "PROBED", "CONNS", "ENABLED"
-        );
+        println!();
+        let mut table = Table::new(&[
+            ("BACKEND", Align::Left),
+            ("ADDR", Align::Left),
+            ("PORT", Align::Right),
+            ("WEIGHT", Align::Right),
+            ("SAME-SEG", Align::Left),
+            ("STATUS", Align::Left),
+            ("PROBED", Align::Left),
+            ("CONNS", Align::Right),
+            ("ENABLED", Align::Left),
+        ])
+        .indent("  ");
         for be in &svc.backends {
-            println!(
-                "  {:<12}  {:<18}  {:>6}  {:>6}  {:<8}  {:<9}  {:<7}  {:>6}  {:<7}",
+            table.row(cells![
                 be.id,
                 be.addr,
                 be.port,
@@ -1519,9 +1624,10 @@ pub async fn cmd_lb_service(client: &ApiClient, id: &str, output: OutputFormat) 
                 be.status,
                 yes_no(be.probed),
                 be.active_connections,
-                yes_no(be.enabled),
-            );
+                yes_no(be.enabled)
+            ]);
         }
+        table.print();
         println!("\n  {} backend(s) total.", svc.backends.len());
     }
     Ok(())
@@ -1569,19 +1675,23 @@ pub async fn cmd_lb_vips(client: &ApiClient, output: OutputFormat) -> Result<()>
         return Ok(());
     }
 
-    println!(
-        "\n  {:<20}  {:<18}  {:>12}  {:<10}",
-        "NAME", "ADDR", "ARP_REPLIES", "ANNOUNCED"
-    );
+    println!();
+    let mut table = Table::new(&[
+        ("NAME", Align::Left),
+        ("ADDR", Align::Left),
+        ("ARP_REPLIES", Align::Right),
+        ("ANNOUNCED", Align::Left),
+    ])
+    .indent("  ");
     for vip in &status.vips {
-        println!(
-            "  {:<20}  {:<18}  {:>12}  {:<10}",
-            truncate(&vip.name, 20),
+        table.row(cells![
+            vip.name,
             vip.addr,
             vip.arp_replies,
-            yes_no(vip.self_announced),
-        );
+            yes_no(vip.self_announced)
+        ]);
     }
+    table.print();
     println!("\n  {} VIP(s) total.", status.vips.len());
     Ok(())
 }
@@ -1636,24 +1746,30 @@ pub async fn cmd_qos_pipes(client: &ApiClient, output: OutputFormat) -> Result<(
         return Ok(());
     }
 
-    println!(
-        "{:<16}  {:>14}  {:>14}  {:<8}  {:>9}  {:>7}  {:<16}  {:<8}",
-        "ID", "RATE (bps)", "BURST (bytes)", "DIR", "DELAY(ms)", "LOSS(%)", "INTERFACES", "STATE"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("RATE (bps)", Align::Right),
+        ("BURST (bytes)", Align::Right),
+        ("DIR", Align::Left),
+        ("DELAY(ms)", Align::Right),
+        ("LOSS(%)", Align::Right),
+        ("INTERFACES", Align::Left),
+        ("STATE", Align::Left),
+    ]);
 
     for pipe in &pipes {
-        println!(
-            "{:<16}  {:>14}  {:>14}  {:<8}  {:>9}  {:>7.2}  {:<16}  {:<8}",
+        table.row(cells![
             pipe.id,
             pipe.rate_bps,
             pipe.burst_bytes,
             pipe.direction,
             pipe.delay_ms,
-            pipe.loss_pct,
+            format!("{:.2}", pipe.loss_pct),
             interface_scope(&pipe.interfaces),
-            if pipe.enabled { "enabled" } else { "disabled" },
-        );
+            if pipe.enabled { "enabled" } else { "disabled" }
+        ]);
     }
+    table.print();
 
     println!("\n{} pipe(s) total.", pipes.len());
     Ok(())
@@ -1672,16 +1788,20 @@ pub async fn cmd_qos_queues(client: &ApiClient, output: OutputFormat) -> Result<
         return Ok(());
     }
 
-    println!("{:<16}  {:<16}  {:<8}", "ID", "PIPE ID", "STATE");
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("PIPE ID", Align::Left),
+        ("STATE", Align::Left),
+    ]);
 
     for queue in &queues {
-        println!(
-            "{:<16}  {:<16}  {:<8}",
+        table.row(cells![
             queue.id,
             queue.pipe_id,
             if queue.enabled { "enabled" } else { "disabled" }
-        );
+        ]);
     }
+    table.print();
 
     println!("\n{} queue(s) total.", queues.len());
     Ok(())
@@ -1700,20 +1820,22 @@ pub async fn cmd_qos_classifiers(client: &ApiClient, output: OutputFormat) -> Re
         return Ok(());
     }
 
-    println!(
-        "{:<16}  {:<16}  {:>4}  {:<16}",
-        "ID", "QUEUE ID", "PRI", "INTERFACES"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("QUEUE ID", Align::Left),
+        ("PRI", Align::Right),
+        ("INTERFACES", Align::Left),
+    ]);
 
     for cls in &classifiers {
-        println!(
-            "{:<16}  {:<16}  {:>4}  {:<16}",
+        table.row(cells![
             cls.id,
             cls.queue_id,
             cls.priority,
-            interface_scope(&cls.interfaces),
-        );
+            interface_scope(&cls.interfaces)
+        ]);
     }
+    table.print();
 
     println!("\n{} classifier(s) total.", classifiers.len());
     Ok(())
@@ -1995,11 +2117,16 @@ pub async fn cmd_top(
         return Ok(());
     }
 
-    println!(
-        "{:<22} {:>5}  {:<22} {:>5}  {:<5}  {:<6}  {:>10}  {:>10}",
-        "SOURCE", "PORT", "DESTINATION", "PORT", "PROTO", "STATE", "BYTES", "PACKETS"
-    );
-    println!("{}", "-".repeat(100));
+    let mut table = Table::new(&[
+        ("SOURCE", Align::Left),
+        ("PORT", Align::Right),
+        ("DESTINATION", Align::Left),
+        ("PORT", Align::Right),
+        ("PROTO", Align::Left),
+        ("STATE", Align::Left),
+        ("BYTES", Align::Right),
+        ("PACKETS", Align::Right),
+    ]);
 
     for c in &conns {
         let total_bytes = u64::from(c.bytes_fwd) + u64::from(c.bytes_rev);
@@ -2011,18 +2138,18 @@ pub async fn cmd_top(
             58 => "ICMPv6",
             _ => "OTHER",
         };
-        println!(
-            "{:<22} {:>5}  {:<22} {:>5}  {:<5}  {:<6}  {:>10}  {:>10}",
-            truncate(&c.src_ip, 22),
+        table.row(cells![
+            c.src_ip,
             c.src_port,
-            truncate(&c.dst_ip, 22),
+            c.dst_ip,
             c.dst_port,
             proto,
-            truncate(&c.state, 6),
+            c.state,
             format_bytes(total_bytes),
             total_pkts,
-        );
+        ]);
     }
+    table.print();
 
     println!("\n{} connection(s) shown (sorted by {sort}).", conns.len());
     Ok(())
@@ -2083,21 +2210,17 @@ pub async fn cmd_flows(client: &ApiClient, limit: usize, output: OutputFormat) -
         return Ok(());
     }
 
-    println!(
-        "{:<60} {:>6}  {:>10}  {:>10}",
-        "FLOW", "CONNS", "BYTES", "PACKETS"
-    );
-    println!("{}", "-".repeat(92));
+    let mut table = Table::new(&[
+        ("FLOW", Align::Left),
+        ("CONNS", Align::Right),
+        ("BYTES", Align::Right),
+        ("PACKETS", Align::Right),
+    ]);
 
     for (key, agg) in &sorted {
-        println!(
-            "{:<60} {:>6}  {:>10}  {:>10}",
-            truncate(key, 60),
-            agg.flows,
-            format_bytes(agg.bytes),
-            agg.packets,
-        );
+        table.row(cells![key, agg.flows, format_bytes(agg.bytes), agg.packets]);
     }
+    table.print();
 
     println!(
         "\n{} aggregated flow(s) from {} connection(s).",
@@ -2134,13 +2257,18 @@ pub async fn cmd_conntrack_list(
     if output == OutputFormat::Json {
         println!("{}", serde_json::to_string_pretty(&conns)?);
     } else {
-        println!(
-            "{:<16} {:<16} {:>6} {:>6} {:>5} {:>12} {:>12} {:>12}",
-            "SRC", "DST", "SPORT", "DPORT", "PROTO", "STATE", "PKT_FWD", "PKT_REV"
-        );
+        let mut table = Table::new(&[
+            ("SRC", Align::Left),
+            ("DST", Align::Left),
+            ("SPORT", Align::Right),
+            ("DPORT", Align::Right),
+            ("PROTO", Align::Right),
+            ("STATE", Align::Right),
+            ("PKT_FWD", Align::Right),
+            ("PKT_REV", Align::Right),
+        ]);
         for c in &conns {
-            println!(
-                "{:<16} {:<16} {:>6} {:>6} {:>5} {:>12} {:>12} {:>12}",
+            table.row(cells![
                 c.src_ip,
                 c.dst_ip,
                 c.src_port,
@@ -2148,9 +2276,10 @@ pub async fn cmd_conntrack_list(
                 c.protocol,
                 c.state,
                 c.packets_fwd,
-                c.packets_rev,
-            );
+                c.packets_rev
+            ]);
         }
+        table.print();
         println!("total: {}", conns.len());
     }
     Ok(())
@@ -2529,20 +2658,24 @@ pub async fn cmd_status_enhanced(client: &ApiClient, output: OutputFormat) -> Re
         if al.alerts.is_empty() {
             println!("  (none)");
         } else {
-            println!(
-                "  {:<12}  {:<8}  {:<18}  {:<18}  MESSAGE",
-                "COMPONENT", "SEVERITY", "SOURCE", "DESTINATION"
-            );
+            let mut table = Table::new(&[
+                ("COMPONENT", Align::Left),
+                ("SEVERITY", Align::Left),
+                ("SOURCE", Align::Left),
+                ("DESTINATION", Align::Left),
+                ("MESSAGE", Align::Left),
+            ])
+            .indent("  ");
             for a in &al.alerts {
-                println!(
-                    "  {:<12}  {:<8}  {:<18}  {:<18}  {}",
+                table.row(cells![
                     a.component,
                     a.severity,
                     a.src_ip_str(),
                     a.dst_ip_str(),
-                    truncate(&a.message, 40),
-                );
+                    truncate(&a.message, 40)
+                ]);
             }
+            table.print();
         }
     }
 
@@ -2646,7 +2779,7 @@ pub async fn cmd_investigate(
     let bl_status = if let Some(entry) = bl_entry {
         format!(
             "YES ({}, {}s left)",
-            truncate(&entry.reason, 30),
+            truncate(&entry.reason, 48),
             entry.ttl_remaining_secs
         )
     } else {
@@ -2665,21 +2798,26 @@ pub async fn cmd_investigate(
     // ── Alerts ──
     println!("  Alerts: {} matching", matched_alerts.len());
     if !matched_alerts.is_empty() {
-        println!(
-            "  {:<12}  {:<8}  {:<6}  {:<18}  {:<18}  MESSAGE",
-            "COMPONENT", "SEVERITY", "ACTION", "SOURCE", "DESTINATION"
-        );
+        let mut table = Table::new(&[
+            ("COMPONENT", Align::Left),
+            ("SEVERITY", Align::Left),
+            ("ACTION", Align::Left),
+            ("SOURCE", Align::Left),
+            ("DESTINATION", Align::Left),
+            ("MESSAGE", Align::Left),
+        ])
+        .indent("  ");
         for a in matched_alerts.iter().take(20) {
-            println!(
-                "  {:<12}  {:<8}  {:<6}  {:<18}  {:<18}  {}",
+            table.row(cells![
                 a.component,
                 a.severity,
                 a.action,
                 a.src_ip_str(),
                 a.dst_ip_str(),
-                truncate(&a.message, 45),
-            );
+                truncate(&a.message, 45)
+            ]);
         }
+        table.print();
         if matched_alerts.len() > 20 {
             println!("  ... and {} more", matched_alerts.len() - 20);
         }
@@ -2689,10 +2827,16 @@ pub async fn cmd_investigate(
     // ── Connections ──
     println!("  Connections: {} active", matched_conns.len());
     if !matched_conns.is_empty() {
-        println!(
-            "  {:<22} {:>5}  {:<22} {:>5}  {:<5}  {:<6}  {:>10}",
-            "SOURCE", "PORT", "DESTINATION", "PORT", "PROTO", "STATE", "BYTES"
-        );
+        let mut table = Table::new(&[
+            ("SOURCE", Align::Left),
+            ("PORT", Align::Right),
+            ("DESTINATION", Align::Left),
+            ("PORT", Align::Right),
+            ("PROTO", Align::Left),
+            ("STATE", Align::Left),
+            ("BYTES", Align::Right),
+        ])
+        .indent("  ");
         for c in matched_conns.iter().take(20) {
             let proto = match c.protocol {
                 6 => "TCP",
@@ -2701,17 +2845,17 @@ pub async fn cmd_investigate(
                 _ => "?",
             };
             let total = u64::from(c.bytes_fwd) + u64::from(c.bytes_rev);
-            println!(
-                "  {:<22} {:>5}  {:<22} {:>5}  {:<5}  {:<6}  {:>10}",
-                truncate(&c.src_ip, 22),
+            table.row(cells![
+                c.src_ip,
                 c.src_port,
-                truncate(&c.dst_ip, 22),
+                c.dst_ip,
                 c.dst_port,
                 proto,
-                truncate(&c.state, 6),
-                format_bytes(total),
-            );
+                c.state,
+                format_bytes(total)
+            ]);
         }
+        table.print();
     }
     println!();
 
@@ -2738,10 +2882,7 @@ pub async fn cmd_investigate(
         for ioc in &matched_iocs {
             println!(
                 "    {} (type: {}, feed: {}, confidence: {})",
-                ioc.ip,
-                ioc.threat_type,
-                truncate(&ioc.source_feed, 20),
-                ioc.confidence,
+                ioc.ip, ioc.threat_type, ioc.source_feed, ioc.confidence,
             );
         }
         println!();
@@ -2766,12 +2907,15 @@ fn format_bytes(bytes: u64) -> String {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+/// Cut free text to `max` characters, marking the cut. Counts characters
+/// rather than bytes, so a message carrying an accent or a non-Latin name is
+/// never sliced through the middle of one.
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    } else {
-        s.to_string()
+    if s.chars().count() <= max {
+        return s.to_string();
     }
+    let kept: String = s.chars().take(max.saturating_sub(3)).collect();
+    format!("{kept}...")
 }
 
 fn yes_no(val: bool) -> &'static str {
@@ -2830,13 +2974,18 @@ pub async fn cmd_nat_rules(client: &ApiClient, output: OutputFormat) -> Result<(
         return Ok(());
     }
 
-    println!(
-        "{:<20}  {:<12}  {:<5}  {:>5}  {:<30}  {:<28}  {:<14}  {:<7}",
-        "ID", "TYPE", "DIR", "PRIO", "TRANSLATES TO", "MATCHES", "INTERFACES", "ENABLED"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("TYPE", Align::Left),
+        ("DIR", Align::Left),
+        ("PRIO", Align::Right),
+        ("TRANSLATES TO", Align::Left),
+        ("MATCHES", Align::Left),
+        ("INTERFACES", Align::Left),
+        ("ENABLED", Align::Left),
+    ]);
     for r in &rules {
-        println!(
-            "{:<20}  {:<12}  {:<5}  {:>5}  {:<30}  {:<28}  {:<14}  {:<7}",
+        table.row(cells![
             r.id,
             r.nat_type,
             r.direction,
@@ -2845,8 +2994,9 @@ pub async fn cmd_nat_rules(client: &ApiClient, output: OutputFormat) -> Result<(
             nat_match_words(r),
             interface_scope(&r.interfaces),
             yes_no(r.enabled)
-        );
+        ]);
     }
+    table.print();
     Ok(())
 }
 
@@ -2892,21 +3042,25 @@ pub async fn cmd_nat_nptv6_list(client: &ApiClient, output: OutputFormat) -> Res
         return Ok(());
     }
 
-    println!(
-        "{:<20}  {:<24}  {:<24}  {:>6}  {:<16}  {:<7}",
-        "ID", "INTERNAL", "EXTERNAL", "PREFIX", "INTERFACES", "ENABLED"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("INTERNAL", Align::Left),
+        ("EXTERNAL", Align::Left),
+        ("PREFIX", Align::Right),
+        ("INTERFACES", Align::Left),
+        ("ENABLED", Align::Left),
+    ]);
     for r in &rules {
-        println!(
-            "{:<20}  {:<24}  {:<24}  {:>6}  {:<16}  {:<7}",
+        table.row(cells![
             r.id,
             r.internal_prefix,
             r.external_prefix,
             format!("/{}", r.prefix_len),
             interface_scope(&r.interfaces),
             yes_no(r.enabled)
-        );
+        ]);
     }
+    table.print();
     Ok(())
 }
 
@@ -2975,16 +3129,20 @@ pub async fn cmd_zones_list(client: &ApiClient, output: OutputFormat) -> Result<
         return Ok(());
     }
 
-    println!("{:<16}  {:<40}  {:<14}", "ID", "INTERFACES", "DEFAULT");
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("INTERFACES", Align::Left),
+        ("DEFAULT", Align::Left),
+    ]);
 
     for zone in &zones {
-        println!(
-            "{:<16}  {:<40}  {:<14}",
+        table.row(cells![
             zone.id,
             zone.interfaces.join(","),
-            zone.default_policy,
-        );
+            zone.default_policy
+        ]);
     }
+    table.print();
 
     println!("\n{} zone(s) total.", zones.len());
     Ok(())
@@ -3028,17 +3186,24 @@ pub async fn cmd_zones_policies(client: &ApiClient, output: OutputFormat) -> Res
         return Ok(());
     }
 
-    println!(
-        "{:<24}  {:<12}  {:<12}  {:<10}  {:<8}",
-        "ID", "FROM", "TO", "POLICY", "ACTION"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("FROM", Align::Left),
+        ("TO", Align::Left),
+        ("POLICY", Align::Left),
+        ("ACTION", Align::Left),
+    ]);
 
     for policy in &policies {
-        println!(
-            "{:<24}  {:<12}  {:<12}  {:<10}  {:<8}",
-            policy.id, policy.from, policy.to, policy.policy, policy.action,
-        );
+        table.row(cells![
+            policy.id,
+            policy.from,
+            policy.to,
+            policy.policy,
+            policy.action
+        ]);
     }
+    table.print();
 
     println!("\n{} policy(ies) total.", policies.len());
     Ok(())
@@ -3100,14 +3265,20 @@ pub async fn cmd_routing_gateways(client: &ApiClient, output: OutputFormat) -> R
         return Ok(());
     }
 
-    println!(
-        "{:<16}  {:<16}  {:<10}  {:<18}  {:>4}  {:>6}  {:<7}  {:<10}  {:<10}",
-        "ID", "NAME", "INTERFACE", "GATEWAY IP", "PRI", "WEIGHT", "ENABLED", "STATUS", "HEALTH"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("NAME", Align::Left),
+        ("INTERFACE", Align::Left),
+        ("GATEWAY IP", Align::Left),
+        ("PRI", Align::Right),
+        ("WEIGHT", Align::Right),
+        ("ENABLED", Align::Left),
+        ("STATUS", Align::Left),
+        ("HEALTH", Align::Left),
+    ]);
 
     for gw in &gateways {
-        println!(
-            "{:<16}  {:<16}  {:<10}  {:<18}  {:>4}  {:>6}  {:<7}  {:<10}  {:<10}",
+        table.row(cells![
             gw.id,
             gw.name,
             gw.interface,
@@ -3116,9 +3287,10 @@ pub async fn cmd_routing_gateways(client: &ApiClient, output: OutputFormat) -> R
             gw.weight,
             yes_no(gw.enabled),
             gw.status,
-            gw.health_status,
-        );
+            gw.health_status
+        ]);
     }
+    table.print();
 
     println!("\n{} gateway(s) total.", gateways.len());
     Ok(())
@@ -3164,14 +3336,20 @@ pub async fn cmd_routing_routes(client: &ApiClient, output: OutputFormat) -> Res
         return Ok(());
     }
 
-    println!("{:<24}  {:<16}  {:<18}", "DESTINATION", "GATEWAY ID", "VIA");
+    let mut table = Table::new(&[
+        ("DESTINATION", Align::Left),
+        ("GATEWAY ID", Align::Left),
+        ("VIA", Align::Left),
+    ]);
 
     for route in &routes {
-        println!(
-            "{:<24}  {:<16}  {:<18}",
-            route.destination, route.gateway_id, route.gateway_ip,
-        );
+        table.row(cells![
+            route.destination,
+            route.gateway_id,
+            route.gateway_ip
+        ]);
     }
+    table.print();
 
     println!("\n{} route(s) total.", routes.len());
     Ok(())
@@ -3207,22 +3385,20 @@ pub async fn cmd_ids_rules(client: &ApiClient, output: OutputFormat) -> Result<(
         return Ok(());
     }
 
-    println!(
-        "{:<16}  {:<30}  {:<8}  {:<6}  {:<6}  {:<24}  {:<16}  {:<7}  {:<20}",
-        "ID",
-        "DESCRIPTION",
-        "SEVERITY",
-        "MODE",
-        "PROTO",
-        "MATCHES",
-        "INTERFACES",
-        "ENABLED",
-        "PATTERN"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("DESCRIPTION", Align::Left),
+        ("SEVERITY", Align::Left),
+        ("MODE", Align::Left),
+        ("PROTO", Align::Left),
+        ("MATCHES", Align::Left),
+        ("INTERFACES", Align::Left),
+        ("ENABLED", Align::Left),
+        ("PATTERN", Align::Left),
+    ]);
 
     for rule in &rules {
-        println!(
-            "{:<16}  {:<30}  {:<8}  {:<6}  {:<6}  {:<24}  {:<16}  {:<7}  {:<20}",
+        table.row(cells![
             rule.id,
             rule.description,
             rule.severity,
@@ -3231,9 +3407,10 @@ pub async fn cmd_ids_rules(client: &ApiClient, output: OutputFormat) -> Result<(
             ids_rule_match(rule),
             interface_scope(&rule.interfaces),
             yes_no(rule.enabled),
-            rule.pattern,
-        );
+            rule.pattern
+        ]);
     }
+    table.print();
 
     println!("\n{} rule(s) total.", rules.len());
     print_ids_thresholds(&rules);
@@ -3369,10 +3546,11 @@ pub async fn cmd_ebpf_status(client: &ApiClient, output: OutputFormat) -> Result
     if status.programs.is_empty() {
         println!("No eBPF programs reported.");
     } else {
-        println!("{:<28}  {:<7}", "PROGRAM", "LOADED");
+        let mut table = Table::new(&[("PROGRAM", Align::Left), ("LOADED", Align::Left)]);
         for prog in &status.programs {
-            println!("{:<28}  {:<7}", prog.name, yes_no(prog.loaded));
+            table.row(cells![prog.name, yes_no(prog.loaded)]);
         }
+        table.print();
         println!("\n{} program(s) reported.", status.programs.len());
     }
 
@@ -3381,19 +3559,21 @@ pub async fn cmd_ebpf_status(client: &ApiClient, output: OutputFormat) -> Result
     }
 
     println!("\nAttaches refused by the kernel:");
-    println!(
-        "{:<28}  {:<12}  {:<11}  REASON",
-        "PROGRAM", "INTERFACE", "NESTED XDP"
-    );
+    let mut table = Table::new(&[
+        ("PROGRAM", Align::Left),
+        ("INTERFACE", Align::Left),
+        ("NESTED XDP", Align::Left),
+        ("REASON", Align::Left),
+    ]);
     for block in &status.attach_blocked {
-        println!(
-            "{:<28}  {:<12}  {:<11}  {}",
+        table.row(cells![
             block.program,
             block.interface,
             yes_no(block.nested_xdp),
-            block.reason,
-        );
+            block.reason
+        ]);
     }
+    table.print();
     Ok(())
 }
 
@@ -3412,14 +3592,19 @@ pub async fn cmd_ebpf_uprobes(client: &ApiClient, output: OutputFormat) -> Resul
         return Ok(());
     }
 
-    println!(
-        "{:<10}  {:<40}  {:<20}  {:<16}  {:<8}  {:<8}  {:<8}  {:<6}",
-        "LIB", "PATH", "PROGRAM", "SYMBOL", "OFFSET", "RETPROBE", "BROKERED", "STICKY"
-    );
+    let mut table = Table::new(&[
+        ("LIB", Align::Left),
+        ("PATH", Align::Left),
+        ("PROGRAM", Align::Left),
+        ("SYMBOL", Align::Left),
+        ("OFFSET", Align::Left),
+        ("RETPROBE", Align::Left),
+        ("BROKERED", Align::Left),
+        ("STICKY", Align::Left),
+    ]);
 
     for probe in &resp.probes {
-        println!(
-            "{:<10}  {:<40}  {:<20}  {:<16}  {:<8}  {:<8}  {:<8}  {:<6}",
+        table.row(cells![
             probe.lib,
             probe.path,
             probe.program,
@@ -3427,9 +3612,10 @@ pub async fn cmd_ebpf_uprobes(client: &ApiClient, output: OutputFormat) -> Resul
             probe.offset,
             yes_no(probe.retprobe),
             yes_no(probe.brokered),
-            yes_no(probe.sticky),
-        );
+            yes_no(probe.sticky)
+        ]);
     }
+    table.print();
 
     println!("\n{} probe(s) attached.", resp.probes.len());
     Ok(())
@@ -3451,41 +3637,50 @@ pub async fn cmd_ebpf_kernel_features(client: &ApiClient, output: OutputFormat) 
     }
 
     if !resp.program_types.is_empty() {
-        println!("\n{:<24}  {:<9}", "PROGRAM TYPE", "SUPPORTED");
+        println!();
+        let mut table = Table::new(&[("PROGRAM TYPE", Align::Left), ("SUPPORTED", Align::Left)]);
         for pt in &resp.program_types {
-            println!("{:<24}  {:<9}", pt.program_type, yes_no(pt.supported));
+            table.row(cells![pt.program_type, yes_no(pt.supported)]);
         }
+        table.print();
     }
 
     if !resp.helpers.is_empty() {
-        println!(
-            "\n{:<24}  {:<32}  {:<9}",
-            "PROGRAM TYPE", "HELPER", "SUPPORTED"
-        );
+        println!();
+        let mut table = Table::new(&[
+            ("PROGRAM TYPE", Align::Left),
+            ("HELPER", Align::Left),
+            ("SUPPORTED", Align::Left),
+        ]);
         for helper in &resp.helpers {
-            println!(
-                "{:<24}  {:<32}  {:<9}",
+            table.row(cells![
                 helper.program_type,
                 helper.helper,
-                yes_no(helper.supported),
-            );
+                yes_no(helper.supported)
+            ]);
         }
+        table.print();
     }
 
     if resp.missing_required.is_empty() {
         println!("\nNo required helper is missing.");
     } else {
         println!("\nRequired helpers the kernel does not provide:");
-        println!(
-            "{:<24}  {:<24}  {:<32}  DETAIL",
-            "OBJECT", "PROGRAM TYPE", "HELPER"
-        );
+        let mut table = Table::new(&[
+            ("OBJECT", Align::Left),
+            ("PROGRAM TYPE", Align::Left),
+            ("HELPER", Align::Left),
+            ("DETAIL", Align::Left),
+        ]);
         for missing in &resp.missing_required {
-            println!(
-                "{:<24}  {:<24}  {:<32}  {}",
-                missing.object, missing.program_type, missing.helper, missing.detail,
-            );
+            table.row(cells![
+                missing.object,
+                missing.program_type,
+                missing.helper,
+                missing.detail
+            ]);
         }
+        table.print();
     }
     Ok(())
 }
@@ -3574,23 +3769,28 @@ pub async fn cmd_dlp_patterns(client: &ApiClient, output: OutputFormat) -> Resul
         return Ok(());
     }
 
-    println!(
-        "{:<16}  {:<20}  {:<8}  {:<14}  {:<6}  {:<7}  {:<30}",
-        "ID", "NAME", "SEVERITY", "DATA TYPE", "MODE", "ENABLED", "REGEX"
-    );
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("NAME", Align::Left),
+        ("SEVERITY", Align::Left),
+        ("DATA TYPE", Align::Left),
+        ("MODE", Align::Left),
+        ("ENABLED", Align::Left),
+        ("REGEX", Align::Left),
+    ]);
 
     for pattern in &patterns {
-        println!(
-            "{:<16}  {:<20}  {:<8}  {:<14}  {:<6}  {:<7}  {:<30}",
+        table.row(cells![
             pattern.id,
             pattern.name,
             pattern.severity,
             pattern.data_type,
             pattern.mode,
             yes_no(pattern.enabled),
-            pattern.regex,
-        );
+            pattern.regex
+        ]);
     }
+    table.print();
 
     println!("\n{} pattern(s) total.", patterns.len());
     Ok(())
@@ -3665,17 +3865,22 @@ pub async fn cmd_threatintel_urls(client: &ApiClient, output: OutputFormat) -> R
         return Ok(());
     }
 
-    println!(
-        "{:<60}  {:<16}  {:>4}  {:<16}",
-        "URL", "FEED", "CONF", "THREAT TYPE"
-    );
+    let mut table = Table::new(&[
+        ("URL", Align::Left),
+        ("FEED", Align::Left),
+        ("CONF", Align::Right),
+        ("THREAT TYPE", Align::Left),
+    ]);
 
     for url in &urls {
-        println!(
-            "{:<60}  {:<16}  {:>4}  {:<16}",
-            url.url, url.feed_id, url.confidence, url.threat_type,
-        );
+        table.row(cells![
+            url.url,
+            url.feed_id,
+            url.confidence,
+            url.threat_type
+        ]);
     }
+    table.print();
 
     println!("\n{} URL indicator(s) total.", urls.len());
     Ok(())
@@ -3806,6 +4011,18 @@ mod tests {
     #[test]
     fn format_uptime_zero() {
         assert_eq!(format_uptime(0), "0s");
+    }
+
+    #[test]
+    fn truncate_leaves_short_text_whole() {
+        assert_eq!(truncate("port scan", 10), "port scan");
+    }
+
+    /// A cut counts characters, so text carrying a multi-byte character is
+    /// never sliced through one, which a byte index would panic on.
+    #[test]
+    fn truncate_cuts_on_characters_not_bytes() {
+        assert_eq!(truncate("éééééééééé", 6), "ééé...");
     }
 
     #[test]
