@@ -8,8 +8,9 @@
 //! counters, the `DDoS` connection table - it is a sizing decision, and locked
 //! memory is paid for every slot whether or not it is ever used: a million
 //! IOC slots on an agent with no feed cost 168 MB, and a per-CPU table costs
-//! its slots once per online CPU, so a figure that fits a 4-vCPU test VM is
-//! sixteen times larger on a 64-core node.
+//! its slots once per possible CPU, so a figure that fits a 4-vCPU test VM is
+//! sixteen times larger on a 64-core node, and a guest whose hypervisor
+//! reserves CPUs for hotplug pays for those as well.
 //!
 //! This module turns the relevant configuration fields into one plan, `map
 //! name -> max_entries`, installed once per process before the first object
