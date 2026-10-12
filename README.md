@@ -4,7 +4,7 @@
   <img src="./assets/ebpfsentinel-lockup-light.svg" width="600">
 </p>
 
-A unified, kernel-native **Network & Security platform** for Linux - one Rust agent that replaces your firewall, IDS/IPS, DDoS mitigation, DLP, and 10+ more tools, all running in-kernel via eBPF at about a microsecond of kernel time per packet (see [Performance](#performance)). Not an endpoint agent - it enforces security inline, right where your traffic flows.
+A unified, kernel-native **Network & Security platform** for Linux - one Rust agent that replaces your firewall, IDS/IPS, DDoS mitigation, DLP, and 10+ more tools, all running in-kernel via eBPF at about a microsecond of kernel time per packet (see [benchmark results](tests/perf/BENCHMARK-RESULTS.md)). Not an endpoint agent - it enforces security inline, right where your traffic flows.
 
 ## Why eBPFsentinel
 
@@ -264,30 +264,6 @@ The changelog is kept with the releases rather than here, so the whole product's
 - **Runtime:** Docker, Podman, Kubernetes (DaemonSet), Nomad
 
 See [Compatibility](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/operations/compatibility.md) for the full matrix.
-
-## Performance
-
-Measured on two VMware guests (4 vCPU, vmxnet3 at 10 Gbps, kernel 7.0) with
-pktgen sending 64-byte UDP frames and every feature enabled: about **1 µs of
-kernel time per received packet**, so about **1 Mpps per core**. The agent's
-RSS is 57 MB and its locked map memory 71 MB on 4 vCPUs, and the map memory
-grows with the CPU count. The per-core figures for higher rates are derived
-from that cost, not measured on a physical NIC. Every number, its method and
-its environment are in [`tests/perf/BENCHMARK-RESULTS.md`](tests/perf/BENCHMARK-RESULTS.md).
-
-## Telemetry
-
-Release builds send an **anonymous heartbeat every 30 minutes**, on by
-default: an installation identifier hashed one way from `/etc/machine-id`
-(random where there is none), the agent version, and the name and load state
-of each eBPF program. Nothing else - no configuration, rule, address,
-interface, host name or the machine identifier itself - and the agent logs a line at boot saying so. Switch it off with
-`telemetry.enabled: false` or `EBPFSENTINEL_TELEMETRY_DISABLE=1` (any value).
-A build from this repository carries no destination and sends nothing. The
-receiving side keeps the source address only for its rate-limit window and
-deletes an installation that has not reported for thirty days. Details and
-the exact bytes on the wire:
-[Telemetry](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/configuration/telemetry.md).
 
 ## OSS vs Enterprise
 
