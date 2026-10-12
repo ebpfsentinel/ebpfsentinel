@@ -211,6 +211,10 @@ pub struct AgentMetrics {
     pub alerts_exported_total: Family<DestinationLabels, Counter>,
     pub alerts_export_failures_total: Family<DestinationLabels, Counter>,
     pub threatintel_matches_total: Family<FeedLabels, Counter>,
+    /// Indicators each feed yielded at its last successful refresh.
+    pub threatintel_feed_indicators: Family<FeedLabels, Gauge>,
+    /// When each feed last refreshed successfully, in seconds since the epoch.
+    pub threatintel_feed_last_refresh: Family<FeedLabels, Gauge>,
     pub zone_interfaces: Family<ZoneLabels, Gauge>,
     pub zone_policies: Family<ZoneLabels, Gauge>,
     pub zone_packets_total: Family<ZonePacketLabels, Counter>,
@@ -414,6 +418,20 @@ impl AgentMetrics {
             "threatintel_matches",
             "IOC matches resolved against a threat-intelligence feed, by feed",
             threatintel_matches_total.clone(),
+        );
+
+        let threatintel_feed_indicators = Family::<FeedLabels, Gauge>::default();
+        registry.register(
+            "threatintel_feed_indicators",
+            "Indicators a threat-intelligence feed yielded at its last successful refresh, by feed",
+            threatintel_feed_indicators.clone(),
+        );
+
+        let threatintel_feed_last_refresh = Family::<FeedLabels, Gauge>::default();
+        registry.register(
+            "threatintel_feed_last_refresh_timestamp_seconds",
+            "When a threat-intelligence feed last refreshed successfully, in seconds since the epoch, by feed",
+            threatintel_feed_last_refresh.clone(),
         );
 
         let zone_interfaces = Family::<ZoneLabels, Gauge>::default();
@@ -806,6 +824,8 @@ impl AgentMetrics {
             alerts_exported_total,
             alerts_export_failures_total,
             threatintel_matches_total,
+            threatintel_feed_indicators,
+            threatintel_feed_last_refresh,
             zone_interfaces,
             zone_policies,
             zone_packets_total,
@@ -1116,6 +1136,21 @@ impl ThreatIntelMetrics for AgentMetrics {
                 feed: feed_id.to_string(),
             })
             .inc();
+    }
+
+    fn record_threatintel_feed_loaded(&self, feed_id: &str, indicators: u64) {
+        let labels = FeedLabels {
+            feed: feed_id.to_string(),
+        };
+        self.threatintel_feed_indicators
+            .get_or_create(&labels)
+            .set(i64::try_from(indicators).unwrap_or(i64::MAX));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        self.threatintel_feed_last_refresh
+            .get_or_create(&labels)
+            .set(i64::try_from(now).unwrap_or(i64::MAX));
     }
 }
 
@@ -1821,6 +1856,28 @@ mod tests {
     }
 
     #[test]
+    fn a_loaded_feed_reports_its_indicators_and_when_it_refreshed() {
+        let metrics = AgentMetrics::new();
+        metrics.record_threatintel_feed_loaded("blocklist", 1_200);
+
+        let encoded = metrics.encode();
+        assert!(
+            encoded.contains("ebpfsentinel_threatintel_feed_indicators{feed=\"blocklist\"} 1200")
+        );
+        let stamp = encoded
+            .lines()
+            .find(|line| {
+                line.starts_with("ebpfsentinel_threatintel_feed_last_refresh_timestamp_seconds{")
+            })
+            .and_then(|line| line.rsplit_once(' '))
+            .and_then(|(_, value)| value.parse::<u64>().ok())
+            .expect("a refresh time");
+        // After the year the product was written, which is all a wall clock
+        // can be held to.
+        assert!(stamp > 1_700_000_000);
+    }
+
+    #[test]
     fn alerts_by_source_country_counter() {
         let metrics = AgentMetrics::new();
         metrics.record_alert_source_country("KP");
@@ -1952,6 +2009,8 @@ mod tests {
         ("rules_loaded", "gauge"),
         ("rules_reloads", "counter"),
         ("thread_count", "gauge"),
+        ("threatintel_feed_indicators", "gauge"),
+        ("threatintel_feed_last_refresh_timestamp_seconds", "gauge"),
         ("threatintel_matches", "counter"),
         ("worker_events", "counter"),
         ("worker_processing_duration_seconds", "histogram"),
@@ -2099,6 +2158,7 @@ mod tests {
                 feed: "abuse-ch".into(),
             })
             .inc();
+        m.record_threatintel_feed_loaded("abuse-ch", 10);
         m.alerts_by_rule_total
             .get_or_create(&RuleLabels {
                 component: "ids".into(),

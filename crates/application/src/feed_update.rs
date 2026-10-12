@@ -48,6 +48,7 @@ pub async fn fetch_all_feeds(
                     "feed loaded successfully"
                 );
                 metrics.record_config_reload(&feed.id, "success");
+                metrics.record_threatintel_feed_loaded(&feed.id, iocs.len() as u64);
                 all_iocs.extend(iocs);
             }
             Err(e) => {
@@ -125,6 +126,10 @@ pub async fn fetch_all_feeds_v2(
                     "feed loaded"
                 );
                 metrics.record_config_reload(&feed.id, "success");
+                metrics.record_threatintel_feed_loaded(
+                    &feed.id,
+                    (parsed.iocs.len() + parsed.domains.len() + parsed.urls.len()) as u64,
+                );
                 result.iocs.extend(parsed.iocs);
                 result.domains.extend(parsed.domains);
                 result.urls.extend(parsed.urls);
@@ -639,6 +644,7 @@ mod tests {
     struct TestMetrics {
         reload_success: AtomicU32,
         reload_failure: AtomicU32,
+        loaded: std::sync::Mutex<Vec<(String, u64)>>,
     }
 
     impl TestMetrics {
@@ -646,6 +652,7 @@ mod tests {
             Self {
                 reload_success: AtomicU32::new(0),
                 reload_failure: AtomicU32::new(0),
+                loaded: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -676,7 +683,14 @@ mod tests {
     impl FingerprintMetrics for TestMetrics {}
     impl ContainerMetrics for TestMetrics {}
     impl CtMetrics for TestMetrics {}
-    impl ThreatIntelMetrics for TestMetrics {}
+    impl ThreatIntelMetrics for TestMetrics {
+        fn record_threatintel_feed_loaded(&self, feed_id: &str, indicators: u64) {
+            self.loaded
+                .lock()
+                .unwrap()
+                .push((feed_id.to_string(), indicators));
+        }
+    }
     impl ZoneMetrics for TestMetrics {}
 
     fn make_feed(id: &str, enabled: bool) -> FeedConfig {
@@ -709,6 +723,29 @@ mod tests {
 
         assert_eq!(iocs.len(), 2);
         assert_eq!(metrics.reload_success.load(Ordering::Relaxed), 1);
+        assert_eq!(*metrics.loaded.lock().unwrap(), [("feed-a".to_string(), 2)]);
+    }
+
+    #[tokio::test]
+    async fn a_refreshed_feed_reports_what_it_yielded_and_a_failed_one_nothing() {
+        let metrics = Arc::new(TestMetrics::new());
+        let feeds = vec![make_feed("feed-a", true)];
+
+        let good = MockSource {
+            response: b"1.2.3.4\n5.6.7.8\n9.9.9.9\n".to_vec(),
+            fail: false,
+        };
+        fetch_all_feeds_v2(&feeds, &good, &(metrics.clone() as Arc<dyn MetricsPort>)).await;
+
+        let bad = MockSource {
+            response: Vec::new(),
+            fail: true,
+        };
+        fetch_all_feeds_v2(&feeds, &bad, &(metrics.clone() as Arc<dyn MetricsPort>)).await;
+
+        // Only the refresh that worked moves the clock: a failed one leaves
+        // the feed as stale as it really is.
+        assert_eq!(*metrics.loaded.lock().unwrap(), [("feed-a".to_string(), 3)]);
     }
 
     #[tokio::test]

@@ -184,6 +184,11 @@ pub trait ZoneMetrics: Send + Sync {
 pub trait ThreatIntelMetrics: Send + Sync {
     /// Record an IOC match resolved against a feed, labelled by feed id.
     fn record_threatintel_match(&self, _feed_id: &str) {}
+
+    /// Record a feed refreshed successfully just now, with the indicators it
+    /// yielded, so how fresh each feed is and how much it holds can be read
+    /// without its contents.
+    fn record_threatintel_feed_loaded(&self, _feed_id: &str, _indicators: u64) {}
 }
 
 pub trait DnsMetrics: Send + Sync {
