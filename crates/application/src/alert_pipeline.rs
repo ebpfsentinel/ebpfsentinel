@@ -6,6 +6,7 @@ use arc_swap::ArcSwap;
 use domain::alert::engine::AlertRouter;
 use domain::alert::entity::PacketSecurityAlert;
 use domain::alert::entity::{Alert, AlertDestination};
+use domain::alias::entity::UNKNOWN_COUNTRY;
 use domain::audit::entity::{AuditAction, AuditComponent};
 use domain::common::entity::RuleId;
 use domain::ddos::entity::DdosAttack;
@@ -15,7 +16,7 @@ use domain::firewall::entity::IpCidr;
 use domain::ids::entity::IdsAlert;
 use domain::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm, RateLimitPolicy};
 use domain::threatintel::entity::ThreatIntelAlert;
-use ports::secondary::alert_enrichment_port::AlertEnrichmentPort;
+use ports::secondary::alert_enrichment_port::{AlertEnrichmentPort, Enrichment};
 use ports::secondary::alert_sender::AlertSender;
 use ports::secondary::alert_store::AlertStore;
 use ports::secondary::metadata_enricher_port::MetadataEnricher;
@@ -234,6 +235,35 @@ impl AlertPipeline {
         self
     }
 
+    /// Run the enricher, when there is one, and keep what it learned that
+    /// the counters need.
+    fn enrich(&self, alert: &mut Alert) -> Enrichment {
+        self.enricher
+            .as_ref()
+            .map(|enricher| enricher.enrich_alert(alert))
+            .unwrap_or_default()
+    }
+
+    /// Count one alert in every family that counts alerts, so the totals by
+    /// component, by rule and by country of origin always agree.
+    fn record_alert_metrics(&self, alert: &Alert, enrichment: &Enrichment) {
+        let severity_str = severity_label(alert.severity);
+        let technique_id = alert
+            .mitre_attack
+            .as_ref()
+            .map_or("", |m| m.technique_id.as_str());
+        self.metrics
+            .record_alert(&alert.component, severity_str, technique_id);
+        self.metrics
+            .record_alert_by_rule(&alert.component, &alert.rule_id.0);
+        self.metrics.record_alert_source_country(
+            enrichment
+                .source_country
+                .as_deref()
+                .unwrap_or(UNKNOWN_COUNTRY),
+        );
+    }
+
     async fn apply_metadata_enrichers(&self, alert: &mut Alert) {
         if self.metadata_enrichers.is_empty() {
             return;
@@ -379,22 +409,12 @@ impl AlertPipeline {
         let mut alert = Alert::from_ids_alert(ids_alert, &description);
 
         // Enrich with domain context (best-effort)
-        if let Some(ref enricher) = self.enricher {
-            enricher.enrich_alert(&mut alert);
-        }
+        let enrichment = self.enrich(&mut alert);
 
         self.apply_metadata_enrichers(&mut alert).await;
 
         // Record alert metrics
-        let severity_str = severity_label(alert.severity);
-        let technique_id = alert
-            .mitre_attack
-            .as_ref()
-            .map_or("", |m| m.technique_id.as_str());
-        self.metrics
-            .record_alert(&alert.component, severity_str, technique_id);
-        self.metrics
-            .record_alert_by_rule(&alert.component, &alert.rule_id.0);
+        self.record_alert_metrics(&alert, &enrichment);
 
         // Persist alert to store (best-effort)
         if let Some(ref store) = self.alert_store
@@ -438,22 +458,12 @@ impl AlertPipeline {
         let mut alert = Alert::from_threatintel_alert(ti_alert, &description);
 
         // Enrich with domain context (best-effort)
-        if let Some(ref enricher) = self.enricher {
-            enricher.enrich_alert(&mut alert);
-        }
+        let enrichment = self.enrich(&mut alert);
 
         self.apply_metadata_enrichers(&mut alert).await;
 
         // Record alert metrics
-        let severity_str = severity_label(alert.severity);
-        let technique_id = alert
-            .mitre_attack
-            .as_ref()
-            .map_or("", |m| m.technique_id.as_str());
-        self.metrics
-            .record_alert(&alert.component, severity_str, technique_id);
-        self.metrics
-            .record_alert_by_rule(&alert.component, &alert.rule_id.0);
+        self.record_alert_metrics(&alert, &enrichment);
 
         // Persist alert to store (best-effort)
         if let Some(ref store) = self.alert_store
@@ -490,9 +500,7 @@ impl AlertPipeline {
         let mut alert = Alert::from_dlp_alert(dlp_alert, &description);
 
         // Enrich with domain context (best-effort)
-        if let Some(ref enricher) = self.enricher {
-            enricher.enrich_alert(&mut alert);
-        }
+        let enrichment = self.enrich(&mut alert);
 
         self.apply_metadata_enrichers(&mut alert).await;
 
@@ -516,15 +524,7 @@ impl AlertPipeline {
         );
 
         // Record alert metrics
-        let severity_str = severity_label(alert.severity);
-        let technique_id = alert
-            .mitre_attack
-            .as_ref()
-            .map_or("", |m| m.technique_id.as_str());
-        self.metrics
-            .record_alert(&alert.component, severity_str, technique_id);
-        self.metrics
-            .record_alert_by_rule(&alert.component, &alert.rule_id.0);
+        self.record_alert_metrics(&alert, &enrichment);
 
         // Persist alert to store (best-effort)
         if let Some(ref store) = self.alert_store
@@ -586,22 +586,12 @@ impl AlertPipeline {
         );
 
         // Enrich with domain context (best-effort)
-        if let Some(ref enricher) = self.enricher {
-            enricher.enrich_alert(&mut alert);
-        }
+        let enrichment = self.enrich(&mut alert);
 
         self.apply_metadata_enrichers(&mut alert).await;
 
         // Record alert metrics
-        let severity_str = severity_label(alert.severity);
-        let technique_id = alert
-            .mitre_attack
-            .as_ref()
-            .map_or("", |m| m.technique_id.as_str());
-        self.metrics
-            .record_alert(&alert.component, severity_str, technique_id);
-        self.metrics
-            .record_alert_by_rule(&alert.component, &alert.rule_id.0);
+        self.record_alert_metrics(&alert, &enrichment);
 
         // Persist alert to store (best-effort)
         if let Some(ref store) = self.alert_store
@@ -634,21 +624,11 @@ impl AlertPipeline {
     pub async fn process_packet_security_alert(&mut self, psa: &PacketSecurityAlert) {
         let mut alert = Alert::from_packet_security_alert(psa);
 
-        if let Some(ref enricher) = self.enricher {
-            enricher.enrich_alert(&mut alert);
-        }
+        let enrichment = self.enrich(&mut alert);
 
         self.apply_metadata_enrichers(&mut alert).await;
 
-        let severity_str = severity_label(alert.severity);
-        let technique_id = alert
-            .mitre_attack
-            .as_ref()
-            .map_or("", |m| m.technique_id.as_str());
-        self.metrics
-            .record_alert(&alert.component, severity_str, technique_id);
-        self.metrics
-            .record_alert_by_rule(&alert.component, &alert.rule_id.0);
+        self.record_alert_metrics(&alert, &enrichment);
 
         if let Some(ref store) = self.alert_store
             && let Err(e) = store.store_alert(&alert)
@@ -697,22 +677,12 @@ impl AlertPipeline {
         let mut alert = Alert::from_dns_alert(dns_alert, &description);
 
         // Enrich with domain context (best-effort)
-        if let Some(ref enricher) = self.enricher {
-            enricher.enrich_alert(&mut alert);
-        }
+        let enrichment = self.enrich(&mut alert);
 
         self.apply_metadata_enrichers(&mut alert).await;
 
         // Record alert metrics
-        let severity_str = severity_label(alert.severity);
-        let technique_id = alert
-            .mitre_attack
-            .as_ref()
-            .map_or("", |m| m.technique_id.as_str());
-        self.metrics
-            .record_alert(&alert.component, severity_str, technique_id);
-        self.metrics
-            .record_alert_by_rule(&alert.component, &alert.rule_id.0);
+        self.record_alert_metrics(&alert, &enrichment);
 
         // Persist alert to store (best-effort)
         if let Some(ref store) = self.alert_store
@@ -803,15 +773,7 @@ impl AlertPipeline {
     pub async fn process_system_alert(&mut self, mut alert: Alert) {
         self.apply_metadata_enrichers(&mut alert).await;
 
-        let severity_str = severity_label(alert.severity);
-        let technique_id = alert
-            .mitre_attack
-            .as_ref()
-            .map_or("", |m| m.technique_id.as_str());
-        self.metrics
-            .record_alert(&alert.component, severity_str, technique_id);
-        self.metrics
-            .record_alert_by_rule(&alert.component, &alert.rule_id.0);
+        self.record_alert_metrics(&alert, &Enrichment::default());
 
         if let Some(ref store) = self.alert_store
             && let Err(e) = store.store_alert(&alert)
@@ -1153,6 +1115,7 @@ mod tests {
         last_severity: std::sync::Mutex<String>,
         last_drop_reason: std::sync::Mutex<String>,
         last_auto_response_policy: std::sync::Mutex<String>,
+        countries: std::sync::Mutex<Vec<String>>,
     }
 
     impl TestMetrics {
@@ -1165,6 +1128,7 @@ mod tests {
                 last_severity: std::sync::Mutex::new(String::new()),
                 last_drop_reason: std::sync::Mutex::new(String::new()),
                 last_auto_response_policy: std::sync::Mutex::new(String::new()),
+                countries: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -1180,6 +1144,9 @@ mod tests {
         fn record_alert_dropped(&self, reason: &str) {
             self.dropped_calls.fetch_add(1, Ordering::Relaxed);
             *self.last_drop_reason.lock().unwrap() = reason.to_string();
+        }
+        fn record_alert_source_country(&self, country: &str) {
+            self.countries.lock().unwrap().push(country.to_string());
         }
     }
     impl IpsMetrics for TestMetrics {
@@ -1814,9 +1781,48 @@ mod tests {
     }
 
     impl AlertEnrichmentPort for MockEnricher {
-        fn enrich_alert(&self, _alert: &mut Alert) {
+        fn enrich_alert(&self, _alert: &mut Alert) -> Enrichment {
             self.enrich_calls.fetch_add(1, Ordering::Relaxed);
+            Enrichment {
+                source_country: Some("KP".to_string()),
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn every_alert_is_counted_once_against_the_country_of_its_source() {
+        let metrics = Arc::new(TestMetrics::new());
+        let mut pipeline =
+            make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics))
+                .with_enricher(Arc::new(MockEnricher::new()) as Arc<dyn AlertEnrichmentPort>);
+
+        pipeline
+            .process_alert(&make_ids_alert("ids-001", Severity::High))
+            .await;
+        pipeline.process_threatintel_alert(&make_ti_alert()).await;
+        // A system alert has no source address to resolve, and is still
+        // counted, so the countries add up to the alerts.
+        let system = Alert::from_ids_alert(&make_ids_alert("sys-001", Severity::Low), "system");
+        pipeline.process_system_alert(system).await;
+
+        assert_eq!(
+            *metrics.countries.lock().unwrap(),
+            ["KP", "KP", UNKNOWN_COUNTRY]
+        );
+        assert_eq!(metrics.alert_calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn an_alert_with_no_enricher_is_counted_under_unknown() {
+        let metrics = Arc::new(TestMetrics::new());
+        let mut pipeline =
+            make_pipeline(vec![make_route("all", Severity::Low)], Arc::clone(&metrics));
+
+        pipeline
+            .process_alert(&make_ids_alert("ids-001", Severity::High))
+            .await;
+
+        assert_eq!(*metrics.countries.lock().unwrap(), [UNKNOWN_COUNTRY]);
     }
 
     #[tokio::test]

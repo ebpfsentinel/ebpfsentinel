@@ -88,6 +88,13 @@ pub struct AlertLabels {
     pub technique_id: String,
 }
 
+/// A country as two upper-case letters, or `unknown`; never anything the
+/// address it was derived from would let somebody recover.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct CountryLabels {
+    pub country: String,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct DestinationLabels {
     pub destination: String,
@@ -218,6 +225,9 @@ pub struct AgentMetrics {
     /// as bounded as the estate's own configuration.
     pub auto_responses_total: Family<PolicyLabels, Counter>,
     pub alerts_by_rule_total: Family<RuleLabels, Counter>,
+    /// Alerts by the country their source address resolved to, `unknown`
+    /// when it resolved to none, so the series add up to `alerts_total`.
+    pub alerts_by_source_country_total: Family<CountryLabels, Counter>,
     pub false_positives_total: Family<RuleLabels, Counter>,
     pub memory_usage_bytes: Gauge,
     pub cpu_usage_percent: Gauge<f64, AtomicU64>,
@@ -467,6 +477,13 @@ impl AgentMetrics {
             "alerts_by_rule",
             "Total alerts per component and rule_id",
             alerts_by_rule_total.clone(),
+        );
+
+        let alerts_by_source_country_total = Family::<CountryLabels, Counter>::default();
+        registry.register(
+            "alerts_by_source_country",
+            "Total alerts by the ISO 3166-1 alpha-2 country their source address resolved to through GeoIP, unknown when it resolved to none",
+            alerts_by_source_country_total.clone(),
         );
 
         let false_positives_total = Family::<RuleLabels, Counter>::default();
@@ -798,6 +815,7 @@ impl AgentMetrics {
             ips_blocks_total,
             auto_responses_total,
             alerts_by_rule_total,
+            alerts_by_source_country_total,
             false_positives_total,
             memory_usage_bytes,
             cpu_usage_percent,
@@ -1030,6 +1048,14 @@ impl AlertMetrics for AgentMetrics {
             .get_or_create(&RuleLabels {
                 component: component.to_string(),
                 rule_id: rule_id.to_string(),
+            })
+            .inc();
+    }
+
+    fn record_alert_source_country(&self, country: &str) {
+        self.alerts_by_source_country_total
+            .get_or_create(&CountryLabels {
+                country: country.to_string(),
             })
             .inc();
     }
@@ -1795,6 +1821,20 @@ mod tests {
     }
 
     #[test]
+    fn alerts_by_source_country_counter() {
+        let metrics = AgentMetrics::new();
+        metrics.record_alert_source_country("KP");
+        metrics.record_alert_source_country("KP");
+        metrics.record_alert_source_country("unknown");
+
+        let encoded = metrics.encode();
+        assert!(encoded.contains("ebpfsentinel_alerts_by_source_country_total{country=\"KP\"} 2"));
+        assert!(
+            encoded.contains("ebpfsentinel_alerts_by_source_country_total{country=\"unknown\"} 1")
+        );
+    }
+
+    #[test]
     fn false_positives_counter() {
         let metrics = AgentMetrics::new();
         metrics.record_false_positive("ids", "ids-001");
@@ -1855,6 +1895,7 @@ mod tests {
         ("alert_sender_circuit_state", "gauge"),
         ("alerts", "counter"),
         ("alerts_by_rule", "counter"),
+        ("alerts_by_source_country", "counter"),
         ("alerts_dropped", "counter"),
         ("alerts_export_failures", "counter"),
         ("alerts_exported", "counter"),
@@ -2031,6 +2072,11 @@ mod tests {
                 component: "ids".into(),
                 severity: "high".into(),
                 technique_id: "T1071".into(),
+            })
+            .inc();
+        m.alerts_by_source_country_total
+            .get_or_create(&CountryLabels {
+                country: "KP".into(),
             })
             .inc();
         m.alerts_dropped_total

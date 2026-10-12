@@ -284,6 +284,40 @@ teardown_file() {
     [ "${has_country:-0}" -ge 1 ]
 }
 
+# ── Alerts counted by country of origin ─────────────────────────
+
+@test "alerts from the namespace are counted under the country their source resolves to" {
+    require_root
+    _require_geoip_mmdb
+
+    # The fixtures map the namespace range 10.200.0.0/24 to KP, so an alert
+    # raised on traffic from it is counted under that code and nowhere else.
+    send_tcp_from_ns "$EBPF_HOST_IP" 9999 "GEOIP_COUNTRY_COUNTER" 3
+    sleep 3
+
+    local body count
+    body="$(api_get /api/v1/alerts)"
+    count="$(echo "$body" | jq '(.alerts // .) | length' 2>/dev/null)" || count=0
+    if [ "${count:-0}" -eq 0 ]; then
+        soft_skip "no alerts generated - nothing to count by country"
+    fi
+
+    local metrics
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    [ -n "$metrics" ]
+
+    local kp
+    kp="$(echo "$metrics" | awk '/^ebpfsentinel_alerts_by_source_country_total\{country="KP"\}/ {print $2}')"
+    [ -n "$kp" ]
+    [ "${kp%.*}" -ge 1 ]
+
+    # Every label is two upper-case letters or `unknown`, never an address.
+    local bad
+    bad="$(echo "$metrics" | grep '^ebpfsentinel_alerts_by_source_country_total{' |
+        grep -cvE 'country="([A-Z]{2}|unknown)"')" || true
+    [ "${bad:-0}" -eq 0 ]
+}
+
 # ── Cross-domain: L7 country matching ───────────────────────────
 
 @test "GeoIP cross-domain: L7 rules with country matching" {

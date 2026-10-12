@@ -4,7 +4,7 @@ use std::sync::Arc;
 use domain::alert::entity::Alert;
 use domain::alias::entity::GeoIpInfo;
 use domain::l7::ja4::{FingerprintCache, FlowKey};
-use ports::secondary::alert_enrichment_port::AlertEnrichmentPort;
+use ports::secondary::alert_enrichment_port::{AlertEnrichmentPort, Enrichment};
 use ports::secondary::dns_cache_port::DnsCachePort;
 use ports::secondary::domain_reputation_port::DomainReputationPort;
 use ports::secondary::geoip_port::GeoIpPort;
@@ -47,7 +47,9 @@ impl DnsAlertEnricher {
 }
 
 impl AlertEnrichmentPort for DnsAlertEnricher {
-    fn enrich_alert(&self, alert: &mut Alert) {
+    fn enrich_alert(&self, alert: &mut Alert) -> Enrichment {
+        let mut enrichment = Enrichment::default();
+
         // Source IP → domain
         let src_ip = addr_to_ip(alert.src_addr, alert.is_ipv6);
         if let Some(ref ip) = src_ip {
@@ -90,6 +92,7 @@ impl AlertEnrichmentPort for DnsAlertEnricher {
             if let Some(ref ip) = src_ip
                 && let Some(info) = geoip.lookup(ip)
             {
+                enrichment.source_country = info.country_alpha2();
                 alert.src_geo = Some(format_geo(&info));
             }
             if let Some(ref ip) = dst_ip
@@ -98,6 +101,8 @@ impl AlertEnrichmentPort for DnsAlertEnricher {
                 alert.dst_geo = Some(format_geo(&info));
             }
         }
+
+        enrichment
     }
 }
 
@@ -356,6 +361,12 @@ mod tests {
                     latitude: Some(40.7128),
                     longitude: Some(-74.006),
                 })
+            } else if ip_str.starts_with("10.200.0.") {
+                Some(domain::alias::entity::GeoIpInfo {
+                    country_code: Some("kp".to_string()),
+                    city: Some("Pyongyang".to_string()),
+                    ..domain::alias::entity::GeoIpInfo::default()
+                })
             } else {
                 None
             }
@@ -364,6 +375,39 @@ mod tests {
         fn is_ready(&self) -> bool {
             true
         }
+    }
+
+    #[test]
+    fn enrich_reports_the_source_country_and_never_the_destination() {
+        let cache = MockDnsCache { entries: vec![] };
+        let enricher = DnsAlertEnricher::new(Arc::new(cache), None).with_geoip(Arc::new(MockGeoIp));
+
+        // src = 10.200.0.7 resolves to KP, dst = 10.0.0.1 to US.
+        let mut alert = make_alert(0x0AC8_0007, 0x0A00_0001);
+        let enrichment = enricher.enrich_alert(&mut alert);
+
+        assert_eq!(enrichment.source_country.as_deref(), Some("KP"));
+        assert!(
+            alert
+                .dst_geo
+                .as_deref()
+                .is_some_and(|geo| geo.contains("US"))
+        );
+    }
+
+    #[test]
+    fn enrich_reports_no_country_for_a_source_that_resolves_to_none() {
+        let cache = MockDnsCache { entries: vec![] };
+        let enricher = DnsAlertEnricher::new(Arc::new(cache), None).with_geoip(Arc::new(MockGeoIp));
+
+        // src = 192.168.1.1 is not in the database; the destination resolving
+        // is no reason to name a country for the source.
+        let mut alert = make_alert(0xC0A8_0101, 0x0A00_0001);
+        assert_eq!(enricher.enrich_alert(&mut alert).source_country, None);
+
+        let without = DnsAlertEnricher::new(Arc::new(MockDnsCache { entries: vec![] }), None);
+        let mut alert = make_alert(0x0AC8_0007, 0);
+        assert_eq!(without.enrich_alert(&mut alert).source_country, None);
     }
 
     #[test]

@@ -1,5 +1,17 @@
 use domain::alert::entity::Alert;
 
+/// What enrichment learned that is counted rather than written onto the alert.
+///
+/// The alert carries a location for a person to read; a count needs the part
+/// of it that is a closed vocabulary, which the formatted location no longer
+/// separates out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Enrichment {
+    /// The ISO 3166-1 alpha-2 code the source address resolved to, upper
+    /// case, or `None` when it resolved to none.
+    pub source_country: Option<String>,
+}
+
 /// Secondary port for enriching alerts with additional context.
 ///
 /// Implementations may add DNS reverse-lookup data, reputation scores,
@@ -8,7 +20,7 @@ pub trait AlertEnrichmentPort: Send + Sync {
     /// Enrich an alert in place with additional context.
     ///
     /// Best-effort: if enrichment data is unavailable, fields remain `None`.
-    fn enrich_alert(&self, alert: &mut Alert);
+    fn enrich_alert(&self, alert: &mut Alert) -> Enrichment;
 }
 
 #[cfg(test)]
@@ -19,8 +31,9 @@ mod tests {
     struct MockEnricher;
 
     impl AlertEnrichmentPort for MockEnricher {
-        fn enrich_alert(&self, alert: &mut Alert) {
+        fn enrich_alert(&self, alert: &mut Alert) -> Enrichment {
             alert.src_domain = Some("enriched.example.com".to_string());
+            Enrichment::default()
         }
     }
 
@@ -80,7 +93,7 @@ mod tests {
         let mut alert = sample_alert();
         assert!(alert.src_domain.is_none());
 
-        enricher.enrich_alert(&mut alert);
+        assert_eq!(enricher.enrich_alert(&mut alert), Enrichment::default());
         assert_eq!(alert.src_domain, Some("enriched.example.com".to_string()));
     }
 

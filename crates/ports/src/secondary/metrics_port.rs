@@ -126,6 +126,12 @@ pub trait AlertMetrics: Send + Sync {
     /// Record an alert for per-rule counting (enables FP rate computation).
     fn record_alert_by_rule(&self, _component: &str, _rule_id: &str) {}
 
+    /// Record an alert against the country its source address resolved to:
+    /// an upper-case ISO 3166-1 alpha-2 code, or `unknown` when it resolved
+    /// to none. Called once for every alert `record_alert` counts, so the two
+    /// totals agree.
+    fn record_alert_source_country(&self, _country: &str) {}
+
     /// Record a false positive marking for a given component and rule.
     fn record_false_positive(&self, _component: &str, _rule_id: &str) {}
 

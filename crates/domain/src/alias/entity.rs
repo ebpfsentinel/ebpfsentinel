@@ -2,6 +2,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::firewall::entity::{IpNetwork, PortRange};
 
+/// The country an address is counted under when it resolved to none.
+///
+/// An address with no `GeoIP` database behind it, a private range or a code
+/// the database spelled in some other way all land here, so a count per
+/// country always adds up to the alerts it was taken from.
+pub const UNKNOWN_COUNTRY: &str = "unknown";
+
 /// `GeoIP` lookup result for a single IP address.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GeoIpInfo {
@@ -29,6 +36,19 @@ pub struct GeoIpInfo {
 }
 
 impl GeoIpInfo {
+    /// The ISO 3166-1 alpha-2 code, upper case, or `None` when the database
+    /// gave anything other than two ASCII letters.
+    ///
+    /// The code is the one part of a lookup that is a fixed vocabulary rather
+    /// than a name somebody chose, which is what makes it safe to use as a
+    /// metric label: a city or an AS organisation would be neither bounded nor
+    /// ours.
+    pub fn country_alpha2(&self) -> Option<String> {
+        let code = self.country_code.as_deref()?;
+        (code.len() == 2 && code.bytes().all(|b| b.is_ascii_alphabetic()))
+            .then(|| code.to_ascii_uppercase())
+    }
+
     /// Format as a compact string: "CC/City (ASN: AS12345 Org)".
     pub fn format_compact(&self) -> String {
         let mut parts = Vec::new();
@@ -282,6 +302,20 @@ impl Alias {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn country_alpha2_is_two_letters_upper_case_or_nothing() {
+        let with = |code: Option<&str>| GeoIpInfo {
+            country_code: code.map(str::to_string),
+            ..GeoIpInfo::default()
+        };
+        assert_eq!(with(Some("KP")).country_alpha2().as_deref(), Some("KP"));
+        assert_eq!(with(Some("fr")).country_alpha2().as_deref(), Some("FR"));
+        assert_eq!(with(Some("FRA")).country_alpha2(), None);
+        assert_eq!(with(Some("1A")).country_alpha2(), None);
+        assert_eq!(with(Some("")).country_alpha2(), None);
+        assert_eq!(with(None).country_alpha2(), None);
+    }
 
     #[test]
     fn alias_id_valid() {
