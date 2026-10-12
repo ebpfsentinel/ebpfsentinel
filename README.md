@@ -278,10 +278,10 @@ its environment are in [`tests/perf/BENCHMARK-RESULTS.md`](tests/perf/BENCHMARK-
 ## Telemetry
 
 Release builds send an **anonymous heartbeat every 30 minutes**, on by
-default: a random installation identifier drawn from `/dev/urandom`, the
-agent version, and the name and load state of each eBPF program. Nothing
-else - no configuration, rule, address, interface, host name or machine
-fingerprint - and the agent logs a line at boot saying so. Switch it off with
+default: an installation identifier hashed one way from `/etc/machine-id`
+(random where there is none), the agent version, and the name and load state
+of each eBPF program. Nothing else - no configuration, rule, address,
+interface, host name or the machine identifier itself - and the agent logs a line at boot saying so. Switch it off with
 `telemetry.enabled: false` or `EBPFSENTINEL_TELEMETRY_DISABLE=1` (any value).
 A build from this repository carries no destination and sends nothing. The
 receiving side keeps the source address only for its rate-limit window and

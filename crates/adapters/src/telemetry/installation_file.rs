@@ -1,6 +1,10 @@
 //! Keeping the installation identifier across restarts.
 //!
-//! One small file holding thirty-two hex characters. It is written `0600`
+//! The machine's own identifier is read first, so that a machine whose state
+//! directory was lost answers to the name it already had; the file is what a
+//! machine without one falls back on, and what keeps a derived name when the
+//! identifier later stops being readable. One small file holding thirty-two hex
+//! characters. It is written `0600`
 //! inside a `0700` directory - not because the identifier is a secret, but
 //! because a world-readable file in `/var/lib` is a file somebody copies onto
 //! a golden image, and then a thousand machines report as one installation.
@@ -17,6 +21,10 @@ use ports::secondary::telemetry_port::InstallationStore;
 /// Where the identifier lives when nothing says otherwise.
 pub const DEFAULT_INSTALLATION_PATH: &str = "/var/lib/ebpfsentinel/telemetry/installation";
 
+/// Where systemd, and every distribution following it, keeps the machine's own
+/// identifier.
+pub const DEFAULT_MACHINE_ID_PATH: &str = "/etc/machine-id";
+
 /// The most this reads off disk before deciding the file is not ours.
 ///
 /// The identifier is thirty-two characters; anything an order of magnitude
@@ -28,13 +36,25 @@ const MAX_FILE_BYTES: u64 = 512;
 #[derive(Debug, Clone)]
 pub struct FileInstallationStore {
     path: PathBuf,
+    machine_id: Option<PathBuf>,
 }
 
 impl FileInstallationStore {
-    /// Points the store at one path.
+    /// Points the store at one path, reading the machine identifier at
+    /// [`DEFAULT_MACHINE_ID_PATH`].
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            machine_id: Some(PathBuf::from(DEFAULT_MACHINE_ID_PATH)),
+        }
+    }
+
+    /// Reads the machine identifier somewhere else, or nowhere when `None`.
+    #[must_use]
+    pub fn with_machine_id(mut self, path: Option<PathBuf>) -> Self {
+        self.machine_id = path;
+        self
     }
 
     /// Points the store at [`DEFAULT_INSTALLATION_PATH`].
@@ -44,26 +64,29 @@ impl FileInstallationStore {
     }
 }
 
+/// Reads at most [`MAX_FILE_BYTES`] of one file.
+fn read_bounded(path: &Path) -> std::io::Result<String> {
+    let mut buffer = String::new();
+    fs::File::open(path)?
+        .take(MAX_FILE_BYTES)
+        .read_to_string(&mut buffer)?;
+    Ok(buffer)
+}
+
 impl InstallationStore for FileInstallationStore {
     fn load(&self) -> Result<Option<InstallationId>, TelemetryError> {
-        let mut file = match fs::File::open(&self.path) {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => {
-                return Err(TelemetryError::Persistence(format!(
-                    "{}: {e}",
-                    self.path.display()
-                )));
-            }
-        };
+        match read_bounded(&self.path) {
+            Ok(buffer) => InstallationId::parse(&buffer).map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(TelemetryError::Persistence(format!(
+                "{}: {e}",
+                self.path.display()
+            ))),
+        }
+    }
 
-        let mut buffer = String::new();
-        file.by_ref()
-            .take(MAX_FILE_BYTES)
-            .read_to_string(&mut buffer)
-            .map_err(|e| TelemetryError::Persistence(format!("{}: {e}", self.path.display())))?;
-
-        InstallationId::parse(&buffer).map(Some)
+    fn machine_identity(&self) -> Option<String> {
+        read_bounded(self.machine_id.as_deref()?).ok()
     }
 
     fn save(&self, id: &InstallationId) -> Result<(), TelemetryError> {
@@ -167,6 +190,34 @@ mod tests {
         assert!(FileInstallationStore::new(&path).load().is_err());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_machine_identifier_is_read_where_it_was_pointed() {
+        let dir = a_temp_dir("machine");
+        fs::create_dir_all(&dir).expect("created");
+        let machine_id = dir.join("machine-id");
+        fs::write(&machine_id, "4c4c4544003958108052b4c04f4e3732\n").expect("written");
+
+        let store =
+            FileInstallationStore::new(dir.join("installation")).with_machine_id(Some(machine_id));
+        assert_eq!(
+            store.machine_identity().as_deref(),
+            Some("4c4c4544003958108052b4c04f4e3732\n")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_machine_identifier_that_is_absent_or_switched_off_is_none() {
+        let dir = a_temp_dir("no-machine");
+        let absent = FileInstallationStore::new(dir.join("installation"))
+            .with_machine_id(Some(dir.join("machine-id")));
+        let off = FileInstallationStore::new(dir.join("installation")).with_machine_id(None);
+
+        assert!(absent.machine_identity().is_none());
+        assert!(off.machine_identity().is_none());
     }
 
     #[test]

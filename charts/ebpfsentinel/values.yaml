@@ -211,6 +211,13 @@ daemonset:
     # but not the pod being replaced, so every rollout starts with empty stores
     # and a new installation identifier.
     ephemeral: false
+    # -- Mount the node's /etc/machine-id read-only so the telemetry
+    # installation identifier is derived from it: a keyed hash, never the
+    # identifier itself. The node then answers to one name whatever happens to
+    # the state, a reinstall under another release name included. Set false on
+    # a node that has no /etc/machine-id, where the mount would keep the pod
+    # from starting; the identifier is then random and lives with the state.
+    machineId: true
   # -- Extra volume mounts (e.g., GeoIP database, TLS certs)
   extraVolumeMounts: []
   # -- Extra volumes

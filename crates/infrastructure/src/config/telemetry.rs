@@ -23,6 +23,9 @@ pub const DISABLE_ENV: &str = "EBPFSENTINEL_TELEMETRY_DISABLE";
 /// Where the installation identifier lives when nothing says otherwise.
 const DEFAULT_STATE_PATH: &str = "/var/lib/ebpfsentinel/telemetry/installation";
 
+/// Where the machine's own identifier is read when nothing says otherwise.
+const DEFAULT_MACHINE_ID_PATH: &str = "/etc/machine-id";
+
 /// Anonymous usage telemetry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -32,6 +35,11 @@ pub struct TelemetryConfig {
 
     /// Where the installation identifier is kept between restarts.
     pub state_path: String,
+
+    /// Where the machine's own identifier is read, so the installation keeps
+    /// its name when the state directory is lost. Empty reads nothing, and the
+    /// name is then random and lives only as long as `state_path` does.
+    pub machine_id_path: String,
 }
 
 impl Default for TelemetryConfig {
@@ -39,11 +47,19 @@ impl Default for TelemetryConfig {
         Self {
             enabled: true,
             state_path: DEFAULT_STATE_PATH.to_string(),
+            machine_id_path: DEFAULT_MACHINE_ID_PATH.to_string(),
         }
     }
 }
 
 impl TelemetryConfig {
+    /// The machine identifier's path, or `None` when it is switched off.
+    #[must_use]
+    pub fn machine_id(&self) -> Option<&str> {
+        let path = self.machine_id_path.trim();
+        (!path.is_empty()).then_some(path)
+    }
+
     /// Whether telemetry runs, taking the environment into account.
     ///
     /// The variable wins over the file, because the person setting it is
@@ -58,9 +74,10 @@ impl TelemetryConfig {
     /// # Errors
     ///
     /// Returns [`ConfigError::Validation`] when the state path is empty or
-    /// relative. A relative path would put the identifier wherever the agent
-    /// happened to be started from, so a service restarted from a different
-    /// directory would mint a new one and be counted twice.
+    /// relative, or the machine identifier's path is relative. A relative path
+    /// would resolve wherever the agent happened to be started from, so a
+    /// service restarted from a different directory would answer to a new name
+    /// and be counted twice.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let path = self.state_path.trim();
 
@@ -75,6 +92,16 @@ impl TelemetryConfig {
             return Err(ConfigError::Validation {
                 field: "telemetry.state_path".to_string(),
                 message: "must be an absolute path".to_string(),
+            });
+        }
+
+        if self
+            .machine_id()
+            .is_some_and(|machine| !machine.starts_with('/'))
+        {
+            return Err(ConfigError::Validation {
+                field: "telemetry.machine_id_path".to_string(),
+                message: "must be an absolute path, or empty to read none".to_string(),
             });
         }
 
@@ -119,6 +146,27 @@ mod tests {
         assert!(empty.validate().is_err());
 
         assert!(TelemetryConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn a_machine_identifier_is_read_from_an_absolute_path_or_not_at_all() {
+        assert_eq!(
+            TelemetryConfig::default().machine_id(),
+            Some(DEFAULT_MACHINE_ID_PATH)
+        );
+
+        let off = TelemetryConfig {
+            machine_id_path: String::new(),
+            ..TelemetryConfig::default()
+        };
+        assert!(off.validate().is_ok());
+        assert!(off.machine_id().is_none());
+
+        let relative = TelemetryConfig {
+            machine_id_path: "etc/machine-id".to_string(),
+            ..TelemetryConfig::default()
+        };
+        assert!(relative.validate().is_err());
     }
 
     #[test]

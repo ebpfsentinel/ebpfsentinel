@@ -2507,6 +2507,9 @@ pub async fn run(
                     Arc::new(
                         adapters::telemetry::installation_file::FileInstallationStore::new(
                             &config.telemetry.state_path,
+                        )
+                        .with_machine_id(
+                            config.telemetry.machine_id().map(std::path::PathBuf::from),
                         ),
                     ),
                     Arc::new(

@@ -235,8 +235,8 @@ management:
   # operator_endpoint: https://operator.example.com
 
 # Anonymous usage telemetry, on by default. Every 30 minutes the agent
-# sends three things and nothing else: a random installation identifier,
-# the agent version, and the name and load state of each eBPF program.
+# sends three things and nothing else: an installation identifier hashed
+# one way from /etc/machine-id (random where there is none), the agent version, and the name and load state of each eBPF program.
 #
 # What the agent runs goes out. What the agent is configured with never
 # does: no configuration, no rules, no addresses, no interface names, no
@@ -249,3 +249,6 @@ management:
 telemetry:
   enabled: true
   # state_path: /var/lib/ebpfsentinel/telemetry/installation
+  # The machine identifier the installation identifier is derived from, so a
+  # machine is counted once whatever happens to state_path. Empty reads none.
+  # machine_id_path: /etc/machine-id

@@ -40,7 +40,14 @@ impl TelemetryService {
         }
     }
 
-    /// The identifier this installation answers to, minting one on first boot.
+    /// The identifier this installation answers to.
+    ///
+    /// The machine's own identifier decides it whenever there is one, ahead of
+    /// whatever the file holds, so a machine reinstalled, or one that lost its
+    /// state directory, comes back under the name it was counted under. The
+    /// derived name is written down too, so that a mount of the identifier
+    /// removed later does not turn into a second installation. Only a machine
+    /// with no identifier of its own keeps a random name, minted on first boot.
     ///
     /// # Errors
     ///
@@ -48,7 +55,21 @@ impl TelemetryService {
     /// read nor written, and [`TelemetryError::Malformed`] when the one on disk
     /// is not an identifier this agent wrote.
     pub fn installation_id(&self) -> Result<InstallationId, TelemetryError> {
-        if let Some(existing) = self.store.load()? {
+        let stored = self.store.load();
+
+        if let Some(derived) = self
+            .store
+            .machine_identity()
+            .as_deref()
+            .and_then(InstallationId::for_machine)
+        {
+            if !matches!(&stored, Ok(Some(held)) if *held == derived) {
+                self.store.save(&derived)?;
+            }
+            return Ok(derived);
+        }
+
+        if let Some(existing) = stored? {
             return Ok(existing);
         }
 
@@ -161,6 +182,7 @@ mod tests {
     #[derive(Default)]
     struct MemoryStore {
         held: Mutex<Option<InstallationId>>,
+        machine: Option<String>,
         draws: AtomicUsize,
     }
 
@@ -172,6 +194,10 @@ mod tests {
         fn save(&self, id: &InstallationId) -> Result<(), TelemetryError> {
             *self.held.lock().expect("not poisoned") = Some(id.clone());
             Ok(())
+        }
+
+        fn machine_identity(&self) -> Option<String> {
+            self.machine.clone()
         }
 
         fn random_bytes(&self) -> Result<[u8; 16], TelemetryError> {
@@ -223,6 +249,79 @@ mod tests {
             1,
             "a second boot drew fresh randomness and would have been counted twice"
         );
+    }
+
+    const A_MACHINE: &str = "4c4c4544003958108052b4c04f4e3732";
+
+    fn a_machine() -> MemoryStore {
+        MemoryStore {
+            machine: Some(A_MACHINE.to_owned()),
+            ..MemoryStore::default()
+        }
+    }
+
+    #[test]
+    fn a_machine_that_lost_its_state_comes_back_under_the_same_name() {
+        let before = a_service(
+            Arc::new(RecordingTransport::default()),
+            Arc::new(a_machine()),
+        )
+        .installation_id()
+        .expect("derived");
+        let after_wipe = a_service(
+            Arc::new(RecordingTransport::default()),
+            Arc::new(a_machine()),
+        )
+        .installation_id()
+        .expect("derived");
+
+        assert_eq!(before, after_wipe);
+    }
+
+    #[test]
+    fn the_machine_decides_over_a_random_name_kept_from_before() {
+        let store = Arc::new(a_machine());
+        *store.held.lock().expect("not poisoned") = Some(InstallationId::from_bytes([0x01; 16]));
+
+        let id = a_service(Arc::new(RecordingTransport::default()), Arc::clone(&store))
+            .installation_id()
+            .expect("derived");
+
+        assert_eq!(Some(id.clone()), InstallationId::for_machine(A_MACHINE));
+        assert_eq!(*store.held.lock().expect("not poisoned"), Some(id));
+        assert_eq!(store.draws.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_derived_name_survives_the_machine_identifier_going_away() {
+        let store = Arc::new(a_machine());
+        let derived = a_service(Arc::new(RecordingTransport::default()), Arc::clone(&store))
+            .installation_id()
+            .expect("derived");
+
+        let unmounted = Arc::new(MemoryStore {
+            held: Mutex::new(store.held.lock().expect("not poisoned").clone()),
+            ..MemoryStore::default()
+        });
+        let later = a_service(Arc::new(RecordingTransport::default()), unmounted)
+            .installation_id()
+            .expect("loaded");
+
+        assert_eq!(derived, later);
+    }
+
+    #[test]
+    fn an_image_placeholder_falls_back_to_a_random_name() {
+        let store = Arc::new(MemoryStore {
+            machine: Some("uninitialized\n".to_owned()),
+            ..MemoryStore::default()
+        });
+
+        a_service(Arc::new(RecordingTransport::default()), Arc::clone(&store))
+            .installation_id()
+            .expect("minted");
+
+        assert_eq!(store.draws.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

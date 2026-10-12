@@ -203,6 +203,13 @@ spec:
               # Stores, captures, GeoIP databases and the telemetry installation
               # identifier. The agent creates what it needs under it.
               mountPath: /var/lib/ebpfsentinel
+            {{- if .Values.daemonset.state.machineId }}
+            - name: machine-id
+              # Read for the telemetry installation identifier, which is a keyed
+              # hash of it, so the node keeps one name whatever happens to state.
+              mountPath: /etc/machine-id
+              readOnly: true
+            {{- end }}
             {{- with .Values.daemonset.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -256,6 +263,12 @@ spec:
             path: {{ .Values.daemonset.state.hostPath | default (printf "/var/lib/ebpfsentinel/k8s/%s/%s" .Release.Namespace .Release.Name) | quote }}
             type: DirectoryOrCreate
           {{- end }}
+        {{- if .Values.daemonset.state.machineId }}
+        - name: machine-id
+          hostPath:
+            path: /etc/machine-id
+            type: File
+        {{- end }}
         {{- with .Values.daemonset.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

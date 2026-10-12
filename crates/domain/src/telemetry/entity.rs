@@ -1,22 +1,32 @@
 //! What one installation says about itself, and nothing else.
 //!
-//! The shape here is the whole of the wire format. It carries three things: a
-//! random name for the installation, the agent version, and which eBPF programs
+//! The shape here is the whole of the wire format. It carries three things: an
+//! opaque name for the installation, the agent version, and which eBPF programs
 //! are loaded. There is deliberately no map, no free-text field and no
 //! `serde_json::Value` anywhere in it, so there is no field a rule, an address,
 //! an interface name, a hostname or a line of configuration could travel in
 //! even by accident. Widening it means editing this file, which is where the
 //! decision belongs.
 
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 
 use super::error::TelemetryError;
 
 /// How many hex characters an installation identifier carries.
 ///
-/// Sixteen random bytes: enough that two installations will not collide, small
-/// enough to read out of a log line.
+/// Sixteen bytes: enough that two installations will not collide, small enough
+/// to read out of a log line.
 pub const INSTALLATION_ID_CHARS: usize = 32;
+
+/// What this product mixes into a machine's identity before keeping any of it.
+///
+/// Fixed and public on purpose, the way systemd's application-specific machine
+/// identifiers are: every build derives the same name for the same machine, so
+/// reinstalling counts it once, and no other product deriving its own name from
+/// the same machine can join its readings to ours.
+const MACHINE_DERIVATION_LABEL: &[u8] = b"ebpfsentinel/telemetry/installation/v1";
 
 /// The longest version string the beat will carry.
 ///
@@ -30,11 +40,16 @@ pub const MAX_VERSION_CHARS: usize = 64;
 /// the beat is refused rather than sent.
 pub const MAX_PROGRAMS: usize = 64;
 
-/// The random name one installation answers to.
+/// The opaque name one installation answers to.
 ///
-/// Random rather than derived: nothing about the machine goes into it, so it
-/// cannot be reversed into a hostname, a MAC address or a network. It exists
-/// only so that counting beats counts installations rather than requests.
+/// Derived from the machine's own identifier when the machine has one, and
+/// drawn at random when it does not. Derived so that a lost state directory, a
+/// release reinstalled under another name or a container recreated without its
+/// volume still answers to the name it had, and is not counted twice; keyed and
+/// truncated so that the name cannot be reversed into the machine identifier,
+/// and nothing else about the machine - a hostname, a MAC address, a network -
+/// goes into it at all. It exists only so that counting beats counts
+/// installations rather than requests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct InstallationId(String);
@@ -82,6 +97,34 @@ impl InstallationId {
             let _ = write!(hex, "{byte:02x}");
         }
         Self(hex)
+    }
+
+    /// Derives the identifier from the machine's own, as `/etc/machine-id`
+    /// holds it.
+    ///
+    /// Returns `None` for anything that is not a machine identifier: the empty
+    /// file a container image ships, systemd's `uninitialized` placeholder, or
+    /// all zeros. Each of those is the same on every machine that carries it,
+    /// and deriving from it would count a whole fleet as one installation, so
+    /// the caller falls back to a random name instead.
+    #[must_use]
+    pub fn for_machine(machine_id: &str) -> Option<Self> {
+        let trimmed = machine_id.trim();
+        let well_formed = trimmed.len() == INSTALLATION_ID_CHARS
+            && trimmed
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase());
+        if !well_formed || trimmed.chars().all(|c| c == '0') {
+            return None;
+        }
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(trimmed.as_bytes()).ok()?;
+        mac.update(MACHINE_DERIVATION_LABEL);
+        let digest = mac.finalize().into_bytes();
+
+        let mut bytes = [0u8; INSTALLATION_ID_CHARS / 2];
+        bytes.copy_from_slice(&digest[..INSTALLATION_ID_CHARS / 2]);
+        Some(Self::from_bytes(bytes))
     }
 
     /// The identifier as it goes on the wire.
@@ -237,6 +280,47 @@ mod tests {
         assert!(InstallationId::parse("").is_err());
         assert!(InstallationId::parse("ABABABABABABABABABABABABABABABAB").is_err());
         assert!(InstallationId::parse("abababababababababababababababa").is_err());
+    }
+
+    const A_MACHINE: &str = "4c4c4544003958108052b4c04f4e3732";
+
+    #[test]
+    fn the_same_machine_answers_to_the_same_name_every_time() {
+        let first = InstallationId::for_machine(A_MACHINE).expect("derived");
+        let again = InstallationId::for_machine(&format!("{A_MACHINE}\n")).expect("derived");
+
+        assert_eq!(first, again);
+        assert_eq!(
+            InstallationId::parse(first.as_str()).expect("parsed"),
+            first
+        );
+    }
+
+    #[test]
+    fn the_name_does_not_carry_the_machine_identifier() {
+        let derived = InstallationId::for_machine(A_MACHINE).expect("derived");
+        let other =
+            InstallationId::for_machine("4c4c4544003958108052b4c04f4e3733").expect("derived");
+
+        assert_ne!(derived.as_str(), A_MACHINE);
+        assert_ne!(derived, other);
+    }
+
+    #[test]
+    fn a_placeholder_every_image_ships_is_not_a_machine() {
+        for placeholder in [
+            "",
+            "\n",
+            "uninitialized",
+            "00000000000000000000000000000000",
+            "4C4C4544003958108052B4C04F4E3732",
+            "4c4c4544-0039-5810-8052-b4c04f4e3732",
+        ] {
+            assert!(
+                InstallationId::for_machine(placeholder).is_none(),
+                "{placeholder:?} was taken for a machine"
+            );
+        }
     }
 
     #[test]

@@ -136,6 +136,15 @@ services:
       # under data/, GeoIP databases and the telemetry installation identifier.
       # A new volume is seeded from the image, which owns it as 65534.
       - ebpfsentinel-state:/var/lib/ebpfsentinel
+      # The host's machine identifier, read for the telemetry installation
+      # identifier, which is a keyed hash of it: the host keeps one name even
+      # when this volume is removed. Long syntax so a host without the file
+      # refuses to start rather than growing a directory at that path; drop
+      # these four lines there and the identifier is random and lives here.
+      - type: bind
+        source: /etc/machine-id
+        target: /etc/machine-id
+        read_only: true
       # Packet captures (POST /api/v1/captures/manual)
       - ebpfsentinel-captures:/var/lib/ebpfsentinel/captures
       # The agent mounts its delegated bpffs here; a container's /sys is

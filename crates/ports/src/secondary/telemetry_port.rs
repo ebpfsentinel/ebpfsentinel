@@ -60,6 +60,14 @@ pub trait InstallationStore: Send + Sync {
     /// Returns [`TelemetryError::Persistence`] when the file cannot be written.
     fn save(&self, id: &InstallationId) -> Result<(), TelemetryError>;
 
+    /// The machine's own identifier, as its file holds it, when there is one.
+    ///
+    /// `None` when the file is absent, unreadable or switched off: a machine
+    /// that cannot be recognised is still counted, under a random name kept in
+    /// the store. What the content is worth is the domain's decision, in
+    /// `InstallationId::for_machine`, never this port's.
+    fn machine_identity(&self) -> Option<String>;
+
     /// Sixteen random bytes for a first identifier.
     ///
     /// Lives beside the store rather than in the domain because drawing them
