@@ -328,6 +328,28 @@ pub fn arp_announce(iface: &str, ip: &str) -> Result<(), String> {
 
 // ── pcap capture socket ───────────────────────────────────────────────────
 
+/// Whether this process can create an `AF_PACKET` socket at all.
+///
+/// The warden normally runs as host root and can, which is what makes the
+/// on-demand [`open_pcap_fd`] fallback worth trying when the pre-opened pool is
+/// spent. A warden inside a user namespace cannot: `CAP_NET_RAW` is checked
+/// against the initial user namespace, so every `socket()` there fails with
+/// `EPERM` and the pool is the only capture there will ever be. Probed once at
+/// startup with a protocol-`0` socket, which is silent and immediately closed,
+/// so an exhausted pool can say so instead of failing inside an open that
+/// cannot work.
+#[must_use]
+pub fn af_packet_available() -> bool {
+    // SAFETY: protocol 0 keeps the socket silent; the fd is closed right away.
+    let fd = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, 0) };
+    if fd < 0 {
+        return false;
+    }
+    // SAFETY: `fd` is a valid descriptor this call owns.
+    unsafe { libc::close(fd) };
+    true
+}
+
 /// Open an `AF_PACKET`/`SOCK_RAW` socket bound to `iface` (`ETH_P_ALL`) and return
 /// it for fd-passing to the agent. The agent installs its cBPF filter on the
 /// received fd (as it already does for the pre-opened pool), so capture stays in

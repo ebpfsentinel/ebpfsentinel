@@ -12,11 +12,11 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::ptr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
 
 use crate::host_ops::HostOps;
+use crate::pcap_slots::{PcapSlot, PcapSlots};
 use crate::{delegate_over_fd, dlp_scan, net_ops, recv_fd, send_msg_fds, uprobe_ops};
 
 /// A handler for [`Command::Extension`] requests - the hook a downstream warden
@@ -52,20 +52,31 @@ pub fn serve_loop(
     ext: Option<Arc<dyn ExtHandler>>,
     allowed_uid: u32,
 ) {
-    // The pcap pool is handed out across all connections, so the next-index is
-    // shared (a reconnecting agent is re-served from where it left off).
-    let pcap_next = Arc::new(AtomicUsize::new(0));
+    // The pcap pool is shared across all connections as claimable slots: a slot
+    // belongs to the connection that took it until that connection's thread
+    // ends, so an agent that restarts gives back every socket it held.
+    let slots = PcapSlots::new((*pcap).clone(), net_ops::af_packet_available());
+    if !slots.is_empty() {
+        eprintln!(
+            "[warden] pcap pool: {} socket(s), on-demand open {}",
+            slots.len(),
+            if slots.can_open_more() {
+                "available"
+            } else {
+                "unavailable in this namespace"
+            }
+        );
+    }
     for stream in listener.incoming() {
         match stream {
             Ok(conn) => {
                 if peer_allowed(&conn, allowed_uid) {
                     let btf = Arc::clone(&btf);
-                    let pcap = Arc::clone(&pcap);
                     let host = Arc::clone(&host);
                     let ext = ext.clone();
-                    let pcap_next = Arc::clone(&pcap_next);
+                    let slots = Arc::clone(&slots);
                     std::thread::spawn(move || {
-                        handle_conn(conn, &btf, &pcap, &*host, ext.as_deref(), &pcap_next);
+                        handle_conn(conn, &btf, &slots, &*host, ext.as_deref());
                     });
                 }
             }
@@ -112,11 +123,14 @@ fn peer_allowed(conn: &UnixStream, allowed_uid: u32) -> bool {
 fn handle_conn(
     conn: UnixStream,
     btf: &[(String, RawFd)],
-    pcap: &[RawFd],
+    pcap: &Arc<PcapSlots>,
     host: &dyn HostOps,
     ext: Option<&dyn ExtHandler>,
-    pcap_next: &AtomicUsize,
 ) {
+    // Every slot this connection claimed, held until the connection ends: the
+    // agent's own pool keeps this connection open for its whole life, so the
+    // sockets are in use for exactly as long as it is there to read them.
+    let mut claimed: Vec<PcapSlot> = Vec::new();
     let mut reader = match conn.try_clone() {
         Ok(c) => c,
         Err(_) => return,
@@ -162,21 +176,25 @@ fn handle_conn(
         let ok = match &cmd {
             Command::PcapOpen { iface, filter } => {
                 eprintln!("[warden] pcap open on {iface} (filter applied agent-side: {filter:?})");
-                // Claim the next pool slot atomically (the index is shared across
-                // all connection threads). The warden keeps its own copy open so a
-                // reconnecting agent is re-served in order; the fd is dup'd into
-                // the agent by `SCM_RIGHTS`, so closing the agent's copy does not
-                // disturb the warden's.
-                let idx = pcap_next.fetch_add(1, Ordering::Relaxed);
-                if idx < pcap.len() {
-                    // Serve a launcher-provided socket: the warden may sit in a
-                    // user namespace where `socket(AF_PACKET)` is denied, so the
-                    // pre-opened pool is the only way to capture rootlessly.
-                    let fd = pcap[idx];
-                    serve_passed_fd(&mut writer, Ok(fd))
-                } else {
-                    // Pool exhausted (or none provided, e.g. a bare-metal warden
-                    // running as host root): open one on demand.
+                if let Some(slot) = pcap.claim() {
+                    // Serve a pre-opened socket: the warden may sit in a user
+                    // namespace where `socket(AF_PACKET)` is denied, so the pool
+                    // is the only way to capture rootlessly. The fd is dup'd into
+                    // the agent by `SCM_RIGHTS`, so closing the agent's copy does
+                    // not disturb the warden's.
+                    eprintln!(
+                        "[warden] pcap slot {} served ({} of {} held)",
+                        slot.index(),
+                        pcap.held(),
+                        pcap.len()
+                    );
+                    let ok = serve_passed_fd(&mut writer, Ok(slot.fd()));
+                    claimed.push(slot);
+                    ok
+                } else if pcap.can_open_more() {
+                    // No pool (a bare-metal warden running as host root) or one
+                    // that is spent, and this namespace can still open a socket:
+                    // open one on demand.
                     match net_ops::open_pcap_fd(iface) {
                         Ok(owned) => {
                             let ok = serve_passed_fd(&mut writer, Ok(owned.as_raw_fd()));
@@ -185,9 +203,19 @@ fn handle_conn(
                         }
                         Err(message) => serve_passed_fd(&mut writer, Err(message)),
                     }
+                } else {
+                    // Nothing left and nothing openable: name the pool rather
+                    // than returning the `EPERM` of an open that never works
+                    // here, which reads as a broken warden instead of a full one.
+                    let message = format!(
+                        "no packet-capture socket available: {} of {} in use and this warden cannot open another",
+                        pcap.held(),
+                        pcap.len()
+                    );
+                    serve_passed_fd(&mut writer, Err(message))
                 }
             }
-            Command::Delegate => serve_delegate(&mut writer, btf, pcap),
+            Command::Delegate => serve_delegate(&mut writer, btf, pcap.fds()),
             // `AttachUprobe` answers out-of-band: it first receives the agent's
             // program fd over `SCM_RIGHTS`, creates the link, then replies
             // `FdReady` + the link fd (or a typed `Error`).
@@ -341,13 +369,13 @@ fn result_to_response(result: Result<(), String>) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExtHandler, HostOps, handle_conn};
+    use super::{ExtHandler, HostOps, PcapSlots, handle_conn};
     use ebpfsentinel_warden_proto::{
         Command, ConntrackTuple, PROTOCOL_VERSION, Response, RouteSpec, read_frame, write_frame,
     };
+    use std::os::fd::{AsRawFd, RawFd};
     use std::os::unix::net::UnixStream;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
     use std::thread::JoinHandle;
 
     /// No host-network op is exercised by the extension tests - only the `Hello`
@@ -390,9 +418,9 @@ mod tests {
     /// Drive `handle_conn` on the server end of a socket pair on its own thread.
     fn run_server(server: UnixStream, ext: Option<Arc<dyn ExtHandler>>) -> JoinHandle<()> {
         std::thread::spawn(move || {
-            let pcap_next = AtomicUsize::new(0);
             let host = NullHost;
-            handle_conn(server, &[], &[], &host, ext.as_deref(), &pcap_next);
+            let slots = PcapSlots::new(Vec::new(), false);
+            handle_conn(server, &[], &slots, &host, ext.as_deref());
         })
     }
 
@@ -466,5 +494,109 @@ mod tests {
     fn extension_without_handler_is_unimplemented() {
         let resp = one_extension(None, "echo", vec![1]);
         assert_eq!(resp, Response::Unimplemented);
+    }
+
+    /// Drive `handle_conn` against a shared slot pool on its own thread.
+    fn run_server_with_slots(server: UnixStream, slots: Arc<PcapSlots>) -> JoinHandle<()> {
+        std::thread::spawn(move || {
+            let host = NullHost;
+            handle_conn(server, &[], &slots, &host, None);
+        })
+    }
+
+    /// One connection asking for one capture socket. The connection and its
+    /// server thread are returned so the caller decides when the agent goes.
+    struct Claim {
+        client: UnixStream,
+        server: JoinHandle<()>,
+        response: Response,
+        fd: Option<RawFd>,
+    }
+
+    /// Ask for a capture socket over a fresh connection.
+    fn claim_over_connection(slots: &Arc<PcapSlots>) -> Claim {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let handle = run_server_with_slots(server, Arc::clone(slots));
+        hello(&mut client);
+        write_frame(
+            &mut client,
+            &Command::PcapOpen {
+                iface: "lo".into(),
+                filter: String::new(),
+            },
+        )
+        .unwrap();
+        let response: Response = read_frame(&mut client).unwrap();
+        let fd = if response == Response::FdReady {
+            let fd = crate::recv_fd(client.as_raw_fd());
+            assert!(fd >= 0, "an FdReady is followed by a descriptor");
+            Some(fd)
+        } else {
+            None
+        };
+        Claim {
+            client,
+            server: handle,
+            response,
+            fd,
+        }
+    }
+
+    /// Close a received descriptor and let the agent's connection go, which is
+    /// what the warden watches for to take its slot back.
+    fn release(claim: Claim) {
+        if let Some(fd) = claim.fd {
+            // SAFETY: the fd was received over `SCM_RIGHTS` and is owned here.
+            unsafe { libc::close(fd) };
+        }
+        drop(claim.client);
+        claim.server.join().unwrap();
+    }
+
+    #[test]
+    fn every_pool_slot_comes_back_when_its_connection_goes() {
+        // Two real descriptors stand in for the pre-opened capture sockets: the
+        // warden only ever passes them over `SCM_RIGHTS`, so any fd will do.
+        let a = std::fs::File::open("/dev/null").unwrap();
+        let b = std::fs::File::open("/dev/null").unwrap();
+        let slots = PcapSlots::new(vec![a.as_raw_fd(), b.as_raw_fd()], false);
+
+        let first = claim_over_connection(&slots);
+        let second = claim_over_connection(&slots);
+        assert_eq!(first.response, Response::FdReady);
+        assert_eq!(second.response, Response::FdReady);
+        assert_eq!(
+            slots.held(),
+            2,
+            "both sockets are in use while both agents hold them"
+        );
+
+        // A third agent finds the pool spent and is told so, rather than meeting
+        // the `EPERM` of an open this warden cannot perform.
+        let third = claim_over_connection(&slots);
+        match &third.response {
+            Response::Error { message } => assert!(
+                message.contains("2 of 2 in use"),
+                "the error names the pool: {message}"
+            ),
+            other => panic!("expected an exhausted-pool error, got {other:?}"),
+        }
+        release(third);
+
+        release(first);
+        release(second);
+        assert_eq!(
+            slots.held(),
+            0,
+            "the connections going returns every socket they held"
+        );
+
+        // Which is what an agent restart is: the whole pool is claimable again.
+        let again_first = claim_over_connection(&slots);
+        let again_second = claim_over_connection(&slots);
+        assert_eq!(again_first.response, Response::FdReady);
+        assert_eq!(again_second.response, Response::FdReady);
+        release(again_first);
+        release(again_second);
     }
 }

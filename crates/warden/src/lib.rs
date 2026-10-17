@@ -45,6 +45,7 @@ use std::ptr;
 pub mod dlp_scan;
 pub mod host_ops;
 pub mod net_ops;
+pub mod pcap_slots;
 pub mod server;
 pub mod uprobe_ops;
 pub mod userns_bootstrap;
