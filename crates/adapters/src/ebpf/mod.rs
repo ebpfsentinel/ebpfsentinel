@@ -61,7 +61,7 @@ pub use config_flags_manager::{
 };
 pub use conntrack_map_manager::ConnTrackMapManager;
 pub use dlp_attach::{
-    AttachedUprobe, DLP_ATTACH_POLL_INTERVAL, DlpUprobeAttacher, ReconcileOutcome,
+    AttachedUprobe, DLP_ATTACH_POLL_INTERVAL, DlpUprobeAttacher, ReconcileOutcome, TargetScope,
     UPROBE_OWNER_EXTENDED_TLS, UPROBE_OWNER_SCAN, UprobeTarget, attached_uprobes,
     clear_uprobe_inventory, push_ktls_iter_offsets,
 };

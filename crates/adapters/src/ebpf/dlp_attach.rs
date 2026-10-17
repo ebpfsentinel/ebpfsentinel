@@ -79,6 +79,54 @@ const KTLS_PROGRAMS: [(&str, &str, bool); 3] = [
 /// droppable on the same terms as the rest.
 const KTLS_ATTACH_KEY: (u64, u64) = (0, 0);
 
+/// The `/proc` the **warden** sees. The brokered attach is issued by the
+/// warden in the init namespaces, so a `/proc/<pid>/root/...` path handed to it
+/// must be spelled from there: the agent's own view may be `/host/proc`, which
+/// means nothing on the other side of that socket.
+const WARDEN_PROC_ROOT: &str = "/proc";
+
+/// Where a binary a caller names can actually be opened.
+///
+/// A path resolved by a scanner that walks `/proc` is a path **inside the
+/// scanned process's mount namespace**: `/usr/lib/libssl.so.3` in a container
+/// is not the agent's `/usr/lib/libssl.so.3`. Stat'ing it as given either fails
+/// or, worse, succeeds on a same-named host library, and the uprobe then sits
+/// at offsets resolved from a different build - a probe reporting plaintext
+/// from the wrong inode, or firing on nothing at all.
+///
+/// So the caller passes the processes it saw the file through, and the inode
+/// identity it recorded, and the attach resolves the name through one of them.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TargetScope<'a> {
+    /// Processes observed running or mapping the file, in whose namespace the
+    /// path is spelled. Empty means the path belongs to this agent's own
+    /// namespace and is taken as written.
+    pub pids: &'a [u32],
+    /// `(dev, ino)` the scanner recorded for the file, when it recorded one. It
+    /// is the attach's dedup key and, when a candidate path resolves to a
+    /// different inode, the reason to refuse that candidate instead of probing
+    /// it.
+    pub identity: Option<(u64, u64)>,
+}
+
+impl<'a> TargetScope<'a> {
+    /// A path in the agent's own namespace, with no process to resolve through.
+    #[must_use]
+    pub const fn local() -> Self {
+        Self {
+            pids: &[],
+            identity: None,
+        }
+    }
+
+    /// A path spelled inside the namespace of `pids`, with the inode the
+    /// scanner recorded.
+    #[must_use]
+    pub const fn in_processes(pids: &'a [u32], identity: Option<(u64, u64)>) -> Self {
+        Self { pids, identity }
+    }
+}
+
 /// What the inventory calls the kernel TLS attachment, in place of a library
 /// basename and a path. An operator reading the attach set has to be able to
 /// tell a probe on the kernel from a probe on a file.
@@ -555,6 +603,89 @@ impl DlpUprobeAttacher {
     /// carries it for bpffs delegation, and the direct posture is privileged - so
     /// the fallback is available wherever it is reachable. Where it is not, the
     /// mapping is skipped exactly as it was before.
+    /// Resolve a path a scanner spelled inside another namespace into a path
+    /// this attach can use, plus the `(dev, ino)` the probes are keyed by.
+    ///
+    /// The order is the order of confidence: the file through the process's own
+    /// root, then the process's `exe` magic link - which stays openable after
+    /// an in-place upgrade unlinked the name - and nothing else. A plan that
+    /// names processes is never satisfied by a same-named file on the host:
+    /// that file is a different build at different offsets, so a probe on it
+    /// reports the wrong bytes rather than none, and refusing is the only safe
+    /// answer. Where the attach is brokered, the warden opens the path, so it
+    /// is spelled from the warden's `/proc` and the inode is the scanner's
+    /// rather than one this agent re-stats: a rootless agent cannot read
+    /// another uid's `/proc` at all, which is why the warden did the scan.
+    fn resolve_scope(
+        &self,
+        path: &str,
+        scope: &TargetScope<'_>,
+        what: &str,
+    ) -> anyhow::Result<(PathBuf, (u64, u64))> {
+        if scope.pids.is_empty() {
+            let meta = std::fs::metadata(path)
+                .map_err(|e| anyhow::anyhow!("stat {what} '{path}': {e}"))?;
+            let key = (meta.dev(), meta.ino());
+            if let Some(expected) = scope.identity
+                && expected != key
+            {
+                anyhow::bail!(
+                    "{what} '{path}' is inode {}:{} now and was {}:{} when it was scanned;                      refusing to probe a file that was replaced",
+                    key.0,
+                    key.1,
+                    expected.0,
+                    expected.1
+                );
+            }
+            return Ok((PathBuf::from(path), key));
+        }
+
+        if self.warden_sock.is_some() {
+            let Some(key) = scope.identity else {
+                anyhow::bail!(
+                    "{what} '{path}' is in another namespace and the scan recorded no inode;                      the brokered attach has nothing to key the probe on"
+                );
+            };
+            let pid = scope.pids[0];
+            let candidate = PathBuf::from(WARDEN_PROC_ROOT)
+                .join(pid.to_string())
+                .join("root")
+                .join(path.trim_start_matches('/'));
+            return Ok((candidate, key));
+        }
+
+        let relative = path.trim_start_matches('/');
+        for &pid in scope.pids {
+            let pid_dir = self.proc_root.join(pid.to_string());
+            for candidate in [pid_dir.join("root").join(relative), pid_dir.join("exe")] {
+                let Ok(meta) = std::fs::metadata(&candidate) else {
+                    continue;
+                };
+                let key = (meta.dev(), meta.ino());
+                match scope.identity {
+                    Some(expected) if expected != key => continue,
+                    // With no recorded inode the process's own root is the only
+                    // evidence there is, and `exe` is only that process's
+                    // executable: accept it as this path only when it is the
+                    // same name.
+                    None if candidate.ends_with("exe")
+                        && std::fs::read_link(&candidate).ok().as_deref()
+                            != Some(std::path::Path::new(path)) =>
+                    {
+                        continue;
+                    }
+                    _ => {}
+                }
+                return Ok((candidate, key));
+            }
+        }
+
+        anyhow::bail!(
+            "{what} '{path}' could not be reached through any of the {} process(es) that mapped              it; the file may be gone, or its namespace unreadable from here",
+            scope.pids.len()
+        )
+    }
+
     fn resolve_mapping(&self, pid: u32, m: &SslMapping) -> Option<(PathBuf, std::fs::Metadata)> {
         let pid_dir = self.proc_root.join(pid.to_string());
         if !m.deleted {
@@ -725,10 +856,9 @@ impl DlpUprobeAttacher {
         path: &str,
         write: (&str, u64),
         read: (&str, u64),
+        scope: &TargetScope<'_>,
     ) -> anyhow::Result<bool> {
-        let meta = std::fs::metadata(path)
-            .map_err(|e| anyhow::anyhow!("stat TLS library '{path}': {e}"))?;
-        let key = (meta.dev(), meta.ino());
+        let (attach_path, key) = self.resolve_scope(path, scope, "TLS library")?;
         if self.attached.contains_key(&key) {
             // Already probed through the OSS scan or an earlier plan; a second
             // set on the same inode would double every captured buffer.
@@ -736,7 +866,7 @@ impl DlpUprobeAttacher {
         }
         let base = path.rsplit('/').next().unwrap_or(path).to_owned();
         let target = UprobeTarget {
-            attach_path: PathBuf::from(path),
+            attach_path,
             lib: base,
             dev: key.0,
             ino: key.1,
@@ -837,6 +967,7 @@ impl DlpUprobeAttacher {
         write: (&str, u64),
         read: (&str, u64),
         read_returns: &[u64],
+        scope: &TargetScope<'_>,
     ) -> anyhow::Result<bool> {
         if write.1 == 0 || read.1 == 0 {
             anyhow::bail!("Go TLS binary '{path}': an entry offset is unresolved");
@@ -847,14 +978,12 @@ impl DlpUprobeAttacher {
                 read.0
             );
         }
-        let meta =
-            std::fs::metadata(path).map_err(|e| anyhow::anyhow!("stat Go binary '{path}': {e}"))?;
-        let key = (meta.dev(), meta.ino());
+        let (attach_path, key) = self.resolve_scope(path, scope, "Go binary")?;
         if self.attached.contains_key(&key) {
             return Ok(false);
         }
         let target = UprobeTarget {
-            attach_path: PathBuf::from(path),
+            attach_path,
             lib: path.rsplit('/').next().unwrap_or(path).to_owned(),
             dev: key.0,
             ino: key.1,
@@ -1432,10 +1561,83 @@ mod tests {
                 missing.to_str().unwrap(),
                 ("gnutls_record_send", 0x10),
                 ("gnutls_record_recv", 0x20),
+                &TargetScope::local(),
             )
             .unwrap_err();
 
         assert!(err.to_string().contains("stat TLS library"));
+    }
+
+    #[test]
+    fn a_container_path_is_resolved_through_the_process_that_mapped_it() {
+        // The scanner spelled the library the way the container sees it. The
+        // same name on the host is a different file, and probing it is the
+        // defect this resolves: what must be reached is the one under the
+        // process's own root.
+        let proc_root = tempfile::tempdir().unwrap();
+        let container = proc_root.path().join("1234").join("root").join("usr/lib");
+        std::fs::create_dir_all(&container).unwrap();
+        let lib = container.join("libssl.so.3");
+        std::fs::write(&lib, b"\x7fELF").unwrap();
+        let ino = std::fs::metadata(&lib).unwrap().ino();
+        let dev = std::fs::metadata(&lib).unwrap().dev();
+
+        let attacher = DlpUprobeAttacher::new(proc_root.path());
+        let pids = [1234u32];
+        let (resolved, key) = attacher
+            .resolve_scope(
+                "/usr/lib/libssl.so.3",
+                &TargetScope::in_processes(&pids, Some((dev, ino))),
+                "TLS library",
+            )
+            .expect("the container's own library resolves");
+
+        assert_eq!(resolved, lib);
+        assert_eq!(key, (dev, ino));
+    }
+
+    #[test]
+    fn a_host_homonym_is_refused_rather_than_probed() {
+        // Nothing resolves under the process, and the path does exist on this
+        // host - the old behaviour attached there, at offsets read from another
+        // build. The attach must say no instead.
+        let proc_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(proc_root.path().join("1234")).unwrap();
+        let attacher = DlpUprobeAttacher::new(proc_root.path());
+        let pids = [1234u32];
+
+        let err = attacher
+            .resolve_scope(
+                "/bin/sh",
+                &TargetScope::in_processes(&pids, None),
+                "TLS library",
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("could not be reached"));
+    }
+
+    #[test]
+    fn a_path_whose_inode_changed_since_the_scan_is_refused() {
+        // An in-place package upgrade leaves the name pointing at a new build.
+        // Its offsets are not the ones the plan carries.
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("libssl.so.3");
+        std::fs::write(&lib, b"\x7fELF").unwrap();
+        let attacher = DlpUprobeAttacher::new(dir.path());
+
+        let err = attacher
+            .resolve_scope(
+                lib.to_str().unwrap(),
+                &TargetScope {
+                    pids: &[],
+                    identity: Some((0xdead, 0xbeef)),
+                },
+                "TLS library",
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("was replaced"));
     }
 
     const GO_WRITE: &str = "crypto/tls.(*Conn).Write";
@@ -1448,7 +1650,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut attacher = DlpUprobeAttacher::new(dir.path());
         let err = attacher
-            .attach_go_tls("/bin/true", (GO_WRITE, 0x10), (GO_READ, 0x20), &[])
+            .attach_go_tls(
+                "/bin/true",
+                (GO_WRITE, 0x10),
+                (GO_READ, 0x20),
+                &[],
+                &TargetScope::local(),
+            )
             .unwrap_err();
         assert!(err.to_string().contains("no return instruction"));
         assert_eq!(attacher.attached_count(), 0);
@@ -1460,7 +1668,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut attacher = DlpUprobeAttacher::new(dir.path());
         let err = attacher
-            .attach_go_tls("/bin/true", (GO_WRITE, 0), (GO_READ, 0x20), &[0x40])
+            .attach_go_tls(
+                "/bin/true",
+                (GO_WRITE, 0),
+                (GO_READ, 0x20),
+                &[0x40],
+                &TargetScope::local(),
+            )
             .unwrap_err();
         assert!(err.to_string().contains("unresolved"));
     }
@@ -1476,6 +1690,7 @@ mod tests {
                 (GO_WRITE, 0x10),
                 (GO_READ, 0x20),
                 &[0x40],
+                &TargetScope::local(),
             )
             .unwrap_err();
         assert!(err.to_string().contains("stat Go binary"));
