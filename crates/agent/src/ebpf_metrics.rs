@@ -159,6 +159,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (5, "ktls_events"),
             (6, "ktls_suppressed"),
             (7, "ktls_unreadable"),
+            (8, "out_of_scope"),
         ],
         "CT_METRICS" => &[
             (0, "new"),

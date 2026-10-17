@@ -2,7 +2,7 @@
 #![no_main]
 
 use aya_ebpf::{
-    btf_maps::{Array, LruHashMap, PerCpuArray, RingBuf},
+    btf_maps::{Array, HashMap, LruHashMap, PerCpuArray, RingBuf},
     helpers::{
         bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_ktime_get_boot_ns, generated,
     },
@@ -13,9 +13,10 @@ use core::ffi::c_void;
 use ebpf_common::dlp::{
     DLP_DIRECTION_READ, DLP_DIRECTION_WRITE, DLP_KTLS_SUPPRESS_WINDOW_NS, DLP_MAX_EXCERPT,
     DLP_METRIC_COUNT, DLP_METRIC_ERRORS, DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_KTLS_EVENTS,
-    DLP_METRIC_KTLS_SUPPRESSED, DLP_METRIC_KTLS_UNREADABLE, DLP_METRIC_READ_EVENTS,
-    DLP_METRIC_TOTAL_SEEN, DLP_METRIC_WRITE_EVENTS, DLP_SMALL_EXCERPT, DlpEvent, DlpEventSmall,
-    KtlsIterOffsets, SslReadArgs,
+    DLP_METRIC_KTLS_SUPPRESSED, DLP_METRIC_KTLS_UNREADABLE, DLP_METRIC_OUT_OF_SCOPE,
+    DLP_METRIC_READ_EVENTS, DLP_METRIC_TOTAL_SEEN, DLP_METRIC_WRITE_EVENTS,
+    DLP_SCOPE_ANCESTOR_LEVELS, DLP_SCOPE_MAX_CGROUPS, DLP_SCOPE_MODE_WORKLOADS,
+    DLP_SMALL_EXCERPT, DlpEvent, DlpEventSmall, KtlsIterOffsets, SslReadArgs,
 };
 use ebpf_helpers::increment_metric;
 use ebpf_helpers::ringbuf::{avail_data, submit_flags};
@@ -73,6 +74,17 @@ static KTLS_ITER_OFFSETS: Array<KtlsIterOffsets, 1> = Array::new();
 /// Per-CPU DLP counters, one slot per `DLP_METRIC_*` index.
 #[btf_map]
 static DLP_METRICS: PerCpuArray<u64, { DLP_METRIC_COUNT as usize }> = PerCpuArray::new();
+
+/// Which cgroups this agent is allowed to read plaintext from, when
+/// `DLP_SCOPE` says `DLP_SCOPE_MODE_WORKLOADS`. Written by userspace from the
+/// configured scope; the value is a presence marker and carries nothing.
+#[btf_map]
+static DLP_CGROUP_ALLOW: HashMap<u64, u8, { DLP_SCOPE_MAX_CGROUPS as usize }> = HashMap::new();
+
+/// The scope mode, slot 0. Unset reads as `DLP_SCOPE_MODE_ALL`, which is what
+/// a host agent with no cgroup scope configured has always done.
+#[btf_map]
+static DLP_SCOPE: Array<u32, 1> = Array::new();
 
 // ── Probes ──────────────────────────────────────────────────────────
 
@@ -389,6 +401,48 @@ fn uprobe_already_captured() -> bool {
     }
 }
 
+/// Whether the running task's plaintext may leave the kernel.
+///
+/// A uprobe is a property of an inode, not of a workload: one `libssl.so.3`
+/// layer shared by thirty containers arms one probe that fires for all thirty.
+/// On a node agent that is somebody else's data, so the scope test sits here,
+/// before any excerpt is copied - an event filtered in userspace has already
+/// crossed into the agent's address space, its ring buffer and its logs.
+///
+/// The task's own cgroup is tested first, then its ancestors, so a scope naming
+/// a pod slice covers every container the kubelet puts under it without the
+/// operator enumerating container ids that change on every restart. The helper
+/// answers zero above the root, which ends the walk.
+#[inline(always)]
+fn in_scope() -> bool {
+    let mode = match DLP_SCOPE.get(0) {
+        Some(m) => *m,
+        None => return true,
+    };
+    if mode != DLP_SCOPE_MODE_WORKLOADS {
+        return true;
+    }
+
+    let own = unsafe { bpf_get_current_cgroup_id() };
+    if own != 0 && DLP_CGROUP_ALLOW.get_ptr(&own).is_some() {
+        return true;
+    }
+
+    let mut level = 0u32;
+    while level < DLP_SCOPE_ANCESTOR_LEVELS {
+        let ancestor = unsafe { generated::bpf_get_current_ancestor_cgroup_id(level as i32) };
+        if ancestor == 0 {
+            break;
+        }
+        if DLP_CGROUP_ALLOW.get_ptr(&ancestor).is_some() {
+            return true;
+        }
+        level += 1;
+    }
+
+    false
+}
+
 #[inline(always)]
 fn read_kernel_u64(addr: u64) -> Result<u64, ()> {
     let mut value: u64 = 0;
@@ -591,6 +645,10 @@ fn try_ktls_recvmsg_ret(ctx: &RetProbeContext) -> Result<(), ()> {
 /// userspace how many of the excerpt bytes are meaningful.
 #[inline(always)]
 fn emit_dlp_event(user_buf: *const u8, data_len: u32, direction: u8) {
+    if !in_scope() {
+        increment_metric(DLP_METRIC_OUT_OF_SCOPE);
+        return;
+    }
     if data_len <= DLP_SMALL_EXCERPT as u32 {
         emit_dlp_small(user_buf, data_len, direction);
     } else {

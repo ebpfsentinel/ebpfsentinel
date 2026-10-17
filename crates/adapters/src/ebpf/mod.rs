@@ -6,6 +6,7 @@ pub mod config_flags_manager;
 pub mod conntrack_map_manager;
 pub mod dlp_attach;
 pub mod dlp_event_reader;
+pub mod dlp_scope;
 pub mod dns_event_reader;
 pub mod ebpf_map_write_adapter;
 pub mod event_reader;
@@ -65,6 +66,7 @@ pub use dlp_attach::{
     clear_uprobe_inventory, push_ktls_iter_offsets,
 };
 pub use dlp_event_reader::DlpEventReader;
+pub use dlp_scope::{ResolvedScope, ScopedCgroup, push_dlp_scope, resolve_cgroup_scope};
 pub use dns_event_reader::DnsEventReader;
 pub use ebpf_map_write_adapter::EbpfMapWriteAdapter;
 pub use event_reader::EventReader;

@@ -18,6 +18,9 @@ pub struct DlpConfig {
 
     #[serde(default)]
     pub patterns: Vec<DlpPatternConfig>,
+
+    #[serde(default)]
+    pub scope: DlpScopeConfig,
 }
 
 impl Default for DlpConfig {
@@ -26,7 +29,112 @@ impl Default for DlpConfig {
             enabled: true,
             mode: "alert".to_string(),
             patterns: Vec::new(),
+            scope: DlpScopeConfig::default(),
         }
+    }
+}
+
+/// Which cgroups the DLP probes may read plaintext from.
+///
+/// A uprobe belongs to an inode, so one `libssl` layer shared by every
+/// container on the node arms one probe that fires for all of them. On a host
+/// that is the point; on a shared node it means the agent reads a neighbour's
+/// plaintext, so the scope is a deliberate choice rather than a default.
+///
+/// * `all` - every task on the node, which is what a host agent does.
+/// * `workloads` - only tasks under one of `cgroups`, enforced in the probe.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DlpScopeConfig {
+    #[serde(default = "default_scope_mode")]
+    pub mode: String,
+
+    /// cgroup v2 paths, relative to `container.resolver.cgroup_root`, whose
+    /// tasks are in scope. A path covers everything below it, so naming a pod
+    /// slice covers its containers without listing ids that change on restart.
+    #[serde(default)]
+    pub cgroups: Vec<String>,
+}
+
+impl Default for DlpScopeConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_scope_mode(),
+            cgroups: Vec::new(),
+        }
+    }
+}
+
+fn default_scope_mode() -> String {
+    DLP_SCOPE_ALL.to_string()
+}
+
+/// Scope mode reading every task on the node.
+pub const DLP_SCOPE_ALL: &str = "all";
+/// Scope mode reading only the configured cgroups.
+pub const DLP_SCOPE_WORKLOADS: &str = "workloads";
+
+impl DlpScopeConfig {
+    /// Whether the probes filter on cgroup.
+    #[must_use]
+    pub fn is_workload_scoped(&self) -> bool {
+        self.mode == DLP_SCOPE_WORKLOADS
+    }
+
+    /// Validate the scope block.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown mode, for `workloads` with no cgroup
+    /// listed - which would arm the probes and discard every event, reading as
+    /// DLP being on while nothing is inspected - or for a path that is empty or
+    /// escapes the cgroup root.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.mode != DLP_SCOPE_ALL && self.mode != DLP_SCOPE_WORKLOADS {
+            return Err(ConfigError::InvalidValue {
+                field: "dlp.scope.mode".to_string(),
+                value: self.mode.clone(),
+                expected: format!("{DLP_SCOPE_ALL}, {DLP_SCOPE_WORKLOADS}"),
+            });
+        }
+
+        if self.mode == DLP_SCOPE_ALL {
+            if !self.cgroups.is_empty() {
+                return Err(ConfigError::Validation {
+                    field: "dlp.scope.cgroups".to_string(),
+                    message: format!(
+                        "cgroups are listed but mode is '{DLP_SCOPE_ALL}', so they would be                          ignored; set mode to '{DLP_SCOPE_WORKLOADS}'"
+                    ),
+                });
+            }
+            return Ok(());
+        }
+
+        if self.cgroups.is_empty() {
+            return Err(ConfigError::Validation {
+                field: "dlp.scope.cgroups".to_string(),
+                message: format!(
+                    "mode '{DLP_SCOPE_WORKLOADS}' needs at least one cgroup path; an empty list                      arms the probes and drops every event"
+                ),
+            });
+        }
+
+        for (idx, path) in self.cgroups.iter().enumerate() {
+            let field = format!("dlp.scope.cgroups[{idx}]");
+            if path.trim().is_empty() {
+                return Err(ConfigError::Validation {
+                    field,
+                    message: "cgroup path must not be empty".to_string(),
+                });
+            }
+            if path.split('/').any(|seg| seg == "..") {
+                return Err(ConfigError::Validation {
+                    field,
+                    message: "cgroup path must not escape the cgroup root with '..'".to_string(),
+                });
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -144,6 +252,62 @@ mod tests {
         assert!(cfg.enabled);
         assert_eq!(cfg.mode, "alert");
         assert!(cfg.patterns.is_empty());
+        assert_eq!(cfg.scope.mode, DLP_SCOPE_ALL);
+        assert!(!cfg.scope.is_workload_scoped());
+    }
+
+    #[test]
+    fn scope_all_with_no_cgroup_is_valid() {
+        assert!(DlpScopeConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn scope_rejects_an_unknown_mode() {
+        let scope = DlpScopeConfig {
+            mode: "pods".to_string(),
+            cgroups: Vec::new(),
+        };
+        assert!(scope.validate().is_err());
+    }
+
+    #[test]
+    fn scope_workloads_without_a_cgroup_is_refused() {
+        let scope = DlpScopeConfig {
+            mode: DLP_SCOPE_WORKLOADS.to_string(),
+            cgroups: Vec::new(),
+        };
+        assert!(scope.validate().is_err());
+    }
+
+    #[test]
+    fn scope_all_with_cgroups_listed_is_refused() {
+        let scope = DlpScopeConfig {
+            mode: DLP_SCOPE_ALL.to_string(),
+            cgroups: vec!["/kubepods.slice".to_string()],
+        };
+        assert!(scope.validate().is_err());
+    }
+
+    #[test]
+    fn scope_rejects_a_path_escaping_the_cgroup_root() {
+        let scope = DlpScopeConfig {
+            mode: DLP_SCOPE_WORKLOADS.to_string(),
+            cgroups: vec!["../../etc".to_string()],
+        };
+        assert!(scope.validate().is_err());
+    }
+
+    #[test]
+    fn scope_workloads_with_a_pod_slice_is_valid() {
+        let scope = DlpScopeConfig {
+            mode: DLP_SCOPE_WORKLOADS.to_string(),
+            cgroups: vec![
+                "kubepods.slice/kubepods-besteffort.slice".to_string(),
+                "/system.slice/docker-abc.scope".to_string(),
+            ],
+        };
+        assert!(scope.validate().is_ok());
+        assert!(scope.is_workload_scoped());
     }
 
     #[test]

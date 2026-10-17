@@ -32,8 +32,38 @@ pub const DLP_METRIC_KTLS_SUPPRESSED: u32 = 6;
 /// were never pushed, or the message iterator is one of the kinds that carries
 /// no single user buffer (kernel vectors from `sendfile` and `splice`).
 pub const DLP_METRIC_KTLS_UNREADABLE: u32 = 7;
+/// Metric index: plaintext left in the kernel because the calling task's cgroup
+/// is outside the configured DLP scope. A node agent sees every container's
+/// `SSL_write`, so on a shared node this counter is how an operator sees that
+/// the probes are armed and the neighbours' bytes are not being read.
+pub const DLP_METRIC_OUT_OF_SCOPE: u32 = 8;
 /// Total number of DLP metric slots (one past the last index).
-pub const DLP_METRIC_COUNT: u32 = 8;
+pub const DLP_METRIC_COUNT: u32 = 9;
+
+/// DLP captures every task's plaintext, whatever cgroup it runs in. This is
+/// what a host agent is for and what a node agent must not do unasked: one
+/// `libssl` inode is shared by every container that maps it, so a probe placed
+/// for one workload fires for all of them.
+pub const DLP_SCOPE_MODE_ALL: u32 = 0;
+/// DLP captures only tasks whose cgroup, or one of its ancestors, is listed in
+/// `DLP_CGROUP_ALLOW`. The filter is in the probe rather than in userspace:
+/// another tenant's plaintext must never reach the agent's address space at
+/// all, which is a property of where the test sits, not of what the scanner
+/// does with the event afterwards.
+pub const DLP_SCOPE_MODE_WORKLOADS: u32 = 1;
+
+/// How many cgroup ancestors the scope test walks above the running task.
+///
+/// Allowing a workload means naming its pod or container cgroup, while
+/// `bpf_get_current_cgroup_id` answers with the leaf the task actually sits in -
+/// `.../kubepods-podUID.slice/cri-containerd-HASH.scope`, and deeper still for a
+/// workload that nests cgroups of its own. Eight levels covers a Kubernetes
+/// slice hierarchy with room to spare, and the walk stops as soon as the helper
+/// answers zero.
+pub const DLP_SCOPE_ANCESTOR_LEVELS: u32 = 8;
+
+/// Capacity of `DLP_CGROUP_ALLOW`: cgroups a DLP scope may name on one node.
+pub const DLP_SCOPE_MAX_CGROUPS: u32 = 4096;
 
 /// A kernel TLS call whose plaintext was captured by a uprobe on the calling
 /// library stays suppressed for this long. `SSL_write` and `SSL_read` reach
@@ -303,7 +333,8 @@ mod tests {
         assert_eq!(DLP_METRIC_KTLS_EVENTS, 5);
         assert_eq!(DLP_METRIC_KTLS_SUPPRESSED, 6);
         assert_eq!(DLP_METRIC_KTLS_UNREADABLE, 7);
-        assert_eq!(DLP_METRIC_COUNT, 8);
+        assert_eq!(DLP_METRIC_OUT_OF_SCOPE, 8);
+        assert_eq!(DLP_METRIC_COUNT, 9);
     }
 
     #[test]
@@ -311,6 +342,7 @@ mod tests {
         // DLP_METRIC_COUNT must be one past the last index
         const _: () = assert!(DLP_METRIC_TOTAL_SEEN < DLP_METRIC_COUNT);
         const _: () = assert!(DLP_METRIC_KTLS_UNREADABLE < DLP_METRIC_COUNT);
+        const _: () = assert!(DLP_METRIC_OUT_OF_SCOPE < DLP_METRIC_COUNT);
     }
 
     #[test]
@@ -331,6 +363,20 @@ mod tests {
         // `valid` at zero is what an unresolved kernel leaves behind, and the
         // probe must read nothing rather than read at offset zero.
         assert_eq!(KtlsIterOffsets::default().valid, 0);
+    }
+
+    #[test]
+    fn scope_modes_are_distinct_and_all_is_the_zero_value() {
+        assert_eq!(DLP_SCOPE_MODE_ALL, 0);
+        assert_ne!(DLP_SCOPE_MODE_ALL, DLP_SCOPE_MODE_WORKLOADS);
+    }
+
+    #[test]
+    fn scope_walks_enough_ancestors_for_a_kubernetes_hierarchy() {
+        // kubepods.slice / kubepods-besteffort.slice / kubepods-pod<uid>.slice
+        // / cri-containerd-<hash>.scope, plus room for a node whose kubelet
+        // sits under another slice of its own.
+        const { assert!(DLP_SCOPE_ANCESTOR_LEVELS >= 4) };
     }
 
     #[test]

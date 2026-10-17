@@ -62,6 +62,7 @@ helpers! {
     BPF_FUNC_get_smp_processor_id => "bpf_get_smp_processor_id",
     BPF_FUNC_get_prandom_u32 => "bpf_get_prandom_u32",
     BPF_FUNC_get_current_cgroup_id => "bpf_get_current_cgroup_id",
+    BPF_FUNC_get_current_ancestor_cgroup_id => "bpf_get_current_ancestor_cgroup_id",
     BPF_FUNC_get_current_pid_tgid => "bpf_get_current_pid_tgid",
     BPF_FUNC_get_socket_cookie => "bpf_get_socket_cookie",
     BPF_FUNC_probe_read_kernel => "bpf_probe_read_kernel",
@@ -202,6 +203,7 @@ const HELPER_UNIVERSE: &[Helper] = &[
     BPF_FUNC_get_smp_processor_id,
     BPF_FUNC_get_prandom_u32,
     BPF_FUNC_get_current_cgroup_id,
+    BPF_FUNC_get_current_ancestor_cgroup_id,
     BPF_FUNC_get_current_pid_tgid,
     BPF_FUNC_get_socket_cookie,
     BPF_FUNC_probe_read_kernel,
@@ -379,6 +381,10 @@ pub const REQUIREMENTS: &[ObjectRequirements] = &[
         program_type: ProbeType::KProbe,
         own: &[
             BPF_FUNC_get_current_cgroup_id,
+            // The cgroup scope walks the ancestors of the calling task's
+            // cgroup, so naming a pod's slice covers the containers under it
+            // without the agent having to enumerate them.
+            BPF_FUNC_get_current_ancestor_cgroup_id,
             BPF_FUNC_get_current_pid_tgid,
             BPF_FUNC_ktime_get_boot_ns,
             BPF_FUNC_probe_read_kernel,
