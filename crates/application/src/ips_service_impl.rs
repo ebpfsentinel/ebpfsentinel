@@ -1,16 +1,19 @@
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use domain::common::entity::DomainMode;
 use domain::common::error::DomainError;
 use domain::ids::entity::{IdsRule, SamplingMode};
 use domain::ips::engine::IpsEngine;
-use domain::ips::entity::{BlacklistEntry, EnforcementAction, IpsPolicy, WhitelistEntry};
+use domain::ips::entity::{
+    BlacklistEntry, EnforcementAction, IpsPolicy, PersistedBlock, WhitelistEntry,
+};
 use ebpf_common::firewall::{ACTION_DROP, FirewallLpmEntryV4, FirewallLpmEntryV6};
 use ports::secondary::geoip_port::GeoIpPort;
 use ports::secondary::lpm_coordinator_port::LpmCoordinatorPort;
 use ports::secondary::metrics_port::MetricsPort;
+use ports::secondary::mitigation_store::MitigationStore;
 
 /// Prefix length that turns an address into a host route.
 fn host_prefix_len(ip: IpAddr) -> u8 {
@@ -33,6 +36,7 @@ pub struct IpsAppService {
     enabled: bool,
     geoip: Option<Arc<dyn GeoIpPort>>,
     lpm_coordinator: Option<Arc<dyn LpmCoordinatorPort>>,
+    store: Option<Arc<dyn MitigationStore>>,
 }
 
 impl IpsAppService {
@@ -45,7 +49,73 @@ impl IpsAppService {
             enabled: true,
             geoip: None,
             lpm_coordinator: None,
+            store: None,
         }
+    }
+
+    /// Write every blacklist decision down, so a restart does not unblock what
+    /// the agent decided to block.
+    ///
+    /// The store is written through on the way out and read back by whoever
+    /// owns startup, which hands the entries still in force to
+    /// [`Self::restore_block`]. A store that fails costs the agent its memory
+    /// of a decision and never the decision itself: every write logs and
+    /// carries on.
+    pub fn set_mitigation_store(&mut self, store: Arc<dyn MitigationStore>) {
+        self.store = Some(store);
+    }
+
+    /// Write down what is currently known about `ip`, if it is blacklisted.
+    fn write_down(&self, ip: IpAddr) {
+        let Some(ref store) = self.store else {
+            return;
+        };
+        let entries = self.engine.blacklist_entries();
+        let Some(entry) = entries.get(&ip) else {
+            return;
+        };
+        let block = PersistedBlock::from_entry(entry, SystemTime::now());
+        if let Err(e) = store.save_block(&block) {
+            tracing::warn!(%ip, error = %e, "IPS block not written down, it will not survive a restart");
+        }
+    }
+
+    /// Forget a written-down block, because it was lifted or expired.
+    fn forget(&self, ip: IpAddr) {
+        let Some(ref store) = self.store else {
+            return;
+        };
+        if let Err(e) = store.remove_block(ip) {
+            tracing::warn!(%ip, error = %e, "lifted IPS block still written down, a restart would reinstate it");
+        }
+    }
+
+    /// Put a block that was written down before the restart back in force, for
+    /// `remaining` rather than for its original TTL.
+    ///
+    /// The record is not written again: it already carries the time the block
+    /// was taken, and re-dating it on every restart is what would turn an hour
+    /// of containment into an open-ended one. The detection count starts over,
+    /// because what is restored is the decision, not the evidence behind it.
+    pub fn restore_block(
+        &self,
+        block: &PersistedBlock,
+        remaining: Duration,
+    ) -> Result<(), DomainError> {
+        self.engine
+            .add_to_blacklist(
+                block.ip,
+                block.reason.clone(),
+                block.auto_generated,
+                remaining,
+            )
+            .map_err(DomainError::from)?;
+        self.update_blacklist_metric();
+        self.apply_enforcements(&[EnforcementAction::BlacklistIp {
+            ip: block.ip,
+            ttl: remaining,
+        }]);
+        Ok(())
     }
 
     /// Set the `GeoIP` port for country-aware auto-blacklist thresholds.
@@ -111,6 +181,13 @@ impl IpsAppService {
             self.metrics.record_ips_block();
             self.update_blacklist_metric();
             self.apply_enforcements(&actions);
+            // An automatic block is the one most likely to be lost to a
+            // restart, because nobody typed it and nobody will type it again.
+            for action in &actions {
+                if let EnforcementAction::BlacklistIp { ip, .. } = action {
+                    self.write_down(*ip);
+                }
+            }
         }
 
         actions
@@ -131,6 +208,7 @@ impl IpsAppService {
             .map_err(DomainError::from)?;
         self.update_blacklist_metric();
         self.apply_enforcements(&[EnforcementAction::BlacklistIp { ip, ttl }]);
+        self.write_down(ip);
         tracing::info!(%ip, "IPS blacklist entry added");
         Ok(())
     }
@@ -142,6 +220,7 @@ impl IpsAppService {
             .map_err(DomainError::from)?;
         self.update_blacklist_metric();
         self.apply_enforcements(&[EnforcementAction::UnblacklistIp { ip }]);
+        self.forget(ip);
         tracing::info!(%ip, "IPS blacklist entry removed");
         Ok(())
     }
@@ -165,6 +244,11 @@ impl IpsAppService {
         self.engine.clear_blacklist();
         self.update_blacklist_metric();
         self.apply_enforcements(&removals);
+        if let Some(ref store) = self.store
+            && let Err(e) = store.clear_blocks()
+        {
+            tracing::warn!(error = %e, "cleared IPS blacklist still written down, a restart would reinstate it");
+        }
         tracing::info!("IPS blacklist cleared");
     }
 
@@ -180,6 +264,11 @@ impl IpsAppService {
         if !actions.is_empty() {
             self.update_blacklist_metric();
             self.apply_enforcements(&actions);
+            for action in &actions {
+                if let EnforcementAction::UnblacklistIp { ip } = action {
+                    self.forget(*ip);
+                }
+            }
         }
         actions
     }
@@ -556,6 +645,218 @@ mod tests {
         svc.clear_blacklist();
         assert_eq!(svc.blacklist_size(), 0);
         assert_eq!(metrics.blacklist_size.load(Ordering::Relaxed), 0);
+    }
+
+    #[derive(Default)]
+    struct TestStore {
+        blocks: Mutex<std::collections::HashMap<IpAddr, PersistedBlock>>,
+        cleared: AtomicU64,
+    }
+
+    impl MitigationStore for TestStore {
+        fn save_block(&self, block: &PersistedBlock) -> Result<(), DomainError> {
+            self.blocks.lock().unwrap().insert(block.ip, block.clone());
+            Ok(())
+        }
+
+        fn remove_block(&self, ip: IpAddr) -> Result<(), DomainError> {
+            self.blocks.lock().unwrap().remove(&ip);
+            Ok(())
+        }
+
+        fn clear_blocks(&self) -> Result<(), DomainError> {
+            self.blocks.lock().unwrap().clear();
+            self.cleared.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn load_blocks(&self) -> Result<Vec<PersistedBlock>, DomainError> {
+            Ok(self.blocks.lock().unwrap().values().cloned().collect())
+        }
+
+        fn save_action(
+            &self,
+            _action: &domain::response::entity::ResponseAction,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+
+        fn remove_action(&self, _id: &str) -> Result<(), DomainError> {
+            Ok(())
+        }
+
+        fn load_actions(
+            &self,
+        ) -> Result<Vec<domain::response::entity::ResponseAction>, DomainError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct FailingStore;
+
+    impl MitigationStore for FailingStore {
+        fn save_block(&self, _block: &PersistedBlock) -> Result<(), DomainError> {
+            Err(DomainError::EngineError("no disk".to_string()))
+        }
+        fn remove_block(&self, _ip: IpAddr) -> Result<(), DomainError> {
+            Err(DomainError::EngineError("no disk".to_string()))
+        }
+        fn clear_blocks(&self) -> Result<(), DomainError> {
+            Err(DomainError::EngineError("no disk".to_string()))
+        }
+        fn load_blocks(&self) -> Result<Vec<PersistedBlock>, DomainError> {
+            Err(DomainError::EngineError("no disk".to_string()))
+        }
+        fn save_action(
+            &self,
+            _action: &domain::response::entity::ResponseAction,
+        ) -> Result<(), DomainError> {
+            Err(DomainError::EngineError("no disk".to_string()))
+        }
+        fn remove_action(&self, _id: &str) -> Result<(), DomainError> {
+            Err(DomainError::EngineError("no disk".to_string()))
+        }
+        fn load_actions(
+            &self,
+        ) -> Result<Vec<domain::response::entity::ResponseAction>, DomainError> {
+            Err(DomainError::EngineError("no disk".to_string()))
+        }
+    }
+
+    fn service_with_store(store: Arc<dyn MitigationStore>) -> IpsAppService {
+        let mut svc = IpsAppService::new(
+            IpsEngine::new(IpsPolicy::default()),
+            Arc::new(TestMetrics::new()),
+        );
+        svc.set_mitigation_store(store);
+        svc
+    }
+
+    #[test]
+    fn a_block_is_written_down_when_it_is_taken_and_forgotten_when_it_is_lifted() {
+        let store = Arc::new(TestStore::default());
+        let svc = service_with_store(store.clone());
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+
+        svc.add_to_blacklist(ip, "manual".to_string(), Duration::from_mins(30))
+            .expect("the block");
+        let written = store.load_blocks().unwrap();
+        assert_eq!(
+            written.len(),
+            1,
+            "the decision is on disk, not only in memory"
+        );
+        assert_eq!(written[0].reason, "manual");
+        assert_eq!(written[0].ttl_secs, 1800);
+        assert!(!written[0].auto_generated);
+
+        svc.remove_from_blacklist(ip).expect("the lift");
+        assert!(
+            store.load_blocks().unwrap().is_empty(),
+            "a lifted block must not come back on the next start"
+        );
+    }
+
+    #[test]
+    fn clearing_the_blacklist_clears_what_was_written_down() {
+        let store = Arc::new(TestStore::default());
+        let svc = service_with_store(store.clone());
+        svc.add_to_blacklist(
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2)),
+            "manual".to_string(),
+            Duration::from_mins(5),
+        )
+        .expect("the block");
+
+        svc.clear_blacklist();
+        assert!(store.load_blocks().unwrap().is_empty());
+        assert_eq!(store.cleared.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn an_expired_block_is_forgotten_by_the_sweeper() {
+        let store = Arc::new(TestStore::default());
+        let svc = service_with_store(store.clone());
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 3));
+        svc.add_to_blacklist(ip, "manual".to_string(), Duration::from_nanos(1))
+            .expect("the block");
+        assert_eq!(store.load_blocks().unwrap().len(), 1);
+
+        std::thread::sleep(Duration::from_millis(5));
+        let actions = svc.cleanup_expired();
+        assert_eq!(actions.len(), 1);
+        assert!(
+            store.load_blocks().unwrap().is_empty(),
+            "an expiry sweeps the record too, or the restart reinstates it"
+        );
+    }
+
+    #[test]
+    fn a_restored_block_is_in_force_for_what_was_left_of_it() {
+        let svc = service_with_store(Arc::new(TestStore::default()));
+        let block = PersistedBlock {
+            ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 4)),
+            reason: "ids threshold reached".to_string(),
+            auto_generated: true,
+            added_at_ns: 1_700_000_000_000_000_000,
+            ttl_secs: 3600,
+            detection_count: 9,
+        };
+        svc.restore_block(&block, Duration::from_mins(10))
+            .expect("the restore");
+
+        assert!(svc.is_blacklisted(block.ip));
+        let entries = svc.list_blacklist();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].ttl, Duration::from_mins(10));
+        assert_eq!(entries[0].reason, "ids threshold reached");
+        assert!(
+            entries[0].auto_generated,
+            "an automatic block comes back as automatic"
+        );
+    }
+
+    #[test]
+    fn a_restore_does_not_re_date_the_record() {
+        let store = Arc::new(TestStore::default());
+        let svc = service_with_store(store.clone());
+        let block = PersistedBlock {
+            ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)),
+            reason: "manual".to_string(),
+            auto_generated: false,
+            added_at_ns: 1_700_000_000_000_000_000,
+            ttl_secs: 3600,
+            detection_count: 1,
+        };
+        svc.restore_block(&block, Duration::from_mins(10))
+            .expect("the restore");
+        assert!(
+            store.load_blocks().unwrap().is_empty(),
+            "restoring writes nothing: a restart loop must not push the expiry outwards"
+        );
+    }
+
+    #[test]
+    fn a_store_that_fails_costs_the_memory_and_not_the_block() {
+        let svc = service_with_store(Arc::new(FailingStore));
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 6));
+        svc.add_to_blacklist(ip, "manual".to_string(), Duration::from_mins(5))
+            .expect("the block is taken even with no store");
+        assert!(svc.is_blacklisted(ip));
+        svc.remove_from_blacklist(ip).expect("the lift still works");
+        assert!(!svc.is_blacklisted(ip));
+    }
+
+    #[test]
+    fn with_no_store_nothing_changes() {
+        let svc = IpsAppService::new(
+            IpsEngine::new(IpsPolicy::default()),
+            Arc::new(TestMetrics::new()),
+        );
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        svc.add_to_blacklist(ip, "manual".to_string(), Duration::from_mins(5))
+            .expect("the block");
+        assert!(svc.is_blacklisted(ip));
     }
 
     #[test]

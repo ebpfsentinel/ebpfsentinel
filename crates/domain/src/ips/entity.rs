@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::str::FromStr;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +24,68 @@ impl BlacklistEntry {
     /// Returns `true` if this entry has exceeded its TTL.
     pub fn is_expired(&self) -> bool {
         self.added_at.elapsed() >= self.ttl
+    }
+}
+
+/// A blacklist entry as it is written down, so that it survives a restart.
+///
+/// [`BlacklistEntry`] dates itself with an `Instant`, which is a monotonic
+/// reading with no meaning in another process: written down and read back it
+/// would say the entry was added at the new process's own start. This carries
+/// the wall clock instead, which is the only clock that can answer "how much of
+/// this block is left" after the agent has been down.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedBlock {
+    pub ip: IpAddr,
+    pub reason: String,
+    pub auto_generated: bool,
+    /// When the block was taken, in nanoseconds since the Unix epoch.
+    pub added_at_ns: u128,
+    /// The TTL it was taken with, in seconds.
+    pub ttl_secs: u64,
+    pub detection_count: u32,
+}
+
+impl PersistedBlock {
+    /// Write an entry down, dating it on the wall clock.
+    ///
+    /// `now` is passed in rather than read here so a test can state the clock,
+    /// and the entry's own age is what places it: an entry added ten minutes
+    /// ago is recorded as having been added ten minutes ago, not now, which is
+    /// what keeps re-saving an entry from pushing its expiry outwards.
+    #[must_use]
+    pub fn from_entry(entry: &BlacklistEntry, now: SystemTime) -> Self {
+        let added_at = now
+            .checked_sub(entry.added_at.elapsed())
+            .unwrap_or(UNIX_EPOCH);
+        Self {
+            ip: entry.ip,
+            reason: entry.reason.clone(),
+            auto_generated: entry.auto_generated,
+            added_at_ns: added_at
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+            ttl_secs: entry.ttl.as_secs(),
+            detection_count: entry.detection_count,
+        }
+    }
+
+    /// How much of the block is left at `now`, or `None` when it elapsed while
+    /// the agent was down.
+    ///
+    /// A block read back is re-installed for its remaining time, never for its
+    /// original TTL: a restart must not extend a containment decision, and a
+    /// restart loop would otherwise make a one-hour block permanent.
+    #[must_use]
+    pub fn remaining(&self, now: SystemTime) -> Option<Duration> {
+        let added_at = UNIX_EPOCH.checked_add(Duration::from_nanos(
+            u64::try_from(self.added_at_ns).unwrap_or(u64::MAX),
+        ))?;
+        let ttl = Duration::from_secs(self.ttl_secs);
+        // A clock that moved backwards leaves the entry looking unaged, which
+        // is the safe reading: it keeps the block rather than dropping it.
+        let elapsed = now.duration_since(added_at).unwrap_or_default();
+        ttl.checked_sub(elapsed).filter(|left| !left.is_zero())
     }
 }
 
@@ -194,6 +256,87 @@ mod tests {
             ..make_entry(Duration::from_millis(1))
         };
         assert!(entry.is_expired());
+    }
+
+    fn at(secs_ago: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_700_000_000 - secs_ago)
+    }
+
+    fn ns(at: SystemTime) -> u128 {
+        at.duration_since(UNIX_EPOCH)
+            .expect("a time after the epoch")
+            .as_nanos()
+    }
+
+    #[test]
+    fn a_written_block_keeps_the_time_it_was_taken() {
+        let entry = BlacklistEntry {
+            added_at: Instant::now()
+                .checked_sub(Duration::from_secs(600))
+                .expect("a monotonic clock ten minutes old"),
+            ttl: Duration::from_hours(1),
+            ..make_entry(Duration::from_hours(1))
+        };
+        let now = at(0);
+        let written = PersistedBlock::from_entry(&entry, now);
+        // Ten minutes of the hour are already spent, and re-reading it says so.
+        let left = written.remaining(now).expect("fifty minutes left");
+        assert!(
+            left <= Duration::from_mins(50) && left >= Duration::from_mins(49),
+            "an entry ten minutes old has fifty minutes left, got {left:?}"
+        );
+    }
+
+    #[test]
+    fn a_block_is_restored_for_what_is_left_of_it() {
+        let written = PersistedBlock {
+            ip: IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+            reason: "test".to_string(),
+            auto_generated: true,
+            added_at_ns: ns(at(600)),
+            ttl_secs: 900,
+            detection_count: 2,
+        };
+        assert_eq!(
+            written.remaining(at(0)),
+            Some(Duration::from_secs(300)),
+            "a fifteen-minute block taken ten minutes ago has five minutes left"
+        );
+    }
+
+    #[test]
+    fn a_block_that_elapsed_while_down_is_not_restored() {
+        let written = PersistedBlock {
+            ip: IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
+            reason: "test".to_string(),
+            auto_generated: false,
+            added_at_ns: ns(at(4000)),
+            ttl_secs: 3600,
+            detection_count: 1,
+        };
+        assert_eq!(
+            written.remaining(at(0)),
+            None,
+            "a block whose TTL ran out during the downtime stays lifted"
+        );
+    }
+
+    #[test]
+    fn a_clock_that_went_backwards_keeps_the_block() {
+        let written = PersistedBlock {
+            ip: IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 3)),
+            reason: "test".to_string(),
+            auto_generated: false,
+            // Taken "in the future" as far as this boot's clock is concerned.
+            added_at_ns: ns(at(0)),
+            ttl_secs: 60,
+            detection_count: 1,
+        };
+        assert_eq!(
+            written.remaining(at(300)),
+            Some(Duration::from_secs(60)),
+            "an unaged entry is kept whole rather than dropped"
+        );
     }
 
     #[test]

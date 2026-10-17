@@ -12,6 +12,11 @@ pub enum ChangeActor {
     ConfigReload,
     /// Change made via the CLI.
     Cli,
+    /// A decision put back in force at startup, from what was written down
+    /// before the agent stopped. Never an operator and never a reload: a
+    /// reader has to be able to tell a restored block from one taken now, or
+    /// the audit log says an address was blocked twice.
+    Restore,
 }
 
 impl ChangeActor {
@@ -20,6 +25,7 @@ impl ChangeActor {
             Self::Api => "api",
             Self::ConfigReload => "config_reload",
             Self::Cli => "cli",
+            Self::Restore => "restore",
         }
     }
 }
@@ -91,6 +97,21 @@ fn current_timestamp_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_restored_decision_names_itself_in_the_log() {
+        assert_eq!(ChangeActor::Restore.as_str(), "restore");
+        assert_eq!(ChangeActor::Restore.to_string(), "restore");
+        assert_ne!(
+            ChangeActor::Restore,
+            ChangeActor::Api,
+            "a block put back after a restart is not one somebody just asked for"
+        );
+        assert_eq!(
+            serde_json::to_string(&ChangeActor::Restore).expect("serialisable"),
+            "\"restore\""
+        );
+    }
 
     #[test]
     fn new_creates_entry_with_timestamp() {

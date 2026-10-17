@@ -23,7 +23,10 @@ fn mask_v6_to_48(ip: std::net::Ipv6Addr) -> std::net::Ipv6Addr {
 /// IPS engine: manages an in-memory IP blacklist with detection counting,
 /// threshold-based auto-blacklisting, and TTL-based expiration.
 ///
-/// The blacklist is ephemeral (lost on restart) by design.
+/// The blacklist itself is in memory. What survives a restart is written down
+/// outside the engine, by whoever owns the store: the engine is handed back the
+/// entries that are still in force, with what is left of their TTL, and knows
+/// nothing about where they were kept.
 #[derive(Debug, Clone)]
 pub struct IpsEngine {
     blacklist: Arc<Mutex<HashMap<IpAddr, BlacklistEntry>>>,

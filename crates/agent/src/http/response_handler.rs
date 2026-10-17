@@ -15,6 +15,7 @@ use domain::common::entity::RuleId;
 use domain::firewall::entity::IpCidr;
 use domain::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm, RateLimitPolicy};
 use domain::response::entity::{ResponseAction, ResponseActionType};
+use ports::secondary::mitigation_store::MitigationStore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use utoipa::ToSchema;
@@ -171,6 +172,8 @@ pub async fn create_response_action(
             })?;
     }
 
+    write_down(state.mitigation_store.as_ref(), &action);
+
     state.audit_service.record_response_action(
         AuditAction::RuleAdded,
         &action.target,
@@ -277,6 +280,7 @@ pub async fn revoke_response_action(
     };
 
     withdraw(&state.ips_service, &state.ratelimit_service, &action).await;
+    forget(state.mitigation_store.as_ref(), &action.id);
 
     state.audit_service.record_response_action(
         AuditAction::RuleRemoved,
@@ -315,44 +319,116 @@ async fn enforce(
                 message: format!("blacklisting {target} failed: {e}"),
             }),
         ResponseActionType::ThrottleIp => {
-            let rate = action.rate_pps.unwrap_or(0);
-            if rate == 0 {
-                return Err(ApiError::BadRequest {
+            let policy =
+                throttle_policy(action, target).map_err(|message| ApiError::BadRequest {
                     code: "INVALID_REQUEST",
-                    message: "throttle_ip needs rate_pps above zero: it is the bucket to install"
-                        .to_string(),
-                });
-            }
-            let IpAddr::V4(v4) = target else {
-                return Err(ApiError::BadRequest {
-                    code: "INVALID_REQUEST",
-                    message: format!(
-                        "the rate limiter matches IPv4 sources; contain {target} with block_ip"
-                    ),
-                });
-            };
-            let policy = RateLimitPolicy {
-                id: RuleId(action.rule_id.clone()),
-                rate,
-                // One second of build-up, the same bucket shape the automatic
-                // throttle installs.
-                burst: rate,
-                action: RateLimitAction::Drop,
-                src_ip: IpCidr::V4 {
-                    addr: v4.to_bits(),
-                    prefix_len: 32,
-                },
-                enabled: true,
-                algorithm: RateLimitAlgorithm::TokenBucket,
-                group_mask: 0,
-                tenant_id: 0,
-            };
+                    message,
+                })?;
             let mut rl = ratelimit_service.write().await;
             rl.add_policy(policy).map_err(|e| ApiError::BadRequest {
                 code: "ENFORCEMENT_FAILED",
                 message: format!("throttling {target} failed: {e}"),
             })
         }
+    }
+}
+
+/// The bucket a throttle installs, which is the same whether the action is
+/// being taken now or put back in force after a restart.
+fn throttle_policy(action: &ResponseAction, target: IpAddr) -> Result<RateLimitPolicy, String> {
+    let rate = action.rate_pps.unwrap_or(0);
+    if rate == 0 {
+        return Err(
+            "throttle_ip needs rate_pps above zero: it is the bucket to install".to_string(),
+        );
+    }
+    let IpAddr::V4(v4) = target else {
+        return Err(format!(
+            "the rate limiter matches IPv4 sources; contain {target} with block_ip"
+        ));
+    };
+    Ok(RateLimitPolicy {
+        id: RuleId(action.rule_id.clone()),
+        rate,
+        // One second of build-up, the same bucket shape the automatic
+        // throttle installs.
+        burst: rate,
+        action: RateLimitAction::Drop,
+        src_ip: IpCidr::V4 {
+            addr: v4.to_bits(),
+            prefix_len: 32,
+        },
+        enabled: true,
+        algorithm: RateLimitAlgorithm::TokenBucket,
+        group_mask: 0,
+        tenant_id: 0,
+    })
+}
+
+/// Put a response action that was written down before the restart back in
+/// force, for `remaining` rather than for its original TTL.
+///
+/// A block whose address the IPS store already restored is left as it is: both
+/// records describe one decision, and the IPS record is the one carrying the
+/// address's own remaining time. A throttle's bucket starts full, because the
+/// token state it had accumulated was in a kernel map that went with the old
+/// process: the rate it is held to is restored, the credit it had spent is not.
+pub(crate) async fn restore(
+    ips_service: &ArcSwap<IpsAppService>,
+    ratelimit_service: &RwLock<RateLimitAppService>,
+    action: &ResponseAction,
+    remaining: Duration,
+) -> Result<(), String> {
+    let target = action
+        .target
+        .parse::<IpAddr>()
+        .map_err(|_| format!("'{}' is not an address", action.target))?;
+    match action.action_type {
+        ResponseActionType::BlockIp => {
+            let ips = ips_service.load();
+            if ips.is_blacklisted(target) {
+                return Ok(());
+            }
+            ips.add_to_blacklist(target, format!("manual response {}", action.id), remaining)
+                .map_err(|e| format!("blacklisting {target} failed: {e}"))
+        }
+        ResponseActionType::ThrottleIp => {
+            let policy = throttle_policy(action, target)?;
+            let mut rl = ratelimit_service.write().await;
+            rl.add_policy(policy)
+                .map_err(|e| format!("throttling {target} failed: {e}"))
+        }
+    }
+}
+
+/// Write a response action down, so it is still in force after a restart.
+fn write_down(store: Option<&Arc<dyn MitigationStore>>, action: &ResponseAction) {
+    let Some(store) = store else {
+        return;
+    };
+    if let Err(e) = store.save_action(action) {
+        tracing::warn!(
+            id = %action.id,
+            error = %e,
+            "response action not written down, it will not survive a restart"
+        );
+    }
+}
+
+/// Forget a written-down response action, because it was revoked or expired.
+///
+/// Takes the store rather than the state, because the sweeper that lifts an
+/// elapsed action runs beside the HTTP surface rather than inside it.
+pub(crate) fn forget(store: Option<&Arc<dyn MitigationStore>>, id: &str) {
+    let Some(store) = store else {
+        return;
+    };
+    if let Err(e) = store.remove_action(id) {
+        tracing::warn!(
+            id = %id,
+            error = %e,
+            "lifted response action still written down, a restart would reinstate it"
+        );
     }
 }
 

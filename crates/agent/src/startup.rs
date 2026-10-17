@@ -22,6 +22,7 @@ use adapters::grpc::server::{GrpcTlsConfig, run_grpc_server};
 use adapters::metrics::AgentMetrics;
 use adapters::storage::redb_alert_store::RedbAlertStore;
 use adapters::storage::redb_audit_store::RedbAuditStore;
+use adapters::storage::redb_mitigation_store::RedbMitigationStore;
 use adapters::storage::redb_rule_change_store::RedbRuleChangeStore;
 use adapters::system_metrics;
 use application::alert_pipeline::AlertPipeline;
@@ -70,6 +71,7 @@ use ports::secondary::audit_store::AuditStore;
 use ports::secondary::auth_provider::AuthProvider;
 use ports::secondary::ebpf_map_port::FirewallArrayMapPort;
 use ports::secondary::metrics_port::{FirewallMetrics, MetricsPort};
+use ports::secondary::mitigation_store::MitigationStore;
 use ports::secondary::rule_change_store::RuleChangeStore;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -780,6 +782,37 @@ pub async fn run(
         .as_ref()
         .map(|s| Arc::clone(s) as Arc<dyn AlertTriageStore>);
 
+    // Attach the mitigation store (redb) - graceful degradation on failure.
+    //
+    // This is what keeps a blocked source blocked across a restart. Losing it
+    // costs the agent its memory of the decisions it took, never the decisions
+    // themselves: every write through it logs and carries on, so an unwritable
+    // disk degrades containment to what it was before the store existed.
+    let mitigation_store_path = storage_path.with_file_name("mitigations.redb");
+    let mitigation_store: Option<Arc<dyn MitigationStore>> =
+        match RedbMitigationStore::open(&mitigation_store_path) {
+            Ok(store) => {
+                info!(
+                    path = %mitigation_store_path.display(),
+                    "mitigation store initialized (redb)"
+                );
+                Some(Arc::new(store) as Arc<dyn MitigationStore>)
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    path = %mitigation_store_path.display(),
+                    "mitigation store unavailable, blocks and responses will not survive a restart"
+                );
+                None
+            }
+        };
+    if let Some(ref store) = mitigation_store {
+        let mut svc = (**ips_svc.load()).clone();
+        svc.set_mitigation_store(Arc::clone(store));
+        ips_svc.store(Arc::new(svc));
+    }
+
     // ── 5f. Initialize auth provider (JWT, OIDC, and/or API keys) ────
     let crate::auth_bootstrap::AuthStack {
         handle: auth_handle,
@@ -971,6 +1004,9 @@ pub async fn run(
         config.response.max_ttl_secs,
     )));
     app_state = app_state.with_response_engine(Arc::clone(&response_engine));
+    if let Some(ref store) = mitigation_store {
+        app_state = app_state.with_mitigation_store(Arc::clone(store));
+    }
 
     // Background sweeper: lift response actions whose TTL has elapsed off the
     // data plane and emit a `responses` audit entry for each genuine expiry
@@ -981,6 +1017,7 @@ pub async fn run(
         let sweeper_audit = Arc::clone(&audit_svc);
         let sweeper_ips = Arc::clone(&ips_svc);
         let sweeper_rl = Arc::clone(&rl_svc);
+        let sweeper_store = mitigation_store.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
             loop {
@@ -1001,6 +1038,7 @@ pub async fn run(
                     }
                     crate::http::response_handler::withdraw(&sweeper_ips, &sweeper_rl, &action)
                         .await;
+                    crate::http::response_handler::forget(sweeper_store.as_ref(), &action.id);
                     sweeper_audit.record_response_action(
                         domain::audit::entity::AuditAction::RuleRemoved,
                         &action.target,
@@ -3412,6 +3450,24 @@ pub async fn run(
             }
         }))
     };
+
+    // ── 11d½. Put back what was in force before the restart ─────────
+    //
+    // Here rather than where the store is opened, because a block is only in
+    // force once the firewall's LPM tries exist and a throttle only once the
+    // rate limiter holds its map: restored earlier, both would be in a
+    // service's memory and in no kernel map.
+    if let Some(ref store) = mitigation_store {
+        crate::mitigation_restore::restore_mitigations(
+            store,
+            &ips_svc,
+            &rl_svc,
+            &response_engine,
+            &audit_svc,
+            std::time::SystemTime::now(),
+        )
+        .await;
+    }
 
     // ── 11e. Spawn IPS/IDS cleanup task (every 60s) ──────────────────
     {

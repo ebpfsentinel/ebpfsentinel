@@ -100,6 +100,10 @@ pub struct AppState {
     pub fingerprint_cache: Option<Arc<domain::l7::ja4::FingerprintCache>>,
     pub ja4s_fingerprint_cache: Option<Arc<domain::l7::ja4::Ja4sFingerprintCache>>,
     pub response_engine: Option<Arc<RwLock<domain::response::engine::ResponseEngine>>>,
+    /// Where a containment decision is written down so that it is still in
+    /// force after a restart. `None` when the store could not be opened, which
+    /// costs the agent its memory of a decision and never the decision itself.
+    pub mitigation_store: Option<Arc<dyn ports::secondary::mitigation_store::MitigationStore>>,
     pub capture_engine: Option<Arc<RwLock<domain::capture::engine::CaptureEngine>>>,
     /// Pool of `AF_PACKET` sockets pre-opened by the privileged launcher for
     /// rootless packet capture. `None` when the launcher did not provision any
@@ -172,6 +176,7 @@ impl AppState {
             fingerprint_cache: None,
             ja4s_fingerprint_cache: None,
             response_engine: None,
+            mitigation_store: None,
             capture_engine: None,
             pcap_pool: None,
             conntrack_event_tx: None,
@@ -222,6 +227,16 @@ impl AppState {
         engine: Arc<RwLock<domain::response::engine::ResponseEngine>>,
     ) -> Self {
         self.response_engine = Some(engine);
+        self
+    }
+
+    /// Attach the store that keeps containment decisions across a restart.
+    #[must_use]
+    pub fn with_mitigation_store(
+        mut self,
+        store: Arc<dyn ports::secondary::mitigation_store::MitigationStore>,
+    ) -> Self {
+        self.mitigation_store = Some(store);
         self
     }
 
