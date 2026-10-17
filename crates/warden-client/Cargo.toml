@@ -17,3 +17,6 @@ fd-pass = ["dep:libc"]
 [dependencies]
 ebpfsentinel-warden-proto = { workspace = true }
 libc = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

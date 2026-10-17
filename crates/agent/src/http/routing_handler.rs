@@ -9,6 +9,8 @@ use domain::routing::error::RoutingError;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::brokered::brokered;
+
 use super::error::{ApiError, ErrorBody};
 use super::middleware::rbac::require_write_access;
 use super::state::AppState;
@@ -207,15 +209,25 @@ pub async fn create_gateway(
                 ..HealthCheck::default()
             }),
     };
-    let mut svc = routing.write().await;
-    let id = svc
-        .add_gateway(gateway)
-        .map_err(|e| map_routing_error(&e))?;
-    let resp = svc
-        .list_gateways()
-        .iter()
-        .find(|gs| gs.gateway.id == id)
-        .map(|gs| GatewayResponse::from_state(gs))
+    // Adding a gateway can re-elect the default route, which is a route write
+    // through the warden in a rootless deployment: blocking, so it runs off the
+    // async worker and under a bound. The response is read under the same lock
+    // the insert took, or a second request could answer for this one.
+    let routing = Arc::clone(routing);
+    let inserted = brokered("gateway create", move || {
+        let mut svc = routing.blocking_write();
+        let id = svc.add_gateway(gateway)?;
+        Ok::<Option<GatewayResponse>, RoutingError>(
+            svc.list_gateways()
+                .iter()
+                .find(|gs| gs.gateway.id == id)
+                .map(|gs| GatewayResponse::from_state(gs)),
+        )
+    })
+    .await
+    .map_err(|message| ApiError::Internal { message })?;
+    let resp = inserted
+        .map_err(|e| map_routing_error(&e))?
         .ok_or(ApiError::Internal {
             message: "gateway vanished after insert".to_string(),
         })?;
@@ -253,9 +265,15 @@ pub async fn delete_gateway(
         code: "INVALID_GATEWAY_ID",
         message: format!("invalid gateway id: {id}"),
     })?;
-    let mut svc = routing.write().await;
-    svc.remove_gateway(gateway_id)
-        .map_err(|e| map_routing_error(&e))?;
+    // Removing the elected gateway re-elects another, so this writes a route
+    // too and is bounded the same way.
+    let routing = Arc::clone(routing);
+    brokered("gateway delete", move || {
+        routing.blocking_write().remove_gateway(gateway_id)
+    })
+    .await
+    .map_err(|message| ApiError::Internal { message })?
+    .map_err(|e| map_routing_error(&e))?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 

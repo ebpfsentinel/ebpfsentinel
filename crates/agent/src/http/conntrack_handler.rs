@@ -13,6 +13,8 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use utoipa::ToSchema;
 
+use crate::brokered::brokered;
+
 use super::error::{ApiError, ErrorBody};
 use super::middleware::rbac::require_write_access;
 use super::state::AppState;
@@ -109,12 +111,18 @@ pub async fn list_connections(
         code: "SERVICE_NOT_AVAILABLE",
         message: "Conntrack not enabled".to_string(),
     })?;
-    let svc = ct.read().await;
-    let conns = svc
-        .get_connections(query.limit)
-        .map_err(|e| ApiError::Internal {
-            message: format!("conntrack query failed: {e}"),
-        })?;
+    // The read reaches the proc file, a `conntrack` dump or the warden, all of
+    // them blocking, so it runs off the async worker and under a bound.
+    let ct = Arc::clone(ct);
+    let limit = query.limit;
+    let conns = brokered("conntrack query", move || {
+        ct.blocking_read().get_connections(limit)
+    })
+    .await
+    .map_err(|message| ApiError::Internal { message })?
+    .map_err(|e| ApiError::Internal {
+        message: format!("conntrack query failed: {e}"),
+    })?;
     let result = conns
         .into_iter()
         .map(|c| ConnectionResponse {
@@ -157,10 +165,13 @@ pub async fn flush_connections(
         code: "SERVICE_NOT_AVAILABLE",
         message: "Conntrack not enabled".to_string(),
     })?;
-    let mut svc = ct.write().await;
-    let count = svc.flush_all().map_err(|e| ApiError::Internal {
-        message: format!("conntrack flush failed: {e}"),
-    })?;
+    let ct = Arc::clone(ct);
+    let count = brokered("conntrack flush", move || ct.blocking_write().flush_all())
+        .await
+        .map_err(|message| ApiError::Internal { message })?
+        .map_err(|e| ApiError::Internal {
+            message: format!("conntrack flush failed: {e}"),
+        })?;
     tracing::info!(count, "conntrack table flushed via API");
     Ok((
         StatusCode::OK,

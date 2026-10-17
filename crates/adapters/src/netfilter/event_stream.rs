@@ -9,8 +9,10 @@
 //! where the kernel exposes it, a conntrack-tools dump where it does not.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
+use domain::common::error::DomainError;
 use domain::conntrack::entity::{Connection, ConntrackEvent, ConntrackEventType};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -53,6 +55,10 @@ pub async fn run_conntrack_event_poller(
     poll_interval: Duration,
     cancel: CancellationToken,
 ) {
+    // A snapshot is a blocking read - the proc file, a `conntrack` dump, or a
+    // round trip to the warden - so it runs on a blocking thread rather than on
+    // this task's worker, and the port is shared rather than moved for it.
+    let port = Arc::new(port);
     let mut prev: HashMap<FlowKey, Connection> = HashMap::new();
     let mut ticker = tokio::time::interval(poll_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -69,7 +75,25 @@ pub async fn run_conntrack_event_poller(
                 break;
             }
             _ = ticker.tick() => {
-                let current = match port.get_connections(usize::MAX) {
+                let snapshot = {
+                    let port = Arc::clone(&port);
+                    tokio::task::spawn_blocking(move || port.get_connections(usize::MAX))
+                };
+                // Cancellation is honoured while the snapshot is in flight: a
+                // warden that has stopped answering must not be what keeps a
+                // stop waiting, and the snapshot is discarded either way.
+                let snapshot = tokio::select! {
+                    () = cancel.cancelled() => {
+                        debug!("conntrack event poller cancelled while taking a snapshot");
+                        break;
+                    }
+                    joined = snapshot => joined,
+                };
+                let current = match snapshot.unwrap_or_else(|e| {
+                    Err(DomainError::EngineError(format!(
+                        "conntrack snapshot task failed: {e}"
+                    )))
+                }) {
                     Ok(conns) => conns,
                     Err(e) => {
                         let msg = e.to_string();

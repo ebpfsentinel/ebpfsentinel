@@ -930,6 +930,7 @@ version = "0.0.0-dev"
 dependencies = [
  "ebpfsentinel-warden-proto",
  "libc",
+ "tempfile",
 ]
 
 [[package]]
@@ -1696,6 +1697,7 @@ dependencies = [
  "anyhow",
  "axum",
  "ebpfsentinel-domain",
+ "ebpfsentinel-warden-client",
  "proptest",
  "regex",
  "serde",

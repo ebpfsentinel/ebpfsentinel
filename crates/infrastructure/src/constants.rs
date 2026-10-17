@@ -27,6 +27,19 @@ pub const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// the cost of being wrong in the other direction is a stop that hangs.
 pub const CAPTURE_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long a caller waits for a warden-brokered operation that it has moved
+/// onto a blocking thread.
+///
+/// The client's own socket timeout is what normally ends such a call, and it is
+/// shorter than this, so an answer that never comes is reported by the call
+/// itself and names the operation. This is the outer bound: a blocking thread
+/// wedged before or after the socket call - a poisoned lock, a child the warden
+/// is still killing - would otherwise hold the request that is awaiting it for
+/// as long as the agent runs. Reaching this bound frees the caller and leaves
+/// the thread to the blocking pool, which is the right way round: a thread is
+/// cheap and a request that never answers is not.
+pub const WARDEN_BROKER_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
 // ── eBPF ──────────────────────────────────────────────────────────
 
 /// Default directory containing compiled eBPF program binaries.
@@ -73,6 +86,17 @@ mod tests {
         assert!(
             CAPTURE_STOP_TIMEOUT <= GRACEFUL_SHUTDOWN_TIMEOUT,
             "a capture must not hold a stop longer than draining the servers does"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn the_broker_bound_is_the_outer_one() {
+        // The warden client gives up first, so the error a caller sees names the
+        // operation that timed out rather than this generic bound.
+        assert!(
+            WARDEN_BROKER_CALL_TIMEOUT > ebpfsentinel_warden_client::CALL_TIMEOUT,
+            "the brokered-call bound must outlast the client's own socket timeout"
         );
     }
 

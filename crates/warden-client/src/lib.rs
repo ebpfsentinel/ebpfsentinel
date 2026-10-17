@@ -23,15 +23,61 @@
 use std::io;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
 // Re-exported under their real names so callers of the typed control methods can
 // build request values without taking a direct dependency on the protocol crate.
 pub use ebpfsentinel_warden_proto::{ConntrackTuple, DlpTarget, RouteSpec};
 
+/// How long one warden call may take before the client gives up on it.
+///
+/// Every operation here is a control-plane rarity - a conntrack read, a route
+/// write, a capture socket - and all of them are cheap in the warden, so five
+/// seconds is already far past "slow". Without a bound the client blocks in
+/// `read` for as long as the warden stays alive and silent, which is what a
+/// warden wedged in a child process looks like, and a caller that never
+/// returns is worse than one that fails: a stop cannot complete, and in an
+/// async caller the worker thread goes with it.
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Whether an error is the socket timeout firing rather than a real failure.
+///
+/// A read that times out surfaces as `WouldBlock` on some platforms and
+/// `TimedOut` on others, and `SO_RCVTIMEO` reports either depending on whether
+/// any byte arrived first, so both count.
+fn is_timeout(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
+}
+
+/// The command's name, for an error that has to say which call timed out.
+fn op_name(cmd: &Command) -> &'static str {
+    match cmd {
+        Command::Hello { .. } => "Hello",
+        Command::Delegate => "Delegate",
+        Command::ConntrackDump => "ConntrackDump",
+        Command::ConntrackDelete { .. } => "ConntrackDelete",
+        Command::ConntrackFlush => "ConntrackFlush",
+        Command::RouteAdd { .. } => "RouteAdd",
+        Command::RouteDel { .. } => "RouteDel",
+        Command::ArpAnnounce { .. } => "ArpAnnounce",
+        Command::PcapOpen { .. } => "PcapOpen",
+        Command::AttachUprobe { .. } => "AttachUprobe",
+        Command::DlpScan => "DlpScan",
+        Command::Extension { .. } => "Extension",
+    }
+}
+
 /// A connected, handshaked client to a warden socket.
 pub struct WardenClient {
     stream: UnixStream,
+    timeout: Duration,
+    /// Set when a call timed out. The frame that timed out may be half-read and
+    /// the answer may still arrive, so the connection is never used again.
+    timed_out: bool,
 }
 
 impl WardenClient {
@@ -39,21 +85,81 @@ impl WardenClient {
     /// handshake. Fails if the socket is absent, the peer is not a warden, or the
     /// warden runs an incompatible [`PROTOCOL_VERSION`].
     pub fn connect<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        Self::connect_with_timeout(path, CALL_TIMEOUT)
+    }
+
+    /// Connect with an explicit per-call timeout instead of [`CALL_TIMEOUT`].
+    /// `timeout` must be non-zero, which the socket options require.
+    pub fn connect_with_timeout<P: AsRef<Path>>(path: P, timeout: Duration) -> io::Result<Self> {
         let stream = UnixStream::connect(path)?;
-        let mut client = Self { stream };
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        let mut client = Self {
+            stream,
+            timeout,
+            timed_out: false,
+        };
         client.handshake()?;
         Ok(client)
     }
 
+    /// Whether a call on this connection has timed out, which makes the
+    /// connection unusable: the caller is expected to drop it and reconnect.
+    #[must_use]
+    pub fn timed_out(&self) -> bool {
+        self.timed_out
+    }
+
+    /// Turn a timeout into an error naming the call, and remember that this
+    /// connection can no longer be trusted to be in sync.
+    fn classify<T>(&mut self, op: &str, phase: &str, result: io::Result<T>) -> io::Result<T> {
+        match result {
+            Err(e) if is_timeout(&e) => {
+                self.timed_out = true;
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "{op}: timed out {phase} the warden after {:?}",
+                        self.timeout
+                    ),
+                ))
+            }
+            other => other,
+        }
+    }
+
+    /// Refuse to write onto a connection whose last call timed out.
+    fn check_usable(&self, op: &str) -> io::Result<()> {
+        if self.timed_out {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("{op}: this warden connection was abandoned after an earlier timeout"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Write one command frame, bounded by the send timeout.
+    fn send(&mut self, cmd: &Command) -> io::Result<()> {
+        let op = op_name(cmd);
+        self.check_usable(op)?;
+        let result = write_frame(&mut self.stream, cmd);
+        self.classify(op, "sending to", result)
+    }
+
+    /// Read one response frame, bounded by the receive timeout.
+    fn recv(&mut self, op: &str) -> io::Result<Response> {
+        self.check_usable(op)?;
+        let result = read_frame::<_, Response>(&mut self.stream);
+        self.classify(op, "waiting for an answer from", result)
+    }
+
     /// Send `Hello` and require a matching-version `HelloOk`.
     fn handshake(&mut self) -> io::Result<()> {
-        write_frame(
-            &mut self.stream,
-            &Command::Hello {
-                version: PROTOCOL_VERSION,
-            },
-        )?;
-        match read_frame::<_, Response>(&mut self.stream)? {
+        self.send(&Command::Hello {
+            version: PROTOCOL_VERSION,
+        })?;
+        match self.recv("Hello")? {
             Response::HelloOk { version } if version == PROTOCOL_VERSION => Ok(()),
             Response::HelloOk { version } => Err(io::Error::other(format!(
                 "warden protocol version {version} != client {PROTOCOL_VERSION}"
@@ -67,8 +173,8 @@ impl WardenClient {
 
     /// Issue one command and read its response.
     fn call(&mut self, cmd: &Command) -> io::Result<Response> {
-        write_frame(&mut self.stream, cmd)?;
-        read_frame(&mut self.stream)
+        self.send(cmd)?;
+        self.recv(op_name(cmd))
     }
 
     /// Ask the warden to scan `/proc` for SSL libraries and return the DLP
@@ -149,15 +255,18 @@ impl WardenClient {
     /// privileged syscall in the agent.
     #[cfg(feature = "fd-pass")]
     pub fn pcap_open(&mut self, iface: &str, filter: &str) -> io::Result<std::os::fd::OwnedFd> {
-        write_frame(
-            &mut self.stream,
-            &Command::PcapOpen {
-                iface: iface.to_owned(),
-                filter: filter.to_owned(),
-            },
-        )?;
-        match read_frame::<_, Response>(&mut self.stream)? {
-            Response::FdReady => fd_pass::recv_one_fd(&self.stream),
+        self.send(&Command::PcapOpen {
+            iface: iface.to_owned(),
+            filter: filter.to_owned(),
+        })?;
+        match self.recv("PcapOpen")? {
+            Response::FdReady => {
+                // The fd rides in its own `recvmsg`, which the receive timeout
+                // bounds as well: a warden that announced the fd and then did
+                // not send it must not park the agent here either.
+                let result = fd_pass::recv_one_fd(&self.stream);
+                self.classify("PcapOpen", "waiting for the capture socket from", result)
+            }
             other => Err(unexpected("PcapOpen", &other)),
         }
     }
@@ -177,19 +286,20 @@ impl WardenClient {
         prog_fd: std::os::fd::RawFd,
     ) -> io::Result<std::os::fd::OwnedFd> {
         use std::os::fd::AsRawFd;
-        write_frame(
-            &mut self.stream,
-            &Command::AttachUprobe {
-                path: path.to_owned(),
-                offset,
-                is_ret,
-            },
-        )?;
+        self.send(&Command::AttachUprobe {
+            path: path.to_owned(),
+            offset,
+            is_ret,
+        })?;
         // The program fd rides in an `SCM_RIGHTS` cmsg right after the frame, the
         // mirror of the warden's `Delegate` fs-fd hand-off.
-        fd_pass::send_one_fd(self.stream.as_raw_fd(), prog_fd)?;
-        match read_frame::<_, Response>(&mut self.stream)? {
-            Response::FdReady => fd_pass::recv_one_fd(&self.stream),
+        let sent = fd_pass::send_one_fd(self.stream.as_raw_fd(), prog_fd);
+        self.classify("AttachUprobe", "sending the program fd to", sent)?;
+        match self.recv("AttachUprobe")? {
+            Response::FdReady => {
+                let result = fd_pass::recv_one_fd(&self.stream);
+                self.classify("AttachUprobe", "waiting for the link fd from", result)
+            }
             other => Err(unexpected("AttachUprobe", &other)),
         }
     }
@@ -220,6 +330,7 @@ fn is_connection_lost(err: &io::Error) -> bool {
 pub struct ReconnectingClient {
     path: PathBuf,
     client: Option<WardenClient>,
+    timeout: Duration,
 }
 
 impl ReconnectingClient {
@@ -227,15 +338,25 @@ impl ReconnectingClient {
     /// warden may legitimately start after the agent).
     #[must_use]
     pub fn new<P: Into<PathBuf>>(path: P) -> Self {
+        Self::with_timeout(path, CALL_TIMEOUT)
+    }
+
+    /// Bind with an explicit per-call timeout instead of [`CALL_TIMEOUT`].
+    #[must_use]
+    pub fn with_timeout<P: Into<PathBuf>>(path: P, timeout: Duration) -> Self {
         Self {
             path: path.into(),
             client: None,
+            timeout,
         }
     }
 
     /// (Re)establish the connection.
     fn reconnect(&mut self) -> io::Result<()> {
-        self.client = Some(WardenClient::connect(&self.path)?);
+        self.client = Some(WardenClient::connect_with_timeout(
+            &self.path,
+            self.timeout,
+        )?);
         Ok(())
     }
 
@@ -256,12 +377,29 @@ impl ReconnectingClient {
             Err(e) if is_connection_lost(&e) => {
                 self.client = None;
                 self.reconnect()?;
-                op(self
+                let second = op(self
                     .client
                     .as_mut()
-                    .expect("client present after reconnect"))
+                    .expect("client present after reconnect"));
+                self.drop_if_timed_out();
+                second
             }
-            other => other,
+            // A timeout is not retried: the answer to the call that timed out may
+            // still be in flight, so replaying would read it as the reply to the
+            // second call. The connection is dropped instead, and the next call
+            // starts a fresh one.
+            other => {
+                self.drop_if_timed_out();
+                other
+            }
+        }
+    }
+
+    /// Drop a connection that a timeout left out of sync, so the next call
+    /// reconnects rather than reading a stale answer.
+    fn drop_if_timed_out(&mut self) {
+        if self.client.as_ref().is_some_and(WardenClient::timed_out) {
+            self.client = None;
         }
     }
 
@@ -423,6 +561,110 @@ mod fd_pass {
         }
         // SAFETY: `fd` is a fresh descriptor the kernel just installed; we own it.
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::{CALL_TIMEOUT, ReconnectingClient, WardenClient};
+    use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
+    use std::os::unix::net::UnixListener;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// Short enough to keep the suite quick, long enough that a loaded machine
+    /// does not make the handshake itself time out.
+    const TEST_TIMEOUT: Duration = Duration::from_millis(250);
+
+    /// A warden that handshakes and then answers nothing - what a warden wedged
+    /// in a child process looks like from the client side. Returns the count of
+    /// connections it has accepted, so a test can see a reconnect happen.
+    fn silent_warden(path: &Path) -> Arc<AtomicUsize> {
+        let listener = UnixListener::bind(path).expect("bind the test warden socket");
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&accepted);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                seen.fetch_add(1, Ordering::SeqCst);
+                // Each connection is held in its own thread, so a second client
+                // is served while the first is still waiting on nothing.
+                std::thread::spawn(move || {
+                    let Ok(Command::Hello { version }) = read_frame::<_, Command>(&mut stream)
+                    else {
+                        return;
+                    };
+                    let _ = write_frame(&mut stream, &Response::HelloOk { version });
+                    assert_eq!(version, PROTOCOL_VERSION);
+                    // Hold the connection open and say nothing at all.
+                    std::thread::sleep(Duration::from_secs(10));
+                });
+            }
+        });
+        accepted
+    }
+
+    #[test]
+    fn the_default_timeout_is_a_timeout_the_socket_accepts() {
+        // `SO_RCVTIMEO` reads a zero timeout as "block forever", so a zero
+        // constant would silently restore the behaviour this bounds.
+        assert!(CALL_TIMEOUT > Duration::ZERO);
+    }
+
+    #[test]
+    fn a_call_the_warden_never_answers_times_out_and_names_itself() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("warden.sock");
+        let _accepted = silent_warden(&sock);
+
+        let mut client =
+            WardenClient::connect_with_timeout(&sock, TEST_TIMEOUT).expect("handshake");
+        let err = client
+            .conntrack_dump()
+            .expect_err("the warden answers nothing");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ConntrackDump"),
+            "the error must say which call timed out, got: {msg}"
+        );
+        assert!(
+            msg.contains("timed out waiting for an answer"),
+            "the error must say what it was waiting for, got: {msg}"
+        );
+        assert!(client.timed_out(), "the connection is no longer usable");
+
+        let second = client
+            .conntrack_flush()
+            .expect_err("a connection out of sync is not reused");
+        assert!(
+            second.to_string().contains("abandoned"),
+            "a later call must say the connection was abandoned, got: {second}"
+        );
+    }
+
+    #[test]
+    fn a_timed_out_connection_is_replaced_rather_than_reused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("warden.sock");
+        let accepted = silent_warden(&sock);
+
+        let mut client = ReconnectingClient::with_timeout(&sock, TEST_TIMEOUT);
+        let first = client.conntrack_dump().expect_err("nothing is answered");
+        assert_eq!(first.kind(), std::io::ErrorKind::TimedOut);
+
+        // The second call must not be answered by the first call's reply, so it
+        // starts a connection of its own rather than reusing the stale one.
+        let second = client.conntrack_dump().expect_err("nothing is answered");
+        assert_eq!(second.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            2,
+            "a timed-out connection must be dropped and replaced"
+        );
     }
 }
 

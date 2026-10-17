@@ -13,6 +13,7 @@
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use ebpfsentinel_warden_proto::{ConntrackTuple, RouteSpec};
 
@@ -399,16 +400,60 @@ pub fn open_pcap_fd(iface: &str) -> Result<OwnedFd, String> {
 
 // ── exec helpers ──────────────────────────────────────────────────────────
 
-/// Run `cmd args`, requiring success.
-fn run(cmd: &str, args: &[String]) -> Result<(), String> {
-    let status = Command::new(cmd)
+/// How long a helper process (`ip`, `conntrack`) may run before the warden
+/// kills it and answers with an error.
+///
+/// Both of these finish in milliseconds when the kernel answers. When it does
+/// not - a netlink socket that never replies, a table lock held by something
+/// else - `status()` waits forever, and because the warden serves one
+/// connection per thread the agent's call waits with it: the caller's own
+/// timeout fires, the agent reconnects, and this thread stays parked on a child
+/// nobody is waiting for any more. Killing the child is what keeps the two ends
+/// agreeing about what is still running.
+const CHILD_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often the wait loop looks at the child. A control-plane call is rare and
+/// the work is milliseconds, so this costs nothing and keeps the latency added
+/// by the poll below one tick of anything that measures it.
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Spawn `cmd args` and wait for it, killing it once `timeout` has passed.
+fn run_bounded(
+    cmd: &str,
+    args: &[String],
+    timeout: Duration,
+) -> Result<std::process::ExitStatus, String> {
+    let mut child = Command::new(cmd)
         .args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
+        .spawn()
         .map_err(|e| {
             format!("failed to run `{cmd}`: {e} (is it installed in the warden image?)")
         })?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {}
+            Err(e) => return Err(format!("failed to wait for `{cmd}`: {e}")),
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            // Reap it, or the warden accumulates zombies for as long as it runs.
+            let _ = child.wait();
+            return Err(format!(
+                "`{cmd}` did not finish within {timeout:?} and was killed"
+            ));
+        }
+        std::thread::sleep(CHILD_POLL_INTERVAL);
+    }
+}
+
+/// Run `cmd args`, requiring success, bounded by [`CHILD_TIMEOUT`].
+fn run(cmd: &str, args: &[String]) -> Result<(), String> {
+    let status = run_bounded(cmd, args, CHILD_TIMEOUT)?;
     if status.success() {
         Ok(())
     } else {
@@ -417,23 +462,17 @@ fn run(cmd: &str, args: &[String]) -> Result<(), String> {
 }
 
 /// Run `cmd args`, treating a non-zero exit as success (used for `conntrack -D`,
-/// which exits non-zero when no flow matched - not an error here).
+/// which exits non-zero when no flow matched - not an error here). A child that
+/// hangs is still an error: it is the wait that matters, not the exit code.
 fn run_allow_nonzero(cmd: &str, args: &[String]) -> Result<(), String> {
-    Command::new(cmd)
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|e| {
-            format!("failed to run `{cmd}`: {e} (is it installed in the warden image?)")
-        })?;
-    Ok(())
+    run_bounded(cmd, args, CHILD_TIMEOUT).map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_garp_frame, conntrack_delete_args, name_to_cbuf, route_args, valid_route_dst,
+        CHILD_TIMEOUT, build_garp_frame, conntrack_delete_args, name_to_cbuf, route_args,
+        run_bounded, valid_route_dst,
     };
     use ebpfsentinel_warden_proto::{ConntrackTuple, RouteSpec};
 
@@ -445,6 +484,26 @@ mod tests {
             src_port: sp,
             dst_port: dp,
         }
+    }
+
+    #[test]
+    fn a_child_that_finishes_is_waited_for_normally() {
+        let status = run_bounded("true", &[], CHILD_TIMEOUT).expect("`true` runs");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn a_child_that_never_finishes_is_killed_and_named() {
+        let err = run_bounded(
+            "sleep",
+            &["30".to_owned()],
+            std::time::Duration::from_millis(100),
+        )
+        .expect_err("a child past its deadline is an error, not a wait");
+        assert!(
+            err.contains("sleep") && err.contains("did not finish"),
+            "the error must name the command that hung, got: {err}"
+        );
     }
 
     #[test]

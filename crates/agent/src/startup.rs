@@ -1120,12 +1120,26 @@ pub async fn run(
                             }
                         }
                     };
-                    let mut svc = probe_routing.write().await;
-                    let _ = if ok {
-                        svc.record_probe_success(*id)
-                    } else {
-                        svc.record_probe_failure(*id)
-                    };
+                    // Recording a probe can elect another gateway, and that
+                    // writes the default route - through the warden in a
+                    // rootless deployment, so blocking and the slowest thing
+                    // this loop does. It runs off the worker and under a bound,
+                    // or a warden that stopped answering would stop every
+                    // gateway in the estate from being probed at all.
+                    let routing = Arc::clone(&probe_routing);
+                    let gateway_id = *id;
+                    if let Err(e) = crate::brokered::brokered("gateway probe record", move || {
+                        let mut svc = routing.blocking_write();
+                        let _ = if ok {
+                            svc.record_probe_success(gateway_id)
+                        } else {
+                            svc.record_probe_failure(gateway_id)
+                        };
+                    })
+                    .await
+                    {
+                        tracing::warn!(error = %e, gateway = gateway_id, "gateway probe result not recorded");
+                    }
                 }
 
                 // Edge-detect the all-down transition under one lock.
