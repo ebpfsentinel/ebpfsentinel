@@ -12,12 +12,75 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::ptr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
 
 use crate::host_ops::HostOps;
 use crate::pcap_slots::{PcapSlot, PcapSlots};
 use crate::{delegate_over_fd, dlp_scan, net_ops, recv_fd, send_msg_fds, uprobe_ops};
+
+/// How long a connection may hold a thread without saying `Hello`.
+///
+/// The client sends it immediately on connect, so anything slower than this is
+/// not an agent: a peer that connects and then says nothing would otherwise
+/// park a warden thread in a blocking read for as long as the warden lives.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long an idle connection that holds nothing is kept.
+///
+/// Idling is normal and not an error - the agent's clients sit open between
+/// calls on purpose, and the client reconnects transparently when a call finds
+/// the connection gone - so this is not a liveness check on the agent. It is
+/// there for the connection whose peer stopped talking without closing: the
+/// socket stays open, the thread stays in its read, and nothing in the protocol
+/// ever ends it. Well above every interval the agent polls on, so a working
+/// deployment reconnects rarely if at all.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// What waiting for the next frame ended with.
+enum Waited {
+    /// The peer sent something, or closed: either way the read is next.
+    Readable,
+    /// Nothing arrived inside the timeout.
+    TimedOut,
+    /// The wait itself failed, which is not something to spin on.
+    Failed,
+}
+
+/// Wait until `fd` has a frame to read, or `timeout` passes.
+///
+/// `poll` rather than `SO_RCVTIMEO`: a receive timeout can fire between the
+/// length prefix and the body, and `read_exact` reports that as a failure with
+/// the bytes already consumed, leaving the stream out of step. Waiting before
+/// the read starts means a timeout only ever happens on a frame boundary.
+fn wait_for_frame(fd: RawFd, timeout: Duration) -> Waited {
+    let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    loop {
+        let mut pollfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // Safety: one pollfd owned by this frame, a count matching it, and a
+        // timeout in milliseconds. `poll` writes only `revents`.
+        let rc = unsafe { libc::poll(ptr::from_mut(&mut pollfd), 1, millis) };
+        if rc > 0 {
+            return Waited::Readable;
+        }
+        if rc == 0 {
+            return Waited::TimedOut;
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() == std::io::ErrorKind::Interrupted {
+            // A signal, not the peer. The remaining wait is restarted rather
+            // than inherited, which at this timescale changes nothing.
+            continue;
+        }
+        eprintln!("[warden] poll on connection failed: {e}");
+        return Waited::Failed;
+    }
+}
 
 /// A handler for [`Command::Extension`] requests - the hook a downstream warden
 /// build (e.g. the enterprise warden) installs to add privileged operations the
@@ -127,6 +190,20 @@ fn handle_conn(
     host: &dyn HostOps,
     ext: Option<&dyn ExtHandler>,
 ) {
+    handle_conn_with_timeouts(conn, btf, pcap, host, ext, HANDSHAKE_TIMEOUT, IDLE_TIMEOUT);
+}
+
+/// [`handle_conn`] with both waits given rather than taken from the constants,
+/// so a test can assert the closes without waiting out a production timeout.
+fn handle_conn_with_timeouts(
+    conn: UnixStream,
+    btf: &[(String, RawFd)],
+    pcap: &Arc<PcapSlots>,
+    host: &dyn HostOps,
+    ext: Option<&dyn ExtHandler>,
+    handshake_timeout: Duration,
+    idle_timeout: Duration,
+) {
     // Every slot this connection claimed, held until the connection ends: the
     // agent's own pool keeps this connection open for its whole life, so the
     // sockets are in use for exactly as long as it is there to read them.
@@ -135,8 +212,16 @@ fn handle_conn(
         Ok(c) => c,
         Err(_) => return,
     };
+    let fd = conn.as_raw_fd();
     let mut writer = conn;
 
+    if !matches!(wait_for_frame(fd, handshake_timeout), Waited::Readable) {
+        eprintln!(
+            "[warden] closing a connection that said nothing within {}s",
+            handshake_timeout.as_secs()
+        );
+        return;
+    }
     let Ok(first) = read_frame::<_, Command>(&mut reader) else {
         return;
     };
@@ -170,7 +255,32 @@ fn handle_conn(
         }
     }
 
-    while let Ok(cmd) = read_frame::<_, Command>(&mut reader) {
+    loop {
+        match wait_for_frame(fd, idle_timeout) {
+            Waited::Readable => {}
+            Waited::TimedOut if claimed.is_empty() => {
+                // Nothing of the warden's is held over this connection, so
+                // closing it costs the agent one reconnect on its next call and
+                // ends a thread that had nothing left to answer.
+                eprintln!(
+                    "[warden] closing a connection idle for {}s",
+                    idle_timeout.as_secs()
+                );
+                return;
+            }
+            Waited::TimedOut => {
+                // This connection is what the agent's capture sockets are held
+                // against: dropping it on idleness would free slots the agent
+                // is still reading from and hand the same socket to the next
+                // caller. An idle pcap connection is the normal case, so it
+                // waits as long as it takes.
+                continue;
+            }
+            Waited::Failed => return,
+        }
+        let Ok(cmd) = read_frame::<_, Command>(&mut reader) else {
+            break;
+        };
         // `PcapOpen` answers out-of-band: an `FdReady` frame followed by a fd in an
         // `SCM_RIGHTS` cmsg, so it bypasses `dispatch`.
         let ok = match &cmd {
@@ -369,7 +479,10 @@ fn result_to_response(result: Result<(), String>) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExtHandler, HostOps, PcapSlots, handle_conn};
+    use super::{
+        ExtHandler, HANDSHAKE_TIMEOUT, HostOps, IDLE_TIMEOUT, PcapSlots, Waited, handle_conn,
+        handle_conn_with_timeouts, wait_for_frame,
+    };
     use ebpfsentinel_warden_proto::{
         Command, ConntrackTuple, PROTOCOL_VERSION, Response, RouteSpec, read_frame, write_frame,
     };
@@ -377,6 +490,7 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use std::sync::Arc;
     use std::thread::JoinHandle;
+    use std::time::Duration;
 
     /// No host-network op is exercised by the extension tests - only the `Hello`
     /// handshake and `Extension` commands are sent - so every method is a stub.
@@ -598,5 +712,183 @@ mod tests {
         assert_eq!(again_second.response, Response::FdReady);
         release(again_first);
         release(again_second);
+    }
+
+    /// Drive the connection handler with waits short enough to assert on.
+    fn run_server_with_timeouts(
+        server: UnixStream,
+        handshake: Duration,
+        idle: Duration,
+    ) -> JoinHandle<()> {
+        std::thread::spawn(move || {
+            let host = NullHost;
+            let slots = PcapSlots::new(Vec::new(), false);
+            handle_conn_with_timeouts(server, &[], &slots, &host, None, handshake, idle);
+        })
+    }
+
+    /// Read until the peer closes, so a test can tell "closed" from "still
+    /// holding the thread" without blocking for ever on either.
+    fn closed_by_peer(stream: &UnixStream) -> bool {
+        use std::io::Read;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("a read timeout");
+        let mut byte = [0u8; 1];
+        let mut stream = stream;
+        matches!(stream.read(&mut byte), Ok(0))
+    }
+
+    #[test]
+    fn a_peer_that_says_nothing_is_dropped() {
+        let (client, server) = UnixStream::pair().expect("a socket pair");
+        let handle =
+            run_server_with_timeouts(server, Duration::from_millis(50), Duration::from_millis(50));
+        assert!(
+            closed_by_peer(&client),
+            "a connection that never sent Hello must not keep a warden thread"
+        );
+        handle.join().expect("the handler returns");
+    }
+
+    #[test]
+    fn an_idle_connection_holding_nothing_is_closed() {
+        let (client, server) = UnixStream::pair().expect("a socket pair");
+        let handle =
+            run_server_with_timeouts(server, Duration::from_secs(5), Duration::from_millis(50));
+
+        let mut writer = client.try_clone().expect("a writer");
+        write_frame(
+            &mut writer,
+            &Command::Hello {
+                version: PROTOCOL_VERSION,
+            },
+        )
+        .expect("the handshake is sent");
+        let mut reader = client.try_clone().expect("a reader");
+        match read_frame::<_, Response>(&mut reader).expect("the handshake is answered") {
+            Response::HelloOk { version } => assert_eq!(version, PROTOCOL_VERSION),
+            other => panic!("unexpected handshake answer: {other:?}"),
+        }
+
+        assert!(
+            closed_by_peer(&client),
+            "an idle connection with no slot claimed must not hold a thread for ever"
+        );
+        handle.join().expect("the handler returns");
+    }
+
+    #[test]
+    fn a_connection_with_a_frame_waiting_is_read_rather_than_timed_out() {
+        use std::io::Write;
+        let (mut client, server) = UnixStream::pair().expect("a socket pair");
+        client.write_all(&[0u8]).expect("a byte on the wire");
+        assert!(matches!(
+            wait_for_frame(server.as_raw_fd(), Duration::from_millis(50)),
+            Waited::Readable
+        ));
+    }
+
+    #[test]
+    fn a_silent_connection_times_out_rather_than_returning_readable() {
+        let (_client, server) = UnixStream::pair().expect("a socket pair");
+        assert!(matches!(
+            wait_for_frame(server.as_raw_fd(), Duration::from_millis(50)),
+            Waited::TimedOut
+        ));
+    }
+
+    #[test]
+    fn a_closed_peer_is_readable_so_the_read_reports_the_end() {
+        let (client, server) = UnixStream::pair().expect("a socket pair");
+        drop(client);
+        assert!(
+            matches!(
+                wait_for_frame(server.as_raw_fd(), Duration::from_millis(50)),
+                Waited::Readable
+            ),
+            "a hangup must reach the read, which ends the connection, not the timeout branch"
+        );
+    }
+
+    #[test]
+    fn an_idle_connection_holding_a_slot_is_kept() {
+        // The agent's capture pool keeps its connection open and silent for the
+        // whole run, and the warden holds the socket against that connection.
+        // Closing it on idleness would free a socket the agent is still reading.
+        let held = std::fs::File::open("/dev/null").expect("a fd to hand out");
+        let (client, server) = UnixStream::pair().expect("a socket pair");
+        let slots = PcapSlots::new(vec![held.as_raw_fd()], false);
+        let handle = std::thread::spawn(move || {
+            let host = NullHost;
+            handle_conn_with_timeouts(
+                server,
+                &[],
+                &slots,
+                &host,
+                None,
+                Duration::from_secs(5),
+                Duration::from_millis(50),
+            );
+        });
+
+        let mut writer = client.try_clone().expect("a writer");
+        write_frame(
+            &mut writer,
+            &Command::Hello {
+                version: PROTOCOL_VERSION,
+            },
+        )
+        .expect("the handshake is sent");
+        write_frame(
+            &mut writer,
+            &Command::PcapOpen {
+                iface: "lo".into(),
+                filter: String::new(),
+            },
+        )
+        .expect("the open is sent");
+
+        // Several idle timeouts' worth of silence, and the connection is still
+        // there because a slot is claimed against it.
+        client
+            .set_read_timeout(Some(Duration::from_millis(400)))
+            .expect("a read timeout");
+        let mut sink = [0u8; 64];
+        let mut reading = &client;
+        loop {
+            use std::io::Read;
+            match reading.read(&mut sink) {
+                // The handshake and the FdReady answer; keep draining.
+                Ok(n) if n > 0 => continue,
+                Ok(_) => panic!("the connection holding a capture socket was closed"),
+                Err(e) => {
+                    assert_eq!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock,
+                        "the connection ended for another reason: {e}"
+                    );
+                    break;
+                }
+            }
+        }
+
+        // Every handle on the client end, the writer clone included: the
+        // connection is gone for the warden only once the last fd closes,
+        // which is how an agent returns the sockets it held.
+        drop(writer);
+        drop(client);
+        handle
+            .join()
+            .expect("the handler returns once the peer goes");
+        drop(held);
+    }
+
+    #[test]
+    fn the_handshake_wait_is_the_shorter_of_the_two() {
+        assert!(
+            HANDSHAKE_TIMEOUT < IDLE_TIMEOUT,
+            "a connection gets longer to sit idle than to introduce itself"
+        );
     }
 }

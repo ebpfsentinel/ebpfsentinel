@@ -239,6 +239,27 @@ pub async fn run(
         "eBPFsentinel agent starting"
     );
 
+    // ── 2b. Refuse to be the second agent on this state directory ────
+    // Startup wipes the pins it finds and opens the redb stores for writing,
+    // so a second process here does not share the node with the first one: it
+    // unpins the maps the first is still serving from. The lock is released by
+    // the kernel when this process ends, so a crash leaves nothing behind for
+    // the next start to clean up or guess at.
+    let lock_path = Path::new(&config.audit.storage_path).with_file_name("agent.lock");
+    let _instance_lock = match adapters::system::acquire_instance_lock(&lock_path) {
+        Ok(lock) => {
+            debug!(path = %lock.path().display(), "state directory claimed");
+            lock
+        }
+        Err(e) => {
+            error!(
+                path = %lock_path.display(),
+                "refusing to start: {e}; stop the running agent or point this one at its own state directory"
+            );
+            return Err(anyhow::anyhow!("{e}"));
+        }
+    };
+
     // ── 3. Convert and load firewall rules ──────────────────────────
     let firewall_mode = config.firewall_mode()?;
     let domain_rules = config.firewall_rules()?;
@@ -1133,6 +1154,15 @@ pub async fn run(
                                 let secs = timeout.as_secs().max(1).to_string();
                                 let mut probe = tokio::process::Command::new("ping");
                                 probe.args(["-c", "1", "-W", &secs]);
+                                // Tokio leaves a child running when its handle
+                                // is dropped. This await is inside a task that
+                                // a shutdown cancels and inside the timeout
+                                // below, and either path drops the handle: with
+                                // nothing here, a `ping` that outlived its own
+                                // -W bound would stay on the process table with
+                                // nobody left to reap it, one per probe
+                                // interval per WAN.
+                                probe.kill_on_drop(true);
                                 // A probe leaving by whatever path the default
                                 // route currently takes measures the elected
                                 // gateway rather than this one, so every WAN
@@ -1145,10 +1175,22 @@ pub async fn run(
                                 probe
                                     .args(["--", &hc.target])
                                     .stdout(std::process::Stdio::null())
-                                    .stderr(std::process::Stdio::null())
-                                    .status()
-                                    .await
-                                    .is_ok_and(|s| s.success())
+                                    .stderr(std::process::Stdio::null());
+                                // `-W` bounds how long ping waits for a reply,
+                                // not how long the process can take: a probe on
+                                // an interface that stops answering ioctls
+                                // hangs before it ever sends. The TCP arm above
+                                // is bounded by its own timeout, so this one is
+                                // too, and the child is killed by the drop
+                                // rather than left behind.
+                                matches!(
+                                    tokio::time::timeout(
+                                        timeout + std::time::Duration::from_secs(1),
+                                        probe.status()
+                                    )
+                                    .await,
+                                    Ok(Ok(status)) if status.success()
+                                )
                             } else {
                                 tracing::warn!(
                                     target = %hc.target,
@@ -1293,13 +1335,26 @@ pub async fn run(
                                     let target = addr.to_string();
                                     // `--` terminates option parsing; the
                                     // target is a parsed IP either way.
-                                    tokio::process::Command::new("ping")
+                                    let mut probe = tokio::process::Command::new("ping");
+                                    probe
                                         .args(["-c", "1", "-W", &secs, "--", &target])
                                         .stdout(std::process::Stdio::null())
                                         .stderr(std::process::Stdio::null())
-                                        .status()
-                                        .await
-                                        .is_ok_and(|s| s.success())
+                                        // Same two reasons as the WAN probe:
+                                        // `-W` does not bound the process, and
+                                        // a dropped handle leaves the child
+                                        // running unless this is set. One
+                                        // backend per interval is one orphan
+                                        // per interval.
+                                        .kill_on_drop(true);
+                                    matches!(
+                                        tokio::time::timeout(
+                                            timeout + std::time::Duration::from_secs(1),
+                                            probe.status()
+                                        )
+                                        .await,
+                                        Ok(Ok(status)) if status.success()
+                                    )
                                 }
                             };
 

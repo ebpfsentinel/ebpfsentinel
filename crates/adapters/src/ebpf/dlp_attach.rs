@@ -459,6 +459,9 @@ pub struct DlpUprobeAttacher {
     /// `BPF_LINK_CREATE` is brokered to the warden; when `None`, the agent
     /// attaches directly (bare-metal / single privileged container).
     warden_sock: Option<PathBuf>,
+    /// The connection the brokered calls go over, built once with the socket
+    /// and reused by every reconcile pass. One per attacher, not one per call.
+    warden: Option<std::sync::Mutex<ebpfsentinel_warden_client::ReconnectingClient>>,
     /// Currently-attached libraries keyed by `(dev, ino)` - dedup, idempotency,
     /// and the owning handle whose drop detaches.
     attached: HashMap<(u64, u64), Attachment>,
@@ -481,6 +484,7 @@ impl DlpUprobeAttacher {
             proc_root: proc_root.into(),
             fds: [-1; PROGRAM_COUNT],
             warden_sock: None,
+            warden: None,
             attached: HashMap::new(),
             published: false,
             owner: UPROBE_OWNER_SCAN,
@@ -508,6 +512,7 @@ impl DlpUprobeAttacher {
             proc_root: proc_root.into(),
             fds,
             warden_sock: None,
+            warden: None,
             attached: HashMap::new(),
             published: false,
             owner: UPROBE_OWNER_SCAN,
@@ -519,7 +524,9 @@ impl DlpUprobeAttacher {
     /// agent still resolves the symbol offset itself (a plain ELF read).
     #[must_use]
     pub fn with_warden_socket(mut self, sock: impl Into<PathBuf>) -> Self {
-        self.warden_sock = Some(sock.into());
+        let sock = sock.into();
+        self.warden = Some(crate::warden::uprobe::client_for(&sock));
+        self.warden_sock = Some(sock);
         self
     }
 
@@ -708,8 +715,8 @@ impl DlpUprobeAttacher {
         // (`CAP_SYS_PTRACE`), so it delegates discovery to the warden, which
         // returns deduped targets with offsets pre-resolved. Direct posture (the
         // agent is privileged) scans `/proc` itself.
-        let live: Vec<UprobeTarget> = match &self.warden_sock {
-            Some(sock) => match crate::warden::uprobe::scan_via_warden(sock) {
+        let live: Vec<UprobeTarget> = match &self.warden {
+            Some(client) => match crate::warden::uprobe::scan_via_warden(client) {
                 Ok(targets) => targets.into_iter().map(UprobeTarget::from_warden).collect(),
                 Err(e) => {
                     // The broker is down, which says nothing about what is
@@ -1114,11 +1121,11 @@ impl DlpUprobeAttacher {
         let mut links = Vec::with_capacity(planned.len());
         let mut probes = Vec::with_capacity(planned.len());
         for p in planned {
-            let link = if let Some(sock) = &self.warden_sock {
+            let link = if let Some(client) = &self.warden {
                 // Rootless: the warden - which holds the tracing capability and
                 // can read the target - creates the link and passes back its fd.
                 let link = crate::warden::uprobe::attach_via_warden(
-                    sock,
+                    client,
                     self.fds[p.index],
                     path,
                     p.offset,
