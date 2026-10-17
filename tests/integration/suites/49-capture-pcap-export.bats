@@ -221,3 +221,72 @@ _pull_remote_pcap() {
     [ -s "${local_pcap}" ]
     tcpdump -nr "${local_pcap}" >/dev/null 2>&1
 }
+
+# ── A long capture can be stopped, and the thread comes back ─────────
+
+@test "DELETE /api/v1/captures/{id} ends a long capture and frees the engine" {
+    local iface
+    iface="$(_capture_iface)"
+    local body
+    body="$(printf '{"filter":"tcp port 4446","duration_seconds":300,"snap_length":1500,"interface":"%s"}' "${iface}")"
+
+    local resp
+    resp="$(api_post /api/v1/captures/manual "${body}")"
+    _load_http_status
+    [ "${HTTP_STATUS}" = "200" ] || [ "${HTTP_STATUS}" = "201" ] || {
+        echo "POST /captures/manual returned HTTP ${HTTP_STATUS}: ${resp}" >&2
+        return 1
+    }
+
+    local id remote_path
+    id="$(echo "${resp}" | jq -r '.id')"
+    remote_path="$(echo "${resp}" | jq -r '.output_path')"
+    [ -n "${id}" ] && [ "${id}" != "null" ]
+
+    _drive_traffic_to_port 4446
+    sleep 2
+
+    # Stop it 298 seconds before its own duration would have.
+    local stop_resp
+    stop_resp="$(api_delete "/api/v1/captures/${id}")"
+    _load_http_status
+    [ "${HTTP_STATUS}" = "200" ] || {
+        echo "DELETE /captures/${id} returned HTTP ${HTTP_STATUS}: ${stop_resp}" >&2
+        return 1
+    }
+    [ "$(echo "${stop_resp}" | jq -r '.status')" = "stopped" ]
+
+    # The reader polls its stop flag every 50 ms, so the socket is back in the
+    # pool and the engine free well inside a second. Starting another capture
+    # is what proves it: the engine refuses a second capture while one runs.
+    sleep 1
+    local second
+    second="$(printf '{"filter":"tcp port 4447","duration_seconds":4,"snap_length":1500,"interface":"%s"}' "${iface}")"
+    local second_resp
+    second_resp="$(api_post /api/v1/captures/manual "${second}")"
+    _load_http_status
+    [ "${HTTP_STATUS}" = "200" ] || [ "${HTTP_STATUS}" = "201" ] || {
+        echo "a capture could not start after a stop: HTTP ${HTTP_STATUS}: ${second_resp}" >&2
+        return 1
+    }
+
+    # The file the stopped capture wrote is a short capture, not a broken one.
+    local local_pcap="${DATA_DIR}/${id}.pcap"
+    _pull_remote_pcap "${remote_path}" "${local_pcap}" || {
+        echo "could not pull ${remote_path} from the agent" >&2
+        return 1
+    }
+    [ -s "${local_pcap}" ] || {
+        echo "pcap ${local_pcap} is empty" >&2
+        return 1
+    }
+    tcpdump -nr "${local_pcap}" >/dev/null 2>&1 || {
+        echo "tcpdump cannot parse the stopped capture ${local_pcap}" >&2
+        return 1
+    }
+
+    # Leave the suite with nothing running.
+    local second_id
+    second_id="$(echo "${second_resp}" | jq -r '.id')"
+    api_delete "/api/v1/captures/${second_id}" >/dev/null 2>&1 || true
+}

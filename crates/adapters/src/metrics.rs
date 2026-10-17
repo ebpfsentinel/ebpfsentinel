@@ -237,6 +237,10 @@ pub struct AgentMetrics {
     pub cpu_usage_percent: Gauge<f64, AtomicU64>,
     pub open_fds: Gauge,
     pub thread_count: Gauge,
+    /// Packet-capture sockets borrowed from the pre-opened pool, and the pool's
+    /// size. Set on every borrow and return.
+    pub pcap_sockets_in_use: Gauge,
+    pub pcap_sockets_pooled: Gauge,
     pub dns_cache_entries: Gauge,
     pub dns_cache_hits_total: Counter,
     pub dns_cache_evictions_total: Counter,
@@ -537,6 +541,20 @@ impl AgentMetrics {
             "thread_count",
             "Number of threads in the process",
             thread_count.clone(),
+        );
+
+        let pcap_sockets_in_use = Gauge::default();
+        registry.register(
+            "pcap_sockets_in_use",
+            "Packet-capture sockets currently borrowed from the pre-opened pool",
+            pcap_sockets_in_use.clone(),
+        );
+
+        let pcap_sockets_pooled = Gauge::default();
+        registry.register(
+            "pcap_sockets_pooled",
+            "Packet-capture sockets the pre-opened pool holds",
+            pcap_sockets_pooled.clone(),
         );
 
         let dns_cache_entries = Gauge::default();
@@ -841,6 +859,8 @@ impl AgentMetrics {
             cpu_usage_percent,
             open_fds,
             thread_count,
+            pcap_sockets_in_use,
+            pcap_sockets_pooled,
             dns_cache_entries,
             dns_cache_hits_total,
             dns_cache_evictions_total,
@@ -1249,6 +1269,13 @@ impl SystemMetrics for AgentMetrics {
 
     fn set_thread_count(&self, count: u64) {
         self.thread_count.set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn set_pcap_sockets(&self, in_use: u64, total: u64) {
+        self.pcap_sockets_in_use
+            .set(in_use.try_into().unwrap_or(i64::MAX));
+        self.pcap_sockets_pooled
+            .set(total.try_into().unwrap_or(i64::MAX));
     }
 }
 
@@ -1999,6 +2026,8 @@ mod tests {
         ("open_fds", "gauge"),
         ("packet_processing_duration_seconds", "histogram"),
         ("packets", "counter"),
+        ("pcap_sockets_in_use", "gauge"),
+        ("pcap_sockets_pooled", "gauge"),
         ("ringbuf_events", "counter"),
         ("ringbuf_events_dropped", "counter"),
         ("ringbuf_drains", "counter"),

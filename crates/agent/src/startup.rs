@@ -59,7 +59,7 @@ use domain::ratelimit::engine::RateLimitEngine;
 use domain::threatintel::engine::ThreatIntelEngine;
 use infrastructure::config::AgentConfig;
 use infrastructure::constants::{
-    ALERT_CHANNEL_CAPACITY, EVENT_CHANNEL_CAPACITY, GRACEFUL_SHUTDOWN_TIMEOUT,
+    ALERT_CHANNEL_CAPACITY, CAPTURE_STOP_TIMEOUT, EVENT_CHANNEL_CAPACITY, GRACEFUL_SHUTDOWN_TIMEOUT,
 };
 use infrastructure::logging::init_logging;
 use infrastructure::retry::RetryConfig;
@@ -903,11 +903,50 @@ pub async fn run(
     }
 
     // Wire capture engine for manual packet capture. The ceiling is the
-    // `capture.max_duration_secs` key, validated at load.
+    // `capture.max_duration_secs` key, validated at load, and the engine also
+    // carries what the files it writes are allowed to cost on disk.
     let capture_engine = Arc::new(RwLock::new(domain::capture::engine::CaptureEngine::new(
         config.capture.max_duration_secs,
+        config.capture.retention(),
     )));
     app_state = app_state.with_capture_engine(Arc::clone(&capture_engine));
+
+    // Capture files outlive the process that wrote them, so a restart finds
+    // whatever the last run left in the directory: adopt each one as an
+    // interrupted session, so the API accounts for a short file instead of
+    // leaving an operator to guess, then sweep what is past its retention.
+    {
+        let dir = std::path::Path::new(adapters::capture::retention_fs::CAPTURE_DIR);
+        let mut engine = capture_engine.write().await;
+        let known = engine.known_ids();
+        let adopted = adapters::capture::retention_fs::orphan_sessions(
+            dir,
+            &known,
+            std::time::SystemTime::now(),
+        );
+        if !adopted.is_empty() {
+            info!(
+                captures = adopted.len(),
+                "capture files from an earlier run listed as interrupted"
+            );
+            for session in adopted {
+                engine.adopt(session);
+            }
+        }
+        let outcome = adapters::capture::retention_fs::sweep(
+            dir,
+            &engine.retention(),
+            &engine.files_in_use(),
+        );
+        if outcome.deleted > 0 || outcome.failed > 0 {
+            info!(
+                deleted = outcome.deleted,
+                bytes_freed = outcome.bytes_freed,
+                failed = outcome.failed,
+                "capture retention sweep at startup"
+            );
+        }
+    }
 
     // Adopt the AF_PACKET sockets the privileged launcher pre-opened for
     // rootless packet capture (advertised via EBPFSENTINEL_PCAP_FDS). Absent in
@@ -917,6 +956,12 @@ pub async fn run(
     let pcap_pool = adapters::net::pcap_capture::PcapSocketPool::from_env()
         .or_else(|| warden_pcap_pool(&config));
     if let Some(ref pool) = pcap_pool {
+        // The pool is a fixed budget handed to this process, so how much of it
+        // is borrowed is worth a gauge: a capture that refuses to start because
+        // every socket is out reads as a full pool rather than as a broken one.
+        pool.attach_metrics(
+            Arc::clone(&metrics) as Arc<dyn ports::secondary::metrics_port::MetricsPort>
+        );
         app_state = app_state.with_pcap_pool(Arc::clone(pool));
     }
 
@@ -2978,12 +3023,8 @@ pub async fn run(
                         let engine = Arc::clone(&cap_engine_clone);
                         tokio::spawn(crate::http::capture_handler::run_pcap_capture(
                             Arc::clone(pool),
-                            s.id,
-                            s.interface,
-                            s.filter,
-                            s.duration_secs,
-                            s.snap_length,
-                            s.output_path,
+                            s,
+                            req.stop,
                             engine,
                         ));
                     } else {
@@ -3444,11 +3485,39 @@ pub async fn run(
     info!("shutdown phase 3: stopping config watcher");
     let _ = tokio::time::timeout(Duration::from_secs(1), reload_handle).await;
 
-    info!("shutdown phase 4: detaching eBPF programs");
+    // A capture reads packets on a socket of its own and owes nothing to the
+    // eBPF programs, but it is stopped before they are detached because the
+    // operator reading the file afterwards will compare it against the alerts
+    // the datapath raised, and a capture that outlived the datapath records a
+    // window nothing was watching.
+    let interrupted = capture_engine.write().await.interrupt_running();
+    if !interrupted.is_empty() {
+        info!(
+            captures = ?interrupted,
+            "shutdown phase 4: stopping packet captures"
+        );
+        let deadline = tokio::time::Instant::now() + CAPTURE_STOP_TIMEOUT;
+        loop {
+            if capture_engine.read().await.unfinished().is_empty() {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                warn!(
+                    captures = ?capture_engine.read().await.unfinished(),
+                    timeout_secs = CAPTURE_STOP_TIMEOUT.as_secs(),
+                    "these captures had not closed their file when the window closed"
+                );
+                break;
+            }
+            tokio::time::sleep(adapters::net::pcap_capture::POLL_INTERVAL).await;
+        }
+    }
+
+    info!("shutdown phase 5: detaching eBPF programs");
     ebpf_manager.lock().await.detach_all().await;
     drop(ebpf_state); // Drop startup loaders (detaches legacy programs)
 
-    info!("shutdown phase 5: draining events and alerts");
+    info!("shutdown phase 6: draining events and alerts");
     drop(event_tx); // close event channel so dispatcher sees channel closed
     let _ = tokio::time::timeout(Duration::from_secs(2), dispatcher_handle).await;
     drop(alert_tx); // close alert channel so alert consumer sees channel closed
@@ -4362,7 +4431,7 @@ const SSL_LIBRARY_CANDIDATES: &[&str] = &[
 
 pub fn try_load_uprobe_dlp(
     ebpf_dir: &str,
-    _config: &AgentConfig,
+    config: &AgentConfig,
     pin_path: &str,
 ) -> anyhow::Result<(
     EbpfLoader,
@@ -4373,6 +4442,12 @@ pub fn try_load_uprobe_dlp(
 )> {
     let program_bytes = read_ebpf_program(ebpf_dir, "uprobe-dlp")?;
     let mut loader = EbpfLoader::load_with_pin_path(&program_bytes, pin_path)?;
+
+    // The cgroup scope goes in before anything attaches. A probe armed first
+    // and scoped afterwards reads every container on the node for the width of
+    // that window, which on a shared node is a neighbour's plaintext in this
+    // agent's ring buffer.
+    push_dlp_cgroup_scope(&mut loader, config)?;
 
     // Discover SSL libraries through the host proc root (`/host/proc` when the
     // host proc is bind-mounted into the agent), so the DLP uprobe sees
@@ -4463,6 +4538,35 @@ pub fn try_load_uprobe_dlp(
 /// Returns an error if any member or enumerator is missing from the blob. A
 /// partially-resolved layout is refused rather than pushed, because a probe
 /// reading one wrong offset reports plaintext that was never sent.
+/// Write the configured DLP cgroup scope into the datapath maps.
+///
+/// `all` keeps the mode the probes default to and touches the allow list not at
+/// all. `workloads` resolves each configured cgroup path under the resolver's
+/// cgroup root to its id and refuses to arm the probes when none of them exists
+/// on this node, since an allow list that matches nothing captures nothing
+/// while every counter says DLP is loaded.
+fn push_dlp_cgroup_scope(loader: &mut EbpfLoader, config: &AgentConfig) -> anyhow::Result<()> {
+    if !config.dlp.scope.is_workload_scoped() {
+        return Ok(());
+    }
+
+    let cgroup_root = Path::new(&config.container.resolver.cgroup_root);
+    let scope = adapters::ebpf::resolve_cgroup_scope(cgroup_root, &config.dlp.scope.cgroups);
+    if !scope.missing.is_empty() {
+        warn!(
+            missing = scope.missing.len(),
+            "DLP scope names cgroups that do not exist on this node; those workloads are not read"
+        );
+    }
+    adapters::ebpf::push_dlp_scope(loader.ebpf_mut(), &scope)?;
+    info!(
+        cgroups = scope.cgroups.len(),
+        cgroup_root = %cgroup_root.display(),
+        "DLP plaintext capture scoped to the configured cgroups"
+    );
+    Ok(())
+}
+
 fn resolve_ktls_iter_offsets() -> anyhow::Result<ebpf_common::dlp::KtlsIterOffsets> {
     use adapters::ebpf::kfunc::{vmlinux_enum_values, vmlinux_struct_member_offsets};
 

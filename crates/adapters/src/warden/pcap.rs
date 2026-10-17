@@ -55,5 +55,10 @@ pub fn pool_from_warden(
         count = fds.len(),
         "packet-capture sockets provisioned by the warden"
     );
-    Some(PcapSocketPool::from_fds(fds))
+    // The client, and so the connection the sockets were served over, is handed
+    // to the pool: the warden holds each socket it gave out against that
+    // connection and takes it back when the connection goes, which is how an
+    // agent that restarts returns what it held. Closing it here would hand the
+    // same socket to the next agent while this one is still reading it.
+    Some(PcapSocketPool::from_warden(fds, client))
 }

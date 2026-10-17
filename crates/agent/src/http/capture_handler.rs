@@ -169,15 +169,15 @@ pub async fn start_capture(
         packets_captured: 0,
     };
 
-    {
+    let stop = {
         let mut engine = capture_engine.write().await;
         engine
             .start(session.clone())
             .map_err(|e| ApiError::Conflict {
                 code: "CAPTURE_CONFLICT",
                 message: e,
-            })?;
-    }
+            })?
+    };
 
     // Build response before spawning (session is moved into the task)
     let resp = to_response(&session);
@@ -188,28 +188,26 @@ pub async fn start_capture(
     {
         if let Some(pool) = state.pcap_pool.clone() {
             let cap_engine = Arc::clone(capture_engine);
-            tokio::spawn(run_pcap_capture(
-                pool,
-                session.id,
-                session.interface,
-                session.filter,
-                session.duration_secs,
-                session.snap_length,
-                session.output_path,
-                cap_engine,
-            ));
+            tokio::spawn(run_pcap_capture(pool, session, stop, cap_engine));
         } else {
+            // Nothing will poll the flag, so the session is failed rather than
+            // left running: a capture with no reader behind it would refuse
+            // every later capture and hold a stop open for its whole window.
             tracing::warn!(
                 capture_id = %session.id,
                 "packet capture unavailable: the launcher provisioned no AF_PACKET socket (EBPFSENTINEL_PCAP_FDS unset)"
             );
+            capture_engine.write().await.fail(&session.id);
         }
     }
     #[cfg(not(feature = "pcap-capture"))]
     {
-        let _ = capture_engine;
+        // Nothing is going to poll the flag this registration handed back, so
+        // the session is failed rather than left running: a capture nobody can
+        // stop would block every later one and hold up a stop for its window.
+        let _ = stop;
         tracing::warn!(capture_id = %session.id, "pcap capture requires the pcap-capture feature");
-        // Session is registered but no actual capture runs without the feature
+        capture_engine.write().await.fail(&session.id);
     }
 
     Ok((StatusCode::CREATED, Json(resp)))
@@ -292,59 +290,93 @@ pub async fn stop_capture(
 ///
 /// Spawned on a blocking thread via `tokio::task::spawn_blocking` because the
 /// capture loop performs blocking `recv` polling.
+///
+/// `stop` is the flag the engine registered for this session: raising it is how
+/// `DELETE /api/v1/captures/{id}` and the agent's own stop sequence end a
+/// capture before its duration runs out. The reader returns through the same
+/// path either way, so the file is flushed and closed and the socket lease
+/// goes back to the pool rather than being held by a thread nobody can reach.
 #[cfg(feature = "pcap-capture")]
-#[allow(clippy::too_many_arguments)]
 pub async fn run_pcap_capture(
     pool: Arc<adapters::net::pcap_capture::PcapSocketPool>,
-    id: String,
-    interface: String,
-    filter: String,
-    duration_secs: u64,
-    snap_length: u32,
-    output_path: String,
+    session: CaptureSession,
+    stop: domain::capture::entity::CaptureStop,
     engine: Arc<tokio::sync::RwLock<domain::capture::engine::CaptureEngine>>,
 ) {
+    let id = session.id.clone();
     let result = tokio::task::spawn_blocking(move || {
         let Some(lease) = pool.borrow() else {
-            return Err((
-                id,
-                "no AF_PACKET capture socket available (all sockets in use)".to_string(),
-            ));
+            return Err("no AF_PACKET capture socket available (all sockets in use)".to_string());
         };
-        match adapters::net::pcap_capture::run_capture(
+        adapters::net::pcap_capture::run_capture(
             lease.fd(),
-            &interface,
-            &filter,
-            std::time::Duration::from_secs(duration_secs),
-            snap_length,
-            &output_path,
-        ) {
-            Ok(stats) => Ok((id, stats.packets, stats.file_size)),
-            Err(e) => Err((id, e)),
-        }
+            &session.interface,
+            &session.filter,
+            std::time::Duration::from_secs(session.duration_secs),
+            session.snap_length,
+            &session.output_path,
+            &stop,
+        )
+        .map(|stats| (stats.packets, stats.file_size))
         // `lease` returns the socket to the pool on drop here.
     })
     .await;
 
-    let (cap_id, packets, file_size) = match result {
+    let (packets, file_size) = match result {
         Ok(Ok(stats)) => stats,
-        Ok(Err((cap_id, err))) => {
-            tracing::error!(capture_id = %cap_id, error = %err, "pcap capture failed");
-            engine.write().await.fail(&cap_id);
+        Ok(Err(err)) => {
+            tracing::error!(capture_id = %id, error = %err, "pcap capture failed");
+            engine.write().await.fail(&id);
             return;
         }
         Err(e) => {
-            tracing::error!(error = %e, "pcap capture task panicked");
+            // Failing the session is what releases it: a flag still registered
+            // is a capture a stop would wait its whole window for.
+            tracing::error!(capture_id = %id, error = %e, "pcap capture task panicked");
+            engine.write().await.fail(&id);
             return;
         }
     };
 
     let mut eng = engine.write().await;
-    if eng.get(&cap_id).map(|s| s.status) == Some(CaptureStatus::Stopped) {
-        tracing::info!(capture_id = %cap_id, "capture stopped by operator");
-    } else {
-        eng.complete(&cap_id, file_size, packets);
-        tracing::info!(capture_id = %cap_id, packets, file_size, "capture completed");
+    let asked_to_stop = eng.get(&id).map(|s| s.status);
+    eng.finish(&id, file_size, packets);
+    match asked_to_stop {
+        Some(CaptureStatus::Stopped) => {
+            tracing::info!(capture_id = %id, packets, file_size, "capture stopped by operator");
+        }
+        Some(CaptureStatus::Interrupted) => {
+            tracing::info!(
+                capture_id = %id,
+                packets,
+                file_size,
+                "capture interrupted: the agent was asked to stop"
+            );
+        }
+        _ => {
+            tracing::info!(capture_id = %id, packets, file_size, "capture completed");
+        }
+    }
+
+    // A capture that just ended is the moment the directory grew, so it is the
+    // moment to check what it costs. The engine carries the policy and knows
+    // which files are still being written, and the session that has just been
+    // finished is no longer one of them.
+    let policy = eng.retention();
+    let in_use = eng.files_in_use();
+    drop(eng);
+    let outcome = adapters::capture::retention_fs::sweep(
+        std::path::Path::new(adapters::capture::retention_fs::CAPTURE_DIR),
+        &policy,
+        &in_use,
+    );
+    if outcome.deleted > 0 || outcome.failed > 0 {
+        tracing::info!(
+            deleted = outcome.deleted,
+            bytes_freed = outcome.bytes_freed,
+            failed = outcome.failed,
+            "capture retention sweep after a capture"
+        );
     }
 }
 

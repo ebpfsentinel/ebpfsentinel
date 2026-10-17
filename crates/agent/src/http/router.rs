@@ -1079,7 +1079,10 @@ mod tests {
                     application::nat_service_impl::NatAppService::new(Arc::new(NoopMetrics)),
                 )))
                 .with_capture_engine(Arc::new(tokio::sync::RwLock::new(
-                    domain::capture::engine::CaptureEngine::new(600),
+                    domain::capture::engine::CaptureEngine::new(
+                        600,
+                        domain::capture::retention::RetentionPolicy::new(7, 1024),
+                    ),
                 )))
                 .with_response_engine(Arc::new(tokio::sync::RwLock::new(
                     domain::response::engine::ResponseEngine::new(3600),

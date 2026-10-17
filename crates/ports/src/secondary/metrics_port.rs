@@ -238,6 +238,17 @@ pub trait SystemMetrics: Send + Sync {
 
     /// Set the number of threads in the process.
     fn set_thread_count(&self, _count: u64) {}
+
+    /// Set how many packet-capture sockets are borrowed against how many the
+    /// pool holds.
+    ///
+    /// The sockets are pre-opened by the privileged launcher or the warden and
+    /// handed to the agent, so the pool is a fixed budget: an operator whose
+    /// captures start failing needs to see whether every socket is in use
+    /// rather than only that a capture refused to start. Published on every
+    /// borrow and every return, so a socket a capture never gave back is
+    /// visible without reproducing the capture.
+    fn set_pcap_sockets(&self, _in_use: u64, _total: u64) {}
 }
 
 // ── Configuration metrics ──────────────────────────────────────────

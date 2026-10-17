@@ -956,16 +956,20 @@ impl AlertPipeline {
         };
 
         // Register in engine
-        {
+        let stop = {
             let mut engine = handler.capture_engine.write().await;
-            if let Err(e) = engine.start(session.clone()) {
-                tracing::debug!(alert_id = %alert.id, error = %e, "auto-capture: registration failed");
-                return;
+            match engine.start(session.clone()) {
+                Ok(stop) => stop,
+                Err(e) => {
+                    tracing::debug!(alert_id = %alert.id, error = %e, "auto-capture: registration failed");
+                    return;
+                }
             }
-        }
+        };
 
-        // Send to capture spawner (adapters layer)
-        let req = domain::capture::entity::AutoCaptureRequest { session };
+        // Send to capture spawner (adapters layer), carrying the flag the
+        // engine registered so the reader can be stopped like any other.
+        let req = domain::capture::entity::AutoCaptureRequest { session, stop };
         if let Err(e) = handler.capture_tx.try_send(req) {
             tracing::warn!(
                 capture_id = %cap_id,
@@ -1967,6 +1971,7 @@ mod tests {
     ) {
         let engine = Arc::new(RwLock::new(domain::capture::engine::CaptureEngine::new(
             300,
+            domain::capture::retention::RetentionPolicy::new(7, 1024),
         )));
         let (tx, rx) = mpsc::channel(4);
         let policy = domain::capture::entity::AutoCapturePolicy {

@@ -18,6 +18,15 @@ pub const MAP_UPDATE_CHANNEL_CAPACITY: usize = 256;
 
 pub const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long the stop sequence waits for running packet captures to close their
+/// files after being asked to stop.
+///
+/// A capture polls its stop flag every 50 ms, so this is two orders of
+/// magnitude more than one reader needs; it is a window rather than a sleep
+/// because the alternative is exiting while a savefile is half flushed, and
+/// the cost of being wrong in the other direction is a stop that hangs.
+pub const CAPTURE_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
 // ── eBPF ──────────────────────────────────────────────────────────
 
 /// Default directory containing compiled eBPF program binaries.
@@ -55,6 +64,16 @@ mod tests {
     fn shutdown_timeout_is_reasonable() {
         assert!(GRACEFUL_SHUTDOWN_TIMEOUT.as_secs() >= 1);
         assert!(GRACEFUL_SHUTDOWN_TIMEOUT.as_secs() <= 30);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn capture_stop_fits_inside_the_graceful_window() {
+        assert!(CAPTURE_STOP_TIMEOUT.as_millis() >= 500);
+        assert!(
+            CAPTURE_STOP_TIMEOUT <= GRACEFUL_SHUTDOWN_TIMEOUT,
+            "a capture must not hold a stop longer than draining the servers does"
+        );
     }
 
     #[test]

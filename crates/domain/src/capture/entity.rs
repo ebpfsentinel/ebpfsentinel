@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use serde::{Deserialize, Serialize};
 
 /// Status of a packet capture session.
@@ -10,8 +13,43 @@ pub enum CaptureStatus {
     Completed,
     /// Capture was stopped early by operator.
     Stopped,
+    /// Capture was cut short because the agent was asked to stop. The file is
+    /// a valid capture of the window that was recorded, which is why this is
+    /// not `Failed`: an operator reading a short file needs to know the agent
+    /// went down under it rather than that the capture went wrong.
+    Interrupted,
     /// Capture failed.
     Failed,
+}
+
+/// The flag a capture's reader thread polls to learn it must stop.
+///
+/// The reader runs on a blocking thread around a `MSG_DONTWAIT` loop, so it
+/// cannot await anything: an `AtomicBool` it already passes over on every
+/// iteration is what a stop costs, where a duration was previously the only
+/// way out. Held by the engine beside the session and handed to the thread, so
+/// `DELETE /api/v1/captures/{id}` and the agent's own stop reach the same flag.
+#[derive(Clone, Debug, Default)]
+pub struct CaptureStop(Arc<AtomicBool>);
+
+impl CaptureStop {
+    /// A flag nobody has raised yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the capture to stop. Idempotent: a second caller is a stop that
+    /// crossed a shutdown, not an error.
+    pub fn request(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether a stop has been asked for.
+    #[must_use]
+    pub fn requested(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
 }
 
 /// Metadata for a manual packet capture session.
@@ -57,6 +95,10 @@ pub struct AutoCapturePolicy {
 #[derive(Debug, Clone)]
 pub struct AutoCaptureRequest {
     pub session: CaptureSession,
+    /// The flag the engine registered for this session. It travels with the
+    /// request so the thread that ends up reading packets polls the same flag
+    /// the API and the stop sequence raise.
+    pub stop: CaptureStop,
 }
 
 #[cfg(test)]
@@ -72,6 +114,27 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&CaptureStatus::Completed).unwrap(),
             "\"completed\""
+        );
+    }
+
+    #[test]
+    fn interrupted_serialises_as_interrupted() {
+        assert_eq!(
+            serde_json::to_string(&CaptureStatus::Interrupted).unwrap(),
+            "\"interrupted\""
+        );
+    }
+
+    #[test]
+    fn a_stop_is_shared_and_idempotent() {
+        let stop = CaptureStop::new();
+        let reader = stop.clone();
+        assert!(!reader.requested());
+        stop.request();
+        stop.request();
+        assert!(
+            reader.requested(),
+            "the reader polls the flag the API raised"
         );
     }
 

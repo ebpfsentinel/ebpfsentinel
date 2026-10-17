@@ -19,15 +19,30 @@
 //! read on a received socket with no capability of its own.
 
 use std::os::fd::RawFd;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
-/// A pool of `AF_PACKET` sockets inherited from the launcher.
+use ebpfsentinel_warden_client::ReconnectingClient;
+use ports::secondary::metrics_port::MetricsPort;
+
+/// A pool of `AF_PACKET` sockets inherited from the launcher or the warden.
 ///
 /// Captures borrow a socket for their lifetime and return it on drop. The
 /// capture engine serialises captures, so in practice one socket is reused
 /// sequentially; the pool simply allows headroom for concurrent captures.
 pub struct PcapSocketPool {
     free: Mutex<Vec<RawFd>>,
+    /// Pool size, for the gauge: `free` only says what is left.
+    total: usize,
+    /// Where the borrow/return gauge goes once the agent has its registry. The
+    /// pool is built before the metrics are wired, so this arrives after.
+    metrics: OnceLock<Arc<dyn MetricsPort>>,
+    /// The warden connection the sockets arrived over, held open for the life of
+    /// the pool. The warden binds each socket it hands out to the connection
+    /// that asked for it and takes it back when that connection goes, so
+    /// dropping this client would offer another agent a socket this process is
+    /// still reading from. `None` in the launcher deployment, where the fds come
+    /// from the environment and no connection is involved.
+    _warden_link: Option<Mutex<ReconnectingClient>>,
 }
 
 impl PcapSocketPool {
@@ -50,17 +65,45 @@ impl PcapSocketPool {
             count = fds.len(),
             "packet-capture sockets provisioned by the launcher"
         );
-        Some(Arc::new(Self {
-            free: Mutex::new(fds),
-        }))
+        Some(Self::build(fds, None))
     }
 
     /// Construct a pool from explicit fds (used in tests).
     #[must_use]
     pub fn from_fds(fds: Vec<RawFd>) -> Arc<Self> {
+        Self::build(fds, None)
+    }
+
+    /// Construct a pool from sockets the warden handed over, keeping its
+    /// connection open for the life of the pool so the warden does not take the
+    /// sockets back while captures are still reading them.
+    #[must_use]
+    pub fn from_warden(fds: Vec<RawFd>, link: ReconnectingClient) -> Arc<Self> {
+        Self::build(fds, Some(link))
+    }
+
+    fn build(fds: Vec<RawFd>, link: Option<ReconnectingClient>) -> Arc<Self> {
+        let total = fds.len();
         Arc::new(Self {
             free: Mutex::new(fds),
+            total,
+            metrics: OnceLock::new(),
+            _warden_link: link.map(Mutex::new),
         })
+    }
+
+    /// Publish the borrow gauge to `metrics` from now on, and publish it once
+    /// for the pool as it stands. Ignored if called twice.
+    pub fn attach_metrics(&self, metrics: Arc<dyn MetricsPort>) {
+        if self.metrics.set(metrics).is_ok() {
+            self.publish();
+        }
+    }
+
+    /// Pool size.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.total
     }
 
     /// Number of sockets currently available.
@@ -69,14 +112,28 @@ impl PcapSocketPool {
         self.free.lock().map_or(0, |f| f.len())
     }
 
+    /// Number of sockets currently borrowed.
+    #[must_use]
+    pub fn in_use(&self) -> usize {
+        self.total.saturating_sub(self.available())
+    }
+
     /// Borrow a socket. Returns `None` when every socket is in use.
     #[must_use]
     pub fn borrow(self: &Arc<Self>) -> Option<PcapLease> {
         let fd = self.free.lock().ok()?.pop()?;
-        Some(PcapLease {
+        let lease = PcapLease {
             fd,
             pool: Arc::clone(self),
-        })
+        };
+        self.publish();
+        Some(lease)
+    }
+
+    fn publish(&self) {
+        if let Some(metrics) = self.metrics.get() {
+            metrics.set_pcap_sockets(self.in_use() as u64, self.total as u64);
+        }
     }
 }
 
@@ -99,8 +156,13 @@ impl Drop for PcapLease {
         if let Ok(mut free) = self.pool.free.lock() {
             free.push(self.fd);
         }
+        self.pool.publish();
     }
 }
+
+/// How long the reader sleeps when the socket had nothing to give, and so the
+/// longest a stop waits to be observed.
+pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Statistics returned by [`run_capture`].
 pub struct CaptureStats {
@@ -115,8 +177,16 @@ pub struct CaptureStats {
 ///
 /// Binds the socket to `interface` (`"any"`/empty = all interfaces), enables
 /// promiscuous mode, attaches the compiled BPF `filter` (empty = capture
-/// everything) and reads frames until `duration` elapses. The socket is left
-/// clean (filter detached, promiscuous mode dropped) so the pool can reuse it.
+/// everything) and reads frames until `duration` elapses or `stop` is raised,
+/// whichever comes first. The socket is left clean (filter detached,
+/// promiscuous mode dropped) so the pool can reuse it.
+///
+/// `stop` is read once per iteration of a loop that already polls, so a stop
+/// costs one atomic load and is observed within [`POLL_INTERVAL`] rather than
+/// at the end of a duration an operator may have set to five minutes. The
+/// return path is the one the duration already took, which is what makes the
+/// file a valid short capture rather than a half-written one: the savefile is
+/// flushed and closed before the function returns either way.
 #[cfg(feature = "pcap-capture")]
 pub fn run_capture(
     fd: RawFd,
@@ -125,6 +195,7 @@ pub fn run_capture(
     duration: std::time::Duration,
     snap_length: u32,
     output_path: &str,
+    stop: &domain::capture::entity::CaptureStop,
 ) -> Result<CaptureStats, String> {
     use pcap::{Capture, Linktype, Packet, PacketHeader};
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -163,7 +234,7 @@ pub fn run_capture(
     let deadline = Instant::now() + duration;
     let mut packets: u64 = 0;
 
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !stop.requested() {
         // SAFETY: `buf` is a valid writable region of `buf.len()` bytes.
         let n = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), buf.len(), libc::MSG_DONTWAIT) };
         if n > 0 {
@@ -185,7 +256,7 @@ pub fn run_capture(
         } else {
             // No frame ready (EAGAIN) - yield briefly and re-check the deadline
             // without busy-spinning.
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(POLL_INTERVAL);
         }
     }
 
@@ -351,5 +422,70 @@ mod tests {
         let pool = PcapSocketPool::from_fds(vec![10]);
         let _held = pool.borrow().expect("first borrow");
         assert!(pool.borrow().is_none());
+    }
+
+    /// Records what the pool published, latest last.
+    #[derive(Default)]
+    struct RecordingMetrics {
+        readings: std::sync::Mutex<Vec<(u64, u64)>>,
+    }
+
+    impl ports::secondary::metrics_port::SystemMetrics for RecordingMetrics {
+        fn set_pcap_sockets(&self, in_use: u64, total: u64) {
+            if let Ok(mut readings) = self.readings.lock() {
+                readings.push((in_use, total));
+            }
+        }
+    }
+
+    impl ports::secondary::metrics_port::PacketMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::FirewallMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::AlertMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::IpsMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::DnsMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::DomainMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::ConfigMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::EventMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::DlpMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::DdosMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::ConntrackMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::RoutingMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::AuditMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::LbMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::FingerprintMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::ContainerMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::CtMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::ZoneMetrics for RecordingMetrics {}
+    impl ports::secondary::metrics_port::ThreatIntelMetrics for RecordingMetrics {}
+
+    #[test]
+    fn the_gauge_follows_every_borrow_and_return() {
+        let pool = PcapSocketPool::from_fds(vec![10, 11]);
+        let metrics = Arc::new(RecordingMetrics::default());
+        pool.attach_metrics(Arc::clone(&metrics) as Arc<dyn MetricsPort>);
+
+        let first = pool.borrow().expect("first borrow");
+        let second = pool.borrow().expect("second borrow");
+        assert_eq!(pool.in_use(), 2);
+        drop(first);
+        drop(second);
+
+        let readings = metrics.readings.lock().unwrap().clone();
+        assert_eq!(
+            readings,
+            vec![(0, 2), (1, 2), (2, 2), (1, 2), (0, 2)],
+            "attaching publishes the pool as it stands, then every borrow and return"
+        );
+        assert_eq!(pool.total(), 2);
+        assert_eq!(pool.in_use(), 0);
+    }
+
+    #[test]
+    fn a_pool_with_no_metrics_still_lends() {
+        let pool = PcapSocketPool::from_fds(vec![10]);
+        let lease = pool.borrow().expect("borrow with no registry attached");
+        assert_eq!(pool.in_use(), 1);
+        drop(lease);
+        assert_eq!(pool.in_use(), 0);
     }
 }

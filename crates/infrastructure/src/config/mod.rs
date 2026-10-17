@@ -53,7 +53,7 @@ pub use ddos::{
     AmpPortConfig, AmpProtectionConfig, DdosConfig, DdosPolicyConfig, IcmpProtectionConfig,
     SynProtectionConfig,
 };
-pub use dlp::{DlpConfig, DlpPatternConfig};
+pub use dlp::{DLP_SCOPE_ALL, DLP_SCOPE_WORKLOADS, DlpConfig, DlpPatternConfig, DlpScopeConfig};
 pub use dns::{
     DnsBlocklistFeedConfig, DnsBlocklistSectionConfig, DnsCacheConfig, DnsConfig,
     ReputationSectionConfig,
@@ -535,6 +535,9 @@ impl AgentConfig {
         for (idx, pattern_cfg) in self.dlp.patterns.iter().enumerate() {
             pattern_cfg.validate(idx)?;
         }
+
+        // Validate the cgroup scope the probes enforce
+        self.dlp.scope.validate()?;
 
         // Reject custom patterns and block mode (enterprise only)
         {
