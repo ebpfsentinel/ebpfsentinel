@@ -102,7 +102,8 @@ impl DlpScopeConfig {
                 return Err(ConfigError::Validation {
                     field: "dlp.scope.cgroups".to_string(),
                     message: format!(
-                        "cgroups are listed but mode is '{DLP_SCOPE_ALL}', so they would be                          ignored; set mode to '{DLP_SCOPE_WORKLOADS}'"
+                        "cgroups are listed but mode is '{DLP_SCOPE_ALL}', which ignores them; \
+                         set mode to '{DLP_SCOPE_WORKLOADS}'"
                     ),
                 });
             }
@@ -113,7 +114,8 @@ impl DlpScopeConfig {
             return Err(ConfigError::Validation {
                 field: "dlp.scope.cgroups".to_string(),
                 message: format!(
-                    "mode '{DLP_SCOPE_WORKLOADS}' needs at least one cgroup path; an empty list                      arms the probes and drops every event"
+                    "mode '{DLP_SCOPE_WORKLOADS}' needs at least one cgroup path; an empty \
+                     list arms the probes and drops every event"
                 ),
             });
         }
