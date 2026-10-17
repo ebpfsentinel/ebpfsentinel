@@ -3469,6 +3469,17 @@ pub async fn run(
         .await;
     }
 
+    // ── 11d¾. Feed the service watchdog, if there is one ─────────────
+    //
+    // After the readers are spawned, so the first ping is sent against a
+    // datapath that is already passing. Nothing is spawned when the
+    // environment carries no NOTIFY_SOCKET, which is every deployment but a
+    // systemd unit with WatchdogSec.
+    if let Some(watchdog) = crate::watchdog::Watchdog::from_env() {
+        let watchdog_cancel = cancel_token.clone();
+        tokio::spawn(async move { watchdog.run(watchdog_cancel).await });
+    }
+
     // ── 11e. Spawn IPS/IDS cleanup task (every 60s) ──────────────────
     {
         let cleanup_ips = Arc::clone(&ips_svc);

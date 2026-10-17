@@ -104,8 +104,17 @@ daemonset:
   minReadySeconds: 0
   # -- Number of old ReplicaSets to retain
   revisionHistoryLimit: 10
-  # -- Grace period for pod termination (seconds)
+  # -- Grace period for pod termination (seconds). Covers the preStop hook and
+  # the agent's own stop budget (TimeoutStopSec=20s in the systemd unit, the
+  # same ordered stop here): 5 + 20 = 25, so 30 leaves room rather than turning
+  # a correct stop into a SIGKILL. The arithmetic is pinned by a test in
+  # crates/infrastructure/src/constants.rs.
   terminationGracePeriodSeconds: 30
+  # -- Seconds the preStop hook holds the agent before it is signalled, so the
+  # endpoint is out of every node's rules before the stop begins. `0` removes
+  # the hook. Must stay below terminationGracePeriodSeconds minus the agent's
+  # 20s stop budget.
+  preStopSleepSeconds: 5
   # -- Pod priority class name
   priorityClassName: ""
   # -- BPF token delegation. eBPF is loaded EXCLUSIVELY through a BPF token

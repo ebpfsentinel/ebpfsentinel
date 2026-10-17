@@ -72,6 +72,10 @@ services:
       # /host/proc/<pid>/root/<lib> path the agent sends for a brokered uprobe.
       - /proc:/host/proc:ro
     restart: unless-stopped
+    # The agent is stopped first and can be mid-call here, so the broker gets
+    # the same budget rather than a shorter one: killing it under a call in
+    # flight is what turns an ordered stop into a socket error.
+    stop_grace_period: 30s
     logging:
       driver: json-file
       options:
@@ -164,6 +168,14 @@ services:
           cpus: "0.5"
 
     restart: unless-stopped
+
+    # Compose's default grace period is 10s, under the agent's own stop budget:
+    # the servers drain in 5s, a running capture closes its file inside that,
+    # and a stop waiting on the warden can hold a brokered call for 10s. At the
+    # default, docker would SIGKILL a stop that was proceeding correctly. Same
+    # number as the systemd unit's TimeoutStopSec and the chart's
+    # terminationGracePeriodSeconds.
+    stop_grace_period: 30s
 
     # Uses the agent's built-in CLI health check (no curl needed)
     healthcheck:

@@ -4,6 +4,12 @@ Documentation=https://github.com/ebpfsentinel/ebpfsentinel
 After=network-online.target
 Wants=network-online.target
 
+# Same reasoning as the agent's: a warden that cannot start - no capability to
+# open the pcap pool, a socket path it cannot bind - must stop retrying and be
+# found failed rather than restarted every two seconds forever.
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
 [Service]
 Type=simple
 
@@ -27,6 +33,17 @@ RuntimeDirectoryMode=0755
 ExecStart=/usr/local/bin/warden serve /run/ebpfsentinel/warden.sock --uid 0
 Restart=on-failure
 RestartSec=2s
+
+# The warden answers one RPC at a time per connection and holds no eBPF, so its
+# stop is the connection threads ending. It gets the agent's budget rather than
+# a shorter one because the agent is stopped first and can be mid-call here:
+# killing the broker under a call in flight is what turns an ordered stop into a
+# socket error in the agent's last log line.
+TimeoutStopSec=20s
+
+# No WatchdogSec: the warden has no loop of its own to be wedged in. It blocks
+# on accept() and answers what arrives, so liveness is the agent's call
+# timeouts (10s, from the agent side) rather than a keep-alive from here.
 
 # Logging
 StandardOutput=journal

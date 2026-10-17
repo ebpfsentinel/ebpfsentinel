@@ -40,6 +40,60 @@ pub const CAPTURE_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 /// cheap and a request that never answers is not.
 pub const WARDEN_BROKER_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long the agent's stop sequence is given before the service manager
+/// kills it, which is `TimeoutStopSec` in both units.
+///
+/// It has to outlast the whole ordered stop and not only the server drain: a
+/// capture closes its file inside [`GRACEFUL_SHUTDOWN_TIMEOUT`], and a stop
+/// that is waiting on the warden can be holding a brokered call for up to
+/// [`WARDEN_BROKER_CALL_TIMEOUT`]. The sum of those two is the worst case, and
+/// this is it plus room, so a `SIGKILL` means something is wrong rather than
+/// that the budget was tight.
+pub const AGENT_STOP_BUDGET: Duration = Duration::from_secs(20);
+
+/// How long the pod's `preStop` hook holds the container before the agent is
+/// signalled, so the endpoint is out of every Service's backend list first.
+///
+/// Kubernetes sends `SIGTERM` and removes the endpoint concurrently, so without
+/// this the agent can be draining while traffic is still being routed to it.
+pub const PRESTOP_DRAIN: Duration = Duration::from_secs(5);
+
+/// What the chart's `terminationGracePeriodSeconds` must be at least, and is.
+///
+/// Kubernetes counts the `preStop` hook inside the grace period, so the budget
+/// is the hook plus the agent's own stop: a grace period shorter than the sum
+/// turns an ordered stop into a `SIGKILL`.
+pub const POD_TERMINATION_GRACE: Duration = Duration::from_secs(30);
+
+/// `WatchdogSec` in both units: how long the service manager waits for a
+/// keep-alive before it concludes the process is wedged and restarts it.
+///
+/// systemd asks for a ping every half of this, so the agent has two chances
+/// inside every window.
+pub const WATCHDOG_INTERVAL: Duration = Duration::from_secs(90);
+
+/// How long the datapath may go without a ring-buffer pass before the agent
+/// stops telling the service manager it is healthy.
+///
+/// A reader makes a pass every 10 ms even with no traffic, so a minute of
+/// silence is six thousand missed ticks: this is a wedged or dead reader task
+/// rather than a quiet network. It is shorter than
+/// [`WATCHDOG_INTERVAL`] so a stall is noticed, and withheld from a ping,
+/// within one watchdog window.
+pub const DATAPATH_STALL_AFTER: Duration = Duration::from_secs(60);
+
+/// `StartLimitBurst`: how many starts inside [`RESTART_LIMIT_WINDOW`] the
+/// service manager allows before it stops trying.
+///
+/// With `RestartSec=5s` a permanent failure - an eBPF program the kernel
+/// refuses, a config that does not parse - exhausts this in about half a
+/// minute and leaves the unit failed, where an operator finds it. Without it,
+/// the loader is re-entered every five seconds for as long as nobody looks.
+pub const RESTART_LIMIT_BURST: u32 = 5;
+
+/// `StartLimitIntervalSec`: the window [`RESTART_LIMIT_BURST`] is counted in.
+pub const RESTART_LIMIT_WINDOW: Duration = Duration::from_secs(300);
+
 // ── eBPF ──────────────────────────────────────────────────────────
 
 /// Default directory containing compiled eBPF program binaries.
@@ -97,6 +151,62 @@ mod tests {
         assert!(
             WARDEN_BROKER_CALL_TIMEOUT > ebpfsentinel_warden_client::CALL_TIMEOUT,
             "the brokered-call bound must outlast the client's own socket timeout"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn the_stop_budget_outlasts_the_stop_it_bounds() {
+        // TimeoutStopSec has to cover the ordered stop's worst case: the server
+        // drain, inside which a capture closes its file, plus a brokered warden
+        // call the stop can be waiting on.
+        assert!(
+            AGENT_STOP_BUDGET > GRACEFUL_SHUTDOWN_TIMEOUT + WARDEN_BROKER_CALL_TIMEOUT,
+            "a stop killed by its own budget looks like a hang and is not one"
+        );
+        assert!(CAPTURE_STOP_TIMEOUT < AGENT_STOP_BUDGET);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn the_pod_grace_period_covers_the_hook_and_the_stop() {
+        // Kubernetes counts preStop inside terminationGracePeriodSeconds, so
+        // the chart's value and these two have to add up or the agent is
+        // SIGKILLed mid-stop.
+        assert!(
+            POD_TERMINATION_GRACE >= PRESTOP_DRAIN + AGENT_STOP_BUDGET,
+            "the grace period must cover the hook and the agent's own stop"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn a_datapath_stall_is_noticed_inside_one_watchdog_window() {
+        // systemd pings at half the interval, so the stall bound plus one ping
+        // gap has to fit inside the window, or a stalled agent could be killed
+        // for a stall nobody had measured yet.
+        assert!(
+            DATAPATH_STALL_AFTER < WATCHDOG_INTERVAL,
+            "a stall must be measurable before the watchdog fires"
+        );
+        assert!(
+            DATAPATH_STALL_AFTER >= WATCHDOG_INTERVAL / 2,
+            "a bound shorter than the ping gap would withhold on a single slow tick"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn the_restart_limit_bites_before_an_operator_would() {
+        // Five starts at RestartSec=5s is about half a minute of trying.
+        assert!(
+            RESTART_LIMIT_BURST >= 3,
+            "a transient failure must be retried"
+        );
+        assert!(
+            RESTART_LIMIT_WINDOW.as_secs()
+                > u64::from(RESTART_LIMIT_BURST) * GRACEFUL_SHUTDOWN_TIMEOUT.as_secs(),
+            "the window must be wider than the burst takes, or the limit never trips"
         );
     }
 

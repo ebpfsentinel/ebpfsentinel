@@ -99,7 +99,7 @@ pub use program_name::published_program_name;
 pub use qos_map_manager::QosMapManager;
 pub use ratelimit_lpm_manager::RateLimitLpmManager;
 pub use ratelimit_map_manager::RateLimitMapManager;
-pub use ringbuf_observer::RingBufObserver;
+pub use ringbuf_observer::{RingBufObserver, datapath_idle_for, last_drain_pass_ns};
 pub use self_binding_manager::SelfBindingManager;
 pub use tenant_cgroup_map_manager::TenantCgroupMapManager;
 pub use tenant_ifindex_map_manager::TenantIfindexMapManager;

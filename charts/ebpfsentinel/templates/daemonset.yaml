@@ -165,6 +165,19 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 3
+          {{- if gt (int .Values.daemonset.preStopSleepSeconds) 0 }}
+          lifecycle:
+            # Kubernetes sends SIGTERM and removes the endpoint at the same
+            # time, so without this the agent drains while kube-proxy is still
+            # routing to it. The hook holds the container for long enough for
+            # every node's rules to drop this endpoint, and only then does the
+            # ordered stop start. It is counted inside
+            # terminationGracePeriodSeconds, so the hook plus the agent's own
+            # 20s stop budget is what that number has to cover.
+            preStop:
+              sleep:
+                seconds: {{ int .Values.daemonset.preStopSleepSeconds }}
+          {{- end }}
           {{- with .Values.daemonset.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

@@ -1,5 +1,6 @@
 #![allow(unsafe_code)] // clock_gettime(CLOCK_BOOTTIME) has no safe wrapper in libc
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -97,6 +98,51 @@ impl DrainTrigger {
     }
 }
 
+/// When a ring-buffer reader last made a pass, on `CLOCK_BOOTTIME`.
+///
+/// Process-wide rather than carried per observer, for the same reason the
+/// kernel-helper report and the blocked-attach list are: a reader is spawned
+/// from a dozen call sites and the watchdog asks one question of all of them,
+/// "did any pass happen recently". Zero means no reader has ever made a pass,
+/// which is a different answer from a stale stamp and must stay
+/// distinguishable: a host whose programs never loaded has nothing to be
+/// stalled about.
+static LAST_DRAIN_PASS_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Stamp a pass over a ring buffer, whether or not it carried records.
+///
+/// An empty pass is the strongest proof of life there is: it means the drain
+/// tick still fires and the task is still scheduled. A loop wedged in a record
+/// handler stops stamping, which is what the watchdog reads.
+fn note_drain_pass() {
+    LAST_DRAIN_PASS_NS.store(boottime_now_ns(), Ordering::Relaxed);
+}
+
+/// `CLOCK_BOOTTIME` nanoseconds at the last ring-buffer pass, `0` if no reader
+/// has ever made one.
+#[must_use]
+pub fn last_drain_pass_ns() -> u64 {
+    LAST_DRAIN_PASS_NS.load(Ordering::Relaxed)
+}
+
+/// How long ago the last ring-buffer pass was, or `None` when no reader has
+/// ever made one.
+///
+/// `None` is not a stall. The token-only load that found no program to attach,
+/// a host whose interfaces all lost their attach, and the window before the
+/// first reader is spawned all report `None`, and none of them is a wedged
+/// agent.
+#[must_use]
+pub fn datapath_idle_for() -> Option<std::time::Duration> {
+    let last = last_drain_pass_ns();
+    if last == 0 {
+        return None;
+    }
+    Some(std::time::Duration::from_nanos(
+        boottime_now_ns().saturating_sub(last),
+    ))
+}
+
 /// Accounting for one datapath ring buffer, shared by every reader.
 ///
 /// The kernel already counts what it refused to emit, in the `events_dropped`
@@ -190,6 +236,9 @@ impl RingBufObserver {
     /// periodic drain doing its job, and counting it would bury the passes
     /// that carried records under a hundred empty ones a second.
     pub fn drain_pass(&self, trigger: DrainTrigger, records: usize) {
+        // Stamped before the empty-pass return: the pass itself is what proves
+        // the reader is alive, and an idle datapath is the common case.
+        note_drain_pass();
         if records == 0 {
             return;
         }

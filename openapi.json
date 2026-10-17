@@ -10603,6 +10603,15 @@
             },
             "description": "Attachments the kernel refused, one operator-readable sentence each,\nnaming the program, the interface and what is holding the slot. A\nnon-empty list is why this host is not ready; an empty one means the\nagent never lost an attach, which is a different situation from having\nno programs at all."
           },
+          "datapath_stalled_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How long the datapath has gone without a ring-buffer pass, in seconds,\nwhen that is long enough to be a stall. Absent when a reader is passing\nnormally and absent when none has ever passed, which are two different\nsituations: `ebpf_loaded` and `attach_blocked` tell them apart. A value\nhere is a wedged reader task, and the same reading is what withholds\nthe service watchdog's keep-alive.",
+            "minimum": 0
+          },
           "ebpf_loaded": {
             "type": "boolean",
             "description": "Whether eBPF programs are successfully loaded."

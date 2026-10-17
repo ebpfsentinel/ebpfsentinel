@@ -10,6 +10,13 @@ Wants=network-online.target
 # its warden client reconnects.
 Wants=ebpfsentinel-warden.service
 
+# A permanent failure must stop hammering the eBPF loader. Five starts inside
+# five minutes, with RestartSec=5s below, is about half a minute of trying; past
+# that the unit stays failed, where `systemctl status` finds it, instead of
+# re-entering the loader every five seconds for as long as nobody looks.
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
 [Service]
 Type=simple
 
@@ -35,6 +42,34 @@ ExecStart=/usr/local/bin/ebpfsentinel-agent --config /etc/ebpfsentinel/config.ya
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
+
+# `Restart=on-failure` covers an agent that exits. It does nothing for one that
+# is still running and no longer working: a ring-buffer reader wedged in a
+# record handler leaves the process alive, the HTTP surface answering and the
+# datapath undrained. So the agent reports its own liveness - it pings every
+# 45s (systemd asks at half the interval) for as long as a reader is still
+# passing over its ring buffers, which it does every 10ms whether or not
+# traffic arrived, and withholds the ping once 60s have gone by without a pass.
+# A stall therefore costs one restart, after at most 90s, and the same reading
+# fails /readyz, so the systemd and Kubernetes deployments notice the same
+# thing. The 60s/90s pair is pinned by a test in
+# crates/infrastructure/src/constants.rs.
+WatchdogSec=90s
+# Without this the unit stays Type=simple and systemd refuses every
+# notification, including the watchdog ping, and sets no NOTIFY_SOCKET for the
+# agent to find - the keep-alive would be written nowhere and the watchdog would
+# kill a healthy agent every 90s. Type is deliberately left simple: the agent
+# does not send READY=1, so promoting it to notify would make systemd wait for a
+# readiness message that never arrives.
+NotifyAccess=main
+
+# The whole stop has to fit in here or systemd SIGKILLs an agent that was
+# stopping correctly: the servers drain in 5s, inside which a running capture
+# closes its file in 2s, and a stop waiting on the warden can hold a brokered
+# call for 10s. That worst case is 15s; this is it plus room, and the same
+# number is the agent's half of the pod's terminationGracePeriodSeconds in the
+# chart, which adds the 5s preStop hook to reach 30s.
+TimeoutStopSec=20s
 
 # Logging
 StandardOutput=journal

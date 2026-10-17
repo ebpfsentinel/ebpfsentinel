@@ -9,6 +9,7 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use super::state::AppState;
+use infrastructure::constants::DATAPATH_STALL_AFTER;
 
 #[derive(Serialize, ToSchema)]
 pub struct HealthResponse {
@@ -36,6 +37,14 @@ pub struct ReadyResponse {
     /// no programs at all.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attach_blocked: Vec<String>,
+    /// How long the datapath has gone without a ring-buffer pass, in seconds,
+    /// when that is long enough to be a stall. Absent when a reader is passing
+    /// normally and absent when none has ever passed, which are two different
+    /// situations: `ebpf_loaded` and `attach_blocked` tell them apart. A value
+    /// here is a wedged reader task, and the same reading is what withholds
+    /// the service watchdog's keep-alive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub datapath_stalled_secs: Option<u64>,
 }
 
 /// Helpers the startup probe reported missing, empty when it never ran.
@@ -82,8 +91,26 @@ pub async fn healthz() -> Json<HealthResponse> {
 )]
 pub async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let loaded = state.ebpf_loaded.load(Ordering::Relaxed);
-    let (code, body) = readiness(loaded, missing_kernel_helpers(), blocked_attaches());
+    let (code, body) = readiness(
+        loaded,
+        missing_kernel_helpers(),
+        blocked_attaches(),
+        datapath_stall(),
+    );
     (code, Json(body))
+}
+
+/// How long the datapath has been idle, when that is long enough to be a
+/// stall rather than a quiet network.
+///
+/// The same reading the service watchdog withholds its keep-alive on, so a
+/// wedged reader task fails the probe and the watchdog together rather than
+/// one of them noticing and the other not. A reader passes over its ring
+/// buffer every 10 ms whether or not traffic arrived, so a stamp this old is a
+/// task that is no longer running.
+#[must_use]
+pub fn datapath_stall() -> Option<std::time::Duration> {
+    adapters::ebpf::datapath_idle_for().filter(|idle| *idle >= DATAPATH_STALL_AFTER)
 }
 
 /// Attachments the kernel refused, rendered one sentence each.
@@ -108,8 +135,9 @@ fn readiness(
     loaded: bool,
     missing: Vec<String>,
     blocked: Vec<String>,
+    datapath_stall: Option<std::time::Duration>,
 ) -> (StatusCode, ReadyResponse) {
-    let ready = loaded && missing.is_empty() && blocked.is_empty();
+    let ready = loaded && missing.is_empty() && blocked.is_empty() && datapath_stall.is_none();
     let code = if ready {
         StatusCode::OK
     } else {
@@ -122,6 +150,7 @@ fn readiness(
             ebpf_loaded: loaded,
             kernel_helpers_missing: missing,
             attach_blocked: blocked,
+            datapath_stalled_secs: datapath_stall.map(|idle| idle.as_secs()),
         },
     )
 }
@@ -219,6 +248,7 @@ mod tests {
                     .to_string(),
             ],
             Vec::new(),
+            None,
         );
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.status, "not_ready");
@@ -230,7 +260,7 @@ mod tests {
     fn an_unprobed_kernel_does_not_hold_readiness_back() {
         // No probe result is not a negative result. The token-only load path
         // cannot probe at all, and every host on it must still reach ready.
-        let (code, body) = readiness(true, Vec::new(), Vec::new());
+        let (code, body) = readiness(true, Vec::new(), Vec::new(), None);
         assert_eq!(code, StatusCode::OK);
         assert_eq!(body.status, "ready");
         assert!(body.kernel_helpers_missing.is_empty());
@@ -249,15 +279,42 @@ mod tests {
                   mode, held by a BPF link"
                     .to_string(),
             ],
+            None,
         );
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.attach_blocked.len(), 1);
         assert!(body.attach_blocked[0].contains("already carries XDP program"));
 
         // The generic case carries no reason at all, which is the distinction.
-        let (code, generic) = readiness(false, Vec::new(), Vec::new());
+        let (code, generic) = readiness(false, Vec::new(), Vec::new(), None);
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
         assert!(generic.attach_blocked.is_empty());
+    }
+
+    #[test]
+    fn a_stalled_datapath_holds_readiness_back_with_everything_else_green() {
+        // The process is alive, the programs are loaded and the HTTP surface
+        // answers; the reader task that drains them is wedged. Without this the
+        // probe reports ready while nothing is being inspected.
+        let (code, body) = readiness(
+            true,
+            Vec::new(),
+            Vec::new(),
+            Some(std::time::Duration::from_secs(74)),
+        );
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "not_ready");
+        assert!(body.ebpf_loaded);
+        assert_eq!(body.datapath_stalled_secs, Some(74));
+    }
+
+    #[test]
+    fn a_draining_datapath_reports_no_stall_at_all() {
+        let (_, body) = readiness(true, Vec::new(), Vec::new(), None);
+        assert!(
+            body.datapath_stalled_secs.is_none(),
+            "a normal pass rate is reported by its absence, not by a zero"
+        );
     }
 
     #[test]
@@ -268,6 +325,7 @@ mod tests {
             true,
             Vec::new(),
             vec!["xdp-firewall on eth0: interface already carries XDP program id 42".to_string()],
+            None,
         );
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.status, "not_ready");
