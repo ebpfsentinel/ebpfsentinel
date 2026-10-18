@@ -55,6 +55,7 @@ pub const SIZED_MAPS: &[(&str, &str)] = &[
     ("NAT_SNAT_REVERSE", "nat.enabled"),
     ("NAT_SNAT_REVERSE_V6", "nat.enabled"),
     ("REJECT_RATELIMIT", "firewall.rules[].action"),
+    ("SOCKET_IDENTITY", "attribution.max_sockets"),
 ];
 
 /// What a table belonging to a feature the configuration switches off is
@@ -121,6 +122,13 @@ impl MapSizing {
         } else {
             IDLE_TABLE_ENTRIES
         };
+        // The socket table is filled by the cgroup hooks and by nothing else,
+        // so a configuration that does not attach them pays for no slots.
+        let sockets = if config.attribution.enabled {
+            config.attribution.max_sockets
+        } else {
+            IDLE_TABLE_ENTRIES
+        };
         let entries = SIZED_MAPS
             .iter()
             .map(|(name, field)| {
@@ -133,6 +141,7 @@ impl MapSizing {
                     "nat.hairpin.enabled" => hairpin,
                     "nat.enabled" => nat_reverse,
                     "firewall.rules[].action" => reject,
+                    "attribution.max_sockets" => sockets,
                     other => unreachable!("unmapped sizing field {other}"),
                 };
                 (*name, n)

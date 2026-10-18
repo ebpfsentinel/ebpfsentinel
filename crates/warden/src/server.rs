@@ -19,7 +19,7 @@ use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame,
 
 use crate::host_ops::HostOps;
 use crate::pcap_slots::{PcapSlot, PcapSlots};
-use crate::{delegate_over_fd, dlp_scan, net_ops, recv_fd, send_msg_fds, uprobe_ops};
+use crate::{cgroup_ops, delegate_over_fd, dlp_scan, net_ops, recv_fd, send_msg_fds, uprobe_ops};
 
 /// How long a connection may hold a thread without saying `Hello`.
 ///
@@ -369,6 +369,12 @@ fn handle_conn_with_timeouts(
                 offset,
                 is_ret,
             } => serve_attach_uprobe(&mut writer, path, *offset, *is_ret),
+            // `AttachCgroup` answers the same way, with a cgroup directory in
+            // place of an ELF offset.
+            Command::AttachCgroup {
+                cgroup_path,
+                attach_type,
+            } => serve_attach_cgroup(&mut writer, cgroup_path, *attach_type),
             // `Extension` is answered by the installed handler (if any); the OSS
             // warden installs none, so it falls through to `Unimplemented`.
             Command::Extension { kind, payload } => {
@@ -467,6 +473,33 @@ fn serve_attach_uprobe(writer: &mut UnixStream, path: &str, offset: u64, is_ret:
         .is_ok();
     }
     let result = uprobe_ops::attach_uprobe_link(prog_fd, path, offset, is_ret);
+    unsafe { libc::close(prog_fd) };
+    match result {
+        Ok(link) => {
+            let ok = serve_passed_fd(writer, Ok(link));
+            unsafe { libc::close(link) };
+            ok
+        }
+        Err(message) => serve_passed_fd(writer, Err(message)),
+    }
+}
+
+/// Serve an `AttachCgroup`: receive the agent's program fd, create the cgroup
+/// link, then reply `FdReady` + the link fd. The warden closes its own copy of
+/// both fds - the link fd is dup'd into the agent by `SCM_RIGHTS` and the link
+/// keeps the program alive - so neither leaks.
+fn serve_attach_cgroup(writer: &mut UnixStream, cgroup_path: &str, attach_type: u32) -> bool {
+    let prog_fd = recv_fd(writer.as_raw_fd());
+    if prog_fd < 0 {
+        return write_frame(
+            writer,
+            &Response::Error {
+                message: "no program fd received for cgroup attach".into(),
+            },
+        )
+        .is_ok();
+    }
+    let result = cgroup_ops::attach_cgroup_link(prog_fd, cgroup_path, attach_type);
     unsafe { libc::close(prog_fd) };
     match result {
         Ok(link) => {

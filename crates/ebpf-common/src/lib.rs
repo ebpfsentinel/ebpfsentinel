@@ -1,6 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod attribution;
 pub mod config_flags;
 pub mod conntrack;
 pub mod ddos;

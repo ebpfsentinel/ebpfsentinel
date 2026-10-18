@@ -20,6 +20,7 @@ pub(crate) const EBPF_PROGRAMS: &[&str] = &[
     "tc-qos",
     "tc-scrub",
     "uprobe-dlp",
+    "cgroup-attribution",
 ];
 
 // Kernel kfuncs called by the eBPF programs. These resolve to undefined

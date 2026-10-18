@@ -7,6 +7,7 @@
 
 mod alerting;
 mod alias;
+mod attribution;
 mod audit;
 mod auth;
 mod capture;
@@ -41,6 +42,7 @@ pub use alerting::{
     AlertRouteConfig, AlertingConfig, OtlpExportConfig, OtlpProtocol, SmtpConfig, validate_header,
 };
 pub use alias::AliasConfig;
+pub use attribution::AttributionConfig;
 pub use audit::AuditConfig;
 pub use auth::{ApiKeyConfig, AuthConfig, JwtAlgorithm, JwtConfig, JwtKeySource, OidcConfig};
 pub use capture::{
@@ -159,6 +161,11 @@ pub struct AgentConfig {
 
     #[serde(default)]
     pub container: ContainerConfig,
+
+    /// Socket attribution: the workload behind a flow, recorded by the cgroup
+    /// socket hooks at the moment the socket is opened.
+    #[serde(default)]
+    pub attribution: AttributionConfig,
 
     #[serde(default)]
     pub nat: NatConfig,
@@ -424,6 +431,9 @@ impl AgentConfig {
 
         // Validate container resolver config
         self.container.validate()?;
+
+        // Validate the socket-attribution block
+        self.attribution.validate()?;
 
         // Validate multi-WAN gateways
         self.routing.validate()?;

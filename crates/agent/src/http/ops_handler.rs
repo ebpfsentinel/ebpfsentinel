@@ -126,6 +126,29 @@ pub struct KernelFeaturesResponse {
     pub program_types: Vec<ProgramTypeSupport>,
     pub helpers: Vec<HelperSupportEntry>,
     pub missing_required: Vec<MissingHelperEntry>,
+    /// Whether the socket-attribution hooks are on this host's cgroup, and
+    /// why not where they are not. Read from what the attach actually did,
+    /// not from the probe: a kernel that supports the program type can still
+    /// refuse the attach, and a flow with no workload on it is the same
+    /// silence either way.
+    pub attribution: AttributionReport,
+}
+
+/// What became of the cgroup socket hooks on this host.
+#[derive(Serialize, ToSchema)]
+pub struct AttributionReport {
+    /// True only when every hook attached. A partial set is reported as not
+    /// attached, because half the hooks make an absent workload mean two
+    /// different things with nothing on the wire to tell them apart.
+    pub attached: bool,
+    /// The cgroup the hooks were attached to, or asked for.
+    pub cgroup: String,
+    /// The hooks that attached, named as the kernel programs are.
+    pub hooks: Vec<String>,
+    /// Why nothing is attached, in the words the attach failed with.
+    pub reason: Option<String>,
+    /// Whether the warden created the links, which is the rootless posture.
+    pub brokered: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -369,6 +392,9 @@ pub async fn get_kernel_features() -> Json<KernelFeaturesResponse> {
 fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> KernelFeaturesResponse {
     use adapters::ebpf::ProbeStatus;
 
+    // Read once, so both arms below answer from the same reading.
+    let attribution = attribution_report(adapters::ebpf::attribution_attach::status());
+
     let Some(report) = report else {
         return KernelFeaturesResponse {
             probed: false,
@@ -377,6 +403,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
             program_types: Vec::new(),
             helpers: Vec::new(),
             missing_required: Vec::new(),
+            attribution,
         };
     };
 
@@ -416,6 +443,18 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
                 detail: m.to_string(),
             })
             .collect(),
+        attribution,
+    }
+}
+
+/// Restate an attach status as the endpoint publishes it.
+fn attribution_report(status: adapters::ebpf::AttributionStatus) -> AttributionReport {
+    AttributionReport {
+        attached: status.attached,
+        cgroup: status.cgroup,
+        hooks: status.hooks,
+        reason: status.reason,
+        brokered: status.brokered,
     }
 }
 

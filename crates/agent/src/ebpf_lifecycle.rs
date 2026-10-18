@@ -68,6 +68,9 @@ pub struct EbpfProgramManager {
     /// Whether a firewall load has handed the pinned IP set map to the alias
     /// service.
     pub ipset_wired: bool,
+    /// The cgroup links of the socket-attribution hooks, where they attached.
+    /// Dropping it detaches them, which is how a reload turns attribution off.
+    pub attribution: Option<adapters::ebpf::AttributionAttacher>,
 }
 
 impl EbpfProgramManager {
@@ -93,6 +96,7 @@ impl EbpfProgramManager {
             vip_svc: None,
             lpm_coordinator: None,
             ipset_wired: false,
+            attribution: None,
         }
     }
 
@@ -192,6 +196,7 @@ impl EbpfProgramManager {
             "tc_nat" => self.enable_tc_nat(config).await,
             "tc_scrub" => self.enable_tc_scrub(config).await,
             "uprobe_dlp" => self.enable_uprobe_dlp(config).await,
+            "cgroup_attribution" => self.enable_cgroup_attribution(config).await,
             _ => {
                 warn!(
                     program = name,
@@ -231,6 +236,15 @@ impl EbpfProgramManager {
             }
             "tc_conntrack" => {
                 self.services.conntrack_svc.write().await.clear_map_port();
+            }
+            "cgroup_attribution" => {
+                // The links are held outside the handle, so the loader going
+                // away would leave the programs attached to the cgroup with
+                // nothing holding their object. Detaching first is what makes
+                // the drop below complete.
+                if let Some(mut attacher) = self.attribution.take() {
+                    attacher.detach_all();
+                }
             }
             "tc_nat" => {
                 self.services.nat_svc.write().await.clear_map_port();
@@ -572,6 +586,36 @@ impl EbpfProgramManager {
         );
 
         info!("uprobe-dlp enabled via hot-reload");
+        Ok(())
+    }
+
+    async fn enable_cgroup_attribution(&mut self, config: &AgentConfig) -> anyhow::Result<()> {
+        let (loader, metrics_rdr, attacher, status) =
+            startup::try_load_cgroup_attribution(&self.ebpf_dir, config)?;
+        if !status.attached {
+            // The object loaded and the kernel refused the hooks. Keeping the
+            // loader would publish a program that attributes nothing, so both
+            // go and the published status carries the reason.
+            self.set_status("cgroup_attribution", false).await;
+            return Ok(());
+        }
+
+        self.attribution = Some(attacher);
+        if let Some(rdr) = metrics_rdr {
+            self.metrics_readers.write().await.push(rdr);
+        }
+        self.set_status("cgroup_attribution", true).await;
+        self.programs.insert(
+            "cgroup_attribution".to_string(),
+            ProgramHandle {
+                name: "cgroup_attribution".to_string(),
+                loader,
+                reader_cancel: CancellationToken::new(),
+                reader_handles: Vec::new(),
+            },
+        );
+
+        info!("cgroup-attribution enabled via hot-reload");
         Ok(())
     }
 
@@ -1137,6 +1181,7 @@ pub fn program_config_map(config: &AgentConfig) -> Vec<(&'static str, bool)> {
         ("tc_nat", config.nat.enabled),
         ("tc_scrub", config.firewall.scrub.enabled),
         ("uprobe_dlp", config.dlp.enabled),
+        ("cgroup_attribution", config.attribution.enabled),
     ]
 }
 
@@ -1180,6 +1225,7 @@ fn metrics_maps(program: &str) -> &'static [&'static str] {
         "tc_nat" => &["NAT_METRICS"],
         "tc_scrub" => &["SCRUB_METRICS"],
         "uprobe_dlp" => &["DLP_METRICS"],
+        "cgroup_attribution" => &["ATTRIBUTION_METRICS"],
         _ => &[],
     }
 }

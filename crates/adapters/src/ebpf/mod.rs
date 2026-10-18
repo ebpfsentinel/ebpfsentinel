@@ -2,6 +2,7 @@ pub mod attach_inspect;
 pub mod bpf_token;
 // NOTE: `netkit` uses raw BPF_LINK_CREATE syscall - the module itself
 // has #[allow(unsafe_code)] at the top.
+pub mod attribution_attach;
 pub mod config_flags_manager;
 pub mod conntrack_map_manager;
 pub mod dlp_attach;
@@ -51,6 +52,7 @@ pub use attach_inspect::{
     AttachBlock, XDP_ATTACH_MODES, XdpAttachMode, XdpAttachment, blocked_attaches,
     clear_all_blocks as clear_attach_blocks, xdp_attachment,
 };
+pub use attribution_attach::{AttributionAttacher, AttributionStatus};
 pub use bpf_token::{
     BPF_F_TOKEN_FD, BpfTokenError, TokenCreateAttr, create_enterprise_token, create_token,
     global_token_fd, open_bpffs_dir, set_global_token_fd as set_bpf_token_fd,

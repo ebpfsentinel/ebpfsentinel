@@ -1818,6 +1818,10 @@ pub async fn run(
     let (mut ct_ok, mut nat_ok, mut scrub_ok, mut lb_ok) = (false, false, false, false);
     let mut qos_ok = false;
     let mut vip_announcer_ok = false;
+    let mut attribution_ok = false;
+    // The cgroup links live here until the manager takes them over: dropping
+    // the attacher detaches every hook, so it must outlive the load.
+    let mut attribution_attacher: Option<adapters::ebpf::AttributionAttacher> = None;
     // What the startup firewall handed over, for the reload path to keep.
     let mut fw_lpm_coordinator: Option<
         Arc<dyn ports::secondary::lpm_coordinator_port::LpmCoordinatorPort>,
@@ -1836,6 +1840,7 @@ pub async fn run(
     let dns_cancel = readers.child_token();
     let dlp_cancel = readers.child_token();
     let ct_cancel = readers.child_token();
+    let attribution_cancel = readers.child_token();
 
     if ebpf_capable {
         // Pins from a previous generation cannot be inspected - the kernel
@@ -2442,6 +2447,51 @@ pub async fn run(
             false
         };
 
+        // 10f-bis. Socket attribution (cgroup hooks)
+        attribution_ok = if config.attribution.enabled {
+            match try_load_cgroup_attribution(&ebpf_dir, &config) {
+                Ok((loader, metrics_rdr, attacher, status)) => {
+                    let attached = status.attached;
+                    if attached {
+                        attribution_attacher = Some(attacher);
+                        if let Some(rdr) = metrics_rdr {
+                            metrics_readers.push(rdr);
+                        }
+                        managed.push(("cgroup_attribution", loader, attribution_cancel.clone()));
+                        metrics.set_ebpf_program_status("cgroup_attribution", true);
+                        info!("eBPF cgroup-attribution active");
+                    } else {
+                        // The object loaded and the kernel refused the attach.
+                        // Dropping both leaves the agent with no socket table
+                        // and no half-attached hooks, which is the degraded
+                        // posture the status now describes.
+                        metrics.set_ebpf_program_status("cgroup_attribution", false);
+                    }
+                    attached
+                }
+                Err(e) => {
+                    warn!("cgroup-attribution load failed (degraded mode): {e}");
+                    adapters::ebpf::attribution_attach::publish_status(
+                        adapters::ebpf::AttributionStatus {
+                            attached: false,
+                            cgroup: config.attribution.cgroup_root.clone(),
+                            hooks: Vec::new(),
+                            reason: Some(e.to_string()),
+                            brokered: false,
+                        },
+                    );
+                    metrics.set_ebpf_program_status("cgroup_attribution", false);
+                    false
+                }
+            }
+        } else {
+            metrics.clear_ebpf_program_status("cgroup_attribution");
+            adapters::ebpf::attribution_attach::publish_status(
+                adapters::ebpf::AttributionStatus::default(),
+            );
+            false
+        };
+
         // 10g. TC ConnTrack
         ct_ok = if config.conntrack.enabled {
             match try_load_tc_conntrack(&ebpf_dir, &config) {
@@ -2675,6 +2725,7 @@ pub async fn run(
         status.insert("tc-qos".to_string(), qos_ok);
         status.insert("xdp-loadbalancer".to_string(), lb_ok);
         status.insert("xdp-vip-announcer".to_string(), vip_announcer_ok);
+        status.insert("cgroup-attribution".to_string(), attribution_ok);
     }
 
     // ── Anonymous usage telemetry ───────────────────────────────
@@ -2831,6 +2882,9 @@ pub async fn run(
         // again reuses them, so the managers handed over here stay valid.
         mgr.lpm_coordinator = fw_lpm_coordinator;
         mgr.ipset_wired = fw_ipset_wired;
+        // The cgroup links come across with the loader that owns the
+        // programs, so a reload that turns attribution off detaches them.
+        mgr.attribution = attribution_attacher;
         // Move map holder fields into the manager
         mgr.config_flags = ebpf_map_holder.config_flags;
         mgr.l7_ports = ebpf_map_holder.l7_ports;
@@ -4635,6 +4689,37 @@ pub fn try_load_tc_dns(
     let reader = DnsEventReader::new(loader.ebpf_mut())?;
 
     Ok((loader, dns_metrics_rdr, reader))
+}
+
+/// Load the socket-attribution object and attach its hooks to the cgroup.
+///
+/// Returns the loader, the attacher holding the links, and what can be said
+/// about the result. A kernel that refuses the attach comes back as a status
+/// carrying the reason rather than as an error: the agent runs on without a
+/// workload block, which is a degradation and not a failure.
+pub fn try_load_cgroup_attribution(
+    ebpf_dir: &str,
+    config: &AgentConfig,
+) -> anyhow::Result<(
+    EbpfLoader,
+    Option<MetricsReader>,
+    adapters::ebpf::AttributionAttacher,
+    adapters::ebpf::AttributionStatus,
+)> {
+    let program_bytes = read_ebpf_program(ebpf_dir, "cgroup-attribution")?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "ATTRIBUTION_METRICS").ok();
+
+    // Rootless posture: the agent dropped the capability the cgroup attach
+    // needs, and the hierarchy it can see is not the host's, so the warden
+    // resolves the path and creates the link.
+    let mut attacher = adapters::ebpf::AttributionAttacher::new();
+    if let Some(sock) = warden_sock_from_env() {
+        attacher = attacher.with_warden_socket(sock);
+    }
+    let status = attacher.attach_all(&loader, &config.attribution.cgroup_root);
+    Ok((loader, metrics_rdr, attacher, status))
 }
 
 /// Load the uprobe DLP program: attach uprobes to SSL functions, start DLP event reader.

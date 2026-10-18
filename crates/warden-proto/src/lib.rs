@@ -146,6 +146,23 @@ pub enum Command {
         /// `true` for a uretprobe (fires on function return).
         is_ret: bool,
     },
+    /// Attach the cgroup-type eBPF program whose fd rides in the accompanying
+    /// `SCM_RIGHTS` cmsg (sent right after this frame) to the cgroup directory
+    /// at `cgroup_path`, for `attach_type` (`enum bpf_attach_type`). The warden
+    /// creates the link - it holds the capability the rootless agent dropped
+    /// and resolves the path in its own mount namespace - and returns the link
+    /// fd via [`Response::FdReady`], so the attachment dies with the agent that
+    /// owns the fd rather than outliving it on the cgroup.
+    ///
+    /// The warden refuses a path outside the cgroup hierarchy and an attach
+    /// type outside the socket hooks it is meant to serve: this must not become
+    /// a general-purpose root-held cgroup attach service.
+    AttachCgroup {
+        /// Absolute path to the cgroup v2 directory, under `/sys/fs/cgroup`.
+        cgroup_path: String,
+        /// The `enum bpf_attach_type` number to attach for.
+        attach_type: u32,
+    },
     /// Scan `/proc` for SSL libraries mapped by any process and return one
     /// [`DlpTarget`] per unique `(dev, ino)`, with `SSL_write` / `SSL_read`
     /// offsets pre-resolved. Reading another process's `/proc/<pid>/maps` and ELF
@@ -292,6 +309,10 @@ mod tests {
                 path: "/proc/4242/root/usr/lib/libssl.so.3".into(),
                 offset: 0x1234,
                 is_ret: true,
+            },
+            Command::AttachCgroup {
+                cgroup_path: "/sys/fs/cgroup".into(),
+                attach_type: 10,
             },
             Command::DlpScan,
             Command::Extension {

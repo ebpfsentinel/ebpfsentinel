@@ -7435,6 +7435,44 @@
           }
         }
       },
+      "AttributionReport": {
+        "type": "object",
+        "description": "What became of the cgroup socket hooks on this host.",
+        "required": [
+          "attached",
+          "cgroup",
+          "hooks",
+          "brokered"
+        ],
+        "properties": {
+          "attached": {
+            "type": "boolean",
+            "description": "True only when every hook attached. A partial set is reported as not\nattached, because half the hooks make an absent workload mean two\ndifferent things with nothing on the wire to tell them apart."
+          },
+          "brokered": {
+            "type": "boolean",
+            "description": "Whether the warden created the links, which is the rootless posture."
+          },
+          "cgroup": {
+            "type": "string",
+            "description": "The cgroup the hooks were attached to, or asked for."
+          },
+          "hooks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The hooks that attached, named as the kernel programs are."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why nothing is attached, in the words the attach failed with."
+          }
+        }
+      },
       "AuditEntryResponse": {
         "type": "object",
         "required": [
@@ -9647,9 +9685,14 @@
           "load_mode",
           "program_types",
           "helpers",
-          "missing_required"
+          "missing_required",
+          "attribution"
         ],
         "properties": {
+          "attribution": {
+            "$ref": "#/components/schemas/AttributionReport",
+            "description": "Whether the socket-attribution hooks are on this host's cgroup, and\nwhy not where they are not. Read from what the attach actually did,\nnot from the probe: a kernel that supports the program type can still\nrefuse the attach, and a flow with no workload on it is the same\nsilence either way."
+          },
           "helpers": {
             "type": "array",
             "items": {

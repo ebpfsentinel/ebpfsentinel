@@ -1,0 +1,16 @@
+[package]
+name = "cgroup-attribution"
+version = "0.0.0-dev"
+edition = "2024"
+
+[dependencies]
+aya-ebpf = "0.2.1"
+ebpf-common = { path = "../../ebpf-common", default-features = false }
+ebpf-helpers = { path = "../../ebpf-helpers" }
+
+[[bin]]
+name = "cgroup-attribution"
+path = "src/main.rs"
+
+[build-dependencies]
+aya-build = "0.2.0"

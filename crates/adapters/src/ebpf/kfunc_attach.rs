@@ -19,7 +19,7 @@
 
 use std::ffi::CString;
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 use object::{Object, ObjectSegment, ObjectSymbol};
 use tracing::info;
@@ -102,6 +102,20 @@ pub enum KfuncAttachError {
     UprobeLink {
         target: String,
         symbol: String,
+        errno: i32,
+        message: String,
+    },
+
+    #[error("open cgroup `{path}`: {message}")]
+    CgroupOpen { path: String, message: String },
+
+    #[error(
+        "BPF_LINK_CREATE(cgroup attach_type={attach_type}) for `{program}` on `{path}`: errno={errno} {message}"
+    )]
+    CgroupLink {
+        program: String,
+        path: String,
+        attach_type: u32,
         errno: i32,
         message: String,
     },
@@ -230,6 +244,84 @@ fn link_create(
         return Err(KfuncAttachError::LinkCreate {
             program: program.to_owned(),
             ifindex,
+            attach_type,
+            errno: err.raw_os_error().unwrap_or(0),
+            message: err.to_string(),
+        });
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let raw = rc as RawFd;
+    // SAFETY: rc >= 0 is a valid link fd owned by this process.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+// ── cgroup attach (cgroup BPF link) ─────────────────────────────────────
+
+/// Attach a cgroup-type program fd to the cgroup directory at `cgroup_path`.
+///
+/// The target of a cgroup link is a directory fd rather than an ifindex, which
+/// is the only thing that differs from the netdev attaches above: the same
+/// `BPF_LINK_CREATE` field carries it, because the kernel's own union puts
+/// `target_fd` and `target_ifindex` in the same place.
+///
+/// A link is used rather than `BPF_PROG_ATTACH` so the attachment is owned by
+/// the returned fd: the agent exiting, crashing or being killed detaches the
+/// program, where a prog-attach would leave it on the cgroup until somebody
+/// detached it by hand.
+pub fn attach_cgroup(
+    program: &str,
+    prog_fd: RawFd,
+    cgroup_path: &str,
+    attach_type: u32,
+) -> Result<OwnedFd, KfuncAttachError> {
+    let cgroup = std::fs::File::open(cgroup_path).map_err(|e| KfuncAttachError::CgroupOpen {
+        path: cgroup_path.to_owned(),
+        message: e.to_string(),
+    })?;
+    let fd = cgroup_link_create(
+        program,
+        prog_fd,
+        cgroup.as_raw_fd(),
+        cgroup_path,
+        attach_type,
+    )?;
+    info!(
+        program,
+        cgroup = cgroup_path,
+        attach_type,
+        "cgroup program attached (raw link)"
+    );
+    Ok(fd)
+}
+
+/// Issue a `BPF_LINK_CREATE` binding `prog_fd` to the cgroup `target_fd`.
+fn cgroup_link_create(
+    program: &str,
+    prog_fd: RawFd,
+    target_fd: RawFd,
+    cgroup_path: &str,
+    attach_type: u32,
+) -> Result<OwnedFd, KfuncAttachError> {
+    let mut attr = LinkCreateAttr {
+        #[allow(clippy::cast_sign_loss)]
+        prog_fd: prog_fd as u32,
+        #[allow(clippy::cast_sign_loss)]
+        target_ifindex: target_fd as u32,
+        attach_type,
+        ..Default::default()
+    };
+    let rc = unsafe {
+        bpf(
+            BPF_LINK_CREATE,
+            (&raw mut attr).cast(),
+            std::mem::size_of::<LinkCreateAttr>(),
+        )
+    };
+    if rc < 0 {
+        let err = io::Error::last_os_error();
+        return Err(KfuncAttachError::CgroupLink {
+            program: program.to_owned(),
+            path: cgroup_path.to_owned(),
             attach_type,
             errno: err.raw_os_error().unwrap_or(0),
             message: err.to_string(),

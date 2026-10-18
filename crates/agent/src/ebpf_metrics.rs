@@ -161,6 +161,16 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (7, "ktls_unreadable"),
             (8, "out_of_scope"),
         ],
+        // Six hooks, counted apart so an operator can see which of them is
+        // doing the work on this node, plus the two ways a record is lost.
+        "ATTRIBUTION_METRICS" => &[
+            (0, "connect"),
+            (1, "post_bind"),
+            (2, "sendmsg"),
+            (3, "sock_ops"),
+            (4, "no_cookie"),
+            (5, "insert_failed"),
+        ],
         "CT_METRICS" => &[
             (0, "new"),
             (1, "established"),
@@ -511,6 +521,10 @@ mod tests {
         ("DDOS_METRICS", ebpf_common::ddos::DDOS_METRIC_COUNT),
         ("LB_METRICS", ebpf_common::loadbalancer::LB_METRIC_COUNT),
         ("QOS_METRICS", ebpf_common::qos::QOS_METRIC_COUNT),
+        (
+            "ATTRIBUTION_METRICS",
+            ebpf_common::attribution::ATTRIBUTION_METRIC_COUNT,
+        ),
     ];
 
     #[test]

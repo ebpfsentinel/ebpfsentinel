@@ -3715,6 +3715,17 @@ pub async fn cmd_ebpf_kernel_features(client: &ApiClient, output: OutputFormat) 
         }
         table.print();
     }
+
+    println!("\nSocket attribution");
+    println!("  Attached:   {}", yes_no(resp.attribution.attached));
+    println!("  Cgroup:     {}", resp.attribution.cgroup);
+    println!("  Brokered:   {}", yes_no(resp.attribution.brokered));
+    if !resp.attribution.hooks.is_empty() {
+        println!("  Hooks:      {}", resp.attribution.hooks.join(", "));
+    }
+    if let Some(reason) = &resp.attribution.reason {
+        println!("  Reason:     {reason}");
+    }
     Ok(())
 }
 

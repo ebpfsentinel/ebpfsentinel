@@ -66,6 +66,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::ArpAnnounce { .. } => "ArpAnnounce",
         Command::PcapOpen { .. } => "PcapOpen",
         Command::AttachUprobe { .. } => "AttachUprobe",
+        Command::AttachCgroup { .. } => "AttachCgroup",
         Command::DlpScan => "DlpScan",
         Command::Extension { .. } => "Extension",
     }
@@ -303,6 +304,33 @@ impl WardenClient {
             other => Err(unexpected("AttachUprobe", &other)),
         }
     }
+
+    /// Ask the warden to attach the agent's cgroup-type `prog_fd` (handed over
+    /// `SCM_RIGHTS`) to the cgroup directory at `cgroup_path` for
+    /// `attach_type`. Returns the link fd; the agent owns it and dropping it
+    /// detaches, so an agent that dies leaves no program on the cgroup.
+    #[cfg(feature = "fd-pass")]
+    pub fn attach_cgroup(
+        &mut self,
+        cgroup_path: &str,
+        attach_type: u32,
+        prog_fd: std::os::fd::RawFd,
+    ) -> io::Result<std::os::fd::OwnedFd> {
+        use std::os::fd::AsRawFd;
+        self.send(&Command::AttachCgroup {
+            cgroup_path: cgroup_path.to_owned(),
+            attach_type,
+        })?;
+        let sent = fd_pass::send_one_fd(self.stream.as_raw_fd(), prog_fd);
+        self.classify("AttachCgroup", "sending the program fd to", sent)?;
+        match self.recv("AttachCgroup")? {
+            Response::FdReady => {
+                let result = fd_pass::recv_one_fd(&self.stream);
+                self.classify("AttachCgroup", "waiting for the link fd from", result)
+            }
+            other => Err(unexpected("AttachCgroup", &other)),
+        }
+    }
 }
 
 /// Was an error caused by the warden's connection going away (so a reconnect is
@@ -461,6 +489,19 @@ impl ReconnectingClient {
         prog_fd: std::os::fd::RawFd,
     ) -> io::Result<std::os::fd::OwnedFd> {
         self.with_retry(|c| c.attach_uprobe(path, offset, is_ret, prog_fd))
+    }
+
+    /// Attach a cgroup program through the warden, reconnecting if it
+    /// bounced. `prog_fd` is the same descriptor on a retry, so the call is
+    /// replayable.
+    #[cfg(feature = "fd-pass")]
+    pub fn attach_cgroup(
+        &mut self,
+        cgroup_path: &str,
+        attach_type: u32,
+        prog_fd: std::os::fd::RawFd,
+    ) -> io::Result<std::os::fd::OwnedFd> {
+        self.with_retry(|c| c.attach_cgroup(cgroup_path, attach_type, prog_fd))
     }
 }
 

@@ -205,6 +205,13 @@ container:
     enabled: true
     socket: /var/run/docker.sock
 
+# Socket attribution: the workload behind a flow, recorded by the cgroup
+# socket hooks when the socket is opened. Records only, enforces nothing.
+attribution:
+  enabled: true
+  cgroup_root: /sys/fs/cgroup
+  max_sockets: 65536
+
 alerting:
   enabled: false
 

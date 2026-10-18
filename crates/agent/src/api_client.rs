@@ -1178,6 +1178,16 @@ pub struct KernelFeaturesResponse {
     pub program_types: Vec<ProgramTypeSupport>,
     pub helpers: Vec<HelperSupportEntry>,
     pub missing_required: Vec<MissingHelperEntry>,
+    pub attribution: AttributionReport,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct AttributionReport {
+    pub attached: bool,
+    pub cgroup: String,
+    pub hooks: Vec<String>,
+    pub reason: Option<String>,
+    pub brokered: bool,
 }
 
 // ── Operations ───────────────────────────────

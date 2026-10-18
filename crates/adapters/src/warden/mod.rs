@@ -4,5 +4,6 @@
 //! - to the privileged warden over its typed `AF_UNIX` protocol.
 
 pub mod arp;
+pub mod attribution;
 pub mod pcap;
 pub mod uprobe;

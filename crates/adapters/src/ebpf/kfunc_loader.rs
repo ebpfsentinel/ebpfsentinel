@@ -43,6 +43,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use aya::maps::{Map as AyaMap, MapData};
 use aya_obj::btf::BtfFeatures;
+use aya_obj::generated::bpf_attach_type;
 use aya_obj::{Object, ProgramSection};
 use object::{Object as _, ObjectSection, ObjectSymbol, RelocationTarget};
 
@@ -85,6 +86,14 @@ const INSN_CALL: u8 = 0x85;
 const BPF_PROG_TYPE_KPROBE: u32 = 2;
 const BPF_PROG_TYPE_SCHED_CLS: u32 = 3;
 const BPF_PROG_TYPE_XDP: u32 = 6;
+const BPF_PROG_TYPE_CGROUP_SOCK: u32 = 9;
+const BPF_PROG_TYPE_SOCK_OPS: u32 = 15;
+const BPF_PROG_TYPE_CGROUP_SOCK_ADDR: u32 = 18;
+
+/// `BPF_CGROUP_SOCK_OPS` (`enum bpf_attach_type`). A `sockops` program carries
+/// no attach type in its section name, so the number is written here rather
+/// than derived from the section the way the cgroup socket hooks are.
+const BPF_CGROUP_SOCK_OPS: u32 = 3;
 
 /// `BPF_TRACE_UPROBE_MULTI` (`enum bpf_attach_type`). A KPROBE-type program
 /// must be loaded with this `expected_attach_type` to be attachable via a
@@ -613,8 +622,33 @@ fn prog_attrs(section: &ProgramSection) -> (u32, u32, u32) {
         ProgramSection::KProbe | ProgramSection::KRetProbe => {
             (BPF_PROG_TYPE_KPROBE, BPF_TRACE_KPROBE_MULTI, 0)
         }
+        // The socket-attribution hooks. Their `expected_attach_type` is not
+        // optional the way an XDP program's is: the kernel decides which
+        // context layout and which helper set the program gets from it, and
+        // refuses the load outright when it is absent. It comes from the
+        // section name, which is the only place `connect4` and `sendmsg6`
+        // differ.
+        ProgramSection::CgroupSockAddr { attach_type, .. } => (
+            BPF_PROG_TYPE_CGROUP_SOCK_ADDR,
+            attach_type_number(bpf_attach_type::from(*attach_type)),
+            0,
+        ),
+        ProgramSection::CgroupSock { attach_type, .. } => (
+            BPF_PROG_TYPE_CGROUP_SOCK,
+            attach_type_number(bpf_attach_type::from(*attach_type)),
+            0,
+        ),
+        ProgramSection::SockOps => (BPF_PROG_TYPE_SOCK_OPS, BPF_CGROUP_SOCK_OPS, 0),
         _ => (0, 0, 0),
     }
+}
+
+/// The number the kernel reads for an `enum bpf_attach_type`.
+///
+/// aya models the enum as a Rust enum and the kernel reads a `u32` out of
+/// `bpf_attr`, so the conversion is here once rather than at each call site.
+fn attach_type_number(attach_type: bpf_attach_type) -> u32 {
+    attach_type as u32
 }
 
 #[repr(C)]
