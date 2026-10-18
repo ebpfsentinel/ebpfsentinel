@@ -16,6 +16,14 @@ agent:
   http_port: 8080
   grpc_port: 50051
   metrics_port: 9090
+  # The attribution cases turn the socket hooks off and back on through
+  # the config API, which is refused unless the file says it is allowed.
+  config_writes: allowed
+
+# On by default; written out because this suite toggles it and a reader
+# of the fixture should see which state the run starts from.
+attribution:
+  enabled: true
 
 firewall:
   enabled: true

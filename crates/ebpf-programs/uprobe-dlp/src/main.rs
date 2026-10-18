@@ -13,7 +13,7 @@ use core::ffi::c_void;
 use ebpf_common::dlp::{
     DLP_DIRECTION_READ, DLP_DIRECTION_WRITE, DLP_FLOW_FAMILY_IPV4, DLP_FLOW_FAMILY_IPV6,
     DLP_FLOW_PROTOCOL_TCP, DLP_FLOW_SOURCE_CORRELATED, DLP_FLOW_SOURCE_KERNEL_SOCKET,
-    DLP_KTLS_SUPPRESS_WINDOW_NS, DLP_MAX_EXCERPT, DLP_METRIC_COUNT, DLP_METRIC_ERRORS,
+    DLP_JOINED_SOCKET_WINDOW_NS, DLP_KTLS_SUPPRESS_WINDOW_NS, DLP_MAX_EXCERPT, DLP_METRIC_COUNT, DLP_METRIC_ERRORS,
     DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_KTLS_EVENTS, DLP_METRIC_KTLS_SUPPRESSED,
     DLP_METRIC_KTLS_UNREADABLE, DLP_METRIC_OUT_OF_SCOPE, DLP_METRIC_READ_EVENTS,
     DLP_METRIC_TOTAL_SEEN, DLP_METRIC_WRITE_EVENTS, DLP_SCOPE_ANCESTOR_LEVELS,
@@ -248,7 +248,7 @@ fn try_ssl_write(ctx: &ProbeContext) -> Result<(), ()> {
         return Ok(());
     }
 
-    emit_dlp_event(buf, num as u32, DLP_DIRECTION_WRITE, correlated_socket());
+    emit_dlp_event(buf, num as u32, DLP_DIRECTION_WRITE, task_socket());
     increment_metric(DLP_METRIC_WRITE_EVENTS);
     Ok(())
 }
@@ -305,7 +305,7 @@ fn try_ssl_read_ret(ctx: &RetProbeContext) -> Result<(), ()> {
         args.buf_ptr as *const u8,
         actual_len,
         DLP_DIRECTION_READ,
-        correlated_socket(),
+        task_socket(),
     );
     increment_metric(DLP_METRIC_READ_EVENTS);
     Ok(())
@@ -368,7 +368,7 @@ fn try_go_tls_write(ctx: &ProbeContext) -> Result<(), ()> {
     if buf == 0 || len == 0 || len > i32::MAX as u64 {
         return Ok(());
     }
-    emit_dlp_event(buf as *const u8, len as u32, DLP_DIRECTION_WRITE, correlated_socket());
+    emit_dlp_event(buf as *const u8, len as u32, DLP_DIRECTION_WRITE, task_socket());
     increment_metric(DLP_METRIC_WRITE_EVENTS);
     Ok(())
 }
@@ -411,7 +411,7 @@ fn try_go_tls_read_ret(ctx: &ProbeContext) -> Result<(), ()> {
         args.buf_ptr as *const u8,
         actual_len,
         DLP_DIRECTION_READ,
-        correlated_socket(),
+        task_socket(),
     );
     increment_metric(DLP_METRIC_READ_EVENTS);
     Ok(())
@@ -607,37 +607,55 @@ fn read_sock(sk: u64) -> Result<DlpSocket, ()> {
 
 /// Remember the socket this task is writing TLS plaintext through, so a
 /// library uprobe firing for the same bytes can name the destination.
+///
+/// The tuple is stamped `DLP_FLOW_SOURCE_CORRELATED` as it is written, not as
+/// it is read: what is stored here is only ever read by somebody else's write,
+/// and the stamp is what tells that reader which of the two writers it has.
+/// The socket-attribution hook writes the same map with its own stamp.
 #[inline(always)]
 fn record_task_socket(socket: &DlpSocket) {
+    let mut socket = *socket;
+    socket.source = DLP_FLOW_SOURCE_CORRELATED;
     let entry = DlpTaskSocket {
-        socket: *socket,
+        socket,
         at_ns: unsafe { bpf_ktime_get_boot_ns() },
     };
     let _ = DLP_TASK_SOCKET.insert(&bpf_get_current_pid_tgid(), &entry, 0);
 }
 
-/// The socket this task last wrote TLS plaintext through, if it is recent
-/// enough to be about the same transfer.
+/// The socket this task was last seen on, if it is recent enough to be about
+/// this transfer.
 ///
-/// What comes back is labelled `DLP_FLOW_SOURCE_CORRELATED`, never the
-/// kernel-socket reading it was recorded from: this is the destination of the
-/// previous write by the same thread, and a thread alternating two connections
-/// inside the window would be given the other one. The window is what bounds
-/// that, and the label is what stops an alert claiming more than it knows.
+/// Two writers fill the map and the entry says which one it came from. A
+/// kernel TLS probe records the socket it was called on, which is the
+/// destination of the *previous* write by the same thread: a thread
+/// alternating two connections inside the window would be given the other
+/// one, so it comes back `DLP_FLOW_SOURCE_CORRELATED` and the alert claims no
+/// more than that. The socket-attribution hook records the socket the kernel
+/// established for this thread, read off the socket itself, and comes back
+/// `DLP_FLOW_SOURCE_KERNEL_SOCKET`.
+///
+/// Each is aged on its own clock, because they are claims of different
+/// lifetimes: a correlation is about one call frame, a joined socket is about
+/// a connection. The stamp decides which window applies, so neither writer can
+/// be given the other's patience.
 #[inline(always)]
-fn correlated_socket() -> DlpSocket {
+fn task_socket() -> DlpSocket {
     let pid_tgid = bpf_get_current_pid_tgid();
     let Some(entry_ptr) = DLP_TASK_SOCKET.get_ptr(&pid_tgid) else {
         return DlpSocket::default();
     };
     let entry = unsafe { *entry_ptr };
+    let window = if entry.socket.source == DLP_FLOW_SOURCE_KERNEL_SOCKET {
+        DLP_JOINED_SOCKET_WINDOW_NS
+    } else {
+        DLP_TASK_SOCKET_WINDOW_NS
+    };
     let now = unsafe { bpf_ktime_get_boot_ns() };
-    if now < entry.at_ns || now - entry.at_ns >= DLP_TASK_SOCKET_WINDOW_NS {
+    if now < entry.at_ns || now - entry.at_ns >= window {
         return DlpSocket::default();
     }
-    let mut socket = entry.socket;
-    socket.source = DLP_FLOW_SOURCE_CORRELATED;
-    socket
+    entry.socket
 }
 
 /// Resolve the user-space plaintext run a `struct msghdr`'s iterator points at.

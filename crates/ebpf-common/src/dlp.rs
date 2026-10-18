@@ -111,6 +111,23 @@ pub const DLP_TASK_SOCKET_WINDOW_NS: u64 = 100_000_000;
 /// LRU map, so a busier node evicts the oldest rather than refusing an insert.
 pub const DLP_TASK_SOCKET_MAX_TASKS: u32 = 16384;
 
+/// How long a socket written by the socket-attribution join stays usable.
+///
+/// The correlation window above bounds a guess about one syscall: the library
+/// uprobe and the kernel TLS probe fire inside the same call frame, so a
+/// recording older than that frame is about a different write. The join is a
+/// different claim. A `sockops` program records the socket at the moment the
+/// connection is established, reading the tuple off the kernel's own socket,
+/// and that tuple stays true for as long as the connection lives - which for
+/// TLS is usually minutes, not milliseconds. Ageing it on the syscall window
+/// would throw away the destination of every long-lived connection, which is
+/// most of them.
+///
+/// It is the identity window of the attribution table, so a socket and the
+/// task that opened it stop being readable at the same moment rather than one
+/// outliving the other.
+pub const DLP_JOINED_SOCKET_WINDOW_NS: u64 = crate::attribution::ATTRIBUTION_IDENTITY_TTL_NS;
+
 /// Byte offsets of the kernel message-iterator fields the kernel TLS probes
 /// read, resolved from the running kernel's vmlinux BTF by userspace and
 /// pushed into `KTLS_ITER_OFFSETS`.
@@ -608,5 +625,14 @@ mod tests {
     fn a_correlation_window_outlives_one_call_frame() {
         assert_eq!(DLP_TASK_SOCKET_WINDOW_NS, DLP_KTLS_SUPPRESS_WINDOW_NS);
         const { assert!(DLP_TASK_SOCKET_MAX_TASKS >= 1024) };
+    }
+
+    #[test]
+    fn a_joined_socket_lives_as_long_as_the_identity_that_opened_it() {
+        assert_eq!(
+            DLP_JOINED_SOCKET_WINDOW_NS,
+            crate::attribution::ATTRIBUTION_IDENTITY_TTL_NS
+        );
+        const { assert!(DLP_JOINED_SOCKET_WINDOW_NS > DLP_TASK_SOCKET_WINDOW_NS) };
     }
 }

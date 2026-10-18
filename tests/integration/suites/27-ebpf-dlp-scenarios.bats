@@ -437,6 +437,87 @@ _send_tls_data() {
     [ "$port" = "9443" ]
 }
 
+# ── Socket attribution: the join, and what happens without it ──
+#
+# Two writers fill the task-socket map and the alert says which one the
+# five-tuple came from. The socket hooks record the socket the kernel
+# established for the thread (`kernel_socket`); the kernel TLS probe records
+# the socket of the thread's previous write (`task_socket_correlation`).
+# Proving the first means turning it off and watching the word change, which
+# is what these two cases do in sequence.
+
+_attribution_attached() {
+    api_get /api/v1/ebpf/kernel-features 2>/dev/null \
+        | jq -r '.attribution.attached // false' 2>/dev/null || echo false
+}
+
+_set_attribution() {
+    local enabled="$1"
+    local yaml="attribution:\n  enabled: ${enabled}\n"
+    api_put /api/v1/config/attribution "{\"yaml\": \"${yaml}\"}" >/dev/null 2>&1 || true
+    _load_http_status
+    sleep 2
+}
+
+_dlp_flow_sources_since() {
+    local since="$1"
+    api_get "/api/v1/alerts?component=dlp&from=${since}&limit=200" 2>/dev/null \
+        | jq -r '[(.alerts // .)[] | .flow_source // "absent"] | join(" ")' 2>/dev/null || echo ""
+}
+
+_ktls_offloaded() {
+    local metrics value
+    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || return 1
+    value="$(echo "$metrics" \
+        | grep -F 'ebpfsentinel_packets_total{interface="DLP_METRICS",action="ktls_events"}' \
+        | awk '{print $NF}' | tail -1)"
+    [ -n "$value" ] && [ "${value%%.*}" -gt 0 ] 2>/dev/null
+}
+
+@test "a TLS write names its socket through the kernel socket join" {
+    require_root
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
+    [ "$(_attribution_attached)" = "true" ] \
+        || soft_skip "the cgroup socket hooks are not attached on this host"
+
+    local since
+    since="$(date +%s%N)"
+    _send_tls_data "payment card: 4111111111111111 through an attributed socket"
+    sleep 3
+
+    local sources
+    sources="$(_dlp_flow_sources_since "$since")"
+    [ -n "$sources" ] || soft_skip "no DLP alert was raised by this write"
+    echo "$sources" | grep -q "kernel_socket"
+}
+
+@test "with the socket hooks off the same write falls back to correlation" {
+    require_root
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
+    [ "$(_attribution_attached)" = "true" ] \
+        || soft_skip "the cgroup socket hooks are not attached on this host"
+    ! _ktls_offloaded \
+        || soft_skip "this host offloads to kernel TLS, where the probe reads the socket itself"
+
+    _set_attribution false
+    [ "$HTTP_STATUS" = "200" ] || soft_skip "this agent refuses configuration writes"
+    [ "$(_attribution_attached)" = "false" ]
+
+    local since
+    since="$(date +%s%N)"
+    _send_tls_data "payment card: 4111111111111111 with nothing attributing it"
+    sleep 3
+
+    local sources
+    sources="$(_dlp_flow_sources_since "$since")"
+
+    _set_attribution true
+    [ "$(_attribution_attached)" = "true" ]
+
+    [ -n "$sources" ] || soft_skip "no DLP alert was raised by this write"
+    ! echo "$sources" | grep -q "kernel_socket"
+}
+
 @test "TLS echo server cleanup" {
     _stop_tls_echo_server
 }

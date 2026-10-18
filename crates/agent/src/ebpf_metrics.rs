@@ -161,8 +161,10 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (7, "ktls_unreadable"),
             (8, "out_of_scope"),
         ],
-        // Six hooks, counted apart so an operator can see which of them is
-        // doing the work on this node, plus the two ways a record is lost.
+        // The hooks counted apart, so an operator can see which of them is
+        // doing the work on this node: the six socket hooks fold into the
+        // three labels an address family does not distinguish, and the
+        // socket join counts on its own. Then the two ways a record is lost.
         "ATTRIBUTION_METRICS" => &[
             (0, "connect"),
             (1, "post_bind"),

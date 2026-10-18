@@ -47,6 +47,7 @@ pub const ATTRIBUTION_HOOKS: &[(&str, u32)] = &[
     ("attribution_post_bind6", BPF_CGROUP_INET6_POST_BIND),
     ("attribution_sendmsg4", BPF_CGROUP_UDP4_SENDMSG),
     ("attribution_sendmsg6", BPF_CGROUP_UDP6_SENDMSG),
+    ("attribution_sockops", BPF_CGROUP_SOCK_OPS),
 ];
 
 /// What the agent can say about socket attribution, for the start-up log and
