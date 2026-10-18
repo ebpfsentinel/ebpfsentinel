@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn the_per_source_guard_is_reachable_from_yaml() {
-        let cfg: ConnTrackSectionConfig = serde_yaml_ng::from_str(
+        let cfg: ConnTrackSectionConfig = serde_norway::from_str(
             "enabled: true\nmax_src_states: 512\nmax_src_conn_rate: 64\nconn_rate_window_secs: 10\noverload_ttl_secs: 300\n",
         )
         .expect("conntrack section parses");

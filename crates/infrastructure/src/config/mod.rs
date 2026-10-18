@@ -252,7 +252,7 @@ pub struct AgentConfig {
     /// being rejected and silently falling back to defaults. Captured opaquely
     /// and never serialized back out by the OSS agent.
     #[serde(default, skip_serializing)]
-    pub enterprise: Option<serde_yaml_ng::Value>,
+    pub enterprise: Option<serde_norway::Value>,
 }
 
 /// Maximum number of interface groups (bits 0-30 of `group_mask`).
@@ -318,7 +318,7 @@ impl AgentConfig {
                 ),
             });
         }
-        let config: Self = serde_yaml_ng::from_str(yaml)?;
+        let config: Self = serde_norway::from_str(yaml)?;
         config.validate()?;
         Ok(config)
     }
@@ -3950,7 +3950,7 @@ auth:
 
     #[test]
     fn auth_oidc_defaults() {
-        let config: AuthConfig = serde_yaml_ng::from_str("enabled: false\n").unwrap();
+        let config: AuthConfig = serde_norway::from_str("enabled: false\n").unwrap();
         assert!(config.oidc.is_none());
     }
 

@@ -438,7 +438,7 @@ mod tests {
     // ── Helpers ──────────────────────────────────────────────────────
 
     fn valid_rule() -> RateLimitRuleConfig {
-        serde_yaml_ng::from_str(
+        serde_norway::from_str(
             r"
 id: rl1
 rate: 500
@@ -546,7 +546,7 @@ algorithm: token_bucket
 
     #[test]
     fn to_domain_policy_carries_the_configured_tenant() {
-        let rule: RateLimitRuleConfig = serde_yaml_ng::from_str(
+        let rule: RateLimitRuleConfig = serde_norway::from_str(
             r#"
 id: rl-tenant
 rate: 100
@@ -564,7 +564,7 @@ tenant_id: 5
 
     #[test]
     fn to_domain_policy_without_a_tenant_is_global() {
-        let rule: RateLimitRuleConfig = serde_yaml_ng::from_str(
+        let rule: RateLimitRuleConfig = serde_norway::from_str(
             r#"
 id: rl-global
 rate: 100
@@ -579,7 +579,7 @@ src_ip: "10.0.0.7"
 
     #[test]
     fn to_domain_policy_correct_conversion() {
-        let rule: RateLimitRuleConfig = serde_yaml_ng::from_str(
+        let rule: RateLimitRuleConfig = serde_norway::from_str(
             r#"
 id: rl-test
 rate: 200
@@ -613,7 +613,7 @@ src_ip: "10.0.0.7"
     // ── CountryTierConfigYaml::validate() ────────────────────────────
 
     fn valid_tier() -> CountryTierConfigYaml {
-        serde_yaml_ng::from_str(
+        serde_norway::from_str(
             r#"
 tier_id: 1
 country_codes: ["US", "CA"]

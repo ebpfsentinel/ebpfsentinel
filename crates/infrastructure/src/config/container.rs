@@ -315,7 +315,7 @@ docker:
   cache_ttl_seconds: 600
   timeout_ms: 3000
 ";
-        let cfg: ContainerConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: ContainerConfig = serde_norway::from_str(yaml).unwrap();
         assert_eq!(cfg.resolver.cache_size, 8192);
         assert_eq!(cfg.resolver.proc_path, "/host/proc");
         assert!(cfg.docker.enabled);
@@ -327,7 +327,7 @@ docker:
     #[test]
     fn deserializes_from_yaml_without_docker_keeps_default() {
         let yaml = "resolver: { enabled: true }";
-        let cfg: ContainerConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: ContainerConfig = serde_norway::from_str(yaml).unwrap();
         assert!(!cfg.docker.enabled);
     }
 }

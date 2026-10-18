@@ -398,7 +398,7 @@ policies:
     to: wan
     policy: allow
 ";
-        let cfg: ZoneSectionConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: ZoneSectionConfig = serde_norway::from_str(yaml).unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.zones.len(), 2);
         assert_eq!(cfg.policies.len(), 1);

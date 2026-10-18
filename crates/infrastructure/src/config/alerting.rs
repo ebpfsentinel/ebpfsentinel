@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn default_config_from_empty_yaml() {
-        let cfg: AlertingConfig = serde_yaml_ng::from_str("{}").unwrap();
+        let cfg: AlertingConfig = serde_norway::from_str("{}").unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.dedup_window_secs, 60);
         assert_eq!(cfg.throttle_window_secs, 300);
@@ -452,7 +452,7 @@ routes:
     min_severity: high
     webhook_url: "https://hooks.example.com/alert"
 "#;
-        let cfg: AlertingConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: AlertingConfig = serde_norway::from_str(yaml).unwrap();
         assert_eq!(cfg.routes.len(), 1);
         assert_eq!(cfg.routes[0].name, "slack-hook");
         assert_eq!(cfg.routes[0].destination, "webhook");
@@ -476,7 +476,7 @@ routes:
     min_severity: critical
     email_to: ops@example.com
 ";
-        let cfg: AlertingConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: AlertingConfig = serde_norway::from_str(yaml).unwrap();
         assert!(cfg.smtp.is_some());
         let smtp = cfg.smtp.as_ref().unwrap();
         assert_eq!(smtp.host, "smtp.example.com");
@@ -660,7 +660,7 @@ routes:
     destination: otlp
     min_severity: low
 ";
-        let config: AlertingConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: AlertingConfig = serde_norway::from_str(yaml).unwrap();
         let otlp = config.otlp.unwrap();
         assert_eq!(otlp.endpoint, "http://otel-collector:4317");
         assert_eq!(otlp.protocol, "grpc");
@@ -676,7 +676,7 @@ otlp:
   endpoint: http://localhost:4317
 routes: []
 ";
-        let config: AlertingConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: AlertingConfig = serde_norway::from_str(yaml).unwrap();
         let otlp = config.otlp.unwrap();
         assert_eq!(otlp.protocol, "grpc");
         assert_eq!(otlp.timeout_ms, 5000);
@@ -789,7 +789,7 @@ routes: []
     // - OTLP collector block ------------------------------------------
 
     fn collector(yaml: &str) -> OtlpExportConfig {
-        serde_yaml_ng::from_str(yaml).expect("the block parses")
+        serde_norway::from_str(yaml).expect("the block parses")
     }
 
     #[test]

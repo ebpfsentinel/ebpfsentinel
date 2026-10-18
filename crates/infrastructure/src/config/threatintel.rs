@@ -334,7 +334,7 @@ mod tests {
     // ── Helpers ──────────────────────────────────────────────────────
 
     fn valid_feed() -> ThreatIntelFeedConfig {
-        serde_yaml_ng::from_str(
+        serde_norway::from_str(
             r#"
 id: feed1
 name: Test Feed
@@ -430,7 +430,7 @@ refresh_interval_secs: 3600
 
     #[test]
     fn to_domain_feed_config_with_field_mapping() {
-        let feed: ThreatIntelFeedConfig = serde_yaml_ng::from_str(
+        let feed: ThreatIntelFeedConfig = serde_norway::from_str(
             r##"
 id: csv-feed
 name: CSV Feed

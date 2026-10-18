@@ -28,7 +28,7 @@ use axum::extract::{Path, State};
 use domain::auth::entity::JwtClaims;
 use infrastructure::config::{AgentConfig, ConfigWrites};
 use serde::Deserialize;
-use serde_yaml_ng::Value;
+use serde_norway::Value;
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
@@ -79,7 +79,7 @@ fn put_at(document: &mut Value, section: &str, value: Value) -> Result<(), Strin
         };
         cursor = map
             .entry(Value::String((*key).to_string()))
-            .or_insert_with(|| Value::Mapping(serde_yaml_ng::Mapping::new()));
+            .or_insert_with(|| Value::Mapping(serde_norway::Mapping::new()));
     }
     match cursor {
         Value::Mapping(map) => {
@@ -106,7 +106,7 @@ fn keep_masked(incoming: Value, on_disk: Option<&Value>, path: &str) -> Result<V
             format!("`{path}` is masked and the file holds no value there; write the value out")
         }),
         Value::Mapping(map) => {
-            let mut merged = serde_yaml_ng::Mapping::new();
+            let mut merged = serde_norway::Mapping::new();
             for (key, value) in map {
                 let held = on_disk.and_then(|v| v.get(&key));
                 let below = match key.as_str() {
@@ -194,7 +194,7 @@ pub async fn put_config_section(
     let path = PathBuf::from(path);
 
     let submitted: Value =
-        serde_yaml_ng::from_str(&body.yaml).map_err(|e| ApiError::BadRequest {
+        serde_norway::from_str(&body.yaml).map_err(|e| ApiError::BadRequest {
             code: "INVALID_YAML",
             message: format!("section is not valid YAML: {e}"),
         })?;
@@ -211,7 +211,7 @@ pub async fn put_config_section(
         .map_err(|e| ApiError::Internal {
             message: format!("configuration file unreadable: {e}"),
         })?;
-    let mut document: Value = serde_yaml_ng::from_str(&text).map_err(|e| ApiError::Internal {
+    let mut document: Value = serde_norway::from_str(&text).map_err(|e| ApiError::Internal {
         message: format!("configuration file is not valid YAML: {e}"),
     })?;
 
@@ -225,7 +225,7 @@ pub async fn put_config_section(
         code: "INVALID_SECTION",
         message,
     })?;
-    let rendered = serde_yaml_ng::to_string(&document).map_err(|e| ApiError::Internal {
+    let rendered = serde_norway::to_string(&document).map_err(|e| ApiError::Internal {
         message: format!("merged configuration could not be written: {e}"),
     })?;
 
@@ -298,7 +298,7 @@ mod tests {
     use super::*;
 
     fn yaml(text: &str) -> Value {
-        serde_yaml_ng::from_str(text).expect("test fixture parses")
+        serde_norway::from_str(text).expect("test fixture parses")
     }
 
     #[test]

@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn a_file_naming_no_method_still_authenticates_off_the_generated_key() {
-        let cfg: AuthConfig = serde_yaml_ng::from_str("metrics_auth_required: false\n").unwrap();
+        let cfg: AuthConfig = serde_norway::from_str("metrics_auth_required: false\n").unwrap();
         assert!(cfg.enabled);
         assert!(cfg.api_keys.is_empty());
         assert!(!cfg.bootstrap_key_path.is_empty());
@@ -261,13 +261,13 @@ mod tests {
 
     #[test]
     fn turning_authentication_off_is_an_explicit_false() {
-        let cfg: AuthConfig = serde_yaml_ng::from_str("enabled: false\n").unwrap();
+        let cfg: AuthConfig = serde_norway::from_str("enabled: false\n").unwrap();
         assert!(!cfg.enabled);
     }
 
     #[test]
     fn an_empty_bootstrap_path_refuses_the_generated_key() {
-        let cfg: AuthConfig = serde_yaml_ng::from_str("bootstrap_key_path: \"\"\n").unwrap();
+        let cfg: AuthConfig = serde_norway::from_str("bootstrap_key_path: \"\"\n").unwrap();
         assert!(cfg.enabled);
         assert!(cfg.bootstrap_key_path.is_empty());
     }
@@ -283,7 +283,7 @@ api_keys:
   - name: readonly
     key: sk-xyz789
 ";
-        let cfg: AuthConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: AuthConfig = serde_norway::from_str(yaml).unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.api_keys.len(), 2);
         assert_eq!(cfg.api_keys[0].name, "admin-key");
@@ -298,7 +298,7 @@ api_keys:
   - name: test
     key: sk-test
 ";
-        let cfg: AuthConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: AuthConfig = serde_norway::from_str(yaml).unwrap();
         assert_eq!(cfg.api_keys[0].role, "viewer");
     }
 
@@ -310,7 +310,7 @@ oidc:
   issuer: "https://idp.example.com"
   audience: "ebpfsentinel"
 "#;
-        let cfg: AuthConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: AuthConfig = serde_norway::from_str(yaml).unwrap();
         let oidc = cfg.oidc.as_ref().unwrap();
         assert_eq!(
             oidc.jwks_url,
@@ -328,7 +328,7 @@ jwt:
   issuer: sentinel
   audience: api
 ";
-        let cfg: AuthConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: AuthConfig = serde_norway::from_str(yaml).unwrap();
         assert_eq!(cfg.jwt.public_key_path, "/etc/sentinel/pub.pem");
         assert_eq!(cfg.jwt.issuer.as_deref(), Some("sentinel"));
         assert_eq!(cfg.jwt.audience.as_deref(), Some("api"));
@@ -415,7 +415,7 @@ jwt:
   issuer: dashboard
   audience: agent
 ";
-        let cfg: AuthConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: AuthConfig = serde_norway::from_str(yaml).unwrap();
         assert_eq!(cfg.jwt.algorithm, JwtAlgorithm::EdDSA);
         assert_eq!(
             cfg.jwt.jwks_url.as_deref(),
@@ -442,7 +442,7 @@ api_keys:
       - staging
 metrics_auth_required: true
 "#;
-        let cfg: AuthConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: AuthConfig = serde_norway::from_str(yaml).unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.jwt.public_key_path, "/etc/ebpfsentinel/pub.pem");
         assert_eq!(cfg.jwt.issuer.as_deref(), Some("myissuer"));

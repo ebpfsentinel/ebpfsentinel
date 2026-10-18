@@ -66,7 +66,7 @@ retention_days: 365
 buffer_size: 50000
 storage_path: /tmp/audit.redb
 ";
-        let cfg: AuditConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: AuditConfig = serde_norway::from_str(yaml).unwrap();
         assert!(!cfg.enabled);
         assert_eq!(cfg.retention_days, 365);
         assert_eq!(cfg.buffer_size, 50_000);
@@ -76,7 +76,7 @@ storage_path: /tmp/audit.redb
     #[test]
     fn optional_fields_use_defaults_when_omitted() {
         let yaml = "enabled: false\n";
-        let cfg: AuditConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: AuditConfig = serde_norway::from_str(yaml).unwrap();
         assert!(!cfg.enabled);
         assert_eq!(cfg.retention_days, 90);
         assert_eq!(cfg.buffer_size, 100_000);

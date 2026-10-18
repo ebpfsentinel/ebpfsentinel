@@ -424,7 +424,7 @@ mod tests {
     // ── Helpers ──────────────────────────────────────────────────────
 
     fn valid_http_rule() -> L7RuleConfig {
-        serde_yaml_ng::from_str(
+        serde_norway::from_str(
             r#"
 id: r1
 priority: 10
@@ -509,7 +509,7 @@ host: "*.example.com"
 
     #[test]
     fn to_domain_http_rule_with_host_pattern() {
-        let rule: L7RuleConfig = serde_yaml_ng::from_str(
+        let rule: L7RuleConfig = serde_norway::from_str(
             r#"
 id: http1
 priority: 5
@@ -547,7 +547,7 @@ content_type: application/json
 
     #[test]
     fn to_domain_tls_rule_with_sni_pattern() {
-        let rule: L7RuleConfig = serde_yaml_ng::from_str(
+        let rule: L7RuleConfig = serde_norway::from_str(
             r#"
 id: tls1
 priority: 1
@@ -568,7 +568,7 @@ sni: "*.evil.com"
 
     #[test]
     fn to_domain_grpc_rule() {
-        let rule: L7RuleConfig = serde_yaml_ng::from_str(
+        let rule: L7RuleConfig = serde_norway::from_str(
             r"
 id: grpc1
 priority: 2
@@ -594,7 +594,7 @@ grpc_method: MyMethod
 
     #[test]
     fn to_domain_smtp_rule() {
-        let rule: L7RuleConfig = serde_yaml_ng::from_str(
+        let rule: L7RuleConfig = serde_norway::from_str(
             r"
 id: smtp1
 priority: 3
@@ -615,7 +615,7 @@ command: EHLO
 
     #[test]
     fn to_domain_ftp_rule() {
-        let rule: L7RuleConfig = serde_yaml_ng::from_str(
+        let rule: L7RuleConfig = serde_norway::from_str(
             r"
 id: ftp1
 priority: 4
@@ -636,7 +636,7 @@ command: RETR
 
     #[test]
     fn to_domain_smb_rule() {
-        let rule: L7RuleConfig = serde_yaml_ng::from_str(
+        let rule: L7RuleConfig = serde_norway::from_str(
             r"
 id: smb1
 priority: 5
@@ -659,7 +659,7 @@ is_smb2: true
 
     #[test]
     fn to_domain_invalid_protocol_error() {
-        let rule: L7RuleConfig = serde_yaml_ng::from_str(
+        let rule: L7RuleConfig = serde_norway::from_str(
             r"
 id: bad1
 priority: 1

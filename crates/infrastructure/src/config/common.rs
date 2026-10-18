@@ -61,8 +61,8 @@ pub enum ConfigError {
     },
 }
 
-impl From<serde_yaml_ng::Error> for ConfigError {
-    fn from(e: serde_yaml_ng::Error) -> Self {
+impl From<serde_norway::Error> for ConfigError {
+    fn from(e: serde_norway::Error) -> Self {
         Self::Yaml(e.to_string())
     }
 }

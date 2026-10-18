@@ -174,7 +174,7 @@ mod tests {
         // `deny_unknown_fields` is what stops somebody thinking they widened
         // what is collected by writing a key into their config file.
         let refused: Result<TelemetryConfig, _> =
-            serde_yaml_ng::from_str("enabled: true\nendpoint: https://elsewhere.test\n");
+            serde_norway::from_str("enabled: true\nendpoint: https://elsewhere.test\n");
         assert!(refused.is_err());
     }
 }

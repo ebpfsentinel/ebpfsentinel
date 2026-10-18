@@ -26,7 +26,7 @@ pub struct AliasConfig {
 
     /// Values for `ip_set` (CIDRs) or `port_set` (ports/ranges).
     #[serde(default)]
-    pub values: Vec<serde_yaml_ng::Value>,
+    pub values: Vec<serde_norway::Value>,
 
     /// Child alias names for `nested` type.
     #[serde(default)]
@@ -339,10 +339,10 @@ pub fn aliases_to_domain(
 }
 
 /// Parse a YAML value to a string (handles both string and integer values).
-fn yaml_value_to_string(val: &serde_yaml_ng::Value) -> String {
+fn yaml_value_to_string(val: &serde_norway::Value) -> String {
     match val {
-        serde_yaml_ng::Value::String(s) => s.clone(),
-        serde_yaml_ng::Value::Number(n) => n.to_string(),
+        serde_norway::Value::String(s) => s.clone(),
+        serde_norway::Value::Number(n) => n.to_string(),
         other => format!("{other:?}"),
     }
 }
@@ -398,8 +398,8 @@ mod tests {
         AliasConfig {
             alias_type: "ip_set".to_string(),
             values: vec![
-                serde_yaml_ng::Value::String("192.168.0.0/16".to_string()),
-                serde_yaml_ng::Value::String("10.0.0.0/8".to_string()),
+                serde_norway::Value::String("192.168.0.0/16".to_string()),
+                serde_norway::Value::String("10.0.0.0/8".to_string()),
             ],
             aliases: Vec::new(),
             url: None,
@@ -429,7 +429,7 @@ mod tests {
     #[test]
     fn validate_ip_set_invalid_cidr() {
         let mut cfg = ip_set_config();
-        cfg.values = vec![serde_yaml_ng::Value::String("not-a-cidr".to_string())];
+        cfg.values = vec![serde_norway::Value::String("not-a-cidr".to_string())];
         assert!(cfg.validate("bad").is_err());
     }
 
@@ -578,8 +578,8 @@ mod tests {
         let cfg = AliasConfig {
             alias_type: "port_set".to_string(),
             values: vec![
-                serde_yaml_ng::Value::String("80-443".to_string()),
-                serde_yaml_ng::Value::Number(serde_yaml_ng::Number::from(8080)),
+                serde_norway::Value::String("80-443".to_string()),
+                serde_norway::Value::Number(serde_norway::Number::from(8080)),
             ],
             aliases: Vec::new(),
             url: None,
@@ -641,7 +641,7 @@ type: ip_set
 values: ["192.168.0.0/16", "10.0.0.0/8"]
 description: "RFC 1918 private networks"
 "#;
-        let cfg: AliasConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: AliasConfig = serde_norway::from_str(yaml).unwrap();
         assert_eq!(cfg.alias_type, "ip_set");
         assert_eq!(cfg.values.len(), 2);
         assert_eq!(

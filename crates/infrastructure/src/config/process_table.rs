@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn the_section_round_trips_through_yaml() {
         let yaml = "enabled: true\ncapacity: 1024\ncapture_command_line: true\n";
-        let cfg: ProcessTableConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: ProcessTableConfig = serde_norway::from_str(yaml).unwrap();
         assert_eq!(cfg.capacity, 1024);
         assert!(cfg.capture_command_line);
         assert!(cfg.validate().is_ok());
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn an_empty_section_is_the_default_section() {
-        let cfg: ProcessTableConfig = serde_yaml_ng::from_str("{}").unwrap();
+        let cfg: ProcessTableConfig = serde_norway::from_str("{}").unwrap();
         assert_eq!(cfg.capacity, default_capacity());
         assert!(cfg.enabled);
     }

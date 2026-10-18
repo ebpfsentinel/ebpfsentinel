@@ -619,7 +619,7 @@ mod tests {
 
     #[test]
     fn to_domain_rule_carries_the_configured_tenant() {
-        let rule: FirewallRuleConfig = serde_yaml_ng::from_str(
+        let rule: FirewallRuleConfig = serde_norway::from_str(
             r"
 id: fw-tenant
 priority: 10
@@ -637,7 +637,7 @@ tenant_id: 4
 
     #[test]
     fn to_domain_rule_without_a_tenant_is_global() {
-        let rule: FirewallRuleConfig = serde_yaml_ng::from_str(
+        let rule: FirewallRuleConfig = serde_norway::from_str(
             r"
 id: fw-global
 priority: 10

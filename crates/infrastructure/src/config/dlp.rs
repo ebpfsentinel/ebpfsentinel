@@ -321,7 +321,7 @@ regex: '\d{4}-\d{4}-\d{4}-\d{4}'
 severity: high
 data_type: pci
 ";
-        let pattern: DlpPatternConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let pattern: DlpPatternConfig = serde_norway::from_str(yaml).unwrap();
         assert_eq!(pattern.id, "pat-1");
         assert_eq!(pattern.name, "Credit Card");
         assert_eq!(pattern.data_type, "pci");

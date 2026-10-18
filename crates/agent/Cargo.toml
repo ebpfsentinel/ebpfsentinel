@@ -45,7 +45,7 @@ governor = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-rustls = { workspace = true }
 jsonwebtoken = { workspace = true }
-serde_yaml_ng = { workspace = true }
+serde_norway = { workspace = true }
 thiserror = { workspace = true }
 utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }

@@ -1029,7 +1029,7 @@ snat_rules:
     match_src: "192.168.0.0/16"
 dnat_rules: []
 "#;
-        let cfg: NatConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: NatConfig = serde_norway::from_str(yaml).unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.snat_rules.len(), 1);
         assert!(cfg.validate().is_ok());
@@ -1111,7 +1111,7 @@ nptv6_rules:
     external_prefix: "2001:db8:1::"
     prefix_len: 48
 "#;
-        let cfg: NatConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: NatConfig = serde_norway::from_str(yaml).unwrap();
         assert_eq!(cfg.nptv6_rules.len(), 1);
         assert!(cfg.validate().is_ok());
         let rule = cfg.nptv6_rules[0].to_domain_rule(&HashMap::new()).unwrap();
@@ -1210,7 +1210,7 @@ hairpin:
   internal_subnet: "192.168.1.0/24"
   hairpin_snat_ip: "192.168.1.1"
 "#;
-        let cfg: NatConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: NatConfig = serde_norway::from_str(yaml).unwrap();
         assert!(cfg.hairpin.enabled);
         assert!(cfg.validate().is_ok());
         let (subnet, _mask, _snat_ip) = cfg.hairpin.to_parsed().unwrap();

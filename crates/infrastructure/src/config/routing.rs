@@ -380,7 +380,7 @@ gateways:
       protocol: "tcp:443"
       interval_secs: 5
 "#;
-        let cfg: RoutingConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: RoutingConfig = serde_norway::from_str(yaml).unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.gateways.len(), 2);
         assert_eq!(cfg.gateways[0].id, 1);

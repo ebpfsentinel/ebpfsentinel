@@ -760,7 +760,7 @@ mod tests {
     // ── Pipe validation ─────────────────────────────────────────────
 
     fn valid_pipe_yaml() -> QosPipeConfig {
-        serde_yaml_ng::from_str(
+        serde_norway::from_str(
             r"
 id: pipe-1
 bandwidth: 100mbps
@@ -839,7 +839,7 @@ direction: egress
     // ── Queue validation ────────────────────────────────────────────
 
     fn valid_queue_yaml() -> QosQueueConfig {
-        serde_yaml_ng::from_str(
+        serde_norway::from_str(
             r"
 id: q-1
 pipe_id: pipe-1
@@ -870,7 +870,7 @@ pipe_id: pipe-1
     // ── Classifier validation ───────────────────────────────────────
 
     fn valid_classifier_yaml() -> QosClassifierConfig {
-        serde_yaml_ng::from_str(
+        serde_norway::from_str(
             r"
 id: cls-1
 queue_id: q-1
@@ -961,7 +961,7 @@ match_rule:
     // ── Section validation (referential integrity) ──────────────────
 
     fn valid_section_yaml() -> QosSectionConfig {
-        serde_yaml_ng::from_str(
+        serde_norway::from_str(
             r"
 enabled: true
 pipes:
@@ -1026,7 +1026,7 @@ classifiers:
 
     #[test]
     fn to_domain_pipe_correct_conversion() {
-        let pipe: QosPipeConfig = serde_yaml_ng::from_str(
+        let pipe: QosPipeConfig = serde_norway::from_str(
             r"
 id: pipe-test
 bandwidth: 1gbps
@@ -1051,7 +1051,7 @@ direction: both
 
     #[test]
     fn to_domain_pipe_and_classifier_carry_the_configured_tenant() {
-        let pipe: QosPipeConfig = serde_yaml_ng::from_str(
+        let pipe: QosPipeConfig = serde_norway::from_str(
             r"
 id: pipe-tenant
 bandwidth: 1gbps
@@ -1061,7 +1061,7 @@ tenant_id: 6
         .unwrap();
         assert_eq!(pipe.to_domain_pipe(&HashMap::new()).unwrap().tenant_id, 6);
 
-        let cls: QosClassifierConfig = serde_yaml_ng::from_str(
+        let cls: QosClassifierConfig = serde_norway::from_str(
             r"
 id: cls-tenant
 queue_id: q-1
@@ -1077,7 +1077,7 @@ tenant_id: 6
 
     #[test]
     fn to_domain_queue_correct_conversion() {
-        let q: QosQueueConfig = serde_yaml_ng::from_str(
+        let q: QosQueueConfig = serde_norway::from_str(
             r"
 id: q-test
 pipe_id: pipe-1
@@ -1093,7 +1093,7 @@ pipe_id: pipe-1
 
     #[test]
     fn to_domain_classifier_correct_conversion() {
-        let c: QosClassifierConfig = serde_yaml_ng::from_str(
+        let c: QosClassifierConfig = serde_norway::from_str(
             r#"
 id: cls-test
 queue_id: q-1
@@ -1119,7 +1119,7 @@ match_rule:
 
     #[test]
     fn to_domain_classifier_all_wildcards() {
-        let c: QosClassifierConfig = serde_yaml_ng::from_str(
+        let c: QosClassifierConfig = serde_norway::from_str(
             r"
 id: cls-wild
 queue_id: q-1
@@ -1186,7 +1186,7 @@ queue_id: q-1
 
     #[test]
     fn pipe_serde_defaults() {
-        let pipe: QosPipeConfig = serde_yaml_ng::from_str(
+        let pipe: QosPipeConfig = serde_norway::from_str(
             r"
 id: pipe-1
 bandwidth: 100mbps
@@ -1204,7 +1204,7 @@ bandwidth: 100mbps
 
     #[test]
     fn queue_serde_defaults() {
-        let q: QosQueueConfig = serde_yaml_ng::from_str(
+        let q: QosQueueConfig = serde_norway::from_str(
             r"
 id: q-1
 pipe_id: pipe-1

@@ -50,7 +50,7 @@ fn key_path(config_path: &str) -> String {
     let Ok(text) = fs::read_to_string(config_path) else {
         return DEFAULT_BOOTSTRAP_KEY_PATH.to_string();
     };
-    match serde_yaml_ng::from_str::<AuthPath>(&text) {
+    match serde_norway::from_str::<AuthPath>(&text) {
         Ok(parsed) => parsed
             .auth
             .and_then(|a| a.bootstrap_key_path)

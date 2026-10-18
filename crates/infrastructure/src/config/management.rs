@@ -101,14 +101,14 @@ mod tests {
 
     #[test]
     fn deserialise_default_when_block_absent() {
-        let parsed: Option<ManagementConfig> = serde_yaml_ng::from_str("").unwrap();
+        let parsed: Option<ManagementConfig> = serde_norway::from_str("").unwrap();
         assert!(parsed.is_none() || parsed == Some(ManagementConfig::default()));
     }
 
     #[test]
     fn deserialise_explicit_block() {
         let yaml = "operator_managed: true\noperator_endpoint: https://operator.example.com\n";
-        let cfg: ManagementConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: ManagementConfig = serde_norway::from_str(yaml).unwrap();
         assert!(cfg.operator_managed);
         assert_eq!(
             cfg.operator_endpoint.as_deref(),
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn rejects_unknown_fields() {
         let yaml = "operator_managed: true\nrogue_field: 1\n";
-        let err = serde_yaml_ng::from_str::<ManagementConfig>(yaml).unwrap_err();
+        let err = serde_norway::from_str::<ManagementConfig>(yaml).unwrap_err();
         assert!(err.to_string().contains("rogue_field"));
     }
 

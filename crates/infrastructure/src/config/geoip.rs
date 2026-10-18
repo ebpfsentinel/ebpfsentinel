@@ -126,7 +126,7 @@ source:
   asn_path: /opt/geoip/GeoLite2-ASN.mmdb
 refresh_interval_hours: 0
 ";
-        let cfg: GeoIpConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: GeoIpConfig = serde_norway::from_str(yaml).unwrap();
         assert!(cfg.enabled);
         assert!(matches!(cfg.source, GeoIpSource::File { .. }));
         if let GeoIpSource::File {
@@ -148,7 +148,7 @@ source:
   mode: url
   city_url: "https://mirror.example.com/GeoLite2-City.mmdb"
 "#;
-        let cfg: GeoIpConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: GeoIpConfig = serde_norway::from_str(yaml).unwrap();
         assert!(matches!(cfg.source, GeoIpSource::Url { .. }));
         assert!(cfg.validate().is_ok());
     }
@@ -162,7 +162,7 @@ source:
   account_id: "123456"
   license_key: "test-key"
 "#;
-        let cfg: GeoIpConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: GeoIpConfig = serde_norway::from_str(yaml).unwrap();
         assert!(matches!(cfg.source, GeoIpSource::MaxMindAccount { .. }));
         if let GeoIpSource::MaxMindAccount { edition_ids, .. } = &cfg.source {
             assert_eq!(edition_ids.len(), 2);
