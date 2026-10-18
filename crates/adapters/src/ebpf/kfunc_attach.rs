@@ -27,6 +27,7 @@ use tracing::info;
 /// `bpf(2)` commands.
 const BPF_LINK_CREATE: u32 = 28;
 const BPF_MAP_UPDATE_ELEM: u32 = 2;
+const BPF_RAW_TRACEPOINT_OPEN: u32 = 17;
 
 /// `enum bpf_attach_type` values (see `<linux/bpf.h>`).
 const BPF_XDP: u32 = 37;
@@ -51,6 +52,21 @@ struct LinkCreateAttr {
     _pad: u32,
     expected_revision: u64,
     _tail: [u64; 4],
+}
+
+/// Subset of `union bpf_attr` for `BPF_RAW_TRACEPOINT_OPEN`.
+///
+/// `name` is a pointer to the NUL-terminated tracepoint name (0), `prog_fd`
+/// (8), then the cookie the kernel hands back to the program (16). A raw
+/// tracepoint is bound by name at this point and not at load, which is why
+/// the program itself carries no attach type.
+#[repr(C)]
+#[derive(Default)]
+struct RawTracepointOpenAttr {
+    name: u64,
+    prog_fd: u32,
+    _pad: u32,
+    cookie: u64,
 }
 
 /// Subset of `union bpf_attr` for map element ops.
@@ -116,6 +132,17 @@ pub enum KfuncAttachError {
         program: String,
         path: String,
         attach_type: u32,
+        errno: i32,
+        message: String,
+    },
+
+    #[error("tracepoint name `{tracepoint}` is not a C string: {message}")]
+    RawTracepointName { tracepoint: String, message: String },
+
+    #[error("BPF_RAW_TRACEPOINT_OPEN(`{tracepoint}`) for `{program}`: errno={errno} {message}")]
+    RawTracepointOpen {
+        program: String,
+        tracepoint: String,
         errno: i32,
         message: String,
     },
@@ -251,6 +278,57 @@ fn link_create(
     }
     #[allow(clippy::cast_possible_truncation)]
     let raw = rc as RawFd;
+    // SAFETY: rc >= 0 is a valid link fd owned by this process.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+// ── raw tracepoint attach ───────────────────────────────────────────────
+
+/// Attach a raw-tracepoint program fd to the kernel tracepoint `tracepoint`.
+///
+/// `BPF_RAW_TRACEPOINT_OPEN` rather than `BPF_LINK_CREATE`: it is the command
+/// the kernel offers for this program type, and it returns a link fd all the
+/// same, so the attachment dies with the agent exactly as the cgroup and TCX
+/// links do. No capability is checked here - the kernel asked for them when
+/// the program was loaded, which under a BPF token happens in the agent's own
+/// user namespace.
+///
+/// A kernel without the named tracepoint answers `ENOENT`, which is a reason
+/// to report rather than a reason to fail: the caller degrades.
+pub fn attach_raw_tracepoint(
+    program: &str,
+    prog_fd: RawFd,
+    tracepoint: &str,
+) -> Result<OwnedFd, KfuncAttachError> {
+    let name = CString::new(tracepoint).map_err(|e| KfuncAttachError::RawTracepointName {
+        tracepoint: tracepoint.to_owned(),
+        message: e.to_string(),
+    })?;
+    let mut attr = RawTracepointOpenAttr {
+        name: name.as_ptr() as u64,
+        #[allow(clippy::cast_sign_loss)]
+        prog_fd: prog_fd as u32,
+        ..Default::default()
+    };
+    let rc = unsafe {
+        bpf(
+            BPF_RAW_TRACEPOINT_OPEN,
+            (&raw mut attr).cast(),
+            std::mem::size_of::<RawTracepointOpenAttr>(),
+        )
+    };
+    if rc < 0 {
+        let err = io::Error::last_os_error();
+        return Err(KfuncAttachError::RawTracepointOpen {
+            program: program.to_owned(),
+            tracepoint: tracepoint.to_owned(),
+            errno: err.raw_os_error().unwrap_or(0),
+            message: err.to_string(),
+        });
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let raw = rc as RawFd;
+    info!(program, tracepoint, "raw tracepoint attached");
     // SAFETY: rc >= 0 is a valid link fd owned by this process.
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }

@@ -132,6 +132,10 @@ pub struct KernelFeaturesResponse {
     /// refuse the attach, and a flow with no workload on it is the same
     /// silence either way.
     pub attribution: AttributionReport,
+    /// Whether the exec and exit tracepoints behind the process table are on
+    /// this host, and why not where they are not. Read the same way as the
+    /// attribution block above: from what the attach did.
+    pub process_tracing: ProcessTracingReport,
 }
 
 /// What became of the cgroup socket hooks on this host.
@@ -149,6 +153,22 @@ pub struct AttributionReport {
     pub reason: Option<String>,
     /// Whether the warden created the links, which is the rootless posture.
     pub brokered: bool,
+}
+
+/// What became of the two process tracepoints on this host.
+#[derive(Serialize, ToSchema)]
+pub struct ProcessTracingReport {
+    /// True only when both tracepoints attached. One of the two is reported
+    /// as not attached: a table fed by exec alone never forgets a process,
+    /// and one fed by exit alone never learns of one.
+    pub attached: bool,
+    /// The tracepoints that attached, named as the kernel programs are.
+    pub tracepoints: Vec<String>,
+    /// Why nothing is attached, in the words the attach failed with.
+    pub reason: Option<String>,
+    /// Whether the table keeps command lines, which is off unless the
+    /// configuration asked for it.
+    pub command_line: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -394,6 +414,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
 
     // Read once, so both arms below answer from the same reading.
     let attribution = attribution_report(adapters::ebpf::attribution_attach::status());
+    let process_tracing = process_tracing_report(adapters::ebpf::process_attach::status());
 
     let Some(report) = report else {
         return KernelFeaturesResponse {
@@ -404,6 +425,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
             helpers: Vec::new(),
             missing_required: Vec::new(),
             attribution,
+            process_tracing,
         };
     };
 
@@ -444,6 +466,17 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
             })
             .collect(),
         attribution,
+        process_tracing,
+    }
+}
+
+/// Restate a process-tracing status as the endpoint publishes it.
+fn process_tracing_report(status: adapters::ebpf::ProcessTracingStatus) -> ProcessTracingReport {
+    ProcessTracingReport {
+        attached: status.attached,
+        tracepoints: status.tracepoints,
+        reason: status.reason,
+        command_line: status.command_line,
     }
 }
 

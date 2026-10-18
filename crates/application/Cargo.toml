@@ -20,6 +20,7 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 ports = { workspace = true, features = ["test-utils"] }
+async-trait = { workspace = true }
 criterion = { workspace = true }
 
 [[bench]]

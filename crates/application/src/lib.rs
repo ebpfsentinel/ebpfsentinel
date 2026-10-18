@@ -78,6 +78,7 @@ pub mod lb_service_impl;
 pub mod nat_aliases;
 pub mod nat_service_impl;
 pub mod packet_pipeline;
+pub mod process_table_service;
 pub mod qos_service_impl;
 pub mod ratelimit_service_impl;
 pub mod reputation_enforcement;

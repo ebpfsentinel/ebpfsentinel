@@ -14,6 +14,7 @@ pub mod interface_group;
 pub mod ipv6;
 pub mod loadbalancer;
 pub mod nat;
+pub mod process;
 pub mod qos;
 pub mod ratelimit;
 pub mod scrub;

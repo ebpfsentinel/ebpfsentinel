@@ -1179,6 +1179,8 @@ pub struct KernelFeaturesResponse {
     pub helpers: Vec<HelperSupportEntry>,
     pub missing_required: Vec<MissingHelperEntry>,
     pub attribution: AttributionReport,
+    #[serde(default)]
+    pub process_tracing: ProcessTracingReport,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1188,6 +1190,87 @@ pub struct AttributionReport {
     pub hooks: Vec<String>,
     pub reason: Option<String>,
     pub brokered: bool,
+}
+
+/// What became of the two process tracepoints. Defaulted on decode, so an
+/// older agent that reports none still answers this command.
+#[derive(Deserialize, Serialize, Default)]
+pub struct ProcessTracingReport {
+    pub attached: bool,
+    #[serde(default)]
+    pub tracepoints: Vec<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub command_line: bool,
+}
+
+// ── Processes ────────────────────────────────
+
+/// The process table, as `GET /api/v1/processes` answers it.
+#[derive(Deserialize, Serialize)]
+pub struct ProcessListResponse {
+    pub tracing: ProcessTracingReport,
+    pub stats: ProcessTableStatsResponse,
+    pub processes: Vec<ProcessEntryResponse>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ProcessTableStatsResponse {
+    pub capacity: usize,
+    pub entries: usize,
+    pub recorded: u64,
+    pub replaced: u64,
+    pub evicted: u64,
+    pub purged: u64,
+    pub missing_exit: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ProcessEntryResponse {
+    pub pid: u32,
+    #[serde(default)]
+    pub parent_pid: Option<u32>,
+    pub comm: String,
+    pub identity: ProcessIdentityResponse,
+    #[serde(default)]
+    pub command_line: Option<String>,
+    pub uid: u32,
+    pub gid: u32,
+    pub cgroup_id: u64,
+    #[serde(default)]
+    pub container: Option<ProcessContainerResponse>,
+    pub started_at_ns: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ProcessIdentityResponse {
+    pub kind: String,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ProcessContainerResponse {
+    pub id: String,
+    pub runtime: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub image: Option<String>,
+}
+
+impl ProcessEntryResponse {
+    /// What the row calls the executable: its path where the identity
+    /// carries one, and the kernel's `comm` in brackets where it does not,
+    /// so a row never silently claims a name it did not resolve.
+    #[must_use]
+    pub fn executable(&self) -> String {
+        match self.identity.path.as_deref() {
+            Some(path) => path.to_string(),
+            None => format!("[{}]", self.comm),
+        }
+    }
 }
 
 // ── Operations ───────────────────────────────
@@ -1727,6 +1810,26 @@ impl ApiClient {
     pub async fn revoke_response(&self, id: &str) -> anyhow::Result<ResponseActionResponse> {
         let resp = self
             .request(reqwest::Method::DELETE, &format!("/api/v1/responses/{id}"))
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── Processes ─────────────────────────────────────────────────────
+
+    pub async fn list_processes(&self) -> anyhow::Result<ProcessListResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/processes")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn get_process(&self, pid: u32) -> anyhow::Result<ProcessEntryResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, &format!("/api/v1/processes/{pid}"))
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

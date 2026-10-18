@@ -33,6 +33,8 @@ pub mod metrics_reader;
 pub mod nat_map_manager;
 pub mod netkit;
 pub mod netkit_discovery;
+pub mod process_attach;
+pub mod process_event_reader;
 pub mod program_name;
 pub mod qos_map_manager;
 pub mod ratelimit_lpm_manager;
@@ -97,6 +99,8 @@ pub use map_fill::{
 pub use map_manager::FirewallMapManager;
 pub use metrics_reader::MetricsReader;
 pub use nat_map_manager::NatMapManager;
+pub use process_attach::{ProcessTracingAttacher, ProcessTracingStatus};
+pub use process_event_reader::ProcessEventReader;
 pub use program_name::published_program_name;
 pub use qos_map_manager::QosMapManager;
 pub use ratelimit_lpm_manager::RateLimitLpmManager;

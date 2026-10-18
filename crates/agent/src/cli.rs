@@ -206,6 +206,9 @@ pub enum Command {
     /// TLS fingerprints: JA4+ cache and analysis
     Fingerprints(DomainArgs<FingerprintsCommand>),
 
+    /// Processes: what a pid is, from its exec to its exit
+    Processes(DomainArgs<ProcessesCommand>),
+
     /// Manual response actions: block/throttle with TTL
     Responses(DomainArgs<ResponsesCommand>),
 
@@ -493,6 +496,23 @@ pub enum FingerprintsCommand {
     Summary,
     /// Show the JA4S server-fingerprint cache summary
     Ja4s,
+}
+
+// ── Processes ───────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum ProcessesCommand {
+    /// List the processes alive on the node, newest first
+    List {
+        /// Show at most this many rows (0 for every one of them)
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Show one process by pid
+    Show {
+        /// The process id
+        pid: u32,
+    },
 }
 
 // ── Capture ─────────────────────────────────────────────────────────────

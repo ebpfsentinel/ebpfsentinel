@@ -13,8 +13,9 @@ use cli::{
     AlertsCommand, AliasesCommand, AuditCommand, BlacklistAction, CaptureCommand, Command,
     ConfigCommand, DdosCommand, DlpCommand, DnsCommand, DomainsCommand, EbpfCommand, FeedsAction,
     FingerprintsCommand, FirewallCommand, GeoipCommand, IdsCommand, IpsCommand, L7Command,
-    LbCommand, MitreCommand, NatCommand, NptV6Command, QosCommand, RatelimitCommand,
-    ResponsesCommand, RoutingCommand, ThreatintelCommand, TlsCommand, ZonesCommand,
+    LbCommand, MitreCommand, NatCommand, NptV6Command, ProcessesCommand, QosCommand,
+    RatelimitCommand, ResponsesCommand, RoutingCommand, ThreatintelCommand, TlsCommand,
+    ZonesCommand,
 };
 
 fn main() -> Result<()> {
@@ -486,6 +487,18 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
                     commands::cmd_fingerprints_summary(&client, output).await
                 }
                 FingerprintsCommand::Ja4s => commands::cmd_fingerprints_ja4s(&client, output).await,
+            }
+        }
+
+        Some(Command::Processes(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                ProcessesCommand::List { limit } => {
+                    commands::cmd_processes_list(&client, limit, output).await
+                }
+                ProcessesCommand::Show { pid } => {
+                    commands::cmd_processes_show(&client, pid, output).await
+                }
             }
         }
 

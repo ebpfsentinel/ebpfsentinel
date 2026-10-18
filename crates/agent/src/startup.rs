@@ -1822,6 +1822,9 @@ pub async fn run(
     // The cgroup links live here until the manager takes them over: dropping
     // the attacher detaches every hook, so it must outlive the load.
     let mut attribution_attacher: Option<adapters::ebpf::AttributionAttacher> = None;
+    let mut process_tracing_ok = false;
+    // The tracepoint links live here until the manager takes them over.
+    let mut process_attacher: Option<adapters::ebpf::ProcessTracingAttacher> = None;
     // What the startup firewall handed over, for the reload path to keep.
     let mut fw_lpm_coordinator: Option<
         Arc<dyn ports::secondary::lpm_coordinator_port::LpmCoordinatorPort>,
@@ -1841,6 +1844,13 @@ pub async fn run(
     let dlp_cancel = readers.child_token();
     let ct_cancel = readers.child_token();
     let attribution_cancel = readers.child_token();
+    let process_cancel = readers.child_token();
+    // The exec and exit events cross from the ring-buffer reader to the table
+    // here. The table is built further down, once the container resolver and
+    // the enrichers exist, so the buffer is what holds the first execs of the
+    // node until it does.
+    let (process_tx, process_rx) =
+        tokio::sync::mpsc::channel::<domain::process::entity::ProcessLifecycleEvent>(4096);
 
     if ebpf_capable {
         // Pins from a previous generation cannot be inspected - the kernel
@@ -2492,6 +2502,61 @@ pub async fn run(
             false
         };
 
+        // 10f-ter. Process tracing (exec and exit tracepoints)
+        process_tracing_ok = if config.process_table.enabled {
+            match try_load_process_tracing(&ebpf_dir, &config) {
+                Ok((loader, metrics_rdr, reader, attacher, status)) => {
+                    let attached = status.attached;
+                    if attached {
+                        process_attacher = Some(attacher);
+                        if let Some(rdr) = metrics_rdr {
+                            metrics_readers.push(rdr);
+                        }
+                        let tx = process_tx.clone();
+                        let rb_obs = RingBufObserver::new(
+                            "tracepoint-process",
+                            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+                        );
+                        let task_cancel = process_cancel.clone();
+                        tokio::spawn(async move {
+                            reader.run(tx, task_cancel, rb_obs).await;
+                        });
+                        managed.push(("tracepoint_process", loader, process_cancel.clone()));
+                        metrics.set_ebpf_program_status("tracepoint_process", true);
+                        info!("eBPF process tracing active");
+                    } else {
+                        // The object loaded and the kernel refused the attach,
+                        // so the table would fill from one tracepoint or from
+                        // neither. Both go, and the status carries the reason.
+                        metrics.set_ebpf_program_status("tracepoint_process", false);
+                    }
+                    attached
+                }
+                Err(e) => {
+                    warn!("process tracing load failed (degraded mode): {e}");
+                    adapters::ebpf::process_attach::publish_status(
+                        adapters::ebpf::ProcessTracingStatus {
+                            attached: false,
+                            tracepoints: Vec::new(),
+                            reason: Some(e.to_string()),
+                            command_line: config.process_table.capture_command_line,
+                        },
+                    );
+                    metrics.set_ebpf_program_status("tracepoint_process", false);
+                    false
+                }
+            }
+        } else {
+            metrics.clear_ebpf_program_status("tracepoint_process");
+            adapters::ebpf::process_attach::publish_status(adapters::ebpf::ProcessTracingStatus {
+                attached: false,
+                tracepoints: Vec::new(),
+                reason: Some("the process table is turned off in the configuration".to_string()),
+                command_line: false,
+            });
+            false
+        };
+
         // 10g. TC ConnTrack
         ct_ok = if config.conntrack.enabled {
             match try_load_tc_conntrack(&ebpf_dir, &config) {
@@ -2726,6 +2791,7 @@ pub async fn run(
         status.insert("xdp-loadbalancer".to_string(), lb_ok);
         status.insert("xdp-vip-announcer".to_string(), vip_announcer_ok);
         status.insert("cgroup-attribution".to_string(), attribution_ok);
+        status.insert("tracepoint-process".to_string(), process_tracing_ok);
     }
 
     // ── Anonymous usage telemetry ───────────────────────────────
@@ -2885,6 +2951,11 @@ pub async fn run(
         // The cgroup links come across with the loader that owns the
         // programs, so a reload that turns attribution off detaches them.
         mgr.attribution = attribution_attacher;
+        // Same for the tracepoint links, with the channel the reader a
+        // reload spawns writes into: the table itself keeps draining it
+        // across a program that goes away and comes back.
+        mgr.process_tracing = process_attacher;
+        mgr.process_events = Some(process_tx.clone());
         // Move map holder fields into the manager
         mgr.config_flags = ebpf_map_holder.config_flags;
         mgr.l7_ports = ebpf_map_holder.l7_ports;
@@ -3045,6 +3116,49 @@ pub async fn run(
         docker: docker_state,
         kubernetes: kubernetes_state,
     }));
+
+    // ── 10f-bis. The process table ──────────────────────────────────
+    //
+    // Built here rather than beside the tracepoints, because what a process
+    // is includes the container it runs in, and the resolver and enrichers
+    // that answer that have only just been decided. The events the reader
+    // produced in between waited in the channel.
+    if config.process_table.enabled {
+        let mut svc = application::process_table_service::ProcessTableService::new(
+            config.process_table.capacity,
+            config.process_table.capture_command_line,
+        )
+        .with_executables(Arc::new(adapters::container::ProcExecutableResolver::new(
+            &coverage_proc,
+        )))
+        .with_details(Arc::new(adapters::container::ProcDetailsResolver::new(
+            &coverage_proc,
+        )));
+        if let Some(ref resolver) = container_resolver {
+            svc = svc.with_containers(Arc::clone(resolver));
+        }
+        if let Some(ref enricher) = docker_enricher {
+            svc = svc.with_metadata_enricher(Arc::clone(enricher));
+        }
+        if let Some(ref enricher) = kubernetes_enricher {
+            svc = svc.with_metadata_enricher(Arc::clone(enricher));
+        }
+        let svc = Arc::new(svc);
+        app_state.install_process_table_service(Arc::clone(&svc));
+        let table_cancel = cancel_token.clone();
+        tokio::spawn(async move {
+            svc.run(process_rx, table_cancel).await;
+        });
+        info!(
+            capacity = config.process_table.capacity,
+            command_line = config.process_table.capture_command_line,
+            "process table running"
+        );
+    } else {
+        // Nothing writes into the channel when the table is off, and the
+        // receiver going out of scope here is what makes that explicit.
+        drop(process_rx);
+    }
 
     // ── 11. Spawn event dispatcher (replaces flat event consumer) ───
     let dispatcher = EventDispatcher::new(
@@ -4720,6 +4834,37 @@ pub fn try_load_cgroup_attribution(
     }
     let status = attacher.attach_all(&loader, &config.attribution.cgroup_root);
     Ok((loader, metrics_rdr, attacher, status))
+}
+
+/// Load the process-tracing object and attach its two tracepoints.
+///
+/// Returns the loader, the counters, the ring-buffer reader, the attacher
+/// holding the links and what can be said about the result. A kernel that
+/// refuses the attach comes back as a status carrying the reason: the table
+/// stays empty and the agent runs on, which is a degradation and not a
+/// failure.
+pub fn try_load_process_tracing(
+    ebpf_dir: &str,
+    config: &AgentConfig,
+) -> anyhow::Result<(
+    EbpfLoader,
+    Option<MetricsReader>,
+    adapters::ebpf::ProcessEventReader,
+    adapters::ebpf::ProcessTracingAttacher,
+    adapters::ebpf::ProcessTracingStatus,
+)> {
+    let program_bytes = read_ebpf_program(ebpf_dir, "tracepoint-process")?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "PROCESS_METRICS").ok();
+    let reader = adapters::ebpf::ProcessEventReader::new(loader.ebpf_mut())?;
+
+    // The tracepoints read the current task and nothing else, so no cgroup
+    // path is resolved and the warden has nothing to broker: the BPF token
+    // the agent loaded with is what the attach is checked against.
+    let mut attacher = adapters::ebpf::ProcessTracingAttacher::new();
+    let status = attacher.attach_all(&loader, config.process_table.capture_command_line);
+    Ok((loader, metrics_rdr, reader, attacher, status))
 }
 
 /// Load the uprobe DLP program: attach uprobes to SSL functions, start DLP event reader.

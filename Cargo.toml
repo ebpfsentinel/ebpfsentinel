@@ -34,6 +34,7 @@ exclude = [
     "crates/ebpf-programs/tc-scrub",
     "crates/ebpf-programs/uprobe-dlp",
     "crates/ebpf-programs/cgroup-attribution",
+    "crates/ebpf-programs/tracepoint-process",
 ]
 
 [workspace.package]

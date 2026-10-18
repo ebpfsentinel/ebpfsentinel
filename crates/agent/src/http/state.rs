@@ -20,13 +20,14 @@ use application::ips_service_impl::IpsAppService;
 use application::l7_service_impl::L7AppService;
 use application::lb_service_impl::LbAppService;
 use application::nat_service_impl::NatAppService;
+use application::process_table_service::ProcessTableService;
 use application::qos_service_impl::QosAppService;
 use application::ratelimit_service_impl::RateLimitAppService;
 use application::routing_service_impl::RoutingAppService;
 use application::threatintel_service_impl::ThreatIntelAppService;
 use application::vip_announcer_service_impl::VipAnnouncerService;
 use application::zone_service_impl::ZoneAppService;
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use domain::alert::entity::Alert;
 use domain::conntrack::entity::ConntrackEvent;
 use infrastructure::config::AgentConfig;
@@ -124,6 +125,13 @@ pub struct AppState {
     /// decided it. Swapped once the resolver and the enrichers are built, so
     /// a status read before that says `starting` rather than guessing.
     pub container_coverage: Arc<ArcSwap<ContainerCoverage>>,
+    /// The process table, where the exec and exit tracepoints attached.
+    /// Empty when the table is turned off or the kernel refused the hooks, in
+    /// which case the route says so rather than answering with an empty list
+    /// that looks like a node running nothing. Swapped in once the container
+    /// resolver and the enrichers have been built, like the coverage above:
+    /// a table answering before that would name no container.
+    pub process_table_service: ArcSwapOption<ProcessTableService>,
 }
 
 impl AppState {
@@ -156,6 +164,7 @@ impl AppState {
             conntrack_service: None,
             ddos_service: None,
             dlp_service: None,
+            process_table_service: ArcSwapOption::empty(),
             nat_service: None,
             alias_service: None,
             routing_service: None,
@@ -312,6 +321,12 @@ impl AppState {
     pub fn with_dlp_service(mut self, svc: Arc<ArcSwap<DlpAppService>>) -> Self {
         self.dlp_service = Some(svc);
         self
+    }
+
+    /// Hand the process table over, once it has everything it names a
+    /// process with.
+    pub fn install_process_table_service(&self, svc: Arc<ProcessTableService>) {
+        self.process_table_service.store(Some(svc));
     }
 
     /// Attach a NAT service.

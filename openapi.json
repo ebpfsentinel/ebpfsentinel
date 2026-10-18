@@ -4773,6 +4773,147 @@
         ]
       }
     },
+    "/api/v1/processes": {
+      "get": {
+        "tags": [
+          "Processes"
+        ],
+        "summary": "`GET /api/v1/processes` - the processes alive on this node.",
+        "operationId": "list_processes",
+        "responses": {
+          "200": {
+            "description": "The process table",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The process table is not running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/processes/{pid}": {
+      "get": {
+        "tags": [
+          "Processes"
+        ],
+        "summary": "`GET /api/v1/processes/{pid}` - one process, by pid.",
+        "operationId": "get_process",
+        "parameters": [
+          {
+            "name": "pid",
+            "in": "path",
+            "description": "Process id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The process",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessEntryResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such process in the table",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The process table is not running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/qos/classifiers": {
       "get": {
         "tags": [
@@ -9686,7 +9827,8 @@
           "program_types",
           "helpers",
           "missing_required",
-          "attribution"
+          "attribution",
+          "process_tracing"
         ],
         "properties": {
           "attribution": {
@@ -9711,6 +9853,10 @@
           },
           "probed": {
             "type": "boolean"
+          },
+          "process_tracing": {
+            "$ref": "#/components/schemas/ProcessTracingReport",
+            "description": "Whether the exec and exit tracepoints behind the process table are on\nthis host, and why not where they are not. Read the same way as the\nattribution block above: from what the attach did."
           },
           "program_types": {
             "type": "array",
@@ -10462,6 +10608,265 @@
           "mode": {
             "type": "string",
             "description": "`alert` or `block`."
+          }
+        }
+      },
+      "ProcessContainerResponse": {
+        "type": "object",
+        "description": "The container a process runs in, where it runs in one. Absent means the\nhost, which is why the field is omitted rather than filled with a name.",
+        "required": [
+          "id",
+          "runtime"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The image, where the enricher that answered carries one."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The container name an enricher resolved, or the namespaced pod name\nunder Kubernetes. Absent when no enricher answered."
+          },
+          "runtime": {
+            "type": "string",
+            "description": "`docker`, `containerd`, `crio`, `podman` or `unknown`."
+          }
+        }
+      },
+      "ProcessEntryResponse": {
+        "type": "object",
+        "description": "One row of the table.",
+        "required": [
+          "pid",
+          "comm",
+          "identity",
+          "uid",
+          "gid",
+          "cgroup_id",
+          "started_at_ns"
+        ],
+        "properties": {
+          "cgroup_id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "comm": {
+            "type": "string"
+          },
+          "command_line": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "container": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProcessContainerResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "gid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "identity": {
+            "$ref": "#/components/schemas/ProcessIdentityResponse"
+          },
+          "parent_pid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "started_at_ns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "uid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "ProcessIdentityResponse": {
+        "type": "object",
+        "description": "What the table knows a process by. `kind` is `path` or `unknown`; the\nhash of the executable is not computed yet, and when it is it arrives as\na third kind rather than as a field nobody can tell apart from absent.",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`path` or `unknown`."
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The executable path, where the identity carries one."
+          }
+        }
+      },
+      "ProcessListResponse": {
+        "type": "object",
+        "description": "`GET /api/v1/processes`.",
+        "required": [
+          "tracing",
+          "stats",
+          "processes"
+        ],
+        "properties": {
+          "processes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProcessEntryResponse"
+            },
+            "description": "Newest first, so a reader watching a node sees what just started."
+          },
+          "stats": {
+            "$ref": "#/components/schemas/ProcessTableStatsResponse"
+          },
+          "tracing": {
+            "$ref": "#/components/schemas/ProcessTracingResponse"
+          }
+        }
+      },
+      "ProcessTableStatsResponse": {
+        "type": "object",
+        "description": "The bound and what it cost, so a reader can tell an empty table from a\nfull one shedding its oldest entry.",
+        "required": [
+          "capacity",
+          "entries",
+          "recorded",
+          "replaced",
+          "evicted",
+          "purged",
+          "missing_exit"
+        ],
+        "properties": {
+          "capacity": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "entries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "evicted": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "missing_exit": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "purged": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "recorded": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "replaced": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "ProcessTracingReport": {
+        "type": "object",
+        "description": "What became of the two process tracepoints on this host.",
+        "required": [
+          "attached",
+          "tracepoints",
+          "command_line"
+        ],
+        "properties": {
+          "attached": {
+            "type": "boolean",
+            "description": "True only when both tracepoints attached. One of the two is reported\nas not attached: a table fed by exec alone never forgets a process,\nand one fed by exit alone never learns of one."
+          },
+          "command_line": {
+            "type": "boolean",
+            "description": "Whether the table keeps command lines, which is off unless the\nconfiguration asked for it."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why nothing is attached, in the words the attach failed with."
+          },
+          "tracepoints": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The tracepoints that attached, named as the kernel programs are."
+          }
+        }
+      },
+      "ProcessTracingResponse": {
+        "type": "object",
+        "description": "What the agent can say about the two tracepoints behind the table.",
+        "required": [
+          "attached",
+          "tracepoints",
+          "command_line"
+        ],
+        "properties": {
+          "attached": {
+            "type": "boolean",
+            "description": "Both tracepoints are attached and the table is being filled."
+          },
+          "command_line": {
+            "type": "boolean",
+            "description": "Command lines are being kept. Off by default: an argument vector\ncarries secrets often enough that keeping it is a decision."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the table is empty or stale, in one sentence. `None` when\neverything attached."
+          },
+          "tracepoints": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The tracepoints that did attach, in attach order."
           }
         }
       },
@@ -11724,6 +12129,10 @@
     {
       "name": "Fingerprints",
       "description": "JA4+ TLS fingerprint cache and analysis"
+    },
+    {
+      "name": "Processes",
+      "description": "The process table: what a pid is, from its exec to its exit"
     },
     {
       "name": "Captures",

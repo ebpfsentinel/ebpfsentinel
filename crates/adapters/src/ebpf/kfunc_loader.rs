@@ -88,6 +88,7 @@ const BPF_PROG_TYPE_SCHED_CLS: u32 = 3;
 const BPF_PROG_TYPE_XDP: u32 = 6;
 const BPF_PROG_TYPE_CGROUP_SOCK: u32 = 9;
 const BPF_PROG_TYPE_SOCK_OPS: u32 = 15;
+const BPF_PROG_TYPE_RAW_TRACEPOINT: u32 = 17;
 const BPF_PROG_TYPE_CGROUP_SOCK_ADDR: u32 = 18;
 
 /// `BPF_CGROUP_SOCK_OPS` (`enum bpf_attach_type`). A `sockops` program carries
@@ -639,6 +640,14 @@ fn prog_attrs(section: &ProgramSection) -> (u32, u32, u32) {
             0,
         ),
         ProgramSection::SockOps => (BPF_PROG_TYPE_SOCK_OPS, BPF_CGROUP_SOCK_OPS, 0),
+        // The process lifecycle tracepoints. A raw tracepoint carries no
+        // attach type at all: the kernel binds it to a tracepoint by name at
+        // attach time, and the name lives in the section rather than in the
+        // load. `tp_btf` would have needed an `attach_btf_id` resolved at
+        // load, which this loader does not carry, and buys nothing here: both
+        // programs read the current task through helpers and never walk a
+        // kernel structure.
+        ProgramSection::RawTracePoint => (BPF_PROG_TYPE_RAW_TRACEPOINT, 0, 0),
         _ => (0, 0, 0),
     }
 }

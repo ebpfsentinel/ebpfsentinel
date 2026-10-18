@@ -25,6 +25,7 @@ mod l7;
 mod loadbalancer;
 mod management;
 mod nat;
+mod process_table;
 mod qos;
 mod ratelimit;
 mod response;
@@ -72,6 +73,7 @@ pub use loadbalancer::{
 };
 pub use management::ManagementConfig;
 pub use nat::{HairpinNatConfig, NatConfig, NatRuleConfig, NptV6RuleConfig};
+pub use process_table::ProcessTableConfig;
 pub use qos::{QosClassifierConfig, QosPipeConfig, QosQueueConfig, QosSectionConfig};
 pub use ratelimit::{RateLimitRuleConfig, RateLimitSectionConfig};
 pub use response::{DEFAULT_MAX_RESPONSE_TTL_SECS, MAX_RESPONSE_TTL_CEILING_SECS, ResponseConfig};
@@ -166,6 +168,12 @@ pub struct AgentConfig {
     /// socket hooks at the moment the socket is opened.
     #[serde(default)]
     pub attribution: AttributionConfig,
+
+    /// The process table: the executable, the parent and the container
+    /// behind a pid, kept from the exec that created it to the exit that
+    /// ended it.
+    #[serde(default)]
+    pub process_table: ProcessTableConfig,
 
     #[serde(default)]
     pub nat: NatConfig,
@@ -434,6 +442,9 @@ impl AgentConfig {
 
         // Validate the socket-attribution block
         self.attribution.validate()?;
+
+        // Validate the process-table block
+        self.process_table.validate()?;
 
         // Validate multi-WAN gateways
         self.routing.validate()?;

@@ -71,6 +71,14 @@ pub struct EbpfProgramManager {
     /// The cgroup links of the socket-attribution hooks, where they attached.
     /// Dropping it detaches them, which is how a reload turns attribution off.
     pub attribution: Option<adapters::ebpf::AttributionAttacher>,
+    /// The links of the exec and exit tracepoints, where they attached.
+    /// Dropping it detaches them, which is how a reload turns the process
+    /// table's source off.
+    pub process_tracing: Option<adapters::ebpf::ProcessTracingAttacher>,
+    /// Where a process event goes. The table drains this channel for the
+    /// life of the agent, so a reload that loads the tracepoints again only
+    /// has to hand the new reader a clone of this sender.
+    pub process_events: Option<mpsc::Sender<domain::process::entity::ProcessLifecycleEvent>>,
 }
 
 impl EbpfProgramManager {
@@ -97,6 +105,8 @@ impl EbpfProgramManager {
             lpm_coordinator: None,
             ipset_wired: false,
             attribution: None,
+            process_tracing: None,
+            process_events: None,
         }
     }
 
@@ -197,6 +207,7 @@ impl EbpfProgramManager {
             "tc_scrub" => self.enable_tc_scrub(config).await,
             "uprobe_dlp" => self.enable_uprobe_dlp(config).await,
             "cgroup_attribution" => self.enable_cgroup_attribution(config).await,
+            "tracepoint_process" => self.enable_process_tracing(config).await,
             _ => {
                 warn!(
                     program = name,
@@ -243,6 +254,15 @@ impl EbpfProgramManager {
                 // nothing holding their object. Detaching first is what makes
                 // the drop below complete.
                 if let Some(mut attacher) = self.attribution.take() {
+                    attacher.detach_all();
+                }
+            }
+            "tracepoint_process" => {
+                // Same shape as the cgroup hooks above: the tracepoint links
+                // outlive the handle, so they come off before the loader does.
+                // The table keeps whatever it already knows and stops learning,
+                // which is why the published status says the source is off.
+                if let Some(mut attacher) = self.process_tracing.take() {
                     attacher.detach_all();
                 }
             }
@@ -616,6 +636,48 @@ impl EbpfProgramManager {
         );
 
         info!("cgroup-attribution enabled via hot-reload");
+        Ok(())
+    }
+
+    async fn enable_process_tracing(&mut self, config: &AgentConfig) -> anyhow::Result<()> {
+        let Some(tx) = self.process_events.clone() else {
+            // No channel means no table drains it, so a loaded tracepoint
+            // would write into nothing. Saying so is better than attaching.
+            warn!("process tracing not enabled: the process table is not running");
+            self.set_status("tracepoint_process", false).await;
+            return Ok(());
+        };
+        let (loader, metrics_rdr, reader, attacher, status) =
+            startup::try_load_process_tracing(&self.ebpf_dir, config)?;
+        if !status.attached {
+            // The object loaded and the kernel refused the tracepoints, so
+            // both go and the published status carries the reason.
+            self.set_status("tracepoint_process", false).await;
+            return Ok(());
+        }
+
+        self.process_tracing = Some(attacher);
+        if let Some(rdr) = metrics_rdr {
+            self.metrics_readers.write().await.push(rdr);
+        }
+        let cancel = CancellationToken::new();
+        let observer = self.ringbuf_observer("tracepoint-process");
+        let reader_cancel = cancel.clone();
+        let handle = tokio::spawn(async move {
+            reader.run(tx, reader_cancel, observer).await;
+        });
+        self.set_status("tracepoint_process", true).await;
+        self.programs.insert(
+            "tracepoint_process".to_string(),
+            ProgramHandle {
+                name: "tracepoint_process".to_string(),
+                loader,
+                reader_cancel: cancel,
+                reader_handles: vec![handle],
+            },
+        );
+
+        info!("process tracing enabled via hot-reload");
         Ok(())
     }
 
@@ -1182,6 +1244,7 @@ pub fn program_config_map(config: &AgentConfig) -> Vec<(&'static str, bool)> {
         ("tc_scrub", config.firewall.scrub.enabled),
         ("uprobe_dlp", config.dlp.enabled),
         ("cgroup_attribution", config.attribution.enabled),
+        ("tracepoint_process", config.process_table.enabled),
     ]
 }
 
@@ -1226,6 +1289,7 @@ fn metrics_maps(program: &str) -> &'static [&'static str] {
         "tc_scrub" => &["SCRUB_METRICS"],
         "uprobe_dlp" => &["DLP_METRICS"],
         "cgroup_attribution" => &["ATTRIBUTION_METRICS"],
+        "tracepoint_process" => &["PROCESS_METRICS"],
         _ => &[],
     }
 }

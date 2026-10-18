@@ -212,6 +212,16 @@ attribution:
   cgroup_root: /sys/fs/cgroup
   max_sockets: 65536
 
+# The process table: the one place a pid becomes a name. Exec and exit
+# tracepoints fill it, an exit purges its own entry, and the bound is there
+# for a notification the kernel could not deliver. Records only, enforces
+# nothing. capture_command_line is off because argv routinely carries a
+# password, a token or a connection string.
+process_table:
+  enabled: true
+  capacity: 8192
+  capture_command_line: false
+
 alerting:
   enabled: false
 

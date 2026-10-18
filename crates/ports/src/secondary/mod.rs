@@ -27,6 +27,7 @@ pub mod metadata_enricher_port;
 pub mod metrics_port;
 pub mod mitigation_store;
 pub mod nat_map_port;
+pub mod process_details_port;
 pub mod process_executable_port;
 pub mod qos_map_port;
 pub mod ratelimit_lpm_port;

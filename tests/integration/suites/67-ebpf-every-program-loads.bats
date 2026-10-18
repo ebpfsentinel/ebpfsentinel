@@ -61,11 +61,13 @@ teardown_file() {
     rm -f "$PREPARED_CONFIG"
 }
 
-# The programs this fixture asks for, by the name the gauge publishes. Thirteen
-# names for sixteen objects: xdp-firewall-reject, xdp-ratelimit-syncookie and
+# The programs this fixture asks for, by the name the gauge publishes. Fifteen
+# names for eighteen objects: xdp-firewall-reject, xdp-ratelimit-syncookie and
 # xdp-pass are not loaded on their own - the first two are tail-call targets of
 # the program that installs them, and the last is test scaffolding for a veth
-# peer.
+# peer. The last two names are the attribution objects, which this fixture does
+# not configure and therefore gets on their defaults, which is the posture a
+# node ships with.
 EXPECTED_PROGRAMS=(
     xdp-firewall
     xdp-ratelimit
@@ -80,6 +82,8 @@ EXPECTED_PROGRAMS=(
     tc-scrub
     tc-qos
     uprobe-dlp
+    cgroup-attribution
+    tracepoint-process
 )
 
 _metrics_body() {
@@ -165,6 +169,83 @@ _wait_for_program_set() {
         _load_log >&3
         false
     fi
+}
+
+@test "the process table names a program that execed after the hooks attached" {
+    require_root
+    require_tool jq
+
+    # The exec tracepoint is the only way into the table, so a process that
+    # started before the agent is deliberately absent. One started now must be
+    # there, with the path the kernel execed rather than the sixteen bytes of
+    # comm, which is what tells a resolved identity from a guessed one.
+    _wait_for_program_set >/dev/null
+
+    sleep 30 &
+    local target=$!
+    # The event crosses a ring buffer and a channel before the table holds it.
+    local waited=0 body="" entry=""
+    while [ "$waited" -lt 10 ]; do
+        body="$(api_get /api/v1/processes)"
+        _load_http_status
+        [ "$HTTP_STATUS" = "200" ]
+        entry="$(echo "$body" | jq -c --argjson pid "$target" \
+            '.processes[] | select(.pid == $pid)')"
+        [ -z "$entry" ] || break
+        sleep 1
+        waited=$((waited + 1))
+    done
+    kill "$target" 2>/dev/null || true
+
+    if [ -z "$entry" ]; then
+        echo "# pid ${target} never reached the process table" >&3
+        echo "$body" | jq -c '.tracing, .stats' >&3
+        false
+    fi
+
+    [ "$(echo "$entry" | jq -r '.identity.kind')" = "path" ]
+    assert_contains "$(echo "$entry" | jq -r '.identity.path')" "sleep"
+}
+
+@test "the exit tracepoint removes the entry rather than ageing it out" {
+    require_root
+    require_tool jq
+
+    _wait_for_program_set >/dev/null
+
+    sleep 5 &
+    local target=$!
+    local waited=0 present=""
+    while [ "$waited" -lt 10 ]; do
+        present="$(api_get /api/v1/processes \
+            | jq -r --argjson pid "$target" '[.processes[] | select(.pid == $pid)] | length')"
+        [ "$present" = "0" ] || break
+        sleep 1
+        waited=$((waited + 1))
+    done
+    [ "$present" = "1" ]
+
+    wait "$target" 2>/dev/null || true
+
+    waited=0
+    while [ "$waited" -lt 10 ]; do
+        present="$(api_get /api/v1/processes \
+            | jq -r --argjson pid "$target" '[.processes[] | select(.pid == $pid)] | length')"
+        [ "$present" = "0" ] && break
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if [ "$present" != "0" ]; then
+        echo "# pid ${target} exited and the table still holds it" >&3
+        false
+    fi
+
+    # A purge is an exit the table had an entry for. An exit it did not is
+    # counted apart, because a process that execed before the hooks attached
+    # has nothing to remove and that is not the same failure.
+    local purged
+    purged="$(api_get /api/v1/processes | jq -r '.stats.purged')"
+    [ "${purged:-0}" -ge 1 ]
 }
 
 @test "the kernel agrees the datapath is attached" {

@@ -105,6 +105,7 @@ use super::openapi::ApiDoc;
 use super::ops_handler::{
     get_config, get_ebpf_status, get_kernel_features, get_uprobes, reload_config,
 };
+use super::process_handler::{get_process, list_processes};
 use super::qos_handler::{
     create_qos_classifier, create_qos_pipe, create_qos_queue, delete_qos_classifier,
     delete_qos_pipe, delete_qos_queue, get_qos_status, list_qos_classifiers, list_qos_pipes,
@@ -307,6 +308,8 @@ pub fn build_router(
             .route("/api/v1/qos/queues", get(list_qos_queues))
             .route("/api/v1/qos/classifiers", get(list_qos_classifiers))
             .route("/api/v1/mitre/coverage", get(mitre_coverage))
+            .route("/api/v1/processes", get(list_processes))
+            .route("/api/v1/processes/{pid}", get(get_process))
             .route("/api/v1/fingerprints/summary", get(fingerprint_summary))
             .route("/api/v1/fingerprints/ja4s", get(ja4s_summary))
             .route("/api/v1/responses", get(list_response_actions))

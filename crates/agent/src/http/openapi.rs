@@ -27,6 +27,7 @@ use super::metrics_handler;
 use super::mitre_handler;
 use super::nat_handler;
 use super::ops_handler;
+use super::process_handler;
 use super::qos_handler;
 use super::ratelimit_handler;
 use super::response_handler;
@@ -154,6 +155,8 @@ use super::zone_handler;
         lb_handler::list_lb_vips,
         lb_handler::apply_lb_announce,
         // QoS
+        process_handler::list_processes,
+        process_handler::get_process,
         qos_handler::get_qos_status,
         qos_handler::list_qos_pipes,
         qos_handler::create_qos_pipe,
@@ -324,6 +327,12 @@ use super::zone_handler;
         mitre_handler::TechniqueEntry,
         mitre_handler::TacticSummary,
         // Fingerprints
+        process_handler::ProcessListResponse,
+        process_handler::ProcessEntryResponse,
+        process_handler::ProcessIdentityResponse,
+        process_handler::ProcessContainerResponse,
+        process_handler::ProcessTableStatsResponse,
+        process_handler::ProcessTracingResponse,
         fingerprint_handler::FingerprintSummaryResponse,
         fingerprint_handler::Ja4sSummaryResponse,
         // Captures
@@ -361,6 +370,7 @@ use super::zone_handler;
         (name = "Zones", description = "Security zone configuration and policies"),
         (name = "MITRE ATT&CK", description = "MITRE ATT&CK coverage and technique mapping"),
         (name = "Fingerprints", description = "JA4+ TLS fingerprint cache and analysis"),
+        (name = "Processes", description = "The process table: what a pid is, from its exec to its exit"),
         (name = "Captures", description = "Manual packet capture (pcap)"),
         (name = "Responses", description = "Manual time-bounded response actions (block/throttle with TTL)"),
     )

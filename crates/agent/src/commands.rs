@@ -992,6 +992,113 @@ pub async fn cmd_responses_revoke(
     Ok(())
 }
 
+// ── Processes ───────────────────────────────────────────────────────
+
+pub async fn cmd_processes_list(
+    client: &ApiClient,
+    limit: usize,
+    output: OutputFormat,
+) -> Result<()> {
+    let resp = client.list_processes().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!("Process table");
+    println!("  Tracepoints:  {}", yes_no(resp.tracing.attached));
+    println!("  Command line: {}", yes_no(resp.tracing.command_line));
+    if let Some(reason) = &resp.tracing.reason {
+        println!("  Reason:       {reason}");
+    }
+    println!(
+        "  Entries:      {} of {}",
+        resp.stats.entries, resp.stats.capacity
+    );
+    // Evictions are what a bound costs, so they are printed next to the
+    // bound rather than left for somebody to find in the JSON.
+    println!(
+        "  Recorded:     {}  replaced {}  evicted {}  purged {}",
+        resp.stats.recorded, resp.stats.replaced, resp.stats.evicted, resp.stats.purged
+    );
+
+    if resp.processes.is_empty() {
+        println!("\nNo process in the table.");
+        return Ok(());
+    }
+
+    let shown: Vec<_> = if limit == 0 {
+        resp.processes.iter().collect()
+    } else {
+        resp.processes.iter().take(limit).collect()
+    };
+
+    println!();
+    let mut table = Table::new(&[
+        ("PID", Align::Right),
+        ("PPID", Align::Right),
+        ("UID", Align::Right),
+        ("EXECUTABLE", Align::Left),
+        ("CONTAINER", Align::Left),
+    ]);
+    for p in &shown {
+        table.row(cells![
+            p.pid,
+            p.parent_pid
+                .map_or_else(|| "-".to_string(), |v| v.to_string()),
+            p.uid,
+            p.executable(),
+            p.container.as_ref().map_or_else(
+                || "-".to_string(),
+                |c| c.name.clone().unwrap_or_else(|| c.id.clone())
+            )
+        ]);
+    }
+    table.print();
+
+    if limit != 0 && resp.processes.len() > shown.len() {
+        println!(
+            "\n{} more, raise --limit to see them.",
+            resp.processes.len() - shown.len()
+        );
+    }
+    Ok(())
+}
+
+pub async fn cmd_processes_show(client: &ApiClient, pid: u32, output: OutputFormat) -> Result<()> {
+    let resp = client.get_process(pid).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!("Process {}", resp.pid);
+    println!("  Command:      {}", resp.comm);
+    println!("  Executable:   {}", resp.executable());
+    println!("  Identity:     {}", resp.identity.kind);
+    if let Some(ppid) = resp.parent_pid {
+        println!("  Parent:       {ppid}");
+    }
+    if let Some(cmdline) = &resp.command_line {
+        println!("  Command line: {cmdline}");
+    }
+    println!("  UID / GID:    {} / {}", resp.uid, resp.gid);
+    println!("  Cgroup id:    {}", resp.cgroup_id);
+    if let Some(container) = &resp.container {
+        println!("  Container:    {} ({})", container.id, container.runtime);
+        if let Some(name) = &container.name {
+            println!("  Name:         {name}");
+        }
+        if let Some(image) = &container.image {
+            println!("  Image:        {image}");
+        }
+    }
+    println!("  Started at:   {} ns", resp.started_at_ns);
+    Ok(())
+}
+
 // ── Fingerprints ────────────────────────────────────────────────────
 
 pub async fn cmd_fingerprints_summary(client: &ApiClient, output: OutputFormat) -> Result<()> {
@@ -3714,6 +3821,22 @@ pub async fn cmd_ebpf_kernel_features(client: &ApiClient, output: OutputFormat) 
             ]);
         }
         table.print();
+    }
+
+    println!("\nProcess tracing");
+    println!("  Attached:   {}", yes_no(resp.process_tracing.attached));
+    println!(
+        "  Cmdline:    {}",
+        yes_no(resp.process_tracing.command_line)
+    );
+    if !resp.process_tracing.tracepoints.is_empty() {
+        println!(
+            "  Hooks:      {}",
+            resp.process_tracing.tracepoints.join(", ")
+        );
+    }
+    if let Some(reason) = &resp.process_tracing.reason {
+        println!("  Reason:     {reason}");
     }
 
     println!("\nSocket attribution");

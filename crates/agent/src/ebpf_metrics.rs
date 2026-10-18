@@ -173,6 +173,15 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (4, "no_cookie"),
             (5, "insert_failed"),
         ],
+        // One exec, one exit, and the two ways the table loses a line: a
+        // ring buffer with nobody draining it fast enough, and a thread exit
+        // that is not the process ending.
+        "PROCESS_METRICS" => &[
+            (0, "exec"),
+            (1, "exit"),
+            (2, "events_dropped"),
+            (3, "thread_exit"),
+        ],
         "CT_METRICS" => &[
             (0, "new"),
             (1, "established"),
@@ -526,6 +535,10 @@ mod tests {
         (
             "ATTRIBUTION_METRICS",
             ebpf_common::attribution::ATTRIBUTION_METRIC_COUNT,
+        ),
+        (
+            "PROCESS_METRICS",
+            ebpf_common::process::PROCESS_METRIC_COUNT,
         ),
     ];
 
