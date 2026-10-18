@@ -160,6 +160,37 @@ flowchart TB
 
 ## Quick start
 
+### See it work first, in one command
+
+Before installing anything on a host you care about, run the lab. It builds a
+network of its own on a bridge named `esdemo0`, touches no uplink of yours,
+asks nothing of you and signs you up to nothing. It comes from the release,
+like every other artifact:
+
+```bash
+curl -fsSLO https://github.com/ebpfsentinel/ebpfsentinel-release/releases/latest/download/ebpfsentinel-demo.tar.gz
+tar xzf ebpfsentinel-demo.tar.gz && cd ebpfsentinel-demo
+sudo ./demo.sh up
+sudo ./demo.sh agent status
+sudo ./demo.sh down
+```
+
+The lab is pinned to the release it was downloaded with, and its checksum and
+signature are in that release's `SHA256SUMS`. From a checkout of this
+repository the same lab is `demo/`, and `sudo ./demo.sh up --local` builds the
+agent from your working tree instead of pulling the published image.
+
+What it shows, with the commands in the
+[tutorials](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/tutorials):
+a SYN flood stopped and its source blocked, a card number caught inside TLS
+without a proxy and without a key, and a workload cut off for calling an AI
+provider. `demo/gitops/gitops.sh up` runs the same agent as a fleet driven by
+Argo CD, where a rule arrives through a commit and leaves through a revert.
+Details, host requirements and the lab's own addresses are in
+[`demo/README.md`](demo/README.md).
+
+### Install for real
+
 **Requirements:** Linux kernel 6.9+ on x86_64 or aarch64, with BTF (`CONFIG_DEBUG_INFO_BTF=y`). The 6.9 floor unlocks **BPF token delegation** - the agent loads its eBPF programs with zero `CAP_BPF` / `CAP_NET_ADMIN` (rootless).
 
 ### Install (prebuilt)

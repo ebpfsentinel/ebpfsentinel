@@ -1,0 +1,30 @@
+# eBPFsentinel demo - the agent and the warden built from this checkout.
+#
+#   sudo ./demo.sh up --local
+#
+# Layered over compose.yaml, which it changes in one way only: where the two
+# agent images come from. The lab network, the addresses, the containers and
+# agent.yaml are the same, so a scenario in the tutorials reads the same
+# whether the images were pulled or built here.
+#
+# Two reasons to want it. A host with no access to the published images runs
+# the lab anyway, which is also the case before the first release exists. And a
+# contributor testing a patch sees that patch in the lab rather than the last
+# published build.
+#
+# The eBPF objects are not built by the Dockerfile: it copies `ebpf-out/`,
+# which the pinned nightly toolchain fills through `cargo xtask ebpf-build`.
+# `demo.sh up --local` checks that directory before building and says so.
+
+services:
+  warden:
+    build:
+      context: ..
+      dockerfile: Dockerfile.warden
+    image: ebpfsentinel-warden:local
+
+  agent:
+    build:
+      context: ..
+      dockerfile: Dockerfile.agent
+    image: ebpfsentinel:local

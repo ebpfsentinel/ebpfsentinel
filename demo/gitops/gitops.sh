@@ -28,6 +28,12 @@ ARGOCD_VERSION=v3.5.3
 ARGOCD_SHA256=1a87025d8eb2eae621653fd312fb9ca51df1b4b3b6992a030e3a9ef38e45c448
 
 CLUSTER=ebpfsentinel-gitops
+# A lab downloaded from a release carries an `.env` pinning EBPFSENTINEL_TAG to
+# that release, which compose reads on its own and a shell script does not. Read
+# the one key rather than sourcing the file, so both labs run the same release.
+if [ -z "${EBPFSENTINEL_TAG:-}" ] && [ -r ../.env ]; then
+  EBPFSENTINEL_TAG="$(sed -n 's/^EBPFSENTINEL_TAG=\([A-Za-z0-9._-]*\)$/\1/p' ../.env)"
+fi
 TAG="${EBPFSENTINEL_TAG:-latest}"
 AGENT_IMAGE="ghcr.io/ebpfsentinel/ebpfsentinel:$TAG"
 WARDEN_IMAGE="ghcr.io/ebpfsentinel/ebpfsentinel-warden:$TAG"
