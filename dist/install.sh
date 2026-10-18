@@ -91,6 +91,12 @@ fi
 
 mkdir -p "${INSTALL_VAR}"
 mkdir -p "${INSTALL_VAR}/captures"
+# Holds the API key the agent draws for itself at first start, when the config
+# names no authentication method. The agent creates the file 0600 and narrows
+# this directory to 0700 itself; creating it here keeps the mode right on a
+# host whose umask is loose.
+mkdir -p "${INSTALL_VAR}/auth"
+chmod 700 "${INSTALL_VAR}/auth"
 # The redb stores do not create their directory; the unit runs from
 # ${INSTALL_VAR}, so the default `data/*.redb` paths need this one.
 mkdir -p "${INSTALL_VAR}/data"
@@ -139,3 +145,10 @@ echo "  2. Start the broker:   systemctl start ebpfsentinel-warden"
 echo "  3. Start the agent:    systemctl start ebpfsentinel"
 echo "  4. Enable on boot:     systemctl enable ebpfsentinel-warden ebpfsentinel"
 echo "  5. View logs:          journalctl -u ebpfsentinel -u ebpfsentinel-warden -f"
+echo ""
+echo "The control API authenticates. With no method configured, the agent"
+echo "draws a key at first start and keeps it here:"
+echo "  sudo cat ${INSTALL_VAR}/auth/api-key"
+echo "Use it on every call but /healthz and /readyz, which stay open:"
+echo "  ebpfsentinel-agent --token \"\$(sudo cat ${INSTALL_VAR}/auth/api-key)\" status"
+echo "Name your own keys under auth.api_keys in the configuration to replace it."

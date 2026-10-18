@@ -1,6 +1,17 @@
 # eBPFsentinel - Authentication & RBAC Configuration Example
 # ==========================================================
 #
+# Authentication is on whether or not this file configures it. An agent
+# started with no `auth` block at all draws an API key for itself at first
+# start, prints it once and keeps it at /var/lib/ebpfsentinel/auth/api-key:
+#
+#   sudo cat /var/lib/ebpfsentinel/auth/api-key
+#   ebpfsentinel-agent --token "$(sudo cat /var/lib/ebpfsentinel/auth/api-key)" status
+#
+# This file is for the next step: naming the keys yourself, or handing the
+# question to an identity provider. Configure any method below and no key is
+# generated - the file is not written and nothing is printed.
+#
 # Three authentication methods available. API keys can be combined with
 # either JWT or OIDC (but not both JWT and OIDC simultaneously).
 #
@@ -23,7 +34,14 @@ agent:
 # Uncomment this block and comment out Options B/C below.
 
 auth:
+  # On by default; written out here because this file is an example of
+  # configuring it rather than of accepting what it already does.
   enabled: true
+
+  # Where the generated key would be kept. Listing api_keys below means none
+  # is drawn, so this path stays unwritten. Set it to "" to state that refusal
+  # explicitly: the agent then refuses to start if no method is configured.
+  # bootstrap_key_path: /var/lib/ebpfsentinel/auth/api-key
 
   # Whether /metrics endpoint requires authentication.
   # Set to true if your metrics contain sensitive topology information.

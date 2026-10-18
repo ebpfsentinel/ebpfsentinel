@@ -21,7 +21,8 @@ pub struct Cli {
     #[arg(long)]
     pub log_format: Option<LogFormat>,
 
-    /// Bearer token for authenticated API requests
+    /// Credential for authenticated API requests. Without it, a command run
+    /// beside the agent reads the key the agent drew for itself
     #[arg(long, env = "EBPFSENTINEL_TOKEN", global = true)]
     pub token: Option<String>,
 

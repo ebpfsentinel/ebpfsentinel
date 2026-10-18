@@ -57,3 +57,8 @@ alerting:
 audit:
   enabled: true
   storage_path: __DATA_DIR__/audit.redb
+
+# The suite drives the token loader, not the control plane's identity, and
+# the bind above is loopback, so nothing has to be opted out of.
+auth:
+  enabled: false

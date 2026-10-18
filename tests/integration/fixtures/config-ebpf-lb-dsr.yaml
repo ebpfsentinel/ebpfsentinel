@@ -16,6 +16,7 @@ agent:
     - eth2
   bind_address: "0.0.0.0"
   allow_unauthenticated_api: true
+  allow_plaintext_api: true
   log_level: debug
   log_format: json
   http_port: 8080
@@ -61,3 +62,9 @@ alerting:
 audit:
   enabled: true
   storage_path: __DATA_DIR__/audit.redb
+
+# The suites drive the datapath, not the control plane's identity: the
+# agent answers unauthenticated plaintext here, which the two opt-outs
+# above are what make legal on a non-loopback bind.
+auth:
+  enabled: false

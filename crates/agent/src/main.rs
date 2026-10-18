@@ -2,6 +2,7 @@
 
 mod api_client;
 mod cli;
+mod cli_token;
 mod commands;
 mod table;
 
@@ -34,8 +35,14 @@ fn main() -> Result<()> {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn run_cli(cli: cli::Cli) -> Result<()> {
+async fn run_cli(mut cli: cli::Cli) -> Result<()> {
     let output = cli.output;
+
+    // A command run beside the agent reads the key the agent drew for itself,
+    // so the published invocations keep working now that the API is shut.
+    if cli.command.is_some() && cli.token.is_none() {
+        cli.token = cli_token::from_bootstrap_key_file(&cli.config);
+    }
 
     match cli.command {
         Some(Command::Version) => {

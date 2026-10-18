@@ -213,9 +213,17 @@ spec:
               mountPath: /host/proc
               readOnly: true
             - name: state
-              # Stores, captures, GeoIP databases and the telemetry installation
-              # identifier. The agent creates what it needs under it.
+              # Stores, captures, GeoIP databases, the telemetry installation
+              # identifier and, unless a Secret is named below, the API key the
+              # agent drew for itself. The agent creates what it needs under it.
               mountPath: /var/lib/ebpfsentinel
+            {{- if .Values.auth.existingSecret }}
+            - name: auth
+              # The API key the agent authenticates callers against, read-only
+              # so nothing in the pod can rewrite the credential it enforces.
+              mountPath: /etc/ebpfsentinel/auth
+              readOnly: true
+            {{- end }}
             {{- if .Values.daemonset.state.machineId }}
             - name: machine-id
               # Read for the telemetry installation identifier, which is a keyed
@@ -276,6 +284,14 @@ spec:
             path: {{ .Values.daemonset.state.hostPath | default (printf "/var/lib/ebpfsentinel/k8s/%s/%s" .Release.Namespace .Release.Name) | quote }}
             type: DirectoryOrCreate
           {{- end }}
+        {{- if .Values.auth.existingSecret }}
+        - name: auth
+          secret:
+            secretName: {{ .Values.auth.existingSecret | quote }}
+            # Secret volumes land root-owned; the pod's fsGroup 65534 is what
+            # the agent reads them through, as with the 0640 configMap.
+            defaultMode: 0440
+        {{- end }}
         {{- if .Values.daemonset.state.machineId }}
         - name: machine-id
           hostPath:

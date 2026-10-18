@@ -1559,19 +1559,31 @@ pub async fn run(
     // network-reachable address. Config validation already refuses this unless
     // the operator opted in with `allow_unauthenticated_api=true`; that escape
     // hatch is preserved, but the exposure must not be silent.
-    if !config.auth.enabled {
-        let bind_is_loopback = http_bind
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback());
-        if !bind_is_loopback {
-            tracing::warn!(
-                bind_address = %http_bind,
-                "control plane is UNAUTHENTICATED on a non-loopback address \
-                 (auth.enabled=false, allow_unauthenticated_api=true): firewall, \
-                 IPS and config-reload APIs are reachable without credentials - \
-                 ensure the port is fenced off by other means"
-            );
-        }
+    let bind_is_loopback = http_bind
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback());
+    if !config.auth.enabled && !bind_is_loopback {
+        tracing::warn!(
+            bind_address = %http_bind,
+            "control plane is UNAUTHENTICATED on a non-loopback address \
+             (auth.enabled=false, allow_unauthenticated_api=true): firewall, \
+             IPS and config-reload APIs are reachable without credentials - \
+             ensure the port is fenced off by other means"
+        );
+    }
+
+    // The same courtesy for the other half of the fence: validation refuses a
+    // plaintext non-loopback listener unless the operator opted in, and the
+    // opt-in must not be silent either - every call to this port carries a
+    // credential readable by anything on the path.
+    if !config.agent.tls.enabled && !bind_is_loopback {
+        tracing::warn!(
+            bind_address = %http_bind,
+            "control plane is served in the CLEAR on a non-loopback address \
+             (agent.tls.enabled=false, allow_plaintext_api=true): API keys and \
+             configuration cross the network readable by anything on the path - \
+             set agent.tls with a certificate and key"
+        );
     }
 
     let state_for_server = Arc::clone(&app_state);

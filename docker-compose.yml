@@ -137,7 +137,12 @@ services:
       # The warden's control socket (read-only - the agent only connects).
       - warden-sock:/run/ebpfsentinel:ro
       # Persistent state: the redb stores (audit, alerts, rule change history)
-      # under data/, GeoIP databases and the telemetry installation identifier.
+      # under data/, GeoIP databases, the telemetry installation identifier and
+      # the API key the agent drew for itself at first start, under auth/.
+      # Keeping this volume is what keeps that key: read it with
+      #   docker compose exec agent cat /var/lib/ebpfsentinel/auth/api-key
+      # and pass it as `-H "X-API-Key: <key>"` or `--token <key>`. Configure
+      # auth.api_keys in the config file to bring your own instead.
       # A new volume is seeded from the image, which owns it as 65534.
       - ebpfsentinel-state:/var/lib/ebpfsentinel
       # The host's machine identifier, read for the telemetry installation
@@ -177,7 +182,9 @@ services:
     # terminationGracePeriodSeconds.
     stop_grace_period: 30s
 
-    # Uses the agent's built-in CLI health check (no curl needed)
+    # Uses the agent's built-in CLI health check (no curl needed). It calls
+    # /healthz, which answers without a credential by design, so the check
+    # keeps working whatever the authentication configuration says.
     healthcheck:
       test: ["CMD", "ebpfsentinel-agent", "health"]
       interval: 10s

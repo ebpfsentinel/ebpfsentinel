@@ -40,11 +40,18 @@ agent:
   # -- Listen address for HTTP/gRPC/metrics
   bindAddress: "0.0.0.0"
   # -- Allow the control API on a non-loopback bind while auth is disabled.
-  # The pod binds 0.0.0.0 so the kubelet can reach the probes, so this is on
-  # by default. INSECURE without auth: set `auth.enabled: true` for production,
-  # or restrict access with a NetworkPolicy. The agent refuses to boot with a
-  # non-loopback bind + auth disabled unless this is true.
-  allowUnauthenticatedApi: true
+  # Off, because authentication is on by default (see `auth` below) and the
+  # pod binds 0.0.0.0 only so the kubelet can reach the probes. Turning
+  # `auth.enabled` off makes this mandatory, and it leaves the firewall, IPS
+  # and config-reload routes open to anything that can reach the pod.
+  allowUnauthenticatedApi: false
+  # -- Allow the control API on a non-loopback bind without TLS. On, because
+  # the pod binds 0.0.0.0 and the chart ships no certificate: the API key and
+  # the configuration travel the cluster network readable by anything on the
+  # path. Fix it properly with `agent.tls` below (a cert from cert-manager,
+  # mounted through extraVolumes) and set this to false; a service mesh
+  # carrying mTLS is the other way to earn it.
+  allowPlaintextApi: true
   # -- REST API port
   httpPort: 8080
   # -- gRPC streaming port
@@ -274,8 +281,23 @@ audit:
   enabled: false
 
 auth:
-  # -- Enable JWT/OIDC/API key authentication
-  enabled: false
+  # -- Establish a principal before the control API answers. On by default:
+  # the same routes reload configuration, write firewall rules and arm the
+  # IPS. `/healthz` and `/readyz` stay public whatever this says, which is
+  # what the kubelet probes use.
+  enabled: true
+  # -- Name of an existing Secret holding the API key. When empty, the agent
+  # draws one for itself at first start and keeps it under the state volume,
+  # printed once in the pod log:
+  #   kubectl logs -l app.kubernetes.io/name=ebpfsentinel | grep "API key"
+  # With `daemonset.state.ephemeral: true` that state is an emptyDir, so a
+  # replaced pod draws a new key - name a Secret here instead.
+  existingSecret: ""
+  # -- Key inside `auth.existingSecret` holding the API key. Its value must be
+  # a key the agent recognises: `sk-` followed by 64 hexadecimal characters.
+  #   kubectl create secret generic ebpfsentinel-auth \
+  #     --from-literal=api-key="sk-$(openssl rand -hex 32)"
+  secretKey: api-key
 
 conntrack:
   # -- Enable connection tracking
@@ -349,6 +371,12 @@ networkPolicy:
 
 # -- Prometheus metrics
 metrics:
+  # -- Require the API key on `/metrics` as well. The control plane is what
+  # authentication is for; the metrics port serves counters and no secret, so
+  # a scraper reaches it without a credential by default. Set this true and
+  # name `auth.existingSecret`, otherwise the key the agent drew for itself
+  # is one nothing outside the pod can present and every scrape answers 401.
+  authRequired: false
   serviceMonitor:
     # -- Create a Prometheus ServiceMonitor
     enabled: false

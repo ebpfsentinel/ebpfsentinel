@@ -239,12 +239,17 @@ prepare_ebpf_config() {
 
     # In 2VM mode the agent must be reachable from the attacker VM (HTTP health
     # check + REST traffic), so it has to bind all interfaces, not loopback.
-    # Many fixtures default to 127.0.0.1; rewrite it. Binding non-loopback with
-    # auth disabled requires allow_unauthenticated_api, so add it when absent
-    # (avoid a duplicate key, which serde_yaml rejects).
+    # Many fixtures default to 127.0.0.1; rewrite it. A non-loopback bind is
+    # refused twice over unless it is opted out of twice: allow_unauthenticated_api
+    # for an agent identifying nobody, allow_plaintext_api for one serving in
+    # the clear. Add each when absent (a duplicate key, which serde_yaml
+    # rejects).
     sed -i -E 's|^([[:space:]]*)bind_address:.*|\1bind_address: "0.0.0.0"|' "$output"
     if ! grep -qE '^[[:space:]]*allow_unauthenticated_api:' "$output"; then
         sed -i -E 's|^([[:space:]]*)bind_address: "0.0.0.0"|\1bind_address: "0.0.0.0"\n\1allow_unauthenticated_api: true|' "$output"
+    fi
+    if ! grep -qE '^[[:space:]]*allow_plaintext_api:' "$output"; then
+        sed -i -E 's|^([[:space:]]*)bind_address: "0.0.0.0"|\1bind_address: "0.0.0.0"\n\1allow_plaintext_api: true|' "$output"
     fi
 
     echo "$output"

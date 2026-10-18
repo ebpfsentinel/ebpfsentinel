@@ -50,6 +50,8 @@
           "description": "Host NICs to attach eBPF programs (REQUIRED)"
         },
         "bindAddress": { "type": "string", "default": "0.0.0.0" },
+        "allowUnauthenticatedApi": { "type": "boolean", "default": false },
+        "allowPlaintextApi": { "type": "boolean", "default": true },
         "httpPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "grpcPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "metricsPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
@@ -151,7 +153,14 @@
     "dns": { "$ref": "#/$defs/domainToggle" },
     "alerting": { "$ref": "#/$defs/domainToggle" },
     "audit": { "$ref": "#/$defs/domainToggle" },
-    "auth": { "$ref": "#/$defs/domainToggle" },
+    "auth": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "existingSecret": { "type": "string" },
+        "secretKey": { "type": "string" }
+      }
+    },
     "conntrack": { "$ref": "#/$defs/domainToggle" },
     "ddos": { "$ref": "#/$defs/domainToggle" },
     "l7": { "$ref": "#/$defs/domainToggle" },

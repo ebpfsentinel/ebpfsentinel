@@ -225,9 +225,17 @@ agent:
 ### Verify it's running
 
 ```bash
-curl http://127.0.0.1:8080/healthz     # liveness probe (no auth)
-ebpfsentinel-agent status              # agent + per-engine status
+curl http://127.0.0.1:8080/healthz     # liveness probe, answers without a key
+# Every other route authenticates. With no method configured, the agent drew a
+# key at first start, printed it once and kept it:
+export EBPFSENTINEL_TOKEN=$(sudo cat /var/lib/ebpfsentinel/auth/api-key)
+ebpfsentinel-agent status              # agent + per-engine status, reads the variable
+curl -H "X-API-Key: $EBPFSENTINEL_TOKEN" http://127.0.0.1:8080/api/v1/firewall/rules
 ```
+
+The control plane is shut by default: it authenticates, and it stays on
+loopback unless TLS is configured. Both are one setting away from being opened
+deliberately, and neither can be opened by accident.
 
 See the [Getting Started guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/getting-started/quickstart.md) for detailed setup instructions.
 

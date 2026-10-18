@@ -15,6 +15,7 @@ agent:
     - __INTERFACE__
   bind_address: "0.0.0.0"
   allow_unauthenticated_api: true
+  allow_plaintext_api: true
   swagger_ui: false
   log_level: info
   log_format: json
@@ -53,4 +54,10 @@ alerting:
   enabled: false
 
 audit:
+  enabled: false
+
+# The suites drive the datapath, not the control plane's identity: the
+# agent answers unauthenticated plaintext here, which the two opt-outs
+# above are what make legal on a non-loopback bind.
+auth:
   enabled: false

@@ -4,7 +4,15 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
-    #[serde(default)]
+    /// Whether the control API establishes a principal before it answers.
+    ///
+    /// On unless an operator says otherwise: the API this guards reloads the
+    /// configuration, writes firewall rules and arms the IPS, so an agent that
+    /// authenticates nobody answers to every local user and every container
+    /// sharing the host's network. Turning it off is an explicit `false`, and
+    /// a non-loopback bind with it off is still refused by validation unless
+    /// `agent.allow_unauthenticated_api` says the port is fenced elsewhere.
+    #[serde(default = "default_auth_enabled")]
     pub enabled: bool,
 
     #[serde(default)]
@@ -26,6 +34,17 @@ pub struct AuthConfig {
     /// Whether `/metrics` requires authentication (default: true).
     #[serde(default = "default_metrics_auth")]
     pub metrics_auth_required: bool,
+
+    /// Where the agent keeps the key it draws for itself when authentication
+    /// is on and no other method is configured.
+    ///
+    /// The file is written `0600` inside a `0700` directory at first start and
+    /// read back on every start after that, so a key an operator scripted
+    /// against survives a restart. Set it to the empty string to refuse the
+    /// generated key entirely: authentication then needs `jwt`, `oidc` or
+    /// `api_keys`, and a configuration carrying none of them is rejected.
+    #[serde(default = "default_bootstrap_key_path")]
+    pub bootstrap_key_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,14 +67,23 @@ pub struct ApiKeyConfig {
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_auth_enabled(),
             jwt: JwtConfig::default(),
             oidc: None,
             api_keys: Vec::new(),
             api_key_salt: None,
             metrics_auth_required: true,
+            bootstrap_key_path: default_bootstrap_key_path(),
         }
     }
+}
+
+fn default_auth_enabled() -> bool {
+    true
+}
+
+fn default_bootstrap_key_path() -> String {
+    "/var/lib/ebpfsentinel/auth/api-key".to_string()
 }
 
 fn default_metrics_auth() -> bool {
@@ -210,13 +238,38 @@ mod tests {
     #[test]
     fn default_config() {
         let cfg = AuthConfig::default();
-        assert!(!cfg.enabled);
+        assert!(
+            cfg.enabled,
+            "the control API authenticates unless an operator writes enabled: false"
+        );
         assert_eq!(cfg.jwt.public_key_path, "");
         assert!(cfg.jwt.issuer.is_none());
         assert!(cfg.jwt.audience.is_none());
         assert!(cfg.oidc.is_none());
         assert!(cfg.api_keys.is_empty());
         assert!(cfg.metrics_auth_required);
+        assert_eq!(cfg.bootstrap_key_path, "/var/lib/ebpfsentinel/auth/api-key");
+    }
+
+    #[test]
+    fn a_file_naming_no_method_still_authenticates_off_the_generated_key() {
+        let cfg: AuthConfig = serde_yaml_ng::from_str("metrics_auth_required: false\n").unwrap();
+        assert!(cfg.enabled);
+        assert!(cfg.api_keys.is_empty());
+        assert!(!cfg.bootstrap_key_path.is_empty());
+    }
+
+    #[test]
+    fn turning_authentication_off_is_an_explicit_false() {
+        let cfg: AuthConfig = serde_yaml_ng::from_str("enabled: false\n").unwrap();
+        assert!(!cfg.enabled);
+    }
+
+    #[test]
+    fn an_empty_bootstrap_path_refuses_the_generated_key() {
+        let cfg: AuthConfig = serde_yaml_ng::from_str("bootstrap_key_path: \"\"\n").unwrap();
+        assert!(cfg.enabled);
+        assert!(cfg.bootstrap_key_path.is_empty());
     }
 
     #[test]

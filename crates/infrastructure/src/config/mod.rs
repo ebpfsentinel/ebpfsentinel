@@ -675,12 +675,19 @@ impl AgentConfig {
                 });
             }
 
-            if !has_jwt && !has_oidc && !has_api_keys {
+            // A file naming no method is the common case now that
+            // authentication is on by default: the agent draws a key for
+            // itself and keeps it at `auth.bootstrap_key_path`. Emptying that
+            // path is how an operator refuses the generated key, and then a
+            // method has to be named.
+            let has_bootstrap_key = !self.auth.bootstrap_key_path.is_empty();
+            if !has_jwt && !has_oidc && !has_api_keys && !has_bootstrap_key {
                 return Err(ConfigError::Validation {
                     field: "auth".to_string(),
-                    message:
-                        "auth is enabled but no auth method configured (jwt, oidc, or api_keys)"
-                            .to_string(),
+                    message: "auth is enabled but no auth method configured (jwt, oidc or \
+                              api_keys) and auth.bootstrap_key_path is empty, so no key can be \
+                              generated either"
+                        .to_string(),
                 });
             }
 
@@ -736,7 +743,7 @@ impl AgentConfig {
         // `auth.enabled: false` exposes an unauthenticated control plane -
         // firewall, IPS, config reload - to anyone who can reach the port.
         // Operators who fence the API off by other means can opt in explicitly.
-        if !self.auth.enabled && !self.agent.allow_unauthenticated_api {
+        if !self.auth.enabled && !self.agent.allow_unauthenticated_api.is_accepted() {
             let bind_is_loopback = self
                 .agent
                 .bind_address
@@ -751,6 +758,31 @@ impl AgentConfig {
                          Enable auth, bind to 127.0.0.1/::1, or set \
                          agent.allow_unauthenticated_api=true if the API is fenced off by \
                          other means",
+                        self.agent.bind_address
+                    ),
+                });
+            }
+        }
+
+        // Refuse to serve the control API in the clear on a network-reachable
+        // address. A credential travels on every call the API answers, so
+        // plaintext off the loopback interface hands the key to anything on
+        // the path. Loopback keeps the privilege because the packet never
+        // leaves the host.
+        if !self.agent.tls.enabled && !self.agent.allow_plaintext_api.is_accepted() {
+            let bind_is_loopback = self
+                .agent
+                .bind_address
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+            if !bind_is_loopback {
+                return Err(ConfigError::Validation {
+                    field: "agent.bind_address".to_string(),
+                    message: format!(
+                        "refusing to serve the control API in the clear on non-loopback address \
+                         '{}': set agent.tls.enabled=true with a certificate and key to fix it, \
+                         or agent.allow_plaintext_api=true to accept that credentials and \
+                         configuration cross the network readable by anything on the path",
                         self.agent.bind_address
                     ),
                 });
@@ -1638,6 +1670,48 @@ pub const AUTO_REACTION_COMPONENTS: [&str; 8] = [
 
 // ── Agent info ─────────────────────────────────────────────────────
 
+/// An operator's explicit acceptance of a risk the agent would otherwise
+/// refuse to take.
+///
+/// It is `true` or `false` in the file, because that is what an operator
+/// writes and what every chart, compose file and rendered config already
+/// carries. It is two named variants in Rust because these flags lower a
+/// security fence, and `if !flags.something` at a call site reads the wrong
+/// way round often enough to be worth the type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "bool", into = "bool")]
+pub enum RiskAcceptance {
+    /// The agent refuses, which is what an absent setting means.
+    #[default]
+    Refused,
+    /// The operator said so in the configuration file.
+    Accepted,
+}
+
+impl RiskAcceptance {
+    /// Whether the operator accepted the risk.
+    #[must_use]
+    pub fn is_accepted(self) -> bool {
+        matches!(self, Self::Accepted)
+    }
+}
+
+impl From<bool> for RiskAcceptance {
+    fn from(accepted: bool) -> Self {
+        if accepted {
+            Self::Accepted
+        } else {
+            Self::Refused
+        }
+    }
+}
+
+impl From<RiskAcceptance> for bool {
+    fn from(acceptance: RiskAcceptance) -> Self {
+        acceptance.is_accepted()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
     pub interfaces: Vec<String>,
@@ -1673,7 +1747,17 @@ pub struct AgentInfo {
     /// network. Set to `true` only when the API is fenced off by other means
     /// (a trusted network, a service mesh, an authenticating proxy).
     #[serde(default)]
-    pub allow_unauthenticated_api: bool,
+    pub allow_unauthenticated_api: RiskAcceptance,
+
+    /// Explicitly allow serving the control API without TLS on a non-loopback
+    /// address. Off by default, and separate from
+    /// `allow_unauthenticated_api`: one says nobody is identified, this one
+    /// says the credential and the configuration cross the network in the
+    /// clear, readable and alterable by anything on the path. Set it only on a
+    /// fenced network segment where TLS is terminated elsewhere, and prefer
+    /// `agent.tls` with a certificate, which is what actually fixes it.
+    #[serde(default)]
+    pub allow_plaintext_api: RiskAcceptance,
 
     /// Enable Swagger UI at `/swagger-ui`. Disabled by default in production.
     #[serde(default)]
@@ -3603,7 +3687,14 @@ agent:
   interfaces: [eth0]
 ";
         let config = AgentConfig::from_yaml(yaml).unwrap();
-        assert!(!config.auth.enabled);
+        assert!(
+            config.auth.enabled,
+            "a file that says nothing about authentication gets it"
+        );
+        assert_eq!(
+            config.auth.bootstrap_key_path,
+            "/var/lib/ebpfsentinel/auth/api-key"
+        );
         assert!(config.auth.jwt.public_key_path.is_empty());
         assert!(config.auth.metrics_auth_required);
         assert!(config.auth.jwt.issuer.is_none());
@@ -3612,15 +3703,31 @@ agent:
 
     #[test]
     fn auth_enabled_requires_some_method() {
+        // Naming no method is fine, because the agent draws a key for itself.
+        // Refusing that key as well leaves nothing to authenticate with.
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+auth:
+  enabled: true
+  bootstrap_key_path: ""
+"#;
+        let err = AgentConfig::from_yaml(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no auth method configured"), "error: {msg}");
+    }
+
+    #[test]
+    fn auth_enabled_with_no_method_falls_back_to_the_generated_key() {
         let yaml = r"
 agent:
   interfaces: [eth0]
 auth:
   enabled: true
 ";
-        let err = AgentConfig::from_yaml(yaml).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("no auth method configured"), "error: {msg}");
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert!(config.auth.api_keys.is_empty());
+        assert!(!config.auth.bootstrap_key_path.is_empty());
     }
 
     #[test]
@@ -3686,11 +3793,12 @@ agent:
   interfaces: [eth0]
   bind_address: "0.0.0.0"
   allow_unauthenticated_api: true
+  allow_plaintext_api: true
 auth:
   enabled: false
 "#;
         let config = AgentConfig::from_yaml(yaml).unwrap();
-        assert!(config.agent.allow_unauthenticated_api);
+        assert!(config.agent.allow_unauthenticated_api.is_accepted());
     }
 
     #[test]
@@ -3699,6 +3807,10 @@ auth:
 agent:
   interfaces: [eth0]
   bind_address: "0.0.0.0"
+  tls:
+    enabled: true
+    cert_path: /etc/ebpfsentinel/tls/server.crt
+    key_path: /etc/ebpfsentinel/tls/server.key
 auth:
   enabled: true
   jwt:
@@ -3706,6 +3818,56 @@ auth:
 "#;
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.agent.bind_address, "0.0.0.0");
+    }
+
+    #[test]
+    fn nonloopback_bind_without_tls_rejected() {
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+  bind_address: "0.0.0.0"
+auth:
+  enabled: true
+"#;
+        let err = AgentConfig::from_yaml(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("in the clear on non-loopback address"),
+            "error: {msg}"
+        );
+        assert!(msg.contains("agent.tls.enabled=true"), "error: {msg}");
+        assert!(
+            msg.contains("agent.allow_plaintext_api=true"),
+            "error: {msg}"
+        );
+    }
+
+    #[test]
+    fn nonloopback_bind_without_tls_allowed_with_optout() {
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+  bind_address: "0.0.0.0"
+  allow_plaintext_api: true
+auth:
+  enabled: true
+"#;
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert!(config.agent.allow_plaintext_api.is_accepted());
+        assert!(!config.agent.allow_unauthenticated_api.is_accepted());
+    }
+
+    #[test]
+    fn loopback_bind_without_tls_ok() {
+        // The packet never leaves the host, so the clear text has no path to
+        // travel on. This is the default shape of a fresh install.
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.agent.bind_address, "127.0.0.1");
+        assert!(!config.agent.tls.enabled);
     }
 
     #[test]
@@ -3719,7 +3881,7 @@ auth:
   enabled: false
 "#;
         let config = AgentConfig::from_yaml(yaml).unwrap();
-        assert!(!config.agent.allow_unauthenticated_api);
+        assert!(!config.agent.allow_unauthenticated_api.is_accepted());
     }
 
     #[test]

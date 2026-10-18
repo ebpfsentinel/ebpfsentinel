@@ -98,20 +98,22 @@ impl<S: NamedService> NamedService for AuthService<S> {
     const NAME: &'static str = S::NAME;
 }
 
-/// Extract a credential from request headers: Bearer JWT first, then x-api-key.
+/// Extract a credential from request headers: Bearer first, then x-api-key.
 ///
-/// Bearer tokens must look like a JWT (3 dot-separated parts); malformed
-/// values are rejected early without hitting the provider.
+/// The bearer value is handed to the provider whatever its shape, because the
+/// key the agent generates for itself is `sk-` and hex rather than a JWT, and
+/// it is the credential a fresh install has. An empty bearer is still refused
+/// without reaching the provider.
 fn extract_token(headers: &HeaderMap) -> Option<String> {
     if let Some(bearer) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
     {
-        if !bearer.is_empty() && bearer.matches('.').count() == 2 {
+        if !bearer.is_empty() {
             return Some(bearer.to_string());
         }
-        // Malformed Bearer → no fallback (caller returns Unauthenticated).
+        // Empty Bearer -> no fallback (caller returns Unauthenticated).
         return None;
     }
     headers
@@ -229,12 +231,28 @@ mod tests {
         assert_eq!(grpc_status(&resp), Some(16));
     }
 
+    /// The key the agent generates for itself is not a JWT, and it is what a
+    /// caller presents on a fresh install, so a bearer of any shape reaches
+    /// the provider and the provider is what accepts or refuses it.
     #[tokio::test]
-    async fn malformed_bearer_rejected() {
+    async fn an_api_key_bearer_reaches_the_provider() {
         let called = Arc::new(AtomicBool::new(false));
         let svc = wrap(Arc::new(AlwaysOkProvider), Arc::clone(&called));
         let req = Request::builder()
-            .header("authorization", "Bearer not-a-jwt")
+            .header("authorization", "Bearer sk-0123456789abcdef")
+            .body(Body::empty())
+            .unwrap();
+        let resp = svc.oneshot(req).await.unwrap();
+        assert!(called.load(Ordering::SeqCst), "inner must be called");
+        assert_eq!(grpc_status(&resp), None);
+    }
+
+    #[tokio::test]
+    async fn empty_bearer_rejected() {
+        let called = Arc::new(AtomicBool::new(false));
+        let svc = wrap(Arc::new(AlwaysOkProvider), Arc::clone(&called));
+        let req = Request::builder()
+            .header("authorization", "Bearer ")
             .body(Body::empty())
             .unwrap();
         let resp = svc.oneshot(req).await.unwrap();

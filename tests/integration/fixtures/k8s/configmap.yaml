@@ -18,6 +18,7 @@ data:
       # unless explicitly acknowledged. This is a deployment-mechanics test on
       # an isolated cluster, so opt in.
       allow_unauthenticated_api: true
+      allow_plaintext_api: true
       # BPF token is the production default, but a nested minikube-on-docker
       # node can't delegate a bpffs; this pod is privileged, so load eBPF the
       # capability way for a deterministic deployment-mechanics test.
@@ -58,3 +59,9 @@ data:
     audit:
       enabled: true
       storage_path: /data/audit.redb
+
+# The suites drive the datapath, not the control plane's identity: the
+# agent answers unauthenticated plaintext here, which the two opt-outs
+# above are what make legal on a non-loopback bind.
+auth:
+  enabled: false

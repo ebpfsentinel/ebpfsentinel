@@ -35,15 +35,19 @@ pub async fn jwt_auth_middleware(
 /// Extract authentication credential from the request.
 ///
 /// Checks `Authorization: Bearer <token>` first, then `X-API-Key: <key>`.
+///
+/// A bearer value is handed to the provider whatever its shape. The key the
+/// agent generates for itself is `sk-` and hex rather than three dot-separated
+/// parts, and it is what the CLI puts in this header, so a shape test here
+/// would refuse the one credential a fresh install has.
 fn extract_token(request: &Request) -> Result<&str, ApiError> {
-    // Try Bearer token first - must look like a JWT (3 dot-separated parts).
     if let Some(auth_header) = request
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         && let Some(token) = auth_header.strip_prefix("Bearer ")
     {
-        if token.is_empty() || token.matches('.').count() != 2 {
+        if token.is_empty() {
             return Err(ApiError::Unauthorized {
                 message: "malformed Bearer token".to_string(),
             });
@@ -229,6 +233,35 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"]["code"], "AUTHENTICATION_REQUIRED");
+    }
+
+    /// The key a fresh install has is the one the agent drew for itself, and
+    /// the CLI presents it as a bearer: it is not a JWT, so refusing it on
+    /// shape would refuse the only credential that exists on day one.
+    #[tokio::test]
+    async fn accept_an_api_key_presented_as_a_bearer() {
+        let state = make_test_state(Some(Arc::new(AlwaysOkProvider)));
+        let router = build_test_router(state);
+        let req = HttpRequest::builder()
+            .uri("/protected")
+            .header("Authorization", "Bearer sk-0123456789abcdef")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn reject_an_empty_bearer() {
+        let state = make_test_state(Some(Arc::new(AlwaysOkProvider)));
+        let router = build_test_router(state);
+        let req = HttpRequest::builder()
+            .uri("/protected")
+            .header("Authorization", "Bearer ")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

@@ -21,4 +21,14 @@ spec:
     - port: metrics
       interval: {{ .Values.metrics.serviceMonitor.interval }}
       path: /metrics
+      {{- if .Values.metrics.authRequired }}
+      {{- if not .Values.auth.existingSecret }}
+      {{- fail "metrics.authRequired needs auth.existingSecret: the key the agent draws for itself cannot be handed to Prometheus" }}
+      {{- end }}
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ .Values.auth.existingSecret }}
+          key: {{ .Values.auth.secretKey }}
+      {{- end }}
 {{- end }}

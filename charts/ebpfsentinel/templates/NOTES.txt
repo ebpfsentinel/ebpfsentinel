@@ -11,9 +11,34 @@ Check agent logs:
 
   kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "ebpfsentinel.name" . }} --tail=20
 
-Access the REST API (from within the cluster):
+Access the REST API (from within the cluster). /healthz and /readyz answer
+without a credential - that is what the kubelet probes use - and every other
+route needs one:
 
   curl http://{{ include "ebpfsentinel.fullname" . }}.{{ .Release.Namespace }}:{{ .Values.agent.httpPort }}/healthz
+{{- if .Values.auth.enabled }}
+{{- if .Values.auth.existingSecret }}
+
+The API key comes from the Secret {{ .Values.auth.existingSecret }}:
+
+  KEY=$(kubectl -n {{ .Release.Namespace }} get secret {{ .Values.auth.existingSecret }} -o jsonpath='{.data.{{ .Values.auth.secretKey }}}' | base64 -d)
+  curl -H "X-API-Key: $KEY" http://{{ include "ebpfsentinel.fullname" . }}.{{ .Release.Namespace }}:{{ .Values.agent.httpPort }}/api/v1/firewall/rules
+{{- else }}
+
+Authentication is ON and no Secret was named, so each agent drew a key for
+itself at first start and printed it once. Read it from the pod log:
+
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "ebpfsentinel.name" . }} | grep "API key"
+  curl -H "X-API-Key: <key>" http://{{ include "ebpfsentinel.fullname" . }}.{{ .Release.Namespace }}:{{ .Values.agent.httpPort }}/api/v1/firewall/rules
+
+Each node has its own key. Name one Secret in auth.existingSecret to give the
+fleet a single credential.
+{{- end }}
+{{- else }}
+
+Authentication is OFF: every caller that reaches this Service can rewrite the
+firewall, arm the IPS and reload the configuration.
+{{- end }}
 {{- if .Values.agent.tls.enabled }}
 
 TLS is ENABLED:

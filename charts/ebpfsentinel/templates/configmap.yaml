@@ -18,6 +18,7 @@ data:
       interfaces: {{ .Values.agent.interfaces | toJson }}
       bind_address: {{ .Values.agent.bindAddress | quote }}
       allow_unauthenticated_api: {{ .Values.agent.allowUnauthenticatedApi }}
+      allow_plaintext_api: {{ .Values.agent.allowPlaintextApi }}
       http_port: {{ .Values.agent.httpPort }}
       grpc_port: {{ .Values.agent.grpcPort }}
       metrics_port: {{ .Values.agent.metricsPort }}
@@ -58,6 +59,12 @@ data:
       enabled: {{ .Values.audit.enabled }}
     auth:
       enabled: {{ .Values.auth.enabled }}
+      metrics_auth_required: {{ .Values.metrics.authRequired }}
+      {{- if .Values.auth.existingSecret }}
+      # The mounted Secret, read-only: the agent uses the key it holds instead
+      # of drawing one. No key is ever written into this ConfigMap.
+      bootstrap_key_path: /etc/ebpfsentinel/auth/{{ .Values.auth.secretKey }}
+      {{- end }}
     conntrack:
       enabled: {{ .Values.conntrack.enabled }}
     ddos:
