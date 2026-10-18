@@ -91,11 +91,6 @@ const BPF_PROG_TYPE_SOCK_OPS: u32 = 15;
 const BPF_PROG_TYPE_RAW_TRACEPOINT: u32 = 17;
 const BPF_PROG_TYPE_CGROUP_SOCK_ADDR: u32 = 18;
 
-/// `BPF_CGROUP_SOCK_OPS` (`enum bpf_attach_type`). A `sockops` program carries
-/// no attach type in its section name, so the number is written here rather
-/// than derived from the section the way the cgroup socket hooks are.
-const BPF_CGROUP_SOCK_OPS: u32 = 3;
-
 /// `BPF_TRACE_UPROBE_MULTI` (`enum bpf_attach_type`). A KPROBE-type program
 /// must be loaded with this `expected_attach_type` to be attachable via a
 /// `uprobe_multi` `BPF_LINK_CREATE` - the token-friendly uprobe attach path.
@@ -169,9 +164,14 @@ pub enum KfuncLoaderError {
     #[error("program `{name}` not found among parsed functions")]
     MissingFunction { name: String },
 
-    #[error("BPF_PROG_LOAD `{name}` failed (errno {errno}); verifier log:\n{log}")]
+    #[error(
+        "BPF_PROG_LOAD `{name}` (prog_type {prog_type}, expected_attach_type \
+         {expected_attach_type}) failed (errno {errno}); verifier log:\n{log}"
+    )]
     ProgLoad {
         name: String,
+        prog_type: u32,
+        expected_attach_type: u32,
         errno: i32,
         log: String,
     },
@@ -205,6 +205,29 @@ pub struct KfuncLoadedProgram {
     pub fd: OwnedFd,
     /// `enum bpf_prog_type` of the loaded program.
     pub prog_type: u32,
+}
+
+/// A program the caller declared optional that the kernel refused.
+///
+/// The object still loads: a hook the kernel will not take is a capability
+/// the host does not have, and a caller that named it optional has somewhere
+/// to put that sentence. Everything else in the object is loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedProgram {
+    /// Program name as keyed in the object.
+    pub name: String,
+    /// The load error, in one sentence, for the operator who asks why.
+    pub reason: String,
+}
+
+/// What an object's programs came to: the ones the kernel took, and the
+/// optional ones it refused.
+#[derive(Debug, Default)]
+pub struct LoadedPrograms {
+    /// Loaded programs, in object order.
+    pub programs: Vec<KfuncLoadedProgram>,
+    /// Optional programs the kernel refused, in object order.
+    pub refused: Vec<RefusedProgram>,
 }
 
 /// Find every kfunc call site: relocations targeting an undefined (extern)
@@ -413,7 +436,8 @@ pub fn load_kfunc_programs<S: BuildHasher>(
     resolver: &KfuncResolver,
     hosted: &HashMap<String, OwnedFd, S>,
     dev_bound_ifindex: Option<u32>,
-) -> Result<Vec<KfuncLoadedProgram>, KfuncLoaderError> {
+    optional: &[&str],
+) -> Result<LoadedPrograms, KfuncLoaderError> {
     let names = unique_names(&find_kfunc_sites(elf)?);
 
     let mut obj = Object::parse(elf).map_err(|e| KfuncLoaderError::ParseObject(e.to_string()))?;
@@ -455,7 +479,7 @@ pub fn load_kfunc_programs<S: BuildHasher>(
         })
         .collect();
 
-    let mut loaded = Vec::new();
+    let mut loaded = LoadedPrograms::default();
     for (name, key, prog_type, eat, flags) in program_meta {
         if prog_type == 0 {
             return Err(KfuncLoaderError::UnsupportedSection { name });
@@ -486,7 +510,7 @@ pub fn load_kfunc_programs<S: BuildHasher>(
             None
         };
 
-        let fd = raw_prog_load(&RawProgLoad {
+        let request = RawProgLoad {
             name: &name,
             prog_type,
             expected_attach_type: eat,
@@ -501,9 +525,26 @@ pub fn load_kfunc_programs<S: BuildHasher>(
             fd_array: &fd_array.fds,
             has_modules: !fd_array.module_slot.is_empty(),
             dev_bound_ifindex: prog_ifindex,
-        })?;
+        };
+        let fd = match raw_prog_load(&request) {
+            Ok(fd) => fd,
+            // A program the caller named optional is one whose absence it
+            // knows how to report. The kernel refusing it is a fact about the
+            // host - a helper this program type may not call under the load
+            // mode in use, a hook the kernel was built without - and failing
+            // the whole object over it would take the programs that did load
+            // down with it.
+            Err(e) if optional.contains(&name.as_str()) => {
+                loaded.refused.push(RefusedProgram {
+                    name,
+                    reason: e.to_string(),
+                });
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
 
-        loaded.push(KfuncLoadedProgram {
+        loaded.programs.push(KfuncLoadedProgram {
             name,
             fd,
             prog_type,
@@ -639,7 +680,11 @@ fn prog_attrs(section: &ProgramSection) -> (u32, u32, u32) {
             attach_type_number(bpf_attach_type::from(*attach_type)),
             0,
         ),
-        ProgramSection::SockOps => (BPF_PROG_TYPE_SOCK_OPS, BPF_CGROUP_SOCK_OPS, 0),
+        // A `sock_ops` program loads with no `expected_attach_type`, unlike
+        // the cgroup socket hooks right above it: libbpf passes none either,
+        // and `BPF_CGROUP_SOCK_OPS` is what `BPF_LINK_CREATE` is given at
+        // attach time rather than what the load is issued with.
+        ProgramSection::SockOps => (BPF_PROG_TYPE_SOCK_OPS, 0, 0),
         // The process lifecycle tracepoints. A raw tracepoint carries no
         // attach type at all: the kernel binds it to a tracepoint by name at
         // attach time, and the name lives in the section rather than in the
@@ -982,6 +1027,8 @@ fn raw_prog_load(req: &RawProgLoad<'_>) -> Result<OwnedFd, KfuncLoaderError> {
         let cleaned: String = raw_log.chars().filter(|&c| c != '\0').collect();
         KfuncLoaderError::ProgLoad {
             name: req.name.to_owned(),
+            prog_type: req.prog_type,
+            expected_attach_type: req.expected_attach_type,
             errno,
             log: cleaned.trim().to_owned(),
         }
@@ -1093,6 +1140,9 @@ pub struct TokenLoadedObject {
     pub maps: HashMap<String, AyaMap>,
     /// Program name → (fd, `bpf_prog_type`).
     pub programs: Vec<KfuncLoadedProgram>,
+    /// The optional programs the kernel refused, with the reason each one
+    /// carried. Empty when the caller named none or the kernel took them all.
+    pub refused: Vec<RefusedProgram>,
     /// Map name → a borrowed (dup'd) raw fd of the same kernel map, kept so the
     /// loader can issue raw `BPF_MAP_UPDATE_ELEM` (e.g. tail-call `ProgramArray`
     /// wiring) against a map whose typed form lives in `maps`.
@@ -1570,16 +1620,17 @@ fn load_programs_counting_rejections<S: BuildHasher>(
     resolver: &KfuncResolver,
     hosted: &HashMap<String, OwnedFd, S>,
     dev_bound_ifindex: Option<u32>,
-) -> Result<Vec<KfuncLoadedProgram>, KfuncLoaderError> {
+    optional: &[&str],
+) -> Result<LoadedPrograms, KfuncLoaderError> {
     // Device-bound metadata fallback: try device bound first (so
     // `bpf_xdp_metadata_rx_*` resolve), then retry neutralized.
     let result = if dev_bound_ifindex.is_some() && uses_dev_bound_metadata_kfuncs(elf) {
-        match load_kfunc_programs(elf, resolver, hosted, dev_bound_ifindex) {
+        match load_kfunc_programs(elf, resolver, hosted, dev_bound_ifindex, optional) {
             Ok(programs) => Ok(programs),
-            Err(_) => load_kfunc_programs(elf, resolver, hosted, None),
+            Err(_) => load_kfunc_programs(elf, resolver, hosted, None, optional),
         }
     } else {
-        load_kfunc_programs(elf, resolver, hosted, None)
+        load_kfunc_programs(elf, resolver, hosted, None, optional)
     };
     if let Err(KfuncLoaderError::ProgLoad { log, .. }) = &result
         && !log.is_empty()
@@ -1596,6 +1647,7 @@ pub fn load_object_token(
     elf: &[u8],
     pin_path: &str,
     dev_bound_ifindex: Option<u32>,
+    optional: &[&str],
 ) -> Result<TokenLoadedObject, KfuncLoaderError> {
     std::fs::create_dir_all(pin_path).map_err(|e| KfuncLoaderError::Pin {
         path: pin_path.to_owned(),
@@ -1634,8 +1686,13 @@ pub fn load_object_token(
         .map_err(|e| KfuncLoaderError::MapWrap(e.to_string()))?;
 
     let resolver = KfuncResolver::new()?;
-    let programs =
-        load_programs_counting_rejections(&patched, &resolver, &hosted, dev_bound_ifindex)?;
+    let loaded_programs = load_programs_counting_rejections(
+        &patched,
+        &resolver,
+        &hosted,
+        dev_bound_ifindex,
+        optional,
+    )?;
     drop(btf_fd);
 
     let mut maps = HashMap::new();
@@ -1647,7 +1704,8 @@ pub fn load_object_token(
     // on so tail-call wiring can update `ProgramArray`s by raw fd.
     Ok(TokenLoadedObject {
         maps,
-        programs,
+        programs: loaded_programs.programs,
+        refused: loaded_programs.refused,
         hosted,
     })
 }

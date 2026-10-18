@@ -1,0 +1,22 @@
+{
+  "baseline_connect_ns": "12936.4",
+  "baseline_connect_per_s": 77301,
+  "baseline_exec_ns": "364438.1",
+  "attribution_hooks_attached": 6,
+  "attribution_degraded_reason": "the kernel refused the socket-to-flow join program, so an established flow is matched to its socket by five-tuple and the workload arrives with `flow` as its source rather than `socket`; every socket is still named: BPF_PROG_LOAD `attribution_sockops` (prog_type 15, expected_attach_type 0) failed (errno 22)",
+  "attribution_connect_ns": "12853.7",
+  "attribution_connect_per_s": 77798,
+  "attribution_overhead_ns": "-82.7",
+  "attribution_overhead_pct": "0",
+  "process_exec_ns": "359156.9",
+  "process_overhead_ns": "-5281.2",
+  "process_overhead_pct": "-1.00",
+  "kernel": "7.0.0-28-generic",
+  "vcpus": 4,
+  "connect_iterations": 20000,
+  "exec_iterations": 3000,
+  "runs_per_arm": 3,
+  "measured_on": "2026-10-18",
+  "host": "Vagrant guest, 4 vCPU, VMware vmxnet3",
+  "agent": "0.0.0-dev, rootless, eBPF loaded through the BPF token with the warden broker"
+}

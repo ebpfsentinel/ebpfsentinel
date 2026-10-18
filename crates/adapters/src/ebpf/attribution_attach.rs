@@ -37,9 +37,22 @@ pub const BPF_CGROUP_UDP4_SENDMSG: u32 = 14;
 /// `BPF_CGROUP_UDP6_SENDMSG` from `enum bpf_attach_type`.
 pub const BPF_CGROUP_UDP6_SENDMSG: u32 = 15;
 
+/// The one hook of the object that may be absent on its own.
+///
+/// It joins the socket the other six recorded to the connection the datapath
+/// sees, and it is the only program of the object that calls
+/// `bpf_get_socket_cookie` from a `sock_ops` context. A kernel can refuse
+/// that one helper to that one program type while taking every other hook -
+/// a tokenized rootless load on Linux 7.0 does exactly that - and when it
+/// does, the workload is still named on the socket and the flow is
+/// correlated by its five-tuple instead of by the cookie.
+pub const ATTRIBUTION_JOIN_HOOK: &str = "attribution_sockops";
+
 /// The programs of the attribution object, with the attach type each one is
 /// loaded for. The order is the order they are attached in, and the first
-/// failure stops the pass: a host refusing `connect4` refuses the rest.
+/// failure stops the pass: a host refusing `connect4` refuses the rest. The
+/// exception is [`ATTRIBUTION_JOIN_HOOK`], which the loader may report as
+/// refused on its own.
 pub const ATTRIBUTION_HOOKS: &[(&str, u32)] = &[
     ("attribution_connect4", BPF_CGROUP_INET4_CONNECT),
     ("attribution_connect6", BPF_CGROUP_INET6_CONNECT),
@@ -56,6 +69,8 @@ pub const ATTRIBUTION_HOOKS: &[(&str, u32)] = &[
 /// `attached` false with a `reason` is the degraded case the whole module
 /// exists to make legible: the agent is running, flows carry no workload, and
 /// the sentence says which hook the kernel refused and with what errno.
+/// `attached` true with a `reason` is the narrower one: every socket is still
+/// named, and only the cookie-to-flow join is missing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AttributionStatus {
     /// Every hook is attached and the socket table is being filled.
@@ -96,6 +111,22 @@ pub fn status() -> AttributionStatus {
         .clone()
 }
 
+/// The one sentence an operator gets when the kernel refused the join hook.
+///
+/// It names what is lost rather than what failed: every socket is still
+/// attributed, and a flow the datapath reports is matched to one by its
+/// five-tuple, so the workload arrives with `flow` as its source instead of
+/// `socket`. The loader's own error is carried along, because the helper and
+/// the errno are what tell a kernel engineer which refusal this is.
+#[must_use]
+pub fn join_refused_reason(refusal: &str) -> String {
+    format!(
+        "the kernel refused the socket-to-flow join program, so an established flow is matched \
+         to its socket by five-tuple and the workload arrives with `flow` as its source rather \
+         than `socket`; every socket is still named: {refusal}"
+    )
+}
+
 /// Holds the cgroup links alive. Dropping it detaches every hook, which is
 /// what a hot reload that turns attribution off does.
 #[derive(Default)]
@@ -134,7 +165,22 @@ impl AttributionAttacher {
     /// treat it as such.
     pub fn attach_all(&mut self, loader: &EbpfLoader, cgroup: &str) -> AttributionStatus {
         let mut hooks = Vec::with_capacity(ATTRIBUTION_HOOKS.len());
+        let mut degraded = None;
         for (program, attach_type) in ATTRIBUTION_HOOKS {
+            // The join hook may be missing from the object: the loader was
+            // told to tolerate a kernel refusing it, and attaching the six
+            // hooks that did load is worth more than taking them down with
+            // it. Everything else is still all-or-nothing.
+            if *program == ATTRIBUTION_JOIN_HOOK
+                && let Some(refusal) = loader.refused_program(ATTRIBUTION_JOIN_HOOK)
+            {
+                warn!(
+                    program,
+                    cgroup, refusal, "socket attribution joins flows by five-tuple on this host"
+                );
+                degraded = Some(join_refused_reason(refusal));
+                continue;
+            }
             match self.attach_one(loader, cgroup, program, *attach_type) {
                 Ok(link) => {
                     self.links.push(link);
@@ -166,13 +212,14 @@ impl AttributionAttacher {
             cgroup,
             hooks = hooks.len(),
             brokered = self.warden_sock.is_some(),
+            joined = degraded.is_none(),
             "socket attribution attached"
         );
         let status = AttributionStatus {
             attached: true,
             cgroup: cgroup.to_owned(),
             hooks,
-            reason: None,
+            reason: degraded,
             brokered: self.warden_sock.is_some(),
         };
         publish_status(status.clone());
@@ -232,6 +279,30 @@ mod tests {
         types.sort_unstable();
         types.dedup();
         assert_eq!(types.len(), ATTRIBUTION_HOOKS.len());
+    }
+
+    #[test]
+    fn the_join_hook_is_one_of_the_hooks_and_is_attached_last() {
+        // Last matters: the six that name the socket attach before the one
+        // that joins it to a flow, so a refusal of the join costs nothing
+        // that already attached.
+        let last = ATTRIBUTION_HOOKS
+            .last()
+            .map(|(name, _)| *name)
+            .expect("the hook table is never empty");
+        assert_eq!(last, ATTRIBUTION_JOIN_HOOK);
+    }
+
+    #[test]
+    fn the_join_refusal_names_the_cost_and_keeps_the_kernel_error() {
+        let reason = join_refused_reason(
+            "BPF_PROG_LOAD `attribution_sockops` (prog_type 15, expected_attach_type 0) \
+             failed (errno 22)",
+        );
+        assert!(reason.contains("five-tuple"));
+        assert!(reason.contains("`flow`"));
+        assert!(reason.contains("every socket is still named"));
+        assert!(reason.contains("errno 22"));
     }
 
     #[test]

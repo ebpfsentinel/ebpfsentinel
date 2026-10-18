@@ -90,7 +90,7 @@ pub fn run() -> Result<()> {
             }
         };
 
-        let loaded = match kfunc_loader::load_object_token(&bytes, &pin, None) {
+        let loaded = match kfunc_loader::load_object_token(&bytes, &pin, None, &[]) {
             Ok(l) => l,
             Err(e) => {
                 skipped.push((object, format!("load: {e}{}", module_hint(&e.to_string()))));

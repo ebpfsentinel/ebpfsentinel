@@ -4849,8 +4849,14 @@ pub fn try_load_cgroup_attribution(
     config: &AgentConfig,
 ) -> anyhow::Result<LoadedAttribution> {
     let program_bytes = read_ebpf_program(ebpf_dir, "cgroup-attribution")?;
-    let mut loader =
-        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    // The join hook is loaded optionally: a kernel that refuses it still
+    // takes the six hooks that name the socket, and the status says what the
+    // refusal costs instead of the object failing whole.
+    let mut loader = EbpfLoader::load_with_pin_path_optional(
+        &program_bytes,
+        adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+        &[adapters::ebpf::ATTRIBUTION_JOIN_HOOK],
+    )?;
     let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "ATTRIBUTION_METRICS").ok();
     // The two tables leave the loader the way the counters do: the kernel
     // maps stay linked into the programs, so taking the userspace handles out

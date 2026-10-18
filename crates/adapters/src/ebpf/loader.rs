@@ -45,6 +45,11 @@ pub struct EbpfLoader {
     kfunc_progs: HashMap<String, OwnedFd>,
     /// Owned link fds for raw XDP/TCX attachments of kfunc programs.
     kfunc_links: Vec<OwnedFd>,
+    /// Optional programs the kernel refused, keyed by program name, with the
+    /// load error each one carried. A caller that declared a program optional
+    /// reads this to say what the host cannot do instead of discovering a
+    /// missing fd.
+    refused_progs: HashMap<String, String>,
     /// Independent `dup`s of the maps aya hosts for a kfunc object, keyed by
     /// map name. Captured at load time (aya exposes no fd accessor and pinning
     /// is refused on integrity kernels) so raw map syscalls - e.g. wiring a
@@ -66,10 +71,16 @@ impl EbpfLoader {
         // Take a handle on every map whose fullness an operator can act on,
         // before this object's maps disperse into the managers that own them.
         super::map_fill::register(&loaded.hosted);
+        let refused_progs = loaded
+            .refused
+            .into_iter()
+            .map(|r| (r.name, r.reason))
+            .collect();
         Self {
             token_maps: super::map_store::TokenMaps::new(loaded.maps),
             netkit_links: Vec::new(),
             kfunc_progs,
+            refused_progs,
             kfunc_links: Vec::new(),
             // Raw map fds captured at load time, so `set_tail_call_raw` can wire
             // `ProgramArray`s (e.g. XDP_PROG_ARRAY).
@@ -83,7 +94,8 @@ impl EbpfLoader {
     /// the token fd, so no `CAP_BPF` is needed. Returns an error if the
     /// verifier rejects the program or the token is unavailable.
     pub fn load(program_bytes: &[u8]) -> Result<Self, anyhow::Error> {
-        let loaded = kfunc_loader::load_object_token(program_bytes, DEFAULT_BPF_PIN_PATH, None)?;
+        let loaded =
+            kfunc_loader::load_object_token(program_bytes, DEFAULT_BPF_PIN_PATH, None, &[])?;
         Ok(Self::from_token_object(loaded))
     }
 
@@ -119,7 +131,8 @@ impl EbpfLoader {
         // The raw token loader creates all maps and loads every program through
         // the token (no aya, no `CAP_BPF`), classifying kfunc usage internally
         // and pin-sharing maps under `pin_path`.
-        let loaded = kfunc_loader::load_object_token(program_bytes, pin_path, dev_bound_ifindex)?;
+        let loaded =
+            kfunc_loader::load_object_token(program_bytes, pin_path, dev_bound_ifindex, &[])?;
         Ok(Self::from_token_object(loaded))
     }
 
@@ -141,7 +154,24 @@ impl EbpfLoader {
         program_bytes: &[u8],
         pin_path: &str,
     ) -> Result<Self, anyhow::Error> {
-        let loaded = kfunc_loader::load_object_token(program_bytes, pin_path, None)?;
+        let loaded = kfunc_loader::load_object_token(program_bytes, pin_path, None, &[])?;
+        Ok(Self::from_token_object(loaded))
+    }
+
+    /// Like [`Self::load_with_pin_path`], but tolerating a refusal of the
+    /// programs named in `optional`.
+    ///
+    /// A program is optional when the object is still worth loading without
+    /// it and the caller can say what its absence costs. The kernel refusing
+    /// one is recorded rather than returned, and read back through
+    /// [`Self::refused_program`]; a refusal of any other program still fails
+    /// the load, because an object loaded half way is a silent degradation.
+    pub fn load_with_pin_path_optional(
+        program_bytes: &[u8],
+        pin_path: &str,
+        optional: &[&str],
+    ) -> Result<Self, anyhow::Error> {
+        let loaded = kfunc_loader::load_object_token(program_bytes, pin_path, None, optional)?;
         Ok(Self::from_token_object(loaded))
     }
 
@@ -528,6 +558,16 @@ impl EbpfLoader {
     /// The returned fd is valid as long as this `EbpfLoader` is alive.
     pub fn program_fd(&self, program_name: &str) -> Option<RawFd> {
         self.kfunc_progs.get(program_name).map(AsRawFd::as_raw_fd)
+    }
+
+    /// Why an optional program is absent, when the kernel refused it.
+    ///
+    /// `None` both when the program loaded and when it was never declared
+    /// optional - the second case cannot happen, since a refusal of a
+    /// mandatory program fails the load outright.
+    #[must_use]
+    pub fn refused_program(&self, program_name: &str) -> Option<&str> {
+        self.refused_progs.get(program_name).map(String::as_str)
     }
 
     // ── Zero-downtime program swap via BPF_LINK_UPDATE (kernel 5.7+) ────
