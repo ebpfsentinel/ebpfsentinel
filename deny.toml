@@ -19,7 +19,22 @@ all-features = true
 [advisories]
 # Unmaintained crates: warn only for direct workspace dependencies
 unmaintained = "workspace"
-ignore = []
+# RUSTSEC-2026-0367, RUSTSEC-2026-0368 and RUSTSEC-2026-0369 are three
+# extraction flaws in `zip`, which arrives as a build dependency of
+# `utoipa-swagger-ui`. That crate pins `zip` at `^8.6` and the fix is `zip 9`,
+# so no published version of it clears them. All three need an
+# attacker-controlled archive, and the only archive this build opens is the
+# Swagger UI distribution carried by `utoipa-swagger-ui-vendored`, pinned in
+# `Cargo.lock` and unpacked into `OUT_DIR` at build time: nothing reads an
+# archive at runtime and nothing downloads one. The `vendored` feature is what
+# keeps the second half of that true, because without it the build script
+# fetches the distribution over the network instead. Drop these three entries
+# the day `utoipa-swagger-ui` takes `zip 9`.
+ignore = [
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+]
 
 [licenses]
 allow = [

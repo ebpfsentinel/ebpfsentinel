@@ -7112,11 +7112,11 @@
           "container": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ContainerIdentity",
                 "description": "Container identity resolved from the event's `cgroup_id` (if any)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -8203,10 +8203,10 @@
           "match_rule": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/CreateQosMatchRuleRequest"
               },
               {
-                "$ref": "#/components/schemas/CreateQosMatchRuleRequest"
+                "type": "null"
               }
             ]
           },
@@ -9356,11 +9356,11 @@
           "kernel_slot": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/SlotContentionResponse",
                 "description": "Present only when another rule holds a kernel map slot this rule also\nclaims."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -9388,10 +9388,10 @@
           "threshold": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/ThresholdResponse"
               },
               {
-                "$ref": "#/components/schemas/ThresholdResponse"
+                "type": "null"
               }
             ]
           }
@@ -9497,11 +9497,11 @@
           "kernel_slot": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/SlotContentionResponse",
                 "description": "Present only when another rule holds a kernel map slot this rule also\nclaims. A prevention rule that lost its slot is never replayed in\nuserspace, so it blocks nothing until the conflict is resolved."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -9795,11 +9795,11 @@
           "health_check": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/LbHealthCheckResponse",
                 "description": "The probe behind the backend statuses below, omitted where the service\ncarries none and nothing is ever measured."
+              },
+              {
+                "type": "null"
               }
             ]
           },
