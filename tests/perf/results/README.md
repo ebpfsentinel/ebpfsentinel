@@ -9,39 +9,56 @@ Nothing in this directory is a target. A guest with four vCPUs is not a
 production node, and the suite says so in its own output: the bounds it
 asserts are what the lane can hold, not what the product promises.
 
-## `2026-10-18-attribution-overhead.json`
+## `2026-10-19-attribution-overhead.json`
 
-`07-attribution-overhead.bats`, run four times on a Vagrant guest, kernel
+`07-attribution-overhead.bats`, run twice on an idle Vagrant guest, kernel
 7.0.0-28-generic, 4 vCPU, agent `0.0.0-dev` running rootless with eBPF loaded
-through the BPF token and the warden broker. The JSON is the fourth run; the
-four runs together are what the figure is worth:
+through the BPF token and the warden broker. All seven attribution hooks
+attached on both runs, `attribution_degraded_reason` empty. The JSON is the
+second run.
 
-| run | connect baseline | connect with attribution | delta | exec baseline | exec with the process table | delta |
+Each arm is 200000 connects or 10000 execs. The arms are interleaved in pairs,
+baseline then measured, back to back, seven pairs; the driver and the listener
+are pinned to CPUs 2 and 3. The figure kept is the median of the per-pair
+differences, so a slow minute costs both arms of a pair the same.
+
+| run | connect baseline | connect delta (median) | per-pair spread | exec baseline | exec delta (median) | per-pair spread |
 |---|---|---|---|---|---|---|
-| 1 | 13045.2 ns | 12976.6 ns | -68.6 ns | 339007.6 ns | 366790.2 ns | +27782.6 ns |
-| 2 | 12490.2 ns | 12913.4 ns | +423.2 ns | 326360.2 ns | 347024.0 ns | +20663.8 ns |
-| 3 | 12752.0 ns | 12957.3 ns | +205.3 ns | 343816.1 ns | 368089.3 ns | +24273.2 ns |
-| 4 | 12936.4 ns | 12853.7 ns | -82.7 ns | 364438.1 ns | 359156.9 ns | -5281.2 ns |
+| 1 | 13200.8 ns | +823.9 ns | -74.3 to +7850.2 ns | 329399.9 ns | +1546.5 ns | -6139.0 to +4918.6 ns |
+| 2 | 12731.0 ns | +803.3 ns | +9.3 to +2261.1 ns | 329422.2 ns | +1407.1 ns | -7747.4 to +8179.5 ns |
 
-Each arm is 20000 connects or 3000 execs, three runs, median kept.
+**The kernel's own clock is the stable instrument.** With
+`kernel.bpf_stats_enabled=1` the kernel times every program run itself, and
+`bpftool prog show` reports the total and the count, so the figure does not
+depend on the guest's scheduling at all:
 
-**What the connect() column means.** The delta changes sign between runs, so
-on this lane the socket hooks cost less than the guest's own run-to-run
-spread: the honest statement is below 500 ns per `connect()`, not a point
-figure. The baseline itself is a loopback handshake against a Python
-listener, around 12.9 us, so the hooks are a small fraction of a syscall that
-is itself dominated by the accept side.
+| run | attribution, per run | runs per connect | attribution, per connect | process, per run | runs per exec | process, per exec |
+|---|---|---|---|---|---|---|
+| 1 | 216.3 ns | 7.00 | 1514.2 ns | 10657.9 ns | 2.00 | 21333.9 ns |
+| 2 | 194.8 ns | 7.00 | 1363.6 ns | 10712.6 ns | 2.00 | 21443.5 ns |
 
-**What the execve() column means.** Three runs of four put the process table
-between +20 us and +28 us per `execve()` on a 340 us baseline, and the fourth
-came in below the baseline. The cost is real - the two tracepoints plus the
-userspace read of `/proc` that follows them - and it is paid once per process
-start, not per packet and not per connection.
+`runs per connect` of exactly 7.00 is the hooks saying what they are: a loopback
+`connect()` runs connect4, post_bind4, the `sock_ops` join and the rest once
+each. The two numbers the suite publishes for the same thing disagree on
+purpose and the disagreement is the caveat: `bpf_stats` measures from program
+entry to program exit including any preemption in between, so it is an upper
+bound, while the paired subtraction measures what the caller actually waited
+for. Where they differ, the subtraction is the cost to a workload and the
+kernel clock is the cost the kernel attributes to the program.
 
-**What the kernel refused.** `attribution_hooks_attached` is 6, not 7: this
-host refuses `bpf_get_socket_cookie` to a `sock_ops` program under the
-tokenized rootless load, so the socket-to-flow join did not attach and the
-agent fell back to matching an established flow to its socket by five-tuple.
-Every socket is still named. The figures above are therefore the cost of six
-hooks on this host; a host that takes the seventh pays one more map write per
-established connection.
+**What to quote.** Socket attribution costs under a microsecond per
+`connect()` on this lane, somewhere between the ~800 ns the paired runs
+measure and the ~1.4 us the kernel's clock bounds it at. The process table
+costs single-digit microseconds per `execve()` by subtraction, bounded at
+~21 us by the kernel's clock, against a 330 us baseline; it is paid once per
+process start, not per packet and not per connection. Neither is a target: the
+bounds the suite asserts are what a four-vCPU guest can hold.
+
+**What was published before.** A run of 2026-10-18 reported six hooks and a
+`sock_ops` join refused with `errno 22`, and that was read at the time as a
+kernel refusing `bpf_get_socket_cookie` under a tokenized rootless load. It was
+not: the loader sent the join as program type 15 rather than 13, so the kernel
+loaded it as a different program type and refused the helper that type is not
+allowed. The file is gone rather than kept beside this one, because it measured
+a defect of ours on a host that does not have the limitation it was used to
+describe.

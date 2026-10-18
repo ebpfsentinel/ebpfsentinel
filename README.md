@@ -81,7 +81,7 @@ A snapshot of the capabilities below - see the [Features guide](https://github.c
 
 ```mermaid
 flowchart TB
-    subgraph kernel["Linux Kernel (16 eBPF programs)"]
+    subgraph kernel["Linux Kernel (18 eBPF programs)"]
         direction TB
         subgraph xdp["XDP - first hook on the receive path"]
             fw["xdp-firewall\n(stateful L3/L4)"]
@@ -103,6 +103,10 @@ flowchart TB
             qos[tc-qos]
         end
         uprobe["uprobe-dlp\n(SSL/TLS intercept)"]
+        subgraph off_wire["Off the wire - who, not what"]
+            attr["cgroup-attribution\n(connect/bind/sendmsg + sock_ops)"]
+            proc["tracepoint-process\n(execve / exit)"]
+        end
     end
 
     packets(("Packets")) --> fw
@@ -120,6 +124,7 @@ flowchart TB
 
     fw -- "XDP_PASS" --> tc
     tc --- uprobe
+    attr -. "socket cookie, five-tuple" .-> uprobe
 
     subgraph agent["Userspace Agent (Rust)"]
         direction LR

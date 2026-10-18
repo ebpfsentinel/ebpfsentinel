@@ -43,7 +43,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use aya::maps::{Map as AyaMap, MapData};
 use aya_obj::btf::BtfFeatures;
-use aya_obj::generated::bpf_attach_type;
+use aya_obj::generated::{bpf_attach_type, bpf_prog_type};
 use aya_obj::{Object, ProgramSection};
 use object::{Object as _, ObjectSection, ObjectSymbol, RelocationTarget};
 
@@ -82,14 +82,20 @@ const BPF_PSEUDO_KFUNC_CALL: u8 = 2;
 /// `BPF_JMP | BPF_CALL` opcode.
 const INSN_CALL: u8 = 0x85;
 
-/// `enum bpf_prog_type` values we emit.
-const BPF_PROG_TYPE_KPROBE: u32 = 2;
-const BPF_PROG_TYPE_SCHED_CLS: u32 = 3;
-const BPF_PROG_TYPE_XDP: u32 = 6;
-const BPF_PROG_TYPE_CGROUP_SOCK: u32 = 9;
-const BPF_PROG_TYPE_SOCK_OPS: u32 = 15;
-const BPF_PROG_TYPE_RAW_TRACEPOINT: u32 = 17;
-const BPF_PROG_TYPE_CGROUP_SOCK_ADDR: u32 = 18;
+/// `enum bpf_prog_type` values we emit. Taken from the kernel bindings rather
+/// than written out, because a wrong number here is not a compile error and
+/// not a load error either: the kernel loads the program as whatever type the
+/// number names and then refuses a helper the real type is allowed, which
+/// reads like a kernel that lacks the feature. `BPF_PROG_TYPE_SOCK_OPS` was
+/// written as 15 (`BPF_PROG_TYPE_CGROUP_DEVICE`) and cost the socket-to-flow
+/// join exactly that way.
+const BPF_PROG_TYPE_KPROBE: u32 = bpf_prog_type::BPF_PROG_TYPE_KPROBE as u32;
+const BPF_PROG_TYPE_SCHED_CLS: u32 = bpf_prog_type::BPF_PROG_TYPE_SCHED_CLS as u32;
+const BPF_PROG_TYPE_XDP: u32 = bpf_prog_type::BPF_PROG_TYPE_XDP as u32;
+const BPF_PROG_TYPE_CGROUP_SOCK: u32 = bpf_prog_type::BPF_PROG_TYPE_CGROUP_SOCK as u32;
+const BPF_PROG_TYPE_SOCK_OPS: u32 = bpf_prog_type::BPF_PROG_TYPE_SOCK_OPS as u32;
+const BPF_PROG_TYPE_RAW_TRACEPOINT: u32 = bpf_prog_type::BPF_PROG_TYPE_RAW_TRACEPOINT as u32;
+const BPF_PROG_TYPE_CGROUP_SOCK_ADDR: u32 = bpf_prog_type::BPF_PROG_TYPE_CGROUP_SOCK_ADDR as u32;
 
 /// `BPF_TRACE_UPROBE_MULTI` (`enum bpf_attach_type`). A KPROBE-type program
 /// must be loaded with this `expected_attach_type` to be attachable via a
@@ -1945,6 +1951,25 @@ mod tests {
             prog_attrs(&ProgramSection::SchedClassifier),
             (BPF_PROG_TYPE_SCHED_CLS, 0, 0)
         );
+    }
+
+    #[test]
+    fn the_program_types_we_emit_are_the_numbers_the_kernel_reads() {
+        // Written out rather than compared with the bindings they now come
+        // from, which would assert nothing. A wrong number loads: the kernel
+        // takes the program as the type the number names, and the refusal
+        // arrives later as a helper the real type is allowed. The join hook
+        // went out as 15, `BPF_PROG_TYPE_CGROUP_DEVICE`, and the verifier
+        // answered that a program of that type cannot use
+        // `bpf_get_socket_cookie`.
+        assert_eq!(BPF_PROG_TYPE_KPROBE, 2);
+        assert_eq!(BPF_PROG_TYPE_SCHED_CLS, 3);
+        assert_eq!(BPF_PROG_TYPE_XDP, 6);
+        assert_eq!(BPF_PROG_TYPE_CGROUP_SOCK, 9);
+        assert_eq!(BPF_PROG_TYPE_SOCK_OPS, 13);
+        assert_eq!(BPF_PROG_TYPE_RAW_TRACEPOINT, 17);
+        assert_eq!(BPF_PROG_TYPE_CGROUP_SOCK_ADDR, 18);
+        assert_eq!(prog_attrs(&ProgramSection::SockOps), (13, 0, 0));
     }
 
     #[test]

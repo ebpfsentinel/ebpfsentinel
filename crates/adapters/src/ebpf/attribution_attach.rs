@@ -1,9 +1,10 @@
 //! Attaching the socket-attribution hooks, and saying so when they cannot be.
 //!
-//! The six programs of the attribution object sit on a cgroup rather than on
-//! an interface: `connect4`/`connect6` and `sendmsg4`/`sendmsg6` fire in the
-//! syscall of the task that opens the socket, `post_bind4`/`post_bind6` when
-//! it binds one. Attaching to the root of the v2 hierarchy covers every task
+//! The seven programs of the attribution object sit on a cgroup rather than
+//! on an interface: `connect4`/`connect6` and `sendmsg4`/`sendmsg6` fire in
+//! the syscall of the task that opens the socket, `post_bind4`/`post_bind6`
+//! when it binds one, and the `sock_ops` join fires once the connection is
+//! established. Attaching to the root of the v2 hierarchy covers every task
 //! on the node, which is what a node agent wants.
 //!
 //! Nothing here enforces. Every program returns the allow verdict and the
@@ -41,11 +42,13 @@ pub const BPF_CGROUP_UDP6_SENDMSG: u32 = 15;
 ///
 /// It joins the socket the other six recorded to the connection the datapath
 /// sees, and it is the only program of the object that calls
-/// `bpf_get_socket_cookie` from a `sock_ops` context. A kernel can refuse
-/// that one helper to that one program type while taking every other hook -
-/// a tokenized rootless load on Linux 7.0 does exactly that - and when it
-/// does, the workload is still named on the socket and the flow is
-/// correlated by its five-tuple instead of by the cookie.
+/// `bpf_get_socket_cookie` from a `sock_ops` context. A kernel can take every
+/// other hook and refuse that one helper to that one program type, so the
+/// join is loaded on its own: when it is refused the workload is still named
+/// on the socket and the flow is correlated by its five-tuple instead of by
+/// the cookie. The one refusal seen in practice was ours rather than the
+/// kernel's - the loader sent `sock_ops` as program type 15 - which is the
+/// reason the reason string carries the kernel's own words.
 pub const ATTRIBUTION_JOIN_HOOK: &str = "attribution_sockops";
 
 /// The programs of the attribution object, with the attach type each one is
@@ -296,13 +299,13 @@ mod tests {
     #[test]
     fn the_join_refusal_names_the_cost_and_keeps_the_kernel_error() {
         let reason = join_refused_reason(
-            "BPF_PROG_LOAD `attribution_sockops` (prog_type 15, expected_attach_type 0) \
-             failed (errno 22)",
+            "BPF_PROG_LOAD `attribution_sockops` (prog_type 13, expected_attach_type 0) \
+             failed (errno 524)",
         );
         assert!(reason.contains("five-tuple"));
         assert!(reason.contains("`flow`"));
         assert!(reason.contains("every socket is still named"));
-        assert!(reason.contains("errno 22"));
+        assert!(reason.contains("errno 524"));
     }
 
     #[test]
