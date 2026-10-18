@@ -72,6 +72,45 @@ pub const DLP_SCOPE_MAX_CGROUPS: u32 = 4096;
 /// been through a probed library for longer than this is captured normally.
 pub const DLP_KTLS_SUPPRESS_WINDOW_NS: u64 = 100_000_000;
 
+/// Flow provenance: the event carries no socket, so nothing is known about
+/// where the plaintext went. A `SSL_write` over a plain TCP socket the probes
+/// never saw is this: the alert names the process and says the destination is
+/// unknown, rather than naming a destination it guessed.
+pub const DLP_FLOW_SOURCE_NONE: u8 = 0;
+/// Flow provenance: the five-tuple was read from the `struct sock` the kernel
+/// TLS call carried in its first argument, at the moment the plaintext was
+/// taken. This is the strongest identity the datapath can produce.
+pub const DLP_FLOW_SOURCE_KERNEL_SOCKET: u8 = 1;
+/// Flow provenance: the five-tuple came from the last socket this task was
+/// seen writing through, inside `DLP_TASK_SOCKET_WINDOW_NS`. A library uprobe
+/// has a buffer and no socket, so a correlated tuple is the best a userspace
+/// probe can do, and it says so rather than passing itself off as a reading.
+pub const DLP_FLOW_SOURCE_CORRELATED: u8 = 2;
+
+/// Address family of a `DlpSocket`: nothing was resolved.
+pub const DLP_FLOW_FAMILY_UNSPEC: u8 = 0;
+/// Address family of a `DlpSocket`: `AF_INET`, as the kernel numbers it.
+pub const DLP_FLOW_FAMILY_IPV4: u8 = 2;
+/// Address family of a `DlpSocket`: `AF_INET6`, as the kernel numbers it.
+pub const DLP_FLOW_FAMILY_IPV6: u8 = 10;
+
+/// IP protocol carried by a `DlpSocket`. Every TLS flow the probes see is a
+/// stream socket, and kernel TLS exists on TCP alone, so the value is a
+/// constant of the datapath rather than a bitfield read out of `struct sock`.
+pub const DLP_FLOW_PROTOCOL_TCP: u8 = 6;
+
+/// How long a socket recorded against a task stays usable as a correlation.
+///
+/// The kernel TLS probes record the socket they were called on; a library
+/// uprobe firing for the same write is in the same syscall, so the window only
+/// has to outlive one call frame. Past it the recording is stale and the event
+/// goes out with no flow rather than with the destination of an older write.
+pub const DLP_TASK_SOCKET_WINDOW_NS: u64 = 100_000_000;
+
+/// Capacity of `DLP_TASK_SOCKET`: tasks whose last socket is remembered. An
+/// LRU map, so a busier node evicts the oldest rather than refusing an insert.
+pub const DLP_TASK_SOCKET_MAX_TASKS: u32 = 16384;
+
 /// Byte offsets of the kernel message-iterator fields the kernel TLS probes
 /// read, resolved from the running kernel's vmlinux BTF by userspace and
 /// pushed into `KTLS_ITER_OFFSETS`.
@@ -118,10 +157,99 @@ unsafe impl aya::Pod for KtlsIterOffsets {}
 
 // ── Types ───────────────────────────────────────────────────────────
 
+/// Byte offsets of the `struct sock` members the kernel TLS probes read,
+/// resolved from the running kernel's vmlinux BTF by userspace and pushed into
+/// `SOCK_OFFSETS`.
+///
+/// Same reason as `KtlsIterOffsets`: the Rust `bpfel` target emits no CO-RE
+/// relocations, so a kernel struct member cannot be relocated at load. The
+/// address members live in the anonymous `struct sock_common __sk_common` at
+/// the head of `struct sock`, and the two address pairs are overlaid on each
+/// other by family, which is why the family is read before either.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SockOffsets {
+    /// Byte offset of `sock.__sk_common` (zero on every kernel seen so far,
+    /// read rather than assumed).
+    pub sk_common: u32,
+    /// Byte offset of `sock_common.skc_rcv_saddr`, the local IPv4 address.
+    pub skc_rcv_saddr: u32,
+    /// Byte offset of `sock_common.skc_daddr`, the peer IPv4 address.
+    pub skc_daddr: u32,
+    /// Byte offset of `sock_common.skc_num`, the local port in host order.
+    pub skc_num: u32,
+    /// Byte offset of `sock_common.skc_dport`, the peer port in network order.
+    pub skc_dport: u32,
+    /// Byte offset of `sock_common.skc_family`.
+    pub skc_family: u32,
+    /// Byte offset of `sock_common.skc_v6_rcv_saddr`, the local IPv6 address.
+    pub skc_v6_rcv_saddr: u32,
+    /// Byte offset of `sock_common.skc_v6_daddr`, the peer IPv6 address.
+    pub skc_v6_daddr: u32,
+    /// 1 = offsets resolved and valid, 0 = not yet populated. The probes read
+    /// nothing at all while this is 0, so an event then carries no flow.
+    pub valid: u8,
+    pub _pad: [u8; 3],
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for SockOffsets {}
+
+/// The socket a DLP event was taken from, as the probe could read it.
+///
+/// Addresses follow the convention the rest of the datapath uses: IPv4 sits in
+/// word 0 as the host-order value of the big-endian address and the other three
+/// words are zero; IPv6 is four host-order words. Ports are host order. A
+/// `source` of `DLP_FLOW_SOURCE_NONE` means every other field is zero and the
+/// event carries no destination at all.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DlpSocket {
+    /// Local address, four words, see the type's own note on encoding.
+    pub src_addr: [u32; 4],
+    /// Peer address, same encoding.
+    pub dst_addr: [u32; 4],
+    /// Local port, host order.
+    pub src_port: u16,
+    /// Peer port, host order.
+    pub dst_port: u16,
+    /// `DLP_FLOW_FAMILY_*`.
+    pub family: u8,
+    /// IP protocol, `DLP_FLOW_PROTOCOL_TCP` wherever a socket was read.
+    pub protocol: u8,
+    /// `DLP_FLOW_SOURCE_*`: how the probe came by this tuple.
+    pub source: u8,
+    pub _pad: u8,
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for DlpSocket {}
+
+/// The last socket a task was seen writing through, with the moment it was
+/// recorded. Value type of `DLP_TASK_SOCKET`, the map a library uprobe reads to
+/// correlate its buffer with a destination.
+///
+/// This is also the slot the socket-attribution hook fills later: it widens who
+/// writes the map, never what the event carries, so the event shape does not
+/// move again when a `sockops` or `cgroup/connect` program starts recording
+/// plain TCP sockets here too.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DlpTaskSocket {
+    /// The socket, already in the shape the event carries.
+    pub socket: DlpSocket,
+    /// `bpf_ktime_get_ns` when the socket was recorded.
+    pub at_ns: u64,
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for DlpTaskSocket {}
+
 /// DLP event emitted from uprobe-dlp to userspace via RingBuf.
-/// Contains a header with process metadata and a variable-length excerpt
+/// Contains a header with process metadata, the socket the plaintext went
+/// through where the probe could read one, and a variable-length excerpt
 /// of the plaintext data captured from SSL_write or SSL_read.
-/// Size: 4128 bytes (aligned to 8 bytes due to timestamp_ns/cgroup_id u64).
+/// Size: 4168 bytes (aligned to 8 bytes due to timestamp_ns/cgroup_id u64).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DlpEvent {
@@ -141,6 +269,9 @@ pub struct DlpEvent {
     pub direction: u8,
     /// Explicit padding for alignment.
     pub _padding: [u8; 3],
+    /// The socket the plaintext was written to or read from. `source` is
+    /// `DLP_FLOW_SOURCE_NONE` when the probe had no socket to read.
+    pub flow: DlpSocket,
     /// Plaintext data excerpt (zero-padded beyond data_len).
     pub data_excerpt: [u8; DLP_MAX_EXCERPT],
 }
@@ -154,13 +285,14 @@ impl core::fmt::Debug for DlpEvent {
             .field("cgroup_id", &self.cgroup_id)
             .field("data_len", &self.data_len)
             .field("direction", &self.direction)
+            .field("flow", &self.flow)
             .finish_non_exhaustive()
     }
 }
 
-/// Small DLP event (288 bytes): header + 256 bytes excerpt.
-/// Used when `data_len ≤ 256`, saving ~93% RingBuf space.
-/// Size: 288 bytes (aligned to 8 bytes).
+/// Small DLP event (328 bytes): header + 256 bytes excerpt.
+/// Used when `data_len ≤ 256`, saving ~92% RingBuf space.
+/// Size: 328 bytes (aligned to 8 bytes).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DlpEventSmall {
@@ -172,6 +304,8 @@ pub struct DlpEventSmall {
     pub data_len: u32,
     pub direction: u8,
     pub _padding: [u8; 3],
+    /// The socket the plaintext was written to or read from. See `DlpEvent`.
+    pub flow: DlpSocket,
     pub data_excerpt: [u8; DLP_SMALL_EXCERPT],
 }
 
@@ -184,12 +318,18 @@ impl core::fmt::Debug for DlpEventSmall {
             .field("cgroup_id", &self.cgroup_id)
             .field("data_len", &self.data_len)
             .field("direction", &self.direction)
+            .field("flow", &self.flow)
             .finish_non_exhaustive()
     }
 }
 
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for DlpEventSmall {}
+
+/// Bytes of header in front of either event's excerpt. The reader slices an
+/// event on this, so it is read off the type rather than written out: growing
+/// the header moves the excerpt and the reader follows without being edited.
+pub const DLP_EVENT_HEADER_SIZE: usize = core::mem::offset_of!(DlpEvent, data_excerpt);
 
 /// Per-task context saved at SSL_read entry, consumed at SSL_read return.
 /// Stored in the SSL_READ_ARGS HashMap keyed by pid_tgid.
@@ -219,7 +359,7 @@ mod tests {
 
     #[test]
     fn test_dlp_event_size() {
-        assert_eq!(mem::size_of::<DlpEvent>(), 4128);
+        assert_eq!(mem::size_of::<DlpEvent>(), 4168);
     }
 
     #[test]
@@ -236,7 +376,8 @@ mod tests {
         assert_eq!(mem::offset_of!(DlpEvent, data_len), 24);
         assert_eq!(mem::offset_of!(DlpEvent, direction), 28);
         assert_eq!(mem::offset_of!(DlpEvent, _padding), 29);
-        assert_eq!(mem::offset_of!(DlpEvent, data_excerpt), 32);
+        assert_eq!(mem::offset_of!(DlpEvent, flow), 32);
+        assert_eq!(mem::offset_of!(DlpEvent, data_excerpt), 72);
     }
 
     #[test]
@@ -258,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_dlp_event_small_size() {
-        assert_eq!(mem::size_of::<DlpEventSmall>(), 288);
+        assert_eq!(mem::size_of::<DlpEventSmall>(), 328);
     }
 
     #[test]
@@ -275,7 +416,8 @@ mod tests {
         assert_eq!(mem::offset_of!(DlpEventSmall, cgroup_id), 16);
         assert_eq!(mem::offset_of!(DlpEventSmall, data_len), 24);
         assert_eq!(mem::offset_of!(DlpEventSmall, direction), 28);
-        assert_eq!(mem::offset_of!(DlpEventSmall, data_excerpt), 32);
+        assert_eq!(mem::offset_of!(DlpEventSmall, flow), 32);
+        assert_eq!(mem::offset_of!(DlpEventSmall, data_excerpt), 72);
     }
 
     #[test]
@@ -304,6 +446,10 @@ mod tests {
         assert_eq!(
             mem::offset_of!(DlpEvent, direction),
             mem::offset_of!(DlpEventSmall, direction)
+        );
+        assert_eq!(
+            mem::offset_of!(DlpEvent, flow),
+            mem::offset_of!(DlpEventSmall, flow)
         );
         assert_eq!(
             mem::offset_of!(DlpEvent, data_excerpt),
@@ -384,5 +530,83 @@ mod tests {
         // Long enough for SSL_write to reach tls_sw_sendmsg, short enough that
         // a process which stopped going through a probed library is captured.
         assert_eq!(DLP_KTLS_SUPPRESS_WINDOW_NS, 100_000_000);
+    }
+
+    #[test]
+    fn dlp_socket_is_a_fixed_layout_block() {
+        assert_eq!(mem::size_of::<DlpSocket>(), 40);
+        assert_eq!(mem::align_of::<DlpSocket>(), 4);
+        assert_eq!(mem::offset_of!(DlpSocket, src_addr), 0);
+        assert_eq!(mem::offset_of!(DlpSocket, dst_addr), 16);
+        assert_eq!(mem::offset_of!(DlpSocket, src_port), 32);
+        assert_eq!(mem::offset_of!(DlpSocket, dst_port), 34);
+        assert_eq!(mem::offset_of!(DlpSocket, family), 36);
+        assert_eq!(mem::offset_of!(DlpSocket, protocol), 37);
+        assert_eq!(mem::offset_of!(DlpSocket, source), 38);
+    }
+
+    #[test]
+    fn a_default_socket_claims_nothing() {
+        let s = DlpSocket::default();
+        assert_eq!(s.source, DLP_FLOW_SOURCE_NONE);
+        assert_eq!(s.family, DLP_FLOW_FAMILY_UNSPEC);
+        assert_eq!(s.dst_addr, [0; 4]);
+        assert_eq!(s.dst_port, 0);
+    }
+
+    #[test]
+    fn flow_sources_are_distinct_and_none_is_the_zero_value() {
+        assert_eq!(DLP_FLOW_SOURCE_NONE, 0);
+        assert_ne!(DLP_FLOW_SOURCE_KERNEL_SOCKET, DLP_FLOW_SOURCE_NONE);
+        assert_ne!(DLP_FLOW_SOURCE_CORRELATED, DLP_FLOW_SOURCE_NONE);
+        assert_ne!(DLP_FLOW_SOURCE_CORRELATED, DLP_FLOW_SOURCE_KERNEL_SOCKET);
+    }
+
+    #[test]
+    fn flow_families_match_the_kernel_numbering() {
+        assert_eq!(DLP_FLOW_FAMILY_IPV4, 2);
+        assert_eq!(DLP_FLOW_FAMILY_IPV6, 10);
+        assert_eq!(DLP_FLOW_PROTOCOL_TCP, 6);
+    }
+
+    #[test]
+    fn task_socket_entry_carries_its_own_age() {
+        assert_eq!(mem::size_of::<DlpTaskSocket>(), 48);
+        assert_eq!(mem::align_of::<DlpTaskSocket>(), 8);
+        assert_eq!(mem::offset_of!(DlpTaskSocket, socket), 0);
+        assert_eq!(mem::offset_of!(DlpTaskSocket, at_ns), 40);
+        assert_eq!(DlpTaskSocket::default().at_ns, 0);
+    }
+
+    #[test]
+    fn sock_offsets_default_is_refused_by_the_probe() {
+        assert_eq!(mem::size_of::<SockOffsets>(), 36);
+        assert_eq!(mem::align_of::<SockOffsets>(), 4);
+        assert_eq!(mem::offset_of!(SockOffsets, sk_common), 0);
+        assert_eq!(mem::offset_of!(SockOffsets, valid), 32);
+        assert_eq!(SockOffsets::default().valid, 0);
+    }
+
+    #[test]
+    fn header_size_is_read_off_the_type() {
+        assert_eq!(DLP_EVENT_HEADER_SIZE, 72);
+        assert_eq!(
+            DLP_EVENT_HEADER_SIZE,
+            mem::offset_of!(DlpEventSmall, data_excerpt)
+        );
+        assert_eq!(
+            mem::size_of::<DlpEvent>(),
+            DLP_EVENT_HEADER_SIZE + DLP_MAX_EXCERPT
+        );
+        assert_eq!(
+            mem::size_of::<DlpEventSmall>(),
+            DLP_EVENT_HEADER_SIZE + DLP_SMALL_EXCERPT
+        );
+    }
+
+    #[test]
+    fn a_correlation_window_outlives_one_call_frame() {
+        assert_eq!(DLP_TASK_SOCKET_WINDOW_NS, DLP_KTLS_SUPPRESS_WINDOW_NS);
+        const { assert!(DLP_TASK_SOCKET_MAX_TASKS >= 1024) };
     }
 }

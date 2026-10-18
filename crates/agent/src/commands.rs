@@ -1943,12 +1943,13 @@ fn print_alert_line(alert: &AlertResponse) {
     };
 
     println!(
-        "  {:<12}  {}  {:<18} -> {:<18}  {}",
+        "  {:<12}  {}  {:<18} -> {:<18}  {}{}",
         alert.component,
         severity,
         alert.src_ip_str(),
         alert.dst_ip_str(),
         truncate(&alert.message, 50),
+        alert.origin_suffix(),
     );
 }
 

@@ -3024,6 +3024,12 @@ pub async fn run(
     } else {
         dispatcher
     };
+    // The same procfs the container resolver walks, so an agent holding the
+    // host's `/proc` names the node's binaries rather than its own.
+    let dispatcher = dispatcher.with_executable_reader(Arc::new(
+        adapters::container::ProcExecutableResolver::new(&coverage_proc),
+    )
+        as Arc<dyn ports::secondary::process_executable_port::ProcessExecutableReader>);
 
     // ── 10g. Build L7 stream reassembler (optional) ─────────────────
     let stream_reassembler: Option<Arc<domain::l7::reassembler::StreamReassembler>> =
@@ -4727,6 +4733,27 @@ pub fn try_load_uprobe_dlp(
         Err(e) => warn!("failed to resolve kernel TLS iterator BTF offsets: {e}"),
     }
 
+    // The socket behind a kernel TLS call is what lets a DLP alert name a
+    // destination. Same BTF reason as the iterator above, and the same
+    // posture on failure: the probes keep reporting the leak and report no
+    // flow, rather than reading a five-tuple out of the wrong offsets.
+    match resolve_sock_offsets() {
+        Ok(offsets) => {
+            if let Err(e) = adapters::ebpf::push_sock_offsets(loader.ebpf_mut(), offsets) {
+                warn!("failed to push socket BTF offsets to BPF: {e}");
+            } else {
+                info!(
+                    skc_daddr = offsets.skc_daddr,
+                    skc_dport = offsets.skc_dport,
+                    "socket BTF offsets resolved and pushed to BPF"
+                );
+            }
+        }
+        Err(e) => {
+            warn!("failed to resolve socket BTF offsets: {e}; DLP alerts will name no destination");
+        }
+    }
+
     let dlp_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "DLP_METRICS").ok();
 
     let reader = DlpEventReader::new(loader.ebpf_mut())?;
@@ -4827,6 +4854,64 @@ fn resolve_ktls_iter_offsets() -> anyhow::Result<ebpf_common::dlp::KtlsIterOffse
         iter_iovec: kind(1)?,
         valid: 1,
         _pad: 0,
+    })
+}
+
+/// Resolve the `struct sock` members the kernel TLS probes read to name a
+/// destination: the embedded `sock_common`, its address pair in both families
+/// and its port pair.
+///
+/// `sock_common` nests the addresses inside anonymous unions, which the BTF
+/// walk descends into, so `skc_rcv_saddr` and `skc_daddr` are found at their
+/// real offsets rather than at the union's.
+///
+/// # Errors
+///
+/// Returns an error if any member is missing from the blob. A partial layout
+/// is refused rather than pushed: a probe reading one wrong offset reports a
+/// destination the data never went to, which is worse than reporting none.
+fn resolve_sock_offsets() -> anyhow::Result<ebpf_common::dlp::SockOffsets> {
+    use adapters::ebpf::kfunc::vmlinux_struct_member_offsets;
+
+    fn member(
+        offsets: &[Option<u32>],
+        type_name: &str,
+        names: &[&str],
+        index: usize,
+    ) -> anyhow::Result<u32> {
+        offsets
+            .get(index)
+            .copied()
+            .flatten()
+            .ok_or_else(|| anyhow::anyhow!("{type_name}.{} not found in BTF", names[index]))
+    }
+
+    const SOCK: [&str; 1] = ["__sk_common"];
+    const COMMON: [&str; 6] = [
+        "skc_rcv_saddr",
+        "skc_daddr",
+        "skc_num",
+        "skc_dport",
+        "skc_family",
+        "skc_v6_rcv_saddr",
+    ];
+    const COMMON_V6_DADDR: [&str; 1] = ["skc_v6_daddr"];
+
+    let sock = vmlinux_struct_member_offsets("sock", &SOCK)?;
+    let common = vmlinux_struct_member_offsets("sock_common", &COMMON)?;
+    let v6_daddr = vmlinux_struct_member_offsets("sock_common", &COMMON_V6_DADDR)?;
+
+    Ok(ebpf_common::dlp::SockOffsets {
+        sk_common: member(&sock, "sock", &SOCK, 0)?,
+        skc_rcv_saddr: member(&common, "sock_common", &COMMON, 0)?,
+        skc_daddr: member(&common, "sock_common", &COMMON, 1)?,
+        skc_num: member(&common, "sock_common", &COMMON, 2)?,
+        skc_dport: member(&common, "sock_common", &COMMON, 3)?,
+        skc_family: member(&common, "sock_common", &COMMON, 4)?,
+        skc_v6_rcv_saddr: member(&common, "sock_common", &COMMON, 5)?,
+        skc_v6_daddr: member(&v6_daddr, "sock_common", &COMMON_V6_DADDR, 0)?,
+        valid: 1,
+        _pad: [0; 3],
     })
 }
 

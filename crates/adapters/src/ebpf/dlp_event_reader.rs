@@ -5,7 +5,7 @@ use crate::ebpf::map_store::MapStore;
 use crate::ebpf::ringbuf_observer::{DrainTrigger, RingBufObserver};
 use aya::maps::{MapData, RingBuf};
 use domain::common::agent_event::AgentEvent;
-use ebpf_common::dlp::{DLP_MAX_EXCERPT, DlpEvent};
+use ebpf_common::dlp::{DLP_EVENT_HEADER_SIZE, DLP_MAX_EXCERPT, DlpEvent, DlpSocket};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -14,7 +14,8 @@ use tracing::{debug, error, info};
 /// Reads DLP events from the eBPF `EVENTS` `RingBuf` of the uprobe-dlp program.
 ///
 /// Uses `AsyncFd` for epoll-based async notification. DLP events are
-/// 4120-byte `DlpEvent` structs containing SSL plaintext excerpts.
+/// `DlpEvent` structs carrying the process, the socket the probe could
+/// account for and an SSL plaintext excerpt.
 ///
 /// Note: this reader takes the `EVENTS` map from a *separate* `Ebpf` instance
 /// (uprobe-dlp), so there is no conflict with the main `EventReader`.
@@ -101,7 +102,10 @@ fn drain(
     let now_ns = observer.now_ns();
     let mut drained = 0usize;
     // pid(4) + tgid(4) + timestamp_ns(8) + cgroup_id(8) + data_len(4) + direction(1) + padding(3)
-    let header_size = 32_usize;
+    // The header is read off the type rather than written out: it grew when
+    // the event gained its socket block, and a reader carrying its own copy
+    // of the number is a reader that silently slices the excerpt wrong.
+    let header_size = DLP_EVENT_HEADER_SIZE;
     while let Some(item) = rb.next() {
         drained += 1;
         let bytes: &[u8] = &item;
@@ -117,6 +121,7 @@ fn drain(
                 data_len: 0,
                 direction: 0,
                 _padding: [0; 3],
+                flow: DlpSocket::default(),
                 data_excerpt: [0; DLP_MAX_EXCERPT],
             };
             // SAFETY: header fields are at known offsets, verified by length check.

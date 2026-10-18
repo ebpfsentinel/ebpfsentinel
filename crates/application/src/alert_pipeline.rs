@@ -1516,6 +1516,8 @@ mod tests {
             redacted_excerpt: "[REDACTED:pci]".to_string(),
             timestamp_ns: 2_000_000_000,
             container: None,
+            executable: None,
+            flow: None,
         }
     }
 

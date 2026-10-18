@@ -160,6 +160,32 @@ pub fn push_ktls_iter_offsets(
     Ok(())
 }
 
+/// Push the socket member offsets resolved from the running kernel's BTF into
+/// the `SOCK_OFFSETS` array the kernel TLS probes read.
+///
+/// Same reason as [`push_ktls_iter_offsets`]: no CO-RE on this target, so the
+/// probe cannot find `sock_common.skc_daddr` by itself. Until this has run the
+/// offsets carry `valid: 0` and the probes report no flow at all, which is the
+/// intended behaviour on a kernel whose layout could not be read - an alert
+/// then names no destination rather than a destination read from the wrong
+/// bytes.
+///
+/// # Errors
+///
+/// Returns an error if the map is absent - the object was built without the
+/// kernel TLS probes - or if the write fails.
+pub fn push_sock_offsets(
+    ebpf: &mut dyn crate::ebpf::map_store::MapStore,
+    offsets: ebpf_common::dlp::SockOffsets,
+) -> anyhow::Result<()> {
+    let map = ebpf
+        .map_mut("SOCK_OFFSETS")
+        .ok_or_else(|| anyhow::anyhow!("SOCK_OFFSETS map not found"))?;
+    let mut arr = aya::maps::Array::<_, ebpf_common::dlp::SockOffsets>::try_from(map)?;
+    arr.set(0, offsets, 0)?;
+    Ok(())
+}
+
 /// A unique SSL library to attach the DLP uprobe set to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UprobeTarget {

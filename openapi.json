@@ -7186,8 +7186,47 @@
             "format": "int32",
             "minimum": 0
           },
+          "executable_dev": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "DLP: device number of that binary, present with `executable_path`.",
+            "minimum": 0
+          },
+          "executable_inode": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "DLP: inode of that binary, present with `executable_path`. The pair\nidentifies the file even where the path was reused.",
+            "minimum": 0
+          },
+          "executable_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "DLP: the binary the writing process was running, read from\n`/proc/<pid>/exe` at alert time. Absent when the process was already\ngone, which is the honest answer rather than a guessed name."
+          },
+          "executable_source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "DLP: how the executable was obtained - `process_at_alert_time`."
+          },
           "false_positive": {
             "type": "boolean"
+          },
+          "flow_source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "DLP: how the five-tuple was obtained - `kernel_socket` when the probe\nread it off the socket, `task_socket_correlation` when it came from\nthe same task's last socket. Absent means the addresses and ports are\nzero because nothing was resolved, not because the peer is 0.0.0.0."
           },
           "id": {
             "type": "string"

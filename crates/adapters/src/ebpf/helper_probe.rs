@@ -387,6 +387,10 @@ pub const REQUIREMENTS: &[ObjectRequirements] = &[
             BPF_FUNC_get_current_ancestor_cgroup_id,
             BPF_FUNC_get_current_pid_tgid,
             BPF_FUNC_ktime_get_boot_ns,
+            // Reads the message iterator and, since the event carries a
+            // destination, the `struct sock` behind a kernel TLS call. Both
+            // walk kernel memory at offsets userspace resolved from BTF, so
+            // the call set does not grow with the second reader.
             BPF_FUNC_probe_read_kernel,
             BPF_FUNC_probe_read_user,
         ],
@@ -660,6 +664,18 @@ mod tests {
         .collect();
         let listed: HashSet<&str> = REQUIREMENTS.iter().map(|r| r.object).collect();
         assert_eq!(listed, expected);
+    }
+
+    #[test]
+    fn the_dlp_object_declares_the_kernel_read_its_socket_walk_needs() {
+        let dlp = REQUIREMENTS
+            .iter()
+            .find(|r| r.object == "uprobe-dlp")
+            .expect("uprobe-dlp entry");
+        let names: Vec<&str> = dlp.helpers().map(|h| h.name).collect();
+        assert!(names.contains(&"bpf_probe_read_kernel"));
+        assert!(names.contains(&"bpf_get_current_pid_tgid"));
+        assert!(names.contains(&"bpf_ktime_get_boot_ns"));
     }
 
     #[test]

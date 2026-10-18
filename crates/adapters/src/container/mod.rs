@@ -5,6 +5,7 @@ pub mod docker_enricher;
 pub mod docker_events;
 #[cfg(feature = "kubernetes")]
 pub mod k8s_enricher;
+pub mod proc_executable;
 pub mod proc_resolver;
 
 pub use cgroupfs_resolver::CgroupfsResolver;
@@ -17,4 +18,5 @@ pub use k8s_enricher::{
     K8sEnricherMetrics, KubernetesEnricher, PodCache, PodInfo, is_running_in_kubernetes,
     pod_info_from, resolve_node_name, spawn_pod_watcher, strip_cri_prefix, try_build_client,
 };
+pub use proc_executable::ProcExecutableResolver;
 pub use proc_resolver::ProcContainerResolver;

@@ -98,6 +98,11 @@ fn sample_alert(seed: u8) -> Alert {
         tls_pqc_status: None,
         container: None,
         container_metadata: None,
+        executable_path: None,
+        executable_dev: None,
+        executable_inode: None,
+        executable_source: None,
+        flow_source: None,
     }
 }
 

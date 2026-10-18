@@ -154,6 +154,11 @@ fuzz_target!(|data: &[u8]| {
             tls_pqc_status: None,
             container: None,
             container_metadata: None,
+            executable_path: None,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
         };
 
         let _ = router.process_alert(&alert);
@@ -217,6 +222,11 @@ fuzz_target!(|data: &[u8]| {
             tls_pqc_status: None,
             container: None,
             container_metadata: None,
+            executable_path: None,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
         };
         let _ = router.process_alert(&alert);
     }

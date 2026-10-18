@@ -162,6 +162,27 @@ pub struct AlertResponse {
     /// Container identity resolved from the event's `cgroup_id` (if any).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<ContainerIdentity>,
+    /// DLP: the binary the writing process was running, read from
+    /// `/proc/<pid>/exe` at alert time. Absent when the process was already
+    /// gone, which is the honest answer rather than a guessed name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executable_path: Option<String>,
+    /// DLP: device number of that binary, present with `executable_path`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executable_dev: Option<u64>,
+    /// DLP: inode of that binary, present with `executable_path`. The pair
+    /// identifies the file even where the path was reused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executable_inode: Option<u64>,
+    /// DLP: how the executable was obtained - `process_at_alert_time`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executable_source: Option<String>,
+    /// DLP: how the five-tuple was obtained - `kernel_socket` when the probe
+    /// read it off the socket, `task_socket_correlation` when it came from
+    /// the same task's last socket. Absent means the addresses and ports are
+    /// zero because nothing was resolved, not because the peer is 0.0.0.0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_source: Option<String>,
     /// Where the alert stands in the queue; `open` until somebody moves it.
     pub status: String,
     /// Who holds it, if anybody.
@@ -433,6 +454,11 @@ pub fn triaged_response(a: Alert, triage: Option<&AlertTriage>) -> AlertResponse
         mitre_tactic: a.mitre_attack.map(|m| m.tactic),
         ja4_fingerprint: a.ja4_fingerprint,
         container: container_identity(a.container.as_ref(), a.container_metadata.as_ref()),
+        executable_path: a.executable_path,
+        executable_dev: a.executable_dev,
+        executable_inode: a.executable_inode,
+        executable_source: a.executable_source,
+        flow_source: a.flow_source,
     }
 }
 
@@ -1228,6 +1254,11 @@ mod tests {
                 tls_pqc_status: None,
                 container: None,
                 container_metadata: None,
+                executable_path: None,
+                executable_dev: None,
+                executable_inode: None,
+                executable_source: None,
+                flow_source: None,
             }
         };
 
@@ -1238,6 +1269,93 @@ mod tests {
         assert_eq!(resp.severity, "high");
         assert_eq!(resp.rule_id, "ids-001");
         assert!(!resp.false_positive);
+    }
+
+    /// A DLP row says what leaked and where it went, and says how it knows
+    /// each. A reader that sees no `flow_source` must read the zeroed
+    /// addresses as "nowhere known" rather than as 0.0.0.0:0.
+    #[test]
+    fn a_dlp_row_prints_the_binary_and_the_destination() {
+        use domain::dlp::entity::{DlpAlert, DlpExecutable, DlpFlow, DlpIdentitySource};
+
+        let dlp = DlpAlert {
+            pattern_id: RuleId("dlp-visa".to_string()),
+            pattern_name: "visa".to_string(),
+            data_type: "pci".to_string(),
+            severity: Severity::High,
+            mode: DomainMode::Alert,
+            pid: 4242,
+            tgid: 4242,
+            direction: 0,
+            redacted_excerpt: "[REDACTED:pci]".to_string(),
+            timestamp_ns: 1_000_000_000,
+            container: None,
+            executable: Some(DlpExecutable {
+                path: "/usr/bin/curl".to_string(),
+                dev: 66_307,
+                inode: 918_273,
+                source: DlpIdentitySource::ProcessAtAlertTime,
+            }),
+            flow: Some(DlpFlow {
+                src_addr: [0x0A01_0203, 0, 0, 0],
+                dst_addr: [0x5DB8_D822, 0, 0, 0],
+                src_port: 44_001,
+                dst_port: 443,
+                protocol: 6,
+                is_ipv6: false,
+                source: DlpIdentitySource::KernelSocket,
+            }),
+        };
+
+        let resp = alert_response(Alert::from_dlp_alert(&dlp, "pci pattern visa matched"));
+
+        assert_eq!(resp.executable_path.as_deref(), Some("/usr/bin/curl"));
+        assert_eq!(resp.executable_dev, Some(66_307));
+        assert_eq!(resp.executable_inode, Some(918_273));
+        assert_eq!(
+            resp.executable_source.as_deref(),
+            Some("process_at_alert_time")
+        );
+        assert_eq!(resp.flow_source.as_deref(), Some("kernel_socket"));
+        assert_eq!(resp.dst_addr, vec![0x5DB8_D822, 0, 0, 0]);
+        assert_eq!(resp.dst_port, 443);
+
+        let body = serde_json::to_value(&resp).expect("a response is JSON");
+        assert_eq!(body["executable_path"], "/usr/bin/curl");
+        assert_eq!(body["flow_source"], "kernel_socket");
+    }
+
+    /// What was not resolved is absent from the payload, so a console can
+    /// tell the two cases apart without a sentinel value.
+    #[test]
+    fn an_unresolved_dlp_row_leaves_the_fields_off_the_wire() {
+        use domain::dlp::entity::DlpAlert;
+
+        let dlp = DlpAlert {
+            pattern_id: RuleId("dlp-visa".to_string()),
+            pattern_name: "visa".to_string(),
+            data_type: "pci".to_string(),
+            severity: Severity::High,
+            mode: DomainMode::Alert,
+            pid: 4242,
+            tgid: 4242,
+            direction: 0,
+            redacted_excerpt: "[REDACTED:pci]".to_string(),
+            timestamp_ns: 1_000_000_000,
+            container: None,
+            executable: None,
+            flow: None,
+        };
+
+        let resp = alert_response(Alert::from_dlp_alert(&dlp, "pci pattern visa matched"));
+        let body = serde_json::to_value(&resp).expect("a response is JSON");
+
+        assert!(body.get("executable_path").is_none());
+        assert!(body.get("executable_dev").is_none());
+        assert!(body.get("executable_inode").is_none());
+        assert!(body.get("executable_source").is_none());
+        assert!(body.get("flow_source").is_none());
+        assert_eq!(body["dst_port"], 0);
     }
 
     /// The live feed carries the query's own words. Serialising the entity
@@ -1397,6 +1515,11 @@ mod tests {
             mitre_tactic: None,
             ja4_fingerprint: None,
             container: None,
+            executable_path: None,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
             status: "open".to_string(),
             assignee: None,
             notes: Vec::new(),

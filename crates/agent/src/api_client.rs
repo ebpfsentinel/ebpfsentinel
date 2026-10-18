@@ -221,6 +221,23 @@ pub struct AlertResponse {
     pub dst_geo: Option<String>,
     #[serde(default)]
     pub ja4_fingerprint: Option<String>,
+    /// DLP: the binary the writing process was running, when the agent could
+    /// still read it.
+    #[serde(default)]
+    pub executable_path: Option<String>,
+    /// DLP: device of that binary.
+    #[serde(default)]
+    pub executable_dev: Option<u64>,
+    /// DLP: inode of that binary.
+    #[serde(default)]
+    pub executable_inode: Option<u64>,
+    /// DLP: how the binary was obtained.
+    #[serde(default)]
+    pub executable_source: Option<String>,
+    /// DLP: how the five-tuple was obtained. Absent means the addresses are
+    /// zero because nothing was resolved.
+    #[serde(default)]
+    pub flow_source: Option<String>,
     /// Where the alert stands in the queue; an older agent sends nothing
     /// and every alert it holds is open.
     #[serde(default = "open_status")]
@@ -320,6 +337,25 @@ impl AlertResponse {
     /// Format destination IP as string.
     pub fn dst_ip_str(&self) -> String {
         addr_to_string(&self.dst_addr, self.is_ipv6)
+    }
+
+    /// What a one-line listing adds for a DLP alert: the binary that wrote,
+    /// and a mark where the destination is a correlation rather than a
+    /// reading. Empty for every alert that resolved neither, so the column
+    /// stays off the other components' rows.
+    pub fn origin_suffix(&self) -> String {
+        let binary = self.executable_path.as_deref().map(|path| {
+            path.rsplit_once('/')
+                .map_or(path, |(_, name)| name)
+                .to_string()
+        });
+        let correlated = self.flow_source.as_deref() == Some("task_socket_correlation");
+        match (binary, correlated) {
+            (Some(name), true) => format!("  [{name}, correlated]"),
+            (Some(name), false) => format!("  [{name}]"),
+            (None, true) => "  [correlated]".to_string(),
+            (None, false) => String::new(),
+        }
     }
 }
 
@@ -2800,6 +2836,80 @@ async fn handle_delete(resp: reqwest::Response) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+
+    use super::AlertResponse;
+
+    fn dlp_row(executable: Option<&str>, flow_source: Option<&str>) -> AlertResponse {
+        AlertResponse {
+            id: "a".to_string(),
+            timestamp_ns: 1,
+            component: "dlp".to_string(),
+            severity: "high".to_string(),
+            rule_id: "dlp-visa".to_string(),
+            action: "alert".to_string(),
+            src_addr: vec![0, 0, 0, 0],
+            dst_addr: vec![0, 0, 0, 0],
+            src_port: 0,
+            dst_port: 0,
+            protocol: 0,
+            is_ipv6: false,
+            message: "pci match".to_string(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            ja4_fingerprint: None,
+            executable_path: executable.map(str::to_string),
+            executable_dev: executable.map(|_| 66_307),
+            executable_inode: executable.map(|_| 918_273),
+            executable_source: executable.map(|_| "process_at_alert_time".to_string()),
+            flow_source: flow_source.map(str::to_string),
+            status: "open".to_string(),
+            assignee: None,
+            notes: Vec::new(),
+        }
+    }
+
+    /// The one-line listing names the binary, and says when the destination
+    /// beside it was correlated rather than read off the socket.
+    #[test]
+    fn a_dlp_row_names_its_binary_and_marks_a_correlation() {
+        assert_eq!(
+            dlp_row(Some("/usr/bin/curl"), Some("kernel_socket")).origin_suffix(),
+            "  [curl]"
+        );
+        assert_eq!(
+            dlp_row(Some("/usr/bin/curl"), Some("task_socket_correlation")).origin_suffix(),
+            "  [curl, correlated]"
+        );
+        assert_eq!(
+            dlp_row(None, Some("task_socket_correlation")).origin_suffix(),
+            "  [correlated]"
+        );
+    }
+
+    /// A row that resolved neither adds no column, so the other components
+    /// print exactly as they did.
+    #[test]
+    fn a_row_with_nothing_resolved_adds_nothing() {
+        assert_eq!(dlp_row(None, None).origin_suffix(), "");
+    }
+
+    /// An older agent sends none of the new fields and must still decode.
+    #[test]
+    fn an_older_agents_alert_still_decodes() {
+        let body = r#"{"id":"a","timestamp_ns":1,"component":"dlp","severity":"high",
+            "rule_id":"dlp-visa","action":"alert","src_addr":[0,0,0,0],
+            "dst_addr":[0,0,0,0],"src_port":0,"dst_port":0,"protocol":0,
+            "message":"pci match"}"#;
+        let alert: AlertResponse = serde_json::from_str(body).expect("an alert decodes");
+        assert!(alert.executable_path.is_none());
+        assert!(alert.flow_source.is_none());
+        assert_eq!(alert.origin_suffix(), "");
+    }
 
     /// Routes the command tree deliberately does not call, and why. A route
     /// listed here is a decision somebody wrote down; a route missing from

@@ -166,6 +166,27 @@ pub struct Alert {
     /// container resolver produces [`ContainerInfo`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_metadata: Option<crate::container::entity::ContainerMetadata>,
+    /// DLP: absolute path of the executable the offending process was
+    /// running, as the agent resolved it. Absent when the process was gone
+    /// before the alert was raised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable_path: Option<String>,
+    /// DLP: device the executable's inode lives on. Travels with
+    /// [`Self::executable_inode`]: a path is renamed, an inode is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable_dev: Option<u64>,
+    /// DLP: inode number of the executable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable_inode: Option<u64>,
+    /// DLP: how the executable was obtained, so a reader can tell a reading
+    /// from an inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable_source: Option<String>,
+    /// DLP: how the five-tuple was obtained - read off the socket the kernel
+    /// was writing through, or correlated from the same task's last write.
+    /// Absent on a DLP alert means the address fields carry nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_source: Option<String>,
 }
 
 impl Alert {
@@ -220,13 +241,23 @@ impl Alert {
             tls_pqc_status: None,
             container: ids.container.clone(),
             container_metadata: None,
+            executable_path: None,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
         }
     }
 
     /// Create a domain alert from a DLP alert with a human-readable description.
-    /// DLP events are process-level (pid/tgid), not network-level, so IP/port
-    /// fields are zeroed.
+    ///
+    /// A DLP event starts process-level (pid/tgid). Where the datapath could
+    /// account for the socket the plaintext went through, the address fields
+    /// carry that flow and [`Self::flow_source`] says how it was obtained;
+    /// where it could not, they stay zeroed and `flow_source` is absent, which
+    /// is how a reader tells "nowhere known" from "0.0.0.0".
     pub fn from_dlp_alert(dlp: &DlpAlert, description: &str) -> Self {
+        let flow = dlp.flow;
         Self {
             id: Self::generate_id(dlp.timestamp_ns, &dlp.pattern_id),
             timestamp_ns: dlp.timestamp_ns,
@@ -234,12 +265,12 @@ impl Alert {
             severity: dlp.severity,
             rule_id: dlp.pattern_id.clone(),
             action: dlp.mode,
-            src_addr: [0; 4],
-            dst_addr: [0; 4],
-            src_port: 0,
-            dst_port: 0,
-            protocol: 0,
-            is_ipv6: false,
+            src_addr: flow.map_or([0; 4], |f| f.src_addr),
+            dst_addr: flow.map_or([0; 4], |f| f.dst_addr),
+            src_port: flow.map_or(0, |f| f.src_port),
+            dst_port: flow.map_or(0, |f| f.dst_port),
+            protocol: flow.map_or(0, |f| f.protocol),
+            is_ipv6: flow.is_some_and(|f| f.is_ipv6),
             message: description.to_string(),
             false_positive: false,
             src_domain: None,
@@ -273,6 +304,14 @@ impl Alert {
             tls_pqc_status: None,
             container: dlp.container.clone(),
             container_metadata: None,
+            executable_path: dlp.executable.as_ref().map(|e| e.path.clone()),
+            executable_dev: dlp.executable.as_ref().map(|e| e.dev),
+            executable_inode: dlp.executable.as_ref().map(|e| e.inode),
+            executable_source: dlp
+                .executable
+                .as_ref()
+                .map(|e| e.source.as_str().to_string()),
+            flow_source: flow.map(|f| f.source.as_str().to_string()),
         }
     }
 
@@ -327,6 +366,11 @@ impl Alert {
             tls_pqc_status: None,
             container: ti.container.clone(),
             container_metadata: None,
+            executable_path: None,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
         }
     }
 
@@ -393,6 +437,11 @@ impl Alert {
             tls_pqc_status: None,
             container: None,
             container_metadata: None,
+            executable_path: None,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
         }
     }
 
@@ -459,6 +508,11 @@ impl Alert {
             tls_pqc_status: None,
             container: dns.container.clone(),
             container_metadata: None,
+            executable_path: None,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
         }
     }
 
@@ -518,6 +572,11 @@ impl Alert {
             tls_pqc_status: None,
             container: None,
             container_metadata: None,
+            executable_path: None,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
         }
     }
 
@@ -591,6 +650,11 @@ impl Alert {
             tls_pqc_status: None,
             container: psa.container.clone(),
             container_metadata: None,
+            executable_path: None,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
         }
     }
 
@@ -656,6 +720,11 @@ impl Alert {
             tls_pqc_status: None,
             container: None,
             container_metadata: None,
+            executable_path: None,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
         }
     }
 
@@ -730,6 +799,11 @@ impl Alert {
             tls_pqc_status: None,
             container: None,
             container_metadata: None,
+            executable_path: None,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
         }
     }
 
@@ -808,6 +882,8 @@ mod tests {
             redacted_excerpt: "[REDACTED:pci]".to_string(),
             timestamp_ns: 2_000_000_000,
             container: None,
+            executable: None,
+            flow: None,
         }
     }
 
@@ -904,6 +980,63 @@ mod tests {
         assert_eq!(alert.timestamp_ns, 2_000_000_000);
         assert_eq!(alert.message, "Visa card detected in SSL traffic");
         assert!(alert.id.contains("dlp-pci-visa"));
+        // Nothing was resolvable on this fixture, so nothing is claimed.
+        assert!(alert.executable_path.is_none());
+        assert!(alert.executable_source.is_none());
+        assert!(alert.flow_source.is_none());
+    }
+
+    #[test]
+    fn alert_from_dlp_alert_carries_the_executable_and_the_destination() {
+        use crate::dlp::entity::{DlpExecutable, DlpFlow, DlpIdentitySource};
+
+        let mut dlp = sample_dlp_alert();
+        dlp.executable = Some(DlpExecutable {
+            path: "/usr/bin/python3.13".to_string(),
+            dev: 66_306,
+            inode: 1_181_234,
+            source: DlpIdentitySource::ProcessAtAlertTime,
+        });
+        dlp.flow = Some(DlpFlow {
+            src_addr: [0x0a01_0203, 0, 0, 0],
+            dst_addr: [0x5db8_d822, 0, 0, 0],
+            src_port: 44001,
+            dst_port: 443,
+            protocol: 6,
+            is_ipv6: false,
+            source: DlpIdentitySource::KernelSocket,
+        });
+
+        let alert = Alert::from_dlp_alert(&dlp, "Visa card written to a TLS socket");
+
+        assert_eq!(
+            alert.executable_path.as_deref(),
+            Some("/usr/bin/python3.13")
+        );
+        assert_eq!(alert.executable_dev, Some(66_306));
+        assert_eq!(alert.executable_inode, Some(1_181_234));
+        assert_eq!(
+            alert.executable_source.as_deref(),
+            Some("process_at_alert_time")
+        );
+        assert_eq!(alert.dst_ip(), 0x5db8_d822);
+        assert_eq!(alert.dst_port, 443);
+        assert_eq!(alert.src_port, 44001);
+        assert_eq!(alert.protocol, 6);
+        assert_eq!(alert.flow_source.as_deref(), Some("kernel_socket"));
+    }
+
+    #[test]
+    fn a_dlp_alert_without_a_flow_keeps_its_addresses_zeroed() {
+        let dlp = sample_dlp_alert();
+        let alert = Alert::from_dlp_alert(&dlp, "Visa card detected");
+
+        // Zeroed addresses with no `flow_source` is the alert saying it does
+        // not know where the data went, which a reader must not confuse with
+        // a connection to 0.0.0.0.
+        assert_eq!(alert.dst_ip(), 0);
+        assert_eq!(alert.dst_port, 0);
+        assert!(alert.flow_source.is_none());
     }
 
     #[test]

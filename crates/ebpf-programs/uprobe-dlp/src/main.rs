@@ -11,21 +11,28 @@ use aya_ebpf::{
 };
 use core::ffi::c_void;
 use ebpf_common::dlp::{
-    DLP_DIRECTION_READ, DLP_DIRECTION_WRITE, DLP_KTLS_SUPPRESS_WINDOW_NS, DLP_MAX_EXCERPT,
-    DLP_METRIC_COUNT, DLP_METRIC_ERRORS, DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_KTLS_EVENTS,
-    DLP_METRIC_KTLS_SUPPRESSED, DLP_METRIC_KTLS_UNREADABLE, DLP_METRIC_OUT_OF_SCOPE,
-    DLP_METRIC_READ_EVENTS, DLP_METRIC_TOTAL_SEEN, DLP_METRIC_WRITE_EVENTS,
-    DLP_SCOPE_ANCESTOR_LEVELS, DLP_SCOPE_MAX_CGROUPS, DLP_SCOPE_MODE_WORKLOADS,
-    DLP_SMALL_EXCERPT, DlpEvent, DlpEventSmall, KtlsIterOffsets, SslReadArgs,
+    DLP_DIRECTION_READ, DLP_DIRECTION_WRITE, DLP_FLOW_FAMILY_IPV4, DLP_FLOW_FAMILY_IPV6,
+    DLP_FLOW_PROTOCOL_TCP, DLP_FLOW_SOURCE_CORRELATED, DLP_FLOW_SOURCE_KERNEL_SOCKET,
+    DLP_KTLS_SUPPRESS_WINDOW_NS, DLP_MAX_EXCERPT, DLP_METRIC_COUNT, DLP_METRIC_ERRORS,
+    DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_KTLS_EVENTS, DLP_METRIC_KTLS_SUPPRESSED,
+    DLP_METRIC_KTLS_UNREADABLE, DLP_METRIC_OUT_OF_SCOPE, DLP_METRIC_READ_EVENTS,
+    DLP_METRIC_TOTAL_SEEN, DLP_METRIC_WRITE_EVENTS, DLP_SCOPE_ANCESTOR_LEVELS,
+    DLP_SCOPE_MAX_CGROUPS, DLP_SCOPE_MODE_WORKLOADS, DLP_SMALL_EXCERPT,
+    DLP_TASK_SOCKET_MAX_TASKS, DLP_TASK_SOCKET_WINDOW_NS, DlpEvent, DlpEventSmall, DlpSocket,
+    DlpTaskSocket, KtlsIterOffsets, SockOffsets, SslReadArgs,
 };
 use ebpf_helpers::increment_metric;
 use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 
 // ── Maps ────────────────────────────────────────────────────────────
 
-/// Kernel->userspace DLP event ring buffer, 4 MiB: about 1,010 full events
-/// of 4,136 bytes, or 14,000 small ones. Emission is refused only when a
-/// reserve fails (sizing in `ebpf_helpers::ringbuf`).
+/// Kernel->userspace DLP event ring buffer, 4 MiB: about 1,000 full events
+/// of 4,176 bytes, or 12,400 small ones of 336. Those are the record sizes
+/// the kernel charges, the event plus the ring buffer's own 8-byte header,
+/// and they grew with the socket block the event now carries: 10 full events
+/// fewer in the same 4 MiB, which is why the reservation is unchanged.
+/// Emission is refused only when a reserve fails (sizing in
+/// `ebpf_helpers::ringbuf`).
 #[btf_map]
 static EVENTS: RingBuf<DlpEvent, { 1024 * 4096 }> = RingBuf::new();
 
@@ -85,6 +92,36 @@ static DLP_CGROUP_ALLOW: HashMap<u64, u8, { DLP_SCOPE_MAX_CGROUPS as usize }> = 
 /// a host agent with no cgroup scope configured has always done.
 #[btf_map]
 static DLP_SCOPE: Array<u32, 1> = Array::new();
+
+/// Byte offsets of the `struct sock` members the kernel TLS probes read,
+/// resolved from the running kernel's BTF by userspace. No socket is read
+/// while `valid` is zero, so the event then carries no destination.
+#[btf_map]
+static SOCK_OFFSETS: Array<SockOffsets, 1> = Array::new();
+
+/// The last socket each task was seen writing TLS plaintext through, stamped
+/// by the kernel TLS probes.
+///
+/// A library uprobe has a plaintext buffer and no socket: `SSL_write` is given
+/// an `SSL *`, whose internals this program deliberately does not walk. Where
+/// the same write reaches the kernel TLS path, the kernel probe sees the
+/// `struct sock` and records it here, and the uprobe path reads it back inside
+/// `DLP_TASK_SOCKET_WINDOW_NS` and says the tuple is a correlation rather than
+/// a reading.
+///
+/// This map is the slot the socket-attribution hook fills later: a
+/// `sockops` or `cgroup/connect` program recording the sockets a task opens
+/// writes the same value type here and the event shape does not move.
+#[btf_map]
+static DLP_TASK_SOCKET: LruHashMap<u64, DlpTaskSocket, { DLP_TASK_SOCKET_MAX_TASKS as usize }> =
+    LruHashMap::new();
+
+/// The socket `tls_sw_recvmsg` was entered on, kept for its return probe the
+/// way `KTLS_READ_ARGS` keeps the buffer. Read at the return site the socket
+/// argument is gone, and correlating through `DLP_TASK_SOCKET` would downgrade
+/// a tuple this program did read to one it merely remembered.
+#[btf_map]
+static KTLS_READ_SOCKET: LruHashMap<u64, DlpSocket, 10240> = LruHashMap::new();
 
 // ── Probes ──────────────────────────────────────────────────────────
 
@@ -211,7 +248,7 @@ fn try_ssl_write(ctx: &ProbeContext) -> Result<(), ()> {
         return Ok(());
     }
 
-    emit_dlp_event(buf, num as u32, DLP_DIRECTION_WRITE);
+    emit_dlp_event(buf, num as u32, DLP_DIRECTION_WRITE, correlated_socket());
     increment_metric(DLP_METRIC_WRITE_EVENTS);
     Ok(())
 }
@@ -264,7 +301,12 @@ fn try_ssl_read_ret(ctx: &RetProbeContext) -> Result<(), ()> {
         args.buf_len
     };
 
-    emit_dlp_event(args.buf_ptr as *const u8, actual_len, DLP_DIRECTION_READ);
+    emit_dlp_event(
+        args.buf_ptr as *const u8,
+        actual_len,
+        DLP_DIRECTION_READ,
+        correlated_socket(),
+    );
     increment_metric(DLP_METRIC_READ_EVENTS);
     Ok(())
 }
@@ -326,7 +368,7 @@ fn try_go_tls_write(ctx: &ProbeContext) -> Result<(), ()> {
     if buf == 0 || len == 0 || len > i32::MAX as u64 {
         return Ok(());
     }
-    emit_dlp_event(buf as *const u8, len as u32, DLP_DIRECTION_WRITE);
+    emit_dlp_event(buf as *const u8, len as u32, DLP_DIRECTION_WRITE, correlated_socket());
     increment_metric(DLP_METRIC_WRITE_EVENTS);
     Ok(())
 }
@@ -365,7 +407,12 @@ fn try_go_tls_read_ret(ctx: &ProbeContext) -> Result<(), ()> {
     } else {
         args.buf_len
     };
-    emit_dlp_event(args.buf_ptr as *const u8, actual_len, DLP_DIRECTION_READ);
+    emit_dlp_event(
+        args.buf_ptr as *const u8,
+        actual_len,
+        DLP_DIRECTION_READ,
+        correlated_socket(),
+    );
     increment_metric(DLP_METRIC_READ_EVENTS);
     Ok(())
 }
@@ -457,6 +504,32 @@ fn read_kernel_u64(addr: u64) -> Result<u64, ()> {
 }
 
 #[inline(always)]
+fn read_kernel_u32(addr: u64) -> Result<u32, ()> {
+    let mut value: u32 = 0;
+    let rc = unsafe {
+        generated::bpf_probe_read_kernel(
+            &raw mut value as *mut c_void,
+            core::mem::size_of::<u32>() as u32,
+            addr as *const c_void,
+        )
+    };
+    if rc == 0 { Ok(value) } else { Err(()) }
+}
+
+#[inline(always)]
+fn read_kernel_u16(addr: u64) -> Result<u16, ()> {
+    let mut value: u16 = 0;
+    let rc = unsafe {
+        generated::bpf_probe_read_kernel(
+            &raw mut value as *mut c_void,
+            core::mem::size_of::<u16>() as u32,
+            addr as *const c_void,
+        )
+    };
+    if rc == 0 { Ok(value) } else { Err(()) }
+}
+
+#[inline(always)]
 fn read_kernel_u8(addr: u64) -> Result<u8, ()> {
     let mut value: u8 = 0;
     let rc = unsafe {
@@ -467,6 +540,104 @@ fn read_kernel_u8(addr: u64) -> Result<u8, ()> {
         )
     };
     if rc == 0 { Ok(value) } else { Err(()) }
+}
+
+/// Read the five-tuple of the socket a kernel TLS call was made on.
+///
+/// `Err(())` is "nothing readable here": the offsets were never pushed, the
+/// pointer is not a socket this program understands, or a read failed. The
+/// caller then emits an event with no flow at all rather than one carrying
+/// zeroes that read like an address.
+///
+/// Addresses are converted to the convention the rest of the datapath uses -
+/// the host-order value of the big-endian address, one word for IPv4 and four
+/// for IPv6 - so an alert's destination is encoded the same way whether it
+/// came from a packet or from a socket. The protocol is a constant: kernel TLS
+/// exists on TCP alone, and reading `sk_protocol` means reading a bitfield
+/// whose position moves between releases for a value that cannot vary.
+#[inline(always)]
+fn read_sock(sk: u64) -> Result<DlpSocket, ()> {
+    if sk == 0 {
+        return Err(());
+    }
+    let offsets = match SOCK_OFFSETS.get(0) {
+        Some(o) if o.valid != 0 => o,
+        _ => return Err(()),
+    };
+
+    let common = sk + u64::from(offsets.sk_common);
+    let family = read_kernel_u16(common + u64::from(offsets.skc_family))?;
+    let src_port = read_kernel_u16(common + u64::from(offsets.skc_num))?;
+    let dst_port_be = read_kernel_u16(common + u64::from(offsets.skc_dport))?;
+
+    let mut socket = DlpSocket {
+        src_port,
+        dst_port: u16::from_be_bytes(dst_port_be.to_ne_bytes()),
+        protocol: DLP_FLOW_PROTOCOL_TCP,
+        source: DLP_FLOW_SOURCE_KERNEL_SOCKET,
+        ..Default::default()
+    };
+
+    if family == u16::from(DLP_FLOW_FAMILY_IPV4) {
+        let saddr = read_kernel_u32(common + u64::from(offsets.skc_rcv_saddr))?;
+        let daddr = read_kernel_u32(common + u64::from(offsets.skc_daddr))?;
+        socket.src_addr[0] = u32::from_be_bytes(saddr.to_ne_bytes());
+        socket.dst_addr[0] = u32::from_be_bytes(daddr.to_ne_bytes());
+        socket.family = DLP_FLOW_FAMILY_IPV4;
+        return Ok(socket);
+    }
+
+    if family == u16::from(DLP_FLOW_FAMILY_IPV6) {
+        let src_base = common + u64::from(offsets.skc_v6_rcv_saddr);
+        let dst_base = common + u64::from(offsets.skc_v6_daddr);
+        let mut word = 0u64;
+        while word < 4 {
+            let s = read_kernel_u32(src_base + word * 4)?;
+            let d = read_kernel_u32(dst_base + word * 4)?;
+            socket.src_addr[word as usize] = u32::from_be_bytes(s.to_ne_bytes());
+            socket.dst_addr[word as usize] = u32::from_be_bytes(d.to_ne_bytes());
+            word += 1;
+        }
+        socket.family = DLP_FLOW_FAMILY_IPV6;
+        return Ok(socket);
+    }
+
+    Err(())
+}
+
+/// Remember the socket this task is writing TLS plaintext through, so a
+/// library uprobe firing for the same bytes can name the destination.
+#[inline(always)]
+fn record_task_socket(socket: &DlpSocket) {
+    let entry = DlpTaskSocket {
+        socket: *socket,
+        at_ns: unsafe { bpf_ktime_get_boot_ns() },
+    };
+    let _ = DLP_TASK_SOCKET.insert(&bpf_get_current_pid_tgid(), &entry, 0);
+}
+
+/// The socket this task last wrote TLS plaintext through, if it is recent
+/// enough to be about the same transfer.
+///
+/// What comes back is labelled `DLP_FLOW_SOURCE_CORRELATED`, never the
+/// kernel-socket reading it was recorded from: this is the destination of the
+/// previous write by the same thread, and a thread alternating two connections
+/// inside the window would be given the other one. The window is what bounds
+/// that, and the label is what stops an alert claiming more than it knows.
+#[inline(always)]
+fn correlated_socket() -> DlpSocket {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let Some(entry_ptr) = DLP_TASK_SOCKET.get_ptr(&pid_tgid) else {
+        return DlpSocket::default();
+    };
+    let entry = unsafe { *entry_ptr };
+    let now = unsafe { bpf_ktime_get_boot_ns() };
+    if now < entry.at_ns || now - entry.at_ns >= DLP_TASK_SOCKET_WINDOW_NS {
+        return DlpSocket::default();
+    }
+    let mut socket = entry.socket;
+    socket.source = DLP_FLOW_SOURCE_CORRELATED;
+    socket
 }
 
 /// Resolve the user-space plaintext run a `struct msghdr`'s iterator points at.
@@ -533,6 +704,21 @@ fn ktls_iter_buf(msg: u64) -> Result<Option<KtlsBuf>, ()> {
 fn try_ktls_sendmsg(ctx: &ProbeContext) -> Result<(), ()> {
     // tls_sw_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
     //   arg(0) = sk, arg(1) = msg, arg(2) = size
+    //
+    // The socket is recorded before the suppression test, because a library
+    // uprobe that already took these bytes emitted its event without a
+    // destination and the next one of its writes is what this recording is
+    // for. Recording is still inside the scope test: another tenant's socket
+    // is not read at all.
+    let sk: u64 = ctx.arg(0).unwrap_or(0);
+    let socket = match read_sock(sk) {
+        Ok(socket) if in_scope() => {
+            record_task_socket(&socket);
+            socket
+        }
+        _ => DlpSocket::default(),
+    };
+
     if uprobe_already_captured() {
         increment_metric(DLP_METRIC_KTLS_SUPPRESSED);
         return Ok(());
@@ -557,7 +743,7 @@ fn try_ktls_sendmsg(ctx: &ProbeContext) -> Result<(), ()> {
         return Ok(());
     }
 
-    emit_dlp_event(buf.base as *const u8, buf.len as u32, DLP_DIRECTION_WRITE);
+    emit_dlp_event(buf.base as *const u8, buf.len as u32, DLP_DIRECTION_WRITE, socket);
     increment_metric(DLP_METRIC_WRITE_EVENTS);
     increment_metric(DLP_METRIC_KTLS_EVENTS);
     Ok(())
@@ -568,6 +754,15 @@ fn try_ktls_recvmsg_entry(ctx: &ProbeContext) -> Result<(), ()> {
     // tls_sw_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
     //                int flags, int *addr_len)
     //   arg(0) = sk, arg(1) = msg
+    let sk: u64 = ctx.arg(0).unwrap_or(0);
+    let socket = match read_sock(sk) {
+        Ok(socket) if in_scope() => {
+            record_task_socket(&socket);
+            Some(socket)
+        }
+        _ => None,
+    };
+
     if uprobe_already_captured() {
         increment_metric(DLP_METRIC_KTLS_SUPPRESSED);
         return Ok(());
@@ -599,6 +794,14 @@ fn try_ktls_recvmsg_entry(ctx: &ProbeContext) -> Result<(), ()> {
         _padding: 0,
     };
     let _ = KTLS_READ_ARGS.insert(&pid_tgid, &args, 0);
+    match socket {
+        Some(socket) => {
+            let _ = KTLS_READ_SOCKET.insert(&pid_tgid, &socket, 0);
+        }
+        None => {
+            let _ = KTLS_READ_SOCKET.remove(&pid_tgid);
+        }
+    }
     Ok(())
 }
 
@@ -608,6 +811,12 @@ fn try_ktls_recvmsg_ret(ctx: &RetProbeContext) -> Result<(), ()> {
     let args_ptr = KTLS_READ_ARGS.get_ptr(&pid_tgid).ok_or(())?;
     let args = unsafe { *args_ptr };
     let _ = KTLS_READ_ARGS.remove(&pid_tgid);
+
+    let socket = match KTLS_READ_SOCKET.get_ptr(&pid_tgid) {
+        Some(socket_ptr) => unsafe { *socket_ptr },
+        None => DlpSocket::default(),
+    };
+    let _ = KTLS_READ_SOCKET.remove(&pid_tgid);
 
     let ret: i32 = ctx.ret();
     if ret <= 0 {
@@ -620,15 +829,15 @@ fn try_ktls_recvmsg_ret(ctx: &RetProbeContext) -> Result<(), ()> {
         args.buf_len
     };
 
-    emit_dlp_event(args.buf_ptr as *const u8, actual_len, DLP_DIRECTION_READ);
+    emit_dlp_event(args.buf_ptr as *const u8, actual_len, DLP_DIRECTION_READ, socket);
     increment_metric(DLP_METRIC_READ_EVENTS);
     increment_metric(DLP_METRIC_KTLS_EVENTS);
     Ok(())
 }
 
 /// Emit a `DlpEvent` to the EVENTS `RingBuf`, picking a size tier:
-/// - `data_len <= 256` -> `DlpEventSmall` (280 bytes)
-/// - `data_len > 256`  -> `DlpEvent` (4120 bytes, full capture)
+/// - `data_len <= 256` -> `DlpEventSmall` (328 bytes)
+/// - `data_len > 256`  -> `DlpEvent` (4168 bytes, full capture)
 ///
 /// # Why two types rather than one runtime-sized reservation
 ///
@@ -643,26 +852,32 @@ fn try_ktls_recvmsg_ret(ctx: &RetProbeContext) -> Result<(), ()> {
 /// `data_len` capped at the tier's excerpt, so only bytes the SSL buffer holds
 /// are read, never adjacent process memory. `data_len` in the header tells
 /// userspace how many of the excerpt bytes are meaningful.
+///
+/// `flow` is the socket the caller could account for, already carrying how it
+/// came by it. A default `DlpSocket` means the probe had no socket, and that
+/// is what the event says: a zeroed block whose `source` is
+/// `DLP_FLOW_SOURCE_NONE`, which userspace drops rather than reading as
+/// `0.0.0.0:0`.
 #[inline(always)]
-fn emit_dlp_event(user_buf: *const u8, data_len: u32, direction: u8) {
+fn emit_dlp_event(user_buf: *const u8, data_len: u32, direction: u8, flow: DlpSocket) {
     if !in_scope() {
         increment_metric(DLP_METRIC_OUT_OF_SCOPE);
         return;
     }
     if data_len <= DLP_SMALL_EXCERPT as u32 {
-        emit_dlp_small(user_buf, data_len, direction);
+        emit_dlp_small(user_buf, data_len, direction, flow);
     } else {
-        emit_dlp_full(user_buf, data_len, direction);
+        emit_dlp_full(user_buf, data_len, direction, flow);
     }
 }
 
-/// Small DLP event (280 bytes): for SSL payloads ≤ 256 bytes.
+/// Small DLP event (328 bytes): for SSL payloads ≤ 256 bytes.
 ///
 /// `#[inline(never)]` gives this function its own stack frame, reducing
 /// per-function verifier complexity and keeping it separate from the
 /// full-size path.
 #[inline(never)]
-fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
+fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8, flow: DlpSocket) {
     if let Some(mut entry) = EVENTS.reserve_untyped::<DlpEventSmall>(0) {
         let ptr = entry.as_mut_ptr();
         let pid_tgid = bpf_get_current_pid_tgid();
@@ -676,6 +891,7 @@ fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
             (*ptr).data_len = data_len;
             (*ptr).direction = direction;
             (*ptr)._padding = [0; 3];
+            (*ptr).flow = flow;
             core::ptr::write_bytes((*ptr).data_excerpt.as_mut_ptr(), 0, DLP_SMALL_EXCERPT);
             // Read only the bytes the payload actually holds - never the
             // full excerpt - so we don't capture adjacent process memory past
@@ -706,14 +922,14 @@ fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8) {
     }
 }
 
-/// Full DLP event (4120 bytes): for SSL payloads > 256 bytes.
+/// Full DLP event (4168 bytes): for SSL payloads > 256 bytes.
 ///
 /// Emitted via RingBuf. Arena zero-copy is not available: the eBPF
 /// arena pointer returned by `bpf_arena_alloc_pages` stays an untyped
 /// scalar on the Rust `bpfel` target (no `addr_space_cast`), so the
 /// verifier rejects any write through it.
 #[inline(never)]
-fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8) {
+fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8, flow: DlpSocket) {
     if let Some(mut entry) = EVENTS.reserve_untyped::<DlpEvent>(0) {
         let ptr = entry.as_mut_ptr();
         let pid_tgid = bpf_get_current_pid_tgid();
@@ -725,6 +941,7 @@ fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8) {
             (*ptr).data_len = data_len;
             (*ptr).direction = direction;
             (*ptr)._padding = [0; 3];
+            (*ptr).flow = flow;
             core::ptr::write_bytes((*ptr).data_excerpt.as_mut_ptr(), 0, DLP_MAX_EXCERPT);
             // Clamp the read to the payload length (capped at the excerpt
             // size) so we never copy adjacent process memory past the SSL

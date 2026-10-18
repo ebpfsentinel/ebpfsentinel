@@ -365,6 +365,78 @@ _send_tls_data() {
     [ "$HTTP_STATUS" = "200" ]
 }
 
+@test "a DLP alert names the binary that leaked" {
+    require_root
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
+
+    _send_tls_data "payment card: 4111111111111111 for the audit"
+    sleep 3
+
+    local body
+    body="$(api_get /api/v1/alerts)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+
+    local path
+    path="$(echo "$body" | jq -r '[(.alerts // .)[] | select(.component == "dlp") | .executable_path // empty] | last // empty' 2>/dev/null)" || path=""
+    [ -n "$path" ] || soft_skip "no DLP alert carried an executable path (process gone before the read)"
+
+    # The writer was openssl s_client, so the agent must have read its binary
+    # and said that is where the name came from.
+    echo "$path" | grep -q "openssl"
+
+    local source
+    source="$(echo "$body" | jq -r '[(.alerts // .)[] | select(.component == "dlp") | .executable_source // empty] | last // empty' 2>/dev/null)" || source=""
+    [ "$source" = "process_at_alert_time" ]
+}
+
+@test "a DLP alert claims a destination only when it read one" {
+    require_root
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
+
+    _send_tls_data "amex corporate 371449635398431 for the audit"
+    sleep 3
+
+    local body
+    body="$(api_get /api/v1/alerts)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+
+    # Every DLP alert carrying a flow source must carry a real peer port with
+    # it. An alert with no flow source is the honest answer on a build whose
+    # write went through userspace TLS, and it must leave the port at zero.
+    local bad
+    bad="$(echo "$body" | jq '[(.alerts // .)[]
+        | select(.component == "dlp")
+        | select((.flow_source != null and (.dst_port // 0) == 0)
+              or (.flow_source == null and (.dst_port // 0) != 0))] | length' 2>/dev/null)" || bad="0"
+    [ "${bad:-0}" -eq 0 ]
+}
+
+@test "a kernel TLS write names its peer" {
+    require_root
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
+
+    # kTLS is what gives the probe a socket to read. Without the module the
+    # agent has no kernel-side write to observe, and the destination is the
+    # correlation case the next hook covers rather than a failure here.
+    modprobe tls 2>/dev/null || true
+    grep -qw tls /proc/modules 2>/dev/null || soft_skip "kernel TLS module not loaded"
+
+    _send_tls_data "payment card: 5105105105105100 over kernel TLS"
+    sleep 3
+
+    local body
+    body="$(api_get /api/v1/alerts)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+
+    local port
+    port="$(echo "$body" | jq -r '[(.alerts // .)[] | select(.component == "dlp") | select(.flow_source == "kernel_socket") | .dst_port] | last // empty' 2>/dev/null)" || port=""
+    [ -n "$port" ] || soft_skip "no kernel TLS write was observed (openssl did not offload)"
+    [ "$port" = "9443" ]
+}
+
 @test "TLS echo server cleanup" {
     _stop_tls_echo_server
 }

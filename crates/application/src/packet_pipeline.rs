@@ -79,6 +79,11 @@ pub struct EventDispatcher {
     ja4s_fingerprint_cache: Arc<Ja4sFingerprintCache>,
     encrypted_dns_detector: EncryptedDnsDetector,
     container_resolver: Option<Arc<domain::container::engine::ContainerResolverEngine>>,
+    /// Reads the executable behind a DLP event's pid. Optional, because an
+    /// agent with no procfs view of the offending process can still raise the
+    /// alert - it just cannot name the program.
+    executable_reader:
+        Option<Arc<dyn ports::secondary::process_executable_port::ProcessExecutableReader>>,
     /// Optional TCP stream reassembler. When present, L7 events are
     /// merged per flow before being handed to `parse_payload`.
     stream_reassembler: Option<Arc<domain::l7::reassembler::StreamReassembler>>,
@@ -122,6 +127,7 @@ impl EventDispatcher {
             )),
             encrypted_dns_detector: EncryptedDnsDetector::default(),
             container_resolver: None,
+            executable_reader: None,
             stream_reassembler: None,
             extended_l7_parser: None,
         }
@@ -165,6 +171,17 @@ impl EventDispatcher {
         resolver: Arc<domain::container::engine::ContainerResolverEngine>,
     ) -> Self {
         self.container_resolver = Some(resolver);
+        self
+    }
+
+    /// Inject the executable reader. When present, a DLP alert names the
+    /// binary the offending process was running.
+    #[must_use]
+    pub fn with_executable_reader(
+        mut self,
+        reader: Arc<dyn ports::secondary::process_executable_port::ProcessExecutableReader>,
+    ) -> Self {
+        self.executable_reader = Some(reader);
         self
     }
 
@@ -1397,11 +1414,19 @@ impl EventDispatcher {
                 self.metrics.record_packet("dlp", "alert");
 
                 let container_info = self.resolve_container_dlp(event.pid, event.cgroup_id);
+                // One read per event rather than one per match: the pid is
+                // the same for every pattern that fired on the same buffer,
+                // and the process may exit under us between two of them.
+                let executable = self
+                    .executable_reader
+                    .as_ref()
+                    .and_then(|reader| reader.read_executable(event.pid));
                 let patterns = svc.list_patterns();
                 for m in &matches {
                     if let Some(pattern) = patterns.get(m.pattern_index) {
                         let mut dlp_alert = DlpAlert::from_event(event, pattern);
                         dlp_alert.container.clone_from(&container_info);
+                        dlp_alert.executable.clone_from(&executable);
                         if self.alert_tx.try_send(AlertEvent::Dlp(dlp_alert)).is_err() {
                             self.metrics.record_event_dropped("alert_channel_full");
                         }
@@ -2845,6 +2870,7 @@ mod tests {
             data_len: data.len() as u32, // DLP_MAX_EXCERPT is small, no truncation possible
             direction: 0,
             _padding: [0; 3],
+            flow: ebpf_common::dlp::DlpSocket::default(),
             data_excerpt: [0u8; DLP_MAX_EXCERPT],
         };
         let copy_len = data.len().min(DLP_MAX_EXCERPT);
@@ -2921,6 +2947,81 @@ mod tests {
             AlertEvent::Dlp(a) => {
                 assert_eq!(a.pattern_id.0, "dlp-pci-001");
                 assert_eq!(a.pattern_name, "Credit Card");
+            }
+            _ => panic!("expected AlertEvent::Dlp"),
+        }
+    }
+
+    /// A reader standing in for procfs, so the enrichment can be asserted
+    /// without a live process to read.
+    struct FixedExecutable(Option<domain::dlp::entity::DlpExecutable>);
+
+    impl ports::secondary::process_executable_port::ProcessExecutableReader for FixedExecutable {
+        fn read_executable(&self, _pid: u32) -> Option<domain::dlp::entity::DlpExecutable> {
+            self.0.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dlp_alert_names_the_binary_and_the_destination() {
+        use domain::dlp::entity::{DlpExecutable, DlpIdentitySource};
+
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dlp = make_dlp_service_with_pattern();
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_dlp_service(Arc::clone(&dlp))
+            .with_executable_reader(Arc::new(FixedExecutable(Some(DlpExecutable {
+                path: "/usr/bin/curl".to_string(),
+                dev: 66_306,
+                inode: 98_765,
+                source: DlpIdentitySource::ProcessAtAlertTime,
+            }))));
+
+        let mut dlp_event = make_dlp_event_with_data(b"card number 1234 here");
+        dlp_event.flow = ebpf_common::dlp::DlpSocket {
+            src_addr: [0x0a01_0203, 0, 0, 0],
+            dst_addr: [0x5db8_d822, 0, 0, 0],
+            src_port: 51234,
+            dst_port: 443,
+            family: ebpf_common::dlp::DLP_FLOW_FAMILY_IPV4,
+            protocol: ebpf_common::dlp::DLP_FLOW_PROTOCOL_TCP,
+            source: ebpf_common::dlp::DLP_FLOW_SOURCE_KERNEL_SOCKET,
+            _pad: 0,
+        };
+        dispatcher.dispatch_agent_event(AgentEvent::Dlp(Box::new(dlp_event)));
+
+        match alert_rx.try_recv().unwrap() {
+            AlertEvent::Dlp(a) => {
+                let exe = a.executable.expect("the reader answered");
+                assert_eq!(exe.path, "/usr/bin/curl");
+                assert_eq!(exe.inode, 98_765);
+                let flow = a.flow.expect("the probe read the socket");
+                assert_eq!(flow.dst_port, 443);
+                assert_eq!(flow.source, DlpIdentitySource::KernelSocket);
+            }
+            _ => panic!("expected AlertEvent::Dlp"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dlp_alert_claims_no_binary_when_the_process_is_gone() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dlp = make_dlp_service_with_pattern();
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_dlp_service(Arc::clone(&dlp))
+            .with_executable_reader(Arc::new(FixedExecutable(None)));
+
+        let dlp_event = make_dlp_event_with_data(b"card number 1234 here");
+        dispatcher.dispatch_agent_event(AgentEvent::Dlp(Box::new(dlp_event)));
+
+        match alert_rx.try_recv().unwrap() {
+            AlertEvent::Dlp(a) => {
+                assert!(a.executable.is_none());
+                assert!(a.flow.is_none());
             }
             _ => panic!("expected AlertEvent::Dlp"),
         }
