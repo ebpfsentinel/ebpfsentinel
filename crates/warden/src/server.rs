@@ -10,6 +10,7 @@
 use std::mem;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -107,6 +108,10 @@ pub trait ExtHandler: Send + Sync {
 /// read and never serve any other (a `DlpScan` after a held conntrack/ARP client
 /// would deadlock). Thread-per-connection keeps every channel independent - the
 /// op rate is low and the connection count small.
+///
+/// `proc_root` is the procfs the DLP scan walks: `/proc` on a host, the
+/// read-only bind mount in a container that was not given the host pid
+/// namespace.
 pub fn serve_loop(
     listener: &UnixListener,
     btf: Arc<Vec<(String, RawFd)>>,
@@ -114,6 +119,7 @@ pub fn serve_loop(
     host: Arc<dyn HostOps>,
     ext: Option<Arc<dyn ExtHandler>>,
     allowed_uid: u32,
+    proc_root: Arc<PathBuf>,
 ) {
     // The pcap pool is shared across all connections as claimable slots: a slot
     // belongs to the connection that took it until that connection's thread
@@ -138,8 +144,18 @@ pub fn serve_loop(
                     let host = Arc::clone(&host);
                     let ext = ext.clone();
                     let slots = Arc::clone(&slots);
+                    let proc_root = Arc::clone(&proc_root);
                     std::thread::spawn(move || {
-                        handle_conn(conn, &btf, &slots, &*host, ext.as_deref());
+                        handle_conn(
+                            conn,
+                            &Served {
+                                btf: &btf,
+                                pcap: &slots,
+                                host: &*host,
+                                ext: ext.as_deref(),
+                                proc_root: &proc_root,
+                            },
+                        );
                     });
                 }
             }
@@ -183,27 +199,46 @@ fn peer_allowed(conn: &UnixStream, allowed_uid: u32) -> bool {
 /// Reads frame-by-frame on the raw stream (no `BufReader`): a buffered reader
 /// would read past a frame boundary and swallow the sentinel byte that carries an
 /// inbound `SCM_RIGHTS` fd (e.g. the `Delegate` bpffs fd), dropping the fd.
-fn handle_conn(
-    conn: UnixStream,
-    btf: &[(String, RawFd)],
-    pcap: &Arc<PcapSlots>,
-    host: &dyn HostOps,
-    ext: Option<&dyn ExtHandler>,
-) {
-    handle_conn_with_timeouts(conn, btf, pcap, host, ext, HANDSHAKE_TIMEOUT, IDLE_TIMEOUT);
+fn handle_conn(conn: UnixStream, served: &Served<'_>) {
+    handle_conn_with_timeouts(conn, served, HANDSHAKE_TIMEOUT, IDLE_TIMEOUT);
+}
+
+/// What one connection is served out of: the resources the whole warden holds,
+/// borrowed for the life of that connection.
+///
+/// They travel together because every one of them is decided once at startup
+/// and read by the same command loop; passing them as a group keeps the two
+/// entry points below honest about that.
+#[derive(Clone, Copy)]
+struct Served<'a> {
+    /// The BTF fds handed out on delegation, by name.
+    btf: &'a [(String, RawFd)],
+    /// The capture-socket pool a connection claims slots from.
+    pcap: &'a Arc<PcapSlots>,
+    /// The host-network operations the warden brokers.
+    host: &'a dyn HostOps,
+    /// The downstream extension handler, when this build installs one.
+    ext: Option<&'a dyn ExtHandler>,
+    /// The procfs the DLP scan walks: `/proc` on a host, the read-only bind
+    /// mount in a container that was not given the host pid namespace.
+    proc_root: &'a Path,
 }
 
 /// [`handle_conn`] with both waits given rather than taken from the constants,
 /// so a test can assert the closes without waiting out a production timeout.
 fn handle_conn_with_timeouts(
     conn: UnixStream,
-    btf: &[(String, RawFd)],
-    pcap: &Arc<PcapSlots>,
-    host: &dyn HostOps,
-    ext: Option<&dyn ExtHandler>,
+    served: &Served<'_>,
     handshake_timeout: Duration,
     idle_timeout: Duration,
 ) {
+    let Served {
+        btf,
+        pcap,
+        host,
+        ext,
+        proc_root,
+    } = *served;
     // Every slot this connection claimed, held until the connection ends: the
     // agent's own pool keeps this connection open for its whole life, so the
     // sockets are in use for exactly as long as it is there to read them.
@@ -347,7 +382,7 @@ fn handle_conn_with_timeouts(
                 };
                 write_frame(&mut writer, &resp).is_ok()
             }
-            other => write_frame(&mut writer, &dispatch(other, host)).is_ok(),
+            other => write_frame(&mut writer, &dispatch(other, host, proc_root)).is_ok(),
         };
         if !ok {
             break;
@@ -446,7 +481,7 @@ fn serve_attach_uprobe(writer: &mut UnixStream, path: &str, offset: u64, is_ret:
 /// Map a request to a response. The conntrack read and the host-network ops go to
 /// `host`. The fd-passing commands (`Delegate`, `PcapOpen`) are answered out of
 /// band by the caller and never reach here.
-fn dispatch(cmd: &Command, host: &dyn HostOps) -> Response {
+fn dispatch(cmd: &Command, host: &dyn HostOps, proc_root: &Path) -> Response {
     match cmd {
         Command::ConntrackDump => match host.conntrack_dump() {
             Ok(table) => Response::Conntrack { table },
@@ -460,7 +495,7 @@ fn dispatch(cmd: &Command, host: &dyn HostOps) -> Response {
         Command::RouteDel { route } => result_to_response(host.route_del(route)),
         Command::ArpAnnounce { iface, ip } => result_to_response(host.arp_announce(iface, ip)),
         Command::DlpScan => Response::DlpTargets {
-            targets: dlp_scan::scan_dlp_targets(),
+            targets: dlp_scan::scan_dlp_targets(proc_root),
         },
         Command::Hello { .. } => Response::Error {
             message: "Hello already completed".into(),
@@ -480,14 +515,15 @@ fn result_to_response(result: Result<(), String>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExtHandler, HANDSHAKE_TIMEOUT, HostOps, IDLE_TIMEOUT, PcapSlots, Waited, handle_conn,
-        handle_conn_with_timeouts, wait_for_frame,
+        ExtHandler, HANDSHAKE_TIMEOUT, HostOps, IDLE_TIMEOUT, PcapSlots, Served, Waited,
+        handle_conn, handle_conn_with_timeouts, wait_for_frame,
     };
     use ebpfsentinel_warden_proto::{
         Command, ConntrackTuple, PROTOCOL_VERSION, Response, RouteSpec, read_frame, write_frame,
     };
     use std::os::fd::{AsRawFd, RawFd};
     use std::os::unix::net::UnixStream;
+    use std::path::Path;
     use std::sync::Arc;
     use std::thread::JoinHandle;
     use std::time::Duration;
@@ -534,7 +570,16 @@ mod tests {
         std::thread::spawn(move || {
             let host = NullHost;
             let slots = PcapSlots::new(Vec::new(), false);
-            handle_conn(server, &[], &slots, &host, ext.as_deref());
+            handle_conn(
+                server,
+                &Served {
+                    btf: &[],
+                    pcap: &slots,
+                    host: &host,
+                    ext: ext.as_deref(),
+                    proc_root: Path::new("/proc"),
+                },
+            );
         })
     }
 
@@ -614,7 +659,16 @@ mod tests {
     fn run_server_with_slots(server: UnixStream, slots: Arc<PcapSlots>) -> JoinHandle<()> {
         std::thread::spawn(move || {
             let host = NullHost;
-            handle_conn(server, &[], &slots, &host, None);
+            handle_conn(
+                server,
+                &Served {
+                    btf: &[],
+                    pcap: &slots,
+                    host: &host,
+                    ext: None,
+                    proc_root: Path::new("/proc"),
+                },
+            );
         })
     }
 
@@ -723,7 +777,18 @@ mod tests {
         std::thread::spawn(move || {
             let host = NullHost;
             let slots = PcapSlots::new(Vec::new(), false);
-            handle_conn_with_timeouts(server, &[], &slots, &host, None, handshake, idle);
+            handle_conn_with_timeouts(
+                server,
+                &Served {
+                    btf: &[],
+                    pcap: &slots,
+                    host: &host,
+                    ext: None,
+                    proc_root: Path::new("/proc"),
+                },
+                handshake,
+                idle,
+            );
         })
     }
 
@@ -823,10 +888,13 @@ mod tests {
             let host = NullHost;
             handle_conn_with_timeouts(
                 server,
-                &[],
-                &slots,
-                &host,
-                None,
+                &Served {
+                    btf: &[],
+                    pcap: &slots,
+                    host: &host,
+                    ext: None,
+                    proc_root: Path::new("/proc"),
+                },
                 Duration::from_secs(5),
                 Duration::from_millis(50),
             );

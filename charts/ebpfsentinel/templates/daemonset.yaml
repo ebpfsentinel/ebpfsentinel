@@ -1,3 +1,6 @@
+{{- with (include "ebpfsentinel.psaViolations" . | trim) }}
+{{- fail (printf "daemonset.podSecurityAdmission=%s, but these values ask for what that level forbids:\n%s\nEither relax daemonset.podSecurityAdmission or turn the listed values off." $.Values.daemonset.podSecurityAdmission .) }}
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -37,9 +40,9 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
-      hostNetwork: true
+      hostNetwork: {{ .Values.daemonset.hostNetwork }}
       hostPID: {{ .Values.daemonset.hostPID }}
-      dnsPolicy: ClusterFirstWithHostNet
+      dnsPolicy: {{ if .Values.daemonset.hostNetwork }}ClusterFirstWithHostNet{{ else }}ClusterFirst{{ end }}
       serviceAccountName: {{ include "ebpfsentinel.serviceAccountName" . }}
       # Only the Kubernetes enricher talks to the API server, so the token is
       # mounted only when it is on.
@@ -94,6 +97,12 @@ spec:
             - "/run/ebpfsentinel/warden.sock"
             - "--uid"
             - "65534" # only the agent's uid is served (SO_PEERCRED gate)
+          env:
+            # The DLP scan walks this procfs rather than its own /proc, which
+            # is what lets the pod run without the host pid namespace: the
+            # mount below carries every node process the agent asks about.
+            - name: EBPFSENTINEL_HOST_PROC
+              value: /host/proc
           {{- with .Values.daemonset.warden.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

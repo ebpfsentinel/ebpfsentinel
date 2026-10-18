@@ -309,6 +309,7 @@ setup_file() {
 teardown_file() {
     if _docker_available; then
         _docker_cmd rm -f "ebpfsentinel-cgroup-probe-$$" >/dev/null 2>&1 || true
+        _docker_cmd rm -f "ebpfsentinel-events-probe-$$" >/dev/null 2>&1 || true
     fi
     _stop_probe_listener 2>/dev/null || true
     _remove_probe_cgroup
@@ -420,6 +421,50 @@ teardown_file() {
     [ "${matched:-0}" -ge 1 ] || {
         echo "no alert carried a complete container identity" >&2
         echo "${alerts}" | jq -c '[.alerts[] | {component, container}] | .[0:5]' >&2 || true
+        return 1
+    }
+}
+
+# ── Event stream ───────────────────────────────────────────────────
+
+@test "a container started after the agent is named without a restart" {
+    _docker_available || env_skip "Docker engine not available"
+    _require_cgroup_v2
+
+    # The agent was started in setup_file, so this container did not exist
+    # when it connected to the socket: its name and image can only come from
+    # the metadata cache being written while the agent runs. The cache is fed
+    # by the /events stream, with the inspect left as the fallback for an id
+    # seen before the connection was up, so what is asserted here is the
+    # outcome an operator sees - a container created afterwards is named -
+    # rather than which of the two paths filled the entry.
+    local cname="ebpfsentinel-events-probe-$$"
+    _docker_cmd rm -f "${cname}" >/dev/null 2>&1 || true
+
+    _docker_cmd run --rm --name "${cname}" \
+        --network host \
+        busybox:latest sh -c \
+            'for i in 1 2 3 4 5; do
+                (echo probe; sleep 0.1) | nc -w 1 '"${EBPF_NS_IP}"' '"${PROBE_PORT}"' >/dev/null 2>&1 || true
+             done; sleep 1' >/dev/null 2>&1 || soft_skip "busybox container could not run"
+
+    sleep 2
+
+    local alerts
+    alerts="$(curl -sf --max-time 5 \
+        "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/api/v1/alerts?limit=200" 2>/dev/null)" || true
+    [ -n "${alerts}" ] || soft_skip "alerts endpoint returned nothing"
+
+    local named
+    named="$(echo "${alerts}" | jq --arg name "${cname}" '[.alerts[]
+        | select(.container != null)
+        | select((.container.name // "") == $name)
+        | select((.container.image // "") | length > 0)] | length' 2>/dev/null)" || named=0
+
+    [ "${named:-0}" -ge 1 ] || {
+        echo "no alert named the container started after the agent (${cname})" >&2
+        echo "${alerts}" | jq -c '[.alerts[] | select(.container != null) | .container] | .[0:5]' >&2 || true
+        grep -c "Docker metadata enricher initialized" "${AGENT_LOG_FILE}" >&2 2>/dev/null || true
         return 1
     }
 }

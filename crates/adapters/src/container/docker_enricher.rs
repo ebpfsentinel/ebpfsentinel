@@ -4,7 +4,16 @@
 //! Unix socket for each container ID. Results are cached in an LRU with TTL,
 //! and the enricher transparently disables itself after a Docker error until
 //! a periodic recheck re-enables it.
+//!
+//! The cache is shared with
+//! [`DockerEventWatcher`](super::docker_events::DockerEventWatcher), which
+//! writes it from Docker's own event stream, so most lookups are answered
+//! without an inspect at all. An entry the stream wrote carries no creation
+//! time, because only an inspect knows it: the enricher completes such an
+//! entry once, and falls back to what the stream gave it when the inspect
+//! fails.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -23,7 +32,7 @@ const RECHECK_INTERVAL_SECS: u64 = 60;
 
 pub struct DockerEnricher {
     client: DockerClient,
-    cache: DockerCache,
+    cache: Arc<DockerCache>,
     available: AtomicBool,
     /// Seconds since `base` at which the enricher was disabled. 0 = never.
     disabled_at_secs: AtomicU64,
@@ -31,7 +40,7 @@ pub struct DockerEnricher {
 }
 
 impl DockerEnricher {
-    pub fn new(client: DockerClient, cache: DockerCache) -> Self {
+    pub fn new(client: DockerClient, cache: Arc<DockerCache>) -> Self {
         Self {
             client,
             cache,
@@ -95,27 +104,32 @@ impl MetadataEnricher for DockerEnricher {
             return Ok(None);
         }
 
-        if let Some(md) = self.cache.get(container_id) {
-            return Ok(Some(ContainerMetadata::Docker(md)));
-        }
+        let from_stream = match self.cache.get(container_id) {
+            // Complete in one inspect what the event stream could not know.
+            Some(md) if md.created_at.is_empty() => Some(md),
+            Some(md) => return Ok(Some(ContainerMetadata::Docker(md))),
+            None => None,
+        };
 
         match self.client.inspect_container(container_id).await {
             Ok(md) => {
                 self.cache.insert(container_id.clone(), md.clone());
                 Ok(Some(ContainerMetadata::Docker(md)))
             }
-            Err(ContainerError::ContainerNotFound { .. }) => Ok(None),
+            Err(ContainerError::ContainerNotFound { .. }) => {
+                Ok(from_stream.map(ContainerMetadata::Docker))
+            }
             Err(
                 err @ (ContainerError::DockerUnavailable { .. }
                 | ContainerError::DockerTimeout { .. }),
             ) => {
                 self.disable();
                 debug!(error = %err, "docker enricher disabled");
-                Ok(None)
+                Ok(from_stream.map(ContainerMetadata::Docker))
             }
             Err(err) => {
                 debug!(error = %err, "docker inspect failed");
-                Ok(None)
+                Ok(from_stream.map(ContainerMetadata::Docker))
             }
         }
     }
@@ -141,9 +155,21 @@ mod tests {
     }
 
     fn unreachable_enricher() -> DockerEnricher {
+        unreachable_enricher_with(Arc::new(DockerCache::new(4, Duration::from_mins(1))))
+    }
+
+    fn unreachable_enricher_with(cache: Arc<DockerCache>) -> DockerEnricher {
         let client = DockerClient::new("/nonexistent/docker.sock", 10);
-        let cache = DockerCache::new(4, Duration::from_mins(1));
         DockerEnricher::new(client, cache)
+    }
+
+    fn docker_info(id: &str) -> ContainerInfo {
+        ContainerInfo::Container {
+            container_id: id.into(),
+            runtime: ContainerRuntime::Docker,
+            cgroup_path: format!("/docker/{id}"),
+            pid: 1,
+        }
     }
 
     #[tokio::test]
@@ -158,6 +184,31 @@ mod tests {
         let e = unreachable_enricher();
         let md = e.enrich(&non_docker_info()).await.unwrap();
         assert!(md.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_entry_written_by_the_event_stream_enriches_without_an_inspect() {
+        // The socket does not exist, so nothing here can have come from an
+        // inspect: what the enricher returns is what the stream wrote.
+        let cache = Arc::new(DockerCache::new(4, Duration::from_mins(1)));
+        cache.insert(
+            "abc".into(),
+            domain::container::entity::DockerMetadata {
+                name: "web".into(),
+                image: "nginx:1.25".into(),
+                labels: vec![],
+                created_at: String::new(),
+                status: "running".into(),
+            },
+        );
+        let enricher = unreachable_enricher_with(Arc::clone(&cache));
+
+        let md = enricher.enrich(&docker_info("abc")).await.unwrap();
+        let Some(ContainerMetadata::Docker(md)) = md else {
+            panic!("expected docker metadata");
+        };
+        assert_eq!(md.name, "web");
+        assert_eq!(md.status, "running");
     }
 
     #[tokio::test]

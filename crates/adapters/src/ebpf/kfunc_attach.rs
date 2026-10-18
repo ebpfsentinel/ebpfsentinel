@@ -447,8 +447,12 @@ pub fn resolve_symbol_offset(target: &str, symbol: &str) -> Result<u64, KfuncAtt
         symbol: symbol.to_owned(),
         message,
     };
-    let data = std::fs::read(target).map_err(|e| err(e.to_string()))?;
-    let file = object::File::parse(&*data).map_err(|e| err(e.to_string()))?;
+    // Headers and symbol tables are read out of the open file as `object` asks
+    // for them, rather than the image being copied into memory first: a symbol
+    // in a 400 MiB binary costs the tables, not the binary.
+    let image = std::fs::File::open(target).map_err(|e| err(e.to_string()))?;
+    let cache = object::read::ReadCache::new(image);
+    let file = object::File::parse(&cache).map_err(|e| err(e.to_string()))?;
 
     let addr = file
         .dynamic_symbols()

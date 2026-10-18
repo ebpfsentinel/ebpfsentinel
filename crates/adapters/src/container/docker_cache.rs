@@ -60,6 +60,15 @@ impl DockerCache {
         }
     }
 
+    /// Forget one entry. The event stream calls this on `destroy`, where
+    /// waiting out the time-to-live would mean enriching a packet with a
+    /// container that no longer exists.
+    pub fn remove(&self, container_id: &str) {
+        if let Ok(mut lock) = self.inner.lock() {
+            lock.pop(container_id);
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().map_or(0, |l| l.len())
     }
@@ -115,6 +124,16 @@ mod tests {
         let cache = DockerCache::new(0, Duration::from_mins(1));
         cache.insert("a".into(), sample("1"));
         assert!(cache.get("a").is_some());
+    }
+
+    #[test]
+    fn remove_forgets_an_entry_before_its_ttl() {
+        let cache = DockerCache::new(4, Duration::from_mins(1));
+        cache.insert("a".into(), sample("1"));
+        cache.remove("a");
+        assert!(cache.get("a").is_none());
+        // Removing what is not there is not an error.
+        cache.remove("a");
     }
 
     #[test]

@@ -349,8 +349,24 @@ start_ebpf_agent() {
             # The warden gets its own log: the agent's redirection below
             # truncates $AGENT_LOG_FILE, so anything the warden had already
             # written there would be lost before the first test runs.
-            setsid "$warden" serve "$sock" --uid 0 \
-                </dev/null >>"${AGENT_LOG_FILE}.warden" 2>&1 &
+            # WARDEN_PID_NS_HOST_PROC puts the broker in the posture the chart
+            # and the compose file ship: its own pid namespace, so its /proc
+            # holds one process, plus a bind mount of the node's procfs at the
+            # named path and EBPFSENTINEL_HOST_PROC pointing there. Everything
+            # the scan finds then came through that mount rather than through a
+            # shared process list.
+            if [ -n "${WARDEN_PID_NS_HOST_PROC:-}" ]; then
+                mkdir -p "${WARDEN_PID_NS_HOST_PROC}"
+                setsid unshare --pid --fork --mount --propagation private \
+                    sh -c "mount --bind /proc '${WARDEN_PID_NS_HOST_PROC}' \
+                        && mount -t proc proc /proc \
+                        && exec env EBPFSENTINEL_HOST_PROC='${WARDEN_PID_NS_HOST_PROC}' \
+                            '$warden' serve '$sock' --uid 0" \
+                    </dev/null >>"${AGENT_LOG_FILE}.warden" 2>&1 &
+            else
+                setsid "$warden" serve "$sock" --uid 0 \
+                    </dev/null >>"${AGENT_LOG_FILE}.warden" 2>&1 &
+            fi
             echo "$!" > "${AGENT_PID_FILE}.warden"
             local _i
             for _i in $(seq 1 100); do [ -S "$sock" ] && break; sleep 0.1; done
@@ -429,7 +445,13 @@ stop_ebpf_agent() {
         stop_agent 2>/dev/null || true
         # Stop the warden broker started alongside the local-binary agent.
         if [ -f "${AGENT_PID_FILE}.warden" ]; then
-            kill "$(cat "${AGENT_PID_FILE}.warden")" 2>/dev/null || true
+            local wpid
+            wpid="$(cat "${AGENT_PID_FILE}.warden")"
+            # The whole session, not the one pid: under WARDEN_PID_NS_HOST_PROC
+            # the broker is the init of a pid namespace whose parent is the
+            # `unshare` this pid names, and an orphaned init keeps the namespace
+            # - and the capabilities - alive for the rest of the run.
+            kill -- "-${wpid}" 2>/dev/null || kill "${wpid}" 2>/dev/null || true
             rm -f "${AGENT_PID_FILE}.warden"
         fi
     fi

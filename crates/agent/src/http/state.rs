@@ -35,6 +35,8 @@ use ports::secondary::auth_provider::AuthProvider;
 use ports::secondary::geoip_port::GeoIpPort;
 use tokio::sync::{Notify, RwLock, broadcast, mpsc};
 
+use super::agent_handler::ContainerCoverage;
+
 /// Shared application state for the REST API server.
 ///
 /// Passed to Axum handlers via `State(Arc<AppState>)`.
@@ -118,6 +120,10 @@ pub struct AppState {
     /// Replay buffer used by the SSE alerts handler to honour the
     /// `Last-Event-ID` resume contract.
     pub alert_replay_buffer: Option<Arc<AlertReplayBuffer>>,
+    /// What the agent sees of the containers on this node, as its startup
+    /// decided it. Swapped once the resolver and the enrichers are built, so
+    /// a status read before that says `starting` rather than guessing.
+    pub container_coverage: Arc<ArcSwap<ContainerCoverage>>,
 }
 
 impl AppState {
@@ -182,6 +188,7 @@ impl AppState {
             conntrack_event_tx: None,
             alert_stream_tx: None,
             alert_replay_buffer: None,
+            container_coverage: Arc::new(ArcSwap::from_pointee(ContainerCoverage::starting())),
         }
     }
 

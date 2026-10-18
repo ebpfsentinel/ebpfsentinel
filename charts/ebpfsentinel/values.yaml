@@ -94,14 +94,28 @@ serviceAccount:
 
 # -- DaemonSet configuration
 daemonset:
-  # -- Share the host PID namespace. Required for cross-container TLS DLP: the
-  # agent resolves each workload's `libssl` through `/host/proc/<pid>` and the
-  # warden attaches the uprobe against the host pid. SECURITY NOTE: hostPID lets
-  # the pod see every process on the node (command lines, `/proc/<pid>`),
-  # widening its visibility beyond its own containers - the irreducible cost of
-  # node-wide DLP. Set to `false` to restrict DLP to the agent's own pod (the
-  # uprobe then covers only libraries the agent itself maps).
-  hostPID: true
+  # -- The Pod Security Admission level this pod is meant to satisfy:
+  # `privileged`, `baseline` or `restricted`. It enforces nothing by itself -
+  # the namespace label does that - but the chart refuses to render when these
+  # values ask for something the named level forbids, listing every offending
+  # value at once instead of letting admission reject the pod on the first one
+  # it notices. As shipped the pod is `privileged`, and the reasons are the
+  # host network namespace (XDP and TC attach to the node's interfaces) and the
+  # warden's capabilities and unconfined profiles (bpffs delegation, netlink,
+  # the DLP uprobe). Cross-container DLP is no longer one of them.
+  podSecurityAdmission: privileged
+  # -- Share the host network namespace. The XDP and TC programs attach to the
+  # node's own interfaces, which only exist in it; turning it off leaves the
+  # datapath with the pod's veth and nothing else. Forbidden by `baseline`.
+  hostNetwork: true
+  # -- Share the host PID namespace. Off: cross-container TLS DLP no longer
+  # needs it. The warden and the agent both read the host procfs through the
+  # read-only `/host/proc` mount (`EBPFSENTINEL_HOST_PROC`), the library path
+  # they exchange is rooted on it, and the uprobe link is created against a
+  # path and an offset with `pid = 0`, so it covers every process that maps the
+  # library whatever namespace it is in. Turning it on adds the node's command
+  # lines to what the pod can see and buys no coverage; `baseline` forbids it.
+  hostPID: false
   # -- DaemonSet update strategy
   updateStrategy:
     type: RollingUpdate

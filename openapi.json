@@ -6973,9 +6973,14 @@
           "ebpf_loaded",
           "rule_count",
           "firewall_enabled",
-          "firewall_mode"
+          "firewall_mode",
+          "container_coverage"
         ],
         "properties": {
+          "container_coverage": {
+            "$ref": "#/components/schemas/ContainerCoverage",
+            "description": "What the agent sees of the containers on this node."
+          },
           "ebpf_loaded": {
             "type": "boolean"
           },
@@ -7825,6 +7830,37 @@
           },
           "state": {
             "type": "string"
+          }
+        }
+      },
+      "ContainerCoverage": {
+        "type": "object",
+        "description": "What this agent can say about the containers it sees.\n\nEvery field is a verdict rather than a setting: the procfs actually being\nread, whether it is the host's, and what each enricher decided.",
+        "required": [
+          "proc_root",
+          "host_proc",
+          "resolver",
+          "docker",
+          "kubernetes"
+        ],
+        "properties": {
+          "docker": {
+            "$ref": "#/components/schemas/EnricherState"
+          },
+          "host_proc": {
+            "type": "boolean",
+            "description": "`proc_root` is a mounted host procfs rather than this process's own,\nwhich is what covers a neighbouring container without sharing the\nnode's pid namespace."
+          },
+          "kubernetes": {
+            "$ref": "#/components/schemas/EnricherState"
+          },
+          "proc_root": {
+            "type": "string",
+            "description": "The procfs every container and DLP lookup is rooted on."
+          },
+          "resolver": {
+            "type": "boolean",
+            "description": "The cgroup-id resolver is running, so an alert carries a container id."
           }
         }
       },
@@ -9001,6 +9037,19 @@
             }
           }
         }
+      },
+      "EnricherState": {
+        "type": "string",
+        "description": "Where a metadata enricher ended up, as the agent decided it at startup.\n\nThe deployment matrix claims container enrichment per mode; this is the\nsame claim answered by the running agent, so the two can be compared on a\nnode instead of taken on trust.",
+        "enum": [
+          "starting",
+          "on",
+          "off_no_socket",
+          "off_not_in_cluster",
+          "off_unavailable",
+          "off_not_built",
+          "off_by_configuration"
+        ]
       },
       "ErrorBody": {
         "type": "object",

@@ -933,7 +933,7 @@ attack_suites:
     kernel_min: "6.9"
     profile: nightly
     surfaces: ["container"]
-    notes: "Container cgroup → identity surface: container_resolver_cache_{hits,misses,errors} counters present when container.resolver.enabled=true; Docker-driven probe traffic on tc-ids signature port advances the cache-misses counter (proves cgroup_id reaches the resolver). AlertResponse REST container fields and kubernetes pod enrichment via suite 10 fixtures are deferred ACs tracked in the suite header. Per-tenant TENANT_CGROUP_MAP filtering is enterprise-only and is tested in the enterprise repo"
+    notes: "Container cgroup → identity surface: container_resolver_cache_{hits,misses,errors} counters present when container.resolver.enabled=true; Docker-driven probe traffic on tc-ids signature port advances the cache-misses counter (proves cgroup_id reaches the resolver); a container created after the agent connected to the Docker socket is named and imaged on its alert, which is the metadata cache being written while the agent runs rather than at startup. AlertResponse REST container fields and kubernetes pod enrichment via suite 10 fixtures are deferred ACs tracked in the suite header. Per-tenant TENANT_CGROUP_MAP filtering is enterprise-only and is tested in the enterprise repo"
 
   - suite: "55"
     name: ipv6-full-path-sweep

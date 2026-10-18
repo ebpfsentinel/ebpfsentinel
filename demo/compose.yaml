@@ -27,7 +27,10 @@ services:
     image: ghcr.io/ebpfsentinel/ebpfsentinel-warden:${EBPFSENTINEL_TAG:-latest}
     command: ["serve", "/run/ebpfsentinel/warden.sock", "--uid", "65534"]
     network_mode: host
-    pid: host
+    # No `pid: host`: the scan reads the host's processes through the read-only
+    # /host/proc mount below and the uprobe attaches by path and offset.
+    environment:
+      EBPFSENTINEL_HOST_PROC: /host/proc
     cap_drop: [ALL]
     cap_add: [SYS_ADMIN, NET_ADMIN, NET_RAW, SYS_PTRACE, BPF, PERFMON]
     security_opt:
@@ -46,7 +49,6 @@ services:
       EBPFSENTINEL_WARDEN_SOCK: /run/ebpfsentinel/warden.sock
       EBPFSENTINEL_HOST_PROC: /host/proc
     network_mode: host
-    pid: host
     user: "65534:65534"
     cap_drop: [ALL]
     security_opt:

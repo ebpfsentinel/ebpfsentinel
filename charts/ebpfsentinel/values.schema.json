@@ -96,6 +96,11 @@
     "daemonset": {
       "type": "object",
       "properties": {
+        "podSecurityAdmission": {
+          "type": "string",
+          "enum": ["privileged", "baseline", "restricted"]
+        },
+        "hostNetwork": { "type": "boolean" },
         "hostPID": { "type": "boolean" },
         "bpfToken": {
           "type": "object",

@@ -33,6 +33,63 @@ pub struct AgentIdentityResponse {
     pub operator_endpoint: Option<String>,
 }
 
+/// Where a metadata enricher ended up, as the agent decided it at startup.
+///
+/// The deployment matrix claims container enrichment per mode; this is the
+/// same claim answered by the running agent, so the two can be compared on a
+/// node instead of taken on trust.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EnricherState {
+    /// The agent has not finished starting, so it has decided nothing yet.
+    Starting,
+    /// Running: alerts carry the workload's name, image and labels.
+    On,
+    /// Enabled, but the runtime socket is not there. Alerts keep the
+    /// container id the resolver reads and lose everything named.
+    OffNoSocket,
+    /// Enabled, but no Kubernetes API is reachable from this process.
+    OffNotInCluster,
+    /// Enabled, reachable, and the client could not be built.
+    OffUnavailable,
+    /// This build does not carry the enricher at all.
+    OffNotBuilt,
+    /// Turned off in the configuration.
+    OffByConfiguration,
+}
+
+/// What this agent can say about the containers it sees.
+///
+/// Every field is a verdict rather than a setting: the procfs actually being
+/// read, whether it is the host's, and what each enricher decided.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ContainerCoverage {
+    /// The procfs every container and DLP lookup is rooted on.
+    pub proc_root: String,
+    /// `proc_root` is a mounted host procfs rather than this process's own,
+    /// which is what covers a neighbouring container without sharing the
+    /// node's pid namespace.
+    pub host_proc: bool,
+    /// The cgroup-id resolver is running, so an alert carries a container id.
+    pub resolver: bool,
+    pub docker: EnricherState,
+    pub kubernetes: EnricherState,
+}
+
+impl ContainerCoverage {
+    /// What the agent reports before it has built its enrichers.
+    #[must_use]
+    pub fn starting() -> Self {
+        Self {
+            proc_root: "/proc".to_string(),
+            host_proc: false,
+            resolver: false,
+            docker: EnricherState::Starting,
+            kubernetes: EnricherState::Starting,
+        }
+    }
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct AgentStatusResponse {
     /// Coarse lifecycle state: `running` once eBPF programs are attached,
@@ -44,6 +101,8 @@ pub struct AgentStatusResponse {
     pub rule_count: usize,
     pub firewall_enabled: bool,
     pub firewall_mode: String,
+    /// What the agent sees of the containers on this node.
+    pub container_coverage: ContainerCoverage,
 }
 
 /// Returns the current agent status including version, uptime, and eBPF state.
@@ -75,6 +134,7 @@ pub async fn agent_status(State(state): State<Arc<AppState>>) -> Json<AgentStatu
         rule_count,
         firewall_enabled,
         firewall_mode,
+        container_coverage: state.container_coverage.load().as_ref().clone(),
     })
 }
 
@@ -159,8 +219,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn status_response_has_expected_fields() {
+    fn state_with_one_rule() -> Arc<AppState> {
         let mut engine = FirewallEngine::new();
         engine
             .add_rule(FirewallRule {
@@ -211,7 +270,7 @@ mod tests {
         );
         let audit_svc = AuditAppService::new(Arc::new(NoopSink) as Arc<dyn AuditSink>);
         let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(1);
-        let state = Arc::new(AppState::new(
+        Arc::new(AppState::new(
             Arc::new(AgentMetrics::new()),
             Arc::new(AtomicBool::new(true)),
             Arc::new(tokio::sync::RwLock::new(svc)),
@@ -226,7 +285,12 @@ mod tests {
             )),
             reload_tx,
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        ));
+        ))
+    }
+
+    #[tokio::test]
+    async fn status_response_has_expected_fields() {
+        let state = state_with_one_rule();
 
         let Json(resp) = agent_status(State(state)).await;
         assert_eq!(resp.version, env!("CARGO_PKG_VERSION"));
@@ -236,5 +300,45 @@ mod tests {
         assert!(resp.uptime_seconds < 2);
         assert!(resp.firewall_enabled);
         assert_eq!(resp.firewall_mode, "alert");
+    }
+
+    /// Before startup has built the enrichers there is nothing to report, and
+    /// saying `starting` is the difference between a verdict and a guess.
+    #[tokio::test]
+    async fn container_coverage_starts_undecided() {
+        let state = state_with_one_rule();
+
+        let Json(resp) = agent_status(State(state)).await;
+        assert_eq!(resp.container_coverage.docker, EnricherState::Starting);
+        assert_eq!(resp.container_coverage.kubernetes, EnricherState::Starting);
+        assert!(!resp.container_coverage.resolver);
+        assert!(!resp.container_coverage.host_proc);
+    }
+
+    /// The deployment matrix claims a mode covers containers; this is the same
+    /// claim answered by the node, so the two can be compared on the node.
+    #[tokio::test]
+    async fn container_coverage_reports_what_startup_decided() {
+        let state = state_with_one_rule();
+        state.container_coverage.store(Arc::new(ContainerCoverage {
+            proc_root: "/host/proc".to_string(),
+            host_proc: true,
+            resolver: true,
+            docker: EnricherState::OffNoSocket,
+            kubernetes: EnricherState::On,
+        }));
+
+        let Json(resp) = agent_status(State(state)).await;
+        let coverage = &resp.container_coverage;
+        assert_eq!(coverage.proc_root, "/host/proc");
+        assert!(coverage.host_proc);
+        assert!(coverage.resolver);
+        assert_eq!(coverage.docker, EnricherState::OffNoSocket);
+        assert_eq!(coverage.kubernetes, EnricherState::On);
+
+        let wire = serde_json::to_value(&resp).unwrap();
+        assert_eq!(wire["container_coverage"]["docker"], "off_no_socket");
+        assert_eq!(wire["container_coverage"]["kubernetes"], "on");
+        assert_eq!(wire["container_coverage"]["proc_root"], "/host/proc");
     }
 }

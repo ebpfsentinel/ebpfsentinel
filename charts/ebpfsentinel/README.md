@@ -59,18 +59,18 @@ See [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/m
 | Feature | DaemonSet | Notes |
 |---------|-----------|-------|
 | Firewall, IDS, DDoS, Rate Limiting | Full | Attached to host NIC - sees all node traffic |
-| DLP | Partial | Only sees pod processes unless `hostPID: true` |
+| DLP | Full | Covers every process on the node without the host pid namespace: the warden and the agent read the node's procfs through the read-only `/host/proc` mount, and the uprobe link is created against a path and an offset rather than a pid |
 | Multi-WAN Routing | Full | `hostNetwork` shares the routing table; route application (`ip rule`/`ip route`) is brokered to the `warden`, which holds `CAP_NET_ADMIN` in the init network namespace. Same path as `conntrack -D` flow-kill and gratuitous ARP |
 | Sidecar mode | Not recommended | XDP works on veth (generic mode) but only sees the pod's own traffic - no host or cross-pod visibility |
 
-**DLP full coverage** requires `hostPID: true` in the DaemonSet spec:
-
-```yaml
-daemonset:
-  hostPID: true
-```
-
-This grants the uprobe visibility into all node processes using `libssl.so.3`. Without it, DLP only inspects TLS traffic from processes inside the agent pod.
+**DLP covers the whole node out of the box**, with `daemonset.hostPID` off. The
+pod mounts the node's `/proc` read-only at `/host/proc`, both containers are
+told about it through `EBPFSENTINEL_HOST_PROC`, and the library path the warden
+hands back is rooted on that mount. The uprobe itself is a `BPF_LINK_CREATE`
+against a path and an offset with `pid = 0`, so it fires for every process that
+maps `libssl.so.3`, in whatever namespace. Turning `hostPID` on adds the node's
+process list and command lines to what the pod can see and buys no coverage,
+and Pod Security Admission `baseline` forbids it.
 
 ### CNI Compatibility
 
@@ -124,11 +124,13 @@ helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --versi
 
 ### DLP with full node visibility
 
+Nothing extra is needed: the host procfs mount is always there, so DLP sees
+every process on the node as soon as it is enabled.
+
 ```bash
 helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --version <version> \
   --namespace ebpfsentinel --create-namespace \
   --set agent.interfaces='{eth0}' \
-  --set daemonset.hostPID=true \
   --set dlp.enabled=true
 ```
 
@@ -248,7 +250,7 @@ helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --versi
 | container | object | `{"kubernetes":{"enabled":false,"labelFilter":[]}}` | Container awareness |
 | container.kubernetes.enabled | bool | `false` | Enable the Kubernetes pod metadata enricher: alerts carry the pod name, namespace and labels of the container that produced them. Turning it on creates a ClusterRole with get/list/watch on `pods`, binds it to the ServiceAccount and mounts the ServiceAccount token into the pod, which is otherwise left unmounted. |
 | container.kubernetes.labelFilter | list | `[]` | Optional label selector (`key=value` pairs) narrowing the pod watcher |
-| daemonset | object | `{"affinity":{},"bpfToken":{"bpffsEmptyDir":false,"bpffsPath":"/sys/fs/bpf/ebpfsentinel"},"extraContainers":[],"extraEnv":[],"extraVolumeMounts":[],"extraVolumes":[],"hostPID":true,"initContainers":[],"minReadySeconds":0,"nodeSelector":{},"podAnnotations":{},"podLabels":{},"preStopSleepSeconds":5,"priorityClassName":"","resources":{"limits":{"cpu":"1000m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}},"revisionHistoryLimit":10,"securityContext":{"allowPrivilegeEscalation":true,"appArmorProfile":{"type":"Unconfined"},"capabilities":{"drop":["ALL"]},"runAsGroup":65534,"runAsUser":65534,"seccompProfile":{"type":"Unconfined"}},"state":{"ephemeral":false,"hostPath":"","machineId":true},"terminationGracePeriodSeconds":30,"tolerations":[{"operator":"Exists"}],"updateStrategy":{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"},"warden":{"resources":{"limits":{"cpu":"1000m","memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}},"securityContext":{"allowPrivilegeEscalation":true,"appArmorProfile":{"type":"Unconfined"},"capabilities":{"add":["SYS_ADMIN","NET_ADMIN","NET_RAW","SYS_PTRACE","BPF","PERFMON"],"drop":["ALL"]},"runAsUser":0,"seccompProfile":{"type":"Unconfined"}}}}` | DaemonSet configuration |
+| daemonset | object | `{"affinity":{},"bpfToken":{"bpffsEmptyDir":false,"bpffsPath":"/sys/fs/bpf/ebpfsentinel"},"extraContainers":[],"extraEnv":[],"extraVolumeMounts":[],"extraVolumes":[],"hostNetwork":true,"hostPID":false,"initContainers":[],"minReadySeconds":0,"nodeSelector":{},"podAnnotations":{},"podLabels":{},"podSecurityAdmission":"privileged","preStopSleepSeconds":5,"priorityClassName":"","resources":{"limits":{"cpu":"1000m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}},"revisionHistoryLimit":10,"securityContext":{"allowPrivilegeEscalation":true,"appArmorProfile":{"type":"Unconfined"},"capabilities":{"drop":["ALL"]},"runAsGroup":65534,"runAsUser":65534,"seccompProfile":{"type":"Unconfined"}},"state":{"ephemeral":false,"hostPath":"","machineId":true},"terminationGracePeriodSeconds":30,"tolerations":[{"operator":"Exists"}],"updateStrategy":{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"},"warden":{"resources":{"limits":{"cpu":"1000m","memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}},"securityContext":{"allowPrivilegeEscalation":true,"appArmorProfile":{"type":"Unconfined"},"capabilities":{"add":["SYS_ADMIN","NET_ADMIN","NET_RAW","SYS_PTRACE","BPF","PERFMON"],"drop":["ALL"]},"runAsUser":0,"seccompProfile":{"type":"Unconfined"}}}}` | DaemonSet configuration |
 | daemonset.affinity | object | `{}` | Affinity rules |
 | daemonset.bpfToken | object | `{"bpffsEmptyDir":false,"bpffsPath":"/sys/fs/bpf/ebpfsentinel"}` | BPF token delegation. eBPF is loaded EXCLUSIVELY through a BPF token (kernel 6.9+), a user-namespace feature. The pod runs the warden broker as a native sidecar; the agent self-unshares a user namespace, has the warden delegate a bpffs at `bpffsPath`, and loads its own eBPF through the token - holding no host capabilities. There is no capability-based loading path. `bpffsPath` drives BOTH the `EBPFSENTINEL_BPFFS` env (DaemonSet, the agent's mount target) and the agent's `bpf_token.bpffs_path` (ConfigMap) - keep them in sync via this one value; they must point at the same mount. |
 | daemonset.bpfToken.bpffsEmptyDir | bool | `false` | Back the bpffs mount with an in-pod tmpfs (emptyDir medium: Memory) instead of the host's /sys/fs/bpf. Required on nested runtimes (kind, minikube) whose node /sys/fs/bpf is read-only or absent - there the hostPath mount fails. On a real node leave this false so pinned maps live on the host bpffs. |
@@ -256,12 +258,14 @@ helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --versi
 | daemonset.extraEnv | list | `[]` | Extra environment variables |
 | daemonset.extraVolumeMounts | list | `[]` | Extra volume mounts (e.g., GeoIP database, TLS certs) |
 | daemonset.extraVolumes | list | `[]` | Extra volumes |
-| daemonset.hostPID | bool | `true` | Share the host PID namespace. Required for cross-container TLS DLP: the agent resolves each workload's `libssl` through `/host/proc/<pid>` and the warden attaches the uprobe against the host pid. SECURITY NOTE: hostPID lets the pod see every process on the node (command lines, `/proc/<pid>`), widening its visibility beyond its own containers - the irreducible cost of node-wide DLP. Set to `false` to restrict DLP to the agent's own pod (the uprobe then covers only libraries the agent itself maps). |
+| daemonset.hostNetwork | bool | `true` | Share the host network namespace. The XDP and TC programs attach to the node's own interfaces, which only exist in it; turning it off leaves the datapath with the pod's veth and nothing else. Forbidden by `baseline`. |
+| daemonset.hostPID | bool | `false` | Share the host PID namespace. Off: cross-container TLS DLP no longer needs it. The warden and the agent both read the host procfs through the read-only `/host/proc` mount (`EBPFSENTINEL_HOST_PROC`), the library path they exchange is rooted on it, and the uprobe link is created against a path and an offset with `pid = 0`, so it covers every process that maps the library whatever namespace it is in. Turning it on adds the node's command lines to what the pod can see and buys no coverage; `baseline` forbids it. |
 | daemonset.initContainers | list | `[]` | Init containers |
 | daemonset.minReadySeconds | int | `0` | Minimum seconds a pod must be ready before considered available |
 | daemonset.nodeSelector | object | `{}` | Node selector |
 | daemonset.podAnnotations | object | `{}` | Extra annotations on DaemonSet pods |
 | daemonset.podLabels | object | `{}` | Extra labels on DaemonSet pods |
+| daemonset.podSecurityAdmission | string | `"privileged"` | The Pod Security Admission level this pod is meant to satisfy: `privileged`, `baseline` or `restricted`. It enforces nothing by itself - the namespace label does that - but the chart refuses to render when these values ask for something the named level forbids, listing every offending value at once instead of letting admission reject the pod on the first one it notices. As shipped the pod is `privileged`, and the reasons are the host network namespace (XDP and TC attach to the node's interfaces) and the warden's capabilities and unconfined profiles (bpffs delegation, netlink, the DLP uprobe). Cross-container DLP is no longer one of them. |
 | daemonset.preStopSleepSeconds | int | `5` | Seconds the preStop hook holds the agent before it is signalled, so the endpoint is out of every node's rules before the stop begins. `0` removes the hook. Must stay below terminationGracePeriodSeconds minus the agent's 20s stop budget. |
 | daemonset.priorityClassName | string | `""` | Pod priority class name |
 | daemonset.resources | object | `{"limits":{"cpu":"1000m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}}` | Resource requests and limits |
@@ -294,7 +298,8 @@ helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --versi
 | ips.enabled | bool | `true` | Enable Intrusion Prevention (auto-blacklist) |
 | l7.enabled | bool | `false` | Enable L7 protocol filtering (HTTP, TLS/SNI, gRPC) |
 | loadbalancer.enabled | bool | `false` | Enable L4 load balancer |
-| metrics | object | `{"prometheusRule":{"enabled":false,"labels":{},"rules":[]},"serviceMonitor":{"enabled":false,"interval":"15s","labels":{}}}` | Prometheus metrics |
+| metrics | object | `{"authRequired":false,"prometheusRule":{"enabled":false,"labels":{},"rules":[]},"serviceMonitor":{"enabled":false,"interval":"15s","labels":{}}}` | Prometheus metrics |
+| metrics.authRequired | bool | `false` | Require the API key on `/metrics` as well. The control plane is what authentication is for; the metrics port serves counters and no secret, so a scraper reaches it without a credential by default. Set this true and name `auth.existingSecret`, otherwise the key the agent drew for itself is one nothing outside the pod can present and every scrape answers 401. |
 | metrics.prometheusRule.enabled | bool | `false` | Create a PrometheusRule with built-in alerting rules |
 | metrics.prometheusRule.labels | object | `{}` | Extra labels on the PrometheusRule |
 | metrics.prometheusRule.rules | list | `[]` | Override the default rules (when empty, built-in rules are used) |

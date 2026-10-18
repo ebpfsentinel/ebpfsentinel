@@ -32,8 +32,28 @@ use ebpfsentinel_warden_proto::PROTOCOL_VERSION;
 /// `--uid <n>`.
 const DEFAULT_UID: u32 = 65534;
 
+/// Where the host procfs is, when it is not `/proc`.
+///
+/// The same name the agent and the enterprise warden already read. A container
+/// that was not given the host pid namespace sees only its own processes under
+/// `/proc`, so the DLP scan is pointed at the read-only bind mount of the
+/// host's instead. Nothing else in the warden needs it: a uprobe link is
+/// created by path and offset over the whole system, never against a pid.
+const HOST_PROC_ENV: &str = "EBPFSENTINEL_HOST_PROC";
+
 const USAGE: &str =
     "usage: warden serve <socket> [--uid <n>]\n       warden prepare-state <dir> [--uid <n>]";
+
+/// The procfs the DLP scan walks: `EBPFSENTINEL_HOST_PROC` when it is set and
+/// not empty, `/proc` otherwise.
+fn host_proc_root() -> std::path::PathBuf {
+    std::env::var_os(HOST_PROC_ENV)
+        .filter(|v| !v.is_empty())
+        .map_or_else(
+            || std::path::PathBuf::from("/proc"),
+            std::path::PathBuf::from,
+        )
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -129,6 +149,13 @@ fn serve(sockpath: &str, allowed_uid: u32) -> ExitCode {
     // The OSS warden installs no extension handler: an `Extension` command
     // answers `Unimplemented`. A downstream build (the enterprise warden) reuses
     // this same `serve_loop` with `Some(handler)` to add privileged operations.
+    let proc_root = host_proc_root();
+    if proc_root != Path::new("/proc") {
+        eprintln!(
+            "[warden] DLP scan reads the procfs at {} ({HOST_PROC_ENV})",
+            proc_root.display()
+        );
+    }
     serve_loop(
         &listener,
         std::sync::Arc::new(btf),
@@ -136,6 +163,7 @@ fn serve(sockpath: &str, allowed_uid: u32) -> ExitCode {
         std::sync::Arc::new(LocalHostOps),
         None,
         allowed_uid,
+        std::sync::Arc::new(proc_root),
     );
     ExitCode::SUCCESS
 }

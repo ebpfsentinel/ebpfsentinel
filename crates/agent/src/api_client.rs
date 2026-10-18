@@ -35,6 +35,20 @@ pub struct AgentStatusResponse {
     pub uptime_seconds: u64,
     pub ebpf_loaded: bool,
     pub rule_count: usize,
+    /// What the agent sees of the containers on this node. An agent too old
+    /// to answer leaves it out, and the CLI says so rather than inventing one.
+    #[serde(default)]
+    pub container_coverage: Option<ContainerCoverage>,
+}
+
+/// The container half of `GET /api/v1/agent/status`, mirrored for the CLI.
+#[derive(Deserialize, Serialize)]
+pub struct ContainerCoverage {
+    pub proc_root: String,
+    pub host_proc: bool,
+    pub resolver: bool,
+    pub docker: String,
+    pub kubernetes: String,
 }
 
 #[derive(Deserialize, Serialize)]

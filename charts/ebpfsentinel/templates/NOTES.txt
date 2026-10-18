@@ -62,13 +62,22 @@ Prometheus metrics:
 
   ServiceMonitor created - Prometheus will auto-discover metrics.
 {{- end }}
+
+Pod Security Admission: this release declares `{{ .Values.daemonset.podSecurityAdmission }}`
+{{- if .Values.daemonset.hostNetwork }} and shares the node's network namespace{{- end }}
+{{- if .Values.daemonset.hostPID }} and the node's pid namespace{{- end }}.
 {{- if .Values.daemonset.hostPID }}
 
-  hostPID is ENABLED - DLP has full visibility into all node processes.
+  hostPID is ENABLED. Cross-container DLP does not need it: the warden and the
+  agent read the host procfs through the read-only /host/proc mount, and the
+  uprobe link is created against a path and an offset rather than a pid. What
+  it adds is the node's process list and command lines inside the pod.
+  Turn it off with: --set daemonset.hostPID=false
 {{- else }}
 
-  hostPID is DISABLED - DLP only sees agent pod processes.
-  Enable with: --set daemonset.hostPID=true
+  hostPID is DISABLED, and DLP still covers every process on the node: the
+  scan walks the read-only /host/proc mount and the uprobe attaches by path
+  and offset, so a library is covered wherever it is mapped.
 {{- end }}
 {{- if .Values.auto_response.enabled }}
 

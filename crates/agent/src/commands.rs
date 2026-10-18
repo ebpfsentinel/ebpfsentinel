@@ -2583,7 +2583,22 @@ pub async fn cmd_identity(client: &ApiClient, output: OutputFormat) -> Result<()
     Ok(())
 }
 
-// ── Enhanced Status ─────────────────────────────────────────────────
+// ── Enhanced Status ─────────────────────────────────────────
+
+/// Read an enricher verdict back as the sentence it means, so a table reader
+/// does not have to learn the wire vocabulary.
+fn enricher_state(state: &str) -> &str {
+    match state {
+        "on" => "on",
+        "off_no_socket" => "off, no socket",
+        "off_not_in_cluster" => "off, not in a cluster",
+        "off_unavailable" => "off, unreachable",
+        "off_by_configuration" => "off by configuration",
+        "off_not_built" => "not in this build",
+        "starting" => "starting",
+        other => other,
+    }
+}
 
 pub async fn cmd_status_enhanced(client: &ApiClient, output: OutputFormat) -> Result<()> {
     // Fetch all data sources in parallel
@@ -2650,6 +2665,23 @@ pub async fn cmd_status_enhanced(client: &ApiClient, output: OutputFormat) -> Re
                 d.total_mitigated
             );
         }
+    }
+
+    // Containers: what this agent can actually say about them, which is what
+    // the deployment matrix claims mode by mode.
+    if let Some(coverage) = &status.container_coverage {
+        let procfs = if coverage.host_proc {
+            "host procfs"
+        } else {
+            "own procfs"
+        };
+        println!(
+            "  Containers {} ({procfs}), ids {}, docker {}, kubernetes {}",
+            coverage.proc_root,
+            if coverage.resolver { "yes" } else { "no" },
+            enricher_state(&coverage.docker),
+            enricher_state(&coverage.kubernetes),
+        );
     }
 
     // Recent alerts

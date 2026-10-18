@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -34,15 +34,19 @@ pub fn discover_netkit_interfaces() -> Vec<String> {
     super::netkit::list_netkit_devices()
 }
 
-/// Discover pod network namespaces by scanning `/proc/*/ns/net`.
+/// Discover pod network namespaces by scanning `<proc_root>/*/ns/net`.
 /// Returns a list of `(pid, ns_inode)` pairs, deduplicated by inode
 /// (pods sharing a network namespace only appear once).
 ///
+/// `proc_root` is `/proc` on a host and the read-only bind mount of the host's
+/// procfs in a pod that was not given the host pid namespace. The pids are the
+/// host's either way: what this reads is the namespace inode behind each one,
+/// which is the same number in every pid namespace.
+///
 /// This is a best-effort scan - processes may exit between listing
 /// and reading. Errors are silently skipped.
-pub fn discover_pod_network_namespaces() -> Vec<(u32, u64)> {
-    let proc_dir = Path::new("/proc");
-    let Ok(entries) = std::fs::read_dir(proc_dir) else {
+pub fn discover_pod_network_namespaces(proc_root: &Path) -> Vec<(u32, u64)> {
+    let Ok(entries) = std::fs::read_dir(proc_root) else {
         return Vec::new();
     };
 
@@ -58,7 +62,7 @@ pub fn discover_pod_network_namespaces() -> Vec<(u32, u64)> {
             continue;
         };
 
-        let ns_path = format!("/proc/{pid}/ns/net");
+        let ns_path = proc_root.join(pid.to_string()).join("ns").join("net");
         let Ok(metadata) = std::fs::symlink_metadata(&ns_path) else {
             continue;
         };
@@ -145,13 +149,14 @@ fn diff_devices(
 /// portability. The poll interval (default 5s) is acceptable for
 /// pod lifecycle events.
 pub async fn watch_netkit_devices(
+    proc_root: PathBuf,
     on_new_device: OnNetkitDevice,
     on_removed: OnNetkitRemoved,
     poll_interval: Duration,
     cancel: CancellationToken,
 ) {
     let mut known_ifaces: HashMap<String, u32> = HashMap::new();
-    let mut known_ns_inodes: HashSet<u64> = discover_pod_network_namespaces()
+    let mut known_ns_inodes: HashSet<u64> = discover_pod_network_namespaces(&proc_root)
         .into_iter()
         .map(|(_, ino)| ino)
         .collect();
@@ -174,7 +179,7 @@ pub async fn watch_netkit_devices(
             _ = ticker.tick() => {
                 let current_ifaces = netkit_devices_by_ifindex();
 
-                let current_nss = discover_pod_network_namespaces();
+                let current_nss = discover_pod_network_namespaces(&proc_root);
                 let new_pods: Vec<PodContext> = current_nss
                     .iter()
                     .filter(|(_, ino)| !known_ns_inodes.contains(ino))
@@ -240,14 +245,14 @@ mod tests {
 
     #[test]
     fn discover_pod_namespaces_includes_init_ns() {
-        let nss = discover_pod_network_namespaces();
+        let nss = discover_pod_network_namespaces(Path::new("/proc"));
         // pid 1 always exists and has a network namespace.
         assert!(!nss.is_empty(), "should find at least init NS");
     }
 
     #[test]
     fn discover_pod_namespaces_deduplicates_by_inode() {
-        let nss = discover_pod_network_namespaces();
+        let nss = discover_pod_network_namespaces(Path::new("/proc"));
         let mut inodes: Vec<u64> = nss.iter().map(|(_, ino)| *ino).collect();
         let before_dedup = inodes.len();
         inodes.sort_unstable();
@@ -312,6 +317,7 @@ mod tests {
         let cancel2 = cancel.clone();
         let handle = tokio::spawn(async move {
             watch_netkit_devices(
+                PathBuf::from("/proc"),
                 Box::new(|iface, pods| {
                     let _ = (iface, pods);
                 }),

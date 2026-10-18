@@ -59,18 +59,18 @@ See [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/m
 | Feature | DaemonSet | Notes |
 |---------|-----------|-------|
 | Firewall, IDS, DDoS, Rate Limiting | Full | Attached to host NIC - sees all node traffic |
-| DLP | Partial | Only sees pod processes unless `hostPID: true` |
+| DLP | Full | Covers every process on the node without the host pid namespace: the warden and the agent read the node's procfs through the read-only `/host/proc` mount, and the uprobe link is created against a path and an offset rather than a pid |
 | Multi-WAN Routing | Full | `hostNetwork` shares the routing table; route application (`ip rule`/`ip route`) is brokered to the `warden`, which holds `CAP_NET_ADMIN` in the init network namespace. Same path as `conntrack -D` flow-kill and gratuitous ARP |
 | Sidecar mode | Not recommended | XDP works on veth (generic mode) but only sees the pod's own traffic - no host or cross-pod visibility |
 
-**DLP full coverage** requires `hostPID: true` in the DaemonSet spec:
-
-```yaml
-daemonset:
-  hostPID: true
-```
-
-This grants the uprobe visibility into all node processes using `libssl.so.3`. Without it, DLP only inspects TLS traffic from processes inside the agent pod.
+**DLP covers the whole node out of the box**, with `daemonset.hostPID` off. The
+pod mounts the node's `/proc` read-only at `/host/proc`, both containers are
+told about it through `EBPFSENTINEL_HOST_PROC`, and the library path the warden
+hands back is rooted on that mount. The uprobe itself is a `BPF_LINK_CREATE`
+against a path and an offset with `pid = 0`, so it fires for every process that
+maps `libssl.so.3`, in whatever namespace. Turning `hostPID` on adds the node's
+process list and command lines to what the pod can see and buys no coverage,
+and Pod Security Admission `baseline` forbids it.
 
 ### CNI Compatibility
 
@@ -124,11 +124,13 @@ helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --versi
 
 ### DLP with full node visibility
 
+Nothing extra is needed: the host procfs mount is always there, so DLP sees
+every process on the node as soon as it is enabled.
+
 ```bash
 helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --version <version> \
   --namespace ebpfsentinel --create-namespace \
   --set agent.interfaces='{eth0}' \
-  --set daemonset.hostPID=true \
   --set dlp.enabled=true
 ```
 

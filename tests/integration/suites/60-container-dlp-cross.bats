@@ -397,3 +397,73 @@ _uprobe_inode_count() {
         return 1
     }
 }
+
+# ── The broker reads the procfs it is handed ────────────────────────
+#
+# The shipped chart and compose file give neither container the node's pid
+# namespace: the broker gets a read-only bind mount of the node's procfs and
+# EBPFSENTINEL_HOST_PROC naming it. This test puts the broker in exactly that
+# posture - its own pid namespace, where its /proc holds a single process - and
+# asks whether the agent still ends up with uprobes on libraries mapped by
+# processes the broker cannot see as pids.
+
+@test "the broker scans a mounted host procfs from inside its own pid namespace" {
+    require_root
+    command -v unshare >/dev/null 2>&1 || env_skip "unshare(1) not available"
+    [ -x "$(dirname "${AGENT_BIN:-}")/warden" ] ||
+        env_skip "no warden binary: this lane runs the agent without a broker"
+
+    local hostproc="${DATA_DIR}/hostproc"
+    local restored=0
+
+    # Restart the split with the broker namespaced, then put the suite's own
+    # agent back however this test ends: the tests after it read the inventory
+    # the file-level setup built.
+    WARDEN_PID_NS_HOST_PROC="${hostproc}" start_ebpf_agent "${PREPARED_CONFIG}" || {
+        WARDEN_PID_NS_HOST_PROC="" start_ebpf_agent "${PREPARED_CONFIG}" >/dev/null 2>&1 || true
+        soft_skip "the agent would not start against a namespaced broker"
+    }
+
+    wait_for_ebpf_loaded 30 || {
+        tail -10 "${AGENT_LOG_FILE}" >&2
+        WARDEN_PID_NS_HOST_PROC="" start_ebpf_agent "${PREPARED_CONFIG}" >/dev/null 2>&1 || true
+        return 1
+    }
+
+    # The watcher polls every 5s; give it a few passes to resolve and attach.
+    local probes=0
+    local _i
+    for _i in $(seq 1 30); do
+        probes="$(_uprobe_inventory | jq '.probes | length' 2>/dev/null || echo 0)"
+        [ "${probes}" -ge 1 ] && break
+        sleep 1
+    done
+
+    local body
+    body="$(_uprobe_inventory)"
+
+    WARDEN_PID_NS_HOST_PROC="" start_ebpf_agent "${PREPARED_CONFIG}" >/dev/null 2>&1 && restored=1
+    wait_for_ebpf_loaded 30 >/dev/null 2>&1 || true
+
+    [ "${probes}" -ge 1 ] || {
+        echo "the namespaced broker resolved no library at all" >&2
+        echo "${body}" >&2
+        tail -20 "${AGENT_LOG_FILE}.warden" >&2
+        return 1
+    }
+
+    # Every probe still names the inode it sits on and a non-zero offset, which
+    # is what says the ELF was read through the mount rather than guessed.
+    echo "${body}" | jq -e '
+        (.probes | length) > 0
+        and ([.probes[] | select(.ino > 0 and .offset > 0)] | length) == (.probes | length)' >/dev/null || {
+        echo "a probe came back without an inode or at offset 0" >&2
+        echo "${body}" | jq -c '.probes' >&2
+        return 1
+    }
+
+    [ "${restored}" -eq 1 ] || {
+        echo "the suite's own agent could not be restarted after the test" >&2
+        return 1
+    }
+}

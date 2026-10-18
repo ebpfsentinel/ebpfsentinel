@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::http::agent_handler::{ContainerCoverage, EnricherState};
 use crate::http::tls::load_rustls_config;
 use crate::http::{AppState, run_http_server, run_metrics_server};
 use adapters::alert::email_sender::EmailAlertSender;
@@ -185,6 +186,22 @@ fn host_proc_root() -> std::path::PathBuf {
         .map(std::path::PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::PathBuf::from("/proc"))
+}
+
+/// The procfs the container resolver walks to map a cgroup id to a container.
+///
+/// The configuration wins wherever it names something other than the default: a
+/// deployment that wrote the key meant it. Where it did not, the agent follows
+/// `EBPFSENTINEL_HOST_PROC`, so a container holding the host procfs resolves the
+/// node's processes without the config file having to repeat the mount point -
+/// which is what lets the same file serve a host and a container, and what lets
+/// a pod drop the host pid namespace without losing container attribution.
+fn resolver_proc_path(configured: &str, host_proc: &std::path::Path) -> std::path::PathBuf {
+    if configured == "/proc" {
+        host_proc.to_path_buf()
+    } else {
+        std::path::PathBuf::from(configured)
+    }
 }
 
 /// Build a capture-socket pool from the warden when the delegation handshake
@@ -1484,6 +1501,9 @@ pub async fn run(
         );
     }
     let app_state = Arc::new(app_state);
+    // Filled once the resolver and the enrichers have decided, below. A status
+    // read before that answers `starting` rather than a setting read back.
+    let container_coverage = Arc::clone(&app_state.container_coverage);
 
     // ── 6. Create cancellation token ────────────────────────────────
     let cancel_token = crate::shutdown::create_shutdown_token();
@@ -2732,10 +2752,15 @@ pub async fn run(
         if registered > 0 {
             let registry = Arc::new(registry);
             let nk_cancel = cancel_token.clone();
+            // Pod network namespaces are discovered through the host procfs,
+            // which is a mount rather than a shared pid namespace in a pod that
+            // runs without hostPID.
+            let nk_proc_root = host_proc_root();
             let nk_registry = Arc::clone(&registry);
             let nk_released = Arc::clone(&registry);
             tokio::spawn(async move {
                 adapters::ebpf::netkit_discovery::watch_netkit_devices(
+                    nk_proc_root,
                     Box::new(move |iface, new_pods| {
                         nk_registry.attach_all(iface, new_pods);
                     }),
@@ -2828,9 +2853,11 @@ pub async fn run(
     );
 
     // ── 10d. Build container resolver ───────────────────────────────
+    let coverage_proc = resolver_proc_path(&config.container.resolver.proc_path, &host_proc_root());
     let container_resolver = if config.container.resolver.enabled {
+        let resolver_proc = coverage_proc.clone();
         let proc_resolver = Arc::new(adapters::container::ProcContainerResolver::new(
-            &config.container.resolver.proc_path,
+            &resolver_proc,
         )) as Arc<dyn domain::container::engine::CgroupReader>;
         let id_resolver = Arc::new(adapters::container::CgroupfsResolver::new(
             &config.container.resolver.cgroup_root,
@@ -2842,7 +2869,7 @@ pub async fn run(
         .with_id_resolver(id_resolver);
         info!(
             cache_size = config.container.resolver.cache_size,
-            proc_path = %config.container.resolver.proc_path,
+            proc_path = %resolver_proc.display(),
             cgroup_root = %config.container.resolver.cgroup_root,
             "Container resolver initialized"
         );
@@ -2853,43 +2880,67 @@ pub async fn run(
     };
 
     // ── 10e. Build Docker metadata enricher (optional) ──────────────
+    let mut docker_state = EnricherState::OffByConfiguration;
     let docker_enricher: Option<
         Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>,
     > = if config.container.docker.enabled {
         let socket_path = std::path::Path::new(&config.container.docker.socket);
-        if !socket_path.exists() {
+        if socket_path.exists() {
+            let client = adapters::container::DockerClient::new(
+                &config.container.docker.socket,
+                config.container.docker.timeout_ms,
+            );
+            let cache = Arc::new(adapters::container::DockerCache::new(
+                config.container.docker.cache_size,
+                Duration::from_secs(config.container.docker.cache_ttl_seconds),
+            ));
+            // The watcher writes the same cache the enricher reads, so a
+            // container is named on the first packet of its life rather than
+            // on the first inspect. It lives as long as the agent does.
+            let _watcher = adapters::container::DockerEventWatcher::spawn(
+                &config.container.docker.socket,
+                Arc::clone(&cache),
+            );
+            let enricher = adapters::container::DockerEnricher::new(client, cache);
+            info!(
+                socket = %config.container.docker.socket,
+                cache_size = config.container.docker.cache_size,
+                cache_ttl_seconds = config.container.docker.cache_ttl_seconds,
+                "Docker metadata enricher initialized, reading the Docker event stream"
+            );
+            docker_state = EnricherState::On;
+            Some(Arc::new(enricher) as _)
+        } else {
+            // Said once, at startup, rather than discovered later from alerts
+            // that carry no container name.
             warn!(
                 socket = %config.container.docker.socket,
-                "Docker socket not found - enricher will stay dormant until it appears"
+                "Docker container enrichment is off: the socket is not there. \
+                 Alerts keep their container id and lose the container name, \
+                 image and labels. Mount the socket read-only, or set \
+                 container.docker.enabled to false to stop asking for it"
             );
+            docker_state = EnricherState::OffNoSocket;
+            None
         }
-        let client = adapters::container::DockerClient::new(
-            &config.container.docker.socket,
-            config.container.docker.timeout_ms,
-        );
-        let cache = adapters::container::DockerCache::new(
-            config.container.docker.cache_size,
-            Duration::from_secs(config.container.docker.cache_ttl_seconds),
-        );
-        let enricher = adapters::container::DockerEnricher::new(client, cache);
-        info!(
-            socket = %config.container.docker.socket,
-            cache_size = config.container.docker.cache_size,
-            cache_ttl_seconds = config.container.docker.cache_ttl_seconds,
-            "Docker metadata enricher initialized"
-        );
-        Some(Arc::new(enricher) as _)
     } else {
+        info!(
+            "Docker container enrichment is off by configuration: alerts keep \
+             their container id and lose the container name, image and labels"
+        );
         None
     };
 
     // ── 10f. Build Kubernetes enricher (optional, auto-detected) ────
+    #[cfg(feature = "kubernetes")]
+    let mut kubernetes_state = EnricherState::OffByConfiguration;
     #[cfg(feature = "kubernetes")]
     let kubernetes_enricher: Option<
         Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>,
     > = if config.container.kubernetes.enabled {
         if !adapters::container::is_running_in_kubernetes() {
             info!("kubernetes.enabled=true but no KUBERNETES_SERVICE_HOST - enricher disabled");
+            kubernetes_state = EnricherState::OffNotInCluster;
             None
         } else if let Some(client) = adapters::container::try_build_client().await {
             let cache = Arc::new(adapters::container::PodCache::new());
@@ -2915,18 +2966,31 @@ pub async fn run(
                 labels = %label_selector,
                 "Kubernetes metadata enricher initialized"
             );
+            kubernetes_state = EnricherState::On;
             Some(Arc::new(enricher) as _)
         } else {
             warn!("kubernetes enricher failed to build kube client - disabled");
+            kubernetes_state = EnricherState::OffUnavailable;
             None
         }
     } else {
         None
     };
     #[cfg(not(feature = "kubernetes"))]
+    let kubernetes_state = EnricherState::OffNotBuilt;
+    #[cfg(not(feature = "kubernetes"))]
     let kubernetes_enricher: Option<
         Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>,
     > = None;
+
+    // What the deployment matrix claims about this node, answered by the node.
+    container_coverage.store(Arc::new(ContainerCoverage {
+        proc_root: coverage_proc.display().to_string(),
+        host_proc: coverage_proc != std::path::Path::new("/proc"),
+        resolver: container_resolver.is_some(),
+        docker: docker_state,
+        kubernetes: kubernetes_state,
+    }));
 
     // ── 11. Spawn event dispatcher (replaces flat event consumer) ───
     let dispatcher = EventDispatcher::new(
@@ -5315,6 +5379,30 @@ mod tests {
         assert_eq!(
             settings.ports,
             [22, config.agent.http_port, config.agent.grpc_port]
+        );
+    }
+
+    #[test]
+    fn an_unset_resolver_proc_path_follows_the_host_proc_mount() {
+        assert_eq!(
+            super::resolver_proc_path("/proc", std::path::Path::new("/host/proc")),
+            std::path::PathBuf::from("/host/proc")
+        );
+    }
+
+    #[test]
+    fn a_configured_resolver_proc_path_wins_over_the_host_proc_mount() {
+        assert_eq!(
+            super::resolver_proc_path("/fixture/proc", std::path::Path::new("/host/proc")),
+            std::path::PathBuf::from("/fixture/proc")
+        );
+    }
+
+    #[test]
+    fn a_host_without_a_mounted_proc_keeps_the_default() {
+        assert_eq!(
+            super::resolver_proc_path("/proc", std::path::Path::new("/proc")),
+            std::path::PathBuf::from("/proc")
         );
     }
 }

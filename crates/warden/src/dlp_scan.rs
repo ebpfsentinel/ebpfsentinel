@@ -8,6 +8,7 @@
 
 use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 
 use ebpfsentinel_warden_proto::DlpTarget;
 use object::{Object, ObjectSegment, ObjectSymbol};
@@ -20,16 +21,34 @@ const SSL_LIB_MARKERS: &[&str] = &["libssl.so", "libboringssl.so"];
 /// still a valid uprobe target - only its name is gone.
 const DELETED_MARKER: &str = " (deleted)";
 
-/// Scan `/proc` and return one [`DlpTarget`] per unique `(dev, ino)` SSL library
-/// any process maps, with offsets pre-resolved. Unreadable processes / files are
-/// skipped silently (they vanish between listing and reading, or are simply not
-/// SSL). A library whose `SSL_write` cannot be resolved is dropped - there is no
-/// DLP value without the write probe.
-pub fn scan_dlp_targets() -> Vec<DlpTarget> {
+/// Scan the procfs rooted at `proc_root` and return one [`DlpTarget`] per unique
+/// `(dev, ino)` SSL library any process maps, with offsets pre-resolved.
+/// Unreadable processes / files are skipped silently (they vanish between
+/// listing and reading, or are simply not SSL). A library whose `SSL_write`
+/// cannot be resolved is dropped - there is no DLP value without the write
+/// probe.
+///
+/// `proc_root` is `/proc` on a host and the read-only bind mount (`/host/proc`)
+/// in a container that was not given the host pid namespace. Nothing below is
+/// keyed on a pid being visible in the warden's own namespace: a uprobe link is
+/// created by path and offset over the whole system, and the identity a target
+/// carries is the `(dev, ino)` of the inode, so the scan sees everything a host
+/// procfs lists whether or not the pids in it are the warden's own.
+pub fn scan_dlp_targets(proc_root: &Path) -> Vec<DlpTarget> {
     let mut seen: HashSet<(u64, u64)> = HashSet::new();
     let mut targets = Vec::new();
 
-    let Ok(entries) = std::fs::read_dir("/proc") else {
+    // Every suffix built below is absolute, so the root is concatenated rather
+    // than `Path::join`ed - `join` would throw the root away. A root that is not
+    // UTF-8 cannot be concatenated with the paths the protocol carries as
+    // `String`, and scanning it would produce targets the agent could not name.
+    let Some(root) = proc_root.to_str() else {
+        eprintln!("[warden] procfs root is not valid UTF-8; DLP scan skipped");
+        return targets;
+    };
+    let root = root.strip_suffix('/').unwrap_or(root);
+
+    let Ok(entries) = std::fs::read_dir(proc_root) else {
         return targets;
     };
     for entry in entries.flatten() {
@@ -40,21 +59,27 @@ pub fn scan_dlp_targets() -> Vec<DlpTarget> {
         else {
             continue;
         };
-        let Ok(maps) = std::fs::read_to_string(format!("/proc/{pid}/maps")) else {
+        let Ok(maps) = std::fs::read_to_string(format!("{root}/{pid}/maps")) else {
             continue;
         };
         for m in ssl_mappings_in_maps(&maps) {
-            let Some((attach_path, meta)) = resolve_mapping(pid, &m) else {
+            let Some((attach_path, meta)) = resolve_mapping(root, pid, &m) else {
                 continue;
             };
             let key = (meta.dev(), meta.ino());
             if !seen.insert(key) {
                 continue;
             }
-            let Ok(data) = std::fs::read(&attach_path) else {
+            // The ELF is read where it is needed rather than copied whole: a
+            // `ReadCache` over the open file hands `object` the headers and the
+            // symbol tables it asks for, so resolving two symbols in a 400 MiB
+            // image costs the pages those tables sit on and not the image. That
+            // is also why no size ceiling is left here: nothing is held.
+            let Ok(image) = std::fs::File::open(&attach_path) else {
                 continue;
             };
-            let Ok(file) = object::File::parse(&*data) else {
+            let cache = object::read::ReadCache::new(image);
+            let Ok(file) = object::File::parse(&cache) else {
                 continue;
             };
             let write_off = symbol_offset(&file, "SSL_write").unwrap_or(0);
@@ -175,21 +200,29 @@ fn ssl_mappings_in_maps(maps: &str) -> Vec<SslMapping> {
 ///
 /// Looking an entry up there requires `CAP_SYS_ADMIN` (readdir alone does not),
 /// which the warden already holds for bpffs delegation.
-fn resolve_mapping(pid: u32, m: &SslMapping) -> Option<(String, std::fs::Metadata)> {
+///
+/// `root` is the procfs root with any trailing slash already removed. Both paths
+/// are rooted on it, so a warden reading a bind-mounted host procfs hands back a
+/// path that resolves in its own mount namespace rather than one that only
+/// resolves in the host's.
+fn resolve_mapping(root: &str, pid: u32, m: &SslMapping) -> Option<(String, std::fs::Metadata)> {
     if !m.deleted {
-        let by_name = format!("/proc/{pid}/root{}", m.path);
+        let by_name = format!("{root}/{pid}/root{}", m.path);
         if let Ok(meta) = std::fs::metadata(&by_name) {
             return Some((by_name, meta));
         }
     }
-    let by_map_file = format!("/proc/{pid}/map_files/{}", m.map_file);
+    let by_map_file = format!("{root}/{pid}/map_files/{}", m.map_file);
     let meta = std::fs::metadata(&by_map_file).ok()?;
     Some((by_map_file, meta))
 }
 
 /// Resolve a symbol to its file offset within an ELF (dynamic table first, then
 /// static). Returns `None` if the symbol is absent.
-fn symbol_offset(file: &object::File, symbol: &str) -> Option<u64> {
+fn symbol_offset<'d, R: object::ReadRef<'d>>(
+    file: &object::File<'d, R>,
+    symbol: &str,
+) -> Option<u64> {
     let addr = file
         .dynamic_symbols()
         .chain(file.symbols())
@@ -281,6 +314,56 @@ mod tests {
     fn scan_runs_without_panicking() {
         // On the host the agent's own process maps libssl; on a minimal CI box it
         // may not. Either way the scan must not panic.
-        let _ = scan_dlp_targets();
+        let _ = scan_dlp_targets(Path::new("/proc"));
+    }
+
+    /// Build `<root>/<pid>/maps` plus the file its line names, as a procfs bind
+    /// mount looks to a container that was not given the host pid namespace.
+    fn fixture_proc(pid: u32, mapped: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proc_pid = dir.path().join(pid.to_string());
+        let target = proc_pid.join("root").join(mapped.trim_start_matches('/'));
+        std::fs::create_dir_all(target.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&target, b"not an elf").expect("write library");
+        std::fs::write(
+            proc_pid.join("maps"),
+            format!("7f10-7f20 r-xp 00000000 fd:01 7 {mapped}\n"),
+        )
+        .expect("write maps");
+        dir
+    }
+
+    #[test]
+    fn a_non_default_root_is_what_every_path_is_built_on() {
+        let dir = fixture_proc(4242, "/usr/lib/libssl.so.3");
+        let m = SslMapping {
+            path: "/usr/lib/libssl.so.3".to_string(),
+            map_file: "7f10-7f20".to_string(),
+            deleted: false,
+        };
+        let root = dir.path().to_str().expect("a utf-8 tempdir");
+        let (path, meta) =
+            resolve_mapping(root, 4242, &m).expect("resolved under the fixture root");
+        assert_eq!(path, format!("{root}/4242/root/usr/lib/libssl.so.3"));
+        assert!(!path.starts_with("/proc/"));
+
+        // The identity stays the inode's, read through the rooted path.
+        let direct = std::fs::metadata(&path).expect("stat");
+        assert_eq!((meta.dev(), meta.ino()), (direct.dev(), direct.ino()));
+    }
+
+    #[test]
+    fn a_fixture_root_is_walked_and_its_unparseable_library_dropped() {
+        let dir = fixture_proc(4242, "/usr/lib/libssl.so.3");
+        // The scan reaches the mapped file - it is rooted correctly - and drops
+        // it for exporting no `SSL_write`, which is what a non-ELF payload means.
+        assert!(scan_dlp_targets(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_root_listing_no_process_yields_no_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(scan_dlp_targets(dir.path()).is_empty());
+        assert!(scan_dlp_targets(Path::new("/nonexistent-proc-root")).is_empty());
     }
 }
