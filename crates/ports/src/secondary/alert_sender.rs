@@ -99,6 +99,7 @@ mod tests {
             executable_inode: None,
             executable_source: None,
             flow_source: None,
+            workload: None,
         };
         let _route = AlertRoute {
             name: "test".to_string(),

@@ -18,6 +18,7 @@ use crate::brokered::brokered;
 use super::error::{ApiError, ErrorBody};
 use super::middleware::rbac::require_write_access;
 use super::state::AppState;
+use super::workload_dto::{WorkloadResponse, workload_response};
 
 // ── Response DTOs ─────────────────────────────────────────────────
 
@@ -45,6 +46,11 @@ pub struct ConnectionResponse {
     pub packets_rev: u32,
     pub bytes_fwd: u32,
     pub bytes_rev: u32,
+    /// The local process that opened the flow, where the socket index could
+    /// name one. A flow this node only forwarded has none, and so does one
+    /// opened before the hooks attached.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload: Option<WorkloadResponse>,
 }
 
 // ── Query params ─────────────────────────────────────────────────
@@ -126,6 +132,7 @@ pub async fn list_connections(
     let result = conns
         .into_iter()
         .map(|c| ConnectionResponse {
+            workload: workload_response(c.workload),
             src_ip: c.src_ip,
             dst_ip: c.dst_ip,
             src_port: c.src_port,

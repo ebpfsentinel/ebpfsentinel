@@ -7535,6 +7535,17 @@
             "format": "int64",
             "description": "When the triage last changed (nanoseconds since epoch).",
             "minimum": 0
+          },
+          "workload": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkloadResponse",
+                "description": "The process behind the flow, where the node could name one. Absent\nfor a flow it only forwarded, for a socket opened before the hooks\nattached, and on a host whose kernel refused them."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -8048,6 +8059,17 @@
           },
           "state": {
             "type": "string"
+          },
+          "workload": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkloadResponse",
+                "description": "The local process that opened the flow, where the socket index could\nname one. A flow this node only forwarded has none, and so does one\nopened before the hooks attached."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -11938,6 +11960,93 @@
           },
           "url": {
             "type": "string"
+          }
+        }
+      },
+      "WorkloadResponse": {
+        "type": "object",
+        "description": "The process a flow belongs to, where the agent could name one.",
+        "required": [
+          "pid",
+          "source"
+        ],
+        "properties": {
+          "cgroup": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "cgroup v2 id, as the kernel numbers it.",
+            "minimum": 0
+          },
+          "container": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Container id, where the process runs in one."
+          },
+          "exe": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The executable path the process table recorded. Forgeable by the\nprocess itself, which is why it is a path and not an identity."
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Container image, where the runtime enricher read one."
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Namespace, on a Kubernetes node."
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The process that owns the socket. Never zero: a block exists only\nwhen there is a process to name.",
+            "minimum": 0
+          },
+          "pod": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pod name, on a Kubernetes node."
+          },
+          "service_account": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Service account the pod runs as, where the enricher read one."
+          },
+          "source": {
+            "type": "string",
+            "description": "How the process was reached - `socket` when the kernel's own handle\non the socket answered, `flow` when the five-tuple was matched\nagainst the index of established connections, `process` when the\nevent already named the task. The first and the third are read, the\nsecond is correlated."
+          },
+          "uid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The real uid of the task when the socket was opened.",
+            "minimum": 0
+          },
+          "unit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "systemd unit, for a host process the agent could place in one."
           }
         }
       },

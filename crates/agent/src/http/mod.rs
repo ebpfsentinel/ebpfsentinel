@@ -36,6 +36,7 @@ pub mod threatintel_handler;
 pub mod tls;
 pub mod tls_handler;
 pub(crate) mod validation;
+pub mod workload_dto;
 pub mod zone_handler;
 
 pub use router::build_router;

@@ -164,7 +164,9 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
         // The hooks counted apart, so an operator can see which of them is
         // doing the work on this node: the six socket hooks fold into the
         // three labels an address family does not distinguish, and the
-        // socket join counts on its own. Then the two ways a record is lost.
+        // socket join counts on its own. Then the way a record is lost, and
+        // the flows indexed by their five-tuple so a connection read out of
+        // the kernel's own table can still be named.
         "ATTRIBUTION_METRICS" => &[
             (0, "connect"),
             (1, "post_bind"),
@@ -172,6 +174,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (3, "sock_ops"),
             (4, "no_cookie"),
             (5, "insert_failed"),
+            (6, "flow_indexed"),
         ],
         // One exec, one exit, and the two ways the table loses a line: a
         // ring buffer with nobody draining it fast enough, and a thread exit

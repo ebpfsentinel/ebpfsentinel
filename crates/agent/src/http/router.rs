@@ -1390,6 +1390,7 @@ mod tests {
             executable_inode: None,
             executable_source: None,
             flow_source: None,
+            workload: None,
         }
     }
 

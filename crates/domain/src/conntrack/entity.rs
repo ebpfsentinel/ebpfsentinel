@@ -92,6 +92,16 @@ pub struct Connection {
     pub packets_rev: u32,
     pub bytes_fwd: u32,
     pub bytes_rev: u32,
+    /// The local workload at one end of this flow, where the kernel socket
+    /// tables still hold it.
+    ///
+    /// A conntrack row has no process id of its own: the table is a packet
+    /// structure and the socket that opened the flow may be closed, may
+    /// belong to another namespace, or may never have existed, which is what
+    /// a transited flow is. The field is therefore absent far more often than
+    /// it is present, and absence is never rendered as a zero.
+    #[serde(default, skip_serializing_if = "crate::workload::entity::is_absent")]
+    pub workload: Option<crate::workload::entity::Workload>,
 }
 
 /// Type of conntrack lifecycle event detected by the snapshot-diff

@@ -223,6 +223,7 @@ mod tests {
             executable_inode: None,
             executable_source: None,
             flow_source: None,
+            workload: None,
         }
     }
 
@@ -538,6 +539,7 @@ mod tests {
                     executable_inode: None,
                     executable_source: None,
                     flow_source: None,
+            workload: None,
                 };
 
                 // First alert should match routes

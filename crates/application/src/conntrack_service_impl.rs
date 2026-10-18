@@ -4,6 +4,25 @@ use domain::common::error::DomainError;
 use domain::conntrack::entity::{ConnTrackSettings, Connection};
 use ports::secondary::conntrack_map_port::ConnTrackMapPort;
 use ports::secondary::metrics_port::MetricsPort;
+use ports::secondary::socket_identity_port::FlowEndpoints;
+
+use crate::workload_resolver::WorkloadResolver;
+
+/// The five-tuple of a row, as the socket tables are keyed.
+///
+/// A conntrack row names an originator and a responder rather than a local
+/// and a remote end, so this hands over the row's own orientation and the
+/// reader tries the mirror itself. An address the kernel printed that does
+/// not parse is not a flow to attribute, and comes back as nothing.
+fn flow_of(connection: &Connection) -> Option<FlowEndpoints> {
+    Some(FlowEndpoints {
+        local_addr: connection.src_ip.parse().ok()?,
+        remote_addr: connection.dst_ip.parse().ok()?,
+        local_port: connection.src_port,
+        remote_port: connection.dst_port,
+        protocol: connection.protocol,
+    })
+}
 
 /// Application-level conntrack service.
 ///
@@ -22,6 +41,10 @@ pub struct ConnTrackAppService {
     /// Sole source for `get_connections` and `connection_count`.
     netfilter_port: Option<Box<dyn ConnTrackMapPort + Send>>,
     metrics: Arc<dyn MetricsPort>,
+    /// Names the local workload behind a row, where the kernel still holds
+    /// the socket. Unwired on a host without the attribution hooks, which is
+    /// why every row's block is optional rather than defaulted.
+    workloads: WorkloadResolver,
     enabled: bool,
 }
 
@@ -32,6 +55,7 @@ impl ConnTrackAppService {
             map_port: None,
             netfilter_port: None,
             metrics,
+            workloads: WorkloadResolver::new(),
             enabled: false,
         }
     }
@@ -74,6 +98,14 @@ impl ConnTrackAppService {
         self.netfilter_port = Some(port);
     }
 
+    /// Name the workload behind each row through `resolver`.
+    ///
+    /// Attribution is a reading and never a filter: a row the resolver
+    /// cannot name is listed exactly as before, with no block.
+    pub fn set_workload_resolver(&mut self, resolver: WorkloadResolver) {
+        self.workloads = resolver;
+    }
+
     /// Reload conntrack settings and sync to eBPF.
     pub fn reload_settings(&mut self, settings: ConnTrackSettings) -> Result<(), DomainError> {
         self.settings = settings;
@@ -91,10 +123,16 @@ impl ConnTrackAppService {
         // connections" for "could not read the connections" - the same answer a
         // genuinely idle host gives, on an endpoint an operator uses to decide
         // whether traffic is flowing. Surface the read failure instead.
-        match self.netfilter_port {
-            Some(ref nf) => nf.get_connections(limit),
-            None => Ok(Vec::new()),
+        let mut connections = match self.netfilter_port {
+            Some(ref nf) => nf.get_connections(limit)?,
+            None => return Ok(Vec::new()),
+        };
+        if self.workloads.is_wired() {
+            for connection in &mut connections {
+                connection.workload = flow_of(connection).and_then(|f| self.workloads.by_flow(&f));
+            }
         }
+        Ok(connections)
     }
 
     /// Flush all connections. Flushes both kernel netfilter (via

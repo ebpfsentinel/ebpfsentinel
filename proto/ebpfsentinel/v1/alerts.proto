@@ -101,6 +101,45 @@ message AlertEvent {
   // Container / Kubernetes provenance resolved from the event's cgroup_id.
   // Unset for host-namespace processes (nothing to attribute).
   ContainerIdentity container = 37;
+  // The process behind the flow, where the node could name one. Unset for a
+  // flow this node only forwarded, for a socket opened before the
+  // attribution hooks attached, and on a host whose kernel refused them.
+  Workload workload = 38;
+}
+
+// The process a flow belongs to, as the agent resolved it. Mirrors the HTTP
+// workload block field for field, so a console reading one and a SIEM
+// reading the other describe the same process in the same words. A field is
+// empty or zero where the node could not add it: a process table that has
+// not seen the exec gives a pid and nothing more.
+message Workload {
+  // The process that owns the socket. Never zero in a message that exists.
+  uint32 pid = 1;
+  // How the process was reached: "socket" when the kernel's own handle on
+  // the socket answered, "flow" when the five-tuple was matched against the
+  // index of established connections, "process" when the event already
+  // named the task. The first and the third are read, the second is
+  // correlated.
+  string source = 2;
+  // The executable path the process table recorded. Empty if absent.
+  string exe = 3;
+  // The real uid of the task when the socket was opened. Unset as 0 only
+  // where the table holds no uid, root being a legitimate 0.
+  uint32 uid = 4;
+  // cgroup v2 id, as the kernel numbers it (0 if absent).
+  uint64 cgroup = 5;
+  // Container id, where the process runs in one. Empty if absent.
+  string container = 6;
+  // Container image. Empty if absent.
+  string image = 7;
+  // Pod name, on a Kubernetes node. Empty if absent.
+  string pod = 8;
+  // Namespace, on a Kubernetes node. Empty if absent.
+  string namespace = 9;
+  // Service account the pod runs as. Empty if absent.
+  string service_account = 10;
+  // systemd unit, for a host process placed in one. Empty if absent.
+  string unit = 11;
 }
 
 // Container and Kubernetes provenance for an alert, resolved from the

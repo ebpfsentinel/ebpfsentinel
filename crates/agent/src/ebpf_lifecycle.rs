@@ -71,6 +71,11 @@ pub struct EbpfProgramManager {
     /// The cgroup links of the socket-attribution hooks, where they attached.
     /// Dropping it detaches them, which is how a reload turns attribution off.
     pub attribution: Option<adapters::ebpf::AttributionAttacher>,
+    /// The resolver every surface reads attribution through. A reload that
+    /// loads the hooks installs the new tables into it, and one that unloads
+    /// them clears it, so nothing is left reading a map whose program has
+    /// gone.
+    pub workloads: application::workload_resolver::WorkloadResolver,
     /// The links of the exec and exit tracepoints, where they attached.
     /// Dropping it detaches them, which is how a reload turns the process
     /// table's source off.
@@ -105,6 +110,7 @@ impl EbpfProgramManager {
             lpm_coordinator: None,
             ipset_wired: false,
             attribution: None,
+            workloads: application::workload_resolver::WorkloadResolver::new(),
             process_tracing: None,
             process_events: None,
         }
@@ -256,6 +262,10 @@ impl EbpfProgramManager {
                 if let Some(mut attacher) = self.attribution.take() {
                     attacher.detach_all();
                 }
+                // Every holder of the resolver stops answering here rather
+                // than when the loader is finally dropped, so no alert is
+                // attributed from a table that is on its way out.
+                self.workloads.clear_sockets();
             }
             "tracepoint_process" => {
                 // Same shape as the cgroup hooks above: the tracepoint links
@@ -610,7 +620,7 @@ impl EbpfProgramManager {
     }
 
     async fn enable_cgroup_attribution(&mut self, config: &AgentConfig) -> anyhow::Result<()> {
-        let (loader, metrics_rdr, attacher, status) =
+        let (loader, metrics_rdr, socket_reader, attacher, status) =
             startup::try_load_cgroup_attribution(&self.ebpf_dir, config)?;
         if !status.attached {
             // The object loaded and the kernel refused the hooks. Keeping the
@@ -621,6 +631,9 @@ impl EbpfProgramManager {
         }
 
         self.attribution = Some(attacher);
+        if let Some(reader) = socket_reader {
+            self.workloads.install_sockets(Box::new(reader));
+        }
         if let Some(rdr) = metrics_rdr {
             self.metrics_readers.write().await.push(rdr);
         }

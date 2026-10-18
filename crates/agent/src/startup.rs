@@ -1819,6 +1819,11 @@ pub async fn run(
     let mut qos_ok = false;
     let mut vip_announcer_ok = false;
     let mut attribution_ok = false;
+    // One resolver, shared by everything that names a workload: the alert
+    // pipeline, the conntrack listing and the reload manager all hold a
+    // clone, and both halves are installed into it as they come up. A clone
+    // taken before the hooks attach starts answering the moment they do.
+    let workloads = application::workload_resolver::WorkloadResolver::new();
     // The cgroup links live here until the manager takes them over: dropping
     // the attacher detaches every hook, so it must outlive the load.
     let mut attribution_attacher: Option<adapters::ebpf::AttributionAttacher> = None;
@@ -2460,12 +2465,15 @@ pub async fn run(
         // 10f-bis. Socket attribution (cgroup hooks)
         attribution_ok = if config.attribution.enabled {
             match try_load_cgroup_attribution(&ebpf_dir, &config) {
-                Ok((loader, metrics_rdr, attacher, status)) => {
+                Ok((loader, metrics_rdr, socket_reader, attacher, status)) => {
                     let attached = status.attached;
                     if attached {
                         attribution_attacher = Some(attacher);
                         if let Some(rdr) = metrics_rdr {
                             metrics_readers.push(rdr);
+                        }
+                        if let Some(reader) = socket_reader {
+                            workloads.install_sockets(Box::new(reader));
                         }
                         managed.push(("cgroup_attribution", loader, attribution_cancel.clone()));
                         metrics.set_ebpf_program_status("cgroup_attribution", true);
@@ -2951,6 +2959,10 @@ pub async fn run(
         // The cgroup links come across with the loader that owns the
         // programs, so a reload that turns attribution off detaches them.
         mgr.attribution = attribution_attacher;
+        // A reload that loads the hooks again hands the new tables to the
+        // same resolver, and one that unloads them takes the old tables away
+        // from every reader in the same instant.
+        mgr.workloads = workloads.clone();
         // Same for the tracepoint links, with the channel the reader a
         // reload spawns writes into: the table itself keeps draining it
         // across a program that goes away and comes back.
@@ -3145,6 +3157,9 @@ pub async fn run(
         }
         let svc = Arc::new(svc);
         app_state.install_process_table_service(Arc::clone(&svc));
+        // The table is what turns a pid into a path, a container and a pod,
+        // so the resolver gains the second half here.
+        workloads.install_processes(Arc::clone(&svc));
         let table_cancel = cancel_token.clone();
         tokio::spawn(async move {
             svc.run(process_rx, table_cancel).await;
@@ -3270,7 +3285,14 @@ pub async fn run(
         Arc::clone(&audit_svc),
     )
     .with_stream_sender(alert_stream_tx)
-    .with_replay_buffer(Arc::clone(&alert_replay_buffer));
+    .with_replay_buffer(Arc::clone(&alert_replay_buffer))
+    .with_workload_resolver(workloads.clone());
+    // The same resolver behind the connection listing, so a flow an operator
+    // reads in `conntrack` and the alert raised on it name the same process.
+    conntrack_svc
+        .write()
+        .await
+        .set_workload_resolver(workloads.clone());
     if let Some(store) = alert_store {
         alert_pipeline = alert_pipeline.with_alert_store(store);
     }
@@ -4805,6 +4827,17 @@ pub fn try_load_tc_dns(
     Ok((loader, dns_metrics_rdr, reader))
 }
 
+/// What loading the socket-attribution object hands back: the loader keeping
+/// the programs alive, the counters, the reader over the two tables, the
+/// attacher holding the links, and what can be said about the attach.
+pub type LoadedAttribution = (
+    EbpfLoader,
+    Option<MetricsReader>,
+    Option<adapters::ebpf::EbpfSocketIdentityReader>,
+    adapters::ebpf::AttributionAttacher,
+    adapters::ebpf::AttributionStatus,
+);
+
 /// Load the socket-attribution object and attach its hooks to the cgroup.
 ///
 /// Returns the loader, the attacher holding the links, and what can be said
@@ -4814,16 +4847,22 @@ pub fn try_load_tc_dns(
 pub fn try_load_cgroup_attribution(
     ebpf_dir: &str,
     config: &AgentConfig,
-) -> anyhow::Result<(
-    EbpfLoader,
-    Option<MetricsReader>,
-    adapters::ebpf::AttributionAttacher,
-    adapters::ebpf::AttributionStatus,
-)> {
+) -> anyhow::Result<LoadedAttribution> {
     let program_bytes = read_ebpf_program(ebpf_dir, "cgroup-attribution")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
     let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "ATTRIBUTION_METRICS").ok();
+    // The two tables leave the loader the way the counters do: the kernel
+    // maps stay linked into the programs, so taking the userspace handles out
+    // costs the hooks nothing and gives the reader something that outlives
+    // the builder.
+    let socket_reader = match adapters::ebpf::EbpfSocketIdentityReader::new(loader.ebpf_mut()) {
+        Ok(reader) => Some(reader),
+        Err(e) => {
+            warn!("socket attribution tables unreadable, flows stay unattributed: {e}");
+            None
+        }
+    };
 
     // Rootless posture: the agent dropped the capability the cgroup attach
     // needs, and the hierarchy it can see is not the host's, so the warden
@@ -4833,7 +4872,7 @@ pub fn try_load_cgroup_attribution(
         attacher = attacher.with_warden_socket(sock);
     }
     let status = attacher.attach_all(&loader, &config.attribution.cgroup_root);
-    Ok((loader, metrics_rdr, attacher, status))
+    Ok((loader, metrics_rdr, socket_reader, attacher, status))
 }
 
 /// Load the process-tracing object and attach its two tracepoints.

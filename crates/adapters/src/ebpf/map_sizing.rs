@@ -56,6 +56,7 @@ pub const SIZED_MAPS: &[(&str, &str)] = &[
     ("NAT_SNAT_REVERSE_V6", "nat.enabled"),
     ("REJECT_RATELIMIT", "firewall.rules[].action"),
     ("SOCKET_IDENTITY", "attribution.max_sockets"),
+    ("SOCKET_FLOW", "attribution.max_sockets"),
 ];
 
 /// What a table belonging to a feature the configuration switches off is

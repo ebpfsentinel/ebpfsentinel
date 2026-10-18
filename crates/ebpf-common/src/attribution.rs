@@ -35,6 +35,15 @@ pub const ATTRIBUTION_MAX_SOCKETS: u32 = 65_536;
 /// connection; past it the flow carries no workload rather than a stale one.
 pub const ATTRIBUTION_IDENTITY_TTL_NS: u64 = 12 * 60 * 60 * 1_000_000_000;
 
+/// Capacity of `SOCKET_FLOW`, the index from an established five-tuple back
+/// to the socket cookie.
+///
+/// One entry per established TCP connection, which is why it is the same
+/// order as the socket table rather than a fraction of it: every connection
+/// the node holds open wants to stay nameable for as long as it is in the
+/// kernel's own conntrack table.
+pub const ATTRIBUTION_MAX_FLOWS: u32 = 65_536;
+
 /// Which hook recorded an identity: `cgroup/connect4` or `cgroup/connect6`.
 pub const ATTRIBUTION_HOOK_CONNECT: u8 = 1;
 /// Which hook recorded an identity: `cgroup/post_bind4` or `post_bind6`.
@@ -65,8 +74,12 @@ pub const ATTRIBUTION_METRIC_NO_COOKIE: u32 = 4;
 /// so a non-zero count here is the kernel saying something other than capacity
 /// went wrong.
 pub const ATTRIBUTION_METRIC_INSERT_FAILED: u32 = 5;
+/// Metric index: established flows indexed by their five-tuple, which is what
+/// lets a connection read out of the kernel's own conntrack table name a
+/// process the agent never saw a packet for.
+pub const ATTRIBUTION_METRIC_FLOW: u32 = 6;
 /// Total number of attribution metric slots (one past the last index).
-pub const ATTRIBUTION_METRIC_COUNT: u32 = 6;
+pub const ATTRIBUTION_METRIC_COUNT: u32 = 7;
 
 /// The task that owned a socket at the moment the kernel first saw it used.
 ///
@@ -106,6 +119,40 @@ pub struct SocketIdentity {
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for SocketIdentity {}
 
+/// The five-tuple of an established connection, as `SOCKET_FLOW` keys it.
+///
+/// A packet hook has the socket cookie and needs nothing else. A connection
+/// read out of the kernel's own conntrack table has no cookie at all: it is a
+/// row of addresses and ports, and the join back to a task has to start from
+/// those. This is that key, written by the `sockops` hook because it is the
+/// only one that knows both ends of a connection at once.
+///
+/// `local` is this node's side, whichever direction opened the connection,
+/// and addresses are the host-order value of the big-endian word, exactly as
+/// the DLP socket records them, so one encoding serves both joins. A reader
+/// starting from a conntrack row does not know which side is local and tries
+/// the key both ways round.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct FlowIdentityKey {
+    /// This node's address. IPv4 sits in the first word, the rest zero.
+    pub local_addr: [u32; 4],
+    /// The peer's address, in the same encoding.
+    pub remote_addr: [u32; 4],
+    /// This node's port, host order.
+    pub local_port: u16,
+    /// The peer's port, host order.
+    pub remote_port: u16,
+    /// IP protocol as the kernel numbers it.
+    pub protocol: u8,
+    /// `ATTRIBUTION_FAMILY_*`.
+    pub family: u8,
+    pub _pad: [u8; 2],
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for FlowIdentityKey {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +177,41 @@ mod tests {
     }
 
     #[test]
+    fn the_flow_key_is_forty_bytes_with_no_implicit_padding() {
+        // Same reason as the identity: the two sides of this map are compiled
+        // separately, and a hole one of them does not know about is a lookup
+        // that never hits.
+        assert_eq!(mem::size_of::<FlowIdentityKey>(), 40);
+        assert_eq!(mem::offset_of!(FlowIdentityKey, local_addr), 0);
+        assert_eq!(mem::offset_of!(FlowIdentityKey, remote_addr), 16);
+        assert_eq!(mem::offset_of!(FlowIdentityKey, local_port), 32);
+        assert_eq!(mem::offset_of!(FlowIdentityKey, remote_port), 34);
+        assert_eq!(mem::offset_of!(FlowIdentityKey, protocol), 36);
+        assert_eq!(mem::offset_of!(FlowIdentityKey, family), 37);
+    }
+
+    #[test]
+    fn a_flow_key_is_the_same_key_whichever_side_built_it() {
+        // Two readers building the key from the same connection must produce
+        // the same bytes, padding included, or the lookup misses on one of
+        // them and the flow silently carries no workload.
+        let one = FlowIdentityKey {
+            local_addr: [0x0a00_0007, 0, 0, 0],
+            remote_addr: [0xcb00_7109, 0, 0, 0],
+            local_port: 45_112,
+            remote_port: 443,
+            protocol: 6,
+            family: ATTRIBUTION_FAMILY_IPV4,
+            _pad: [0; 2],
+        };
+        let two = FlowIdentityKey {
+            _pad: [0; 2],
+            ..one
+        };
+        assert_eq!(one, two);
+    }
+
+    #[test]
     fn every_hook_has_its_own_number_and_none_of_them_is_zero() {
         // Zero is "no hook wrote this", which a zeroed value already says.
         let hooks = [
@@ -146,9 +228,9 @@ mod tests {
 
     #[test]
     fn the_metric_count_is_one_past_the_last_slot() {
-        assert_eq!(
-            ATTRIBUTION_METRIC_COUNT,
-            ATTRIBUTION_METRIC_INSERT_FAILED + 1
-        );
+        assert_eq!(ATTRIBUTION_METRIC_COUNT, ATTRIBUTION_METRIC_FLOW + 1);
+        const {
+            assert!(ATTRIBUTION_METRIC_INSERT_FAILED < ATTRIBUTION_METRIC_FLOW);
+        }
     }
 }

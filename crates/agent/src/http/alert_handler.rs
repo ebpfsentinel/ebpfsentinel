@@ -29,6 +29,7 @@ use ports::secondary::metrics_port::{AlertMetrics, MetricsPort};
 use super::error::{ApiError, ErrorBody};
 use super::middleware::rbac::require_write_access;
 use super::state::AppState;
+use super::workload_dto::{WorkloadResponse, workload_response};
 
 // ── Query parameters DTO ────────────────────────────────────────────
 
@@ -194,6 +195,11 @@ pub struct AlertResponse {
     /// When the triage last changed (nanoseconds since epoch).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub triage_updated_ns: Option<u64>,
+    /// The process behind the flow, where the node could name one. Absent
+    /// for a flow it only forwarded, for a socket opened before the hooks
+    /// attached, and on a host whose kernel refused them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload: Option<WorkloadResponse>,
 }
 
 /// One note on an alert as the API writes it.
@@ -459,6 +465,7 @@ pub fn triaged_response(a: Alert, triage: Option<&AlertTriage>) -> AlertResponse
         executable_inode: a.executable_inode,
         executable_source: a.executable_source,
         flow_source: a.flow_source,
+        workload: workload_response(a.workload),
     }
 }
 
@@ -1259,6 +1266,7 @@ mod tests {
                 executable_inode: None,
                 executable_source: None,
                 flow_source: None,
+                workload: None,
             }
         };
 
@@ -1520,6 +1528,7 @@ mod tests {
             executable_inode: None,
             executable_source: None,
             flow_source: None,
+            workload: None,
             status: "open".to_string(),
             assignee: None,
             notes: Vec::new(),

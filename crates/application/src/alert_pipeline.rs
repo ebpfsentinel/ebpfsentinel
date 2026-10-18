@@ -21,6 +21,7 @@ use ports::secondary::alert_sender::AlertSender;
 use ports::secondary::alert_store::AlertStore;
 use ports::secondary::metadata_enricher_port::MetadataEnricher;
 use ports::secondary::metrics_port::MetricsPort;
+use ports::secondary::socket_identity_port::FlowEndpoints;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -29,6 +30,7 @@ use crate::alert_replay::AlertReplayBuffer;
 use crate::audit_service_impl::AuditAppService;
 use crate::ips_service_impl::IpsAppService;
 use crate::ratelimit_service_impl::RateLimitAppService;
+use crate::workload_resolver::WorkloadResolver;
 
 /// Alert pipeline application service.
 ///
@@ -60,6 +62,10 @@ pub struct AlertPipeline {
     auto_response: Option<AutoResponseHandler>,
     /// Optional auto-capture trigger (OSS).
     auto_capture: Option<AutoCaptureHandler>,
+    /// Names the workload behind an alert's flow. Unwired by default, and
+    /// unwired for good on a host whose kernel refused the attribution
+    /// hooks, which is why every alert's block is optional.
+    workloads: WorkloadResolver,
 }
 
 /// Auto-capture trigger: starts a PCAP capture when a high-severity alert fires.
@@ -171,6 +177,25 @@ fn alert_source_ip(alert: &domain::alert::entity::Alert) -> Option<IpAddr> {
 }
 
 /// Single-host CIDR (/32 or /128) for the source an alert names.
+/// The alert's own five-tuple, where it is about a flow at all.
+///
+/// A system alert, a `DDoS` summary on a zeroed tuple and an alert whose
+/// addresses were never filled have nothing to look up, and asking the socket
+/// tables for 0.0.0.0:0 would at best waste a lookup and at worst match a
+/// row that has nothing to do with it.
+fn alert_flow(alert: &Alert) -> Option<FlowEndpoints> {
+    if alert.src_addr == [0; 4] && alert.dst_addr == [0; 4] {
+        return None;
+    }
+    Some(FlowEndpoints {
+        local_addr: crate::addr_to_ip(alert.src_addr, alert.is_ipv6),
+        remote_addr: crate::addr_to_ip(alert.dst_addr, alert.is_ipv6),
+        local_port: alert.src_port,
+        remote_port: alert.dst_port,
+        protocol: alert.protocol,
+    })
+}
+
 fn host_cidr(ip: IpAddr) -> IpCidr {
     match ip {
         IpAddr::V4(v4) => IpCidr::V4 {
@@ -223,7 +248,15 @@ impl AlertPipeline {
             metadata_enrichers: Vec::new(),
             auto_response: None,
             auto_capture: None,
+            workloads: WorkloadResolver::new(),
         }
+    }
+
+    /// Name the workload behind every alert through `resolver`.
+    #[must_use]
+    pub fn with_workload_resolver(mut self, resolver: WorkloadResolver) -> Self {
+        self.workloads = resolver;
+        self
     }
 
     /// Register a [`MetadataEnricher`]. Enrichers are consulted in registration
@@ -238,10 +271,35 @@ impl AlertPipeline {
     /// Run the enricher, when there is one, and keep what it learned that
     /// the counters need.
     fn enrich(&self, alert: &mut Alert) -> Enrichment {
+        self.attribute(alert);
         self.enricher
             .as_ref()
             .map(|enricher| enricher.enrich_alert(alert))
             .unwrap_or_default()
+    }
+
+    /// Name the workload behind the alert's flow, for every family at once.
+    ///
+    /// This sits on the one path every alert takes rather than in each
+    /// `process_*`, because an attribution that six call sites each had to
+    /// remember is an attribution that one of them eventually forgets. A
+    /// pipeline with no resolver, a flow the kernel no longer holds and an
+    /// alert that is about no flow at all each leave the block absent.
+    fn attribute(&self, alert: &mut Alert) {
+        if !self.workloads.is_wired() || alert.workload.is_some() {
+            return;
+        }
+        // A DLP alert already names its own thread: the uprobe fired in the
+        // process doing the writing, which is a reading rather than a match.
+        if let Some(pid) = alert.tgid.or(alert.pid)
+            && let Some(workload) = self.workloads.by_pid(pid)
+        {
+            alert.workload = Some(workload);
+            return;
+        }
+        if let Some(flow) = alert_flow(alert) {
+            alert.workload = self.workloads.by_flow(&flow);
+        }
     }
 
     /// Count one alert in every family that counts alerts, so the totals by
@@ -1271,6 +1329,90 @@ mod tests {
         assert_eq!(metrics.alert_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "ids");
         assert_eq!(*metrics.last_severity.lock().unwrap(), "high");
+    }
+
+    struct FixedOwner(Option<ports::secondary::socket_identity_port::SocketOwner>);
+
+    impl ports::secondary::socket_identity_port::SocketIdentityReader for FixedOwner {
+        fn by_cookie(
+            &self,
+            _cookie: u64,
+        ) -> Option<ports::secondary::socket_identity_port::SocketOwner> {
+            self.0
+        }
+        fn by_flow(
+            &self,
+            _flow: &FlowEndpoints,
+        ) -> Option<ports::secondary::socket_identity_port::SocketOwner> {
+            self.0
+        }
+    }
+
+    fn resolver_naming(pid: u32) -> WorkloadResolver {
+        WorkloadResolver::new().with_sockets(Box::new(FixedOwner(Some(
+            ports::secondary::socket_identity_port::SocketOwner {
+                pid,
+                tgid: pid,
+                uid: 1_000,
+                cgroup_id: 77,
+                source: domain::workload::entity::WorkloadSource::Flow,
+            },
+        ))))
+    }
+
+    #[tokio::test]
+    async fn an_alert_on_an_attributed_flow_names_its_workload() {
+        let metrics = Arc::new(TestMetrics::new());
+        let (tx, mut rx) = broadcast::channel(4);
+        let mut pipeline = make_pipeline(vec![make_route("all", Severity::Low)], metrics)
+            .with_stream_sender(tx)
+            .with_workload_resolver(resolver_naming(4_242));
+
+        pipeline
+            .process_alert(&make_ids_alert("ids-001", Severity::High))
+            .await;
+
+        let alert = rx.recv().await.unwrap();
+        let workload = alert.workload.unwrap();
+        assert_eq!(workload.pid, 4_242);
+        assert_eq!(workload.uid, Some(1_000));
+    }
+
+    #[tokio::test]
+    async fn an_alert_the_tables_cannot_name_carries_no_block() {
+        let metrics = Arc::new(TestMetrics::new());
+        let (tx, mut rx) = broadcast::channel(4);
+        let mut pipeline = make_pipeline(vec![make_route("all", Severity::Low)], metrics)
+            .with_stream_sender(tx)
+            .with_workload_resolver(
+                WorkloadResolver::new().with_sockets(Box::new(FixedOwner(None))),
+            );
+
+        pipeline
+            .process_alert(&make_ids_alert("ids-002", Severity::High))
+            .await;
+
+        let alert = rx.recv().await.unwrap();
+        assert!(domain::workload::entity::is_absent(&alert.workload));
+        assert!(!serde_json::to_string(&alert).unwrap().contains("workload"));
+    }
+
+    #[tokio::test]
+    async fn an_alert_about_no_flow_asks_the_tables_nothing() {
+        // A system alert carries zeroed addresses by construction, and a
+        // lookup on 0.0.0.0:0 could only match the wrong socket.
+        let metrics = Arc::new(TestMetrics::new());
+        let (tx, mut rx) = broadcast::channel(4);
+        let mut pipeline = make_pipeline(vec![make_route("all", Severity::Low)], metrics)
+            .with_stream_sender(tx)
+            .with_workload_resolver(resolver_naming(4_242));
+
+        pipeline
+            .process_system_alert(Alert::wan_all_down(&["gw0".to_string()], 1_000))
+            .await;
+
+        let alert = rx.recv().await.unwrap();
+        assert!(alert.workload.is_none());
     }
 
     #[tokio::test]

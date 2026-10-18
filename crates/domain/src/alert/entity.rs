@@ -9,6 +9,7 @@ use crate::dlp::entity::DlpAlert;
 use crate::dns::entity::{DnsAlert, DnsAlertReason};
 use crate::ids::entity::IdsAlert;
 use crate::threatintel::entity::ThreatIntelAlert;
+use crate::workload::entity::Workload;
 
 /// Component type for packet-level security alerts (firewall, ratelimit, L7, IPS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +188,17 @@ pub struct Alert {
     /// Absent on a DLP alert means the address fields carry nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_source: Option<String>,
+    /// The workload that opened the flow this alert is about.
+    ///
+    /// Absent is a real answer and the common one: a transited flow has no
+    /// local process at all, a node whose kernel refused the attribution
+    /// hooks has no table to read, and a socket opened before the agent
+    /// started was never recorded. The block is therefore never zeroed and
+    /// never partially invented - [`crate::workload::entity::is_absent`] is
+    /// the one predicate every surface serialises through, so no format can
+    /// show a process id of 0.
+    #[serde(default, skip_serializing_if = "crate::workload::entity::is_absent")]
+    pub workload: Option<Workload>,
 }
 
 impl Alert {
@@ -246,6 +258,7 @@ impl Alert {
             executable_inode: None,
             executable_source: None,
             flow_source: None,
+            workload: None,
         }
     }
 
@@ -312,6 +325,7 @@ impl Alert {
                 .as_ref()
                 .map(|e| e.source.as_str().to_string()),
             flow_source: flow.map(|f| f.source.as_str().to_string()),
+            workload: None,
         }
     }
 
@@ -371,6 +385,7 @@ impl Alert {
             executable_inode: None,
             executable_source: None,
             flow_source: None,
+            workload: None,
         }
     }
 
@@ -442,6 +457,7 @@ impl Alert {
             executable_inode: None,
             executable_source: None,
             flow_source: None,
+            workload: None,
         }
     }
 
@@ -513,6 +529,7 @@ impl Alert {
             executable_inode: None,
             executable_source: None,
             flow_source: None,
+            workload: None,
         }
     }
 
@@ -577,6 +594,7 @@ impl Alert {
             executable_inode: None,
             executable_source: None,
             flow_source: None,
+            workload: None,
         }
     }
 
@@ -655,6 +673,7 @@ impl Alert {
             executable_inode: None,
             executable_source: None,
             flow_source: None,
+            workload: None,
         }
     }
 
@@ -725,6 +744,7 @@ impl Alert {
             executable_inode: None,
             executable_source: None,
             flow_source: None,
+            workload: None,
         }
     }
 
@@ -804,7 +824,19 @@ impl Alert {
             executable_inode: None,
             executable_source: None,
             flow_source: None,
+            workload: None,
         }
+    }
+
+    /// Attach the workload that owned the flow, where one was resolved.
+    ///
+    /// Takes an `Option` rather than a `Workload` so a caller that resolved
+    /// nothing says so in the same line, instead of branching around the
+    /// call and leaving two paths for a reader to compare.
+    #[must_use]
+    pub fn with_workload(mut self, workload: Option<Workload>) -> Self {
+        self.workload = workload.filter(|w| w.pid != 0);
+        self
     }
 
     /// Returns the source IPv4 address (first element of `src_addr`).
@@ -1024,6 +1056,51 @@ mod tests {
         assert_eq!(alert.src_port, 44001);
         assert_eq!(alert.protocol, 6);
         assert_eq!(alert.flow_source.as_deref(), Some("kernel_socket"));
+    }
+
+    #[test]
+    fn an_unattributed_alert_serialises_without_a_workload_block() {
+        let alert = Alert::from_dlp_alert(&sample_dlp_alert(), "Visa card detected");
+        assert!(alert.workload.is_none());
+        let json = serde_json::to_string(&alert).unwrap();
+        assert!(!json.contains("workload"));
+    }
+
+    #[test]
+    fn an_attributed_alert_carries_the_block_it_was_given() {
+        let workload = crate::workload::entity::Workload::new(
+            4_242,
+            crate::workload::entity::WorkloadSource::Socket,
+        );
+        let alert = Alert::from_dlp_alert(&sample_dlp_alert(), "Visa card detected")
+            .with_workload(workload);
+        assert_eq!(alert.workload.as_ref().unwrap().pid, 4_242);
+        let json = serde_json::to_string(&alert).unwrap();
+        assert!(json.contains("\"workload\":{\"pid\":4242,\"source\":\"socket\"}"));
+    }
+
+    #[test]
+    fn a_block_naming_no_process_never_reaches_the_wire() {
+        // A resolver hands back `None` for a pid of 0, and the builder
+        // refuses one anyway: a surface showing "pid 0" is the one failure
+        // this whole field exists to prevent.
+        let zeroed = Some(crate::workload::entity::Workload {
+            pid: 0,
+            source: crate::workload::entity::WorkloadSource::Socket,
+            exe: None,
+            uid: None,
+            cgroup: None,
+            container: None,
+            image: None,
+            pod: None,
+            namespace: None,
+            service_account: None,
+            unit: None,
+        });
+        let alert =
+            Alert::from_dlp_alert(&sample_dlp_alert(), "Visa card detected").with_workload(zeroed);
+        assert!(alert.workload.is_none());
+        assert!(!serde_json::to_string(&alert).unwrap().contains("workload"));
     }
 
     #[test]

@@ -31,10 +31,10 @@ use aya_ebpf::{
 use ebpf_common::attribution::{
     ATTRIBUTION_FAMILY_IPV4, ATTRIBUTION_FAMILY_IPV6, ATTRIBUTION_HOOK_CONNECT,
     ATTRIBUTION_HOOK_POST_BIND, ATTRIBUTION_HOOK_SENDMSG, ATTRIBUTION_IDENTITY_TTL_NS,
-    ATTRIBUTION_MAX_SOCKETS, ATTRIBUTION_METRIC_CONNECT, ATTRIBUTION_METRIC_COUNT,
-    ATTRIBUTION_METRIC_INSERT_FAILED, ATTRIBUTION_METRIC_NO_COOKIE,
-    ATTRIBUTION_METRIC_POST_BIND, ATTRIBUTION_METRIC_SENDMSG, ATTRIBUTION_METRIC_SOCK_OPS,
-    SocketIdentity,
+    ATTRIBUTION_MAX_FLOWS, ATTRIBUTION_MAX_SOCKETS, ATTRIBUTION_METRIC_CONNECT,
+    ATTRIBUTION_METRIC_COUNT, ATTRIBUTION_METRIC_FLOW, ATTRIBUTION_METRIC_INSERT_FAILED,
+    ATTRIBUTION_METRIC_NO_COOKIE, ATTRIBUTION_METRIC_POST_BIND, ATTRIBUTION_METRIC_SENDMSG,
+    ATTRIBUTION_METRIC_SOCK_OPS, FlowIdentityKey, SocketIdentity,
 };
 use ebpf_common::dlp::{
     DLP_FLOW_FAMILY_IPV4, DLP_FLOW_FAMILY_IPV6, DLP_FLOW_PROTOCOL_TCP,
@@ -64,6 +64,21 @@ static SOCKET_IDENTITY: LruHashMap<u64, SocketIdentity, { ATTRIBUTION_MAX_SOCKET
 /// the thread is what they have in common.
 #[btf_map]
 static DLP_TASK_SOCKET: LruHashMap<u64, DlpTaskSocket, { DLP_TASK_SOCKET_MAX_TASKS as usize }> =
+    LruHashMap::new();
+
+/// Five-tuple -> the task that opened the connection.
+///
+/// `SOCKET_IDENTITY` answers a reader holding a socket cookie, which every
+/// packet hook has and no row of the kernel's conntrack table does. A
+/// connection listed out of that table is addresses and ports and nothing
+/// else, so it needs an index keyed on exactly that, and this is it. Written
+/// only here, because `sockops` is the one hook that knows both ends at once.
+///
+/// LRU for the same reason as the socket table: a node holding more
+/// connections than the table was sized for loses the coldest rather than
+/// stopping, and a flow with no workload reads as absent everywhere.
+#[btf_map]
+static SOCKET_FLOW: LruHashMap<FlowIdentityKey, SocketIdentity, { ATTRIBUTION_MAX_FLOWS as usize }> =
     LruHashMap::new();
 
 /// Per-CPU counters, read by the agent and exported as metrics. Nothing here
@@ -176,6 +191,24 @@ fn join_socket(ctx: &SockOpsContext) {
         return;
     }
     increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_SOCK_OPS);
+
+    // The same socket, keyed the other way round, for the reader that has a
+    // connection and no cookie. Written after the task join so a failure here
+    // costs the conntrack row its workload and leaves the DLP join standing.
+    let flow = FlowIdentityKey {
+        local_addr: socket.src_addr,
+        remote_addr: socket.dst_addr,
+        local_port: socket.src_port,
+        remote_port: socket.dst_port,
+        protocol: socket.protocol,
+        family: identity.family,
+        _pad: [0; 2],
+    };
+    if SOCKET_FLOW.insert(&flow, &identity, 0).is_err() {
+        increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_INSERT_FAILED);
+        return;
+    }
+    increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_FLOW);
 }
 
 /// The five-tuple of an established socket, in the encoding the DLP event

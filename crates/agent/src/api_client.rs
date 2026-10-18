@@ -246,6 +246,61 @@ pub struct AlertResponse {
     pub assignee: Option<String>,
     #[serde(default)]
     pub notes: Vec<AlertNoteResponse>,
+    /// The process behind the flow, where the agent could name one. Absent
+    /// from an older agent and from a flow with no local process, which the
+    /// JSON output reproduces by leaving the key out rather than printing a
+    /// pid of zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<WorkloadResponse>,
+}
+
+/// The workload block as the agent writes it, kept whole on the way through
+/// so `--output json` prints what the API answered.
+#[derive(Deserialize, Serialize)]
+pub struct WorkloadResponse {
+    pub pid: u32,
+    /// `socket`, `flow` or `process`: how the process was reached.
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+impl WorkloadResponse {
+    /// One line for a table view: the process, and the container or pod
+    /// where there is one. The source word rides along because a correlated
+    /// match is a weaker claim than a socket read.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = match self.exe.as_deref() {
+            Some(exe) => format!("{} ({})", exe, self.pid),
+            None => format!("pid {}", self.pid),
+        };
+        if let Some(pod) = self.pod.as_deref() {
+            let _ = write!(out, " in pod {pod}");
+        } else if let Some(container) = self.container.as_deref() {
+            let _ = write!(out, " in container {container}");
+        }
+        let _ = write!(out, " [{}]", self.source);
+        out
+    }
 }
 
 fn open_status() -> String {
@@ -645,6 +700,10 @@ pub struct ConnectionResponse {
     pub packets_rev: u32,
     pub bytes_fwd: u32,
     pub bytes_rev: u32,
+    /// The local process that opened the flow, where the agent could name
+    /// one. A forwarded flow has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<WorkloadResponse>,
 }
 
 /// One frame of `GET /api/v1/conntrack/events`. The body carries the same
@@ -2980,6 +3039,7 @@ mod tests {
             executable_inode: executable.map(|_| 918_273),
             executable_source: executable.map(|_| "process_at_alert_time".to_string()),
             flow_source: flow_source.map(str::to_string),
+            workload: None,
             status: "open".to_string(),
             assignee: None,
             notes: Vec::new(),

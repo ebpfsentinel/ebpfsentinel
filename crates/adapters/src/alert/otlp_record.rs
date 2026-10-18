@@ -74,6 +74,17 @@ impl OtlpLogRecord {
         }
         attributes.push(("alert.component".to_string(), alert.component.clone()));
         attributes.push(("alert.rule_id".to_string(), alert.rule_id.0.clone()));
+        // The workload travels in the body like every other field, and the
+        // two attributes a collector actually filters on are lifted out
+        // under their OpenTelemetry names. Absent stays absent: an
+        // attribute holding a pid of zero is one a query matches and learns
+        // nothing from.
+        if let Some(workload) = alert.workload.as_ref().filter(|w| w.pid != 0) {
+            attributes.push(("process.pid".to_string(), workload.pid.to_string()));
+            if let Some(exe) = workload.exe.clone().filter(|e| !e.is_empty()) {
+                attributes.push(("process.executable.path".to_string(), exe));
+            }
+        }
 
         Ok(Self {
             time_unix_nano: alert.timestamp_ns,
@@ -417,7 +428,39 @@ mod tests {
             executable_inode: None,
             executable_source: None,
             flow_source: None,
+            workload: None,
         }
+    }
+
+    #[test]
+    fn an_unattributed_alert_lifts_no_process_attribute() {
+        let record = OtlpLogRecord::from_alert(&sample_alert(), 1_709_913_601_000_000_000)
+            .expect("the alert serialises");
+        assert!(!record.attributes.iter().any(|(k, _)| k == "process.pid"));
+    }
+
+    #[test]
+    fn an_attributed_alert_lifts_the_process_out_of_the_body() {
+        use domain::workload::entity::{Workload, WorkloadSource};
+
+        let mut alert = sample_alert();
+        let mut workload = Workload::new(4242, WorkloadSource::Socket).expect("a pid builds one");
+        workload.exe = Some("/usr/bin/curl".to_string());
+        alert.workload = Some(workload);
+
+        let record = OtlpLogRecord::from_alert(&alert, 1_709_913_601_000_000_000)
+            .expect("the alert serialises");
+        assert!(
+            record
+                .attributes
+                .contains(&("process.pid".to_string(), "4242".to_string()))
+        );
+        assert!(record.attributes.contains(&(
+            "process.executable.path".to_string(),
+            "/usr/bin/curl".to_string()
+        )));
+        // And the whole block is still in the body the collector stores.
+        assert!(record.body.contains(r#""workload""#));
     }
 
     #[test]

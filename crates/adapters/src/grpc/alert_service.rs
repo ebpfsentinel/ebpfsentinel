@@ -56,7 +56,28 @@ fn alert_to_event(alert: &Alert) -> proto::AlertEvent {
             .map_or_else(String::new, |m| m.tactic.clone()),
         ja4_fingerprint: alert.ja4_fingerprint.clone().unwrap_or_default(),
         container: container_context(alert),
+        workload: workload_block(alert),
     }
+}
+
+/// The alert's workload block on the wire, or nothing where the agent could
+/// not name a process. A block is never half-built: the pid and the source
+/// are what make it exist, everything else is what the node could add.
+fn workload_block(alert: &Alert) -> Option<proto::Workload> {
+    let w = alert.workload.as_ref().filter(|w| w.pid != 0)?;
+    Some(proto::Workload {
+        pid: w.pid,
+        source: w.source.as_str().to_string(),
+        exe: w.exe.clone().unwrap_or_default(),
+        uid: w.uid.unwrap_or(0),
+        cgroup: w.cgroup.unwrap_or(0),
+        container: w.container.clone().unwrap_or_default(),
+        image: w.image.clone().unwrap_or_default(),
+        pod: w.pod.clone().unwrap_or_default(),
+        namespace: w.namespace.clone().unwrap_or_default(),
+        service_account: w.service_account.clone().unwrap_or_default(),
+        unit: w.unit.clone().unwrap_or_default(),
+    })
 }
 
 /// Build the alert's [`proto::ContainerContext`] from the domain container
@@ -273,6 +294,7 @@ mod tests {
             executable_inode: None,
             executable_source: None,
             flow_source: None,
+            workload: None,
         }
     }
 
@@ -299,6 +321,43 @@ mod tests {
         assert!((event.dst_domain_score - (-1.0)).abs() < f64::EPSILON);
         // Host-namespace process: no container context surfaced.
         assert!(event.container.is_none());
+    }
+
+    #[test]
+    fn an_alert_with_no_workload_carries_no_block() {
+        let alert = make_alert("ids", Severity::High, "ids-001");
+        assert!(alert_to_event(&alert).workload.is_none());
+    }
+
+    #[test]
+    fn the_workload_block_rides_the_stream_whole() {
+        use domain::workload::entity::{Workload, WorkloadSource};
+
+        let mut alert = make_alert("ids", Severity::High, "ids-001");
+        let mut workload = Workload::new(4242, WorkloadSource::Socket).expect("a pid builds one");
+        workload.exe = Some("/usr/bin/curl".to_string());
+        workload.pod = Some("api-7f9".to_string());
+        alert.workload = Some(workload);
+
+        let block = alert_to_event(&alert).workload.expect("the block travels");
+        assert_eq!(block.pid, 4242);
+        assert_eq!(block.source, "socket");
+        assert_eq!(block.exe, "/usr/bin/curl");
+        assert_eq!(block.pod, "api-7f9");
+        // What the node could not add is empty rather than invented.
+        assert_eq!(block.namespace, "");
+        assert_eq!(block.cgroup, 0);
+    }
+
+    #[test]
+    fn a_block_naming_no_process_never_reaches_the_stream() {
+        use domain::workload::entity::{Workload, WorkloadSource};
+
+        let mut alert = make_alert("ids", Severity::High, "ids-001");
+        let mut workload = Workload::new(4242, WorkloadSource::Flow).expect("a pid builds one");
+        workload.pid = 0;
+        alert.workload = Some(workload);
+        assert!(alert_to_event(&alert).workload.is_none());
     }
 
     #[test]

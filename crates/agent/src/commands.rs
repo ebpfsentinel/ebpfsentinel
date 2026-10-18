@@ -619,6 +619,9 @@ pub async fn cmd_alerts_show(client: &ApiClient, id: &str, output: OutputFormat)
     if let Some(ja4) = alert.ja4_fingerprint.as_deref() {
         println!("  JA4:            {ja4}");
     }
+    if let Some(workload) = alert.workload.as_ref() {
+        println!("  Workload:       {}", workload.summary());
+    }
     println!("  Message:        {}", alert.message);
     for note in &alert.notes {
         println!("  Note ({}): {}", note.author, note.text);
@@ -2374,8 +2377,16 @@ pub async fn cmd_conntrack_list(
             ("STATE", Align::Right),
             ("PKT_FWD", Align::Right),
             ("PKT_REV", Align::Right),
+            ("WORKLOAD", Align::Left),
         ]);
         for c in &conns {
+            // A dash rather than a blank, because an empty cell reads as a
+            // column the agent forgot to fill: a forwarded flow has no local
+            // process and that is an answer.
+            let workload = c.workload.as_ref().map_or_else(
+                || "-".to_string(),
+                crate::api_client::WorkloadResponse::summary,
+            );
             table.row(cells![
                 c.src_ip,
                 c.dst_ip,
@@ -2384,7 +2395,8 @@ pub async fn cmd_conntrack_list(
                 c.protocol,
                 c.state,
                 c.packets_fwd,
-                c.packets_rev
+                c.packets_rev,
+                workload
             ]);
         }
         table.print();
