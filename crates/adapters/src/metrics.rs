@@ -234,6 +234,12 @@ pub struct AgentMetrics {
     /// is a verifier that refused nothing, and a bare gauge would export that
     /// from the moment the registry existed, before anything had been loaded.
     pub ebpf_verifier_rejections: Family<Vec<(String, String)>, Gauge>,
+    pub ebpf_link_handovers: Family<Vec<(String, String)>, Gauge>,
+    pub ebpf_link_handover_fallbacks: Family<Vec<(String, String)>, Gauge>,
+    /// Write-once maps frozen behind their one write, and the freezes the
+    /// kernel refused. Both are families for the same reason as the two above.
+    pub ebpf_frozen_maps: Family<Vec<(String, String)>, Gauge>,
+    pub ebpf_map_freeze_refusals: Family<Vec<(String, String)>, Gauge>,
     /// Occupancy per map, in parts per thousand. Only the maps that refuse an
     /// insert when full are ever set, so a map with no series here is one
     /// nobody could measure rather than one sitting empty.
@@ -250,6 +256,10 @@ pub struct AgentMetrics {
     pub threatintel_feed_indicators: Family<FeedLabels, Gauge>,
     /// When each feed last refreshed successfully, in seconds since the epoch.
     pub threatintel_feed_last_refresh: Family<FeedLabels, Gauge>,
+    /// How long a full reload of the indicator sets into the eBPF maps took.
+    pub threatintel_reload_duration_seconds: Histogram,
+    /// Indicators written by the last full reload.
+    pub threatintel_reload_indicators: Gauge,
     pub zone_interfaces: Family<ZoneLabels, Gauge>,
     pub zone_policies: Family<ZoneLabels, Gauge>,
     pub zone_packets_total: Family<ZonePacketLabels, Counter>,
@@ -414,6 +424,34 @@ impl AgentMetrics {
             ebpf_verifier_rejections.clone(),
         );
 
+        let ebpf_link_handovers = Family::<Vec<(String, String)>, Gauge>::default();
+        registry.register(
+            "ebpf_link_handovers",
+            "eBPF hooks whose program was replaced without a detach window",
+            ebpf_link_handovers.clone(),
+        );
+
+        let ebpf_link_handover_fallbacks = Family::<Vec<(String, String)>, Gauge>::default();
+        registry.register(
+            "ebpf_link_handover_fallbacks",
+            "eBPF hooks the kernel made detach and attach again instead of replacing",
+            ebpf_link_handover_fallbacks.clone(),
+        );
+
+        let ebpf_frozen_maps = Family::<Vec<(String, String)>, Gauge>::default();
+        registry.register(
+            "ebpf_frozen_maps",
+            "eBPF maps written once at load and made read-only behind that write",
+            ebpf_frozen_maps.clone(),
+        );
+
+        let ebpf_map_freeze_refusals = Family::<Vec<(String, String)>, Gauge>::default();
+        registry.register(
+            "ebpf_map_freeze_refusals",
+            "eBPF maps left writable because the kernel refused to freeze them",
+            ebpf_map_freeze_refusals.clone(),
+        );
+
         let ebpf_map_fill_permille = Family::<MapLabels, Gauge>::default();
         registry.register(
             "ebpf_map_fill_permille",
@@ -493,6 +531,24 @@ impl AgentMetrics {
             "threatintel_feed_last_refresh_timestamp_seconds",
             "When a threat-intelligence feed last refreshed successfully, in seconds since the epoch, by feed",
             threatintel_feed_last_refresh.clone(),
+        );
+
+        // A reload runs from under a second on a small feed to tens of
+        // seconds on a large one, so the buckets span that rather than the
+        // millisecond range the packet-path histograms use.
+        let threatintel_reload_duration_seconds =
+            Histogram::new(exponential_buckets_range(0.001, 60.0, 12));
+        registry.register(
+            "threatintel_reload_duration_seconds",
+            "Duration of a full reload of the threat-intelligence indicators into the eBPF maps, in seconds",
+            threatintel_reload_duration_seconds.clone(),
+        );
+
+        let threatintel_reload_indicators = Gauge::default();
+        registry.register(
+            "threatintel_reload_indicators",
+            "Indicators written into the eBPF maps by the last full reload",
+            threatintel_reload_indicators.clone(),
         );
 
         let zone_interfaces = Family::<ZoneLabels, Gauge>::default();
@@ -932,6 +988,10 @@ impl AgentMetrics {
             ebpf_program_status,
             ebpf_attach_blocked,
             ebpf_verifier_rejections,
+            ebpf_link_handovers,
+            ebpf_link_handover_fallbacks,
+            ebpf_frozen_maps,
+            ebpf_map_freeze_refusals,
             ebpf_map_fill_permille,
             xdp_attach_mode,
             packet_processing_duration,
@@ -943,6 +1003,8 @@ impl AgentMetrics {
             threatintel_matches_total,
             threatintel_feed_indicators,
             threatintel_feed_last_refresh,
+            threatintel_reload_duration_seconds,
+            threatintel_reload_indicators,
             zone_interfaces,
             zone_policies,
             zone_packets_total,
@@ -1114,6 +1176,30 @@ impl FirewallMetrics for AgentMetrics {
 
     fn set_ebpf_verifier_rejections(&self, count: u64) {
         self.ebpf_verifier_rejections
+            .get_or_create(&Vec::new())
+            .set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn set_ebpf_link_handovers(&self, count: u64) {
+        self.ebpf_link_handovers
+            .get_or_create(&Vec::new())
+            .set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn set_ebpf_link_handover_fallbacks(&self, count: u64) {
+        self.ebpf_link_handover_fallbacks
+            .get_or_create(&Vec::new())
+            .set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn set_ebpf_frozen_maps(&self, count: u64) {
+        self.ebpf_frozen_maps
+            .get_or_create(&Vec::new())
+            .set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn set_ebpf_map_freeze_refusals(&self, count: u64) {
+        self.ebpf_map_freeze_refusals
             .get_or_create(&Vec::new())
             .set(count.try_into().unwrap_or(i64::MAX));
     }
@@ -1323,6 +1409,12 @@ impl ThreatIntelMetrics for AgentMetrics {
         self.threatintel_feed_last_refresh
             .get_or_create(&labels)
             .set(i64::try_from(now).unwrap_or(i64::MAX));
+    }
+
+    fn observe_threatintel_reload(&self, seconds: f64, indicators: u64) {
+        self.threatintel_reload_duration_seconds.observe(seconds);
+        self.threatintel_reload_indicators
+            .set(i64::try_from(indicators).unwrap_or(i64::MAX));
     }
 }
 
@@ -2159,6 +2251,10 @@ mod tests {
         ("domain_auto_blocked", "counter"),
         ("domain_reputation_high_risk", "gauge"),
         ("ebpf_attach_blocked", "gauge"),
+        ("ebpf_frozen_maps", "gauge"),
+        ("ebpf_link_handover_fallbacks", "gauge"),
+        ("ebpf_link_handovers", "gauge"),
+        ("ebpf_map_freeze_refusals", "gauge"),
         ("ebpf_map_fill_permille", "gauge"),
         ("ebpf_program_status", "gauge"),
         ("ebpf_verifier_rejections", "gauge"),
@@ -2198,6 +2294,8 @@ mod tests {
         ("threatintel_feed_indicators", "gauge"),
         ("threatintel_feed_last_refresh_timestamp_seconds", "gauge"),
         ("threatintel_matches", "counter"),
+        ("threatintel_reload_duration_seconds", "histogram"),
+        ("threatintel_reload_indicators", "gauge"),
         ("worker_events", "counter"),
         ("worker_processing_duration_seconds", "histogram"),
         ("workload_denials", "counter"),
@@ -2346,6 +2444,7 @@ mod tests {
             })
             .inc();
         m.record_threatintel_feed_loaded("abuse-ch", 10);
+        m.observe_threatintel_reload(0.25, 10);
         m.alerts_by_rule_total
             .get_or_create(&RuleLabels {
                 component: "ids".into(),
@@ -2411,6 +2510,12 @@ mod tests {
             .set(1);
         m.ebpf_attach_blocked.get_or_create(&Vec::new()).set(0);
         m.ebpf_verifier_rejections.get_or_create(&Vec::new()).set(0);
+        m.ebpf_link_handovers.get_or_create(&Vec::new()).set(0);
+        m.ebpf_link_handover_fallbacks
+            .get_or_create(&Vec::new())
+            .set(0);
+        m.ebpf_frozen_maps.get_or_create(&Vec::new()).set(0);
+        m.ebpf_map_freeze_refusals.get_or_create(&Vec::new()).set(0);
         m.ebpf_map_fill_permille
             .get_or_create(&MapLabels {
                 map: "IDS_PATTERNS".into(),

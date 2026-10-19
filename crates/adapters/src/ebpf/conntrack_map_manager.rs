@@ -85,17 +85,21 @@ fn source_limits_off(cfg: &ebpf_common::conntrack::ConnTrackConfig) -> bool {
 }
 
 /// Push runtime-resolved `nf_conn` BTF offsets into the
-/// `CT_NF_CONN_OFFSETS` BPF array map.
+/// `CT_NF_CONN_OFFSETS` BPF array map, and freeze the map behind the write.
+///
+/// Two objects read these offsets - the firewall and the conntrack program -
+/// and they share the pinned map, so the second one to load finds it frozen
+/// with the same reading of the same kernel and writes nothing.
+///
+/// # Errors
+///
+/// Returns an error if the map is absent, if the write fails, or if a frozen
+/// map holds offsets other than the ones being pushed.
 pub fn push_nf_conn_offsets(
     ebpf: &mut dyn MapStore,
     offsets: ebpf_common::conntrack::NfConnOffsets,
 ) -> Result<(), anyhow::Error> {
-    let map = ebpf
-        .map_mut("CT_NF_CONN_OFFSETS")
-        .ok_or_else(|| anyhow::anyhow!("CT_NF_CONN_OFFSETS map not found"))?;
-    let mut arr = aya::maps::Array::<_, ebpf_common::conntrack::NfConnOffsets>::try_from(map)?;
-    arr.set(0, offsets, 0)?;
-    Ok(())
+    crate::ebpf::map_freeze::push_once(ebpf, "CT_NF_CONN_OFFSETS", offsets)
 }
 
 #[cfg(test)]

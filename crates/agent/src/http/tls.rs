@@ -7,42 +7,11 @@ use infrastructure::config::PqMode;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
-use tokio_rustls::rustls::crypto::aws_lc_rs;
 use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::server::TlsStream;
 
-/// Install the PQ-aware [`CryptoProvider`] as the process-wide default.
-///
-/// Call once at startup (before any rustls/reqwest client is created) so that
-/// outbound TLS connections also use PQ hybrid key exchange.
-pub fn install_pq_provider(pq_mode: PqMode) {
-    let outbound = outbound_mode(pq_mode);
-    let provider = build_crypto_provider(outbound);
-    let _ = provider.install_default();
-    tracing::info!(
-        ?pq_mode,
-        ?outbound,
-        "PQ CryptoProvider installed for outbound TLS"
-    );
-}
-
-/// Translate the listener's PQ policy into the one the agent's own clients use.
-///
-/// `pq_mode` states which clients the listener accepts. Outbound connections
-/// are the opposite side of that decision: threat-intel feeds, webhooks, SIEM
-/// endpoints and the OIDC provider are servers this agent dials, and offering
-/// `X25519MLKEM768` alone would make every one of them that lacks hybrid key
-/// exchange unreachable, which today is nearly all of them. `require` therefore
-/// keeps the classical fallback on the way out while still preferring hybrid;
-/// only `disable`, which is a statement about PQ itself rather than about
-/// inbound clients, takes the hybrid group off the wire in both directions.
-fn outbound_mode(pq_mode: PqMode) -> PqMode {
-    match pq_mode {
-        PqMode::Require => PqMode::Prefer,
-        other => other,
-    }
-}
+pub use adapters::tls::{build_crypto_provider, install_pq_provider, outbound_mode};
 
 /// Load a rustls [`ServerConfig`] with PQ-hybrid key exchange support.
 ///
@@ -96,26 +65,6 @@ pub fn load_rustls_config(
     tracing::info!(pq_mode = ?pq_mode, "TLS server configured");
 
     Ok(Arc::new(config))
-}
-
-/// Build a [`CryptoProvider`] with key exchange groups ordered by PQ mode.
-///
-/// Public so that the enterprise crate can build mTLS `ServerConfig`/`ClientConfig`
-/// for HA replication and multi-cluster federation with the same PQ settings.
-pub fn build_crypto_provider(pq_mode: PqMode) -> tokio_rustls::rustls::crypto::CryptoProvider {
-    let mut provider = aws_lc_rs::default_provider();
-
-    provider.kx_groups = match pq_mode {
-        PqMode::Prefer => vec![
-            aws_lc_rs::kx_group::X25519MLKEM768,
-            aws_lc_rs::kx_group::X25519,
-            aws_lc_rs::kx_group::SECP256R1,
-        ],
-        PqMode::Require => vec![aws_lc_rs::kx_group::X25519MLKEM768],
-        PqMode::Disable => vec![aws_lc_rs::kx_group::X25519, aws_lc_rs::kx_group::SECP256R1],
-    };
-
-    provider
 }
 
 /// Newtype around [`SocketAddr`] that lets us implement
@@ -195,78 +144,5 @@ impl axum::serve::Listener for TlsListener {
 
     fn local_addr(&self) -> io::Result<Self::Addr> {
         self.inner.local_addr()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio_rustls::rustls::{NamedGroup, ProtocolVersion};
-
-    #[test]
-    fn crypto_provider_prefer_has_pq_first() {
-        let provider = build_crypto_provider(PqMode::Prefer);
-        assert_eq!(provider.kx_groups.len(), 3);
-        assert_eq!(provider.kx_groups[0].name(), NamedGroup::X25519MLKEM768);
-        assert_eq!(provider.kx_groups[1].name(), NamedGroup::X25519);
-        assert_eq!(provider.kx_groups[2].name(), NamedGroup::secp256r1);
-    }
-
-    #[test]
-    fn install_pq_provider_does_not_panic() {
-        install_pq_provider(PqMode::Prefer);
-        // Second call should be harmless (already installed)
-        install_pq_provider(PqMode::Require);
-    }
-
-    #[test]
-    fn crypto_provider_require_only_pq() {
-        let provider = build_crypto_provider(PqMode::Require);
-        assert_eq!(provider.kx_groups.len(), 1);
-        assert_eq!(provider.kx_groups[0].name(), NamedGroup::X25519MLKEM768);
-    }
-
-    #[test]
-    fn outbound_keeps_a_classical_fallback_when_inbound_requires_pq() {
-        // Requiring PQ of inbound clients must not sever the agent's own
-        // outbound TLS: the feeds and webhooks it dials are servers, and
-        // an MLKEM-only offer would fail against every one that lacks it.
-        assert_eq!(outbound_mode(PqMode::Require), PqMode::Prefer);
-
-        let provider = build_crypto_provider(outbound_mode(PqMode::Require));
-        assert_eq!(provider.kx_groups[0].name(), NamedGroup::X25519MLKEM768);
-        assert!(
-            provider
-                .kx_groups
-                .iter()
-                .any(|g| g.name() == NamedGroup::X25519)
-        );
-    }
-
-    #[test]
-    fn outbound_follows_inbound_when_pq_is_preferred_or_disabled() {
-        assert_eq!(outbound_mode(PqMode::Prefer), PqMode::Prefer);
-        assert_eq!(outbound_mode(PqMode::Disable), PqMode::Disable);
-    }
-
-    #[test]
-    fn the_hybrid_group_is_offered_for_tls13_only() {
-        // This is what makes `allow_tls12` with `pq_mode: require` an
-        // unreachable listener, and why the config refuses that pair.
-        let hybrid = aws_lc_rs::kx_group::X25519MLKEM768;
-        assert!(hybrid.usable_for_version(ProtocolVersion::TLSv1_3));
-        assert!(!hybrid.usable_for_version(ProtocolVersion::TLSv1_2));
-    }
-
-    #[test]
-    fn crypto_provider_disable_no_pq() {
-        let provider = build_crypto_provider(PqMode::Disable);
-        assert_eq!(provider.kx_groups.len(), 2);
-        assert!(
-            provider
-                .kx_groups
-                .iter()
-                .all(|g| g.name() != NamedGroup::X25519MLKEM768)
-        );
     }
 }

@@ -226,8 +226,20 @@ impl ThreatIntelAppService {
             return;
         };
 
-        if let Err(e) = map.load_all_iocs(&iocs) {
-            tracing::warn!("failed to sync threat intel IOCs to eBPF maps: {e}");
+        // The datapath matches against a partly written table for the whole
+        // of this call, so how long it took is the figure that says whether a
+        // feed has outgrown the host it is loaded on.
+        let started = std::time::Instant::now();
+        let outcome = map.load_all_iocs(&iocs);
+        let elapsed = started.elapsed();
+        drop(map);
+
+        match outcome {
+            Ok(()) => self.metrics.observe_threatintel_reload(
+                elapsed.as_secs_f64(),
+                u64::try_from(iocs.len()).unwrap_or(u64::MAX),
+            ),
+            Err(e) => tracing::warn!("failed to sync threat intel IOCs to eBPF maps: {e}"),
         }
     }
 

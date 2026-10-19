@@ -9,6 +9,7 @@ use tracing::{info, warn};
 use super::attach_inspect::{self, AttachBlock};
 use super::kfunc_attach;
 use super::kfunc_loader;
+use super::link_handover::{self, AttachedLink, LinkHook};
 
 /// Default BPF filesystem pin path for shared maps.
 pub const DEFAULT_BPF_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel";
@@ -37,14 +38,17 @@ pub struct EbpfLoader {
     /// Token-mode maps (from `kfunc_loader::load_object_token`), exposed to the
     /// map managers through the [`MapStore`](super::map_store::MapStore) surface.
     token_maps: super::map_store::TokenMaps,
-    /// Owned link fds for netkit attachments. Dropping these detaches.
-    netkit_links: Vec<OwnedFd>,
     /// Programs aya cannot load because they call kfuncs it can't relocate.
     /// Loaded via raw `BPF_PROG_LOAD` outside aya and keyed by program name;
     /// the fd owns the loaded program (dropping it unloads).
     kfunc_progs: HashMap<String, OwnedFd>,
-    /// Owned link fds for raw XDP/TCX attachments of kfunc programs.
-    kfunc_links: Vec<OwnedFd>,
+    /// The links this loader holds, each naming the program it runs, the
+    /// interface it holds and the hook of that interface. Dropping one
+    /// detaches; handing one to another loader through
+    /// [`link_handover`] replaces the program it runs without ever
+    /// detaching, which is why a link is addressable here rather than being
+    /// an anonymous fd kept alive in a vector.
+    links: Vec<AttachedLink>,
     /// Optional programs the kernel refused, keyed by program name, with the
     /// load error each one carried. A caller that declared a program optional
     /// reads this to say what the host cannot do instead of discovering a
@@ -78,10 +82,9 @@ impl EbpfLoader {
             .collect();
         Self {
             token_maps: super::map_store::TokenMaps::new(loaded.maps),
-            netkit_links: Vec::new(),
             kfunc_progs,
             refused_progs,
-            kfunc_links: Vec::new(),
+            links: Vec::new(),
             // Raw map fds captured at load time, so `set_tail_call_raw` can wire
             // `ProgramArray`s (e.g. XDP_PROG_ARRAY).
             kfunc_hosted_maps: loaded.hosted,
@@ -252,10 +255,26 @@ impl EbpfLoader {
                 return Ok(());
             }
 
+            // A link parked by the loader this one replaces still holds the
+            // interface, so the program changes under a hook that never goes
+            // empty. Nothing parked is the ordinary first attach.
+            if let Some(link) =
+                link_handover::take_over(program_name, interface, LinkHook::Xdp, raw)
+            {
+                self.links.push(link);
+                attach_inspect::clear_block(program_name, interface);
+                return Ok(());
+            }
+
             let mode_label = xdp_flags_label(flags);
             match attach_xdp_ebusy_retry(program_name, raw, interface, flags) {
                 Ok(link) => {
-                    self.kfunc_links.push(link);
+                    self.links.push(AttachedLink::new(
+                        program_name,
+                        interface,
+                        LinkHook::Xdp,
+                        link,
+                    ));
                     attach_inspect::clear_block(program_name, interface);
                     info!(
                         program_name,
@@ -275,7 +294,12 @@ impl EbpfLoader {
                     );
                     match attach_xdp_ebusy_retry(program_name, raw, interface, XDP_MODE_AUTO) {
                         Ok(link) => {
-                            self.kfunc_links.push(link);
+                            self.links.push(AttachedLink::new(
+                                program_name,
+                                interface,
+                                LinkHook::Xdp,
+                                link,
+                            ));
                             attach_inspect::clear_block(program_name, interface);
                             info!(
                                 program_name,
@@ -345,23 +369,34 @@ impl EbpfLoader {
         interface: &str,
     ) -> Result<(), anyhow::Error> {
         if let Some(prog_fd) = self.kfunc_progs.get(program_name) {
+            let raw = prog_fd.as_raw_fd();
+            if let Some(link) =
+                link_handover::take_over(program_name, interface, LinkHook::TcxIngress, raw)
+            {
+                self.links.push(link);
+                attach_inspect::clear_block(program_name, interface);
+                return Ok(());
+            }
             // TCX (kernel >= 6.6) needs no qdisc; the raw helper mirrors aya's
             // ingress attach for programs aya never loaded.
-            let link =
-                match kfunc_attach::attach_tcx(program_name, prog_fd.as_raw_fd(), interface, false)
-                {
-                    Ok(link) => link,
-                    Err(e) => {
-                        return Err(record_link_block(
-                            program_name,
-                            interface,
-                            "TCX ingress",
-                            errno_of(&e),
-                            &e,
-                        ));
-                    }
-                };
-            self.kfunc_links.push(link);
+            let link = match kfunc_attach::attach_tcx(program_name, raw, interface, false) {
+                Ok(link) => link,
+                Err(e) => {
+                    return Err(record_link_block(
+                        program_name,
+                        interface,
+                        "TCX ingress",
+                        errno_of(&e),
+                        &e,
+                    ));
+                }
+            };
+            self.links.push(AttachedLink::new(
+                program_name,
+                interface,
+                LinkHook::TcxIngress,
+                link,
+            ));
             attach_inspect::clear_block(program_name, interface);
             info!(
                 program_name,
@@ -388,12 +423,15 @@ impl EbpfLoader {
         interface: &str,
     ) -> Result<(), anyhow::Error> {
         if let Some(prog_fd) = self.kfunc_progs.get(program_name) {
-            let link = match kfunc_attach::attach_tcx(
-                program_name,
-                prog_fd.as_raw_fd(),
-                interface,
-                true,
-            ) {
+            let raw = prog_fd.as_raw_fd();
+            if let Some(link) =
+                link_handover::take_over(program_name, interface, LinkHook::TcxEgress, raw)
+            {
+                self.links.push(link);
+                attach_inspect::clear_block(program_name, interface);
+                return Ok(());
+            }
+            let link = match kfunc_attach::attach_tcx(program_name, raw, interface, true) {
                 Ok(link) => link,
                 Err(e) => {
                     return Err(record_link_block(
@@ -405,7 +443,12 @@ impl EbpfLoader {
                     ));
                 }
             };
-            self.kfunc_links.push(link);
+            self.links.push(AttachedLink::new(
+                program_name,
+                interface,
+                LinkHook::TcxEgress,
+                link,
+            ));
             attach_inspect::clear_block(program_name, interface);
             info!(
                 program_name,
@@ -460,6 +503,16 @@ impl EbpfLoader {
         } else {
             "egress"
         };
+        let hook = if attach_type == BPF_NETKIT_PRIMARY {
+            LinkHook::NetkitPrimary
+        } else {
+            LinkHook::NetkitPeer
+        };
+        if let Some(link) = link_handover::take_over(program_name, interface, hook, prog_fd) {
+            self.links.push(link);
+            attach_inspect::clear_block(program_name, interface);
+            return Ok(());
+        }
         let link_fd = match netkit_attach_by_name(prog_fd, interface, attach_type) {
             Ok(link_fd) => link_fd,
             Err(e) => {
@@ -467,23 +520,41 @@ impl EbpfLoader {
                     super::netkit::NetkitError::AttachFailed { errno, .. } => *errno,
                     _ => 0,
                 };
-                let hook = if attach_type == BPF_NETKIT_PRIMARY {
+                let hook_label = if attach_type == BPF_NETKIT_PRIMARY {
                     "netkit primary"
                 } else {
                     "netkit peer"
                 };
-                return Err(record_link_block(program_name, interface, hook, errno, &e));
+                return Err(record_link_block(
+                    program_name,
+                    interface,
+                    hook_label,
+                    errno,
+                    &e,
+                ));
             }
         };
         // Store the link fd to keep the attachment alive.
         // When EbpfLoader is dropped, the link fd closes and detaches.
-        self.netkit_links.push(link_fd);
+        self.links
+            .push(AttachedLink::new(program_name, interface, hook, link_fd));
         attach_inspect::clear_block(program_name, interface);
         info!(
             program_name,
             interface, direction, "TC program attached via netkit"
         );
         Ok(())
+    }
+
+    /// Give up every link this loader holds, without detaching anything.
+    ///
+    /// The links keep their programs attached and running: the caller parks
+    /// them in [`link_handover`] so that the loader replacing this one takes
+    /// the interfaces over through `BPF_LINK_UPDATE` instead of attaching to
+    /// a hook that was emptied first. A link nobody takes is released there,
+    /// which detaches it exactly as dropping this loader would have.
+    pub fn take_links(&mut self) -> Vec<AttachedLink> {
+        std::mem::take(&mut self.links)
     }
 
     /// Get the raw fd of a loaded program by name, for tail-call wiring.
@@ -570,52 +641,19 @@ impl EbpfLoader {
         self.refused_progs.get(program_name).map(String::as_str)
     }
 
-    // ── Zero-downtime program swap via BPF_LINK_UPDATE (kernel 5.7+) ────
-    //
-    // Current approach: detach old program, attach new program. This creates
-    // a brief window where no eBPF program is processing packets.
-    //
-    // Upgrade: BPF_LINK_UPDATE atomically replaces the program attached to
-    // a link without any gap. Packets are processed by the old program until
-    // the exact moment the new program takes over.
-    //
-    // aya 0.14.0: Link::update() is not exposed. Use raw syscall:
-    //   bpf(BPF_LINK_UPDATE, &bpf_attr { link_update: { link_fd, new_prog_fd, ... } })
-    //
-    // Requires storing link FDs after initial attachment (currently discarded).
-    //
-    // TODO: store link FDs and implement atomic program replacement.
+    // A program swap keeps its hook: the links this loader holds are parked
+    // by [`super::link_handover`] before the old loader goes, and every attach
+    // path here takes one over with `BPF_LINK_UPDATE` rather than attaching
+    // into an interface that was briefly bare.
 
-    // ── eBPF program unit testing via BPF_PROG_TEST_RUN (kernel 4.12+) ──
-    //
-    // Run loaded eBPF programs with synthetic packet data without attaching
-    // to a real network interface. Useful for:
-    //   - Verifying packet classification logic
-    //   - Testing rule matching
-    //   - Benchmarking per-packet processing time
-    //
-    // Usage:
-    //   let test_pkt = build_syn_packet(src_ip, dst_ip, src_port, dst_port);
-    //   let result = prog.test_run(test_pkt, repeat=1000, ctx_in=None)?;
-    //   assert_eq!(result.return_val, XDP_DROP); // or TC_ACT_OK etc.
-    //   println!("Duration: {}ns per packet", result.duration / 1000);
-    //
-    // aya 0.14.0: Program::test_run() is available.
-    //
-    // TODO: add an eBPF unit test suite using test_run with crafted packets.
+    // A program is run against a crafted packet rather than only loaded:
+    // [`super::prog_test_run`] wraps `BPF_PROG_TEST_RUN`, and the harness in
+    // `tests/ebpf_prog_test_run.rs` pushes a packet through every entry
+    // program so a verifier rejection fails a test run rather than a deploy.
 
-    // TODO: BPF_MAP_FREEZE for read-only config maps.
-    //
-    // After populating static config maps at startup (e.g. AMP_PROTECT_CONFIG,
-    // RL_TIER_CONFIG), call `BPF_MAP_FREEZE` via `libc::syscall(SYS_bpf, BPF_MAP_FREEZE, ...)` to
-    // prevent any subsequent writes - this hardens against userspace-side map tampering after init.
-    //
-    // Blocked by: aya 0.14.0 exposes no public `Map::freeze()`; it freezes rodata maps
-    // internally only. The underlying kernel
-    // syscall is available since Linux 5.2 (BPF_MAP_FREEZE cmd). When aya adds freeze support,
-    // wire it here after each static map population. Maps that receive runtime updates
-    // (CONFIG_FLAGS, CT_CONFIG, DDOS_SYN_CONFIG, ICMP_CONFIG, QOS_PIPE_CONFIG, etc.) must NOT
-    // be frozen - only truly write-once maps are candidates.
+    // The maps written once at load are frozen behind that write: see
+    // [`super::map_freeze`], which also lists the maps that stay writable and
+    // why each one does.
 }
 
 /// How many times to retry an XDP attach that fails with `EBUSY`, and the

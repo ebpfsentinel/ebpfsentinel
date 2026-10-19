@@ -19,4 +19,5 @@ pub mod system;
 pub mod system_metrics;
 pub mod telemetry;
 pub mod threatintel;
+pub mod tls;
 pub mod warden;

@@ -799,8 +799,14 @@ impl EbpfProgramManager {
     /// When the root changes, a program loaded as a target would have to be
     /// attached and the old root detached, so the chain is rebuilt: every XDP
     /// program is unloaded and the wanted ones loaded again, root first. The
-    /// lookup maps are pinned, so the rules survive the rebuild; traffic
-    /// crosses the interfaces unfiltered for as long as it takes.
+    /// lookup maps are pinned, so the rules survive the rebuild.
+    ///
+    /// The interfaces are not left bare while it happens. The old root's
+    /// links are parked before it goes, so its program keeps answering for
+    /// every interface until the new root's attach takes the link over and
+    /// the kernel swaps the program under it. Only a kernel or an attach type
+    /// that refuses that swap falls back to the detach the agent did before,
+    /// and the fallback is counted and logged with the program named.
     ///
     /// Returns whether anything changed.
     pub async fn reconcile_xdp(&mut self, config: &AgentConfig) -> bool {
@@ -828,6 +834,17 @@ impl EbpfProgramManager {
             );
         }
 
+        // The root is the only program on an interface, so it is the only one
+        // whose links are worth keeping: the rest of the chain is reached by
+        // tail call and holds no hook. Parking them hands the interfaces to
+        // whatever attaches next instead of emptying them first.
+        if let Some(old_root) = loaded.first()
+            && wanted.first() != Some(old_root)
+            && let Some(handle) = self.programs.get_mut(*old_root)
+        {
+            adapters::ebpf::link_handover::park(handle.loader.take_links());
+        }
+
         // Leaves first, so no attached program tail-calls into one going away.
         for name in to_disable.iter().rev() {
             if let Err(e) = self.disable_xdp_program(name, config).await {
@@ -839,6 +856,15 @@ impl EbpfProgramManager {
             if let Err(e) = self.enable_xdp_program(name, config).await {
                 warn!(program = name, "XDP program enable failed: {e}");
             }
+        }
+        // Whatever no attach claimed is detached here: an interface the new
+        // root does not cover, or a chain that ends with nothing attached.
+        let released = adapters::ebpf::link_handover::release_parked();
+        if released > 0 {
+            info!(
+                links = released,
+                "XDP links released after the chain was rebuilt"
+            );
         }
         true
     }

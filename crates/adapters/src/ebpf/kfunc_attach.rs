@@ -26,6 +26,7 @@ use tracing::info;
 
 /// `bpf(2)` commands.
 const BPF_LINK_CREATE: u32 = 28;
+const BPF_LINK_UPDATE: u32 = 29;
 const BPF_MAP_UPDATE_ELEM: u32 = 2;
 const BPF_RAW_TRACEPOINT_OPEN: u32 = 17;
 
@@ -52,6 +53,21 @@ struct LinkCreateAttr {
     _pad: u32,
     expected_revision: u64,
     _tail: [u64; 4],
+}
+
+/// Subset of `union bpf_attr` for `BPF_LINK_UPDATE`.
+///
+/// `link_fd` (0), `new_prog_fd` (4), `flags` (8), `old_prog_fd` (12). The
+/// command swaps the program a live link runs without the link ever pointing
+/// at nothing, which is the only way a hook changes program with no window
+/// where a packet crosses an interface carrying none.
+#[repr(C)]
+#[derive(Default)]
+struct LinkUpdateAttr {
+    link_fd: u32,
+    new_prog_fd: u32,
+    flags: u32,
+    old_prog_fd: u32,
 }
 
 /// Subset of `union bpf_attr` for `BPF_RAW_TRACEPOINT_OPEN`.
@@ -96,6 +112,13 @@ pub enum KfuncAttachError {
         program: String,
         ifindex: u32,
         attach_type: u32,
+        errno: i32,
+        message: String,
+    },
+
+    #[error("BPF_LINK_UPDATE for `{program}`: errno={errno} {message}")]
+    LinkUpdate {
+        program: String,
         errno: i32,
         message: String,
     },
@@ -280,6 +303,49 @@ fn link_create(
     let raw = rc as RawFd;
     // SAFETY: rc >= 0 is a valid link fd owned by this process.
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+/// Point a live link at `new_prog_fd`, replacing the program it runs.
+///
+/// `BPF_LINK_UPDATE` is atomic in the kernel: the hook runs the old program
+/// until the command returns and the new one after it, and at no instant does
+/// it run neither. Not every attach type implements it - the kernel answers
+/// `EINVAL` or `EOPNOTSUPP` where the link type has no `update_prog`, and a
+/// program of a different type or a different device binding is refused the
+/// same way - so a caller treats the error as a reason to fall back rather
+/// than as a failure.
+pub fn link_update(
+    program: &str,
+    link_fd: RawFd,
+    new_prog_fd: RawFd,
+) -> Result<(), KfuncAttachError> {
+    let mut attr = LinkUpdateAttr {
+        #[allow(clippy::cast_sign_loss)]
+        link_fd: link_fd as u32,
+        #[allow(clippy::cast_sign_loss)]
+        new_prog_fd: new_prog_fd as u32,
+        // No `BPF_F_REPLACE`: the old program is whatever the link carries,
+        // and naming it would mean holding an fd on a program this process
+        // is in the middle of dropping.
+        flags: 0,
+        old_prog_fd: 0,
+    };
+    let rc = unsafe {
+        bpf(
+            BPF_LINK_UPDATE,
+            (&raw mut attr).cast(),
+            std::mem::size_of::<LinkUpdateAttr>(),
+        )
+    };
+    if rc < 0 {
+        let err = io::Error::last_os_error();
+        return Err(KfuncAttachError::LinkUpdate {
+            program: program.to_owned(),
+            errno: err.raw_os_error().unwrap_or(0),
+            message: err.to_string(),
+        });
+    }
+    Ok(())
 }
 
 // ── raw tracepoint attach ───────────────────────────────────────────────
@@ -645,7 +711,7 @@ pub fn resolve_symbol_offset(target: &str, symbol: &str) -> Result<u64, KfuncAtt
 }
 
 /// SAFETY wrapper: invoke `bpf(cmd, attr, size)`.
-unsafe fn bpf(cmd: u32, attr: *mut core::ffi::c_void, size: usize) -> i64 {
+pub(super) unsafe fn bpf(cmd: u32, attr: *mut core::ffi::c_void, size: usize) -> i64 {
     // SAFETY: caller passes a valid attr region of `size` bytes matching the
     // union member the kernel reads for `cmd`.
     unsafe {
@@ -673,6 +739,16 @@ mod tests {
         assert_eq!(std::ptr::from_ref(&a.flags) as usize - base, 12);
         assert_eq!(std::ptr::from_ref(&a.relative_fd) as usize - base, 16);
         assert_eq!(std::ptr::from_ref(&a.expected_revision) as usize - base, 24);
+    }
+
+    #[test]
+    fn link_update_attr_field_offsets_match_uapi() {
+        let a = LinkUpdateAttr::default();
+        let base = std::ptr::from_ref(&a) as usize;
+        assert_eq!(std::ptr::from_ref(&a.link_fd) as usize - base, 0);
+        assert_eq!(std::ptr::from_ref(&a.new_prog_fd) as usize - base, 4);
+        assert_eq!(std::ptr::from_ref(&a.flags) as usize - base, 8);
+        assert_eq!(std::ptr::from_ref(&a.old_prog_fd) as usize - base, 12);
     }
 
     #[test]

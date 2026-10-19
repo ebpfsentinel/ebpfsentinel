@@ -7,7 +7,7 @@
 /// after parsing vmlinux BTF. Used by `bpf_probe_read_kernel` to
 /// read kernel CT fields portably across kernel configs.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NfConnOffsets {
     /// Byte offset of `nf_conn.status` (`unsigned long`).
     pub status_offset: u32,

@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use domain::common::error::DomainError;
 use domain::flow::entity::FlowRecord;
 use domain::flow::siem;
-use infrastructure::config::{FlowTargetConfig, FlowTransport, SyslogSinkConfig};
+use infrastructure::config::{FlowTargetConfig, FlowTransport, PqMode, SyslogSinkConfig};
 use ports::secondary::flow_sink_port::{FlowSink, FlowSinkHealth};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, UdpSocket, lookup_host};
@@ -201,6 +201,7 @@ impl TextSink {
         hostname: &str,
         device_version: &str,
         sampling: u32,
+        pq_mode: PqMode,
     ) -> Result<Vec<Arc<Self>>, DomainError> {
         if !config.enabled {
             return Ok(Vec::new());
@@ -211,7 +212,7 @@ impl TextSink {
             .any(|target| target.transport() == FlowTransport::Tls);
         let tls = if needs_tls {
             let authority = config.ca_cert.as_deref().unwrap_or_default();
-            Some(Arc::new(client_config(Path::new(authority))?))
+            Some(Arc::new(client_config(Path::new(authority), pq_mode)?))
         } else {
             None
         };
@@ -379,7 +380,7 @@ fn host_of(address: &str) -> &str {
 /// syslog collector is an internal service, so naming its authority is the
 /// configuration, and an agent that would accept any certificate is an agent
 /// whose flow records go to whoever answers the port first.
-fn client_config(authority: &Path) -> Result<ClientConfig, DomainError> {
+fn client_config(authority: &Path, pq_mode: PqMode) -> Result<ClientConfig, DomainError> {
     let certificates: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(authority)
         .map_err(|error| {
             DomainError::EngineError(format!("failed to read '{}': {error}", authority.display()))
@@ -405,9 +406,17 @@ fn client_config(authority: &Path) -> Result<ClientConfig, DomainError> {
             authority.display()
         )));
     }
-    Ok(ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth())
+    // The hybrid group is offered first here too, so a collector that knows
+    // `X25519MLKEM768` gets it without the operator configuring anything. A
+    // collector that does not falls back to a classical group, because
+    // `require` is a statement about who may reach this agent rather than
+    // about who this agent may reach.
+    ClientConfig::builder_with_provider(crate::tls::client_provider(pq_mode))
+        .with_safe_default_protocol_versions()
+        .map_err(|error| {
+            DomainError::EngineError(format!("failed to build the TLS client policy: {error}"))
+        })
+        .map(|builder| builder.with_root_certificates(roots).with_no_client_auth())
 }
 
 impl FlowSink for TextSink {
@@ -600,8 +609,15 @@ mod tests {
     #[test]
     fn a_disabled_section_builds_no_sink() {
         let config = SyslogSinkConfig::default();
-        let sinks = TextSink::from_config(&config, TextFormat::Syslog, "node-1", "0.0.0-dev", 1)
-            .expect("a disabled section is not an error");
+        let sinks = TextSink::from_config(
+            &config,
+            TextFormat::Syslog,
+            "node-1",
+            "0.0.0-dev",
+            1,
+            PqMode::Prefer,
+        )
+        .expect("a disabled section is not an error");
         assert!(sinks.is_empty());
     }
 
@@ -617,8 +633,15 @@ mod tests {
             hostname: String::new(),
             ca_cert: None,
         };
-        let sinks = TextSink::from_config(&config, TextFormat::Cef, "node-7", "1.2.3", 100)
-            .expect("neither target needs an authority");
+        let sinks = TextSink::from_config(
+            &config,
+            TextFormat::Cef,
+            "node-7",
+            "1.2.3",
+            100,
+            PqMode::Prefer,
+        )
+        .expect("neither target needs an authority");
         assert_eq!(sinks.len(), 2);
         assert_eq!(sinks[0].name(), "cef-udp-collector-a:514");
         assert_eq!(sinks[1].name(), "cef-tcp-collector-b:601");
@@ -638,8 +661,15 @@ mod tests {
             hostname: "edge-3".to_string(),
             ca_cert: None,
         };
-        let sinks = TextSink::from_config(&config, TextFormat::Syslog, "node-7", "1.2.3", 1)
-            .expect("no authority is needed");
+        let sinks = TextSink::from_config(
+            &config,
+            TextFormat::Syslog,
+            "node-7",
+            "1.2.3",
+            1,
+            PqMode::Prefer,
+        )
+        .expect("no authority is needed");
         let frame = String::from_utf8(sinks[0].frame(&record())).expect("the frame is text");
         assert!(frame.contains(" edge-3 "), "{frame}");
     }
@@ -653,8 +683,14 @@ mod tests {
             hostname: String::new(),
             ca_cert: Some("/nonexistent/ca.pem".to_string()),
         };
-        let Err(error) = TextSink::from_config(&config, TextFormat::Syslog, "node-7", "1.2.3", 1)
-        else {
+        let Err(error) = TextSink::from_config(
+            &config,
+            TextFormat::Syslog,
+            "node-7",
+            "1.2.3",
+            1,
+            PqMode::Prefer,
+        ) else {
             panic!("an unreadable authority is a startup failure")
         };
         assert!(error.to_string().contains("/nonexistent/ca.pem"), "{error}");
@@ -665,7 +701,8 @@ mod tests {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let path = directory.path().join("ca.pem");
         std::fs::write(&path, b"not a certificate").expect("the file is written");
-        let error = client_config(&path).expect_err("a text file is not an authority");
+        let error =
+            client_config(&path, PqMode::Prefer).expect_err("a text file is not an authority");
         assert!(
             error.to_string().contains(&path.display().to_string()),
             "{error}"

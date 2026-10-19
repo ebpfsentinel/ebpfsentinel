@@ -80,6 +80,36 @@ pub trait FirewallMetrics: Send + Sync {
     /// worst kind of wrong figure because every figure beside it is right.
     fn set_ebpf_verifier_rejections(&self, _count: u64) {}
 
+    /// Set how many hooks changed program without ever being detached.
+    ///
+    /// A program replaced through `BPF_LINK_UPDATE` leaves no window in which
+    /// the interface carries nothing, so this counts the reloads a packet
+    /// could not cross unexamined.
+    fn set_ebpf_link_handovers(&self, _count: u64) {}
+
+    /// Set how many hooks had to be detached and attached again.
+    ///
+    /// The kernel refuses to update a link whose type has no replacement path,
+    /// and that fallback is the old behaviour: an interface bare for as long
+    /// as the attach takes. Zero is the figure an estate should see, which is
+    /// why it is published rather than only logged.
+    fn set_ebpf_link_handover_fallbacks(&self, _count: u64) {}
+
+    /// Set how many write-once maps are frozen.
+    ///
+    /// A map holding a reading of the running kernel is frozen behind its one
+    /// write, so this is the count of maps no later write can reach from
+    /// userspace.
+    fn set_ebpf_frozen_maps(&self, _count: u64) {}
+
+    /// Set how many freezes the kernel refused.
+    ///
+    /// `BPF_MAP_FREEZE` is refused where the command wants a capability a
+    /// token-only process does not hold. The map then stays writable, which
+    /// costs the protection and nothing else, so the refusal is published
+    /// rather than turned into a failed start.
+    fn set_ebpf_map_freeze_refusals(&self, _count: u64) {}
+
     /// Set how full one eBPF map is, in parts per thousand.
     ///
     /// Only the maps that refuse an insert when they are full are reported: an
@@ -222,6 +252,15 @@ pub trait ThreatIntelMetrics: Send + Sync {
     /// yielded, so how fresh each feed is and how much it holds can be read
     /// without its contents.
     fn record_threatintel_feed_loaded(&self, _feed_id: &str, _indicators: u64) {}
+
+    /// Observe how long a full reload of the indicator sets into the eBPF
+    /// maps took, in seconds, with the number of indicators it wrote.
+    ///
+    /// A reload replaces the whole set, so the datapath is matching against a
+    /// partly written table for exactly this long. It is the figure that says
+    /// whether a feed has outgrown the host, which no counter of indicators
+    /// can answer on its own.
+    fn observe_threatintel_reload(&self, _seconds: f64, _indicators: u64) {}
 }
 
 pub trait DnsMetrics: Send + Sync {

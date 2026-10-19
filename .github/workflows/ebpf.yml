@@ -59,6 +59,25 @@ jobs:
       - name: Build all eBPF kernel programs
         run: cargo xtask ebpf-build
 
+      # Loading a program is what asks the verifier, and nothing before this
+      # step has asked it. The harness loads every object just built and runs
+      # its entry program with BPF_PROG_TEST_RUN, so a rejection fails here
+      # rather than on a host. The build stays unprivileged and only the test
+      # binary is run as root, so the target directory keeps its owner.
+      - name: Run the entry programs against crafted packets
+        env:
+          EBPFSENTINEL_EBPF_DIR: ${{ github.workspace }}/target/bpfel-unknown-none/release
+        run: |
+          set -eu
+          binary="$(cargo test -p adapters --test ebpf_prog_test_run --no-run --message-format=json |
+            jq -r 'select(.executable != null and .target.name == "ebpf_prog_test_run") | .executable' |
+            tail -1)"
+          if [ -z "$binary" ]; then
+            echo "::error::cargo built no ebpf_prog_test_run binary"
+            exit 1
+          fi
+          sudo -E "$binary" --nocapture --test-threads=1
+
       - uses: actions/upload-artifact@v7
         with:
           name: ebpf-programs

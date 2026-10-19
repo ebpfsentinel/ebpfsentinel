@@ -144,20 +144,21 @@ const PROGRAM_COUNT: usize = SSL_UPROBES.len() + GO_TLS_PROGRAMS.len() + KTLS_PR
 /// read nothing and count every call unreadable, which is why it happens before
 /// [`DlpUprobeAttacher::attach_ktls`] rather than after.
 ///
+/// The map is frozen behind the write: the offsets are a reading of the
+/// running kernel, so nothing has a reason to write them twice, and a pinned
+/// map a second object finds already frozen is read back and compared rather
+/// than written again.
+///
 /// # Errors
 ///
 /// Returns an error if the map is absent - the object was built without the
-/// kernel TLS probes - or if the write fails.
+/// kernel TLS probes - if the write fails, or if a frozen map disagrees with
+/// the offsets being pushed.
 pub fn push_ktls_iter_offsets(
     ebpf: &mut dyn crate::ebpf::map_store::MapStore,
     offsets: ebpf_common::dlp::KtlsIterOffsets,
 ) -> anyhow::Result<()> {
-    let map = ebpf
-        .map_mut("KTLS_ITER_OFFSETS")
-        .ok_or_else(|| anyhow::anyhow!("KTLS_ITER_OFFSETS map not found"))?;
-    let mut arr = aya::maps::Array::<_, ebpf_common::dlp::KtlsIterOffsets>::try_from(map)?;
-    arr.set(0, offsets, 0)?;
-    Ok(())
+    crate::ebpf::map_freeze::push_once(ebpf, "KTLS_ITER_OFFSETS", offsets)
 }
 
 /// Push the socket member offsets resolved from the running kernel's BTF into
@@ -170,20 +171,18 @@ pub fn push_ktls_iter_offsets(
 /// then names no destination rather than a destination read from the wrong
 /// bytes.
 ///
+/// Frozen behind the write for the same reason as the iterator offsets.
+///
 /// # Errors
 ///
 /// Returns an error if the map is absent - the object was built without the
-/// kernel TLS probes - or if the write fails.
+/// kernel TLS probes - if the write fails, or if a frozen map disagrees with
+/// the offsets being pushed.
 pub fn push_sock_offsets(
     ebpf: &mut dyn crate::ebpf::map_store::MapStore,
     offsets: ebpf_common::dlp::SockOffsets,
 ) -> anyhow::Result<()> {
-    let map = ebpf
-        .map_mut("SOCK_OFFSETS")
-        .ok_or_else(|| anyhow::anyhow!("SOCK_OFFSETS map not found"))?;
-    let mut arr = aya::maps::Array::<_, ebpf_common::dlp::SockOffsets>::try_from(map)?;
-    arr.set(0, offsets, 0)?;
-    Ok(())
+    crate::ebpf::map_freeze::push_once(ebpf, "SOCK_OFFSETS", offsets)
 }
 
 /// A unique SSL library to attach the DLP uprobe set to.

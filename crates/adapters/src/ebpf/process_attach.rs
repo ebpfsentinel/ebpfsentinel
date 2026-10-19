@@ -193,8 +193,15 @@ mod tests {
         assert!(!s.command_line);
     }
 
+    /// The published status is one global, so the two tests that write it
+    /// take turns rather than reading each other's value.
+    static PUBLISHED: Mutex<()> = Mutex::new(());
+
     #[test]
     fn a_published_status_is_what_the_next_reader_gets() {
+        let _turn = PUBLISHED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let s = ProcessTracingStatus {
             attached: true,
             tracepoints: vec!["sched_process_exec".to_string()],
@@ -208,6 +215,9 @@ mod tests {
 
     #[test]
     fn an_attacher_with_no_links_detaches_without_touching_the_status() {
+        let _turn = PUBLISHED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let published = ProcessTracingStatus {
             attached: true,
             tracepoints: vec!["sched_process_exec".to_string()],

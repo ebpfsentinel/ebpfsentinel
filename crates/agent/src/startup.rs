@@ -1687,7 +1687,12 @@ pub async fn run(
     let grpc_tls = if config.agent.tls.enabled {
         let cert_pem = std::fs::read(&config.agent.tls.cert_path)?;
         let key_pem = std::fs::read(&config.agent.tls.key_path)?;
-        Some(GrpcTlsConfig { cert_pem, key_pem })
+        Some(GrpcTlsConfig {
+            cert_pem,
+            key_pem,
+            pq_mode: config.agent.tls.pq_mode,
+            allow_tls12: config.agent.tls.allow_tls12,
+        })
     } else {
         None
     };
@@ -3614,6 +3619,7 @@ pub async fn run(
                 &node_name,
                 env!("CARGO_PKG_VERSION"),
                 config.flow_export.sampling,
+                config.agent.tls.pq_mode,
             ) {
                 Ok(built) => sinks.extend(
                     built

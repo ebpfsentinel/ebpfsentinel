@@ -412,6 +412,22 @@ pub async fn run_datapath_state_loop(
         metrics.set_ebpf_attach_blocked(u64::try_from(blocked).unwrap_or(u64::MAX));
         metrics.set_ebpf_verifier_rejections(adapters::ebpf::kfunc_loader::verifier_rejections());
 
+        // Both figures are cumulative for the life of the process: a reload
+        // that replaced a program and one that could not are each worth the
+        // same attention later, and a counter reset at every tick would hide
+        // the second one between two scrapes.
+        let handover = adapters::ebpf::link_handover::stats();
+        metrics.set_ebpf_link_handovers(handover.handovers);
+        metrics.set_ebpf_link_handover_fallbacks(handover.fallbacks);
+
+        // A map is frozen once and stays frozen, so the first figure settles
+        // at what this kernel allowed and the second one says what it refused.
+        // The pair is what tells an estate whether the write-once maps are
+        // actually read-only here, which no log line survives long enough to.
+        let frozen = adapters::ebpf::map_freeze::frozen_maps().len();
+        metrics.set_ebpf_frozen_maps(u64::try_from(frozen).unwrap_or(u64::MAX));
+        metrics.set_ebpf_map_freeze_refusals(adapters::ebpf::map_freeze::refusals());
+
         for interface in &interfaces {
             match xdp_mode_of(interface) {
                 Some(mode) => metrics.set_xdp_attach_mode(interface, mode),
