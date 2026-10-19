@@ -534,21 +534,26 @@ impl Alert {
         }
     }
 
-    /// Create a critical alert when every enabled WAN gateway has gone down
-    /// (multi-WAN total-failure). `gateways` lists the down gateway names and
-    /// `timestamp_ns` is the wall-clock time of the transition.
-    pub fn wan_all_down(gateways: &[String], timestamp_ns: u64) -> Self {
-        let rule_id = RuleId("routing-wan-all-down".to_string());
-        let message = format!(
-            "all {} WAN gateway(s) down: {}",
-            gateways.len(),
-            gateways.join(", ")
-        );
+    /// Create an alert about the agent itself rather than about traffic.
+    ///
+    /// Every address, port and protocol field is zero and stays zero: this is
+    /// not a flow, and filling those in with something plausible would put a
+    /// packet that never existed in front of an analyst. `component` is the
+    /// subsystem that noticed, `rule_id` is the stable identifier an operator
+    /// filters and alerts on, and `message` is what went wrong in one line.
+    pub fn operational(
+        component: &str,
+        rule_id: &str,
+        severity: Severity,
+        message: String,
+        timestamp_ns: u64,
+    ) -> Self {
+        let rule_id = RuleId(rule_id.to_string());
         Self {
             id: Self::generate_id(timestamp_ns, &rule_id),
             timestamp_ns,
-            component: "routing".to_string(),
-            severity: Severity::Critical,
+            component: component.to_string(),
+            severity,
             rule_id,
             action: DomainMode::Alert,
             src_addr: [0; 4],
@@ -597,6 +602,23 @@ impl Alert {
             flow_source: None,
             workload: None,
         }
+    }
+
+    /// Create a critical alert when every enabled WAN gateway has gone down
+    /// (multi-WAN total-failure). `gateways` lists the down gateway names and
+    /// `timestamp_ns` is the wall-clock time of the transition.
+    pub fn wan_all_down(gateways: &[String], timestamp_ns: u64) -> Self {
+        Self::operational(
+            "routing",
+            "routing-wan-all-down",
+            Severity::Critical,
+            format!(
+                "all {} WAN gateway(s) down: {}",
+                gateways.len(),
+                gateways.join(", ")
+            ),
+            timestamp_ns,
+        )
     }
 
     /// Create an alert from a packet-level security event (firewall, ratelimit, L7, IPS).
@@ -1441,5 +1463,39 @@ mod id_uniqueness_tests {
     fn the_id_still_starts_with_timestamp_and_rule() {
         let id = Alert::generate_id(42, &RuleId("ids-001".to_string()));
         assert!(id.starts_with("42-ids-001-"), "unexpected id shape: {id}");
+    }
+}
+
+#[cfg(test)]
+mod operational_tests {
+    use super::*;
+
+    #[test]
+    fn an_alert_about_the_agent_carries_no_flow() {
+        let alert = Alert::operational(
+            "routing",
+            "routing-wan-all-down",
+            Severity::Critical,
+            "every gateway is down".to_string(),
+            1_000,
+        );
+        assert_eq!(alert.src_addr, [0; 4]);
+        assert_eq!(alert.dst_addr, [0; 4]);
+        assert_eq!(alert.src_port, 0);
+        assert_eq!(alert.dst_port, 0);
+        assert_eq!(alert.protocol, 0);
+        assert!(!alert.is_ipv6);
+        assert!(alert.mitre_attack.is_none(), "no technique produced this");
+        assert_eq!(alert.action, DomainMode::Alert);
+    }
+
+    #[test]
+    fn the_gateway_alert_is_the_operational_one_it_always_was() {
+        let alert = Alert::wan_all_down(&["gw0".to_string(), "gw1".to_string()], 7);
+        assert_eq!(alert.component, "routing");
+        assert_eq!(alert.rule_id.0, "routing-wan-all-down");
+        assert_eq!(alert.severity, Severity::Critical);
+        assert_eq!(alert.message, "all 2 WAN gateway(s) down: gw0, gw1");
+        assert_eq!(alert.timestamp_ns, 7);
     }
 }
