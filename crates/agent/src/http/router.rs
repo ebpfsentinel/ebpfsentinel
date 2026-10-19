@@ -82,7 +82,9 @@ use super::dns_handler::{
 };
 use super::domain_handler::{add_to_blocklist, list_domain_reputations, remove_from_blocklist};
 use super::fingerprint_handler::{fingerprint_summary, ja4s_summary};
-use super::firewall_handler::{create_rule, delete_rule, list_rules};
+use super::firewall_handler::{
+    create_rule, delete_rule, list_rules, list_workload_rules, workload_reach,
+};
 use super::geoip_handler::{geoip_lookup, geoip_status};
 use super::health_handler::{healthz, readyz};
 use super::ids_handler::{ids_status, list_ids_rules};
@@ -253,6 +255,8 @@ pub fn build_router(
             .route("/api/v1/agent/identity", get(agent_identity))
             .route("/api/v1/firewall/rules", get(list_rules))
             .route("/api/v1/firewall/l7-rules", get(list_l7_rules))
+            .route("/api/v1/firewall/workload/reach", get(workload_reach))
+            .route("/api/v1/firewall/workload/rules", get(list_workload_rules))
             .route("/api/v1/ips/rules", get(list_ips_rules))
             .route("/api/v1/ips/blacklist", get(list_ips_blacklist))
             .route("/api/v1/ips/domain-blocks", get(list_ips_domain_blocks))

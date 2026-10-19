@@ -126,6 +126,13 @@ pub trait AlertMetrics: Send + Sync {
     /// Record an alert for per-rule counting (enables FP rate computation).
     fn record_alert_by_rule(&self, _component: &str, _rule_id: &str) {}
 
+    /// Add what a workload firewall rule refused since the last reading.
+    ///
+    /// A count rather than an increment, because the figure is read out of
+    /// the kernel's own per-rule array: the caller holds the previous
+    /// reading and passes the difference.
+    fn record_workload_denials(&self, _rule_id: &str, _enforced: bool, _count: u64) {}
+
     /// Record an alert against the country its source address resolved to:
     /// an upper-case ISO 3166-1 alpha-2 code, or `unknown` when it resolved
     /// to none. Called once for every alert `record_alert` counts, so the two

@@ -107,8 +107,33 @@ pub const WORKLOAD_METRIC_WOULD_REFUSE: u32 = 5;
 pub const WORKLOAD_METRIC_UNRESOLVED: u32 = 6;
 /// Metric index: operations by a named workload that no rule spoke about.
 pub const WORKLOAD_METRIC_NO_RULE: u32 = 7;
+/// Metric index: denial records the ring buffer had no room for.
+///
+/// The decision is taken whatever happens to the record, so a lost one costs
+/// an alert and never a refusal. It is counted here rather than inferred from
+/// a gap, because the per-rule counters are exact and a reader comparing them
+/// against the alerts needs the difference to have a name.
+pub const WORKLOAD_METRIC_EVENT_LOST: u32 = 8;
 /// How many counters the metrics array holds.
-pub const WORKLOAD_METRIC_COUNT: u32 = 8;
+pub const WORKLOAD_METRIC_COUNT: u32 = 9;
+
+/// `hook` on a denial record: the workload was connecting.
+pub const WORKLOAD_HOOK_CONNECT: u8 = 0;
+/// `hook` on a denial record: the workload was sending a datagram with no
+/// connection.
+pub const WORKLOAD_HOOK_SENDMSG: u8 = 1;
+/// `hook` on a denial record: the workload was taking a local address.
+pub const WORKLOAD_HOOK_BIND: u8 = 2;
+
+/// Size of `WORKLOAD_EVENTS`, the ring buffer denial records travel in.
+///
+/// A record is forty-eight bytes and only a refusal writes one, so sixty-four
+/// kilobytes is well over a thousand denials in flight: the buffer is sized
+/// for a policy turned on against a workload that then retries in a loop,
+/// which is the one shape that produces denials faster than userspace reads
+/// them. Past that the records are dropped and counted, never queued in the
+/// kernel at the cost of the syscall.
+pub const WORKLOAD_EVENTS_RINGBUF_BYTES: u32 = 16 * 4_096;
 
 /// One workload rule, in the form the kernel walks.
 ///
@@ -154,6 +179,49 @@ pub struct WorkloadRuleEntry {
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for WorkloadRuleEntry {}
 
+/// One refusal, as the kernel half writes it down.
+///
+/// It carries what the hook knew and nothing it would have had to go and look
+/// up: the rule's slot, the destination, the calling task and the cgroup.
+/// Userspace turns the slot into the rule's own identifier and the task into
+/// the workload's name, because both of those are readings it already holds
+/// and neither is something a socket hook can do.
+///
+/// `enforced` is what separates a connection that failed from one that would
+/// have: an observing rule writes the same record with it clear, so the alert
+/// an operator reads before turning a policy on is the alert they will read
+/// after.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WorkloadDenialEvent {
+    /// `bpf_ktime_get_boot_ns` at the hook.
+    pub at_ns: u64,
+    /// The cgroup the calling task sat in.
+    pub cgroup_id: u64,
+    /// Destination network address, host-order words, IPv4 in word zero.
+    pub dst_addr: [u32; 4],
+    /// Thread group id of the caller.
+    pub tgid: u32,
+    /// Effective user id of the caller.
+    pub uid: u32,
+    /// Destination port, host order.
+    pub dst_port: u16,
+    /// Which slot of `WORKLOAD_RULES` refused, which is the rule's position
+    /// among the enabled rules userspace published.
+    pub rule: u16,
+    /// `WORKLOAD_FAMILY_IPV4` or `WORKLOAD_FAMILY_IPV6`.
+    pub family: u8,
+    /// IP protocol as the kernel numbers it.
+    pub protocol: u8,
+    /// `WORKLOAD_HOOK_*`.
+    pub hook: u8,
+    /// One when the syscall was refused, zero when the rule only observes.
+    pub enforced: u8,
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for WorkloadDenialEvent {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +246,31 @@ mod tests {
     }
 
     #[test]
+    fn the_denial_record_is_the_size_both_sides_compiled_against() {
+        assert_eq!(mem::size_of::<WorkloadDenialEvent>(), 48);
+        assert_eq!(mem::align_of::<WorkloadDenialEvent>(), 8);
+    }
+
+    #[test]
+    fn a_rule_slot_fits_the_field_that_carries_it_back() {
+        // The record names the slot in sixteen bits; a rule ceiling past that
+        // would be a denial attributed to the wrong rule.
+        assert!(WORKLOAD_POLICY_MAX_RULES <= usize::from(u16::MAX));
+    }
+
+    #[test]
+    fn every_hook_is_distinct_and_named() {
+        let hooks = [
+            WORKLOAD_HOOK_CONNECT,
+            WORKLOAD_HOOK_SENDMSG,
+            WORKLOAD_HOOK_BIND,
+        ];
+        for (position, hook) in hooks.iter().enumerate() {
+            assert_eq!(usize::from(*hook), position);
+        }
+    }
+
+    #[test]
     fn every_metric_index_is_inside_the_array_and_distinct() {
         let indices = [
             WORKLOAD_METRIC_CONNECT,
@@ -188,6 +281,7 @@ mod tests {
             WORKLOAD_METRIC_WOULD_REFUSE,
             WORKLOAD_METRIC_UNRESOLVED,
             WORKLOAD_METRIC_NO_RULE,
+            WORKLOAD_METRIC_EVENT_LOST,
         ];
         assert_eq!(indices.len(), WORKLOAD_METRIC_COUNT as usize);
         for (position, index) in indices.iter().enumerate() {

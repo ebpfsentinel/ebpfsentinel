@@ -14,9 +14,25 @@ pub const ALERT_CHANNEL_CAPACITY: usize = 1_000;
 pub const CONFIG_BROADCAST_CAPACITY: usize = 16;
 pub const MAP_UPDATE_CHANNEL_CAPACITY: usize = 256;
 
+/// How many workload firewall refusals wait between the ring buffer and the
+/// alert they become.
+///
+/// Smaller than the alert channel on purpose: a refusal is one socket
+/// operation rather than a packet, and a backlog deep enough to outlive the
+/// policy that named its slots would turn into alerts about the wrong rule.
+pub const WORKLOAD_DENIAL_CHANNEL_CAPACITY: usize = 256;
+
 // ── Timeouts ───────────────────────────────────────────────────────
 
 pub const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often the per-rule refusal counters are read out of the kernel.
+///
+/// The counters are exact and cumulative, so the interval decides how fresh a
+/// scrape is and nothing else: a reading missed is a reading folded into the
+/// next one. Ten seconds is shorter than any sensible scrape interval and long
+/// enough that a policy at its ceiling costs one map walk a tick.
+pub const WORKLOAD_DENIAL_READ_INTERVAL: Duration = Duration::from_secs(10);
 
 /// How long the stop sequence waits for running packet captures to close their
 /// files after being asked to stop.
@@ -124,6 +140,7 @@ mod tests {
         assert!(ALERT_CHANNEL_CAPACITY > 0);
         assert!(CONFIG_BROADCAST_CAPACITY > 0);
         assert!(MAP_UPDATE_CHANNEL_CAPACITY > 0);
+        assert!(WORKLOAD_DENIAL_CHANNEL_CAPACITY > 0);
     }
 
     #[test]

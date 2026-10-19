@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use axum::Extension;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use domain::auth::entity::JwtClaims;
 use domain::common::entity::{Protocol, RuleId};
 use domain::firewall::entity::{FirewallAction, FirewallRule, IpCidr, IpNetwork, PortRange, Scope};
+use domain::firewall::workload::WorkloadMode;
 use infrastructure::config::{group_mask_words, parse_cidr};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -578,6 +579,240 @@ pub async fn delete_rule(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ── Workload reach ──────────────────────────────────────────────────
+
+/// What a workload is asked about, when it is not a running task.
+///
+/// Four of the five facts a selector can be written against are typed here,
+/// because the question is asked before the workload exists as often as
+/// after: an operator writing a rule wants to know what the policy would do
+/// to a unit that is not running yet.
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+pub struct WorkloadReachQuery {
+    /// Answer for the task carrying this pid, reading its facts out of the
+    /// process table. Every other parameter is ignored when it is given.
+    pub pid: Option<u32>,
+    /// Absolute path of the executable.
+    pub exe: Option<String>,
+    /// systemd unit, such as `nginx.service`.
+    pub unit: Option<String>,
+    /// Container id, in full.
+    pub container_id: Option<String>,
+    /// Container name, as the runtime enricher reads it.
+    pub container_name: Option<String>,
+}
+
+/// One rule naming the workload, and what it has refused.
+#[derive(Serialize, ToSchema)]
+pub struct WorkloadReachEntry {
+    pub rule: String,
+    /// Whether the rule lets the destination through.
+    pub allows: bool,
+    /// `enforce` when the kernel refuses, `observe` when it only counts.
+    pub mode: String,
+    /// The selector written out, as the rule names the workload.
+    pub selector: String,
+    /// The destination half of the match, written out.
+    pub destination: String,
+    /// How many socket operations this rule has refused since it was
+    /// published, counted by the kernel.
+    pub denials: u64,
+}
+
+/// The answer to "what may this workload reach".
+#[derive(Serialize, ToSchema)]
+pub struct WorkloadReachResponse {
+    /// The facts the rules were matched against, after the process table
+    /// filled in whatever the caller did not give.
+    pub exe: Option<String>,
+    pub unit: Option<String>,
+    pub cgroup: Option<String>,
+    pub container_id: Option<String>,
+    pub container_name: Option<String>,
+    /// Whether any rule in force has the kernel refuse rather than count.
+    pub enforcing: bool,
+    /// Every rule naming this workload, in the order the kernel walks them.
+    /// The first one admitting the destination decides, so a rule low in
+    /// this list is a rule something above it may never reach.
+    pub rules: Vec<WorkloadReachEntry>,
+}
+
+/// The workload rules in force, each with what it has refused.
+#[derive(Serialize, ToSchema)]
+pub struct WorkloadRulesResponse {
+    /// Whether any rule in force has the kernel refuse rather than count.
+    pub enforcing: bool,
+    /// Every rule in force, in the order the kernel walks them.
+    pub rules: Vec<WorkloadReachEntry>,
+}
+
+/// `GET /api/v1/firewall/workload/rules` - the workload rules in force and
+/// what each has refused.
+#[utoipa::path(
+    get, path = "/api/v1/firewall/workload/rules",
+    tag = "Firewall",
+    responses(
+        (status = 200, description = "The workload rules in force, in kernel order", body = WorkloadRulesResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 503, description = "The workload firewall is not loaded", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn list_workload_rules(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<WorkloadRulesResponse>, ApiError> {
+    let Some(service) = state.workload_policy_service.load_full() else {
+        return Err(ApiError::ServiceUnavailable {
+            message: "the workload firewall is not loaded, so no rule is in force".to_string(),
+        });
+    };
+
+    let rules = service
+        .rules_in_force()
+        .map_err(|e| ApiError::Internal {
+            message: format!("the refusal counters could not be read: {e}"),
+        })?
+        .into_iter()
+        .map(entry_of)
+        .collect();
+
+    Ok(Json(WorkloadRulesResponse {
+        enforcing: service.enforces(),
+        rules,
+    }))
+}
+
+/// One rule as the API writes it, with the mode spelled out.
+fn entry_of(reach: domain::firewall::workload::WorkloadReach) -> WorkloadReachEntry {
+    WorkloadReachEntry {
+        rule: reach.rule.0,
+        allows: reach.allows,
+        mode: if reach.mode == WorkloadMode::Enforce {
+            "enforce"
+        } else {
+            "observe"
+        }
+        .to_string(),
+        selector: reach.selector,
+        destination: reach.destination,
+        denials: reach.denials,
+    }
+}
+
+/// `GET /api/v1/firewall/workload/reach` - what the workload policy lets a
+/// workload reach.
+#[utoipa::path(
+    get, path = "/api/v1/firewall/workload/reach",
+    tag = "Firewall",
+    params(WorkloadReachQuery),
+    responses(
+        (status = 200, description = "Rules naming the workload, in kernel order", body = WorkloadReachResponse),
+        (status = 400, description = "No workload named", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "No such task in the process table", body = ErrorBody),
+        (status = 503, description = "The workload firewall is not loaded", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn workload_reach(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<WorkloadReachQuery>,
+) -> Result<Json<WorkloadReachResponse>, ApiError> {
+    let Some(service) = state.workload_policy_service.load_full() else {
+        return Err(ApiError::ServiceUnavailable {
+            message: "the workload firewall is not loaded, so no rule names any workload"
+                .to_string(),
+        });
+    };
+
+    let resolved = resolve_workload(&state, &service, &query)?;
+    let facts = resolved.facts();
+    let rules = service
+        .reach_for(&facts)
+        .map_err(|e| ApiError::Internal {
+            message: format!("the refusal counters could not be read: {e}"),
+        })?
+        .into_iter()
+        .map(entry_of)
+        .collect();
+
+    Ok(Json(WorkloadReachResponse {
+        exe: resolved.exe.clone(),
+        unit: resolved.unit.clone(),
+        cgroup: resolved.cgroup.clone(),
+        container_id: resolved.container_id.clone(),
+        container_name: resolved.container_name.clone(),
+        enforcing: service.enforces(),
+        rules,
+    }))
+}
+
+/// Turn the query into the facts a selector is matched against.
+///
+/// A pid is read out of the process table rather than trusted, because the
+/// unit and the container of a running task are what the kernel matched it
+/// against and a caller retyping them is a caller asking about a workload
+/// that does not exist.
+fn resolve_workload(
+    state: &AppState,
+    service: &application::workload_policy_service::WorkloadPolicyService,
+    query: &WorkloadReachQuery,
+) -> Result<application::workload_policy_service::ResolvedWorkload, ApiError> {
+    if let Some(pid) = query.pid {
+        let Some(table) = state.process_table_service.load_full() else {
+            return Err(ApiError::ServiceUnavailable {
+                message: "the process table is not running, so a pid names no workload".to_string(),
+            });
+        };
+        let Some(entry) = table.get(pid) else {
+            return Err(ApiError::NotFound {
+                code: "PROCESS_NOT_FOUND",
+                message: format!("no task {pid} in the process table"),
+            });
+        };
+        return Ok(service.resolve(&entry));
+    }
+
+    facts_from_query(query)
+}
+
+/// The facts a caller typed, refused when they named no workload at all.
+///
+/// An empty query is the shape that would otherwise answer with every rule
+/// carrying a selector nothing constrains, which reads like a policy about
+/// this workload rather than a question nobody asked.
+fn facts_from_query(
+    query: &WorkloadReachQuery,
+) -> Result<application::workload_policy_service::ResolvedWorkload, ApiError> {
+    let resolved = application::workload_policy_service::ResolvedWorkload {
+        exe: query.exe.clone(),
+        unit: query.unit.clone(),
+        cgroup: None,
+        container_id: query.container_id.clone(),
+        container_name: query.container_name.clone(),
+    };
+    if resolved.exe.is_none()
+        && resolved.unit.is_none()
+        && resolved.container_id.is_none()
+        && resolved.container_name.is_none()
+    {
+        return Err(ApiError::BadRequest {
+            code: "WORKLOAD_NOT_NAMED",
+            message: "name the workload with pid, exe, unit, container_id or container_name"
+                .to_string(),
+        });
+    }
+    Ok(resolved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -869,5 +1104,34 @@ mod tests {
         resp.interfaces = vec!["!wan".to_string()];
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["interfaces"], serde_json::json!(["!wan"]));
+    }
+
+    #[test]
+    fn a_question_naming_no_workload_is_refused_rather_than_answered_about_every_rule() {
+        let refused = facts_from_query(&WorkloadReachQuery::default());
+
+        assert!(matches!(
+            refused,
+            Err(ApiError::BadRequest {
+                code: "WORKLOAD_NOT_NAMED",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_workload_named_by_one_fact_is_asked_about_on_that_fact_alone() {
+        // The cgroup is deliberately not typeable: it is what the kernel
+        // matched a running task against, and a caller writing one by hand
+        // is describing a task that does not exist.
+        let resolved = facts_from_query(&WorkloadReachQuery {
+            unit: Some("nginx.service".to_string()),
+            ..WorkloadReachQuery::default()
+        })
+        .expect("a unit names a workload");
+
+        assert_eq!(resolved.unit.as_deref(), Some("nginx.service"));
+        assert!(resolved.exe.is_none());
+        assert!(resolved.cgroup.is_none());
     }
 }

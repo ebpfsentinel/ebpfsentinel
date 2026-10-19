@@ -61,7 +61,8 @@ use domain::ratelimit::engine::RateLimitEngine;
 use domain::threatintel::engine::ThreatIntelEngine;
 use infrastructure::config::AgentConfig;
 use infrastructure::constants::{
-    ALERT_CHANNEL_CAPACITY, CAPTURE_STOP_TIMEOUT, EVENT_CHANNEL_CAPACITY, GRACEFUL_SHUTDOWN_TIMEOUT,
+    ALERT_CHANNEL_CAPACITY, CAPTURE_STOP_TIMEOUT, EVENT_CHANNEL_CAPACITY,
+    GRACEFUL_SHUTDOWN_TIMEOUT, WORKLOAD_DENIAL_CHANNEL_CAPACITY, WORKLOAD_DENIAL_READ_INTERVAL,
 };
 use infrastructure::logging::init_logging;
 use infrastructure::retry::RetryConfig;
@@ -2543,7 +2544,7 @@ pub async fn run(
         } else {
             let outcome = try_load_cgroup_workload_firewall(&ebpf_dir, &config);
             let refused = match outcome {
-                Ok((loader, metrics_rdr, manager, attacher, status)) if status.attached => {
+                Ok((loader, metrics_rdr, manager, reader, attacher, status)) if status.attached => {
                     workload_firewall_attacher = Some(attacher);
                     if let Some(rdr) = metrics_rdr {
                         metrics_readers.push(rdr);
@@ -2560,6 +2561,97 @@ pub async fn run(
                     // The rules go in before the table starts naming tasks,
                     // so no task is resolved against an empty rule array.
                     service.apply(workload_policy.clone())?;
+
+                    // Every refusal becomes an alert naming the rule that
+                    // refused it. The record carries a slot rather than a
+                    // rule identifier, because the kernel walks an array,
+                    // so the policy in force is what turns one into the
+                    // other and a record that crossed a reload is dropped
+                    // rather than named after whoever inherited its slot.
+                    let (denial_tx, mut denial_rx) =
+                        mpsc::channel::<domain::firewall::workload::WorkloadDenialRecord>(
+                            WORKLOAD_DENIAL_CHANNEL_CAPACITY,
+                        );
+                    let rb_obs = RingBufObserver::new(
+                        adapters::ebpf::workload_event_reader::RINGBUF_SOURCE,
+                        Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+                    );
+                    let reader_cancel = workload_cancel.clone();
+                    tokio::spawn(async move {
+                        reader.run(denial_tx, reader_cancel, rb_obs).await;
+                    });
+                    let naming = Arc::clone(&service);
+                    let denial_alert_tx = alert_tx.clone();
+                    tokio::spawn(async move {
+                        while let Some(record) = denial_rx.recv().await {
+                            let Some(denial) = naming.name_denial(record) else {
+                                continue;
+                            };
+                            // The task is named by the pipeline, off the
+                            // thread group the hook reported: a socket hook
+                            // has no flow to look the workload up by.
+                            let alert =
+                                domain::alert::entity::Alert::from_workload_denial(&denial, None);
+                            if denial_alert_tx
+                                .send(application::alert_event::AlertEvent::WorkloadDenial(
+                                    Box::new(alert),
+                                ))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+
+                    // The per-rule counters are the kernel's own and are
+                    // read rather than counted off the records, because the
+                    // ring can drop one under load and a security count
+                    // that quietly loses a refusal is worse than none. What
+                    // goes to Prometheus is the difference between two
+                    // readings, and a rule whose count went backwards was
+                    // republished rather than refused a negative number of
+                    // times.
+                    let counting = Arc::clone(&service);
+                    let counter_metrics = Arc::clone(&metrics) as Arc<dyn MetricsPort>;
+                    let counter_cancel = workload_cancel.clone();
+                    tokio::spawn(async move {
+                        use std::collections::HashMap;
+
+                        let mut seen: HashMap<String, u64> = HashMap::new();
+                        let mut ticker = tokio::time::interval(WORKLOAD_DENIAL_READ_INTERVAL);
+                        loop {
+                            tokio::select! {
+                                () = counter_cancel.cancelled() => break,
+                                _ = ticker.tick() => {}
+                            }
+                            let counts = match counting.denials_by_rule() {
+                                Ok(counts) => counts,
+                                Err(e) => {
+                                    warn!("workload denial counters unreadable: {e}");
+                                    continue;
+                                }
+                            };
+                            let enforcing = counting.policy();
+                            for (rule, total) in counts {
+                                let previous = seen.get(&rule.0).copied().unwrap_or(0);
+                                let delta = total.saturating_sub(previous);
+                                seen.insert(rule.0.clone(), total);
+                                if delta == 0 {
+                                    continue;
+                                }
+                                let enforced = enforcing
+                                    .rules()
+                                    .iter()
+                                    .find(|candidate| candidate.id == rule)
+                                    .is_some_and(
+                                        domain::firewall::workload::WorkloadRule::enforces,
+                                    );
+                                counter_metrics.record_workload_denials(&rule.0, enforced, delta);
+                            }
+                        }
+                    });
+
                     workload_policy_service = Some(service);
                     managed.push(("cgroup_workload_firewall", loader, workload_cancel.clone()));
                     metrics.set_ebpf_program_status("cgroup_workload_firewall", true);
@@ -2570,7 +2662,7 @@ pub async fn run(
                     );
                     None
                 }
-                Ok((_, _, _, _, status)) => Some(
+                Ok((_, _, _, _, _, status)) => Some(
                     status
                         .reason
                         .unwrap_or_else(|| "the kernel refused the attach".to_string()),
@@ -3072,6 +3164,13 @@ pub async fn run(
         }
         Arc::new(tokio::sync::Mutex::new(mgr))
     };
+
+    // The screen and the command answering "what may this workload reach"
+    // read the policy in force rather than the document, because a rule the
+    // kernel refused to take is a rule that answers nothing.
+    if let Some(ref workload) = workload_policy_service {
+        app_state.install_workload_policy_service(Arc::clone(workload));
+    }
 
     // The workload policy goes through the same reload path as every other
     // rule set, and only where the hooks are there to carry it out: a reload
@@ -4999,8 +5098,8 @@ pub fn try_load_cgroup_attribution(
 /// Load the workload firewall and attach its six cgroup hooks.
 ///
 /// Returns the loader, the counters, the map manager the policy is written
-/// through, the attacher holding the links, and what can be said about the
-/// result. A kernel that refuses the attach comes back as a status carrying
+/// through, the reader draining the refusals, the attacher holding the links,
+/// and what can be said about the result. A kernel that refuses the attach comes back as a status carrying
 /// the reason rather than as an error, because whether that is survivable is
 /// the policy's business and not this function's: a policy that only observes
 /// runs on, and one that refuses stops the agent at the caller.
@@ -5015,6 +5114,7 @@ pub fn try_load_cgroup_workload_firewall(
     EbpfLoader,
     Option<MetricsReader>,
     adapters::ebpf::workload_policy_map_manager::WorkloadPolicyMapManager,
+    adapters::ebpf::WorkloadEventReader,
     adapters::ebpf::workload_firewall_attach::WorkloadFirewallAttacher,
     adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus,
 )> {
@@ -5027,6 +5127,7 @@ pub fn try_load_cgroup_workload_firewall(
     let manager = adapters::ebpf::workload_policy_map_manager::WorkloadPolicyMapManager::new(
         loader.ebpf_mut(),
     )?;
+    let reader = adapters::ebpf::WorkloadEventReader::new(loader.ebpf_mut())?;
 
     // Same posture as the attribution hooks: rootless, the agent dropped the
     // capability the cgroup attach needs and the warden resolves the path.
@@ -5035,7 +5136,7 @@ pub fn try_load_cgroup_workload_firewall(
         attacher = attacher.with_warden_socket(sock);
     }
     let status = attacher.attach_all(&loader, &config.attribution.cgroup_root);
-    Ok((loader, metrics_rdr, manager, attacher, status))
+    Ok((loader, metrics_rdr, manager, reader, attacher, status))
 }
 
 /// Load the process-tracing object and attach its two tracepoints.

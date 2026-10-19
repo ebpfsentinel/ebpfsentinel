@@ -30,18 +30,22 @@
 #![no_main]
 
 use aya_ebpf::{
-    btf_maps::{Array, HashMap, LruHashMap, PerCpuArray},
-    helpers::{bpf_get_current_cgroup_id, bpf_get_current_pid_tgid},
+    btf_maps::{Array, HashMap, LruHashMap, PerCpuArray, RingBuf},
+    helpers::{
+        bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_get_current_uid_gid,
+        bpf_ktime_get_boot_ns,
+    },
     macros::{btf_map, cgroup_sock_addr},
     programs::SockAddrContext,
 };
 use ebpf_common::workload_policy::{
-    WORKLOAD_ACTION_DENY, WORKLOAD_FAMILY_ANY, WORKLOAD_FAMILY_IPV4, WORKLOAD_FAMILY_IPV6,
+    WORKLOAD_ACTION_DENY, WORKLOAD_EVENTS_RINGBUF_BYTES, WORKLOAD_FAMILY_ANY, WORKLOAD_FAMILY_IPV4,
+    WORKLOAD_FAMILY_IPV6, WORKLOAD_HOOK_BIND, WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_SENDMSG,
     WORKLOAD_METRIC_ALLOWED, WORKLOAD_METRIC_BIND, WORKLOAD_METRIC_CONNECT, WORKLOAD_METRIC_COUNT,
-    WORKLOAD_METRIC_NO_RULE, WORKLOAD_METRIC_REFUSED, WORKLOAD_METRIC_SENDMSG,
-    WORKLOAD_METRIC_UNRESOLVED, WORKLOAD_METRIC_WOULD_REFUSE, WORKLOAD_MODE_ENFORCE,
-    WORKLOAD_POLICY_MAX_CGROUPS, WORKLOAD_POLICY_MAX_RULES, WORKLOAD_POLICY_MAX_TASKS,
-    WORKLOAD_PROTOCOL_ANY, WorkloadRuleEntry,
+    WORKLOAD_METRIC_EVENT_LOST, WORKLOAD_METRIC_NO_RULE, WORKLOAD_METRIC_REFUSED,
+    WORKLOAD_METRIC_SENDMSG, WORKLOAD_METRIC_UNRESOLVED, WORKLOAD_METRIC_WOULD_REFUSE,
+    WORKLOAD_MODE_ENFORCE, WORKLOAD_POLICY_MAX_CGROUPS, WORKLOAD_POLICY_MAX_RULES,
+    WORKLOAD_POLICY_MAX_TASKS, WORKLOAD_PROTOCOL_ANY, WorkloadDenialEvent, WorkloadRuleEntry,
 };
 use ebpf_helpers::increment_metric;
 
@@ -81,6 +85,26 @@ static WORKLOAD_TASK_SELECTORS: LruHashMap<u32, u64, { WORKLOAD_POLICY_MAX_TASKS
 #[btf_map]
 static WORKLOAD_METRICS: PerCpuArray<u64, { WORKLOAD_METRIC_COUNT as usize }> = PerCpuArray::new();
 
+/// How many operations each rule refused, per CPU, one slot per rule.
+///
+/// It sits beside the ring buffer rather than being counted off it: a record
+/// the buffer had no room for is a denial that happened, and a per-rule
+/// figure that drops the overflow is a figure an operator would read as a
+/// policy that stopped matching. The counter is the count, the ring is the
+/// detail, and the first is exact.
+#[btf_map]
+static WORKLOAD_RULE_DENIALS: PerCpuArray<u64, { WORKLOAD_POLICY_MAX_RULES }> = PerCpuArray::new();
+
+/// One record per refusal, on its way to an alert.
+///
+/// Its own ring and not a share of the packet ring: a refusal is rare, it is
+/// the one thing a deny policy exists to tell somebody about, and it must not
+/// queue behind a flood of packets. A full ring costs the record and never
+/// the decision, which is already taken by the time anything is written.
+#[btf_map]
+static WORKLOAD_EVENTS: RingBuf<WorkloadDenialEvent, { WORKLOAD_EVENTS_RINGBUF_BYTES as usize }> =
+    RingBuf::new();
+
 // ── Verdicts, in the kernel's own numbering ─────────────────────────
 
 /// What a `cgroup_sock_addr` program returns to let the syscall proceed.
@@ -98,26 +122,26 @@ const AF_INET6: u32 = 10;
 /// A workload asking for an IPv4 connection.
 #[cgroup_sock_addr(connect4)]
 pub fn workload_connect4(ctx: SockAddrContext) -> i32 {
-    decide(&ctx, WORKLOAD_METRIC_CONNECT)
+    decide(&ctx, WORKLOAD_HOOK_CONNECT)
 }
 
 /// A workload asking for an IPv6 connection.
 #[cgroup_sock_addr(connect6)]
 pub fn workload_connect6(ctx: SockAddrContext) -> i32 {
-    decide(&ctx, WORKLOAD_METRIC_CONNECT)
+    decide(&ctx, WORKLOAD_HOOK_CONNECT)
 }
 
 /// A workload sending a datagram with no connection, the path almost all DNS
 /// takes.
 #[cgroup_sock_addr(sendmsg4)]
 pub fn workload_sendmsg4(ctx: SockAddrContext) -> i32 {
-    decide(&ctx, WORKLOAD_METRIC_SENDMSG)
+    decide(&ctx, WORKLOAD_HOOK_SENDMSG)
 }
 
 /// The same, over IPv6.
 #[cgroup_sock_addr(sendmsg6)]
 pub fn workload_sendmsg6(ctx: SockAddrContext) -> i32 {
-    decide(&ctx, WORKLOAD_METRIC_SENDMSG)
+    decide(&ctx, WORKLOAD_HOOK_SENDMSG)
 }
 
 /// A workload taking an IPv4 local address, before the kernel assigns it.
@@ -127,13 +151,13 @@ pub fn workload_sendmsg6(ctx: SockAddrContext) -> i32 {
 /// listener may sit.
 #[cgroup_sock_addr(bind4)]
 pub fn workload_bind4(ctx: SockAddrContext) -> i32 {
-    decide(&ctx, WORKLOAD_METRIC_BIND)
+    decide(&ctx, WORKLOAD_HOOK_BIND)
 }
 
 /// The same, over IPv6.
 #[cgroup_sock_addr(bind6)]
 pub fn workload_bind6(ctx: SockAddrContext) -> i32 {
-    decide(&ctx, WORKLOAD_METRIC_BIND)
+    decide(&ctx, WORKLOAD_HOOK_BIND)
 }
 
 // ── The decision ────────────────────────────────────────────────────
@@ -143,14 +167,14 @@ pub fn workload_bind6(ctx: SockAddrContext) -> i32 {
 /// Nothing is counted on a node with no policy: the hooks stay attached when
 /// the last rule is removed, and a counter climbing on an empty policy would
 /// be a figure about the attachment rather than about the product.
-fn decide(ctx: &SockAddrContext, hook_metric: u32) -> i32 {
+fn decide(ctx: &SockAddrContext, hook: u8) -> i32 {
     let Some(first) = WORKLOAD_RULES.get(0) else {
         return ALLOW;
     };
     if first.enabled == 0 {
         return ALLOW;
     }
-    increment_metric!(WORKLOAD_METRICS, hook_metric);
+    increment_metric!(WORKLOAD_METRICS, hook_metric(hook));
 
     let mask = selectors();
     if mask == 0 {
@@ -181,16 +205,68 @@ fn decide(ctx: &SockAddrContext, hook_metric: u32) -> i32 {
             increment_metric!(WORKLOAD_METRICS, WORKLOAD_METRIC_ALLOWED);
             return ALLOW;
         }
-        if rule.mode == WORKLOAD_MODE_ENFORCE {
-            increment_metric!(WORKLOAD_METRICS, WORKLOAD_METRIC_REFUSED);
+        let enforced = rule.mode == WORKLOAD_MODE_ENFORCE;
+        increment_metric!(
+            WORKLOAD_METRICS,
+            if enforced {
+                WORKLOAD_METRIC_REFUSED
+            } else {
+                WORKLOAD_METRIC_WOULD_REFUSE
+            }
+        );
+        increment_metric!(WORKLOAD_RULE_DENIALS, index as u32);
+        report(index, &addr, family, port, protocol, hook, enforced);
+        if enforced {
             return REFUSE;
         }
-        increment_metric!(WORKLOAD_METRICS, WORKLOAD_METRIC_WOULD_REFUSE);
         return ALLOW;
     }
 
     increment_metric!(WORKLOAD_METRICS, WORKLOAD_METRIC_NO_RULE);
     ALLOW
+}
+
+/// Which counter this hook's own calls are added to.
+fn hook_metric(hook: u8) -> u32 {
+    match hook {
+        WORKLOAD_HOOK_CONNECT => WORKLOAD_METRIC_CONNECT,
+        WORKLOAD_HOOK_SENDMSG => WORKLOAD_METRIC_SENDMSG,
+        _ => WORKLOAD_METRIC_BIND,
+    }
+}
+
+/// Write down one refusal, or count the record that did not fit.
+///
+/// The slot is what travels rather than the rule's name: a hook has no string
+/// to send and userspace published the slots in the order it holds the rules,
+/// so the translation is exact and costs the kernel nothing.
+fn report(
+    index: usize,
+    addr: &[u32; 4],
+    family: u8,
+    port: u16,
+    protocol: u8,
+    hook: u8,
+    enforced: bool,
+) {
+    let Some(mut entry) = WORKLOAD_EVENTS.reserve(0) else {
+        increment_metric!(WORKLOAD_METRICS, WORKLOAD_METRIC_EVENT_LOST);
+        return;
+    };
+    entry.write(WorkloadDenialEvent {
+        at_ns: unsafe { bpf_ktime_get_boot_ns() },
+        cgroup_id: unsafe { bpf_get_current_cgroup_id() },
+        dst_addr: *addr,
+        tgid: (bpf_get_current_pid_tgid() >> 32) as u32,
+        uid: bpf_get_current_uid_gid() as u32,
+        dst_port: port,
+        rule: index as u16,
+        family,
+        protocol,
+        hook,
+        enforced: u8::from(enforced),
+    });
+    entry.submit(0);
 }
 
 /// Every selector the calling task satisfies, from both halves of the lookup.

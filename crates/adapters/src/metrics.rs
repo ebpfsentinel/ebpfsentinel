@@ -111,6 +111,16 @@ pub struct RuleIdLabels {
     pub rule_id: String,
 }
 
+/// A workload firewall rule and whether it is carrying its refusals out.
+///
+/// The mode is a label rather than two counter families because a rule moves
+/// between the two and an operator reads the same series before and after.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct WorkloadRuleLabels {
+    pub rule_id: String,
+    pub mode: String,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct AttackTypeLabels {
     pub attack_type: String,
@@ -229,6 +239,12 @@ pub struct AgentMetrics {
     /// as bounded as the estate's own configuration.
     pub auto_responses_total: Family<PolicyLabels, Counter>,
     pub alerts_by_rule_total: Family<RuleLabels, Counter>,
+    /// Socket operations each workload firewall rule refused, read from the
+    /// kernel's own per-rule array rather than counted off the alerts: a
+    /// refusal whose record found no room in the ring buffer still happened,
+    /// and a security figure that loses it reads as a rule that stopped
+    /// matching.
+    pub workload_denials_total: Family<WorkloadRuleLabels, Counter>,
     /// Alerts by the country their source address resolved to, `unknown`
     /// when it resolved to none, so the series add up to `alerts_total`.
     pub alerts_by_source_country_total: Family<CountryLabels, Counter>,
@@ -499,6 +515,13 @@ impl AgentMetrics {
             "alerts_by_rule",
             "Total alerts per component and rule_id",
             alerts_by_rule_total.clone(),
+        );
+
+        let workload_denials_total = Family::<WorkloadRuleLabels, Counter>::default();
+        registry.register(
+            "workload_denials",
+            "Socket operations refused by each workload firewall rule, by rule_id and mode",
+            workload_denials_total.clone(),
         );
 
         let alerts_by_source_country_total = Family::<CountryLabels, Counter>::default();
@@ -853,6 +876,7 @@ impl AgentMetrics {
             ips_blocks_total,
             auto_responses_total,
             alerts_by_rule_total,
+            workload_denials_total,
             alerts_by_source_country_total,
             false_positives_total,
             memory_usage_bytes,
@@ -1090,6 +1114,15 @@ impl AlertMetrics for AgentMetrics {
                 rule_id: rule_id.to_string(),
             })
             .inc();
+    }
+
+    fn record_workload_denials(&self, rule_id: &str, enforced: bool, count: u64) {
+        self.workload_denials_total
+            .get_or_create(&WorkloadRuleLabels {
+                rule_id: rule_id.to_string(),
+                mode: if enforced { "enforce" } else { "observe" }.to_string(),
+            })
+            .inc_by(count);
     }
 
     fn record_alert_source_country(&self, country: &str) {
@@ -2043,6 +2076,7 @@ mod tests {
         ("threatintel_matches", "counter"),
         ("worker_events", "counter"),
         ("worker_processing_duration_seconds", "histogram"),
+        ("workload_denials", "counter"),
         ("xdp_attach_mode", "gauge"),
         ("zone_interfaces", "gauge"),
         ("zone_packets", "counter"),
@@ -2210,6 +2244,7 @@ mod tests {
                 rule_id: "dlp-001".into(),
             })
             .inc();
+        m.record_workload_denials("workload-001", true, 1);
         m.ddos_attacks_detected_total
             .get_or_create(&AttackTypeLabels {
                 attack_type: "syn_flood".into(),

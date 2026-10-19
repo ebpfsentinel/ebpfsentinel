@@ -26,6 +26,7 @@ use application::ratelimit_service_impl::RateLimitAppService;
 use application::routing_service_impl::RoutingAppService;
 use application::threatintel_service_impl::ThreatIntelAppService;
 use application::vip_announcer_service_impl::VipAnnouncerService;
+use application::workload_policy_service::WorkloadPolicyService;
 use application::zone_service_impl::ZoneAppService;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use domain::alert::entity::Alert;
@@ -132,6 +133,11 @@ pub struct AppState {
     /// resolver and the enrichers have been built, like the coverage above:
     /// a table answering before that would name no container.
     pub process_table_service: ArcSwapOption<ProcessTableService>,
+    /// The workload policy, where the cgroup hooks attached. Empty when the
+    /// document carries no workload rule or the kernel refused the attach,
+    /// in which case the route says so rather than answering that nothing
+    /// names this workload, which reads like a policy that admits it.
+    pub workload_policy_service: ArcSwapOption<WorkloadPolicyService>,
 }
 
 impl AppState {
@@ -165,6 +171,7 @@ impl AppState {
             ddos_service: None,
             dlp_service: None,
             process_table_service: ArcSwapOption::empty(),
+            workload_policy_service: ArcSwapOption::empty(),
             nat_service: None,
             alias_service: None,
             routing_service: None,
@@ -327,6 +334,11 @@ impl AppState {
     /// process with.
     pub fn install_process_table_service(&self, svc: Arc<ProcessTableService>) {
         self.process_table_service.store(Some(svc));
+    }
+
+    /// Hand the workload policy over, once it is in force in the kernel.
+    pub fn install_workload_policy_service(&self, svc: Arc<WorkloadPolicyService>) {
+        self.workload_policy_service.store(Some(svc));
     }
 
     /// Attach a NAT service.

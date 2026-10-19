@@ -79,6 +79,36 @@ pub struct RuleResponse {
     pub interfaces: Vec<String>,
 }
 
+/// One rule naming a workload, as the reach route answers it.
+#[derive(Deserialize, Serialize)]
+pub struct WorkloadReachEntry {
+    pub rule: String,
+    pub allows: bool,
+    pub mode: String,
+    pub selector: String,
+    pub destination: String,
+    pub denials: u64,
+}
+
+/// What the workload policy lets a workload reach.
+#[derive(Deserialize, Serialize)]
+pub struct WorkloadReachResponse {
+    pub exe: Option<String>,
+    pub unit: Option<String>,
+    pub cgroup: Option<String>,
+    pub container_id: Option<String>,
+    pub container_name: Option<String>,
+    pub enforcing: bool,
+    pub rules: Vec<WorkloadReachEntry>,
+}
+
+/// The workload rules in force.
+#[derive(Deserialize, Serialize)]
+pub struct WorkloadRulesResponse {
+    pub enforcing: bool,
+    pub rules: Vec<WorkloadReachEntry>,
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct L7RuleResponse {
     pub id: String,
@@ -1545,6 +1575,34 @@ impl ApiClient {
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;
         handle_delete(resp).await
+    }
+
+    /// What the workload policy lets a workload reach.
+    ///
+    /// The query is passed through as it was typed rather than normalised,
+    /// because the agent is what matches a selector and a second opinion
+    /// here would answer about a workload the kernel never saw.
+    pub async fn workload_reach(
+        &self,
+        query: &[(&str, String)],
+    ) -> anyhow::Result<WorkloadReachResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/firewall/workload/reach")
+            .query(query)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    /// The workload rules in force, with what each has refused.
+    pub async fn workload_rules(&self) -> anyhow::Result<WorkloadRulesResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/firewall/workload/rules")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
     }
 
     // ── L7 ──────────────────────────────────────────────────────────

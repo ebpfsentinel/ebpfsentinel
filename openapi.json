@@ -3369,6 +3369,208 @@
         ]
       }
     },
+    "/api/v1/firewall/workload/reach": {
+      "get": {
+        "tags": [
+          "Firewall"
+        ],
+        "summary": "`GET /api/v1/firewall/workload/reach` - what the workload policy lets a\nworkload reach.",
+        "operationId": "workload_reach",
+        "parameters": [
+          {
+            "name": "pid",
+            "in": "query",
+            "description": "Answer for the task carrying this pid, reading its facts out of the\nprocess table. Every other parameter is ignored when it is given.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "exe",
+            "in": "query",
+            "description": "Absolute path of the executable.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "unit",
+            "in": "query",
+            "description": "systemd unit, such as `nginx.service`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "container_id",
+            "in": "query",
+            "description": "Container id, in full.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "container_name",
+            "in": "query",
+            "description": "Container name, as the runtime enricher reads it.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rules naming the workload, in kernel order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkloadReachResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No workload named",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such task in the process table",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The workload firewall is not loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/firewall/workload/rules": {
+      "get": {
+        "tags": [
+          "Firewall"
+        ],
+        "summary": "`GET /api/v1/firewall/workload/rules` - the workload rules in force and\nwhat each has refused.",
+        "operationId": "list_workload_rules",
+        "responses": {
+          "200": {
+            "description": "The workload rules in force, in kernel order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkloadRulesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The workload firewall is not loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/geoip/lookup": {
       "get": {
         "tags": [
@@ -12006,6 +12208,97 @@
           }
         }
       },
+      "WorkloadReachEntry": {
+        "type": "object",
+        "description": "One rule naming the workload, and what it has refused.",
+        "required": [
+          "rule",
+          "allows",
+          "mode",
+          "selector",
+          "destination",
+          "denials"
+        ],
+        "properties": {
+          "allows": {
+            "type": "boolean",
+            "description": "Whether the rule lets the destination through."
+          },
+          "denials": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many socket operations this rule has refused since it was\npublished, counted by the kernel.",
+            "minimum": 0
+          },
+          "destination": {
+            "type": "string",
+            "description": "The destination half of the match, written out."
+          },
+          "mode": {
+            "type": "string",
+            "description": "`enforce` when the kernel refuses, `observe` when it only counts."
+          },
+          "rule": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string",
+            "description": "The selector written out, as the rule names the workload."
+          }
+        }
+      },
+      "WorkloadReachResponse": {
+        "type": "object",
+        "description": "The answer to \"what may this workload reach\".",
+        "required": [
+          "enforcing",
+          "rules"
+        ],
+        "properties": {
+          "cgroup": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "container_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "container_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enforcing": {
+            "type": "boolean",
+            "description": "Whether any rule in force has the kernel refuse rather than count."
+          },
+          "exe": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The facts the rules were matched against, after the process table\nfilled in whatever the caller did not give."
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkloadReachEntry"
+            },
+            "description": "Every rule naming this workload, in the order the kernel walks them.\nThe first one admitting the destination decides, so a rule low in\nthis list is a rule something above it may never reach."
+          },
+          "unit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "WorkloadResponse": {
         "type": "object",
         "description": "The process a flow belongs to, where the agent could name one.",
@@ -12090,6 +12383,27 @@
               "null"
             ],
             "description": "systemd unit, for a host process the agent could place in one."
+          }
+        }
+      },
+      "WorkloadRulesResponse": {
+        "type": "object",
+        "description": "The workload rules in force, each with what it has refused.",
+        "required": [
+          "enforcing",
+          "rules"
+        ],
+        "properties": {
+          "enforcing": {
+            "type": "boolean",
+            "description": "Whether any rule in force has the kernel refuse rather than count."
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkloadReachEntry"
+            },
+            "description": "Every rule in force, in the order the kernel walks them."
           }
         }
       },

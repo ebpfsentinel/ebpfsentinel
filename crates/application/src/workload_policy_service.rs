@@ -25,10 +25,14 @@
 
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
+use domain::common::entity::RuleId;
 use domain::common::error::DomainError;
 use domain::container::engine::CgroupReader;
 use domain::container::entity::{ContainerInfo, ContainerMetadata};
-use domain::firewall::workload::{WorkloadFacts, WorkloadPolicy, cgroup_path_of, unit_of};
+use domain::firewall::workload::{
+    WorkloadDenial, WorkloadDenialRecord, WorkloadFacts, WorkloadPolicy, WorkloadReach,
+    cgroup_path_of, unit_of,
+};
 use domain::process::entity::ProcessEntry;
 use ports::secondary::workload_policy_map_port::WorkloadPolicyMapPort;
 use tracing::{debug, info, warn};
@@ -321,6 +325,104 @@ impl WorkloadPolicyService {
         }
     }
 
+    /// Name the rule a kernel record refused under, or nothing.
+    ///
+    /// Nothing happens when the slot is past the policy in force, which is
+    /// a record that crossed a reload: the slots are renumbered by every
+    /// publish, so the alternative to dropping it is an alert naming a rule
+    /// that did not refuse anything.
+    #[must_use]
+    pub fn name_denial(&self, record: WorkloadDenialRecord) -> Option<WorkloadDenial> {
+        let policy = self
+            .policy
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let rule = policy.rule_in_slot(record.slot)?;
+        Some(record.named(rule.id.clone()))
+    }
+
+    /// What each rule in force has refused, from the kernel's own counters.
+    ///
+    /// Empty where no maps are held, because a host that never loaded the
+    /// object has no figure rather than a figure of zero.
+    ///
+    /// # Errors
+    ///
+    /// Whatever reading the counter array refused.
+    pub fn denials_by_rule(&self) -> Result<Vec<(RuleId, u64)>, DomainError> {
+        let Some(maps) = &self.maps else {
+            return Ok(Vec::new());
+        };
+        let counts = maps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .rule_denials()?;
+        let policy = self
+            .policy
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(policy
+            .in_slot_order()
+            .enumerate()
+            .map(|(slot, rule)| (rule.id.clone(), counts.get(slot).copied().unwrap_or(0)))
+            .collect())
+    }
+
+    /// The rules naming `facts`, in the order the kernel walks them, each
+    /// with what it has refused.
+    ///
+    /// This is the answer to "why can this not connect", so the whole list
+    /// is returned rather than the first match: an operator reading it is
+    /// usually looking for the rule above the one they wrote.
+    ///
+    /// # Errors
+    ///
+    /// Whatever reading the counter array refused.
+    pub fn reach_for(&self, facts: &WorkloadFacts<'_>) -> Result<Vec<WorkloadReach>, DomainError> {
+        self.reach(Some(facts))
+    }
+
+    /// Every rule in force, in the order the kernel walks them, each with
+    /// what it has refused.
+    ///
+    /// A disabled rule is absent rather than listed as idle: it occupies no
+    /// slot, so it has no counter of its own and a zero beside it would read
+    /// as a rule nothing ever hit.
+    ///
+    /// # Errors
+    ///
+    /// Whatever reading the counter array refused.
+    pub fn rules_in_force(&self) -> Result<Vec<WorkloadReach>, DomainError> {
+        self.reach(None)
+    }
+
+    fn reach(&self, facts: Option<&WorkloadFacts<'_>>) -> Result<Vec<WorkloadReach>, DomainError> {
+        let counts = match &self.maps {
+            Some(maps) => maps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .rule_denials()?,
+            None => Vec::new(),
+        };
+        let policy = self
+            .policy
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(policy
+            .in_slot_order()
+            .enumerate()
+            .filter(|(_, rule)| facts.is_none_or(|facts| rule.selector.matches(facts)))
+            .map(|(slot, rule)| WorkloadReach {
+                rule: rule.id.clone(),
+                allows: !rule.refuses(),
+                mode: rule.mode,
+                selector: rule.selector.describe(),
+                destination: rule.describe_destination(),
+                denials: counts.get(slot).copied().unwrap_or(0),
+            })
+            .collect())
+    }
+
     /// Forget a task that exited.
     ///
     /// A pid is reused, and a mask left behind would name the next program
@@ -351,7 +453,10 @@ mod tests {
         ContainerContext, ContainerInfo, ContainerRuntime, DockerMetadata,
     };
     use domain::firewall::entity::FirewallAction;
-    use domain::firewall::workload::{WorkloadMode, WorkloadRule, WorkloadSelector};
+    use domain::firewall::workload::{
+        DestinationAddr, WorkloadDestination, WorkloadHook, WorkloadMode, WorkloadRule,
+        WorkloadSelector,
+    };
     use domain::process::entity::ProcessIdentity;
 
     use super::*;
@@ -361,12 +466,17 @@ mod tests {
         cgroups: HashMap<u64, u64>,
         tasks: HashMap<u32, u64>,
         published: usize,
+        denials: Vec<u64>,
     }
 
     #[derive(Clone, Default)]
     struct SharedMaps(Arc<Mutex<RecordingMaps>>);
 
     impl WorkloadPolicyMapPort for SharedMaps {
+        fn rule_denials(&self) -> Result<Vec<u64>, DomainError> {
+            Ok(self.0.lock().unwrap().denials.clone())
+        }
+
         fn publish_policy(&mut self, _policy: &WorkloadPolicy) -> Result<(), DomainError> {
             let mut held = self.0.lock().unwrap();
             held.published += 1;
@@ -443,6 +553,23 @@ mod tests {
         };
         entry.cgroup_id = 4242;
         entry
+    }
+
+    fn record(slot: u16) -> WorkloadDenialRecord {
+        WorkloadDenialRecord {
+            slot,
+            hook: WorkloadHook::Connect,
+            destination: WorkloadDestination {
+                addr: DestinationAddr::V4(0x0a00_0001),
+                port: 443,
+                protocol: Protocol::Tcp,
+            },
+            enforced: true,
+            tgid: 99,
+            uid: 0,
+            cgroup_id: 4242,
+            at_ns: 1_000,
+        }
     }
 
     fn service(rules: Vec<WorkloadRule>, maps: SharedMaps) -> WorkloadPolicyService {
@@ -603,5 +730,130 @@ mod tests {
         service.record_exec(&entry(31, "/usr/sbin/nginx"));
 
         assert_eq!(maps.0.lock().unwrap().cgroups.get(&4242), Some(&0));
+    }
+
+    #[test]
+    fn a_kernel_record_is_named_after_the_rule_sitting_in_its_slot() {
+        let mut disabled = exe_rule("off", "/usr/bin/wget");
+        disabled.enabled = false;
+        let service = service(
+            vec![
+                exe_rule("one", "/usr/bin/curl"),
+                disabled,
+                unit_rule("two", "nginx.service"),
+            ],
+            SharedMaps::default(),
+        );
+
+        let named = service
+            .name_denial(record(1))
+            .expect("the second enabled rule");
+
+        // Slot one is the second *enabled* rule, which is the unit rule: a
+        // disabled rule occupies no slot in the kernel's array.
+        assert_eq!(named.rule, RuleId("two".to_string()));
+        assert_eq!(named.destination.port, 443);
+    }
+
+    #[test]
+    fn a_record_that_crossed_a_reload_names_nothing_rather_than_the_wrong_rule() {
+        let service = service(
+            vec![exe_rule("one", "/usr/bin/curl")],
+            SharedMaps::default(),
+        );
+
+        assert!(service.name_denial(record(7)).is_none());
+    }
+
+    #[test]
+    fn each_rule_carries_the_count_of_the_slot_it_was_published_in() {
+        let maps = SharedMaps::default();
+        maps.0.lock().unwrap().denials = vec![4, 9];
+        let service = service(
+            vec![
+                exe_rule("one", "/usr/bin/curl"),
+                unit_rule("two", "nginx.service"),
+            ],
+            maps,
+        );
+
+        assert_eq!(
+            service.denials_by_rule().expect("the counters are read"),
+            vec![
+                (RuleId("one".to_string()), 4),
+                (RuleId("two".to_string()), 9),
+            ]
+        );
+    }
+
+    #[test]
+    fn what_a_workload_may_reach_is_every_rule_naming_it_and_not_the_first() {
+        let maps = SharedMaps::default();
+        maps.0.lock().unwrap().denials = vec![0, 2];
+        let mut allowed = exe_rule("allowed", "/usr/bin/curl");
+        allowed.action = FirewallAction::Allow;
+        let service = service(
+            vec![
+                allowed,
+                exe_rule("refused", "/usr/bin/curl"),
+                exe_rule("other", "/usr/bin/wget"),
+            ],
+            maps,
+        );
+
+        let reach = service
+            .reach_for(&WorkloadFacts {
+                exe: Some("/usr/bin/curl"),
+                ..WorkloadFacts::default()
+            })
+            .expect("the counters are read");
+
+        assert_eq!(reach.len(), 2);
+        assert!(reach[0].allows);
+        assert_eq!(reach[0].rule, RuleId("allowed".to_string()));
+        assert_eq!(reach[1].rule, RuleId("refused".to_string()));
+        assert!(!reach[1].allows);
+        assert_eq!(reach[1].denials, 2);
+        assert_eq!(reach[1].destination, "to anywhere");
+    }
+
+    #[test]
+    fn a_disabled_rule_is_absent_from_what_is_in_force_rather_than_listed_as_idle() {
+        let maps = SharedMaps::default();
+        maps.0.lock().unwrap().denials = vec![3];
+        let mut off = unit_rule("off", "nginx.service");
+        off.enabled = false;
+        let service = service(vec![exe_rule("on", "/usr/bin/curl"), off], maps);
+
+        let in_force = service.rules_in_force().expect("the counters are read");
+
+        assert_eq!(in_force.len(), 1);
+        assert_eq!(in_force[0].rule, RuleId("on".to_string()));
+        assert_eq!(in_force[0].denials, 3);
+    }
+
+    #[test]
+    fn a_host_that_loaded_no_object_has_no_figure_rather_than_a_figure_of_zero() {
+        let service = WorkloadPolicyService::new(
+            WorkloadPolicy::new(vec![exe_rule("one", "/usr/bin/curl")])
+                .expect("inside the ceiling"),
+        );
+
+        assert!(
+            service
+                .denials_by_rule()
+                .expect("no maps to read")
+                .is_empty()
+        );
+        assert_eq!(
+            service
+                .reach_for(&WorkloadFacts {
+                    exe: Some("/usr/bin/curl"),
+                    ..WorkloadFacts::default()
+                })
+                .expect("no maps to read")
+                .len(),
+            1
+        );
     }
 }

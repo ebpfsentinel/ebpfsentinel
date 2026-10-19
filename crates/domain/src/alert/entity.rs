@@ -7,6 +7,7 @@ use crate::common::entity::{DomainMode, RuleId, Severity};
 use crate::ddos::entity::DdosAttack;
 use crate::dlp::entity::DlpAlert;
 use crate::dns::entity::{DnsAlert, DnsAlertReason};
+use crate::firewall::workload::{DestinationAddr, WORKLOAD_FIREWALL_COMPONENT, WorkloadDenial};
 use crate::ids::entity::IdsAlert;
 use crate::threatintel::entity::ThreatIntelAlert;
 use crate::workload::entity::Workload;
@@ -745,6 +746,92 @@ impl Alert {
             executable_source: None,
             flow_source: None,
             workload: None,
+        }
+    }
+
+    /// Create a domain alert from a workload policy refusal.
+    ///
+    /// The rule identifier is the alert's own rule, which is what makes the
+    /// counter by rule and the alert about the same thing: an operator
+    /// reading a figure on one screen can find the alerts behind it without
+    /// a second vocabulary.
+    ///
+    /// No ATT&CK technique is attached, and the absence is deliberate. Every
+    /// other alert here is about something observed on the wire; this one is
+    /// about our own policy, and a refusal is as often a rule written too
+    /// wide as it is an adversary. Naming a technique would turn the first
+    /// case into a report of an attack that did not happen.
+    #[must_use]
+    pub fn from_workload_denial(denial: &WorkloadDenial, workload: Option<Workload>) -> Self {
+        let (dst_addr, is_ipv6) = match denial.destination.addr {
+            DestinationAddr::V4(addr) => ([addr, 0, 0, 0], false),
+            DestinationAddr::V6(addr) => (
+                [
+                    u32::from_be_bytes([addr[0], addr[1], addr[2], addr[3]]),
+                    u32::from_be_bytes([addr[4], addr[5], addr[6], addr[7]]),
+                    u32::from_be_bytes([addr[8], addr[9], addr[10], addr[11]]),
+                    u32::from_be_bytes([addr[12], addr[13], addr[14], addr[15]]),
+                ],
+                true,
+            ),
+        };
+        let message = denial.message();
+        Self {
+            id: Self::generate_id(denial.at_ns, &denial.rule),
+            timestamp_ns: denial.at_ns,
+            component: WORKLOAD_FIREWALL_COMPONENT.to_string(),
+            severity: Severity::Medium,
+            rule_id: denial.rule.clone(),
+            action: if denial.enforced {
+                DomainMode::Block
+            } else {
+                DomainMode::Alert
+            },
+            src_addr: [0; 4],
+            dst_addr,
+            src_port: 0,
+            dst_port: denial.destination.port,
+            protocol: denial.destination.protocol.to_u8(),
+            is_ipv6,
+            message,
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: Some(denial.tgid),
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: None,
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
+            executable_path: None,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
+            workload: workload.filter(|w| w.pid != 0),
         }
     }
 

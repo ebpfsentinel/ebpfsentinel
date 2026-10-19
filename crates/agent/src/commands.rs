@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::api_client::{
     AlertResponse, ApiClient, ConnectionResponse, ConntrackEventFrame, IdsRuleResponse,
@@ -85,6 +85,135 @@ pub async fn cmd_firewall_list(client: &ApiClient, output: OutputFormat) -> Resu
     table.print();
 
     println!("\n{} rule(s) total.", rules.len());
+    Ok(())
+}
+
+/// `firewall workload` - the workload rules in force, with their refusals.
+pub async fn cmd_firewall_workload(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let listing = client.workload_rules().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&listing)?);
+        return Ok(());
+    }
+
+    if listing.rules.is_empty() {
+        println!("No workload rule is in force.");
+        return Ok(());
+    }
+
+    let mut table = Table::new(&[
+        ("RULE", Align::Left),
+        ("VERDICT", Align::Left),
+        ("MODE", Align::Left),
+        ("SELECTOR", Align::Left),
+        ("DESTINATION", Align::Left),
+        ("DENIALS", Align::Right),
+    ]);
+    for rule in &listing.rules {
+        table.row(cells![
+            rule.rule,
+            if rule.allows { "allow" } else { "deny" },
+            rule.mode,
+            rule.selector,
+            rule.destination,
+            rule.denials
+        ]);
+    }
+    table.print();
+
+    if !listing.enforcing {
+        println!("\nNo rule in force refuses: every one of them only counts.");
+    }
+    Ok(())
+}
+
+/// `firewall reach` - what the workload rules let a workload reach.
+///
+/// The first support question on a deny-by-default policy is why an
+/// application cannot connect, and the answer is almost never the rule the
+/// person wrote: it is the one above it. So the whole list comes back in the
+/// order the kernel walks it rather than the rule that would decide.
+pub async fn cmd_firewall_reach(
+    client: &ApiClient,
+    pid: Option<u32>,
+    exe: Option<String>,
+    unit: Option<String>,
+    container_id: Option<String>,
+    container_name: Option<String>,
+    output: OutputFormat,
+) -> Result<()> {
+    let mut query: Vec<(&str, String)> = Vec::new();
+    if let Some(pid) = pid {
+        query.push(("pid", pid.to_string()));
+    }
+    for (name, value) in [
+        ("exe", exe),
+        ("unit", unit),
+        ("container_id", container_id),
+        ("container_name", container_name),
+    ] {
+        if let Some(value) = value {
+            query.push((name, value));
+        }
+    }
+    if query.is_empty() {
+        bail!("name the workload with --pid, --exe, --unit, --container-id or --container-name");
+    }
+
+    let reach = client.workload_reach(&query).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&reach)?);
+        return Ok(());
+    }
+
+    println!("Workload:");
+    for (label, value) in [
+        ("executable", reach.exe.as_deref()),
+        ("unit", reach.unit.as_deref()),
+        ("cgroup", reach.cgroup.as_deref()),
+        ("container id", reach.container_id.as_deref()),
+        ("container name", reach.container_name.as_deref()),
+    ] {
+        if let Some(value) = value {
+            println!("  {label}: {value}");
+        }
+    }
+
+    if reach.rules.is_empty() {
+        println!("\nNo workload rule names this workload.");
+        return Ok(());
+    }
+
+    let mut table = Table::new(&[
+        ("RULE", Align::Left),
+        ("VERDICT", Align::Left),
+        ("MODE", Align::Left),
+        ("SELECTOR", Align::Left),
+        ("DESTINATION", Align::Left),
+        ("DENIALS", Align::Right),
+    ]);
+    for rule in &reach.rules {
+        table.row(cells![
+            rule.rule,
+            if rule.allows { "allow" } else { "deny" },
+            rule.mode,
+            rule.selector,
+            rule.destination,
+            rule.denials
+        ]);
+    }
+    table.print();
+
+    println!(
+        "\n{} rule(s) name this workload, in the order the kernel walks them. The first one \
+         admitting a destination decides.",
+        reach.rules.len()
+    );
+    if !reach.enforcing {
+        println!("No rule in force refuses: every one of them only counts.");
+    }
     Ok(())
 }
 

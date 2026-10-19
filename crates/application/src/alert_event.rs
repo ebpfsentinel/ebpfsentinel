@@ -27,6 +27,11 @@ pub enum AlertEvent {
     /// threat type, and answers to the component an operator filters on.
     ThreatIntel(ThreatIntelAlert),
     PacketSecurity(PacketSecurityAlert),
+    /// A workload firewall refusal, already named after the rule that
+    /// refused it. It travels on its own arm rather than as a system alert
+    /// because the workload block is what makes it readable, and the
+    /// pipeline fills that from the task the kernel reported.
+    WorkloadDenial(Box<Alert>),
     /// A pre-built system alert (e.g. multi-WAN total failure) that does not
     /// originate from a kernel security event. Boxed to keep the envelope small.
     System(Box<Alert>),

@@ -65,6 +65,8 @@ use super::zone_handler;
         firewall_handler::list_rules,
         firewall_handler::create_rule,
         firewall_handler::delete_rule,
+        firewall_handler::workload_reach,
+        firewall_handler::list_workload_rules,
         // L7
         l7_handler::list_l7_rules,
         l7_handler::create_l7_rule,
@@ -205,6 +207,9 @@ use super::zone_handler;
         // Firewall
         firewall_handler::CreateRuleRequest,
         firewall_handler::RuleResponse,
+        firewall_handler::WorkloadReachEntry,
+        firewall_handler::WorkloadReachResponse,
+        firewall_handler::WorkloadRulesResponse,
         // L7
         l7_handler::CreateL7RuleRequest,
         l7_handler::L7RuleResponse,

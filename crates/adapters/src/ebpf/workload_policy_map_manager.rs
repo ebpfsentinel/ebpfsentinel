@@ -14,7 +14,7 @@
 //! workload may mean another one afterwards - and the manager clears both
 //! tables rather than leaving a task carrying the previous numbering.
 
-use aya::maps::{Array, HashMap as AyaHashMap, MapData};
+use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, PerCpuValues};
 use domain::common::error::DomainError;
 use domain::firewall::entity::IpNetwork;
 use domain::firewall::workload::{WorkloadPolicy, WorkloadRule};
@@ -33,6 +33,7 @@ pub struct WorkloadPolicyMapManager {
     rules: Array<MapData, WorkloadRuleEntry>,
     cgroups: AyaHashMap<MapData, u64, u64>,
     tasks: AyaHashMap<MapData, u32, u64>,
+    denials: PerCpuArray<MapData, u64>,
 }
 
 impl WorkloadPolicyMapManager {
@@ -59,11 +60,16 @@ impl WorkloadPolicyMapManager {
             ebpf.take_map("WORKLOAD_TASK_SELECTORS")
                 .ok_or_else(|| anyhow::anyhow!("map 'WORKLOAD_TASK_SELECTORS' not found"))?,
         )?;
+        let denials = PerCpuArray::try_from(
+            ebpf.take_map("WORKLOAD_RULE_DENIALS")
+                .ok_or_else(|| anyhow::anyhow!("map 'WORKLOAD_RULE_DENIALS' not found"))?,
+        )?;
         info!("workload policy tables acquired");
         Ok(Self {
             rules,
             cgroups,
             tasks,
+            denials,
         })
     }
 
@@ -109,6 +115,17 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
             "workload policy published"
         );
         Ok(())
+    }
+
+    fn rule_denials(&self) -> Result<Vec<u64>, DomainError> {
+        let mut counts = Vec::with_capacity(WORKLOAD_POLICY_MAX_RULES);
+        for index in 0..WORKLOAD_POLICY_MAX_RULES {
+            let values: PerCpuValues<u64> = self.denials.get(&(index as u32), 0).map_err(|e| {
+                DomainError::EngineError(format!("WORKLOAD_RULE_DENIALS read failed: {e}"))
+            })?;
+            counts.push(values.iter().sum());
+        }
+        Ok(counts)
     }
 
     fn set_cgroup_selectors(&mut self, cgroup_id: u64, mask: u64) -> Result<(), DomainError> {

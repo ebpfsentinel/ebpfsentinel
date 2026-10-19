@@ -822,8 +822,20 @@ impl AlertPipeline {
             AlertEvent::PacketSecurity(psa) => {
                 self.process_packet_security_alert(&psa).await;
             }
+            AlertEvent::WorkloadDenial(alert) => self.process_workload_denial(*alert).await,
             AlertEvent::System(alert) => self.process_system_alert(*alert).await,
         }
+    }
+
+    /// Emit a workload firewall refusal, naming the task that was refused.
+    ///
+    /// The refusal already carries the rule and the destination; what it
+    /// cannot carry out of a socket hook is who the task was, so the
+    /// attribution happens here, off the thread group id the kernel
+    /// reported, before the alert takes the system path like any other.
+    pub async fn process_workload_denial(&mut self, mut alert: Alert) {
+        self.attribute(&mut alert);
+        self.process_system_alert(alert).await;
     }
 
     /// Emit a pre-built system alert (multi-WAN failure, etc.) through the same

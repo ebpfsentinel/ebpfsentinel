@@ -295,6 +295,26 @@ pub enum FirewallCommand {
         /// Rule ID to delete
         id: String,
     },
+    /// List the workload rules in force and what each has refused
+    Workload,
+    /// List what the workload rules let a workload reach
+    Reach {
+        /// Read the facts of this running task out of the process table
+        #[arg(long)]
+        pid: Option<u32>,
+        /// Absolute path of the executable
+        #[arg(long)]
+        exe: Option<String>,
+        /// systemd unit, such as nginx.service
+        #[arg(long)]
+        unit: Option<String>,
+        /// Container id, in full
+        #[arg(long)]
+        container_id: Option<String>,
+        /// Container name, as the runtime names it
+        #[arg(long)]
+        container_name: Option<String>,
+    },
 }
 
 // ── L7 ──────────────────────────────────────────────────────────────────

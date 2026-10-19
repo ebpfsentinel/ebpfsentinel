@@ -344,6 +344,10 @@ mod tests {
     struct TaskMasks(Arc<std::sync::Mutex<Vec<(u32, u64)>>>);
 
     impl ports::secondary::workload_policy_map_port::WorkloadPolicyMapPort for TaskMasks {
+        fn rule_denials(&self) -> Result<Vec<u64>, domain::common::error::DomainError> {
+            Ok(Vec::new())
+        }
+
         fn publish_policy(
             &mut self,
             _policy: &domain::firewall::workload::WorkloadPolicy,

@@ -31,6 +31,19 @@ pub trait WorkloadPolicyMapPort: Send + Sync {
     /// Forget a task, which is what an exit means.
     fn forget_task(&mut self, tgid: u32) -> Result<(), DomainError>;
 
+    /// How many times each kernel slot refused, summed across CPUs.
+    ///
+    /// Slot order, which is the order the enabled rules were published in,
+    /// so the caller names them by asking the policy what sits in each slot.
+    /// This is the exact figure: the ring buffer that carries the detail can
+    /// drop a record under load, and a security count that quietly loses one
+    /// is worse than no count at all.
+    ///
+    /// # Errors
+    ///
+    /// Whatever reading the counter array refused.
+    fn rule_denials(&self) -> Result<Vec<u64>, DomainError>;
+
     /// Forget every recorded cgroup and task.
     ///
     /// Called when the policy's selectors change, because a bit means a

@@ -184,7 +184,8 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
         // counts `refused`, so turning enforcement on changes which counter
         // moves and not how much. The last two are the honest ones - a task
         // the userspace side had not named yet, and a workload no rule
-        // covers.
+        // covers, and the refusal whose record found no room in the ring,
+        // which is the gap between the per-rule counters and the alerts.
         "WORKLOAD_METRICS" => &[
             (0, "connect"),
             (1, "sendmsg"),
@@ -194,6 +195,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (5, "would_refuse"),
             (6, "unresolved"),
             (7, "no_rule"),
+            (8, "event_lost"),
         ],
         "PROCESS_METRICS" => &[
             (0, "exec"),

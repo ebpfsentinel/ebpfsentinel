@@ -29,7 +29,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use ebpf_common::workload_policy::WORKLOAD_POLICY_MAX_RULES;
+use ebpf_common::workload_policy::{
+    WORKLOAD_HOOK_BIND, WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_SENDMSG, WORKLOAD_POLICY_MAX_RULES,
+};
 
 use crate::common::entity::{Protocol, RuleId};
 
@@ -468,6 +470,216 @@ pub enum WorkloadVerdict {
     NoRule,
 }
 
+/// The component name a workload policy alert and its counters carry.
+///
+/// One constant rather than a literal per surface: the alert, the metric
+/// label, the API response and the command line all have to agree, and the
+/// first place they stopped agreeing would be the place somebody filters on.
+pub const WORKLOAD_FIREWALL_COMPONENT: &str = "workload-firewall";
+
+/// Which socket operation a decision was taken on.
+///
+/// It is part of the refusal rather than a detail of it: the same rule
+/// refusing a `connect()` and refusing a `bind()` are two different
+/// sentences, one about where a workload may go and one about where it may
+/// listen, and an operator reading the alert needs to know which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkloadHook {
+    /// `connect()`, on either family.
+    Connect,
+    /// `sendmsg()` on an unconnected socket, which is the path most DNS
+    /// takes.
+    Sendmsg,
+    /// `bind()`, where the address is the local one the workload is taking.
+    Bind,
+}
+
+impl WorkloadHook {
+    /// The word an API response, an alert and the command line use.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::Sendmsg => "sendmsg",
+            Self::Bind => "bind",
+        }
+    }
+
+    /// What the workload was doing, as a sentence fragment.
+    #[must_use]
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Connect => "connecting to",
+            Self::Sendmsg => "sending to",
+            Self::Bind => "binding to",
+        }
+    }
+
+    /// The hook a kernel record names, or nothing for a value this build
+    /// does not know.
+    #[must_use]
+    pub fn from_kernel(value: u8) -> Option<Self> {
+        match value {
+            WORKLOAD_HOOK_CONNECT => Some(Self::Connect),
+            WORKLOAD_HOOK_SENDMSG => Some(Self::Sendmsg),
+            WORKLOAD_HOOK_BIND => Some(Self::Bind),
+            _ => None,
+        }
+    }
+}
+
+/// One refusal the kernel took, named.
+///
+/// The kernel reports a slot and a task; this is what that becomes once the
+/// rule it refers to and the workload behind the task have been looked up.
+/// `enforced` is false for an observing rule, where the syscall went through
+/// and the only thing produced is this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkloadDenial {
+    /// The rule that refused.
+    pub rule: RuleId,
+    /// Which operation was refused.
+    pub hook: WorkloadHook,
+    /// Where the workload was going.
+    pub destination: WorkloadDestination,
+    /// Whether the syscall was actually refused.
+    pub enforced: bool,
+    /// Thread group id of the calling task.
+    pub tgid: u32,
+    /// Effective user id of the calling task.
+    pub uid: u32,
+    /// The cgroup the task sat in.
+    pub cgroup_id: u64,
+    /// `bpf_ktime_get_boot_ns` at the hook.
+    pub at_ns: u64,
+}
+
+impl WorkloadDenial {
+    /// The destination as an address and a port.
+    #[must_use]
+    pub fn destination_text(&self) -> String {
+        match self.destination.addr {
+            DestinationAddr::V4(addr) => {
+                let octets = addr.to_be_bytes();
+                format!(
+                    "{}.{}.{}.{}:{}",
+                    octets[0], octets[1], octets[2], octets[3], self.destination.port
+                )
+            }
+            DestinationAddr::V6(addr) => {
+                format!("[{}]:{}", describe_v6(&addr), self.destination.port)
+            }
+        }
+    }
+
+    /// The one line an alert and a log carry.
+    ///
+    /// The rule is named first because it is the answer to the question the
+    /// refusal raises: a connection that failed is read backwards, from the
+    /// rule to the workload, and not the other way round.
+    #[must_use]
+    pub fn message(&self) -> String {
+        let verb = if self.enforced {
+            "refused"
+        } else {
+            "would refuse"
+        };
+        format!(
+            "workload rule {} {} pid {} {} {}",
+            self.rule.0,
+            verb,
+            self.tgid,
+            self.hook.describe(),
+            self.destination_text()
+        )
+    }
+}
+
+/// A refusal as the kernel reported it, before the slot is a rule.
+///
+/// The kernel knows a position in its own array and nothing about the
+/// identifier an operator wrote, so the two halves are separate types: this
+/// one is what the ring buffer carries, and [`WorkloadDenial`] is what it
+/// becomes once the policy in force has been asked what sits in that slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkloadDenialRecord {
+    /// Position in the kernel's rule array, which is the rule's position
+    /// among the enabled rules.
+    pub slot: u16,
+    /// Which operation was refused.
+    pub hook: WorkloadHook,
+    /// Where the workload was going.
+    pub destination: WorkloadDestination,
+    /// Whether the syscall was actually refused.
+    pub enforced: bool,
+    /// Thread group id of the calling task.
+    pub tgid: u32,
+    /// Effective user id of the calling task.
+    pub uid: u32,
+    /// The cgroup the task sat in.
+    pub cgroup_id: u64,
+    /// `bpf_ktime_get_boot_ns` at the hook.
+    pub at_ns: u64,
+}
+
+impl WorkloadDenialRecord {
+    /// The same refusal with the rule it names resolved.
+    #[must_use]
+    pub fn named(self, rule: RuleId) -> WorkloadDenial {
+        WorkloadDenial {
+            rule,
+            hook: self.hook,
+            destination: self.destination,
+            enforced: self.enforced,
+            tgid: self.tgid,
+            uid: self.uid,
+            cgroup_id: self.cgroup_id,
+            at_ns: self.at_ns,
+        }
+    }
+}
+
+/// One line of the answer to "what may this workload reach".
+///
+/// The question is asked of a policy rather than of a connection, so the
+/// destination is the rule's own half of the match written out and not an
+/// address somebody tried: what an operator is looking for when an
+/// application cannot connect is the rule above the one they expected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadReach {
+    /// The rule, as the operator wrote its identifier.
+    pub rule: RuleId,
+    /// Whether this rule lets the workload through.
+    pub allows: bool,
+    /// Whether a refusal is carried out rather than only reported.
+    pub mode: WorkloadMode,
+    /// Which workload the rule names.
+    pub selector: String,
+    /// The destination half, in the words the command line prints.
+    pub destination: String,
+    /// What this rule has refused since the policy was published, from the
+    /// kernel's own counter.
+    pub denials: u64,
+}
+
+/// An IPv6 address as the eight groups it is written in.
+///
+/// Deliberately not the shortest form: the domain has no address formatter
+/// and a half-written `::` compression is worse than the long spelling,
+/// which every reader and every tool still parses.
+#[must_use]
+fn describe_v6(addr: &[u8; 16]) -> String {
+    let mut groups = Vec::with_capacity(8);
+    for pair in addr.as_chunks::<2>().0 {
+        groups.push(format!(
+            "{:x}",
+            u16::from(pair[0]) << 8 | u16::from(pair[1])
+        ));
+    }
+    groups.join(":")
+}
+
 /// The rules of one configuration that name a workload, in the order the
 /// kernel walks them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -579,6 +791,29 @@ impl WorkloadPolicy {
         self.rules
             .iter()
             .any(|rule| rule.enabled && rule.enforces())
+    }
+
+    /// The enabled rules, in the order the kernel's rule array holds them.
+    ///
+    /// Slot n of that array is the nth enabled rule, because that is how the
+    /// policy is written out, and it is the only way back from a refusal the
+    /// kernel reported to the rule an operator wrote. Disabled rules take no
+    /// slot, so counting them in would shift every rule after the first one
+    /// somebody turned off.
+    pub fn in_slot_order(&self) -> impl Iterator<Item = &WorkloadRule> {
+        self.rules.iter().filter(|rule| rule.enabled)
+    }
+
+    /// The rule the kernel's slot `slot` holds, if the policy still has one
+    /// there.
+    ///
+    /// Nothing is the honest answer for a record that crossed a reload: the
+    /// slot it names belonged to the policy that was in force when it was
+    /// written, and guessing at the new one would attribute a refusal to a
+    /// rule that did not take it.
+    #[must_use]
+    pub fn rule_in_slot(&self, slot: u16) -> Option<&WorkloadRule> {
+        self.in_slot_order().nth(usize::from(slot))
     }
 
     /// The enabled rules naming `facts`, in the order they are examined.
@@ -1183,6 +1418,74 @@ mod tests {
             addr: [0x20, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             prefix_len: 32,
         }));
+    }
+
+    #[test]
+    fn a_refusal_names_the_rule_first_then_the_task_and_the_destination() {
+        let denial = WorkloadDenial {
+            rule: RuleId("no-egress".to_string()),
+            hook: WorkloadHook::Connect,
+            destination: WorkloadDestination {
+                addr: DestinationAddr::V4(0x0a00_0001),
+                port: 443,
+                protocol: Protocol::Tcp,
+            },
+            enforced: true,
+            tgid: 4242,
+            uid: 1000,
+            cgroup_id: 77,
+            at_ns: 1_000,
+        };
+
+        assert_eq!(
+            denial.message(),
+            "workload rule no-egress refused pid 4242 connecting to 10.0.0.1:443"
+        );
+    }
+
+    #[test]
+    fn an_observing_rule_says_it_would_refuse_rather_than_that_it_did() {
+        // The operator reading this is deciding whether to turn the policy
+        // on, so the sentence must not claim an outage that did not happen.
+        let denial = WorkloadDenial {
+            rule: RuleId("no-egress".to_string()),
+            hook: WorkloadHook::Sendmsg,
+            destination: WorkloadDestination {
+                addr: DestinationAddr::V6([
+                    0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x35,
+                ]),
+                port: 53,
+                protocol: Protocol::Udp,
+            },
+            enforced: false,
+            tgid: 7,
+            uid: 0,
+            cgroup_id: 0,
+            at_ns: 2_000,
+        };
+
+        assert_eq!(
+            denial.message(),
+            "workload rule no-egress would refuse pid 7 sending to [2001:db8:0:0:0:0:0:35]:53"
+        );
+    }
+
+    #[test]
+    fn every_hook_the_kernel_can_report_has_a_name_and_an_unknown_one_has_none() {
+        assert_eq!(
+            WorkloadHook::from_kernel(WORKLOAD_HOOK_CONNECT),
+            Some(WorkloadHook::Connect)
+        );
+        assert_eq!(
+            WorkloadHook::from_kernel(WORKLOAD_HOOK_SENDMSG),
+            Some(WorkloadHook::Sendmsg)
+        );
+        assert_eq!(
+            WorkloadHook::from_kernel(WORKLOAD_HOOK_BIND),
+            Some(WorkloadHook::Bind)
+        );
+        assert_eq!(WorkloadHook::from_kernel(9), None);
+        assert_eq!(WorkloadHook::Bind.as_str(), "bind");
     }
 }
 
