@@ -278,6 +278,34 @@ firewall:
       dst_port: 8443
       scope: global
 
+    # ── Workload rules ───────────────────────────────────────────────
+    # A rule may name the workload that opened the connection instead of,
+    # or as well as, an address: an executable, a systemd unit, a cgroup
+    # or a container. These are decided by the cgroup socket hooks when
+    # the task calls connect(), sendmsg() or bind(), so they need no LSM,
+    # and they accept no matcher that needs a packet (src_ip, src_port,
+    # state, flags, icmp, dscp, vlan_id, mac addresses, interfaces) and
+    # no reject action. `mode` defaults to observe, which counts what it
+    # would have refused and lets the call through.
+    - id: fw-allow-curl-to-registry
+      priority: 40
+      action: allow
+      protocol: tcp
+      dst_ip: "10.20.0.0/16"
+      dst_port: 443
+      workload:
+        exe: /usr/bin/curl
+        mode: observe
+
+    # The same workload, anywhere else: a selector with no address is
+    # that workload wherever it connects.
+    - id: fw-deny-curl-elsewhere
+      priority: 41
+      action: deny
+      workload:
+        exe: /usr/bin/curl
+        mode: observe
+
     # ── IPv6 examples ────────────────────────────────────────────────
     # Allow traffic from a specific IPv6 documentation prefix
     - id: fw-allow-v6-internal
