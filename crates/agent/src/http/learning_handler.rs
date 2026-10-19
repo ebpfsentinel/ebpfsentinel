@@ -162,6 +162,25 @@ pub fn session_response(progress: LearningProgress) -> LearningSessionResponse {
     }
 }
 
+/// The allow-list a window describes, with what it took to write it.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct LearningPolicyResponse {
+    /// The window it was rendered from, as it stood at the reading.
+    pub session: LearningSessionResponse,
+    /// The document, YAML in the agent's own rule schema.
+    pub yaml: String,
+    /// Workloads it speaks for.
+    pub workloads: usize,
+    /// Rules written, the closing deny of each workload included.
+    pub rules: usize,
+    /// Rules whose destination was widened to a prefix. Each one names the
+    /// addresses it came from in a comment above it.
+    pub collapsed_rules: usize,
+    /// Destinations no rule could be written for, because their workload
+    /// cannot be named by a selector.
+    pub skipped_edges: usize,
+}
+
 fn learning(
     state: &AppState,
 ) -> Result<Arc<application::learning_service::LearningAppService>, ApiError> {
@@ -312,6 +331,44 @@ pub async fn stop_learning(
         "learning window closed"
     );
     Ok(Json(session_response(progress)))
+}
+
+/// `GET /api/v1/learning/sessions/{id}/policy` - the allow-list the window
+/// describes.
+#[utoipa::path(
+    get, path = "/api/v1/learning/sessions/{id}/policy",
+    tag = "Learning",
+    params(("id" = String, Path, description = "The window's id")),
+    responses(
+        (status = 200, description = "The proposed allow-list", body = LearningPolicyResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "No such window, or learning mode is off", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key" = []))
+)]
+pub async fn get_learning_policy(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<LearningPolicyResponse>, ApiError> {
+    let service = learning(&state)?;
+    let now = now_ns();
+    let document = service.policy(Some(&id), now).ok_or(ApiError::NotFound {
+        code: "LEARNING_NOT_FOUND",
+        message: format!("no learning window with id '{id}'"),
+    })?;
+    let progress = service.progress(Some(&id), now).ok_or(ApiError::NotFound {
+        code: "LEARNING_NOT_FOUND",
+        message: format!("no learning window with id '{id}'"),
+    })?;
+    Ok(Json(LearningPolicyResponse {
+        session: session_response(progress),
+        yaml: document.yaml,
+        workloads: document.workloads,
+        rules: document.rules,
+        collapsed_rules: document.collapsed_rules,
+        skipped_edges: document.skipped_edges,
+    }))
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@ pub mod grpc;
 pub mod metrics;
 pub mod net;
 pub mod netfilter;
+pub mod otlp_transport;
 pub mod storage;
 pub mod system;
 pub mod system_metrics;

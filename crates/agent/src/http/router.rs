@@ -98,7 +98,9 @@ use super::lb_handler::{
     apply_lb_announce, create_lb_service, delete_lb_service, get_lb_service, lb_status,
     list_lb_services, list_lb_vips,
 };
-use super::learning_handler::{get_learning, list_learning, start_learning, stop_learning};
+use super::learning_handler::{
+    get_learning, get_learning_policy, list_learning, start_learning, stop_learning,
+};
 use super::metrics_handler::metrics;
 use super::middleware::auth::jwt_auth_middleware;
 use super::mitre_handler::mitre_coverage;
@@ -261,6 +263,10 @@ pub fn build_router(
             .route("/api/v1/firewall/workload/rules", get(list_workload_rules))
             .route("/api/v1/learning/sessions", get(list_learning))
             .route("/api/v1/learning/sessions/{id}", get(get_learning))
+            .route(
+                "/api/v1/learning/sessions/{id}/policy",
+                get(get_learning_policy),
+            )
             .route("/api/v1/ips/rules", get(list_ips_rules))
             .route("/api/v1/ips/blacklist", get(list_ips_blacklist))
             .route("/api/v1/ips/domain-blocks", get(list_ips_domain_blocks))

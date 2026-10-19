@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use infrastructure::config::{LogFormat, LogLevel};
 use infrastructure::constants::{DEFAULT_CONFIG_PATH, DEFAULT_HTTP_PORT};
@@ -304,6 +306,15 @@ pub enum LearningCommand {
     Stop {
         /// The window's id
         id: Option<String>,
+    },
+    /// Write the allow-list a window describes, as rules the agent loads
+    Policy {
+        /// The window's id
+        id: Option<String>,
+
+        /// Write the document to this file instead of to standard output
+        #[arg(short = 'f', long)]
+        output_file: Option<PathBuf>,
     },
 }
 

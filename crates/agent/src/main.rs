@@ -13,9 +13,9 @@ use cli::{
     AlertsCommand, AliasesCommand, AuditCommand, BlacklistAction, CaptureCommand, Command,
     ConfigCommand, DdosCommand, DlpCommand, DnsCommand, DomainsCommand, EbpfCommand, FeedsAction,
     FingerprintsCommand, FirewallCommand, FlowsAction, GeoipCommand, IdsCommand, IpsCommand,
-    L7Command, LbCommand, LearningCommand, MitreCommand, NatCommand, NptV6Command, ProcessesCommand, QosCommand,
-    RatelimitCommand, ResponsesCommand, RoutingCommand, ThreatintelCommand, TlsCommand,
-    ZonesCommand,
+    L7Command, LbCommand, LearningCommand, MitreCommand, NatCommand, NptV6Command,
+    ProcessesCommand, QosCommand, RatelimitCommand, ResponsesCommand, RoutingCommand,
+    ThreatintelCommand, TlsCommand, ZonesCommand,
 };
 
 fn main() -> Result<()> {
@@ -133,6 +133,9 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
                 }
                 LearningCommand::Stop { id } => {
                     commands::cmd_learning_stop(&client, id, output).await
+                }
+                LearningCommand::Policy { id, output_file } => {
+                    commands::cmd_learning_policy(&client, id, output_file, output).await
                 }
             }
         }

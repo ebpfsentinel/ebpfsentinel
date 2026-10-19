@@ -158,6 +158,17 @@ pub struct LearningSessionResponse {
     pub continuous: bool,
 }
 
+/// The allow-list a window describes, as the agent renders it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LearningPolicyResponse {
+    pub session: LearningSessionResponse,
+    pub yaml: String,
+    pub workloads: usize,
+    pub rules: usize,
+    pub collapsed_rules: usize,
+    pub skipped_edges: usize,
+}
+
 /// The workload rules in force.
 #[derive(Deserialize, Serialize)]
 pub struct WorkloadRulesResponse {
@@ -2245,6 +2256,18 @@ impl ApiClient {
             .request(
                 reqwest::Method::POST,
                 &format!("/api/v1/learning/sessions/{id}/stop"),
+            )
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn learning_policy(&self, id: &str) -> anyhow::Result<LearningPolicyResponse> {
+        let resp = self
+            .request(
+                reqwest::Method::GET,
+                &format!("/api/v1/learning/sessions/{id}/policy"),
             )
             .send()
             .await

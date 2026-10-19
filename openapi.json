@@ -4921,6 +4921,76 @@
         ]
       }
     },
+    "/api/v1/learning/sessions/{id}/policy": {
+      "get": {
+        "tags": [
+          "Learning"
+        ],
+        "summary": "`GET /api/v1/learning/sessions/{id}/policy` - the allow-list the window\ndescribes.",
+        "operationId": "get_learning_policy",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The window's id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The proposed allow-list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearningPolicyResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such window, or learning mode is off",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/learning/sessions/{id}/stop": {
       "post": {
         "tags": [
@@ -10982,6 +11052,48 @@
             "items": {
               "$ref": "#/components/schemas/LbVipResponse"
             }
+          }
+        }
+      },
+      "LearningPolicyResponse": {
+        "type": "object",
+        "description": "The allow-list a window describes, with what it took to write it.",
+        "required": [
+          "session",
+          "yaml",
+          "workloads",
+          "rules",
+          "collapsed_rules",
+          "skipped_edges"
+        ],
+        "properties": {
+          "collapsed_rules": {
+            "type": "integer",
+            "description": "Rules whose destination was widened to a prefix. Each one names the\naddresses it came from in a comment above it.",
+            "minimum": 0
+          },
+          "rules": {
+            "type": "integer",
+            "description": "Rules written, the closing deny of each workload included.",
+            "minimum": 0
+          },
+          "session": {
+            "$ref": "#/components/schemas/LearningSessionResponse",
+            "description": "The window it was rendered from, as it stood at the reading."
+          },
+          "skipped_edges": {
+            "type": "integer",
+            "description": "Destinations no rule could be written for, because their workload\ncannot be named by a selector.",
+            "minimum": 0
+          },
+          "workloads": {
+            "type": "integer",
+            "description": "Workloads it speaks for.",
+            "minimum": 0
+          },
+          "yaml": {
+            "type": "string",
+            "description": "The document, YAML in the agent's own rule schema."
           }
         }
       },

@@ -1,4 +1,4 @@
-# Flow export: IPFIX to a collector.
+# Flow export: IPFIX to a collector, and the same records as OTLP logs.
 #
 # The flow source is the kernel conntrack table, which the agent already
 # reads. A flow record carries the five-tuple, the counters in both
@@ -79,3 +79,24 @@ flow_export:
     # Keep a message inside the path's MTU. 1400 is a safe default on a 1500
     # byte path with a tunnel in the way; raise it on a path you know.
     max_message_bytes: 1400
+
+  otlp:
+    # The same records as OTLP logs, on the collector the alerting section
+    # already names. There is no endpoint here, and that is the point: the
+    # address, the protocol, the headers, the certificate authority and the
+    # timeout are read from alerting.otlp below, so one collector is written
+    # down once. Turning this on with no alerting.otlp block is refused at
+    # startup rather than exporting nowhere.
+    #
+    # Attribute names follow the OpenTelemetry semantic conventions where
+    # one exists (source.address, destination.port, network.transport,
+    # process.pid, container.id, k8s.pod.name) and sit under
+    # ebpfsentinel.flow.* and ebpfsentinel.workload.* where none does. A
+    # transited flow carries no workload attribute at all.
+    enabled: true
+
+alerting:
+  otlp:
+    endpoint: http://otel-collector:4318
+    protocol: http
+    timeout_ms: 5000

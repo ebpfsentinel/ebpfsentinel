@@ -222,6 +222,19 @@ process_table:
   capacity: 8192
   capture_command_line: false
 
+# Learning mode: what this node reached, for a window an operator declares.
+# Nothing is observed until a window is opened, so enabled here only means
+# the routes and the sampler exist. max_edges is the ceiling a window holds;
+# past it the window refuses destinations and says so rather than quietly
+# forgetting the oldest, because a policy written from a truncated reading
+# would refuse traffic the node really sends. storage_path empty keeps the
+# windows in memory only, which costs them a restart.
+learning:
+  enabled: true
+  max_edges: 8192
+  sample_interval_secs: 10
+  storage_path: data/learning.redb
+
 # Flow export. Off by default, and off here means no record is built at all:
 # a node exporting nowhere should not pay for a flow table. The source is the
 # kernel conntrack table, so a host that cannot read it has no flow source
@@ -262,6 +275,12 @@ flow_export:
     # so they go out again on this interval.
     template_interval_secs: 600
     max_message_bytes: 1400
+  otlp:
+    # Flow records as OTLP logs, to the collector alerting.otlp already
+    # names: there is no endpoint, credential or certificate authority here
+    # on purpose, so an estate running one collector writes its address once.
+    # Turning this on without an alerting.otlp block is refused at startup.
+    enabled: false
 
 alerting:
   enabled: false

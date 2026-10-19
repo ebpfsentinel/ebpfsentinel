@@ -12,6 +12,7 @@
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use domain::learning::document::{PolicyDocument, render_policy};
 use domain::learning::engine::{LearningEngine, LearningSession};
 use domain::learning::entity::{
     LearningProgress, LearningScope, Observation, ObservedFlow, ObservedWorkload,
@@ -295,6 +296,22 @@ impl LearningAppService {
     #[must_use]
     pub fn active_session(&self) -> Option<LearningSession> {
         self.read().active().cloned()
+    }
+
+    /// The allow-list one window describes, the open one when no id is
+    /// given.
+    ///
+    /// Rendering reads the session and writes nothing: a document can be
+    /// asked for while the window is still open, which is how an operator
+    /// decides whether it has run long enough.
+    #[must_use]
+    pub fn policy(&self, id: Option<&str>, now_ns: u64) -> Option<PolicyDocument> {
+        let engine = self.read();
+        let session = match id {
+            Some(id) => engine.get(id)?,
+            None => engine.active()?,
+        };
+        Some(render_policy(session, now_ns))
     }
 
     /// An id that reads as a date and never collides with one the engine

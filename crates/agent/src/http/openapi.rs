@@ -78,6 +78,7 @@ use super::zone_handler;
         learning_handler::list_learning,
         learning_handler::get_learning,
         learning_handler::stop_learning,
+        learning_handler::get_learning_policy,
         // IPS
         ips_handler::list_ips_rules,
         ips_handler::patch_ips_rule_mode,
@@ -224,6 +225,7 @@ use super::zone_handler;
         // Learning
         learning_handler::StartLearningRequest,
         learning_handler::LearningSessionResponse,
+        learning_handler::LearningPolicyResponse,
         learning_handler::ScopeBody,
         learning_handler::WorkloadSelectorBody,
         // IPS

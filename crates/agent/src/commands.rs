@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::{Context, Result, bail};
 
 use crate::api_client::{
@@ -4439,6 +4441,43 @@ pub async fn cmd_learning_stop(
     let id = resolve_learning_id(client, id).await?;
     let session = client.stop_learning(&id).await?;
     print_learning_session(&session, output)
+}
+
+/// Write the allow-list a window describes.
+///
+/// The document goes to standard output so it can be piped into a review,
+/// and to a file when one is named. Nothing is applied here: the agent
+/// loads this document the day somebody puts it in its configuration, and
+/// every rule in it is in observe mode until somebody changes that.
+pub async fn cmd_learning_policy(
+    client: &ApiClient,
+    id: Option<String>,
+    output_file: Option<PathBuf>,
+    output: OutputFormat,
+) -> Result<()> {
+    let id = resolve_learning_id(client, id).await?;
+    let policy = client.learning_policy(&id).await?;
+    if let Some(path) = output_file {
+        std::fs::write(&path, &policy.yaml)
+            .with_context(|| format!("writing the document to {}", path.display()))?;
+        if matches!(output, OutputFormat::Json) {
+            println!("{}", serde_json::to_string_pretty(&policy)?);
+        } else {
+            println!(
+                "{} rules for {} workloads written to {}",
+                policy.rules,
+                policy.workloads,
+                path.display()
+            );
+        }
+        return Ok(());
+    }
+    if matches!(output, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(&policy)?);
+        return Ok(());
+    }
+    print!("{}", policy.yaml);
+    Ok(())
 }
 
 /// An id the caller did not give is the window that is still running.

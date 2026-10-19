@@ -13,6 +13,7 @@
 //! enough before turning the aggregate into a policy.
 
 pub mod aggregate;
+pub mod document;
 pub mod engine;
 pub mod entity;
 pub mod error;

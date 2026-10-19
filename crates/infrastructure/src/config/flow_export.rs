@@ -262,6 +262,23 @@ impl IpfixSinkConfig {
     }
 }
 
+/// Flow records as OTLP logs.
+///
+/// There is one field here and deliberately no second one: the endpoint, the
+/// protocol, the headers, the certificate authority and the timeout are the
+/// ones under `alerting.otlp`, because an estate running one collector should
+/// not have to write its address twice and then discover, at the worst
+/// moment, that the two copies disagree. Turning flows on is one switch, and
+/// turning that switch on without an `alerting.otlp` block to read is
+/// refused rather than quietly inert.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OtlpFlowSinkConfig {
+    /// Send flow records to the collector the alerting section already
+    /// names. Off by default.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 /// The whole section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowExportConfig {
@@ -309,6 +326,10 @@ pub struct FlowExportConfig {
     /// IPFIX.
     #[serde(default)]
     pub ipfix: IpfixSinkConfig,
+
+    /// OTLP logs, on the collector `alerting.otlp` already names.
+    #[serde(default)]
+    pub otlp: OtlpFlowSinkConfig,
 }
 
 impl Default for FlowExportConfig {
@@ -323,6 +344,7 @@ impl Default for FlowExportConfig {
             batch_size: default_batch_size(),
             tick_interval_secs: default_tick_interval_secs(),
             ipfix: IpfixSinkConfig::default(),
+            otlp: OtlpFlowSinkConfig::default(),
         }
     }
 }
@@ -331,7 +353,7 @@ impl FlowExportConfig {
     /// Whether any sink is configured to receive records.
     #[must_use]
     pub fn any_sink_enabled(&self) -> bool {
-        self.ipfix.enabled
+        self.ipfix.enabled || self.otlp.enabled
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -527,6 +549,22 @@ ipfix:
         let mut config = enabled();
         config.ipfix.targets[0].address = "2001:db8::9".to_string();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn the_otlp_sink_alone_is_a_sink() {
+        let mut config = FlowExportConfig {
+            enabled: true,
+            ..FlowExportConfig::default()
+        };
+        config.otlp.enabled = true;
+        assert!(
+            config.any_sink_enabled(),
+            "flows on OTLP and nothing else is still an export"
+        );
+        config
+            .validate()
+            .expect("a section with one sink enabled is complete");
     }
 
     #[test]

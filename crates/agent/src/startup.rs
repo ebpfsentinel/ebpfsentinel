@@ -3338,6 +3338,10 @@ pub async fn run(
     // is includes the container it runs in, and the resolver and enrichers
     // that answer that have only just been decided. The events the reader
     // produced in between waited in the channel.
+    // Kept for the learning collector, which names a pid the same way.
+    let mut process_table_for_learning: Option<
+        Arc<application::process_table_service::ProcessTableService>,
+    > = None;
     if config.process_table.enabled {
         let mut svc = application::process_table_service::ProcessTableService::new(
             config.process_table.capacity,
@@ -3374,6 +3378,7 @@ pub async fn run(
         // The table is what turns a pid into a path, a container and a pod,
         // so the resolver gains the second half here.
         workloads.install_processes(Arc::clone(&svc));
+        process_table_for_learning = Some(Arc::clone(&svc));
         let table_cancel = cancel_token.clone();
         tokio::spawn(async move {
             svc.run(process_rx, table_cancel).await;
@@ -3387,6 +3392,63 @@ pub async fn run(
         // Nothing writes into the channel when the table is off, and the
         // receiver going out of scope here is what makes that explicit.
         drop(process_rx);
+    }
+
+    // ── 10f-ter. Learning mode ──────────────────────────────────────
+    //
+    // Built after the process table because an edge is only worth writing
+    // down once a pid can be turned into a workload, and before the
+    // dispatcher because a window taken back from disk must be open again
+    // before the first sample runs. Nothing is observed until an operator
+    // opens a window, so the collector is spawned whether or not one is.
+    if config.learning.enabled {
+        let mut svc = application::learning_service::LearningAppService::new(
+            config.learning.max_edges,
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+        );
+        // Graceful degradation, the way every other store here degrades: a
+        // window that cannot be written down is a window that does not
+        // survive a restart, which the progress report states as a gap
+        // rather than hiding.
+        if !config.learning.storage_path.is_empty() {
+            let learning_path = Path::new(&config.learning.storage_path);
+            match adapters::storage::redb_learning_store::RedbLearningStore::open(learning_path) {
+                Ok(store) => {
+                    svc = svc.with_store(Arc::new(store)
+                        as Arc<dyn ports::secondary::learning_store_port::LearningStorePort>);
+                    info!(
+                        path = %config.learning.storage_path,
+                        "learning store initialized (redb)"
+                    );
+                }
+                Err(e) => warn!(
+                    error = %e,
+                    path = %config.learning.storage_path,
+                    "learning store unavailable, a window will not survive a restart"
+                ),
+            }
+        }
+        let svc = Arc::new(svc);
+        svc.restore(application::learning_service::now_ns());
+        app_state.install_learning_service(Arc::clone(&svc));
+        let collector = Arc::new(application::learning_collector::LearningCollector::new(
+            Arc::clone(&svc),
+            Arc::clone(&conntrack_svc),
+            workloads.clone(),
+        ));
+        if let Some(ref table) = process_table_for_learning {
+            collector.install_processes(Arc::clone(table));
+        }
+        let interval = Duration::from_secs(config.learning.sample_interval_secs);
+        let learning_cancel = cancel_token.clone();
+        tokio::spawn(async move {
+            collector.run(interval, learning_cancel).await;
+        });
+        info!(
+            max_edges = config.learning.max_edges,
+            sample_interval_secs = config.learning.sample_interval_secs,
+            "learning mode available"
+        );
     }
 
     // ── 11. Spawn event dispatcher (replaces flat event consumer) ───
@@ -3515,11 +3577,20 @@ pub async fn run(
     // table. A host whose conntrack table cannot be read has no flow source
     // at all, and says so here rather than exporting nothing in silence.
     if config.flow_export.enabled {
-        let sinks: Vec<Arc<dyn ports::secondary::flow_sink_port::FlowSink>> =
+        let mut sinks: Vec<Arc<dyn ports::secondary::flow_sink_port::FlowSink>> =
             adapters::flow::ipfix_sink::IpfixSink::from_config(&config.flow_export.ipfix)
                 .into_iter()
                 .map(|sink| sink as Arc<dyn ports::secondary::flow_sink_port::FlowSink>)
                 .collect();
+        // The OTLP sink carries no endpoint of its own: it exports to the
+        // collector the alerting section names, so an estate that configured
+        // one collector has one place where its address is written.
+        if let Some(sink) = adapters::flow::otlp_sink::OtlpFlowSink::from_config(
+            &config.flow_export,
+            config.alerting.otlp.as_ref(),
+        ) {
+            sinks.push(sink as Arc<dyn ports::secondary::flow_sink_port::FlowSink>);
+        }
         match conntrack_event_tx.as_ref() {
             Some(tx) if !sinks.is_empty() => {
                 let settings = application::flow_export_service::FlowExportSettings {

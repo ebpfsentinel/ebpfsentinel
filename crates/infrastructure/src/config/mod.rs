@@ -66,7 +66,9 @@ pub use dns::{
 pub use firewall::{
     DefaultPolicy, FirewallConfig, FirewallRuleConfig, PortRangeConfig, ScopeConfig, ScopeMap,
 };
-pub use flow_export::{FlowExportConfig, FlowTargetConfig, FlowTransport, IpfixSinkConfig};
+pub use flow_export::{
+    FlowExportConfig, FlowTargetConfig, FlowTransport, IpfixSinkConfig, OtlpFlowSinkConfig,
+};
 pub use geoip::{GeoIpConfig, GeoIpSource};
 pub use ids::{IdsConfig, IdsRuleConfig, SamplingConfig, ThresholdRuleConfig};
 pub use ips::{IpsConfig, IpsRuleConfig};
@@ -463,6 +465,20 @@ impl AgentConfig {
 
         // Validate flow export, sinks included
         self.flow_export.validate()?;
+
+        // The OTLP flow sink has no endpoint of its own on purpose: it rides
+        // the collector the alerting section names. Asking for flows with no
+        // such block is a configuration error rather than a sink that sits
+        // there sending nowhere.
+        if self.flow_export.enabled && self.flow_export.otlp.enabled && self.alerting.otlp.is_none()
+        {
+            return Err(ConfigError::Validation {
+                field: "flow_export.otlp.enabled".to_string(),
+                message: "is on, but no alerting.otlp block names a collector to send to; \
+                          the flow sink reads that endpoint rather than carrying a second one"
+                    .to_string(),
+            });
+        }
 
         // Validate multi-WAN gateways
         self.routing.validate()?;
@@ -2158,6 +2174,45 @@ mod tests {
     use domain::l7::entity::L7Matcher;
     use domain::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm};
     use domain::threatintel::entity::FeedFormat;
+
+    // ── Flow export across sections ────────────────────────────────
+
+    #[test]
+    fn otlp_flows_without_a_collector_are_refused() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+flow_export:
+  enabled: true
+  otlp:
+    enabled: true
+";
+        let error = AgentConfig::from_yaml(yaml).expect_err("there is nowhere to export to");
+        let message = error.to_string();
+        assert!(
+            message.contains("alerting.otlp"),
+            "the refusal did not name the block that holds the endpoint: {message}"
+        );
+    }
+
+    #[test]
+    fn otlp_flows_ride_the_collector_alerting_already_names() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+alerting:
+  otlp:
+    endpoint: http://otel-collector:4318
+    protocol: http
+flow_export:
+  enabled: true
+  otlp:
+    enabled: true
+";
+        let config = AgentConfig::from_yaml(yaml).expect("one collector is enough for both");
+        assert!(config.flow_export.otlp.enabled);
+        assert!(config.flow_export.any_sink_enabled());
+    }
 
     // ── VLAN config validation ─────────────────────────────────────
 
