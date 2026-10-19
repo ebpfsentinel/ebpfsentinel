@@ -106,6 +106,100 @@ impl LearningConfig {
 mod tests {
     use super::*;
 
+    use domain::common::entity::Protocol;
+    use domain::learning::document::render_policy;
+    use domain::learning::engine::LearningSession;
+    use domain::learning::entity::{LearningScope, ObservedFlow, ObservedWorkload};
+    use serde::Deserialize;
+
+    use super::super::firewall::FirewallConfig;
+
+    /// The document's own root, so it is read exactly as the agent reads a
+    /// configuration file carrying that section.
+    #[derive(Debug, Deserialize)]
+    struct DocumentRoot {
+        firewall: FirewallConfig,
+    }
+
+    fn a_window_that_reached(destinations: &[(&str, &str, u16)]) -> LearningSession {
+        let mut session =
+            LearningSession::new("learn-1".to_string(), LearningScope::Node, 3_600, 1_024, 0)
+                .expect("a window opens");
+        for (i, (unit, address, port)) in destinations.iter().enumerate() {
+            let flow = ObservedFlow {
+                workload: ObservedWorkload {
+                    exe: None,
+                    unit: Some((*unit).to_string()),
+                    cgroup: None,
+                    container_id: None,
+                    container_name: None,
+                },
+                destination: address.parse().expect("an address"),
+                port: *port,
+                protocol: Protocol::Tcp,
+            };
+            session.observe(&flow, (i as u64 + 1) * 1_000_000_000);
+        }
+        session
+    }
+
+    /// The point of the renderer: what it writes is a document this binary
+    /// loads, not a report that looks like one.
+    #[test]
+    fn the_document_a_window_produces_is_a_configuration_this_agent_reads() {
+        let session = a_window_that_reached(&[
+            ("nginx.service", "10.0.0.1", 443),
+            ("nginx.service", "10.0.0.2", 5432),
+            ("redis.service", "10.0.1.7", 6379),
+        ]);
+        let document = render_policy(&session, 10_000_000_000);
+
+        let root: DocumentRoot =
+            serde_norway::from_str(&document.yaml).expect("the document parses as configuration");
+        assert_eq!(root.firewall.rules.len(), document.rules);
+        for (idx, rule) in root.firewall.rules.iter().enumerate() {
+            rule.validate(idx).expect("every generated rule validates");
+        }
+    }
+
+    /// A collapsed rule is still a rule the loader accepts, prefix and all.
+    #[test]
+    fn a_collapsed_prefix_is_a_destination_the_loader_accepts() {
+        let session = a_window_that_reached(&[
+            ("api.service", "10.0.0.1", 443),
+            ("api.service", "10.0.0.2", 443),
+            ("api.service", "10.0.0.3", 443),
+            ("api.service", "10.0.0.4", 443),
+        ]);
+        let document = render_policy(&session, 10_000_000_000);
+        assert_eq!(document.collapsed_rules, 1);
+
+        let root: DocumentRoot =
+            serde_norway::from_str(&document.yaml).expect("the document parses as configuration");
+        for (idx, rule) in root.firewall.rules.iter().enumerate() {
+            rule.validate(idx).expect("every generated rule validates");
+        }
+        assert!(
+            root.firewall
+                .rules
+                .iter()
+                .any(|rule| rule.dst_ip.as_deref() == Some("10.0.0.0/24"))
+        );
+    }
+
+    /// Nothing a window produces may refuse traffic the day it is applied.
+    #[test]
+    fn every_rule_the_document_carries_is_in_observe_mode() {
+        let session = a_window_that_reached(&[("nginx.service", "10.0.0.1", 443)]);
+        let document = render_policy(&session, 10_000_000_000);
+        let root: DocumentRoot =
+            serde_norway::from_str(&document.yaml).expect("the document parses as configuration");
+        for rule in &root.firewall.rules {
+            let workload = rule.workload.as_ref().expect("a generated rule names one");
+            assert_eq!(workload.mode, "observe");
+        }
+    }
+
     #[test]
     fn a_node_that_says_nothing_can_still_open_a_window() {
         let cfg = LearningConfig::default();

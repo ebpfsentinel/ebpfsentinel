@@ -139,8 +139,8 @@ pub fn render_policy(session: &LearningSession, now_ns: u64) -> PolicyDocument {
             selector_key: selector_key.to_string(),
             selector_value: selector_value.clone(),
             comment: Some(
-                "what makes the rules above an allow-list: everything else this workload\n    \
-                 opens. It counts while the mode is observe, and refuses the day somebody\n    \
+                "what makes the rules above an allow-list: everything else this workload\n\
+                 opens. It counts while the mode is observe, and refuses the day somebody\n\
                  moves it to enforce."
                     .to_string(),
             ),
@@ -357,8 +357,8 @@ fn collapse_addresses(addresses: &[IpAddr]) -> Vec<Destination> {
             out.push(Destination {
                 text: prefix,
                 comment: Some(format!(
-                    "{} addresses in this prefix were reached: {}. The rule allows the\n    \
-                     whole prefix, which is wider than what was observed.",
+                    "{} addresses in this prefix were reached: {}.\nThe rule allows the whole \
+                     prefix, which is wider than what was observed.",
                     members.len(),
                     observed.join(", ")
                 )),
@@ -449,7 +449,9 @@ fn protocol_name(protocol: Protocol) -> String {
 
 fn write_rule(out: &mut String, rule: &DraftRule) {
     if let Some(comment) = &rule.comment {
-        let _ = writeln!(out, "    # {comment}");
+        for line in comment.lines() {
+            let _ = writeln!(out, "    # {}", line.trim());
+        }
     }
     let _ = writeln!(out, "    - id: {}", rule.id);
     let _ = writeln!(out, "      priority: {}", rule.priority);
