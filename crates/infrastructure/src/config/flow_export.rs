@@ -83,21 +83,34 @@ const MIN_MESSAGE_BYTES: usize = 512;
 const MAX_MESSAGE_BYTES: usize = 65_535;
 
 /// Which wire a sink uses.
+///
+/// `Tls` is TCP with the stream encrypted, which is what RFC 5425 asks of
+/// syslog leaving a node: a flow record names every address a workload
+/// talked to, so on anything but a trusted segment it is the transport to
+/// pick. IPFIX refuses it, because this agent's IPFIX encoder writes to a
+/// plain socket and a collector offered a TLS stream it cannot read is worse
+/// than a refusal at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowTransport {
     Udp,
     Tcp,
+    Tls,
 }
 
 impl FlowTransport {
     /// What an error message tells an operator to type.
-    pub const ACCEPTED: &'static str = "udp, tcp";
+    pub const ACCEPTED: &'static str = "udp, tcp, tls";
+
+    /// What an error message tells an operator to type where the sink has no
+    /// TLS of its own.
+    pub const ACCEPTED_UNENCRYPTED: &'static str = "udp, tcp";
 
     /// Parse the configured word.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "udp" => Some(Self::Udp),
             "tcp" => Some(Self::Tcp),
+            "tls" => Some(Self::Tls),
             _ => None,
         }
     }
@@ -107,7 +120,15 @@ impl FlowTransport {
         match self {
             Self::Udp => "udp",
             Self::Tcp => "tcp",
+            Self::Tls => "tls",
         }
+    }
+
+    /// Whether the record travels over a stream, which is what decides
+    /// framing: a datagram is its own frame, a stream needs one.
+    #[must_use]
+    pub fn is_stream(self) -> bool {
+        matches!(self, Self::Tcp | Self::Tls)
     }
 }
 
@@ -135,16 +156,21 @@ impl FlowTargetConfig {
         FlowTransport::parse(&self.transport).unwrap_or(FlowTransport::Udp)
     }
 
-    fn validate(&self, field: &str) -> Result<(), ConfigError> {
-        if FlowTransport::parse(&self.transport).is_none() {
-            return Err(ConfigError::Validation {
-                field: format!("{field}.transport"),
-                message: format!(
-                    "must be one of {}, got '{}'",
-                    FlowTransport::ACCEPTED,
-                    self.transport
-                ),
-            });
+    fn validate(&self, field: &str, accepted: &str) -> Result<(), ConfigError> {
+        let refused = |message: String| ConfigError::Validation {
+            field: format!("{field}.transport"),
+            message,
+        };
+        let Some(transport) = FlowTransport::parse(&self.transport) else {
+            return Err(refused(format!(
+                "must be one of {accepted}, got '{}'",
+                self.transport
+            )));
+        };
+        if transport == FlowTransport::Tls && accepted == FlowTransport::ACCEPTED_UNENCRYPTED {
+            return Err(refused(format!(
+                "is tls, which this sink does not speak; it accepts {accepted}"
+            )));
         }
         validate_address(&self.address, &format!("{field}.address"))
     }
@@ -245,7 +271,10 @@ impl IpfixSinkConfig {
             });
         }
         for (index, target) in self.targets.iter().enumerate() {
-            target.validate(&format!("flow_export.ipfix.targets[{index}]"))?;
+            target.validate(
+                &format!("flow_export.ipfix.targets[{index}]"),
+                FlowTransport::ACCEPTED_UNENCRYPTED,
+            )?;
         }
         range(
             self.template_interval_secs,
@@ -259,6 +288,144 @@ impl IpfixSinkConfig {
             MAX_MESSAGE_BYTES,
             "flow_export.ipfix.max_message_bytes",
         )
+    }
+}
+
+/// A text sink over syslog's transports: RFC 5424 records, or the same
+/// fields inside a CEF payload.
+///
+/// One struct serves both because they differ only in what the message
+/// carries: the transports, the framing, the facility and the host name in
+/// the header are the same decisions, and an operator who configured one has
+/// nothing new to learn for the other.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SyslogSinkConfig {
+    /// Off by default, like every sink.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// The collectors. One sink per entry, each with its own backoff.
+    #[serde(default)]
+    pub targets: Vec<FlowTargetConfig>,
+
+    /// The syslog facility the records are sent under, 0 to 23.
+    ///
+    /// `local0` by default rather than `user`, which is where this agent's
+    /// own alerts go: a flow record is volume, and an operator routing it to
+    /// a file of its own should not have to write a message filter to keep it
+    /// out of the alert stream.
+    #[serde(default = "default_facility")]
+    pub facility: u8,
+
+    /// The host name written into the header. Empty means the node's own,
+    /// read once at startup, which is what a collector expects to see.
+    #[serde(default)]
+    pub hostname: String,
+
+    /// The certificate authority that signs the collector's certificate.
+    ///
+    /// Required for the `tls` transport and ignored for the other two. There
+    /// is no public root list in this binary and no way to turn verification
+    /// off: a syslog collector is an internal service, so naming its
+    /// authority is the configuration, and an agent that would accept any
+    /// certificate is an agent whose flow records can be read by whoever
+    /// answers the port first.
+    #[serde(default)]
+    pub ca_cert: Option<String>,
+}
+
+/// `local0`, which is 16.
+fn default_facility() -> u8 {
+    16
+}
+
+const MAX_FACILITY: u8 = 23;
+
+impl SyslogSinkConfig {
+    fn validate(&self, section: &str) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.targets.is_empty() {
+            return Err(ConfigError::Validation {
+                field: format!("flow_export.{section}.targets"),
+                message: "is empty, so the sink has nowhere to send".to_string(),
+            });
+        }
+        for (index, target) in self.targets.iter().enumerate() {
+            target.validate(
+                &format!("flow_export.{section}.targets[{index}]"),
+                FlowTransport::ACCEPTED,
+            )?;
+        }
+        if self.facility > MAX_FACILITY {
+            return Err(ConfigError::Validation {
+                field: format!("flow_export.{section}.facility"),
+                message: format!(
+                    "must be between 0 and {MAX_FACILITY}, got {}",
+                    self.facility
+                ),
+            });
+        }
+        let needs_authority = self
+            .targets
+            .iter()
+            .any(|target| target.transport() == FlowTransport::Tls);
+        if needs_authority && self.ca_cert.as_deref().unwrap_or_default().is_empty() {
+            return Err(ConfigError::Validation {
+                field: format!("flow_export.{section}.ca_cert"),
+                message: "is empty and a target uses the tls transport; name the authority \
+                          that signs the collector's certificate, because this sink will \
+                          not skip verification"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Flow records as JSON lines in a file.
+///
+/// Rotation is the system's job: an estate already runs logrotate or a
+/// journald equivalent on every other file on the node, and a second
+/// rotation policy inside the agent is one more place for a disk to fill in a
+/// way nobody is watching. The sink reopens its path when the file it holds
+/// is no longer the file at that path, so `create` and `copytruncate` both
+/// work and no record is written into a rotated-away handle.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct JsonLinesSinkConfig {
+    /// Off by default, like every sink.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// The file the lines are appended to. Created with owner-only write
+    /// where it does not exist, because a flow record names addresses.
+    #[serde(default)]
+    pub path: String,
+}
+
+impl JsonLinesSinkConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.path.trim().is_empty() {
+            return Err(ConfigError::Validation {
+                field: "flow_export.json_lines.path".to_string(),
+                message: "is empty, so the sink has nowhere to write".to_string(),
+            });
+        }
+        if !self.path.starts_with('/') {
+            return Err(ConfigError::Validation {
+                field: "flow_export.json_lines.path".to_string(),
+                message: format!(
+                    "must be an absolute path, got '{}'; the agent's working directory \
+                     is not where an operator will look for it",
+                    self.path
+                ),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -330,6 +497,18 @@ pub struct FlowExportConfig {
     /// OTLP logs, on the collector `alerting.otlp` already names.
     #[serde(default)]
     pub otlp: OtlpFlowSinkConfig,
+
+    /// RFC 5424 syslog.
+    #[serde(default)]
+    pub syslog: SyslogSinkConfig,
+
+    /// CEF, inside the same syslog envelope.
+    #[serde(default)]
+    pub cef: SyslogSinkConfig,
+
+    /// JSON lines in a file.
+    #[serde(default)]
+    pub json_lines: JsonLinesSinkConfig,
 }
 
 impl Default for FlowExportConfig {
@@ -345,6 +524,9 @@ impl Default for FlowExportConfig {
             tick_interval_secs: default_tick_interval_secs(),
             ipfix: IpfixSinkConfig::default(),
             otlp: OtlpFlowSinkConfig::default(),
+            syslog: SyslogSinkConfig::default(),
+            cef: SyslogSinkConfig::default(),
+            json_lines: JsonLinesSinkConfig::default(),
         }
     }
 }
@@ -353,11 +535,18 @@ impl FlowExportConfig {
     /// Whether any sink is configured to receive records.
     #[must_use]
     pub fn any_sink_enabled(&self) -> bool {
-        self.ipfix.enabled || self.otlp.enabled
+        self.ipfix.enabled
+            || self.otlp.enabled
+            || self.syslog.enabled
+            || self.cef.enabled
+            || self.json_lines.enabled
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.ipfix.validate()?;
+        self.syslog.validate("syslog")?;
+        self.cef.validate("cef")?;
+        self.json_lines.validate()?;
         if !self.enabled {
             return Ok(());
         }
@@ -653,5 +842,221 @@ ipfix:
         assert_eq!(FlowTransport::parse("quic"), None);
         assert_eq!(FlowTransport::Udp.as_str(), "udp");
         assert_eq!(FlowTransport::Tcp.as_str(), "tcp");
+    }
+
+    fn syslog_target(address: &str, transport: &str) -> FlowTargetConfig {
+        FlowTargetConfig {
+            address: address.to_string(),
+            transport: transport.to_string(),
+        }
+    }
+
+    fn with_syslog(targets: Vec<FlowTargetConfig>, ca_cert: Option<&str>) -> FlowExportConfig {
+        FlowExportConfig {
+            enabled: true,
+            syslog: SyslogSinkConfig {
+                enabled: true,
+                targets,
+                facility: 16,
+                hostname: String::new(),
+                ca_cert: ca_cert.map(str::to_string),
+            },
+            ..FlowExportConfig::default()
+        }
+    }
+
+    #[test]
+    fn each_text_sink_alone_is_a_sink() {
+        let syslog = with_syslog(vec![syslog_target("collector:514", "udp")], None);
+        assert!(syslog.any_sink_enabled());
+        syslog
+            .validate()
+            .expect("a syslog sink with a target is valid");
+
+        let cef = FlowExportConfig {
+            enabled: true,
+            cef: syslog.syslog.clone(),
+            ..FlowExportConfig::default()
+        };
+        assert!(cef.any_sink_enabled());
+        cef.validate().expect("a cef sink with a target is valid");
+
+        let lines = FlowExportConfig {
+            enabled: true,
+            json_lines: JsonLinesSinkConfig {
+                enabled: true,
+                path: "/var/log/ebpfsentinel/flows.jsonl".to_string(),
+            },
+            ..FlowExportConfig::default()
+        };
+        assert!(lines.any_sink_enabled());
+        lines.validate().expect("a file sink with a path is valid");
+    }
+
+    #[test]
+    fn a_text_sink_with_no_target_is_refused_and_names_its_own_section() {
+        let config = with_syslog(Vec::new(), None);
+        let error = config.validate().expect_err("nowhere to send");
+        assert!(
+            error.to_string().contains("flow_export.syslog.targets"),
+            "{error}"
+        );
+
+        let config = FlowExportConfig {
+            enabled: true,
+            cef: SyslogSinkConfig {
+                enabled: true,
+                ..SyslogSinkConfig::default()
+            },
+            ..FlowExportConfig::default()
+        };
+        let error = config.validate().expect_err("nowhere to send");
+        assert!(
+            error.to_string().contains("flow_export.cef.targets"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_three_transport_words_are_the_ones_a_text_sink_offers() {
+        let config = with_syslog(vec![syslog_target("collector:514", "sctp")], None);
+        let error = config.validate().expect_err("sctp is not a transport here");
+        let message = error.to_string();
+        assert!(message.contains("udp, tcp, tls"), "{message}");
+        assert!(message.contains("sctp"), "{message}");
+    }
+
+    #[test]
+    fn a_tls_target_is_refused_on_a_sink_that_cannot_encrypt() {
+        let config = FlowExportConfig {
+            enabled: true,
+            ipfix: IpfixSinkConfig {
+                enabled: true,
+                targets: vec![syslog_target("collector:4739", "tls")],
+                ..IpfixSinkConfig::default()
+            },
+            ..FlowExportConfig::default()
+        };
+        let error = config
+            .validate()
+            .expect_err("the ipfix encoder writes to a plain socket");
+        let message = error.to_string();
+        assert!(message.contains("does not speak"), "{message}");
+        assert!(message.contains("udp, tcp"), "{message}");
+    }
+
+    #[test]
+    fn a_tls_target_with_no_authority_is_refused_rather_than_trusting_anything() {
+        let config = with_syslog(vec![syslog_target("collector:6514", "tls")], None);
+        let error = config.validate().expect_err("no authority was named");
+        let message = error.to_string();
+        assert!(message.contains("flow_export.syslog.ca_cert"), "{message}");
+        assert!(
+            message.contains("not skip verification"),
+            "the refusal says why rather than only what: {message}"
+        );
+
+        let config = with_syslog(
+            vec![syslog_target("collector:6514", "tls")],
+            Some("/etc/ebpfsentinel/syslog-ca.pem"),
+        );
+        config
+            .validate()
+            .expect("a named authority is the whole requirement");
+    }
+
+    #[test]
+    fn an_unencrypted_target_needs_no_authority() {
+        with_syslog(vec![syslog_target("collector:514", "udp")], None)
+            .validate()
+            .expect("udp asks for no certificate");
+    }
+
+    #[test]
+    fn a_facility_outside_the_rfc_s_range_is_refused() {
+        let mut config = with_syslog(vec![syslog_target("collector:514", "udp")], None);
+        config.syslog.facility = 24;
+        let error = config.validate().expect_err("the range stops at 23");
+        let message = error.to_string();
+        assert!(message.contains("flow_export.syslog.facility"), "{message}");
+        assert!(message.contains("0 and 23"), "{message}");
+
+        config.syslog.facility = 23;
+        config.validate().expect("23 is local7");
+    }
+
+    #[test]
+    fn a_file_sink_needs_an_absolute_path() {
+        let mut config = FlowExportConfig {
+            enabled: true,
+            json_lines: JsonLinesSinkConfig {
+                enabled: true,
+                path: "flows.jsonl".to_string(),
+            },
+            ..FlowExportConfig::default()
+        };
+        let error = config.validate().expect_err("a relative path is refused");
+        assert!(error.to_string().contains("absolute path"), "{error}");
+
+        config.json_lines.path = "   ".to_string();
+        let error = config.validate().expect_err("an empty path is refused");
+        assert!(error.to_string().contains("nowhere to write"), "{error}");
+    }
+
+    #[test]
+    fn a_text_sink_is_validated_even_when_export_is_off() {
+        let mut config = with_syslog(vec![syslog_target("collector", "udp")], None);
+        config.enabled = false;
+        let error = config
+            .validate()
+            .expect_err("a sink pointed at a port-less address is wrong either way");
+        assert!(
+            error
+                .to_string()
+                .contains("flow_export.syslog.targets[0].address"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_defaults_of_a_text_sink_are_off_local0_and_no_authority() {
+        let config: SyslogSinkConfig = serde_norway::from_str("{}").expect("empty is valid");
+        assert!(!config.enabled);
+        assert_eq!(config.facility, 16);
+        assert!(config.hostname.is_empty());
+        assert!(config.ca_cert.is_none());
+        assert!(config.targets.is_empty());
+    }
+
+    #[test]
+    fn a_configured_text_section_round_trips() {
+        let yaml = r"
+enabled: true
+syslog:
+  enabled: true
+  facility: 1
+  hostname: edge-3
+  ca_cert: /etc/ebpfsentinel/ca.pem
+  targets:
+    - address: 'syslog.internal:6514'
+      transport: tls
+cef:
+  enabled: true
+  targets:
+    - address: '10.0.0.9:514'
+      transport: udp
+json_lines:
+  enabled: true
+  path: /var/log/ebpfsentinel/flows.jsonl
+";
+        let config: FlowExportConfig = serde_norway::from_str(yaml).expect("valid");
+        assert_eq!(config.syslog.facility, 1);
+        assert_eq!(config.syslog.hostname, "edge-3");
+        assert_eq!(config.syslog.targets[0].transport(), FlowTransport::Tls);
+        assert!(config.syslog.targets[0].transport().is_stream());
+        assert_eq!(config.cef.targets[0].transport(), FlowTransport::Udp);
+        assert!(!config.cef.targets[0].transport().is_stream());
+        assert_eq!(config.json_lines.path, "/var/log/ebpfsentinel/flows.jsonl");
+        config.validate().expect("valid");
     }
 }

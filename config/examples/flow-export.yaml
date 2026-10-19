@@ -1,4 +1,5 @@
-# Flow export: IPFIX to a collector, and the same records as OTLP logs.
+# Flow export: IPFIX to a collector, the same records as OTLP logs, RFC 5424
+# syslog, CEF, and JSON lines on disk.
 #
 # The flow source is the kernel conntrack table, which the agent already
 # reads. A flow record carries the five-tuple, the counters in both
@@ -94,6 +95,64 @@ flow_export:
     # ebpfsentinel.flow.* and ebpfsentinel.workload.* where none does. A
     # transited flow carries no workload attribute at all.
     enabled: true
+
+  # RFC 5424 syslog over udp, tcp or tls. One sink per target, each with its
+  # own connection and its own backoff, so one collector being down costs
+  # flow records on that sink alone.
+  #
+  # The message is the field list and nothing else, because a reader parses
+  # it: rt, src, spt, dst, dpt, proto, out, in, flowPackets,
+  # flowPacketsReverse, start, end, flowDurationMs, flowEndReason, and the
+  # workload block where the node resolved one. A field the node could not
+  # read has no key at all rather than an empty one.
+  #
+  # Framing follows the transport. udp sends one datagram per record, tcp and
+  # tls use RFC 6587 octet counting rather than newlines, because a container
+  # image name or a systemd unit is somebody else's string.
+  syslog:
+    enabled: true
+    targets:
+      - address: "10.0.0.9:514"
+        transport: udp
+      - address: "syslog.internal:6514"
+        transport: tls
+    # 16 is local0: flow volume lands somewhere an operator can route
+    # without writing a filter to keep it out of this agent's alerts.
+    facility: 16
+    # Empty takes the node's own name.
+    hostname: ""
+    # Required because a target above uses tls. There is no public root list
+    # in this binary and no option to skip verification.
+    ca_cert: /etc/ebpfsentinel/syslog-ca.pem
+
+  # The same fields inside a CEF message, in the same envelope, over the same
+  # three transports. The header is CEF:0|eBPFsentinel|Agent|<version>|flow|
+  # network flow|1, and the extension keys are the ones the enterprise SIEM
+  # exporters already write for the same fields, so an estate that moves from
+  # the open-source agent to the enterprise one does not re-learn them.
+  # Anything a flow has and an alert does not is prefixed flow, because CEF
+  # has no key for it.
+  cef:
+    enabled: false
+    targets:
+      - address: "siem.internal:6514"
+        transport: tls
+    facility: 16
+    hostname: ""
+    ca_cert: /etc/ebpfsentinel/siem-ca.pem
+
+  # One JSON object per line, appended to a file. The names are the OTLP
+  # attribute names, so a file tailed off disk and a log pushed to a
+  # collector answer the same query, and every count is a JSON number rather
+  # than a string.
+  #
+  # Rotation is logrotate's job. The sink reopens its path when the file it
+  # holds open is no longer the file at that path, so `create` and
+  # `copytruncate` both work and no record is written into a rotated-away
+  # inode. The file is created readable by its owner alone.
+  json_lines:
+    enabled: true
+    path: /var/log/ebpfsentinel/flows.jsonl
 
 alerting:
   otlp:

@@ -3591,6 +3591,48 @@ pub async fn run(
         ) {
             sinks.push(sink as Arc<dyn ports::secondary::flow_sink_port::FlowSink>);
         }
+        // Syslog and CEF share one adapter, so the host name in the header
+        // and the version in the CEF one are read once here rather than by
+        // each sink. A certificate file that cannot be read is a startup
+        // failure naming the path: a sink that was asked for and silently
+        // not built is how an estate discovers at audit time that nothing
+        // was exported.
+        let node_name = crate::http::agent_handler::hostname();
+        for (section, format) in [
+            (
+                &config.flow_export.syslog,
+                adapters::flow::text_sink::TextFormat::Syslog,
+            ),
+            (
+                &config.flow_export.cef,
+                adapters::flow::text_sink::TextFormat::Cef,
+            ),
+        ] {
+            match adapters::flow::text_sink::TextSink::from_config(
+                section,
+                format,
+                &node_name,
+                env!("CARGO_PKG_VERSION"),
+                config.flow_export.sampling,
+            ) {
+                Ok(built) => sinks.extend(
+                    built
+                        .into_iter()
+                        .map(|sink| sink as Arc<dyn ports::secondary::flow_sink_port::FlowSink>),
+                ),
+                Err(error) => {
+                    anyhow::bail!("flow export sink could not be built: {error}");
+                }
+            }
+        }
+        sinks.extend(
+            adapters::flow::jsonl_sink::JsonLinesSink::from_config(
+                &config.flow_export.json_lines,
+                config.flow_export.sampling,
+            )
+            .into_iter()
+            .map(|sink| sink as Arc<dyn ports::secondary::flow_sink_port::FlowSink>),
+        );
         match conntrack_event_tx.as_ref() {
             Some(tx) if !sinks.is_empty() => {
                 let settings = application::flow_export_service::FlowExportSettings {

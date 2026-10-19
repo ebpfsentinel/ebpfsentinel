@@ -67,7 +67,8 @@ pub use firewall::{
     DefaultPolicy, FirewallConfig, FirewallRuleConfig, PortRangeConfig, ScopeConfig, ScopeMap,
 };
 pub use flow_export::{
-    FlowExportConfig, FlowTargetConfig, FlowTransport, IpfixSinkConfig, OtlpFlowSinkConfig,
+    FlowExportConfig, FlowTargetConfig, FlowTransport, IpfixSinkConfig, JsonLinesSinkConfig,
+    OtlpFlowSinkConfig, SyslogSinkConfig,
 };
 pub use geoip::{GeoIpConfig, GeoIpSource};
 pub use ids::{IdsConfig, IdsRuleConfig, SamplingConfig, ThresholdRuleConfig};

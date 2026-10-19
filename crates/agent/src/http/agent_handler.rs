@@ -173,8 +173,10 @@ pub async fn agent_identity(State(state): State<Arc<AppState>>) -> Json<AgentIde
 
 /// Read the system hostname at request time. Falls back to `"unknown"`
 /// if the syscall fails (e.g. in stripped containers without
-/// `gethostname` support).
-fn hostname() -> String {
+/// `gethostname` support). Also what the syslog and CEF flow sinks put in
+/// their header, so the name a SIEM sees and the name this route reports are
+/// read the same way.
+pub(crate) fn hostname() -> String {
     std::env::var("HOSTNAME")
         .ok()
         .filter(|s| !s.is_empty())

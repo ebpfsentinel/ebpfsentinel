@@ -197,6 +197,14 @@ impl IpfixSink {
                 })?;
                 Connection::Tcp(stream)
             }
+            // Configuration refuses a tls target for this sink, because the
+            // encoder writes to a plain socket. Saying so again here is what
+            // keeps the two answers the same if that ever changes.
+            FlowTransport::Tls => {
+                return Err(DomainError::EngineError(
+                    "ipfix does not speak tls".to_string(),
+                ));
+            }
         };
         state.encoder.reset_sequence();
         state.templates_at = None;

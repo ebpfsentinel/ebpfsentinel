@@ -281,6 +281,43 @@ flow_export:
     # on purpose, so an estate running one collector writes its address once.
     # Turning this on without an alerting.otlp block is refused at startup.
     enabled: false
+  syslog:
+    # RFC 5424 records over udp, tcp or tls. One sink per target, each with
+    # its own backoff: a collector that is down costs flow records and never
+    # the pipeline.
+    enabled: false
+    targets: []
+    # - address: "10.0.0.9:514"
+    #   transport: udp        # udp, tcp or tls
+    # Facility 16 is local0, which keeps flow volume out of the stream this
+    # agent's own alerts go to without an operator writing a filter. 0 to 23.
+    facility: 16
+    # Empty takes the node's own name, read once at startup.
+    hostname: ""
+    # Required when a target uses tls, ignored otherwise. There is no public
+    # root list in this binary and no way to skip verification: a collector
+    # is an internal service, so naming the authority that signs its
+    # certificate is the configuration.
+    ca_cert: null
+  cef:
+    # The same fields inside a CEF message, in the same envelope and over the
+    # same three transports. The field names a CEF reader sees are the ones
+    # the enterprise SIEM exporters write, so a correlation rule survives the
+    # move from one to the other.
+    enabled: false
+    targets: []
+    # - address: "siem.internal:6514"
+    #   transport: tls
+    facility: 16
+    hostname: ""
+    ca_cert: null
+  json_lines:
+    # One JSON object per line, appended to a file. Rotation is logrotate's
+    # job: the sink reopens when the file at this path is no longer the file
+    # it holds, so both `create` and `copytruncate` work. The file is created
+    # readable by its owner alone, because a flow record names addresses.
+    enabled: false
+    path: "/var/log/ebpfsentinel/flows.jsonl"
 
 alerting:
   enabled: false
