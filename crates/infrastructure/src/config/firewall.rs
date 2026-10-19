@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use domain::common::entity::RuleId;
 use domain::firewall::entity::{FirewallAction, FirewallRule, PortRange, Scope as DomainScope};
+use domain::firewall::workload::{WorkloadMatch, WorkloadMode, WorkloadSelector};
 use serde::{Deserialize, Serialize};
 
 use super::alias::AliasConfig;
@@ -278,6 +279,79 @@ pub struct FirewallRuleConfig {
     /// every tenant, which is all a standalone agent resolves.
     #[serde(default)]
     pub tenant_id: u32,
+
+    /// Which workload this rule is about, when it is about one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<WorkloadMatchConfig>,
+}
+
+// ── Workload match config ──────────────────────────────────────────
+
+/// The workload half of a rule as a document writes it.
+///
+/// `deny_unknown_fields` is deliberate and is not what the rest of this file
+/// does. A misspelled key here is a rule that silently stops naming the
+/// workload it was written for, and the document still loads: the rule then
+/// matches every workload or none, depending on which key was lost. That is
+/// exactly the hole the strictness is for, and it is affordable on a block
+/// nothing has written yet.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkloadMatchConfig {
+    /// Absolute path of the executable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
+
+    /// systemd unit name, such as `nginx.service`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+
+    /// Absolute cgroup v2 path, matching that cgroup and everything under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<String>,
+
+    /// Container id, an id prefix of at least twelve characters, or the name
+    /// the runtime gave it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+
+    /// `observe`, the default, or `enforce`. A rule says this for itself
+    /// rather than inheriting it, because the first policy anybody writes is
+    /// wrong and a kernel refusing a connection is not something a deployment
+    /// should walk into.
+    #[serde(default = "default_workload_mode")]
+    pub mode: String,
+}
+
+fn default_workload_mode() -> String {
+    WorkloadMode::Observe.as_str().to_string()
+}
+
+impl WorkloadMatchConfig {
+    /// Read the block into the domain's selector and mode.
+    ///
+    /// `prefix` is the document path of the rule, so a refusal names the line
+    /// somebody has to go and edit.
+    pub fn to_domain(&self, prefix: &str) -> Result<WorkloadMatch, ConfigError> {
+        let mode = WorkloadMode::parse(&self.mode).map_err(|value| ConfigError::InvalidValue {
+            field: format!("{prefix}.workload.mode"),
+            value: value.to_string(),
+            expected: "observe, enforce".to_string(),
+        })?;
+
+        let selector = WorkloadSelector::new(
+            self.exe.clone(),
+            self.unit.clone(),
+            self.cgroup.clone(),
+            self.container.clone(),
+        )
+        .map_err(|e| ConfigError::Validation {
+            field: format!("{prefix}.workload"),
+            message: e.to_string(),
+        })?;
+
+        Ok(WorkloadMatch { selector, mode })
+    }
 }
 
 fn default_protocol() -> String {
@@ -341,6 +415,45 @@ impl FirewallRuleConfig {
                 })?;
             }
         }
+
+        if self.workload.is_some() {
+            self.validate_workload(&prefix)?;
+        }
+
+        Ok(())
+    }
+
+    /// Check the workload block and everything that may not sit beside it.
+    ///
+    /// The second half is the domain's own rule rather than a copy of it: the
+    /// rule is built and asked, so the list of matchers the socket hooks
+    /// cannot decide is written once. It is built with the interface list
+    /// emptied because resolving a group name needs the interface
+    /// configuration, which this check does not have; the list itself is
+    /// refused first and by name, since `interfaces` is the one of those
+    /// matchers somebody would otherwise see reported as an unknown group.
+    fn validate_workload(&self, prefix: &str) -> Result<(), ConfigError> {
+        if let Some(ref workload) = self.workload {
+            workload.to_domain(prefix)?;
+        }
+
+        if !self.interfaces.is_empty() {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.interfaces"),
+                message: "a rule naming a workload is decided in the socket hooks, where the \
+                          connection has not been routed and no interface is chosen yet"
+                    .to_string(),
+            });
+        }
+
+        let mut without_interfaces = self.clone();
+        without_interfaces.interfaces.clear();
+        without_interfaces
+            .to_domain_rule(&HashMap::new())
+            .map_err(|e| ConfigError::Validation {
+                field: prefix.to_string(),
+                message: e.to_string(),
+            })?;
 
         Ok(())
     }
@@ -449,7 +562,7 @@ impl FirewallRuleConfig {
                 message: e.to_string(),
             })?;
 
-        Ok(FirewallRule {
+        let rule = FirewallRule {
             id: RuleId(self.id.clone()),
             enabled: self.enabled,
             priority: self.priority,
@@ -487,7 +600,20 @@ impl FirewallRuleConfig {
                 },
             )?,
             tenant_id: self.tenant_id,
-        })
+            workload: self
+                .workload
+                .as_ref()
+                .map(|workload| workload.to_domain("firewall.rules"))
+                .transpose()?,
+        };
+
+        rule.validate_workload()
+            .map_err(|e| ConfigError::Validation {
+                field: format!("firewall.rules[{}]", self.id),
+                message: e.to_string(),
+            })?;
+
+        Ok(rule)
     }
 }
 
@@ -648,6 +774,168 @@ protocol: tcp
         .unwrap();
 
         assert_eq!(rule.to_domain_rule(&HashMap::new()).unwrap().tenant_id, 0);
+    }
+
+    // ── Workload matchers ─────────────────────────────────────────
+
+    fn workload_rule(body: &str) -> FirewallRuleConfig {
+        serde_norway::from_str(body).expect("the document parses")
+    }
+
+    #[test]
+    fn a_rule_may_name_a_workload_and_no_address_at_all() {
+        let rule = workload_rule(
+            r"
+id: fw-nginx
+priority: 10
+action: deny
+workload:
+  exe: /usr/sbin/nginx
+",
+        );
+
+        rule.validate(0).expect("a valid rule");
+        let domain_rule = rule.to_domain_rule(&HashMap::new()).expect("a domain rule");
+        let workload = domain_rule.workload.expect("the workload half");
+
+        assert_eq!(workload.selector.exe.as_deref(), Some("/usr/sbin/nginx"));
+        assert_eq!(workload.mode, WorkloadMode::Observe);
+        assert!(domain_rule.dst_ip.is_none());
+    }
+
+    #[test]
+    fn a_rule_naming_a_workload_and_a_destination_keeps_both() {
+        let rule = workload_rule(
+            r"
+id: fw-nginx-db
+priority: 10
+action: deny
+protocol: tcp
+dst_ip: 10.0.0.0/8
+dst_port: 5432
+workload:
+  unit: nginx.service
+  mode: enforce
+",
+        );
+
+        rule.validate(0).expect("a valid rule");
+        let domain_rule = rule.to_domain_rule(&HashMap::new()).expect("a domain rule");
+
+        assert!(domain_rule.dst_ip.is_some());
+        assert_eq!(
+            domain_rule.workload.expect("the workload half").mode,
+            WorkloadMode::Enforce
+        );
+    }
+
+    #[test]
+    fn a_misspelled_matcher_fails_the_document_rather_than_being_ignored() {
+        // The quiet reading is the dangerous one: the rule would load naming
+        // no workload, and a deny would then be about every workload there is.
+        let refused: Result<FirewallRuleConfig, _> = serde_norway::from_str(
+            r"
+id: fw-typo
+priority: 10
+action: deny
+workload:
+  exec: /usr/sbin/nginx
+",
+        );
+
+        assert!(refused.is_err());
+    }
+
+    #[test]
+    fn a_workload_block_naming_nothing_is_refused() {
+        let rule = workload_rule(
+            r"
+id: fw-empty
+priority: 10
+action: deny
+workload:
+  mode: enforce
+",
+        );
+
+        assert!(rule.validate(0).is_err());
+    }
+
+    #[test]
+    fn a_mode_nobody_defined_is_refused_with_both_words() {
+        let rule = workload_rule(
+            r"
+id: fw-mode
+priority: 10
+action: deny
+workload:
+  exe: /usr/sbin/nginx
+  mode: block
+",
+        );
+
+        let refused = rule.validate(0).expect_err("an unknown mode");
+
+        assert!(format!("{refused}").contains("observe, enforce"));
+    }
+
+    #[test]
+    fn a_matcher_the_socket_hooks_cannot_decide_fails_the_document() {
+        for beside in [
+            "src_ip: 10.0.0.0/8",
+            "src_port: 1024",
+            "vlan_id: 10",
+            "state: [established]",
+            "dscp_match: 46",
+            "interfaces: [lan]",
+        ] {
+            let rule = workload_rule(&format!(
+                r"
+id: fw-unsupported
+priority: 10
+action: deny
+{beside}
+workload:
+  exe: /usr/sbin/nginx
+"
+            ));
+
+            assert!(
+                rule.validate(0).is_err(),
+                "{beside} should be refused beside a workload"
+            );
+        }
+    }
+
+    #[test]
+    fn reject_is_refused_on_a_workload_rule_because_there_is_nothing_to_answer() {
+        let rule = workload_rule(
+            r"
+id: fw-reject
+priority: 10
+action: reject
+workload:
+  exe: /usr/sbin/nginx
+",
+        );
+
+        assert!(rule.validate(0).is_err());
+        assert!(rule.to_domain_rule(&HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn the_same_matchers_are_still_fine_on_a_rule_naming_no_workload() {
+        let rule = workload_rule(
+            r"
+id: fw-address
+priority: 10
+action: reject
+src_ip: 10.0.0.0/8
+vlan_id: 10
+",
+        );
+
+        rule.validate(0).expect("an ordinary address rule");
     }
 
     #[test]

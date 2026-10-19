@@ -685,6 +685,7 @@ impl FirewallAppService {
             system: true,
             group_mask: 0,
             tenant_id: 0,
+            workload: None,
         }
     }
 
@@ -745,6 +746,7 @@ impl FirewallAppService {
             system: true,
             group_mask: 0,
             tenant_id: 0,
+            workload: None,
         })
         .collect()
     }
@@ -835,6 +837,7 @@ impl FirewallAppService {
                     system: true,
                     group_mask: 0,
                     tenant_id: 0,
+                    workload: None,
                 };
                 let v6 = FirewallRule {
                     id: RuleId(format!("{}-v6", v4.id.0)),
@@ -996,6 +999,7 @@ mod tests {
             system: false,
             group_mask: 0,
             tenant_id: 0,
+            workload: None,
         }
     }
 

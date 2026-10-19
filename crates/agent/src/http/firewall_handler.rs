@@ -259,6 +259,7 @@ impl CreateRuleRequest {
             system: false,
             group_mask: 0,
             tenant_id: 0,
+            workload: None,
         })
     }
 }
@@ -825,6 +826,7 @@ mod tests {
             system: false,
             group_mask: 0,
             tenant_id: 0,
+            workload: None,
         };
         let resp = RuleResponse::from(&rule);
         assert_eq!(resp.id, "fw-001");

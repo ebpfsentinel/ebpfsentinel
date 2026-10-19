@@ -11,6 +11,7 @@ use ebpf_common::firewall::{
 };
 
 use super::error::FirewallError;
+use super::workload::WorkloadMatch;
 
 // ── Actions ─────────────────────────────────────────────────────────
 
@@ -495,6 +496,16 @@ pub struct FirewallRule {
     /// traffic resolved to any other tenant.
     #[serde(default)]
     pub tenant_id: u32,
+    /// Which workload the rule is about, when it is about one.
+    ///
+    /// A rule carrying this is decided in the socket hooks rather than on the
+    /// packet path, because the task behind a frame is no longer knowable by
+    /// the time the frame exists. The address matchers beside it still apply
+    /// and narrow it: a rule naming a workload and a destination is the
+    /// intersection of the two, and one naming a workload alone is that
+    /// workload anywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<WorkloadMatch>,
 }
 
 /// Connection state names for stateful rule matching.
@@ -603,6 +614,109 @@ impl FirewallRule {
             && dscp > 63
         {
             return Err(FirewallError::InvalidDscp { value: dscp });
+        }
+
+        self.validate_workload()?;
+
+        Ok(())
+    }
+
+    /// Check the workload half of the rule, and that nothing the socket hooks
+    /// cannot decide was written beside it.
+    ///
+    /// The hooks run inside the task's own `connect()`, `sendmsg()` or
+    /// `bind()`. At that point the kernel has not picked a source address or a
+    /// source port, there is no frame and so no VLAN tag, no MAC address, no
+    /// DSCP field and no TCP flags, and there is no connection and so no
+    /// conntrack state. A rule pairing any of those with a workload would
+    /// match nothing for a reason no log would ever give, so it is refused
+    /// when the rule is read.
+    ///
+    /// `reject` is refused for a different reason: it means forging a TCP
+    /// reset or an ICMP unreachable at the packet path, and the socket hooks
+    /// have no packet to answer. What they do instead is fail the syscall
+    /// with `EPERM`, which is what `deny` means here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirewallError::WorkloadMatcherUnsupported`] for a matcher the
+    /// hooks cannot decide, or whatever the selector itself refuses.
+    pub fn validate_workload(&self) -> Result<(), FirewallError> {
+        let Some(workload) = self.workload.as_ref() else {
+            return Ok(());
+        };
+        workload.selector.validate()?;
+
+        let unsupported: [(&'static str, bool, &'static str); 10] = [
+            (
+                "src_ip",
+                self.src_ip.is_some() || self.src_alias.is_some(),
+                "the kernel has not chosen a source address when connect() is called",
+            ),
+            (
+                "src_port",
+                self.src_port.is_some() || self.src_port_alias.is_some(),
+                "the kernel has not bound a source port when connect() is called",
+            ),
+            (
+                "vlan_id",
+                self.vlan_id.is_some(),
+                "there is no frame at the socket layer and so no tag",
+            ),
+            (
+                "src_mac",
+                self.src_mac.is_some() || self.src_mac_alias.is_some(),
+                "there is no frame at the socket layer and so no address",
+            ),
+            (
+                "dst_mac",
+                self.dst_mac.is_some() || self.dst_mac_alias.is_some(),
+                "there is no frame at the socket layer and so no address",
+            ),
+            (
+                "state",
+                self.ct_states.is_some(),
+                "the connection does not exist yet when connect() is called",
+            ),
+            (
+                "tcp_flags",
+                self.tcp_flags.is_some(),
+                "there is no segment at the socket layer and so no flags",
+            ),
+            (
+                "icmp",
+                self.icmp_type.is_some() || self.icmp_code.is_some(),
+                "an ICMP socket carries no destination port the hooks decide on",
+            ),
+            (
+                "dscp",
+                self.dscp_match.is_some() || self.dscp_mark.is_some(),
+                "there is no header at the socket layer to read or to mark",
+            ),
+            (
+                "interfaces",
+                self.group_mask != 0,
+                "the kernel has not routed the connection when connect() is called, so no \
+                 interface is chosen yet",
+            ),
+        ];
+        for (matcher, present, reason) in unsupported {
+            if present {
+                return Err(FirewallError::WorkloadMatcherUnsupported { matcher, reason });
+            }
+        }
+
+        if self.action == FirewallAction::Reject {
+            return Err(FirewallError::WorkloadMatcherUnsupported {
+                matcher: "action: reject",
+                reason: "a refused connect() fails with EPERM rather than being answered, so the                          action is deny",
+            });
+        }
+        if self.negate_src || self.negate_dst {
+            return Err(FirewallError::WorkloadMatcherUnsupported {
+                matcher: "negate",
+                reason: "a negated address on a workload rule reads as an exception and is                          written as a second rule at a lower priority",
+            });
         }
 
         Ok(())
@@ -1265,6 +1379,7 @@ mod tests {
             system: false,
             group_mask: 0,
             tenant_id: 0,
+            workload: None,
         }
     }
 

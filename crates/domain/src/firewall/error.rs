@@ -51,6 +51,23 @@ pub enum FirewallError {
 
     #[error("invalid scope: {reason}")]
     InvalidScope { reason: String },
+
+    #[error("invalid workload selector: {reason}")]
+    InvalidWorkloadSelector { reason: String },
+
+    /// A matcher the socket hooks cannot decide was written on a rule naming a
+    /// workload. The hook runs inside the task's own `connect()` or `bind()`,
+    /// where there is no frame, no source address and no connection yet, so a
+    /// rule carrying one of those would never match anything and saying so at
+    /// load time is the only way an operator finds out.
+    #[error("{matcher} has no meaning on a rule naming a workload: {reason}")]
+    WorkloadMatcherUnsupported {
+        matcher: &'static str,
+        reason: &'static str,
+    },
+
+    #[error("too many workload rules: {count}, more than the {maximum} the kernel holds")]
+    WorkloadPolicyTooLarge { count: usize, maximum: usize },
 }
 
 impl From<FirewallError> for DomainError {

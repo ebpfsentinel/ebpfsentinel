@@ -46,6 +46,7 @@ fn make_rule(id: usize, priority: u32, action: FirewallAction) -> FirewallRule {
         system: false,
         group_mask: 0,
         tenant_id: 0,
+        workload: None,
     }
 }
 
