@@ -1240,6 +1240,8 @@ pub struct KernelFeaturesResponse {
     pub attribution: AttributionReport,
     #[serde(default)]
     pub process_tracing: ProcessTracingReport,
+    #[serde(default)]
+    pub workload_firewall: WorkloadFirewallReport,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1248,6 +1250,21 @@ pub struct AttributionReport {
     pub cgroup: String,
     pub hooks: Vec<String>,
     pub reason: Option<String>,
+    pub brokered: bool,
+}
+
+/// What became of the workload firewall hooks. Defaulted on decode for the
+/// same reason as the block below it.
+#[derive(Deserialize, Serialize, Default)]
+pub struct WorkloadFirewallReport {
+    pub attached: bool,
+    #[serde(default)]
+    pub cgroup: String,
+    #[serde(default)]
+    pub hooks: Vec<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
     pub brokered: bool,
 }
 

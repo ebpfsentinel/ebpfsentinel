@@ -669,6 +669,41 @@ fn cgroup_contains(selector: &str, path: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
+/// The cgroup v2 path a `/proc/<pid>/cgroup` payload reports.
+///
+/// One line, `0::/system.slice/nginx.service`, and the path is what comes
+/// after the two colons. A host running cgroup v1 alone reports no such
+/// line, and the answer there is `None` rather than one of the v1
+/// controller paths: the kernel keys every hook here on a v2 id, so a v1
+/// path would be a string that matches an operator's rule and names a
+/// hierarchy nothing enforces on.
+#[must_use]
+pub fn cgroup_path_of(payload: &str) -> Option<&str> {
+    payload
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("0::"))
+        .filter(|path| path.starts_with('/'))
+}
+
+/// The systemd unit a cgroup path belongs to, where it belongs to one.
+///
+/// systemd puts a unit's processes in a cgroup named after the unit, so the
+/// unit is the last segment carrying a unit suffix: `nginx.service` under
+/// `/system.slice/nginx.service`, and `session-3.scope` under the two slices
+/// above it. The last rather than the first, because a unit inside a slice
+/// is written below it and the innermost name is the one a person means.
+///
+/// A slice is not a unit for this purpose even though systemd calls it one:
+/// a rule naming `system.slice` would name every service on the host, which
+/// is what the cgroup matcher is for and says so in the rule.
+#[must_use]
+pub fn unit_of(cgroup_path: &str) -> Option<&str> {
+    const SUFFIXES: [&str; 5] = [".service", ".scope", ".socket", ".mount", ".timer"];
+    cgroup_path
+        .rsplit('/')
+        .find(|segment| SUFFIXES.iter().any(|suffix| segment.ends_with(suffix)))
+}
+
 /// Drop the v2 mount point from a cgroup path, leaving the path the kernel
 /// itself reports.
 fn strip_mount(path: &str) -> &str {
@@ -1148,5 +1183,48 @@ mod tests {
             addr: [0x20, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             prefix_len: 32,
         }));
+    }
+}
+
+#[cfg(test)]
+mod cgroup_facts_tests {
+    use super::{cgroup_path_of, unit_of};
+
+    #[test]
+    fn the_v2_line_is_the_one_read_and_a_v1_only_host_answers_nothing() {
+        assert_eq!(
+            cgroup_path_of("0::/system.slice/nginx.service\n"),
+            Some("/system.slice/nginx.service")
+        );
+        assert_eq!(
+            cgroup_path_of("12:memory:/docker/abc\n5:cpu:/docker/abc\n"),
+            None
+        );
+        assert_eq!(cgroup_path_of("0::\n"), None);
+    }
+
+    #[test]
+    fn the_innermost_unit_is_the_unit_and_a_slice_alone_is_not_one() {
+        assert_eq!(
+            unit_of("/system.slice/nginx.service"),
+            Some("nginx.service")
+        );
+        assert_eq!(
+            unit_of("/user.slice/user-1000.slice/session-3.scope"),
+            Some("session-3.scope")
+        );
+        assert_eq!(unit_of("/system.slice"), None);
+        assert_eq!(unit_of("/"), None);
+    }
+
+    #[test]
+    fn a_container_scope_reads_as_the_unit_it_is() {
+        // Nothing pretends this is a nicer name than the container matcher
+        // gives: it is what systemd called the scope, and a rule naming it
+        // matches exactly that container.
+        assert_eq!(
+            unit_of("/system.slice/docker-0123456789ab.scope"),
+            Some("docker-0123456789ab.scope")
+        );
     }
 }

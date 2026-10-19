@@ -61,6 +61,7 @@ struct ReloadLocks {
     qos: Mutex<()>,
     zone: Mutex<()>,
     schedule: Mutex<()>,
+    workload: Mutex<()>,
 }
 
 /// Application-level service for hot-reloading configuration.
@@ -87,6 +88,7 @@ pub struct ConfigReloadService {
     qos_service: Option<Arc<RwLock<crate::qos_service_impl::QosAppService>>>,
     zone_service: Option<Arc<RwLock<ZoneAppService>>>,
     schedule_service: Option<Arc<RwLock<ScheduleService>>>,
+    workload_service: Option<Arc<crate::workload_policy_service::WorkloadPolicyService>>,
     metrics: Arc<dyn MetricsPort>,
     reload_locks: ReloadLocks,
 }
@@ -123,9 +125,46 @@ impl ConfigReloadService {
             qos_service: None,
             zone_service: None,
             schedule_service: None,
+            workload_service: None,
             metrics,
             reload_locks: ReloadLocks::default(),
         }
+    }
+
+    /// Set the workload policy service for reload integration.
+    pub fn set_workload_service(
+        &mut self,
+        svc: Arc<crate::workload_policy_service::WorkloadPolicyService>,
+    ) {
+        self.workload_service = Some(svc);
+    }
+
+    /// Put a new workload policy in force.
+    ///
+    /// The caller has already refused the file if it carries a refusing rule
+    /// on a host where the hooks did not attach, so what arrives here is a
+    /// policy the kernel can actually carry out.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the kernel maps refuse.
+    pub async fn reload_workload(
+        &self,
+        policy: domain::firewall::workload::WorkloadPolicy,
+    ) -> Result<(), anyhow::Error> {
+        let Some(ref workload_svc) = self.workload_service else {
+            return Ok(());
+        };
+        let _guard = self.reload_locks.workload.lock().await;
+
+        let rules = policy.rules().len();
+        workload_svc
+            .apply(policy)
+            .map_err(|e| anyhow::anyhow!("workload policy reload failed: {e}"))?;
+
+        self.metrics.record_config_reload("workload", "success");
+        tracing::info!(count = rules, "workload policy reloaded");
+        Ok(())
     }
 
     /// Set the conntrack service for reload integration.

@@ -426,6 +426,32 @@ pub async fn apply_config_file(
         }
     };
 
+    // Phase 2b: the workload half of those rules, and the one refusal that
+    // is not about the file being malformed.
+    //
+    // A rule that refuses is only worth anything where the cgroup hooks
+    // attached, and whether they did was settled at start-up: a file adding
+    // one on a host that refused them would leave the operator reading a
+    // deny rule the kernel never sees. Rejecting the file keeps the rules in
+    // force and says why, which is the same answer start-up gives.
+    let workload_policy = match domain::firewall::workload::WorkloadPolicy::from_rules(&rules) {
+        Ok(policy) => policy,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid workload rules");
+            return None;
+        }
+    };
+    if workload_policy.enforces() && !adapters::ebpf::workload_firewall_attach::status().attached {
+        let reason = adapters::ebpf::workload_firewall_attach::status()
+            .reason
+            .unwrap_or_else(|| "the hooks are not attached on this host".to_string());
+        tracing::warn!(
+            "config reload rejected: {}",
+            adapters::ebpf::workload_firewall_attach::enforcement_unavailable(&reason)
+        );
+        return None;
+    }
+
     // Phase 3: parse firewall mode
     let mode = match config.firewall_mode() {
         Ok(m) => m,
@@ -741,6 +767,15 @@ pub async fn apply_config_file(
         .await
     {
         tracing::warn!(error = %e, "DLP config reload failed at application level");
+    }
+
+    // Phase 6b¾: the workload policy
+    //
+    // After the firewall's own rules rather than before: the two come out of
+    // the same list, and a policy in force naming rules the engine has not
+    // got yet is a window where the kernel refuses what no rule explains.
+    if let Err(e) = reload_service.reload_workload(workload_policy).await {
+        tracing::warn!(error = %e, "workload policy reload failed at application level");
     }
 
     // Phase 6c: ConnTrack reload

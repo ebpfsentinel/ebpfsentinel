@@ -9850,7 +9850,8 @@
           "helpers",
           "missing_required",
           "attribution",
-          "process_tracing"
+          "process_tracing",
+          "workload_firewall"
         ],
         "properties": {
           "attribution": {
@@ -9891,6 +9892,10 @@
               "string",
               "null"
             ]
+          },
+          "workload_firewall": {
+            "$ref": "#/components/schemas/WorkloadFirewallReport",
+            "description": "Whether the hooks deciding a workload rule are on this host's cgroup.\nRead the same way as the two blocks above, and asked more often than\neither: a rule naming a binary is the one kind of rule whose absence\nnothing on the wire makes visible."
           }
         }
       },
@@ -11960,6 +11965,44 @@
           },
           "url": {
             "type": "string"
+          }
+        }
+      },
+      "WorkloadFirewallReport": {
+        "type": "object",
+        "description": "What became of the workload firewall hooks on this host.",
+        "required": [
+          "attached",
+          "cgroup",
+          "hooks",
+          "brokered"
+        ],
+        "properties": {
+          "attached": {
+            "type": "boolean",
+            "description": "True only when every hook attached. There is no optional hook here:\nhalf the hooks is a policy that reads as in force and is not."
+          },
+          "brokered": {
+            "type": "boolean",
+            "description": "Whether the warden created the links, which is the rootless posture."
+          },
+          "cgroup": {
+            "type": "string",
+            "description": "The cgroup the hooks were attached to, or asked for."
+          },
+          "hooks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The hooks that attached, named as the kernel programs are."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why nothing is attached, in the words the attach failed with. A\ndocument carrying no workload rule loads no object, and says so here."
           }
         }
       },

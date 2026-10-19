@@ -23,6 +23,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::workload_policy_service::WorkloadPolicyService;
+
 /// The service behind the process table: one writer fed by the ring buffer,
 /// any number of readers behind the API.
 pub struct ProcessTableService {
@@ -31,6 +33,7 @@ pub struct ProcessTableService {
     details: Option<Arc<dyn ProcessDetailsReader>>,
     containers: Option<Arc<ContainerResolverEngine>>,
     metadata_enrichers: Vec<Arc<dyn MetadataEnricher>>,
+    workload: Option<Arc<WorkloadPolicyService>>,
     capture_command_line: bool,
 }
 
@@ -49,6 +52,7 @@ impl ProcessTableService {
             details: None,
             containers: None,
             metadata_enrichers: Vec::new(),
+            workload: None,
             capture_command_line,
         }
     }
@@ -79,6 +83,19 @@ impl ProcessTableService {
     #[must_use]
     pub fn with_metadata_enricher(mut self, enricher: Arc<dyn MetadataEnricher>) -> Self {
         self.metadata_enrichers.push(enricher);
+        self
+    }
+
+    /// Tell `service` which workload each exec is, so the kernel's workload
+    /// firewall can decide on an integer rather than on a path.
+    ///
+    /// It hangs off the process table because this is the one place in the
+    /// agent that learns of an exec and has already resolved the binary and
+    /// the container: resolving either of them a second time elsewhere would
+    /// be a second answer to the same question.
+    #[must_use]
+    pub fn with_workload_policy(mut self, service: Arc<WorkloadPolicyService>) -> Self {
+        self.workload = Some(service);
         self
     }
 
@@ -124,6 +141,13 @@ impl ProcessTableService {
 
         entry.container = self.resolve_container(pid, event.cgroup_id).await;
 
+        // Before the table write rather than after: the entry moves into the
+        // table, and the sooner the task's bit is set the shorter the window
+        // in which it connects unresolved.
+        if let Some(workload) = &self.workload {
+            workload.record_exec(&entry);
+        }
+
         let replaced = self
             .table
             .write()
@@ -137,6 +161,9 @@ impl ProcessTableService {
     }
 
     fn record_exit(&self, pid: u32) {
+        if let Some(workload) = &self.workload {
+            workload.record_exit(pid);
+        }
         let purged = self
             .table
             .write()
@@ -312,6 +339,49 @@ mod tests {
         }
     }
 
+    /// A workload map port that only remembers which tasks were written.
+    #[derive(Clone, Default)]
+    struct TaskMasks(Arc<std::sync::Mutex<Vec<(u32, u64)>>>);
+
+    impl ports::secondary::workload_policy_map_port::WorkloadPolicyMapPort for TaskMasks {
+        fn publish_policy(
+            &mut self,
+            _policy: &domain::firewall::workload::WorkloadPolicy,
+        ) -> Result<(), domain::common::error::DomainError> {
+            // A published policy renumbers the bits, so the real port drops
+            // every mask recorded under the last one.
+            self.0.lock().unwrap().clear();
+            Ok(())
+        }
+
+        fn set_cgroup_selectors(
+            &mut self,
+            _cgroup_id: u64,
+            _mask: u64,
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+
+        fn set_task_selectors(
+            &mut self,
+            tgid: u32,
+            mask: u64,
+        ) -> Result<(), domain::common::error::DomainError> {
+            self.0.lock().unwrap().push((tgid, mask));
+            Ok(())
+        }
+
+        fn forget_task(&mut self, tgid: u32) -> Result<(), domain::common::error::DomainError> {
+            self.0.lock().unwrap().retain(|(held, _)| *held != tgid);
+            Ok(())
+        }
+
+        fn clear_selectors(&mut self) -> Result<(), domain::common::error::DomainError> {
+            self.0.lock().unwrap().clear();
+            Ok(())
+        }
+    }
+
     fn exit(pid: u32) -> ProcessLifecycleEvent {
         ProcessLifecycleEvent {
             kind: ProcessEventKind::Exit,
@@ -414,5 +484,85 @@ mod tests {
         let pids: Vec<u32> = service.list().iter().map(|e| e.pid).collect();
         assert_eq!(pids, vec![3, 2]);
         assert_eq!(service.stats().evicted, 1);
+    }
+    #[tokio::test]
+    async fn an_exec_names_the_task_to_the_workload_policy_and_an_exit_takes_it_back() {
+        use domain::common::entity::{Protocol, RuleId};
+        use domain::firewall::entity::FirewallAction;
+        use domain::firewall::workload::{
+            WorkloadMode, WorkloadPolicy, WorkloadRule, WorkloadSelector,
+        };
+
+        let masks = TaskMasks::default();
+        let policy = WorkloadPolicy::new(vec![WorkloadRule {
+            id: RuleId("one".to_string()),
+            priority: 10,
+            action: FirewallAction::Deny,
+            mode: WorkloadMode::Observe,
+            selector: WorkloadSelector::new(Some("/usr/bin/curl".to_string()), None, None, None)
+                .expect("a valid selector"),
+            protocol: Protocol::Any,
+            dst_ip: None,
+            dst_port: None,
+            enabled: true,
+        }])
+        .expect("inside the ceiling");
+        let workload =
+            Arc::new(WorkloadPolicyService::new(policy).with_maps(Box::new(masks.clone())));
+        let service = ProcessTableService::new(16, false)
+            .with_executables(Arc::new(FixedExecutable))
+            .with_workload_policy(Arc::clone(&workload));
+
+        service.apply(exec(4242, 1)).await;
+        assert_eq!(masks.0.lock().unwrap().as_slice(), [(4242, 1)]);
+
+        service.apply(exit(4242)).await;
+        assert!(masks.0.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn a_new_policy_is_replayed_over_the_tasks_already_running() {
+        use domain::common::entity::{Protocol, RuleId};
+        use domain::firewall::entity::FirewallAction;
+        use domain::firewall::workload::{
+            WorkloadMode, WorkloadPolicy, WorkloadRule, WorkloadSelector,
+        };
+
+        fn policy(exe: &str) -> WorkloadPolicy {
+            WorkloadPolicy::new(vec![WorkloadRule {
+                id: RuleId("one".to_string()),
+                priority: 10,
+                action: FirewallAction::Deny,
+                mode: WorkloadMode::Observe,
+                selector: WorkloadSelector::new(Some(exe.to_string()), None, None, None)
+                    .expect("a valid selector"),
+                protocol: Protocol::Any,
+                dst_ip: None,
+                dst_port: None,
+                enabled: true,
+            }])
+            .expect("inside the ceiling")
+        }
+
+        let masks = TaskMasks::default();
+        let workload = Arc::new(
+            WorkloadPolicyService::new(policy("/usr/bin/wget")).with_maps(Box::new(masks.clone())),
+        );
+        let service = Arc::new(
+            ProcessTableService::new(16, false)
+                .with_executables(Arc::new(FixedExecutable))
+                .with_workload_policy(Arc::clone(&workload)),
+        );
+        workload.watch_processes(&service);
+
+        service.apply(exec(77, 1)).await;
+        assert_eq!(masks.0.lock().unwrap().as_slice(), [(77, 0)]);
+
+        // The task is running and will not exec again: without the replay it
+        // would stay nameless under the policy that now names it.
+        workload
+            .apply(policy("/usr/bin/curl"))
+            .expect("the port accepts it");
+
+        assert_eq!(masks.0.lock().unwrap().as_slice(), [(77, 1)]);
     }
 }

@@ -76,6 +76,12 @@ pub struct EbpfProgramManager {
     /// them clears it, so nothing is left reading a map whose program has
     /// gone.
     pub workloads: application::workload_resolver::WorkloadResolver,
+    /// The cgroup links of the workload firewall, where they attached.
+    /// Held here for the same reason as the attribution links: the agent
+    /// would otherwise drop them at the end of start-up and the hooks would
+    /// go with them, leaving a policy in force that decides nothing.
+    pub workload_firewall:
+        Option<adapters::ebpf::workload_firewall_attach::WorkloadFirewallAttacher>,
     /// The links of the exec and exit tracepoints, where they attached.
     /// Dropping it detaches them, which is how a reload turns the process
     /// table's source off.
@@ -110,6 +116,7 @@ impl EbpfProgramManager {
             lpm_coordinator: None,
             ipset_wired: false,
             attribution: None,
+            workload_firewall: None,
             workloads: application::workload_resolver::WorkloadResolver::new(),
             process_tracing: None,
             process_events: None,

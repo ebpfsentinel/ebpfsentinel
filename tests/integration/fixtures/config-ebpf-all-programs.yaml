@@ -32,7 +32,18 @@ firewall:
   enabled: true
   mode: alert
   default_policy: pass
-  rules: []
+  # cgroup-workload-firewall. The object is loaded off the rules rather than
+  # off a key of its own, so the one way to ask for it is a rule naming a
+  # workload. It observes, which is this fixture's whole posture: nothing here
+  # is tuned to make traffic do anything, and an enforcing rule would refuse
+  # connections the other suites make.
+  rules:
+    - id: fw-workload-observes
+      priority: 100
+      action: allow
+      workload:
+        exe: /usr/bin/curl
+        mode: observe
   scrub:
     enabled: true
     min_ttl: 64

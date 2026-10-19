@@ -13,6 +13,8 @@ const BPF_LINK_CREATE: libc::c_int = 28;
 /// product has any business attaching. A warden that forwarded whatever number
 /// arrived would be a general-purpose cgroup attach service running as root.
 const ALLOWED_ATTACH_TYPES: &[u32] = &[
+    BPF_CGROUP_INET4_BIND,
+    BPF_CGROUP_INET6_BIND,
     BPF_CGROUP_INET4_CONNECT,
     BPF_CGROUP_INET6_CONNECT,
     BPF_CGROUP_INET4_POST_BIND,
@@ -24,6 +26,14 @@ const ALLOWED_ATTACH_TYPES: &[u32] = &[
 
 /// `BPF_CGROUP_SOCK_OPS` from `enum bpf_attach_type`.
 pub const BPF_CGROUP_SOCK_OPS: u32 = 3;
+/// `BPF_CGROUP_INET4_BIND` from `enum bpf_attach_type`.
+///
+/// The pre-bind hook, which the workload firewall needs because the post-bind
+/// pair below runs after the kernel has assigned the address and can report a
+/// listener but not refuse one.
+pub const BPF_CGROUP_INET4_BIND: u32 = 8;
+/// `BPF_CGROUP_INET6_BIND` from `enum bpf_attach_type`.
+pub const BPF_CGROUP_INET6_BIND: u32 = 9;
 /// `BPF_CGROUP_INET4_CONNECT` from `enum bpf_attach_type`.
 pub const BPF_CGROUP_INET4_CONNECT: u32 = 10;
 /// `BPF_CGROUP_INET6_CONNECT` from `enum bpf_attach_type`.
@@ -140,6 +150,17 @@ mod tests {
     fn a_relative_path_is_refused() {
         let err = attach_cgroup_link(3, "sys/fs/cgroup", BPF_CGROUP_INET4_CONNECT).unwrap_err();
         assert!(err.contains("not under /sys/fs/cgroup"), "{err}");
+    }
+
+    #[test]
+    fn the_pre_bind_hooks_are_attachable_and_are_not_the_post_bind_ones() {
+        // The workload firewall refuses a bind, which only the pre-bind pair
+        // can do; the post-bind pair stays on the list because attribution
+        // names a listener with it. Both pairs being here is deliberate.
+        assert!(ALLOWED_ATTACH_TYPES.contains(&BPF_CGROUP_INET4_BIND));
+        assert!(ALLOWED_ATTACH_TYPES.contains(&BPF_CGROUP_INET6_BIND));
+        assert_ne!(BPF_CGROUP_INET4_BIND, BPF_CGROUP_INET4_POST_BIND);
+        assert_ne!(BPF_CGROUP_INET6_BIND, BPF_CGROUP_INET6_POST_BIND);
     }
 
     #[test]

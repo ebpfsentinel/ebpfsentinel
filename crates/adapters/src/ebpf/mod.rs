@@ -49,6 +49,8 @@ pub mod tenant_vlan_map_manager;
 pub mod threatintel_map_manager;
 pub mod token_bootstrap;
 pub mod vip_map_manager;
+pub mod workload_firewall_attach;
+pub mod workload_policy_map_manager;
 pub mod zone_map_manager;
 
 pub use attach_inspect::{

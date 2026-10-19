@@ -61,13 +61,15 @@ teardown_file() {
     rm -f "$PREPARED_CONFIG"
 }
 
-# The programs this fixture asks for, by the name the gauge publishes. Fifteen
-# names for eighteen objects: xdp-firewall-reject, xdp-ratelimit-syncookie and
+# The programs this fixture asks for, by the name the gauge publishes. Sixteen
+# names for nineteen objects: xdp-firewall-reject, xdp-ratelimit-syncookie and
 # xdp-pass are not loaded on their own - the first two are tail-call targets of
 # the program that installs them, and the last is test scaffolding for a veth
 # peer. The last two names are the attribution objects, which this fixture does
 # not configure and therefore gets on their defaults, which is the posture a
-# node ships with.
+# node ships with. The workload firewall is the one object a default
+# configuration does not load: the fixture carries one observing workload rule,
+# because the rules are what asks for the object.
 EXPECTED_PROGRAMS=(
     xdp-firewall
     xdp-ratelimit
@@ -83,6 +85,7 @@ EXPECTED_PROGRAMS=(
     tc-qos
     uprobe-dlp
     cgroup-attribution
+    cgroup-workload-firewall
     tracepoint-process
 )
 

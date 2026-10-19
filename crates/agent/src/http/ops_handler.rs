@@ -136,6 +136,11 @@ pub struct KernelFeaturesResponse {
     /// this host, and why not where they are not. Read the same way as the
     /// attribution block above: from what the attach did.
     pub process_tracing: ProcessTracingReport,
+    /// Whether the hooks deciding a workload rule are on this host's cgroup.
+    /// Read the same way as the two blocks above, and asked more often than
+    /// either: a rule naming a binary is the one kind of rule whose absence
+    /// nothing on the wire makes visible.
+    pub workload_firewall: WorkloadFirewallReport,
 }
 
 /// What became of the cgroup socket hooks on this host.
@@ -150,6 +155,23 @@ pub struct AttributionReport {
     /// The hooks that attached, named as the kernel programs are.
     pub hooks: Vec<String>,
     /// Why nothing is attached, in the words the attach failed with.
+    pub reason: Option<String>,
+    /// Whether the warden created the links, which is the rootless posture.
+    pub brokered: bool,
+}
+
+/// What became of the workload firewall hooks on this host.
+#[derive(Serialize, ToSchema)]
+pub struct WorkloadFirewallReport {
+    /// True only when every hook attached. There is no optional hook here:
+    /// half the hooks is a policy that reads as in force and is not.
+    pub attached: bool,
+    /// The cgroup the hooks were attached to, or asked for.
+    pub cgroup: String,
+    /// The hooks that attached, named as the kernel programs are.
+    pub hooks: Vec<String>,
+    /// Why nothing is attached, in the words the attach failed with. A
+    /// document carrying no workload rule loads no object, and says so here.
     pub reason: Option<String>,
     /// Whether the warden created the links, which is the rootless posture.
     pub brokered: bool,
@@ -415,6 +437,8 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
     // Read once, so both arms below answer from the same reading.
     let attribution = attribution_report(adapters::ebpf::attribution_attach::status());
     let process_tracing = process_tracing_report(adapters::ebpf::process_attach::status());
+    let workload_firewall =
+        workload_firewall_report(adapters::ebpf::workload_firewall_attach::status());
 
     let Some(report) = report else {
         return KernelFeaturesResponse {
@@ -426,6 +450,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
             missing_required: Vec::new(),
             attribution,
             process_tracing,
+            workload_firewall,
         };
     };
 
@@ -467,6 +492,20 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
             .collect(),
         attribution,
         process_tracing,
+        workload_firewall,
+    }
+}
+
+/// Restate a workload firewall status as the endpoint publishes it.
+fn workload_firewall_report(
+    status: adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus,
+) -> WorkloadFirewallReport {
+    WorkloadFirewallReport {
+        attached: status.attached,
+        cgroup: status.cgroup,
+        hooks: status.hooks,
+        reason: status.reason,
+        brokered: status.brokered,
     }
 }
 

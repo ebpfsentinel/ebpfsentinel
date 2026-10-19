@@ -3851,6 +3851,17 @@ pub async fn cmd_ebpf_kernel_features(client: &ApiClient, output: OutputFormat) 
         println!("  Reason:     {reason}");
     }
 
+    println!("\nWorkload firewall");
+    println!("  Attached:   {}", yes_no(resp.workload_firewall.attached));
+    println!("  Cgroup:     {}", resp.workload_firewall.cgroup);
+    println!("  Brokered:   {}", yes_no(resp.workload_firewall.brokered));
+    if !resp.workload_firewall.hooks.is_empty() {
+        println!("  Hooks:      {}", resp.workload_firewall.hooks.join(", "));
+    }
+    if let Some(reason) = &resp.workload_firewall.reason {
+        println!("  Reason:     {reason}");
+    }
+
     println!("\nSocket attribution");
     println!("  Attached:   {}", yes_no(resp.attribution.attached));
     println!("  Cgroup:     {}", resp.attribution.cgroup);

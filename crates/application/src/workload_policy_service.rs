@@ -1,0 +1,607 @@
+//! Resolving which workload a task is, so the kernel can compare integers.
+//!
+//! The rule language names an executable, a unit, a cgroup or a container.
+//! None of the four is readable from a `connect()` hook: the first is a path
+//! in `/proc`, the second is a systemd name, and the last two are strings on
+//! a hierarchy. So the matching happens here, once per exec, and what
+//! reaches the kernel is a bit per selector in two tables - one keyed on the
+//! cgroup, one on the task.
+//!
+//! Which table a selector lands in is decided by the selector itself. A
+//! cgroup, a unit and a container belong to the cgroup, which outlives every
+//! process in it, so one write covers every task that will ever run there.
+//! An executable belongs to one task, and the only thing that knows it is
+//! the process table at `execve`.
+//!
+//! A bit is set only when the whole selector matched, so an `exe` plus
+//! `container` selector is never half-true across the two tables: it is
+//! decided here against both facts and written to the task table alone.
+//!
+//! What this cannot close is stated rather than papered over: a task that
+//! execs and connects before this service has written its bit is unresolved,
+//! and the kernel counts that rather than guessing. The window is the
+//! `/proc` read in the middle, and a policy that refuses by default leaks
+//! for exactly as long as it lasts.
+
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
+
+use domain::common::error::DomainError;
+use domain::container::engine::CgroupReader;
+use domain::container::entity::{ContainerInfo, ContainerMetadata};
+use domain::firewall::workload::{WorkloadFacts, WorkloadPolicy, cgroup_path_of, unit_of};
+use domain::process::entity::ProcessEntry;
+use ports::secondary::workload_policy_map_port::WorkloadPolicyMapPort;
+use tracing::{debug, info, warn};
+
+/// What one task is, in the words a selector is written in.
+///
+/// Owned rather than borrowed because it is assembled from three sources -
+/// the process table, `/proc` and the container resolver - and no one of
+/// them outlives the others.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResolvedWorkload {
+    /// Absolute path of the executable.
+    pub exe: Option<String>,
+    /// systemd unit, derived from the cgroup path.
+    pub unit: Option<String>,
+    /// Absolute cgroup v2 path.
+    pub cgroup: Option<String>,
+    /// Container id in full.
+    pub container_id: Option<String>,
+    /// Container name, where an enricher read one.
+    pub container_name: Option<String>,
+}
+
+impl ResolvedWorkload {
+    /// The borrowed form a selector is matched against.
+    #[must_use]
+    pub fn facts(&self) -> WorkloadFacts<'_> {
+        WorkloadFacts {
+            exe: self.exe.as_deref(),
+            unit: self.unit.as_deref(),
+            cgroup: self.cgroup.as_deref(),
+            container_id: self.container_id.as_deref(),
+            container_name: self.container_name.as_deref(),
+        }
+    }
+}
+
+/// The two masks one task produces.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SelectorMasks {
+    /// Selectors satisfied by the cgroup alone, which every task in it
+    /// shares.
+    pub cgroup: u64,
+    /// Selectors needing this task's own executable.
+    pub task: u64,
+}
+
+impl SelectorMasks {
+    /// Whether the task matched nothing at all, in which case there is
+    /// nothing to write.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.cgroup == 0 && self.task == 0
+    }
+}
+
+/// Keeps the kernel's view of which workload is which.
+pub struct WorkloadPolicyService {
+    policy: RwLock<WorkloadPolicy>,
+    maps: Option<Mutex<Box<dyn WorkloadPolicyMapPort>>>,
+    cgroups: Option<Arc<dyn CgroupReader>>,
+    /// Weak because the table holds this service: the table is what learns
+    /// of an exec, and this is what a new policy has to be replayed over.
+    /// An `Arc` both ways would be a cycle neither end ever drops.
+    processes: OnceLock<Weak<crate::process_table_service::ProcessTableService>>,
+}
+
+impl WorkloadPolicyService {
+    /// A service over `policy`, writing to nothing until it is given maps.
+    ///
+    /// Useful on its own: the command line and the API read the policy
+    /// through the same service on a host where the object did not load.
+    #[must_use]
+    pub fn new(policy: WorkloadPolicy) -> Self {
+        Self {
+            policy: RwLock::new(policy),
+            maps: None,
+            cgroups: None,
+            processes: OnceLock::new(),
+        }
+    }
+
+    /// Write what is resolved into `maps`.
+    #[must_use]
+    pub fn with_maps(mut self, maps: Box<dyn WorkloadPolicyMapPort>) -> Self {
+        self.maps = Some(Mutex::new(maps));
+        self
+    }
+
+    /// Read a task's cgroup path through `reader`.
+    ///
+    /// Without one, a unit or cgroup selector can still be decided for a
+    /// container, whose path the resolver already carries, and never for a
+    /// host process - which is the shape of a degradation worth logging
+    /// rather than guessing around.
+    #[must_use]
+    pub fn with_cgroups(mut self, reader: Arc<dyn CgroupReader>) -> Self {
+        self.cgroups = Some(reader);
+        self
+    }
+
+    /// Replay the table through a new policy, so the tasks already running
+    /// carry their bits under it.
+    ///
+    /// Set after construction rather than taken by the builder, because the
+    /// table is built around this service and cannot be handed to it first.
+    pub fn watch_processes(
+        &self,
+        processes: &Arc<crate::process_table_service::ProcessTableService>,
+    ) {
+        let _ = self.processes.set(Arc::downgrade(processes));
+    }
+
+    /// The policy in force.
+    #[must_use]
+    pub fn policy(&self) -> WorkloadPolicy {
+        self.policy
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Whether any enabled rule has the kernel refuse a syscall.
+    #[must_use]
+    pub fn enforces(&self) -> bool {
+        self.policy
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .enforces()
+    }
+
+    /// Put `policy` in force and write it to the kernel.
+    ///
+    /// Every recorded selector mask is dropped by the write, because a bit
+    /// index is a position in this policy's own list of selectors and means
+    /// something else in the next one. The caller replays the process table
+    /// through [`Self::record_exec`] afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the map port refuses.
+    pub fn apply(&self, policy: WorkloadPolicy) -> Result<(), DomainError> {
+        if let Some(maps) = &self.maps {
+            maps.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .publish_policy(&policy)?;
+        }
+        let rules = policy.rules().len();
+        *self
+            .policy
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = policy;
+        info!(rules, "workload policy in force");
+        // After the lock on the maps is released, because the replay takes
+        // it once per task.
+        self.replay();
+        Ok(())
+    }
+
+    /// Resolve every task the table holds under the policy in force.
+    ///
+    /// A reload renumbers the bits and drops what the last policy recorded,
+    /// so without this the processes already running would be nameless until
+    /// each of them next execs, which for a long-lived daemon is never.
+    fn replay(&self) {
+        let Some(processes) = self.processes.get().and_then(Weak::upgrade) else {
+            return;
+        };
+        let entries = processes.list();
+        for entry in &entries {
+            self.record_exec(entry);
+        }
+        debug!(
+            tasks = entries.len(),
+            "workload policy replayed over the process table"
+        );
+    }
+
+    /// What `entry` is, with the cgroup path read where one can be.
+    #[must_use]
+    pub fn resolve(&self, entry: &ProcessEntry) -> ResolvedWorkload {
+        let mut resolved = ResolvedWorkload {
+            exe: entry.identity.path().map(ToOwned::to_owned),
+            ..ResolvedWorkload::default()
+        };
+        if let Some(context) = entry.container.as_ref() {
+            if let ContainerInfo::Container {
+                container_id,
+                cgroup_path,
+                ..
+            } = &context.info
+            {
+                resolved.container_id = Some(container_id.clone());
+                resolved.cgroup = Some(cgroup_path.clone());
+            }
+            resolved.container_name = context.metadata.as_ref().and_then(|metadata| {
+                match metadata {
+                    ContainerMetadata::Docker(docker) => Some(docker.name.clone()),
+                    ContainerMetadata::Kubernetes(pod) => Some(pod.container_name.clone()),
+                    // A runtime this build does not name yet gives no name,
+                    // and a selector naming one does not match it. Inventing
+                    // a name here is how a rule starts matching a container
+                    // nobody meant.
+                    _ => None,
+                }
+            });
+        }
+        if resolved.cgroup.is_none()
+            && let Some(reader) = &self.cgroups
+        {
+            match reader.read_cgroup(entry.pid) {
+                Ok(payload) => {
+                    resolved.cgroup = cgroup_path_of(&payload).map(ToOwned::to_owned);
+                }
+                Err(err) => {
+                    // Routine rather than exceptional: a short-lived process
+                    // is gone by the time this read happens, and a unit or
+                    // cgroup rule simply does not name it.
+                    debug!(pid = entry.pid, error = %err, "no cgroup path for a task");
+                }
+            }
+        }
+        resolved.unit = resolved
+            .cgroup
+            .as_deref()
+            .and_then(unit_of)
+            .map(ToOwned::to_owned);
+        resolved
+    }
+
+    /// The two masks `facts` satisfy under the policy in force.
+    #[must_use]
+    pub fn masks_for(&self, facts: &WorkloadFacts<'_>) -> SelectorMasks {
+        let policy = self
+            .policy
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut masks = SelectorMasks::default();
+        for (bit, selector) in policy.selectors().enumerate() {
+            if !selector.matches(facts) {
+                continue;
+            }
+            let bit = 1u64 << (bit & 63);
+            if selector.names_executable() {
+                masks.task |= bit;
+            } else {
+                masks.cgroup |= bit;
+            }
+        }
+        masks
+    }
+
+    /// Resolve one exec and write what it matched.
+    ///
+    /// The cgroup mask is written even when it is the same as last time: it
+    /// is one small map write per exec, and the alternative is a cache of
+    /// what was written that goes stale the moment a cgroup is reused.
+    pub fn record_exec(&self, entry: &ProcessEntry) {
+        let Some(maps) = &self.maps else {
+            return;
+        };
+        if self
+            .policy
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+        {
+            return;
+        }
+        let resolved = self.resolve(entry);
+        let masks = self.masks_for(&resolved.facts());
+        let mut maps = maps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if entry.cgroup_id != 0
+            && let Err(err) = maps.set_cgroup_selectors(entry.cgroup_id, masks.cgroup)
+        {
+            warn!(pid = entry.pid, error = %err, "a cgroup's workload selectors were not written");
+        }
+        if let Err(err) = maps.set_task_selectors(entry.pid, masks.task) {
+            warn!(pid = entry.pid, error = %err, "a task's workload selectors were not written");
+        }
+        if !masks.is_empty() {
+            debug!(
+                pid = entry.pid,
+                cgroup = masks.cgroup,
+                task = masks.task,
+                "a task was named by the workload policy"
+            );
+        }
+    }
+
+    /// Forget a task that exited.
+    ///
+    /// A pid is reused, and a mask left behind would name the next program
+    /// to take the number. The cgroup entry is deliberately left alone: it
+    /// is about the cgroup rather than about this task, and the next exec
+    /// there rewrites it.
+    pub fn record_exit(&self, pid: u32) {
+        let Some(maps) = &self.maps else {
+            return;
+        };
+        if let Err(err) = maps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .forget_task(pid)
+        {
+            warn!(pid, error = %err, "a task's workload selectors were not cleared");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::io;
+
+    use domain::common::entity::{Protocol, RuleId};
+    use domain::container::entity::{
+        ContainerContext, ContainerInfo, ContainerRuntime, DockerMetadata,
+    };
+    use domain::firewall::entity::FirewallAction;
+    use domain::firewall::workload::{WorkloadMode, WorkloadRule, WorkloadSelector};
+    use domain::process::entity::ProcessIdentity;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingMaps {
+        cgroups: HashMap<u64, u64>,
+        tasks: HashMap<u32, u64>,
+        published: usize,
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedMaps(Arc<Mutex<RecordingMaps>>);
+
+    impl WorkloadPolicyMapPort for SharedMaps {
+        fn publish_policy(&mut self, _policy: &WorkloadPolicy) -> Result<(), DomainError> {
+            let mut held = self.0.lock().unwrap();
+            held.published += 1;
+            held.cgroups.clear();
+            held.tasks.clear();
+            Ok(())
+        }
+
+        fn set_cgroup_selectors(&mut self, cgroup_id: u64, mask: u64) -> Result<(), DomainError> {
+            self.0.lock().unwrap().cgroups.insert(cgroup_id, mask);
+            Ok(())
+        }
+
+        fn set_task_selectors(&mut self, tgid: u32, mask: u64) -> Result<(), DomainError> {
+            self.0.lock().unwrap().tasks.insert(tgid, mask);
+            Ok(())
+        }
+
+        fn forget_task(&mut self, tgid: u32) -> Result<(), DomainError> {
+            self.0.lock().unwrap().tasks.remove(&tgid);
+            Ok(())
+        }
+
+        fn clear_selectors(&mut self) -> Result<(), DomainError> {
+            let mut held = self.0.lock().unwrap();
+            held.cgroups.clear();
+            held.tasks.clear();
+            Ok(())
+        }
+    }
+
+    struct StaticCgroup(String);
+
+    impl CgroupReader for StaticCgroup {
+        fn read_cgroup(&self, _pid: u32) -> io::Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn rule(id: &str, selector: WorkloadSelector) -> WorkloadRule {
+        WorkloadRule {
+            id: RuleId(id.to_string()),
+            priority: 10,
+            action: FirewallAction::Deny,
+            mode: WorkloadMode::Observe,
+            selector,
+            protocol: Protocol::Any,
+            dst_ip: None,
+            dst_port: None,
+            enabled: true,
+        }
+    }
+
+    fn exe_rule(id: &str, exe: &str) -> WorkloadRule {
+        rule(
+            id,
+            WorkloadSelector::new(Some(exe.to_string()), None, None, None).expect("a valid path"),
+        )
+    }
+
+    fn unit_rule(id: &str, unit: &str) -> WorkloadRule {
+        rule(
+            id,
+            WorkloadSelector::new(None, Some(unit.to_string()), None, None).expect("a valid unit"),
+        )
+    }
+
+    fn entry(pid: u32, exe: &str) -> ProcessEntry {
+        let mut entry = ProcessEntry::new(pid, "curl", 1);
+        entry.identity = ProcessIdentity::Path {
+            path: exe.to_string(),
+            dev: 1,
+            inode: 2,
+        };
+        entry.cgroup_id = 4242;
+        entry
+    }
+
+    fn service(rules: Vec<WorkloadRule>, maps: SharedMaps) -> WorkloadPolicyService {
+        WorkloadPolicyService::new(WorkloadPolicy::new(rules).expect("inside the ceiling"))
+            .with_maps(Box::new(maps))
+            .with_cgroups(Arc::new(StaticCgroup(
+                "0::/system.slice/nginx.service\n".to_string(),
+            )))
+    }
+
+    #[test]
+    fn an_executable_selector_lands_on_the_task_and_a_unit_selector_on_the_cgroup() {
+        let maps = SharedMaps::default();
+        let service = service(
+            vec![
+                exe_rule("one", "/usr/bin/curl"),
+                unit_rule("two", "nginx.service"),
+            ],
+            maps.clone(),
+        );
+
+        service.record_exec(&entry(99, "/usr/bin/curl"));
+
+        let held = maps.0.lock().unwrap();
+        assert_eq!(held.tasks.get(&99), Some(&0b01));
+        assert_eq!(held.cgroups.get(&4242), Some(&0b10));
+    }
+
+    #[test]
+    fn a_selector_naming_both_halves_is_decided_here_and_written_once() {
+        // The kernel ORs the two masks, so a selector split across them
+        // would be satisfied by a task that only matched one half. It is
+        // decided against both facts and written to the task table alone.
+        let both = WorkloadSelector::new(
+            Some("/usr/bin/curl".to_string()),
+            Some("nginx.service".to_string()),
+            None,
+            None,
+        )
+        .expect("a valid selector");
+        let maps = SharedMaps::default();
+        let service = service(vec![rule("one", both)], maps.clone());
+
+        service.record_exec(&entry(7, "/usr/bin/curl"));
+        service.record_exec(&entry(8, "/usr/bin/wget"));
+
+        let held = maps.0.lock().unwrap();
+        assert_eq!(held.tasks.get(&7), Some(&0b1));
+        assert_eq!(held.tasks.get(&8), Some(&0));
+        assert_eq!(held.cgroups.get(&4242), Some(&0));
+    }
+
+    #[test]
+    fn two_rules_about_one_workload_share_a_bit() {
+        let maps = SharedMaps::default();
+        let service = service(
+            vec![
+                exe_rule("one", "/usr/bin/curl"),
+                exe_rule("two", "/usr/bin/curl"),
+            ],
+            maps.clone(),
+        );
+
+        service.record_exec(&entry(5, "/usr/bin/curl"));
+
+        assert_eq!(maps.0.lock().unwrap().tasks.get(&5), Some(&0b1));
+    }
+
+    #[test]
+    fn a_task_that_exits_is_forgotten_and_its_cgroup_is_not() {
+        let maps = SharedMaps::default();
+        let service = service(vec![exe_rule("one", "/usr/bin/curl")], maps.clone());
+
+        service.record_exec(&entry(11, "/usr/bin/curl"));
+        service.record_exit(11);
+
+        let held = maps.0.lock().unwrap();
+        assert!(!held.tasks.contains_key(&11));
+        assert!(held.cgroups.contains_key(&4242));
+    }
+
+    #[test]
+    fn putting_a_policy_in_force_drops_every_mask_recorded_under_the_last_one() {
+        let maps = SharedMaps::default();
+        let service = service(vec![exe_rule("one", "/usr/bin/curl")], maps.clone());
+        service.record_exec(&entry(3, "/usr/bin/curl"));
+
+        service
+            .apply(WorkloadPolicy::new(vec![unit_rule("two", "nginx.service")]).unwrap())
+            .expect("the port accepts it");
+
+        let held = maps.0.lock().unwrap();
+        assert_eq!(held.published, 1);
+        assert!(held.tasks.is_empty());
+        assert!(held.cgroups.is_empty());
+    }
+
+    #[test]
+    fn an_empty_policy_reads_no_cgroup_and_writes_nothing() {
+        let maps = SharedMaps::default();
+        let service = service(Vec::new(), maps.clone());
+
+        service.record_exec(&entry(1, "/usr/bin/curl"));
+
+        let held = maps.0.lock().unwrap();
+        assert!(held.tasks.is_empty());
+        assert!(held.cgroups.is_empty());
+    }
+
+    #[test]
+    fn a_container_carries_its_own_cgroup_path_and_the_enricher_s_name() {
+        let maps = SharedMaps::default();
+        let service = service(
+            vec![
+                rule(
+                    "one",
+                    WorkloadSelector::new(None, None, None, Some("web".to_string()))
+                        .expect("a valid name"),
+                ),
+                rule(
+                    "two",
+                    WorkloadSelector::new(None, None, Some("/docker".to_string()), None)
+                        .expect("a valid path"),
+                ),
+            ],
+            maps.clone(),
+        );
+        let mut inside = entry(21, "/usr/sbin/nginx");
+        inside.container = Some(ContainerContext::with_metadata(
+            ContainerInfo::Container {
+                container_id: "0123456789abcdef".to_string(),
+                runtime: ContainerRuntime::Docker,
+                cgroup_path: "/docker/0123456789abcdef".to_string(),
+                pid: 21,
+            },
+            ContainerMetadata::Docker(DockerMetadata {
+                name: "web".to_string(),
+                image: "nginx".to_string(),
+                labels: Vec::new(),
+                created_at: String::new(),
+                status: String::new(),
+            }),
+        ));
+
+        service.record_exec(&inside);
+
+        assert_eq!(maps.0.lock().unwrap().cgroups.get(&4242), Some(&0b11));
+    }
+
+    #[test]
+    fn a_host_task_with_no_cgroup_reader_matches_no_unit_rather_than_a_guessed_one() {
+        let maps = SharedMaps::default();
+        let service = WorkloadPolicyService::new(
+            WorkloadPolicy::new(vec![unit_rule("one", "nginx.service")]).unwrap(),
+        )
+        .with_maps(Box::new(maps.clone()));
+
+        service.record_exec(&entry(31, "/usr/sbin/nginx"));
+
+        assert_eq!(maps.0.lock().unwrap().cgroups.get(&4242), Some(&0));
+    }
+}

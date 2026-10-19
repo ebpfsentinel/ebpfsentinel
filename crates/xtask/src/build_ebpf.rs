@@ -21,6 +21,7 @@ pub(crate) const EBPF_PROGRAMS: &[&str] = &[
     "tc-scrub",
     "uprobe-dlp",
     "cgroup-attribution",
+    "cgroup-workload-firewall",
     "tracepoint-process",
 ];
 

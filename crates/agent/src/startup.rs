@@ -280,6 +280,10 @@ pub async fn run(
     // ── 3. Convert and load firewall rules ──────────────────────────
     let firewall_mode = config.firewall_mode()?;
     let domain_rules = config.firewall_rules()?;
+    // Read off the same rules, before they move into the engine: a workload
+    // rule is a firewall rule with a selector on it, and the kernel object
+    // that carries it out is loaded only when the document holds one.
+    let workload_policy = domain::firewall::workload::WorkloadPolicy::from_rules(&domain_rules)?;
 
     // ── 3b. Convert and load IDS rules ──────────────────────────────
     let ids_mode = config.ids_mode()?;
@@ -1669,7 +1673,6 @@ pub async fn run(
     reload_service.set_qos_service(Arc::clone(&qos_svc));
     reload_service.set_zone_service(Arc::clone(&zone_svc));
     reload_service.set_schedule_service(Arc::clone(&schedule_svc));
-    let reload_service = Arc::new(reload_service);
     // Clone auth provider for gRPC from the app state
     let grpc_auth: Option<Arc<dyn AuthProvider>> = app_state.auth_provider.clone();
 
@@ -1828,6 +1831,14 @@ pub async fn run(
     // the attacher detaches every hook, so it must outlive the load.
     let mut attribution_attacher: Option<adapters::ebpf::AttributionAttacher> = None;
     let mut process_tracing_ok = false;
+    // The workload firewall's links, kept the same way the attribution ones
+    // are, and the service the process table names each exec to.
+    let mut workload_firewall_attacher: Option<
+        adapters::ebpf::workload_firewall_attach::WorkloadFirewallAttacher,
+    > = None;
+    let mut workload_policy_service: Option<
+        Arc<application::workload_policy_service::WorkloadPolicyService>,
+    > = None;
     // The tracepoint links live here until the manager takes them over.
     let mut process_attacher: Option<adapters::ebpf::ProcessTracingAttacher> = None;
     // What the startup firewall handed over, for the reload path to keep.
@@ -1850,6 +1861,11 @@ pub async fn run(
     let ct_cancel = readers.child_token();
     let attribution_cancel = readers.child_token();
     let process_cancel = readers.child_token();
+    let workload_cancel = readers.child_token();
+    // Decided before the programs load, because the workload firewall reads
+    // it through the same proc root the container resolver does and both are
+    // built from it further down.
+    let coverage_proc = resolver_proc_path(&config.container.resolver.proc_path, &host_proc_root());
     // The exec and exit events cross from the ring-buffer reader to the table
     // here. The table is built further down, once the container resolver and
     // the enrichers exist, so the buffer is what holds the first execs of the
@@ -2510,6 +2526,79 @@ pub async fn run(
             false
         };
 
+        // 10f-bis-b. The workload firewall (cgroup bind and connect hooks)
+        //
+        // Driven by the rules rather than by a key of its own: a document
+        // with no workload rule loads nothing, and one that carries a rule
+        // that refuses means it. That is also why a kernel refusing the
+        // attach is survivable for a policy that only observes and fatal for
+        // one that does not - an agent reporting healthy while the rule in
+        // the file enforces nothing is the outcome worth refusing to start
+        // over.
+        if workload_policy.is_empty() {
+            metrics.clear_ebpf_program_status("cgroup_workload_firewall");
+            adapters::ebpf::workload_firewall_attach::publish_status(
+                adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus::default(),
+            );
+        } else {
+            let outcome = try_load_cgroup_workload_firewall(&ebpf_dir, &config);
+            let refused = match outcome {
+                Ok((loader, metrics_rdr, manager, attacher, status)) if status.attached => {
+                    workload_firewall_attacher = Some(attacher);
+                    if let Some(rdr) = metrics_rdr {
+                        metrics_readers.push(rdr);
+                    }
+                    let service = Arc::new(
+                        application::workload_policy_service::WorkloadPolicyService::new(
+                            workload_policy.clone(),
+                        )
+                        .with_maps(Box::new(manager))
+                        .with_cgroups(Arc::new(
+                            adapters::container::ProcContainerResolver::new(&coverage_proc),
+                        )),
+                    );
+                    // The rules go in before the table starts naming tasks,
+                    // so no task is resolved against an empty rule array.
+                    service.apply(workload_policy.clone())?;
+                    workload_policy_service = Some(service);
+                    managed.push(("cgroup_workload_firewall", loader, workload_cancel.clone()));
+                    metrics.set_ebpf_program_status("cgroup_workload_firewall", true);
+                    info!(
+                        rules = workload_policy.rules().len(),
+                        enforcing = workload_policy.enforces(),
+                        "eBPF cgroup-workload-firewall active"
+                    );
+                    None
+                }
+                Ok((_, _, _, _, status)) => Some(
+                    status
+                        .reason
+                        .unwrap_or_else(|| "the kernel refused the attach".to_string()),
+                ),
+                Err(e) => Some(e.to_string()),
+            };
+            if let Some(reason) = refused {
+                metrics.set_ebpf_program_status("cgroup_workload_firewall", false);
+                adapters::ebpf::workload_firewall_attach::publish_status(
+                    adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus {
+                        attached: false,
+                        cgroup: config.attribution.cgroup_root.clone(),
+                        hooks: Vec::new(),
+                        reason: Some(reason.clone()),
+                        brokered: false,
+                    },
+                );
+                if workload_policy.enforces() {
+                    return Err(anyhow::anyhow!(
+                        adapters::ebpf::workload_firewall_attach::enforcement_unavailable(&reason)
+                    ));
+                }
+                warn!(
+                    "workload firewall not loaded, the rules that observe observe nothing: {reason}"
+                );
+            }
+        }
+
         // 10f-ter. Process tracing (exec and exit tracepoints)
         process_tracing_ok = if config.process_table.enabled {
             match try_load_process_tracing(&ebpf_dir, &config) {
@@ -2800,6 +2889,10 @@ pub async fn run(
         status.insert("xdp-vip-announcer".to_string(), vip_announcer_ok);
         status.insert("cgroup-attribution".to_string(), attribution_ok);
         status.insert("tracepoint-process".to_string(), process_tracing_ok);
+        status.insert(
+            "cgroup-workload-firewall".to_string(),
+            adapters::ebpf::workload_firewall_attach::status().attached,
+        );
     }
 
     // ── Anonymous usage telemetry ───────────────────────────────
@@ -2959,6 +3052,9 @@ pub async fn run(
         // The cgroup links come across with the loader that owns the
         // programs, so a reload that turns attribution off detaches them.
         mgr.attribution = attribution_attacher;
+        // The workload firewall's links travel the same way, so they outlive
+        // start-up and a reload that unloads the object takes them with it.
+        mgr.workload_firewall = workload_firewall_attacher;
         // A reload that loads the hooks again hands the new tables to the
         // same resolver, and one that unloads them takes the old tables away
         // from every reader in the same instant.
@@ -2977,6 +3073,15 @@ pub async fn run(
         Arc::new(tokio::sync::Mutex::new(mgr))
     };
 
+    // The workload policy goes through the same reload path as every other
+    // rule set, and only where the hooks are there to carry it out: a reload
+    // on a host that refused the attach has nothing to write to, and the
+    // reload path refuses a file that would need it.
+    if let Some(ref workload) = workload_policy_service {
+        reload_service.set_workload_service(Arc::clone(workload));
+    }
+    let reload_service = Arc::new(reload_service);
+
     // Spawn config hot-reload task
     let reload_handle = crate::reload::spawn_reload_task(
         config_path.to_string(),
@@ -2990,7 +3095,6 @@ pub async fn run(
     );
 
     // ── 10d. Build container resolver ───────────────────────────────
-    let coverage_proc = resolver_proc_path(&config.container.resolver.proc_path, &host_proc_root());
     let container_resolver = if config.container.resolver.enabled {
         let resolver_proc = coverage_proc.clone();
         let proc_resolver = Arc::new(adapters::container::ProcContainerResolver::new(
@@ -3155,7 +3259,18 @@ pub async fn run(
         if let Some(ref enricher) = kubernetes_enricher {
             svc = svc.with_metadata_enricher(Arc::clone(enricher));
         }
+        // The table is where an exec is learned of, so it is where the
+        // kernel's idea of which workload a task is gets written.
+        if let Some(ref workload) = workload_policy_service {
+            svc = svc.with_workload_policy(Arc::clone(workload));
+        }
         let svc = Arc::new(svc);
+        // And the other way for a reload: a new policy renumbers the bits,
+        // so it is replayed over the tasks already running rather than
+        // waiting for each of them to exec again.
+        if let Some(ref workload) = workload_policy_service {
+            workload.watch_processes(&svc);
+        }
         app_state.install_process_table_service(Arc::clone(&svc));
         // The table is what turns a pid into a path, a container and a pod,
         // so the resolver gains the second half here.
@@ -4879,6 +4994,48 @@ pub fn try_load_cgroup_attribution(
     }
     let status = attacher.attach_all(&loader, &config.attribution.cgroup_root);
     Ok((loader, metrics_rdr, socket_reader, attacher, status))
+}
+
+/// Load the workload firewall and attach its six cgroup hooks.
+///
+/// Returns the loader, the counters, the map manager the policy is written
+/// through, the attacher holding the links, and what can be said about the
+/// result. A kernel that refuses the attach comes back as a status carrying
+/// the reason rather than as an error, because whether that is survivable is
+/// the policy's business and not this function's: a policy that only observes
+/// runs on, and one that refuses stops the agent at the caller.
+///
+/// It is loaded off the rules rather than off a configuration key, because a
+/// workload rule is already the switch: a file with none loads nothing, and a
+/// file with one means it.
+pub fn try_load_cgroup_workload_firewall(
+    ebpf_dir: &str,
+    config: &AgentConfig,
+) -> anyhow::Result<(
+    EbpfLoader,
+    Option<MetricsReader>,
+    adapters::ebpf::workload_policy_map_manager::WorkloadPolicyMapManager,
+    adapters::ebpf::workload_firewall_attach::WorkloadFirewallAttacher,
+    adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus,
+)> {
+    let program_bytes = read_ebpf_program(ebpf_dir, "cgroup-workload-firewall")?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "WORKLOAD_METRICS").ok();
+    // Taken before anything attaches: a hook deciding a syscall against a
+    // table userspace never got hold of would refuse on an empty policy.
+    let manager = adapters::ebpf::workload_policy_map_manager::WorkloadPolicyMapManager::new(
+        loader.ebpf_mut(),
+    )?;
+
+    // Same posture as the attribution hooks: rootless, the agent dropped the
+    // capability the cgroup attach needs and the warden resolves the path.
+    let mut attacher = adapters::ebpf::workload_firewall_attach::WorkloadFirewallAttacher::new();
+    if let Some(sock) = warden_sock_from_env() {
+        attacher = attacher.with_warden_socket(sock);
+    }
+    let status = attacher.attach_all(&loader, &config.attribution.cgroup_root);
+    Ok((loader, metrics_rdr, manager, attacher, status))
 }
 
 /// Load the process-tracing object and attach its two tracepoints.

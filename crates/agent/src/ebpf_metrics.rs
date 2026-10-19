@@ -179,6 +179,22 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
         // One exec, one exit, and the two ways the table loses a line: a
         // ring buffer with nobody draining it fast enough, and a thread exit
         // that is not the process ending.
+        // Which hook the decision was taken at, then what was decided: an
+        // observing policy counts `would_refuse` where an enforcing one
+        // counts `refused`, so turning enforcement on changes which counter
+        // moves and not how much. The last two are the honest ones - a task
+        // the userspace side had not named yet, and a workload no rule
+        // covers.
+        "WORKLOAD_METRICS" => &[
+            (0, "connect"),
+            (1, "sendmsg"),
+            (2, "bind"),
+            (3, "allowed"),
+            (4, "refused"),
+            (5, "would_refuse"),
+            (6, "unresolved"),
+            (7, "no_rule"),
+        ],
         "PROCESS_METRICS" => &[
             (0, "exec"),
             (1, "exit"),
@@ -542,6 +558,10 @@ mod tests {
         (
             "PROCESS_METRICS",
             ebpf_common::process::PROCESS_METRIC_COUNT,
+        ),
+        (
+            "WORKLOAD_METRICS",
+            ebpf_common::workload_policy::WORKLOAD_METRIC_COUNT,
         ),
     ];
 
