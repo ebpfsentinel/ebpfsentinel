@@ -1,0 +1,90 @@
+# eBPFsentinel - Proxmox host
+#
+# A hypervisor with a bridge carrying the guests and a management address of
+# its own. The two are watched differently: the bridge is where the guests'
+# traffic is, and the management interface is where an administrator reaches
+# the host.
+#
+# Copy this over /etc/ebpfsentinel/config.yaml and change the two interface
+# names. On a stock Proxmox install the bridge is `vmbr0` and the management
+# address sits on it; a host with a separate management NIC names it second.
+#
+#   ip -o link show | awk -F': ' '{print $2}'
+#
+# The agent attaches to the bridge, not to each guest's tap device: a guest
+# created after the agent started is on the bridge the moment it boots, and
+# nothing has to be reattached.
+
+agent:
+  interfaces: [vmbr0]
+  bind_address: "127.0.0.1"
+
+zones:
+  enabled: true
+  zones:
+    # One zone, because a stock host has one bridge. A second NIC for
+    # management or for storage is a second zone, denied from the first.
+    - id: guests
+      interfaces: [vmbr0]
+      default_policy: allow
+
+firewall:
+  enabled: true
+  # Alert first. A hypervisor's own storage and cluster traffic rides the
+  # same bridge as the guests on most installs, and a drop there takes a
+  # cluster quorum with it.
+  mode: alert
+  default_policy: pass
+  rules:
+    - id: allow-established
+      priority: 1
+      action: allow
+      state: [established, related]
+    - id: drop-invalid
+      priority: 2
+      action: deny
+      state: [invalid]
+
+conntrack:
+  enabled: true
+
+# A guest is a process on the host, so the process table and the socket
+# attribution are what tie a flow back to the VM that opened it.
+attribution:
+  enabled: true
+
+process_table:
+  enabled: true
+
+ids:
+  enabled: true
+  mode: alert
+
+ips:
+  enabled: true
+  mode: alert
+
+threatintel:
+  enabled: true
+
+dns:
+  enabled: true
+
+ratelimit:
+  enabled: true
+
+# A hypervisor is a reflector worth having: the guests sit behind one
+# address and a flood at them arrives here first.
+ddos:
+  enabled: true
+  syn_protection:
+    enabled: true
+    threshold_mode: true
+    threshold_pps: 20000
+  icmp_protection:
+    enabled: true
+    max_pps: 50
+    max_payload_size: 64
+
+learning:
+  enabled: true

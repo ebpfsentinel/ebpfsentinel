@@ -1,4 +1,4 @@
-//! Two invariants this tree states about itself, asserted rather than reviewed.
+//! Three invariants this tree states about itself, asserted rather than reviewed.
 //!
 //! The repository's own rules say a dash is a plain hyphen and that a planning
 //! identifier belongs in a pull request rather than in a file somebody ships.
@@ -6,6 +6,12 @@
 //! they are read off the tracked files here: a comment that leaks a story
 //! number into a runtime log, or a typographic dash pasted out of a document,
 //! fails the build that introduced it.
+//!
+//! The third is the packages: the unit files are written for the tarball,
+//! which installs under `/usr/local`, and the package build rewrites them on
+//! the way in. A path added to a unit and not to that rewrite table installs
+//! cleanly and fails at the first start, which is the one failure a package
+//! must not have.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -283,4 +289,70 @@ fn the_reference_shape_is_the_one_this_tree_used() {
             "a line that is not a planning reference must pass: {clean}"
         );
     }
+}
+
+/// Paths the unit files name, which the package build has to rewrite.
+fn usr_local_paths(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("/usr/local/") {
+        let tail = &rest[at..];
+        let end = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || "/-_.".contains(c)))
+            .unwrap_or(tail.len());
+        found.push(tail[..end].to_string());
+        rest = &tail[end..];
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+#[test]
+fn the_package_build_rewrites_every_path_the_units_name() {
+    let root = workspace_root();
+    let script = root.join("dist/packaging/build-packages.sh");
+    let table = read_text(&script).expect("the package build script is readable");
+
+    let mut missing: Vec<String> = Vec::new();
+    for unit in ["ebpfsentinel.service", "ebpfsentinel-warden.service"] {
+        let text = read_text(&root.join("dist").join(unit)).expect("the unit is readable");
+        for path in usr_local_paths(&text) {
+            // The rewrite is written as a sed expression, so the path appears
+            // between the first two separators of its own rule.
+            if !table.contains(&format!("s#{path}#")) {
+                missing.push(format!("{unit}: {path}"));
+            }
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "the units name paths the package build does not rewrite, so the packaged units \
+         would point into /usr/local, which no package installs into: {missing:#?}"
+    );
+}
+
+#[test]
+fn the_rewrite_table_names_no_path_the_units_dropped() {
+    let root = workspace_root();
+    let table =
+        read_text(&root.join("dist/packaging/build-packages.sh")).expect("the script is readable");
+
+    let units: String = ["ebpfsentinel.service", "ebpfsentinel-warden.service"]
+        .iter()
+        .filter_map(|unit| read_text(&root.join("dist").join(unit)))
+        .collect();
+
+    let mut stale = Vec::new();
+    for path in usr_local_paths(&table) {
+        if !units.contains(&path) {
+            stale.push(path);
+        }
+    }
+
+    assert!(
+        stale.is_empty(),
+        "the package build rewrites paths no unit names any more: {stale:#?}"
+    );
 }

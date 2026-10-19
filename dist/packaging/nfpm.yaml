@@ -1,0 +1,119 @@
+# Native package definition, one file for both formats.
+#
+# It is driven by environment variables rather than edited per build, and
+# `build-packages.sh` is what sets them: STAGE is the directory holding the
+# binaries, the eBPF objects and the unit files with their paths already
+# rewritten, PKG_VERSION is the version the release manifest pinned, and
+# PKG_ARCH is nfpm's architecture name (amd64 or arm64), which nfpm maps to
+# the Debian and RPM spellings itself.
+#
+# Where the files go differs from the tarball on purpose. `install.sh` writes
+# under /usr/local because that prefix is the administrator's; a package may
+# not, so the binaries land in /usr/bin and the eBPF objects in
+# /usr/lib/ebpfsentinel, which the agent looks in after /usr/local.
+name: ebpfsentinel
+arch: ${PKG_ARCH}
+platform: linux
+version: ${PKG_VERSION}
+section: net
+priority: optional
+maintainer: eBPFsentinel <security@ebpfsentinel.io>
+description: |
+  Kernel-native network security agent.
+  One Rust agent carrying firewall, IDS/IPS, DDoS mitigation, DLP, threat
+  intelligence, NAT and QoS as eBPF programs on one kernel pipeline, beside a
+  small privileged broker that holds the operations the kernel will not
+  delegate. Needs Linux 6.9 or newer with BTF.
+vendor: eBPFsentinel
+homepage: https://github.com/ebpfsentinel/ebpfsentinel
+license: AGPL-3.0-only
+
+# The binaries are statically linked against musl and the eBPF objects are
+# loaded by the agent itself, so systemd is the whole of the runtime
+# dependency. Declaring it is the point: a host without it must refuse the
+# package rather than install two units nothing will ever start.
+depends:
+  - systemd
+recommends:
+  # Only read on hosts that gate unprivileged user namespaces behind AppArmor.
+  # A recommendation rather than a dependency, because the agent runs as root
+  # in the shipped unit and is exempt there.
+  - apparmor
+
+overrides:
+  rpm:
+    depends:
+      - systemd
+
+contents:
+  - src: ${STAGE}/ebpfsentinel-agent
+    dst: /usr/bin/ebpfsentinel-agent
+    file_info:
+      mode: 0755
+  - src: ${STAGE}/warden
+    dst: /usr/bin/ebpfsentinel-warden
+    file_info:
+      mode: 0755
+
+  - src: ${STAGE}/ebpf/*
+    dst: /usr/lib/ebpfsentinel/
+    file_info:
+      mode: 0644
+
+  # A configuration file in both formats: dpkg prompts rather than overwrites,
+  # rpm writes the new one beside it as .rpmnew. An upgrade never takes an
+  # operator's rules away.
+  - src: ${STAGE}/config.yaml
+    dst: /etc/ebpfsentinel/config.yaml
+    type: config|noreplace
+    file_info:
+      mode: 0640
+
+  - src: ${STAGE}/profiles/*.yaml
+    dst: /usr/share/ebpfsentinel/profiles/
+    file_info:
+      mode: 0644
+
+  - src: ${STAGE}/systemd/ebpfsentinel.service
+    dst: /usr/lib/systemd/system/ebpfsentinel.service
+    file_info:
+      mode: 0644
+  - src: ${STAGE}/systemd/ebpfsentinel-warden.service
+    dst: /usr/lib/systemd/system/ebpfsentinel-warden.service
+    file_info:
+      mode: 0644
+
+  - src: ${STAGE}/tmpfiles.d/ebpfsentinel.conf
+    dst: /usr/lib/tmpfiles.d/ebpfsentinel.conf
+    file_info:
+      mode: 0644
+
+  - src: ${STAGE}/apparmor.d/ebpfsentinel-agent
+    dst: /etc/apparmor.d/ebpfsentinel-agent
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+  # Not installed into /etc/sysctl.d: it is host-wide, and a package widening
+  # a host-wide kernel setting without being asked is not a package anybody
+  # trusts. The documentation says when to copy it.
+  - src: ${STAGE}/sysctl.d/60-ebpfsentinel-userns.conf
+    dst: /usr/share/ebpfsentinel/sysctl.d/60-ebpfsentinel-userns.conf
+    file_info:
+      mode: 0644
+
+  - src: ${STAGE}/uninstall.sh
+    dst: /usr/share/ebpfsentinel/uninstall.sh
+    file_info:
+      mode: 0755
+
+  - src: ${STAGE}/LICENSE
+    dst: /usr/share/doc/ebpfsentinel/LICENSE
+    file_info:
+      mode: 0644
+
+scripts:
+  preinstall: ${PACKAGING}/preinst.sh
+  postinstall: ${PACKAGING}/postinst.sh
+  preremove: ${PACKAGING}/prerm.sh
+  postremove: ${PACKAGING}/postrm.sh

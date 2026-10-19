@@ -1,0 +1,74 @@
+# eBPFsentinel - single k3s node
+#
+# One node carrying both the control plane and the workloads, with a CNI in
+# front of the pods. The agent watches the node's own interface and the
+# cgroup hierarchy; it does not replace the CNI and does not try to police
+# pod-to-pod traffic the CNI already decides.
+#
+# Copy this over /etc/ebpfsentinel/config.yaml and change the interface
+# name. On k3s the CNI interface is usually `cni0` or `flannel.1`, and the
+# one worth watching is the node's own uplink.
+#
+# What this profile is for: seeing which workload opened which flow, and
+# catching what reaches the node from outside the cluster. The firewall runs
+# in alert mode, because a rule that drops the wrong packet on a node also
+# drops the kubelet's.
+
+agent:
+  interfaces: [eth0]
+  bind_address: "127.0.0.1"
+  # netkit where the CNI uses it, TC otherwise. `auto` asks the kernel.
+  attach_mode: auto
+
+# The point of running this on a node: a flow carries the pod that opened
+# it. The resolver needs the cgroup hierarchy and a procfs and nothing else;
+# the Kubernetes enricher turns the container id into a pod name, a
+# namespace and its labels, and needs a ServiceAccount with pods
+# get/list/watch.
+container:
+  resolver:
+    enabled: true
+  kubernetes:
+    enabled: true
+  # The Docker socket is not on a k3s node; containerd is, and the resolver
+  # reads the cgroup rather than a socket, so nothing is lost here.
+  docker:
+    enabled: false
+
+attribution:
+  enabled: true
+
+process_table:
+  enabled: true
+
+firewall:
+  enabled: true
+  # Alert, not block. A node drops its own kubelet exactly once.
+  mode: alert
+  default_policy: pass
+
+conntrack:
+  enabled: true
+
+ids:
+  enabled: true
+  mode: alert
+
+ips:
+  enabled: true
+  mode: alert
+
+threatintel:
+  enabled: true
+
+dns:
+  enabled: true
+
+ratelimit:
+  enabled: true
+
+# A cluster node is where learning mode earns its keep: open a window, let
+# the workloads run their normal day, and read back what they actually
+# reached before writing a single rule.
+learning:
+  enabled: true

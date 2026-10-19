@@ -199,25 +199,84 @@ Details, host requirements and the lab's own addresses are in
 
 **Requirements:** Linux kernel 6.9+ on x86_64 or aarch64, with BTF (`CONFIG_DEBUG_INFO_BTF=y`). The 6.9 floor unlocks **BPF token delegation** - the agent loads its eBPF programs with zero `CAP_BPF` / `CAP_NET_ADMIN` (rootless).
 
-### Install (prebuilt)
+### Install (package)
 
-Grab the latest tarball for your architecture from the
-[releases page](https://github.com/ebpfsentinel/ebpfsentinel-release/releases) -
-every component is released together from there, so the release you download
-also tells you which operator and dashboard versions it was tested with. The
-tarball ships the agent, prebuilt eBPF objects, a systemd unit, and an
-`install.sh`:
+The shortest path onto a Linux host, and the one that upgrades and removes
+through the mechanism the host already runs. The packages are release
+artifacts, built for amd64 and arm64 and covered by the release's signed
+`ebpfsentinel-SHA256SUMS`.
 
 ```bash
-tar xzf ebpfsentinel-<version>-linux-amd64.tar.gz
-cd ebpfsentinel-<version>-linux-amd64
-sudo ./install.sh            # installs to /usr/local, wires up the systemd unit
+# Debian, Ubuntu
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://ebpfsentinel.github.io/ebpfsentinel-release/ebpfsentinel.gpg \
+  | sudo tee /etc/apt/keyrings/ebpfsentinel.gpg > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/ebpfsentinel.gpg] https://ebpfsentinel.github.io/ebpfsentinel-release/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/ebpfsentinel.list
+sudo apt-get update && sudo apt-get install ebpfsentinel
+
+# Fedora, RHEL and derivatives
+sudo rpm --import https://ebpfsentinel.github.io/ebpfsentinel-release/ebpfsentinel.asc
+sudo curl -fsSL -o /etc/yum.repos.d/ebpfsentinel.repo \
+  https://ebpfsentinel.github.io/ebpfsentinel-release/ebpfsentinel.repo
+sudo dnf install ebpfsentinel
 ```
 
-Each release carries a dual-signed inventory of every binary hash and image
-digest; verify before installing with `policy/verify.sh` from the same release.
+Installing starts nothing: the shipped configuration cannot guess which
+interfaces to watch. Three host profiles ship beside it - a home router, a k3s
+node, a Proxmox host - and the first start is a copy and two edits:
+
+```bash
+sudo cp /usr/share/ebpfsentinel/profiles/home-router.yaml /etc/ebpfsentinel/config.yaml
+sudo $EDITOR /etc/ebpfsentinel/config.yaml      # the interface names
+sudo systemctl enable --now ebpfsentinel-warden ebpfsentinel
+```
+
+Removing is `apt-get remove` or `dnf remove`, `apt-get purge` to drop the
+configuration and the state with it. Either way both units are stopped and the
+eBPF programs are detached from every interface. A single `.deb` or `.rpm`
+verified against the release signing identity, the installed paths, the
+upgrade behaviour and the NixOS module are in the
+[packages guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/operations/deployment/packages.md).
+
+### Install (tarball)
+
+For a host that carries no third-party repository. Every artifact comes from
+the [release](https://github.com/ebpfsentinel/ebpfsentinel-release/releases),
+which also says which operator and dashboard versions it was tested with. The
+tarball ships the agent, the warden, prebuilt eBPF objects, both systemd units,
+the profiles and an `install.sh`:
+
+```bash
+REL=<release>
+BASE=https://github.com/ebpfsentinel/ebpfsentinel-release/releases/download/v$REL
+curl -fsSLO "$BASE/ebpfsentinel-${REL}-linux-amd64.tar.gz"
+curl -fsSLO "$BASE/ebpfsentinel-SHA256SUMS"
+curl -fsSLO "$BASE/ebpfsentinel-SHA256SUMS.sig"
+curl -fsSLO "$BASE/ebpfsentinel-SHA256SUMS.crt"
+
+cosign verify-blob \
+  --certificate ebpfsentinel-SHA256SUMS.crt \
+  --signature ebpfsentinel-SHA256SUMS.sig \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/ebpfsentinel/ebpfsentinel-release/\.github/workflows/sign-blob\.yml@refs/tags/v.*$' \
+  ebpfsentinel-SHA256SUMS
+sha256sum --ignore-missing -c ebpfsentinel-SHA256SUMS
+
+tar xzf "ebpfsentinel-${REL}-linux-amd64.tar.gz"
+cd "ebpfsentinel-${REL}-linux-amd64"
+sudo ./install.sh            # installs to /usr/local, wires up both systemd units
+```
+
+`cosign verify-blob` says the checksum file came from this project's release
+workflow at a tag; `sha256sum -c` says the file on disk is the one it names.
+`sudo /usr/local/share/ebpfsentinel/uninstall.sh [--purge]` reverses the
+install. Each release also carries a dual-signed inventory of every binary hash
+and image digest, checkable with `policy/verify.sh` from the same release.
 
 ### Build from source
+
+For contributors and for reading the code. A local build produces eBPF objects nobody signed, so it is not what a published install path uses.
 
 The userspace agent builds on **stable**; the eBPF kernel programs need a **nightly** toolchain, pinned to a date in `crates/ebpf-programs/rust-toolchain.toml` and passed to cargo by `cargo xtask` (`bpfel` target). Install Rust via [rustup](https://rustup.rs):
 

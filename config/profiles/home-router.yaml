@@ -1,0 +1,116 @@
+# eBPFsentinel - home router
+#
+# A box with two interfaces: one towards the provider, one towards the
+# house. It routes and masquerades for the LAN, and the only thing reaching
+# it from outside is traffic it asked for.
+#
+# Copy this over /etc/ebpfsentinel/config.yaml, change the two interface
+# names and the LAN prefix, and start the agent. Everything here is a
+# decision already taken, not an example to adapt line by line.
+#
+#   ip -o link show | awk -F': ' '{print $2}'   # the interface names
+#
+# Enforcement is on from the first start, except for the IDS, which runs in
+# alert mode: the rules that fire on a home network are the ones nobody can
+# predict from here, and a box that cuts the household off the internet on
+# its first evening is a box that gets uninstalled. Open a learning window,
+# read what fired, then set `ids.mode: block`.
+
+agent:
+  # wan first, lan second. Rename both.
+  interfaces: [eth0, eth1]
+  bind_address: "127.0.0.1"
+
+zones:
+  enabled: true
+  zones:
+    - id: wan
+      interfaces: [eth0]
+      default_policy: deny
+    - id: lan
+      interfaces: [eth1]
+      default_policy: allow
+  zone_pairs:
+    # Out of the house, yes. Into it, only as the answer to something that
+    # left - which is the established rule in the firewall below.
+    - from: lan
+      to: wan
+      policy: allow
+
+firewall:
+  enabled: true
+  mode: block
+  # Nothing unmatched gets in. Everything the house starts is matched by the
+  # established rule on the way back.
+  default_policy: drop
+  rules:
+    - id: allow-established
+      priority: 1
+      action: allow
+      state: [established, related]
+    - id: drop-invalid
+      priority: 2
+      action: deny
+      state: [invalid]
+    # The LAN talks to the box: DNS, DHCP and the web interface of whatever
+    # else runs here.
+    - id: allow-lan-out
+      priority: 10
+      action: allow
+      src_cidr: "192.168.1.0/24"
+      state: [new]
+      scope:
+        interface: eth1
+
+nat:
+  enabled: true
+  snat_rules:
+    - id: masquerade-lan
+      type: masquerade
+      interface: eth0
+      match_src: "192.168.1.0/24"
+      port_range: "10000-60000"
+
+conntrack:
+  enabled: true
+
+# A home line is the one place a flood is visible immediately: the household
+# notices before any dashboard does. SYN cookies only past a rate no home
+# line ever reaches legitimately, and ICMP capped per source.
+ddos:
+  enabled: true
+  syn_protection:
+    enabled: true
+    threshold_mode: true
+    threshold_pps: 2000
+  icmp_protection:
+    enabled: true
+    max_pps: 10
+    max_payload_size: 64
+
+ratelimit:
+  enabled: true
+
+# DNS is where a home network shows what it is doing. Captured, never
+# resolved on the agent's behalf.
+dns:
+  enabled: true
+
+threatintel:
+  enabled: true
+
+ids:
+  enabled: true
+  mode: alert
+
+ips:
+  enabled: true
+  mode: alert
+
+# Off: a household's traffic is personal, and deep inspection of it is not a
+# default anybody should inherit from a profile.
+dlp:
+  enabled: false
+
+learning:
+  enabled: true

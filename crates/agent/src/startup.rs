@@ -4583,11 +4583,9 @@ mod kernel_version_tests {
 /// Resolve the directory containing compiled eBPF program binaries.
 ///
 /// Precedence: `EBPF_PROGRAM_DIR` env var > `agent.ebpf_program_dir` config
-/// > production default (`/usr/local/lib/ebpfsentinel`)
+/// > the installed directories, in the order [`installed_program_dir`] states
 /// > dev fallback (`target/bpfel-unknown-none/release`).
 pub fn resolve_ebpf_program_dir(config: &AgentConfig) -> String {
-    use infrastructure::constants::{DEFAULT_EBPF_PROGRAM_DIR, DEFAULT_EBPF_PROGRAM_DIR_DEV};
-
     // 1. Env var (highest priority, set in Dockerfile / systemd unit)
     if let Ok(dir) = std::env::var("EBPF_PROGRAM_DIR") {
         return dir;
@@ -4602,11 +4600,61 @@ pub fn resolve_ebpf_program_dir(config: &AgentConfig) -> String {
     if let Some(ref dir) = config.agent.ebpf_program_dir {
         return dir.clone();
     }
-    // 3. Production default, fall back to dev path
-    if Path::new(DEFAULT_EBPF_PROGRAM_DIR).is_dir() {
-        DEFAULT_EBPF_PROGRAM_DIR.to_string()
-    } else {
-        DEFAULT_EBPF_PROGRAM_DIR_DEV.to_string()
+    // 3. Whichever install form put the objects on this host, dev path last
+    installed_program_dir(&|dir| Path::new(dir).is_dir()).to_string()
+}
+
+/// Pick the first installed object directory that exists on this host.
+///
+/// Two install forms put the objects in two places, and a host can carry
+/// both: the tarball's `install.sh` writes `/usr/local/lib/ebpfsentinel`,
+/// while a `.deb` or an `.rpm` may not write under `/usr/local` at all and
+/// uses `/usr/lib/ebpfsentinel`. The tarball comes first because it is the
+/// one an administrator put there by hand, so a manual install placed beside
+/// a package is the one that wins rather than the one silently ignored.
+fn installed_program_dir(exists: &dyn Fn(&str) -> bool) -> &'static str {
+    use infrastructure::constants::{
+        DEFAULT_EBPF_PROGRAM_DIR, DEFAULT_EBPF_PROGRAM_DIR_DEV, DEFAULT_EBPF_PROGRAM_DIR_PACKAGE,
+    };
+
+    [DEFAULT_EBPF_PROGRAM_DIR, DEFAULT_EBPF_PROGRAM_DIR_PACKAGE]
+        .into_iter()
+        .find(|dir| exists(dir))
+        .unwrap_or(DEFAULT_EBPF_PROGRAM_DIR_DEV)
+}
+
+#[cfg(test)]
+mod program_dir_tests {
+    use super::installed_program_dir;
+    use infrastructure::constants::{
+        DEFAULT_EBPF_PROGRAM_DIR, DEFAULT_EBPF_PROGRAM_DIR_DEV, DEFAULT_EBPF_PROGRAM_DIR_PACKAGE,
+    };
+
+    #[test]
+    fn a_manual_install_is_preferred_to_a_package() {
+        let both = |_: &str| true;
+
+        assert_eq!(installed_program_dir(&both), DEFAULT_EBPF_PROGRAM_DIR);
+    }
+
+    #[test]
+    fn a_package_only_host_finds_the_objects_the_package_installed() {
+        let package_only = |dir: &str| dir == DEFAULT_EBPF_PROGRAM_DIR_PACKAGE;
+
+        assert_eq!(
+            installed_program_dir(&package_only),
+            DEFAULT_EBPF_PROGRAM_DIR_PACKAGE
+        );
+    }
+
+    #[test]
+    fn a_working_tree_with_no_install_falls_back_to_the_build_output() {
+        let nothing_installed = |_: &str| false;
+
+        assert_eq!(
+            installed_program_dir(&nothing_installed),
+            DEFAULT_EBPF_PROGRAM_DIR_DEV
+        );
     }
 }
 

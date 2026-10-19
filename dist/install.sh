@@ -5,6 +5,7 @@ INSTALL_BIN="/usr/local/bin"
 INSTALL_LIB="/usr/local/lib/ebpfsentinel"
 INSTALL_ETC="/etc/ebpfsentinel"
 INSTALL_VAR="/var/lib/ebpfsentinel"
+INSTALL_SHARE="/usr/local/share/ebpfsentinel"
 SYSTEMD_DIR="/etc/systemd/system"
 
 # ── Preflight checks ──────────────────────────────────────────────
@@ -87,6 +88,29 @@ else
   echo "Configuration already exists at ${INSTALL_ETC}/config.yaml, skipping."
 fi
 
+# ── Install the host profiles ─────────────────────────────────────
+#
+# Three configurations meant to be copied over the one above rather than
+# read: a home router, a single k3s node and a Proxmox host. They are a
+# starting point with enforcement deliberately held back where a wrong drop
+# costs more than a missed detection, and the comment at the top of each one
+# says which parts to turn up once learning mode has answered.
+
+if [[ -d "${SCRIPT_DIR}/profiles" ]]; then
+  echo "Installing host profiles to ${INSTALL_SHARE}/profiles..."
+  mkdir -p "${INSTALL_SHARE}/profiles"
+  install -Dm644 "${SCRIPT_DIR}/profiles/"*.yaml "${INSTALL_SHARE}/profiles/"
+fi
+
+# ── Install the uninstall script ──────────────────────────────────
+#
+# Beside the install, because an administrator who installed by hand has no
+# package manager to ask for the removal.
+
+if [[ -f "${SCRIPT_DIR}/uninstall.sh" ]]; then
+  install -Dm755 "${SCRIPT_DIR}/uninstall.sh" "${INSTALL_SHARE}/uninstall.sh"
+fi
+
 # ── Create state directories ─────────────────────────────────────
 
 mkdir -p "${INSTALL_VAR}"
@@ -141,6 +165,8 @@ echo "eBPFsentinel installed successfully."
 echo ""
 echo "Next steps:"
 echo "  1. Edit configuration: ${INSTALL_ETC}/config.yaml"
+echo "     Or copy one of the host profiles over it:"
+echo "       ls ${INSTALL_SHARE}/profiles"
 echo "  2. Start the broker:   systemctl start ebpfsentinel-warden"
 echo "  3. Start the agent:    systemctl start ebpfsentinel"
 echo "  4. Enable on boot:     systemctl enable ebpfsentinel-warden ebpfsentinel"
@@ -152,3 +178,5 @@ echo "  sudo cat ${INSTALL_VAR}/auth/api-key"
 echo "Use it on every call but /healthz and /readyz, which stay open:"
 echo "  ebpfsentinel-agent --token \"\$(sudo cat ${INSTALL_VAR}/auth/api-key)\" status"
 echo "Name your own keys under auth.api_keys in the configuration to replace it."
+echo ""
+echo "To remove it all again: sudo ${INSTALL_SHARE}/uninstall.sh [--purge]"

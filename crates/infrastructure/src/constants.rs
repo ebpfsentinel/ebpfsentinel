@@ -113,7 +113,17 @@ pub const RESTART_LIMIT_WINDOW: Duration = Duration::from_secs(300);
 // ── eBPF ──────────────────────────────────────────────────────────
 
 /// Default directory containing compiled eBPF program binaries.
+///
+/// Where the tarball's `install.sh` puts them: `/usr/local` is the prefix for
+/// software installed outside the package manager.
 pub const DEFAULT_EBPF_PROGRAM_DIR: &str = "/usr/local/lib/ebpfsentinel";
+
+/// Where a distribution package puts the same objects.
+///
+/// A `.deb` or an `.rpm` may not write under `/usr/local` - that prefix
+/// belongs to the administrator, not to the package manager - so the native
+/// packages install the objects here and the agent looks in both places.
+pub const DEFAULT_EBPF_PROGRAM_DIR_PACKAGE: &str = "/usr/lib/ebpfsentinel";
 
 /// Fall-back for local development (relative to the workspace root).
 pub const DEFAULT_EBPF_PROGRAM_DIR_DEV: &str = "target/bpfel-unknown-none/release";
