@@ -1358,6 +1358,12 @@ mod tests {
         ) -> Option<ports::secondary::socket_identity_port::SocketOwner> {
             self.0
         }
+        fn by_originated_flow(
+            &self,
+            _flow: &FlowEndpoints,
+        ) -> Option<ports::secondary::socket_identity_port::SocketOwner> {
+            self.0
+        }
     }
 
     fn resolver_naming(pid: u32) -> WorkloadResolver {

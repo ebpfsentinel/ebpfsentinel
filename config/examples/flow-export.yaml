@@ -1,0 +1,81 @@
+# Flow export: IPFIX to a collector.
+#
+# The flow source is the kernel conntrack table, which the agent already
+# reads. A flow record carries the five-tuple, the counters in both
+# directions, the two timestamps and the reason the flow ended; with a
+# registered private enterprise number it also carries the workload block,
+# the process and container behind the local end.
+#
+# Counters are deltas. A conntrack row is cumulative, so each record carries
+# what happened since the previous record for that flow, which is what
+# octetDeltaCount and packetDeltaCount mean on the wire.
+#
+# What a transited flow carries: nothing in the workload block. A packet this
+# node only forwarded has no local socket, so there is no process to name, and
+# the record is sent on a template that has no workload fields rather than
+# with zeroes in them.
+
+agent:
+  interfaces: [eth0]
+
+flow_export:
+  enabled: true
+
+  # A record is written for a running flow every active_timeout_secs, and a
+  # flow that has not changed for idle_timeout_secs is treated as over. The
+  # idle decision is taken first, so a flow that is both idle and overdue is
+  # reported as having ended rather than as still running.
+  active_timeout_secs: 60
+  idle_timeout_secs: 15
+
+  # Flows held at once. Past this the flow whose last reading is oldest is
+  # written out with the lack-of-resources reason and dropped from the table.
+  table_capacity: 65536
+
+  # 1 exports every flow. A rate of 10 exports one flow in ten, chosen once
+  # per flow from a hash of its five-tuple, so what a collector receives is
+  # whole conversations rather than fragments of all of them. Tell the
+  # collector this number: no information element carries it.
+  sampling: 1
+
+  # The queue between the flow table and the sinks. A sink that cannot reach
+  # its destination costs flow records and nothing else: the queue is bounded,
+  # a full queue drops the newest record, and the drop is counted under
+  # queue_full on the metrics endpoint and on `flows export`.
+  queue_depth: 4096
+  batch_size: 256
+  tick_interval_secs: 5
+
+  ipfix:
+    enabled: true
+
+    # One sink per target, each with its own connection, sequence number and
+    # health. A UDP target is a datagram socket; a TCP target is a session, so
+    # a reconnection restarts the sequence and re-sends the templates before
+    # the first record.
+    targets:
+      - address: "10.0.0.9:4739"
+        transport: udp
+      - address: "collector.internal:4739"
+        transport: tcp
+
+    # Written into every message header, for a collector that receives from
+    # several exporters.
+    observation_domain_id: 1
+
+    # The private enterprise number the workload block is exported under.
+    # Leave it at 0 unless you hold a registered PEN: at 0 the agent exports
+    # the five-tuple templates only, because a private element sent under
+    # somebody else's number is a collector decoding the wrong field. The
+    # reverse counters are not affected: they use PEN 29305, which RFC 5103
+    # registered for exactly that.
+    enterprise_number: 0
+
+    # RFC 7011 section 10.3.6. A UDP collector has no way to ask for the
+    # templates, so a sender that announced them once makes every restart of
+    # the collector a silent loss.
+    template_interval_secs: 600
+
+    # Keep a message inside the path's MTU. 1400 is a safe default on a 1500
+    # byte path with a tunnel in the way; raise it on a path you know.
+    max_message_bytes: 1400

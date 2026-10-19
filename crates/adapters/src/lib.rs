@@ -7,6 +7,7 @@ pub mod auth;
 pub mod capture;
 pub mod container;
 pub mod ebpf;
+pub mod flow;
 pub mod geoip;
 pub mod grpc;
 pub mod metrics;

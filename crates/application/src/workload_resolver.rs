@@ -106,6 +106,18 @@ impl WorkloadResolver {
         Some(self.enrich(owner))
     }
 
+    /// The workload that opened a connection from the local end stated.
+    ///
+    /// The orientation is taken as given: a row whose local end is this
+    /// node's listening side answers nothing here, which is what a caller
+    /// learning what a workload reaches needs. Everything else is
+    /// [`Self::by_flow`].
+    #[must_use]
+    pub fn by_originated_flow(&self, flow: &FlowEndpoints) -> Option<Workload> {
+        let owner = self.sockets.load().as_ref()?.by_originated_flow(flow)?;
+        Some(self.enrich(owner))
+    }
+
     /// The workload behind a pid the caller already knows, which is how a DLP
     /// write arrives: the uprobe fires in the writing thread.
     #[must_use]
@@ -176,6 +188,9 @@ mod tests {
             self.0
         }
         fn by_flow(&self, _flow: &FlowEndpoints) -> Option<SocketOwner> {
+            self.0
+        }
+        fn by_originated_flow(&self, _flow: &FlowEndpoints) -> Option<SocketOwner> {
             self.0
         }
     }

@@ -102,6 +102,62 @@ pub struct WorkloadReachResponse {
     pub rules: Vec<WorkloadReachEntry>,
 }
 
+/// One of the selectors a learning scope is written with.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct LearningSelector {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+}
+
+/// What a learning window watches.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LearningScopeBody {
+    Node,
+    Cgroup { path: String },
+    Workloads { selectors: Vec<LearningSelector> },
+}
+
+/// The body of `POST /api/v1/learning/sessions`.
+#[derive(Debug, Clone, Serialize)]
+pub struct StartLearningBody {
+    pub scope: LearningScopeBody,
+    pub duration_secs: u64,
+}
+
+/// A learning window as the agent reports it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LearningSessionResponse {
+    pub id: String,
+    pub status: String,
+    pub scope: LearningScopeBody,
+    pub scope_description: String,
+    pub requested_duration_secs: u64,
+    pub started_at_ns: u64,
+    #[serde(default)]
+    pub ended_at_ns: Option<u64>,
+    pub elapsed_secs: u64,
+    pub gap_secs: u64,
+    pub remaining_secs: u64,
+    pub edges: usize,
+    pub capacity: usize,
+    pub dropped_edges: u64,
+    pub observations: u64,
+    pub unattributed: u64,
+    pub out_of_scope: u64,
+    #[serde(default)]
+    pub last_new_edge_ns: Option<u64>,
+    #[serde(default)]
+    pub secs_since_new_edge: Option<u64>,
+    pub continuous: bool,
+}
+
 /// The workload rules in force.
 #[derive(Deserialize, Serialize)]
 pub struct WorkloadRulesResponse {
@@ -704,6 +760,38 @@ pub struct BlocklistAddResponse {
 pub struct BlocklistRemoveResponse {
     pub domain: String,
     pub removed: bool,
+}
+
+// ── Flow Export ──────────────────────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct FlowSinkStatusResponse {
+    pub name: String,
+    pub healthy: bool,
+    #[serde(default)]
+    pub detail: Option<String>,
+    pub records_sent: u64,
+    pub records_failed: u64,
+    pub consecutive_failures: u32,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct FlowExportStatusResponse {
+    pub enabled: bool,
+    pub observed: u64,
+    pub exported: u64,
+    pub sampled_out: u64,
+    pub evicted: u64,
+    pub restarted: u64,
+    pub queue_drops: u64,
+    pub active_timeout_secs: u64,
+    pub idle_timeout_secs: u64,
+    pub sampling: u32,
+    pub table_capacity: usize,
+    pub queue_depth: usize,
+    pub batch_size: usize,
+    #[serde(default)]
+    pub sinks: Vec<FlowSinkStatusResponse>,
 }
 
 // ── Connection Tracking ──────────────────────────────────────────────
@@ -2084,6 +2172,17 @@ impl ApiClient {
         handle_response(resp).await
     }
 
+    // ── Flow Export ─────────────────────────────────────────────────
+
+    pub async fn flow_export_status(&self) -> anyhow::Result<FlowExportStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/flows/export")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
     // ── Connection Tracking ─────────────────────────────────────────
 
     pub async fn conntrack_status(&self) -> anyhow::Result<ConnTrackStatusResponse> {
@@ -2099,6 +2198,54 @@ impl ApiClient {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/conntrack/connections")
             .query(&[("limit", limit.to_string())])
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── Learning mode ───────────────────────────────
+
+    pub async fn start_learning(
+        &self,
+        body: &StartLearningBody,
+    ) -> anyhow::Result<LearningSessionResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/learning/sessions")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn learning_sessions(&self) -> anyhow::Result<Vec<LearningSessionResponse>> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/learning/sessions")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn learning_session(&self, id: &str) -> anyhow::Result<LearningSessionResponse> {
+        let resp = self
+            .request(
+                reqwest::Method::GET,
+                &format!("/api/v1/learning/sessions/{id}"),
+            )
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn stop_learning(&self, id: &str) -> anyhow::Result<LearningSessionResponse> {
+        let resp = self
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/v1/learning/sessions/{id}/stop"),
+            )
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

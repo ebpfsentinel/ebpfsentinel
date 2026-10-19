@@ -85,6 +85,7 @@ use super::fingerprint_handler::{fingerprint_summary, ja4s_summary};
 use super::firewall_handler::{
     create_rule, delete_rule, list_rules, list_workload_rules, workload_reach,
 };
+use super::flow_handler::flow_export_status;
 use super::geoip_handler::{geoip_lookup, geoip_status};
 use super::health_handler::{healthz, readyz};
 use super::ids_handler::{ids_status, list_ids_rules};
@@ -97,6 +98,7 @@ use super::lb_handler::{
     apply_lb_announce, create_lb_service, delete_lb_service, get_lb_service, lb_status,
     list_lb_services, list_lb_vips,
 };
+use super::learning_handler::{get_learning, list_learning, start_learning, stop_learning};
 use super::metrics_handler::metrics;
 use super::middleware::auth::jwt_auth_middleware;
 use super::mitre_handler::mitre_coverage;
@@ -257,6 +259,8 @@ pub fn build_router(
             .route("/api/v1/firewall/l7-rules", get(list_l7_rules))
             .route("/api/v1/firewall/workload/reach", get(workload_reach))
             .route("/api/v1/firewall/workload/rules", get(list_workload_rules))
+            .route("/api/v1/learning/sessions", get(list_learning))
+            .route("/api/v1/learning/sessions/{id}", get(get_learning))
             .route("/api/v1/ips/rules", get(list_ips_rules))
             .route("/api/v1/ips/blacklist", get(list_ips_blacklist))
             .route("/api/v1/ips/domain-blocks", get(list_ips_domain_blocks))
@@ -289,6 +293,7 @@ pub fn build_router(
             .route("/api/v1/conntrack/status", get(conntrack_status))
             .route("/api/v1/conntrack/connections", get(list_connections))
             .route("/api/v1/conntrack/events", get(conntrack_events))
+            .route("/api/v1/flows/export", get(flow_export_status))
             .route("/api/v1/dlp/status", get(dlp_status))
             .route("/api/v1/dlp/patterns", get(list_dlp_patterns))
             .route("/api/v1/nat/status", get(nat_status))
@@ -328,6 +333,8 @@ pub fn build_router(
             .route("/api/v1/firewall/rules/{id}", delete(delete_rule))
             .route("/api/v1/firewall/l7-rules", post(create_l7_rule))
             .route("/api/v1/firewall/l7-rules/{id}", delete(delete_l7_rule))
+            .route("/api/v1/learning/sessions", post(start_learning))
+            .route("/api/v1/learning/sessions/{id}/stop", post(stop_learning))
             .route("/api/v1/ips/rules/{id}", patch(patch_ips_rule_mode))
             .route("/api/v1/ips/blacklist", post(add_ips_blacklist))
             .route("/api/v1/ips/blacklist/{ip}", delete(delete_ips_blacklist))

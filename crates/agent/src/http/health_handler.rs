@@ -45,6 +45,15 @@ pub struct ReadyResponse {
     /// the service watchdog's keep-alive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub datapath_stalled_secs: Option<u64>,
+    /// Flow sinks that cannot currently reach their destination, by name.
+    ///
+    /// Reported and deliberately not gating: a collector that stopped
+    /// answering must not take this node's traffic enforcement out of a
+    /// cluster, and a readiness probe that fails on it would do exactly
+    /// that. The name is the transport and the address the operator
+    /// configured, and the reason is on the flow export status route.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub flow_sinks_unhealthy: Vec<String>,
 }
 
 /// Helpers the startup probe reported missing, empty when it never ran.
@@ -91,11 +100,16 @@ pub async fn healthz() -> Json<HealthResponse> {
 )]
 pub async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let loaded = state.ebpf_loaded.load(Ordering::Relaxed);
+    let flow_sinks_unhealthy = match state.flow_export.load_full() {
+        Some(handle) => handle.unhealthy().await,
+        None => Vec::new(),
+    };
     let (code, body) = readiness(
         loaded,
         missing_kernel_helpers(),
         blocked_attaches(),
         datapath_stall(),
+        flow_sinks_unhealthy,
     );
     (code, Json(body))
 }
@@ -136,6 +150,7 @@ fn readiness(
     missing: Vec<String>,
     blocked: Vec<String>,
     datapath_stall: Option<std::time::Duration>,
+    flow_sinks_unhealthy: Vec<String>,
 ) -> (StatusCode, ReadyResponse) {
     let ready = loaded && missing.is_empty() && blocked.is_empty() && datapath_stall.is_none();
     let code = if ready {
@@ -151,6 +166,7 @@ fn readiness(
             kernel_helpers_missing: missing,
             attach_blocked: blocked,
             datapath_stalled_secs: datapath_stall.map(|idle| idle.as_secs()),
+            flow_sinks_unhealthy,
         },
     )
 }
@@ -249,6 +265,7 @@ mod tests {
             ],
             Vec::new(),
             None,
+            Vec::new(),
         );
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.status, "not_ready");
@@ -260,7 +277,7 @@ mod tests {
     fn an_unprobed_kernel_does_not_hold_readiness_back() {
         // No probe result is not a negative result. The token-only load path
         // cannot probe at all, and every host on it must still reach ready.
-        let (code, body) = readiness(true, Vec::new(), Vec::new(), None);
+        let (code, body) = readiness(true, Vec::new(), Vec::new(), None, Vec::new());
         assert_eq!(code, StatusCode::OK);
         assert_eq!(body.status, "ready");
         assert!(body.kernel_helpers_missing.is_empty());
@@ -280,13 +297,14 @@ mod tests {
                     .to_string(),
             ],
             None,
+            Vec::new(),
         );
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.attach_blocked.len(), 1);
         assert!(body.attach_blocked[0].contains("already carries XDP program"));
 
         // The generic case carries no reason at all, which is the distinction.
-        let (code, generic) = readiness(false, Vec::new(), Vec::new(), None);
+        let (code, generic) = readiness(false, Vec::new(), Vec::new(), None, Vec::new());
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
         assert!(generic.attach_blocked.is_empty());
     }
@@ -301,6 +319,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Some(std::time::Duration::from_secs(74)),
+            Vec::new(),
         );
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.status, "not_ready");
@@ -310,7 +329,7 @@ mod tests {
 
     #[test]
     fn a_draining_datapath_reports_no_stall_at_all() {
-        let (_, body) = readiness(true, Vec::new(), Vec::new(), None);
+        let (_, body) = readiness(true, Vec::new(), Vec::new(), None, Vec::new());
         assert!(
             body.datapath_stalled_secs.is_none(),
             "a normal pass rate is reported by its absence, not by a zero"
@@ -326,9 +345,33 @@ mod tests {
             Vec::new(),
             vec!["xdp-firewall on eth0: interface already carries XDP program id 42".to_string()],
             None,
+            Vec::new(),
         );
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.status, "not_ready");
         assert!(body.ebpf_loaded);
+    }
+
+    #[test]
+    fn an_unreachable_flow_sink_is_reported_and_does_not_hold_readiness_back() {
+        // A SIEM that stopped answering is a reporting problem. Failing the
+        // probe on it would evict a pod that is still enforcing traffic, so
+        // the name travels and the verdict does not change.
+        let (code, body) = readiness(
+            true,
+            Vec::new(),
+            Vec::new(),
+            None,
+            vec!["ipfix-tcp-10.0.0.9:4739".to_string()],
+        );
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body.status, "ready");
+        assert_eq!(body.flow_sinks_unhealthy, vec!["ipfix-tcp-10.0.0.9:4739"]);
+    }
+
+    #[test]
+    fn a_node_with_no_flow_sink_reports_none_rather_than_an_empty_complaint() {
+        let (_, body) = readiness(true, Vec::new(), Vec::new(), None, Vec::new());
+        assert!(body.flow_sinks_unhealthy.is_empty());
     }
 }

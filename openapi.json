@@ -3571,6 +3571,65 @@
         ]
       }
     },
+    "/api/v1/flows/export": {
+      "get": {
+        "tags": [
+          "Flows"
+        ],
+        "summary": "`GET /api/v1/flows/export` - flow export status.",
+        "operationId": "flow_export_status",
+        "responses": {
+          "200": {
+            "description": "Flow export status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowExportStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Flow export not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/geoip/lookup": {
       "get": {
         "tags": [
@@ -4624,6 +4683,305 @@
           },
           "404": {
             "description": "VIP announcer not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/learning/sessions": {
+      "get": {
+        "tags": [
+          "Learning"
+        ],
+        "summary": "`GET /api/v1/learning/sessions` - every window this node remembers.",
+        "operationId": "list_learning",
+        "responses": {
+          "200": {
+            "description": "The windows, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LearningSessionResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Learning mode is turned off on this node",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Learning"
+        ],
+        "summary": "`POST /api/v1/learning/sessions` - open a window.",
+        "operationId": "start_learning",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartLearningRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The window that is now open",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearningSessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A scope or a duration the node cannot honour",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Learning mode is turned off on this node",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A window is already open",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/learning/sessions/{id}": {
+      "get": {
+        "tags": [
+          "Learning"
+        ],
+        "summary": "`GET /api/v1/learning/sessions/{id}` - one window, as it stands.",
+        "operationId": "get_learning",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The window's id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The window",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearningSessionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such window, or learning mode is off",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/learning/sessions/{id}/stop": {
+      "post": {
+        "tags": [
+          "Learning"
+        ],
+        "summary": "`POST /api/v1/learning/sessions/{id}/stop` - close a window early.",
+        "operationId": "stop_learning",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The window's id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The window, now closed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearningSessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The window was already closed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such window, or learning mode is off",
             "content": {
               "application/json": {
                 "schema": {
@@ -9637,6 +9995,145 @@
           }
         }
       },
+      "FlowExportStatusResponse": {
+        "type": "object",
+        "description": "The exporter, its table and its sinks.",
+        "required": [
+          "enabled",
+          "observed",
+          "exported",
+          "sampled_out",
+          "evicted",
+          "restarted",
+          "queue_drops",
+          "active_timeout_secs",
+          "idle_timeout_secs",
+          "sampling",
+          "table_capacity",
+          "queue_depth",
+          "batch_size",
+          "sinks"
+        ],
+        "properties": {
+          "active_timeout_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "batch_size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "False when no sink is configured, in which case every counter below\nis zero because nothing was ever collected, not because nothing\nhappened."
+          },
+          "evicted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Flows written out early because the table was full.",
+            "minimum": 0
+          },
+          "exported": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Records handed to the queue.",
+            "minimum": 0
+          },
+          "idle_timeout_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "observed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Readings the table took in.",
+            "minimum": 0
+          },
+          "queue_depth": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "queue_drops": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Records built and then dropped because the queue to the sinks was\nfull. A number here is a collector that cannot keep up, and it is why\na missing flow is never a silence.",
+            "minimum": 0
+          },
+          "restarted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Flows whose counters went backwards, which is a five-tuple the kernel\nhanded to a new connection rather than a negative.",
+            "minimum": 0
+          },
+          "sampled_out": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Flows the sampling rate left out. Zero at the default rate of one.",
+            "minimum": 0
+          },
+          "sampling": {
+            "type": "integer",
+            "format": "int32",
+            "description": "One flow in this many is exported. The collector cannot infer it, so\nit has to be configured on both sides.",
+            "minimum": 0
+          },
+          "sinks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowSinkStatusResponse"
+            }
+          },
+          "table_capacity": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "FlowSinkStatusResponse": {
+        "type": "object",
+        "description": "What one sink says about itself.",
+        "required": [
+          "name",
+          "healthy",
+          "records_sent",
+          "records_failed",
+          "consecutive_failures"
+        ],
+        "properties": {
+          "consecutive_failures": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it is unhealthy, in the words the transport used. Absent while it\nis healthy, and it names no address beyond the sink's own name."
+          },
+          "healthy": {
+            "type": "boolean",
+            "description": "False once a write failed and before the next one succeeds."
+          },
+          "name": {
+            "type": "string",
+            "description": "Transport and target, as configured."
+          },
+          "records_failed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "records_sent": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "GatewayResponse": {
         "type": "object",
         "required": [
@@ -10485,6 +10982,126 @@
             "items": {
               "$ref": "#/components/schemas/LbVipResponse"
             }
+          }
+        }
+      },
+      "LearningSessionResponse": {
+        "type": "object",
+        "description": "A window, as it stands.\n\nEverything a reader needs to decide whether the document it would\nproduce is worth applying: how long it has really been watching, whether\nthe agent was up for all of it, how many destinations it holds, how many\nit had to refuse, and how long since it last found a new one.",
+        "required": [
+          "id",
+          "status",
+          "scope",
+          "scope_description",
+          "requested_duration_secs",
+          "started_at_ns",
+          "elapsed_secs",
+          "gap_secs",
+          "remaining_secs",
+          "edges",
+          "capacity",
+          "dropped_edges",
+          "observations",
+          "unattributed",
+          "out_of_scope",
+          "continuous"
+        ],
+        "properties": {
+          "capacity": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "continuous": {
+            "type": "boolean",
+            "description": "False once the agent has been down for part of the window."
+          },
+          "dropped_edges": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Destinations refused because the window was full. Anything but zero\nmeans the document it produces is incomplete, and it says so.",
+            "minimum": 0
+          },
+          "edges": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "elapsed_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "ended_at_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "gap_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds of the window the agent was not running for.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_new_edge_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "observations": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "out_of_scope": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "remaining_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "requested_duration_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ScopeBody"
+          },
+          "scope_description": {
+            "type": "string",
+            "description": "The scope in one line, as the generated document states it."
+          },
+          "secs_since_new_edge": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "started_at_ns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string"
+          },
+          "unattributed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },
@@ -11381,6 +11998,13 @@
             "type": "boolean",
             "description": "Whether eBPF programs are successfully loaded."
           },
+          "flow_sinks_unhealthy": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Flow sinks that cannot currently reach their destination, by name.\n\nReported and deliberately not gating: a collector that stopped\nanswering must not take this node's traffic enforcement out of a\ncluster, and a readiness probe that fails on it would do exactly\nthat. The name is the transport and the address the operator\nconfigured, and the reason is on the flow export status route."
+          },
           "kernel_helpers_missing": {
             "type": "array",
             "items": {
@@ -11791,6 +12415,67 @@
           }
         }
       },
+      "ScopeBody": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Every workload on the node a flow can be attributed to.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "node"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "One cgroup v2 subtree, by absolute path.",
+            "required": [
+              "path",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "cgroup"
+                ]
+              },
+              "path": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A set of workloads, named the way a rule names them.",
+            "required": [
+              "selectors",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "workloads"
+                ]
+              },
+              "selectors": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/WorkloadSelectorBody"
+                }
+              }
+            }
+          }
+        ],
+        "description": "What the window is asked to watch."
+      },
       "SlotContentionResponse": {
         "type": "object",
         "description": "A kernel map slot holds one rule, so two rules watching the same port and\nprotocol cannot both be installed. This says which rule took the slot and\nwhether the loser is still evaluated.",
@@ -11841,6 +12526,25 @@
             "format": "int32",
             "description": "Snap length: max bytes per packet (default 1500).",
             "minimum": 0
+          }
+        }
+      },
+      "StartLearningRequest": {
+        "type": "object",
+        "description": "Open a window.",
+        "required": [
+          "duration_secs"
+        ],
+        "properties": {
+          "duration_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long to watch for, in seconds.",
+            "minimum": 0
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ScopeBody",
+            "description": "What to watch. Omitted means the whole node."
           }
         }
       },
@@ -12407,6 +13111,36 @@
           }
         }
       },
+      "WorkloadSelectorBody": {
+        "type": "object",
+        "description": "One of the selectors a scope is written with, in the shape a workload\nrule already uses.",
+        "properties": {
+          "cgroup": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "container": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exe": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "ZonePolicyResponse": {
         "type": "object",
         "required": [
@@ -12521,6 +13255,10 @@
       "description": "Intrusion prevention rules and blacklist"
     },
     {
+      "name": "Learning",
+      "description": "Learning mode: what this node reached, for a declared window and scope"
+    },
+    {
       "name": "IDS",
       "description": "Intrusion detection status and rules"
     },
@@ -12559,6 +13297,10 @@
     {
       "name": "ConnTrack",
       "description": "Connection tracking status and management"
+    },
+    {
+      "name": "Flows",
+      "description": "Flow record export status"
     },
     {
       "name": "DLP",

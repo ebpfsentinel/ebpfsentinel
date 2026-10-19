@@ -3507,6 +3507,52 @@ pub async fn run(
         .write()
         .await
         .set_workload_resolver(workloads.clone());
+
+    // ── Flow export: IPFIX records off the conntrack readings ────────
+    // The exporter reads the same broadcast the SSE stream reads, so the
+    // flow a SOC sees in IPFIX and the flow an operator watches on the
+    // events route are the same reading rather than two pollers of one
+    // table. A host whose conntrack table cannot be read has no flow source
+    // at all, and says so here rather than exporting nothing in silence.
+    if config.flow_export.enabled {
+        let sinks: Vec<Arc<dyn ports::secondary::flow_sink_port::FlowSink>> =
+            adapters::flow::ipfix_sink::IpfixSink::from_config(&config.flow_export.ipfix)
+                .into_iter()
+                .map(|sink| sink as Arc<dyn ports::secondary::flow_sink_port::FlowSink>)
+                .collect();
+        match conntrack_event_tx.as_ref() {
+            Some(tx) if !sinks.is_empty() => {
+                let settings = application::flow_export_service::FlowExportSettings {
+                    limits: domain::flow::entity::FlowTableLimits {
+                        capacity: config.flow_export.table_capacity,
+                        active_timeout_ms: config
+                            .flow_export
+                            .active_timeout_secs
+                            .saturating_mul(1_000),
+                        idle_timeout_ms: config.flow_export.idle_timeout_secs.saturating_mul(1_000),
+                        sampling: config.flow_export.sampling,
+                    },
+                    queue_depth: config.flow_export.queue_depth,
+                    batch_size: config.flow_export.batch_size,
+                    tick_interval: Duration::from_secs(config.flow_export.tick_interval_secs),
+                };
+                if let Some(handle) = application::flow_export_service::spawn_flow_export(
+                    settings,
+                    workloads.clone(),
+                    sinks,
+                    Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+                    tx.subscribe(),
+                    cancel_token.clone(),
+                ) {
+                    app_state.flow_export.store(Some(Arc::new(handle)));
+                }
+            }
+            Some(_) => warn!("flow export enabled with no sink configured: nothing is exported"),
+            None => warn!(
+                "flow export enabled but this host's conntrack table is unreadable: no flow source"
+            ),
+        }
+    }
     if let Some(store) = alert_store {
         alert_pipeline = alert_pipeline.with_alert_store(store);
     }

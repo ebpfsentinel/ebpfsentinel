@@ -51,4 +51,17 @@ pub trait SocketIdentityReader: Send + Sync {
 
     /// The task that opened a connection with these endpoints.
     fn by_flow(&self, flow: &FlowEndpoints) -> Option<SocketOwner>;
+
+    /// The task that opened a connection whose local end is the one stated,
+    /// with no mirror tried.
+    ///
+    /// [`Self::by_flow`] answers a caller holding a conntrack row, which
+    /// does not say which side is this node's, so it tries the key both
+    /// ways round and the answer no longer says which way matched. A caller
+    /// that is learning what a workload reaches needs exactly that: an
+    /// accepted connection names a client's ephemeral port, and a policy
+    /// carrying it would allow a destination nobody ever dialled. This
+    /// answers only when the local end given is the end the socket was
+    /// opened from.
+    fn by_originated_flow(&self, flow: &FlowEndpoints) -> Option<SocketOwner>;
 }

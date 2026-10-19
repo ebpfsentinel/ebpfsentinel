@@ -17,12 +17,14 @@ use super::domain_handler;
 use super::error;
 use super::fingerprint_handler;
 use super::firewall_handler;
+use super::flow_handler;
 use super::geoip_handler;
 use super::health_handler;
 use super::ids_handler;
 use super::ips_handler;
 use super::l7_handler;
 use super::lb_handler;
+use super::learning_handler;
 use super::metrics_handler;
 use super::mitre_handler;
 use super::nat_handler;
@@ -71,6 +73,11 @@ use super::zone_handler;
         l7_handler::list_l7_rules,
         l7_handler::create_l7_rule,
         l7_handler::delete_l7_rule,
+        // Learning
+        learning_handler::start_learning,
+        learning_handler::list_learning,
+        learning_handler::get_learning,
+        learning_handler::stop_learning,
         // IPS
         ips_handler::list_ips_rules,
         ips_handler::patch_ips_rule_mode,
@@ -131,6 +138,7 @@ use super::zone_handler;
         conntrack_handler::list_connections,
         conntrack_handler::flush_connections,
         conntrack_handler::conntrack_events,
+        flow_handler::flow_export_status,
         // DLP
         dlp_handler::dlp_status,
         dlp_handler::list_dlp_patterns,
@@ -213,6 +221,11 @@ use super::zone_handler;
         // L7
         l7_handler::CreateL7RuleRequest,
         l7_handler::L7RuleResponse,
+        // Learning
+        learning_handler::StartLearningRequest,
+        learning_handler::LearningSessionResponse,
+        learning_handler::ScopeBody,
+        learning_handler::WorkloadSelectorBody,
         // IPS
         ips_handler::IpsRuleResponse,
         ips_handler::BlacklistEntryResponse,
@@ -284,6 +297,8 @@ use super::zone_handler;
         ddos_handler::CreateDdosPolicyRequest,
         // ConnTrack
         conntrack_handler::ConnTrackStatusResponse,
+        flow_handler::FlowExportStatusResponse,
+        flow_handler::FlowSinkStatusResponse,
         conntrack_handler::ConnectionResponse,
         // DLP
         dlp_handler::DlpStatusResponse,
@@ -359,6 +374,7 @@ use super::zone_handler;
         (name = "Firewall", description = "L3/L4 firewall rule management"),
         (name = "L7 Firewall", description = "Application-layer firewall rules"),
         (name = "IPS", description = "Intrusion prevention rules and blacklist"),
+        (name = "Learning", description = "Learning mode: what this node reached, for a declared window and scope"),
         (name = "IDS", description = "Intrusion detection status and rules"),
         (name = "Rate Limiting", description = "Rate limit policy management"),
         (name = "Alerts", description = "Alert queries and false-positive marking"),
@@ -369,6 +385,7 @@ use super::zone_handler;
         (name = "Domains", description = "Domain reputation and blocklist management"),
         (name = "DDoS", description = "DDoS detection, mitigation, and policy management"),
         (name = "ConnTrack", description = "Connection tracking status and management"),
+        (name = "Flows", description = "Flow record export status"),
         (name = "DLP", description = "Data loss prevention status and patterns"),
         (name = "NAT", description = "Network address translation rules"),
         (name = "Aliases", description = "IP/port alias management"),

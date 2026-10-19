@@ -164,6 +164,16 @@ impl SocketIdentityReader for EbpfSocketIdentityReader {
         }
         None
     }
+
+    fn by_originated_flow(&self, flow: &FlowEndpoints) -> Option<SocketOwner> {
+        // The map is keyed by the socket's own source end, so the key built
+        // from the orientation as given matches only a connection opened
+        // from it. The mirror is deliberately not tried.
+        let candidate = flow_key(flow)?;
+        let identity = self.flows.get(&candidate, 0).ok()?;
+        let identity = Self::fresh(identity, boottime_now_ns())?;
+        owner_of(identity, WorkloadSource::Flow)
+    }
 }
 
 #[cfg(test)]

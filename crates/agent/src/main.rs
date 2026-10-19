@@ -12,8 +12,8 @@ use api_client::ApiClient;
 use cli::{
     AlertsCommand, AliasesCommand, AuditCommand, BlacklistAction, CaptureCommand, Command,
     ConfigCommand, DdosCommand, DlpCommand, DnsCommand, DomainsCommand, EbpfCommand, FeedsAction,
-    FingerprintsCommand, FirewallCommand, GeoipCommand, IdsCommand, IpsCommand, L7Command,
-    LbCommand, MitreCommand, NatCommand, NptV6Command, ProcessesCommand, QosCommand,
+    FingerprintsCommand, FirewallCommand, FlowsAction, GeoipCommand, IdsCommand, IpsCommand,
+    L7Command, LbCommand, LearningCommand, MitreCommand, NatCommand, NptV6Command, ProcessesCommand, QosCommand,
     RatelimitCommand, ResponsesCommand, RoutingCommand, ThreatintelCommand, TlsCommand,
     ZonesCommand,
 };
@@ -86,9 +86,16 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
             commands::cmd_top(&client, limit, &sort, output).await
         }
 
-        Some(Command::Flows { conn, limit }) => {
+        Some(Command::Flows {
+            action,
+            conn,
+            limit,
+        }) => {
             let client = ApiClient::new(&conn.host, conn.port, cli.token);
-            commands::cmd_flows(&client, limit, output).await
+            match action {
+                Some(FlowsAction::Export) => commands::cmd_flow_export(&client, output).await,
+                None => commands::cmd_flows(&client, limit, output).await,
+            }
         }
 
         Some(Command::Score { conn, alert_limit }) => {
@@ -103,6 +110,31 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
         }) => {
             let client = ApiClient::new(&conn.host, conn.port, cli.token);
             commands::cmd_investigate(&client, &ip, alert_limit, output).await
+        }
+
+        Some(Command::Learning(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                LearningCommand::Start {
+                    duration,
+                    cgroup,
+                    exe,
+                    unit,
+                    container,
+                } => {
+                    commands::cmd_learning_start(
+                        &client, duration, cgroup, exe, unit, container, output,
+                    )
+                    .await
+                }
+                LearningCommand::List => commands::cmd_learning_list(&client, output).await,
+                LearningCommand::Status { id } => {
+                    commands::cmd_learning_status(&client, id, output).await
+                }
+                LearningCommand::Stop { id } => {
+                    commands::cmd_learning_stop(&client, id, output).await
+                }
+            }
         }
 
         Some(Command::Conntrack { action, conn }) => {

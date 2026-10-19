@@ -19,6 +19,7 @@ use application::ids_service_impl::IdsAppService;
 use application::ips_service_impl::IpsAppService;
 use application::l7_service_impl::L7AppService;
 use application::lb_service_impl::LbAppService;
+use application::learning_service::LearningAppService;
 use application::nat_service_impl::NatAppService;
 use application::process_table_service::ProcessTableService;
 use application::qos_service_impl::QosAppService;
@@ -116,6 +117,13 @@ pub struct AppState {
     /// Broadcast sender for conntrack lifecycle events. SSE clients
     /// subscribe by calling `tx.subscribe()`.
     pub conntrack_event_tx: Option<broadcast::Sender<ConntrackEvent>>,
+    /// What the flow exporter has done, when one is running. Empty when no
+    /// sink is configured, which is what the status route then says rather
+    /// than answering with zeroes that look like an exporter writing nothing.
+    /// Filled after the eBPF load, like the container coverage below, because
+    /// the exporter's tasks take the cancellation token the agent only has
+    /// once the HTTP state is built.
+    pub flow_export: Arc<ArcSwapOption<application::flow_export_service::FlowExportHandle>>,
     /// Broadcast sender feeding the SSE alerts stream. SSE handlers
     /// subscribe via `tx.subscribe()`.
     pub alert_stream_tx: Option<broadcast::Sender<Alert>>,
@@ -138,6 +146,10 @@ pub struct AppState {
     /// in which case the route says so rather than answering that nothing
     /// names this workload, which reads like a policy that admits it.
     pub workload_policy_service: ArcSwapOption<WorkloadPolicyService>,
+    /// Learning mode. Empty when the configuration turns it off, in which
+    /// case the routes say the node does not learn rather than answering
+    /// that it learnt nothing.
+    pub learning_service: ArcSwapOption<LearningAppService>,
 }
 
 impl AppState {
@@ -172,6 +184,7 @@ impl AppState {
             dlp_service: None,
             process_table_service: ArcSwapOption::empty(),
             workload_policy_service: ArcSwapOption::empty(),
+            learning_service: ArcSwapOption::empty(),
             nat_service: None,
             alias_service: None,
             routing_service: None,
@@ -202,6 +215,7 @@ impl AppState {
             capture_engine: None,
             pcap_pool: None,
             conntrack_event_tx: None,
+            flow_export: Arc::new(ArcSwapOption::empty()),
             alert_stream_tx: None,
             alert_replay_buffer: None,
             container_coverage: Arc::new(ArcSwap::from_pointee(ContainerCoverage::starting())),
@@ -339,6 +353,11 @@ impl AppState {
     /// Hand the workload policy over, once it is in force in the kernel.
     pub fn install_workload_policy_service(&self, svc: Arc<WorkloadPolicyService>) {
         self.workload_policy_service.store(Some(svc));
+    }
+
+    /// Hand learning mode over, once whatever stores its windows is open.
+    pub fn install_learning_service(&self, svc: Arc<LearningAppService>) {
+        self.learning_service.store(Some(svc));
     }
 
     /// Attach a NAT service.

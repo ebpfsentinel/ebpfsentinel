@@ -133,6 +133,32 @@ pub trait AlertMetrics: Send + Sync {
     /// reading and passes the difference.
     fn record_workload_denials(&self, _rule_id: &str, _enforced: bool, _count: u64) {}
 
+    /// How many distinct edges the open learning window holds.
+    ///
+    /// A gauge rather than a counter, and zero when no window is open: the
+    /// figure an operator watches is whether the aggregate has stopped
+    /// growing, which a counter that only ever rises cannot show.
+    fn set_learning_edges(&self, _count: u64) {}
+
+    /// One observation folded into the open learning window.
+    ///
+    /// `outcome` is what the aggregate did with it - `new_edge`,
+    /// `known_edge`, `out_of_scope`, `unattributed`, `dropped` or `ignored` -
+    /// because a window that filled up and one that saw nothing in scope
+    /// read the same way on the edge count alone.
+    fn record_learning_observation(&self, _outcome: &str) {}
+
+    /// Add the flow records one sink wrote.
+    fn record_flows_exported(&self, _sink: &str, _count: u64) {}
+
+    /// Record that a sink could not write, with the reason in one word.
+    fn record_flow_export_failure(&self, _sink: &str, _reason: &str) {}
+
+    /// Add the flow records that were built and never written, with the
+    /// reason: a full queue, a sink in backoff, a table at capacity. A
+    /// dropped flow is a counter rather than a silence.
+    fn record_flows_dropped(&self, _reason: &str, _count: u64) {}
+
     /// Record an alert against the country its source address resolved to:
     /// an upper-case ISO 3166-1 alpha-2 code, or `unknown` when it resolved
     /// to none. Called once for every alert `record_alert` counts, so the two

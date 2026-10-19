@@ -70,6 +70,50 @@ impl ResolvedWorkload {
     }
 }
 
+/// What a process table entry alone says about the workload it belongs to.
+///
+/// Everything here is already in the entry, so it costs no read: the
+/// executable the table recorded at the exec, and, for a container, the
+/// cgroup path and the name the runtime enricher could add. A host process
+/// whose entry carries no cgroup path comes back without one, and the
+/// caller that holds a cgroup reader fills it in; a caller that holds none
+/// gets what the table knows rather than nothing.
+#[must_use]
+pub fn workload_of(entry: &ProcessEntry) -> ResolvedWorkload {
+    let mut resolved = ResolvedWorkload {
+        exe: entry.identity.path().map(ToOwned::to_owned),
+        ..ResolvedWorkload::default()
+    };
+    if let Some(context) = entry.container.as_ref() {
+        if let ContainerInfo::Container {
+            container_id,
+            cgroup_path,
+            ..
+        } = &context.info
+        {
+            resolved.container_id = Some(container_id.clone());
+            resolved.cgroup = Some(cgroup_path.clone());
+        }
+        resolved.container_name = context.metadata.as_ref().and_then(|metadata| {
+            match metadata {
+                ContainerMetadata::Docker(docker) => Some(docker.name.clone()),
+                ContainerMetadata::Kubernetes(pod) => Some(pod.container_name.clone()),
+                // A runtime this build does not name yet gives no name,
+                // and a selector naming one does not match it. Inventing
+                // a name here is how a rule starts matching a container
+                // nobody meant.
+                _ => None,
+            }
+        });
+    }
+    resolved.unit = resolved
+        .cgroup
+        .as_deref()
+        .and_then(unit_of)
+        .map(ToOwned::to_owned);
+    resolved
+}
+
 /// The two masks one task produces.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SelectorMasks {
@@ -214,32 +258,7 @@ impl WorkloadPolicyService {
     /// What `entry` is, with the cgroup path read where one can be.
     #[must_use]
     pub fn resolve(&self, entry: &ProcessEntry) -> ResolvedWorkload {
-        let mut resolved = ResolvedWorkload {
-            exe: entry.identity.path().map(ToOwned::to_owned),
-            ..ResolvedWorkload::default()
-        };
-        if let Some(context) = entry.container.as_ref() {
-            if let ContainerInfo::Container {
-                container_id,
-                cgroup_path,
-                ..
-            } = &context.info
-            {
-                resolved.container_id = Some(container_id.clone());
-                resolved.cgroup = Some(cgroup_path.clone());
-            }
-            resolved.container_name = context.metadata.as_ref().and_then(|metadata| {
-                match metadata {
-                    ContainerMetadata::Docker(docker) => Some(docker.name.clone()),
-                    ContainerMetadata::Kubernetes(pod) => Some(pod.container_name.clone()),
-                    // A runtime this build does not name yet gives no name,
-                    // and a selector naming one does not match it. Inventing
-                    // a name here is how a rule starts matching a container
-                    // nobody meant.
-                    _ => None,
-                }
-            });
-        }
+        let mut resolved = workload_of(entry);
         if resolved.cgroup.is_none()
             && let Some(reader) = &self.cgroups
         {

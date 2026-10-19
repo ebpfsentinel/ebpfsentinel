@@ -18,10 +18,12 @@ mod ddos;
 mod dlp;
 mod dns;
 mod firewall;
+mod flow_export;
 mod geoip;
 mod ids;
 mod ips;
 mod l7;
+mod learning;
 mod loadbalancer;
 mod management;
 mod nat;
@@ -64,10 +66,12 @@ pub use dns::{
 pub use firewall::{
     DefaultPolicy, FirewallConfig, FirewallRuleConfig, PortRangeConfig, ScopeConfig, ScopeMap,
 };
+pub use flow_export::{FlowExportConfig, FlowTargetConfig, FlowTransport, IpfixSinkConfig};
 pub use geoip::{GeoIpConfig, GeoIpSource};
 pub use ids::{IdsConfig, IdsRuleConfig, SamplingConfig, ThresholdRuleConfig};
 pub use ips::{IpsConfig, IpsRuleConfig};
 pub use l7::{L7Config, L7RuleConfig};
+pub use learning::LearningConfig;
 pub use loadbalancer::{
     AnnounceConfig, LbBackendConfig, LbServiceConfig as LbServiceCfg, LoadBalancerConfig, VipConfig,
 };
@@ -174,6 +178,16 @@ pub struct AgentConfig {
     /// ended it.
     #[serde(default)]
     pub process_table: ProcessTableConfig,
+
+    /// Learning mode: the window an operator opens to find out what this
+    /// node reaches, before anything is allowed or refused.
+    #[serde(default)]
+    pub learning: LearningConfig,
+
+    /// Flow export: the conntrack readings turned into flow records and sent
+    /// to a collector in the formats a SOC already reads.
+    #[serde(default)]
+    pub flow_export: FlowExportConfig,
 
     #[serde(default)]
     pub nat: NatConfig,
@@ -445,6 +459,10 @@ impl AgentConfig {
 
         // Validate the process-table block
         self.process_table.validate()?;
+        self.learning.validate()?;
+
+        // Validate flow export, sinks included
+        self.flow_export.validate()?;
 
         // Validate multi-WAN gateways
         self.routing.validate()?;

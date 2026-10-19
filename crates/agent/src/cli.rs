@@ -121,6 +121,9 @@ pub enum Command {
 
     /// Network flows - aggregated connection map from conntrack
     Flows {
+        #[command(subcommand)]
+        action: Option<FlowsAction>,
+
         #[command(flatten)]
         conn: ConnectionArgs,
 
@@ -151,6 +154,9 @@ pub enum Command {
         #[arg(long, default_value_t = 100)]
         alert_limit: u64,
     },
+
+    /// Learning mode - watch what this node reaches, for a window you declare
+    Learning(DomainArgs<LearningCommand>),
 
     /// Connection tracking - live flow events and status
     Conntrack {
@@ -251,6 +257,54 @@ pub struct DomainArgs<T: Subcommand> {
 
     #[command(subcommand)]
     pub command: T,
+}
+
+// ── Flows ──────────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum FlowsAction {
+    /// Show flow record export status: the table's counters and every sink
+    Export,
+}
+
+// ── Learning ────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum LearningCommand {
+    /// Open a window and start watching
+    Start {
+        /// How long to watch for, in seconds
+        #[arg(short, long)]
+        duration: u64,
+
+        /// Watch one cgroup v2 subtree, by absolute path
+        #[arg(long, conflicts_with_all = ["exe", "unit", "container"])]
+        cgroup: Option<String>,
+
+        /// Watch the workload running this executable, repeatable
+        #[arg(long)]
+        exe: Vec<String>,
+
+        /// Watch this systemd unit, repeatable
+        #[arg(long)]
+        unit: Vec<String>,
+
+        /// Watch this container, by name or by id prefix, repeatable
+        #[arg(long)]
+        container: Vec<String>,
+    },
+    /// List the windows this node remembers
+    List,
+    /// Show one window, or the open one when no id is given
+    Status {
+        /// The window's id
+        id: Option<String>,
+    },
+    /// Close a window before its time is up
+    Stop {
+        /// The window's id
+        id: Option<String>,
+    },
 }
 
 // ── Conntrack ──────────────────────────────────────────────────────────

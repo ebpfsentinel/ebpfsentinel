@@ -121,6 +121,31 @@ pub struct WorkloadRuleLabels {
     pub mode: String,
 }
 
+/// One flow-export sink, named by its format and its index in configuration.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct FlowSinkLabels {
+    pub sink: String,
+}
+
+/// A flow-export sink and why a write failed.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct FlowSinkReasonLabels {
+    pub sink: String,
+    pub reason: String,
+}
+
+/// Why a flow record was built and never written.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct FlowDropLabels {
+    pub reason: String,
+}
+
+/// What the learning aggregate did with one observation.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct LearningOutcomeLabels {
+    pub outcome: String,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct AttackTypeLabels {
     pub attack_type: String,
@@ -245,6 +270,22 @@ pub struct AgentMetrics {
     /// and a security figure that loses it reads as a rule that stopped
     /// matching.
     pub workload_denials_total: Family<WorkloadRuleLabels, Counter>,
+    /// Distinct edges the open learning window holds, zero when none is
+    /// open: an operator decides the window was long enough by watching
+    /// this stop growing, which a counter cannot show.
+    pub learning_edges: Gauge,
+    /// Observations the learning window folded, by what the aggregate did
+    /// with each, so a window that filled and a window that saw nothing in
+    /// scope do not read alike.
+    pub learning_observations_total: Family<LearningOutcomeLabels, Counter>,
+    /// Flow records each export sink wrote.
+    pub flows_exported_total: Family<FlowSinkLabels, Counter>,
+    /// Writes a sink could not complete, by reason.
+    pub flow_export_failures_total: Family<FlowSinkReasonLabels, Counter>,
+    /// Flow records built and never written: the cost of the queue bound, of
+    /// a sink in backoff and of a table at capacity, each under its own
+    /// reason rather than lost in one number.
+    pub flows_dropped_total: Family<FlowDropLabels, Counter>,
     /// Alerts by the country their source address resolved to, `unknown`
     /// when it resolved to none, so the series add up to `alerts_total`.
     pub alerts_by_source_country_total: Family<CountryLabels, Counter>,
@@ -522,6 +563,41 @@ impl AgentMetrics {
             "workload_denials",
             "Socket operations refused by each workload firewall rule, by rule_id and mode",
             workload_denials_total.clone(),
+        );
+
+        let flows_exported_total = Family::<FlowSinkLabels, Counter>::default();
+        registry.register(
+            "flows_exported",
+            "Flow records written by each flow-export sink",
+            flows_exported_total.clone(),
+        );
+
+        let flow_export_failures_total = Family::<FlowSinkReasonLabels, Counter>::default();
+        registry.register(
+            "flow_export_failures",
+            "Flow-export writes that could not reach their destination, by sink and reason",
+            flow_export_failures_total.clone(),
+        );
+
+        let flows_dropped_total = Family::<FlowDropLabels, Counter>::default();
+        registry.register(
+            "flows_dropped",
+            "Flow records built and never written, by reason",
+            flows_dropped_total.clone(),
+        );
+
+        let learning_edges = Gauge::default();
+        registry.register(
+            "learning_edges",
+            "Distinct destination edges the open learning window holds, zero when no window is open",
+            learning_edges.clone(),
+        );
+
+        let learning_observations_total = Family::<LearningOutcomeLabels, Counter>::default();
+        registry.register(
+            "learning_observations",
+            "Observations folded into the learning window, by what the aggregate did with each",
+            learning_observations_total.clone(),
         );
 
         let alerts_by_source_country_total = Family::<CountryLabels, Counter>::default();
@@ -877,6 +953,11 @@ impl AgentMetrics {
             auto_responses_total,
             alerts_by_rule_total,
             workload_denials_total,
+            learning_edges,
+            learning_observations_total,
+            flows_exported_total,
+            flow_export_failures_total,
+            flows_dropped_total,
             alerts_by_source_country_total,
             false_positives_total,
             memory_usage_bytes,
@@ -1123,6 +1204,44 @@ impl AlertMetrics for AgentMetrics {
                 mode: if enforced { "enforce" } else { "observe" }.to_string(),
             })
             .inc_by(count);
+    }
+
+    fn record_flows_exported(&self, sink: &str, count: u64) {
+        self.flows_exported_total
+            .get_or_create(&FlowSinkLabels {
+                sink: sink.to_string(),
+            })
+            .inc_by(count);
+    }
+
+    fn record_flow_export_failure(&self, sink: &str, reason: &str) {
+        self.flow_export_failures_total
+            .get_or_create(&FlowSinkReasonLabels {
+                sink: sink.to_string(),
+                reason: reason.to_string(),
+            })
+            .inc();
+    }
+
+    fn record_flows_dropped(&self, reason: &str, count: u64) {
+        self.flows_dropped_total
+            .get_or_create(&FlowDropLabels {
+                reason: reason.to_string(),
+            })
+            .inc_by(count);
+    }
+
+    fn set_learning_edges(&self, count: u64) {
+        self.learning_edges
+            .set(i64::try_from(count).unwrap_or(i64::MAX));
+    }
+
+    fn record_learning_observation(&self, outcome: &str) {
+        self.learning_observations_total
+            .get_or_create(&LearningOutcomeLabels {
+                outcome: outcome.to_string(),
+            })
+            .inc();
     }
 
     fn record_alert_source_country(&self, country: &str) {
@@ -2047,6 +2166,9 @@ mod tests {
         ("events_dropped", "counter"),
         ("false_positives", "counter"),
         ("fingerprints_seen", "counter"),
+        ("flow_export_failures", "counter"),
+        ("flows_dropped", "counter"),
+        ("flows_exported", "counter"),
         ("geoip_lookups", "counter"),
         ("ids_ct_dying", "counter"),
         ("ids_domain_matches", "counter"),
@@ -2055,6 +2177,8 @@ mod tests {
         ("lb_backends_healthy", "gauge"),
         ("lb_vip_arp_replies", "gauge"),
         ("lb_vip_takeovers", "counter"),
+        ("learning_edges", "gauge"),
+        ("learning_observations", "counter"),
         ("memory_usage_bytes", "gauge"),
         ("open_fds", "gauge"),
         ("packet_processing_duration_seconds", "histogram"),
@@ -2245,6 +2369,11 @@ mod tests {
             })
             .inc();
         m.record_workload_denials("workload-001", true, 1);
+        m.set_learning_edges(3);
+        m.record_learning_observation("new_edge");
+        m.record_flows_exported("ipfix-udp-127.0.0.1:4739", 1);
+        m.record_flow_export_failure("ipfix-udp-127.0.0.1:4739", "transport");
+        m.record_flows_dropped("queue_full", 1);
         m.ddos_attacks_detected_total
             .get_or_create(&AttackTypeLabels {
                 attack_type: "syn_flood".into(),

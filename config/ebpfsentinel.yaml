@@ -222,6 +222,47 @@ process_table:
   capacity: 8192
   capture_command_line: false
 
+# Flow export. Off by default, and off here means no record is built at all:
+# a node exporting nowhere should not pay for a flow table. The source is the
+# kernel conntrack table, so a host that cannot read it has no flow source
+# and the agent says so at start rather than exporting silence.
+flow_export:
+  enabled: false
+  # How long a running flow goes before a record is written for it, and how
+  # long one goes without a change before it is treated as over.
+  active_timeout_secs: 60
+  idle_timeout_secs: 15
+  # Flows held at once. Past this the flow whose last reading is oldest is
+  # written out early, which is counted as an eviction rather than lost.
+  table_capacity: 65536
+  # Export one flow in this many. 1 exports every flow. The decision is taken
+  # once per flow from a hash of its five-tuple, so a sampled estate shows
+  # whole conversations. No information element carries this number, so a
+  # collector has to be told it before it scales a count back up.
+  sampling: 1
+  # Records held between the flow table and the sinks, records handed to a
+  # sink at once, and how often the table is asked what the clock made due. A
+  # full queue drops the newest record and counts it under queue_full.
+  queue_depth: 4096
+  batch_size: 256
+  tick_interval_secs: 5
+  ipfix:
+    enabled: false
+    targets: []
+    # - address: "10.0.0.9:4739"
+    #   transport: udp        # udp or tcp
+    observation_domain_id: 0
+    # The private enterprise number the workload block is exported under. 0,
+    # the default, exports the five-tuple templates only: this project holds
+    # no registered PEN, and exporting a private element under somebody
+    # else's number is a collector decoding the wrong field. Set it to your
+    # own registered number to receive the workload elements.
+    enterprise_number: 0
+    # RFC 7011 section 10.3.6: a UDP collector cannot ask for the templates,
+    # so they go out again on this interval.
+    template_interval_secs: 600
+    max_message_bytes: 1400
+
 alerting:
   enabled: false
 

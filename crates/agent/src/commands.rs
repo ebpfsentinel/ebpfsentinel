@@ -2,7 +2,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::api_client::{
     AlertResponse, ApiClient, ConnectionResponse, ConntrackEventFrame, IdsRuleResponse,
-    IpsRuleResponse, StreamOpenError,
+    IpsRuleResponse, LearningScopeBody, LearningSelector, LearningSessionResponse,
+    StartLearningBody, StreamOpenError,
 };
 use crate::cli::OutputFormat;
 use crate::table::{Align, Table, cells};
@@ -2397,6 +2398,57 @@ pub async fn cmd_top(
 
 // ── Flows ───────────────────────────────────────────────────────────
 
+pub async fn cmd_flow_export(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.flow_export_status().await?;
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!(
+        "enabled: {}\nsampling: 1 in {}\nactive timeout: {}s\nidle timeout: {}s",
+        resp.enabled, resp.sampling, resp.active_timeout_secs, resp.idle_timeout_secs
+    );
+    println!(
+        "table: {} flows capacity, queue {} records, batch {}",
+        resp.table_capacity, resp.queue_depth, resp.batch_size
+    );
+    println!(
+        "observed: {}  exported: {}  sampled out: {}  evicted: {}  restarted: {}",
+        resp.observed, resp.exported, resp.sampled_out, resp.evicted, resp.restarted
+    );
+    // Said even at zero: a reader has to be able to tell a queue that never
+    // filled from a figure nobody reported.
+    println!("dropped by a full queue: {}", resp.queue_drops);
+
+    if resp.sinks.is_empty() {
+        println!("\nNo sink configured.");
+        return Ok(());
+    }
+
+    let mut table = Table::new(&[
+        ("SINK", Align::Left),
+        ("HEALTHY", Align::Right),
+        ("SENT", Align::Right),
+        ("FAILED", Align::Right),
+        ("FAILURES", Align::Right),
+        ("DETAIL", Align::Left),
+    ]);
+    for sink in &resp.sinks {
+        let detail = sink.detail.as_deref().unwrap_or("-");
+        table.row(cells![
+            sink.name,
+            if sink.healthy { "yes" } else { "no" },
+            sink.records_sent,
+            sink.records_failed,
+            sink.consecutive_failures,
+            detail
+        ]);
+    }
+    table.print();
+    Ok(())
+}
+
 pub async fn cmd_flows(client: &ApiClient, limit: usize, output: OutputFormat) -> Result<()> {
     use std::collections::HashMap;
 
@@ -4305,6 +4357,179 @@ pub async fn cmd_conntrack_flush(client: &ApiClient, output: OutputFormat) -> Re
     }
 
     println!("Conntrack table flushed: {} entry(ies).", resp.flushed);
+    Ok(())
+}
+
+// ── Learning mode ────────────────────────────────────────
+
+/// `learning start` - open a window.
+pub async fn cmd_learning_start(
+    client: &ApiClient,
+    duration: u64,
+    cgroup: Option<String>,
+    exe: Vec<String>,
+    unit: Vec<String>,
+    container: Vec<String>,
+    output: OutputFormat,
+) -> Result<()> {
+    let scope = learning_scope(cgroup, exe, unit, container);
+    let body = StartLearningBody {
+        scope,
+        duration_secs: duration,
+    };
+    let session = client.start_learning(&body).await?;
+    print_learning_session(&session, output)
+}
+
+/// `learning list` - the windows this node remembers.
+pub async fn cmd_learning_list(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let sessions = client.learning_sessions().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&sessions)?);
+        return Ok(());
+    }
+
+    if sessions.is_empty() {
+        println!("No window has been opened on this node.");
+        return Ok(());
+    }
+
+    let mut table = Table::new(&[
+        ("ID", Align::Left),
+        ("STATUS", Align::Left),
+        ("SCOPE", Align::Left),
+        ("ELAPSED", Align::Right),
+        ("REMAINING", Align::Right),
+        ("EDGES", Align::Right),
+        ("GAP", Align::Right),
+    ]);
+    for session in &sessions {
+        table.row(cells![
+            session.id,
+            session.status,
+            session.scope_description,
+            format!("{}s", session.elapsed_secs),
+            format!("{}s", session.remaining_secs),
+            session.edges,
+            format!("{}s", session.gap_secs)
+        ]);
+    }
+    table.print();
+    Ok(())
+}
+
+/// `learning status` - one window, the open one when no id is given.
+pub async fn cmd_learning_status(
+    client: &ApiClient,
+    id: Option<String>,
+    output: OutputFormat,
+) -> Result<()> {
+    let id = resolve_learning_id(client, id).await?;
+    let session = client.learning_session(&id).await?;
+    print_learning_session(&session, output)
+}
+
+/// `learning stop` - close a window before its time is up.
+pub async fn cmd_learning_stop(
+    client: &ApiClient,
+    id: Option<String>,
+    output: OutputFormat,
+) -> Result<()> {
+    let id = resolve_learning_id(client, id).await?;
+    let session = client.stop_learning(&id).await?;
+    print_learning_session(&session, output)
+}
+
+/// An id the caller did not give is the window that is still running.
+///
+/// Asking the agent rather than remembering locally is what makes the
+/// command usable from a second terminal, and a node with no window open
+/// is told so here rather than through a 404 naming an id nobody typed.
+async fn resolve_learning_id(client: &ApiClient, id: Option<String>) -> Result<String> {
+    if let Some(id) = id {
+        return Ok(id);
+    }
+    let sessions = client.learning_sessions().await?;
+    let running: Vec<&LearningSessionResponse> =
+        sessions.iter().filter(|s| s.status == "running").collect();
+    match running.as_slice() {
+        [session] => Ok(session.id.clone()),
+        [] => bail!("no learning window is open on this node; name one with its id"),
+        _ => bail!("more than one window is open; name the one you mean with its id"),
+    }
+}
+
+fn learning_scope(
+    cgroup: Option<String>,
+    exe: Vec<String>,
+    unit: Vec<String>,
+    container: Vec<String>,
+) -> LearningScopeBody {
+    if let Some(path) = cgroup {
+        return LearningScopeBody::Cgroup { path };
+    }
+    let selectors: Vec<LearningSelector> = exe
+        .into_iter()
+        .map(|exe| LearningSelector {
+            exe: Some(exe),
+            ..LearningSelector::default()
+        })
+        .chain(unit.into_iter().map(|unit| LearningSelector {
+            unit: Some(unit),
+            ..LearningSelector::default()
+        }))
+        .chain(container.into_iter().map(|container| LearningSelector {
+            container: Some(container),
+            ..LearningSelector::default()
+        }))
+        .collect();
+    if selectors.is_empty() {
+        LearningScopeBody::Node
+    } else {
+        LearningScopeBody::Workloads { selectors }
+    }
+}
+
+fn print_learning_session(session: &LearningSessionResponse, output: OutputFormat) -> Result<()> {
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(session)?);
+        return Ok(());
+    }
+
+    println!("id:          {}", session.id);
+    println!("status:      {}", session.status);
+    println!("scope:       {}", session.scope_description);
+    println!(
+        "window:      {}s elapsed of {}s, {}s left",
+        session.elapsed_secs, session.requested_duration_secs, session.remaining_secs
+    );
+    println!(
+        "edges:       {} of {} ({} observations, {} unattributed, {} out of scope)",
+        session.edges,
+        session.capacity,
+        session.observations,
+        session.unattributed,
+        session.out_of_scope
+    );
+    match session.secs_since_new_edge {
+        Some(secs) => println!("last new:    {secs}s ago"),
+        None => println!("last new:    nothing seen yet"),
+    }
+    if session.gap_secs > 0 {
+        println!(
+            "gap:         the agent was down for {}s of this window",
+            session.gap_secs
+        );
+    } else if !session.continuous {
+        println!("gap:         the agent did not run for all of this window");
+    }
+    if session.dropped_edges > 0 {
+        println!(
+            "dropped:     {} destinations refused, the window is full",
+            session.dropped_edges
+        );
+    }
     Ok(())
 }
 
