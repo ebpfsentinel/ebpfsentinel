@@ -203,6 +203,19 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (2, "events_dropped"),
             (3, "thread_exit"),
         ],
+        // What became of each arming: the signal went out, the kernel's own
+        // protected set refused it, the window closed before the target made
+        // a syscall, or the helper itself said no. `sent` is a signal
+        // delivered and not a process stopped, which is why the service goes
+        // and looks afterwards and this counter is never read as a kill
+        // count.
+        "SIGNAL_METRICS" => &[
+            (0, "sent"),
+            (1, "protected"),
+            (2, "expired"),
+            (3, "helper_failed"),
+            (4, "event_lost"),
+        ],
         "CT_METRICS" => &[
             (0, "new"),
             (1, "established"),
@@ -581,6 +594,7 @@ mod tests {
             "WORKLOAD_METRICS",
             ebpf_common::workload_policy::WORKLOAD_METRIC_COUNT,
         ),
+        ("SIGNAL_METRICS", ebpf_common::signal::SIGNAL_METRIC_COUNT),
     ];
 
     #[test]

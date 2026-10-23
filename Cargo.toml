@@ -36,6 +36,7 @@ exclude = [
     "crates/ebpf-programs/cgroup-attribution",
     "crates/ebpf-programs/cgroup-workload-firewall",
     "crates/ebpf-programs/tracepoint-process",
+    "crates/ebpf-programs/tracepoint-signal",
 ]
 
 [workspace.package]

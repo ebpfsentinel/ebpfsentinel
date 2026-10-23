@@ -18,6 +18,7 @@ pub mod process;
 pub mod qos;
 pub mod ratelimit;
 pub mod scrub;
+pub mod signal;
 pub mod tenant;
 pub mod threatintel;
 pub mod vip;

@@ -83,7 +83,10 @@ pub use nat::{HairpinNatConfig, NatConfig, NatRuleConfig, NptV6RuleConfig};
 pub use process_table::ProcessTableConfig;
 pub use qos::{QosClassifierConfig, QosPipeConfig, QosQueueConfig, QosSectionConfig};
 pub use ratelimit::{RateLimitRuleConfig, RateLimitSectionConfig};
-pub use response::{DEFAULT_MAX_RESPONSE_TTL_SECS, MAX_RESPONSE_TTL_CEILING_SECS, ResponseConfig};
+pub use response::{
+    DEFAULT_MAX_RESPONSE_TTL_SECS, KillProcessConfig, MAX_KILL_WINDOW_MS,
+    MAX_RESPONSE_TTL_CEILING_SECS, MAX_SIGNAL_NUMBER, ResponseConfig,
+};
 pub use routing::{GatewayConfig, HealthCheckConfig, RoutingConfig};
 pub use telemetry::{DISABLE_ENV as TELEMETRY_DISABLE_ENV, TelemetryConfig};
 pub use threatintel::{

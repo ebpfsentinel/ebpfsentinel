@@ -76,6 +76,11 @@ pub struct ServiceHandles {
     // ── DNS services (optional) ──────────────────────────────────
     pub dns_cache_svc: Option<Arc<DnsCacheAppService>>,
 
+    /// Stopping the process behind a flow. `None` whenever the capability is
+    /// off, the object did not load or the kernel refused the attach, and a
+    /// caller holding `None` has no way to signal anything.
+    pub process_signal_svc: Option<Arc<application::process_signal_service::ProcessSignalService>>,
+
     // ── Infrastructure ───────────────────────────────────────────
     pub metrics: Arc<AgentMetrics>,
     pub ebpf_loaded: Arc<AtomicBool>,
@@ -541,6 +546,9 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         schedule_svc,
         audit_svc,
         dns_cache_svc,
+        // Nothing is loaded here, so there is no map to arm through: the
+        // capability exists only where the object was loaded and attached.
+        process_signal_svc: None,
         metrics,
         ebpf_loaded,
     })

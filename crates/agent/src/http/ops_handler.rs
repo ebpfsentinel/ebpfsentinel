@@ -141,6 +141,10 @@ pub struct KernelFeaturesResponse {
     /// either: a rule naming a binary is the one kind of rule whose absence
     /// nothing on the wire makes visible.
     pub workload_firewall: WorkloadFirewallReport,
+    /// Whether this node can stop the process behind a flow, and with what.
+    /// Reported whether or not the capability is on, because the blast radius
+    /// of an action has to be readable before somebody arms it.
+    pub process_signal: ProcessSignalReport,
 }
 
 /// What became of the cgroup socket hooks on this host.
@@ -191,6 +195,26 @@ pub struct ProcessTracingReport {
     /// Whether the table keeps command lines, which is off unless the
     /// configuration asked for it.
     pub command_line: bool,
+}
+
+/// What this node can do to the process behind a flow.
+#[derive(Serialize, ToSchema)]
+pub struct ProcessSignalReport {
+    /// True only when the capability is on in the configuration and the
+    /// tracepoint attached. False is the ordinary answer: the capability is
+    /// off unless a configuration asked for it.
+    pub attached: bool,
+    /// Why nothing can be stopped on this node, in one sentence.
+    pub reason: Option<String>,
+    /// The signal a kill would send, zero when nothing is armed.
+    pub signal: u32,
+    /// How long a target stays armed before the arming lapses. A target that
+    /// makes no syscall in that window is reported as a survivor rather than
+    /// assumed dead.
+    pub window_ms: u64,
+    /// How many thread group ids the kernel refuses to signal whatever a rule
+    /// asks, the agent's own among them.
+    pub protected: usize,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -439,6 +463,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
     let process_tracing = process_tracing_report(adapters::ebpf::process_attach::status());
     let workload_firewall =
         workload_firewall_report(adapters::ebpf::workload_firewall_attach::status());
+    let process_signal = process_signal_report(adapters::ebpf::signal_attach::status());
 
     let Some(report) = report else {
         return KernelFeaturesResponse {
@@ -451,6 +476,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
             attribution,
             process_tracing,
             workload_firewall,
+            process_signal,
         };
     };
 
@@ -493,6 +519,18 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
         attribution,
         process_tracing,
         workload_firewall,
+        process_signal,
+    }
+}
+
+/// Restate a signal status as the endpoint publishes it.
+fn process_signal_report(status: adapters::ebpf::SignalStatus) -> ProcessSignalReport {
+    ProcessSignalReport {
+        attached: status.attached,
+        reason: status.reason,
+        signal: status.signal,
+        window_ms: status.window_ms,
+        protected: status.protected,
     }
 }
 

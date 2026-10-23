@@ -3956,6 +3956,24 @@ pub async fn cmd_ebpf_uprobes(client: &ApiClient, output: OutputFormat) -> Resul
     Ok(())
 }
 
+/// Print what this node can do to the process behind a flow.
+///
+/// The signal, the window and the size of the protected set are printed only
+/// when something is armed, because a figure beside a capability that is off
+/// reads as a capability that is on.
+fn print_process_signal(report: &crate::api_client::ProcessSignalReport) {
+    println!("\nStopping a process");
+    println!("  Armed:      {}", yes_no(report.attached));
+    if report.attached {
+        println!("  Signal:     {}", report.signal);
+        println!("  Window:     {} ms", report.window_ms);
+        println!("  Protected:  {} pids", report.protected);
+    }
+    if let Some(reason) = &report.reason {
+        println!("  Reason:     {reason}");
+    }
+}
+
 pub async fn cmd_ebpf_kernel_features(client: &ApiClient, output: OutputFormat) -> Result<()> {
     let resp = client.kernel_features().await?;
 
@@ -4044,6 +4062,8 @@ pub async fn cmd_ebpf_kernel_features(client: &ApiClient, output: OutputFormat) 
     if let Some(reason) = &resp.workload_firewall.reason {
         println!("  Reason:     {reason}");
     }
+
+    print_process_signal(&resp.process_signal);
 
     println!("\nSocket attribution");
     println!("  Attached:   {}", yes_no(resp.attribution.attached));

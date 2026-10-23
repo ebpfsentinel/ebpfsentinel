@@ -23,6 +23,7 @@ pub(crate) const EBPF_PROGRAMS: &[&str] = &[
     "cgroup-attribution",
     "cgroup-workload-firewall",
     "tracepoint-process",
+    "tracepoint-signal",
 ];
 
 // Kernel kfuncs called by the eBPF programs. These resolve to undefined

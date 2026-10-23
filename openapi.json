@@ -10836,7 +10836,8 @@
           "missing_required",
           "attribution",
           "process_tracing",
-          "workload_firewall"
+          "workload_firewall",
+          "process_signal"
         ],
         "properties": {
           "attribution": {
@@ -10861,6 +10862,10 @@
           },
           "probed": {
             "type": "boolean"
+          },
+          "process_signal": {
+            "$ref": "#/components/schemas/ProcessSignalReport",
+            "description": "Whether this node can stop the process behind a flow, and with what.\nReported whether or not the capability is on, because the blast radius\nof an action has to be readable before somebody arms it."
           },
           "process_tracing": {
             "$ref": "#/components/schemas/ProcessTracingReport",
@@ -11927,6 +11932,46 @@
           },
           "tracing": {
             "$ref": "#/components/schemas/ProcessTracingResponse"
+          }
+        }
+      },
+      "ProcessSignalReport": {
+        "type": "object",
+        "description": "What this node can do to the process behind a flow.",
+        "required": [
+          "attached",
+          "signal",
+          "window_ms",
+          "protected"
+        ],
+        "properties": {
+          "attached": {
+            "type": "boolean",
+            "description": "True only when the capability is on in the configuration and the\ntracepoint attached. False is the ordinary answer: the capability is\noff unless a configuration asked for it."
+          },
+          "protected": {
+            "type": "integer",
+            "description": "How many thread group ids the kernel refuses to signal whatever a rule\nasks, the agent's own among them.",
+            "minimum": 0
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why nothing can be stopped on this node, in one sentence."
+          },
+          "signal": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The signal a kill would send, zero when nothing is armed.",
+            "minimum": 0
+          },
+          "window_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long a target stays armed before the arming lapses. A target that\nmakes no syscall in that window is reported as a survivor rather than\nassumed dead.",
+            "minimum": 0
           }
         }
       },

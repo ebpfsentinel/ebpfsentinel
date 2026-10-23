@@ -84,6 +84,10 @@ pub enum AuditAction {
     FalsePositive,
     /// An operator changed an alert's status, assignee or notes.
     AlertTriaged,
+    /// A process was signalled, and the detail says whether it died.
+    ProcessSignalled,
+    /// A process was not signalled, and the detail says what protected it.
+    ProcessSignalRefused,
 }
 
 impl AuditAction {
@@ -100,6 +104,8 @@ impl AuditAction {
             Self::PolicyViolation => "policy_violation",
             Self::FalsePositive => "false_positive",
             Self::AlertTriaged => "alert_triaged",
+            Self::ProcessSignalled => "process_signalled",
+            Self::ProcessSignalRefused => "process_signal_refused",
         }
     }
 }

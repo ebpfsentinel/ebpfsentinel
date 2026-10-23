@@ -1443,6 +1443,23 @@ pub struct KernelFeaturesResponse {
     pub process_tracing: ProcessTracingReport,
     #[serde(default)]
     pub workload_firewall: WorkloadFirewallReport,
+    #[serde(default)]
+    pub process_signal: ProcessSignalReport,
+}
+
+/// What this node can do to the process behind a flow. Defaulted on decode
+/// for the same reason as the two blocks below it.
+#[derive(Deserialize, Serialize, Default)]
+pub struct ProcessSignalReport {
+    pub attached: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub signal: u32,
+    #[serde(default)]
+    pub window_ms: u64,
+    #[serde(default)]
+    pub protected: usize,
 }
 
 #[derive(Deserialize, Serialize)]
