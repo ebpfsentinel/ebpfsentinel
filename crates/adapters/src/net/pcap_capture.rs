@@ -273,9 +273,73 @@ pub fn run_capture(
     Ok(CaptureStats { packets, file_size })
 }
 
+/// One frame read off the socket, as [`stream_frames`] hands it over.
+pub struct Frame<'a> {
+    /// When the frame was read, in nanoseconds since the Unix epoch: the same
+    /// clock the agent stamps an alert with, so a window around an alert is a
+    /// comparison and not a conversion.
+    pub timestamp_ns: u64,
+    /// The frame from its Ethernet header, cut at the snap length.
+    pub data: &'a [u8],
+    /// The frame's length on the wire, before the cut.
+    pub original_len: u32,
+}
+
+/// Read frames off an inherited `AF_PACKET` socket and hand each one to `sink`
+/// until `stop` is raised.
+///
+/// Unlike [`run_capture`] this writes nothing: what to keep, for how long and
+/// whether any of it reaches a disk is the caller's decision. The socket is
+/// bound to `interface` and put in promiscuous mode where the link accepts it,
+/// and is left clean on return so the pool can lend it again.
+///
+/// # Errors
+///
+/// Returns a message when the interface cannot be resolved or the socket
+/// cannot be bound; a read that finds nothing is not an error.
+pub fn stream_frames(
+    fd: RawFd,
+    interface: &str,
+    snap_length: u32,
+    stop: &domain::capture::entity::CaptureStop,
+    sink: &mut dyn FnMut(Frame<'_>),
+) -> Result<u64, String> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let ifindex = resolve_ifindex(interface)?;
+    bind_packet(fd, ifindex)?;
+    let promisc = ifindex != 0 && set_promisc(fd, ifindex, true).is_ok();
+
+    let snaplen = (snap_length.max(64)) as usize;
+    let mut buf = vec![0u8; 65_536];
+    let mut frames: u64 = 0;
+    while !stop.requested() {
+        // SAFETY: `buf` is a valid writable region of `buf.len()` bytes.
+        let n = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), buf.len(), libc::MSG_DONTWAIT) };
+        if n > 0 {
+            let len = n as usize;
+            let timestamp_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+            sink(Frame {
+                timestamp_ns,
+                data: &buf[..len.min(snaplen)],
+                original_len: len as u32,
+            });
+            frames += 1;
+        } else {
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+
+    if promisc {
+        let _ = set_promisc(fd, ifindex, false);
+    }
+    Ok(frames)
+}
+
 /// Resolve an interface name to its index. `"any"`/empty yields `0` (all
 /// interfaces, unbound).
-#[cfg(feature = "pcap-capture")]
 fn resolve_ifindex(interface: &str) -> Result<i32, String> {
     if interface.is_empty() || interface == "any" {
         return Ok(0);
@@ -292,7 +356,6 @@ fn resolve_ifindex(interface: &str) -> Result<i32, String> {
 
 /// Bind an `AF_PACKET` socket to `(ifindex, ETH_P_ALL)`. The `CAP_NET_RAW` check
 /// already happened at `socket()`; `bind` does not re-check it.
-#[cfg(feature = "pcap-capture")]
 fn bind_packet(fd: RawFd, ifindex: i32) -> Result<(), String> {
     let mut addr: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
     addr.sll_family = libc::AF_PACKET as u16;
@@ -316,7 +379,6 @@ fn bind_packet(fd: RawFd, ifindex: i32) -> Result<(), String> {
 }
 
 /// Add or drop promiscuous-mode membership on `ifindex`.
-#[cfg(feature = "pcap-capture")]
 fn set_promisc(fd: RawFd, ifindex: i32, on: bool) -> Result<(), String> {
     let mut mreq: libc::packet_mreq = unsafe { std::mem::zeroed() };
     mreq.mr_ifindex = ifindex;
@@ -457,6 +519,24 @@ mod tests {
     impl ports::secondary::metrics_port::CtMetrics for RecordingMetrics {}
     impl ports::secondary::metrics_port::ZoneMetrics for RecordingMetrics {}
     impl ports::secondary::metrics_port::ThreatIntelMetrics for RecordingMetrics {}
+
+    #[test]
+    fn a_stream_on_an_unknown_interface_reads_nothing() {
+        let stop = domain::capture::entity::CaptureStop::new();
+        let mut seen = 0_u32;
+        let result = stream_frames(-1, "no-such-iface-zz9", 1500, &stop, &mut |_| seen += 1);
+        assert!(result.is_err_and(|e| e.contains("unknown interface")));
+        assert_eq!(seen, 0);
+    }
+
+    #[test]
+    fn a_stream_on_a_socket_that_will_not_bind_reads_nothing() {
+        let stop = domain::capture::entity::CaptureStop::new();
+        let mut seen = 0_u32;
+        let result = stream_frames(-1, "any", 1500, &stop, &mut |_| seen += 1);
+        assert!(result.is_err_and(|e| e.contains("bind(AF_PACKET) failed")));
+        assert_eq!(seen, 0);
+    }
 
     #[test]
     fn the_gauge_follows_every_borrow_and_return() {
