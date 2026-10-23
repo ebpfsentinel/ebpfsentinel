@@ -20,6 +20,12 @@ pub struct MitreCoverageResponse {
     pub techniques: Vec<TechniqueEntry>,
     /// Coverage summary per tactic.
     pub by_tactic: Vec<TacticSummary>,
+    /// Techniques this agent maps but whose component is switched off.
+    ///
+    /// They are what the product could raise here and this configuration
+    /// does not, kept apart from `techniques` so that nobody reading the
+    /// response can count them as coverage by accident.
+    pub switched_off: Vec<TechniqueEntry>,
 }
 
 /// A single technique in the coverage matrix.
@@ -93,7 +99,6 @@ async fn active_components(state: &AppState) -> Vec<&'static str> {
 ///
 /// A word here that the mapping is not keyed on filters the matrix down to
 /// nothing without saying so, which is what the test beside it asserts against.
-#[cfg(test)]
 const REPORTABLE_COMPONENTS: [&str; 9] = [
     "firewall",
     "ips",
@@ -123,17 +128,20 @@ const REPORTABLE_COMPONENTS: [&str; 9] = [
 pub async fn mitre_coverage(State(state): State<Arc<AppState>>) -> Json<MitreCoverageResponse> {
     let active = active_components(&state).await;
     let report = mitre::coverage_report(&active);
+    let idle: Vec<&str> = REPORTABLE_COMPONENTS
+        .into_iter()
+        .filter(|c| !active.contains(c))
+        .collect();
+    let switched_off = mitre::coverage_report(&idle)
+        .techniques
+        .into_iter()
+        .map(TechniqueEntry::from)
+        .collect();
 
     let techniques = report
         .techniques
         .into_iter()
-        .map(|t| TechniqueEntry {
-            component: t.component,
-            technique_id: t.technique_id,
-            technique_name: t.technique_name,
-            tactic: t.tactic,
-            description: t.description,
-        })
+        .map(TechniqueEntry::from)
         .collect();
 
     let by_tactic = report
@@ -151,7 +159,20 @@ pub async fn mitre_coverage(State(state): State<Arc<AppState>>) -> Json<MitreCov
         total_techniques: report.total_techniques,
         techniques,
         by_tactic,
+        switched_off,
     })
+}
+
+impl From<mitre::CoverageEntry> for TechniqueEntry {
+    fn from(t: mitre::CoverageEntry) -> Self {
+        Self {
+            component: t.component,
+            technique_id: t.technique_id,
+            technique_name: t.technique_name,
+            tactic: t.tactic,
+            description: t.description,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -283,6 +304,22 @@ mod tests {
         }
     }
 
+    /// A mapping whose component is off is reported, and reported apart from
+    /// coverage, so the switched-off and the covered never overlap.
+    #[tokio::test]
+    async fn a_switched_off_service_is_reported_apart_from_coverage() {
+        let state = quiet_state()
+            .with_ids_service(ids_service(true))
+            .with_ddos_service(ddos_service(false));
+
+        let Json(resp) = mitre_coverage(State(Arc::new(state))).await;
+
+        assert!(resp.techniques.iter().all(|t| t.component != "ddos"));
+        assert!(resp.switched_off.iter().any(|t| t.component == "ddos"));
+        assert!(resp.switched_off.iter().all(|t| t.component != "ids"));
+        assert!(resp.techniques.iter().any(|t| t.component == "ids"));
+    }
+
     #[test]
     fn coverage_response_serialization() {
         let resp = MitreCoverageResponse {
@@ -309,6 +346,7 @@ mod tests {
                 covered_techniques: 1,
                 components: vec!["ids".to_string()],
             }],
+            switched_off: vec![],
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["attack_version"], "v18");

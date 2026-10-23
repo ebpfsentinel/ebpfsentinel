@@ -970,6 +970,21 @@ pub async fn cmd_mitre_coverage(client: &ApiClient, output: OutputFormat) -> Res
         );
     }
 
+    if !resp.switched_off.is_empty() {
+        let mut components: Vec<&str> = resp
+            .switched_off
+            .iter()
+            .map(|t| t.component.as_str())
+            .collect();
+        components.sort_unstable();
+        components.dedup();
+        println!(
+            "\nMapped but switched off: {} technique(s)  [{}]",
+            resp.switched_off.len(),
+            components.join(", "),
+        );
+    }
+
     Ok(())
 }
 

@@ -11475,7 +11475,8 @@
           "attack_version",
           "total_techniques",
           "techniques",
-          "by_tactic"
+          "by_tactic",
+          "switched_off"
         ],
         "properties": {
           "attack_version": {
@@ -11488,6 +11489,13 @@
               "$ref": "#/components/schemas/TacticSummary"
             },
             "description": "Coverage summary per tactic."
+          },
+          "switched_off": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TechniqueEntry"
+            },
+            "description": "Techniques this agent maps but whose component is switched off.\n\nThey are what the product could raise here and this configuration\ndoes not, kept apart from `techniques` so that nobody reading the\nresponse can count them as coverage by accident."
           },
           "techniques": {
             "type": "array",

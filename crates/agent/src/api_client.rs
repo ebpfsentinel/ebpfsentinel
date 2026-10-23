@@ -541,6 +541,8 @@ pub struct MitreCoverageResponse {
     pub total_techniques: usize,
     pub techniques: Vec<MitreTechniqueEntry>,
     pub by_tactic: Vec<MitreTacticSummary>,
+    #[serde(default)]
+    pub switched_off: Vec<MitreTechniqueEntry>,
 }
 
 #[derive(Deserialize, Serialize)]
