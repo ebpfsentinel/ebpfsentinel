@@ -21,6 +21,7 @@ dependencies = [
  "futures-util",
  "governor",
  "http-body-util",
+ "hyper-util",
  "infrastructure",
  "ipnetwork",
  "jsonwebtoken",

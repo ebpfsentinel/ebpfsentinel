@@ -1,0 +1,141 @@
+syntax = "proto3";
+
+// The subset of the Kubernetes CRI runtime service this agent calls.
+//
+// containerd and CRI-O both serve this service on their own socket, so one
+// client speaks to either. Only the calls the agent makes are declared here,
+// and only the fields it reads: field numbers, message names, the package and
+// the service name are copied from the upstream definition because they are
+// the wire contract, while every field declared nowhere below is skipped on
+// decode. Declaring the whole runtime service would vendor a few thousand
+// lines of definition for container creation, exec, attach, port forwarding
+// and image management that nothing here will ever call.
+package runtime.v1;
+
+service RuntimeService {
+  // Which runtime answers on this socket, and which API version it speaks.
+  rpc Version(VersionRequest) returns (VersionResponse) {}
+  // The pods on this node. A pod's own labels live here rather than on its
+  // containers, so a tenant claim written on the pod is read from this call.
+  rpc ListPodSandbox(ListPodSandboxRequest) returns (ListPodSandboxResponse) {}
+  // The containers on this node, each naming the pod it belongs to.
+  rpc ListContainers(ListContainersRequest) returns (ListContainersResponse) {}
+  // Lifecycle events as the runtime sees them, so a container appearing is
+  // reacted to rather than waited for. Runtimes that do not implement it
+  // answer UNIMPLEMENTED, which is what the caller falls back from.
+  rpc GetContainerEvents(GetEventsRequest) returns (stream ContainerEventResponse) {}
+}
+
+message VersionRequest {
+  string version = 1;
+}
+
+message VersionResponse {
+  string version = 1;
+  string runtime_name = 2;
+  string runtime_version = 3;
+  string runtime_api_version = 4;
+}
+
+enum PodSandboxState {
+  SANDBOX_READY = 0;
+  SANDBOX_NOTREADY = 1;
+}
+
+message PodSandboxStateValue {
+  PodSandboxState state = 1;
+}
+
+message PodSandboxMetadata {
+  string name = 1;
+  string uid = 2;
+  string namespace = 3;
+  uint32 attempt = 4;
+}
+
+message PodSandboxFilter {
+  string id = 1;
+  PodSandboxStateValue state = 2;
+  map<string, string> label_selector = 3;
+}
+
+message ListPodSandboxRequest {
+  PodSandboxFilter filter = 1;
+}
+
+message PodSandbox {
+  string id = 1;
+  PodSandboxMetadata metadata = 2;
+  PodSandboxState state = 3;
+  int64 created_at = 4;
+  map<string, string> labels = 5;
+  map<string, string> annotations = 6;
+  string runtime_handler = 7;
+}
+
+message ListPodSandboxResponse {
+  repeated PodSandbox items = 1;
+}
+
+enum ContainerState {
+  CONTAINER_CREATED = 0;
+  CONTAINER_RUNNING = 1;
+  CONTAINER_EXITED = 2;
+  CONTAINER_UNKNOWN = 3;
+}
+
+message ContainerStateValue {
+  ContainerState state = 1;
+}
+
+message ContainerMetadata {
+  string name = 1;
+  uint32 attempt = 2;
+}
+
+message ImageSpec {
+  string image = 1;
+  map<string, string> annotations = 2;
+}
+
+message ContainerFilter {
+  string id = 1;
+  ContainerStateValue state = 2;
+  string pod_sandbox_id = 3;
+  map<string, string> label_selector = 4;
+}
+
+message ListContainersRequest {
+  ContainerFilter filter = 1;
+}
+
+message Container {
+  string id = 1;
+  string pod_sandbox_id = 2;
+  ContainerMetadata metadata = 3;
+  ImageSpec image = 4;
+  string image_ref = 5;
+  ContainerState state = 6;
+  int64 created_at = 7;
+  map<string, string> labels = 8;
+  map<string, string> annotations = 9;
+}
+
+message ListContainersResponse {
+  repeated Container containers = 1;
+}
+
+message GetEventsRequest {}
+
+enum ContainerEventType {
+  CONTAINER_CREATED_EVENT = 0;
+  CONTAINER_STARTED_EVENT = 1;
+  CONTAINER_STOPPED_EVENT = 2;
+  CONTAINER_DELETED_EVENT = 3;
+}
+
+message ContainerEventResponse {
+  string container_id = 1;
+  ContainerEventType container_event_type = 2;
+  int64 created_at = 3;
+}

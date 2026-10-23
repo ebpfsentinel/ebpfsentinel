@@ -26,6 +26,7 @@ tower-http = { workspace = true }
 tower_governor = { workspace = true }
 governor = { workspace = true }
 tonic = { workspace = true }
+hyper-util = { workspace = true }
 tonic-health = { workspace = true }
 tonic-reflection = { workspace = true }
 prost = { workspace = true }

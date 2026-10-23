@@ -62,13 +62,14 @@ async-trait = "0.1"
 # HTTP
 axum = "0.8"
 http-body-util = "0.1"
-tower = "0.5"
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["cors"] }
 tower_governor = "0.8"
 governor = "0.10"
 
 # gRPC
 tonic = { version = "0.14", features = ["tls-aws-lc"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 tonic-health = "0.14"
 tonic-reflection = "0.14"
 tonic-prost = "0.14"
