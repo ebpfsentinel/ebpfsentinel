@@ -1925,6 +1925,9 @@ pub async fn cmd_lb_vips(client: &ApiClient, output: OutputFormat) -> Result<()>
     println!("  Role:           {}", status.role);
     println!("  Interface:      {}", status.interface);
     println!("  Speaker:        {}", yes_no(status.is_speaker));
+    if let Some(ms) = status.grant_remaining_ms {
+        println!("  Grant left:     {}.{:03}s", ms / 1000, ms % 1000);
+    }
     println!("  Bindings count: {}", status.bindings_count);
 
     if status.vips.is_empty() {
@@ -1950,6 +1953,22 @@ pub async fn cmd_lb_vips(client: &ApiClient, output: OutputFormat) -> Result<()>
     }
     table.print();
     println!("\n  {} VIP(s) total.", status.vips.len());
+    Ok(())
+}
+
+pub async fn cmd_lb_grant(client: &ApiClient, seconds: u32, output: OutputFormat) -> Result<()> {
+    let status = client.grant_lb_vip_speaker(seconds).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    if status.is_speaker {
+        println!("Speaker for {} VIP(s) for {seconds}s", status.vips.len());
+    } else {
+        println!("Speaker role released");
+    }
     Ok(())
 }
 

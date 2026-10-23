@@ -421,6 +421,9 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
                 LbCommand::Announce { json } => {
                     commands::cmd_lb_announce(&client, &json, output).await
                 }
+                LbCommand::Grant { seconds } => {
+                    commands::cmd_lb_grant(&client, seconds, output).await
+                }
             }
         }
 

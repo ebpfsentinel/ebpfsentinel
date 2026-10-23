@@ -341,6 +341,8 @@ pub struct AgentMetrics {
     pub lb_vip_arp_replies: Family<VipLabels, Gauge>,
     /// Speaker takeovers per VIP (userspace-incremented on promotion).
     pub lb_vip_takeovers_total: Family<VipLabels, Counter>,
+    /// 1 while this node answers for its VIPs, 0 while it stays silent.
+    pub lb_vip_speaker: Gauge,
     pub worker_events_total: Family<WorkerLabels, Counter>,
     pub worker_processing_duration: Family<WorkerLabels, Histogram>,
     /// Records drained from a datapath ring buffer, per producing program.
@@ -888,6 +890,13 @@ impl AgentMetrics {
             lb_vip_takeovers_total.clone(),
         );
 
+        let lb_vip_speaker = Gauge::default();
+        registry.register(
+            "lb_vip_speaker",
+            "Whether this node answers ARP for its VIPs (1) or stays silent (0)",
+            lb_vip_speaker.clone(),
+        );
+
         let worker_events_total = Family::<WorkerLabels, Counter>::default();
         registry.register(
             "worker_events",
@@ -1054,6 +1063,7 @@ impl AgentMetrics {
             lb_backends_healthy,
             lb_vip_arp_replies,
             lb_vip_takeovers_total,
+            lb_vip_speaker,
             worker_events_total,
             worker_processing_duration,
             ringbuf_events_total,
@@ -1695,6 +1705,10 @@ impl LbMetrics for AgentMetrics {
             })
             .inc();
     }
+
+    fn set_vip_speaker(&self, speaking: bool) {
+        self.lb_vip_speaker.set(i64::from(speaking));
+    }
 }
 
 impl ports::secondary::metrics_port::FingerprintMetrics for AgentMetrics {
@@ -2272,6 +2286,7 @@ mod tests {
         ("ips_blocks", "counter"),
         ("lb_backends_healthy", "gauge"),
         ("lb_vip_arp_replies", "gauge"),
+        ("lb_vip_speaker", "gauge"),
         ("lb_vip_takeovers", "counter"),
         ("learning_edges", "gauge"),
         ("learning_observations", "counter"),

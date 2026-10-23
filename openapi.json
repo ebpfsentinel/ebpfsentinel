@@ -4761,6 +4761,86 @@
         ]
       }
     },
+    "/api/v1/lb/vips/grant": {
+      "post": {
+        "tags": [
+          "Load Balancer"
+        ],
+        "summary": "`POST /api/v1/lb/vips/grant` - grant or release the speaker role of an\n`elected` node.",
+        "description": "The elector calls it again before the grant runs out; a node that hears\nnothing falls silent on its own clock. Only a change of speaker is\naudited, never a renewal, so the trail records who answered for the\naddress and not every heartbeat.",
+        "operationId": "grant_lb_vip_speaker",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LbVipGrantRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Grant applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LbVipStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Node is not elected, or the grant is too long",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "VIP announcer not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/learning/sessions": {
       "get": {
         "tags": [
@@ -11189,18 +11269,32 @@
         "properties": {
           "interface": {
             "type": "string",
-            "description": "L2 interface VIPs egress on. Required when role is primary/standby."
+            "description": "L2 interface VIPs egress on. Required unless role is disabled."
           },
           "role": {
             "type": "string",
-            "description": "`disabled`, `primary`, or `standby`."
+            "description": "`disabled`, `primary`, `standby`, or `elected`."
           },
           "vips": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/LbVipRequest"
             },
-            "description": "VIPs this node owns. Must be non-empty when role is\nprimary/standby; ignored when role is disabled."
+            "description": "VIPs this node owns. Must be non-empty unless role is disabled,\nand ignored when it is."
+          }
+        }
+      },
+      "LbVipGrantRequest": {
+        "type": "object",
+        "required": [
+          "seconds"
+        ],
+        "properties": {
+          "seconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How long this node speaks for its VIPs unless renewed, in seconds,\nat most 300. Zero releases the role at once.",
+            "minimum": 0
           }
         }
       },
@@ -11261,6 +11355,15 @@
             "description": "Number of self-owned bindings registered in the kernel\n`SELF_OWNED_BINDINGS` map.",
             "minimum": 0
           },
+          "grant_remaining_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Milliseconds left on the speaker grant of an `elected` node, absent\nwhen it holds none. The node falls silent when this reaches zero\nwithout a renewal.",
+            "minimum": 0
+          },
           "interface": {
             "type": "string",
             "description": "L2 interface VIPs egress on (empty when role is disabled)."
@@ -11271,7 +11374,7 @@
           },
           "role": {
             "type": "string",
-            "description": "`disabled`, `primary`, or `standby`."
+            "description": "`disabled`, `primary`, `standby`, or `elected`."
           },
           "vips": {
             "type": "array",

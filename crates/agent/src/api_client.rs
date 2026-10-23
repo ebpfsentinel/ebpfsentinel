@@ -1023,6 +1023,8 @@ pub struct LbVipStatusResponse {
     pub role: String,
     pub interface: String,
     pub is_speaker: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_remaining_ms: Option<u64>,
     pub bindings_count: usize,
     pub vips: Vec<LbVipResponse>,
 }
@@ -2564,6 +2566,16 @@ impl ApiClient {
         let resp = self
             .request(reqwest::Method::POST, "/api/v1/lb/vips")
             .json(body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn grant_lb_vip_speaker(&self, seconds: u32) -> anyhow::Result<LbVipStatusResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/lb/vips/grant")
+            .json(&serde_json::json!({ "seconds": seconds }))
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

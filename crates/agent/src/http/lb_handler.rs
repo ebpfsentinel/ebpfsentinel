@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::Extension;
 use axum::Json;
@@ -432,12 +433,17 @@ pub async fn delete_lb_service(
 
 #[derive(Serialize, ToSchema)]
 pub struct LbVipStatusResponse {
-    /// `disabled`, `primary`, or `standby`.
+    /// `disabled`, `primary`, `standby`, or `elected`.
     pub role: String,
     /// L2 interface VIPs egress on (empty when role is disabled).
     pub interface: String,
     /// Whether this node currently answers ARP / sends gratuitous ARP.
     pub is_speaker: bool,
+    /// Milliseconds left on the speaker grant of an `elected` node, absent
+    /// when it holds none. The node falls silent when this reaches zero
+    /// without a renewal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_remaining_ms: Option<u64>,
     /// Number of self-owned bindings registered in the kernel
     /// `SELF_OWNED_BINDINGS` map.
     pub bindings_count: usize,
@@ -458,14 +464,14 @@ pub struct LbVipResponse {
 
 #[derive(Deserialize, ToSchema)]
 pub struct LbVipAnnounceRequest {
-    /// `disabled`, `primary`, or `standby`.
+    /// `disabled`, `primary`, `standby`, or `elected`.
     #[serde(default = "default_vip_role")]
     pub role: String,
-    /// L2 interface VIPs egress on. Required when role is primary/standby.
+    /// L2 interface VIPs egress on. Required unless role is disabled.
     #[serde(default)]
     pub interface: String,
-    /// VIPs this node owns. Must be non-empty when role is
-    /// primary/standby; ignored when role is disabled.
+    /// VIPs this node owns. Must be non-empty unless role is disabled,
+    /// and ignored when it is.
     #[serde(default)]
     pub vips: Vec<LbVipRequest>,
 }
@@ -474,6 +480,13 @@ pub struct LbVipAnnounceRequest {
 pub struct LbVipRequest {
     pub name: String,
     pub addr: String,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct LbVipGrantRequest {
+    /// How long this node speaks for its VIPs unless renewed, in seconds,
+    /// at most 300. Zero releases the role at once.
+    pub seconds: u32,
 }
 
 fn default_vip_role() -> String {
@@ -569,6 +582,83 @@ pub async fn apply_lb_announce(
     Ok(Json(status))
 }
 
+/// `POST /api/v1/lb/vips/grant` - grant or release the speaker role of an
+/// `elected` node.
+///
+/// The elector calls it again before the grant runs out; a node that hears
+/// nothing falls silent on its own clock. Only a change of speaker is
+/// audited, never a renewal, so the trail records who answered for the
+/// address and not every heartbeat.
+#[utoipa::path(
+    post, path = "/api/v1/lb/vips/grant",
+    tag = "Load Balancer",
+    request_body = LbVipGrantRequest,
+    responses(
+        (status = 200, description = "Grant applied", body = LbVipStatusResponse),
+        (status = 400, description = "Node is not elected, or the grant is too long", body = ErrorBody),
+        (status = 404, description = "VIP announcer not enabled", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn grant_lb_vip_speaker(
+    State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
+    Json(req): Json<LbVipGrantRequest>,
+) -> Result<Json<LbVipStatusResponse>, ApiError> {
+    if let Some(Extension(ref claims)) = claims {
+        require_write_access(claims)?;
+    }
+    let svc = state
+        .vip_announcer_service
+        .as_ref()
+        .ok_or(ApiError::NotFound {
+            code: "SERVICE_NOT_AVAILABLE",
+            message: "VIP announcer not enabled".to_string(),
+        })?;
+    let mut guard = svc.write().await;
+    let was_speaking = guard.is_speaker();
+    guard
+        .grant(req.seconds, Instant::now())
+        .map_err(|e| ApiError::BadRequest {
+            code: "VALIDATION_ERROR",
+            message: e.to_string(),
+        })?;
+    let speaking = guard.is_speaker();
+    let status = snapshot_status(&guard)?;
+    drop(guard);
+
+    if speaking != was_speaking {
+        let (action, before, after) = if speaking {
+            (
+                domain::audit::entity::AuditAction::RuleAdded,
+                None,
+                Some(serde_json::json!({"speaker": true, "seconds": req.seconds}).to_string()),
+            )
+        } else {
+            (
+                domain::audit::entity::AuditAction::RuleRemoved,
+                Some(serde_json::json!({"speaker": true}).to_string()),
+                None,
+            )
+        };
+        state.audit_service.record_rule_change(
+            domain::audit::entity::AuditComponent::Loadbalancer,
+            action,
+            domain::audit::rule_change::ChangeActor::Api,
+            "lb-speaker",
+            before,
+            after,
+        );
+    }
+
+    Ok(Json(status))
+}
+
 fn snapshot_status(
     svc: &application::vip_announcer_service_impl::VipAnnouncerService,
 ) -> Result<LbVipStatusResponse, ApiError> {
@@ -588,6 +678,9 @@ fn snapshot_status(
         role: svc.role().to_string(),
         interface: svc.interface().to_string(),
         is_speaker: svc.is_speaker(),
+        grant_remaining_ms: svc
+            .grant_remaining(Instant::now())
+            .map(|left| u64::try_from(left.as_millis()).unwrap_or(u64::MAX)),
         bindings_count: svc.bindings_count(),
         vips,
     })
@@ -598,9 +691,12 @@ fn parse_announce_role(s: &str) -> Result<AnnounceRole, ApiError> {
         "" | "disabled" | "off" | "none" => Ok(AnnounceRole::Disabled),
         "primary" | "speaker" | "active" => Ok(AnnounceRole::Primary),
         "standby" | "passive" | "backup" => Ok(AnnounceRole::Standby),
+        "elected" => Ok(AnnounceRole::Elected),
         _ => Err(ApiError::BadRequest {
             code: "VALIDATION_ERROR",
-            message: format!("invalid announce role '{s}': expected disabled, primary, or standby"),
+            message: format!(
+                "invalid announce role '{s}': expected disabled, primary, standby, or elected"
+            ),
         }),
     }
 }

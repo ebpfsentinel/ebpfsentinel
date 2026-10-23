@@ -976,20 +976,7 @@ impl EbpfProgramManager {
             }
         }
         let cancel = CancellationToken::new();
-        let c = cancel.clone();
-        let jh = tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(15));
-            loop {
-                tokio::select! {
-                    () = c.cancelled() => break,
-                    _ = tick.tick() => {
-                        if let Err(e) = vip_svc.read().await.refresh_metrics() {
-                            warn!("vip announcer metrics refresh failed: {e}");
-                        }
-                    }
-                }
-            }
-        });
+        let jh = tokio::spawn(vip_announcer_tick(vip_svc, cancel.clone()));
         self.programs.insert(
             "xdp_vip_announcer".to_string(),
             ProgramHandle {
@@ -1351,6 +1338,38 @@ pub fn xdp_config_map(config: &AgentConfig) -> Vec<(&'static str, bool)> {
         ("xdp_ratelimit", config.ratelimit.enabled),
         ("xdp_loadbalancer", config.loadbalancer.enabled),
     ]
+}
+
+/// The VIP announcer's clock: once a second it lets an unrenewed speaker
+/// grant lapse, so an elected node cut off from its elector stops answering
+/// within a second of its deadline, and every fifteenth second it mirrors the
+/// kernel's per-VIP reply counters into Prometheus.
+pub(crate) async fn vip_announcer_tick(
+    svc: Arc<RwLock<application::vip_announcer_service_impl::VipAnnouncerService>>,
+    cancel: CancellationToken,
+) {
+    const METRICS_EVERY: u32 = 15;
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut beats: u32 = 0;
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            _ = tick.tick() => {
+                if svc.read().await.grant_remaining(std::time::Instant::now())
+                    .is_some_and(|left| left.is_zero())
+                    && let Err(e) = svc.write().await.expire_grant(std::time::Instant::now())
+                {
+                    warn!("vip announcer grant expiry failed: {e}");
+                }
+                beats = beats.wrapping_add(1);
+                if beats.is_multiple_of(METRICS_EVERY)
+                    && let Err(e) = svc.read().await.refresh_metrics()
+                {
+                    warn!("vip announcer metrics refresh failed: {e}");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

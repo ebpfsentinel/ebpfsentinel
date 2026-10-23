@@ -426,6 +426,10 @@ pub trait LbMetrics: Send + Sync {
 
     /// Record a speaker takeover that emitted gratuitous ARP for a VIP.
     fn record_vip_takeover(&self, _vip: &str) {}
+
+    /// Whether this node currently answers for its VIPs: 1 while it speaks,
+    /// 0 while it is a standby or an elected node holding no grant.
+    fn set_vip_speaker(&self, _speaking: bool) {}
 }
 
 // ── Fingerprint metrics ──────────────────────────────────────────

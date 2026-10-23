@@ -2290,18 +2290,12 @@ pub async fn run(
                         }
                     }
                     managed.push(("xdp_vip_announcer", vip_loader, readers.child_token()));
-                    // Mirror the kernel per-VIP forged-reply counters into
-                    // Prometheus on a slow cadence (cumulative gauge).
-                    let vip_metrics_svc = Arc::clone(&vip_svc);
-                    tokio::spawn(async move {
-                        let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
-                        loop {
-                            tick.tick().await;
-                            if let Err(e) = vip_metrics_svc.read().await.refresh_metrics() {
-                                warn!("vip announcer metrics refresh failed: {e}");
-                            }
-                        }
-                    });
+                    // Lapse unrenewed speaker grants and mirror the kernel
+                    // per-VIP forged-reply counters into Prometheus.
+                    tokio::spawn(crate::ebpf_lifecycle::vip_announcer_tick(
+                        Arc::clone(&vip_svc),
+                        readers.child_token(),
+                    ));
                     metrics.set_ebpf_program_status("xdp_vip_announcer", true);
                     vip_announcer_ok = true;
                     info!(

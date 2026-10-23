@@ -48,16 +48,15 @@ pub(super) const MAX_VIPS: usize = 256;
 
 /// Node-level VIP announce configuration.
 ///
-/// Single-speaker election is explicit and config-driven: set `role` to
-/// `primary` on exactly one node of an L2 failover pair, `standby` on the
-/// other. A standby node validates the same VIP set but stays silent
-/// until promoted (split-brain safe). The Kubernetes Lease seam that
-/// would drive automatic promotion is documented in the operator and
-/// deliberately not implemented here. `disabled` (default) turns the
-/// announcer off entirely.
+/// Either the file decides the speaker - `primary` on exactly one node of
+/// an L2 failover pair, `standby` on the other, promoted by editing it - or
+/// `elected` hands the decision to an elector: every node stays silent until
+/// `POST /api/v1/lb/vips/grant` names it speaker for a bounded time, and
+/// falls silent again when that grant lapses unrenewed. The Kubernetes
+/// operator is that elector. `disabled` (default) turns the announcer off.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AnnounceConfig {
-    /// `disabled` (default), `primary`, or `standby`.
+    /// `disabled` (default), `primary`, `standby`, or `elected`.
     #[serde(default = "default_announce_role")]
     pub role: String,
 
@@ -87,6 +86,7 @@ fn parse_announce_role(s: &str) -> Result<AnnounceRole, ()> {
         "" | "disabled" | "off" | "none" => Ok(AnnounceRole::Disabled),
         "primary" | "speaker" | "active" => Ok(AnnounceRole::Primary),
         "standby" | "passive" | "backup" => Ok(AnnounceRole::Standby),
+        "elected" => Ok(AnnounceRole::Elected),
         _ => Err(()),
     }
 }
@@ -96,7 +96,7 @@ impl AnnounceConfig {
         let role = parse_announce_role(&self.role).map_err(|()| ConfigError::InvalidValue {
             field: "loadbalancer.announce.role".to_string(),
             value: self.role.clone(),
-            expected: "disabled, primary, standby".to_string(),
+            expected: "disabled, primary, standby, elected".to_string(),
         })?;
 
         if self.vips.len() > MAX_VIPS {
@@ -123,7 +123,7 @@ impl AnnounceConfig {
         }
 
         // Delegate the role-coupled invariants (interface required,
-        // non-empty + unique VIP set for primary/standby) to the domain.
+        // non-empty + unique VIP set for every active role) to the domain.
         if role != AnnounceRole::Disabled {
             self.to_domain()?
                 .validate()

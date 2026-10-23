@@ -1,10 +1,11 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use std::net::IpAddr;
 
 use domain::common::error::DomainError;
 use domain::l2::{L2Binding, OwnedBindings};
-use domain::loadbalancer::vip::{Vip, VipAnnounceConfig};
+use domain::loadbalancer::vip::{AnnounceRole, Vip, VipAnnounceConfig, validate_grant_seconds};
 use ports::secondary::l2_binding_port::L2BindingPort;
 use ports::secondary::metrics_port::MetricsPort;
 use ports::secondary::vip_announcer_port::{GratuitousArpPort, IfaceMacResolverPort, VipMapPort};
@@ -13,9 +14,9 @@ use ports::secondary::vip_announcer_port::{GratuitousArpPort, IfaceMacResolverPo
 ///
 /// Owns the node's [`VipAnnounceConfig`] and reconciles it against the
 /// kernel `VIP_SET` / `IFACE_MAC` maps. The split-brain invariant lives
-/// here: `VIP_SET` is populated **only** while this node is the elected
-/// speaker; standby/disabled nodes always leave it empty so the bounded
-/// XDP responder never answers.
+/// here: `VIP_SET` is populated **only** while this node speaks - configured
+/// `primary`, or `elected` under a live grant - and every other node leaves
+/// it empty so the bounded XDP responder never answers.
 ///
 /// Gratuitous ARP on takeover is emitted from userspace via
 /// [`GratuitousArpPort`] - never from eBPF.
@@ -32,6 +33,10 @@ pub struct VipAnnouncerService {
     /// [`OwnedBindings::is_self_announced`] predicate exposed via
     /// [`VipAnnouncerService::is_self_announced`].
     bindings: OwnedBindings,
+    /// When the speaker grant an elector handed this node runs out. Only
+    /// ever set under [`AnnounceRole::Elected`]; cleared by a release, by a
+    /// role change and by [`Self::expire_grant`] once the instant passes.
+    grant_until: Option<Instant>,
 }
 
 impl VipAnnouncerService {
@@ -44,6 +49,18 @@ impl VipAnnouncerService {
             garp: None,
             metrics,
             bindings: OwnedBindings::new(),
+            grant_until: None,
+        }
+    }
+
+    /// Whether this node answers for its VIPs right now: configured
+    /// `primary`, or `elected` and holding a grant that has not yet been
+    /// expired.
+    fn speaks(&self) -> bool {
+        match self.config.role {
+            AnnounceRole::Primary => true,
+            AnnounceRole::Elected => self.grant_until.is_some(),
+            AnnounceRole::Disabled | AnnounceRole::Standby => false,
         }
     }
 
@@ -96,9 +113,66 @@ impl VipAnnouncerService {
         self.config.role.as_str()
     }
 
-    /// Whether this node is the elected speaker.
+    /// Whether this node is the speaker.
     pub fn is_speaker(&self) -> bool {
-        self.config.is_speaker()
+        self.speaks()
+    }
+
+    /// Time left on the speaker grant, `None` when the node holds none.
+    #[must_use]
+    pub fn grant_remaining(&self, now: Instant) -> Option<Duration> {
+        self.grant_until
+            .map(|until| until.saturating_duration_since(now))
+    }
+
+    /// Grant this node the speaker role for `seconds`, or release it with
+    /// zero.
+    ///
+    /// Only an `elected` node takes a grant: a `primary` or `standby` one is
+    /// decided by its file, and accepting a grant there would put two
+    /// authorities on one address. A renewal moves the deadline and does not
+    /// announce again; the transition into speaking is the only one that
+    /// sends gratuitous ARP.
+    pub fn grant(&mut self, seconds: u32, now: Instant) -> Result<(), DomainError> {
+        if self.config.role != AnnounceRole::Elected {
+            return Err(DomainError::InvalidConfig(format!(
+                "speaker grants apply to role elected, this node is {}",
+                self.config.role
+            )));
+        }
+        validate_grant_seconds(seconds).map_err(|e| DomainError::InvalidConfig(e.to_string()))?;
+        let was_speaking = self.speaks();
+        self.grant_until = if seconds == 0 {
+            None
+        } else {
+            Some(now + Duration::from_secs(u64::from(seconds)))
+        };
+        let speaking = self.speaks();
+        if speaking != was_speaking {
+            self.reconcile()?;
+            if speaking {
+                self.announce_takeover()?;
+                tracing::info!(seconds, "vip announcer: speaker grant taken");
+            } else {
+                tracing::info!("vip announcer: speaker grant released");
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop a grant whose deadline has passed and fall silent. Returns
+    /// whether it did, so the caller can say so once.
+    pub fn expire_grant(&mut self, now: Instant) -> Result<bool, DomainError> {
+        let Some(until) = self.grant_until else {
+            return Ok(false);
+        };
+        if until > now {
+            return Ok(false);
+        }
+        self.grant_until = None;
+        self.reconcile()?;
+        tracing::warn!("vip announcer: speaker grant lapsed unrenewed, standing down");
+        Ok(true)
     }
 
     /// L2 interface VIPs egress on (empty when the announcer is disabled).
@@ -150,10 +224,18 @@ impl VipAnnouncerService {
     ///
     /// On a speaker→standby (or →disabled) transition this clears
     /// `VIP_SET`, which is what keeps the failover pair split-brain safe.
+    ///
+    /// A reload that keeps the node `elected` keeps a live grant, so
+    /// rewriting the file does not cost the address its speaker; any other
+    /// role drops the grant.
     pub fn configure(&mut self, config: VipAnnounceConfig) -> Result<(), DomainError> {
         config.validate()?;
-        let became_speaker = config.is_speaker() && !self.config.is_speaker();
+        let was_speaking = self.speaks();
+        if config.role != AnnounceRole::Elected {
+            self.grant_until = None;
+        }
         self.config = config;
+        let became_speaker = self.speaks() && !was_speaking;
         self.reconcile()?;
         if became_speaker {
             self.announce_takeover()?;
@@ -166,11 +248,13 @@ impl VipAnnouncerService {
     /// Speaker: push this interface's NIC MAC into `IFACE_MAC` and the
     /// full VIP set into `VIP_SET`. Non-speaker: empty `VIP_SET`.
     pub fn reconcile(&mut self) -> Result<(), DomainError> {
+        let speaks = self.speaks();
+        self.metrics.set_vip_speaker(speaks);
         let Some(map) = self.map_port.as_mut() else {
             return Ok(());
         };
 
-        if !self.config.is_speaker() {
+        if !speaks {
             // Standby / disabled → guarantee silence and own nothing.
             map.clear_vips()?;
             self.bindings.clear();
@@ -219,7 +303,7 @@ impl VipAnnouncerService {
     /// Emit a gratuitous ARP for every owned VIP and bump the takeover
     /// metric. Called once on a transition into the speaker role.
     pub fn announce_takeover(&mut self) -> Result<(), DomainError> {
-        if !self.config.is_speaker() {
+        if !self.speaks() {
             return Ok(());
         }
         let (Some(resolver), Some(garp)) = (self.mac_resolver.as_ref(), self.garp.as_ref()) else {
@@ -377,6 +461,13 @@ mod tests {
         }
     }
 
+    fn elected_cfg() -> VipAnnounceConfig {
+        VipAnnounceConfig {
+            role: AnnounceRole::Elected,
+            ..primary_cfg()
+        }
+    }
+
     fn svc() -> VipAnnouncerService {
         let mut s = VipAnnouncerService::new(Arc::new(NoopMetrics));
         s.set_mac_resolver(Arc::new(FakeResolver));
@@ -507,5 +598,103 @@ mod tests {
         .unwrap();
         assert!(!s.is_speaker());
         assert!(!s.is_self_announced(ip(192, 0, 2, 10), RESOLVED_MAC));
+    }
+
+    #[test]
+    fn elected_is_silent_until_granted() {
+        let mut s = svc();
+        let garp = Arc::new(FakeGarp::default());
+        s.set_gratuitous_arp(garp.clone());
+        s.set_map_port(Box::new(FakeMap::default())).unwrap();
+        s.configure(elected_cfg()).unwrap();
+        assert!(!s.is_speaker());
+        assert_eq!(s.bindings_count(), 0);
+        assert!(garp.sent.lock().unwrap().is_empty());
+
+        let now = Instant::now();
+        s.grant(20, now).unwrap();
+        assert!(s.is_speaker());
+        assert_eq!(s.bindings_count(), 2);
+        assert_eq!(garp.sent.lock().unwrap().len(), 2);
+        assert_eq!(s.grant_remaining(now), Some(Duration::from_secs(20)));
+    }
+
+    #[test]
+    fn renewal_moves_the_deadline_without_announcing_again() {
+        let mut s = svc();
+        let garp = Arc::new(FakeGarp::default());
+        s.set_gratuitous_arp(garp.clone());
+        s.set_map_port(Box::new(FakeMap::default())).unwrap();
+        s.configure(elected_cfg()).unwrap();
+        let now = Instant::now();
+        s.grant(20, now).unwrap();
+        s.grant(20, now + Duration::from_secs(10)).unwrap();
+        assert_eq!(garp.sent.lock().unwrap().len(), 2);
+        assert!(!s.expire_grant(now + Duration::from_secs(25)).unwrap());
+        assert!(s.is_speaker());
+    }
+
+    #[test]
+    fn an_unrenewed_grant_lapses_on_the_node() {
+        let mut s = svc();
+        s.set_gratuitous_arp(Arc::new(FakeGarp::default()));
+        s.set_map_port(Box::new(FakeMap::default())).unwrap();
+        s.configure(elected_cfg()).unwrap();
+        let now = Instant::now();
+        s.grant(20, now).unwrap();
+        assert!(!s.expire_grant(now + Duration::from_secs(19)).unwrap());
+        assert!(s.expire_grant(now + Duration::from_secs(20)).unwrap());
+        assert!(!s.is_speaker());
+        assert_eq!(s.bindings_count(), 0);
+        assert_eq!(s.grant_remaining(now), None);
+        assert!(!s.expire_grant(now + Duration::from_secs(30)).unwrap());
+    }
+
+    #[test]
+    fn zero_releases_the_grant() {
+        let mut s = svc();
+        s.set_gratuitous_arp(Arc::new(FakeGarp::default()));
+        s.set_map_port(Box::new(FakeMap::default())).unwrap();
+        s.configure(elected_cfg()).unwrap();
+        let now = Instant::now();
+        s.grant(20, now).unwrap();
+        s.grant(0, now).unwrap();
+        assert!(!s.is_speaker());
+        assert_eq!(s.bindings_count(), 0);
+    }
+
+    #[test]
+    fn a_grant_is_refused_outside_role_elected() {
+        let mut s = svc();
+        s.set_map_port(Box::new(FakeMap::default())).unwrap();
+        let now = Instant::now();
+        assert!(s.grant(20, now).is_err());
+        s.configure(primary_cfg()).unwrap();
+        assert!(s.grant(20, now).is_err());
+        s.configure(elected_cfg()).unwrap();
+        assert!(s.grant(301, now).is_err());
+        assert!(!s.is_speaker());
+    }
+
+    #[test]
+    fn a_reload_keeps_a_live_grant_and_a_role_change_drops_it() {
+        let mut s = svc();
+        let garp = Arc::new(FakeGarp::default());
+        s.set_gratuitous_arp(garp.clone());
+        s.set_map_port(Box::new(FakeMap::default())).unwrap();
+        s.configure(elected_cfg()).unwrap();
+        let now = Instant::now();
+        s.grant(20, now).unwrap();
+        s.configure(elected_cfg()).unwrap();
+        assert!(s.is_speaker());
+        assert_eq!(garp.sent.lock().unwrap().len(), 2);
+
+        s.configure(VipAnnounceConfig {
+            role: AnnounceRole::Standby,
+            ..primary_cfg()
+        })
+        .unwrap();
+        assert!(!s.is_speaker());
+        assert_eq!(s.grant_remaining(now), None);
     }
 }

@@ -770,9 +770,15 @@ pub enum LbCommand {
     Vips,
     /// Apply a VIP announce configuration from inline JSON
     Announce {
-        /// JSON `{"role":"primary|standby|disabled","interface":"eth0","vips":[{"name":"web","addr":"192.0.2.10"}]}`
+        /// JSON `{"role":"primary|standby|elected|disabled","interface":"eth0","vips":[{"name":"web","addr":"192.0.2.10"}]}`
         #[arg(long)]
         json: String,
+    },
+    /// Grant this `elected` node the speaker role for a number of seconds
+    /// (at most 300), or release it with 0. Renew before it runs out.
+    Grant {
+        /// Seconds the node speaks for its VIPs unless renewed
+        seconds: u32,
     },
 }
 
