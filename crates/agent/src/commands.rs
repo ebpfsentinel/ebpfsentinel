@@ -1800,6 +1800,7 @@ pub async fn cmd_lb_services(client: &ApiClient, output: OutputFormat) -> Result
         ("ID", Align::Left),
         ("NAME", Align::Left),
         ("PROTO", Align::Left),
+        ("ADDRESS", Align::Left),
         ("PORT", Align::Right),
         ("ALGORITHM", Align::Left),
         ("MODE", Align::Left),
@@ -1813,6 +1814,7 @@ pub async fn cmd_lb_services(client: &ApiClient, output: OutputFormat) -> Result
             svc.id,
             svc.name,
             svc.protocol,
+            svc.listen_addr.as_deref().unwrap_or("*"),
             svc.listen_port,
             svc.algorithm,
             svc.mode,
@@ -1837,6 +1839,10 @@ pub async fn cmd_lb_service(client: &ApiClient, id: &str, output: OutputFormat) 
 
     println!("Service: {} ({})", svc.name, svc.id);
     println!("  Protocol:  {}", svc.protocol);
+    println!(
+        "  Address:   {}",
+        svc.listen_addr.as_deref().unwrap_or("* (every address)")
+    );
     println!("  Port:      {}", svc.listen_port);
     println!("  Algorithm: {}", svc.algorithm);
     println!("  Mode:      {}", svc.mode);

@@ -970,6 +970,9 @@ pub struct LbServiceResponse {
     pub id: String,
     pub name: String,
     pub protocol: String,
+    /// Destination address the service answers on, absent for every address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_addr: Option<String>,
     pub listen_port: u16,
     pub algorithm: String,
     /// How packets reach the backend: `dnat` rewrites, `l2dsr` does not.
@@ -985,6 +988,9 @@ pub struct LbServiceDetailResponse {
     pub id: String,
     pub name: String,
     pub protocol: String,
+    /// Destination address the service answers on, absent for every address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_addr: Option<String>,
     pub listen_port: u16,
     pub algorithm: String,
     pub mode: String,

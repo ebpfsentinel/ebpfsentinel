@@ -49,28 +49,66 @@ pub fn lb_fnv1a_u32(val: u32) -> u32 {
     hash
 }
 
-/// Per-service index in `0..MAX_LB_SERVICES`, keyed by (protocol, port).
+/// Per-service index in `0..MAX_LB_SERVICES`, keyed by the whole service
+/// key: two services on one port at two addresses keep two counters.
 /// Used as the `LB_RR_STATE` and `LB_MAGLEV` map key.
 #[must_use]
-pub fn lb_service_index(protocol: u8, port: u16) -> u32 {
-    let combined = (u32::from(protocol) << 16) | u32::from(port);
-    lb_fnv1a_u32(combined) % MAX_LB_SERVICES
+pub fn lb_service_index(key: &LbServiceKey) -> u32 {
+    let head =
+        (u32::from(key.protocol) << 24) | (u32::from(key.family) << 16) | u32::from(key.port);
+    let mut hash = lb_fnv1a_u32(head);
+    let mut i = 0;
+    while i < 4 {
+        hash = lb_fnv1a_u32(hash ^ key.addr[i]);
+        i += 1;
+    }
+    hash % MAX_LB_SERVICES
 }
 
 // ── Service Key ────────────────────────────────────────────────
 
+/// Address family of a service bound to every destination address.
+pub const LB_FAMILY_ANY: u8 = 0;
+/// Address family of a service bound to one IPv4 destination.
+pub const LB_FAMILY_V4: u8 = 4;
+/// Address family of a service bound to one IPv6 destination.
+pub const LB_FAMILY_V6: u8 = 6;
+
 /// Key for the `LB_SERVICES` `HashMap`.
-/// Keyed by (protocol, listen_port) to identify a load-balanced service.
 ///
-/// Size: 4 bytes.
+/// A service is bound either to one destination address, which is what a
+/// virtual address is, or to every address the interface receives on that
+/// port. The data plane looks the exact address up first and the any-address
+/// key second, so two services on one port at two virtual addresses never
+/// collide and a service bound to one address never captures traffic sent to
+/// the node's own address.
+///
+/// Size: 20 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LbServiceKey {
     /// IP protocol (6 = TCP, 17 = UDP).
     pub protocol: u8,
-    pub _pad: u8,
+    /// `LB_FAMILY_ANY`, `LB_FAMILY_V4` or `LB_FAMILY_V6`.
+    pub family: u8,
     /// Listen port in host byte order.
     pub port: u16,
+    /// Destination address in host byte order: an IPv4 address in the first
+    /// word, an IPv6 address as four big-endian words, zero for any address.
+    pub addr: [u32; 4],
+}
+
+impl LbServiceKey {
+    /// The any-address key for a protocol and port.
+    #[must_use]
+    pub const fn any(protocol: u8, port: u16) -> Self {
+        Self {
+            protocol,
+            family: LB_FAMILY_ANY,
+            port,
+            addr: [0; 4],
+        }
+    }
 }
 
 // ── Service Config ─────────────────────────────────────────────
@@ -256,19 +294,40 @@ mod tests {
 
     #[test]
     fn lb_service_key_size() {
-        assert_eq!(mem::size_of::<LbServiceKey>(), 4);
+        assert_eq!(mem::size_of::<LbServiceKey>(), 20);
     }
 
     #[test]
     fn lb_service_key_alignment() {
-        assert_eq!(mem::align_of::<LbServiceKey>(), 2);
+        assert_eq!(mem::align_of::<LbServiceKey>(), 4);
     }
 
     #[test]
     fn lb_service_key_offsets() {
         assert_eq!(mem::offset_of!(LbServiceKey, protocol), 0);
-        assert_eq!(mem::offset_of!(LbServiceKey, _pad), 1);
+        assert_eq!(mem::offset_of!(LbServiceKey, family), 1);
         assert_eq!(mem::offset_of!(LbServiceKey, port), 2);
+        assert_eq!(mem::offset_of!(LbServiceKey, addr), 4);
+    }
+
+    #[test]
+    fn two_addresses_on_one_port_keep_two_indexes() {
+        let a = LbServiceKey {
+            protocol: 6,
+            family: LB_FAMILY_V4,
+            port: 80,
+            addr: [0x0a00_0032, 0, 0, 0],
+        };
+        let b = LbServiceKey {
+            addr: [0x0a00_0033, 0, 0, 0],
+            ..a
+        };
+        assert_ne!(lb_service_index(&a), lb_service_index(&b));
+        assert!(lb_service_index(&a) < MAX_LB_SERVICES);
+        assert_ne!(
+            lb_service_index(&a),
+            lb_service_index(&LbServiceKey::any(6, 80))
+        );
     }
 
     #[test]

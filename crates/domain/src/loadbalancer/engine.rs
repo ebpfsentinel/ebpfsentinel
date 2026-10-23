@@ -72,6 +72,19 @@ impl LbEngine {
             .into());
         }
 
+        if let Some(held) = self
+            .states
+            .values()
+            .find(|state| state.service.listen_key() == service.listen_key())
+        {
+            return Err(LbError::ListenConflict {
+                first: held.service.id.to_string(),
+                second: service.id.to_string(),
+                listen: service.listen_label(),
+            }
+            .into());
+        }
+
         if self.states.len() >= MAX_SERVICES {
             return Err(
                 LbError::InvalidService("maximum service count reached".to_string()).into(),
@@ -111,11 +124,24 @@ impl LbEngine {
             service.validate()?;
         }
 
-        // Check for duplicate IDs
+        // Check for duplicate IDs, and for two services the data plane
+        // would hold under one key, where the later would silently replace
+        // the earlier.
         for (i, service) in services.iter().enumerate() {
             if services[i + 1..].iter().any(|s| s.id == service.id) {
                 return Err(LbError::DuplicateService {
                     id: service.id.to_string(),
+                }
+                .into());
+            }
+            if let Some(other) = services[i + 1..]
+                .iter()
+                .find(|s| s.listen_key() == service.listen_key())
+            {
+                return Err(LbError::ListenConflict {
+                    first: service.id.to_string(),
+                    second: other.id.to_string(),
+                    listen: service.listen_label(),
                 }
                 .into());
             }
@@ -496,12 +522,20 @@ mod tests {
         }
     }
 
+    /// Each service its own port, so a test loading several never trips the
+    /// listen-conflict refusal it is not about.
+    fn next_port() -> u16 {
+        static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(1024);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn make_service(id: &str, algorithm: LbAlgorithm, backends: Vec<LbBackend>) -> LbService {
         LbService {
             id: RuleId(id.to_string()),
             name: format!("test-{id}"),
             protocol: LbProtocol::Tcp,
-            listen_port: 443,
+            listen_addr: None,
+            listen_port: next_port(),
             algorithm,
             mode: LbForwardingMode::Dnat,
             backends,
@@ -515,6 +549,48 @@ mod tests {
     }
 
     // ── Service CRUD ──────────────────────────────────────────
+
+    #[test]
+    fn two_services_on_one_listen_key_are_refused() {
+        let mut engine = LbEngine::new();
+        let a = make_service(
+            "a",
+            LbAlgorithm::RoundRobin,
+            vec![make_backend("be-1", 80, 1)],
+        );
+        engine.add_service(a.clone()).unwrap();
+        let mut b = a.clone();
+        b.id = RuleId("b".to_string());
+        assert!(engine.add_service(b.clone()).is_err());
+        assert!(engine.reload(vec![a.clone(), b.clone()]).is_err());
+
+        // One port at two virtual addresses, and the any-address service
+        // beside them, are three keys.
+        let mut c = b.clone();
+        c.listen_addr = Some("192.0.2.10".parse().unwrap());
+        engine.add_service(c.clone()).unwrap();
+        let mut d = c.clone();
+        d.id = RuleId("d".to_string());
+        d.listen_addr = Some("192.0.2.11".parse().unwrap());
+        engine.add_service(d.clone()).unwrap();
+        assert_eq!(engine.service_count(), 3);
+        assert!(engine.reload(vec![a, c, d]).is_ok());
+    }
+
+    #[test]
+    fn tls_passthrough_and_tcp_share_one_listen_key() {
+        let mut engine = LbEngine::new();
+        let a = make_service(
+            "a",
+            LbAlgorithm::RoundRobin,
+            vec![make_backend("be-1", 80, 1)],
+        );
+        engine.add_service(a.clone()).unwrap();
+        let mut b = a;
+        b.id = RuleId("b".to_string());
+        b.protocol = LbProtocol::TlsPassthrough;
+        assert!(engine.add_service(b).is_err());
+    }
 
     #[test]
     fn engine_new_is_empty() {

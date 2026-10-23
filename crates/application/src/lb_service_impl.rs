@@ -4,13 +4,11 @@ use std::sync::Arc;
 
 use domain::common::error::DomainError;
 use domain::loadbalancer::engine::LbEngine;
-use domain::loadbalancer::entity::{
-    LbAlgorithm, LbBackend, LbForwardingMode, LbProtocol, LbService,
-};
+use domain::loadbalancer::entity::{LbAlgorithm, LbBackend, LbForwardingMode, LbService};
 use ebpf_common::loadbalancer::{
     LB_ALG_IP_HASH, LB_ALG_LEAST_CONN, LB_ALG_MAGLEV, LB_ALG_ROUND_ROBIN, LB_ALG_WEIGHTED,
-    LB_MAX_BACKENDS_V2, LB_MODE_DNAT, LB_MODE_L2DSR, LbBackendEntry, LbServiceConfigV2,
-    LbServiceKey, lb_service_index,
+    LB_FAMILY_V4, LB_FAMILY_V6, LB_MAX_BACKENDS_V2, LB_MODE_DNAT, LB_MODE_L2DSR, LbBackendEntry,
+    LbServiceConfigV2, LbServiceKey, lb_service_index,
 };
 use ports::secondary::loadbalancer_map_port::LoadBalancerMapPort;
 use ports::secondary::metrics_port::MetricsPort;
@@ -210,7 +208,7 @@ impl LbAppService {
             .filter(|s| s.enabled && s.algorithm == LbAlgorithm::Maglev)
             .map(|s| {
                 let key = service_to_ebpf_key(s);
-                (s.id.to_string(), lb_service_index(key.protocol, key.port))
+                (s.id.to_string(), lb_service_index(&key))
             })
             .collect();
 
@@ -266,15 +264,33 @@ impl LbAppService {
 
 // ── Domain → eBPF Conversion ──────────────────────────────────────
 
+/// The data plane's key for a service, the address encoded exactly the way
+/// the XDP program reads a destination: an IPv4 address as one host-order
+/// word, an IPv6 address as four big-endian words.
 fn service_to_ebpf_key(service: &LbService) -> LbServiceKey {
-    let protocol = match service.protocol {
-        LbProtocol::Tcp | LbProtocol::TlsPassthrough => 6, // TCP
-        LbProtocol::Udp => 17,                             // UDP
-    };
-    LbServiceKey {
-        protocol,
-        _pad: 0,
-        port: service.listen_port,
+    let protocol = service.protocol.ip_protocol();
+    match service.listen_addr {
+        None => LbServiceKey::any(protocol, service.listen_port),
+        Some(IpAddr::V4(v4)) => LbServiceKey {
+            protocol,
+            family: LB_FAMILY_V4,
+            port: service.listen_port,
+            addr: [u32::from(v4), 0, 0, 0],
+        },
+        Some(IpAddr::V6(v6)) => {
+            let o = v6.octets();
+            LbServiceKey {
+                protocol,
+                family: LB_FAMILY_V6,
+                port: service.listen_port,
+                addr: [
+                    u32::from_be_bytes([o[0], o[1], o[2], o[3]]),
+                    u32::from_be_bytes([o[4], o[5], o[6], o[7]]),
+                    u32::from_be_bytes([o[8], o[9], o[10], o[11]]),
+                    u32::from_be_bytes([o[12], o[13], o[14], o[15]]),
+                ],
+            }
+        }
     }
 }
 
@@ -365,6 +381,7 @@ mod tests {
             id: RuleId(id.to_string()),
             name: format!("test-{id}"),
             protocol: LbProtocol::Tcp,
+            listen_addr: None,
             listen_port: port,
             algorithm: LbAlgorithm::RoundRobin,
             mode: LbForwardingMode::Dnat,
@@ -372,6 +389,25 @@ mod tests {
             enabled: true,
             health_check: None,
         }
+    }
+
+    #[test]
+    fn the_key_encodes_the_address_the_way_the_data_plane_reads_it() {
+        let mut svc = make_lb_service("vip", 80);
+        let any = service_to_ebpf_key(&svc);
+        assert_eq!(any, LbServiceKey::any(6, 80));
+
+        svc.listen_addr = Some("10.0.0.50".parse().unwrap());
+        let v4 = service_to_ebpf_key(&svc);
+        assert_eq!(v4.family, LB_FAMILY_V4);
+        // The program reads the header's network-order bytes big-endian.
+        assert_eq!(v4.addr, [u32::from_be_bytes([10, 0, 0, 50]), 0, 0, 0]);
+
+        svc.listen_addr = Some("2001:db8::1".parse().unwrap());
+        let v6 = service_to_ebpf_key(&svc);
+        assert_eq!(v6.family, LB_FAMILY_V6);
+        assert_eq!(v6.addr, [0x2001_0db8, 0, 0, 1]);
+        assert_ne!(lb_service_index(&v4), lb_service_index(&v6));
     }
 
     #[test]

@@ -17,7 +17,8 @@ use ebpf_common::{
     event::{FLAG_IPV6, FLAG_VLAN, PacketEvent},
     loadbalancer::{
         BackendMac, EVENT_TYPE_LB, LB_ACTION_FORWARD, LB_ACTION_NO_BACKEND, LB_ALG_IP_HASH,
-        LB_ALG_MAGLEV, LB_ALG_ROUND_ROBIN, LB_ALG_WEIGHTED, LB_MAX_BACKENDS_V2,
+        LB_ALG_MAGLEV, LB_ALG_ROUND_ROBIN, LB_ALG_WEIGHTED, LB_FAMILY_V4, LB_FAMILY_V6,
+        LB_MAX_BACKENDS_V2,
         LB_METRIC_BYTES_FORWARDED, LB_METRIC_COUNT, LB_METRIC_EVENTS_DROPPED,
         LB_METRIC_MTU_EXCEEDED, LB_METRIC_PACKETS_FORWARDED, LB_METRIC_PACKETS_NO_BACKEND,
         LB_METRIC_TOTAL_SEEN, LB_MODE_L2DSR, LbBackendEntry, LbServiceConfigV2, LbServiceKey,
@@ -170,19 +171,20 @@ fn process_v4(
     let dst_port = u16::from_be(unsafe { (*l4hdr).dst_port });
     let src_port = u16::from_be(unsafe { (*l4hdr).src_port });
 
-    // Lookup service
-    let key = LbServiceKey {
-        protocol,
-        _pad: 0,
-        port: dst_port,
-    };
-    let svc_config = match unsafe { LB_SERVICES.get(&key) } {
-        Some(c) => c,
-        None => return Ok(xdp_action::XDP_PASS), // Not a load-balanced service
-    };
-
     let src_addr_raw = unsafe { (*ipv4hdr).src_addr };
     let dst_addr_raw = unsafe { (*ipv4hdr).dst_addr };
+
+    // The service bound to this destination address first, then the one
+    // bound to every address on this port.
+    let key = LbServiceKey {
+        protocol,
+        family: LB_FAMILY_V4,
+        port: dst_port,
+        addr: [u32::from_be_bytes(dst_addr_raw), 0, 0, 0],
+    };
+    let Some((key, svc_config)) = lookup_service(key) else {
+        return Ok(xdp_action::XDP_PASS); // Not a load-balanced service
+    };
     let src_ip = u32::from_be_bytes(src_addr_raw);
     let pkt_len = ctx.data_end().saturating_sub(ctx.data()) as u64;
 
@@ -314,18 +316,18 @@ fn process_v6(
     let dst_port = u16::from_be(unsafe { (*l4hdr).dst_port });
     let src_port = u16::from_be(unsafe { (*l4hdr).src_port });
 
-    let key = LbServiceKey {
-        protocol: next_hdr,
-        _pad: 0,
-        port: dst_port,
-    };
-    let svc_config = match unsafe { LB_SERVICES.get(&key) } {
-        Some(c) => c,
-        None => return Ok(xdp_action::XDP_PASS),
-    };
-
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
     let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
+
+    let key = LbServiceKey {
+        protocol: next_hdr,
+        family: LB_FAMILY_V6,
+        port: dst_port,
+        addr: dst_addr,
+    };
+    let Some((key, svc_config)) = lookup_service(key) else {
+        return Ok(xdp_action::XDP_PASS);
+    };
 
     // For IP hash, XOR-fold IPv6 src to u32
     let src_ip_folded = src_addr[0] ^ src_addr[1] ^ src_addr[2] ^ src_addr[3];
@@ -748,11 +750,24 @@ fn select_backend<'a>(
     None
 }
 
-/// Derive a per-service index from a `LbServiceKey` for round-robin state lookup.
-/// Maps the (protocol, port) pair to an index in `0..MAX_LB_SERVICES`.
+/// The service a packet is addressed to: the one bound to its exact
+/// destination address, else the one bound to every address on its port.
+/// Returns the key that matched, since that is what the per-service state
+/// is indexed by.
+#[inline(always)]
+fn lookup_service(exact: LbServiceKey) -> Option<(LbServiceKey, &'static LbServiceConfigV2)> {
+    if let Some(config) = unsafe { LB_SERVICES.get(&exact) } {
+        return Some((exact, config));
+    }
+    let any = LbServiceKey::any(exact.protocol, exact.port);
+    unsafe { LB_SERVICES.get(&any) }.map(|config| (any, config))
+}
+
+/// Derive a per-service index from a `LbServiceKey` for round-robin state lookup,
+/// in `0..MAX_LB_SERVICES`.
 #[inline(always)]
 fn service_key_index(key: &LbServiceKey) -> u32 {
-    lb_service_index(key.protocol, key.port)
+    lb_service_index(key)
 }
 
 /// FNV-1a hash of a u32 value. Delegates to the shared `ebpf-common`

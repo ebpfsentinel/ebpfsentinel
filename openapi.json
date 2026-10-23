@@ -9190,6 +9190,13 @@
           "id": {
             "type": "string"
           },
+          "listen_addr": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Destination address the service answers on, a virtual address.\nOmitted, the service answers on every address on its port."
+          },
           "listen_port": {
             "type": "integer",
             "format": "int32",
@@ -11185,6 +11192,13 @@
           "id": {
             "type": "string"
           },
+          "listen_addr": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Destination address the service answers on, omitted when it answers\non every address on its port."
+          },
           "listen_port": {
             "type": "integer",
             "format": "int32",
@@ -11231,6 +11245,13 @@
           },
           "id": {
             "type": "string"
+          },
+          "listen_addr": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Destination address the service answers on, omitted when it answers\non every address on its port."
           },
           "listen_port": {
             "type": "integer",

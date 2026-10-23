@@ -27,6 +27,7 @@ fn make_service(id: usize, algorithm: LbAlgorithm, n_backends: usize) -> LbServi
         id: RuleId(format!("svc-{id}")),
         name: format!("service-{id}"),
         protocol: LbProtocol::Tcp,
+        listen_addr: None,
         listen_port: 443 + id as u16,
         algorithm,
         mode: LbForwardingMode::Dnat,

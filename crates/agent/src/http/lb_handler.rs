@@ -33,6 +33,10 @@ pub struct LbServiceResponse {
     pub id: String,
     pub name: String,
     pub protocol: String,
+    /// Destination address the service answers on, omitted when it answers
+    /// on every address on its port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub listen_addr: Option<String>,
     pub listen_port: u16,
     pub algorithm: String,
     pub mode: String,
@@ -50,6 +54,7 @@ impl LbServiceResponse {
             id: s.id.0.clone(),
             name: s.name.clone(),
             protocol: s.protocol.as_str().to_string(),
+            listen_addr: s.listen_addr.map(|a| a.to_string()),
             listen_port: s.listen_port,
             algorithm: s.algorithm.as_str().to_string(),
             mode: s.mode.as_str().to_string(),
@@ -65,6 +70,10 @@ pub struct LbServiceDetailResponse {
     pub id: String,
     pub name: String,
     pub protocol: String,
+    /// Destination address the service answers on, omitted when it answers
+    /// on every address on its port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub listen_addr: Option<String>,
     pub listen_port: u16,
     pub algorithm: String,
     pub mode: String,
@@ -127,6 +136,10 @@ pub struct CreateLbServiceRequest {
     pub id: String,
     pub name: String,
     pub protocol: String,
+    /// Destination address the service answers on, a virtual address.
+    /// Omitted, the service answers on every address on its port.
+    #[serde(default)]
+    pub listen_addr: Option<String>,
     pub listen_port: u16,
     #[serde(default = "default_algorithm")]
     pub algorithm: String,
@@ -301,6 +314,7 @@ pub async fn get_lb_service(
         id: service.id.0.clone(),
         name: service.name.clone(),
         protocol: service.protocol.as_str().to_string(),
+        listen_addr: service.listen_addr.map(|a| a.to_string()),
         listen_port: service.listen_port,
         algorithm: service.algorithm.as_str().to_string(),
         mode: service.mode.as_str().to_string(),
@@ -786,6 +800,17 @@ fn parse_create_request(req: CreateLbServiceRequest) -> Result<LbService, ApiErr
         });
     }
 
+    let listen_addr = match req.listen_addr.as_deref() {
+        None => None,
+        Some(addr) => {
+            validate_string_length("listen_addr", addr, MAX_SHORT_STRING_LENGTH)?;
+            Some(addr.parse().map_err(|_| ApiError::BadRequest {
+                code: "VALIDATION_ERROR",
+                message: format!("invalid listen_addr: {addr}"),
+            })?)
+        }
+    };
+
     if req.backends.is_empty() {
         return Err(ApiError::BadRequest {
             code: "VALIDATION_ERROR",
@@ -830,6 +855,7 @@ fn parse_create_request(req: CreateLbServiceRequest) -> Result<LbService, ApiErr
         id: domain::common::entity::RuleId(req.id),
         name: req.name,
         protocol,
+        listen_addr,
         listen_port: req.listen_port,
         algorithm,
         mode,
@@ -865,6 +891,7 @@ mod tests {
             id: "lb-probe".to_string(),
             name: "web".to_string(),
             protocol: "tcp".to_string(),
+            listen_addr: None,
             listen_port: 443,
             algorithm: "round_robin".to_string(),
             mode: "dnat".to_string(),
@@ -931,6 +958,7 @@ mod tests {
             id: "lb-001".to_string(),
             name: "web-service".to_string(),
             protocol: "tcp".to_string(),
+            listen_addr: None,
             listen_port: 443,
             algorithm: "round_robin".to_string(),
             mode: "dnat".to_string(),
@@ -957,6 +985,7 @@ mod tests {
             id: "lb-002".to_string(),
             name: "test".to_string(),
             protocol: "invalid".to_string(),
+            listen_addr: None,
             listen_port: 443,
             algorithm: "round_robin".to_string(),
             mode: "dnat".to_string(),
@@ -979,6 +1008,7 @@ mod tests {
             id: "lb-003".to_string(),
             name: "test".to_string(),
             protocol: "tcp".to_string(),
+            listen_addr: None,
             listen_port: 443,
             algorithm: "unknown".to_string(),
             mode: "dnat".to_string(),
@@ -996,11 +1026,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_listen_addr() {
+        let req = |addr: &str| CreateLbServiceRequest {
+            id: "lb-vip".to_string(),
+            name: "test".to_string(),
+            protocol: "tcp".to_string(),
+            listen_addr: Some(addr.to_string()),
+            listen_port: 80,
+            algorithm: "round_robin".to_string(),
+            mode: "dnat".to_string(),
+            backends: vec![CreateLbBackendRequest {
+                id: "be-1".to_string(),
+                addr: "10.0.0.1".to_string(),
+                port: 8080,
+                weight: 1,
+                enabled: true,
+                same_segment: false,
+            }],
+            enabled: true,
+        };
+        let svc = parse_create_request(req("192.0.2.10")).unwrap();
+        assert_eq!(svc.listen_addr, Some("192.0.2.10".parse().unwrap()));
+        assert!(parse_create_request(req("not-an-ip")).is_err());
+    }
+
+    #[test]
     fn parse_zero_listen_port() {
         let req = CreateLbServiceRequest {
             id: "lb-004".to_string(),
             name: "test".to_string(),
             protocol: "tcp".to_string(),
+            listen_addr: None,
             listen_port: 0,
             algorithm: "round_robin".to_string(),
             mode: "dnat".to_string(),
@@ -1023,6 +1079,7 @@ mod tests {
             id: "lb-005".to_string(),
             name: "test".to_string(),
             protocol: "tcp".to_string(),
+            listen_addr: None,
             listen_port: 443,
             algorithm: "round_robin".to_string(),
             mode: "dnat".to_string(),
@@ -1038,6 +1095,7 @@ mod tests {
             id: "lb-006".to_string(),
             name: "test".to_string(),
             protocol: "tcp".to_string(),
+            listen_addr: None,
             listen_port: 443,
             algorithm: "round_robin".to_string(),
             mode: "dnat".to_string(),
@@ -1082,6 +1140,7 @@ mod tests {
             id: domain::common::entity::RuleId("lb-001".to_string()),
             name: "web".to_string(),
             protocol: LbProtocol::Tcp,
+            listen_addr: None,
             listen_port: 443,
             algorithm: LbAlgorithm::RoundRobin,
             mode: LbForwardingMode::Dnat,
@@ -1109,6 +1168,7 @@ mod tests {
             id: "lb-007".to_string(),
             name: "test".to_string(),
             protocol: "tcp".to_string(),
+            listen_addr: None,
             listen_port: 443,
             algorithm: "round_robin".to_string(),
             mode: "dnat".to_string(),
@@ -1139,6 +1199,7 @@ mod tests {
             id: "lb-mode".to_string(),
             name: "test".to_string(),
             protocol: "tcp".to_string(),
+            listen_addr: None,
             listen_port: 443,
             algorithm: "round_robin".to_string(),
             mode: default_mode(),
@@ -1162,6 +1223,7 @@ mod tests {
             id: "lb-dsr".to_string(),
             name: "test".to_string(),
             protocol: "tcp".to_string(),
+            listen_addr: None,
             listen_port: 443,
             algorithm: "round_robin".to_string(),
             mode: "l2dsr".to_string(),
@@ -1184,6 +1246,7 @@ mod tests {
             id: "lb-dsr".to_string(),
             name: "test".to_string(),
             protocol: "tcp".to_string(),
+            listen_addr: None,
             listen_port: 443,
             algorithm: "round_robin".to_string(),
             mode: "l2dsr".to_string(),

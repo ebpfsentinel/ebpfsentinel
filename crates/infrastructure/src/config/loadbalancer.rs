@@ -174,6 +174,11 @@ pub struct LbServiceConfig {
     #[serde(default = "default_lb_protocol")]
     pub protocol: String,
 
+    /// Destination address the service answers on, a virtual address.
+    /// Absent, the service answers on every address on its port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_addr: Option<String>,
+
     /// Port to listen on for incoming traffic.
     pub listen_port: u16,
 
@@ -286,6 +291,15 @@ impl LbServiceConfig {
             });
         }
 
+        if let Some(addr) = &self.listen_addr
+            && addr.parse::<std::net::IpAddr>().is_err()
+        {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.listen_addr"),
+                message: format!("invalid IP address: {addr}"),
+            });
+        }
+
         if self.listen_port == 0 {
             return Err(ConfigError::Validation {
                 field: format!("{prefix}.listen_port"),
@@ -377,10 +391,22 @@ impl LbServiceConfig {
             .map(LbHealthCheckConfig::to_domain_health_check)
             .transpose()?;
 
+        let listen_addr = self
+            .listen_addr
+            .as_deref()
+            .map(|addr| {
+                addr.parse().map_err(|_| ConfigError::Validation {
+                    field: "listen_addr".to_string(),
+                    message: format!("invalid IP address: {addr}"),
+                })
+            })
+            .transpose()?;
+
         Ok(LbService {
             id: RuleId(self.id.clone()),
             name: self.name.clone(),
             protocol,
+            listen_addr,
             listen_port: self.listen_port,
             algorithm,
             mode,
@@ -582,6 +608,7 @@ mod tests {
             id: id.to_string(),
             name: format!("test-{id}"),
             protocol: "tcp".to_string(),
+            listen_addr: None,
             listen_port: 443,
             algorithm: "round_robin".to_string(),
             mode: "dnat".to_string(),
@@ -714,6 +741,18 @@ mod tests {
         assert_eq!(svc.algorithm, LbAlgorithm::RoundRobin);
         assert_eq!(svc.listen_port, 443);
         assert_eq!(svc.backends.len(), 1);
+    }
+
+    #[test]
+    fn listen_addr_is_carried_and_checked() {
+        let mut cfg = make_service_config("vip");
+        cfg.listen_addr = Some("192.0.2.10".to_string());
+        assert!(cfg.validate(0).is_ok());
+        let svc = cfg.to_domain_service().unwrap();
+        assert_eq!(svc.listen_addr, Some("192.0.2.10".parse().unwrap()));
+
+        cfg.listen_addr = Some("not-an-ip".to_string());
+        assert!(cfg.validate(0).is_err());
     }
 
     #[test]

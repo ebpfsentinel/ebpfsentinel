@@ -21,6 +21,13 @@ pub enum LbError {
 
     #[error("invalid backend: {0}")]
     InvalidBackend(String),
+
+    #[error("services '{first}' and '{second}' both listen on {listen}")]
+    ListenConflict {
+        first: String,
+        second: String,
+        listen: String,
+    },
 }
 
 impl From<LbError> for DomainError {
@@ -30,6 +37,7 @@ impl From<LbError> for DomainError {
                 Self::RuleNotFound(id)
             }
             LbError::DuplicateService { id } => Self::DuplicateRule(id),
+            LbError::ListenConflict { .. } => Self::DuplicateRule(e.to_string()),
             LbError::InvalidService(msg) | LbError::InvalidBackend(msg) => Self::InvalidRule(msg),
             LbError::NoHealthyBackend { .. } => Self::EngineError(e.to_string()),
         }

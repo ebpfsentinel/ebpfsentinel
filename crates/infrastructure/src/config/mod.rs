@@ -896,6 +896,23 @@ impl AgentConfig {
         for (idx, svc_cfg) in self.loadbalancer.services.iter().enumerate() {
             svc_cfg.validate(idx)?;
         }
+        let lb_services = self.lb_services()?;
+        for (idx, svc) in lb_services.iter().enumerate() {
+            if let Some(other) = lb_services[idx + 1..]
+                .iter()
+                .find(|o| o.listen_key() == svc.listen_key())
+            {
+                return Err(ConfigError::Validation {
+                    field: "loadbalancer.services".to_string(),
+                    message: format!(
+                        "services '{}' and '{}' both listen on {}",
+                        svc.id,
+                        other.id,
+                        svc.listen_label()
+                    ),
+                });
+            }
+        }
         self.loadbalancer.announce.validate()?;
 
         // Validate QoS config

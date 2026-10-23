@@ -20,6 +20,14 @@ pub enum LbProtocol {
 }
 
 impl LbProtocol {
+    /// IP protocol number the data plane matches: TLS passthrough is TCP.
+    pub fn ip_protocol(self) -> u8 {
+        match self {
+            Self::Tcp | Self::TlsPassthrough => 6,
+            Self::Udp => 17,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Tcp => "tcp",
@@ -124,6 +132,11 @@ pub struct LbService {
     pub name: String,
     /// Protocol to load balance.
     pub protocol: LbProtocol,
+    /// Destination address the service answers on, which is how a virtual
+    /// address is served. Absent, the service answers on every address the
+    /// interface receives on its port.
+    #[serde(default)]
+    pub listen_addr: Option<IpAddr>,
     /// Port to listen on for incoming traffic.
     pub listen_port: u16,
     /// Balancing algorithm.
@@ -140,6 +153,25 @@ pub struct LbService {
 }
 
 impl LbService {
+    /// What the data plane matches a packet against: two services sharing it
+    /// cannot both be in force.
+    pub fn listen_key(&self) -> (u8, Option<IpAddr>, u16) {
+        (
+            self.protocol.ip_protocol(),
+            self.listen_addr,
+            self.listen_port,
+        )
+    }
+
+    /// The address and port a person reads, `*` standing for every address.
+    pub fn listen_label(&self) -> String {
+        match self.listen_addr {
+            Some(IpAddr::V6(addr)) => format!("{} [{addr}]:{}", self.protocol, self.listen_port),
+            Some(IpAddr::V4(addr)) => format!("{} {addr}:{}", self.protocol, self.listen_port),
+            None => format!("{} *:{}", self.protocol, self.listen_port),
+        }
+    }
+
     /// Validate the service configuration.
     pub fn validate(&self) -> Result<(), LbError> {
         self.id
@@ -307,6 +339,7 @@ mod tests {
             id: RuleId("svc-1".to_string()),
             name: "test-service".to_string(),
             protocol: LbProtocol::Tcp,
+            listen_addr: None,
             listen_port: 443,
             algorithm: LbAlgorithm::RoundRobin,
             mode: LbForwardingMode::Dnat,
