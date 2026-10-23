@@ -81,6 +81,12 @@ pub struct ServiceHandles {
     /// caller holding `None` has no way to signal anything.
     pub process_signal_svc: Option<Arc<application::process_signal_service::ProcessSignalService>>,
 
+    /// Cutting a workload off the network while leaving it running. `None`
+    /// whenever the capability is off, the workload firewall did not load or
+    /// its quarantine maps were not acquired, and a caller holding `None`
+    /// cannot quarantine anything.
+    pub quarantine_svc: Option<Arc<application::quarantine_service::QuarantineService>>,
+
     // ── Infrastructure ───────────────────────────────────────────
     pub metrics: Arc<AgentMetrics>,
     pub ebpf_loaded: Arc<AtomicBool>,
@@ -549,6 +555,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         // Nothing is loaded here, so there is no map to arm through: the
         // capability exists only where the object was loaded and attached.
         process_signal_svc: None,
+        quarantine_svc: None,
         metrics,
         ebpf_loaded,
     })

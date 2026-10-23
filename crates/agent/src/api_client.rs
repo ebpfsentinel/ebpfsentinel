@@ -1445,6 +1445,23 @@ pub struct KernelFeaturesResponse {
     pub workload_firewall: WorkloadFirewallReport,
     #[serde(default)]
     pub process_signal: ProcessSignalReport,
+    #[serde(default)]
+    pub quarantine: QuarantineReport,
+}
+
+/// What this node can do to a workload short of stopping it. Defaulted on
+/// decode for the same reason as the blocks below it.
+#[derive(Deserialize, Serialize, Default)]
+pub struct QuarantineReport {
+    pub armed: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub window_ms: u64,
+    #[serde(default)]
+    pub tears_down_flows: bool,
+    #[serde(default)]
+    pub protected: usize,
 }
 
 /// What this node can do to the process behind a flow. Defaulted on decode

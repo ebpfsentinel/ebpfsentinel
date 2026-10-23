@@ -197,6 +197,17 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (7, "no_rule"),
             (8, "event_lost"),
         ],
+        // What the quarantine check decided before the rules were consulted:
+        // the workload was cut off, the entry had lapsed and the rules got the
+        // call, the quarantine was observing rather than enforcing, or the
+        // record found no room in the ring. `expired` moving is the normal end
+        // of a quarantine nobody released by hand.
+        "QUARANTINE_METRICS" => &[
+            (0, "refused"),
+            (1, "expired"),
+            (2, "observed"),
+            (3, "event_lost"),
+        ],
         "PROCESS_METRICS" => &[
             (0, "exec"),
             (1, "exit"),
@@ -595,6 +606,10 @@ mod tests {
             ebpf_common::workload_policy::WORKLOAD_METRIC_COUNT,
         ),
         ("SIGNAL_METRICS", ebpf_common::signal::SIGNAL_METRIC_COUNT),
+        (
+            "QUARANTINE_METRICS",
+            ebpf_common::quarantine::QUARANTINE_METRIC_COUNT,
+        ),
     ];
 
     #[test]

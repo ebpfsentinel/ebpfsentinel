@@ -85,6 +85,7 @@ pub mod packet_pipeline;
 pub mod process_signal_service;
 pub mod process_table_service;
 pub mod qos_service_impl;
+pub mod quarantine_service;
 pub mod ratelimit_service_impl;
 pub mod reputation_enforcement;
 pub mod routing_service_impl;

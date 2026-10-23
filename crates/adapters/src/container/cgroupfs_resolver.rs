@@ -79,6 +79,36 @@ impl CgroupIdResolver for CgroupfsResolver {
     }
 }
 
+/// The id the kernel would report for the root of the unified hierarchy.
+///
+/// The walk above answers id to path, and a fence has to answer the other way
+/// round: the two cgroups a response must never act on are this hierarchy's
+/// root and the agent's own cgroup, and both are known as paths.
+#[must_use]
+pub fn root_cgroup_id(root: &str) -> Option<u64> {
+    std::fs::metadata(root).ok().map(|meta| meta.ino())
+}
+
+/// The id of the cgroup this process is in, or `None` on a host whose
+/// `/proc/self/cgroup` is not the unified one.
+///
+/// Read from `/proc/self/cgroup` rather than from a helper, because the
+/// userspace side has no eBPF context to call `bpf_get_current_cgroup_id` in.
+/// The unified hierarchy writes one line, `0::<path>`, and a v1-only host
+/// writes none of that shape: a `None` there is a fence that could not be
+/// built, which the caller reports rather than treating as "nothing to
+/// protect".
+#[must_use]
+pub fn self_cgroup_id(root: &str) -> Option<u64> {
+    let contents = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let relative = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))?
+        .trim();
+    let path = Path::new(root).join(relative.trim_start_matches('/'));
+    std::fs::metadata(path).ok().map(|meta| meta.ino())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +168,34 @@ mod tests {
         );
         // The root's own inode is not returned (search starts in its children).
         assert!(resolver.path_for_id(ino).is_none());
+    }
+
+    #[test]
+    fn the_root_id_is_the_roots_own_inode() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        assert_eq!(
+            root_cgroup_id(root.to_str().unwrap()),
+            Some(fs::metadata(root).unwrap().ino())
+        );
+        assert!(root_cgroup_id("/nonexistent/cgroup-root").is_none());
+    }
+
+    #[test]
+    fn the_agents_own_cgroup_is_read_or_reported_missing() {
+        // Against a tree that holds no cgroup of this process, the answer is
+        // None rather than the root or a guess: a fence built on a wrong id
+        // would protect a cgroup nobody asked about and leave the agent's own
+        // open.
+        let dir = tempdir().unwrap();
+        assert!(self_cgroup_id(dir.path().to_str().unwrap()).is_none());
+        // On a unified host the agent's own cgroup resolves under the real
+        // mount; on a v1-only one there is no `0::` line and None is correct.
+        match self_cgroup_id("/sys/fs/cgroup") {
+            Some(id) => assert_ne!(id, 0),
+            None => assert!(
+                std::fs::read_to_string("/proc/self/cgroup").map_or(true, |c| !c.contains("0::"))
+            ),
+        }
     }
 }

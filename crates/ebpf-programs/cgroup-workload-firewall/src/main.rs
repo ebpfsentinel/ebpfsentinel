@@ -25,6 +25,12 @@
 //! Default is observe. A rule in observe mode counts what it would have
 //! refused and lets the syscall through, which is what makes a policy
 //! something an operator can measure before turning it on.
+//!
+//! The same six hooks carry a second, unrelated question: whether this cgroup
+//! is quarantined. It is asked first and answered before the rule array is
+//! even looked at, for two reasons. A quarantine is a response rather than a
+//! policy, so it must work on a node whose policy document is empty; and a
+//! rule that allows must not be able to let a cut-off workload back out.
 
 #![no_std]
 #![no_main]
@@ -37,6 +43,12 @@ use aya_ebpf::{
     },
     macros::{btf_map, cgroup_sock_addr},
     programs::SockAddrContext,
+};
+use ebpf_common::quarantine::{
+    QUARANTINE_EVENTS_RINGBUF_BYTES, QUARANTINE_MAX_CGROUPS, QUARANTINE_METRIC_COUNT,
+    QUARANTINE_METRIC_EVENT_LOST, QUARANTINE_METRIC_EXPIRED, QUARANTINE_METRIC_OBSERVED,
+    QUARANTINE_METRIC_REFUSED, QUARANTINE_MODE_REPORT, QUARANTINE_OUTCOME_EXPIRED,
+    QUARANTINE_OUTCOME_OBSERVED, QUARANTINE_OUTCOME_REFUSED, QuarantineEntry, QuarantineEvent,
 };
 use ebpf_common::workload_policy::{
     WORKLOAD_ACTION_DENY, WORKLOAD_EVENTS_RINGBUF_BYTES, WORKLOAD_FAMILY_ANY, WORKLOAD_FAMILY_IPV4,
@@ -105,6 +117,31 @@ static WORKLOAD_RULE_DENIALS: PerCpuArray<u64, { WORKLOAD_POLICY_MAX_RULES }> = 
 static WORKLOAD_EVENTS: RingBuf<WorkloadDenialEvent, { WORKLOAD_EVENTS_RINGBUF_BYTES as usize }> =
     RingBuf::new();
 
+/// cgroup id -> the quarantine cutting it off, with its own expiry.
+///
+/// A plain hash map for the same reason as the selectors: an eviction here is
+/// a workload an operator believes is cut off quietly reaching the network
+/// again. Userspace sizes it, and a refused insert is a quarantine that failed
+/// to arm rather than one that armed and lapsed.
+#[btf_map]
+static QUARANTINE_CGROUPS: HashMap<u64, QuarantineEntry, { QUARANTINE_MAX_CGROUPS as usize }> =
+    HashMap::new();
+
+/// What the quarantine did, per CPU.
+#[btf_map]
+static QUARANTINE_METRICS: PerCpuArray<u64, { QUARANTINE_METRIC_COUNT as usize }> =
+    PerCpuArray::new();
+
+/// One record per socket operation a quarantine decided, on its way to an
+/// alert.
+///
+/// Separate from the policy's ring because the two are read by different
+/// things and a quarantined workload in a reconnect loop would otherwise
+/// starve the refusals a deny rule exists to report.
+#[btf_map]
+static QUARANTINE_EVENTS: RingBuf<QuarantineEvent, { QUARANTINE_EVENTS_RINGBUF_BYTES as usize }> =
+    RingBuf::new();
+
 // ── Verdicts, in the kernel's own numbering ─────────────────────────
 
 /// What a `cgroup_sock_addr` program returns to let the syscall proceed.
@@ -122,26 +159,26 @@ const AF_INET6: u32 = 10;
 /// A workload asking for an IPv4 connection.
 #[cgroup_sock_addr(connect4)]
 pub fn workload_connect4(ctx: SockAddrContext) -> i32 {
-    decide(&ctx, WORKLOAD_HOOK_CONNECT)
+    answer(&ctx, WORKLOAD_HOOK_CONNECT)
 }
 
 /// A workload asking for an IPv6 connection.
 #[cgroup_sock_addr(connect6)]
 pub fn workload_connect6(ctx: SockAddrContext) -> i32 {
-    decide(&ctx, WORKLOAD_HOOK_CONNECT)
+    answer(&ctx, WORKLOAD_HOOK_CONNECT)
 }
 
 /// A workload sending a datagram with no connection, the path almost all DNS
 /// takes.
 #[cgroup_sock_addr(sendmsg4)]
 pub fn workload_sendmsg4(ctx: SockAddrContext) -> i32 {
-    decide(&ctx, WORKLOAD_HOOK_SENDMSG)
+    answer(&ctx, WORKLOAD_HOOK_SENDMSG)
 }
 
 /// The same, over IPv6.
 #[cgroup_sock_addr(sendmsg6)]
 pub fn workload_sendmsg6(ctx: SockAddrContext) -> i32 {
-    decide(&ctx, WORKLOAD_HOOK_SENDMSG)
+    answer(&ctx, WORKLOAD_HOOK_SENDMSG)
 }
 
 /// A workload taking an IPv4 local address, before the kernel assigns it.
@@ -151,16 +188,75 @@ pub fn workload_sendmsg6(ctx: SockAddrContext) -> i32 {
 /// listener may sit.
 #[cgroup_sock_addr(bind4)]
 pub fn workload_bind4(ctx: SockAddrContext) -> i32 {
-    decide(&ctx, WORKLOAD_HOOK_BIND)
+    answer(&ctx, WORKLOAD_HOOK_BIND)
 }
 
 /// The same, over IPv6.
 #[cgroup_sock_addr(bind6)]
 pub fn workload_bind6(ctx: SockAddrContext) -> i32 {
-    decide(&ctx, WORKLOAD_HOOK_BIND)
+    answer(&ctx, WORKLOAD_HOOK_BIND)
 }
 
 // ── The decision ────────────────────────────────────────────────────
+
+/// The whole verdict for one socket operation: the quarantine first, the
+/// policy after.
+///
+/// Order is the point. A quarantine that the rule array could overrule would
+/// be a response an allow rule turns off, and a quarantine that only worked
+/// where a policy was loaded would be a response that does nothing on most
+/// nodes. So the cut-off check runs before the array is read at all, and only
+/// a cgroup that is not cut off ever reaches a rule.
+fn answer(ctx: &SockAddrContext, hook: u8) -> i32 {
+    if let Some(verdict) = quarantined(hook) {
+        return verdict;
+    }
+    decide(ctx, hook)
+}
+
+/// Whether this task's cgroup is cut off, and what that means for this
+/// operation.
+///
+/// `Some(REFUSE)` is a live enforcing quarantine. `None` is every other case -
+/// no entry, an entry that has expired, or one in report-only mode - and the
+/// policy decides from there. The expiry is compared here rather than swept by
+/// userspace, so an entry outliving the agent that wrote it stops refusing at
+/// the instant it was given and not at the instant somebody notices.
+fn quarantined(hook: u8) -> Option<i32> {
+    let cgroup = unsafe { bpf_get_current_cgroup_id() };
+    let entry = *unsafe { QUARANTINE_CGROUPS.get(&cgroup) }?;
+    let now = unsafe { bpf_ktime_get_boot_ns() };
+    if now >= entry.expires_at_ns {
+        increment_metric!(QUARANTINE_METRICS, QUARANTINE_METRIC_EXPIRED);
+        record_quarantine(cgroup, hook, QUARANTINE_OUTCOME_EXPIRED);
+        return None;
+    }
+    if entry.mode == QUARANTINE_MODE_REPORT {
+        increment_metric!(QUARANTINE_METRICS, QUARANTINE_METRIC_OBSERVED);
+        record_quarantine(cgroup, hook, QUARANTINE_OUTCOME_OBSERVED);
+        return None;
+    }
+    increment_metric!(QUARANTINE_METRICS, QUARANTINE_METRIC_REFUSED);
+    record_quarantine(cgroup, hook, QUARANTINE_OUTCOME_REFUSED);
+    Some(REFUSE)
+}
+
+/// Write down one quarantine decision, or count the record that did not fit.
+fn record_quarantine(cgroup: u64, hook: u8, outcome: u32) {
+    let Some(mut entry) = QUARANTINE_EVENTS.reserve(0) else {
+        increment_metric!(QUARANTINE_METRICS, QUARANTINE_METRIC_EVENT_LOST);
+        return;
+    };
+    entry.write(QuarantineEvent {
+        at_ns: unsafe { bpf_ktime_get_boot_ns() },
+        cgroup_id: cgroup,
+        tgid: (bpf_get_current_pid_tgid() >> 32) as u32,
+        hook: u32::from(hook),
+        outcome,
+        _pad: 0,
+    });
+    entry.submit(0);
+}
 
 /// Walk the policy for this task and answer the one question the hook asks.
 ///

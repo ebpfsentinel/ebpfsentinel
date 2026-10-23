@@ -28,7 +28,7 @@ use std::sync::Mutex;
 use domain::common::error::DomainError;
 use domain::conntrack::entity::{ConnTrackSettings, Connection, ConnectionState};
 use ebpfsentinel_warden_client::{ConntrackTuple, ReconnectingClient};
-use ports::secondary::conntrack_kill_port::ConnTrackKillPort;
+use ports::secondary::conntrack_kill_port::{ConnTrackFlow, ConnTrackKillPort};
 use ports::secondary::conntrack_map_port::ConnTrackMapPort;
 use tracing::{debug, warn};
 
@@ -123,14 +123,10 @@ impl Default for ProcNetfilterConntrackPort {
 
 impl ConnTrackKillPort for ProcNetfilterConntrackPort {
     fn delete_matching(&self, protocol: u8, dst_port: u16) -> Result<u64, DomainError> {
-        let proto = match protocol {
-            6 => "tcp",
-            17 => "udp",
-            1 => "icmp",
-            132 => "sctp",
-            // Wildcard / unsupported protocol - no precise tuple to target,
-            // so refuse rather than risk a table-wide delete.
-            _ => return Ok(0),
+        // Wildcard / unsupported protocol - no precise tuple to target,
+        // so refuse rather than risk a table-wide delete.
+        let Some(proto) = proto_name(protocol) else {
+            return Ok(0);
         };
         // Rootless agent: the netlink delete is a CAP_NET_ADMIN op the warden runs.
         // The warden reports only success/failure (no deleted count), so report 0
@@ -175,6 +171,93 @@ impl ConnTrackKillPort for ProcNetfilterConntrackPort {
             dst_port, deleted, "conntrack entries deleted to enforce firewall deny rule"
         );
         Ok(deleted)
+    }
+
+    fn delete_flow(&self, flow: &ConnTrackFlow) -> Result<u64, DomainError> {
+        let Some(proto) = proto_name(flow.protocol) else {
+            // No precise tuple to target, so refuse rather than widen the
+            // delete to everything sharing the ports.
+            return Ok(0);
+        };
+        // Rootless agent: the netlink delete is a CAP_NET_ADMIN op the warden
+        // runs. Unlike the port-only delete above, every field of the tuple is
+        // filled in here, which is the whole point: a quarantine tears down
+        // one workload's flows and must leave every other workload's alone.
+        // The warden reports only success or failure, so report 1 for a flow
+        // the caller read out of the table a moment ago and log it.
+        if let Some(warden) = &self.warden {
+            let tuple = ConntrackTuple {
+                proto: flow.protocol,
+                src_ip: flow.src_ip.clone(),
+                dst_ip: flow.dst_ip.clone(),
+                src_port: flow.src_port,
+                dst_port: flow.dst_port,
+            };
+            warden
+                .lock()
+                .map_err(|_| DomainError::EngineError("warden client lock poisoned".into()))?
+                .conntrack_delete(&tuple)
+                .map_err(|e| {
+                    DomainError::EngineError(format!("warden conntrack delete failed: {e}"))
+                })?;
+            debug!(
+                protocol = proto,
+                src = %flow.src_ip,
+                dst = %flow.dst_ip,
+                src_port = flow.src_port,
+                dst_port = flow.dst_port,
+                "single conntrack flow teardown issued via warden"
+            );
+            return Ok(1);
+        }
+        let src_port = flow.src_port.to_string();
+        let dst_port = flow.dst_port.to_string();
+        let output = std::process::Command::new("conntrack")
+            .args([
+                "-D",
+                "-p",
+                proto,
+                "-s",
+                &flow.src_ip,
+                "-d",
+                &flow.dst_ip,
+                "--sport",
+                &src_port,
+                "--dport",
+                &dst_port,
+            ])
+            .output()
+            .map_err(|e| {
+                DomainError::EngineError(format!(
+                    "failed to run `conntrack -D`: {e} (conntrack-tools installed?)"
+                ))
+            })?;
+        // A flow that closed between the table read and the delete exits
+        // non-zero with nothing deleted, which is the ordinary case and not an
+        // error: the count is parsed from the output regardless.
+        let deleted = parse_deleted_count(&String::from_utf8_lossy(&output.stderr));
+        debug!(
+            protocol = proto,
+            src = %flow.src_ip,
+            dst = %flow.dst_ip,
+            deleted,
+            "conntrack flow deleted to enforce a quarantine"
+        );
+        Ok(deleted)
+    }
+}
+
+/// The `conntrack` tool's name for a protocol number, where it has one.
+///
+/// `None` is a protocol with no port pair to narrow a delete with, and every
+/// caller treats that as a refusal rather than as a wildcard.
+fn proto_name(protocol: u8) -> Option<&'static str> {
+    match protocol {
+        6 => Some("tcp"),
+        17 => Some("udp"),
+        1 => Some("icmp"),
+        132 => Some("sctp"),
+        _ => None,
     }
 }
 
@@ -491,6 +574,37 @@ pub fn is_conntrack_readable() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proto_name_covers_the_four_with_a_tuple_and_refuses_the_rest() {
+        assert_eq!(proto_name(6), Some("tcp"));
+        assert_eq!(proto_name(17), Some("udp"));
+        assert_eq!(proto_name(1), Some("icmp"));
+        assert_eq!(proto_name(132), Some("sctp"));
+        // 0 is the wildcard a rule carries when it names no protocol, and 47
+        // is one conntrack holds without ports. Neither can narrow a delete,
+        // so neither gets one.
+        assert_eq!(proto_name(0), None);
+        assert_eq!(proto_name(47), None);
+    }
+
+    #[test]
+    fn a_flow_with_an_unnarrowable_protocol_deletes_nothing() {
+        let port = ProcNetfilterConntrackPort::with_paths(
+            "/nonexistent/nf_conntrack".into(),
+            "/nonexistent/nf_conntrack_count".into(),
+        );
+        let deleted = port
+            .delete_flow(&ConnTrackFlow {
+                protocol: 47,
+                src_ip: "10.0.0.2".into(),
+                dst_ip: "10.0.0.3".into(),
+                src_port: 0,
+                dst_port: 0,
+            })
+            .expect("refusing a protocol is not an error");
+        assert_eq!(deleted, 0);
+    }
 
     #[test]
     fn parse_deleted_count_extracts_number() {

@@ -3974,6 +3974,25 @@ fn print_process_signal(report: &crate::api_client::ProcessSignalReport) {
     }
 }
 
+/// Print what the node can do to a workload short of stopping it.
+///
+/// The window and the protected count are printed only when something is
+/// armed, for the same reason as the block above. Whether the cut reaches the
+/// flows already open is printed either way, because that is the line between
+/// a workload off the network and one that merely opens nothing new.
+fn print_quarantine(report: &crate::api_client::QuarantineReport) {
+    println!("\nQuarantining a workload");
+    println!("  Armed:      {}", yes_no(report.armed));
+    println!("  Cuts flows: {}", yes_no(report.tears_down_flows));
+    if report.armed {
+        println!("  Window:     {} ms", report.window_ms);
+        println!("  Protected:  {} cgroups", report.protected);
+    }
+    if let Some(reason) = &report.reason {
+        println!("  Reason:     {reason}");
+    }
+}
+
 pub async fn cmd_ebpf_kernel_features(client: &ApiClient, output: OutputFormat) -> Result<()> {
     let resp = client.kernel_features().await?;
 
@@ -4064,6 +4083,7 @@ pub async fn cmd_ebpf_kernel_features(client: &ApiClient, output: OutputFormat) 
     }
 
     print_process_signal(&resp.process_signal);
+    print_quarantine(&resp.quarantine);
 
     println!("\nSocket attribution");
     println!("  Attached:   {}", yes_no(resp.attribution.attached));

@@ -88,6 +88,13 @@ pub enum AuditAction {
     ProcessSignalled,
     /// A process was not signalled, and the detail says what protected it.
     ProcessSignalRefused,
+    /// A workload's cgroup was cut off from the network, and the detail says
+    /// how many of its established flows went with it.
+    WorkloadQuarantined,
+    /// A workload was not cut off, and the detail says what protected it.
+    WorkloadQuarantineRefused,
+    /// A workload's quarantine was lifted, by an operator or by its expiry.
+    WorkloadReleased,
 }
 
 impl AuditAction {
@@ -106,6 +113,9 @@ impl AuditAction {
             Self::AlertTriaged => "alert_triaged",
             Self::ProcessSignalled => "process_signalled",
             Self::ProcessSignalRefused => "process_signal_refused",
+            Self::WorkloadQuarantined => "workload_quarantined",
+            Self::WorkloadQuarantineRefused => "workload_quarantine_refused",
+            Self::WorkloadReleased => "workload_released",
         }
     }
 }

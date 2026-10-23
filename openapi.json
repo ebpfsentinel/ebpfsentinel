@@ -10837,7 +10837,8 @@
           "attribution",
           "process_tracing",
           "workload_firewall",
-          "process_signal"
+          "process_signal",
+          "quarantine"
         ],
         "properties": {
           "attribution": {
@@ -10876,6 +10877,10 @@
             "items": {
               "$ref": "#/components/schemas/ProgramTypeSupport"
             }
+          },
+          "quarantine": {
+            "$ref": "#/components/schemas/QuarantineReport",
+            "description": "Whether this node can cut a workload off the network while leaving it\nrunning, and whether that cut reaches the flows it already holds.\nReported whether or not the capability is on, for the same reason as\nthe block above."
           },
           "reason": {
             "type": [
@@ -12294,6 +12299,44 @@
           },
           "queue_count": {
             "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "QuarantineReport": {
+        "type": "object",
+        "description": "What this node can do to a workload short of stopping it.",
+        "required": [
+          "armed",
+          "window_ms",
+          "tears_down_flows",
+          "protected"
+        ],
+        "properties": {
+          "armed": {
+            "type": "boolean",
+            "description": "True only when the capability is on in the configuration and the maps\nbehind it are held. False is the ordinary answer: the capability is off\nunless a configuration asked for it."
+          },
+          "protected": {
+            "type": "integer",
+            "description": "How many cgroups are refused whatever a rule asks, the agent's own and\nthe hierarchy root among them.",
+            "minimum": 0
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why nothing can be quarantined on this node, in one sentence."
+          },
+          "tears_down_flows": {
+            "type": "boolean",
+            "description": "Whether arming also tears down the flows the workload already holds. A\nfalse here is the difference between a workload that can open nothing\nnew and one that is actually off the network."
+          },
+          "window_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long a cgroup stays cut off before the arming lapses, zero when\nnothing is armed. A rule may ask for less.",
             "minimum": 0
           }
         }

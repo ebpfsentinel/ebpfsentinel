@@ -145,6 +145,11 @@ pub struct KernelFeaturesResponse {
     /// Reported whether or not the capability is on, because the blast radius
     /// of an action has to be readable before somebody arms it.
     pub process_signal: ProcessSignalReport,
+    /// Whether this node can cut a workload off the network while leaving it
+    /// running, and whether that cut reaches the flows it already holds.
+    /// Reported whether or not the capability is on, for the same reason as
+    /// the block above.
+    pub quarantine: QuarantineReport,
 }
 
 /// What became of the cgroup socket hooks on this host.
@@ -214,6 +219,27 @@ pub struct ProcessSignalReport {
     pub window_ms: u64,
     /// How many thread group ids the kernel refuses to signal whatever a rule
     /// asks, the agent's own among them.
+    pub protected: usize,
+}
+
+/// What this node can do to a workload short of stopping it.
+#[derive(Serialize, ToSchema)]
+pub struct QuarantineReport {
+    /// True only when the capability is on in the configuration and the maps
+    /// behind it are held. False is the ordinary answer: the capability is off
+    /// unless a configuration asked for it.
+    pub armed: bool,
+    /// Why nothing can be quarantined on this node, in one sentence.
+    pub reason: Option<String>,
+    /// How long a cgroup stays cut off before the arming lapses, zero when
+    /// nothing is armed. A rule may ask for less.
+    pub window_ms: u64,
+    /// Whether arming also tears down the flows the workload already holds. A
+    /// false here is the difference between a workload that can open nothing
+    /// new and one that is actually off the network.
+    pub tears_down_flows: bool,
+    /// How many cgroups are refused whatever a rule asks, the agent's own and
+    /// the hierarchy root among them.
     pub protected: usize,
 }
 
@@ -464,6 +490,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
     let workload_firewall =
         workload_firewall_report(adapters::ebpf::workload_firewall_attach::status());
     let process_signal = process_signal_report(adapters::ebpf::signal_attach::status());
+    let quarantine = quarantine_report(adapters::ebpf::quarantine_map_manager::status());
 
     let Some(report) = report else {
         return KernelFeaturesResponse {
@@ -477,6 +504,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
             process_tracing,
             workload_firewall,
             process_signal,
+            quarantine,
         };
     };
 
@@ -520,6 +548,18 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
         process_tracing,
         workload_firewall,
         process_signal,
+        quarantine,
+    }
+}
+
+/// Restate a quarantine status as the endpoint publishes it.
+fn quarantine_report(status: adapters::ebpf::QuarantineStatus) -> QuarantineReport {
+    QuarantineReport {
+        armed: status.armed,
+        reason: status.reason,
+        window_ms: status.window_ms,
+        tears_down_flows: status.tears_down_flows,
+        protected: status.protected,
     }
 }
 

@@ -16,6 +16,7 @@ pub mod loadbalancer;
 pub mod nat;
 pub mod process;
 pub mod qos;
+pub mod quarantine;
 pub mod ratelimit;
 pub mod scrub;
 pub mod signal;
