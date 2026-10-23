@@ -1,6 +1,6 @@
 #![allow(unsafe_code)] // Required for eBPF RingBuf event parsing (read_unaligned)
 
-use crate::ebpf::event_reader::drain_tick;
+use crate::ebpf::event_reader::{drain_tick, watch_ringbuf};
 use crate::ebpf::map_store::MapStore;
 use crate::ebpf::ringbuf_observer::{DrainTrigger, RingBufObserver};
 use aya::maps::{MapData, RingBuf};
@@ -31,7 +31,7 @@ impl DlpEventReader {
             .take_map("EVENTS")
             .ok_or_else(|| anyhow::anyhow!("map 'EVENTS' not found in uprobe-dlp eBPF object"))?;
         let ring_buf = RingBuf::try_from(map)?;
-        let async_fd = AsyncFd::with_interest(ring_buf, tokio::io::Interest::READABLE)?;
+        let async_fd = watch_ringbuf(ring_buf)?;
         info!("DLP EVENTS RingBuf reader initialized");
         Ok(Self { ring_buf: async_fd })
     }

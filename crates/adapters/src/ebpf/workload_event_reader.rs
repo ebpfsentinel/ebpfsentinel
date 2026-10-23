@@ -1,6 +1,6 @@
 #![allow(unsafe_code)] // Required for eBPF RingBuf record parsing (read_unaligned)
 
-use crate::ebpf::event_reader::drain_tick;
+use crate::ebpf::event_reader::{drain_tick, watch_ringbuf};
 use crate::ebpf::map_store::MapStore;
 use crate::ebpf::ringbuf_observer::{DrainTrigger, RingBufObserver};
 use aya::maps::{MapData, RingBuf};
@@ -39,7 +39,7 @@ impl WorkloadEventReader {
             )
         })?;
         let ring_buf = RingBuf::try_from(map)?;
-        let async_fd = AsyncFd::with_interest(ring_buf, tokio::io::Interest::READABLE)?;
+        let async_fd = watch_ringbuf(ring_buf)?;
         info!("WORKLOAD_EVENTS RingBuf reader initialized");
         Ok(Self { ring_buf: async_fd })
     }

@@ -56,10 +56,22 @@ pub(crate) fn ringbuf_from_fd(
 ) -> Result<AsyncFd<RingBuf<MapData>>, anyhow::Error> {
     let data = MapData::from_fd(fd)?;
     let ring_buf = RingBuf::try_from(aya::maps::Map::RingBuf(data))?;
-    Ok(AsyncFd::with_interest(
-        ring_buf,
-        tokio::io::Interest::READABLE,
-    )?)
+    Ok(watch_ringbuf(ring_buf)?)
+}
+
+/// Register a ring buffer with the reactor, readable only.
+///
+/// Every reader goes through here so the one obligation tokio puts on the
+/// caller is argued once: the fd being watched must stay open, and stay the
+/// same file, for as long as the reactor holds it.
+pub(crate) fn watch_ringbuf(
+    ring_buf: RingBuf<MapData>,
+) -> std::io::Result<AsyncFd<RingBuf<MapData>>> {
+    // SAFETY: the `RingBuf` owns its map fd through `MapData` and is moved into
+    // the `AsyncFd`, which deregisters before dropping it. Nothing else holds
+    // that fd, and `RingBuf` exposes no way to close or replace it, so the
+    // registered descriptor stays valid for the whole registration.
+    Ok(unsafe { AsyncFd::register_with_interest(ring_buf, tokio::io::Interest::READABLE) }?)
 }
 
 impl EventReader {
@@ -69,7 +81,7 @@ impl EventReader {
             .take_map("EVENTS")
             .ok_or_else(|| anyhow::anyhow!("map 'EVENTS' not found in eBPF object"))?;
         let ring_buf = RingBuf::try_from(map)?;
-        let async_fd = AsyncFd::with_interest(ring_buf, tokio::io::Interest::READABLE)?;
+        let async_fd = watch_ringbuf(ring_buf)?;
         info!("EVENTS RingBuf reader initialized");
         Ok(Self { ring_buf: async_fd })
     }

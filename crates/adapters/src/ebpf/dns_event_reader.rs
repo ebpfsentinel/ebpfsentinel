@@ -1,5 +1,6 @@
 #![allow(unsafe_code)] // Required for eBPF RingBuf event parsing (read_unaligned)
 
+use crate::ebpf::event_reader::watch_ringbuf;
 use crate::ebpf::map_store::MapStore;
 use crate::ebpf::ringbuf_observer::{DrainTrigger, RingBufObserver};
 use aya::maps::{MapData, RingBuf};
@@ -29,7 +30,7 @@ impl DnsEventReader {
             .take_map("DNS_EVENTS")
             .ok_or_else(|| anyhow::anyhow!("map 'DNS_EVENTS' not found in eBPF object"))?;
         let ring_buf = RingBuf::try_from(map)?;
-        let async_fd = AsyncFd::with_interest(ring_buf, tokio::io::Interest::READABLE)?;
+        let async_fd = watch_ringbuf(ring_buf)?;
         info!("DNS_EVENTS RingBuf reader initialized");
         Ok(Self { ring_buf: async_fd })
     }
