@@ -16,7 +16,11 @@
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use aya::maps::{Array, HashMap as AyaHashMap, MapData};
+use domain::common::error::DomainError;
 use ebpf_common::dlp::{DLP_SCOPE_MAX_CGROUPS, DLP_SCOPE_MODE_ALL, DLP_SCOPE_MODE_WORKLOADS};
+use ports::secondary::dlp_scope_map_port::DlpScopeMapPort;
+use tracing::info;
 
 use crate::ebpf::map_store::MapStore;
 
@@ -106,6 +110,96 @@ pub fn push_dlp_scope(ebpf: &mut dyn MapStore, scope: &ResolvedScope) -> anyhow:
     // half-written allow list that is already enforced is a workload silently
     // out of scope.
     write_mode(ebpf, DLP_SCOPE_MODE_WORKLOADS)
+}
+
+/// Holds the two scope maps of a loaded DLP object, so the scope can be
+/// rewritten for as long as the object lives.
+///
+/// [`push_dlp_scope`] writes the configured paths once, through a borrow, at
+/// load time. A selector names workloads that come and go, so something has
+/// to keep writing after the load, and a borrowed map cannot outlive the
+/// loader: the manager owns both maps instead.
+pub struct DlpScopeMapManager {
+    mode: Array<MapData, u32>,
+    allow: AyaHashMap<MapData, u64, u8>,
+    allowed: usize,
+}
+
+impl DlpScopeMapManager {
+    /// Take both scope maps out of a loaded DLP object.
+    ///
+    /// Both or neither, for the reason stated on the port: a mode without an
+    /// allow-list reads as DLP being on while every event is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either map is missing from the object, which
+    /// means the object was built without the scope maps, or when a map has
+    /// another shape than the one declared here.
+    pub fn new(ebpf: &mut dyn MapStore) -> anyhow::Result<Self> {
+        let mode = Array::try_from(
+            ebpf.take_map("DLP_SCOPE")
+                .ok_or_else(|| anyhow::anyhow!("map 'DLP_SCOPE' not found"))?,
+        )?;
+        let allow = AyaHashMap::try_from(
+            ebpf.take_map("DLP_CGROUP_ALLOW")
+                .ok_or_else(|| anyhow::anyhow!("map 'DLP_CGROUP_ALLOW' not found"))?,
+        )?;
+        info!("DLP scope tables acquired");
+        Ok(Self {
+            mode,
+            allow,
+            allowed: 0,
+        })
+    }
+}
+
+impl DlpScopeMapPort for DlpScopeMapManager {
+    fn publish_scope(&mut self, scoped: bool, cgroup_ids: &[u64]) -> Result<(), DomainError> {
+        if cgroup_ids.len() > DLP_SCOPE_MAX_CGROUPS as usize {
+            return Err(DomainError::InvalidConfig(format!(
+                "DLP scope resolved to {} cgroups, more than the {DLP_SCOPE_MAX_CGROUPS} the map holds",
+                cgroup_ids.len()
+            )));
+        }
+
+        // Collected before the first removal because the iterator borrows the
+        // map. A key that went away between the walk and the removal is not an
+        // error: it is a cgroup that ended, which is what the removal is for.
+        let present: Vec<u64> = self.allow.keys().filter_map(Result::ok).collect();
+        for key in present {
+            if cgroup_ids.contains(&key) {
+                continue;
+            }
+            // A removal is attempted for every key that left the scope and its
+            // failure is not fatal, because the entry may already be gone.
+            let _ = self.allow.remove(&key);
+        }
+        for id in cgroup_ids {
+            self.allow.insert(id, 1u8, 0).map_err(|e| {
+                DomainError::EngineError(format!("DLP_CGROUP_ALLOW write failed: {e}"))
+            })?;
+        }
+        self.allowed = cgroup_ids.len();
+
+        // The mode goes last when it opens the fence and would go first if it
+        // closed it, which it never does here: writing the list before the
+        // mode means the probes see an empty list under the previous mode,
+        // never a scoped mode over a list that is still being filled.
+        let mode = if scoped {
+            DLP_SCOPE_MODE_WORKLOADS
+        } else {
+            DLP_SCOPE_MODE_ALL
+        };
+        self.mode
+            .set(0, mode, 0)
+            .map_err(|e| DomainError::EngineError(format!("DLP_SCOPE write failed: {e}")))?;
+        Ok(())
+    }
+
+    fn allowed_cgroups(&self) -> usize {
+        self.allowed
+    }
 }
 
 fn write_mode(ebpf: &mut dyn MapStore, mode: u32) -> anyhow::Result<()> {

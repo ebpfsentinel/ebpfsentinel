@@ -2094,6 +2094,65 @@
         ]
       }
     },
+    "/api/v1/dlp/scope": {
+      "get": {
+        "tags": [
+          "DLP"
+        ],
+        "summary": "`GET /api/v1/dlp/scope` - which workloads DLP is reading.",
+        "operationId": "dlp_scope",
+        "responses": {
+          "200": {
+            "description": "Effective DLP scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DlpScopeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "DLP not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/dlp/status": {
       "get": {
         "tags": [
@@ -9616,6 +9675,163 @@
           "severity": {
             "type": "string",
             "description": "`low`, `medium`, `high` or `critical`."
+          }
+        }
+      },
+      "DlpScopeResponse": {
+        "type": "object",
+        "description": "What the probes are reading right now.\n\nThe effective scope rather than the configured one: it is built from the\nworkloads the resolvers answered for, so an operator verifies the fence\ninstead of trusting the document.",
+        "required": [
+          "mode",
+          "selectors",
+          "allowed_cgroups",
+          "enabled",
+          "in_scope",
+          "excluded",
+          "unmatched",
+          "unselected",
+          "refreshed_unix"
+        ],
+        "properties": {
+          "allowed_cgroups": {
+            "type": "integer",
+            "description": "How many cgroup ids the kernel allow-list carries.",
+            "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the probes are armed at all."
+          },
+          "excluded": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DlpScopeWorkloadResponse"
+            }
+          },
+          "in_scope": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DlpScopeWorkloadResponse"
+            }
+          },
+          "mode": {
+            "type": "string",
+            "description": "`all` when every task on the node is read, `workloads` when the\nkernel allow-list decides."
+          },
+          "refreshed_unix": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the scope was last resolved, seconds since the epoch.",
+            "minimum": 0
+          },
+          "selectors": {
+            "type": "integer",
+            "description": "How many selectors are in force.",
+            "minimum": 0
+          },
+          "unmatched": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DlpScopeUnmatchedResponse"
+            }
+          },
+          "unselected": {
+            "type": "integer",
+            "description": "Workloads seen and named by no rule, counted rather than listed:\non a busy node that list is the node.",
+            "minimum": 0
+          }
+        }
+      },
+      "DlpScopeUnmatchedResponse": {
+        "type": "object",
+        "description": "A rule that matched nothing, and why.",
+        "required": [
+          "rule",
+          "selector",
+          "action",
+          "reason"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`include` or `exclude`."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why it matched nothing, in a sentence an operator can act on."
+          },
+          "rule": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string",
+            "description": "The matchers it carries, as one line."
+          }
+        }
+      },
+      "DlpScopeWorkloadResponse": {
+        "type": "object",
+        "description": "One workload the scope decided on, as the scope route answers it.",
+        "required": [
+          "rule"
+        ],
+        "properties": {
+          "cgroup": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Absolute cgroup v2 path, where one was resolved."
+          },
+          "cgroup_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Cgroup id the kernel allow-list carries.",
+            "minimum": 0
+          },
+          "container": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exe": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pod": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rule": {
+            "type": "string",
+            "description": "The rule that decided it, by name."
+          },
+          "tenant": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tenant, where one was attributed."
+          },
+          "unit": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

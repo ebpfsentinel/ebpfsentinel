@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::dlp_scope_service::DlpScopeService;
 use crate::workload_policy_service::WorkloadPolicyService;
 
 /// The service behind the process table: one writer fed by the ring buffer,
@@ -34,6 +35,7 @@ pub struct ProcessTableService {
     containers: Option<Arc<ContainerResolverEngine>>,
     metadata_enrichers: Vec<Arc<dyn MetadataEnricher>>,
     workload: Option<Arc<WorkloadPolicyService>>,
+    dlp_scope: Option<Arc<DlpScopeService>>,
     capture_command_line: bool,
 }
 
@@ -53,6 +55,7 @@ impl ProcessTableService {
             containers: None,
             metadata_enrichers: Vec::new(),
             workload: None,
+            dlp_scope: None,
             capture_command_line,
         }
     }
@@ -96,6 +99,18 @@ impl ProcessTableService {
     #[must_use]
     pub fn with_workload_policy(mut self, service: Arc<WorkloadPolicyService>) -> Self {
         self.workload = Some(service);
+        self
+    }
+
+    /// Tell `service` which executable each task runs, so a DLP scope rule
+    /// naming an executable can be decided.
+    ///
+    /// It hangs off the same place for the same reason as the workload
+    /// policy: an exec is learned of once, and the binary behind it has been
+    /// resolved by the time this runs.
+    #[must_use]
+    pub fn with_dlp_scope(mut self, service: Arc<DlpScopeService>) -> Self {
+        self.dlp_scope = Some(service);
         self
     }
 
@@ -147,6 +162,9 @@ impl ProcessTableService {
         if let Some(workload) = &self.workload {
             workload.record_exec(&entry);
         }
+        if let Some(scope) = &self.dlp_scope {
+            scope.record_exec(&entry);
+        }
 
         let replaced = self
             .table
@@ -163,6 +181,9 @@ impl ProcessTableService {
     fn record_exit(&self, pid: u32) {
         if let Some(workload) = &self.workload {
             workload.record_exit(pid);
+        }
+        if let Some(scope) = &self.dlp_scope {
+            scope.record_exit(pid);
         }
         let purged = self
             .table

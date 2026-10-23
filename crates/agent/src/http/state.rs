@@ -141,6 +141,10 @@ pub struct AppState {
     /// resolver and the enrichers have been built, like the coverage above:
     /// a table answering before that would name no container.
     pub process_table_service: ArcSwapOption<ProcessTableService>,
+    /// Which workloads the DLP probes are reading, when the configuration
+    /// scopes DLP at all. Filled after the eBPF load, because the maps it
+    /// reports on are installed there; empty on a node reading every task.
+    pub dlp_scope_service: ArcSwapOption<application::dlp_scope_service::DlpScopeService>,
     /// The workload policy, where the cgroup hooks attached. Empty when the
     /// document carries no workload rule or the kernel refused the attach,
     /// in which case the route says so rather than answering that nothing
@@ -183,6 +187,7 @@ impl AppState {
             ddos_service: None,
             dlp_service: None,
             process_table_service: ArcSwapOption::empty(),
+            dlp_scope_service: ArcSwapOption::empty(),
             workload_policy_service: ArcSwapOption::empty(),
             learning_service: ArcSwapOption::empty(),
             nat_service: None,
@@ -348,6 +353,14 @@ impl AppState {
     /// process with.
     pub fn install_process_table_service(&self, svc: Arc<ProcessTableService>) {
         self.process_table_service.store(Some(svc));
+    }
+
+    /// Hand the DLP scope resolver over, once its maps are installed.
+    pub fn install_dlp_scope_service(
+        &self,
+        svc: Arc<application::dlp_scope_service::DlpScopeService>,
+    ) {
+        self.dlp_scope_service.store(Some(svc));
     }
 
     /// Hand the workload policy over, once it is in force in the kernel.

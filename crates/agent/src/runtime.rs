@@ -59,6 +59,9 @@ pub struct ServiceHandles {
     pub l7_svc: Arc<ArcSwap<L7AppService>>,
     pub ddos_svc: Arc<ArcSwap<application::ddos_service_impl::DdosAppService>>,
     pub dlp_svc: Arc<ArcSwap<DlpAppService>>,
+    /// Which workloads DLP reads, when the configuration scopes it. `None`
+    /// when `dlp.scope.mode` is `all`, where there is nothing to resolve.
+    pub dlp_scope_svc: Option<Arc<application::dlp_scope_service::DlpScopeService>>,
     pub conntrack_svc: Arc<RwLock<ConnTrackAppService>>,
     pub nat_svc: Arc<RwLock<NatAppService>>,
     pub lb_svc: Arc<RwLock<application::lb_service_impl::LbAppService>>,
@@ -120,6 +123,61 @@ impl ServiceHandles {
 /// # Errors
 ///
 /// Returns an error if config validation or initial rule loading fails.
+/// The resolver that turns DLP workload selectors into cgroup ids.
+///
+/// `None` when DLP is off or its scope mode is `all`: every task on the node
+/// is read, so there is nothing to resolve and nothing to keep refreshing,
+/// and the probes' own default is the policy.
+///
+/// The cgroup tree is the source here. A node that can also name a pod or a
+/// container hands the service a richer source once the container resolver
+/// and the metadata enrichers have been decided, which happens later in
+/// startup than this.
+///
+/// # Errors
+///
+/// Returns an error when a selector is malformed, which is the same refusal
+/// configuration validation already raised.
+pub fn build_dlp_scope_service(
+    config: &AgentConfig,
+) -> anyhow::Result<Option<Arc<application::dlp_scope_service::DlpScopeService>>> {
+    use application::dlp_scope_service::{ConfiguredCgroup, DlpScopeService};
+    use domain::dlp::scope::DlpScopeMode;
+
+    if !config.dlp.enabled || !config.dlp.scope.is_workload_scoped() {
+        return Ok(None);
+    }
+
+    let policy = config.dlp.scope.to_policy()?;
+    let cgroup_root = std::path::Path::new(&config.container.resolver.cgroup_root);
+    let resolved = adapters::ebpf::resolve_cgroup_scope(cgroup_root, &config.dlp.scope.cgroups);
+    for missing in &resolved.missing {
+        warn!(
+            path = %missing.display(),
+            "DLP scope names a cgroup that does not exist on this node; its tasks are not read"
+        );
+    }
+    let configured: Vec<ConfiguredCgroup> = resolved
+        .cgroups
+        .iter()
+        .map(|cgroup| ConfiguredCgroup {
+            path: cgroup.path.display().to_string(),
+            id: cgroup.id,
+        })
+        .collect();
+
+    let scanner = adapters::container::CgroupWorkloadScanner::new(cgroup_root);
+    let service = DlpScopeService::new(DlpScopeMode::Workloads, policy, configured)
+        .with_source(Arc::new(scanner));
+    info!(
+        cgroups = resolved.cgroups.len(),
+        selectors = config.dlp.scope.selectors.len(),
+        cgroup_root = %cgroup_root.display(),
+        "DLP scope resolver initialized"
+    );
+    Ok(Some(Arc::new(service)))
+}
+
 #[allow(clippy::too_many_lines, clippy::similar_names)]
 pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     // ── Metrics ──────────────────────────────────────────────────
@@ -257,6 +315,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     dlp_svc.set_mode(config.dlp_mode()?)?;
     dlp_svc.set_enabled(config.dlp.enabled);
     let dlp_svc = Arc::new(ArcSwap::from_pointee(dlp_svc));
+    let dlp_scope_svc = build_dlp_scope_service(config)?;
 
     // ── ConnTrack ────────────────────────────────────────────────
     let ct_settings = config.conntrack_settings();
@@ -470,6 +529,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         l7_svc,
         ddos_svc,
         dlp_svc,
+        dlp_scope_svc,
         conntrack_svc,
         nat_svc,
         lb_svc,
@@ -941,7 +1001,12 @@ pub async fn load_ebpf_programs(
 
     // ── Uprobe DLP ──────────────────────────────────────────────
     let dlp_ok = if config.dlp.enabled {
-        match startup::try_load_uprobe_dlp(&ebpf_dir, config, startup::DLP_PIN_PATH) {
+        match startup::try_load_uprobe_dlp(
+            &ebpf_dir,
+            config,
+            startup::DLP_PIN_PATH,
+            services.dlp_scope_svc.as_ref(),
+        ) {
             Ok((mut loader, dlp_rdr, reader, attacher, extended)) => {
                 extended_tls_attacher = Some(extended);
                 let event_tx_clone = event_tx.clone();
@@ -963,6 +1028,16 @@ pub async fn load_ebpf_programs(
                 });
                 if let Some(rdr) = dlp_rdr {
                     metrics_readers.push(rdr);
+                }
+                // The maps are installed, so the selectors can start widening
+                // the scope from the configured cgroups to the workloads they
+                // name. Shares the readers' cancel, so an unload stops it.
+                if let Some(scope) = services.dlp_scope_svc.clone() {
+                    let scope_cancel = readers.clone();
+                    let refresh = std::time::Duration::from_secs(config.dlp.scope.refresh_seconds);
+                    tokio::spawn(async move {
+                        scope.watch(refresh, scope_cancel).await;
+                    });
                 }
                 tenant_vlan_mgr.add_map(loader.ebpf_mut());
                 tenant_ifindex_mgr.add_map(loader.ebpf_mut());

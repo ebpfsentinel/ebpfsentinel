@@ -78,7 +78,9 @@ pub use dlp_attach::{
     clear_uprobe_inventory, push_ktls_iter_offsets, push_sock_offsets,
 };
 pub use dlp_event_reader::DlpEventReader;
-pub use dlp_scope::{ResolvedScope, ScopedCgroup, push_dlp_scope, resolve_cgroup_scope};
+pub use dlp_scope::{
+    DlpScopeMapManager, ResolvedScope, ScopedCgroup, push_dlp_scope, resolve_cgroup_scope,
+};
 pub use dns_event_reader::DnsEventReader;
 pub use ebpf_map_write_adapter::EbpfMapWriteAdapter;
 pub use event_reader::EventReader;

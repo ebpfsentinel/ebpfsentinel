@@ -633,6 +633,7 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
             match args.command {
                 DlpCommand::Status => commands::cmd_dlp_status(&client, output).await,
                 DlpCommand::Patterns => commands::cmd_dlp_patterns(&client, output).await,
+                DlpCommand::Scope => commands::cmd_dlp_scope(&client, output).await,
             }
         }
 

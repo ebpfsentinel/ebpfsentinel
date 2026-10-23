@@ -2,6 +2,7 @@
 
 use domain::common::entity::RuleId;
 use domain::dlp::entity::DlpPattern;
+use domain::dlp::scope::{DlpScopePolicy, DlpScopeSelector};
 use serde::{Deserialize, Serialize};
 
 use super::common::{
@@ -42,7 +43,14 @@ impl Default for DlpConfig {
 /// plaintext, so the scope is a deliberate choice rather than a default.
 ///
 /// * `all` - every task on the node, which is what a host agent does.
-/// * `workloads` - only tasks under one of `cgroups`, enforced in the probe.
+/// * `workloads` - only tasks under one of `cgroups`, or matched by one of
+///   `selectors`, enforced in the probe.
+///
+/// `mode` is also the answer for a workload no selector names, and it is
+/// written down rather than inferred: a selector list is refused under `all`,
+/// so a document that aims the fence has had to say that everything else is
+/// outside it. An empty selector list leaves that same `mode` in charge, with
+/// the configured `cgroups` as the whole of the scope.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DlpScopeConfig {
     #[serde(default = "default_scope_mode")]
@@ -53,6 +61,27 @@ pub struct DlpScopeConfig {
     /// slice covers its containers without listing ids that change on restart.
     #[serde(default)]
     pub cgroups: Vec<String>,
+
+    /// Workload selectors, in the vocabulary the rest of the agent names a
+    /// workload by: a tenant, a namespace, a pod, a container, a cgroup, a
+    /// systemd unit or an executable, any combination of them narrowing
+    /// together. Each is resolved against the workloads actually running and
+    /// compiled into the same cgroup allow-list the probes read, so a pod
+    /// that restarts under a new id stays in scope without the document
+    /// changing.
+    ///
+    /// A selector carrying `action: exclude` takes a workload out whatever
+    /// else matched it, which is how one tenant inside a selected namespace
+    /// is kept unread.
+    #[serde(default)]
+    pub selectors: Vec<DlpScopeSelector>,
+
+    /// How often the selectors are resolved against the workloads running,
+    /// in seconds. A pod that starts between two passes is read from the
+    /// pass that sees it and not before, so this is the width of the window
+    /// in which a newly selected workload is not yet inspected.
+    #[serde(default = "default_scope_refresh_seconds")]
+    pub refresh_seconds: u64,
 }
 
 impl Default for DlpScopeConfig {
@@ -60,6 +89,8 @@ impl Default for DlpScopeConfig {
         Self {
             mode: default_scope_mode(),
             cgroups: Vec::new(),
+            selectors: Vec::new(),
+            refresh_seconds: default_scope_refresh_seconds(),
         }
     }
 }
@@ -67,6 +98,13 @@ impl Default for DlpScopeConfig {
 fn default_scope_mode() -> String {
     DLP_SCOPE_ALL.to_string()
 }
+
+fn default_scope_refresh_seconds() -> u64 {
+    15
+}
+
+/// The slowest refresh the scope accepts, an hour.
+const DLP_SCOPE_REFRESH_MAX_SECONDS: u64 = 3_600;
 
 /// Scope mode reading every task on the node.
 pub const DLP_SCOPE_ALL: &str = "all";
@@ -80,15 +118,41 @@ impl DlpScopeConfig {
         self.mode == DLP_SCOPE_WORKLOADS
     }
 
+    /// The selectors as the policy the resolver evaluates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the offending selector, with the same
+    /// refusals [`Self::validate`] documents.
+    pub fn to_policy(&self) -> Result<DlpScopePolicy, ConfigError> {
+        DlpScopePolicy::from_selectors(self.selectors.clone()).map_err(|err| {
+            ConfigError::Validation {
+                field: "dlp.scope.selectors".to_string(),
+                message: err.to_string(),
+            }
+        })
+    }
+
     /// Validate the scope block.
     ///
     /// # Errors
     ///
-    /// Returns an error for an unknown mode, for `workloads` with no cgroup
-    /// listed - which would arm the probes and discard every event, reading as
-    /// DLP being on while nothing is inspected - or for a path that is empty or
-    /// escapes the cgroup root.
+    /// Returns an error for a refresh interval of zero or longer than an
+    /// hour, for an unknown mode, for `workloads` with neither a
+    /// cgroup nor a selector - which would arm the probes and discard every
+    /// event, reading as DLP being on while nothing is inspected - for a
+    /// cgroup path that is empty or escapes the cgroup root, for a selector
+    /// listed under mode `all`, which ignores it, and for a selector that
+    /// names nothing or names it badly.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.refresh_seconds == 0 || self.refresh_seconds > DLP_SCOPE_REFRESH_MAX_SECONDS {
+            return Err(ConfigError::InvalidValue {
+                field: "dlp.scope.refresh_seconds".to_string(),
+                value: self.refresh_seconds.to_string(),
+                expected: format!("1..={DLP_SCOPE_REFRESH_MAX_SECONDS}"),
+            });
+        }
+
         if self.mode != DLP_SCOPE_ALL && self.mode != DLP_SCOPE_WORKLOADS {
             return Err(ConfigError::InvalidValue {
                 field: "dlp.scope.mode".to_string(),
@@ -107,18 +171,30 @@ impl DlpScopeConfig {
                     ),
                 });
             }
+            if !self.selectors.is_empty() {
+                return Err(ConfigError::Validation {
+                    field: "dlp.scope.selectors".to_string(),
+                    message: format!(
+                        "selectors are listed but mode is '{DLP_SCOPE_ALL}', which reads every \
+                         task on the node and ignores them; set mode to \
+                         '{DLP_SCOPE_WORKLOADS}' to say that everything else is out of scope"
+                    ),
+                });
+            }
             return Ok(());
         }
 
-        if self.cgroups.is_empty() {
+        if self.cgroups.is_empty() && self.selectors.is_empty() {
             return Err(ConfigError::Validation {
                 field: "dlp.scope.cgroups".to_string(),
                 message: format!(
-                    "mode '{DLP_SCOPE_WORKLOADS}' needs at least one cgroup path; an empty \
-                     list arms the probes and drops every event"
+                    "mode '{DLP_SCOPE_WORKLOADS}' needs at least one cgroup path or one \
+                     selector; an empty scope arms the probes and drops every event"
                 ),
             });
         }
+
+        self.to_policy()?;
 
         for (idx, path) in self.cgroups.iter().enumerate() {
             let field = format!("dlp.scope.cgroups[{idx}]");
@@ -268,6 +344,8 @@ mod tests {
         let scope = DlpScopeConfig {
             mode: "pods".to_string(),
             cgroups: Vec::new(),
+            selectors: Vec::new(),
+            ..DlpScopeConfig::default()
         };
         assert!(scope.validate().is_err());
     }
@@ -277,6 +355,8 @@ mod tests {
         let scope = DlpScopeConfig {
             mode: DLP_SCOPE_WORKLOADS.to_string(),
             cgroups: Vec::new(),
+            selectors: Vec::new(),
+            ..DlpScopeConfig::default()
         };
         assert!(scope.validate().is_err());
     }
@@ -286,6 +366,8 @@ mod tests {
         let scope = DlpScopeConfig {
             mode: DLP_SCOPE_ALL.to_string(),
             cgroups: vec!["/kubepods.slice".to_string()],
+            selectors: Vec::new(),
+            ..DlpScopeConfig::default()
         };
         assert!(scope.validate().is_err());
     }
@@ -295,6 +377,8 @@ mod tests {
         let scope = DlpScopeConfig {
             mode: DLP_SCOPE_WORKLOADS.to_string(),
             cgroups: vec!["../../etc".to_string()],
+            selectors: Vec::new(),
+            ..DlpScopeConfig::default()
         };
         assert!(scope.validate().is_err());
     }
@@ -307,9 +391,72 @@ mod tests {
                 "kubepods.slice/kubepods-besteffort.slice".to_string(),
                 "/system.slice/docker-abc.scope".to_string(),
             ],
+            selectors: Vec::new(),
+            ..DlpScopeConfig::default()
         };
         assert!(scope.validate().is_ok());
         assert!(scope.is_workload_scoped());
+    }
+
+    #[test]
+    fn scope_workloads_with_a_selector_and_no_cgroup_is_valid() {
+        let scope = DlpScopeConfig {
+            mode: DLP_SCOPE_WORKLOADS.to_string(),
+            cgroups: Vec::new(),
+            selectors: vec![DlpScopeSelector {
+                name: Some("payments".to_string()),
+                namespace: Some("payments".to_string()),
+                ..DlpScopeSelector::default()
+            }],
+            ..DlpScopeConfig::default()
+        };
+        assert!(scope.validate().is_ok());
+        assert_eq!(scope.to_policy().expect("a valid policy").len(), 1);
+    }
+
+    #[test]
+    fn scope_all_with_selectors_listed_is_refused() {
+        let scope = DlpScopeConfig {
+            mode: DLP_SCOPE_ALL.to_string(),
+            cgroups: Vec::new(),
+            selectors: vec![DlpScopeSelector {
+                namespace: Some("payments".to_string()),
+                ..DlpScopeSelector::default()
+            }],
+            ..DlpScopeConfig::default()
+        };
+        let err = scope
+            .validate()
+            .expect_err("mode all reads the node and ignores a selector");
+        assert!(err.to_string().contains("selectors"));
+    }
+
+    #[test]
+    fn scope_refuses_a_selector_naming_nothing() {
+        let scope = DlpScopeConfig {
+            mode: DLP_SCOPE_WORKLOADS.to_string(),
+            cgroups: Vec::new(),
+            selectors: vec![DlpScopeSelector::default()],
+            ..DlpScopeConfig::default()
+        };
+        assert!(scope.validate().is_err());
+    }
+
+    #[test]
+    fn a_selector_reads_from_yaml_in_the_workload_vocabulary() {
+        let yaml = r"
+mode: workloads
+selectors:
+  - name: payments
+    namespace: payments
+  - action: exclude
+    pod: vault-0
+";
+        let scope: DlpScopeConfig = serde_norway::from_str(yaml).expect("a readable scope");
+        assert!(scope.validate().is_ok());
+        let policy = scope.to_policy().expect("a valid policy");
+        assert_eq!(policy.len(), 2);
+        assert_eq!(policy.selectors()[1].action.as_str(), "exclude");
     }
 
     #[test]

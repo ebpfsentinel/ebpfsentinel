@@ -4169,6 +4169,73 @@ pub async fn cmd_dlp_patterns(client: &ApiClient, output: OutputFormat) -> Resul
     Ok(())
 }
 
+pub async fn cmd_dlp_scope(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let scope = client.dlp_scope().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&scope)?);
+        return Ok(());
+    }
+
+    println!("DLP scope");
+    println!("  Probes armed:    {}", yes_no(scope.enabled));
+    println!("  Mode:            {}", scope.mode);
+    println!("  Selectors:       {}", scope.selectors);
+    println!("  Allowed cgroups: {}", scope.allowed_cgroups);
+    if scope.mode == "all" {
+        println!("\nEvery task this agent has a probe on is read.");
+        return Ok(());
+    }
+
+    if scope.in_scope.is_empty() {
+        println!("\nNo workload is in scope, so no plaintext is read.");
+    } else {
+        println!("\nIn scope ({}):", scope.in_scope.len());
+        let mut table = Table::new(&[
+            ("WORKLOAD", Align::Left),
+            ("CGROUP", Align::Left),
+            ("RULE", Align::Left),
+        ]);
+        for workload in &scope.in_scope {
+            table.row(cells![
+                workload.label(),
+                workload.cgroup.as_deref().unwrap_or("-"),
+                workload.rule
+            ]);
+        }
+        table.print();
+    }
+
+    if !scope.excluded.is_empty() {
+        println!("\nExcluded ({}):", scope.excluded.len());
+        let mut table = Table::new(&[("WORKLOAD", Align::Left), ("BY RULE", Align::Left)]);
+        for workload in &scope.excluded {
+            table.row(cells![workload.label(), workload.rule]);
+        }
+        table.print();
+    }
+
+    // The point of the route: a rule that reads nothing is a fence nobody
+    // aimed, and on a typo in a pod name that is DLP silently off.
+    if scope.unmatched.is_empty() {
+        println!("\nEvery rule matched at least one workload.");
+    } else {
+        println!("\nRules matching nothing ({}):", scope.unmatched.len());
+        for finding in &scope.unmatched {
+            println!(
+                "  {} ({}, {}): {}",
+                finding.rule, finding.action, finding.selector, finding.reason
+            );
+        }
+    }
+
+    println!(
+        "\n{} workload(s) seen and named by no rule. Resolved at epoch {}.",
+        scope.unselected, scope.refreshed_unix
+    );
+    Ok(())
+}
+
 // ── TLS ─────────────────────────────────────────────────────────────────
 
 pub async fn cmd_tls_status(client: &ApiClient, output: OutputFormat) -> Result<()> {

@@ -489,6 +489,9 @@ pub async fn run(
     dlp_svc.set_mode(config.dlp_mode()?)?;
     dlp_svc.set_enabled(config.dlp.enabled);
     let dlp_svc = Arc::new(ArcSwap::from_pointee(dlp_svc));
+    // Before the eBPF load, because the load is what installs the maps it
+    // writes: a probe armed before the scope exists reads the whole node.
+    let dlp_scope_svc = crate::runtime::build_dlp_scope_service(&config)?;
     info!(
         pattern_count = dlp_pattern_count,
         enabled = config.dlp.enabled,
@@ -2444,7 +2447,7 @@ pub async fn run(
 
         // 10f. Uprobe DLP
         dlp_ok = if config.dlp.enabled {
-            match try_load_uprobe_dlp(&ebpf_dir, &config, DLP_PIN_PATH) {
+            match try_load_uprobe_dlp(&ebpf_dir, &config, DLP_PIN_PATH, dlp_scope_svc.as_ref()) {
                 // No extended-TLS consumer on this path; see the hot-reload
                 // path for why dropping an attacher that never attached is safe.
                 Ok((loader, dlp_rdr, reader, attacher, _extended)) => {
@@ -3110,6 +3113,7 @@ pub async fn run(
                 l7_svc: Arc::clone(&l7_svc),
                 ddos_svc: Arc::clone(&ddos_svc),
                 dlp_svc: Arc::clone(&dlp_svc),
+                dlp_scope_svc: dlp_scope_svc.clone(),
                 conntrack_svc: Arc::clone(&conntrack_svc),
                 nat_svc: Arc::clone(&nat_svc),
                 lb_svc: Arc::clone(&lb_svc),
@@ -3372,6 +3376,14 @@ pub async fn run(
         if let Some(ref workload) = workload_policy_service {
             svc = svc.with_workload_policy(Arc::clone(workload));
         }
+        // Only when a rule names an executable: an exec event carries the
+        // binary and nothing else the scope needs, so a scope with no such
+        // rule has no reason to hear about every exec on the node.
+        if let Some(ref scope) = dlp_scope_svc
+            && scope.needs_executables()
+        {
+            svc = svc.with_dlp_scope(Arc::clone(scope));
+        }
         let svc = Arc::new(svc);
         // And the other way for a reload: a new policy renumbers the bits,
         // so it is replayed over the tasks already running rather than
@@ -3397,6 +3409,34 @@ pub async fn run(
         // Nothing writes into the channel when the table is off, and the
         // receiver going out of scope here is what makes that explicit.
         drop(process_rx);
+    }
+
+    // ── 10f-quater. The DLP scope refresh ───────────────────────────
+    //
+    // Here rather than beside the load, because a selector naming a pod or a
+    // container is only decidable once the resolver and the enrichers that
+    // answer those questions exist, and they have only just been decided.
+    // Until this runs the probes read the configured cgroups alone.
+    if let Some(ref scope) = dlp_scope_svc {
+        let mut scanner =
+            adapters::container::CgroupWorkloadScanner::new(&config.container.resolver.cgroup_root);
+        if let Some(ref enricher) = docker_enricher {
+            scanner = scanner.with_enricher(Arc::clone(enricher));
+        }
+        if let Some(ref enricher) = kubernetes_enricher {
+            scanner = scanner.with_enricher(Arc::clone(enricher));
+        }
+        scope.set_source(Arc::new(scanner));
+        // The route reports what the resolver decided, so it is handed over
+        // here and not at the load: before the source exists the answer would
+        // be the configured cgroups presented as the whole scope.
+        app_state.install_dlp_scope_service(Arc::clone(scope));
+        let scope_cancel = cancel_token.clone();
+        let refresh = Duration::from_secs(config.dlp.scope.refresh_seconds);
+        let scope_task = Arc::clone(scope);
+        tokio::spawn(async move {
+            scope_task.watch(refresh, scope_cancel).await;
+        });
     }
 
     // ── 10f-ter. Learning mode ──────────────────────────────────────
@@ -5397,6 +5437,7 @@ pub fn try_load_uprobe_dlp(
     ebpf_dir: &str,
     config: &AgentConfig,
     pin_path: &str,
+    scope: Option<&Arc<application::dlp_scope_service::DlpScopeService>>,
 ) -> anyhow::Result<(
     EbpfLoader,
     Option<MetricsReader>,
@@ -5411,7 +5452,7 @@ pub fn try_load_uprobe_dlp(
     // and scoped afterwards reads every container on the node for the width of
     // that window, which on a shared node is a neighbour's plaintext in this
     // agent's ring buffer.
-    push_dlp_cgroup_scope(&mut loader, config)?;
+    push_dlp_cgroup_scope(&mut loader, config, scope)?;
 
     // Discover SSL libraries through the host proc root (`/host/proc` when the
     // host proc is bind-mounted into the agent), so the DLP uprobe sees
@@ -5530,8 +5571,25 @@ pub fn try_load_uprobe_dlp(
 /// cgroup root to its id and refuses to arm the probes when none of them exists
 /// on this node, since an allow list that matches nothing captures nothing
 /// while every counter says DLP is loaded.
-fn push_dlp_cgroup_scope(loader: &mut EbpfLoader, config: &AgentConfig) -> anyhow::Result<()> {
+fn push_dlp_cgroup_scope(
+    loader: &mut EbpfLoader,
+    config: &AgentConfig,
+    service: Option<&Arc<application::dlp_scope_service::DlpScopeService>>,
+) -> anyhow::Result<()> {
     if !config.dlp.scope.is_workload_scoped() {
+        return Ok(());
+    }
+
+    // With a resolver, the maps become its own: it writes the configured
+    // cgroups now and widens to the workloads the selectors name on its first
+    // refresh. Narrowest first, because the window between the two is a
+    // window in which the probes are armed.
+    if let Some(service) = service {
+        let maps = adapters::ebpf::DlpScopeMapManager::new(loader.ebpf_mut())?;
+        service.install_maps(Box::new(maps))?;
+        info!(
+            "DLP plaintext capture scoped to the configured cgroups, pending selector resolution"
+        );
         return Ok(());
     }
 

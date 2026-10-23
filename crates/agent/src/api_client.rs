@@ -1292,6 +1292,78 @@ pub struct DlpPatternResponse {
     pub enabled: bool,
 }
 
+/// One workload the scope decided on.
+#[derive(Deserialize, Serialize)]
+pub struct DlpScopeWorkloadResponse {
+    #[serde(default)]
+    pub cgroup: Option<String>,
+    #[serde(default)]
+    pub cgroup_id: Option<u64>,
+    #[serde(default)]
+    pub tenant: Option<String>,
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default)]
+    pub pod: Option<String>,
+    #[serde(default)]
+    pub container: Option<String>,
+    #[serde(default)]
+    pub unit: Option<String>,
+    #[serde(default)]
+    pub exe: Option<String>,
+    pub rule: String,
+}
+
+impl DlpScopeWorkloadResponse {
+    /// The workload as one line, in the vocabulary that resolved it: the pod
+    /// where the node reads pods, the unit where it reads units, the cgroup
+    /// where it reads neither.
+    #[must_use]
+    pub fn label(&self) -> String {
+        if let (Some(namespace), Some(pod)) = (&self.namespace, &self.pod) {
+            return format!("{namespace}/{pod}");
+        }
+        [
+            &self.pod,
+            &self.container,
+            &self.unit,
+            &self.exe,
+            &self.cgroup,
+        ]
+        .into_iter()
+        .flatten()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string())
+    }
+}
+
+/// A rule that matched nothing, and why.
+#[derive(Deserialize, Serialize)]
+pub struct DlpScopeUnmatchedResponse {
+    pub rule: String,
+    pub selector: String,
+    pub action: String,
+    pub reason: String,
+}
+
+/// What the probes are reading right now.
+#[derive(Deserialize, Serialize)]
+pub struct DlpScopeResponse {
+    pub mode: String,
+    pub selectors: usize,
+    pub allowed_cgroups: usize,
+    pub enabled: bool,
+    #[serde(default)]
+    pub in_scope: Vec<DlpScopeWorkloadResponse>,
+    #[serde(default)]
+    pub excluded: Vec<DlpScopeWorkloadResponse>,
+    #[serde(default)]
+    pub unmatched: Vec<DlpScopeUnmatchedResponse>,
+    pub unselected: usize,
+    pub refreshed_unix: u64,
+}
+
 // ── TLS ──────────────────────────────────────
 
 #[derive(Deserialize, Serialize)]
@@ -2802,6 +2874,15 @@ impl ApiClient {
     pub async fn list_dlp_patterns(&self) -> anyhow::Result<Vec<DlpPatternResponse>> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/dlp/patterns")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn dlp_scope(&self) -> anyhow::Result<DlpScopeResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/dlp/scope")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

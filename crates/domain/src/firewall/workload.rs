@@ -881,7 +881,8 @@ fn trimmed(value: Option<String>) -> Option<String> {
 /// that is nothing but hex digits is read as an id and held to the prefix
 /// length. A name that happens to be hex is a name somebody will regret
 /// either way.
-fn is_id_like(value: &str) -> bool {
+#[must_use]
+pub fn is_id_like(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -891,7 +892,8 @@ fn is_id_like(value: &str) -> bool {
 /// a cgroup path relative to the v2 root and an operator writes the one they
 /// see under `/sys/fs/cgroup`. Comparing those two literally is the mistake
 /// that makes every cgroup rule silently match nothing.
-fn cgroup_contains(selector: &str, path: &str) -> bool {
+#[must_use]
+pub fn cgroup_contains(selector: &str, path: &str) -> bool {
     let selector = strip_mount(selector);
     let path = strip_mount(path);
     if selector == "/" {

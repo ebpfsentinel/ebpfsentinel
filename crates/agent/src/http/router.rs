@@ -76,7 +76,7 @@ use super::ddos_handler::{
     create_ddos_policy, ddos_attacks, ddos_history, ddos_status, delete_ddos_policy,
     list_ddos_policies,
 };
-use super::dlp_handler::{dlp_status, list_dlp_patterns};
+use super::dlp_handler::{dlp_scope, dlp_status, list_dlp_patterns};
 use super::dns_handler::{
     dns_stats, dns_status, flush_dns_cache, list_dns_blocklist, list_dns_cache,
 };
@@ -302,6 +302,7 @@ pub fn build_router(
             .route("/api/v1/flows/export", get(flow_export_status))
             .route("/api/v1/dlp/status", get(dlp_status))
             .route("/api/v1/dlp/patterns", get(list_dlp_patterns))
+            .route("/api/v1/dlp/scope", get(dlp_scope))
             .route("/api/v1/nat/status", get(nat_status))
             .route("/api/v1/nat/rules", get(list_nat_rules))
             .route("/api/v1/nat/nptv6", get(list_nptv6_rules))

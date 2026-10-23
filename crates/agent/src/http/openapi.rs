@@ -143,6 +143,7 @@ use super::zone_handler;
         // DLP
         dlp_handler::dlp_status,
         dlp_handler::list_dlp_patterns,
+        dlp_handler::dlp_scope,
         // NAT
         nat_handler::nat_status,
         nat_handler::list_nat_rules,
@@ -304,6 +305,9 @@ use super::zone_handler;
         conntrack_handler::ConnectionResponse,
         // DLP
         dlp_handler::DlpStatusResponse,
+        dlp_handler::DlpScopeResponse,
+        dlp_handler::DlpScopeWorkloadResponse,
+        dlp_handler::DlpScopeUnmatchedResponse,
         dlp_handler::DlpPatternResponse,
         // NAT
         nat_handler::NatStatusResponse,

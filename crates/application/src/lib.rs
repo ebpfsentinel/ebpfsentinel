@@ -61,6 +61,7 @@ pub mod audit_service_impl;
 pub mod config_reload;
 pub mod conntrack_service_impl;
 pub mod ddos_service_impl;
+pub mod dlp_scope_service;
 pub mod dlp_service_impl;
 pub mod dns_blocklist_service_impl;
 pub mod dns_cache_service_impl;

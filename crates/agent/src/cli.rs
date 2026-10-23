@@ -1009,6 +1009,8 @@ pub enum DlpCommand {
     Status,
     /// List DLP patterns
     Patterns,
+    /// Show which workloads DLP is reading, and which it is not
+    Scope,
 }
 
 // ── TLS ─────────────────────────────────────────────────────────────────
