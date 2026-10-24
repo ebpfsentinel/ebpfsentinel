@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use domain::common::entity::RuleId;
 use domain::firewall::entity::{FirewallAction, FirewallRule, PortRange, Scope as DomainScope};
+use domain::firewall::fqdn::{DEFAULT_GRACE_SECS, FqdnPattern, WorkloadDnsSettings};
 use domain::firewall::workload::{WorkloadMatch, WorkloadMode, WorkloadSelector};
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +44,70 @@ pub struct FirewallConfig {
     /// Schedules for time-based rule activation.
     #[serde(default)]
     pub schedules: HashMap<String, ScheduleConfig>,
+
+    /// The resolvers whose answers open the destinations workload rules
+    /// name by DNS name.
+    #[serde(default)]
+    pub workload_dns: WorkloadDnsConfig,
+}
+
+// ── Workload DNS config ────────────────────────────────────────────
+
+/// Who an answer is believed from when a workload rule names a destination by
+/// DNS name, and how long past its TTL the address stays open.
+///
+/// Strict for the same reason the workload block is: a misspelled
+/// `resolvers` is a policy whose every name stays closed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkloadDnsConfig {
+    /// Resolver addresses or networks, such as the cluster DNS Service.
+    #[serde(default)]
+    pub resolvers: Vec<String>,
+
+    /// Seconds an address stays open past its record's TTL, at most 300.
+    #[serde(default = "default_workload_dns_grace")]
+    pub grace_secs: u32,
+}
+
+impl Default for WorkloadDnsConfig {
+    fn default() -> Self {
+        Self {
+            resolvers: Vec::new(),
+            grace_secs: DEFAULT_GRACE_SECS,
+        }
+    }
+}
+
+fn default_workload_dns_grace() -> u32 {
+    DEFAULT_GRACE_SECS
+}
+
+impl WorkloadDnsConfig {
+    /// Read the block into the domain's settings.
+    pub fn to_domain(&self) -> Result<WorkloadDnsSettings, ConfigError> {
+        let resolvers = self
+            .resolvers
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| {
+                parse_cidr(value).map_err(|_| ConfigError::InvalidValue {
+                    field: format!("firewall.workload_dns.resolvers[{idx}]"),
+                    value: value.clone(),
+                    expected: "an IP address or a CIDR".to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let settings = WorkloadDnsSettings {
+            resolvers,
+            grace_secs: self.grace_secs,
+        };
+        settings.validate().map_err(|e| ConfigError::Validation {
+            field: "firewall.workload_dns".to_string(),
+            message: e.to_string(),
+        })?;
+        Ok(settings)
+    }
 }
 
 impl FirewallConfig {
@@ -74,6 +139,7 @@ impl Default for FirewallConfig {
             anti_lockout: AntiLockoutConfig::default(),
             scrub: ScrubConfig::default(),
             schedules: HashMap::new(),
+            workload_dns: WorkloadDnsConfig::default(),
         }
     }
 }
@@ -321,6 +387,12 @@ pub struct WorkloadMatchConfig {
     /// should walk into.
     #[serde(default = "default_workload_mode")]
     pub mode: String,
+
+    /// Destinations named by DNS name, in place of `dst_ip`: an exact name or
+    /// `*.domain` for one label under it. The addresses are learned from the
+    /// answers this workload is given by `firewall.workload_dns.resolvers`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fqdn: Vec<String>,
 }
 
 fn default_workload_mode() -> String {
@@ -350,7 +422,23 @@ impl WorkloadMatchConfig {
             message: e.to_string(),
         })?;
 
-        Ok(WorkloadMatch { selector, mode })
+        let fqdn = self
+            .fqdn
+            .iter()
+            .enumerate()
+            .map(|(idx, raw)| {
+                FqdnPattern::parse(raw).map_err(|e| ConfigError::Validation {
+                    field: format!("{prefix}.workload.fqdn[{idx}]"),
+                    message: e.to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(WorkloadMatch {
+            selector,
+            mode,
+            fqdn,
+        })
     }
 }
 

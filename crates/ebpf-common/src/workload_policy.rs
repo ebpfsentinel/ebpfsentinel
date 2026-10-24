@@ -114,8 +114,14 @@ pub const WORKLOAD_METRIC_NO_RULE: u32 = 7;
 /// a gap, because the per-rule counters are exact and a reader comparing them
 /// against the alerts needs the difference to have a name.
 pub const WORKLOAD_METRIC_EVENT_LOST: u32 = 8;
+/// Metric index: DNS packets of a workload the capture ring had no room for.
+///
+/// A lost response is an address that was not learned, so the connection
+/// that follows is refused as if the name had never resolved. Counting it is
+/// what tells that apart from a resolver answering nothing.
+pub const WORKLOAD_METRIC_DNS_LOST: u32 = 9;
 /// How many counters the metrics array holds.
-pub const WORKLOAD_METRIC_COUNT: u32 = 9;
+pub const WORKLOAD_METRIC_COUNT: u32 = 10;
 
 /// `hook` on a denial record: the workload was connecting.
 pub const WORKLOAD_HOOK_CONNECT: u8 = 0;
@@ -134,6 +140,39 @@ pub const WORKLOAD_HOOK_BIND: u8 = 2;
 /// them. Past that the records are dropped and counted, never queued in the
 /// kernel at the cost of the syscall.
 pub const WORKLOAD_EVENTS_RINGBUF_BYTES: u32 = 16 * 4_096;
+
+/// Capacity of `WORKLOAD_FQDN_ALLOWED`, the addresses learned from DNS.
+///
+/// One entry per pod, address and rule, so a busy namespace resolving a
+/// content network's names fills it faster than the rule count suggests.
+/// A plain hash map rather than an LRU: an eviction would be a connection
+/// refused for a name that resolved a second ago. Userspace sweeps what has
+/// lapsed, and a grant that finds the map full is refused and counted.
+pub const WORKLOAD_FQDN_MAX_ALLOWED: u32 = 16_384;
+
+/// Size of `WORKLOAD_DNS_EVENTS`, the ring DNS packets of a named workload
+/// travel up in.
+///
+/// Only workloads in a cgroup the policy names are captured, and only while a
+/// rule names a destination by name, so this carries a few hundred queries and
+/// answers in flight rather than a node's whole resolver traffic.
+pub const WORKLOAD_DNS_RINGBUF_BYTES: u32 = 64 * 4_096;
+
+/// Bytes of a DNS message the capture copies, past which the answer is cut.
+///
+/// Five hundred and twelve is the classic UDP DNS ceiling; a longer answer is
+/// truncated, its addresses past the cut are not learned, and a connection to
+/// one of them is refused rather than allowed on a partial reading.
+pub const WORKLOAD_DNS_MAX_PAYLOAD: usize = 512;
+
+/// `direction` on a DNS record: a query leaving the workload.
+pub const WORKLOAD_DNS_QUERY: u8 = 0;
+/// `direction` on a DNS record: an answer arriving at the workload.
+pub const WORKLOAD_DNS_RESPONSE: u8 = 1;
+
+/// `fqdn` on a rule: the destination is the set of addresses learned for
+/// this rule from DNS, per cgroup, rather than `dst_addr`.
+pub const WORKLOAD_RULE_FQDN: u8 = 1;
 
 /// One workload rule, in the form the kernel walks.
 ///
@@ -173,7 +212,9 @@ pub struct WorkloadRuleEntry {
     /// the first disabled slot, so the array is written in priority order
     /// with no holes.
     pub enabled: u8,
-    pub _pad: u8,
+    /// `WORKLOAD_RULE_FQDN` when the destination is learned from DNS, zero
+    /// when it is `dst_addr`.
+    pub fqdn: u8,
 }
 
 #[cfg(feature = "userspace")]
@@ -222,6 +263,81 @@ pub struct WorkloadDenialEvent {
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for WorkloadDenialEvent {}
 
+/// Key of `WORKLOAD_FQDN_ALLOWED`: one address a name resolved to, for one
+/// cgroup and one rule.
+///
+/// The cgroup is in the key because an answer belongs to the pod that asked:
+/// the same address learned by another pod is another entry, so an address is
+/// never opened for a workload that did not resolve it. The rule's slot is in
+/// the key because two rules naming different names can resolve to one
+/// address, and each grants only what its own rule says.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WorkloadFqdnKey {
+    /// The cgroup of the socket that received the answer.
+    pub cgroup_id: u64,
+    /// The address, host-order words, IPv4 in word zero.
+    pub addr: [u32; 4],
+    /// `WORKLOAD_FAMILY_IPV4` or `WORKLOAD_FAMILY_IPV6`.
+    pub family: u8,
+    /// Which slot of `WORKLOAD_RULES` the address was learned for.
+    pub slot: u8,
+    pub _pad: [u8; 6],
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for WorkloadFqdnKey {}
+
+/// One DNS packet of a named workload, as the capture hands it up.
+///
+/// Queries travel as well as answers because an answer is only believed when
+/// it answers a query the same cgroup sent to a trusted resolver; the pairing
+/// is done in userspace, where the name can be compared.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkloadDnsEvent {
+    /// `bpf_ktime_get_boot_ns` at the hook.
+    pub at_ns: u64,
+    /// The cgroup of the socket the packet belongs to.
+    pub cgroup_id: u64,
+    /// Source address, host-order words, IPv4 in word zero.
+    pub src_addr: [u32; 4],
+    /// Destination address, host-order words, IPv4 in word zero.
+    pub dst_addr: [u32; 4],
+    /// Source port, host order.
+    pub src_port: u16,
+    /// Destination port, host order.
+    pub dst_port: u16,
+    /// Bytes of `payload` that carry the message.
+    pub payload_len: u16,
+    /// `WORKLOAD_FAMILY_IPV4` or `WORKLOAD_FAMILY_IPV6`.
+    pub family: u8,
+    /// `WORKLOAD_DNS_QUERY` or `WORKLOAD_DNS_RESPONSE`.
+    pub direction: u8,
+    /// The DNS message, from its header.
+    pub payload: [u8; WORKLOAD_DNS_MAX_PAYLOAD],
+}
+
+impl Default for WorkloadDnsEvent {
+    fn default() -> Self {
+        Self {
+            at_ns: 0,
+            cgroup_id: 0,
+            src_addr: [0; 4],
+            dst_addr: [0; 4],
+            src_port: 0,
+            dst_port: 0,
+            payload_len: 0,
+            family: 0,
+            direction: 0,
+            payload: [0; WORKLOAD_DNS_MAX_PAYLOAD],
+        }
+    }
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for WorkloadDnsEvent {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +365,20 @@ mod tests {
     fn the_denial_record_is_the_size_both_sides_compiled_against() {
         assert_eq!(mem::size_of::<WorkloadDenialEvent>(), 48);
         assert_eq!(mem::align_of::<WorkloadDenialEvent>(), 8);
+    }
+
+    #[test]
+    fn the_fqdn_key_and_record_are_the_size_both_sides_compiled_against() {
+        assert_eq!(mem::size_of::<WorkloadFqdnKey>(), 32);
+        assert_eq!(
+            mem::size_of::<WorkloadDnsEvent>(),
+            56 + WORKLOAD_DNS_MAX_PAYLOAD
+        );
+    }
+
+    #[test]
+    fn every_rule_slot_fits_the_byte_the_fqdn_key_carries_it_in() {
+        assert!(WORKLOAD_POLICY_MAX_RULES <= usize::from(u8::MAX) + 1);
     }
 
     #[test]
@@ -282,6 +412,7 @@ mod tests {
             WORKLOAD_METRIC_UNRESOLVED,
             WORKLOAD_METRIC_NO_RULE,
             WORKLOAD_METRIC_EVENT_LOST,
+            WORKLOAD_METRIC_DNS_LOST,
         ];
         assert_eq!(indices.len(), WORKLOAD_METRIC_COUNT as usize);
         for (position, index) in indices.iter().enumerate() {

@@ -196,6 +196,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (6, "unresolved"),
             (7, "no_rule"),
             (8, "event_lost"),
+            (9, "dns_lost"),
         ],
         // What the quarantine check decided before the rules were consulted:
         // the workload was cut off, the entry had lapsed and the rules got the

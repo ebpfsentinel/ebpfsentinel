@@ -13,15 +13,25 @@
 //! policy therefore invalidates every recorded mask - the bit that meant one
 //! workload may mean another one afterwards - and the manager clears both
 //! tables rather than leaving a task carrying the previous numbering.
+//!
+//! Two more maps serve rules naming their destinations by DNS name:
+//! `WORKLOAD_FQDN_ALLOWED` holds each address a cgroup was answered, under
+//! the slot of the rule that named it, until the record's lifetime runs out,
+//! and `WORKLOAD_DNS_CAPTURE` turns on the reading of the workloads' DNS
+//! packets that fills it. Grants are keyed by slot too, so a publish clears
+//! them for the same reason it clears the masks.
 
 use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, PerCpuValues};
 use domain::common::error::DomainError;
+use std::net::IpAddr;
+
 use domain::firewall::entity::IpNetwork;
+use domain::firewall::fqdn::FqdnGrantKey;
 use domain::firewall::workload::{WorkloadPolicy, WorkloadRule};
 use ebpf_common::workload_policy::{
     WORKLOAD_ACTION_ALLOW, WORKLOAD_ACTION_DENY, WORKLOAD_FAMILY_ANY, WORKLOAD_FAMILY_IPV4,
     WORKLOAD_FAMILY_IPV6, WORKLOAD_MODE_ENFORCE, WORKLOAD_MODE_OBSERVE, WORKLOAD_POLICY_MAX_RULES,
-    WorkloadRuleEntry,
+    WORKLOAD_RULE_FQDN, WorkloadFqdnKey, WorkloadRuleEntry,
 };
 use ports::secondary::workload_policy_map_port::WorkloadPolicyMapPort;
 use tracing::info;
@@ -34,12 +44,14 @@ pub struct WorkloadPolicyMapManager {
     cgroups: AyaHashMap<MapData, u64, u64>,
     tasks: AyaHashMap<MapData, u32, u64>,
     denials: PerCpuArray<MapData, u64>,
+    fqdn: AyaHashMap<MapData, WorkloadFqdnKey, u64>,
+    capture: Array<MapData, u32>,
 }
 
 impl WorkloadPolicyMapManager {
-    /// Take all three maps out of a loaded workload firewall object.
+    /// Take every map out of a loaded workload firewall object.
     ///
-    /// All three or none: a manager holding the rules without the selector
+    /// All of them or none: a manager holding the rules without the selector
     /// tables would publish a policy whose every bit is unset, which is a
     /// policy that decides nothing while reporting itself loaded.
     ///
@@ -64,12 +76,22 @@ impl WorkloadPolicyMapManager {
             ebpf.take_map("WORKLOAD_RULE_DENIALS")
                 .ok_or_else(|| anyhow::anyhow!("map 'WORKLOAD_RULE_DENIALS' not found"))?,
         )?;
+        let fqdn = AyaHashMap::try_from(
+            ebpf.take_map("WORKLOAD_FQDN_ALLOWED")
+                .ok_or_else(|| anyhow::anyhow!("map 'WORKLOAD_FQDN_ALLOWED' not found"))?,
+        )?;
+        let capture = Array::try_from(
+            ebpf.take_map("WORKLOAD_DNS_CAPTURE")
+                .ok_or_else(|| anyhow::anyhow!("map 'WORKLOAD_DNS_CAPTURE' not found"))?,
+        )?;
         info!("workload policy tables acquired");
         Ok(Self {
             rules,
             cgroups,
             tasks,
             denials,
+            fqdn,
+            capture,
         })
     }
 
@@ -109,6 +131,14 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
                 })?;
         }
         self.clear_selectors()?;
+        for key in Self::keys(&self.fqdn) {
+            let _ = self.fqdn.remove(&key);
+        }
+        self.capture
+            .set(0, u32::from(policy.names_destinations()), 0)
+            .map_err(|e| {
+                DomainError::EngineError(format!("WORKLOAD_DNS_CAPTURE write failed: {e}"))
+            })?;
         info!(
             rules = written,
             selectors = selectors.len(),
@@ -166,6 +196,43 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
         }
         Ok(())
     }
+
+    fn grant_fqdn(&mut self, key: &FqdnGrantKey, expires_ns: u64) -> Result<(), DomainError> {
+        self.fqdn.insert(fqdn_key(key), expires_ns, 0).map_err(|e| {
+            DomainError::EngineError(format!("WORKLOAD_FQDN_ALLOWED insert failed: {e}"))
+        })
+    }
+
+    fn revoke_fqdn(&mut self, key: &FqdnGrantKey) -> Result<(), DomainError> {
+        let _ = self.fqdn.remove(&fqdn_key(key));
+        Ok(())
+    }
+}
+
+/// A grant in the shape the hook looks it up by.
+///
+/// The address is written the way the hook reads the socket's own: host
+/// order words, and an IPv4-mapped IPv6 address folded down to IPv4, since a
+/// dual-stack socket connecting to an IPv4 peer presents it in that form.
+#[must_use]
+pub fn fqdn_key(key: &FqdnGrantKey) -> WorkloadFqdnKey {
+    let (addr, family) = match key.addr {
+        IpAddr::V4(v4) => ([u32::from(v4), 0, 0, 0], WORKLOAD_FAMILY_IPV4),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => ([u32::from(v4), 0, 0, 0], WORKLOAD_FAMILY_IPV4),
+            None => (
+                IpNetwork::v6_addr_to_u32x4(&v6.octets()),
+                WORKLOAD_FAMILY_IPV6,
+            ),
+        },
+    };
+    WorkloadFqdnKey {
+        cgroup_id: key.cgroup_id,
+        addr,
+        family,
+        slot: u8::try_from(key.slot).unwrap_or(u8::MAX),
+        _pad: [0; 6],
+    }
 }
 
 /// One rule in the shape the kernel walks, with the bit its selector owns.
@@ -183,6 +250,8 @@ pub fn entry_for(rule: &WorkloadRule, bit: usize) -> WorkloadRuleEntry {
             prefix_len,
             WORKLOAD_FAMILY_IPV6,
         ),
+        // A rule naming its destinations by DNS name carries no address:
+        // the hook looks the learned grants up instead, in either family.
         None => ([0; 4], 0, WORKLOAD_FAMILY_ANY),
     };
     let (port_start, port_end) = rule
@@ -207,7 +276,11 @@ pub fn entry_for(rule: &WorkloadRule, bit: usize) -> WorkloadRuleEntry {
             WORKLOAD_MODE_OBSERVE
         },
         enabled: 1,
-        _pad: 0,
+        fqdn: if rule.dst_fqdn.is_empty() {
+            0
+        } else {
+            WORKLOAD_RULE_FQDN
+        },
     }
 }
 
@@ -236,6 +309,7 @@ mod tests {
                 start: 443,
                 end: 443,
             }),
+            dst_fqdn: Vec::new(),
             enabled: true,
         }
     }
@@ -295,5 +369,51 @@ mod tests {
         assert_eq!(entry.dst_addr[0], 0x2001_0000);
         assert_eq!(entry.dst_addr[3], 1);
         assert_eq!(entry.prefix_len, 64);
+    }
+
+    #[test]
+    fn a_rule_naming_a_name_goes_out_with_no_address_and_the_fqdn_flag() {
+        let mut named = rule(FirewallAction::Allow, WorkloadMode::Enforce);
+        named.dst_ip = None;
+        named.dst_fqdn = vec![
+            domain::firewall::fqdn::FqdnPattern::parse("api.example.com")
+                .expect("an exact name is valid"),
+        ];
+        let entry = entry_for(&named, 0);
+        assert_eq!(entry.fqdn, WORKLOAD_RULE_FQDN);
+        assert_eq!(entry.family, WORKLOAD_FAMILY_ANY);
+        assert_eq!(entry.prefix_len, 0);
+        assert_eq!(
+            entry_for(&rule(FirewallAction::Deny, WorkloadMode::Enforce), 0).fqdn,
+            0
+        );
+    }
+
+    #[test]
+    fn a_grant_is_keyed_the_way_the_hook_reads_the_socket() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let v4 = fqdn_key(&FqdnGrantKey {
+            cgroup_id: 7,
+            addr: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            slot: 3,
+        });
+        assert_eq!(v4.addr, [0xc000_0201, 0, 0, 0]);
+        assert_eq!(v4.family, WORKLOAD_FAMILY_IPV4);
+        assert_eq!((v4.cgroup_id, v4.slot), (7, 3));
+
+        let mapped = fqdn_key(&FqdnGrantKey {
+            cgroup_id: 7,
+            addr: IpAddr::V6(Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped()),
+            slot: 3,
+        });
+        assert_eq!(mapped, v4);
+
+        let v6 = fqdn_key(&FqdnGrantKey {
+            cgroup_id: 7,
+            addr: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            slot: 3,
+        });
+        assert_eq!(v6.addr, [0x2001_0db8, 0, 0, 1]);
+        assert_eq!(v6.family, WORKLOAD_FAMILY_IPV6);
     }
 }

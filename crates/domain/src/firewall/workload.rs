@@ -37,6 +37,7 @@ use crate::common::entity::{Protocol, RuleId};
 
 use super::entity::{FirewallAction, FirewallRule, IpNetwork, PortRange};
 use super::error::FirewallError;
+use super::fqdn::{FqdnPattern, WorkloadDnsSettings};
 
 /// Longest value one matcher may carry.
 ///
@@ -293,6 +294,12 @@ pub struct WorkloadMatch {
     /// Whether a match refuses the syscall or only reports it.
     #[serde(default)]
     pub mode: WorkloadMode,
+    /// Destinations named by DNS name, in place of an address.
+    ///
+    /// The addresses come from the answers the workload itself is given, and
+    /// each opens for that workload alone; see [`super::fqdn`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fqdn: Vec<FqdnPattern>,
 }
 
 impl WorkloadMatch {
@@ -302,6 +309,7 @@ impl WorkloadMatch {
         Self {
             selector,
             mode: WorkloadMode::Observe,
+            fqdn: Vec::new(),
         }
     }
 
@@ -311,6 +319,7 @@ impl WorkloadMatch {
         Self {
             selector,
             mode: WorkloadMode::Enforce,
+            fqdn: Vec::new(),
         }
     }
 }
@@ -395,6 +404,9 @@ pub struct WorkloadRule {
     /// Destination port range, absent for "any port".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dst_port: Option<PortRange>,
+    /// Destinations named by DNS name, empty for a rule naming an address.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dst_fqdn: Vec<FqdnPattern>,
     /// Whether the rule is in force.
     pub enabled: bool,
 }
@@ -403,9 +415,15 @@ impl WorkloadRule {
     /// Whether this rule's destination half admits `destination`.
     ///
     /// A rule with no address matcher admits every destination, which is the
-    /// "this workload, anywhere" half of the contract.
+    /// "this workload, anywhere" half of the contract. A rule naming its
+    /// destinations by DNS name admits nothing here: which address a name
+    /// stands for is known only to the kernel map the answers filled, per
+    /// workload, and a guess from userspace would be a second opinion.
     #[must_use]
     pub fn admits_destination(&self, destination: &WorkloadDestination) -> bool {
+        if !self.dst_fqdn.is_empty() {
+            return false;
+        }
         if self.protocol != Protocol::Any && self.protocol != destination.protocol {
             return false;
         }
@@ -443,6 +461,14 @@ impl WorkloadRule {
         }
         match self.dst_ip {
             Some(network) => parts.push(format!("to {}", describe_network(&network))),
+            None if !self.dst_fqdn.is_empty() => parts.push(format!(
+                "to {}",
+                self.dst_fqdn
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )),
             None => parts.push("to anywhere".to_string()),
         }
         if let Some(range) = self.dst_port {
@@ -685,6 +711,7 @@ fn describe_v6(addr: &[u8; 16]) -> String {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkloadPolicy {
     rules: Vec<WorkloadRule>,
+    dns: WorkloadDnsSettings,
 }
 
 impl WorkloadPolicy {
@@ -714,6 +741,7 @@ impl WorkloadPolicy {
                 protocol: rule.protocol,
                 dst_ip: rule.dst_ip,
                 dst_port: rule.dst_port,
+                dst_fqdn: workload.fqdn.clone(),
                 enabled: rule.enabled,
             });
         }
@@ -746,7 +774,46 @@ impl WorkloadPolicy {
                 maximum: WORKLOAD_POLICY_MAX_RULES,
             });
         }
-        Ok(Self { rules })
+        Ok(Self {
+            rules,
+            dns: WorkloadDnsSettings::default(),
+        })
+    }
+
+    /// Attach the resolvers answers are believed from.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirewallError::InvalidWorkloadDns`] for settings out of
+    /// bounds, and for a policy naming a destination by DNS name with no
+    /// resolver to believe: every answer would be dropped and the rule would
+    /// read as an allowance that never opens.
+    pub fn with_dns(mut self, dns: WorkloadDnsSettings) -> Result<Self, FirewallError> {
+        dns.validate()?;
+        if dns.resolvers.is_empty() && self.names_destinations() {
+            return Err(FirewallError::InvalidWorkloadDns {
+                reason: "a workload rule names a destination by DNS name and \
+                         firewall.workload_dns.resolvers is empty"
+                    .to_string(),
+            });
+        }
+        self.dns = dns;
+        Ok(self)
+    }
+
+    /// The resolvers and grace answers are read under.
+    #[must_use]
+    pub fn dns(&self) -> &WorkloadDnsSettings {
+        &self.dns
+    }
+
+    /// Whether any enabled rule names its destinations by DNS name, which is
+    /// what turns the capture of the workloads' DNS packets on.
+    #[must_use]
+    pub fn names_destinations(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|rule| rule.enabled && !rule.dst_fqdn.is_empty())
     }
 
     /// The rules, in the order they are examined.

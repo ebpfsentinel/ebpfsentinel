@@ -84,6 +84,17 @@ firewall:
   #   "drop" - deny unmatched traffic (blocklist approach: allow what you specify)
   default_policy: drop
 
+  # ── Workload DNS ───────────────────────────────────────────────────
+  # Where a workload rule names its destination by host name (`fqdn`),
+  # the agent reads the answers the pod gets from these resolvers and
+  # opens each returned address for that pod alone, for the record's
+  # TTL plus `grace_secs` (at most 300). An answer from any other
+  # address teaches nothing, and so does DNS over TCP or HTTPS: the
+  # connection that follows is refused rather than guessed at.
+  workload_dns:
+    resolvers: ["10.96.0.10"]
+    grace_secs: 30
+
   # ── Aliases ────────────────────────────────────────────────────────
   #
   # Named groups of IPs, CIDRs, or ports reusable across rules.
@@ -304,6 +315,19 @@ firewall:
       action: deny
       workload:
         exe: /usr/bin/curl
+        mode: observe
+
+    # A destination by host name. Exact names and one leading `*.` label
+    # are accepted; the rule must allow, and its selector cannot be an
+    # executable, because an answer is credited to the cgroup that asked.
+    - id: fw-allow-payments-to-psp
+      priority: 42
+      action: allow
+      protocol: tcp
+      dst_port: 443
+      workload:
+        container: payments
+        fqdn: ["api.psp.example", "*.cdn.psp.example"]
         mode: observe
 
     # ── IPv6 examples ────────────────────────────────────────────────

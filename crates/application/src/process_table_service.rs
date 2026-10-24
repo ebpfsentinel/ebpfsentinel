@@ -396,6 +396,21 @@ mod tests {
             Ok(())
         }
 
+        fn grant_fqdn(
+            &mut self,
+            _key: &domain::firewall::fqdn::FqdnGrantKey,
+            _expires_ns: u64,
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+
+        fn revoke_fqdn(
+            &mut self,
+            _key: &domain::firewall::fqdn::FqdnGrantKey,
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+
         fn forget_task(&mut self, tgid: u32) -> Result<(), domain::common::error::DomainError> {
             self.0.lock().unwrap().retain(|(held, _)| *held != tgid);
             Ok(())
@@ -529,6 +544,7 @@ mod tests {
             protocol: Protocol::Any,
             dst_ip: None,
             dst_port: None,
+            dst_fqdn: Vec::new(),
             enabled: true,
         }])
         .expect("inside the ceiling");
@@ -563,6 +579,7 @@ mod tests {
                 protocol: Protocol::Any,
                 dst_ip: None,
                 dst_port: None,
+                dst_fqdn: Vec::new(),
                 enabled: true,
             }])
             .expect("inside the ceiling")

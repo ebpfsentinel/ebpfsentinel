@@ -63,6 +63,7 @@ use infrastructure::config::AgentConfig;
 use infrastructure::constants::{
     ALERT_CHANNEL_CAPACITY, CAPTURE_STOP_TIMEOUT, EVENT_CHANNEL_CAPACITY,
     GRACEFUL_SHUTDOWN_TIMEOUT, WORKLOAD_DENIAL_CHANNEL_CAPACITY, WORKLOAD_DENIAL_READ_INTERVAL,
+    WORKLOAD_DNS_CHANNEL_CAPACITY, WORKLOAD_FQDN_SWEEP_INTERVAL,
 };
 use infrastructure::logging::init_logging;
 use infrastructure::retry::RetryConfig;
@@ -284,7 +285,8 @@ pub async fn run(
     // Read off the same rules, before they move into the engine: a workload
     // rule is a firewall rule with a selector on it, and the kernel object
     // that carries it out is loaded only when the document holds one.
-    let workload_policy = domain::firewall::workload::WorkloadPolicy::from_rules(&domain_rules)?;
+    let workload_policy = domain::firewall::workload::WorkloadPolicy::from_rules(&domain_rules)?
+        .with_dns(config.workload_dns()?)?;
 
     // ── 3b. Convert and load IDS rules ──────────────────────────────
     let ids_mode = config.ids_mode()?;
@@ -2644,6 +2646,53 @@ pub async fn run(
                             }
                         }
                     });
+
+                    // The answers named workloads are given, read so the
+                    // addresses a rule names by DNS name open for the pod
+                    // that asked. Without the reader those rules stay
+                    // closed, which is the side a failure belongs on.
+                    match adapters::ebpf::WorkloadDnsReader::new(loader.ebpf_mut()) {
+                        Ok(dns_reader) => {
+                            let (dns_tx, mut dns_rx) =
+                                mpsc::channel::<domain::firewall::fqdn::DnsCapture>(
+                                    WORKLOAD_DNS_CHANNEL_CAPACITY,
+                                );
+                            let dns_obs = RingBufObserver::new(
+                                adapters::ebpf::workload_dns_reader::RINGBUF_SOURCE,
+                                Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+                            );
+                            let dns_cancel = workload_cancel.clone();
+                            tokio::spawn(async move {
+                                dns_reader.run(dns_tx, dns_cancel, dns_obs).await;
+                            });
+                            let learning = Arc::clone(&service);
+                            tokio::spawn(async move {
+                                while let Some(capture) = dns_rx.recv().await {
+                                    learning.observe_dns(&capture);
+                                }
+                            });
+                            let sweeping = Arc::clone(&service);
+                            let fqdn_cancel = workload_cancel.clone();
+                            tokio::spawn(async move {
+                                let mut ticker =
+                                    tokio::time::interval(WORKLOAD_FQDN_SWEEP_INTERVAL);
+                                loop {
+                                    tokio::select! {
+                                        () = fqdn_cancel.cancelled() => break,
+                                        _ = ticker.tick() => {}
+                                    }
+                                    sweeping.sweep_fqdn(
+                                        adapters::ebpf::ringbuf_observer::boottime_now_ns(),
+                                    );
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            warn!(
+                                "workload DNS answers unreadable, rules naming a destination by name stay closed: {e}"
+                            );
+                        }
+                    }
 
                     // The per-rule counters are the kernel's own and are
                     // read rather than counted off the records, because the
@@ -5633,7 +5682,7 @@ pub fn try_load_cgroup_attribution(
     Ok((loader, metrics_rdr, socket_reader, attacher, status))
 }
 
-/// Load the workload firewall and attach its six cgroup hooks.
+/// Load the workload firewall and attach its eight cgroup hooks.
 ///
 /// Returns the loader, the counters, the map manager the policy is written
 /// through, the reader draining the refusals, the attacher holding the links,

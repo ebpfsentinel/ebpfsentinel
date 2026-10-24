@@ -718,7 +718,37 @@ impl FirewallRule {
                 reason: "a negated address on a workload rule reads as an exception and is                          written as a second rule at a lower priority",
             });
         }
+        if !workload.fqdn.is_empty() {
+            self.validate_workload_fqdn(workload)?;
+        }
 
+        Ok(())
+    }
+
+    /// The constraints on a workload rule naming its destinations by DNS
+    /// name, each of which would otherwise make it mean less than it reads.
+    fn validate_workload_fqdn(&self, workload: &WorkloadMatch) -> Result<(), FirewallError> {
+        if self.action != FirewallAction::Allow {
+            return Err(FirewallError::WorkloadMatcherUnsupported {
+                matcher: "fqdn",
+                reason: "a name opens the addresses the workload was answered and nothing else, \
+                         so it can only allow; refuse everything else with a deny rule below it",
+            });
+        }
+        if self.dst_ip.is_some() || self.dst_alias.is_some() {
+            return Err(FirewallError::WorkloadMatcherUnsupported {
+                matcher: "fqdn",
+                reason: "a rule names its destination by address or by name, not both; write \
+                         two rules",
+            });
+        }
+        if workload.selector.names_executable() {
+            return Err(FirewallError::WorkloadMatcherUnsupported {
+                matcher: "fqdn",
+                reason: "an answer is attributed to the cgroup that asked, not to one executable \
+                         inside it, so the selector names a cgroup, a unit or a container",
+            });
+        }
         Ok(())
     }
 

@@ -441,6 +441,17 @@ pub async fn apply_config_file(
             return None;
         }
     };
+    let workload_policy = match config
+        .workload_dns()
+        .map_err(|e| e.to_string())
+        .and_then(|dns| workload_policy.with_dns(dns).map_err(|e| e.to_string()))
+    {
+        Ok(policy) => policy,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid workload DNS settings");
+            return None;
+        }
+    };
     if workload_policy.enforces() && !adapters::ebpf::workload_firewall_attach::status().attached {
         let reason = adapters::ebpf::workload_firewall_attach::status()
             .reason

@@ -1,4 +1,5 @@
 use domain::common::error::DomainError;
+use domain::firewall::fqdn::FqdnGrantKey;
 use domain::firewall::workload::WorkloadPolicy;
 
 /// Secondary port for the workload policy the cgroup socket hooks read.
@@ -17,6 +18,11 @@ pub trait WorkloadPolicyMapPort: Send + Sync {
     /// disabled, because the kernel stops its walk at the first disabled
     /// slot: a leftover rule behind a shorter policy would be a rule nobody
     /// configured, still in force.
+    ///
+    /// Every address opened by name goes with it, since a grant is keyed by
+    /// the slot of the rule that named it and the slots are numbered afresh,
+    /// and the capture of DNS packets is turned on exactly when an enabled
+    /// rule names a destination by DNS name.
     fn publish_policy(&mut self, policy: &WorkloadPolicy) -> Result<(), DomainError>;
 
     /// Record which selectors a cgroup satisfies, by bit.
@@ -50,6 +56,18 @@ pub trait WorkloadPolicyMapPort: Send + Sync {
     /// different workload after that and every recorded mask is about the
     /// old numbering.
     fn clear_selectors(&mut self) -> Result<(), DomainError>;
+
+    /// Open one address for one cgroup under one rule until `expires_ns`,
+    /// on the `CLOCK_BOOTTIME` the hooks read.
+    ///
+    /// # Errors
+    ///
+    /// Whatever writing the map refused, a full map among them: the address
+    /// then stays closed, which is the direction a failure here must go.
+    fn grant_fqdn(&mut self, key: &FqdnGrantKey, expires_ns: u64) -> Result<(), DomainError>;
+
+    /// Close one address opened by name. A miss is not an error.
+    fn revoke_fqdn(&mut self, key: &FqdnGrantKey) -> Result<(), DomainError>;
 }
 
 #[cfg(test)]

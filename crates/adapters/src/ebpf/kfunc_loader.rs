@@ -96,6 +96,7 @@ const BPF_PROG_TYPE_CGROUP_SOCK: u32 = bpf_prog_type::BPF_PROG_TYPE_CGROUP_SOCK 
 const BPF_PROG_TYPE_SOCK_OPS: u32 = bpf_prog_type::BPF_PROG_TYPE_SOCK_OPS as u32;
 const BPF_PROG_TYPE_RAW_TRACEPOINT: u32 = bpf_prog_type::BPF_PROG_TYPE_RAW_TRACEPOINT as u32;
 const BPF_PROG_TYPE_CGROUP_SOCK_ADDR: u32 = bpf_prog_type::BPF_PROG_TYPE_CGROUP_SOCK_ADDR as u32;
+const BPF_PROG_TYPE_CGROUP_SKB: u32 = bpf_prog_type::BPF_PROG_TYPE_CGROUP_SKB as u32;
 
 /// `BPF_TRACE_UPROBE_MULTI` (`enum bpf_attach_type`). A KPROBE-type program
 /// must be loaded with this `expected_attach_type` to be attachable via a
@@ -684,6 +685,14 @@ fn prog_attrs(section: &ProgramSection) -> (u32, u32, u32) {
         ProgramSection::CgroupSock { attach_type, .. } => (
             BPF_PROG_TYPE_CGROUP_SOCK,
             attach_type_number(bpf_attach_type::from(*attach_type)),
+            0,
+        ),
+        // The packet hooks of a cgroup. The kernel would load one without an
+        // attach type, but the direction is what `BPF_LINK_CREATE` checks it
+        // against later, so it goes out with the load as libbpf sends it.
+        ProgramSection::CgroupSkb { attach_type } => (
+            BPF_PROG_TYPE_CGROUP_SKB,
+            attach_type.map_or(0, |kind| attach_type_number(bpf_attach_type::from(kind))),
             0,
         ),
         // A `sock_ops` program loads with no `expected_attach_type`, unlike
@@ -1970,6 +1979,24 @@ mod tests {
         assert_eq!(BPF_PROG_TYPE_RAW_TRACEPOINT, 17);
         assert_eq!(BPF_PROG_TYPE_CGROUP_SOCK_ADDR, 18);
         assert_eq!(prog_attrs(&ProgramSection::SockOps), (13, 0, 0));
+        assert_eq!(BPF_PROG_TYPE_CGROUP_SKB, 8);
+    }
+
+    #[test]
+    fn a_cgroup_packet_hook_loads_with_its_direction() {
+        use aya_obj::programs::CgroupSkbAttachType;
+        assert_eq!(
+            prog_attrs(&ProgramSection::CgroupSkb {
+                attach_type: Some(CgroupSkbAttachType::Ingress)
+            }),
+            (8, 0, 0)
+        );
+        assert_eq!(
+            prog_attrs(&ProgramSection::CgroupSkb {
+                attach_type: Some(CgroupSkbAttachType::Egress)
+            }),
+            (8, 1, 0)
+        );
     }
 
     #[test]

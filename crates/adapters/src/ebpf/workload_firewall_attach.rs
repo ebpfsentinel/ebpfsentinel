@@ -6,6 +6,13 @@
 //! after the kernel has assigned the address and can report it but not refuse
 //! it.
 //!
+//! Two more read the packets of a cgroup, egress and ingress, so the answers
+//! a named workload is given reach the agent: a rule naming its destination by
+//! DNS name is opened by them. They decide nothing and copy nothing until a
+//! policy carrying such a rule is in force, and they are part of the same
+//! all-or-nothing attach, because a policy that names a destination it can
+//! never learn is a policy refusing what it says it allows.
+//!
 //! Unlike attribution, this object decides things, so a refused attach is not
 //! always survivable. The decision is the caller's rather than this module's:
 //! the status says what attached, and the start-up path refuses to come up
@@ -22,6 +29,10 @@ use tracing::{info, warn};
 use super::kfunc_attach;
 use super::loader::EbpfLoader;
 
+/// `BPF_CGROUP_INET_INGRESS` from `enum bpf_attach_type`.
+pub const BPF_CGROUP_INET_INGRESS: u32 = 0;
+/// `BPF_CGROUP_INET_EGRESS` from `enum bpf_attach_type`.
+pub const BPF_CGROUP_INET_EGRESS: u32 = 1;
 /// `BPF_CGROUP_INET4_BIND` from `enum bpf_attach_type`.
 pub const BPF_CGROUP_INET4_BIND: u32 = 8;
 /// `BPF_CGROUP_INET6_BIND` from `enum bpf_attach_type`.
@@ -49,6 +60,8 @@ pub const WORKLOAD_HOOKS: &[(&str, u32)] = &[
     ("workload_sendmsg6", BPF_CGROUP_UDP6_SENDMSG),
     ("workload_bind4", BPF_CGROUP_INET4_BIND),
     ("workload_bind6", BPF_CGROUP_INET6_BIND),
+    ("workload_dns_egress", BPF_CGROUP_INET_EGRESS),
+    ("workload_dns_ingress", BPF_CGROUP_INET_INGRESS),
 ];
 
 /// What the agent can say about the workload firewall, for the start-up log
@@ -247,6 +260,16 @@ mod tests {
             .map(|(_, attach_type)| *attach_type)
             .collect();
         assert_eq!(bind, vec![BPF_CGROUP_INET4_BIND, BPF_CGROUP_INET6_BIND]);
+    }
+
+    #[test]
+    fn the_dns_hooks_sit_on_both_directions_of_the_cgroup() {
+        let dns: Vec<u32> = WORKLOAD_HOOKS
+            .iter()
+            .filter(|(name, _)| name.contains("dns"))
+            .map(|(_, attach_type)| *attach_type)
+            .collect();
+        assert_eq!(dns, vec![BPF_CGROUP_INET_EGRESS, BPF_CGROUP_INET_INGRESS]);
     }
 
     #[test]

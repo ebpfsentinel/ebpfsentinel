@@ -34,6 +34,21 @@ pub const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// enough that a policy at its ceiling costs one map walk a tick.
 pub const WORKLOAD_DENIAL_READ_INTERVAL: Duration = Duration::from_secs(10);
 
+/// How many DNS packets of named workloads wait between the ring buffer and
+/// the policy service.
+///
+/// A packet dropped here is an answer nothing learns from, so the connection
+/// after it is refused: the loss lands on the closed side, and this only has
+/// to absorb a burst of lookups.
+pub const WORKLOAD_DNS_CHANNEL_CAPACITY: usize = 4_096;
+
+/// How often the addresses learned from DNS answers are checked for expiry.
+///
+/// The hook already refuses a lapsed address by the expiry it carries, so
+/// this keeps the map to what is in force rather than enforcing anything, and
+/// one second keeps the listed state no staler than the grace is long.
+pub const WORKLOAD_FQDN_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+
 /// How long the stop sequence waits for running packet captures to close their
 /// files after being asked to stop.
 ///

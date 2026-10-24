@@ -13,6 +13,8 @@ const BPF_LINK_CREATE: libc::c_int = 28;
 /// product has any business attaching. A warden that forwarded whatever number
 /// arrived would be a general-purpose cgroup attach service running as root.
 const ALLOWED_ATTACH_TYPES: &[u32] = &[
+    BPF_CGROUP_INET_INGRESS,
+    BPF_CGROUP_INET_EGRESS,
     BPF_CGROUP_INET4_BIND,
     BPF_CGROUP_INET6_BIND,
     BPF_CGROUP_INET4_CONNECT,
@@ -24,6 +26,12 @@ const ALLOWED_ATTACH_TYPES: &[u32] = &[
     BPF_CGROUP_SOCK_OPS,
 ];
 
+/// `BPF_CGROUP_INET_INGRESS` from `enum bpf_attach_type`.
+///
+/// The packet hooks the workload firewall reads DNS answers through.
+pub const BPF_CGROUP_INET_INGRESS: u32 = 0;
+/// `BPF_CGROUP_INET_EGRESS` from `enum bpf_attach_type`.
+pub const BPF_CGROUP_INET_EGRESS: u32 = 1;
 /// `BPF_CGROUP_SOCK_OPS` from `enum bpf_attach_type`.
 pub const BPF_CGROUP_SOCK_OPS: u32 = 3;
 /// `BPF_CGROUP_INET4_BIND` from `enum bpf_attach_type`.
@@ -161,6 +169,14 @@ mod tests {
         assert!(ALLOWED_ATTACH_TYPES.contains(&BPF_CGROUP_INET6_BIND));
         assert_ne!(BPF_CGROUP_INET4_BIND, BPF_CGROUP_INET4_POST_BIND);
         assert_ne!(BPF_CGROUP_INET6_BIND, BPF_CGROUP_INET6_POST_BIND);
+    }
+
+    #[test]
+    fn the_packet_hooks_of_a_cgroup_are_attachable_and_the_device_hook_is_not() {
+        assert!(ALLOWED_ATTACH_TYPES.contains(&BPF_CGROUP_INET_INGRESS));
+        assert!(ALLOWED_ATTACH_TYPES.contains(&BPF_CGROUP_INET_EGRESS));
+        // `BPF_CGROUP_DEVICE` is 6.
+        assert!(!ALLOWED_ATTACH_TYPES.contains(&6));
     }
 
     #[test]

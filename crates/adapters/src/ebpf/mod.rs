@@ -56,6 +56,7 @@ pub mod tenant_vlan_map_manager;
 pub mod threatintel_map_manager;
 pub mod token_bootstrap;
 pub mod vip_map_manager;
+pub mod workload_dns_reader;
 pub mod workload_event_reader;
 pub mod workload_firewall_attach;
 pub mod workload_policy_map_manager;
@@ -134,5 +135,6 @@ pub use token_bootstrap::{
     bootstrap_with_kernel,
 };
 pub use vip_map_manager::VipMapManager;
+pub use workload_dns_reader::WorkloadDnsReader;
 pub use workload_event_reader::WorkloadEventReader;
 pub use zone_map_manager::ZoneMapManager;

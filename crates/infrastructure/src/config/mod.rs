@@ -104,6 +104,7 @@ use domain::conntrack::entity::ConnTrackSettings;
 use domain::ddos::entity::DdosPolicy;
 use domain::dlp::entity::DlpPattern;
 use domain::firewall::entity::{FirewallRule, IpNetwork, Scope};
+use domain::firewall::fqdn::WorkloadDnsSettings;
 use domain::ids::entity::{IdsRule, SamplingMode};
 use domain::ips::entity::{IpsPolicy, WhitelistEntry};
 use domain::l7::entity::L7Rule;
@@ -551,6 +552,21 @@ impl AgentConfig {
                 format!("firewall.rules[{idx}].interfaces"),
                 &rule_cfg.interfaces,
             )?;
+        }
+        let dns = self.firewall.workload_dns.to_domain()?;
+        if dns.resolvers.is_empty()
+            && let Some(idx) = self.firewall.rules.iter().position(|rule| {
+                rule.workload
+                    .as_ref()
+                    .is_some_and(|workload| !workload.fqdn.is_empty())
+            })
+        {
+            return Err(ConfigError::Validation {
+                field: format!("firewall.rules[{idx}].workload.fqdn"),
+                message: "a destination named by DNS name is learned from the answers of a \
+                          trusted resolver, and firewall.workload_dns.resolvers is empty"
+                    .to_string(),
+            });
         }
 
         // Validate IDS rules
@@ -1099,6 +1115,12 @@ impl AgentConfig {
     /// Parse the firewall mode from config to domain enum.
     pub fn firewall_mode(&self) -> Result<DomainMode, ConfigError> {
         pdm(&self.firewall.mode)
+    }
+
+    /// The resolvers and grace the workload rules naming a destination by DNS
+    /// name are enforced under.
+    pub fn workload_dns(&self) -> Result<WorkloadDnsSettings, ConfigError> {
+        self.firewall.workload_dns.to_domain()
     }
 
     /// Convert all firewall rule configs to domain rules.
@@ -5415,5 +5437,121 @@ ids:
 ";
         let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
         assert!(err.contains("pattern"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn a_rule_naming_a_destination_by_name_is_read_with_its_resolvers() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+firewall:
+  workload_dns:
+    resolvers: [10.96.0.10, fd00::a]
+    grace_secs: 45
+  rules:
+    - id: fw-api
+      priority: 10
+      action: allow
+      protocol: tcp
+      dst_port: 443
+      workload:
+        container: payments
+        fqdn: [api.example.com, '*.storage.example.net']
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let dns = config.workload_dns().unwrap();
+        assert_eq!(dns.resolvers.len(), 2);
+        assert_eq!(dns.grace_secs, 45);
+        let rules = config.firewall_rules().unwrap();
+        let workload = rules[0].workload.as_ref().unwrap();
+        assert_eq!(workload.fqdn.len(), 2);
+        assert_eq!(workload.fqdn[1].to_string(), "*.storage.example.net");
+    }
+
+    #[test]
+    fn a_rule_naming_a_destination_by_name_with_no_resolver_is_refused() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+firewall:
+  rules:
+    - id: fw-api
+      priority: 10
+      action: allow
+      workload:
+        container: payments
+        fqdn: [api.example.com]
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("workload_dns.resolvers"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_wildcard_that_cannot_be_enforced_precisely_is_refused_with_its_reason() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+firewall:
+  workload_dns:
+    resolvers: [10.96.0.10]
+  rules:
+    - id: fw-api
+      priority: 10
+      action: allow
+      workload:
+        container: payments
+        fqdn: ['api.*.example.com']
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("workload.fqdn[0]"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn a_grace_past_the_ceiling_and_a_resolver_that_is_no_address_are_refused() {
+        let grace = r"
+agent:
+  interfaces: [eth0]
+firewall:
+  workload_dns:
+    resolvers: [10.96.0.10]
+    grace_secs: 301
+";
+        assert!(AgentConfig::from_yaml(grace).is_err());
+        let resolver = r"
+agent:
+  interfaces: [eth0]
+firewall:
+  workload_dns:
+    resolvers: [kube-dns]
+";
+        let err = AgentConfig::from_yaml(resolver).unwrap_err().to_string();
+        assert!(err.contains("resolvers[0]"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn a_rule_naming_a_destination_by_name_and_by_address_is_refused() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+firewall:
+  workload_dns:
+    resolvers: [10.96.0.10]
+  rules:
+    - id: fw-api
+      priority: 10
+      action: allow
+      dst_ip: 10.0.0.0/8
+      workload:
+        container: payments
+        fqdn: [api.example.com]
+";
+        assert!(
+            AgentConfig::from_yaml(yaml)
+                .and_then(|config| config.firewall_rules())
+                .is_err()
+        );
     }
 }

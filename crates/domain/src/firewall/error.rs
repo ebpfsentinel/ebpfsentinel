@@ -68,6 +68,15 @@ pub enum FirewallError {
 
     #[error("too many workload rules: {count}, more than the {maximum} the kernel holds")]
     WorkloadPolicyTooLarge { count: usize, maximum: usize },
+
+    #[error("invalid destination name {pattern:?}: {reason}")]
+    InvalidFqdnPattern {
+        pattern: String,
+        reason: &'static str,
+    },
+
+    #[error("invalid workload_dns: {reason}")]
+    InvalidWorkloadDns { reason: String },
 }
 
 impl From<FirewallError> for DomainError {

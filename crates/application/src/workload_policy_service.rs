@@ -22,13 +22,22 @@
 //! and the kernel counts that rather than guessing. The window is the
 //! `/proc` read in the middle, and a policy that refuses by default leaks
 //! for exactly as long as it lasts.
+//!
+//! A rule naming its destination by DNS name is served from here as well.
+//! The answers a named workload is given come back from the kernel, are
+//! paired with the query that same cgroup sent, and every address they carry
+//! is opened for that cgroup under that rule's slot alone. The cgroup's mask
+//! is remembered from the exec that wrote it, because an answer arrives with
+//! a cgroup id and nothing else.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use domain::common::entity::RuleId;
 use domain::common::error::DomainError;
 use domain::container::engine::CgroupReader;
 use domain::container::entity::{ContainerInfo, ContainerMetadata};
+use domain::firewall::fqdn::{DnsCapture, FqdnGrantKey, FqdnLearner, FqdnLedger};
 use domain::firewall::workload::{
     WorkloadDenial, WorkloadDenialRecord, WorkloadFacts, WorkloadPolicy, WorkloadReach,
     cgroup_path_of, unit_of,
@@ -133,10 +142,22 @@ impl SelectorMasks {
     }
 }
 
+/// What the answers of named workloads have opened so far.
+#[derive(Debug, Default)]
+struct FqdnState {
+    learner: FqdnLearner,
+    ledger: FqdnLedger,
+}
+
 /// Keeps the kernel's view of which workload is which.
 pub struct WorkloadPolicyService {
     policy: RwLock<WorkloadPolicy>,
     maps: Option<Mutex<Box<dyn WorkloadPolicyMapPort>>>,
+    /// The cgroup mask each cgroup was last written, by cgroup id.
+    cgroup_masks: Mutex<HashMap<u64, u64>>,
+    /// Taken before the policy and the maps, by every path that touches a
+    /// grant, so a reload and an answer never interleave.
+    fqdn: Mutex<FqdnState>,
     cgroups: Option<Arc<dyn CgroupReader>>,
     /// Weak because the table holds this service: the table is what learns
     /// of an exec, and this is what a new policy has to be replayed over.
@@ -151,9 +172,15 @@ impl WorkloadPolicyService {
     /// through the same service on a host where the object did not load.
     #[must_use]
     pub fn new(policy: WorkloadPolicy) -> Self {
+        let fqdn = FqdnState {
+            learner: FqdnLearner::new(policy.dns().clone()),
+            ledger: FqdnLedger::default(),
+        };
         Self {
             policy: RwLock::new(policy),
             maps: None,
+            cgroup_masks: Mutex::new(HashMap::new()),
+            fqdn: Mutex::new(fqdn),
             cgroups: None,
             processes: OnceLock::new(),
         }
@@ -219,16 +246,30 @@ impl WorkloadPolicyService {
     ///
     /// Whatever the map port refuses.
     pub fn apply(&self, policy: WorkloadPolicy) -> Result<(), DomainError> {
+        let mut fqdn = self
+            .fqdn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(maps) = &self.maps {
             maps.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .publish_policy(&policy)?;
         }
+        // The publish dropped every grant and every mask in the kernel, so
+        // what mirrors them here goes too, and the learner starts over under
+        // the resolvers this policy trusts.
+        fqdn.ledger.clear();
+        fqdn.learner = FqdnLearner::new(policy.dns().clone());
+        self.cgroup_masks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         let rules = policy.rules().len();
         *self
             .policy
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = policy;
+        drop(fqdn);
         info!(rules, "workload policy in force");
         // After the lock on the maps is released, because the replay takes
         // it once per task.
@@ -323,6 +364,17 @@ impl WorkloadPolicyService {
         }
         let resolved = self.resolve(entry);
         let masks = self.masks_for(&resolved.facts());
+        if entry.cgroup_id != 0 {
+            let mut known = self
+                .cgroup_masks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if masks.cgroup == 0 {
+                known.remove(&entry.cgroup_id);
+            } else {
+                known.insert(entry.cgroup_id, masks.cgroup);
+            }
+        }
         let mut maps = maps
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -442,6 +494,121 @@ impl WorkloadPolicyService {
             .collect())
     }
 
+    /// Read one DNS packet of a named workload, and open what a believed
+    /// answer carried. Returns how many grants were written.
+    ///
+    /// An address opens under every rule naming that name whose selector the
+    /// cgroup satisfies, each in its own slot and for that cgroup alone: an
+    /// address one pod was answered is never reused for another, because
+    /// the grant is keyed by the cgroup that asked. A grant the kernel
+    /// refused to hold leaves the address closed and is logged.
+    pub fn observe_dns(&self, capture: &DnsCapture) -> usize {
+        let Some(maps) = &self.maps else {
+            return 0;
+        };
+        let mut fqdn = self
+            .fqdn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(resolution) = fqdn.learner.observe(capture) else {
+            return 0;
+        };
+        let Some(mask) = self
+            .cgroup_masks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&resolution.cgroup_id)
+            .copied()
+        else {
+            return 0;
+        };
+        let policy = self
+            .policy
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let selectors: Vec<_> = policy.selectors().collect();
+        let mut maps = maps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut granted = 0usize;
+        for (slot, rule) in policy.in_slot_order().enumerate() {
+            if rule.dst_fqdn.is_empty()
+                || !rule
+                    .dst_fqdn
+                    .iter()
+                    .any(|pattern| pattern.matches(&resolution.name))
+            {
+                continue;
+            }
+            let Some(bit) = selectors.iter().position(|one| *one == &rule.selector) else {
+                continue;
+            };
+            if mask & (1u64 << (bit & 63)) == 0 {
+                continue;
+            }
+            let Ok(slot) = u16::try_from(slot) else {
+                continue;
+            };
+            for &(addr, ttl) in &resolution.addresses {
+                let key = FqdnGrantKey {
+                    cgroup_id: resolution.cgroup_id,
+                    addr,
+                    slot,
+                };
+                let expires_ns = policy.dns().expiry_ns(resolution.at_ns, ttl);
+                let in_force =
+                    fqdn.ledger
+                        .record(key, &resolution.name, expires_ns, resolution.at_ns);
+                if let Err(err) = maps.grant_fqdn(&key, in_force) {
+                    fqdn.ledger.remove(&key);
+                    warn!(
+                        rule = %rule.id.0,
+                        name = %resolution.name,
+                        %addr,
+                        error = %err,
+                        "an address a workload resolved was not opened"
+                    );
+                    continue;
+                }
+                granted += 1;
+            }
+        }
+        if granted > 0 {
+            debug!(
+                cgroup = resolution.cgroup_id,
+                name = %resolution.name,
+                granted,
+                "a workload's resolution opened its addresses"
+            );
+        }
+        granted
+    }
+
+    /// Close every grant lapsed at `now_ns`, on `CLOCK_BOOTTIME`, and forget
+    /// the queries nobody answered. Returns how many grants were closed.
+    ///
+    /// The hook already refuses a lapsed grant by its expiry, so this is the
+    /// map being kept to what is in force rather than the enforcement itself.
+    pub fn sweep_fqdn(&self, now_ns: u64) -> usize {
+        let mut fqdn = self
+            .fqdn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        fqdn.learner.prune(now_ns);
+        let lapsed = fqdn.ledger.sweep(now_ns);
+        if let Some(maps) = &self.maps {
+            let mut maps = maps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for key in &lapsed {
+                if let Err(err) = maps.revoke_fqdn(key) {
+                    warn!(error = %err, "a lapsed address was not removed from the kernel");
+                }
+            }
+        }
+        lapsed.len()
+    }
+
     /// Forget a task that exited.
     ///
     /// A pid is reused, and a mask left behind would name the next program
@@ -471,7 +638,8 @@ mod tests {
     use domain::container::entity::{
         ContainerContext, ContainerInfo, ContainerRuntime, DockerMetadata,
     };
-    use domain::firewall::entity::FirewallAction;
+    use domain::firewall::entity::{FirewallAction, IpNetwork};
+    use domain::firewall::fqdn::{DnsDirection, FqdnPattern, WorkloadDnsSettings};
     use domain::firewall::workload::{
         DestinationAddr, WorkloadDestination, WorkloadHook, WorkloadMode, WorkloadRule,
         WorkloadSelector,
@@ -486,6 +654,7 @@ mod tests {
         tasks: HashMap<u32, u64>,
         published: usize,
         denials: Vec<u64>,
+        grants: HashMap<FqdnGrantKey, u64>,
     }
 
     #[derive(Clone, Default)]
@@ -501,6 +670,17 @@ mod tests {
             held.published += 1;
             held.cgroups.clear();
             held.tasks.clear();
+            held.grants.clear();
+            Ok(())
+        }
+
+        fn grant_fqdn(&mut self, key: &FqdnGrantKey, expires_ns: u64) -> Result<(), DomainError> {
+            self.0.lock().unwrap().grants.insert(*key, expires_ns);
+            Ok(())
+        }
+
+        fn revoke_fqdn(&mut self, key: &FqdnGrantKey) -> Result<(), DomainError> {
+            self.0.lock().unwrap().grants.remove(key);
             Ok(())
         }
 
@@ -545,6 +725,7 @@ mod tests {
             protocol: Protocol::Any,
             dst_ip: None,
             dst_port: None,
+            dst_fqdn: Vec::new(),
             enabled: true,
         }
     }
@@ -874,5 +1055,172 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    const RESOLVER: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 96, 0, 10));
+
+    fn dns_name(out: &mut Vec<u8>, name: &str) {
+        for label in name.split('.') {
+            out.push(u8::try_from(label.len()).unwrap());
+            out.extend_from_slice(label.as_bytes());
+        }
+        out.push(0);
+    }
+
+    fn dns_query(txid: u16, name: &str) -> Vec<u8> {
+        let mut out = txid.to_be_bytes().to_vec();
+        out.extend_from_slice(&[0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0]);
+        dns_name(&mut out, name);
+        out.extend_from_slice(&[0, 1, 0, 1]);
+        out
+    }
+
+    fn dns_answer(txid: u16, name: &str, addr: [u8; 4], ttl: u32) -> Vec<u8> {
+        let mut out = txid.to_be_bytes().to_vec();
+        out.extend_from_slice(&[0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0]);
+        dns_name(&mut out, name);
+        out.extend_from_slice(&[0, 1, 0, 1]);
+        dns_name(&mut out, name);
+        out.extend_from_slice(&[0, 1, 0, 1]);
+        out.extend_from_slice(&ttl.to_be_bytes());
+        out.extend_from_slice(&[0, 4]);
+        out.extend_from_slice(&addr);
+        out
+    }
+
+    fn dns(cgroup_id: u64, direction: DnsDirection, payload: Vec<u8>, at_ns: u64) -> DnsCapture {
+        DnsCapture {
+            at_ns,
+            cgroup_id,
+            direction,
+            client_port: 40_000,
+            resolver: RESOLVER,
+            payload,
+        }
+    }
+
+    fn named_service(maps: SharedMaps) -> WorkloadPolicyService {
+        let mut allowed = unit_rule("api", "nginx.service");
+        allowed.action = FirewallAction::Allow;
+        allowed.dst_fqdn = vec![FqdnPattern::parse("api.example.com").unwrap()];
+        let policy = WorkloadPolicy::new(vec![exe_rule("other", "/usr/bin/curl"), allowed])
+            .unwrap()
+            .with_dns(WorkloadDnsSettings {
+                resolvers: vec![IpNetwork::V4 {
+                    addr: u32::from(std::net::Ipv4Addr::new(10, 96, 0, 10)),
+                    prefix_len: 32,
+                }],
+                grace_secs: 30,
+            })
+            .unwrap();
+        WorkloadPolicyService::new(policy)
+            .with_maps(Box::new(maps))
+            .with_cgroups(Arc::new(StaticCgroup(
+                "0::/system.slice/nginx.service\n".to_string(),
+            )))
+    }
+
+    fn exec_in(pid: u32, cgroup_id: u64) -> ProcessEntry {
+        let mut task = entry(pid, "/usr/sbin/nginx");
+        task.cgroup_id = cgroup_id;
+        task
+    }
+
+    #[test]
+    fn a_resolved_name_opens_its_address_for_the_cgroup_that_asked_alone() {
+        let maps = SharedMaps::default();
+        let service = named_service(maps.clone());
+        service.record_exec(&exec_in(10, 4242));
+        service.record_exec(&exec_in(11, 5555));
+
+        assert_eq!(
+            service.observe_dns(&dns(
+                4242,
+                DnsDirection::Query,
+                dns_query(7, "api.example.com"),
+                1_000
+            )),
+            0
+        );
+        let answer = dns_answer(7, "api.example.com", [203, 0, 113, 7], 60);
+        assert_eq!(
+            service.observe_dns(&dns(4242, DnsDirection::Response, answer.clone(), 2_000)),
+            1
+        );
+        // The same answer delivered to another pod, which never asked, opens
+        // nothing for it.
+        assert_eq!(
+            service.observe_dns(&dns(5555, DnsDirection::Response, answer, 3_000)),
+            0
+        );
+
+        let held = maps.0.lock().unwrap();
+        assert_eq!(held.grants.len(), 1);
+        let (key, expires) = held.grants.iter().next().unwrap();
+        assert_eq!(key.cgroup_id, 4242);
+        assert_eq!(key.slot, 1);
+        assert_eq!(
+            key.addr,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 7))
+        );
+        assert_eq!(*expires, 2_000 + 90 * 1_000_000_000);
+    }
+
+    #[test]
+    fn a_cgroup_no_rule_names_learns_nothing_from_its_answers() {
+        let maps = SharedMaps::default();
+        let service = named_service(maps.clone());
+        service.observe_dns(&dns(
+            9,
+            DnsDirection::Query,
+            dns_query(7, "api.example.com"),
+            1_000,
+        ));
+        let answer = dns_answer(7, "api.example.com", [203, 0, 113, 7], 60);
+        assert_eq!(
+            service.observe_dns(&dns(9, DnsDirection::Response, answer, 2_000)),
+            0
+        );
+        assert!(maps.0.lock().unwrap().grants.is_empty());
+    }
+
+    #[test]
+    fn a_lapsed_grant_is_swept_and_a_reload_drops_every_grant() {
+        let maps = SharedMaps::default();
+        let service = named_service(maps.clone());
+        service.record_exec(&exec_in(10, 4242));
+        service.observe_dns(&dns(
+            4242,
+            DnsDirection::Query,
+            dns_query(1, "api.example.com"),
+            0,
+        ));
+        service.observe_dns(&dns(
+            4242,
+            DnsDirection::Response,
+            dns_answer(1, "api.example.com", [203, 0, 113, 7], 10),
+            0,
+        ));
+        assert_eq!(service.sweep_fqdn(39 * 1_000_000_000), 0);
+        assert_eq!(maps.0.lock().unwrap().grants.len(), 1);
+        assert_eq!(service.sweep_fqdn(41 * 1_000_000_000), 1);
+        assert!(maps.0.lock().unwrap().grants.is_empty());
+
+        service.observe_dns(&dns(
+            4242,
+            DnsDirection::Query,
+            dns_query(2, "api.example.com"),
+            0,
+        ));
+        service.observe_dns(&dns(
+            4242,
+            DnsDirection::Response,
+            dns_answer(2, "api.example.com", [203, 0, 113, 8], 10),
+            0,
+        ));
+        assert_eq!(maps.0.lock().unwrap().grants.len(), 1);
+        service.apply(service.policy()).unwrap();
+        assert!(maps.0.lock().unwrap().grants.is_empty());
+        assert_eq!(service.sweep_fqdn(41 * 1_000_000_000), 0);
     }
 }

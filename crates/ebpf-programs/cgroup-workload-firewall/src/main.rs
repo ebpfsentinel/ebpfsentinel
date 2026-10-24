@@ -31,6 +31,15 @@
 //! even looked at, for two reasons. A quarantine is a response rather than a
 //! policy, so it must work on a node whose policy document is empty; and a
 //! rule that allows must not be able to let a cut-off workload back out.
+//!
+//! Two more programs sit on the packet side of the same cgroups, for rules
+//! that name a destination by its DNS name. `cgroup_skb` egress and ingress
+//! copy the UDP DNS queries and answers of a named workload up to userspace,
+//! which pairs them, believes only an answer from a trusted resolver to a
+//! query the same cgroup sent, and writes the addresses it learned into
+//! `WORKLOAD_FQDN_ALLOWED` for that cgroup and that rule alone. The connect
+//! hook then reads that map instead of a prefix. Neither DNS program ever
+//! drops a packet: capture is all they do.
 
 #![no_std]
 #![no_main]
@@ -39,10 +48,10 @@ use aya_ebpf::{
     btf_maps::{Array, HashMap, LruHashMap, PerCpuArray, RingBuf},
     helpers::{
         bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_get_current_uid_gid,
-        bpf_ktime_get_boot_ns,
+        bpf_ktime_get_boot_ns, bpf_skb_cgroup_id, bpf_skb_load_bytes,
     },
-    macros::{btf_map, cgroup_sock_addr},
-    programs::SockAddrContext,
+    macros::{btf_map, cgroup_skb, cgroup_sock_addr},
+    programs::{SkBuffContext, SockAddrContext},
 };
 use ebpf_common::quarantine::{
     QUARANTINE_EVENTS_RINGBUF_BYTES, QUARANTINE_MAX_CGROUPS, QUARANTINE_METRIC_COUNT,
@@ -51,15 +60,18 @@ use ebpf_common::quarantine::{
     QUARANTINE_OUTCOME_OBSERVED, QUARANTINE_OUTCOME_REFUSED, QuarantineEntry, QuarantineEvent,
 };
 use ebpf_common::workload_policy::{
-    WORKLOAD_ACTION_DENY, WORKLOAD_EVENTS_RINGBUF_BYTES, WORKLOAD_FAMILY_ANY, WORKLOAD_FAMILY_IPV4,
-    WORKLOAD_FAMILY_IPV6, WORKLOAD_HOOK_BIND, WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_SENDMSG,
-    WORKLOAD_METRIC_ALLOWED, WORKLOAD_METRIC_BIND, WORKLOAD_METRIC_CONNECT, WORKLOAD_METRIC_COUNT,
+    WORKLOAD_ACTION_DENY, WORKLOAD_DNS_MAX_PAYLOAD, WORKLOAD_DNS_QUERY, WORKLOAD_DNS_RESPONSE,
+    WORKLOAD_DNS_RINGBUF_BYTES, WORKLOAD_EVENTS_RINGBUF_BYTES, WORKLOAD_FAMILY_ANY,
+    WORKLOAD_FAMILY_IPV4, WORKLOAD_FAMILY_IPV6, WORKLOAD_FQDN_MAX_ALLOWED, WORKLOAD_HOOK_BIND,
+    WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_SENDMSG, WORKLOAD_METRIC_ALLOWED, WORKLOAD_METRIC_BIND,
+    WORKLOAD_METRIC_CONNECT, WORKLOAD_METRIC_COUNT, WORKLOAD_METRIC_DNS_LOST,
     WORKLOAD_METRIC_EVENT_LOST, WORKLOAD_METRIC_NO_RULE, WORKLOAD_METRIC_REFUSED,
     WORKLOAD_METRIC_SENDMSG, WORKLOAD_METRIC_UNRESOLVED, WORKLOAD_METRIC_WOULD_REFUSE,
     WORKLOAD_MODE_ENFORCE, WORKLOAD_POLICY_MAX_CGROUPS, WORKLOAD_POLICY_MAX_RULES,
-    WORKLOAD_POLICY_MAX_TASKS, WORKLOAD_PROTOCOL_ANY, WorkloadDenialEvent, WorkloadRuleEntry,
+    WORKLOAD_POLICY_MAX_TASKS, WORKLOAD_PROTOCOL_ANY, WorkloadDenialEvent, WorkloadDnsEvent,
+    WorkloadFqdnKey, WorkloadRuleEntry,
 };
-use ebpf_helpers::increment_metric;
+use ebpf_helpers::{increment_metric, opaque_usize};
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -142,6 +154,32 @@ static QUARANTINE_METRICS: PerCpuArray<u64, { QUARANTINE_METRIC_COUNT as usize }
 static QUARANTINE_EVENTS: RingBuf<QuarantineEvent, { QUARANTINE_EVENTS_RINGBUF_BYTES as usize }> =
     RingBuf::new();
 
+/// (cgroup, address, rule) -> `CLOCK_BOOTTIME` instant the grant lapses.
+///
+/// Written by userspace from DNS answers the workload itself received, and
+/// read by the connect and sendmsg hooks for a rule naming a destination by
+/// name. The expiry is compared here, so a grant whose TTL ran out stops
+/// opening new connections at that instant whether or not the sweep has run.
+#[btf_map]
+static WORKLOAD_FQDN_ALLOWED: HashMap<
+    WorkloadFqdnKey,
+    u64,
+    { WORKLOAD_FQDN_MAX_ALLOWED as usize },
+> = HashMap::new();
+
+/// Slot zero non-zero while a loaded rule names a destination by name.
+///
+/// Off, the two DNS programs return at their first instruction, so a node
+/// whose policy names no host pays one array read per packet of a named
+/// workload and copies nothing.
+#[btf_map]
+static WORKLOAD_DNS_CAPTURE: Array<u32, 1> = Array::new();
+
+/// DNS queries and answers of named workloads, on their way to the learner.
+#[btf_map]
+static WORKLOAD_DNS_EVENTS: RingBuf<WorkloadDnsEvent, { WORKLOAD_DNS_RINGBUF_BYTES as usize }> =
+    RingBuf::new();
+
 // ── Verdicts, in the kernel's own numbering ─────────────────────────
 
 /// What a `cgroup_sock_addr` program returns to let the syscall proceed.
@@ -153,6 +191,22 @@ const REFUSE: i32 = 0;
 const AF_INET: u32 = 2;
 /// `AF_INET6`.
 const AF_INET6: u32 = 10;
+
+/// What a `cgroup_skb` program returns to let the packet through.
+const SKB_PASS: i32 = 1;
+
+/// `ETH_P_IP` and `ETH_P_IPV6`, host order, as `__sk_buff.protocol` carries
+/// them once swapped.
+const ETH_P_IP: u16 = 0x0800;
+const ETH_P_IPV6: u16 = 0x86dd;
+/// UDP, as the IP header numbers it.
+const IPPROTO_UDP: u8 = 17;
+/// The port DNS is served on.
+const DNS_PORT: u16 = 53;
+/// A UDP header.
+const UDP_HEADER_LEN: usize = 8;
+/// A fixed IPv6 header.
+const IPV6_HEADER_LEN: usize = 40;
 
 // ── Programs ────────────────────────────────────────────────────────
 
@@ -195,6 +249,150 @@ pub fn workload_bind4(ctx: SockAddrContext) -> i32 {
 #[cgroup_sock_addr(bind6)]
 pub fn workload_bind6(ctx: SockAddrContext) -> i32 {
     answer(&ctx, WORKLOAD_HOOK_BIND)
+}
+
+/// A packet leaving a socket, which is where a workload's DNS query is seen.
+#[cgroup_skb(egress)]
+pub fn workload_dns_egress(ctx: SkBuffContext) -> i32 {
+    capture(&ctx, WORKLOAD_DNS_QUERY);
+    SKB_PASS
+}
+
+/// A packet arriving at a socket, which is where the answer is seen, after
+/// the kernel found the socket and so with the cgroup of the pod that asked.
+#[cgroup_skb(ingress)]
+pub fn workload_dns_ingress(ctx: SkBuffContext) -> i32 {
+    capture(&ctx, WORKLOAD_DNS_RESPONSE);
+    SKB_PASS
+}
+
+// ── DNS capture ─────────────────────────────────────────────────────
+
+/// Copy one UDP DNS packet of a named workload into the ring.
+///
+/// TCP DNS is not read, nor an IPv6 packet carrying extension headers, nor a
+/// fragment past the first: none of them teaches anything, which leaves the
+/// rule refusing the address rather than allowing it on a reading that was
+/// never made.
+fn capture(ctx: &SkBuffContext, direction: u8) {
+    let Some(flag) = WORKLOAD_DNS_CAPTURE.get(0) else {
+        return;
+    };
+    if *flag == 0 {
+        return;
+    }
+    let cgroup = unsafe { bpf_skb_cgroup_id(ctx.skb.skb) };
+    if unsafe { WORKLOAD_CGROUP_SELECTORS.get(&cgroup) }.is_none() {
+        return;
+    }
+
+    let protocol = u16::from_be(ctx.skb.protocol() as u16);
+    let mut src = [0u32; 4];
+    let mut dst = [0u32; 4];
+    let (l4, family) = if protocol == ETH_P_IP {
+        let Ok(first) = ctx.load::<u8>(0) else {
+            return;
+        };
+        if first >> 4 != 4 {
+            return;
+        }
+        let Ok(next) = ctx.load::<u8>(9) else {
+            return;
+        };
+        if next != IPPROTO_UDP {
+            return;
+        }
+        let Ok(fragment) = ctx.load::<u16>(6) else {
+            return;
+        };
+        if u16::from_be(fragment) & 0x1fff != 0 {
+            return;
+        }
+        let (Ok(s4), Ok(d4)) = (ctx.load::<u32>(12), ctx.load::<u32>(16)) else {
+            return;
+        };
+        src[0] = u32::from_be(s4);
+        dst[0] = u32::from_be(d4);
+        (usize::from(first & 0x0f) * 4, WORKLOAD_FAMILY_IPV4)
+    } else if protocol == ETH_P_IPV6 {
+        let Ok(next) = ctx.load::<u8>(6) else {
+            return;
+        };
+        if next != IPPROTO_UDP {
+            return;
+        }
+        let (Ok(s6), Ok(d6)) = (ctx.load::<[u32; 4]>(8), ctx.load::<[u32; 4]>(24)) else {
+            return;
+        };
+        let mut word = 0usize;
+        while word < 4 {
+            src[word] = u32::from_be(s6[word]);
+            dst[word] = u32::from_be(d6[word]);
+            word += 1;
+        }
+        (IPV6_HEADER_LEN, WORKLOAD_FAMILY_IPV6)
+    } else {
+        return;
+    };
+
+    let (Ok(sport), Ok(dport)) = (ctx.load::<u16>(l4), ctx.load::<u16>(l4 + 2)) else {
+        return;
+    };
+    let src_port = u16::from_be(sport);
+    let dst_port = u16::from_be(dport);
+    let dns_port = if direction == WORKLOAD_DNS_QUERY {
+        dst_port
+    } else {
+        src_port
+    };
+    if dns_port != DNS_PORT {
+        return;
+    }
+
+    let offset = l4 + UDP_HEADER_LEN;
+    let total = ctx.len() as usize;
+    if offset >= total {
+        return;
+    }
+    let available = total - offset;
+    let payload_len = if available > WORKLOAD_DNS_MAX_PAYLOAD {
+        WORKLOAD_DNS_MAX_PAYLOAD
+    } else {
+        available
+    };
+
+    let Some(mut entry) = WORKLOAD_DNS_EVENTS.reserve(0) else {
+        increment_metric!(WORKLOAD_METRICS, WORKLOAD_METRIC_DNS_LOST);
+        return;
+    };
+    let record = entry.as_mut_ptr();
+    let loaded = unsafe {
+        (*record).at_ns = bpf_ktime_get_boot_ns();
+        (*record).cgroup_id = cgroup;
+        (*record).src_addr = src;
+        (*record).dst_addr = dst;
+        (*record).src_port = src_port;
+        (*record).dst_port = dst_port;
+        (*record).payload_len = payload_len as u16;
+        (*record).family = family;
+        (*record).direction = direction;
+        let payload = (*record).payload.as_mut_ptr();
+        core::ptr::write_bytes(payload, 0, WORKLOAD_DNS_MAX_PAYLOAD);
+        // The reserve spills the length, and the verifier loses its lower
+        // bound across the spill; the barrier and the clamp put it back.
+        let load_len = opaque_usize(payload_len).clamp(1, WORKLOAD_DNS_MAX_PAYLOAD);
+        bpf_skb_load_bytes(
+            ctx.skb.skb as *const _,
+            offset as u32,
+            payload as *mut _,
+            load_len as u32,
+        ) >= 0
+    };
+    if loaded {
+        entry.submit(0);
+    } else {
+        entry.discard(0);
+    }
 }
 
 // ── The decision ────────────────────────────────────────────────────
@@ -286,6 +484,15 @@ fn decide(ctx: &SockAddrContext, hook: u8) -> i32 {
     let port = u16::from_be(unsafe { (*ctx.sock_addr).user_port } as u16);
     let protocol = unsafe { (*ctx.sock_addr).protocol } as u8;
     let (addr, family) = address_of(ctx, family);
+    let cgroup = unsafe { bpf_get_current_cgroup_id() };
+    let operation = Operation {
+        addr: &addr,
+        family,
+        port,
+        protocol,
+        hook,
+        cgroup,
+    };
 
     for index in 0..WORKLOAD_POLICY_MAX_RULES {
         let Some(rule) = WORKLOAD_RULES.get(index as u32) else {
@@ -294,7 +501,7 @@ fn decide(ctx: &SockAddrContext, hook: u8) -> i32 {
         if rule.enabled == 0 {
             break;
         }
-        if !applies(rule, mask, &addr, family, port, protocol) {
+        if !applies(rule, index, mask, &operation) {
             continue;
         }
         if rule.action != WORKLOAD_ACTION_DENY {
@@ -409,30 +616,58 @@ fn address_of(ctx: &SockAddrContext, family: u32) -> ([u32; 4], u8) {
     ([0; 4], WORKLOAD_FAMILY_ANY)
 }
 
-/// Whether one rule speaks about this operation.
-fn applies(
-    rule: &WorkloadRuleEntry,
-    mask: u64,
-    addr: &[u32; 4],
+/// One socket operation, as a rule is compared against it.
+struct Operation<'a> {
+    addr: &'a [u32; 4],
     family: u8,
     port: u16,
     protocol: u8,
-) -> bool {
+    hook: u8,
+    cgroup: u64,
+}
+
+/// Whether one rule speaks about this operation.
+fn applies(rule: &WorkloadRuleEntry, slot: usize, mask: u64, op: &Operation<'_>) -> bool {
     if mask & (1u64 << (rule.selector & 63)) == 0 {
         return false;
     }
-    if rule.family != WORKLOAD_FAMILY_ANY && rule.family != family {
+    if rule.family != WORKLOAD_FAMILY_ANY && rule.family != op.family {
         return false;
     }
-    if rule.protocol != WORKLOAD_PROTOCOL_ANY && rule.protocol != protocol {
+    if rule.protocol != WORKLOAD_PROTOCOL_ANY && rule.protocol != op.protocol {
         return false;
     }
     if (rule.port_start != 0 || rule.port_end != 0)
-        && (port < rule.port_start || port > rule.port_end)
+        && (op.port < rule.port_start || op.port > rule.port_end)
     {
         return false;
     }
-    inside(&rule.dst_addr, rule.prefix_len, addr)
+    if rule.fqdn != 0 {
+        return learned(slot, op);
+    }
+    inside(&rule.dst_addr, rule.prefix_len, op.addr)
+}
+
+/// Whether this cgroup was answered this address for this rule, and the
+/// answer has not lapsed.
+///
+/// A name is never something a workload binds to, so a rule naming one does
+/// not apply at the bind hook at all.
+fn learned(slot: usize, op: &Operation<'_>) -> bool {
+    if op.hook == WORKLOAD_HOOK_BIND {
+        return false;
+    }
+    let key = WorkloadFqdnKey {
+        cgroup_id: op.cgroup,
+        addr: *op.addr,
+        family: op.family,
+        slot: slot as u8,
+        _pad: [0; 6],
+    };
+    let Some(expires) = (unsafe { WORKLOAD_FQDN_ALLOWED.get(&key) }).copied() else {
+        return false;
+    };
+    expires > unsafe { bpf_ktime_get_boot_ns() }
 }
 
 /// Whether an address sits inside a prefix, both as host-order words.

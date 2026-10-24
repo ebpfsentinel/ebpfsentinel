@@ -262,7 +262,7 @@ impl RingBufObserver {
 /// `bpf_ktime_get_boot_ns()`, which includes suspend time. Comparing against
 /// `CLOCK_MONOTONIC` would report every event as arriving early by however
 /// long the host had been suspended.
-pub(crate) fn boottime_now_ns() -> u64 {
+pub fn boottime_now_ns() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
