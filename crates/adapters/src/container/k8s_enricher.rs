@@ -2,9 +2,10 @@
 //!
 //! Runs a `kube-rs` reflector on the `Pod` resource scoped to the current
 //! node and maintains a reverse index from container ID (as seen in
-//! `status.containerStatuses[].containerID`) to the owning pod. On lookup
-//! it returns a [`KubernetesMetadata`] value from the local cache - no API
-//! call per alert.
+//! `status.containerStatuses[].containerID`) to the owning pod. A second
+//! watcher keeps the labels of every namespace, which a workload selector
+//! naming namespaces reads. On lookup it returns a [`KubernetesMetadata`]
+//! value from the local cache - no API call per alert.
 //!
 //! When the agent is not running inside a Kubernetes cluster (no
 //! `KUBERNETES_SERVICE_HOST` env var) or the API is unreachable at startup,
@@ -18,7 +19,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{Namespace, Pod};
 use kube::{
     Api, Client,
     runtime::watcher::{self, Event},
@@ -55,7 +56,11 @@ pub struct PodInfo {
 }
 
 impl PodInfo {
-    fn to_metadata(&self, container_id: &str) -> KubernetesMetadata {
+    fn to_metadata(
+        &self,
+        container_id: &str,
+        namespace_labels: Option<&BTreeMap<String, String>>,
+    ) -> KubernetesMetadata {
         KubernetesMetadata {
             pod_name: self.name.clone(),
             namespace: self.namespace.clone(),
@@ -78,6 +83,11 @@ impl PodInfo {
             owner_kind: self.owner_kind.clone(),
             owner_name: self.owner_name.clone(),
             node_name: self.node_name.clone(),
+            namespace_labels: namespace_labels
+                .into_iter()
+                .flatten()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         }
     }
 }
@@ -89,6 +99,8 @@ pub struct PodCache {
     pods: RwLock<HashMap<String, Arc<PodInfo>>>,
     /// `container_id` → `pod_uid`
     reverse_index: RwLock<HashMap<String, String>>,
+    /// namespace name → its labels
+    namespaces: RwLock<HashMap<String, BTreeMap<String, String>>>,
 }
 
 impl PodCache {
@@ -131,6 +143,21 @@ impl PodCache {
                 index.remove(cid);
             }
         }
+    }
+
+    /// Record a namespace's labels, replacing what was known of it.
+    pub async fn upsert_namespace(&self, name: String, labels: BTreeMap<String, String>) {
+        self.namespaces.write().await.insert(name, labels);
+    }
+
+    /// Forget a namespace.
+    pub async fn delete_namespace(&self, name: &str) {
+        self.namespaces.write().await.remove(name);
+    }
+
+    /// The labels of a namespace, once the watcher has seen it.
+    pub async fn namespace_labels(&self, name: &str) -> Option<BTreeMap<String, String>> {
+        self.namespaces.read().await.get(name).cloned()
     }
 
     /// Look up a container id in the cache. Returns the matching pod
@@ -334,7 +361,8 @@ impl MetadataEnricher for KubernetesEnricher {
         if let Some(hook) = self.namespace_hook.lock().await.as_ref() {
             let _ = hook.on_namespace_resolved(&pod.namespace);
         }
-        let metadata = pod.to_metadata(container_id);
+        let namespace_labels = self.cache.namespace_labels(&pod.namespace).await;
+        let metadata = pod.to_metadata(container_id, namespace_labels.as_ref());
         Ok(Some(ContainerMetadata::Kubernetes(metadata)))
     }
 }
@@ -407,6 +435,45 @@ pub fn spawn_pod_watcher(
             }
         }
         debug!("kubernetes pod watcher stream closed");
+    })
+}
+
+/// Spawn a background task that keeps the labels of every namespace in the
+/// [`PodCache`], so a workload selector naming namespaces can be matched
+/// without a request per exec. Namespaces are few and their labels small,
+/// so the whole cluster's are held rather than only those of this node's
+/// pods, which would need a second index kept in step with the first.
+pub fn spawn_namespace_watcher(
+    client: Client,
+    cache: Arc<PodCache>,
+    metrics: Arc<K8sEnricherMetrics>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let namespaces: Api<Namespace> = Api::all(client);
+        info!("kubernetes namespace watcher started");
+        let mut stream = watcher::watcher(namespaces, watcher::Config::default()).boxed();
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(Event::Apply(namespace) | Event::InitApply(namespace)) => {
+                    if let Some(name) = namespace.metadata.name.clone() {
+                        let labels = namespace.metadata.labels.unwrap_or_default();
+                        cache.upsert_namespace(name, labels).await;
+                    }
+                }
+                Ok(Event::Delete(namespace)) => {
+                    if let Some(name) = namespace.metadata.name.as_deref() {
+                        cache.delete_namespace(name).await;
+                    }
+                }
+                Ok(Event::Init | Event::InitDone) => {}
+                Err(err) => {
+                    metrics.api_errors_total.fetch_add(1, Ordering::Relaxed);
+                    warn!(error = %err, "kube namespace watcher error, backing off 5s");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        }
+        debug!("kubernetes namespace watcher stream closed");
     })
 }
 
@@ -597,6 +664,33 @@ mod tests {
         assert_eq!(k.container_name, "app");
         assert_eq!(k.node_name, "node-a");
         assert_eq!(k.service_account, "sa");
+        assert!(
+            k.namespace_labels.is_empty(),
+            "a namespace not seen yet lends no labels"
+        );
+
+        cache
+            .upsert_namespace(
+                "prod".into(),
+                BTreeMap::from([(
+                    "kubernetes.io/metadata.name".to_string(),
+                    "prod".to_string(),
+                )]),
+            )
+            .await;
+        let ContainerMetadata::Kubernetes(k) = e.enrich(&info).await.unwrap().unwrap() else {
+            panic!("expected kubernetes metadata");
+        };
+        assert_eq!(
+            k.namespace_labels,
+            vec![(
+                "kubernetes.io/metadata.name".to_string(),
+                "prod".to_string()
+            )]
+        );
+
+        cache.delete_namespace("prod").await;
+        assert!(cache.namespace_labels("prod").await.is_none());
     }
 
     #[tokio::test]

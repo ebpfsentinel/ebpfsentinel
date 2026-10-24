@@ -3,8 +3,9 @@
 //! The address matchers answer "from where to where". They cannot answer the
 //! question a host firewall is actually asked, which is "which program on
 //! this node may leave it, and for what". A selector is that half of the
-//! rule: an executable, a systemd unit, a cgroup or a container, any
-//! combination of the four, all of them narrowing together.
+//! rule: an executable, a systemd unit, a cgroup or a container, and on a
+//! Kubernetes node the labels of the pod, the labels of its namespace and
+//! its service account, any combination of them, all narrowing together.
 //!
 //! Three decisions are written into the types rather than left to a caller.
 //!
@@ -27,6 +28,8 @@
 //! anybody writes is wrong and the kernel refusing a `connect()` is not a
 //! thing a deployment should walk into.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use ebpf_common::workload_policy::{
@@ -34,6 +37,7 @@ use ebpf_common::workload_policy::{
 };
 
 use crate::common::entity::{Protocol, RuleId};
+use crate::netpol::LabelSelector;
 
 use super::entity::{FirewallAction, FirewallRule, IpNetwork, PortRange};
 use super::error::FirewallError;
@@ -82,7 +86,37 @@ pub struct WorkloadSelector {
     /// the runtime gave it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
+    /// Labels of the pod the task runs in, read with the Kubernetes
+    /// selector semantics. An empty selector names every pod, and never a
+    /// task outside one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pods: Option<LabelSelector>,
+    /// Labels of the namespace that pod sits in. Every namespace carries
+    /// `kubernetes.io/metadata.name`, which is how a namespace is named by
+    /// its name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespaces: Option<LabelSelector>,
+    /// Name of the service account the pod runs as, compared exactly. A
+    /// service account is namespaced, so the same name in two namespaces is
+    /// two accounts, and `namespaces` is what tells them apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account: Option<String>,
 }
+
+/// The Kubernetes half of a selector: what a pod is, rather than what runs
+/// in it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KubernetesMatchers {
+    /// Pod label selector.
+    pub pods: Option<LabelSelector>,
+    /// Namespace label selector.
+    pub namespaces: Option<LabelSelector>,
+    /// Service account name.
+    pub service_account: Option<String>,
+}
+
+/// Longest service account name the API server accepts, a DNS subdomain.
+const SERVICE_ACCOUNT_MAX_LEN: usize = 253;
 
 impl WorkloadSelector {
     /// Build a selector, refusing one that names nothing or names it badly.
@@ -100,11 +134,32 @@ impl WorkloadSelector {
         cgroup: Option<String>,
         container: Option<String>,
     ) -> Result<Self, FirewallError> {
+        Self::with_kubernetes(exe, unit, cgroup, container, KubernetesMatchers::default())
+    }
+
+    /// Build a selector that may also name pods, namespaces and a service
+    /// account.
+    ///
+    /// # Errors
+    ///
+    /// The refusals [`Self::new`] documents, plus a label selector the API
+    /// server would refuse and a service account name that is not a DNS
+    /// subdomain.
+    pub fn with_kubernetes(
+        exe: Option<String>,
+        unit: Option<String>,
+        cgroup: Option<String>,
+        container: Option<String>,
+        kubernetes: KubernetesMatchers,
+    ) -> Result<Self, FirewallError> {
         let selector = Self {
             exe: trimmed(exe),
             unit: trimmed(unit),
             cgroup: trimmed(cgroup),
             container: trimmed(container),
+            pods: kubernetes.pods,
+            namespaces: kubernetes.namespaces,
+            service_account: trimmed(kubernetes.service_account),
         };
         selector.validate()?;
         Ok(selector)
@@ -118,8 +173,8 @@ impl WorkloadSelector {
     pub fn validate(&self) -> Result<(), FirewallError> {
         if self.is_empty() {
             return Err(FirewallError::InvalidWorkloadSelector {
-                reason: "a workload selector must name at least one of exe, unit, cgroup or \
-                         container"
+                reason: "a workload selector must name at least one of exe, unit, cgroup, \
+                         container, pods, namespaces or service_account"
                     .to_string(),
             });
         }
@@ -167,13 +222,53 @@ impl WorkloadSelector {
                 ),
             });
         }
+        for (field, selector) in self.label_selectors() {
+            selector
+                .validate()
+                .map_err(|reason| FirewallError::InvalidWorkloadSelector {
+                    reason: format!("{field}: {reason}"),
+                })?;
+        }
+        if let Some(account) = self.service_account.as_deref()
+            && (account.len() > SERVICE_ACCOUNT_MAX_LEN
+                || !account.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.'
+                })
+                || !account.starts_with(|c: char| c.is_ascii_alphanumeric())
+                || !account.ends_with(|c: char| c.is_ascii_alphanumeric()))
+        {
+            return Err(FirewallError::InvalidWorkloadSelector {
+                reason: format!(
+                    "service_account '{account}' is not a name the API server accepts: lowercase \
+                     letters, digits, '-' and '.', starting and ending alphanumeric, at most \
+                     {SERVICE_ACCOUNT_MAX_LEN} characters"
+                ),
+            });
+        }
         Ok(())
     }
 
     /// Whether no matcher is set.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.matchers().next().is_none()
+        self.matchers().next().is_none() && self.label_selectors().next().is_none()
+    }
+
+    /// Whether the selector names anything only a Kubernetes node can tell:
+    /// a pod's labels, its namespace's labels or its service account.
+    #[must_use]
+    pub fn names_kubernetes(&self) -> bool {
+        self.pods.is_some() || self.namespaces.is_some() || self.service_account.is_some()
+    }
+
+    /// The label selectors that are set, as field name and selector.
+    pub fn label_selectors(&self) -> impl Iterator<Item = (&'static str, &LabelSelector)> {
+        [
+            ("pods", self.pods.as_ref()),
+            ("namespaces", self.namespaces.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(field, value)| value.map(|value| (field, value)))
     }
 
     /// Whether this selector can only be decided against a task.
@@ -196,6 +291,7 @@ impl WorkloadSelector {
             ("unit", self.unit.as_deref()),
             ("cgroup", self.cgroup.as_deref()),
             ("container", self.container.as_deref()),
+            ("service_account", self.service_account.as_deref()),
         ]
         .into_iter()
         .filter_map(|(field, value)| value.map(|value| (field, value)))
@@ -229,14 +325,39 @@ impl WorkloadSelector {
         {
             return false;
         }
+        if let Some(pods) = self.pods.as_ref()
+            && !facts.pod_labels.is_some_and(|labels| pods.matches(labels))
+        {
+            return false;
+        }
+        if let Some(namespaces) = self.namespaces.as_ref()
+            && !facts
+                .namespace_labels
+                .is_some_and(|labels| namespaces.matches(labels))
+        {
+            return false;
+        }
+        if let Some(account) = self.service_account.as_deref()
+            && facts.service_account != Some(account)
+        {
+            return false;
+        }
         true
     }
 
     /// The selector as one line, for a log, an alert and the command line.
+    /// An empty label selector reads `*`, which is what it selects.
     #[must_use]
     pub fn describe(&self) -> String {
         self.matchers()
             .map(|(field, value)| format!("{field}={value}"))
+            .chain(self.label_selectors().map(|(field, selector)| {
+                if selector.is_empty() {
+                    format!("{field}=*")
+                } else {
+                    format!("{field}={{{}}}", selector.describe())
+                }
+            }))
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -343,6 +464,13 @@ pub struct WorkloadFacts<'a> {
     pub container_id: Option<&'a str>,
     /// Container name, where a runtime enricher could read one.
     pub container_name: Option<&'a str>,
+    /// Labels of the pod the task runs in, on a Kubernetes node whose pod
+    /// was found.
+    pub pod_labels: Option<&'a BTreeMap<String, String>>,
+    /// Labels of that pod's namespace, once the namespace has been seen.
+    pub namespace_labels: Option<&'a BTreeMap<String, String>>,
+    /// Service account the pod runs as.
+    pub service_account: Option<&'a str>,
 }
 
 /// Where a task is trying to go, as the socket hook sees it.
@@ -1080,6 +1208,7 @@ mod tests {
             cgroup: Some("/system.slice/nginx.service"),
             container_id: None,
             container_name: None,
+            ..WorkloadFacts::default()
         }
     }
 
@@ -1555,6 +1684,145 @@ mod tests {
         );
         assert_eq!(WorkloadHook::from_kernel(9), None);
         assert_eq!(WorkloadHook::Bind.as_str(), "bind");
+    }
+
+    fn labels(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    fn kubernetes(json: &str) -> WorkloadSelector {
+        let selector: WorkloadSelector = serde_json::from_str(json).expect("selector parses");
+        selector.validate().expect("selector is valid");
+        selector
+    }
+
+    fn pod<'a>(
+        pod_labels: &'a BTreeMap<String, String>,
+        namespace_labels: &'a BTreeMap<String, String>,
+        service_account: &'a str,
+    ) -> WorkloadFacts<'a> {
+        WorkloadFacts {
+            cgroup: Some("/kubepods.slice/kubepods-pod1.slice/cri-containerd-abc.scope"),
+            container_id: Some("abcdef0123456789"),
+            pod_labels: Some(pod_labels),
+            namespace_labels: Some(namespace_labels),
+            service_account: Some(service_account),
+            ..WorkloadFacts::default()
+        }
+    }
+
+    #[test]
+    fn a_pod_selector_reads_labels_with_the_kubernetes_semantics() {
+        let selector = kubernetes(
+            r#"{"pods":{"match_labels":{"app":"web"},
+                "match_expressions":[{"key":"tier","operator":"In","values":["front","edge"]},
+                                     {"key":"legacy","operator":"DoesNotExist"}]}}"#,
+        );
+        let ns = labels(&[("kubernetes.io/metadata.name", "shop")]);
+        let web = labels(&[("app", "web"), ("tier", "front")]);
+        let old = labels(&[("app", "web"), ("tier", "front"), ("legacy", "1")]);
+        let api = labels(&[("app", "api"), ("tier", "front")]);
+        assert!(selector.matches(&pod(&web, &ns, "default")));
+        assert!(!selector.matches(&pod(&old, &ns, "default")));
+        assert!(!selector.matches(&pod(&api, &ns, "default")));
+        assert!(selector.names_kubernetes());
+        assert!(!selector.names_executable());
+    }
+
+    #[test]
+    fn an_empty_pod_selector_names_every_pod_and_no_host_process() {
+        let selector = kubernetes(r#"{"pods":{}}"#);
+        assert!(!selector.is_empty());
+        let none = BTreeMap::new();
+        assert!(selector.matches(&pod(&none, &none, "default")));
+        assert!(!selector.matches(&nginx()));
+        assert_eq!(selector.describe(), "pods=*");
+    }
+
+    #[test]
+    fn a_namespace_is_named_by_its_name_label_and_an_account_by_its_name() {
+        let selector = kubernetes(
+            r#"{"namespaces":{"match_labels":{"kubernetes.io/metadata.name":"payments"}},
+                "service_account":"api"}"#,
+        );
+        let app = labels(&[("app", "api")]);
+        let payments = labels(&[("kubernetes.io/metadata.name", "payments")]);
+        let shop = labels(&[("kubernetes.io/metadata.name", "shop")]);
+        assert!(selector.matches(&pod(&app, &payments, "api")));
+        assert!(!selector.matches(&pod(&app, &shop, "api")));
+        assert!(!selector.matches(&pod(&app, &payments, "default")));
+        // A namespace the watcher has not seen yet is not a namespace that
+        // matches: the rule holds off until the labels are known.
+        let unseen = WorkloadFacts {
+            namespace_labels: None,
+            ..pod(&app, &payments, "api")
+        };
+        assert!(!selector.matches(&unseen));
+        assert_eq!(
+            selector.describe(),
+            "service_account=api namespaces={kubernetes.io/metadata.name=payments}"
+        );
+    }
+
+    #[test]
+    fn a_kubernetes_selector_narrows_together_with_the_process_matchers() {
+        let selector =
+            kubernetes(r#"{"exe":"/usr/sbin/nginx","pods":{"match_labels":{"app":"web"}}}"#);
+        let web = labels(&[("app", "web")]);
+        let ns = BTreeMap::new();
+        let nginx_in_pod = WorkloadFacts {
+            exe: Some("/usr/sbin/nginx"),
+            ..pod(&web, &ns, "default")
+        };
+        assert!(selector.matches(&nginx_in_pod));
+        assert!(!selector.matches(&pod(&web, &ns, "default")));
+        assert!(!selector.matches(&nginx()));
+    }
+
+    #[test]
+    fn a_selector_the_api_server_would_refuse_is_refused_here() {
+        for json in [
+            r#"{"pods":{"match_expressions":[{"key":"app","operator":"In"}]}}"#,
+            r#"{"namespaces":{"match_expressions":[{"key":"x","operator":"Exists","values":["y"]}]}}"#,
+            r#"{"pods":{"match_labels":{" ":"web"}}}"#,
+            r#"{"service_account":"Api_Account"}"#,
+            r#"{"service_account":"-api"}"#,
+        ] {
+            let selector: WorkloadSelector = serde_json::from_str(json).expect("parses");
+            assert!(
+                matches!(
+                    selector.validate(),
+                    Err(FirewallError::InvalidWorkloadSelector { .. })
+                ),
+                "{json} should be refused"
+            );
+        }
+        let typo = serde_json::from_str::<WorkloadSelector>(r#"{"pods":{"matchLabels":{}}}"#);
+        assert!(
+            typo.is_err(),
+            "an unknown field is a typo, never an empty selector"
+        );
+    }
+
+    #[test]
+    fn the_builder_carries_the_kubernetes_matchers_through_validation() {
+        let built = WorkloadSelector::with_kubernetes(
+            None,
+            None,
+            None,
+            None,
+            KubernetesMatchers {
+                pods: Some(LabelSelector::default()),
+                namespaces: None,
+                service_account: Some("  api  ".to_string()),
+            },
+        )
+        .expect("valid");
+        assert_eq!(built.service_account.as_deref(), Some("api"));
+        assert!(built.pods.is_some());
     }
 }
 

@@ -10,11 +10,15 @@ metadata:
     {{- . | nindent 4 }}
   {{- end }}
 rules:
-  # The Kubernetes enricher watches the pods on its own node and reads
-  # nothing else.
+  # The Kubernetes enricher watches the pods on its own node, and the
+  # labels of every namespace, which a workload rule naming namespaces
+  # matches against.
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["list", "watch"]
   {{- if ne .Values.container.kubernetes.networkPolicy.mode "off" }}
   # NetworkPolicy is compiled on the agent: a policy names its peers by pod
   # and namespace labels anywhere in the cluster, and a Service address is
@@ -23,7 +27,7 @@ rules:
     resources: ["networkpolicies"]
     verbs: ["list", "watch"]
   - apiGroups: [""]
-    resources: ["namespaces", "services"]
+    resources: ["services"]
     verbs: ["list", "watch"]
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]

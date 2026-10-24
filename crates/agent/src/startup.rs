@@ -3657,6 +3657,11 @@ pub async fn run(
             // The watcher takes the selector the API server understands: the
             // configured `k=v` pairs joined by commas, empty for every pod.
             let label_selector = config.container.kubernetes.label_filter.join(",");
+            let _namespaces = adapters::container::spawn_namespace_watcher(
+                client.clone(),
+                Arc::clone(&cache),
+                Arc::clone(&metrics_handle),
+            );
             let _watcher = adapters::container::spawn_pod_watcher(
                 client,
                 node_name.clone(),
@@ -3685,6 +3690,34 @@ pub async fn run(
     let kubernetes_enricher: Option<
         Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>,
     > = None;
+
+    // A workload rule naming pods, namespaces or a service account is
+    // decided against what the Kubernetes enricher read. Without it the rule
+    // loads and matches nothing, which is the safe failure for an allow and a
+    // silent one for a deny, so the reason is said once, here.
+    if !matches!(kubernetes_state, EnricherState::On) {
+        let naming: Vec<&str> = config
+            .firewall
+            .rules
+            .iter()
+            .filter(|rule| {
+                rule.workload.as_ref().is_some_and(|workload| {
+                    workload.pods.is_some()
+                        || workload.namespaces.is_some()
+                        || workload.service_account.is_some()
+                })
+            })
+            .map(|rule| rule.id.as_str())
+            .collect();
+        if !naming.is_empty() {
+            warn!(
+                rules = %naming.join(","),
+                enricher = ?kubernetes_state,
+                "workload rules name pods, namespaces or service accounts and the Kubernetes \
+                 enricher is not running on this node: they match no task until it is"
+            );
+        }
+    }
 
     // What the deployment matrix claims about this node, answered by the node.
     container_coverage.store(Arc::new(ContainerCoverage {

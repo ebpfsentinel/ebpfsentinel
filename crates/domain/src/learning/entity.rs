@@ -208,6 +208,7 @@ impl ObservedWorkload {
             cgroup: self.cgroup.as_deref(),
             container_id: self.container_id.as_deref(),
             container_name: self.container_name.as_deref(),
+            ..WorkloadFacts::default()
         }
     }
 }
@@ -390,6 +391,7 @@ mod tests {
             cgroup,
             container_id: None,
             container_name: None,
+            ..WorkloadFacts::default()
         }
     }
 
@@ -456,6 +458,7 @@ mod tests {
             cgroup: Some("/sys/fs/cgroup/docker"),
             container_id: Some("abcdef0123456789"),
             container_name: Some("web"),
+            ..WorkloadFacts::default()
         };
         assert_eq!(
             WorkloadKey::from_facts(&full),

@@ -360,8 +360,8 @@ container:
   kubernetes:
     # -- Enable the Kubernetes pod metadata enricher: alerts carry the pod name,
     # namespace and labels of the container that produced them. Turning it on
-    # creates a ClusterRole with get/list/watch on `pods`, binds it to the
-    # ServiceAccount and mounts the ServiceAccount token into the pod, which is
+    # creates a ClusterRole with get/list/watch on `pods` and list/watch on
+    # `namespaces`, binds it to the ServiceAccount and mounts the ServiceAccount token into the pod, which is
     # otherwise left unmounted.
     enabled: false
     # -- Optional label selector (`key=value` pairs) narrowing the pod watcher
@@ -369,8 +369,8 @@ container:
     networkPolicy:
       # -- Kubernetes NetworkPolicy on this node's pods: `off`, `observe`
       # (refusals counted and let through) or `enforce`. Needs `enabled`, and
-      # widens the ClusterRole to list and watch networkpolicies, namespaces,
-      # services and endpointslices across the cluster.
+      # widens the ClusterRole to list and watch networkpolicies, services and
+      # endpointslices across the cluster.
       mode: "off"
 
 # -- Pod disruption budget (protects against voluntary evictions)

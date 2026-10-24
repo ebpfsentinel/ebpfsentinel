@@ -1462,6 +1462,7 @@ mod tests {
             owner_kind: None,
             owner_name: None,
             node_name: String::new(),
+            namespace_labels: Vec::new(),
         });
 
         let identity =

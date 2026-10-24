@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::net::IpAddr;
 
+use serde::{Deserialize, Serialize};
+
 /// Which way a connection goes, seen from the selected pod.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Direction {
@@ -155,8 +157,9 @@ impl fmt::Display for NetPrefix {
     }
 }
 
-/// How a label selector requirement compares a key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How a label selector requirement compares a key, spelt the way the
+/// Kubernetes API spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SelectorOperator {
     In,
     NotIn,
@@ -165,21 +168,96 @@ pub enum SelectorOperator {
 }
 
 /// One `matchExpressions` entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LabelRequirement {
     pub key: String,
     pub operator: SelectorOperator,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub values: Vec<String>,
 }
 
 /// A Kubernetes label selector. The empty one selects everything.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LabelSelector {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub match_labels: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub match_expressions: Vec<LabelRequirement>,
 }
 
 impl LabelSelector {
+    /// Check the selector the way the API server checks one: a key is never
+    /// blank, `In` and `NotIn` carry at least one value, and `Exists` and
+    /// `DoesNotExist` carry none.
+    ///
+    /// # Errors
+    ///
+    /// The first requirement that breaks one of those, in words.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(key) = self.match_labels.keys().find(|key| key.trim().is_empty()) {
+            return Err(format!("matchLabels carries a blank key '{key}'"));
+        }
+        for requirement in &self.match_expressions {
+            if requirement.key.trim().is_empty() {
+                return Err("a matchExpressions entry carries a blank key".to_string());
+            }
+            let wants_values = matches!(
+                requirement.operator,
+                SelectorOperator::In | SelectorOperator::NotIn
+            );
+            if wants_values && requirement.values.is_empty() {
+                return Err(format!(
+                    "matchExpressions on '{}' uses {:?} with no values",
+                    requirement.key, requirement.operator
+                ));
+            }
+            if !wants_values && !requirement.values.is_empty() {
+                return Err(format!(
+                    "matchExpressions on '{}' uses {:?}, which takes no values",
+                    requirement.key, requirement.operator
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the selector carries no requirement, and so selects every
+    /// object of its kind.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.match_labels.is_empty() && self.match_expressions.is_empty()
+    }
+
+    /// The selector in the API server's own query syntax, such as
+    /// `app=web,tier in (a,b),!legacy`, for a log line and the command line.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let mut parts: Vec<String> = self
+            .match_labels
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        for requirement in &self.match_expressions {
+            parts.push(match requirement.operator {
+                SelectorOperator::In => {
+                    format!("{} in ({})", requirement.key, requirement.values.join(","))
+                }
+                SelectorOperator::NotIn => {
+                    format!(
+                        "{} notin ({})",
+                        requirement.key,
+                        requirement.values.join(",")
+                    )
+                }
+                SelectorOperator::Exists => requirement.key.clone(),
+                SelectorOperator::DoesNotExist => format!("!{}", requirement.key),
+            });
+        }
+        parts.join(",")
+    }
+
     /// Whether `labels` satisfies every requirement. `NotIn` holds for an
     /// object that does not carry the key at all, as the API server reads it.
     pub fn matches(&self, labels: &BTreeMap<String, String>) -> bool {
@@ -422,6 +500,44 @@ mod tests {
             values: vec![],
         });
         assert!(!selector.matches(&pod));
+    }
+
+    #[test]
+    fn a_selector_reads_back_in_the_api_server_syntax() {
+        let selector: LabelSelector = serde_json::from_str(
+            r#"{"match_labels":{"app":"web"},"match_expressions":[
+                {"key":"tier","operator":"In","values":["a","b"]},
+                {"key":"env","operator":"NotIn","values":["prod"]},
+                {"key":"canary","operator":"Exists"},
+                {"key":"legacy","operator":"DoesNotExist"}]}"#,
+        )
+        .unwrap();
+        assert!(selector.validate().is_ok());
+        assert_eq!(
+            selector.describe(),
+            "app=web,tier in (a,b),env notin (prod),canary,!legacy"
+        );
+        assert!(LabelSelector::default().is_empty());
+        assert!(!selector.is_empty());
+    }
+
+    #[test]
+    fn a_requirement_the_api_server_refuses_is_refused() {
+        for json in [
+            r#"{"match_expressions":[{"key":"tier","operator":"NotIn"}]}"#,
+            r#"{"match_expressions":[{"key":"tier","operator":"DoesNotExist","values":["x"]}]}"#,
+            r#"{"match_expressions":[{"key":"","operator":"Exists"}]}"#,
+        ] {
+            let selector: LabelSelector = serde_json::from_str(json).unwrap();
+            assert!(selector.validate().is_err(), "{json}");
+        }
+        assert!(
+            serde_json::from_str::<LabelSelector>(
+                r#"{"match_expressions":[{"key":"a","operator":"in"}]}"#
+            )
+            .is_err(),
+            "the operator is spelt the way the API spells it"
+        );
     }
 
     #[test]

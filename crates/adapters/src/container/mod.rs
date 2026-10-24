@@ -28,7 +28,8 @@ pub use docker_events::{ContainerEvent, DockerEventStats, DockerEventWatcher};
 #[cfg(feature = "kubernetes")]
 pub use k8s_enricher::{
     K8sEnricherMetrics, KubernetesEnricher, PodCache, PodInfo, is_running_in_kubernetes,
-    pod_info_from, resolve_node_name, spawn_pod_watcher, strip_cri_prefix, try_build_client,
+    pod_info_from, resolve_node_name, spawn_namespace_watcher, spawn_pod_watcher, strip_cri_prefix,
+    try_build_client,
 };
 #[cfg(feature = "kubernetes")]
 pub use netpol_watch::{NetpolClusterCache, NetworkPolicyManifests, spawn_netpol_watchers};

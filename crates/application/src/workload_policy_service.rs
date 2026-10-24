@@ -30,7 +30,7 @@
 //! is remembered from the exec that wrote it, because an answer arrives with
 //! a cgroup id and nothing else.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use domain::common::entity::RuleId;
@@ -65,6 +65,12 @@ pub struct ResolvedWorkload {
     pub container_id: Option<String>,
     /// Container name, where an enricher read one.
     pub container_name: Option<String>,
+    /// Labels of the pod, where the Kubernetes enricher found it.
+    pub pod_labels: Option<BTreeMap<String, String>>,
+    /// Labels of the pod's namespace, once the namespace watcher saw it.
+    pub namespace_labels: Option<BTreeMap<String, String>>,
+    /// Service account the pod runs as.
+    pub service_account: Option<String>,
 }
 
 impl ResolvedWorkload {
@@ -77,6 +83,9 @@ impl ResolvedWorkload {
             cgroup: self.cgroup.as_deref(),
             container_id: self.container_id.as_deref(),
             container_name: self.container_name.as_deref(),
+            pod_labels: self.pod_labels.as_ref(),
+            namespace_labels: self.namespace_labels.as_ref(),
+            service_account: self.service_account.as_deref(),
         }
     }
 }
@@ -116,6 +125,16 @@ pub fn workload_of(entry: &ProcessEntry) -> ResolvedWorkload {
                 _ => None,
             }
         });
+        if let Some(ContainerMetadata::Kubernetes(pod)) = context.metadata.as_ref() {
+            resolved.pod_labels = Some(pod.labels.iter().cloned().collect());
+            // Every namespace carries `kubernetes.io/metadata.name`, so no
+            // labels at all means the watcher has not seen it yet, and a
+            // namespace selector waits rather than deciding on nothing.
+            resolved.namespace_labels = (!pod.namespace_labels.is_empty())
+                .then(|| pod.namespace_labels.iter().cloned().collect());
+            resolved.service_account =
+                (!pod.service_account.is_empty()).then(|| pod.service_account.clone());
+        }
     }
     resolved.unit = resolved
         .cgroup
@@ -679,14 +698,15 @@ mod tests {
 
     use domain::common::entity::{Protocol, RuleId};
     use domain::container::entity::{
-        ContainerContext, ContainerInfo, ContainerRuntime, DockerMetadata,
+        ContainerContext, ContainerInfo, ContainerRuntime, DockerMetadata, KubernetesMetadata,
     };
     use domain::firewall::entity::{FirewallAction, IpNetwork};
     use domain::firewall::fqdn::{DnsDirection, FqdnPattern, WorkloadDnsSettings};
     use domain::firewall::workload::{
-        DestinationAddr, WorkloadDestination, WorkloadHook, WorkloadMode, WorkloadRule,
-        WorkloadSelector,
+        DestinationAddr, KubernetesMatchers, WorkloadDestination, WorkloadHook, WorkloadMode,
+        WorkloadRule, WorkloadSelector,
     };
+    use domain::netpol::LabelSelector;
     use domain::process::entity::ProcessIdentity;
 
     use super::*;
@@ -960,6 +980,80 @@ mod tests {
         service.record_exec(&inside);
 
         assert_eq!(maps.0.lock().unwrap().cgroups.get(&4242), Some(&0b11));
+    }
+
+    fn pod_entry(pid: u32, namespace_labels: Vec<(String, String)>) -> ProcessEntry {
+        let mut inside = entry(pid, "/app/api");
+        inside.container = Some(ContainerContext::with_metadata(
+            ContainerInfo::Container {
+                container_id: "fedcba9876543210".to_string(),
+                runtime: ContainerRuntime::Containerd,
+                cgroup_path: "/kubepods.slice/cri-containerd-fedcba9876543210.scope".to_string(),
+                pid,
+            },
+            ContainerMetadata::Kubernetes(KubernetesMetadata {
+                pod_name: "api-7f9".to_string(),
+                namespace: "payments".to_string(),
+                container_name: "api".to_string(),
+                labels: vec![("app".to_string(), "api".to_string())],
+                annotations: Vec::new(),
+                service_account: "api".to_string(),
+                owner_kind: None,
+                owner_name: None,
+                node_name: "node-1".to_string(),
+                namespace_labels,
+            }),
+        ));
+        inside
+    }
+
+    #[test]
+    fn a_pod_is_matched_by_its_labels_its_namespace_and_its_service_account() {
+        let maps = SharedMaps::default();
+        let by_labels: LabelSelector =
+            serde_json::from_str(r#"{"match_labels":{"app":"api"}}"#).unwrap();
+        let payments: LabelSelector =
+            serde_json::from_str(r#"{"match_labels":{"kubernetes.io/metadata.name":"payments"}}"#)
+                .unwrap();
+        let kubernetes = |matchers| {
+            WorkloadSelector::with_kubernetes(None, None, None, None, matchers).expect("valid")
+        };
+        let service = service(
+            vec![
+                rule(
+                    "pods",
+                    kubernetes(KubernetesMatchers {
+                        pods: Some(by_labels),
+                        ..KubernetesMatchers::default()
+                    }),
+                ),
+                rule(
+                    "namespace",
+                    kubernetes(KubernetesMatchers {
+                        namespaces: Some(payments),
+                        service_account: Some("api".to_string()),
+                        ..KubernetesMatchers::default()
+                    }),
+                ),
+            ],
+            maps.clone(),
+        );
+
+        // The namespace has not been seen yet: the pod rule holds, the
+        // namespace rule waits for the labels rather than guessing.
+        service.record_exec(&pod_entry(41, Vec::new()));
+        assert_eq!(maps.0.lock().unwrap().cgroups.get(&4242), Some(&0b01));
+
+        let seen = vec![(
+            "kubernetes.io/metadata.name".to_string(),
+            "payments".to_string(),
+        )];
+        service.record_exec(&pod_entry(41, seen));
+        assert_eq!(maps.0.lock().unwrap().cgroups.get(&4242), Some(&0b11));
+
+        // A host process is in no pod, so neither rule names it.
+        service.record_exec(&entry(42, "/app/api"));
+        assert_eq!(maps.0.lock().unwrap().cgroups.get(&4242), Some(&0));
     }
 
     #[test]

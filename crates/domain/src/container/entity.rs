@@ -118,6 +118,12 @@ pub struct KubernetesMetadata {
     pub owner_name: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub node_name: String,
+    /// Labels of the pod's namespace, as the namespace watcher last saw
+    /// them. Read by a workload selector naming namespaces and never carried
+    /// on the wire: an alert reports the pod, and the namespace's labels are
+    /// one lookup away for whoever reads it.
+    #[serde(skip)]
+    pub namespace_labels: Vec<(String, String)>,
 }
 
 /// Full container context attached to an event: the cgroup-derived

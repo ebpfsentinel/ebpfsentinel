@@ -899,6 +899,9 @@ fn facts_from_query(
         cgroup: None,
         container_id: query.container_id.clone(),
         container_name: query.container_name.clone(),
+        // A pod is asked about by pid, whose entry carries its labels: a
+        // caller retyping them would be asking about a pod that is not here.
+        ..Default::default()
     };
     if resolved.exe.is_none()
         && resolved.unit.is_none()

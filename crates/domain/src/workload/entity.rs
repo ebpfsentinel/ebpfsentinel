@@ -264,6 +264,7 @@ mod tests {
                 owner_kind: None,
                 owner_name: None,
                 node_name: "node-1".to_string(),
+                namespace_labels: Vec::new(),
             }),
         )
     }

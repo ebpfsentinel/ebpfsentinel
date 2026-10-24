@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use domain::common::entity::RuleId;
 use domain::firewall::entity::{FirewallAction, FirewallRule, PortRange, Scope as DomainScope};
 use domain::firewall::fqdn::{DEFAULT_GRACE_SECS, FqdnPattern, WorkloadDnsSettings};
-use domain::firewall::workload::{WorkloadMatch, WorkloadMode, WorkloadSelector};
+use domain::firewall::workload::{
+    KubernetesMatchers, WorkloadMatch, WorkloadMode, WorkloadSelector,
+};
+use domain::netpol::LabelSelector;
 use serde::{Deserialize, Serialize};
 
 use super::alias::AliasConfig;
@@ -381,6 +384,21 @@ pub struct WorkloadMatchConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
 
+    /// Labels of the pod the task runs in, as `match_labels` and
+    /// `match_expressions` with the Kubernetes meaning. `{}` names every pod
+    /// on the node and no process outside one. Needs the Kubernetes enricher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pods: Option<LabelSelector>,
+
+    /// Labels of the pod's namespace, in the same shape. A namespace is named
+    /// by its name through `kubernetes.io/metadata.name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespaces: Option<LabelSelector>,
+
+    /// Name of the service account the pod runs as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account: Option<String>,
+
     /// `observe`, the default, or `enforce`. A rule says this for itself
     /// rather than inheriting it, because the first policy anybody writes is
     /// wrong and a kernel refusing a connection is not something a deployment
@@ -411,11 +429,16 @@ impl WorkloadMatchConfig {
             expected: "observe, enforce".to_string(),
         })?;
 
-        let selector = WorkloadSelector::new(
+        let selector = WorkloadSelector::with_kubernetes(
             self.exe.clone(),
             self.unit.clone(),
             self.cgroup.clone(),
             self.container.clone(),
+            KubernetesMatchers {
+                pods: self.pods.clone(),
+                namespaces: self.namespaces.clone(),
+                service_account: self.service_account.clone(),
+            },
         )
         .map_err(|e| ConfigError::Validation {
             field: format!("{prefix}.workload"),
@@ -889,6 +912,58 @@ workload:
         assert_eq!(workload.selector.exe.as_deref(), Some("/usr/sbin/nginx"));
         assert_eq!(workload.mode, WorkloadMode::Observe);
         assert!(domain_rule.dst_ip.is_none());
+    }
+
+    #[test]
+    fn a_rule_may_name_pods_namespaces_and_a_service_account() {
+        let rule = workload_rule(
+            r"
+id: fw-payments-api
+priority: 10
+action: allow
+workload:
+  pods:
+    match_labels:
+      app: api
+    match_expressions:
+      - key: tier
+        operator: In
+        values: [front, edge]
+  namespaces:
+    match_labels:
+      kubernetes.io/metadata.name: payments
+  service_account: api
+",
+        );
+
+        rule.validate(0).expect("a valid rule");
+        let domain_rule = rule.to_domain_rule(&HashMap::new()).expect("a domain rule");
+        let selector = domain_rule.workload.expect("the workload half").selector;
+        assert_eq!(
+            selector.describe(),
+            "service_account=api pods={app=api,tier in (front,edge)} \
+             namespaces={kubernetes.io/metadata.name=payments}"
+        );
+    }
+
+    #[test]
+    fn a_label_selector_the_api_server_refuses_names_the_rule() {
+        let rule = workload_rule(
+            r"
+id: fw-broken
+priority: 10
+action: deny
+workload:
+  pods:
+    match_expressions:
+      - key: tier
+        operator: In
+",
+        );
+        let err = rule
+            .to_domain_rule(&HashMap::new())
+            .expect_err("a requirement without values is refused");
+        assert!(err.to_string().contains("pods"), "{err}");
     }
 
     #[test]

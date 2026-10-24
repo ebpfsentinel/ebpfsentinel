@@ -201,7 +201,7 @@ helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --versi
   --set container.kubernetes.enabled=true
 ```
 
-This creates a ClusterRole with `get`/`list`/`watch` on `pods` and nothing else, binds it to the chart's ServiceAccount and mounts that account's token into the pod. With the enricher off the token is not mounted at all.
+This creates a ClusterRole with `get`/`list`/`watch` on `pods` and `list`/`watch` on `namespaces`, whose labels a workload rule naming namespaces is matched against, and nothing else, binds it to the chart's ServiceAccount and mounts that account's token into the pod. With the enricher off the token is not mounted at all.
 
 ### Custom config (bypass values.yaml)
 
