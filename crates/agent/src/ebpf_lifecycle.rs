@@ -1342,13 +1342,16 @@ pub fn xdp_config_map(config: &AgentConfig) -> Vec<(&'static str, bool)> {
 
 /// The VIP announcer's clock: once a second it lets an unrenewed speaker
 /// grant lapse, so an elected node cut off from its elector stops answering
-/// within a second of its deadline, and every fifteenth second it mirrors the
-/// kernel's per-VIP reply counters into Prometheus.
+/// within a second of its deadline, every fifth second it reads the BGP
+/// sessions back and pushes the policy again to a daemon that lost it, and
+/// every fifteenth second it mirrors the kernel's per-VIP reply counters into
+/// Prometheus.
 pub(crate) async fn vip_announcer_tick(
     svc: Arc<RwLock<application::vip_announcer_service_impl::VipAnnouncerService>>,
     cancel: CancellationToken,
 ) {
     const METRICS_EVERY: u32 = 15;
+    const BGP_EVERY: u32 = 5;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut beats: u32 = 0;
     loop {
@@ -1362,6 +1365,9 @@ pub(crate) async fn vip_announcer_tick(
                     warn!("vip announcer grant expiry failed: {e}");
                 }
                 beats = beats.wrapping_add(1);
+                if beats.is_multiple_of(BGP_EVERY) && svc.read().await.bgp_enabled() {
+                    svc.write().await.supervise_bgp();
+                }
                 if beats.is_multiple_of(METRICS_EVERY)
                     && let Err(e) = svc.read().await.refresh_metrics()
                 {

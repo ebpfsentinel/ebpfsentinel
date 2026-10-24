@@ -188,6 +188,11 @@ pub struct VipLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct BgpPeerLabels {
+    pub peer: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct PolicyLabels {
     pub policy: String,
 }
@@ -343,6 +348,7 @@ pub struct AgentMetrics {
     pub lb_vip_takeovers_total: Family<VipLabels, Counter>,
     /// 1 while this node answers for its VIPs, 0 while it stays silent.
     pub lb_vip_speaker: Gauge,
+    pub lb_vip_bgp_session_established: Family<BgpPeerLabels, Gauge>,
     pub worker_events_total: Family<WorkerLabels, Counter>,
     pub worker_processing_duration: Family<WorkerLabels, Histogram>,
     /// Records drained from a datapath ring buffer, per producing program.
@@ -897,6 +903,13 @@ impl AgentMetrics {
             lb_vip_speaker.clone(),
         );
 
+        let lb_vip_bgp_session_established = Family::<BgpPeerLabels, Gauge>::default();
+        registry.register(
+            "lb_vip_bgp_session_established",
+            "Whether the BGP session announcing the VIPs to a peer is established (1) or not (0)",
+            lb_vip_bgp_session_established.clone(),
+        );
+
         let worker_events_total = Family::<WorkerLabels, Counter>::default();
         registry.register(
             "worker_events",
@@ -1064,6 +1077,7 @@ impl AgentMetrics {
             lb_vip_arp_replies,
             lb_vip_takeovers_total,
             lb_vip_speaker,
+            lb_vip_bgp_session_established,
             worker_events_total,
             worker_processing_duration,
             ringbuf_events_total,
@@ -1709,6 +1723,14 @@ impl LbMetrics for AgentMetrics {
     fn set_vip_speaker(&self, speaking: bool) {
         self.lb_vip_speaker.set(i64::from(speaking));
     }
+
+    fn set_vip_bgp_established(&self, peer: &str, established: bool) {
+        self.lb_vip_bgp_session_established
+            .get_or_create(&BgpPeerLabels {
+                peer: peer.to_string(),
+            })
+            .set(i64::from(established));
+    }
 }
 
 impl ports::secondary::metrics_port::FingerprintMetrics for AgentMetrics {
@@ -2286,6 +2308,7 @@ mod tests {
         ("ips_blocks", "counter"),
         ("lb_backends_healthy", "gauge"),
         ("lb_vip_arp_replies", "gauge"),
+        ("lb_vip_bgp_session_established", "gauge"),
         ("lb_vip_speaker", "gauge"),
         ("lb_vip_takeovers", "counter"),
         ("learning_edges", "gauge"),
@@ -2568,6 +2591,11 @@ mod tests {
                 vip: "web-vip".into(),
             })
             .set(3);
+        m.lb_vip_bgp_session_established
+            .get_or_create(&BgpPeerLabels {
+                peer: "tor1".into(),
+            })
+            .set(1);
     }
 
     /// One observation in every histogram, family or not: a histogram is

@@ -430,6 +430,9 @@ pub trait LbMetrics: Send + Sync {
     /// Whether this node currently answers for its VIPs: 1 while it speaks,
     /// 0 while it is a standby or an elected node holding no grant.
     fn set_vip_speaker(&self, _speaking: bool) {}
+
+    /// Whether the BGP session with `peer` is established (1) or not (0).
+    fn set_vip_bgp_established(&self, _peer: &str, _established: bool) {}
 }
 
 // ── Fingerprint metrics ──────────────────────────────────────────

@@ -418,6 +418,7 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
                 LbCommand::Add { json } => commands::cmd_lb_add(&client, &json, output).await,
                 LbCommand::Delete { id } => commands::cmd_lb_delete(&client, &id).await,
                 LbCommand::Vips => commands::cmd_lb_vips(&client, output).await,
+                LbCommand::Bgp => commands::cmd_lb_bgp(&client, output).await,
                 LbCommand::Announce { json } => {
                     commands::cmd_lb_announce(&client, &json, output).await
                 }

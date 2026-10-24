@@ -780,6 +780,8 @@ pub enum LbCommand {
         /// Seconds the node speaks for its VIPs unless renewed
         seconds: u32,
     },
+    /// Show the BGP sessions announcing the VIPs (state, since, last error)
+    Bgp,
 }
 
 // ── QoS ─────────────────────────────────────────────────────────────────

@@ -576,6 +576,14 @@ pub async fn apply_config_file(
         }
     };
 
+    let vip_bgp = match config.lb_announce_bgp() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid BGP announce config");
+            return None;
+        }
+    };
+
     let qos_pipes = match config.qos_pipes() {
         Ok(p) => p,
         Err(e) => {
@@ -851,7 +859,10 @@ pub async fn apply_config_file(
     }
 
     // Phase 6f⅔: L2 VIP announcer reload
-    if let Err(e) = reload_service.reload_vip_announcer(vip_announce).await {
+    if let Err(e) = reload_service
+        .reload_vip_announcer(vip_announce, vip_bgp)
+        .await
+    {
         tracing::warn!(error = %e, "VIP announcer config reload failed at application level");
     }
 

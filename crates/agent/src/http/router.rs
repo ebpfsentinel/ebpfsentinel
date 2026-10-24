@@ -95,8 +95,8 @@ use super::ips_handler::{
 };
 use super::l7_handler::{create_l7_rule, delete_l7_rule, list_l7_rules};
 use super::lb_handler::{
-    apply_lb_announce, create_lb_service, delete_lb_service, get_lb_service, grant_lb_vip_speaker,
-    lb_status, list_lb_services, list_lb_vips,
+    apply_lb_announce, create_lb_service, delete_lb_service, get_lb_service, get_lb_vip_bgp,
+    grant_lb_vip_speaker, lb_status, list_lb_services, list_lb_vips,
 };
 use super::learning_handler::{
     get_learning, get_learning_policy, list_learning, start_learning, stop_learning,
@@ -314,6 +314,7 @@ pub fn build_router(
             .route("/api/v1/lb/services", get(list_lb_services))
             .route("/api/v1/lb/services/{id}", get(get_lb_service))
             .route("/api/v1/lb/vips", get(list_lb_vips))
+            .route("/api/v1/lb/vips/bgp", get(get_lb_vip_bgp))
             .route("/api/v1/zones/status", get(zone_status))
             .route("/api/v1/zones", get(list_zones))
             .route("/api/v1/zones/policies", get(list_zone_policies))

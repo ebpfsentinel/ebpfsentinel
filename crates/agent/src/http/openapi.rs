@@ -166,6 +166,7 @@ use super::zone_handler;
         lb_handler::create_lb_service,
         lb_handler::delete_lb_service,
         lb_handler::list_lb_vips,
+        lb_handler::get_lb_vip_bgp,
         lb_handler::apply_lb_announce,
         lb_handler::grant_lb_vip_speaker,
         // QoS
@@ -331,6 +332,8 @@ use super::zone_handler;
         lb_handler::CreateLbServiceRequest,
         lb_handler::CreateLbBackendRequest,
         lb_handler::LbVipStatusResponse,
+        lb_handler::LbVipBgpResponse,
+        lb_handler::LbVipBgpSessionResponse,
         lb_handler::LbVipResponse,
         lb_handler::LbVipAnnounceRequest,
         lb_handler::LbVipGrantRequest,

@@ -1418,6 +1418,12 @@ impl AgentConfig {
         self.loadbalancer.announce.to_domain()
     }
 
+    /// Convert the BGP announcement config to its domain entity, reading
+    /// the peers' password files.
+    pub fn lb_announce_bgp(&self) -> Result<domain::loadbalancer::bgp::BgpConfig, ConfigError> {
+        self.loadbalancer.announce.bgp.to_domain()
+    }
+
     /// Convert all `QoS` pipe configs to domain `QosPipe` entities.
     pub fn qos_pipes(&self) -> Result<Vec<domain::qos::entity::QosPipe>, ConfigError> {
         self.qos.to_domain_pipes(&self.interface_group_bitmasks())

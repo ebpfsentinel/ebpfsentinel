@@ -4761,6 +4761,65 @@
         ]
       }
     },
+    "/api/v1/lb/vips/bgp": {
+      "get": {
+        "tags": [
+          "Load Balancer"
+        ],
+        "summary": "`GET /api/v1/lb/vips/bgp` - BGP sessions announcing the VIPs.",
+        "operationId": "get_lb_vip_bgp",
+        "responses": {
+          "200": {
+            "description": "BGP announcement status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LbVipBgpResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "VIP announcer not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/lb/vips/grant": {
       "post": {
         "tags": [
@@ -11302,6 +11361,64 @@
               "$ref": "#/components/schemas/LbVipRequest"
             },
             "description": "VIPs this node owns. Must be non-empty unless role is disabled,\nand ignored when it is."
+          }
+        }
+      },
+      "LbVipBgpResponse": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "exporting",
+          "sessions"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether BGP announcement is on."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last push to, or read of, the BGP daemon failed."
+          },
+          "exporting": {
+            "type": "boolean",
+            "description": "Whether this node exports a route for its VIPs right now."
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LbVipBgpSessionResponse"
+            }
+          }
+        }
+      },
+      "LbVipBgpSessionResponse": {
+        "type": "object",
+        "required": [
+          "peer",
+          "state",
+          "since"
+        ],
+        "properties": {
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "peer": {
+            "type": "string"
+          },
+          "since": {
+            "type": "string",
+            "description": "When the session entered that state, as the daemon reports it."
+          },
+          "state": {
+            "type": "string",
+            "description": "`Idle`, `Connect`, `Active`, `OpenSent`, `OpenConfirm`,\n`Established`, or `Down` when the daemon holds it switched off."
           }
         }
       },

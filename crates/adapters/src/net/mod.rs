@@ -3,6 +3,7 @@
 //! programming, and rootless packet capture over launcher-provisioned
 //! `AF_PACKET` sockets.
 
+pub mod bird;
 pub mod default_route;
 pub mod gratuitous_arp;
 pub mod iface_addrs;

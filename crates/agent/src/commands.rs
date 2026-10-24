@@ -1919,6 +1919,45 @@ pub async fn cmd_lb_delete(client: &ApiClient, id: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn cmd_lb_bgp(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let status = client.lb_vip_bgp().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    println!("BGP VIP Announcement");
+    println!("  Enabled:   {}", yes_no(status.enabled));
+    println!("  Exporting: {}", yes_no(status.exporting));
+    if let Some(err) = &status.error {
+        println!("  Error:     {err}");
+    }
+    if status.sessions.is_empty() {
+        println!("\n  No sessions reported.");
+        return Ok(());
+    }
+
+    println!();
+    let mut table = Table::new(&[
+        ("PEER", Align::Left),
+        ("STATE", Align::Left),
+        ("SINCE", Align::Left),
+        ("LAST_ERROR", Align::Left),
+    ])
+    .indent("  ");
+    for s in &status.sessions {
+        table.row(cells![
+            s.peer,
+            s.state,
+            s.since,
+            s.last_error.as_deref().unwrap_or("-")
+        ]);
+    }
+    table.print();
+    Ok(())
+}
+
 pub async fn cmd_lb_vips(client: &ApiClient, output: OutputFormat) -> Result<()> {
     let status = client.list_lb_vips().await?;
 

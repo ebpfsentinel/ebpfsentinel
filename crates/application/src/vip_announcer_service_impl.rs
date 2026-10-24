@@ -5,7 +5,9 @@ use std::net::IpAddr;
 
 use domain::common::error::DomainError;
 use domain::l2::{L2Binding, OwnedBindings};
+use domain::loadbalancer::bgp::{BgpConfig, BgpSession};
 use domain::loadbalancer::vip::{AnnounceRole, Vip, VipAnnounceConfig, validate_grant_seconds};
+use ports::secondary::bgp_daemon_port::BgpDaemonPort;
 use ports::secondary::l2_binding_port::L2BindingPort;
 use ports::secondary::metrics_port::MetricsPort;
 use ports::secondary::vip_announcer_port::{GratuitousArpPort, IfaceMacResolverPort, VipMapPort};
@@ -37,6 +39,14 @@ pub struct VipAnnouncerService {
     /// ever set under [`AnnounceRole::Elected`]; cleared by a release, by a
     /// role change and by [`Self::expire_grant`] once the instant passes.
     grant_until: Option<Instant>,
+    /// BGP announcement policy; routes are exported only while this node
+    /// speaks, sessions are held on every node.
+    bgp: BgpConfig,
+    bgp_port: Option<Arc<dyn BgpDaemonPort>>,
+    /// Sessions as the daemon last reported them.
+    bgp_sessions: Vec<BgpSession>,
+    /// Why the last push to the daemon or the last read of it failed.
+    bgp_error: Option<String>,
 }
 
 impl VipAnnouncerService {
@@ -50,6 +60,10 @@ impl VipAnnouncerService {
             metrics,
             bindings: OwnedBindings::new(),
             grant_until: None,
+            bgp: BgpConfig::default(),
+            bgp_port: None,
+            bgp_sessions: Vec::new(),
+            bgp_error: None,
         }
     }
 
@@ -250,6 +264,7 @@ impl VipAnnouncerService {
     pub fn reconcile(&mut self) -> Result<(), DomainError> {
         let speaks = self.speaks();
         self.metrics.set_vip_speaker(speaks);
+        self.sync_bgp();
         let Some(map) = self.map_port.as_mut() else {
             return Ok(());
         };
@@ -328,6 +343,118 @@ impl VipAnnouncerService {
             tracing::info!(vip = %vip.name, addr = %vip.addr, "vip announcer: gratuitous ARP sent");
         }
         Ok(())
+    }
+
+    /// Inject the routing daemon driver and push the current policy to it.
+    pub fn set_bgp_port(&mut self, port: Arc<dyn BgpDaemonPort>) {
+        self.bgp_port = Some(port);
+        self.sync_bgp();
+    }
+
+    /// Apply a new BGP announcement policy.
+    pub fn configure_bgp(&mut self, config: BgpConfig) -> Result<(), DomainError> {
+        config
+            .validate()
+            .map_err(|e| DomainError::InvalidConfig(e.to_string()))?;
+        if !config.enabled {
+            for s in &self.bgp_sessions {
+                self.metrics.set_vip_bgp_established(&s.peer, false);
+            }
+            self.bgp_sessions.clear();
+            self.bgp_error = None;
+        }
+        self.bgp = config;
+        self.sync_bgp();
+        Ok(())
+    }
+
+    /// Push the policy to the daemon, exporting the VIPs only while this
+    /// node speaks. A daemon that refuses is recorded rather than failing
+    /// the announcer: ARP keeps working and the supervisor retries.
+    fn sync_bgp(&mut self) {
+        let Some(port) = self.bgp_port.as_ref() else {
+            return;
+        };
+        if !self.bgp.enabled {
+            return;
+        }
+        let routes: Vec<IpAddr> = if self.speaks() {
+            self.config.vips.iter().map(|v| v.addr).collect()
+        } else {
+            Vec::new()
+        };
+        match port.apply(&self.bgp, &routes) {
+            Ok(()) => {
+                self.bgp_error = None;
+                tracing::info!(
+                    routes = routes.len(),
+                    peers = self.bgp.peers.len(),
+                    "vip announcer: bgp daemon configured"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("vip announcer: bgp daemon refused the configuration: {e}");
+                self.bgp_error = Some(e.to_string());
+            }
+        }
+    }
+
+    /// Read the sessions back and push the policy again when the daemon no
+    /// longer holds it - restarted on its base configuration, or after a
+    /// push that failed.
+    pub fn supervise_bgp(&mut self) {
+        let Some(port) = self.bgp_port.clone() else {
+            return;
+        };
+        if !self.bgp.enabled {
+            return;
+        }
+        let mut read = port.sessions();
+        let missing = |s: &[BgpSession], cfg: &BgpConfig| {
+            cfg.peers
+                .iter()
+                .any(|p| !s.iter().any(|x| x.peer == p.name))
+        };
+        if self.bgp_error.is_some() || read.as_ref().is_ok_and(|s| missing(s, &self.bgp)) {
+            self.sync_bgp();
+            read = port.sessions();
+        }
+        match read {
+            Ok(sessions) => {
+                for p in &self.bgp.peers {
+                    let up = sessions
+                        .iter()
+                        .any(|s| s.peer == p.name && s.is_established());
+                    self.metrics.set_vip_bgp_established(&p.name, up);
+                }
+                self.bgp_sessions = sessions;
+            }
+            Err(e) => {
+                for p in &self.bgp.peers {
+                    self.metrics.set_vip_bgp_established(&p.name, false);
+                }
+                self.bgp_sessions.clear();
+                self.bgp_error = Some(e.to_string());
+            }
+        }
+    }
+
+    /// Whether BGP announcement is on.
+    #[must_use]
+    pub fn bgp_enabled(&self) -> bool {
+        self.bgp.enabled
+    }
+
+    /// Sessions as last read from the daemon.
+    #[must_use]
+    pub fn bgp_sessions(&self) -> &[BgpSession] {
+        &self.bgp_sessions
+    }
+
+    /// The last failure to configure or read the daemon.
+    #[must_use]
+    pub fn bgp_error(&self) -> Option<&str> {
+        self.bgp_error.as_deref()
     }
 
     /// Mirror the kernel per-VIP forged-reply counters into Prometheus.
@@ -696,5 +823,89 @@ mod tests {
         .unwrap();
         assert!(!s.is_speaker());
         assert_eq!(s.grant_remaining(now), None);
+    }
+
+    #[derive(Default)]
+    struct FakeBgp {
+        applies: Mutex<Vec<Vec<IpAddr>>>,
+        sessions: Mutex<Vec<BgpSession>>,
+    }
+
+    impl BgpDaemonPort for FakeBgp {
+        fn apply(&self, _config: &BgpConfig, routes: &[IpAddr]) -> Result<(), DomainError> {
+            self.applies.lock().unwrap().push(routes.to_vec());
+            Ok(())
+        }
+        fn sessions(&self) -> Result<Vec<BgpSession>, DomainError> {
+            Ok(self.sessions.lock().unwrap().clone())
+        }
+    }
+
+    fn bgp_cfg() -> BgpConfig {
+        BgpConfig {
+            enabled: true,
+            local_asn: 64513,
+            router_id: None,
+            peers: vec![domain::loadbalancer::bgp::BgpPeer {
+                name: "tor1".into(),
+                address: ip(10, 0, 0, 1),
+                asn: 64512,
+                port: 179,
+                hold_time: 90,
+                password: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn bgp_exports_routes_only_while_speaking() {
+        let bgp = Arc::new(FakeBgp::default());
+        let mut s = svc();
+        s.set_bgp_port(bgp.clone());
+        s.configure_bgp(bgp_cfg()).unwrap();
+        s.configure(elected_cfg()).unwrap();
+        assert!(bgp.applies.lock().unwrap().last().unwrap().is_empty());
+        s.grant(30, Instant::now()).unwrap();
+        assert_eq!(
+            bgp.applies.lock().unwrap().last().unwrap().len(),
+            primary_cfg().vips.len()
+        );
+        s.grant(0, Instant::now()).unwrap();
+        assert!(bgp.applies.lock().unwrap().last().unwrap().is_empty());
+    }
+
+    #[test]
+    fn bgp_supervisor_repushes_when_the_daemon_lost_the_peers() {
+        let bgp = Arc::new(FakeBgp::default());
+        let mut s = svc();
+        s.set_bgp_port(bgp.clone());
+        s.configure_bgp(bgp_cfg()).unwrap();
+        let before = bgp.applies.lock().unwrap().len();
+        s.supervise_bgp();
+        assert_eq!(bgp.applies.lock().unwrap().len(), before + 1);
+        *bgp.sessions.lock().unwrap() = vec![BgpSession {
+            peer: "tor1".into(),
+            state: "Established".into(),
+            since: "2026-10-24 10:00:00".into(),
+            last_error: None,
+        }];
+        s.supervise_bgp();
+        assert_eq!(bgp.applies.lock().unwrap().len(), before + 1);
+        assert!(s.bgp_sessions()[0].is_established());
+        assert_eq!(s.bgp_error(), None);
+    }
+
+    #[test]
+    fn bgp_disabled_pushes_nothing() {
+        let bgp = Arc::new(FakeBgp::default());
+        let mut s = svc();
+        s.set_bgp_port(bgp.clone());
+        s.configure(primary_cfg()).unwrap();
+        s.supervise_bgp();
+        assert!(bgp.applies.lock().unwrap().is_empty());
+        let mut bad = bgp_cfg();
+        bad.local_asn = 0;
+        assert!(s.configure_bgp(bad).is_err());
+        assert!(!s.bgp_enabled());
     }
 }

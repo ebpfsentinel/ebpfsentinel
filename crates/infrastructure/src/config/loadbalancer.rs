@@ -1,6 +1,7 @@
 //! Load balancer domain configuration structs and conversion logic.
 
 use domain::common::entity::RuleId;
+use domain::loadbalancer::bgp::{BgpConfig, BgpPeer, DEFAULT_BGP_PORT, DEFAULT_HOLD_TIME_SECS};
 use domain::loadbalancer::entity::{
     LbAlgorithm, LbBackend, LbForwardingMode, LbProtocol, LbService,
 };
@@ -67,6 +68,153 @@ pub struct AnnounceConfig {
     /// The set of VIPs this node owns.
     #[serde(default)]
     pub vips: Vec<VipConfig>,
+
+    /// BGP announcement of the same VIPs through a BIRD daemon.
+    #[serde(default)]
+    pub bgp: BgpAnnounceConfig,
+}
+
+/// BGP announcement through a BIRD 2 daemon running beside the agent.
+///
+/// The agent writes the daemon's whole configuration to `config_path` and
+/// loads it over the control socket at `socket`. Every node keeps its
+/// sessions up; only the speaker exports a route for each VIP.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BgpAnnounceConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// BIRD control socket.
+    #[serde(default = "default_bird_socket")]
+    pub socket: String,
+
+    /// Where the agent writes the configuration BIRD loads.
+    #[serde(default = "default_bird_config_path")]
+    pub config_path: String,
+
+    /// This node's autonomous system number.
+    #[serde(default)]
+    pub local_asn: u32,
+
+    /// BGP router ID (IPv4 notation); BIRD derives one when unset.
+    #[serde(default)]
+    pub router_id: Option<String>,
+
+    #[serde(default)]
+    pub peers: Vec<BgpPeerConfig>,
+}
+
+impl Default for BgpAnnounceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            socket: default_bird_socket(),
+            config_path: default_bird_config_path(),
+            local_asn: 0,
+            router_id: None,
+            peers: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BgpPeerConfig {
+    /// Lowercase letters, digits and underscores; the `{peer}` metric label.
+    pub name: String,
+    pub address: String,
+    pub asn: u32,
+    #[serde(default = "default_bgp_port")]
+    pub port: u16,
+    #[serde(default = "default_hold_time")]
+    pub hold_time: u16,
+    /// File holding the TCP MD5 session password.
+    #[serde(default)]
+    pub password_file: Option<String>,
+}
+
+fn default_bird_socket() -> String {
+    "/run/bird/bird.ctl".to_string()
+}
+
+fn default_bird_config_path() -> String {
+    "/run/bird/ebpfsentinel.conf".to_string()
+}
+
+fn default_bgp_port() -> u16 {
+    DEFAULT_BGP_PORT
+}
+
+fn default_hold_time() -> u16 {
+    DEFAULT_HOLD_TIME_SECS
+}
+
+impl BgpAnnounceConfig {
+    /// Convert to the domain [`BgpConfig`]. With `read_secrets` the
+    /// password files are read; without, a placeholder stands in so the
+    /// shape can be validated before the files are mounted.
+    fn convert(&self, read_secrets: bool) -> Result<BgpConfig, ConfigError> {
+        let router_id = match self.router_id.as_deref() {
+            None | Some("") => None,
+            Some(r) => Some(r.parse().map_err(|_| ConfigError::Validation {
+                field: "loadbalancer.announce.bgp.router_id".to_string(),
+                message: format!("invalid IPv4 router id: {r}"),
+            })?),
+        };
+        let mut peers = Vec::with_capacity(self.peers.len());
+        for (idx, p) in self.peers.iter().enumerate() {
+            let prefix = format!("loadbalancer.announce.bgp.peers[{idx}]");
+            let address = p.address.parse().map_err(|_| ConfigError::Validation {
+                field: format!("{prefix}.address"),
+                message: format!("invalid IP address: {}", p.address),
+            })?;
+            let password = match p.password_file.as_deref() {
+                None | Some("") => None,
+                Some(path) if read_secrets => Some(
+                    std::fs::read_to_string(path)
+                        .map_err(|e| ConfigError::Validation {
+                            field: format!("{prefix}.password_file"),
+                            message: format!("cannot read {path}: {e}"),
+                        })?
+                        .trim_end_matches(['\n', '\r'])
+                        .to_string(),
+                ),
+                Some(_) => Some("placeholder".to_string()),
+            };
+            peers.push(BgpPeer {
+                name: p.name.clone(),
+                address,
+                asn: p.asn,
+                port: p.port,
+                hold_time: p.hold_time,
+                password,
+            });
+        }
+        let cfg = BgpConfig {
+            enabled: self.enabled,
+            local_asn: self.local_asn,
+            router_id,
+            peers,
+        };
+        cfg.validate().map_err(|e| ConfigError::Validation {
+            field: "loadbalancer.announce.bgp".to_string(),
+            message: e.to_string(),
+        })?;
+        Ok(cfg)
+    }
+
+    pub(super) fn validate(&self) -> Result<(), ConfigError> {
+        self.convert(false).map(|_| ())
+    }
+
+    /// Convert to the domain [`BgpConfig`], reading the password files.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] when a field fails to parse, a
+    /// password file cannot be read or the policy is invalid.
+    pub fn to_domain(&self) -> Result<BgpConfig, ConfigError> {
+        self.convert(true)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +268,14 @@ impl AnnounceConfig {
                     field: format!("{prefix}.addr"),
                     message: format!("invalid IP address: {}", vip.addr),
                 })?;
+        }
+
+        self.bgp.validate()?;
+        if self.bgp.enabled && role == AnnounceRole::Disabled {
+            return Err(ConfigError::Validation {
+                field: "loadbalancer.announce.bgp".to_string(),
+                message: "bgp announcement needs an announce role other than disabled".to_string(),
+            });
         }
 
         // Delegate the role-coupled invariants (interface required,
@@ -925,5 +1081,42 @@ mod tests {
         let cfg = LoadBalancerConfig::default();
         assert!(!cfg.enabled);
         assert!(cfg.services.is_empty());
+    }
+
+    fn bgp_announce(yaml: &str) -> AnnounceConfig {
+        serde_norway::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn bgp_block_parses_with_defaults_and_reads_the_password() {
+        let dir = std::env::temp_dir().join(format!("bgp-pw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pw = dir.join("password");
+        std::fs::write(&pw, "s3cret\n").unwrap();
+        let a = bgp_announce(&format!(
+            "role: elected\ninterface: eth0\nvips: [{{name: web, addr: 192.0.2.10}}]\nbgp:\n  enabled: true\n  local_asn: 64513\n  peers:\n    - {{name: tor1, address: 10.0.0.1, asn: 64512, password_file: {}}}\n",
+            pw.display()
+        ));
+        assert!(a.validate().is_ok());
+        assert_eq!(a.bgp.socket, "/run/bird/bird.ctl");
+        let d = a.bgp.to_domain().unwrap();
+        assert_eq!(d.peers[0].port, 179);
+        assert_eq!(d.peers[0].hold_time, 90);
+        assert_eq!(d.peers[0].password.as_deref(), Some("s3cret"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bgp_block_is_refused_when_invalid() {
+        let no_role = bgp_announce(
+            "bgp:\n  enabled: true\n  local_asn: 64513\n  peers: [{name: tor1, address: 10.0.0.1, asn: 64512}]\n",
+        );
+        assert!(no_role.validate().is_err());
+        let no_peers = bgp_announce(
+            "role: primary\ninterface: eth0\nvips: [{name: web, addr: 192.0.2.10}]\nbgp:\n  enabled: true\n  local_asn: 64513\n",
+        );
+        assert!(no_peers.validate().is_err());
+        let off = bgp_announce("bgp:\n  enabled: false\n");
+        assert!(off.validate().is_ok());
     }
 }

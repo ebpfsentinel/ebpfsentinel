@@ -443,6 +443,7 @@ pub async fn run(
 
     // ── 5c⅝¾. Build L2 VIP announcer service ────────────────────────
     let vip_announce_cfg = config.lb_announce()?;
+    let vip_bgp_cfg = config.lb_announce_bgp()?;
     let vip_svc = {
         let mut svc = application::vip_announcer_service_impl::VipAnnouncerService::new(
             Arc::clone(&metrics) as Arc<dyn MetricsPort>,
@@ -457,6 +458,11 @@ pub async fn run(
                 None => Arc::new(adapters::net::RawSocketGratuitousArp),
             };
         svc.set_gratuitous_arp(arp_port);
+        let bgp = &config.loadbalancer.announce.bgp;
+        svc.set_bgp_port(Arc::new(adapters::net::bird::BirdDaemon::new(
+            &bgp.socket,
+            &bgp.config_path,
+        )));
         Arc::new(RwLock::new(svc))
     };
     info!(
@@ -2287,6 +2293,9 @@ pub async fn run(
                         }
                         if let Err(e) = svc.configure(vip_announce_cfg.clone()) {
                             warn!("vip announcer configure failed: {e}");
+                        }
+                        if let Err(e) = svc.configure_bgp(vip_bgp_cfg.clone()) {
+                            warn!("vip announcer bgp configure failed: {e}");
                         }
                     }
                     managed.push(("xdp_vip_announcer", vip_loader, readers.child_token()));

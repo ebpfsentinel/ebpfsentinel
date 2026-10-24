@@ -331,10 +331,12 @@ impl ConfigReloadService {
         Ok(())
     }
 
-    /// Reload the L2 VIP announcer (role, interface, VIP list).
+    /// Reload the L2 VIP announcer (role, interface, VIP list) and its BGP
+    /// announcement policy.
     pub async fn reload_vip_announcer(
         &self,
         cfg: domain::loadbalancer::vip::VipAnnounceConfig,
+        bgp: domain::loadbalancer::bgp::BgpConfig,
     ) -> Result<(), anyhow::Error> {
         let Some(ref svc) = self.vip_announcer_service else {
             return Ok(());
@@ -349,6 +351,9 @@ impl ConfigReloadService {
         announcer
             .configure(cfg)
             .map_err(|e| anyhow::anyhow!("VIP announcer reload failed: {e}"))?;
+        announcer
+            .configure_bgp(bgp)
+            .map_err(|e| anyhow::anyhow!("VIP announcer BGP reload failed: {e}"))?;
         drop(announcer);
 
         self.metrics

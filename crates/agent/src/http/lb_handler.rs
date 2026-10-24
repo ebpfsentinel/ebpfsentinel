@@ -476,6 +476,30 @@ pub struct LbVipResponse {
     pub self_announced: bool,
 }
 
+#[derive(Serialize, ToSchema)]
+pub struct LbVipBgpResponse {
+    /// Whether BGP announcement is on.
+    pub enabled: bool,
+    /// Whether this node exports a route for its VIPs right now.
+    pub exporting: bool,
+    /// Why the last push to, or read of, the BGP daemon failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub sessions: Vec<LbVipBgpSessionResponse>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct LbVipBgpSessionResponse {
+    pub peer: String,
+    /// `Idle`, `Connect`, `Active`, `OpenSent`, `OpenConfirm`,
+    /// `Established`, or `Down` when the daemon holds it switched off.
+    pub state: String,
+    /// When the session entered that state, as the daemon reports it.
+    pub since: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct LbVipAnnounceRequest {
     /// `disabled`, `primary`, `standby`, or `elected`.
@@ -536,6 +560,49 @@ pub async fn list_lb_vips(
         })?;
     let svc = svc.read().await;
     Ok(Json(snapshot_status(&svc)?))
+}
+
+/// `GET /api/v1/lb/vips/bgp` - BGP sessions announcing the VIPs.
+#[utoipa::path(
+    get, path = "/api/v1/lb/vips/bgp",
+    tag = "Load Balancer",
+    responses(
+        (status = 200, description = "BGP announcement status", body = LbVipBgpResponse),
+        (status = 404, description = "VIP announcer not enabled", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn get_lb_vip_bgp(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<LbVipBgpResponse>, ApiError> {
+    let svc = state
+        .vip_announcer_service
+        .as_ref()
+        .ok_or(ApiError::NotFound {
+            code: "SERVICE_NOT_AVAILABLE",
+            message: "VIP announcer not enabled".to_string(),
+        })?;
+    let svc = svc.read().await;
+    Ok(Json(LbVipBgpResponse {
+        enabled: svc.bgp_enabled(),
+        exporting: svc.bgp_enabled() && svc.is_speaker(),
+        error: svc.bgp_error().map(str::to_string),
+        sessions: svc
+            .bgp_sessions()
+            .iter()
+            .map(|s| LbVipBgpSessionResponse {
+                peer: s.peer.clone(),
+                state: s.state.clone(),
+                since: s.since.clone(),
+                last_error: s.last_error.clone(),
+            })
+            .collect(),
+    }))
 }
 
 /// `POST /api/v1/lb/vips` - apply a new VIP announce configuration.

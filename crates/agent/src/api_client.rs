@@ -1036,6 +1036,24 @@ pub struct LbVipStatusResponse {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct LbVipBgpResponse {
+    pub enabled: bool,
+    pub exporting: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub sessions: Vec<LbVipBgpSessionResponse>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct LbVipBgpSessionResponse {
+    pub peer: String,
+    pub state: String,
+    pub since: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct LbVipResponse {
     pub name: String,
     pub addr: String,
@@ -2572,6 +2590,15 @@ impl ApiClient {
         let resp = self
             .request(reqwest::Method::POST, "/api/v1/lb/vips")
             .json(body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn lb_vip_bgp(&self) -> anyhow::Result<LbVipBgpResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/lb/vips/bgp")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;
