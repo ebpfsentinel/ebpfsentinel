@@ -37,7 +37,9 @@ use domain::common::entity::RuleId;
 use domain::common::error::DomainError;
 use domain::container::engine::CgroupReader;
 use domain::container::entity::{ContainerInfo, ContainerMetadata};
-use domain::firewall::fqdn::{DnsCapture, FqdnGrantKey, FqdnLearner, FqdnLedger};
+use domain::firewall::fqdn::{
+    DnsCapture, FqdnGrantKey, FqdnLearner, FqdnLedger, FqdnPatternReport,
+};
 use domain::firewall::workload::{
     WorkloadDenial, WorkloadDenialRecord, WorkloadFacts, WorkloadPolicy, WorkloadReach,
     cgroup_path_of, unit_of,
@@ -140,6 +142,14 @@ impl SelectorMasks {
     pub fn is_empty(self) -> bool {
         self.cgroup == 0 && self.task == 0
     }
+}
+
+/// What the names of one rule have resolved on this node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FqdnRuleState {
+    pub rule: RuleId,
+    /// One entry per pattern the rule writes, in the rule's order.
+    pub patterns: Vec<FqdnPatternReport>,
 }
 
 /// What the answers of named workloads have opened so far.
@@ -607,6 +617,39 @@ impl WorkloadPolicyService {
             }
         }
         lapsed.len()
+    }
+
+    /// Every rule naming a destination by name, with what each of its
+    /// patterns has resolved and what is still open at `now_ns`.
+    ///
+    /// A pattern with no name under it has never resolved since the policy
+    /// was published, which on a rule that allows is usually a typo rather
+    /// than a quiet success, so it is reported rather than left out.
+    pub fn fqdn_state(&self, now_ns: u64) -> Vec<FqdnRuleState> {
+        let fqdn = self
+            .fqdn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let policy = self
+            .policy
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        policy
+            .in_slot_order()
+            .enumerate()
+            .filter(|(_, rule)| !rule.dst_fqdn.is_empty())
+            .filter_map(|(slot, rule)| {
+                let slot = u16::try_from(slot).ok()?;
+                Some(FqdnRuleState {
+                    rule: rule.id.clone(),
+                    patterns: rule
+                        .dst_fqdn
+                        .iter()
+                        .map(|pattern| fqdn.ledger.report(slot, pattern, now_ns))
+                        .collect(),
+                })
+            })
+            .collect()
     }
 
     /// Forget a task that exited.
@@ -1222,5 +1265,40 @@ mod tests {
         service.apply(service.policy()).unwrap();
         assert!(maps.0.lock().unwrap().grants.is_empty());
         assert_eq!(service.sweep_fqdn(41 * 1_000_000_000), 0);
+    }
+
+    #[test]
+    fn the_state_of_a_named_rule_shows_what_resolved_and_what_never_did() {
+        let maps = SharedMaps::default();
+        let service = named_service(maps);
+        let before = service.fqdn_state(0);
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].rule.0, "api");
+        assert!(before[0].patterns[0].names.is_empty());
+
+        service.record_exec(&exec_in(10, 4242));
+        service.observe_dns(&dns(
+            4242,
+            DnsDirection::Query,
+            dns_query(1, "api.example.com"),
+            0,
+        ));
+        service.observe_dns(&dns(
+            4242,
+            DnsDirection::Response,
+            dns_answer(1, "api.example.com", [203, 0, 113, 7], 10),
+            0,
+        ));
+        let open = service.fqdn_state(1);
+        let name = &open[0].patterns[0].names[0];
+        assert_eq!(name.name, "api.example.com");
+        assert_eq!(name.addresses, 1);
+        assert_eq!(name.workloads, 1);
+        assert_eq!(name.expires_ns, Some(40 * 1_000_000_000));
+
+        service.sweep_fqdn(41 * 1_000_000_000);
+        let lapsed = service.fqdn_state(41 * 1_000_000_000);
+        assert_eq!(lapsed[0].patterns[0].names[0].addresses, 0);
+        assert_eq!(lapsed[0].patterns[0].names[0].expires_ns, None);
     }
 }

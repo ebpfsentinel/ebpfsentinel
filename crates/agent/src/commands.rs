@@ -131,6 +131,80 @@ pub async fn cmd_firewall_workload(client: &ApiClient, output: OutputFormat) -> 
     Ok(())
 }
 
+/// `firewall fqdn` - what each rule naming a destination by name has
+/// resolved, and what is still open.
+///
+/// A pattern under which nothing ever resolved is printed as such rather
+/// than left out: on a rule that allows, it is usually a typo.
+pub async fn cmd_firewall_fqdn(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let listing = client.workload_fqdn().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&listing)?);
+        return Ok(());
+    }
+
+    if listing.rules.is_empty() {
+        println!("No workload rule names a destination by name.");
+        return Ok(());
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let mut table = Table::new(&[
+        ("RULE", Align::Left),
+        ("PATTERN", Align::Left),
+        ("NAME", Align::Left),
+        ("ADDRESSES", Align::Right),
+        ("WORKLOADS", Align::Right),
+        ("REFRESHED", Align::Left),
+        ("EXPIRES IN", Align::Left),
+    ]);
+    let mut never = 0usize;
+    for rule in &listing.rules {
+        for pattern in &rule.patterns {
+            if pattern.names.is_empty() {
+                never += 1;
+                table.row(cells![
+                    rule.rule,
+                    pattern.pattern,
+                    "never resolved",
+                    0,
+                    0,
+                    "-",
+                    "-"
+                ]);
+            }
+            for name in &pattern.names {
+                table.row(cells![
+                    rule.rule,
+                    pattern.pattern,
+                    name.name,
+                    name.addresses,
+                    name.workloads,
+                    format!(
+                        "{} ago",
+                        format_uptime(now.saturating_sub(name.refreshed_at))
+                    ),
+                    name.expires_at.map_or_else(
+                        || "lapsed".to_string(),
+                        |at| format_uptime(at.saturating_sub(now))
+                    )
+                ]);
+            }
+        }
+    }
+    table.print();
+
+    if never > 0 {
+        println!(
+            "\n{never} pattern(s) never resolved since the policy was published: check the spelling and that the workload asks a listed resolver."
+        );
+    }
+    Ok(())
+}
+
 /// `firewall reach` - what the workload rules let a workload reach.
 ///
 /// The first support question on a deny-by-default policy is why an

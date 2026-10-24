@@ -362,6 +362,8 @@ pub enum FirewallCommand {
     },
     /// List the workload rules in force and what each has refused
     Workload,
+    /// List what the rules naming destinations by name have resolved
+    Fqdn,
     /// List what the workload rules let a workload reach
     Reach {
         /// Read the facts of this running task out of the process table

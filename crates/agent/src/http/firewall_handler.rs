@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use adapters::ebpf::ringbuf_observer::{boottime_now_ns, boottime_to_epoch_ns};
+use application::workload_policy_service::FqdnRuleState;
 use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -686,6 +688,105 @@ pub async fn list_workload_rules(
     }))
 }
 
+/// One name a pattern matched, and what it currently opens.
+#[derive(Serialize, ToSchema)]
+pub struct FqdnNameEntry {
+    /// The name the workload asked for.
+    pub name: String,
+    /// Distinct addresses currently open for it.
+    pub addresses: usize,
+    /// Distinct workloads (cgroups) it is currently open for.
+    pub workloads: usize,
+    /// Unix seconds of the last answer naming it.
+    pub refreshed_at: u64,
+    /// Unix seconds its last open address lapses at, absent once every
+    /// address it opened has lapsed.
+    pub expires_at: Option<u64>,
+}
+
+/// One pattern of a rule and the names it has resolved.
+#[derive(Serialize, ToSchema)]
+pub struct FqdnPatternEntry {
+    /// The pattern as the rule wrote it.
+    pub pattern: String,
+    /// Every name it matched that is still remembered, the most recently
+    /// refreshed first. Empty means it never resolved on this node since the
+    /// policy was published.
+    pub names: Vec<FqdnNameEntry>,
+}
+
+/// One rule naming its destinations by name.
+#[derive(Serialize, ToSchema)]
+pub struct FqdnRuleEntry {
+    pub rule: String,
+    /// One entry per pattern, in the rule's order.
+    pub patterns: Vec<FqdnPatternEntry>,
+}
+
+/// What every rule naming a destination by name has resolved on this node.
+#[derive(Serialize, ToSchema)]
+pub struct WorkloadFqdnResponse {
+    pub rules: Vec<FqdnRuleEntry>,
+}
+
+/// `GET /api/v1/firewall/workload/fqdn` - what the rules naming destinations
+/// by name have resolved, and what is still open.
+#[utoipa::path(
+    get, path = "/api/v1/firewall/workload/fqdn",
+    tag = "Firewall",
+    responses(
+        (status = 200, description = "Each rule naming a destination by name, with the names resolved per pattern", body = WorkloadFqdnResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 503, description = "The workload firewall is not loaded", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn workload_fqdn(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<WorkloadFqdnResponse>, ApiError> {
+    let Some(service) = state.workload_policy_service.load_full() else {
+        return Err(ApiError::ServiceUnavailable {
+            message: "the workload firewall is not loaded, so no rule is in force".to_string(),
+        });
+    };
+    let rules = service
+        .fqdn_state(boottime_now_ns())
+        .into_iter()
+        .map(fqdn_rule_of)
+        .collect();
+    Ok(Json(WorkloadFqdnResponse { rules }))
+}
+
+/// One rule's resolved names as the API writes them, on the wall clock.
+fn fqdn_rule_of(state: FqdnRuleState) -> FqdnRuleEntry {
+    let seconds = |boot_ns: u64| boottime_to_epoch_ns(boot_ns) / 1_000_000_000;
+    FqdnRuleEntry {
+        rule: state.rule.0,
+        patterns: state
+            .patterns
+            .into_iter()
+            .map(|report| FqdnPatternEntry {
+                pattern: report.pattern.to_string(),
+                names: report
+                    .names
+                    .into_iter()
+                    .map(|name| FqdnNameEntry {
+                        name: name.name,
+                        addresses: name.addresses,
+                        workloads: name.workloads,
+                        refreshed_at: seconds(name.refreshed_ns),
+                        expires_at: name.expires_ns.map(seconds),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
 /// One rule as the API writes it, with the mode spelled out.
 fn entry_of(reach: domain::firewall::workload::WorkloadReach) -> WorkloadReachEntry {
     WorkloadReachEntry {
@@ -816,6 +917,41 @@ fn facts_from_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_resolved_name_is_written_on_the_wall_clock_and_a_lapsed_one_carries_no_expiry() {
+        use domain::firewall::fqdn::{FqdnNameReport, FqdnPattern, FqdnPatternReport};
+        let pattern = FqdnPattern::parse("*.cdn.example.com").expect("a valid pattern");
+        let entry = fqdn_rule_of(FqdnRuleState {
+            rule: RuleId("psp".to_string()),
+            patterns: vec![
+                FqdnPatternReport {
+                    pattern: pattern.clone(),
+                    names: vec![FqdnNameReport {
+                        name: "a.cdn.example.com".to_string(),
+                        addresses: 2,
+                        workloads: 1,
+                        refreshed_ns: 5_000_000_000,
+                        expires_ns: None,
+                    }],
+                },
+                FqdnPatternReport {
+                    pattern,
+                    names: Vec::new(),
+                },
+            ],
+        });
+        assert_eq!(entry.rule, "psp");
+        assert_eq!(entry.patterns[0].pattern, "*.cdn.example.com");
+        let name = &entry.patterns[0].names[0];
+        assert_eq!(name.addresses, 2);
+        assert!(
+            name.refreshed_at > 1_000_000_000,
+            "seconds since 1970, not since boot"
+        );
+        assert!(name.expires_at.is_none());
+        assert!(entry.patterns[1].names.is_empty());
+    }
 
     #[test]
     fn parse_action_valid() {

@@ -176,6 +176,34 @@ pub struct WorkloadRulesResponse {
     pub rules: Vec<WorkloadReachEntry>,
 }
 
+/// What the rules naming destinations by name have resolved.
+#[derive(Deserialize, Serialize)]
+pub struct WorkloadFqdnResponse {
+    pub rules: Vec<FqdnRuleEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct FqdnRuleEntry {
+    pub rule: String,
+    pub patterns: Vec<FqdnPatternEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct FqdnPatternEntry {
+    pub pattern: String,
+    pub names: Vec<FqdnNameEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct FqdnNameEntry {
+    pub name: String,
+    pub addresses: usize,
+    pub workloads: usize,
+    pub refreshed_at: u64,
+    #[serde(default)]
+    pub expires_at: Option<u64>,
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct L7RuleResponse {
     pub id: String,
@@ -1832,6 +1860,16 @@ impl ApiClient {
     pub async fn workload_rules(&self) -> anyhow::Result<WorkloadRulesResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/firewall/workload/rules")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    /// What each rule naming a destination by name has resolved.
+    pub async fn workload_fqdn(&self) -> anyhow::Result<WorkloadFqdnResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/firewall/workload/fqdn")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

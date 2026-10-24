@@ -3428,6 +3428,65 @@
         ]
       }
     },
+    "/api/v1/firewall/workload/fqdn": {
+      "get": {
+        "tags": [
+          "Firewall"
+        ],
+        "summary": "`GET /api/v1/firewall/workload/fqdn` - what the rules naming destinations\nby name have resolved, and what is still open.",
+        "operationId": "workload_fqdn",
+        "responses": {
+          "200": {
+            "description": "Each rule naming a destination by name, with the names resolved per pattern",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkloadFqdnResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The workload firewall is not loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/firewall/workload/reach": {
       "get": {
         "tags": [
@@ -10566,6 +10625,88 @@
           }
         }
       },
+      "FqdnNameEntry": {
+        "type": "object",
+        "description": "One name a pattern matched, and what it currently opens.",
+        "required": [
+          "name",
+          "addresses",
+          "workloads",
+          "refreshed_at"
+        ],
+        "properties": {
+          "addresses": {
+            "type": "integer",
+            "description": "Distinct addresses currently open for it.",
+            "minimum": 0
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix seconds its last open address lapses at, absent once every\naddress it opened has lapsed.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "The name the workload asked for."
+          },
+          "refreshed_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds of the last answer naming it.",
+            "minimum": 0
+          },
+          "workloads": {
+            "type": "integer",
+            "description": "Distinct workloads (cgroups) it is currently open for.",
+            "minimum": 0
+          }
+        }
+      },
+      "FqdnPatternEntry": {
+        "type": "object",
+        "description": "One pattern of a rule and the names it has resolved.",
+        "required": [
+          "pattern",
+          "names"
+        ],
+        "properties": {
+          "names": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FqdnNameEntry"
+            },
+            "description": "Every name it matched that is still remembered, the most recently\nrefreshed first. Empty means it never resolved on this node since the\npolicy was published."
+          },
+          "pattern": {
+            "type": "string",
+            "description": "The pattern as the rule wrote it."
+          }
+        }
+      },
+      "FqdnRuleEntry": {
+        "type": "object",
+        "description": "One rule naming its destinations by name.",
+        "required": [
+          "rule",
+          "patterns"
+        ],
+        "properties": {
+          "patterns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FqdnPatternEntry"
+            },
+            "description": "One entry per pattern, in the rule's order."
+          },
+          "rule": {
+            "type": "string"
+          }
+        }
+      },
       "GatewayResponse": {
         "type": "object",
         "required": [
@@ -13574,6 +13715,21 @@
               "null"
             ],
             "description": "Why nothing is attached, in the words the attach failed with. A\ndocument carrying no workload rule loads no object, and says so here."
+          }
+        }
+      },
+      "WorkloadFqdnResponse": {
+        "type": "object",
+        "description": "What every rule naming a destination by name has resolved on this node.",
+        "required": [
+          "rules"
+        ],
+        "properties": {
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FqdnRuleEntry"
+            }
           }
         }
       },

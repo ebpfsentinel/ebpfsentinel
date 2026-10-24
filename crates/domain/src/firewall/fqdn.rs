@@ -60,6 +60,13 @@ pub const PENDING_QUERY_NS: u64 = 5_000_000_000;
 /// loses its own resolutions rather than everybody's.
 pub const MAX_PENDING_QUERIES: usize = 4_096;
 
+/// How many names are remembered per node after their last answer lapsed.
+///
+/// Remembering is what lets a report tell a name that resolved an hour ago
+/// from one that never resolved at all, which is usually a typo. Past it the
+/// name refreshed longest ago is forgotten first.
+pub const MAX_REMEMBERED_NAMES: usize = 4_096;
+
 /// How many CNAME hops are followed from the name asked to its addresses.
 const MAX_CNAME_HOPS: usize = 8;
 
@@ -465,10 +472,37 @@ pub struct FqdnGrant {
 }
 
 /// Every address currently open by name, mirrored from the kernel map so it
-/// can be swept and reported.
+/// can be swept and reported, and when each name under each rule last
+/// resolved, kept after its addresses lapsed.
 #[derive(Debug, Clone, Default)]
 pub struct FqdnLedger {
     grants: HashMap<FqdnGrantKey, FqdnGrant>,
+    last_resolved: HashMap<(u16, String), u64>,
+}
+
+/// One name a rule's pattern matched, as a report writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FqdnNameReport {
+    /// The name the workload asked for.
+    pub name: String,
+    /// Distinct addresses currently open for it.
+    pub addresses: usize,
+    /// Distinct cgroups it is currently open for.
+    pub workloads: usize,
+    /// `CLOCK_BOOTTIME` of the last answer naming it.
+    pub refreshed_ns: u64,
+    /// `CLOCK_BOOTTIME` its last address lapses at, `None` once all have.
+    pub expires_ns: Option<u64>,
+}
+
+/// What one pattern of one rule has resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FqdnPatternReport {
+    /// The pattern as the rule wrote it.
+    pub pattern: FqdnPattern,
+    /// Every name it matched that is still remembered, the most recently
+    /// refreshed first. Empty is a pattern that never resolved on this node.
+    pub names: Vec<FqdnNameReport>,
 }
 
 impl FqdnLedger {
@@ -488,7 +522,67 @@ impl FqdnLedger {
             name.clone_into(&mut grant.name);
         }
         grant.refreshed_ns = grant.refreshed_ns.max(at_ns);
-        grant.expires_ns
+        let in_force = grant.expires_ns;
+        self.remember(key.slot, name, at_ns);
+        in_force
+    }
+
+    fn remember(&mut self, slot: u16, name: &str, at_ns: u64) {
+        let entry = (slot, name.to_string());
+        if !self.last_resolved.contains_key(&entry)
+            && self.last_resolved.len() >= MAX_REMEMBERED_NAMES
+            && let Some(oldest) = self
+                .last_resolved
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(key, _)| key.clone())
+        {
+            self.last_resolved.remove(&oldest);
+        }
+        let at = self.last_resolved.entry(entry).or_insert(at_ns);
+        *at = (*at).max(at_ns);
+    }
+
+    /// What `pattern`, written on the rule in `slot`, has resolved, with the
+    /// addresses still open at `now_ns`.
+    #[must_use]
+    pub fn report(&self, slot: u16, pattern: &FqdnPattern, now_ns: u64) -> FqdnPatternReport {
+        let mut names: Vec<FqdnNameReport> = self
+            .last_resolved
+            .iter()
+            .filter(|((at_slot, name), _)| *at_slot == slot && pattern.matches(name))
+            .map(|((_, name), refreshed_ns)| {
+                let open: Vec<(&FqdnGrantKey, &FqdnGrant)> = self
+                    .grants
+                    .iter()
+                    .filter(|(key, grant)| {
+                        key.slot == slot && grant.name == *name && grant.expires_ns > now_ns
+                    })
+                    .collect();
+                let mut addresses: Vec<IpAddr> = open.iter().map(|(key, _)| key.addr).collect();
+                addresses.sort_unstable();
+                addresses.dedup();
+                let mut workloads: Vec<u64> = open.iter().map(|(key, _)| key.cgroup_id).collect();
+                workloads.sort_unstable();
+                workloads.dedup();
+                FqdnNameReport {
+                    name: name.clone(),
+                    addresses: addresses.len(),
+                    workloads: workloads.len(),
+                    refreshed_ns: *refreshed_ns,
+                    expires_ns: open.iter().map(|(_, grant)| grant.expires_ns).max(),
+                }
+            })
+            .collect();
+        names.sort_by(|a, b| {
+            b.refreshed_ns
+                .cmp(&a.refreshed_ns)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        FqdnPatternReport {
+            pattern: pattern.clone(),
+            names,
+        }
     }
 
     /// Remove and return every grant lapsed at `now_ns`.
@@ -514,6 +608,7 @@ impl FqdnLedger {
     /// numbered afresh.
     pub fn clear(&mut self) {
         self.grants.clear();
+        self.last_resolved.clear();
     }
 
     /// How many grants are held.
@@ -840,5 +935,59 @@ mod tests {
         assert!(ledger.sweep(99).is_empty());
         assert_eq!(ledger.sweep(100), vec![key]);
         assert!(ledger.is_empty());
+    }
+
+    #[test]
+    fn a_report_tells_a_lapsed_name_from_one_that_never_resolved() {
+        let mut ledger = FqdnLedger::default();
+        let wildcard = FqdnPattern::parse("*.cdn.example.com").unwrap();
+        let exact = FqdnPattern::parse("api.example.com").unwrap();
+        let one = |cgroup_id, last| FqdnGrantKey {
+            cgroup_id,
+            addr: IpAddr::V4(Ipv4Addr::new(192, 0, 2, last)),
+            slot: 3,
+        };
+        ledger.record(one(7, 1), "a.cdn.example.com", 100, 10);
+        ledger.record(one(8, 1), "a.cdn.example.com", 120, 20);
+        ledger.record(one(7, 2), "a.cdn.example.com", 110, 15);
+        ledger.record(one(7, 3), "b.cdn.example.com", 50, 5);
+
+        let report = ledger.report(3, &wildcard, 60);
+        assert_eq!(report.names.len(), 2);
+        assert_eq!(report.names[0].name, "a.cdn.example.com");
+        assert_eq!(report.names[0].addresses, 2);
+        assert_eq!(report.names[0].workloads, 2);
+        assert_eq!(report.names[0].refreshed_ns, 20);
+        assert_eq!(report.names[0].expires_ns, Some(120));
+
+        ledger.sweep(60);
+        let lapsed = &ledger.report(3, &wildcard, 60).names[1];
+        assert_eq!(lapsed.name, "b.cdn.example.com");
+        assert_eq!(lapsed.addresses, 0);
+        assert_eq!(lapsed.expires_ns, None);
+
+        assert!(ledger.report(3, &exact, 60).names.is_empty());
+        assert!(ledger.report(4, &wildcard, 60).names.is_empty());
+
+        ledger.clear();
+        assert!(ledger.report(3, &wildcard, 60).names.is_empty());
+    }
+
+    #[test]
+    fn the_names_remembered_are_bounded_and_the_oldest_goes_first() {
+        let mut ledger = FqdnLedger::default();
+        let key = FqdnGrantKey {
+            cgroup_id: 1,
+            addr: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            slot: 0,
+        };
+        for index in 0..=MAX_REMEMBERED_NAMES {
+            let at = u64::try_from(index).unwrap() + 1;
+            ledger.record(key, &format!("n{index}.example.com"), at, at);
+        }
+        let all = FqdnPattern::parse("*.example.com").unwrap();
+        let names = ledger.report(0, &all, 0).names;
+        assert_eq!(names.len(), MAX_REMEMBERED_NAMES);
+        assert!(names.iter().all(|name| name.name != "n0.example.com"));
     }
 }
