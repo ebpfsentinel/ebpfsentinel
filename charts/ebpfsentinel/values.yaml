@@ -366,6 +366,12 @@ container:
     enabled: false
     # -- Optional label selector (`key=value` pairs) narrowing the pod watcher
     labelFilter: []
+    networkPolicy:
+      # -- Kubernetes NetworkPolicy on this node's pods: `off`, `observe`
+      # (refusals counted and let through) or `enforce`. Needs `enabled`, and
+      # widens the ClusterRole to list and watch networkpolicies, namespaces,
+      # services and endpointslices across the cluster.
+      mode: "off"
 
 # -- Pod disruption budget (protects against voluntary evictions)
 podDisruptionBudget:

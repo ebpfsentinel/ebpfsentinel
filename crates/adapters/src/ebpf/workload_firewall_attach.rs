@@ -60,8 +60,8 @@ pub const WORKLOAD_HOOKS: &[(&str, u32)] = &[
     ("workload_sendmsg6", BPF_CGROUP_UDP6_SENDMSG),
     ("workload_bind4", BPF_CGROUP_INET4_BIND),
     ("workload_bind6", BPF_CGROUP_INET6_BIND),
-    ("workload_dns_egress", BPF_CGROUP_INET_EGRESS),
-    ("workload_dns_ingress", BPF_CGROUP_INET_INGRESS),
+    ("workload_skb_egress", BPF_CGROUP_INET_EGRESS),
+    ("workload_skb_ingress", BPF_CGROUP_INET_INGRESS),
 ];
 
 /// What the agent can say about the workload firewall, for the start-up log
@@ -263,10 +263,10 @@ mod tests {
     }
 
     #[test]
-    fn the_dns_hooks_sit_on_both_directions_of_the_cgroup() {
+    fn the_packet_hooks_sit_on_both_directions_of_the_cgroup() {
         let dns: Vec<u32> = WORKLOAD_HOOKS
             .iter()
-            .filter(|(name, _)| name.contains("dns"))
+            .filter(|(name, _)| name.contains("skb"))
             .map(|(_, attach_type)| *attach_type)
             .collect();
         assert_eq!(dns, vec![BPF_CGROUP_INET_EGRESS, BPF_CGROUP_INET_INGRESS]);

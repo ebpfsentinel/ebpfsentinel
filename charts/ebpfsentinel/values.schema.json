@@ -189,6 +189,12 @@
             "labelFilter": {
               "type": "array",
               "items": { "type": "string", "pattern": "^[^=,]+=[^=,]*$" }
+            },
+            "networkPolicy": {
+              "type": "object",
+              "properties": {
+                "mode": { "type": "string", "enum": ["off", "observe", "enforce"] }
+              }
             }
           }
         }

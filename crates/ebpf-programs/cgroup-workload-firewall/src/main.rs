@@ -38,20 +38,41 @@
 //! which pairs them, believes only an answer from a trusted resolver to a
 //! query the same cgroup sent, and writes the addresses it learned into
 //! `WORKLOAD_FQDN_ALLOWED` for that cgroup and that rule alone. The connect
-//! hook then reads that map instead of a prefix. Neither DNS program ever
-//! drops a packet: capture is all they do.
+//! hook then reads that map instead of a prefix.
+//!
+//! The same hooks enforce Kubernetes `NetworkPolicy` for the pods of this
+//! node, when the agent is asked to. Userspace compiles every policy selecting
+//! a local pod into longest-prefix entries of `NETPOL_RULES`, one table per
+//! distinct rule set, and writes which table each of the pod's cgroups
+//! answers to in `NETPOL_CGROUPS`. Egress is checked at `connect()` and
+//! `sendmsg()`, ahead of the workload rules, so a connection must be allowed
+//! by both. Ingress is checked by the `cgroup_skb` ingress program, which is
+//! the only one that ever drops a packet, and only the first packet of a TCP
+//! connection or a UDP datagram that does not answer one the pod sent: every
+//! later packet belongs to a connection the policy already let in. ICMP and
+//! SCTP inbound are not filtered. The DNS capture never drops anything.
 
 #![no_std]
 #![no_main]
 
 use aya_ebpf::{
-    btf_maps::{Array, HashMap, LruHashMap, PerCpuArray, RingBuf},
+    btf_maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
     helpers::{
         bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_get_current_uid_gid,
         bpf_ktime_get_boot_ns, bpf_skb_cgroup_id, bpf_skb_load_bytes,
     },
     macros::{btf_map, cgroup_skb, cgroup_sock_addr},
     programs::{SkBuffContext, SockAddrContext},
+};
+use ebpf_common::netpol::{
+    NETPOL_DIR_EGRESS, NETPOL_DIR_INGRESS, NETPOL_FLAG_EGRESS_ISOLATED, NETPOL_FLAG_ENFORCE,
+    NETPOL_FLAG_INGRESS_ISOLATED, NETPOL_KEY_LEN, NETPOL_MAX_CGROUPS, NETPOL_MAX_ENTRIES,
+    NETPOL_MAX_RANGES, NETPOL_MAX_REPLIES, NETPOL_METRIC_COUNT, NETPOL_METRIC_EGRESS_CHECKED,
+    NETPOL_METRIC_EGRESS_REFUSED, NETPOL_METRIC_EGRESS_WOULD_REFUSE,
+    NETPOL_METRIC_INGRESS_CHECKED, NETPOL_METRIC_INGRESS_REFUSED,
+    NETPOL_METRIC_INGRESS_WOULD_REFUSE, NETPOL_METRIC_REPLY_ADMITTED, NETPOL_REPLY_WINDOW_NS,
+    NetpolCgroup, NetpolEntry, NetpolReplyKey, netpol_key_data, netpol_key_word,
+    netpol_prefix_len,
 };
 use ebpf_common::quarantine::{
     QUARANTINE_EVENTS_RINGBUF_BYTES, QUARANTINE_MAX_CGROUPS, QUARANTINE_METRIC_COUNT,
@@ -180,6 +201,36 @@ static WORKLOAD_DNS_CAPTURE: Array<u32, 1> = Array::new();
 static WORKLOAD_DNS_EVENTS: RingBuf<WorkloadDnsEvent, { WORKLOAD_DNS_RINGBUF_BYTES as usize }> =
     RingBuf::new();
 
+/// Every policy rule set of this node, as longest-prefix entries.
+///
+/// The first word of a key names the table, the family and the direction and
+/// is always matched whole, so the longest prefix found is always one of this
+/// table's own, and an address no entry holds is closed.
+#[btf_map]
+static NETPOL_RULES: LpmTrie<[u8; NETPOL_KEY_LEN], NetpolEntry, { NETPOL_MAX_ENTRIES as usize }> =
+    LpmTrie::new();
+
+/// cgroup id -> which table it answers to and in which directions.
+///
+/// A plain hash map, for the reason the selectors have one: an eviction would
+/// be a pod quietly leaving its policy while it runs.
+#[btf_map]
+static NETPOL_CGROUPS: HashMap<u64, NetpolCgroup, { NETPOL_MAX_CGROUPS as usize }> =
+    HashMap::new();
+
+/// (cgroup, peer, peer port, family) -> instant the way back closes.
+///
+/// A UDP datagram an ingress-isolated pod sends opens its answer, as a
+/// stateful implementation of the policy does. LRU because an exchange that
+/// is evicted only costs a reply being checked like a new datagram.
+#[btf_map]
+static NETPOL_REPLIES: LruHashMap<NetpolReplyKey, u64, { NETPOL_MAX_REPLIES as usize }> =
+    LruHashMap::new();
+
+/// What the policy did, per CPU.
+#[btf_map]
+static NETPOL_METRICS: PerCpuArray<u64, { NETPOL_METRIC_COUNT as usize }> = PerCpuArray::new();
+
 // ── Verdicts, in the kernel's own numbering ─────────────────────────
 
 /// What a `cgroup_sock_addr` program returns to let the syscall proceed.
@@ -194,6 +245,8 @@ const AF_INET6: u32 = 10;
 
 /// What a `cgroup_skb` program returns to let the packet through.
 const SKB_PASS: i32 = 1;
+/// What it returns to drop it.
+const SKB_DROP: i32 = 0;
 
 /// `ETH_P_IP` and `ETH_P_IPV6`, host order, as `__sk_buff.protocol` carries
 /// them once swapped.
@@ -201,6 +254,11 @@ const ETH_P_IP: u16 = 0x0800;
 const ETH_P_IPV6: u16 = 0x86dd;
 /// UDP, as the IP header numbers it.
 const IPPROTO_UDP: u8 = 17;
+/// TCP.
+const IPPROTO_TCP: u8 = 6;
+/// The SYN and ACK bits of a TCP header's flag byte.
+const TCP_SYN: u8 = 0x02;
+const TCP_ACK: u8 = 0x10;
 /// The port DNS is served on.
 const DNS_PORT: u16 = 53;
 /// A UDP header.
@@ -251,19 +309,22 @@ pub fn workload_bind6(ctx: SockAddrContext) -> i32 {
     answer(&ctx, WORKLOAD_HOOK_BIND)
 }
 
-/// A packet leaving a socket, which is where a workload's DNS query is seen.
+/// A packet leaving a socket, which is where a workload's DNS query is seen
+/// and where a UDP exchange of an ingress-isolated pod opens its way back.
 #[cgroup_skb(egress)]
-pub fn workload_dns_egress(ctx: SkBuffContext) -> i32 {
+pub fn workload_skb_egress(ctx: SkBuffContext) -> i32 {
     capture(&ctx, WORKLOAD_DNS_QUERY);
+    remember_reply(&ctx);
     SKB_PASS
 }
 
-/// A packet arriving at a socket, which is where the answer is seen, after
-/// the kernel found the socket and so with the cgroup of the pod that asked.
+/// A packet arriving at a socket, which is where a DNS answer is seen and
+/// where a pod's ingress policy is decided, after the kernel found the socket
+/// and so with the cgroup of the pod it is for.
 #[cgroup_skb(ingress)]
-pub fn workload_dns_ingress(ctx: SkBuffContext) -> i32 {
+pub fn workload_skb_ingress(ctx: SkBuffContext) -> i32 {
     capture(&ctx, WORKLOAD_DNS_RESPONSE);
-    SKB_PASS
+    admit(&ctx)
 }
 
 // ── DNS capture ─────────────────────────────────────────────────────
@@ -407,6 +468,9 @@ fn capture(ctx: &SkBuffContext, direction: u8) {
 /// a cgroup that is not cut off ever reaches a rule.
 fn answer(ctx: &SockAddrContext, hook: u8) -> i32 {
     if let Some(verdict) = quarantined(hook) {
+        return verdict;
+    }
+    if let Some(verdict) = netpol_egress(ctx, hook) {
         return verdict;
     }
     decide(ctx, hook)
@@ -694,6 +758,255 @@ fn inside(network: &[u32; 4], prefix_len: u8, addr: &[u32; 4]) -> bool {
         word += 1;
     }
     true
+}
+
+// ── NetworkPolicy ───────────────────────────────────────────────────
+
+/// Whether the policy table `slot` opens `port` of `protocol` towards or
+/// from `addr` in `direction`.
+fn netpol_open(
+    slot: u16,
+    v6: bool,
+    direction: u32,
+    addr: [u8; 16],
+    protocol: u8,
+    port: u16,
+) -> bool {
+    let key = Key::new(
+        netpol_prefix_len(128),
+        netpol_key_data(netpol_key_word(slot, v6, direction), addr),
+    );
+    let Some(entry) = NETPOL_RULES.get(&key) else {
+        return false;
+    };
+    if entry.all != 0 {
+        return true;
+    }
+    let count = usize::from(entry.count);
+    let mut index = 0usize;
+    while index < NETPOL_MAX_RANGES {
+        if index >= count {
+            break;
+        }
+        let range = &entry.ranges[index];
+        if range.protocol == protocol && range.lo <= port && port <= range.hi {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+/// The table and flags of this cgroup, when a policy isolates it in the
+/// direction named by `flag`.
+fn netpol_target(cgroup: u64, flag: u8) -> Option<NetpolCgroup> {
+    let entry = *unsafe { NETPOL_CGROUPS.get(&cgroup) }?;
+    if entry.flags & flag == 0 {
+        return None;
+    }
+    Some(entry)
+}
+
+/// The policy's answer to a pod's outbound connection or datagram.
+///
+/// `Some(REFUSE)` only when enforcing; `None` lets the workload rules decide
+/// next, so a connection must be allowed by both.
+fn netpol_egress(ctx: &SockAddrContext, hook: u8) -> Option<i32> {
+    if hook == WORKLOAD_HOOK_BIND {
+        return None;
+    }
+    let target = netpol_target(
+        unsafe { bpf_get_current_cgroup_id() },
+        NETPOL_FLAG_EGRESS_ISOLATED,
+    )?;
+    let (words, family) = address_of(ctx, unsafe { (*ctx.sock_addr).family });
+    if family == WORKLOAD_FAMILY_ANY {
+        return None;
+    }
+    increment_metric!(NETPOL_METRICS, NETPOL_METRIC_EGRESS_CHECKED);
+    let v6 = family == WORKLOAD_FAMILY_IPV6;
+    let port = u16::from_be(unsafe { (*ctx.sock_addr).user_port } as u16);
+    let protocol = unsafe { (*ctx.sock_addr).protocol } as u8;
+    if netpol_open(
+        target.slot,
+        v6,
+        NETPOL_DIR_EGRESS,
+        address_bytes(&words, v6),
+        protocol,
+        port,
+    ) {
+        return None;
+    }
+    if target.flags & NETPOL_FLAG_ENFORCE != 0 {
+        increment_metric!(NETPOL_METRICS, NETPOL_METRIC_EGRESS_REFUSED);
+        return Some(REFUSE);
+    }
+    increment_metric!(NETPOL_METRICS, NETPOL_METRIC_EGRESS_WOULD_REFUSE);
+    None
+}
+
+/// Host-order words back to the network-order bytes the table is keyed on,
+/// an IPv4 address in the first four.
+fn address_bytes(words: &[u32; 4], v6: bool) -> [u8; 16] {
+    let mut bytes = [0u8; 16];
+    let used = if v6 { 4 } else { 1 };
+    let mut word = 0usize;
+    while word < used {
+        let b = words[word].to_be_bytes();
+        bytes[word * 4] = b[0];
+        bytes[word * 4 + 1] = b[1];
+        bytes[word * 4 + 2] = b[2];
+        bytes[word * 4 + 3] = b[3];
+        word += 1;
+    }
+    bytes
+}
+
+/// The parts of a packet's headers the policy reads.
+struct Packet {
+    v6: bool,
+    protocol: u8,
+    src: [u8; 16],
+    dst: [u8; 16],
+    l4: usize,
+}
+
+/// Read the IP header, or `None` for a packet the policy does not look at: a
+/// family other than IP, a transport other than TCP or UDP, an IPv6 header
+/// followed by an extension header, or an IPv4 fragment past the first.
+fn packet(ctx: &SkBuffContext) -> Option<Packet> {
+    let protocol = u16::from_be(ctx.skb.protocol() as u16);
+    let mut src = [0u8; 16];
+    let mut dst = [0u8; 16];
+    if protocol == ETH_P_IP {
+        let first = ctx.load::<u8>(0).ok()?;
+        if first >> 4 != 4 {
+            return None;
+        }
+        let next = ctx.load::<u8>(9).ok()?;
+        let fragment = ctx.load::<u16>(6).ok()?;
+        if u16::from_be(fragment) & 0x1fff != 0 {
+            return None;
+        }
+        let s4 = ctx.load::<[u8; 4]>(12).ok()?;
+        let d4 = ctx.load::<[u8; 4]>(16).ok()?;
+        src[..4].copy_from_slice(&s4);
+        dst[..4].copy_from_slice(&d4);
+        return transport(next).then_some(Packet {
+            v6: false,
+            protocol: next,
+            src,
+            dst,
+            l4: usize::from(first & 0x0f) * 4,
+        });
+    }
+    if protocol == ETH_P_IPV6 {
+        let next = ctx.load::<u8>(6).ok()?;
+        src = ctx.load::<[u8; 16]>(8).ok()?;
+        dst = ctx.load::<[u8; 16]>(24).ok()?;
+        return transport(next).then_some(Packet {
+            v6: true,
+            protocol: next,
+            src,
+            dst,
+            l4: IPV6_HEADER_LEN,
+        });
+    }
+    None
+}
+
+fn transport(protocol: u8) -> bool {
+    protocol == IPPROTO_TCP || protocol == IPPROTO_UDP
+}
+
+/// Open the way back for a UDP datagram an ingress-isolated pod is sending.
+///
+/// The entry is only rewritten once half its window has gone, so a pod
+/// streaming datagrams costs a lookup per packet and not an update.
+fn remember_reply(ctx: &SkBuffContext) {
+    let cgroup = unsafe { bpf_skb_cgroup_id(ctx.skb.skb) };
+    if netpol_target(cgroup, NETPOL_FLAG_INGRESS_ISOLATED).is_none() {
+        return;
+    }
+    let Some(packet) = packet(ctx) else {
+        return;
+    };
+    if packet.protocol != IPPROTO_UDP {
+        return;
+    }
+    let Ok(dport) = ctx.load::<u16>(packet.l4 + 2) else {
+        return;
+    };
+    let key = NetpolReplyKey {
+        cgroup_id: cgroup,
+        addr: packet.dst,
+        port: u16::from_be(dport),
+        family: u8::from(packet.v6),
+        _pad: [0; 5],
+    };
+    let now = unsafe { bpf_ktime_get_boot_ns() };
+    if let Some(expires) = unsafe { NETPOL_REPLIES.get(&key) }
+        && *expires > now + NETPOL_REPLY_WINDOW_NS / 2
+    {
+        return;
+    }
+    let _ = NETPOL_REPLIES.insert(&key, &(now + NETPOL_REPLY_WINDOW_NS), 0);
+}
+
+/// The policy's answer to a packet arriving at an ingress-isolated pod.
+fn admit(ctx: &SkBuffContext) -> i32 {
+    let cgroup = unsafe { bpf_skb_cgroup_id(ctx.skb.skb) };
+    let Some(target) = netpol_target(cgroup, NETPOL_FLAG_INGRESS_ISOLATED) else {
+        return SKB_PASS;
+    };
+    let Some(packet) = packet(ctx) else {
+        return SKB_PASS;
+    };
+    let (Ok(sport), Ok(dport)) = (ctx.load::<u16>(packet.l4), ctx.load::<u16>(packet.l4 + 2))
+    else {
+        return SKB_PASS;
+    };
+    let peer_port = u16::from_be(sport);
+    let local_port = u16::from_be(dport);
+    if packet.protocol == IPPROTO_TCP {
+        let Ok(flags) = ctx.load::<u8>(packet.l4 + 13) else {
+            return SKB_PASS;
+        };
+        if flags & TCP_SYN == 0 || flags & TCP_ACK != 0 {
+            return SKB_PASS;
+        }
+    } else {
+        let key = NetpolReplyKey {
+            cgroup_id: cgroup,
+            addr: packet.src,
+            port: peer_port,
+            family: u8::from(packet.v6),
+            _pad: [0; 5],
+        };
+        if let Some(expires) = unsafe { NETPOL_REPLIES.get(&key) }
+            && *expires > unsafe { bpf_ktime_get_boot_ns() }
+        {
+            increment_metric!(NETPOL_METRICS, NETPOL_METRIC_REPLY_ADMITTED);
+            return SKB_PASS;
+        }
+    }
+    increment_metric!(NETPOL_METRICS, NETPOL_METRIC_INGRESS_CHECKED);
+    if netpol_open(
+        target.slot,
+        packet.v6,
+        NETPOL_DIR_INGRESS,
+        packet.src,
+        packet.protocol,
+        local_port,
+    ) {
+        return SKB_PASS;
+    }
+    if target.flags & NETPOL_FLAG_ENFORCE != 0 {
+        increment_metric!(NETPOL_METRICS, NETPOL_METRIC_INGRESS_REFUSED);
+        return SKB_DROP;
+    }
+    increment_metric!(NETPOL_METRICS, NETPOL_METRIC_INGRESS_WOULD_REFUSE);
+    SKB_PASS
 }
 
 #[cfg(not(test))]

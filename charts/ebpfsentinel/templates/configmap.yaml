@@ -96,6 +96,8 @@ data:
         {{- with .Values.container.kubernetes.labelFilter }}
         label_filter: {{ . | toJson }}
         {{- end }}
+        network_policy:
+          mode: {{ .Values.container.kubernetes.networkPolicy.mode | quote }}
     {{- end }}
     {{- with .Values.auto_response }}
     auto_response:

@@ -36,6 +36,7 @@ pub mod metrics_reader;
 pub mod nat_map_manager;
 pub mod netkit;
 pub mod netkit_discovery;
+pub mod netpol_map_manager;
 pub mod process_attach;
 pub mod process_event_reader;
 pub mod prog_test_run;
@@ -113,6 +114,7 @@ pub use map_fill::{
 pub use map_manager::FirewallMapManager;
 pub use metrics_reader::MetricsReader;
 pub use nat_map_manager::NatMapManager;
+pub use netpol_map_manager::NetpolMapManager;
 pub use process_attach::{ProcessTracingAttacher, ProcessTracingStatus};
 pub use process_event_reader::ProcessEventReader;
 pub use program_name::published_program_name;

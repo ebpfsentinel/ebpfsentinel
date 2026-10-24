@@ -20,6 +20,7 @@ pub mod l7;
 pub mod learning;
 pub mod loadbalancer;
 pub mod nat;
+pub mod netpol;
 pub mod process;
 pub mod qos;
 pub mod ratelimit;

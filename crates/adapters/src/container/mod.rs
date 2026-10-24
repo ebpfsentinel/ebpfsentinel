@@ -7,6 +7,9 @@ pub mod docker_enricher;
 pub mod docker_events;
 #[cfg(feature = "kubernetes")]
 pub mod k8s_enricher;
+#[cfg(feature = "kubernetes")]
+pub mod netpol_watch;
+pub mod pod_cgroups;
 pub mod proc_details;
 pub mod proc_executable;
 pub mod proc_resolver;
@@ -27,6 +30,9 @@ pub use k8s_enricher::{
     K8sEnricherMetrics, KubernetesEnricher, PodCache, PodInfo, is_running_in_kubernetes,
     pod_info_from, resolve_node_name, spawn_pod_watcher, strip_cri_prefix, try_build_client,
 };
+#[cfg(feature = "kubernetes")]
+pub use netpol_watch::{NetpolClusterCache, spawn_netpol_watchers};
+pub use pod_cgroups::PodCgroupScanner;
 pub use proc_details::ProcDetailsResolver;
 pub use proc_executable::ProcExecutableResolver;
 pub use proc_resolver::ProcContainerResolver;

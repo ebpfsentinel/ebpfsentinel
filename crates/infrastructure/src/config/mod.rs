@@ -53,7 +53,10 @@ pub use capture::{
 };
 pub use common::{ConfigError, parse_cidr, parse_domain_mode};
 pub use conntrack::ConnTrackSectionConfig;
-pub use container::{ContainerConfig, ResolverConfig as ContainerResolverConfig};
+pub use container::{
+    ContainerConfig, NetworkPolicyConfig, NetworkPolicyMode,
+    ResolverConfig as ContainerResolverConfig,
+};
 pub use ddos::{
     AmpPortConfig, AmpProtectionConfig, DdosConfig, DdosPolicyConfig, IcmpProtectionConfig,
     SynProtectionConfig,

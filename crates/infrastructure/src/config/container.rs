@@ -120,6 +120,31 @@ pub struct KubernetesEnricherConfig {
     /// When empty, all pods on the node are cached.
     #[serde(default)]
     pub label_filter: Vec<String>,
+
+    /// Kubernetes `NetworkPolicy`, read from the cluster and enforced on
+    /// this node's pods by the cgroup hooks.
+    #[serde(default)]
+    pub network_policy: NetworkPolicyConfig,
+}
+
+/// What the agent does with the cluster's `NetworkPolicy` objects.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkPolicyMode {
+    /// Not read.
+    #[default]
+    Off,
+    /// Compiled and evaluated on every new connection, refusals counted and
+    /// let through.
+    Observe,
+    /// Refusals carried out.
+    Enforce,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NetworkPolicyConfig {
+    #[serde(default)]
+    pub mode: NetworkPolicyMode,
 }
 
 impl ContainerConfig {
@@ -188,6 +213,16 @@ impl ContainerConfig {
                     });
                 }
             }
+        }
+        if self.kubernetes.network_policy.mode != NetworkPolicyMode::Off && !self.kubernetes.enabled
+        {
+            return Err(ConfigError::Validation {
+                field: "container.kubernetes.network_policy.mode".to_string(),
+                message:
+                    "network policy is read from the cluster, so container.kubernetes.enabled \
+                          must be true"
+                        .to_string(),
+            });
         }
         Ok(())
     }
@@ -264,6 +299,33 @@ mod tests {
     fn validate_ignores_the_label_filter_when_kubernetes_is_off() {
         let mut cfg = ContainerConfig::default();
         cfg.kubernetes.label_filter = vec!["not-a-pair".to_string()];
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn network_policy_is_off_by_default_and_reads_its_three_modes() {
+        assert_eq!(
+            ContainerConfig::default().kubernetes.network_policy.mode,
+            NetworkPolicyMode::Off
+        );
+        for (text, mode) in [
+            ("off", NetworkPolicyMode::Off),
+            ("observe", NetworkPolicyMode::Observe),
+            ("enforce", NetworkPolicyMode::Enforce),
+        ] {
+            let cfg: NetworkPolicyConfig =
+                serde_json::from_value(serde_json::json!({ "mode": text })).unwrap();
+            assert_eq!(cfg.mode, mode);
+        }
+    }
+
+    #[test]
+    fn validate_rejects_network_policy_without_kubernetes() {
+        let mut cfg = ContainerConfig::default();
+        cfg.kubernetes.network_policy.mode = NetworkPolicyMode::Observe;
+        assert!(cfg.validate().is_err());
+        cfg.kubernetes.enabled = true;
         assert!(cfg.validate().is_ok());
     }
 

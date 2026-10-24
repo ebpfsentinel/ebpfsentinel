@@ -2571,7 +2571,12 @@ pub async fn run(
         // it on gets it loaded whether or not the document carries a workload
         // rule: the hooks that answer a `connect()` are these, and a node with
         // no rules has nothing else to attach them for.
-        if workload_policy.is_empty() && !config.response.quarantine.enabled {
+        //
+        // `NetworkPolicy` rides in it too, on the packet hooks of the same
+        // cgroup, so turning it on loads the object on its own as well.
+        let netpol_mode = config.container.kubernetes.network_policy.mode;
+        let netpol_on = netpol_mode != infrastructure::config::NetworkPolicyMode::Off;
+        if workload_policy.is_empty() && !config.response.quarantine.enabled && !netpol_on {
             metrics.clear_ebpf_program_status("cgroup_workload_firewall");
             adapters::ebpf::workload_firewall_attach::publish_status(
                 adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus::default(),
@@ -2865,6 +2870,16 @@ pub async fn run(
                         );
                     }
 
+                    if netpol_on {
+                        start_network_policy(
+                            &mut loader,
+                            &config,
+                            &mut metrics_readers,
+                            workload_cancel.clone(),
+                        )
+                        .await?;
+                    }
+
                     workload_policy_service = Some(service);
                     managed.push(("cgroup_workload_firewall", loader, workload_cancel.clone()));
                     metrics.set_ebpf_program_status("cgroup_workload_firewall", true);
@@ -2911,6 +2926,14 @@ pub async fn run(
                     return Err(anyhow::anyhow!(
                         adapters::ebpf::workload_firewall_attach::enforcement_unavailable(&reason)
                     ));
+                }
+                if netpol_mode == infrastructure::config::NetworkPolicyMode::Enforce {
+                    return Err(anyhow::anyhow!(network_policy_unavailable(&reason)));
+                }
+                if netpol_on {
+                    warn!(
+                        "network policy observes nothing, the cgroup hooks did not attach: {reason}"
+                    );
                 }
                 warn!(
                     "workload firewall not loaded, the rules that observe observe nothing: {reason}"
@@ -5724,6 +5747,90 @@ pub fn try_load_cgroup_workload_firewall(
     }
     let status = attacher.attach_all(&loader, &config.attribution.cgroup_root);
     Ok((loader, metrics_rdr, manager, reader, attacher, status))
+}
+
+/// Why an agent told to enforce `NetworkPolicy` refuses to start.
+fn network_policy_unavailable(reason: &str) -> String {
+    format!(
+        "container.kubernetes.network_policy.mode is enforce, and the agent cannot enforce it, so \
+         it would run with every pod of this node open while the cluster believes otherwise: \
+         {reason}"
+    )
+}
+
+/// Start compiling the cluster's `NetworkPolicy` into the workload firewall
+/// object, once its hooks are attached.
+///
+/// The policy is read and compiled here, on the agent, rather than handed
+/// down in the configuration: the pods a policy selects change with every
+/// rollout, and a document that changed with them would restart every agent
+/// of the cluster each time. In enforce mode every way of not getting there
+/// stops the agent; in observe mode it is said and the agent runs on.
+#[cfg(feature = "kubernetes")]
+async fn start_network_policy(
+    loader: &mut EbpfLoader,
+    config: &AgentConfig,
+    metrics_readers: &mut Vec<MetricsReader>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<()> {
+    let enforce = config.container.kubernetes.network_policy.mode
+        == infrastructure::config::NetworkPolicyMode::Enforce;
+    let refuse = |reason: String| {
+        if enforce {
+            Err(anyhow::anyhow!(network_policy_unavailable(&reason)))
+        } else {
+            warn!("network policy observes nothing: {reason}");
+            Ok(())
+        }
+    };
+    if !adapters::container::is_running_in_kubernetes() {
+        return refuse("the agent is not running in a Kubernetes cluster".to_string());
+    }
+    let Some(client) = adapters::container::try_build_client().await else {
+        return refuse("no Kubernetes client could be built".to_string());
+    };
+    let maps = match adapters::ebpf::NetpolMapManager::new(loader.ebpf_mut()) {
+        Ok(maps) => maps,
+        Err(e) => {
+            return refuse(format!(
+                "the workload firewall object carries no policy map: {e}"
+            ));
+        }
+    };
+    if let Ok(rdr) = MetricsReader::new(loader.ebpf_mut(), "NETPOL_METRICS") {
+        metrics_readers.push(rdr);
+    }
+
+    let cache = Arc::new(adapters::container::NetpolClusterCache::default());
+    let changes = cache.subscribe();
+    let _watchers = adapters::container::spawn_netpol_watchers(&client, &cache);
+    let service = application::netpol_service::NetpolService::new(
+        cache,
+        Arc::new(adapters::container::PodCgroupScanner::new(
+            config.attribution.cgroup_root.clone(),
+        )),
+        Box::new(maps),
+        enforce,
+    );
+    tokio::spawn(service.run(changes, cancel));
+    Ok(())
+}
+
+#[cfg(not(feature = "kubernetes"))]
+async fn start_network_policy(
+    _loader: &mut EbpfLoader,
+    config: &AgentConfig,
+    _metrics_readers: &mut Vec<MetricsReader>,
+    _cancel: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<()> {
+    let reason = "this agent was built without Kubernetes support";
+    if config.container.kubernetes.network_policy.mode
+        == infrastructure::config::NetworkPolicyMode::Enforce
+    {
+        return Err(anyhow::anyhow!(network_policy_unavailable(reason)));
+    }
+    warn!("network policy observes nothing: {reason}");
+    Ok(())
 }
 
 /// Load the process-tracing object and attach its two tracepoints.

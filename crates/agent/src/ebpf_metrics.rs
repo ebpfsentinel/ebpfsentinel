@@ -209,6 +209,19 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (2, "observed"),
             (3, "event_lost"),
         ],
+        // `NetworkPolicy` on the packet hooks, per direction: consulted,
+        // refused, and what enforcement would have refused while observing.
+        // `reply_admitted` is the datagrams let into an ingress-isolated pod
+        // because they answer one it sent.
+        "NETPOL_METRICS" => &[
+            (0, "egress_checked"),
+            (1, "egress_refused"),
+            (2, "egress_would_refuse"),
+            (3, "ingress_checked"),
+            (4, "ingress_refused"),
+            (5, "ingress_would_refuse"),
+            (6, "reply_admitted"),
+        ],
         "PROCESS_METRICS" => &[
             (0, "exec"),
             (1, "exit"),
@@ -611,6 +624,7 @@ mod tests {
             "QUARANTINE_METRICS",
             ebpf_common::quarantine::QUARANTINE_METRIC_COUNT,
         ),
+        ("NETPOL_METRICS", ebpf_common::netpol::NETPOL_METRIC_COUNT),
     ];
 
     #[test]
