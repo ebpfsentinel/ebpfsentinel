@@ -383,6 +383,8 @@ pub enum FirewallCommand {
     Workload,
     /// List what the rules naming destinations by name have resolved
     Fqdn,
+    /// List the containers whose labels carry policy, and any label refused
+    Labels,
     /// List what the workload rules let a workload reach
     Reach {
         /// Read the facts of this running task out of the process table

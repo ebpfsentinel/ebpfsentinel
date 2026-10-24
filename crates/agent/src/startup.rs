@@ -61,9 +61,9 @@ use domain::ratelimit::engine::RateLimitEngine;
 use domain::threatintel::engine::ThreatIntelEngine;
 use infrastructure::config::AgentConfig;
 use infrastructure::constants::{
-    ALERT_CHANNEL_CAPACITY, CAPTURE_STOP_TIMEOUT, EVENT_CHANNEL_CAPACITY,
-    GRACEFUL_SHUTDOWN_TIMEOUT, WORKLOAD_DENIAL_CHANNEL_CAPACITY, WORKLOAD_DENIAL_READ_INTERVAL,
-    WORKLOAD_DNS_CHANNEL_CAPACITY, WORKLOAD_FQDN_SWEEP_INTERVAL,
+    ALERT_CHANNEL_CAPACITY, CAPTURE_STOP_TIMEOUT, CONTAINER_LABEL_CHANNEL_CAPACITY,
+    EVENT_CHANNEL_CAPACITY, GRACEFUL_SHUTDOWN_TIMEOUT, WORKLOAD_DENIAL_CHANNEL_CAPACITY,
+    WORKLOAD_DENIAL_READ_INTERVAL, WORKLOAD_DNS_CHANNEL_CAPACITY, WORKLOAD_FQDN_SWEEP_INTERVAL,
 };
 use infrastructure::logging::init_logging;
 use infrastructure::retry::RetryConfig;
@@ -2618,7 +2618,14 @@ pub async fn run(
         // cgroup, so turning it on loads the object on its own as well.
         let netpol_mode = config.container.kubernetes.network_policy.mode;
         let netpol_on = netpol_mode != infrastructure::config::NetworkPolicyMode::Off;
-        if workload_policy.is_empty() && !config.response.quarantine.enabled && !netpol_on {
+        // A container's labels are policy too, so reading them loads the
+        // object even while the file carries no workload rule.
+        let label_policy = config.container.docker.label_policy;
+        if workload_policy.is_empty()
+            && !config.response.quarantine.enabled
+            && !netpol_on
+            && !label_policy
+        {
             metrics.clear_ebpf_program_status("cgroup_workload_firewall");
             adapters::ebpf::workload_firewall_attach::publish_status(
                 adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus::default(),
@@ -2971,6 +2978,14 @@ pub async fn run(
                 }
                 if netpol_mode == infrastructure::config::NetworkPolicyMode::Enforce {
                     return Err(anyhow::anyhow!(network_policy_unavailable(&reason)));
+                }
+                if label_policy {
+                    // A label may say enforce on any container started later,
+                    // and nothing at that point could refuse it.
+                    return Err(anyhow::anyhow!(
+                        "container.docker.label_policy is on and the cgroup hooks that would \
+                         carry a container's labels did not attach: {reason}"
+                    ));
                 }
                 if netpol_on {
                     warn!(
@@ -3652,9 +3667,17 @@ pub async fn run(
             // The watcher writes the same cache the enricher reads, so a
             // container is named on the first packet of its life rather than
             // on the first inspect. It lives as long as the agent does.
-            let _watcher = adapters::container::DockerEventWatcher::spawn(
+            let labels = if config.container.docker.label_policy {
+                workload_policy_service
+                    .as_ref()
+                    .map(follow_container_labels)
+            } else {
+                None
+            };
+            let _watcher = adapters::container::DockerEventWatcher::spawn_with_labels(
                 &config.container.docker.socket,
                 Arc::clone(&cache),
+                labels,
             );
             let enricher = adapters::container::DockerEnricher::new(client, cache);
             info!(
@@ -3675,6 +3698,13 @@ pub async fn run(
                  image and labels. Mount the socket read-only, or set \
                  container.docker.enabled to false to stop asking for it"
             );
+            if config.container.docker.label_policy {
+                warn!(
+                    socket = %config.container.docker.socket,
+                    "container.docker.label_policy is on and no container label is read: \
+                     the socket is not there"
+                );
+            }
             docker_state = EnricherState::OffNoSocket;
             None
         }
@@ -5847,6 +5877,34 @@ pub fn try_load_cgroup_workload_firewall(
     }
     let status = attacher.attach_all(&loader, &config.attribution.cgroup_root);
     Ok((loader, metrics_rdr, manager, reader, attacher, status))
+}
+
+/// Forward what the Docker watcher learns of each container's labels into
+/// the workload policy, and hand back the channel the watcher writes.
+fn follow_container_labels(
+    workload: &Arc<application::workload_policy_service::WorkloadPolicyService>,
+) -> mpsc::Sender<adapters::container::LabelUpdate> {
+    let (tx, mut rx) =
+        mpsc::channel::<adapters::container::LabelUpdate>(CONTAINER_LABEL_CHANNEL_CAPACITY);
+    let workload = Arc::clone(workload);
+    tokio::spawn(async move {
+        while let Some(update) = rx.recv().await {
+            let outcome = match update {
+                adapters::container::LabelUpdate::Seen { id, name, labels } => {
+                    workload.observe_container(&id, &name, &labels)
+                }
+                adapters::container::LabelUpdate::Gone { id } => workload.forget_container(&id),
+                adapters::container::LabelUpdate::Snapshot(containers) => {
+                    workload.reconcile_containers(&containers)
+                }
+            };
+            if let Err(e) = outcome {
+                warn!("container label policy not applied: {e}");
+            }
+        }
+    });
+    info!("container label policy followed through the Docker event stream");
+    tx
 }
 
 /// Why an agent told to enforce `NetworkPolicy` refuses to start.

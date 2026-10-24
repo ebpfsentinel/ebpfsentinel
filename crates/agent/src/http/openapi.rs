@@ -71,6 +71,7 @@ use super::zone_handler;
         firewall_handler::workload_reach,
         firewall_handler::list_workload_rules,
         firewall_handler::workload_fqdn,
+        firewall_handler::workload_labels,
         // L7
         l7_handler::list_l7_rules,
         l7_handler::create_l7_rule,

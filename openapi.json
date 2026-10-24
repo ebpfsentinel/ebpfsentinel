@@ -3487,6 +3487,65 @@
         ]
       }
     },
+    "/api/v1/firewall/workload/labels": {
+      "get": {
+        "tags": [
+          "Firewall"
+        ],
+        "summary": "`GET /api/v1/firewall/workload/labels` - the containers whose labels\ncarry policy, the rules each produced and any label refused.",
+        "operationId": "workload_labels",
+        "responses": {
+          "200": {
+            "description": "Containers carrying policy labels, by id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContainerLabelsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The workload firewall is not loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/firewall/workload/reach": {
       "get": {
         "tags": [
@@ -9131,6 +9190,78 @@
           "runtime": {
             "type": "string",
             "description": "Detected runtime (docker, containerd, crio, podman, unknown)."
+          }
+        }
+      },
+      "ContainerLabelEntry": {
+        "type": "object",
+        "description": "One container carrying policy labels, and what came of them.",
+        "required": [
+          "container_id",
+          "container_name",
+          "mode",
+          "rules",
+          "problems"
+        ],
+        "properties": {
+          "container_id": {
+            "type": "string",
+            "description": "Container id, in full."
+          },
+          "container_name": {
+            "type": "string",
+            "description": "Container name, when the runtime gave one."
+          },
+          "mode": {
+            "type": "string",
+            "description": "`observe` or `enforce`, as the mode label says."
+          },
+          "problems": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContainerLabelProblem"
+            },
+            "description": "What kept its labels out of force."
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Identifiers of the workload rules its labels produced, in kernel\norder. Empty whenever a problem is listed: a container is policed by\nevery one of its labels or by none."
+          }
+        }
+      },
+      "ContainerLabelProblem": {
+        "type": "object",
+        "description": "A label of a container that could not be put in force.",
+        "required": [
+          "label",
+          "reason"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "The label key, or the label prefix when the problem is the\ncontainer as a whole."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why it was refused."
+          }
+        }
+      },
+      "ContainerLabelsResponse": {
+        "type": "object",
+        "description": "Every container whose labels carry policy.",
+        "required": [
+          "containers"
+        ],
+        "properties": {
+          "containers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContainerLabelEntry"
+            }
           }
         }
       },

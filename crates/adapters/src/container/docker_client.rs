@@ -1,7 +1,7 @@
 //! Minimal Docker Engine API client over Unix socket.
 //!
-//! Performs a single-request HTTP/1.1 `GET /v1.43/containers/{id}/json` on
-//! `/var/run/docker.sock`. No external Docker SDK dependency - raw
+//! Performs single-request HTTP/1.1 calls - `GET /v1.43/containers/{id}/json`
+//! and `GET /v1.43/containers/json` - on `/var/run/docker.sock`. No external Docker SDK dependency - raw
 //! [`tokio::net::UnixStream`] with manual request framing and response
 //! parsing. Keeps the OSS dependency surface tiny.
 
@@ -22,6 +22,9 @@ pub const DEFAULT_SOCKET: &str = "/var/run/docker.sock";
 pub const DEFAULT_TIMEOUT_MS: u64 = 2_000;
 /// Max response body size we accept (1 MiB - Docker inspect payloads are tiny).
 const MAX_BODY_BYTES: usize = 1 << 20;
+/// Max list response we accept: a few kilobytes per container, so this
+/// holds a node far denser than any Docker host runs.
+const MAX_LIST_BODY_BYTES: usize = 16 << 20;
 
 /// Subset of the Docker inspect payload we consume.
 #[derive(Debug, Deserialize)]
@@ -72,8 +75,25 @@ impl DockerClient {
 
     /// `GET /v1.43/containers/{id}/json` - returns parsed metadata.
     pub async fn inspect_container(&self, id: &str) -> Result<DockerMetadata, ContainerError> {
+        let raw = self
+            .get(&format!("/v1.43/containers/{id}/json"), MAX_BODY_BYTES)
+            .await?;
+        parse_inspect_response(&raw, id)
+    }
+
+    /// `GET /v1.43/containers/json` - every running container, with its
+    /// labels.
+    pub async fn list_containers(&self) -> Result<Vec<ListedContainer>, ContainerError> {
+        let raw = self
+            .get("/v1.43/containers/json", MAX_LIST_BODY_BYTES)
+            .await?;
+        parse_list_response(&raw)
+    }
+
+    /// One request on a fresh connection, the whole response read back.
+    async fn get(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, ContainerError> {
         let request = format!(
-            "GET /v1.43/containers/{id}/json HTTP/1.1\r\n\
+            "GET {path} HTTP/1.1\r\n\
              Host: localhost\r\n\
              Accept: application/json\r\n\
              Connection: close\r\n\
@@ -101,7 +121,7 @@ impl DockerClient {
                     break;
                 }
                 buf.extend_from_slice(&chunk[..n]);
-                if buf.len() > MAX_BODY_BYTES {
+                if buf.len() > max_bytes {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "response too large",
@@ -117,12 +137,32 @@ impl DockerClient {
         .map_err(|_| ContainerError::DockerUnavailable {
             socket: self.socket.display().to_string(),
         })
-        .and_then(|raw| parse_inspect_response(&raw, id))
     }
 }
 
-/// Parse an HTTP/1.1 response and decode the JSON body into [`DockerMetadata`].
-fn parse_inspect_response(raw: &[u8], id: &str) -> Result<DockerMetadata, ContainerError> {
+/// One running container as the list call reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedContainer {
+    /// Container id, in full.
+    pub id: String,
+    /// Name the runtime gave it, without the leading slash.
+    pub name: String,
+    /// Every label it carries.
+    pub labels: Vec<(String, String)>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireListed {
+    #[serde(rename = "Id", default)]
+    id: String,
+    #[serde(rename = "Names", default)]
+    names: Vec<String>,
+    #[serde(rename = "Labels", default)]
+    labels: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// Split a whole response into its status and its decoded body.
+fn split_response(raw: &[u8]) -> Result<(u16, Vec<u8>), ContainerError> {
     let split = find_header_end(raw).ok_or_else(|| ContainerError::DockerMalformed {
         reason: "missing header/body boundary".to_string(),
     })?;
@@ -134,6 +174,47 @@ fn parse_inspect_response(raw: &[u8], id: &str) -> Result<DockerMetadata, Contai
             reason: "non-utf8 headers".to_string(),
         })?;
     let status = parse_status(header_str)?;
+
+    // Docker returns `Transfer-Encoding: chunked`. Decode if present.
+    let chunked = header_str
+        .lines()
+        .any(|l| l.to_ascii_lowercase().starts_with("transfer-encoding:") && l.contains("chunked"));
+    let body: Vec<u8> = if chunked && status == 200 {
+        decode_chunked(body_bytes)?
+    } else {
+        body_bytes.to_vec()
+    };
+    Ok((status, body))
+}
+
+/// Parse the list call's response.
+fn parse_list_response(raw: &[u8]) -> Result<Vec<ListedContainer>, ContainerError> {
+    let (status, body) = split_response(raw)?;
+    if status != 200 {
+        return Err(ContainerError::DockerApi { status });
+    }
+    let listed: Vec<WireListed> =
+        serde_json::from_slice(&body).map_err(|e| ContainerError::DockerMalformed {
+            reason: format!("json parse: {e}"),
+        })?;
+    Ok(listed
+        .into_iter()
+        .filter(|container| !container.id.is_empty())
+        .map(|container| ListedContainer {
+            id: container.id,
+            name: container
+                .names
+                .first()
+                .map(|name| name.trim_start_matches('/').to_string())
+                .unwrap_or_default(),
+            labels: container.labels.unwrap_or_default().into_iter().collect(),
+        })
+        .collect())
+}
+
+/// Parse an HTTP/1.1 response and decode the JSON body into [`DockerMetadata`].
+fn parse_inspect_response(raw: &[u8], id: &str) -> Result<DockerMetadata, ContainerError> {
+    let (status, body) = split_response(raw)?;
     match status {
         200 => {}
         404 => {
@@ -141,16 +222,6 @@ fn parse_inspect_response(raw: &[u8], id: &str) -> Result<DockerMetadata, Contai
         }
         other => return Err(ContainerError::DockerApi { status: other }),
     }
-
-    // Docker returns `Transfer-Encoding: chunked`. Decode if present.
-    let chunked = header_str
-        .lines()
-        .any(|l| l.to_ascii_lowercase().starts_with("transfer-encoding:") && l.contains("chunked"));
-    let body: Vec<u8> = if chunked {
-        decode_chunked(body_bytes)?
-    } else {
-        body_bytes.to_vec()
-    };
 
     let inspect: DockerInspect =
         serde_json::from_slice(&body).map_err(|e| ContainerError::DockerMalformed {
@@ -352,5 +423,30 @@ mod tests {
         let body_bytes = b"5\r\nhell"; // missing rest
         let err = decode_chunked(body_bytes).unwrap_err();
         assert!(matches!(err, ContainerError::DockerMalformed { .. }));
+    }
+
+    #[test]
+    fn the_list_keeps_id_name_and_labels() {
+        let body = r#"[{"Id":"abc","Names":["/web"],"Labels":{"a":"1"}},{"Id":"def","Names":[],"Labels":null},{"Names":["/ghost"]}]"#;
+        let listed = parse_list_response(&build_response(200, body)).unwrap();
+        assert_eq!(
+            listed,
+            vec![
+                ListedContainer {
+                    id: "abc".to_string(),
+                    name: "web".to_string(),
+                    labels: vec![("a".to_string(), "1".to_string())],
+                },
+                ListedContainer {
+                    id: "def".to_string(),
+                    name: String::new(),
+                    labels: Vec::new(),
+                },
+            ]
+        );
+        assert!(matches!(
+            parse_list_response(&build_simple_response(500, "{}")),
+            Err(ContainerError::DockerApi { status: 500 })
+        ));
     }
 }

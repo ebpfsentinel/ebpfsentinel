@@ -688,6 +688,85 @@ pub async fn list_workload_rules(
     }))
 }
 
+/// A label of a container that could not be put in force.
+#[derive(Serialize, ToSchema)]
+pub struct ContainerLabelProblem {
+    /// The label key, or the label prefix when the problem is the
+    /// container as a whole.
+    pub label: String,
+    /// Why it was refused.
+    pub reason: String,
+}
+
+/// One container carrying policy labels, and what came of them.
+#[derive(Serialize, ToSchema)]
+pub struct ContainerLabelEntry {
+    /// Container id, in full.
+    pub container_id: String,
+    /// Container name, when the runtime gave one.
+    pub container_name: String,
+    /// `observe` or `enforce`, as the mode label says.
+    pub mode: String,
+    /// Identifiers of the workload rules its labels produced, in kernel
+    /// order. Empty whenever a problem is listed: a container is policed by
+    /// every one of its labels or by none.
+    pub rules: Vec<String>,
+    /// What kept its labels out of force.
+    pub problems: Vec<ContainerLabelProblem>,
+}
+
+/// Every container whose labels carry policy.
+#[derive(Serialize, ToSchema)]
+pub struct ContainerLabelsResponse {
+    pub containers: Vec<ContainerLabelEntry>,
+}
+
+/// `GET /api/v1/firewall/workload/labels` - the containers whose labels
+/// carry policy, the rules each produced and any label refused.
+#[utoipa::path(
+    get, path = "/api/v1/firewall/workload/labels",
+    tag = "Firewall",
+    responses(
+        (status = 200, description = "Containers carrying policy labels, by id", body = ContainerLabelsResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 503, description = "The workload firewall is not loaded", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn workload_labels(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ContainerLabelsResponse>, ApiError> {
+    let Some(service) = state.workload_policy_service.load_full() else {
+        return Err(ApiError::ServiceUnavailable {
+            message: "the workload firewall is not loaded, so no container label is in force"
+                .to_string(),
+        });
+    };
+    let containers = service
+        .label_policies()
+        .into_iter()
+        .map(|policy| ContainerLabelEntry {
+            container_id: policy.container_id,
+            container_name: policy.container_name,
+            mode: policy.mode.as_str().to_string(),
+            rules: policy.rules.into_iter().map(|rule| rule.id.0).collect(),
+            problems: policy
+                .problems
+                .into_iter()
+                .map(|problem| ContainerLabelProblem {
+                    label: problem.label,
+                    reason: problem.reason,
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(Json(ContainerLabelsResponse { containers }))
+}
+
 /// One name a pattern matched, and what it currently opens.
 #[derive(Serialize, ToSchema)]
 pub struct FqdnNameEntry {

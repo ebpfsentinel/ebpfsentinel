@@ -42,6 +42,11 @@ pub const WORKLOAD_DENIAL_READ_INTERVAL: Duration = Duration::from_secs(10);
 /// to absorb a burst of lookups.
 pub const WORKLOAD_DNS_CHANNEL_CAPACITY: usize = 4_096;
 
+/// Container label changes waiting to reach the workload policy. Each one
+/// costs at most one republish, and a snapshot on every reconnect replaces
+/// whatever a full queue held back.
+pub const CONTAINER_LABEL_CHANNEL_CAPACITY: usize = 256;
+
 /// How often the addresses learned from DNS answers are checked for expiry.
 ///
 /// The hook already refuses a lapsed address by the expiry it carries, so

@@ -91,6 +91,13 @@ pub struct DockerEnricherConfig {
 
     #[serde(default = "default_docker_timeout_ms")]
     pub timeout_ms: u64,
+
+    /// Reads each container's `io.ebpfsentinel.policy.*` labels and puts
+    /// what they say in force through the workload firewall, followed
+    /// through the event stream so a relabelled or recreated container is
+    /// policed without a reload.
+    #[serde(default)]
+    pub label_policy: bool,
 }
 
 impl Default for DockerEnricherConfig {
@@ -101,6 +108,7 @@ impl Default for DockerEnricherConfig {
             cache_size: default_docker_cache_size(),
             cache_ttl_seconds: default_docker_cache_ttl_seconds(),
             timeout_ms: default_docker_timeout_ms(),
+            label_policy: false,
         }
     }
 }
@@ -186,6 +194,14 @@ impl ContainerConfig {
                     message: "timeout_ms must be at least 1".to_string(),
                 });
             }
+        }
+        if self.docker.label_policy && !self.docker.enabled {
+            return Err(ConfigError::Validation {
+                field: "container.docker.label_policy".to_string(),
+                message: "labels are read from the Docker socket, so container.docker.enabled \
+                          must be true"
+                    .to_string(),
+            });
         }
         if self.kubernetes.enabled {
             // The entries are joined into the label selector the API server
@@ -391,5 +407,14 @@ docker:
         let yaml = "resolver: { enabled: true }";
         let cfg: ContainerConfig = serde_norway::from_str(yaml).unwrap();
         assert!(!cfg.docker.enabled);
+    }
+
+    #[test]
+    fn label_policy_needs_the_docker_socket() {
+        let mut cfg = ContainerConfig::default();
+        cfg.docker.label_policy = true;
+        assert!(cfg.validate().is_err());
+        cfg.docker.enabled = true;
+        assert!(cfg.validate().is_ok());
     }
 }

@@ -30,8 +30,10 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use domain::container::entity::DockerMetadata;
+use domain::firewall::container_labels::ListedContainer;
 
 use super::docker_cache::DockerCache;
+use super::docker_client::{DEFAULT_TIMEOUT_MS, DockerClient};
 
 /// Events we ask Docker for. Anything else is noise for a metadata cache.
 const WANTED_ACTIONS: [&str; 4] = ["create", "start", "die", "destroy"];
@@ -85,6 +87,52 @@ struct WireActor {
     attributes: BTreeMap<String, String>,
 }
 
+/// What a container's labels became, for a consumer that acts on them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LabelUpdate {
+    /// A container was created or started carrying these labels.
+    Seen {
+        id: String,
+        name: String,
+        labels: Vec<(String, String)>,
+    },
+    /// A container was removed.
+    Gone { id: String },
+    /// Every running container, listed each time the stream connects, so
+    /// whatever happened while it was down is replaced rather than guessed.
+    Snapshot(Vec<ListedContainer>),
+}
+
+/// The label update an event carries, if any. `die` is not one: a container
+/// that stopped keeps its labels and its policy until it is removed, so a
+/// restart does not come back unpoliced for a moment.
+#[must_use]
+pub fn label_update(event: &ContainerEvent) -> Option<LabelUpdate> {
+    match event.action.as_str() {
+        "destroy" => Some(LabelUpdate::Gone {
+            id: event.id.clone(),
+        }),
+        "create" | "start" => Some(LabelUpdate::Seen {
+            id: event.id.clone(),
+            name: event.attributes.get("name").cloned().unwrap_or_default(),
+            labels: event_labels(event),
+        }),
+        _ => None,
+    }
+}
+
+/// Docker carries the name and the image as attributes; every other
+/// attribute is a container label, which is what the inspect path reports as
+/// labels too.
+fn event_labels(event: &ContainerEvent) -> Vec<(String, String)> {
+    event
+        .attributes
+        .iter()
+        .filter(|(key, _)| key.as_str() != "name" && key.as_str() != "image")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
 /// Decode one event line. `None` for anything that is not a container event
 /// we asked for, which includes Docker's own keep-alive newlines.
 #[must_use]
@@ -126,9 +174,6 @@ pub fn apply_event(cache: &DockerCache, event: &ContainerEvent) {
         "die" => "exited",
         _ => "running",
     };
-    // Docker carries the name and the image as attributes; every other
-    // attribute is a container label, which is what the inspect path reports
-    // as labels too.
     let name = event
         .attributes
         .get("name")
@@ -141,12 +186,7 @@ pub fn apply_event(cache: &DockerCache, event: &ContainerEvent) {
         .cloned()
         .or_else(|| previous.as_ref().map(|md| md.image.clone()))
         .unwrap_or_default();
-    let labels: Vec<(String, String)> = event
-        .attributes
-        .iter()
-        .filter(|(key, _)| key.as_str() != "name" && key.as_str() != "image")
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
+    let labels = event_labels(event);
     cache.insert(
         event.id.clone(),
         DockerMetadata {
@@ -289,6 +329,7 @@ fn events_request() -> String {
 async fn stream_once(
     socket: &Path,
     tx: &mpsc::Sender<ContainerEvent>,
+    labels: Option<&mpsc::Sender<LabelUpdate>>,
     stats: &DockerEventStats,
 ) -> std::io::Result<()> {
     let mut stream = UnixStream::connect(socket).await?;
@@ -332,6 +373,11 @@ async fn stream_once(
             let rest = header.split_off(end + 4);
             header.clear();
             body_started = true;
+            // Listed once the stream is open, so nothing that happens after
+            // the list is missed: it is already queued on the socket.
+            if let Some(labels) = labels {
+                send_snapshot(socket, labels).await;
+            }
             let mut payload = Vec::new();
             let mut lines = Vec::new();
             decoder.push(&rest, &mut payload);
@@ -350,6 +396,27 @@ async fn stream_once(
         }
         splitter.push(&payload, &mut lines);
         dispatch(lines, tx, stats);
+    }
+}
+
+/// List every running container and hand the list to the label consumer.
+/// A list that fails leaves the previous state in place and is logged; the
+/// events that follow still apply.
+async fn send_snapshot(socket: &Path, labels: &mpsc::Sender<LabelUpdate>) {
+    match DockerClient::new(socket, DEFAULT_TIMEOUT_MS)
+        .list_containers()
+        .await
+    {
+        Ok(listed) => {
+            let snapshot = listed
+                .into_iter()
+                .map(|container| (container.id, container.name, container.labels))
+                .collect();
+            if labels.send(LabelUpdate::Snapshot(snapshot)).await.is_err() {
+                debug!("container label consumer gone");
+            }
+        }
+        Err(err) => warn!(error = %err, "listing containers for their labels failed"),
     }
 }
 
@@ -376,7 +443,19 @@ impl DockerEventWatcher {
     /// Start reading `socket`, writing every container event into `cache`.
     /// Reconnects for as long as the handle lives.
     pub fn spawn(socket: impl Into<PathBuf>, cache: Arc<DockerCache>) -> Self {
+        Self::spawn_with_labels(socket, cache, None)
+    }
+
+    /// As [`Self::spawn`], and also hand every change of a container's labels
+    /// to `labels`: a full list each time the stream connects, then one
+    /// update per event.
+    pub fn spawn_with_labels(
+        socket: impl Into<PathBuf>,
+        cache: Arc<DockerCache>,
+        labels: Option<mpsc::Sender<LabelUpdate>>,
+    ) -> Self {
         let socket = socket.into();
+        let applier_labels = labels.clone();
         let stats = Arc::new(DockerEventStats::default());
         let (tx, mut rx) = mpsc::channel::<ContainerEvent>(EVENT_BACKLOG);
 
@@ -385,6 +464,11 @@ impl DockerEventWatcher {
             while let Some(event) = rx.recv().await {
                 apply_event(&cache, &event);
                 applier_stats.applied.fetch_add(1, Ordering::Relaxed);
+                if let (Some(tx), Some(update)) = (&applier_labels, label_update(&event))
+                    && tx.send(update).await.is_err()
+                {
+                    debug!("container label consumer gone");
+                }
             }
         });
 
@@ -392,7 +476,7 @@ impl DockerEventWatcher {
         let reader = tokio::spawn(async move {
             let mut attempt = 0u32;
             loop {
-                match stream_once(&socket, &tx, &reader_stats).await {
+                match stream_once(&socket, &tx, labels.as_ref(), &reader_stats).await {
                     Ok(()) => {
                         debug!(socket = %socket.display(), "docker event stream closed, reconnecting");
                         attempt = 0;
@@ -608,6 +692,87 @@ mod tests {
         assert_eq!(cached.status, "exited");
         assert!(stats.connects.load(Ordering::Relaxed) >= 2);
         assert_eq!(stats.dropped.load(Ordering::Relaxed), 0);
+        watcher.abort();
+    }
+
+    #[test]
+    fn a_label_update_follows_create_start_and_destroy_but_not_die() {
+        let start = parse_event(event_line("start", "abc", "web", "nginx").as_bytes()).unwrap();
+        assert_eq!(
+            label_update(&start),
+            Some(LabelUpdate::Seen {
+                id: "abc".to_string(),
+                name: "web".to_string(),
+                labels: vec![("app".to_string(), "web".to_string())],
+            })
+        );
+        let die = parse_event(event_line("die", "abc", "web", "nginx").as_bytes()).unwrap();
+        assert_eq!(label_update(&die), None);
+        let destroy = parse_event(event_line("destroy", "abc", "web", "nginx").as_bytes()).unwrap();
+        assert_eq!(
+            label_update(&destroy),
+            Some(LabelUpdate::Gone {
+                id: "abc".to_string()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn the_watcher_lists_containers_once_the_stream_opens_then_follows_events() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("docker.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let (label_tx, mut label_rx) = mpsc::channel(16);
+
+        let cache = Arc::new(DockerCache::new(8, Duration::from_mins(5)));
+        let watcher =
+            DockerEventWatcher::spawn_with_labels(&socket, Arc::clone(&cache), Some(label_tx));
+
+        // The event stream opens first and stays open while the list is
+        // served on a second connection.
+        let (mut events, _) = listener.accept().await.expect("accept events");
+        let mut request = [0u8; 1024];
+        let _ = events.read(&mut request).await;
+        let line = format!("{}\n", event_line("start", "def", "db", "postgres"));
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{line}\r\n",
+            line.len()
+        );
+        events.write_all(response.as_bytes()).await.expect("write");
+
+        let (mut list, _) = listener.accept().await.expect("accept list");
+        let _ = list.read(&mut request).await;
+        assert!(String::from_utf8_lossy(&request).starts_with("GET /v1.43/containers/json "));
+        let body =
+            r#"[{"Id":"abc","Names":["/web"],"Labels":{"io.ebpfsentinel.policy.mode":"enforce"}}]"#;
+        let listed = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        list.write_all(listed.as_bytes()).await.expect("write list");
+        drop(list);
+
+        let first = tokio::time::timeout(Duration::from_secs(5), label_rx.recv())
+            .await
+            .expect("snapshot in time")
+            .expect("snapshot");
+        assert_eq!(
+            first,
+            LabelUpdate::Snapshot(vec![(
+                "abc".to_string(),
+                "web".to_string(),
+                vec![(
+                    "io.ebpfsentinel.policy.mode".to_string(),
+                    "enforce".to_string()
+                )],
+            )])
+        );
+        let second = tokio::time::timeout(Duration::from_secs(5), label_rx.recv())
+            .await
+            .expect("event in time")
+            .expect("event");
+        assert!(matches!(second, LabelUpdate::Seen { ref id, .. } if id == "def"));
+        drop(events);
         watcher.abort();
     }
 

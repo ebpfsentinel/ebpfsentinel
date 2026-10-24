@@ -205,6 +205,54 @@ pub async fn cmd_firewall_fqdn(client: &ApiClient, output: OutputFormat) -> Resu
     Ok(())
 }
 
+/// `firewall labels` - the containers whose labels carry policy.
+///
+/// A container whose labels were refused is printed with the reason, since
+/// none of its rules is in force and a silent omission would read as a
+/// container nobody labelled.
+pub async fn cmd_firewall_labels(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let listing = client.workload_labels().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&listing)?);
+        return Ok(());
+    }
+
+    if listing.containers.is_empty() {
+        println!("No container carries a policy label.");
+        return Ok(());
+    }
+
+    let mut table = Table::new(&[
+        ("CONTAINER", Align::Left),
+        ("NAME", Align::Left),
+        ("MODE", Align::Left),
+        ("RULES", Align::Right),
+        ("REFUSED", Align::Left),
+    ]);
+    for container in &listing.containers {
+        let refused = container
+            .problems
+            .iter()
+            .map(|problem| format!("{}: {}", problem.label, problem.reason))
+            .collect::<Vec<_>>()
+            .join("; ");
+        table.row(cells![
+            container.container_id.chars().take(12).collect::<String>(),
+            container.container_name,
+            container.mode,
+            container.rules.len(),
+            if refused.is_empty() {
+                "-".to_string()
+            } else {
+                refused
+            }
+        ]);
+    }
+    table.print();
+    Ok(())
+}
+
 /// `firewall reach` - what the workload rules let a workload reach.
 ///
 /// The first support question on a deny-by-default policy is why an

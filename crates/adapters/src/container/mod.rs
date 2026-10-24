@@ -24,7 +24,7 @@ pub use dlp_workload_scan::CgroupWorkloadScanner;
 pub use docker_cache::{DEFAULT_CAPACITY as DOCKER_CACHE_DEFAULT_CAPACITY, DockerCache};
 pub use docker_client::{DEFAULT_SOCKET as DOCKER_DEFAULT_SOCKET, DockerClient};
 pub use docker_enricher::DockerEnricher;
-pub use docker_events::{ContainerEvent, DockerEventStats, DockerEventWatcher};
+pub use docker_events::{ContainerEvent, DockerEventStats, DockerEventWatcher, LabelUpdate};
 #[cfg(feature = "kubernetes")]
 pub use k8s_enricher::{
     K8sEnricherMetrics, KubernetesEnricher, PodCache, PodInfo, is_running_in_kubernetes,

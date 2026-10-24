@@ -37,6 +37,7 @@ use domain::common::entity::RuleId;
 use domain::common::error::DomainError;
 use domain::container::engine::CgroupReader;
 use domain::container::entity::{ContainerInfo, ContainerMetadata};
+use domain::firewall::container_labels::{ContainerLabelPolicy, LABEL_PREFIX, ListedContainer};
 use domain::firewall::fqdn::{
     DnsCapture, FqdnGrantKey, FqdnLearner, FqdnLedger, FqdnPatternReport,
 };
@@ -45,6 +46,7 @@ use domain::firewall::workload::{
     cgroup_path_of, unit_of,
 };
 use domain::process::entity::ProcessEntry;
+use ebpf_common::workload_policy::WORKLOAD_POLICY_MAX_RULES;
 use ports::secondary::workload_policy_map_port::WorkloadPolicyMapPort;
 use tracing::{debug, info, warn};
 
@@ -178,9 +180,61 @@ struct FqdnState {
     ledger: FqdnLedger,
 }
 
+/// One container's labels, as last read, and whether there was room for
+/// them in the last composition.
+#[derive(Debug, Clone)]
+struct LabelledContainer {
+    policy: ContainerLabelPolicy,
+    crowded: bool,
+}
+
+/// The configured policy with every container's label rules after it.
+///
+/// Containers are added in id order, so which one is left out when the
+/// ceiling is reached does not depend on the order they started in.
+fn compose(
+    configured: &WorkloadPolicy,
+    labelled: &mut BTreeMap<String, LabelledContainer>,
+) -> Result<WorkloadPolicy, DomainError> {
+    let mut rules = configured.rules().to_vec();
+    for entry in labelled.values_mut() {
+        entry.crowded = false;
+        if !entry.policy.problems.is_empty() {
+            continue;
+        }
+        if rules.len() + entry.policy.rules.len() > WORKLOAD_POLICY_MAX_RULES {
+            entry.crowded = true;
+            warn!(
+                container = %entry.policy.container_id,
+                rules = entry.policy.rules.len(),
+                maximum = WORKLOAD_POLICY_MAX_RULES,
+                "no room for a container's label rules, none of them is in force"
+            );
+            continue;
+        }
+        rules.extend(entry.policy.rules.iter().cloned());
+    }
+    rules.sort_by(|a, b| {
+        a.priority
+            .cmp(&b.priority)
+            .then_with(|| a.id.0.cmp(&b.id.0))
+    });
+    WorkloadPolicy::new(rules)
+        .and_then(|policy| policy.with_dns(configured.dns().clone()))
+        .map_err(|e| DomainError::InvalidRule(e.to_string()))
+}
+
 /// Keeps the kernel's view of which workload is which.
 pub struct WorkloadPolicyService {
+    /// The policy in force: the configured rules and every container's
+    /// label rules, composed.
     policy: RwLock<WorkloadPolicy>,
+    /// The policy the configuration file carries, which a label never
+    /// edits and every composition starts from.
+    configured: RwLock<WorkloadPolicy>,
+    /// What each container's labels said, by container id. Only containers
+    /// that carry a label under the prefix are held.
+    labelled: Mutex<BTreeMap<String, LabelledContainer>>,
     maps: Option<Mutex<Box<dyn WorkloadPolicyMapPort>>>,
     /// The cgroup mask each cgroup was last written, by cgroup id.
     cgroup_masks: Mutex<HashMap<u64, u64>>,
@@ -206,7 +260,9 @@ impl WorkloadPolicyService {
             ledger: FqdnLedger::default(),
         };
         Self {
+            configured: RwLock::new(policy.clone()),
             policy: RwLock::new(policy),
+            labelled: Mutex::new(BTreeMap::new()),
             maps: None,
             cgroup_masks: Mutex::new(HashMap::new()),
             fqdn: Mutex::new(fqdn),
@@ -275,6 +331,38 @@ impl WorkloadPolicyService {
     ///
     /// Whatever the map port refuses.
     pub fn apply(&self, policy: WorkloadPolicy) -> Result<(), DomainError> {
+        *self
+            .configured
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = policy;
+        self.recompose()
+    }
+
+    /// Compose the configured policy with every container's label rules and
+    /// put the result in force.
+    ///
+    /// A container whose rules would carry the policy past the kernel's
+    /// ceiling is refused whole, in container id order, and the refusal is
+    /// reported against it: half a container's policy is a policy nobody
+    /// wrote.
+    fn recompose(&self) -> Result<(), DomainError> {
+        let configured = self
+            .configured
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let composed = {
+            let mut labelled = self
+                .labelled
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            compose(&configured, &mut labelled)?
+        };
+        self.publish(composed)
+    }
+
+    /// Write `policy` to the kernel and hold it as the policy in force.
+    fn publish(&self, policy: WorkloadPolicy) -> Result<(), DomainError> {
         let mut fqdn = self
             .fqdn
             .lock()
@@ -667,6 +755,142 @@ impl WorkloadPolicyService {
                         .map(|pattern| fqdn.ledger.report(slot, pattern, now_ns))
                         .collect(),
                 })
+            })
+            .collect()
+    }
+
+    /// Read what a container's labels say and put it in force.
+    ///
+    /// A container carrying no label under the prefix, and never seen with
+    /// one, costs nothing: the policy is republished only when a container's
+    /// own rules change, because a republish renumbers every bit and replays
+    /// the process table.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the map port refuses.
+    pub fn observe_container(
+        &self,
+        container_id: &str,
+        container_name: &str,
+        labels: &[(String, String)],
+    ) -> Result<(), DomainError> {
+        let policy = ContainerLabelPolicy::from_labels(container_id, container_name, labels);
+        {
+            let mut labelled = self
+                .labelled
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous = labelled.get(container_id);
+            if previous.is_none() && policy.is_empty() {
+                return Ok(());
+            }
+            if previous.is_some_and(|entry| entry.policy == policy) {
+                return Ok(());
+            }
+            for problem in &policy.problems {
+                warn!(
+                    container = container_id,
+                    name = container_name,
+                    label = %problem.label,
+                    reason = %problem.reason,
+                    "a container's policy labels cannot be read, none of its label rules is in force"
+                );
+            }
+            if policy.is_empty() {
+                labelled.remove(container_id);
+            } else {
+                labelled.insert(
+                    container_id.to_string(),
+                    LabelledContainer {
+                        policy,
+                        crowded: false,
+                    },
+                );
+            }
+        }
+        self.recompose()
+    }
+
+    /// Drop a container that is gone, and its label rules with it.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the map port refuses.
+    pub fn forget_container(&self, container_id: &str) -> Result<(), DomainError> {
+        let removed = self
+            .labelled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(container_id)
+            .is_some();
+        if removed { self.recompose() } else { Ok(()) }
+    }
+
+    /// Replace every container's labels with `containers`, the whole list
+    /// the runtime holds.
+    ///
+    /// This is what a reconnection to the runtime calls, because an event
+    /// missed while the stream was down is a container whose labels nobody
+    /// read, or one gone whose rules are still in force.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the map port refuses.
+    pub fn reconcile_containers(&self, containers: &[ListedContainer]) -> Result<(), DomainError> {
+        let next: BTreeMap<String, LabelledContainer> = containers
+            .iter()
+            .map(|(id, name, labels)| ContainerLabelPolicy::from_labels(id, name, labels))
+            .filter(|policy| !policy.is_empty())
+            .map(|policy| {
+                (
+                    policy.container_id.clone(),
+                    LabelledContainer {
+                        policy,
+                        crowded: false,
+                    },
+                )
+            })
+            .collect();
+        {
+            let mut labelled = self
+                .labelled
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let same = labelled.len() == next.len()
+                && labelled
+                    .iter()
+                    .zip(next.iter())
+                    .all(|((a, x), (b, y))| a == b && x.policy == y.policy);
+            if same {
+                return Ok(());
+            }
+            *labelled = next;
+        }
+        self.recompose()
+    }
+
+    /// What every labelled container's labels say, in container id order,
+    /// with a container left out for want of room reported as refused.
+    #[must_use]
+    pub fn label_policies(&self) -> Vec<ContainerLabelPolicy> {
+        self.labelled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .map(|entry| {
+                let mut policy = entry.policy.clone();
+                if entry.crowded {
+                    policy.refuse(
+                        LABEL_PREFIX,
+                        format!(
+                            "the node already holds as many workload rules as the kernel \
+                             walks ({WORKLOAD_POLICY_MAX_RULES}), so none of this container's \
+                             label rules is in force"
+                        ),
+                    );
+                }
+                policy
             })
             .collect()
     }
@@ -1394,5 +1618,142 @@ mod tests {
         let lapsed = service.fqdn_state(41 * 1_000_000_000);
         assert_eq!(lapsed[0].patterns[0].names[0].addresses, 0);
         assert_eq!(lapsed[0].patterns[0].names[0].expires_ns, None);
+    }
+
+    const LABELLED: &str = "4f1c2a9b8e7d6c5b4a3928170615f4e3d2c1b0a99887766554433221100ffeed";
+
+    fn policy_labels(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_labelled_container_adds_its_rules_after_the_configured_ones() {
+        let maps = SharedMaps::default();
+        let service = service(vec![unit_rule("cfg", "nginx.service")], maps.clone());
+        service
+            .observe_container(
+                LABELLED,
+                "web",
+                &policy_labels(&[
+                    ("io.ebpfsentinel.policy.egress.allow", "tcp/443"),
+                    ("io.ebpfsentinel.policy.egress.default", "deny"),
+                ]),
+            )
+            .unwrap();
+        let ids: Vec<String> = service
+            .policy()
+            .rules()
+            .iter()
+            .map(|r| r.id.0.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "cfg",
+                "label-4f1c2a9b8e7d-allow-0",
+                "label-4f1c2a9b8e7d-default-0"
+            ]
+        );
+        assert_eq!(maps.0.lock().unwrap().published, 1);
+
+        // A reload of the file keeps the label rules.
+        service
+            .apply(WorkloadPolicy::new(vec![exe_rule("cfg2", "/usr/bin/curl")]).unwrap())
+            .unwrap();
+        assert_eq!(service.policy().rules().len(), 3);
+        assert_eq!(service.policy().rules()[0].id.0, "cfg2");
+
+        service.forget_container(LABELLED).unwrap();
+        assert_eq!(service.policy().rules().len(), 1);
+        assert!(service.label_policies().is_empty());
+    }
+
+    #[test]
+    fn an_unlabelled_or_unchanged_container_does_not_republish() {
+        let maps = SharedMaps::default();
+        let service = service(Vec::new(), maps.clone());
+        service
+            .observe_container(LABELLED, "web", &policy_labels(&[("owner", "team")]))
+            .unwrap();
+        assert_eq!(maps.0.lock().unwrap().published, 0);
+        let labels = policy_labels(&[("io.ebpfsentinel.policy.egress.deny", "tcp/25")]);
+        service.observe_container(LABELLED, "web", &labels).unwrap();
+        service.observe_container(LABELLED, "web", &labels).unwrap();
+        assert_eq!(maps.0.lock().unwrap().published, 1);
+        service.forget_container("not-labelled").unwrap();
+        assert_eq!(maps.0.lock().unwrap().published, 1);
+    }
+
+    #[test]
+    fn unreadable_labels_are_reported_and_put_nothing_in_force() {
+        let service = service(Vec::new(), SharedMaps::default());
+        service
+            .observe_container(
+                LABELLED,
+                "web",
+                &policy_labels(&[("io.ebpfsentinel.policy.mode", "block")]),
+            )
+            .unwrap();
+        assert!(service.policy().is_empty());
+        let report = service.label_policies();
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].container_name, "web");
+        assert_eq!(report[0].problems[0].label, "io.ebpfsentinel.policy.mode");
+    }
+
+    #[test]
+    fn a_container_past_the_ceiling_is_refused_whole() {
+        let configured: Vec<WorkloadRule> = (0..60)
+            .map(|i| unit_rule(&format!("cfg-{i}"), "nginx.service"))
+            .collect();
+        let service = service(configured, SharedMaps::default());
+        let list = (1..=5)
+            .map(|port| format!("tcp/{port}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        service
+            .observe_container(
+                LABELLED,
+                "web",
+                &policy_labels(&[("io.ebpfsentinel.policy.egress.allow", &list)]),
+            )
+            .unwrap();
+        assert_eq!(service.policy().rules().len(), 60);
+        let report = service.label_policies();
+        assert!(report[0].rules.is_empty());
+        assert!(
+            report[0].problems[0]
+                .reason
+                .contains("as many workload rules")
+        );
+    }
+
+    #[test]
+    fn a_reconciliation_replaces_what_the_events_left() {
+        let maps = SharedMaps::default();
+        let service = service(Vec::new(), maps.clone());
+        service
+            .observe_container(
+                LABELLED,
+                "old",
+                &policy_labels(&[("io.ebpfsentinel.policy.egress.deny", "tcp/25")]),
+            )
+            .unwrap();
+        let other = "aaaaaaaaaaaabbbbbbbbbbbbccccccccccccddddddddddddeeeeeeeeeeeeffff".to_string();
+        let containers = vec![(
+            other.clone(),
+            "new".to_string(),
+            policy_labels(&[("io.ebpfsentinel.policy.egress.deny", "udp/53")]),
+        )];
+        service.reconcile_containers(&containers).unwrap();
+        let report = service.label_policies();
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].container_id, other);
+        let published = maps.0.lock().unwrap().published;
+        service.reconcile_containers(&containers).unwrap();
+        assert_eq!(maps.0.lock().unwrap().published, published);
     }
 }

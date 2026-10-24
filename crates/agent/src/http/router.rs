@@ -83,7 +83,8 @@ use super::dns_handler::{
 use super::domain_handler::{add_to_blocklist, list_domain_reputations, remove_from_blocklist};
 use super::fingerprint_handler::{fingerprint_summary, ja4s_summary};
 use super::firewall_handler::{
-    create_rule, delete_rule, list_rules, list_workload_rules, workload_fqdn, workload_reach,
+    create_rule, delete_rule, list_rules, list_workload_rules, workload_fqdn, workload_labels,
+    workload_reach,
 };
 use super::flow_handler::flow_export_status;
 use super::geoip_handler::{geoip_lookup, geoip_status};
@@ -263,6 +264,7 @@ pub fn build_router(
             .route("/api/v1/firewall/workload/reach", get(workload_reach))
             .route("/api/v1/firewall/workload/rules", get(list_workload_rules))
             .route("/api/v1/firewall/workload/fqdn", get(workload_fqdn))
+            .route("/api/v1/firewall/workload/labels", get(workload_labels))
             .route("/api/v1/learning/sessions", get(list_learning))
             .route("/api/v1/learning/sessions/{id}", get(get_learning))
             .route(

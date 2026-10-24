@@ -36,6 +36,7 @@ container:
     cache_size: 1024
     cache_ttl_seconds: 300
     timeout_ms: 2000
+    label_policy: false        # true = each container's io.ebpfsentinel.policy.* labels become workload rules
 
   # Kubernetes pod metadata enrichment (requires in-cluster SA).
   kubernetes:

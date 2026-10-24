@@ -213,6 +213,27 @@ pub struct WorkloadRulesResponse {
     pub rules: Vec<WorkloadReachEntry>,
 }
 
+/// The containers whose labels carry policy.
+#[derive(Deserialize, Serialize)]
+pub struct ContainerLabelsResponse {
+    pub containers: Vec<ContainerLabelEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ContainerLabelEntry {
+    pub container_id: String,
+    pub container_name: String,
+    pub mode: String,
+    pub rules: Vec<String>,
+    pub problems: Vec<ContainerLabelProblem>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ContainerLabelProblem {
+    pub label: String,
+    pub reason: String,
+}
+
 /// What the rules naming destinations by name have resolved.
 #[derive(Deserialize, Serialize)]
 pub struct WorkloadFqdnResponse {
@@ -1907,6 +1928,16 @@ impl ApiClient {
     pub async fn workload_fqdn(&self) -> anyhow::Result<WorkloadFqdnResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/firewall/workload/fqdn")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    /// The containers whose labels carry policy, and what came of them.
+    pub async fn workload_labels(&self) -> anyhow::Result<ContainerLabelsResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/firewall/workload/labels")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

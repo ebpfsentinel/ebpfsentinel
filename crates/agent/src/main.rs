@@ -175,6 +175,7 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
                 FirewallCommand::Delete { id } => commands::cmd_firewall_delete(&client, &id).await,
                 FirewallCommand::Workload => commands::cmd_firewall_workload(&client, output).await,
                 FirewallCommand::Fqdn => commands::cmd_firewall_fqdn(&client, output).await,
+                FirewallCommand::Labels => commands::cmd_firewall_labels(&client, output).await,
                 FirewallCommand::Reach {
                     pid,
                     exe,
