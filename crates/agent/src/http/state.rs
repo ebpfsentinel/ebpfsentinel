@@ -159,6 +159,10 @@ pub struct AppState {
     /// agent was built without Kubernetes support, in which case the route
     /// says so rather than answering that nothing would be refused.
     pub netpol_replay: ArcSwapOption<application::netpol_replay_service::NetpolReplayService>,
+    /// What the agent sees of each pod on this node. Always present: the
+    /// link watcher reports into it from startup, and it answers only once a
+    /// pod inventory is installed, which needs Kubernetes.
+    pub pod_coverage: Arc<application::pod_coverage_service::PodCoverageService>,
     /// Learning mode. Empty when the configuration turns it off, in which
     /// case the routes say the node does not learn rather than answering
     /// that it learnt nothing.
@@ -199,6 +203,7 @@ impl AppState {
             dlp_scope_service: ArcSwapOption::empty(),
             workload_policy_service: ArcSwapOption::empty(),
             netpol_replay: ArcSwapOption::empty(),
+            pod_coverage: Arc::new(application::pod_coverage_service::PodCoverageService::new()),
             learning_service: ArcSwapOption::empty(),
             nat_service: None,
             alias_service: None,

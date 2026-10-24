@@ -1021,6 +1021,8 @@ pub enum EbpfCommand {
     Uprobes,
     /// Show the kernel feature probe: load mode, program types, helpers
     KernelFeatures,
+    /// Show what the agent sees of each pod on this node, uncovered first
+    Coverage,
 }
 
 // ── Config ──────────────────────────────────────────────────────────────
@@ -2554,6 +2556,18 @@ mod tests {
             cli.command,
             Some(Command::Ebpf(DomainArgs {
                 command: EbpfCommand::Uprobes,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_ebpf_coverage() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "ebpf", "coverage"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ebpf(DomainArgs {
+                command: EbpfCommand::Coverage,
                 ..
             }))
         ));

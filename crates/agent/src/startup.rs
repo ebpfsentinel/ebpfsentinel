@@ -3508,6 +3508,11 @@ pub async fn run(
                 owners = owners.with_processes(process_tx.clone());
             }
             registry.report_owners(owners);
+            registry.report_coverage(Arc::clone(&app_state.pod_coverage)
+                as Arc<dyn ports::secondary::pod_coverage_port::LinkCoverageSink>);
+            app_state
+                .pod_coverage
+                .set_uplinks_attached(!config.agent.interfaces.is_empty());
             // Workload namespaces are found through the host procfs, which is
             // a mount rather than a shared pid namespace in a pod that runs
             // without hostPID.
@@ -3748,6 +3753,8 @@ pub async fn run(
         } else if let Some(client) = adapters::container::try_build_client().await {
             let cache = Arc::new(adapters::container::PodCache::new());
             kubernetes_changes = Some(cache.changes());
+            app_state.pod_coverage.install_inventory(Arc::clone(&cache)
+                as Arc<dyn ports::secondary::pod_coverage_port::PodInventoryPort>);
             let enricher = adapters::container::KubernetesEnricher::with_cache(Arc::clone(&cache));
             let metrics_handle = enricher.metrics();
             let node_name = if config.container.kubernetes.node_name.is_empty() {

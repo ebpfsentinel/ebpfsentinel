@@ -4194,6 +4194,64 @@ fn print_quarantine(report: &crate::api_client::QuarantineReport) {
     }
 }
 
+pub async fn cmd_ebpf_coverage(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.ebpf_coverage().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!("Pod coverage on this node");
+    println!("  Uplinks attached:  {}", yes_no(resp.uplinks_attached));
+    println!("  Encapsulated:      {}", yes_no(resp.encapsulated));
+    println!(
+        "  Pods:              {} uncovered, {} partial, {} full",
+        resp.uncovered, resp.partial, resp.full
+    );
+    if resp.links_without_pod > 0 {
+        println!("  Links naming no pod: {}", resp.links_without_pod);
+    }
+    if resp.pods.is_empty() {
+        println!("\nNo pod is scheduled on this node.");
+        return Ok(());
+    }
+
+    println!();
+    let mut table = Table::new(&[
+        ("NAMESPACE", Align::Left),
+        ("POD", Align::Left),
+        ("COVERAGE", Align::Left),
+        ("INTERFACES", Align::Left),
+        ("NOT OBSERVED", Align::Left),
+    ]);
+    for pod in &resp.pods {
+        let interfaces = if pod.host_network {
+            "host network".to_string()
+        } else if pod.interfaces.is_empty() {
+            "-".to_string()
+        } else {
+            pod.interfaces
+                .iter()
+                .map(|i| {
+                    let state = if i.attached { "attached" } else { "left" };
+                    format!("{} ({}, {state})", i.name, i.kind)
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let gaps = pod
+            .classes
+            .iter()
+            .filter_map(|c| c.gap.as_ref().map(|gap| format!("{}: {gap}", c.class)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        table.row(cells![pod.namespace, pod.name, pod.level, interfaces, gaps]);
+    }
+    table.print();
+    Ok(())
+}
+
 pub async fn cmd_ebpf_kernel_features(client: &ApiClient, output: OutputFormat) -> Result<()> {
     let resp = client.kernel_features().await?;
 

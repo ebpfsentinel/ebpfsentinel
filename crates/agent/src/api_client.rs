@@ -1555,6 +1555,53 @@ pub struct MissingHelperEntry {
     pub detail: String,
 }
 
+/// One link leading into a pod, as the coverage verdict reports it.
+#[derive(Deserialize, Serialize)]
+pub struct CoverageInterface {
+    pub name: String,
+    pub kind: String,
+    pub attached: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Whether one class of a pod's traffic is observed, and why not.
+#[derive(Deserialize, Serialize)]
+pub struct CoverageClass {
+    pub class: String,
+    pub observed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gap: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The verdict for one pod.
+#[derive(Deserialize, Serialize)]
+pub struct PodCoverageEntry {
+    pub uid: String,
+    pub name: String,
+    pub namespace: String,
+    pub host_network: bool,
+    pub level: String,
+    pub interfaces: Vec<CoverageInterface>,
+    pub classes: Vec<CoverageClass>,
+}
+
+/// What the agent sees of each pod on its node.
+#[derive(Deserialize, Serialize)]
+pub struct EbpfCoverageResponse {
+    pub uplinks_attached: bool,
+    pub encapsulated: bool,
+    pub links_without_pod: usize,
+    pub uncovered: usize,
+    pub partial: usize,
+    pub full: usize,
+    pub pods: Vec<PodCoverageEntry>,
+}
+
 /// What the kernel answered when the agent probed it at startup.
 ///
 /// `probed = false` means the probe could not run, not that the kernel lacks
@@ -3174,6 +3221,15 @@ impl ApiClient {
     pub async fn kernel_features(&self) -> anyhow::Result<KernelFeaturesResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/ebpf/kernel-features")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn ebpf_coverage(&self) -> anyhow::Result<EbpfCoverageResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ebpf/coverage")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

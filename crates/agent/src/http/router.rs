@@ -72,6 +72,7 @@ use super::config_handler::put_config_section;
 use super::conntrack_handler::{
     conntrack_events, conntrack_status, flush_connections, list_connections,
 };
+use super::coverage_handler::get_ebpf_coverage;
 use super::ddos_handler::{
     create_ddos_policy, ddos_attacks, ddos_history, ddos_status, delete_ddos_policy,
     list_ddos_policies,
@@ -295,6 +296,7 @@ pub fn build_router(
             .route("/api/v1/config", get(get_config))
             .route("/api/v1/ebpf/status", get(get_ebpf_status))
             .route("/api/v1/ebpf/kernel-features", get(get_kernel_features))
+            .route("/api/v1/ebpf/coverage", get(get_ebpf_coverage))
             .route("/api/v1/ebpf/uprobes", get(get_uprobes))
             .route("/api/v1/dns/status", get(dns_status))
             .route("/api/v1/dns/cache", get(list_dns_cache))

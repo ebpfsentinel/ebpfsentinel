@@ -2799,6 +2799,66 @@
         ]
       }
     },
+    "/api/v1/ebpf/coverage": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "`GET /api/v1/ebpf/coverage` - what the agent sees of each pod on this node.",
+        "description": "Computed from the links the chain is actually on, so a pod whose link was\nrefused is reported with the reason rather than counted as watched.",
+        "operationId": "get_ebpf_coverage",
+        "responses": {
+          "200": {
+            "description": "One verdict per pod on this node, uncovered first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EbpfCoverageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No pod inventory on this node: Kubernetes enrichment is off or the agent was built without it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/ebpf/kernel-features": {
       "get": {
         "tags": [
@@ -9345,6 +9405,73 @@
           }
         }
       },
+      "CoverageClass": {
+        "type": "object",
+        "required": [
+          "class",
+          "observed"
+        ],
+        "properties": {
+          "class": {
+            "type": "string",
+            "description": "`north_south`, `east_west_across_nodes`, `east_west_on_node` or\n`loopback`."
+          },
+          "gap": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it does not, as a stable code. Absent when observed."
+          },
+          "observed": {
+            "type": "boolean",
+            "description": "The agent's chain sees this traffic."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The same reason in a sentence. Absent when observed."
+          }
+        }
+      },
+      "CoverageInterface": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind",
+          "attached"
+        ],
+        "properties": {
+          "attached": {
+            "type": "boolean",
+            "description": "Every program of the chain is on the link."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`veth`, `netkit`, `macvlan`, `ipvlan`, `bridge-member`, or the\nkernel's own word for a kind the agent does not attach to."
+          },
+          "name": {
+            "type": "string",
+            "description": "Interface name in the host namespace."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The same reason in a sentence. Absent when attached."
+          },
+          "refusal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it is not, as a stable code. Absent when attached."
+          }
+        }
+      },
       "CreateDdosPolicyRequest": {
         "type": "object",
         "required": [
@@ -10596,6 +10723,55 @@
           "score": {
             "type": "number",
             "format": "double"
+          }
+        }
+      },
+      "EbpfCoverageResponse": {
+        "type": "object",
+        "required": [
+          "uplinks_attached",
+          "encapsulated",
+          "links_without_pod",
+          "uncovered",
+          "partial",
+          "full",
+          "pods"
+        ],
+        "properties": {
+          "encapsulated": {
+            "type": "boolean",
+            "description": "The node carries an encapsulating device, so traffic between nodes\ncrosses the uplink inside an outer header."
+          },
+          "full": {
+            "type": "integer",
+            "description": "Pods with every class but loopback observed.",
+            "minimum": 0
+          },
+          "links_without_pod": {
+            "type": "integer",
+            "description": "Workload links whose owner names no pod the inventory holds.",
+            "minimum": 0
+          },
+          "partial": {
+            "type": "integer",
+            "description": "Pods with some classes observed.",
+            "minimum": 0
+          },
+          "pods": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PodCoverageEntry"
+            },
+            "description": "One verdict per pod, uncovered first."
+          },
+          "uncovered": {
+            "type": "integer",
+            "description": "Pods with no class observed.",
+            "minimum": 0
+          },
+          "uplinks_attached": {
+            "type": "boolean",
+            "description": "The chain is on the node's configured interfaces."
           }
         }
       },
@@ -12658,6 +12834,51 @@
           "mode": {
             "type": "string",
             "description": "`alert` or `block`."
+          }
+        }
+      },
+      "PodCoverageEntry": {
+        "type": "object",
+        "required": [
+          "uid",
+          "name",
+          "namespace",
+          "host_network",
+          "level",
+          "interfaces",
+          "classes"
+        ],
+        "properties": {
+          "classes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoverageClass"
+            },
+            "description": "One entry per traffic class, in a fixed order."
+          },
+          "host_network": {
+            "type": "boolean",
+            "description": "The pod shares the node's network namespace."
+          },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CoverageInterface"
+            },
+            "description": "The links found leading into the pod; empty for a host-network pod,\nor when none was found."
+          },
+          "level": {
+            "type": "string",
+            "description": "`none`, `partial` or `full`, loopback aside: no node agent sees a\npod's loopback."
+          },
+          "name": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "uid": {
+            "type": "string"
           }
         }
       },

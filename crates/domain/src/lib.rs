@@ -8,6 +8,7 @@ pub mod capture;
 pub mod common;
 pub mod conntrack;
 pub mod container;
+pub mod coverage;
 pub mod ddos;
 pub mod dlp;
 pub mod dns;

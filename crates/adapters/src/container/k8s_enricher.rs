@@ -32,7 +32,9 @@ use domain::container::entity::{
     ContainerInfo, ContainerMetadata, ContainerRuntime, KubernetesMetadata,
 };
 use domain::container::error::ContainerError;
+use domain::coverage::PodSubject;
 use ports::secondary::metadata_enricher_port::{MetadataEnricher, NamespaceHook};
+use ports::secondary::pod_coverage_port::PodInventoryPort;
 
 /// Prefixes used by the CRI in `containerID` strings.
 const CRI_PREFIXES: &[&str] = &["containerd://", "cri-o://", "docker://", "crio://"];
@@ -53,6 +55,8 @@ pub struct PodInfo {
     pub container_ids: Vec<String>,
     /// Map of container id → container name (within this pod).
     pub container_names: BTreeMap<String, String>,
+    /// The pod shares the node's network namespace.
+    pub host_network: bool,
 }
 
 impl PodInfo {
@@ -208,6 +212,25 @@ impl PodCache {
     }
 }
 
+/// The watcher is fenced to this node, so every pod the cache holds is one
+/// scheduled here.
+#[async_trait]
+impl PodInventoryPort for PodCache {
+    async fn pods(&self) -> Vec<PodSubject> {
+        self.pods
+            .read()
+            .await
+            .values()
+            .map(|p| PodSubject {
+                uid: p.uid.clone(),
+                name: p.name.clone(),
+                namespace: p.namespace.clone(),
+                host_network: p.host_network,
+            })
+            .collect()
+    }
+}
+
 /// Convert a raw `Pod` into a [`PodInfo`], extracting container IDs.
 pub fn pod_info_from(pod: &Pod) -> Option<PodInfo> {
     let metadata = &pod.metadata;
@@ -233,6 +256,7 @@ pub fn pod_info_from(pod: &Pod) -> Option<PodInfo> {
         .and_then(|s| s.service_account_name.clone())
         .unwrap_or_default();
     let node_name = spec.and_then(|s| s.node_name.clone()).unwrap_or_default();
+    let host_network = spec.and_then(|s| s.host_network).unwrap_or(false);
 
     let owner = metadata
         .owner_references
@@ -273,6 +297,7 @@ pub fn pod_info_from(pod: &Pod) -> Option<PodInfo> {
         node_name,
         container_ids,
         container_names,
+        host_network,
     })
 }
 
@@ -593,6 +618,27 @@ mod tests {
         assert_eq!(got.node_name, "node-a");
         assert_eq!(got.owner_kind.as_deref(), Some("ReplicaSet"));
         assert_eq!(got.service_account, "sa");
+    }
+
+    #[tokio::test]
+    async fn the_cache_lists_its_pods_with_their_network_mode() {
+        let cache = PodCache::new();
+        let mut host = pod("u-host", "node-exporter", "mon", "n1", &[]);
+        if let Some(spec) = host.spec.as_mut() {
+            spec.host_network = Some(true);
+        }
+        cache.upsert(pod_info_from(&host).unwrap()).await;
+        cache
+            .upsert(pod_info_from(&pod("u-web", "web", "shop", "n1", &[])).unwrap())
+            .await;
+        let mut pods = PodInventoryPort::pods(&cache).await;
+        pods.sort_by(|a, b| a.uid.cmp(&b.uid));
+        assert_eq!(
+            pods.iter()
+                .map(|p| (p.uid.as_str(), p.host_network))
+                .collect::<Vec<_>>(),
+            vec![("u-host", true), ("u-web", false)]
+        );
     }
 
     #[tokio::test]

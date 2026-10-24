@@ -52,9 +52,11 @@ use std::time::{Duration, Instant};
 
 use domain::container::engine::parse_cgroup_payload;
 use domain::container::entity::ContainerInfo;
+use domain::coverage::{LinkAttachment, LinkRefusal, WorkloadLink};
 use domain::process::entity::{ProcessEventKind, ProcessLifecycleEvent};
 use ports::secondary::ids_workload_scope_port::WorkloadLinkSink;
 use ports::secondary::metrics_port::ContainerMetrics;
+use ports::secondary::pod_coverage_port::LinkCoverageSink;
 use tokio::io::unix::AsyncFd;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -64,6 +66,7 @@ use super::ids_workload_scope::cgroup_id_of;
 use super::netkit::{BPF_NETKIT_PEER, BPF_NETKIT_PRIMARY, netkit_attach};
 use super::ringbuf_observer::boottime_now_ns;
 use super::{kfunc_attach, tcx_order};
+use crate::container::pod_cgroups::pod_uid;
 
 /// How long messages are gathered after the first one before the batch is
 /// applied. Long enough to fold a container's create, rename, move and up
@@ -137,6 +140,31 @@ const INFRASTRUCTURE_KINDS: &[&str] = &[
     "wireguard",
     "xfrm",
 ];
+
+/// Infrastructure kinds that wrap traffic between nodes in an outer header,
+/// so the chain on the uplink reads that header rather than the pod's.
+const ENCAPSULATING_KINDS: &[&str] = &[
+    "geneve",
+    "gre",
+    "gretap",
+    "ip6gre",
+    "ip6gretap",
+    "ip6tnl",
+    "ipip",
+    "sit",
+    "vxlan",
+    "wireguard",
+];
+
+/// Whether any link in `links` encapsulates traffic between nodes.
+#[must_use]
+pub fn encapsulates(links: &[LinkInfo]) -> bool {
+    links.iter().any(|l| {
+        l.kind
+            .as_deref()
+            .is_some_and(|k| ENCAPSULATING_KINDS.contains(&k))
+    })
+}
 
 /// What one link message says about one interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,6 +295,16 @@ impl HookPolicy {
             (Self::Netkit, false) => None,
         }
     }
+
+    /// The attach mode as the configuration spells it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Tcx => "tc",
+            Self::Netkit => "netkit",
+        }
+    }
 }
 
 /// A link the plan attaches to.
@@ -304,13 +342,22 @@ pub struct Plan {
     /// Kinds seen for the first time and not understood, with the link that
     /// carried each.
     pub unknown: Vec<(String, String)>,
+    /// Links leading into a workload that the chain does not go on, newly
+    /// or for a new reason.
+    pub left: Vec<(LinkInfo, LinkRefusal)>,
+    /// Links that were left alone and are gone or no longer a workload's.
+    pub forget: Vec<u32>,
 }
 
 impl Plan {
     /// Whether the plan changes nothing and reports nothing.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.detach.is_empty() && self.attach.is_empty() && self.unknown.is_empty()
+        self.detach.is_empty()
+            && self.attach.is_empty()
+            && self.unknown.is_empty()
+            && self.left.is_empty()
+            && self.forget.is_empty()
     }
 }
 
@@ -325,6 +372,9 @@ pub struct LinkTable {
     /// would run the chain twice on every packet.
     configured: HashSet<String>,
     attached: HashMap<u32, (String, WorkloadKind)>,
+    /// Workload links the chain does not go on, with the reason last
+    /// reported for each.
+    left: HashMap<u32, LinkRefusal>,
     reported_kinds: HashSet<String>,
     /// First message received for each interface in the batch being folded.
     heard: HashMap<u32, Instant>,
@@ -338,6 +388,7 @@ impl LinkTable {
             policy,
             configured: configured.into_iter().collect(),
             attached: HashMap::new(),
+            left: HashMap::new(),
             reported_kinds: HashSet::new(),
             heard: HashMap::new(),
         }
@@ -365,6 +416,9 @@ impl LinkTable {
                 LinkEvent::Removed { .. } => {
                     if let Some((name, _)) = self.attached.remove(&ifindex) {
                         plan.detach.push(Detach { ifindex, name });
+                    }
+                    if self.left.remove(&ifindex).is_some() {
+                        plan.forget.push(ifindex);
                     }
                 }
                 LinkEvent::New(link) => self.observe_link(link, &mut plan),
@@ -394,8 +448,11 @@ impl LinkTable {
         let gone: Vec<u32> = self
             .attached
             .keys()
+            .chain(self.left.keys())
             .copied()
             .filter(|idx| !present.contains(idx))
+            .collect::<HashSet<u32>>()
+            .into_iter()
             .collect();
         let mut events: Vec<LinkEvent> = gone
             .into_iter()
@@ -409,12 +466,21 @@ impl LinkTable {
     }
 
     fn observe_link(&mut self, link: LinkInfo, plan: &mut Plan) {
+        let mut refusal = None;
         let wanted = match classify(&link) {
-            LinkClass::Workload(kind) if !self.configured.contains(&link.name) => self
-                .policy
-                .hooks_for(kind)
-                .map(|via_netkit| (kind, via_netkit)),
+            LinkClass::Workload(kind) if !self.configured.contains(&link.name) => {
+                let hooks = self.policy.hooks_for(kind);
+                if hooks.is_none() {
+                    refusal = Some(LinkRefusal::AttachMode(self.policy.as_str().to_owned()));
+                }
+                hooks.map(|via_netkit| (kind, via_netkit))
+            }
             LinkClass::Unknown(kind) => {
+                // Only a link whose peer sits in another namespace leads into
+                // a workload; an unknown device of the host's own is not one.
+                if link.link_netnsid.is_some() {
+                    refusal = Some(LinkRefusal::UnknownKind(kind.clone()));
+                }
                 if self.reported_kinds.insert(kind.clone()) {
                     plan.unknown.push((kind, link.name.clone()));
                 }
@@ -422,6 +488,19 @@ impl LinkTable {
             }
             _ => None,
         };
+        match refusal {
+            Some(refusal) => {
+                if self.left.get(&link.ifindex) != Some(&refusal) {
+                    self.left.insert(link.ifindex, refusal.clone());
+                    plan.left.push((link.clone(), refusal));
+                }
+            }
+            None => {
+                if self.left.remove(&link.ifindex).is_some() {
+                    plan.forget.push(link.ifindex);
+                }
+            }
+        }
         let held = self.attached.get(&link.ifindex).cloned();
         let heard_at = match held {
             None => self.heard.get(&link.ifindex).copied(),
@@ -487,6 +566,7 @@ pub struct LinkHotPlugRegistry {
     programs: Vec<(String, RawFd, HookSide)>,
     links: Mutex<HashMap<u32, Vec<OwnedFd>>>,
     owners: Option<OwnerReporting>,
+    coverage: Option<Arc<dyn LinkCoverageSink>>,
 }
 
 /// Where the owner of a container link is reported, and how its cgroup is
@@ -588,6 +668,7 @@ impl LinkHotPlugRegistry {
             programs: Vec::new(),
             links: Mutex::new(HashMap::new()),
             owners: None,
+            coverage: None,
         }
     }
 
@@ -595,6 +676,32 @@ impl LinkHotPlugRegistry {
     /// `reporting`.
     pub fn report_owners(&mut self, reporting: OwnerReporting) {
         self.owners = Some(reporting);
+    }
+
+    /// Report what became of every workload link to `sink`: attached, left
+    /// alone and why, or gone.
+    pub fn report_coverage(&mut self, sink: Arc<dyn LinkCoverageSink>) {
+        self.coverage = Some(sink);
+    }
+
+    /// Report a link the chain does not go on.
+    fn left(&self, link: &LinkInfo, refusal: LinkRefusal, owner: Option<&LinkOwner>) {
+        if let Some(sink) = &self.coverage {
+            sink.link_seen(WorkloadLink {
+                ifindex: link.ifindex,
+                name: link.name.clone(),
+                kind: link.kind.clone().unwrap_or_default(),
+                attachment: LinkAttachment::Refused(refusal),
+                pod_uid: owner_pod_uid(owner),
+            });
+        }
+    }
+
+    /// Withdraw a link that was left alone.
+    fn forget(&self, ifindex: u32) {
+        if let Some(sink) = &self.coverage {
+            sink.link_forgotten(ifindex);
+        }
     }
 
     /// Register a loaded TC program on `side`. Programs attach in
@@ -656,6 +763,23 @@ impl LinkHotPlugRegistry {
         if let Some(reporting) = &self.owners {
             reporting.owned(link.ifindex, owner);
         }
+        if let Some(sink) = &self.coverage {
+            let of = self.programs.len();
+            sink.link_seen(WorkloadLink {
+                ifindex: link.ifindex,
+                name: link.name.clone(),
+                kind: target.kind.as_str().to_owned(),
+                attachment: if attached == of {
+                    LinkAttachment::Attached
+                } else {
+                    LinkAttachment::Refused(LinkRefusal::ProgramsRefused {
+                        attached: u32::try_from(attached).unwrap_or(u32::MAX),
+                        of: u32::try_from(of).unwrap_or(u32::MAX),
+                    })
+                },
+                pod_uid: owner_pod_uid(owner),
+            });
+        }
         attached
     }
 
@@ -673,6 +797,7 @@ impl LinkHotPlugRegistry {
         if let Some(reporting) = &self.owners {
             reporting.sink.link_gone(target.ifindex);
         }
+        self.forget(target.ifindex);
         if let Some(dropped) = dropped {
             info!(
                 iface = %target.name,
@@ -681,6 +806,15 @@ impl LinkHotPlugRegistry {
                 "hot-plug: workload link released"
             );
         }
+    }
+}
+
+/// The pod a link's owner belongs to, read off the pod segment of its cgroup
+/// path.
+fn owner_pod_uid(owner: Option<&LinkOwner>) -> Option<String> {
+    match owner.and_then(|o| o.container.as_ref())? {
+        ContainerInfo::Container { cgroup_path, .. } => cgroup_path.split('/').find_map(pod_uid),
+        ContainerInfo::Host => None,
     }
 }
 
@@ -836,12 +970,21 @@ pub fn apply(
              (reported once per kind)"
         );
     }
+    for ifindex in &plan.forget {
+        registry.forget(*ifindex);
+    }
     let wanted: HashSet<i32> = plan
         .attach
         .iter()
-        .filter_map(|a| a.link.link_netnsid)
+        .map(|a| &a.link)
+        .chain(plan.left.iter().map(|(link, _)| link))
+        .filter_map(|link| link.link_netnsid)
         .collect();
     let owners = resolver.resolve(&wanted);
+    for (link, refusal) in &plan.left {
+        let owner = link.link_netnsid.and_then(|n| owners.get(&n));
+        registry.left(link, refusal.clone(), owner);
+    }
     for target in &plan.attach {
         let owner = target.link.link_netnsid.and_then(|n| owners.get(&n));
         let attached = registry.attach(target, owner);
@@ -1252,6 +1395,9 @@ impl Worker {
     fn resync(&mut self) {
         match dump_links() {
             Ok(links) => {
+                if let Some(sink) = &self.registry.coverage {
+                    sink.node_encapsulates(encapsulates(&links));
+                }
                 let plan = self.table.resync(links);
                 self.apply(&plan);
             }
@@ -1716,6 +1862,110 @@ mod tests {
         );
         let netkit = LinkTable::new(HookPolicy::Netkit, []).observe(both());
         assert_eq!(hooks(&netkit), vec![("nk0".to_owned(), true)]);
+    }
+
+    #[test]
+    fn a_workload_link_left_alone_is_reported_once_per_reason_and_forgotten() {
+        let mut table = LinkTable::new(HookPolicy::Netkit, []);
+        let plan = table.observe(vec![new(2, "veth0", "veth")]);
+        assert_eq!(
+            plan.left
+                .iter()
+                .map(|(l, r)| (l.ifindex, r.clone()))
+                .collect::<Vec<_>>(),
+            vec![(2, LinkRefusal::AttachMode("netkit".to_owned()))]
+        );
+        assert!(table.observe(vec![new(2, "veth0", "veth")]).is_empty());
+        assert_eq!(table.observe(vec![gone(2, "veth0")]).forget, vec![2]);
+    }
+
+    #[test]
+    fn an_unknown_kind_leading_into_a_namespace_is_a_workload_left_alone() {
+        let mut table = LinkTable::new(ALL, []);
+        let mut tun = link(5, "tun0", Some("tun"));
+        tun.link_netnsid = Some(3);
+        let plan = table.observe(vec![LinkEvent::New(tun)]);
+        assert_eq!(plan.left[0].1, LinkRefusal::UnknownKind("tun".to_owned()));
+        // The host's own device of an unknown kind is reported, not left.
+        let plan = table.observe(vec![new(6, "odd0", "odd")]);
+        assert!(plan.left.is_empty());
+        assert_eq!(plan.unknown.len(), 1);
+        // A resync that no longer lists it forgets it.
+        assert_eq!(table.resync(Vec::new()).forget, vec![5]);
+    }
+
+    #[test]
+    fn the_pod_is_read_off_the_owner_cgroup_path() {
+        let uid = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
+        let systemd = container_owner(
+            1,
+            "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod6f1c2d3e_4a5b_4c6d_8e7f_0123456789ab.slice/cri-containerd-abc.scope",
+        );
+        assert_eq!(owner_pod_uid(Some(&systemd)).as_deref(), Some(uid));
+        let cgroupfs = container_owner(1, &format!("/kubepods/besteffort/pod{uid}/abc"));
+        assert_eq!(owner_pod_uid(Some(&cgroupfs)).as_deref(), Some(uid));
+        assert_eq!(
+            owner_pod_uid(Some(&container_owner(1, "/docker/abc"))),
+            None
+        );
+        assert_eq!(owner_pod_uid(None), None);
+    }
+
+    #[test]
+    fn encapsulating_devices_are_told_from_the_rest() {
+        assert!(encapsulates(&[link(1, "flannel.1", Some("vxlan"))]));
+        assert!(encapsulates(&[link(1, "wg0", Some("wireguard"))]));
+        assert!(!encapsulates(&[
+            link(1, "eth0", None),
+            link(2, "veth1", Some("veth"))
+        ]));
+    }
+
+    /// What the registry told the coverage sink.
+    #[derive(Default)]
+    struct CoverageLog(Mutex<Vec<(u32, Option<LinkAttachment>)>>);
+
+    impl LinkCoverageSink for CoverageLog {
+        fn link_seen(&self, link: WorkloadLink) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((link.ifindex, Some(link.attachment)));
+        }
+
+        fn link_forgotten(&self, ifindex: u32) {
+            self.0.lock().unwrap().push((ifindex, None));
+        }
+
+        fn node_encapsulates(&self, _: bool) {}
+    }
+
+    #[test]
+    fn the_registry_reports_links_left_and_released_to_the_coverage_sink() {
+        let log = Arc::new(CoverageLog::default());
+        let mut registry = LinkHotPlugRegistry::new();
+        registry.report_coverage(Arc::clone(&log) as Arc<dyn LinkCoverageSink>);
+        registry.left(
+            &link(4, "veth4", Some("veth")),
+            LinkRefusal::AttachMode("netkit".to_owned()),
+            None,
+        );
+        registry.detach(&Detach {
+            ifindex: 7,
+            name: String::new(),
+        });
+        assert_eq!(
+            *log.0.lock().unwrap(),
+            vec![
+                (
+                    4,
+                    Some(LinkAttachment::Refused(LinkRefusal::AttachMode(
+                        "netkit".to_owned()
+                    )))
+                ),
+                (7, None),
+            ]
+        );
     }
 
     #[test]

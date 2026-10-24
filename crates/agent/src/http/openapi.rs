@@ -10,6 +10,7 @@ use super::audit_handler;
 use super::capture_handler;
 use super::config_handler;
 use super::conntrack_handler;
+use super::coverage_handler;
 use super::ddos_handler;
 use super::dlp_handler;
 use super::dns_handler;
@@ -121,6 +122,7 @@ use super::zone_handler;
         ops_handler::get_config,
         ops_handler::get_ebpf_status,
         ops_handler::get_kernel_features,
+        coverage_handler::get_ebpf_coverage,
         ops_handler::get_uprobes,
         // DNS
         dns_handler::dns_status,
@@ -241,6 +243,10 @@ use super::zone_handler;
         learning_handler::LearningSegmentationResponse,
         learning_handler::ScopeBody,
         learning_handler::WorkloadSelectorBody,
+        coverage_handler::EbpfCoverageResponse,
+        coverage_handler::PodCoverageEntry,
+        coverage_handler::CoverageInterface,
+        coverage_handler::CoverageClass,
         netpol_handler::NetpolReplayRequest,
         netpol_handler::NetpolReplayResponse,
         netpol_handler::NetpolWorkloadReplay,
