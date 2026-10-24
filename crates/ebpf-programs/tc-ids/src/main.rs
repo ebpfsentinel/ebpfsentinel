@@ -29,7 +29,8 @@ use ebpf_common::{
         IDS_ACTION_DROP, IDS_METRIC_CGROUP_ATTRIBUTED, IDS_METRIC_CGROUP_TENANT_RESOLVED,
         IDS_METRIC_COUNT, IDS_METRIC_CT_KILL_CONFIRMED, IDS_METRIC_DROPPED, IDS_METRIC_ERRORS,
         IDS_METRIC_EVENTS_DROPPED, IDS_METRIC_MATCHED, IDS_METRIC_TOTAL_SEEN, IDS_SAMPLING_RANDOM,
-        IdsPatternKey, IdsPatternValue, IdsSamplingConfig,
+        IDS_SCOPE_WORKLOAD, IDS_WORKLOAD_SCOPE_MAX_ENTRIES, IdsPatternKey, IdsPatternValue,
+        IdsSamplingConfig, IdsWorkloadScopeKey, WORKLOAD_LINK_MAX_ENTRIES,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
@@ -125,6 +126,26 @@ fn feature_empty(gates: u32, bit: u32) -> bool {
 /// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
 #[btf_map]
 static INTERFACE_GROUPS: HashMap<u32, u32, 64> = HashMap::new();
+
+/// Workload link -> cgroup v2 id of the container behind it.
+///
+/// Written by the agent when it attaches to a container's host-side link,
+/// and removed when the link goes. The packet itself cannot say: the socket
+/// of a packet crossing a veth has been released by the time it reaches the
+/// host side, so `bpf_skb_cgroup_id` reads 0 there.
+#[btf_map]
+static WORKLOAD_LINKS: HashMap<u32, u64, { WORKLOAD_LINK_MAX_ENTRIES as usize }> =
+    HashMap::new();
+
+/// (cgroup v2 id, rule id) pairs for the rules scoped to workloads. A scoped
+/// rule applies when the pair is present; presence is the answer and the
+/// value is not read.
+#[btf_map]
+static IDS_WORKLOAD_SCOPE: HashMap<
+    IdsWorkloadScopeKey,
+    u8,
+    { IDS_WORKLOAD_SCOPE_MAX_ENTRIES as usize },
+> = HashMap::new();
 
 /// Tenant resolution: VLAN ID -> tenant_id.
 #[btf_map]
@@ -345,6 +366,32 @@ unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4], 
         // Default tenant
         0
     }
+}
+
+/// Whether a rule scoped to workloads applies to this packet.
+///
+/// The workload is the container behind the link the packet is on, as the
+/// agent recorded it, and otherwise the cgroup of the socket that sent it.
+/// The link comes first because it is authoritative where it exists: a
+/// packet on a container's veth belongs to that container whatever task the
+/// kernel happens to be running. A packet attributable to no cgroup is out
+/// of every scope.
+#[inline(always)]
+fn workload_scope_matches(ctx: &TcContext, rule_id: u32) -> bool {
+    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+    let cgroup_id = match unsafe { WORKLOAD_LINKS.get(&ifindex) } {
+        Some(&id) => id,
+        None => unsafe { bpf_skb_cgroup_id(ctx.skb.skb as *mut _) },
+    };
+    if cgroup_id == 0 {
+        return false;
+    }
+    let key = IdsWorkloadScopeKey {
+        cgroup_id,
+        rule_id,
+        _padding: 0,
+    };
+    unsafe { IDS_WORKLOAD_SCOPE.get(&key) }.is_some()
 }
 
 // ── Container cgroup attribution ────────────────────────────────────
@@ -646,6 +693,9 @@ fn process_ids_pattern(
     let iface_groups = get_iface_groups(_ctx, gates);
     if !group_matches(pattern.group_mask, iface_groups) {
         return Ok(TC_ACT_OK); // group mismatch -> pass
+    }
+    if pattern.scope == IDS_SCOPE_WORKLOAD && !workload_scope_matches(_ctx, pattern.rule_id) {
+        return Ok(TC_ACT_OK); // workload outside the rule's scope -> pass
     }
 
     increment_metric(METRIC_MATCHED);

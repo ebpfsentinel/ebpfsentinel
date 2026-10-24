@@ -249,6 +249,7 @@ impl EbpfProgramManager {
         // Clear map ports from services
         match name {
             "tc_ids" => {
+                self.services.ids_workload_scope.clear_maps();
                 let mut svc = (**self.services.ids_svc.load()).clone();
                 svc.clear_map_port();
                 self.services.ids_svc.store(Arc::new(svc));
@@ -342,6 +343,7 @@ impl EbpfProgramManager {
 
         let reader_handles = vec![jh];
 
+        startup::install_ids_workload_scope(&self.services.ids_workload_scope, &mut loader);
         if let Some(ids_mgr) = ids_mgr_opt {
             {
                 let mut svc = (**self.services.ids_svc.load()).clone();

@@ -86,7 +86,11 @@ pub struct IdsPatternKey {
 pub struct IdsPatternValue {
     pub action: u8,
     pub severity: u8,
-    pub _padding: [u8; 2],
+    /// `IDS_SCOPE_ALL`, or `IDS_SCOPE_WORKLOAD` for a rule that applies only
+    /// to the workloads its selector names, decided through
+    /// `IDS_WORKLOAD_SCOPE`.
+    pub scope: u8,
+    pub _padding: u8,
     pub rule_id: u32,
     /// Interface group bitmask (0 = floating/all interfaces).
     /// Bits 0-30: group membership, bit 31: invert flag.
@@ -97,10 +101,44 @@ pub struct IdsPatternValue {
 
 // SAFETY: Both types are #[repr(C)], Copy, 'static, and contain only primitive types
 // with explicit padding. Safe for zero-copy eBPF map operations via aya.
+/// The rule applies to every packet its key matches.
+pub const IDS_SCOPE_ALL: u8 = 0;
+/// The rule applies only when `IDS_WORKLOAD_SCOPE` holds an entry for the
+/// workload's cgroup and the rule's id.
+pub const IDS_SCOPE_WORKLOAD: u8 = 1;
+
+/// Capacity of `IDS_WORKLOAD_SCOPE`: one entry per (cgroup, scoped rule)
+/// pair that matched. A node with 512 workloads and 32 scoped rules matching
+/// every one of them fills half of it.
+pub const IDS_WORKLOAD_SCOPE_MAX_ENTRIES: u32 = 16384;
+
+/// Capacity of `WORKLOAD_LINKS`: one entry per workload link the agent has
+/// attached to, which is one per container network namespace.
+pub const WORKLOAD_LINK_MAX_ENTRIES: u32 = 4096;
+
+/// Key for the `IDS_WORKLOAD_SCOPE` HashMap: a scoped rule applies to the
+/// workload in `cgroup_id` when this key is present. The value is a single
+/// byte nothing reads; presence is the answer.
+///
+/// Keyed on the cgroup rather than on an interface group, so the number of
+/// scopes is bounded by the map's capacity and not by the width of a mask.
+/// Size: 16 bytes (aligned to 8 bytes).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IdsWorkloadScopeKey {
+    /// cgroup v2 id of the workload.
+    pub cgroup_id: u64,
+    /// Rule id as carried in `IdsPatternValue::rule_id`.
+    pub rule_id: u32,
+    pub _padding: u32,
+}
+
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for IdsPatternKey {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for IdsPatternValue {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for IdsWorkloadScopeKey {}
 
 #[cfg(test)]
 mod tests {
@@ -138,9 +176,24 @@ mod tests {
     fn test_ids_pattern_value_field_offsets() {
         assert_eq!(mem::offset_of!(IdsPatternValue, action), 0);
         assert_eq!(mem::offset_of!(IdsPatternValue, severity), 1);
+        assert_eq!(mem::offset_of!(IdsPatternValue, scope), 2);
         assert_eq!(mem::offset_of!(IdsPatternValue, rule_id), 4);
         assert_eq!(mem::offset_of!(IdsPatternValue, group_mask), 8);
         assert_eq!(mem::offset_of!(IdsPatternValue, tenant_id), 12);
+    }
+
+    #[test]
+    fn test_ids_workload_scope_key_layout() {
+        assert_eq!(mem::size_of::<IdsWorkloadScopeKey>(), 16);
+        assert_eq!(mem::align_of::<IdsWorkloadScopeKey>(), 8);
+        assert_eq!(mem::offset_of!(IdsWorkloadScopeKey, cgroup_id), 0);
+        assert_eq!(mem::offset_of!(IdsWorkloadScopeKey, rule_id), 8);
+    }
+
+    #[test]
+    fn test_ids_scope_constants() {
+        assert_eq!(IDS_SCOPE_ALL, 0);
+        assert_eq!(IDS_SCOPE_WORKLOAD, 1);
     }
 
     #[test]

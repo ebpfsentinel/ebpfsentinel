@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 
 use domain::common::entity::RuleId;
+use domain::firewall::workload::{KubernetesMatchers, WorkloadSelector};
 use domain::ids::entity::{IdsRule, SamplingMode, ThresholdConfig, ThresholdType, TrackBy};
+use domain::netpol::LabelSelector;
 use serde::{Deserialize, Serialize};
 
 use super::common::{
@@ -308,6 +310,67 @@ pub struct IdsRuleConfig {
     /// unset keeps single-tenant behaviour.
     #[serde(default)]
     pub tenant_id: u32,
+
+    /// The workload this rule inspects, decided on the cgroup behind the
+    /// container link or the sending socket. Absent, the rule inspects every
+    /// workload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<IdsWorkloadConfig>,
+}
+
+/// The workload an IDS rule is scoped to, as a document writes it.
+///
+/// The firewall's workload block without its executable, mode and names: a
+/// link belongs to a cgroup rather than to one binary in it, and an IDS rule
+/// has its own mode. `deny_unknown_fields` for the firewall's reason, a
+/// misspelled key would otherwise widen the rule to every workload.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdsWorkloadConfig {
+    /// systemd unit name, such as `nginx.service`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+
+    /// Absolute cgroup v2 path, matching that cgroup and everything under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<String>,
+
+    /// Container id, an id prefix of at least twelve characters, or the name
+    /// the runtime gave it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+
+    /// Labels of the pod, with the Kubernetes meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pods: Option<LabelSelector>,
+
+    /// Labels of the pod's namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespaces: Option<LabelSelector>,
+
+    /// Name of the service account the pod runs as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account: Option<String>,
+}
+
+impl IdsWorkloadConfig {
+    fn to_selector(&self, prefix: &str) -> Result<WorkloadSelector, ConfigError> {
+        WorkloadSelector::with_kubernetes(
+            None,
+            self.unit.clone(),
+            self.cgroup.clone(),
+            self.container.clone(),
+            KubernetesMatchers {
+                pods: self.pods.clone(),
+                namespaces: self.namespaces.clone(),
+                service_account: self.service_account.clone(),
+            },
+        )
+        .map_err(|e| ConfigError::Validation {
+            field: format!("{prefix}.workload"),
+            message: e.to_string(),
+        })
+    }
 }
 
 fn default_protocol_any() -> String {
@@ -315,6 +378,31 @@ fn default_protocol_any() -> String {
 }
 
 impl IdsRuleConfig {
+    /// A workload block names something, and stands alone: interfaces and a
+    /// workload are two scopes for one rule, and a content pattern is matched
+    /// in userspace, where the link a packet crossed is not known.
+    fn validate_workload(&self, prefix: &str) -> Result<(), ConfigError> {
+        let Some(workload) = &self.workload else {
+            return Ok(());
+        };
+        workload.to_selector(prefix)?;
+        if !self.interfaces.is_empty() {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.workload"),
+                message: "a rule names interfaces or a workload, not both".to_string(),
+            });
+        }
+        if self.pattern.as_deref().is_some_and(|p| !p.is_empty()) {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.workload"),
+                message: "a content rule cannot be scoped to a workload: the payload is \
+                          matched where the link is not known"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     pub(super) fn validate(&self, idx: usize) -> Result<(), ConfigError> {
         let prefix = format!("ids.rules[{idx}]");
 
@@ -336,6 +424,8 @@ impl IdsRuleConfig {
             value: self.protocol.clone(),
             expected: "tcp, udp, icmp, any".to_string(),
         })?;
+
+        self.validate_workload(&prefix)?;
 
         // The classifier is the only source of IDS events and keys its
         // lookup on a port, so a rule naming neither would be loaded,
@@ -509,6 +599,11 @@ impl IdsRuleConfig {
                 },
             )?,
             tenant_id: self.tenant_id,
+            workload: self
+                .workload
+                .as_ref()
+                .map(|w| w.to_selector("ids.rules"))
+                .transpose()?,
         })
     }
 }
@@ -558,6 +653,7 @@ mod tests {
             domain_match_mode: None,
             country_thresholds: None,
             interfaces: Vec::new(),
+            workload: None,
             tenant_id: 0,
         }
     }
@@ -710,5 +806,51 @@ mod tests {
         let mut rule = base_rule();
         rule.interfaces = vec!["dmz".to_string()];
         assert!(rule.to_domain_rule("alert", &HashMap::new()).is_err());
+    }
+
+    fn scoped_rule() -> IdsRuleConfig {
+        let mut rule = base_rule();
+        rule.workload = Some(IdsWorkloadConfig {
+            container: Some("web".to_string()),
+            ..IdsWorkloadConfig::default()
+        });
+        rule
+    }
+
+    #[test]
+    fn a_rule_scoped_to_a_workload_carries_its_selector() {
+        let rule = scoped_rule();
+        rule.validate(0).unwrap();
+        let domain = rule.to_domain_rule("alert", &HashMap::new()).unwrap();
+        let selector = domain.workload.unwrap();
+        assert_eq!(selector.container.as_deref(), Some("web"));
+        assert!(selector.exe.is_none());
+    }
+
+    #[test]
+    fn a_workload_block_names_no_executable() {
+        let yaml = "id: r\nseverity: low\ndst_port: 22\nworkload:\n  exe: /usr/bin/curl\n";
+        assert!(serde_norway::from_str::<IdsRuleConfig>(yaml).is_err());
+    }
+
+    #[test]
+    fn an_empty_workload_block_is_refused() {
+        let mut rule = base_rule();
+        rule.workload = Some(IdsWorkloadConfig::default());
+        assert!(rule.validate(0).is_err());
+    }
+
+    #[test]
+    fn a_workload_and_interfaces_are_refused_together() {
+        let mut rule = scoped_rule();
+        rule.interfaces = vec!["lan".to_string()];
+        assert!(rule.validate(0).is_err());
+    }
+
+    #[test]
+    fn a_content_rule_cannot_be_scoped() {
+        let mut rule = scoped_rule();
+        rule.pattern = Some("evil".to_string());
+        assert!(rule.validate(0).is_err());
     }
 }

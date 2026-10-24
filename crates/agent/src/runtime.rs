@@ -17,6 +17,7 @@ use application::dns_blocklist_service_impl::DnsBlocklistAppService;
 use application::dns_cache_service_impl::DnsCacheAppService;
 use application::firewall_service_impl::FirewallAppService;
 use application::ids_service_impl::IdsAppService;
+use application::ids_workload_scope_service::IdsWorkloadScopeService;
 use application::ips_service_impl::{IpsAppService, IpsBlacklistAdapter};
 use application::l7_service_impl::L7AppService;
 use application::nat_service_impl::NatAppService;
@@ -50,6 +51,7 @@ pub struct ServiceHandles {
     // ── Core security services (replicated in HA) ─────────────────
     pub firewall_svc: Arc<RwLock<FirewallAppService>>,
     pub ids_svc: Arc<ArcSwap<IdsAppService>>,
+    pub ids_workload_scope: Arc<IdsWorkloadScopeService>,
     pub ips_svc: Arc<ArcSwap<IpsAppService>>,
     pub rl_svc: Arc<RwLock<RateLimitAppService>>,
     pub ti_svc: Arc<ArcSwap<ThreatIntelAppService>>,
@@ -230,6 +232,8 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         None,
         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
     );
+    let ids_workload_scope = startup::ids_workload_scope_service(config);
+    ids_svc.set_workload_scope(Arc::clone(&ids_workload_scope));
     ids_svc.set_mode(ids_mode);
     ids_svc.set_enabled(config.ids.enabled);
     ids_svc.set_sampling(config.ids_sampling()?);
@@ -533,6 +537,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     Ok(ServiceHandles {
         firewall_svc,
         ids_svc,
+        ids_workload_scope,
         ips_svc,
         rl_svc,
         ti_svc,
@@ -902,6 +907,7 @@ pub async fn load_ebpf_programs(
                 tokio::spawn(async move {
                     reader.run(event_tx_clone, task_cancel_3, rb_obs).await;
                 });
+                startup::install_ids_workload_scope(&services.ids_workload_scope, &mut loader);
                 if let Some(ids_mgr) = ids_mgr_opt {
                     let mut svc = (**services.ids_svc.load()).clone();
                     svc.set_map_port(Box::new(ids_mgr));

@@ -206,6 +206,38 @@ fn resolver_proc_path(configured: &str, host_proc: &std::path::Path) -> std::pat
     }
 }
 
+/// The service that compiles IDS rules scoped to workloads into the
+/// classifier's two tables, reading cgroup paths through the same procfs the
+/// container resolver walks.
+pub(crate) fn ids_workload_scope_service(
+    config: &AgentConfig,
+) -> Arc<application::ids_workload_scope_service::IdsWorkloadScopeService> {
+    let proc_root = resolver_proc_path(&config.container.resolver.proc_path, &host_proc_root());
+    Arc::new(
+        application::ids_workload_scope_service::IdsWorkloadScopeService::new().with_cgroups(
+            Arc::new(adapters::container::ProcContainerResolver::new(&proc_root)),
+        ),
+    )
+}
+
+/// Hand a freshly loaded tc-ids object's scope tables to the scope service,
+/// or tell it there are none, before the pattern map is handed over: the
+/// pattern sync is what decides whether a scoped rule can be installed.
+pub(crate) fn install_ids_workload_scope(
+    scope: &application::ids_workload_scope_service::IdsWorkloadScopeService,
+    loader: &mut EbpfLoader,
+) {
+    match adapters::ebpf::IdsWorkloadScopeMaps::new(loader.ebpf_mut()) {
+        Ok(maps) => scope.set_maps(Box::new(maps)),
+        Err(e) => {
+            scope.clear_maps();
+            warn!(
+                "IDS workload scope tables not available, rules scoped to a workload are left out: {e}"
+            );
+        }
+    }
+}
+
 /// Build a capture-socket pool from the warden when the delegation handshake
 /// provisioned none and the agent runs against a warden (`EBPFSENTINEL_WARDEN_SOCK`
 /// set). The warden performs the privileged `socket(AF_PACKET)`; the agent rebinds
@@ -333,11 +365,13 @@ pub async fn run(
     ));
     let firewall_svc = Arc::new(RwLock::new(svc));
 
+    let ids_workload_scope = ids_workload_scope_service(&config);
     let mut ids_svc = IdsAppService::new(
         ids_engine,
         None,
         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
     );
+    ids_svc.set_workload_scope(Arc::clone(&ids_workload_scope));
     ids_svc.set_mode(ids_mode);
     ids_svc.set_enabled(config.ids.enabled);
     ids_svc.set_sampling(config.ids_sampling()?);
@@ -2352,6 +2386,7 @@ pub async fn run(
                     tokio::spawn(async move {
                         reader.run(event_tx_clone, task_cancel_5, rb_obs).await;
                     });
+                    install_ids_workload_scope(&ids_workload_scope, &mut loader);
                     if let Some(ids_mgr) = ids_mgr_opt {
                         {
                             let mut svc = (**ids_svc.load()).clone();
@@ -3387,8 +3422,11 @@ pub async fn run(
 
     // ── Build link hot-plug registry + spawn watcher ─────────
     if ebpf_capable {
-        use adapters::ebpf::link_watcher::{HookPolicy, HookSide, LinkHotPlugRegistry, LinkTable};
+        use adapters::ebpf::link_watcher::{
+            HookPolicy, HookSide, LinkHotPlugRegistry, LinkTable, OwnerReporting,
+        };
         use infrastructure::config::AttachMode;
+        use ports::secondary::ids_workload_scope_port::WorkloadLinkSink;
 
         // Each side in the order the chain runs on a configured interface:
         // programs on one hook run in the order they were attached.
@@ -3428,6 +3466,19 @@ pub async fn run(
                 AttachMode::Netkit => HookPolicy::Netkit,
             };
             let table = LinkTable::new(policy, config.agent.interfaces.iter().cloned());
+            // A packet on the host side of a container link carries no
+            // socket, so the classifier learns the workload from the link;
+            // the process holding it is fed to the process table as well, so
+            // the scope knows the workload before anything in it execs.
+            let mut owners = OwnerReporting::new(
+                Arc::clone(&ids_workload_scope) as Arc<dyn WorkloadLinkSink>,
+                config.container.resolver.cgroup_root.clone().into(),
+                host_proc_root(),
+            );
+            if config.process_table.enabled {
+                owners = owners.with_processes(process_tx.clone());
+            }
+            registry.report_owners(owners);
             // Workload namespaces are found through the host procfs, which is
             // a mount rather than a shared pid namespace in a pod that runs
             // without hostPID.
@@ -3455,6 +3506,7 @@ pub async fn run(
             Arc::new(crate::runtime::ServiceHandles {
                 firewall_svc: Arc::clone(&firewall_svc),
                 ids_svc: Arc::clone(&ids_svc),
+                ids_workload_scope: Arc::clone(&ids_workload_scope),
                 ips_svc: Arc::clone(&ips_svc),
                 rl_svc: Arc::clone(&rl_svc),
                 ti_svc: Arc::clone(&ti_svc),
@@ -3775,6 +3827,7 @@ pub async fn run(
         if let Some(ref workload) = workload_policy_service {
             svc = svc.with_workload_policy(Arc::clone(workload));
         }
+        svc = svc.with_ids_workload_scope(Arc::clone(&ids_workload_scope));
         // Only when a rule names an executable: an exec event carries the
         // binary and nothing else the scope needs, so a scope with no such
         // rule has no reason to hear about every exec on the node.

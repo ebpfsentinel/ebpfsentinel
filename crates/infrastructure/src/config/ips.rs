@@ -222,6 +222,7 @@ impl IpsRuleConfig {
             country_thresholds: None,
             group_mask: 0,
             tenant_id: self.tenant_id,
+            workload: None,
         })
     }
 }

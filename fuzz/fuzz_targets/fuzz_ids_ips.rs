@@ -62,6 +62,7 @@ fuzz_target!(|data: &[u8]| {
                     country_thresholds: None,
                     group_mask: u32::from(data[14]),
                     tenant_id: u32::from(data[15] % 4),
+                    workload: None,
                 };
                 // Exercise regex compilation with DoS limits.
                 let _ = engine.add_rule(rule);
@@ -89,6 +90,7 @@ fuzz_target!(|data: &[u8]| {
                     country_thresholds: None,
                     group_mask: 0,
                     tenant_id: u32::from(i % 3),
+                    workload: None,
                 });
             }
 

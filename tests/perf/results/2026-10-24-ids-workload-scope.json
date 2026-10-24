@@ -1,0 +1,34 @@
+{
+  "measured": "2026-10-24",
+  "instrument": "cargo xtask ebpf-cost (BPF_PROG_TEST_RUN, 64-byte UDP frame to port 9, average of 1000000 runs, best of 3)",
+  "host": {
+    "kernel": "7.0.0-38-generic",
+    "cpu": "13th Gen Intel(R) Core(TM) i7-1370P",
+    "cpus": 20,
+    "kind": "developer workstation, desktop session running, not idle"
+  },
+  "program": "tc_ids",
+  "event_emission": "sampled out on every arm, so the figure is the decision and not the ring buffer",
+  "runs": [
+    {
+      "every_workload_ns": 39,
+      "scoped_link_known_in_scope_ns": 64,
+      "scoped_link_known_out_of_scope_ns": 62,
+      "scoped_no_link_no_socket_ns": 59
+    },
+    {
+      "every_workload_ns": 34,
+      "scoped_link_known_in_scope_ns": 50,
+      "scoped_link_known_out_of_scope_ns": 43,
+      "scoped_no_link_no_socket_ns": 43
+    }
+  ],
+  "memlock_bytes": {
+    "WORKLOAD_LINKS": 330016,
+    "IDS_WORKLOAD_SCOPE": 1444288
+  },
+  "capacity": {
+    "WORKLOAD_LINKS": 4096,
+    "IDS_WORKLOAD_SCOPE": 16384
+  }
+}

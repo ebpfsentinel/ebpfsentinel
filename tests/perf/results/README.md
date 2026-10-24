@@ -9,6 +9,34 @@ Nothing in this directory is a target. A guest with four vCPUs is not a
 production node, and the suite says so in its own output: the bounds it
 asserts are what the lane can hold, not what the product promises.
 
+## `2026-10-24-ids-workload-scope.json`
+
+`cargo xtask ebpf-cost`, run twice through `BPF_PROG_TEST_RUN` on a developer
+workstation, kernel 7.0.0-38-generic, i7-1370P, with a desktop session running.
+The harness installs one IDS rule on the frame's destination port and times the
+classifier on four arms: the rule applying to every workload, then the same
+rule scoped to a workload with the container link known and the workload in
+scope, with the link known and the workload out of scope, and with no container
+link and no socket to ask. Event emission is sampled out on every arm, so the
+figure is the decision and not the ring buffer.
+
+| run | every workload | scoped, in scope | scoped, out of scope | scoped, no link |
+|---|---|---|---|---|
+| 1 | 39 ns | 64 ns (+25) | 62 ns (+23) | 59 ns (+20) |
+| 2 | 34 ns | 50 ns (+16) | 43 ns (+9) | 43 ns (+9) |
+
+The two tables lock 330016 bytes (`WORKLOAD_LINKS`, 4096 links) and 1444288
+bytes (`IDS_WORKLOAD_SCOPE`, 16384 cgroup and rule pairs) as the kernel reports
+them in the map's fdinfo, whether or not a rule is scoped.
+
+**What to quote.** A rule scoped to a workload costs two hash lookups more than
+one that is not, measured between 9 and 25 ns on a packet the rule's port
+already claimed, and nothing at all on a packet no rule claims: the scope is
+read only after the pattern lookup hit. It replaces no bitmap, so there is no
+ceiling of 31 scopes to quote, and the bound is the scope table's 16384
+entries. The spread between the two runs is the workstation, which is why the
+range and not a single figure is what this file supports.
+
 ## `2026-10-19-attribution-overhead.json`
 
 `07-attribution-overhead.bats`, run twice on an idle Vagrant guest, kernel

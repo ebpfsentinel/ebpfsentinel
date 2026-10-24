@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::dlp_scope_service::DlpScopeService;
+use crate::ids_workload_scope_service::IdsWorkloadScopeService;
 use crate::workload_policy_service::WorkloadPolicyService;
 
 /// How long the writer lets the metadata settle after it last changed before
@@ -43,6 +44,7 @@ pub struct ProcessTableService {
     metadata_enrichers: Vec<Arc<dyn MetadataEnricher>>,
     workload: Option<Arc<WorkloadPolicyService>>,
     dlp_scope: Option<Arc<DlpScopeService>>,
+    ids_scope: Option<Arc<IdsWorkloadScopeService>>,
     metadata_changes: Option<watch::Receiver<u64>>,
     capture_command_line: bool,
 }
@@ -64,6 +66,7 @@ impl ProcessTableService {
             metadata_enrichers: Vec::new(),
             workload: None,
             dlp_scope: None,
+            ids_scope: None,
             metadata_changes: None,
             capture_command_line,
         }
@@ -123,6 +126,14 @@ impl ProcessTableService {
         self
     }
 
+    /// Tell `service` which cgroup each task runs in, so an IDS rule scoped
+    /// to a workload is written against the cgroups that workload holds.
+    #[must_use]
+    pub fn with_ids_workload_scope(mut self, service: Arc<IdsWorkloadScopeService>) -> Self {
+        self.ids_scope = Some(service);
+        self
+    }
+
     /// Resolve the running containers again each time `changes` moves.
     ///
     /// An exec is resolved once, against what the enrichers knew at that
@@ -176,6 +187,9 @@ impl ProcessTableService {
                 workload.record_exec(&updated);
             }
             if let Some(scope) = &self.dlp_scope {
+                scope.record_exec(&updated);
+            }
+            if let Some(scope) = &self.ids_scope {
                 scope.record_exec(&updated);
             }
             changed += 1;
@@ -234,6 +248,9 @@ impl ProcessTableService {
         if let Some(scope) = &self.dlp_scope {
             scope.record_exec(&entry);
         }
+        if let Some(scope) = &self.ids_scope {
+            scope.record_exec(&entry);
+        }
 
         let replaced = self
             .table
@@ -252,6 +269,9 @@ impl ProcessTableService {
             workload.record_exit(pid);
         }
         if let Some(scope) = &self.dlp_scope {
+            scope.record_exit(pid);
+        }
+        if let Some(scope) = &self.ids_scope {
             scope.record_exit(pid);
         }
         let purged = self
@@ -694,6 +714,47 @@ mod tests {
             comm: "curl".to_string(),
             at_ns: 10,
         }
+    }
+
+    struct DiscardedScope;
+    impl ports::secondary::ids_workload_scope_port::IdsWorkloadScopeMapPort for DiscardedScope {
+        fn publish_links(
+            &mut self,
+            _links: &[(u32, u64)],
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+        fn publish_scope(
+            &mut self,
+            _entries: &[(u64, u32)],
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_container_task_scopes_an_ids_rule_until_it_exits() {
+        let scope = Arc::new(IdsWorkloadScopeService::new());
+        scope.set_maps(Box::new(DiscardedScope));
+        scope.set_rules(vec![(
+            0,
+            domain::firewall::workload::WorkloadSelector::new(
+                None,
+                None,
+                None,
+                Some("3f2a1b4c5d6e".to_string()),
+            )
+            .unwrap(),
+        )]);
+        let resolver = Arc::new(ContainerResolverEngine::new(Arc::new(ContainerCgroups), 16));
+        let service = ProcessTableService::new(16, false)
+            .with_containers(resolver)
+            .with_ids_workload_scope(Arc::clone(&scope));
+
+        service.apply(exec(42, 1)).await;
+        assert_eq!(scope.published_scope(), vec![(777, 0)]);
+        service.apply(exit(42)).await;
+        assert!(scope.published_scope().is_empty());
     }
 
     #[tokio::test]

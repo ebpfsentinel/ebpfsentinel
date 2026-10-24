@@ -11035,6 +11035,13 @@
                 "type": "null"
               }
             ]
+          },
+          "workload": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The workload this rule is scoped to, written out the way the\nfirewall's workload rules are. Absent is a rule that inspects every\nworkload."
           }
         }
       },

@@ -3,8 +3,12 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::common::entity::{DomainMode, Protocol, RuleId, Severity};
+use crate::firewall::workload::WorkloadSelector;
 use ebpf_common::event::PacketEvent;
-use ebpf_common::ids::{IDS_ACTION_ALERT, IDS_ACTION_DROP, IdsPatternKey, IdsPatternValue};
+use ebpf_common::ids::{
+    IDS_ACTION_ALERT, IDS_ACTION_DROP, IDS_SCOPE_ALL, IDS_SCOPE_WORKLOAD, IdsPatternKey,
+    IdsPatternValue,
+};
 
 // ── Domain matching ─────────────────────────────────────────────
 
@@ -257,6 +261,13 @@ pub struct IdsRule {
     /// that tenant.
     #[serde(default)]
     pub tenant_id: u32,
+    /// The workloads this rule applies to, when it applies to some rather
+    /// than to every packet its key matches. The kernel decides it on the
+    /// cgroup of the container behind the link, through a map the agent
+    /// fills as workloads appear, so a rule names a pod or a container
+    /// rather than an interface group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<WorkloadSelector>,
 }
 
 impl IdsRule {
@@ -285,6 +296,27 @@ impl IdsRule {
                 return Err("domain_pattern must not be empty");
             }
             _ => {}
+        }
+        if let Some(selector) = &self.workload {
+            if selector.is_empty() {
+                return Err("workload must name at least one field");
+            }
+            if selector.names_executable() {
+                return Err(
+                    "workload cannot name an executable: a link belongs to a cgroup, not to a task",
+                );
+            }
+            if self.group_mask != 0 {
+                return Err("workload and interfaces cannot both scope one rule");
+            }
+            // A content pattern is decided on the captured payload in
+            // userspace, where the link the packet crossed is not known, so a
+            // scoped content rule would fire on every workload.
+            if !self.pattern.is_empty() {
+                return Err(
+                    "workload cannot scope a content rule: the payload is matched where the link is not known",
+                );
+            }
         }
         Ok(())
     }
@@ -353,7 +385,12 @@ impl IdsRule {
                 DomainMode::Block => IDS_ACTION_DROP,
             },
             severity: self.severity.to_u8(),
-            _padding: [0; 2],
+            scope: if self.workload.is_some() {
+                IDS_SCOPE_WORKLOAD
+            } else {
+                IDS_SCOPE_ALL
+            },
+            _padding: 0,
             rule_id: rule_index,
             // The classifier compares this against the group membership of
             // the interface the packet arrived on; a zero mask is a floating
@@ -479,6 +516,7 @@ mod tests {
             country_thresholds: None,
             group_mask: 0,
             tenant_id: 0,
+            workload: None,
         }
     }
 
@@ -538,6 +576,51 @@ mod tests {
         rule.domain_pattern = Some("evil.com".to_string());
         rule.domain_match_mode = Some(DomainMatchMode::Exact);
         assert!(rule.validate().is_ok());
+    }
+
+    fn pod_selector() -> WorkloadSelector {
+        WorkloadSelector::new(None, None, None, Some("web".to_string())).unwrap()
+    }
+
+    #[test]
+    fn ids_rule_scoped_to_a_workload_validates_and_marks_the_value() {
+        let mut rule = sample_rule();
+        rule.workload = Some(pod_selector());
+        assert!(rule.validate().is_ok());
+        assert_eq!(rule.to_ebpf_value(3).scope, IDS_SCOPE_WORKLOAD);
+        assert_eq!(sample_rule().to_ebpf_value(3).scope, IDS_SCOPE_ALL);
+    }
+
+    #[test]
+    fn ids_rule_workload_refuses_an_executable() {
+        let mut rule = sample_rule();
+        rule.workload = Some(
+            WorkloadSelector::new(Some("/usr/bin/curl".to_string()), None, None, None).unwrap(),
+        );
+        assert!(rule.validate().unwrap_err().contains("executable"));
+    }
+
+    #[test]
+    fn ids_rule_workload_and_interfaces_are_disjoint() {
+        let mut rule = sample_rule();
+        rule.workload = Some(pod_selector());
+        rule.group_mask = 0b10;
+        assert!(rule.validate().unwrap_err().contains("interfaces"));
+    }
+
+    #[test]
+    fn ids_rule_workload_refuses_a_content_pattern() {
+        let mut rule = sample_rule();
+        rule.workload = Some(pod_selector());
+        rule.pattern = "GET /admin".to_string();
+        assert!(rule.validate().unwrap_err().contains("content"));
+    }
+
+    #[test]
+    fn ids_rule_workload_refuses_an_empty_selector() {
+        let mut rule = sample_rule();
+        rule.workload = Some(WorkloadSelector::default());
+        assert!(rule.validate().is_err());
     }
 
     #[test]

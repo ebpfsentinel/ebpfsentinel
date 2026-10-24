@@ -16,6 +16,7 @@ pub mod geoip_lpm_manager;
 pub mod helper_probe;
 pub mod ids_map_manager;
 pub mod ids_mirror_map_manager;
+pub mod ids_workload_scope;
 pub mod ipset_map_manager;
 pub mod kernel_probe;
 pub mod kfunc;
@@ -99,6 +100,7 @@ pub use helper_probe::{
 };
 pub use ids_map_manager::IdsMapManager;
 pub use ids_mirror_map_manager::IdsMirrorMapManager;
+pub use ids_workload_scope::{IdsWorkloadScopeMaps, cgroup_id_of};
 pub use ipset_map_manager::IpSetMapManager;
 pub use kernel_probe::{
     KernelFeatures, KernelProbeError, MIN_KERNEL_MAJOR, MIN_KERNEL_MINOR,

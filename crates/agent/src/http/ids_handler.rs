@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+use domain::firewall::workload::WorkloadSelector;
 use domain::ids::entity::ThresholdConfig;
 use infrastructure::config::group_mask_words;
 use serde::Serialize;
@@ -54,6 +55,11 @@ pub struct IdsRuleResponse {
     /// rule, which sees every interface the classifier is attached to.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub interfaces: Vec<String>,
+    /// The workload this rule is scoped to, written out the way the
+    /// firewall's workload rules are. Absent is a rule that inspects every
+    /// workload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload: Option<String>,
     /// Present only when another rule holds a kernel map slot this rule also
     /// claims.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -183,6 +189,7 @@ pub async fn list_ids_rules(
                     .collect()
             }),
             interfaces: group_mask_words(r.group_mask, &group_bits),
+            workload: r.workload.as_ref().map(WorkloadSelector::describe),
             kernel_slot: shadows.get(&r.id.0).map(SlotContentionResponse::from),
         })
         .collect();
@@ -246,6 +253,7 @@ mod tests {
             country_thresholds: None,
             kernel_slot: None,
             interfaces: Vec::new(),
+            workload: None,
         }
     }
 
@@ -278,6 +286,19 @@ mod tests {
         assert_eq!(json["dst_port"], 22);
         assert_eq!(json["threshold"]["count"], 5);
         assert!(json.get("kernel_slot").is_none());
+    }
+
+    #[test]
+    fn a_scoped_rule_names_its_workload_and_an_unscoped_one_does_not() {
+        let json = serde_json::to_value(a_rule_response()).unwrap();
+        assert!(json.get("workload").is_none());
+        let selector = WorkloadSelector::new(None, None, None, Some("web".to_string())).unwrap();
+        let resp = IdsRuleResponse {
+            workload: Some(selector.describe()),
+            ..a_rule_response()
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["workload"], selector.describe());
     }
 
     /// The IPS listing answers the same rules in lowercase, so a reading that

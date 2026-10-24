@@ -20,10 +20,20 @@
 //! an empty control block, so each parses the packet itself; in the real chain
 //! only the first one does, and the rest read the parse back.
 //!
+//! The IDS classifier is measured a second time, on a packet its pattern table
+//! claims, to price what a rule scoped to a workload adds over a rule that is
+//! not: the link table lookup and the scope table lookup, on a hit, on a miss
+//! and on a packet arriving on no known container link. The memory the two
+//! tables lock is read back from the kernel rather than computed.
+//!
 //! Needs root, and needs the objects built: `cargo xtask ebpf-build`.
 
 #![allow(unsafe_code)] // Raw bpf(BPF_PROG_TEST_RUN) - aya types no program here.
 
+use ebpf_common::ids::{
+    IDS_ACTION_ALERT, IDS_SAMPLING_RANDOM, IDS_SCOPE_ALL, IDS_SCOPE_WORKLOAD, IdsPatternKey,
+    IdsPatternValue, IdsSamplingConfig, IdsWorkloadScopeKey,
+};
 use ebpf_common::qos::QOS_SHAPES_ALL_EMPTY;
 use std::mem;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
@@ -31,7 +41,7 @@ use std::path::{Path, PathBuf};
 
 use adapters::ebpf::kfunc_loader::{self, KfuncLoadedProgram};
 use anyhow::{Context, Result, anyhow, bail};
-use aya::maps::{Array, MapData};
+use aya::maps::{Array, HashMap as AyaHashMap, Map as AyaMap, MapData};
 use aya_obj::generated::{bpf_attr, bpf_cmd, bpf_prog_type};
 
 use crate::build_ebpf::EBPF_PROGRAMS;
@@ -75,6 +85,7 @@ pub fn run() -> Result<()> {
 
     let mut costs: Vec<Cost> = Vec::new();
     let mut skipped: Vec<(&str, String)> = Vec::new();
+    let mut scope_costs: Option<ScopeCosts> = None;
 
     for object in EBPF_PROGRAMS {
         // Each object gets its own pin directory. Sharing one would hand the
@@ -151,11 +162,141 @@ pub fn run() -> Result<()> {
                 retval: gated.1,
             });
         }
+
+        if *object == "tc-ids"
+            && let Some(program) = programs.iter().find(|p| p.name == "tc_ids")
+        {
+            match measure_ids_scope(program, &mut maps, &packet) {
+                Ok(measured) => scope_costs = Some(measured),
+                Err(e) => skipped.push((object, format!("workload scope: {e:#}"))),
+            }
+        }
     }
 
     let _ = std::fs::remove_dir_all(PIN_PATH);
     report(&costs, &skipped);
+    if let Some(scope) = &scope_costs {
+        report_ids_scope(scope);
+    }
     Ok(())
+}
+
+/// The cgroup id the scope measurement pretends the container link leads to.
+const SCOPE_CGROUP: u64 = 0x1_0000_0001;
+
+/// The rule id the scope measurement installs.
+const SCOPE_RULE: u32 = 7;
+
+/// `BPF_PROG_TEST_RUN` hands a TC program its packet on the loopback device.
+const TEST_RUN_IFINDEX: u32 = 1;
+
+/// The IDS classifier on a packet its pattern table claims.
+struct ScopeCosts {
+    /// A rule that applies to every workload.
+    unscoped_ns: u64,
+    /// A scoped rule, the link known and the workload in scope.
+    scoped_hit_ns: u64,
+    /// A scoped rule, the link known and the workload out of scope.
+    scoped_miss_ns: u64,
+    /// A scoped rule, the packet on no container link and carrying no socket.
+    no_link_ns: u64,
+    /// What the kernel reports the link table locks, in bytes.
+    links_memlock: Option<u64>,
+    /// What the kernel reports the scope table locks, in bytes.
+    scope_memlock: Option<u64>,
+}
+
+/// Price a scoped rule against an unscoped one on the same packet.
+///
+/// Event emission is sampled out for every arm, so the figure is the
+/// decision and not the ring buffer: a million matches would fill it within
+/// the first round and leave later rounds measuring the backpressure path.
+fn measure_ids_scope(
+    program: &KfuncLoadedProgram,
+    maps: &mut std::collections::HashMap<String, AyaMap>,
+    packet: &[u8],
+) -> Result<ScopeCosts> {
+    let mut take = |name: &str| {
+        maps.remove(name)
+            .ok_or_else(|| anyhow!("map '{name}' not in the object"))
+    };
+    let mut patterns: AyaHashMap<MapData, IdsPatternKey, IdsPatternValue> =
+        AyaHashMap::try_from(take("IDS_PATTERNS")?)?;
+    let links_map = take("WORKLOAD_LINKS")?;
+    let scope_map = take("IDS_WORKLOAD_SCOPE")?;
+    let links_memlock = memlock(&links_map);
+    let scope_memlock = memlock(&scope_map);
+    let mut links: AyaHashMap<MapData, u32, u64> = AyaHashMap::try_from(links_map)?;
+    let mut scope: AyaHashMap<MapData, IdsWorkloadScopeKey, u8> = AyaHashMap::try_from(scope_map)?;
+    let mut sampling: Array<MapData, IdsSamplingConfig> =
+        Array::try_from(take("IDS_SAMPLING_CONFIG")?)?;
+
+    sampling.set(
+        0,
+        IdsSamplingConfig {
+            mode: IDS_SAMPLING_RANDOM,
+            _padding: [0; 3],
+            rate_threshold: 0,
+        },
+        0,
+    )?;
+
+    // The frame's destination: UDP port 9, the global tenant.
+    let key = IdsPatternKey {
+        tenant_id: 0,
+        dst_port: 9,
+        protocol: 17,
+        _padding: 0,
+    };
+    let rule = |scope: u8| IdsPatternValue {
+        action: IDS_ACTION_ALERT,
+        severity: 2,
+        scope,
+        _padding: 0,
+        rule_id: SCOPE_RULE,
+        group_mask: 0,
+        tenant_id: 0,
+    };
+    let scope_key = IdsWorkloadScopeKey {
+        cgroup_id: SCOPE_CGROUP,
+        rule_id: SCOPE_RULE,
+        _padding: 0,
+    };
+
+    patterns.insert(key, rule(IDS_SCOPE_ALL), 0)?;
+    let unscoped = measure(program, packet)?;
+
+    patterns.insert(key, rule(IDS_SCOPE_WORKLOAD), 0)?;
+    links.insert(TEST_RUN_IFINDEX, SCOPE_CGROUP, 0)?;
+    scope.insert(scope_key, 1u8, 0)?;
+    let scoped_hit = measure(program, packet)?;
+
+    scope.remove(&scope_key)?;
+    let scoped_miss = measure(program, packet)?;
+
+    links.remove(&TEST_RUN_IFINDEX)?;
+    let no_link = measure(program, packet)?;
+
+    Ok(ScopeCosts {
+        unscoped_ns: unscoped.0,
+        scoped_hit_ns: scoped_hit.0,
+        scoped_miss_ns: scoped_miss.0,
+        no_link_ns: no_link.0,
+        links_memlock,
+        scope_memlock,
+    })
+}
+
+/// The `memlock` the kernel charges a hash map, from its fd's fdinfo.
+fn memlock(map: &AyaMap) -> Option<u64> {
+    let AyaMap::HashMap(data) = map else {
+        return None;
+    };
+    let fd = data.fd().as_fd().as_raw_fd();
+    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}")).ok()?;
+    info.lines()
+        .find_map(|line| line.strip_prefix("memlock:"))
+        .and_then(|value| value.trim().parse().ok())
 }
 
 /// Write one mask into an emptiness array, where the object declares it.
@@ -329,4 +470,32 @@ fn report(costs: &[Cost], skipped: &[(&str, String)]) {
             println!("  {object}: {why}");
         }
     }
+}
+
+fn report_ids_scope(scope: &ScopeCosts) {
+    let delta = |ns: u64| ns as i64 - scope.unscoped_ns as i64;
+    println!();
+    println!("IDS classifier on a packet a rule claims, event emission sampled out");
+    println!();
+    println!("{:<44} {:>10} {:>10}", "rule", "ns", "vs all");
+    println!("{}", "-".repeat(66));
+    println!(
+        "{:<44} {:>10} {:>10}",
+        "every workload", scope.unscoped_ns, "-"
+    );
+    for (label, ns) in [
+        ("scoped, link known, workload in scope", scope.scoped_hit_ns),
+        (
+            "scoped, link known, workload out of scope",
+            scope.scoped_miss_ns,
+        ),
+        ("scoped, no container link, no socket", scope.no_link_ns),
+    ] {
+        println!("{label:<44} {ns:>10} {:>+10}", delta(ns));
+    }
+    println!();
+    let bytes =
+        |b: Option<u64>| b.map_or_else(|| String::from("unknown"), |b| format!("{b} bytes"));
+    println!("WORKLOAD_LINKS memlock      {}", bytes(scope.links_memlock));
+    println!("IDS_WORKLOAD_SCOPE memlock  {}", bytes(scope.scope_memlock));
 }

@@ -22,6 +22,7 @@ pub mod flow_sink_port;
 pub mod geoip_lpm_port;
 pub mod geoip_port;
 pub mod ids_map_port;
+pub mod ids_workload_scope_port;
 pub mod ips_blacklist_port;
 pub mod l2_binding_port;
 pub mod l7_extended_parser_port;

@@ -52,13 +52,17 @@ use std::time::{Duration, Instant};
 
 use domain::container::engine::parse_cgroup_payload;
 use domain::container::entity::ContainerInfo;
+use domain::process::entity::{ProcessEventKind, ProcessLifecycleEvent};
+use ports::secondary::ids_workload_scope_port::WorkloadLinkSink;
 use ports::secondary::metrics_port::ContainerMetrics;
 use tokio::io::unix::AsyncFd;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::attach_inspect::{find_attr, nla_align};
+use super::ids_workload_scope::cgroup_id_of;
 use super::netkit::{BPF_NETKIT_PEER, BPF_NETKIT_PRIMARY, netkit_attach};
+use super::ringbuf_observer::boottime_now_ns;
 use super::{kfunc_attach, tcx_order};
 
 /// How long messages are gathered after the first one before the batch is
@@ -482,6 +486,92 @@ pub struct LinkOwner {
 pub struct LinkHotPlugRegistry {
     programs: Vec<(String, RawFd, HookSide)>,
     links: Mutex<HashMap<u32, Vec<OwnedFd>>>,
+    owners: Option<OwnerReporting>,
+}
+
+/// Where the owner of a container link is reported, and how its cgroup is
+/// found.
+///
+/// A packet crossing the host side of a container's link carries no socket,
+/// so the only way to say which workload it belongs to is the link itself.
+/// Two things are told when one appears: the sink, which keeps the
+/// interface-to-cgroup table the classifier reads, and the process table, as
+/// an exec of the process holding the link, so the cgroup is matched against
+/// what that workload is even though the process started before the agent.
+pub struct OwnerReporting {
+    sink: Arc<dyn WorkloadLinkSink>,
+    processes: Option<tokio::sync::mpsc::Sender<ProcessLifecycleEvent>>,
+    cgroup_root: PathBuf,
+    proc_root: PathBuf,
+}
+
+impl OwnerReporting {
+    /// Report to `sink`, resolving cgroup paths under `cgroup_root` and
+    /// reading the owning process under `proc_root`.
+    #[must_use]
+    pub fn new(sink: Arc<dyn WorkloadLinkSink>, cgroup_root: PathBuf, proc_root: PathBuf) -> Self {
+        Self {
+            sink,
+            processes: None,
+            cgroup_root,
+            proc_root,
+        }
+    }
+
+    /// Also hand the owning process to the process table on `processes`.
+    #[must_use]
+    pub fn with_processes(
+        mut self,
+        processes: tokio::sync::mpsc::Sender<ProcessLifecycleEvent>,
+    ) -> Self {
+        self.processes = Some(processes);
+        self
+    }
+
+    /// Tell the sink and the process table who owns the link at `ifindex`.
+    /// A host-side link, or an owner whose cgroup is already gone, is
+    /// reported as no link at all.
+    fn owned(&self, ifindex: u32, owner: Option<&LinkOwner>) {
+        let Some((owner, cgroup_path)) = owner.and_then(|owner| match &owner.container {
+            Some(ContainerInfo::Container { cgroup_path, .. }) => Some((owner, cgroup_path)),
+            _ => None,
+        }) else {
+            self.sink.link_gone(ifindex);
+            return;
+        };
+        let Some(cgroup_id) = cgroup_id_of(&self.cgroup_root, cgroup_path) else {
+            debug!(ifindex, cgroup = %cgroup_path, "hot-plug: owner cgroup gone before its id was read");
+            self.sink.link_gone(ifindex);
+            return;
+        };
+        self.sink.link_owned(ifindex, cgroup_id);
+        if let Some(processes) = &self.processes
+            && let Some(event) = self.exec_of(owner.pid, cgroup_id)
+            && let Err(error) = processes.try_send(event)
+        {
+            debug!(pid = owner.pid, %error, "hot-plug: link owner not handed to the process table");
+        }
+    }
+
+    /// The owning process as an exec notification: the table records the
+    /// tasks it hears exec, and this one started before anything listened.
+    fn exec_of(&self, pid: u32, cgroup_id: u64) -> Option<ProcessLifecycleEvent> {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = self.proc_root.join(pid.to_string());
+        let meta = std::fs::metadata(&dir).ok()?;
+        let comm = std::fs::read_to_string(dir.join("comm")).unwrap_or_default();
+        Some(ProcessLifecycleEvent {
+            kind: ProcessEventKind::Exec,
+            pid,
+            tgid: pid,
+            uid: meta.uid(),
+            gid: meta.gid(),
+            cgroup_id,
+            comm: comm.trim_end().to_owned(),
+            at_ns: boottime_now_ns(),
+        })
+    }
 }
 
 impl Default for LinkHotPlugRegistry {
@@ -497,7 +587,14 @@ impl LinkHotPlugRegistry {
         Self {
             programs: Vec::new(),
             links: Mutex::new(HashMap::new()),
+            owners: None,
         }
+    }
+
+    /// Report the owner of every link attached from now on through
+    /// `reporting`.
+    pub fn report_owners(&mut self, reporting: OwnerReporting) {
+        self.owners = Some(reporting);
     }
 
     /// Register a loaded TC program on `side`. Programs attach in
@@ -556,6 +653,9 @@ impl LinkHotPlugRegistry {
         if let Ok(mut links) = self.links.lock() {
             links.insert(link.ifindex, made);
         }
+        if let Some(reporting) = &self.owners {
+            reporting.owned(link.ifindex, owner);
+        }
         attached
     }
 
@@ -569,6 +669,9 @@ impl LinkHotPlugRegistry {
             .and_then(|mut links| links.remove(&target.ifindex));
         if !target.name.is_empty() {
             tcx_order::forget(&target.name);
+        }
+        if let Some(reporting) = &self.owners {
+            reporting.sink.link_gone(target.ifindex);
         }
         if let Some(dropped) = dropped {
             info!(
@@ -1245,6 +1348,103 @@ mod tests {
     use super::*;
 
     const ALL: HookPolicy = HookPolicy::Auto;
+
+    /// What the owner reporting told its sink.
+    #[derive(Default)]
+    struct LinkLog(Mutex<Vec<(u32, Option<u64>)>>);
+
+    impl WorkloadLinkSink for LinkLog {
+        fn link_owned(&self, ifindex: u32, cgroup_id: u64) {
+            self.0.lock().unwrap().push((ifindex, Some(cgroup_id)));
+        }
+
+        fn link_gone(&self, ifindex: u32) {
+            self.0.lock().unwrap().push((ifindex, None));
+        }
+    }
+
+    fn container_owner(pid: u32, cgroup_path: &str) -> LinkOwner {
+        LinkOwner {
+            pid,
+            ns_inode: 1,
+            container: Some(ContainerInfo::Container {
+                container_id: "abc".to_owned(),
+                runtime: domain::container::entity::ContainerRuntime::Containerd,
+                cgroup_path: cgroup_path.to_owned(),
+                pid,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_container_link_is_reported_with_its_cgroup_and_its_owner() {
+        use std::os::unix::fs::MetadataExt;
+
+        let cgroups = tempfile::tempdir().unwrap();
+        let procs = tempfile::tempdir().unwrap();
+        let cgroup = cgroups.path().join("kubepods/pod1/abc");
+        std::fs::create_dir_all(&cgroup).unwrap();
+        std::fs::create_dir_all(procs.path().join("4242")).unwrap();
+        std::fs::write(procs.path().join("4242/comm"), "pause\n").unwrap();
+        let ino = std::fs::metadata(&cgroup).unwrap().ino();
+
+        let log = Arc::new(LinkLog::default());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let reporting = OwnerReporting::new(
+            Arc::clone(&log) as Arc<dyn WorkloadLinkSink>,
+            cgroups.path().to_path_buf(),
+            procs.path().to_path_buf(),
+        )
+        .with_processes(tx);
+
+        reporting.owned(7, Some(&container_owner(4242, "/kubepods/pod1/abc")));
+        assert_eq!(*log.0.lock().unwrap(), vec![(7, Some(ino))]);
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.kind, ProcessEventKind::Exec);
+        assert_eq!((event.pid, event.tgid, event.cgroup_id), (4242, 4242, ino));
+        assert_eq!(event.comm, "pause");
+    }
+
+    #[test]
+    fn a_link_without_a_container_owner_is_no_link() {
+        let cgroups = tempfile::tempdir().unwrap();
+        let log = Arc::new(LinkLog::default());
+        let reporting = OwnerReporting::new(
+            Arc::clone(&log) as Arc<dyn WorkloadLinkSink>,
+            cgroups.path().to_path_buf(),
+            cgroups.path().to_path_buf(),
+        );
+
+        reporting.owned(7, None);
+        let host = LinkOwner {
+            pid: 1,
+            ns_inode: 1,
+            container: Some(ContainerInfo::Host),
+        };
+        reporting.owned(8, Some(&host));
+        // A container whose cgroup is gone has no id to name.
+        reporting.owned(9, Some(&container_owner(5, "/kubepods/gone")));
+        assert_eq!(
+            *log.0.lock().unwrap(),
+            vec![(7, None), (8, None), (9, None)]
+        );
+    }
+
+    #[test]
+    fn a_released_link_is_withdrawn() {
+        let log = Arc::new(LinkLog::default());
+        let mut registry = LinkHotPlugRegistry::new();
+        registry.report_owners(OwnerReporting::new(
+            Arc::clone(&log) as Arc<dyn WorkloadLinkSink>,
+            PathBuf::from("/nonexistent"),
+            PathBuf::from("/nonexistent"),
+        ));
+        registry.detach(&Detach {
+            ifindex: 7,
+            name: String::new(),
+        });
+        assert_eq!(*log.0.lock().unwrap(), vec![(7, None)]);
+    }
 
     /// What the watcher reported through the metrics port.
     #[derive(Default)]

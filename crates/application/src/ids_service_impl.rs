@@ -13,6 +13,8 @@ use ports::secondary::geoip_port::GeoIpPort;
 use ports::secondary::ids_map_port::IdsMapPort;
 use ports::secondary::metrics_port::MetricsPort;
 
+use crate::ids_workload_scope_service::IdsWorkloadScopeService;
+
 /// Shared handle to the eBPF map port, behind `Arc<Mutex<..>>` so the
 /// service can be cheaply cloned (required by the `ArcSwap` pattern)
 /// while the map port remains shared across clones.
@@ -62,6 +64,11 @@ pub struct IdsAppService {
     /// Uncontested slots are absent, so the map is empty in the common case
     /// and the pipeline skips the lookup entirely.
     contested_slots: Arc<HashMap<KernelSlot, Vec<usize>>>,
+    /// Where rules scoped to workloads are compiled to cgroup ids. Absent,
+    /// or present without kernel tables, every scoped rule is left out of
+    /// the kernel: installing it unscoped would inspect every workload under
+    /// a rule written for one.
+    workload_scope: Option<Arc<IdsWorkloadScopeService>>,
 }
 
 impl IdsAppService {
@@ -83,7 +90,23 @@ impl IdsAppService {
             geoip: None,
             prevention_offset,
             contested_slots,
+            workload_scope: None,
         }
+    }
+
+    /// Register the service that compiles workload scopes, and sync again
+    /// so the scoped rules reach the kernel.
+    pub fn set_workload_scope(&mut self, scope: Arc<IdsWorkloadScopeService>) {
+        self.workload_scope = Some(scope);
+        self.sync_ebpf_maps();
+    }
+
+    /// Whether the rule at `index` is scoped to workloads.
+    fn is_scoped_index(&self, index: usize) -> bool {
+        self.engine
+            .rules()
+            .get(index)
+            .is_some_and(|rule| rule.workload.is_some())
     }
 
     /// Set the `GeoIP` port for country-aware threshold and sampling.
@@ -300,7 +323,13 @@ impl IdsAppService {
                 continue;
             };
             for &idx in claimants {
-                if idx != matched && !self.is_prevention_index(idx) && !peers.contains(&idx) {
+                // A scoped rule is never replayed: the event names no
+                // workload, so a replay would fire it for everyone.
+                if idx != matched
+                    && !self.is_prevention_index(idx)
+                    && !self.is_scoped_index(idx)
+                    && !peers.contains(&idx)
+                {
                     peers.push(idx);
                 }
             }
@@ -340,10 +369,15 @@ impl IdsAppService {
                     .entry(rule.id.0.clone())
                     .or_insert_with(|| SlotShadow {
                         shadowed_by: Vec::new(),
-                        // Mirrors `shadowed_peers`, which replays detection
-                        // rules only: a prevention rule that loses its slot
-                        // enforces nothing at all.
-                        evaluated_in_userspace: !self.is_prevention_index(idx),
+                        // Mirrors `shadowed_peers`, which replays unscoped
+                        // detection rules only: a prevention rule that loses
+                        // its slot enforces nothing at all, and a scoped one
+                        // cannot be told apart from its neighbours. Under a
+                        // scoped owner the replay only happens when that
+                        // owner's workload matched, which is not the rule.
+                        evaluated_in_userspace: !self.is_prevention_index(idx)
+                            && !self.is_scoped_index(idx)
+                            && !self.is_scoped_index(owner),
                     });
                 if !entry.shadowed_by.iter().any(|id| id == owner_id) {
                     entry.shadowed_by.push(owner_id.to_string());
@@ -492,10 +526,27 @@ impl IdsAppService {
         // Key -> id of the rule currently occupying it, so a collision can
         // name both sides.
         let mut owners: HashMap<KernelSlot, String> = HashMap::new();
+        let scope = self
+            .workload_scope
+            .as_ref()
+            .filter(|scope| scope.supported());
+        let mut scoped = Vec::new();
 
         for (idx, rule) in self.engine.rules().iter().enumerate() {
             if !rule.enabled {
                 continue;
+            }
+            if let Some(selector) = &rule.workload {
+                if scope.is_none() {
+                    tracing::error!(
+                        rule_id = %rule.id,
+                        "rule scoped to a workload left out: the loaded classifier cannot decide workload scope"
+                    );
+                    continue;
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                // rule count bounded well below u32::MAX
+                scoped.push((idx as u32, selector.clone()));
             }
             #[allow(clippy::cast_possible_truncation)] // rule count bounded well below u32::MAX
             let mut value = rule.to_ebpf_value(idx as u32);
@@ -517,6 +568,9 @@ impl IdsAppService {
                     tracing::warn!(rule_id = %rule.id, "failed to sync IDS src rule to eBPF map: {e}");
                 }
             }
+        }
+        if let Some(scope) = scope {
+            scope.set_rules(scoped);
         }
     }
 
@@ -587,6 +641,7 @@ mod tests {
             country_thresholds: None,
             group_mask: 0,
             tenant_id: 0,
+            workload: None,
         }
     }
 
@@ -929,5 +984,120 @@ mod tests {
         let config = written.lock().unwrap().unwrap();
         assert_eq!(config.mode, IDS_SAMPLING_RANDOM);
         assert_eq!(config.rate_threshold, u32::MAX);
+    }
+
+    /// Counts the destination-port keys written, shared with the test.
+    struct PatternCounter(Arc<Mutex<usize>>);
+
+    impl IdsMapPort for PatternCounter {
+        fn insert_pattern(
+            &mut self,
+            _key: &IdsPatternKey,
+            _value: &ebpf_common::ids::IdsPatternValue,
+        ) -> Result<(), DomainError> {
+            *self.0.lock().unwrap() += 1;
+            Ok(())
+        }
+        fn remove_pattern(&mut self, _key: &IdsPatternKey) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn clear_patterns(&mut self) -> Result<(), DomainError> {
+            *self.0.lock().unwrap() = 0;
+            Ok(())
+        }
+        fn pattern_count(&self) -> Result<usize, DomainError> {
+            Ok(*self.0.lock().unwrap())
+        }
+        fn set_sampling_config(&mut self, _config: &IdsSamplingConfig) -> Result<(), DomainError> {
+            Ok(())
+        }
+    }
+
+    struct NoScopeMaps;
+
+    impl ports::secondary::ids_workload_scope_port::IdsWorkloadScopeMapPort for NoScopeMaps {
+        fn publish_links(&mut self, _links: &[(u32, u64)]) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn publish_scope(&mut self, _entries: &[(u64, u32)]) -> Result<(), DomainError> {
+            Ok(())
+        }
+    }
+
+    fn scoped_rule(id: &str) -> IdsRule {
+        let mut rule = make_rule(id);
+        rule.workload = Some(
+            domain::firewall::workload::WorkloadSelector::new(
+                None,
+                None,
+                Some("/system.slice/docker-abc.scope".to_string()),
+                None,
+            )
+            .unwrap(),
+        );
+        rule
+    }
+
+    fn container_task(pid: u32, cgroup_id: u64) -> domain::process::entity::ProcessEntry {
+        use domain::container::entity::{ContainerContext, ContainerInfo, ContainerRuntime};
+        let mut entry = domain::process::entity::ProcessEntry::new(pid, "app".to_string(), 1);
+        entry.cgroup_id = cgroup_id;
+        entry.container = Some(ContainerContext::new(ContainerInfo::Container {
+            container_id: "abc".to_string(),
+            runtime: ContainerRuntime::Docker,
+            cgroup_path: "/system.slice/docker-abc.scope".to_string(),
+            pid,
+        }));
+        entry
+    }
+
+    #[test]
+    fn a_scoped_rule_stays_out_of_a_classifier_that_cannot_scope_it() {
+        let written = Arc::new(Mutex::new(0));
+        let mut svc = make_service();
+        svc.add_rule(scoped_rule("ids-001")).unwrap();
+        svc.set_map_port(Box::new(PatternCounter(Arc::clone(&written))));
+        assert_eq!(*written.lock().unwrap(), 0);
+
+        // A scope service without kernel tables is the same refusal.
+        svc.set_workload_scope(Arc::new(IdsWorkloadScopeService::new()));
+        assert_eq!(*written.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_scoped_rule_reaches_the_kernel_with_its_cgroups() {
+        let written = Arc::new(Mutex::new(0));
+        let scope = Arc::new(IdsWorkloadScopeService::new());
+        scope.set_maps(Box::new(NoScopeMaps));
+        let mut svc = make_service();
+        svc.add_rule(make_rule("ids-000")).unwrap();
+        svc.add_rule(scoped_rule("ids-001")).unwrap();
+        svc.set_workload_scope(Arc::clone(&scope));
+        svc.set_map_port(Box::new(PatternCounter(Arc::clone(&written))));
+        assert_eq!(*written.lock().unwrap(), 2);
+
+        scope.record_exec(&container_task(10, 4242));
+        assert_eq!(scope.published_scope(), vec![(4242, 1)]);
+    }
+
+    #[test]
+    fn a_scoped_rule_that_lost_its_slot_is_never_replayed() {
+        let mut svc = make_service();
+        svc.add_rule(scoped_rule("ids-001")).unwrap();
+        svc.add_rule(make_rule("ids-002")).unwrap();
+
+        assert!(svc.shadowed_peers(&make_event(22), 1).is_empty());
+        let shadows = svc.slot_shadows();
+        assert!(!shadows["ids-001"].evaluated_in_userspace);
+    }
+
+    #[test]
+    fn a_rule_under_a_scoped_owner_is_reported_as_not_evaluated() {
+        let mut svc = make_service();
+        svc.add_rule(make_rule("ids-001")).unwrap();
+        svc.add_rule(scoped_rule("ids-002")).unwrap();
+
+        let shadows = svc.slot_shadows();
+        assert!(!shadows["ids-001"].evaluated_in_userspace);
     }
 }
