@@ -3385,28 +3385,28 @@ pub async fn run(
         }
     }
 
-    // ── Build netkit hot-plug registry + spawn watcher ─────────
-    if config.agent.attach_mode != infrastructure::config::AttachMode::Tc && ebpf_capable {
-        use adapters::ebpf::netkit::NetkitSide;
+    // ── Build link hot-plug registry + spawn watcher ─────────
+    if ebpf_capable {
+        use adapters::ebpf::link_watcher::{HookPolicy, HookSide, LinkHotPlugRegistry, LinkTable};
+        use infrastructure::config::AttachMode;
 
         // Each side in the order the chain runs on a configured interface:
-        // programs on one netkit side run in the order they were attached.
+        // programs on one hook run in the order they were attached.
         let ids_egress = config.ids.inspect_egress || config.container.resolver.enabled;
         let tc_programs = [
-            ("tc_ids", ids_ok, NetkitSide::Ingress),
-            ("tc_threatintel", ti_ok, NetkitSide::Ingress),
-            ("tc_dns", dns_ok, NetkitSide::Ingress),
-            ("tc_conntrack", ct_ok, NetkitSide::Ingress),
-            ("tc_nat_ingress", nat_ok, NetkitSide::Ingress),
-            ("tc_scrub", scrub_ok, NetkitSide::Ingress),
-            ("tc_qos_ingress", qos_ok, NetkitSide::Ingress),
-            ("tc_ids", ids_ok && ids_egress, NetkitSide::Egress),
-            ("tc_nat_egress", nat_ok, NetkitSide::Egress),
-            ("tc_qos", qos_ok, NetkitSide::Egress),
+            ("tc_ids", ids_ok, HookSide::Ingress),
+            ("tc_threatintel", ti_ok, HookSide::Ingress),
+            ("tc_dns", dns_ok, HookSide::Ingress),
+            ("tc_conntrack", ct_ok, HookSide::Ingress),
+            ("tc_nat_ingress", nat_ok, HookSide::Ingress),
+            ("tc_scrub", scrub_ok, HookSide::Ingress),
+            ("tc_qos_ingress", qos_ok, HookSide::Ingress),
+            ("tc_ids", ids_ok && ids_egress, HookSide::Egress),
+            ("tc_nat_egress", nat_ok, HookSide::Egress),
+            ("tc_qos", qos_ok, HookSide::Egress),
         ];
 
-        let mut registry = adapters::ebpf::netkit::NetkitHotPlugRegistry::new();
-
+        let mut registry = LinkHotPlugRegistry::new();
         for &(name, ok, side) in &tc_programs {
             if !ok {
                 continue;
@@ -3419,40 +3419,31 @@ pub async fn run(
                 registry.register(name.to_string(), fd, side);
             }
         }
-        for iface in &config.agent.interfaces {
-            registry.skip_configured(iface.clone());
-        }
 
         let registered = registry.program_count();
         if registered > 0 {
-            let registry = Arc::new(registry);
-            let nk_cancel = cancel_token.clone();
-            // Pod network namespaces are discovered through the host procfs,
-            // which is a mount rather than a shared pid namespace in a pod that
-            // runs without hostPID.
-            let nk_proc_root = host_proc_root();
-            let nk_registry = Arc::clone(&registry);
-            let nk_released = Arc::clone(&registry);
-            tokio::spawn(async move {
-                adapters::ebpf::netkit_discovery::watch_netkit_devices(
-                    nk_proc_root,
-                    Box::new(move |iface, new_pods| {
-                        nk_registry.attach_all(iface, new_pods);
-                    }),
-                    Box::new(move |iface| {
-                        nk_released.detach(iface);
-                    }),
-                    std::time::Duration::from_secs(5),
-                    nk_cancel,
-                )
-                .await;
-            });
+            let policy = match config.agent.attach_mode {
+                AttachMode::Auto => HookPolicy::Auto,
+                AttachMode::Tc => HookPolicy::Tcx,
+                AttachMode::Netkit => HookPolicy::Netkit,
+            };
+            let table = LinkTable::new(policy, config.agent.interfaces.iter().cloned());
+            // Workload namespaces are found through the host procfs, which is
+            // a mount rather than a shared pid namespace in a pod that runs
+            // without hostPID.
+            tokio::spawn(adapters::ebpf::link_watcher::watch_links(
+                Arc::new(registry),
+                table,
+                host_proc_root(),
+                cancel_token.clone(),
+            ));
             info!(
                 programs = registered,
-                "netkit hot-plug watcher started (5s poll, auto-attach enabled)"
+                ?policy,
+                "link hot-plug watcher started (rtnetlink, veth/netkit/macvlan/ipvlan/bridge members)"
             );
         } else {
-            info!("netkit hot-plug watcher skipped (no TC programs loaded)");
+            info!("link hot-plug watcher skipped (no TC programs loaded)");
         }
     }
 

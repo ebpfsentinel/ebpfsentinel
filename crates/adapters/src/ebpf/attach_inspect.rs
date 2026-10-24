@@ -566,7 +566,7 @@ fn parse_xdp_nest(reply: &[u8]) -> Option<XdpAttachment> {
 }
 
 /// Netlink attributes are padded to a 4-byte boundary.
-const fn nla_align(len: usize) -> usize {
+pub(super) const fn nla_align(len: usize) -> usize {
     (len + 3) & !3
 }
 
@@ -574,7 +574,7 @@ const fn nla_align(len: usize) -> usize {
 ///
 /// Returns the payload without its header, so a nest can be handed straight
 /// back into this function to walk its members.
-fn find_attr(mut stream: &[u8], want: u16) -> Option<&[u8]> {
+pub(super) fn find_attr(mut stream: &[u8], want: u16) -> Option<&[u8]> {
     while stream.len() >= 4 {
         let len = u16::from_ne_bytes(stream[..2].try_into().ok()?) as usize;
         let kind = u16::from_ne_bytes(stream[2..4].try_into().ok()?);

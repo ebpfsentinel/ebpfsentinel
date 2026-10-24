@@ -168,6 +168,18 @@ fn placed() -> &'static Mutex<Placed> {
     PLACED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Forget every placement recorded on `interface`, both directions: the
+/// interface went away, and a new device given the same name starts with an
+/// empty chain.
+pub fn forget(interface: &str) {
+    if let Ok(mut placed) = placed().lock() {
+        placed.retain(|(iface, _), _| iface != interface);
+    }
+    if let Ok(mut warned) = warned().lock() {
+        warned.retain(|(iface, _)| iface != interface);
+    }
+}
+
 /// The agent's programs already placed on a hook, most recent first: the
 /// programs a new attach goes right after, so the agent's own programs keep
 /// running in the order they were attached.
@@ -301,6 +313,26 @@ mod tests {
 
     fn ours(ids: &[u32]) -> HashSet<u32> {
         ids.iter().copied().collect()
+    }
+
+    #[test]
+    fn a_forgotten_interface_starts_with_no_anchors() {
+        let gone = Hook {
+            interface: "veth-forget-test",
+            egress: false,
+        };
+        record_placed(gone, 7);
+        record_placed(
+            Hook {
+                egress: true,
+                ..gone
+            },
+            8,
+        );
+        assert_eq!(anchors("veth-forget-test", false), vec![7]);
+        forget("veth-forget-test");
+        assert_eq!(anchors("veth-forget-test", false), Vec::<u32>::new());
+        assert_eq!(anchors("veth-forget-test", true), Vec::<u32>::new());
     }
 
     #[test]
