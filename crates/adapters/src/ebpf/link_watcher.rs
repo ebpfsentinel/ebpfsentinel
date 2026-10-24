@@ -34,16 +34,25 @@
 //! A link of a kind the watcher does not know is logged once per kind, with
 //! the kind, and left alone: it is a gap an operator can read, not one that
 //! hides.
+//!
+//! Between a link appearing and the chain going on it, its traffic is not
+//! seen by the TC programs. That window is measured for every link the
+//! watcher heard announced, from the first message to the attach, and the
+//! packets the link had carried by then are read from the kernel's own
+//! counters for it, so the gap is a figure rather than an assumption. A link
+//! found by reading the table, at start or on a resync, has no announcement
+//! to measure from and is not counted.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use domain::container::engine::parse_cgroup_payload;
 use domain::container::entity::ContainerInfo;
+use ports::secondary::metrics_port::ContainerMetrics;
 use tokio::io::unix::AsyncFd;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -88,6 +97,7 @@ const RTMGRP_LINK: u32 = 1;
 const IFLA_IFNAME: u16 = 3;
 const IFLA_LINK: u16 = 5;
 const IFLA_MASTER: u16 = 10;
+const IFLA_STATS64: u16 = 23;
 const IFLA_LINKINFO: u16 = 18;
 const IFLA_LINK_NETNSID: u16 = 37;
 /// Members of the `IFLA_LINKINFO` nest.
@@ -264,6 +274,11 @@ pub struct Attach {
     pub kind: WorkloadKind,
     /// `true` when the link takes netkit's own hooks rather than TCX.
     pub via_netkit: bool,
+    /// When the first message announcing a new link was received, for a
+    /// link the watcher heard about rather than found in the table. `None`
+    /// as well when the link was already attached under another name or
+    /// kind: its traffic was guarded until the release just before.
+    pub heard_at: Option<Instant>,
 }
 
 /// A link the plan releases.
@@ -307,6 +322,8 @@ pub struct LinkTable {
     configured: HashSet<String>,
     attached: HashMap<u32, (String, WorkloadKind)>,
     reported_kinds: HashSet<String>,
+    /// First message received for each interface in the batch being folded.
+    heard: HashMap<u32, Instant>,
 }
 
 impl LinkTable {
@@ -318,6 +335,7 @@ impl LinkTable {
             configured: configured.into_iter().collect(),
             attached: HashMap::new(),
             reported_kinds: HashSet::new(),
+            heard: HashMap::new(),
         }
     }
 
@@ -348,6 +366,19 @@ impl LinkTable {
                 LinkEvent::New(link) => self.observe_link(link, &mut plan),
             }
         }
+        plan
+    }
+
+    /// Fold a batch of messages, each with the moment it was received, so a
+    /// link attached by this batch carries the time it was first announced.
+    pub fn observe_heard(&mut self, events: Vec<(Instant, LinkEvent)>) -> Plan {
+        for (at, event) in &events {
+            if let LinkEvent::New(link) = event {
+                self.heard.entry(link.ifindex).or_insert(*at);
+            }
+        }
+        let plan = self.observe(events.into_iter().map(|(_, e)| e).collect());
+        self.heard.clear();
         plan
     }
 
@@ -388,6 +419,10 @@ impl LinkTable {
             _ => None,
         };
         let held = self.attached.get(&link.ifindex).cloned();
+        let heard_at = match held {
+            None => self.heard.get(&link.ifindex).copied(),
+            Some(_) => None,
+        };
         match (held, wanted) {
             (Some((name, held_kind)), Some((kind, _)))
                 if name == link.name && held_kind == kind => {}
@@ -406,6 +441,7 @@ impl LinkTable {
                         link,
                         kind,
                         via_netkit,
+                        heard_at,
                     });
                 }
             }
@@ -677,8 +713,15 @@ impl OwnerResolver {
     }
 }
 
-/// Apply a plan: release, report, then attach with the owners found.
-pub fn apply(plan: &Plan, registry: &LinkHotPlugRegistry, resolver: &mut OwnerResolver) {
+/// Apply a plan: release, report, then attach with the owners found, and
+/// count how long each announced link went without the chain and what it
+/// carried meanwhile.
+pub fn apply(
+    plan: &Plan,
+    registry: &LinkHotPlugRegistry,
+    resolver: &mut OwnerResolver,
+    metrics: &dyn ContainerMetrics,
+) {
     for target in &plan.detach {
         registry.detach(target);
     }
@@ -698,7 +741,38 @@ pub fn apply(plan: &Plan, registry: &LinkHotPlugRegistry, resolver: &mut OwnerRe
     let owners = resolver.resolve(&wanted);
     for target in &plan.attach {
         let owner = target.link.link_netnsid.and_then(|n| owners.get(&n));
-        registry.attach(target, owner);
+        let attached = registry.attach(target, owner);
+        if attached > 0
+            && let Some(heard_at) = target.heard_at
+        {
+            record_gap(target, heard_at.elapsed(), metrics);
+        }
+    }
+}
+
+/// Count the window an announced link spent without the chain, and the
+/// packets it carried in that window as the kernel counted them.
+fn record_gap(target: &Attach, gap: Duration, metrics: &dyn ContainerMetrics) {
+    let kind = target.kind.as_str();
+    metrics.observe_link_attach_gap(kind, gap.as_secs_f64());
+    match link_packets(target.link.ifindex) {
+        Ok(packets) => {
+            metrics.record_link_unguarded_packets(kind, packets);
+            if packets > 0 {
+                debug!(
+                    iface = %target.link.name,
+                    kind,
+                    packets,
+                    gap_ms = gap.as_millis(),
+                    "hot-plug: workload link carried traffic before the chain was attached"
+                );
+            }
+        }
+        Err(error) => debug!(
+            iface = %target.link.name,
+            %error,
+            "hot-plug: packet counters of a workload link could not be read"
+        ),
     }
 }
 
@@ -930,6 +1004,39 @@ pub fn dump_links() -> io::Result<Vec<LinkInfo>> {
     }
 }
 
+/// Packets one link has carried, received plus sent, from its
+/// `IFLA_STATS64` counters.
+fn link_packets(ifindex: u32) -> io::Result<u64> {
+    let sock = NetlinkSocket::open(0, false)?;
+    let mut ifi = [0u8; IFINFOMSG_LEN];
+    ifi[0] = u8::try_from(libc::AF_UNSPEC).unwrap_or(0);
+    let index = i32::try_from(ifindex).map_err(io::Error::other)?;
+    ifi[4..8].copy_from_slice(&index.to_ne_bytes());
+    sock.send(&message(RTM_GETLINK, NLM_F_REQUEST, &ifi, &[]))?;
+    let mut buf = vec![0u8; 16 * 1024];
+    let got = sock.recv(&mut buf)?;
+    let mut packets = None;
+    let trailer = walk(&buf[..got], |msg_type, payload| {
+        if msg_type == RTM_NEWLINK {
+            packets = parse_link_packets(payload);
+        }
+    });
+    if let Some(errno) = trailer.error {
+        return Err(io::Error::from_raw_os_error(errno));
+    }
+    packets.ok_or_else(|| io::Error::other("no IFLA_STATS64 in the link reply"))
+}
+
+/// `rx_packets + tx_packets`, the first two members of the
+/// `rtnl_link_stats64` an `RTM_NEWLINK` payload carries.
+fn parse_link_packets(payload: &[u8]) -> Option<u64> {
+    let attrs = payload.get(nla_align(IFINFOMSG_LEN)..)?;
+    let stats = find_attr(attrs, IFLA_STATS64)?;
+    let rx = u64::from_ne_bytes(stats.get(0..8)?.try_into().ok()?);
+    let tx = u64::from_ne_bytes(stats.get(8..16)?.try_into().ok()?);
+    Some(rx.saturating_add(tx))
+}
+
 /// The id the namespace behind `ns_file` carries as seen from this socket's
 /// namespace, or `None` when it has none yet.
 fn namespace_id(sock: &NetlinkSocket, ns_file: &Path) -> io::Result<Option<i32>> {
@@ -985,14 +1092,19 @@ impl Subscription {
         })
     }
 
-    /// The link messages of the next datagram. `ENOBUFS` means messages
-    /// were lost and the table has to be read again.
-    async fn next(&mut self) -> io::Result<Vec<LinkEvent>> {
+    /// The link messages of the next datagram, each with the moment it was
+    /// read. `ENOBUFS` means messages were lost and the table has to be
+    /// read again.
+    async fn next(&mut self) -> io::Result<Vec<(Instant, LinkEvent)>> {
         loop {
             let mut guard = self.fd.readable().await?;
             let buf = &mut self.buf;
             match guard.try_io(|inner| inner.get_ref().recv(buf)) {
-                Ok(Ok(got)) => return Ok(parse_link_messages(&self.buf[..got]).0),
+                Ok(Ok(got)) => {
+                    let at = Instant::now();
+                    let (events, _) = parse_link_messages(&self.buf[..got]);
+                    return Ok(events.into_iter().map(|e| (at, e)).collect());
+                }
                 Ok(Err(e)) => return Err(e),
                 Err(_would_block) => {}
             }
@@ -1001,7 +1113,7 @@ impl Subscription {
 }
 
 enum Batch {
-    Events(Vec<LinkEvent>),
+    Events(Vec<(Instant, LinkEvent)>),
     Overrun,
     Failed(io::Error),
 }
@@ -1030,6 +1142,7 @@ struct Worker {
     table: LinkTable,
     resolver: OwnerResolver,
     registry: Arc<LinkHotPlugRegistry>,
+    metrics: Arc<dyn ContainerMetrics>,
 }
 
 impl Worker {
@@ -1037,18 +1150,20 @@ impl Worker {
         match dump_links() {
             Ok(links) => {
                 let plan = self.table.resync(links);
-                if !plan.is_empty() {
-                    apply(&plan, &self.registry, &mut self.resolver);
-                }
+                self.apply(&plan);
             }
             Err(error) => warn!(%error, "hot-plug: the link table could not be read"),
         }
     }
 
-    fn observe(&mut self, events: Vec<LinkEvent>) {
-        let plan = self.table.observe(events);
+    fn observe(&mut self, events: Vec<(Instant, LinkEvent)>) {
+        let plan = self.table.observe_heard(events);
+        self.apply(&plan);
+    }
+
+    fn apply(&mut self, plan: &Plan) {
         if !plan.is_empty() {
-            apply(&plan, &self.registry, &mut self.resolver);
+            apply(plan, &self.registry, &mut self.resolver, &*self.metrics);
         }
     }
 }
@@ -1075,6 +1190,7 @@ pub async fn watch_links(
     registry: Arc<LinkHotPlugRegistry>,
     table: LinkTable,
     proc_root: PathBuf,
+    metrics: Arc<dyn ContainerMetrics>,
     cancel: CancellationToken,
 ) {
     let mut sub = match Subscription::open() {
@@ -1092,6 +1208,7 @@ pub async fn watch_links(
         table,
         resolver: OwnerResolver::new(proc_root),
         registry,
+        metrics,
     }));
     // The first tick fires at once: that is the initial read of the table,
     // taken after the subscription so nothing between the two is missed.
@@ -1128,6 +1245,26 @@ mod tests {
     use super::*;
 
     const ALL: HookPolicy = HookPolicy::Auto;
+
+    /// What the watcher reported through the metrics port.
+    #[derive(Default)]
+    struct Recorded {
+        gaps: Mutex<Vec<(String, f64)>>,
+        packets: Mutex<Vec<(String, u64)>>,
+    }
+
+    impl ContainerMetrics for Recorded {
+        fn observe_link_attach_gap(&self, kind: &str, seconds: f64) {
+            self.gaps.lock().unwrap().push((kind.to_owned(), seconds));
+        }
+
+        fn record_link_unguarded_packets(&self, kind: &str, packets: u64) {
+            self.packets
+                .lock()
+                .unwrap()
+                .push((kind.to_owned(), packets));
+        }
+    }
 
     fn link(ifindex: u32, name: &str, kind: Option<&str>) -> LinkInfo {
         LinkInfo {
@@ -1425,6 +1562,7 @@ mod tests {
             link: link(999_999, "nonexistent_xyz", Some("veth")),
             kind: WorkloadKind::Veth,
             via_netkit: false,
+            heard_at: Some(Instant::now()),
         };
         assert_eq!(reg.attach(&target, None), 0);
         assert_eq!(reg.link_count(), 0);
@@ -1435,6 +1573,113 @@ mod tests {
         assert_eq!(reg.program_count(), 1);
     }
 
+    #[test]
+    fn an_announced_link_carries_the_moment_it_was_first_heard() {
+        let mut table = LinkTable::new(ALL, []);
+        let first = Instant::now();
+        let later = first + Duration::from_millis(40);
+        let mut moved = link(7, "veth7", Some("veth"));
+        moved.link_netnsid = Some(2);
+        let plan = table.observe_heard(vec![
+            (first, new(7, "veth7", "veth")),
+            (later, LinkEvent::New(moved)),
+        ]);
+        assert_eq!(plan.attach.len(), 1);
+        assert_eq!(plan.attach[0].heard_at, Some(first));
+        assert_eq!(plan.attach[0].link.link_netnsid, Some(2));
+    }
+
+    #[test]
+    fn a_link_found_in_the_table_has_no_announcement_to_measure_from() {
+        let mut table = LinkTable::new(ALL, []);
+        let plan = table.resync(vec![link(3, "veth3", Some("veth"))]);
+        assert_eq!(plan.attach.len(), 1);
+        assert_eq!(plan.attach[0].heard_at, None);
+    }
+
+    #[test]
+    fn a_renamed_link_is_not_counted_as_unguarded() {
+        let mut table = LinkTable::new(ALL, []);
+        table.observe_heard(vec![(Instant::now(), new(9, "veth9", "veth"))]);
+        let plan = table.observe_heard(vec![(Instant::now(), new(9, "eth-pod", "veth"))]);
+        assert_eq!(names(&plan), (vec!["eth-pod"], vec!["veth9"]));
+        assert_eq!(plan.attach[0].heard_at, None);
+    }
+
+    #[test]
+    fn a_heard_link_that_is_not_attached_leaves_nothing_behind() {
+        let mut table = LinkTable::new(ALL, []);
+        table.observe_heard(vec![(Instant::now(), new(12, "tap0", "tun"))]);
+        // Joining a bridge later is a resync finding, not the old announcement.
+        let mut tap = link(12, "tap0", Some("tun"));
+        tap.slave_kind = Some("bridge".into());
+        let plan = table.resync(vec![tap]);
+        assert_eq!(plan.attach[0].heard_at, None);
+    }
+
+    #[test]
+    fn link_counters_are_read_from_the_stats64_attribute() {
+        let mut stats = vec![0u8; 24 * 8];
+        stats[0..8].copy_from_slice(&1_200u64.to_ne_bytes());
+        stats[8..16].copy_from_slice(&34u64.to_ne_bytes());
+        stats[16..24].copy_from_slice(&999_999u64.to_ne_bytes());
+        let mut payload = vec![0u8; IFINFOMSG_LEN];
+        payload.extend(attr(IFLA_IFNAME, b"veth0\0"));
+        payload.extend(attr(IFLA_STATS64, &stats));
+        assert_eq!(parse_link_packets(&payload), Some(1_234));
+        let mut bare = vec![0u8; IFINFOMSG_LEN];
+        bare.extend(attr(IFLA_IFNAME, b"veth0\0"));
+        assert_eq!(parse_link_packets(&bare), None);
+    }
+
+    #[test]
+    fn the_gap_and_the_packets_carried_meanwhile_are_reported() {
+        let lo = dump_links()
+            .unwrap()
+            .into_iter()
+            .find(|l| l.name == "lo")
+            .unwrap();
+        let target = Attach {
+            link: lo,
+            kind: WorkloadKind::Veth,
+            via_netkit: false,
+            heard_at: None,
+        };
+        let recorded = Recorded::default();
+        record_gap(&target, Duration::from_millis(120), &recorded);
+        assert_eq!(
+            *recorded.gaps.lock().unwrap(),
+            vec![("veth".to_owned(), 0.12)]
+        );
+        let packets = recorded.packets.lock().unwrap();
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].0, "veth");
+    }
+
+    #[test]
+    fn an_attach_that_made_no_link_reports_no_gap() {
+        let mut reg = LinkHotPlugRegistry::new();
+        reg.register("tc_ids".into(), -1, HookSide::Ingress);
+        let plan = Plan {
+            attach: vec![Attach {
+                link: link(999_998, "nonexistent_abc", Some("veth")),
+                kind: WorkloadKind::Veth,
+                via_netkit: false,
+                heard_at: Some(Instant::now()),
+            }],
+            ..Plan::default()
+        };
+        let recorded = Recorded::default();
+        apply(
+            &plan,
+            &reg,
+            &mut OwnerResolver::new(PathBuf::from("/proc")),
+            &recorded,
+        );
+        assert!(recorded.gaps.lock().unwrap().is_empty());
+        assert!(recorded.packets.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn the_watcher_starts_and_stops() {
         let cancel = CancellationToken::new();
@@ -1442,6 +1687,7 @@ mod tests {
             Arc::new(LinkHotPlugRegistry::new()),
             LinkTable::new(ALL, []),
             PathBuf::from("/proc"),
+            Arc::new(Recorded::default()),
             cancel.clone(),
         ));
         tokio::time::sleep(Duration::from_millis(50)).await;

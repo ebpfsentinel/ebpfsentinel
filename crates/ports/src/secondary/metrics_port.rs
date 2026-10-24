@@ -453,6 +453,14 @@ pub trait ContainerMetrics: Send + Sync {
 
     /// Increment the container resolver read-error counter.
     fn record_container_resolver_error(&self) {}
+
+    /// Record how long a workload link of `kind` existed before the agent's
+    /// TC chain was attached to it, from the first message announcing it.
+    fn observe_link_attach_gap(&self, _kind: &str, _seconds: f64) {}
+
+    /// Add the packets a workload link of `kind` had carried, both
+    /// directions, by the time the agent's TC chain was attached to it.
+    fn record_link_unguarded_packets(&self, _kind: &str, _packets: u64) {}
 }
 
 // ── Netfilter conntrack metrics ────────────────────────────────────

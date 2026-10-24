@@ -57,6 +57,14 @@ pub struct ComponentLabels {
     pub component: String,
 }
 
+/// Labels for the workload link hot-plug: `kind` is the link kind the
+/// watcher classified (`veth`, `netkit`, `macvlan`, `ipvlan`,
+/// `bridge-member`).
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct LinkKindLabels {
+    pub kind: String,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct ProgramLabels {
     pub program: String,
@@ -369,6 +377,12 @@ pub struct AgentMetrics {
     pub container_resolver_cache_hits_total: Counter,
     pub container_resolver_cache_misses_total: Counter,
     pub container_resolver_errors_total: Counter,
+    /// Time from the first message announcing a workload link to the agent's
+    /// TC chain being attached to it.
+    pub link_attach_gap_seconds: Family<LinkKindLabels, Histogram>,
+    /// Packets workload links had carried, both directions, by the time the
+    /// agent's TC chain was attached to them.
+    pub link_attach_unguarded_packets_total: Family<LinkKindLabels, Counter>,
     /// IDS flow-kill counter - times the IDS pipeline decided to
     /// mark a conntrack entry `IPS_DYING` to terminate a live flow
     /// following a block-mode rule match.
@@ -981,6 +995,26 @@ impl AgentMetrics {
             container_resolver_errors_total.clone(),
         );
 
+        // The window is a debounce of a tenth of a second plus a few
+        // syscalls per program, so the range starts well under it and ends
+        // where a link has plainly been missed until a resync.
+        let link_attach_gap_seconds =
+            Family::<LinkKindLabels, Histogram>::new_with_constructor(|| {
+                Histogram::new(exponential_buckets_range(0.001, 120.0, 14))
+            });
+        registry.register(
+            "link_attach_gap_seconds",
+            "Time from the first message announcing a workload link to the TC chain being attached to it, by link kind",
+            link_attach_gap_seconds.clone(),
+        );
+
+        let link_attach_unguarded_packets_total = Family::<LinkKindLabels, Counter>::default();
+        registry.register(
+            "link_attach_unguarded_packets",
+            "Packets workload links carried, both directions, before the TC chain was attached to them, by link kind",
+            link_attach_unguarded_packets_total.clone(),
+        );
+
         let ids_ct_dying_total = Counter::default();
         registry.register(
             "ids_ct_dying",
@@ -1087,6 +1121,8 @@ impl AgentMetrics {
             container_resolver_cache_hits_total,
             container_resolver_cache_misses_total,
             container_resolver_errors_total,
+            link_attach_gap_seconds,
+            link_attach_unguarded_packets_total,
             ids_ct_dying_total,
             fingerprints_seen_total,
             bpf_token_used,
@@ -1759,6 +1795,22 @@ impl ports::secondary::metrics_port::ContainerMetrics for AgentMetrics {
     fn record_container_resolver_error(&self) {
         self.container_resolver_errors_total.inc();
     }
+
+    fn observe_link_attach_gap(&self, kind: &str, seconds: f64) {
+        self.link_attach_gap_seconds
+            .get_or_create(&LinkKindLabels {
+                kind: kind.to_owned(),
+            })
+            .observe(seconds);
+    }
+
+    fn record_link_unguarded_packets(&self, kind: &str, packets: u64) {
+        self.link_attach_unguarded_packets_total
+            .get_or_create(&LinkKindLabels {
+                kind: kind.to_owned(),
+            })
+            .inc_by(packets);
+    }
 }
 
 impl ports::secondary::metrics_port::CtMetrics for AgentMetrics {
@@ -2313,6 +2365,8 @@ mod tests {
         ("lb_vip_takeovers", "counter"),
         ("learning_edges", "gauge"),
         ("learning_observations", "counter"),
+        ("link_attach_gap_seconds", "histogram"),
+        ("link_attach_unguarded_packets", "counter"),
         ("memory_usage_bytes", "gauge"),
         ("open_fds", "gauge"),
         ("packet_processing_duration_seconds", "histogram"),
@@ -2596,6 +2650,11 @@ mod tests {
                 peer: "tor1".into(),
             })
             .set(1);
+        m.link_attach_unguarded_packets_total
+            .get_or_create(&LinkKindLabels {
+                kind: "veth".into(),
+            })
+            .inc_by(4);
     }
 
     /// One observation in every histogram, family or not: a histogram is
@@ -2618,6 +2677,11 @@ mod tests {
             })
             .observe(0.000_01);
         m.dlp_scan_duration_seconds.observe(0.000_01);
+        m.link_attach_gap_seconds
+            .get_or_create(&LinkKindLabels {
+                kind: "veth".into(),
+            })
+            .observe(0.12);
     }
 
     #[test]

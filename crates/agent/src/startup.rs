@@ -73,7 +73,7 @@ use ports::secondary::audit_sink::AuditSink;
 use ports::secondary::audit_store::AuditStore;
 use ports::secondary::auth_provider::AuthProvider;
 use ports::secondary::ebpf_map_port::FirewallArrayMapPort;
-use ports::secondary::metrics_port::{FirewallMetrics, MetricsPort};
+use ports::secondary::metrics_port::{ContainerMetrics, FirewallMetrics, MetricsPort};
 use ports::secondary::mitigation_store::MitigationStore;
 use ports::secondary::rule_change_store::RuleChangeStore;
 use tokio::sync::{RwLock, broadcast, mpsc};
@@ -3435,6 +3435,7 @@ pub async fn run(
                 Arc::new(registry),
                 table,
                 host_proc_root(),
+                Arc::clone(&metrics) as Arc<dyn ContainerMetrics>,
                 cancel_token.clone(),
             ));
             info!(
