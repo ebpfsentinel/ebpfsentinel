@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use crate::api_client::{
     AlertResponse, ApiClient, ConnectionResponse, ConntrackEventFrame, IdsRuleResponse,
     IpsRuleResponse, LearningScopeBody, LearningSelector, LearningSessionResponse,
-    StartLearningBody, StreamOpenError,
+    NetpolReplayBody, NetpolReplayResponse, StartLearningBody, StreamOpenError,
 };
 use crate::cli::OutputFormat;
 use crate::table::{Align, Table, cells};
@@ -4619,6 +4619,90 @@ pub async fn cmd_conntrack_flush(client: &ApiClient, output: OutputFormat) -> Re
     }
 
     println!("Conntrack table flushed: {} entry(ies).", resp.flushed);
+    Ok(())
+}
+
+// ── Network policy ───────────────────────────────────────
+
+/// `netpol replay` - what proposed policies would refuse of the tracked
+/// connections.
+pub async fn cmd_netpol_replay(
+    client: &ApiClient,
+    file: &str,
+    limit: Option<usize>,
+    output: OutputFormat,
+) -> Result<()> {
+    let manifests = if file == "-" {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+            .context("reading the manifests from standard input")?;
+        text
+    } else {
+        std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?
+    };
+    let report = client
+        .replay_netpol(&NetpolReplayBody { manifests, limit })
+        .await?;
+    print_netpol_replay(&report, output)
+}
+
+fn print_netpol_replay(report: &NetpolReplayResponse, output: OutputFormat) -> Result<()> {
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+
+    println!(
+        "{} connections read, {} with a pod at one end: {} newly refused, {} refused already.",
+        report.flows, report.judged, report.newly_refused, report.still_refused
+    );
+    // No connection with a pod at either end means nothing was checked, which
+    // is not the same answer as a proposal that refuses nothing.
+    if report.judged == 0 {
+        println!("No tracked connection had a pod at either end, so nothing was checked.");
+        return Ok(());
+    }
+    if report.workloads.is_empty() {
+        println!("Nothing tracked on this node would be refused.");
+        return Ok(());
+    }
+    let mut table = Table::new(&[
+        ("NAMESPACE", Align::Left),
+        ("POD", Align::Left),
+        ("DIRECTION", Align::Left),
+        ("PEER", Align::Left),
+        ("PROTO", Align::Left),
+        ("PORT", Align::Right),
+        ("FLOWS", Align::Right),
+        ("TODAY", Align::Left),
+    ]);
+    for workload in &report.workloads {
+        for flow in &workload.refused {
+            let proto = match flow.protocol {
+                6 => "TCP",
+                17 => "UDP",
+                132 => "SCTP",
+                1 => "ICMP",
+                58 => "ICMPv6",
+                _ => "OTHER",
+            };
+            table.row(cells![
+                workload.namespace,
+                workload.pod,
+                flow.direction,
+                flow.peer,
+                proto,
+                flow.port,
+                flow.flows,
+                if flow.already_refused {
+                    "refused"
+                } else {
+                    "allowed"
+                }
+            ]);
+        }
+    }
+    table.print();
     Ok(())
 }
 

@@ -590,6 +590,7 @@ mod tests {
             bytes_fwd: bytes,
             bytes_rev: bytes,
             workload: None,
+            reply: None,
         }
     }
 

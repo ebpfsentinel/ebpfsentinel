@@ -160,6 +160,9 @@ pub enum Command {
     /// Learning mode - watch what this node reaches, for a window you declare
     Learning(DomainArgs<LearningCommand>),
 
+    /// Kubernetes network policy - what a proposed policy would refuse
+    Netpol(DomainArgs<NetpolCommand>),
+
     /// Connection tracking - live flow events and status
     Conntrack {
         #[command(subcommand)]
@@ -315,6 +318,22 @@ pub enum LearningCommand {
         /// Write the document to this file instead of to standard output
         #[arg(short = 'f', long)]
         output_file: Option<PathBuf>,
+    },
+}
+
+// ── Network policy ──────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum NetpolCommand {
+    /// Replay network policy manifests against the connections this node
+    /// tracks, and list what they would refuse, by pod. Changes nothing.
+    Replay {
+        /// The manifests, as a YAML file, or `-` for standard input
+        file: String,
+
+        /// How many tracked connections to replay
+        #[arg(long)]
+        limit: Option<usize>,
     },
 }
 

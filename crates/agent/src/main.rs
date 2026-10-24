@@ -13,7 +13,7 @@ use cli::{
     AlertsCommand, AliasesCommand, AuditCommand, BlacklistAction, CaptureCommand, Command,
     ConfigCommand, DdosCommand, DlpCommand, DnsCommand, DomainsCommand, EbpfCommand, FeedsAction,
     FingerprintsCommand, FirewallCommand, FlowsAction, GeoipCommand, IdsCommand, IpsCommand,
-    L7Command, LbCommand, LearningCommand, MitreCommand, NatCommand, NptV6Command,
+    L7Command, LbCommand, LearningCommand, MitreCommand, NatCommand, NetpolCommand, NptV6Command,
     ProcessesCommand, QosCommand, RatelimitCommand, ResponsesCommand, RoutingCommand,
     ThreatintelCommand, TlsCommand, ZonesCommand,
 };
@@ -136,6 +136,15 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
                 }
                 LearningCommand::Policy { id, output_file } => {
                     commands::cmd_learning_policy(&client, id, output_file, output).await
+                }
+            }
+        }
+
+        Some(Command::Netpol(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                NetpolCommand::Replay { file, limit } => {
+                    commands::cmd_netpol_replay(&client, &file, limit, output).await
                 }
             }
         }

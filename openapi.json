@@ -5660,6 +5660,86 @@
         ]
       }
     },
+    "/api/v1/netpol/replay": {
+      "post": {
+        "tags": [
+          "NetworkPolicy"
+        ],
+        "summary": "`POST /api/v1/netpol/replay` - what proposed policies would have refused.",
+        "description": "Changes nothing: the proposal is compiled beside the policies in force\nand the connections this node tracks are put to both.",
+        "operationId": "replay_netpol",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NetpolReplayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What the proposal would have refused, by pod",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetpolReplayResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The manifests are not namespaced NetworkPolicy objects",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Network policy or connection tracking is off on this node",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/processes": {
       "get": {
         "tags": [
@@ -12136,6 +12216,126 @@
         ],
         "description": "The addresses and ports a translation rewrites to.\n\nTagged with the same word `nat_type` carries, since a reader deciding what\na rule does reads the two together."
       },
+      "NetpolRefusedFlow": {
+        "type": "object",
+        "required": [
+          "direction",
+          "peer",
+          "protocol",
+          "port",
+          "already_refused",
+          "flows"
+        ],
+        "properties": {
+          "already_refused": {
+            "type": "boolean",
+            "description": "The policies in force refuse it already."
+          },
+          "direction": {
+            "type": "string",
+            "description": "`ingress` or `egress`, seen from the pod that would refuse."
+          },
+          "flows": {
+            "type": "integer",
+            "description": "How many tracked connections had this shape.",
+            "minimum": 0
+          },
+          "peer": {
+            "type": "string",
+            "description": "The address at the other end, as the deciding hook sees it: the\ndestination the pod connected to, a Service address included, or\nthe source the pod was reached from."
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "protocol": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "NetpolReplayRequest": {
+        "type": "object",
+        "required": [
+          "manifests"
+        ],
+        "properties": {
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "How many tracked connections to replay, at most 100000.",
+            "minimum": 0
+          },
+          "manifests": {
+            "type": "string",
+            "description": "One or more `networking.k8s.io/v1` `NetworkPolicy` manifests, as a\nYAML stream. A `List` is read item by item. A policy with the\nnamespace and name of one in force replaces it; any other is added."
+          }
+        }
+      },
+      "NetpolReplayResponse": {
+        "type": "object",
+        "required": [
+          "flows",
+          "judged",
+          "newly_refused",
+          "still_refused",
+          "workloads"
+        ],
+        "properties": {
+          "flows": {
+            "type": "integer",
+            "description": "Tracked connections read.",
+            "minimum": 0
+          },
+          "judged": {
+            "type": "integer",
+            "description": "Connections with a known pod at one end at least, the only ones a\npolicy can decide.",
+            "minimum": 0
+          },
+          "newly_refused": {
+            "type": "integer",
+            "description": "Connections the proposal refuses that the policies in force let\nthrough.",
+            "minimum": 0
+          },
+          "still_refused": {
+            "type": "integer",
+            "description": "Connections the proposal refuses that are refused already.",
+            "minimum": 0
+          },
+          "workloads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NetpolWorkloadReplay"
+            }
+          }
+        }
+      },
+      "NetpolWorkloadReplay": {
+        "type": "object",
+        "required": [
+          "namespace",
+          "pod",
+          "refused"
+        ],
+        "properties": {
+          "namespace": {
+            "type": "string"
+          },
+          "pod": {
+            "type": "string"
+          },
+          "refused": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NetpolRefusedFlow"
+            }
+          }
+        }
+      },
       "NptV6RuleResponse": {
         "type": "object",
         "description": "Response DTO for an `NPTv6` prefix translation rule.",
@@ -14078,6 +14278,10 @@
     {
       "name": "Learning",
       "description": "Learning mode: what this node reached, for a declared window and scope"
+    },
+    {
+      "name": "NetworkPolicy",
+      "description": "What proposed Kubernetes NetworkPolicy would refuse, replayed against tracked connections"
     },
     {
       "name": "IDS",

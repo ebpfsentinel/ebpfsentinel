@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use domain::common::error::DomainError;
-use domain::conntrack::entity::{ConnTrackSettings, Connection, ConnectionState};
+use domain::conntrack::entity::{ConnTrackSettings, Connection, ConnectionState, ReplyTuple};
 use ebpfsentinel_warden_client::{ConntrackTuple, ReconnectingClient};
 use ports::secondary::conntrack_kill_port::{ConnTrackFlow, ConnTrackKillPort};
 use ports::secondary::conntrack_map_port::ConnTrackMapPort;
@@ -469,6 +469,10 @@ fn parse_nf_conntrack_line(line: &str) -> Option<Connection> {
     let mut bytes_fwd: u32 = 0;
     let mut packets_rev: u32 = 0;
     let mut bytes_rev: u32 = 0;
+    let mut reply_src = String::new();
+    let mut reply_dst = String::new();
+    let mut reply_sport: u16 = 0;
+    let mut reply_dport: u16 = 0;
 
     // Track whether we've seen the reply tuple. The original and reply
     // tuples both have src=/dst=/sport=/dport= so we count occurrences.
@@ -477,20 +481,28 @@ fn parse_nf_conntrack_line(line: &str) -> Option<Connection> {
     for token in &tokens[tuple_start..] {
         if let Some(val) = token.strip_prefix("src=") {
             src_count += 1;
-            if src_count == 1 {
-                src_ip = val.to_string();
+            match src_count {
+                1 => src_ip = val.to_string(),
+                2 => reply_src = val.to_string(),
+                _ => {}
             }
         } else if let Some(val) = token.strip_prefix("dst=") {
-            if src_count == 1 {
-                dst_ip = val.to_string();
+            match src_count {
+                1 => dst_ip = val.to_string(),
+                2 => reply_dst = val.to_string(),
+                _ => {}
             }
         } else if let Some(val) = token.strip_prefix("sport=") {
-            if src_count == 1 {
-                src_port = val.parse().unwrap_or(0);
+            match src_count {
+                1 => src_port = val.parse().unwrap_or(0),
+                2 => reply_sport = val.parse().unwrap_or(0),
+                _ => {}
             }
         } else if let Some(val) = token.strip_prefix("dport=") {
-            if src_count == 1 {
-                dst_port = val.parse().unwrap_or(0);
+            match src_count {
+                1 => dst_port = val.parse().unwrap_or(0),
+                2 => reply_dport = val.parse().unwrap_or(0),
+                _ => {}
             }
         } else if let Some(val) = token.strip_prefix("packets=") {
             let p: u32 = val.parse().unwrap_or(0);
@@ -512,6 +524,12 @@ fn parse_nf_conntrack_line(line: &str) -> Option<Connection> {
     if src_ip.is_empty() || dst_ip.is_empty() {
         return None;
     }
+    let reply = (!reply_src.is_empty() && !reply_dst.is_empty()).then_some(ReplyTuple {
+        src_ip: reply_src,
+        dst_ip: reply_dst,
+        src_port: reply_sport,
+        dst_port: reply_dport,
+    });
 
     Some(Connection {
         src_ip,
@@ -525,6 +543,7 @@ fn parse_nf_conntrack_line(line: &str) -> Option<Connection> {
         bytes_fwd,
         bytes_rev,
         workload: None,
+        reply,
     })
 }
 
@@ -629,6 +648,22 @@ mod tests {
         assert_eq!(conn.dst_port, 443);
         assert_eq!(conn.protocol, 6);
         assert_eq!(conn.state, ConnectionState::Established);
+    }
+
+    #[test]
+    fn a_translated_flow_keeps_the_backend_it_reached() {
+        let line = "ipv4     2 tcp      6 431999 ESTABLISHED src=10.244.1.7 dst=10.96.0.10 sport=40000 dport=80 src=10.244.2.9 dst=10.244.1.7 sport=8080 dport=40000 [ASSURED] mark=0 use=2";
+        let conn = parse_nf_conntrack_line(line).unwrap();
+        assert_eq!(conn.dst_ip, "10.96.0.10");
+        assert_eq!(
+            conn.reply,
+            Some(ReplyTuple {
+                src_ip: "10.244.2.9".into(),
+                dst_ip: "10.244.1.7".into(),
+                src_port: 8080,
+                dst_port: 40000,
+            })
+        );
     }
 
     #[test]

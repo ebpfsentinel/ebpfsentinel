@@ -102,6 +102,43 @@ pub struct WorkloadReachResponse {
     pub rules: Vec<WorkloadReachEntry>,
 }
 
+/// The body of `POST /api/v1/netpol/replay`.
+#[derive(Debug, Clone, Serialize)]
+pub struct NetpolReplayBody {
+    pub manifests: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// A flow shape the proposed policies would refuse.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NetpolRefusedFlow {
+    pub direction: String,
+    pub peer: String,
+    pub protocol: u8,
+    pub port: u16,
+    pub already_refused: bool,
+    pub flows: usize,
+}
+
+/// Everything one pod would refuse.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NetpolWorkloadReplay {
+    pub namespace: String,
+    pub pod: String,
+    pub refused: Vec<NetpolRefusedFlow>,
+}
+
+/// What a replay found.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NetpolReplayResponse {
+    pub flows: usize,
+    pub judged: usize,
+    pub newly_refused: usize,
+    pub still_refused: usize,
+    pub workloads: Vec<NetpolWorkloadReplay>,
+}
+
 /// One of the selectors a learning scope is written with.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct LearningSelector {
@@ -2381,6 +2418,21 @@ impl ApiClient {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/conntrack/connections")
             .query(&[("limit", limit.to_string())])
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── Network policy ───────────────────────────────
+
+    pub async fn replay_netpol(
+        &self,
+        body: &NetpolReplayBody,
+    ) -> anyhow::Result<NetpolReplayResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/netpol/replay")
+            .json(body)
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

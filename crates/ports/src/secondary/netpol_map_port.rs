@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use domain::common::error::DomainError;
-use domain::netpol::{ClusterView, CompiledPolicy};
+use domain::netpol::{ClusterView, CompiledPolicy, NetworkPolicy};
 
 /// What one write of the policy maps left in the kernel.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -55,4 +55,18 @@ pub trait PodCgroupPort: Send + Sync {
 pub trait ClusterViewPort: Send + Sync {
     /// The policies, pods, namespaces and services as they stand now.
     fn view(&self) -> ClusterView;
+}
+
+/// Secondary port reading `NetworkPolicy` manifests into the domain's terms.
+///
+/// The same translation the watchers apply to what the API server holds,
+/// applied to a document nobody has submitted yet.
+///
+/// Implemented by `NetworkPolicyManifests` in the adapter layer.
+pub trait NetworkPolicyManifestPort: Send + Sync {
+    /// Every policy in a YAML stream, or the reason the stream is refused.
+    /// A document that is not a `NetworkPolicy`, or names no namespace, is
+    /// refused rather than skipped, because a replay that quietly left a
+    /// policy out would answer for a set nobody proposed.
+    fn parse(&self, manifests: &str) -> Result<Vec<NetworkPolicy>, DomainError>;
 }

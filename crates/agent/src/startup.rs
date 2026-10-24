@@ -1858,6 +1858,8 @@ pub async fn run(
     let mut workload_firewall_attacher: Option<
         adapters::ebpf::workload_firewall_attach::WorkloadFirewallAttacher,
     > = None;
+    let mut netpol_replay: Option<Arc<application::netpol_replay_service::NetpolReplayService>> =
+        None;
     let mut workload_policy_service: Option<
         Arc<application::workload_policy_service::WorkloadPolicyService>,
     > = None;
@@ -2871,7 +2873,7 @@ pub async fn run(
                     }
 
                     if netpol_on {
-                        start_network_policy(
+                        netpol_replay = start_network_policy(
                             &mut loader,
                             &config,
                             &mut metrics_readers,
@@ -3529,6 +3531,9 @@ pub async fn run(
     // The screen and the command answering "what may this workload reach"
     // read the policy in force rather than the document, because a rule the
     // kernel refused to take is a rule that answers nothing.
+    if let Some(replay) = netpol_replay {
+        app_state.install_netpol_replay(replay);
+    }
     if let Some(ref workload) = workload_policy_service {
         app_state.install_workload_policy_service(Arc::clone(workload));
     }
@@ -5766,13 +5771,16 @@ fn network_policy_unavailable(reason: &str) -> String {
 /// rollout, and a document that changed with them would restart every agent
 /// of the cluster each time. In enforce mode every way of not getting there
 /// stops the agent; in observe mode it is said and the agent runs on.
+///
+/// What comes back is the replay, which reads the same cluster cache, and
+/// nothing when the cluster could not be read.
 #[cfg(feature = "kubernetes")]
 async fn start_network_policy(
     loader: &mut EbpfLoader,
     config: &AgentConfig,
     metrics_readers: &mut Vec<MetricsReader>,
     cancel: tokio_util::sync::CancellationToken,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<Arc<application::netpol_replay_service::NetpolReplayService>>> {
     let enforce = config.container.kubernetes.network_policy.mode
         == infrastructure::config::NetworkPolicyMode::Enforce;
     let refuse = |reason: String| {
@@ -5780,7 +5788,7 @@ async fn start_network_policy(
             Err(anyhow::anyhow!(network_policy_unavailable(&reason)))
         } else {
             warn!("network policy observes nothing: {reason}");
-            Ok(())
+            Ok(None)
         }
     };
     if !adapters::container::is_running_in_kubernetes() {
@@ -5804,6 +5812,12 @@ async fn start_network_policy(
     let cache = Arc::new(adapters::container::NetpolClusterCache::default());
     let changes = cache.subscribe();
     let _watchers = adapters::container::spawn_netpol_watchers(&client, &cache);
+    let replay = Arc::new(
+        application::netpol_replay_service::NetpolReplayService::new(
+            Arc::clone(&cache) as Arc<dyn ports::secondary::netpol_map_port::ClusterViewPort>,
+            Box::new(adapters::container::NetworkPolicyManifests),
+        ),
+    );
     let service = application::netpol_service::NetpolService::new(
         cache,
         Arc::new(adapters::container::PodCgroupScanner::new(
@@ -5813,7 +5827,7 @@ async fn start_network_policy(
         enforce,
     );
     tokio::spawn(service.run(changes, cancel));
-    Ok(())
+    Ok(Some(replay))
 }
 
 #[cfg(not(feature = "kubernetes"))]
@@ -5822,7 +5836,7 @@ async fn start_network_policy(
     config: &AgentConfig,
     _metrics_readers: &mut Vec<MetricsReader>,
     _cancel: tokio_util::sync::CancellationToken,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<Arc<application::netpol_replay_service::NetpolReplayService>>> {
     let reason = "this agent was built without Kubernetes support";
     if config.container.kubernetes.network_policy.mode
         == infrastructure::config::NetworkPolicyMode::Enforce
@@ -5830,7 +5844,7 @@ async fn start_network_policy(
         return Err(anyhow::anyhow!(network_policy_unavailable(reason)));
     }
     warn!("network policy observes nothing: {reason}");
-    Ok(())
+    Ok(None)
 }
 
 /// Load the process-tracing object and attach its two tracepoints.

@@ -102,6 +102,23 @@ pub struct Connection {
     /// it is present, and absence is never rendered as a zero.
     #[serde(default, skip_serializing_if = "crate::workload::entity::is_absent")]
     pub workload: Option<crate::workload::entity::Workload>,
+    /// The tuple the answers travel on, as the kernel table records it.
+    ///
+    /// It differs from the original one when an address was translated on
+    /// the way: its source is the backend a Service address was resolved to,
+    /// and its destination is the address the backend saw the flow come
+    /// from. Absent where the source carries only the original tuple.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<ReplyTuple>,
+}
+
+/// The reply direction of a tracked flow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyTuple {
+    pub src_ip: String,
+    pub dst_ip: String,
+    pub src_port: u16,
+    pub dst_port: u16,
 }
 
 /// Type of conntrack lifecycle event detected by the snapshot-diff

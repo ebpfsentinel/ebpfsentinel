@@ -116,23 +116,7 @@ fn allows(
     protocol: u8,
     port: u16,
 ) -> bool {
-    let Some(assignment) = compiled.pods.get(uid) else {
-        return true;
-    };
-    let isolated = match direction {
-        Direction::Ingress => assignment.ingress_isolated,
-        Direction::Egress => assignment.egress_isolated,
-    };
-    if !isolated {
-        return true;
-    }
-    let peer = NetPrefix::host(ip(peer));
-    compiled.slots[usize::from(assignment.slot)]
-        .entries
-        .iter()
-        .filter(|entry| entry.direction == direction && entry.prefix.contains(&peer))
-        .max_by_key(|entry| entry.prefix.len())
-        .is_some_and(|entry| entry.ports.allows(protocol, port))
+    compiled.admits(uid, direction, ip(peer), protocol, port)
 }
 
 fn base() -> ClusterView {

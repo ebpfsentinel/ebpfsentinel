@@ -449,6 +449,7 @@ mod tests {
             bytes_fwd: packets * 100,
             bytes_rev: packets * 100,
             workload: None,
+            reply: None,
         }
     }
 

@@ -172,6 +172,41 @@ impl CompiledPolicy {
     pub fn entry_count(&self) -> usize {
         self.slots.iter().map(|slot| slot.entries.len()).sum()
     }
+
+    /// The question the kernel asks of these tables: is a connection between
+    /// the pod `uid` and `peer`, on `port` of `protocol`, let through in
+    /// `direction`? The longest prefix holding the peer decides, and its
+    /// ports must open this one. A pod no policy selects, or one not
+    /// isolated in that direction, admits everything.
+    pub fn admits(
+        &self,
+        uid: &str,
+        direction: Direction,
+        peer: IpAddr,
+        protocol: u8,
+        port: u16,
+    ) -> bool {
+        let Some(assignment) = self.pods.get(uid) else {
+            return true;
+        };
+        let isolated = match direction {
+            Direction::Ingress => assignment.ingress_isolated,
+            Direction::Egress => assignment.egress_isolated,
+        };
+        if !isolated {
+            return true;
+        }
+        let peer = NetPrefix::host(peer);
+        self.slots
+            .get(usize::from(assignment.slot))
+            .and_then(|slot| {
+                slot.entries
+                    .iter()
+                    .filter(|entry| entry.direction == direction && entry.prefix.contains(&peer))
+                    .max_by_key(|entry| entry.prefix.len())
+            })
+            .is_some_and(|entry| entry.ports.allows(protocol, port))
+    }
 }
 
 /// What the compile knows about the node itself.

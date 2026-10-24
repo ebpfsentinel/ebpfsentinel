@@ -107,6 +107,7 @@ use super::mitre_handler::mitre_coverage;
 use super::nat_handler::{
     create_nptv6_rule, delete_nptv6_rule, list_nat_rules, list_nptv6_rules, nat_status,
 };
+use super::netpol_handler::replay_netpol;
 use super::openapi::ApiDoc;
 use super::ops_handler::{
     get_config, get_ebpf_status, get_kernel_features, get_uprobes, reload_config,
@@ -343,6 +344,7 @@ pub fn build_router(
             .route("/api/v1/firewall/l7-rules", post(create_l7_rule))
             .route("/api/v1/firewall/l7-rules/{id}", delete(delete_l7_rule))
             .route("/api/v1/learning/sessions", post(start_learning))
+            .route("/api/v1/netpol/replay", post(replay_netpol))
             .route("/api/v1/learning/sessions/{id}/stop", post(stop_learning))
             .route("/api/v1/ips/rules/{id}", patch(patch_ips_rule_mode))
             .route("/api/v1/ips/blacklist", post(add_ips_blacklist))

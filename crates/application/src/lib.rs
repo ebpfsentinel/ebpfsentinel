@@ -81,6 +81,7 @@ pub mod learning_collector;
 pub mod learning_service;
 pub mod nat_aliases;
 pub mod nat_service_impl;
+pub mod netpol_replay_service;
 pub mod netpol_service;
 pub mod packet_pipeline;
 pub mod process_signal_service;

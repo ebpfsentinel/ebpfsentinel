@@ -150,6 +150,11 @@ pub struct AppState {
     /// in which case the route says so rather than answering that nothing
     /// names this workload, which reads like a policy that admits it.
     pub workload_policy_service: ArcSwapOption<WorkloadPolicyService>,
+    /// The `NetworkPolicy` replay, where the cluster is read for policy.
+    /// Empty when network policy is off, its hooks did not attach, or the
+    /// agent was built without Kubernetes support, in which case the route
+    /// says so rather than answering that nothing would be refused.
+    pub netpol_replay: ArcSwapOption<application::netpol_replay_service::NetpolReplayService>,
     /// Learning mode. Empty when the configuration turns it off, in which
     /// case the routes say the node does not learn rather than answering
     /// that it learnt nothing.
@@ -189,6 +194,7 @@ impl AppState {
             process_table_service: ArcSwapOption::empty(),
             dlp_scope_service: ArcSwapOption::empty(),
             workload_policy_service: ArcSwapOption::empty(),
+            netpol_replay: ArcSwapOption::empty(),
             learning_service: ArcSwapOption::empty(),
             nat_service: None,
             alias_service: None,
@@ -366,6 +372,14 @@ impl AppState {
     /// Hand the workload policy over, once it is in force in the kernel.
     pub fn install_workload_policy_service(&self, svc: Arc<WorkloadPolicyService>) {
         self.workload_policy_service.store(Some(svc));
+    }
+
+    /// Hand the `NetworkPolicy` replay over, once the cluster is watched.
+    pub fn install_netpol_replay(
+        &self,
+        svc: Arc<application::netpol_replay_service::NetpolReplayService>,
+    ) {
+        self.netpol_replay.store(Some(svc));
     }
 
     /// Hand learning mode over, once whatever stores its windows is open.

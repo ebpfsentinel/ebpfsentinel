@@ -31,7 +31,7 @@ pub use k8s_enricher::{
     pod_info_from, resolve_node_name, spawn_pod_watcher, strip_cri_prefix, try_build_client,
 };
 #[cfg(feature = "kubernetes")]
-pub use netpol_watch::{NetpolClusterCache, spawn_netpol_watchers};
+pub use netpol_watch::{NetpolClusterCache, NetworkPolicyManifests, spawn_netpol_watchers};
 pub use pod_cgroups::PodCgroupScanner;
 pub use proc_details::ProcDetailsResolver;
 pub use proc_executable::ProcExecutableResolver;

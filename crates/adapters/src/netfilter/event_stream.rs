@@ -166,6 +166,7 @@ mod tests {
             bytes_fwd: 1000,
             bytes_rev: 500,
             workload: None,
+            reply: None,
         }
     }
 

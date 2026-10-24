@@ -28,6 +28,7 @@ use super::learning_handler;
 use super::metrics_handler;
 use super::mitre_handler;
 use super::nat_handler;
+use super::netpol_handler;
 use super::ops_handler;
 use super::process_handler;
 use super::qos_handler;
@@ -80,6 +81,7 @@ use super::zone_handler;
         learning_handler::get_learning,
         learning_handler::stop_learning,
         learning_handler::get_learning_policy,
+        netpol_handler::replay_netpol,
         // IPS
         ips_handler::list_ips_rules,
         ips_handler::patch_ips_rule_mode,
@@ -236,6 +238,10 @@ use super::zone_handler;
         learning_handler::LearningPolicyResponse,
         learning_handler::ScopeBody,
         learning_handler::WorkloadSelectorBody,
+        netpol_handler::NetpolReplayRequest,
+        netpol_handler::NetpolReplayResponse,
+        netpol_handler::NetpolWorkloadReplay,
+        netpol_handler::NetpolRefusedFlow,
         // IPS
         ips_handler::IpsRuleResponse,
         ips_handler::BlacklistEntryResponse,
@@ -391,6 +397,7 @@ use super::zone_handler;
         (name = "L7 Firewall", description = "Application-layer firewall rules"),
         (name = "IPS", description = "Intrusion prevention rules and blacklist"),
         (name = "Learning", description = "Learning mode: what this node reached, for a declared window and scope"),
+        (name = "NetworkPolicy", description = "What proposed Kubernetes NetworkPolicy would refuse, replayed against tracked connections"),
         (name = "IDS", description = "Intrusion detection status and rules"),
         (name = "Rate Limiting", description = "Rate limit policy management"),
         (name = "Alerts", description = "Alert queries and false-positive marking"),

@@ -17,6 +17,7 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use domain::common::error::DomainError;
 use domain::netpol::{
     ClusterView, Direction, IpBlock, LabelRequirement, LabelSelector, NamedPort, NamespaceView,
     NetPrefix, NetworkPolicy, Peer, PodView, PolicyPort, PolicyRule, PortRef, Protocol,
@@ -32,7 +33,8 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector as K8sLabelSel
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::runtime::watcher::{self, Event};
 use kube::{Api, Client, Resource};
-use ports::secondary::netpol_map_port::ClusterViewPort;
+use ports::secondary::netpol_map_port::{ClusterViewPort, NetworkPolicyManifestPort};
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -390,6 +392,60 @@ fn policy_from(object: &K8sNetworkPolicy) -> Option<NetworkPolicy> {
     converted
 }
 
+/// Reads `NetworkPolicy` manifests the way the watchers read the API
+/// server's objects, so a replayed policy means what it will mean once
+/// applied.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NetworkPolicyManifests;
+
+impl NetworkPolicyManifestPort for NetworkPolicyManifests {
+    fn parse(&self, manifests: &str) -> Result<Vec<NetworkPolicy>, DomainError> {
+        let mut objects = Vec::new();
+        for (index, document) in serde_norway::Deserializer::from_str(manifests).enumerate() {
+            let value = serde_norway::Value::deserialize(document).map_err(|error| {
+                DomainError::InvalidConfig(format!("document {}: {error}", index + 1))
+            })?;
+            if value.is_null() {
+                continue;
+            }
+            // `kubectl get -o yaml` wraps what it returns in a list.
+            if value.get("kind").and_then(serde_norway::Value::as_str) == Some("List") {
+                let items = value
+                    .get("items")
+                    .and_then(serde_norway::Value::as_sequence)
+                    .cloned()
+                    .unwrap_or_default();
+                objects.extend(items.into_iter().map(|item| (index, item)));
+            } else {
+                objects.push((index, value));
+            }
+        }
+        objects
+            .into_iter()
+            .map(|(index, value)| {
+                let object: K8sNetworkPolicy =
+                    serde_norway::from_value(value).map_err(|error| {
+                        DomainError::InvalidConfig(format!(
+                            "document {}: not a networking.k8s.io/v1 NetworkPolicy: {error}",
+                            index + 1
+                        ))
+                    })?;
+                let name = object.metadata.name.clone().unwrap_or_default();
+                if object.metadata.namespace.is_none() {
+                    return Err(DomainError::InvalidConfig(format!(
+                        "network policy {name:?} names no namespace, and a policy applies to one"
+                    )));
+                }
+                policy_from(&object).ok_or_else(|| {
+                    DomainError::InvalidConfig(format!(
+                        "network policy {name:?} carries a value it could not be read with"
+                    ))
+                })
+            })
+            .collect()
+    }
+}
+
 fn pod_from(pod: &Pod) -> Option<PodView> {
     let meta = &pod.metadata;
     let status = pod.status.as_ref();
@@ -553,6 +609,61 @@ mod tests {
             uid: Some(format!("{namespace}-{name}")),
             ..ObjectMeta::default()
         }
+    }
+
+    const API_POLICY: &str = "apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api
+  namespace: shop
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: web
+      ports:
+        - protocol: TCP
+          port: 8080
+";
+
+    #[test]
+    fn a_manifest_stream_reads_every_policy_in_it() {
+        let stream = format!(
+            "---\n{API_POLICY}---\napiVersion: v1\nkind: List\nitems:\n  - apiVersion: networking.k8s.io/v1\n    kind: NetworkPolicy\n    metadata: {{name: deny, namespace: shop}}\n    spec: {{podSelector: {{}}, policyTypes: [Egress]}}\n---\n"
+        );
+        let policies = NetworkPolicyManifests.parse(&stream).unwrap();
+        assert_eq!(policies.len(), 2);
+        assert_eq!(
+            (policies[0].namespace.as_str(), policies[0].name.as_str()),
+            ("shop", "api")
+        );
+        assert_eq!(
+            policies[0].ingress[0].ports[0].port,
+            Some(PortRef::Number(8080))
+        );
+        assert_eq!(policies[1].policy_types, Some(vec![Direction::Egress]));
+    }
+
+    #[test]
+    fn a_manifest_that_is_not_a_namespaced_policy_is_refused() {
+        let other_kind = API_POLICY.replace("kind: NetworkPolicy", "kind: Service");
+        let error = NetworkPolicyManifests.parse(&other_kind).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not a networking.k8s.io/v1 NetworkPolicy")
+        );
+
+        let no_namespace = API_POLICY.replace("  namespace: shop\n", "");
+        let error = NetworkPolicyManifests.parse(&no_namespace).unwrap_err();
+        assert!(error.to_string().contains("names no namespace"));
+
+        let bad_type = API_POLICY.replace("ingress:\n", "policyTypes: [Sideways]\n  ingress:\n");
+        assert!(NetworkPolicyManifests.parse(&bad_type).is_err());
     }
 
     #[test]
