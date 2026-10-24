@@ -118,6 +118,9 @@ suite_profiles:
   # 67 loads every program at once: the only lane where a verifier refusal
   # is visible, so it runs on every pull request rather than nightly.
   "67": pr
+  # 69 needs root and a Docker daemon, both on the hosted runner, and proves
+  # the deny rule holds where Docker's DNAT would otherwise walk past it.
+  "69": pr
   "perf/01": nightly
   "perf/02": nightly
   "perf/03": nightly
@@ -130,11 +133,11 @@ coverage:
   # ── eBPF programs (16) ──────────────────────────────────────────
   - kind: ebpf_program
     feature: xdp-firewall
-    suites: ["11", "24", "26", "perf/04", "40", "67"]
+    suites: ["11", "24", "26", "perf/04", "40", "67", "69"]
     topology: 2vm
     kernel_min: "6.9"
     profile: pr
-    notes: "L3/L4 stateful firewall (XDP); XDP-drop CPU savings measured in perf/04; amplification ports denied in 40"
+    notes: "L3/L4 stateful firewall (XDP); XDP-drop CPU savings measured in perf/04; amplification ports denied in 40; a port Docker publishes refused before its DNAT in 69"
 
   - kind: ebpf_program
     feature: xdp-firewall-reject
