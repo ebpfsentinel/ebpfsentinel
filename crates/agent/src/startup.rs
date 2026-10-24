@@ -6103,6 +6103,79 @@ pub fn try_load_cgroup_workload_firewall(
     Ok((loader, metrics_rdr, manager, reader, attacher, status))
 }
 
+/// The connection redirect, loaded, configured and attached.
+pub struct ConnectRedirect {
+    /// Holds the programs and the maps for as long as the redirect runs.
+    pub loader: EbpfLoader,
+    /// The outcome counters, absent when the map did not resolve.
+    pub metrics: Option<MetricsReader>,
+    /// The selection, written by whoever resolves the workloads.
+    pub maps: adapters::ebpf::connect_redirect::ConnectRedirectMaps,
+    /// Where each redirected connection was going, read by the listener.
+    pub origins: adapters::ebpf::connect_redirect::RedirectOriginTable,
+    /// Holds the cgroup links; dropping it detaches every hook.
+    pub attacher: adapters::ebpf::connect_redirect::ConnectRedirectAttacher,
+    /// What can be said about the attach.
+    pub status: adapters::ebpf::connect_redirect::ConnectRedirectStatus,
+}
+
+/// Load the connection redirect, write where connections go, and attach its
+/// three cgroup hooks to `cgroup_root`.
+///
+/// Nothing is selected on return: the selection is written afterwards by the
+/// caller's resolver, so a load that succeeds and is never given a workload
+/// redirects nothing. The agent's own cgroup is exempted before the listener
+/// is written, because the listener's onward connection to the real server
+/// leaves from it, and a selection that happened to cover the agent would
+/// otherwise send that connection back to the listener.
+///
+/// A refused attach comes back as a status carrying the reason; whether that
+/// is survivable is the caller's decision.
+///
+/// # Errors
+///
+/// Returns an error when the object cannot be read or loaded, when a map is
+/// missing, when the listener or the ports are refused, or when the agent's
+/// own cgroup cannot be named, since a redirect that cannot exempt its own
+/// listener is one that can loop.
+pub fn try_load_cgroup_connect_redirect(
+    ebpf_dir: &str,
+    cgroup_root: &str,
+    listener: adapters::ebpf::connect_redirect::RedirectListener,
+    ports: &[u16],
+) -> anyhow::Result<ConnectRedirect> {
+    use adapters::ebpf::connect_redirect::{
+        ConnectRedirectAttacher, ConnectRedirectMaps, RedirectOriginTable, own_cgroup_id,
+        validate_listener,
+    };
+
+    validate_listener(listener, ports)?;
+    let own = own_cgroup_id(Path::new(cgroup_root))
+        .map_err(|e| anyhow::anyhow!("the agent's own cgroup cannot be exempted: {e}"))?;
+
+    let program_bytes = read_ebpf_program(ebpf_dir, "cgroup-connect-redirect")?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    let metrics = MetricsReader::new(loader.ebpf_mut(), "REDIRECT_METRICS").ok();
+    let mut maps = ConnectRedirectMaps::new(loader.ebpf_mut())?;
+    let origins = RedirectOriginTable::new(loader.ebpf_mut())?;
+    maps.configure(listener, ports, &[own])?;
+
+    let mut attacher = ConnectRedirectAttacher::new();
+    if let Some(sock) = warden_sock_from_env() {
+        attacher = attacher.with_warden_socket(sock);
+    }
+    let status = attacher.attach_all(&loader, cgroup_root);
+    Ok(ConnectRedirect {
+        loader,
+        metrics,
+        maps,
+        origins,
+        attacher,
+        status,
+    })
+}
+
 /// Forward what the Docker watcher learns of each container's labels into
 /// the workload policy, and hand back the channel the watcher writes.
 fn follow_container_labels(

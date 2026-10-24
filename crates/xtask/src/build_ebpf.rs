@@ -22,6 +22,7 @@ pub(crate) const EBPF_PROGRAMS: &[&str] = &[
     "uprobe-dlp",
     "cgroup-attribution",
     "cgroup-workload-firewall",
+    "cgroup-connect-redirect",
     "tracepoint-process",
     "tracepoint-signal",
     "lsm-exec-network",

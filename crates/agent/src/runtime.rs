@@ -191,6 +191,77 @@ pub fn build_dlp_scope_service(
     Ok(Some(Arc::new(service)))
 }
 
+/// The workload source a selector is resolved against, naming each cgroup's
+/// container and pod where the node can say.
+///
+/// For a binary that does not run the agent's own start-up path, which builds
+/// the same enrichers inline beside the rest of the container tracking. Docker
+/// is read when its socket is there, Kubernetes when the agent runs in a
+/// cluster and was built with it; without either, a selector naming a pod or a
+/// container matches nothing, which is said once here.
+pub async fn build_workload_source(
+    config: &AgentConfig,
+) -> adapters::container::CgroupWorkloadScanner {
+    let mut scanner =
+        adapters::container::CgroupWorkloadScanner::new(&config.container.resolver.cgroup_root);
+    let mut named = false;
+
+    let docker = &config.container.docker;
+    if docker.enabled && Path::new(&docker.socket).exists() {
+        let client = adapters::container::DockerClient::new(&docker.socket, docker.timeout_ms);
+        let cache = Arc::new(adapters::container::DockerCache::new(
+            docker.cache_size,
+            std::time::Duration::from_secs(docker.cache_ttl_seconds),
+        ));
+        let _watcher = adapters::container::DockerEventWatcher::spawn_with_labels(
+            &docker.socket,
+            Arc::clone(&cache),
+            None,
+        );
+        scanner = scanner.with_enricher(Arc::new(adapters::container::DockerEnricher::new(
+            client, cache,
+        )));
+        named = true;
+    }
+
+    #[cfg(feature = "kubernetes")]
+    if config.container.kubernetes.enabled
+        && adapters::container::is_running_in_kubernetes()
+        && let Some(client) = adapters::container::try_build_client().await
+    {
+        let cache = Arc::new(adapters::container::PodCache::new());
+        let enricher = adapters::container::KubernetesEnricher::with_cache(Arc::clone(&cache));
+        let metrics = enricher.metrics();
+        let node_name = if config.container.kubernetes.node_name.is_empty() {
+            adapters::container::resolve_node_name()
+        } else {
+            config.container.kubernetes.node_name.clone()
+        };
+        let _namespaces = adapters::container::spawn_namespace_watcher(
+            client.clone(),
+            Arc::clone(&cache),
+            Arc::clone(&metrics),
+        );
+        let _pods = adapters::container::spawn_pod_watcher(
+            client,
+            node_name,
+            config.container.kubernetes.label_filter.join(","),
+            cache,
+            metrics,
+        );
+        scanner = scanner.with_enricher(Arc::new(enricher));
+        named = true;
+    }
+
+    if !named {
+        warn!(
+            "no container runtime or cluster answers on this node, so a workload selector \
+             naming a pod or a container matches nothing; cgroups and units still resolve"
+        );
+    }
+    scanner
+}
+
 #[allow(clippy::too_many_lines, clippy::similar_names)]
 pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     // ── Metrics ──────────────────────────────────────────────────

@@ -20,6 +20,7 @@ pub mod process;
 pub mod qos;
 pub mod quarantine;
 pub mod ratelimit;
+pub mod redirect;
 pub mod scrub;
 pub mod signal;
 pub mod tenant;

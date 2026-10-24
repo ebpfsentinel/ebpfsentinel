@@ -35,6 +35,7 @@ exclude = [
     "crates/ebpf-programs/uprobe-dlp",
     "crates/ebpf-programs/cgroup-attribution",
     "crates/ebpf-programs/cgroup-workload-firewall",
+    "crates/ebpf-programs/cgroup-connect-redirect",
     "crates/ebpf-programs/tracepoint-process",
     "crates/ebpf-programs/tracepoint-signal",
     "crates/ebpf-programs/lsm-exec-network",

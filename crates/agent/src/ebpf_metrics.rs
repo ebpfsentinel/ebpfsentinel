@@ -247,6 +247,13 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (4, "unreadable"),
             (5, "event_lost"),
         ],
+        "REDIRECT_METRICS" => &[
+            (0, "redirected"),
+            (1, "refused"),
+            (2, "port_skipped"),
+            (3, "published"),
+            (4, "publish_failed"),
+        ],
         "SIGNAL_METRICS" => &[
             (0, "sent"),
             (1, "protected"),
@@ -636,6 +643,10 @@ mod tests {
         (
             "EXEC_NET_METRICS",
             ebpf_common::exec_network::EXEC_NET_METRIC_COUNT,
+        ),
+        (
+            "REDIRECT_METRICS",
+            ebpf_common::redirect::REDIRECT_METRIC_COUNT,
         ),
         (
             "QUARANTINE_METRICS",
