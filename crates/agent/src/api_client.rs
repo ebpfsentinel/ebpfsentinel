@@ -206,6 +206,21 @@ pub struct LearningPolicyResponse {
     pub skipped_edges: usize,
 }
 
+/// The bridge segmentation a window describes, as the agent renders it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LearningSegmentationResponse {
+    pub session: LearningSessionResponse,
+    pub yaml: String,
+    pub bridges: usize,
+    pub containers: usize,
+    pub rules: usize,
+    pub peer_rules: usize,
+    #[serde(default)]
+    pub unlearned: Vec<String>,
+    #[serde(default)]
+    pub unnamed: Vec<String>,
+}
+
 /// The workload rules in force.
 #[derive(Deserialize, Serialize)]
 pub struct WorkloadRulesResponse {
@@ -2523,6 +2538,21 @@ impl ApiClient {
             .request(
                 reqwest::Method::GET,
                 &format!("/api/v1/learning/sessions/{id}/policy"),
+            )
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn learning_segmentation(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<LearningSegmentationResponse> {
+        let resp = self
+            .request(
+                reqwest::Method::GET,
+                &format!("/api/v1/learning/sessions/{id}/segmentation"),
             )
             .send()
             .await

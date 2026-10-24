@@ -137,6 +137,9 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
                 LearningCommand::Policy { id, output_file } => {
                     commands::cmd_learning_policy(&client, id, output_file, output).await
                 }
+                LearningCommand::Segmentation { id, output_file } => {
+                    commands::cmd_learning_segmentation(&client, id, output_file, output).await
+                }
             }
         }
 

@@ -319,6 +319,15 @@ pub enum LearningCommand {
         #[arg(short = 'f', long)]
         output_file: Option<PathBuf>,
     },
+    /// Write the rules keeping each bridge container to the peers a window saw
+    Segmentation {
+        /// The window's id
+        id: Option<String>,
+
+        /// Write the document to this file instead of to standard output
+        #[arg(short = 'f', long)]
+        output_file: Option<PathBuf>,
+    },
 }
 
 // ── Network policy ──────────────────────────────────────

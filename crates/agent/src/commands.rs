@@ -4872,6 +4872,48 @@ pub async fn cmd_learning_policy(
     Ok(())
 }
 
+/// Write the rules segmenting the containers on the node's bridges.
+///
+/// Like the allow-list, the document is printed or written to a file and
+/// never applied here, and every rule in it is in observe mode.
+pub async fn cmd_learning_segmentation(
+    client: &ApiClient,
+    id: Option<String>,
+    output_file: Option<PathBuf>,
+    output: OutputFormat,
+) -> Result<()> {
+    let id = resolve_learning_id(client, id).await?;
+    let document = client.learning_segmentation(&id).await?;
+    if matches!(output, OutputFormat::Json) {
+        if let Some(path) = &output_file {
+            std::fs::write(path, &document.yaml)
+                .with_context(|| format!("writing the document to {}", path.display()))?;
+        }
+        println!("{}", serde_json::to_string_pretty(&document)?);
+        return Ok(());
+    }
+    let Some(path) = output_file else {
+        print!("{}", document.yaml);
+        return Ok(());
+    };
+    std::fs::write(&path, &document.yaml)
+        .with_context(|| format!("writing the document to {}", path.display()))?;
+    println!(
+        "{} rules for {} containers on {} bridges written to {}",
+        document.rules,
+        document.containers,
+        document.bridges,
+        path.display()
+    );
+    for name in &document.unlearned {
+        println!("not seen by the window, left without a rule: {name}");
+    }
+    for name in &document.unnamed {
+        println!("seen under a name no rule can select: {name}");
+    }
+    Ok(())
+}
+
 /// An id the caller did not give is the window that is still running.
 ///
 /// Asking the agent rather than remembering locally is what makes the

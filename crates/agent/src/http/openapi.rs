@@ -82,6 +82,7 @@ use super::zone_handler;
         learning_handler::get_learning,
         learning_handler::stop_learning,
         learning_handler::get_learning_policy,
+        learning_handler::get_learning_segmentation,
         netpol_handler::replay_netpol,
         // IPS
         ips_handler::list_ips_rules,
@@ -237,6 +238,7 @@ use super::zone_handler;
         learning_handler::StartLearningRequest,
         learning_handler::LearningSessionResponse,
         learning_handler::LearningPolicyResponse,
+        learning_handler::LearningSegmentationResponse,
         learning_handler::ScopeBody,
         learning_handler::WorkloadSelectorBody,
         netpol_handler::NetpolReplayRequest,

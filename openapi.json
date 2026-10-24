@@ -5307,6 +5307,86 @@
         ]
       }
     },
+    "/api/v1/learning/sessions/{id}/segmentation": {
+      "get": {
+        "tags": [
+          "Learning"
+        ],
+        "summary": "`GET /api/v1/learning/sessions/{id}/segmentation` - the rules that keep\neach container on a bridge to the peers the window saw it reach.",
+        "operationId": "get_learning_segmentation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The window's id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The proposed segmentation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearningSegmentationResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such window, or learning mode is off",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Docker enrichment is off, or the Docker socket did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/learning/sessions/{id}/stop": {
       "post": {
         "tags": [
@@ -11916,6 +11996,64 @@
             "type": "integer",
             "description": "Workloads it speaks for.",
             "minimum": 0
+          },
+          "yaml": {
+            "type": "string",
+            "description": "The document, YAML in the agent's own rule schema."
+          }
+        }
+      },
+      "LearningSegmentationResponse": {
+        "type": "object",
+        "description": "The rules segmenting the containers on the node's bridges, with what it\ntook to write them.",
+        "required": [
+          "session",
+          "yaml",
+          "bridges",
+          "containers",
+          "rules",
+          "peer_rules",
+          "unlearned",
+          "unnamed"
+        ],
+        "properties": {
+          "bridges": {
+            "type": "integer",
+            "description": "Bridges that carried at least one container.",
+            "minimum": 0
+          },
+          "containers": {
+            "type": "integer",
+            "description": "Containers given rules, counted once per bridge they sit on.",
+            "minimum": 0
+          },
+          "peer_rules": {
+            "type": "integer",
+            "description": "Rules letting a container through to a peer on its bridge.",
+            "minimum": 0
+          },
+          "rules": {
+            "type": "integer",
+            "description": "Rules written.",
+            "minimum": 0
+          },
+          "session": {
+            "$ref": "#/components/schemas/LearningSessionResponse",
+            "description": "The window it was rendered from, as it stood at the reading."
+          },
+          "unlearned": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Containers on a bridge the window never saw, which get no rule."
+          },
+          "unnamed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Containers the window saw under a name no rule can select them by."
           },
           "yaml": {
             "type": "string",

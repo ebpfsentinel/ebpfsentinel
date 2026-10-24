@@ -1550,6 +1550,15 @@ pub async fn run(
         .with_vip_announcer_service(Arc::clone(&vip_svc))
         .with_qos_service(Arc::clone(&qos_svc))
         .with_zone_service(Arc::clone(&zone_svc));
+    if config.container.docker.enabled {
+        // Asked only when somebody renders a segmentation document, so a
+        // socket that is missing now answers then, with the reason.
+        app_state =
+            app_state.with_bridge_networks(Arc::new(adapters::container::DockerClient::new(
+                &config.container.docker.socket,
+                config.container.docker.timeout_ms,
+            )));
+    }
     if let Some(ref adapter) = geoip_adapter {
         app_state = app_state.with_geoip_port(
             Arc::clone(adapter) as Arc<dyn ports::secondary::geoip_port::GeoIpPort>

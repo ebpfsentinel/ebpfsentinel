@@ -6,6 +6,7 @@ pub mod audit_sink;
 pub mod audit_store;
 pub mod auth_provider;
 pub mod bgp_daemon_port;
+pub mod bridge_network_port;
 pub mod conntrack_kill_port;
 pub mod conntrack_map_port;
 pub mod container_resolver_port;

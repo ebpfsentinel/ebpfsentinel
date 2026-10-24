@@ -18,6 +18,7 @@ use domain::learning::entity::{
     LearningProgress, LearningScope, Observation, ObservedFlow, ObservedWorkload,
 };
 use domain::learning::error::LearningError;
+use domain::learning::segmentation::{BridgeNetwork, SegmentationDocument, render_segmentation};
 use ports::secondary::learning_store_port::LearningStorePort;
 use ports::secondary::metrics_port::MetricsPort;
 use tracing::{debug, info, warn};
@@ -314,6 +315,22 @@ impl LearningAppService {
         Some(render_policy(session, now_ns))
     }
 
+    /// The rules segmenting `bridges` from what a window saw, or the open
+    /// window when no id is given.
+    pub fn segmentation(
+        &self,
+        id: Option<&str>,
+        bridges: &[BridgeNetwork],
+        now_ns: u64,
+    ) -> Option<SegmentationDocument> {
+        let engine = self.read();
+        let session = match id {
+            Some(id) => engine.get(id)?,
+            None => engine.active()?,
+        };
+        Some(render_segmentation(session, bridges, now_ns))
+    }
+
     /// An id that reads as a date and never collides with one the engine
     /// already holds.
     fn session_id(engine: &LearningEngine, now_ns: u64) -> String {
@@ -458,6 +475,42 @@ mod tests {
             port,
             protocol: Protocol::Tcp,
         }
+    }
+
+    #[test]
+    fn a_segmentation_is_rendered_from_the_named_window_and_none_without_one() {
+        use domain::learning::segmentation::{BridgeMember, BridgeNetwork, BridgeSubnet};
+
+        let store = Arc::new(MemoryStore::default());
+        let service = service(&store);
+        let bridges = vec![BridgeNetwork {
+            name: "app".to_string(),
+            subnets: vec![BridgeSubnet {
+                network: "172.18.0.0".parse().expect("an address"),
+                prefix_len: 16,
+                gateway: None,
+            }],
+            embedded_dns: true,
+            members: vec![BridgeMember {
+                id: "abc".to_string(),
+                name: "web".to_string(),
+                addresses: vec!["172.18.0.2".parse().expect("an address")],
+            }],
+        }];
+        assert!(service.segmentation(None, &bridges, 1_000 * SEC).is_none());
+
+        let progress = service
+            .start(LearningScope::Node, 600, 1_000 * SEC)
+            .expect("the window opens");
+        let mut web = flow("nginx.service", "172.18.0.3", 80);
+        web.workload = observed_workload(None, None, None, None, Some("web".to_string()));
+        service.observe(&[web], 1_010 * SEC);
+
+        let document = service
+            .segmentation(Some(&progress.id), &bridges, 1_020 * SEC)
+            .expect("the window is there");
+        assert_eq!(document.containers, 1);
+        assert_eq!(document.peer_rules, 1);
     }
 
     #[test]

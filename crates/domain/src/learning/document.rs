@@ -62,16 +62,16 @@ pub struct PolicyDocument {
 }
 
 /// One rule, before it is written out.
-struct DraftRule {
-    id: String,
-    priority: u32,
-    allow: bool,
-    protocol: Protocol,
-    destination: Option<String>,
-    ports: Option<(u16, u16)>,
-    selector_key: String,
-    selector_value: String,
-    comment: Option<String>,
+pub(super) struct DraftRule {
+    pub(super) id: String,
+    pub(super) priority: u32,
+    pub(super) allow: bool,
+    pub(super) protocol: Protocol,
+    pub(super) destination: Option<String>,
+    pub(super) ports: Option<(u16, u16)>,
+    pub(super) selector_key: String,
+    pub(super) selector_value: String,
+    pub(super) comment: Option<String>,
 }
 
 /// Render the allow-list this session's aggregate describes.
@@ -298,10 +298,10 @@ fn group_by_protocol<'a>(edges: &[&'a LearningEdge]) -> Vec<(Protocol, Vec<&'a L
 /// 8080 and 8081 are one. Grouping the addresses by their whole port set
 /// first is what keeps those two rules about the same set of addresses.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct PortSet(Vec<(u16, u16)>);
+pub(super) struct PortSet(Vec<(u16, u16)>);
 
 impl PortSet {
-    fn of(ports: &[u16]) -> Self {
+    pub(super) fn of(ports: &[u16]) -> Self {
         let mut sorted: Vec<u16> = ports.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
@@ -315,7 +315,7 @@ impl PortSet {
         Self(ranges)
     }
 
-    fn iter(&self) -> impl Iterator<Item = &(u16, u16)> {
+    pub(super) fn iter(&self) -> impl Iterator<Item = &(u16, u16)> {
         self.0.iter()
     }
 }
@@ -391,14 +391,16 @@ fn prefix_of(address: IpAddr) -> String {
     }
 }
 
-fn host_prefix(address: IpAddr) -> String {
+pub(super) fn host_prefix(address: IpAddr) -> String {
     match address {
         IpAddr::V4(v4) => format!("{v4}/32"),
         IpAddr::V6(v6) => format!("{v6}/128"),
     }
 }
 
-fn selector_pair(selector: &crate::firewall::workload::WorkloadSelector) -> (&'static str, String) {
+pub(super) fn selector_pair(
+    selector: &crate::firewall::workload::WorkloadSelector,
+) -> (&'static str, String) {
     if let Some(container) = &selector.container {
         return ("container", container.clone());
     }
@@ -414,7 +416,7 @@ fn selector_pair(selector: &crate::firewall::workload::WorkloadSelector) -> (&'s
 }
 
 /// An id a human can read and the rule language accepts.
-fn slug_of(value: &str) -> String {
+pub(super) fn slug_of(value: &str) -> String {
     let mut slug = String::new();
     let mut last_dash = true;
     for ch in value.chars() {
@@ -447,7 +449,7 @@ fn protocol_name(protocol: Protocol) -> String {
     }
 }
 
-fn write_rule(out: &mut String, rule: &DraftRule) {
+pub(super) fn write_rule(out: &mut String, rule: &DraftRule) {
     if let Some(comment) = &rule.comment {
         for line in comment.lines() {
             let _ = writeln!(out, "    # {}", line.trim());

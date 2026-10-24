@@ -181,6 +181,28 @@ pub struct LearningPolicyResponse {
     pub skipped_edges: usize,
 }
 
+/// The rules segmenting the containers on the node's bridges, with what it
+/// took to write them.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct LearningSegmentationResponse {
+    /// The window it was rendered from, as it stood at the reading.
+    pub session: LearningSessionResponse,
+    /// The document, YAML in the agent's own rule schema.
+    pub yaml: String,
+    /// Bridges that carried at least one container.
+    pub bridges: usize,
+    /// Containers given rules, counted once per bridge they sit on.
+    pub containers: usize,
+    /// Rules written.
+    pub rules: usize,
+    /// Rules letting a container through to a peer on its bridge.
+    pub peer_rules: usize,
+    /// Containers on a bridge the window never saw, which get no rule.
+    pub unlearned: Vec<String>,
+    /// Containers the window saw under a name no rule can select them by.
+    pub unnamed: Vec<String>,
+}
+
 fn learning(
     state: &AppState,
 ) -> Result<Arc<application::learning_service::LearningAppService>, ApiError> {
@@ -368,6 +390,60 @@ pub async fn get_learning_policy(
         rules: document.rules,
         collapsed_rules: document.collapsed_rules,
         skipped_edges: document.skipped_edges,
+    }))
+}
+
+/// `GET /api/v1/learning/sessions/{id}/segmentation` - the rules that keep
+/// each container on a bridge to the peers the window saw it reach.
+#[utoipa::path(
+    get, path = "/api/v1/learning/sessions/{id}/segmentation",
+    tag = "Learning",
+    params(("id" = String, Path, description = "The window's id")),
+    responses(
+        (status = 200, description = "The proposed segmentation", body = LearningSegmentationResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "No such window, or learning mode is off", body = ErrorBody),
+        (status = 503, description = "Docker enrichment is off, or the Docker socket did not answer", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key" = []))
+)]
+pub async fn get_learning_segmentation(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<LearningSegmentationResponse>, ApiError> {
+    let service = learning(&state)?;
+    let source = state
+        .bridge_networks
+        .as_ref()
+        .ok_or_else(|| ApiError::ServiceUnavailable {
+            message: "the bridges are read from Docker, and container.docker.enabled is off"
+                .to_string(),
+        })?;
+    let bridges = source
+        .bridge_networks()
+        .await
+        .map_err(|e| ApiError::ServiceUnavailable {
+            message: format!("the bridges could not be read from Docker: {e}"),
+        })?;
+    let now = now_ns();
+    let not_found = || ApiError::NotFound {
+        code: "LEARNING_NOT_FOUND",
+        message: format!("no learning window with id '{id}'"),
+    };
+    let document = service
+        .segmentation(Some(&id), &bridges, now)
+        .ok_or_else(not_found)?;
+    let progress = service.progress(Some(&id), now).ok_or_else(not_found)?;
+    Ok(Json(LearningSegmentationResponse {
+        session: session_response(progress),
+        yaml: document.yaml,
+        bridges: document.bridges,
+        containers: document.containers,
+        rules: document.rules,
+        peer_rules: document.peer_rules,
+        unlearned: document.unlearned,
+        unnamed: document.unnamed,
     }))
 }
 

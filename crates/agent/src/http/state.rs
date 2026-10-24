@@ -35,6 +35,7 @@ use domain::conntrack::entity::ConntrackEvent;
 use infrastructure::config::AgentConfig;
 use ports::secondary::alert_store::{AlertStore, AlertTriageStore};
 use ports::secondary::auth_provider::AuthProvider;
+use ports::secondary::bridge_network_port::BridgeNetworkPort;
 use ports::secondary::geoip_port::GeoIpPort;
 use tokio::sync::{Notify, RwLock, broadcast, mpsc};
 
@@ -65,6 +66,9 @@ pub struct AppState {
     /// `GeoIP` lookup port. `Some` only when `GeoIP` is enabled and an mmdb-backed
     /// adapter was built successfully; drives `/api/v1/geoip/status`.
     pub geoip_port: Option<Arc<dyn GeoIpPort>>,
+    /// The container runtime's bridge networks. `Some` only when Docker
+    /// enrichment is on; drives the learning window's segmentation document.
+    pub bridge_networks: Option<Arc<dyn BridgeNetworkPort>>,
     pub loadbalancer_service: Option<Arc<RwLock<LbAppService>>>,
     pub vip_announcer_service: Option<Arc<RwLock<VipAnnouncerService>>>,
     pub qos_service: Option<Arc<RwLock<QosAppService>>>,
@@ -201,6 +205,7 @@ impl AppState {
             routing_service: None,
             zone_service: None,
             geoip_port: None,
+            bridge_networks: None,
             loadbalancer_service: None,
             vip_announcer_service: None,
             qos_service: None,
@@ -419,6 +424,13 @@ impl AppState {
     #[must_use]
     pub fn with_geoip_port(mut self, port: Arc<dyn GeoIpPort>) -> Self {
         self.geoip_port = Some(port);
+        self
+    }
+
+    /// Attach the source of the runtime's bridge networks.
+    #[must_use]
+    pub fn with_bridge_networks(mut self, port: Arc<dyn BridgeNetworkPort>) -> Self {
+        self.bridge_networks = Some(port);
         self
     }
 

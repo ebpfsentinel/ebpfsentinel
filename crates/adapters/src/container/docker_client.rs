@@ -1,13 +1,17 @@
 //! Minimal Docker Engine API client over Unix socket.
 //!
-//! Performs single-request HTTP/1.1 calls - `GET /v1.43/containers/{id}/json`
-//! and `GET /v1.43/containers/json` - on `/var/run/docker.sock`. No external Docker SDK dependency - raw
+//! Performs single-request HTTP/1.1 calls - `GET /v1.43/containers/{id}/json`,
+//! `GET /v1.43/containers/json`, `GET /v1.43/networks` and
+//! `GET /v1.43/networks/{id}` - on `/var/run/docker.sock`. No external Docker SDK dependency - raw
 //! [`tokio::net::UnixStream`] with manual request framing and response
 //! parsing. Keeps the OSS dependency surface tiny.
 
+use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -15,6 +19,8 @@ use tokio::time::timeout;
 
 use domain::container::entity::DockerMetadata;
 use domain::container::error::ContainerError;
+use domain::learning::segmentation::{BridgeMember, BridgeNetwork, BridgeSubnet};
+use ports::secondary::bridge_network_port::BridgeNetworkPort;
 
 /// Default socket path.
 pub const DEFAULT_SOCKET: &str = "/var/run/docker.sock";
@@ -25,6 +31,13 @@ const MAX_BODY_BYTES: usize = 1 << 20;
 /// Max list response we accept: a few kilobytes per container, so this
 /// holds a node far denser than any Docker host runs.
 const MAX_LIST_BODY_BYTES: usize = 16 << 20;
+
+/// `{"driver":{"bridge":true}}`, percent-encoded for the query string.
+const BRIDGE_DRIVER_FILTER: &str = "%7B%22driver%22%3A%7B%22bridge%22%3Atrue%7D%7D";
+
+/// The option Docker sets on the one network that is the default bridge,
+/// which is the one network its embedded resolver does not serve.
+const DEFAULT_BRIDGE_OPTION: &str = "com.docker.network.bridge.default_bridge";
 
 /// Subset of the Docker inspect payload we consume.
 #[derive(Debug, Deserialize)]
@@ -88,6 +101,28 @@ impl DockerClient {
             .get("/v1.43/containers/json", MAX_LIST_BODY_BYTES)
             .await?;
         parse_list_response(&raw)
+    }
+
+    /// `GET /v1.43/networks` filtered to the bridge driver, then
+    /// `GET /v1.43/networks/{id}` for each, since only the inspect call
+    /// names the containers attached.
+    pub async fn bridge_networks(&self) -> Result<Vec<BridgeNetwork>, ContainerError> {
+        let raw = self
+            .get(
+                &format!("/v1.43/networks?filters={BRIDGE_DRIVER_FILTER}"),
+                MAX_LIST_BODY_BYTES,
+            )
+            .await?;
+        let mut networks = Vec::new();
+        for id in parse_network_list(&raw)? {
+            let raw = self
+                .get(&format!("/v1.43/networks/{id}"), MAX_LIST_BODY_BYTES)
+                .await?;
+            if let Some(network) = parse_network_inspect(&raw)? {
+                networks.push(network);
+            }
+        }
+        Ok(networks)
     }
 
     /// One request on a fresh connection, the whole response read back.
@@ -212,6 +247,136 @@ fn parse_list_response(raw: &[u8]) -> Result<Vec<ListedContainer>, ContainerErro
         .collect())
 }
 
+#[async_trait]
+impl BridgeNetworkPort for DockerClient {
+    async fn bridge_networks(&self) -> Result<Vec<BridgeNetwork>, ContainerError> {
+        DockerClient::bridge_networks(self).await
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WireNetworkId {
+    #[serde(rename = "Id", default)]
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireNetwork {
+    #[serde(rename = "Name", default)]
+    name: String,
+    #[serde(rename = "Driver", default)]
+    driver: String,
+    #[serde(rename = "IPAM", default)]
+    ipam: WireIpam,
+    #[serde(rename = "Options", default)]
+    options: Option<BTreeMap<String, String>>,
+    #[serde(rename = "Containers", default)]
+    containers: Option<BTreeMap<String, WireEndpoint>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct WireIpam {
+    #[serde(rename = "Config", default)]
+    config: Option<Vec<WireIpamConfig>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireIpamConfig {
+    #[serde(rename = "Subnet", default)]
+    subnet: String,
+    #[serde(rename = "Gateway", default)]
+    gateway: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireEndpoint {
+    #[serde(rename = "Name", default)]
+    name: String,
+    #[serde(rename = "IPv4Address", default)]
+    ipv4: String,
+    #[serde(rename = "IPv6Address", default)]
+    ipv6: String,
+}
+
+fn decode_json<T: serde::de::DeserializeOwned>(raw: &[u8]) -> Result<T, ContainerError> {
+    let (status, body) = split_response(raw)?;
+    if status != 200 {
+        return Err(ContainerError::DockerApi { status });
+    }
+    serde_json::from_slice(&body).map_err(|e| ContainerError::DockerMalformed {
+        reason: format!("json parse: {e}"),
+    })
+}
+
+/// The ids the network list call returned.
+fn parse_network_list(raw: &[u8]) -> Result<Vec<String>, ContainerError> {
+    let listed: Vec<WireNetworkId> = decode_json(raw)?;
+    Ok(listed
+        .into_iter()
+        .map(|network| network.id)
+        .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric()))
+        .collect())
+}
+
+/// One network's inspect payload, or `None` when it is not a bridge.
+fn parse_network_inspect(raw: &[u8]) -> Result<Option<BridgeNetwork>, ContainerError> {
+    let network: WireNetwork = decode_json(raw)?;
+    if network.driver != "bridge" {
+        return Ok(None);
+    }
+    let subnets = network
+        .ipam
+        .config
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|config| !config.subnet.is_empty())
+        .map(|config| parse_subnet(&config.subnet, &config.gateway))
+        .collect::<Result<Vec<_>, _>>()?;
+    let default_bridge = network
+        .options
+        .as_ref()
+        .and_then(|options| options.get(DEFAULT_BRIDGE_OPTION))
+        .is_some_and(|value| value == "true");
+    let members = network
+        .containers
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, endpoint)| BridgeMember {
+            id,
+            name: endpoint.name,
+            addresses: [endpoint.ipv4, endpoint.ipv6]
+                .iter()
+                .filter_map(|address| address.split('/').next())
+                .filter_map(|address| address.parse::<IpAddr>().ok())
+                .collect(),
+        })
+        .collect();
+    Ok(Some(BridgeNetwork {
+        name: network.name,
+        subnets,
+        embedded_dns: !default_bridge,
+        members,
+    }))
+}
+
+fn parse_subnet(subnet: &str, gateway: &str) -> Result<BridgeSubnet, ContainerError> {
+    let malformed = || ContainerError::DockerMalformed {
+        reason: format!("network subnet: {subnet}"),
+    };
+    let (network, prefix) = subnet.split_once('/').ok_or_else(malformed)?;
+    let network: IpAddr = network.parse().map_err(|_| malformed())?;
+    let prefix_len: u8 = prefix.parse().map_err(|_| malformed())?;
+    let ceiling = if network.is_ipv4() { 32 } else { 128 };
+    if prefix_len > ceiling {
+        return Err(malformed());
+    }
+    Ok(BridgeSubnet {
+        network,
+        prefix_len,
+        gateway: gateway.split('/').next().and_then(|g| g.parse().ok()),
+    })
+}
+
 /// Parse an HTTP/1.1 response and decode the JSON body into [`DockerMetadata`].
 fn parse_inspect_response(raw: &[u8], id: &str) -> Result<DockerMetadata, ContainerError> {
     let (status, body) = split_response(raw)?;
@@ -324,6 +489,75 @@ mod tests {
             "Labels": { "app": "web", "env": "prod" }
         }
     }"#;
+
+    #[test]
+    fn a_bridge_network_keeps_its_subnet_gateway_and_members() {
+        let raw = build_response(
+            200,
+            r#"{"Name": "app", "Driver": "bridge",
+                "IPAM": {"Config": [{"Subnet": "172.18.0.0/16", "Gateway": "172.18.0.1"}]},
+                "Options": {},
+                "Containers": {"abc123": {"Name": "web",
+                    "IPv4Address": "172.18.0.2/16", "IPv6Address": ""}}}"#,
+        );
+        let network = parse_network_inspect(&raw)
+            .expect("the payload parses")
+            .expect("a bridge");
+        assert_eq!(network.name, "app");
+        assert!(network.embedded_dns);
+        assert_eq!(network.subnets[0].cidr(), "172.18.0.0/16");
+        assert_eq!(
+            network.subnets[0].gateway,
+            Some("172.18.0.1".parse().expect("an address"))
+        );
+        assert_eq!(network.members[0].name, "web");
+        assert_eq!(network.members[0].id, "abc123");
+        assert_eq!(
+            network.members[0].addresses,
+            vec!["172.18.0.2".parse::<IpAddr>().expect("an address")]
+        );
+    }
+
+    #[test]
+    fn the_default_bridge_has_no_embedded_resolver_and_other_drivers_are_skipped() {
+        let raw = build_simple_response(
+            200,
+            r#"{"Name": "bridge", "Driver": "bridge",
+                "IPAM": {"Config": [{"Subnet": "172.17.0.0/16"}]},
+                "Options": {"com.docker.network.bridge.default_bridge": "true"}}"#,
+        );
+        let network = parse_network_inspect(&raw)
+            .expect("the payload parses")
+            .expect("a bridge");
+        assert!(!network.embedded_dns);
+        assert!(network.members.is_empty());
+        assert_eq!(network.subnets[0].gateway, None);
+
+        let overlay = build_simple_response(200, r#"{"Name": "swarm", "Driver": "overlay"}"#);
+        assert!(parse_network_inspect(&overlay).expect("parses").is_none());
+    }
+
+    #[test]
+    fn a_subnet_that_does_not_read_is_refused_rather_than_skipped() {
+        let raw = build_simple_response(
+            200,
+            r#"{"Name": "app", "Driver": "bridge",
+                "IPAM": {"Config": [{"Subnet": "172.18.0.0/40"}]}}"#,
+        );
+        assert!(matches!(
+            parse_network_inspect(&raw),
+            Err(ContainerError::DockerMalformed { .. })
+        ));
+    }
+
+    #[test]
+    fn the_network_list_keeps_only_ids_safe_in_a_path() {
+        let raw = build_simple_response(200, r#"[{"Id": "abc123"}, {"Id": "../x"}, {"Id": ""}]"#);
+        assert_eq!(
+            parse_network_list(&raw).expect("parses"),
+            vec!["abc123".to_string()]
+        );
+    }
 
     #[test]
     fn parses_happy_path_chunked() {
