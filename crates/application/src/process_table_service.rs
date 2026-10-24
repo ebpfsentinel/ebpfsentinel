@@ -9,6 +9,7 @@
 //! the next flow rather than naming none.
 
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use domain::container::engine::ContainerResolverEngine;
 use domain::container::entity::ContainerContext;
@@ -19,12 +20,18 @@ use domain::process::entity::{
 use ports::secondary::metadata_enricher_port::MetadataEnricher;
 use ports::secondary::process_details_port::ProcessDetailsReader;
 use ports::secondary::process_executable_port::ProcessExecutableReader;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::dlp_scope_service::DlpScopeService;
 use crate::workload_policy_service::WorkloadPolicyService;
+
+/// How long the writer lets the metadata settle after it last changed before
+/// resolving the running containers again: a rollout changes dozens of pods
+/// within a second, and one pass after the burst names them all.
+const REFRESH_SETTLE: Duration = Duration::from_secs(1);
 
 /// The service behind the process table: one writer fed by the ring buffer,
 /// any number of readers behind the API.
@@ -36,6 +43,7 @@ pub struct ProcessTableService {
     metadata_enrichers: Vec<Arc<dyn MetadataEnricher>>,
     workload: Option<Arc<WorkloadPolicyService>>,
     dlp_scope: Option<Arc<DlpScopeService>>,
+    metadata_changes: Option<watch::Receiver<u64>>,
     capture_command_line: bool,
 }
 
@@ -56,6 +64,7 @@ impl ProcessTableService {
             metadata_enrichers: Vec::new(),
             workload: None,
             dlp_scope: None,
+            metadata_changes: None,
             capture_command_line,
         }
     }
@@ -112,6 +121,66 @@ impl ProcessTableService {
     pub fn with_dlp_scope(mut self, service: Arc<DlpScopeService>) -> Self {
         self.dlp_scope = Some(service);
         self
+    }
+
+    /// Resolve the running containers again each time `changes` moves.
+    ///
+    /// An exec is resolved once, against what the enrichers knew at that
+    /// instant, and a pod's metadata arrives after its first process has
+    /// started and changes while it runs: a label added, a namespace
+    /// relabelled. Without this a selector naming labels would see a pod as
+    /// it was when each process last exec'd, which for a long-lived server
+    /// is as it was before it was ready.
+    #[must_use]
+    pub fn with_metadata_changes(mut self, changes: watch::Receiver<u64>) -> Self {
+        self.metadata_changes = Some(changes);
+        self
+    }
+
+    /// Resolve every containerised entry's metadata again, and tell the
+    /// workload policy and the DLP scope about each entry whose answer
+    /// changed. Returns how many changed.
+    ///
+    /// A host process is left alone, because which cgroup a task sits in is
+    /// what made it a host process and that does not move. An entry the
+    /// resolver now calls a host, which is a process gone before its exit was
+    /// read, keeps the container it had.
+    pub async fn refresh_containers(&self) -> usize {
+        if self.containers.is_none() {
+            return 0;
+        }
+        let entries = self.list();
+        let mut changed = 0;
+        for entry in entries {
+            let Some(previous) = entry.container.as_ref() else {
+                continue;
+            };
+            let Some(current) = self.resolve_container(entry.pid, entry.cgroup_id).await else {
+                continue;
+            };
+            if &current == previous {
+                continue;
+            }
+            let updated = {
+                let mut table = self
+                    .table
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(held) = table.get_mut(entry.pid) else {
+                    continue;
+                };
+                held.container = Some(current);
+                held.clone()
+            };
+            if let Some(workload) = &self.workload {
+                workload.record_exec(&updated);
+            }
+            if let Some(scope) = &self.dlp_scope {
+                scope.record_exec(&updated);
+            }
+            changed += 1;
+        }
+        changed
     }
 
     /// Whether argv is being captured.
@@ -258,6 +327,10 @@ impl ProcessTableService {
         cancel: CancellationToken,
     ) {
         info!("process table writer started");
+        // The refresh runs on this task rather than beside it, so it is never
+        // interleaved with an exec or an exit of the entry it is rewriting.
+        let mut changes = self.metadata_changes.clone();
+        let mut settle: Option<Instant> = None;
         loop {
             tokio::select! {
                 () = cancel.cancelled() => break,
@@ -265,12 +338,41 @@ impl ProcessTableService {
                     Some(event) => self.apply(event).await,
                     None => break,
                 },
+                open = next_change(changes.as_mut()) => {
+                    if open {
+                        settle.get_or_insert_with(|| Instant::now() + REFRESH_SETTLE);
+                    } else {
+                        changes = None;
+                    }
+                }
+                () = settled(settle) => {
+                    settle = None;
+                    let changed = self.refresh_containers().await;
+                    debug!(changed, "process table resolved the running containers again");
+                }
             }
         }
         info!(
             entries = self.stats().entries,
             "process table writer stopped"
         );
+    }
+}
+
+/// The next move of `changes`: `true` when it moved, `false` once its sender
+/// is gone, and never without one.
+async fn next_change(changes: Option<&mut watch::Receiver<u64>>) -> bool {
+    match changes {
+        Some(changes) => changes.changed().await.is_ok(),
+        None => std::future::pending().await,
+    }
+}
+
+/// The instant a pending refresh is due, and never without one.
+async fn settled(settle: Option<Instant>) {
+    match settle {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -347,6 +449,161 @@ mod tests {
         }
     }
 
+    /// An enricher whose answer the test changes, the way a pod watcher's
+    /// does when a pod is relabelled.
+    #[derive(Clone, Default)]
+    struct PodEnricher(Arc<std::sync::Mutex<Vec<(String, String)>>>);
+    #[async_trait::async_trait]
+    impl MetadataEnricher for PodEnricher {
+        async fn enrich(
+            &self,
+            _info: &ContainerInfo,
+        ) -> Result<Option<ContainerMetadata>, domain::container::error::ContainerError> {
+            Ok(Some(ContainerMetadata::Kubernetes(
+                domain::container::entity::KubernetesMetadata {
+                    pod_name: "api-7f9".to_string(),
+                    namespace: "payments".to_string(),
+                    container_name: "api".to_string(),
+                    labels: self.0.lock().unwrap().clone(),
+                    annotations: Vec::new(),
+                    service_account: "api".to_string(),
+                    owner_kind: None,
+                    owner_name: None,
+                    node_name: "node-1".to_string(),
+                    namespace_labels: Vec::new(),
+                },
+            )))
+        }
+        fn name(&self) -> &'static str {
+            "pod"
+        }
+    }
+
+    fn labelled_pod_policy() -> WorkloadPolicyService {
+        use domain::common::entity::{Protocol, RuleId};
+        use domain::firewall::entity::FirewallAction;
+        use domain::firewall::workload::{
+            KubernetesMatchers, WorkloadMode, WorkloadPolicy, WorkloadRule, WorkloadSelector,
+        };
+        let pods: domain::netpol::LabelSelector =
+            serde_json::from_str(r#"{"match_labels":{"app":"api"}}"#).unwrap();
+        let selector = WorkloadSelector::with_kubernetes(
+            None,
+            None,
+            None,
+            None,
+            KubernetesMatchers {
+                pods: Some(pods),
+                ..KubernetesMatchers::default()
+            },
+        )
+        .unwrap();
+        WorkloadPolicyService::new(
+            WorkloadPolicy::new(vec![WorkloadRule {
+                id: RuleId("api".to_string()),
+                priority: 10,
+                action: FirewallAction::Deny,
+                mode: WorkloadMode::Observe,
+                selector,
+                protocol: Protocol::Any,
+                dst_ip: None,
+                dst_port: None,
+                dst_fqdn: Vec::new(),
+                enabled: true,
+            }])
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_pod_relabelled_after_its_process_started_is_named_by_the_refresh() {
+        let masks = TaskMasks::default();
+        let workload = Arc::new(labelled_pod_policy().with_maps(Box::new(masks.clone())));
+        let enricher = PodEnricher::default();
+        let resolver = Arc::new(ContainerResolverEngine::new(Arc::new(ContainerCgroups), 16));
+        let service = ProcessTableService::new(16, false)
+            .with_containers(resolver)
+            .with_metadata_enricher(Arc::new(enricher.clone()))
+            .with_workload_policy(workload);
+
+        service.apply(exec(42, 1)).await;
+        assert_eq!(masks.1.lock().unwrap().get(&777), Some(&0));
+        assert_eq!(service.refresh_containers().await, 0, "nothing moved");
+
+        enricher
+            .0
+            .lock()
+            .unwrap()
+            .push(("app".to_string(), "api".to_string()));
+        assert_eq!(service.refresh_containers().await, 1);
+        assert_eq!(masks.1.lock().unwrap().get(&777), Some(&1));
+        let Some(ContainerMetadata::Kubernetes(pod)) =
+            service.get(42).unwrap().container.unwrap().metadata
+        else {
+            panic!("the entry lost its pod");
+        };
+        assert_eq!(pod.labels, vec![("app".to_string(), "api".to_string())]);
+
+        enricher.0.lock().unwrap().clear();
+        assert_eq!(service.refresh_containers().await, 1);
+        assert_eq!(masks.1.lock().unwrap().get(&777), Some(&0));
+    }
+
+    #[tokio::test]
+    async fn a_host_process_is_never_resolved_again() {
+        let resolver = Arc::new(ContainerResolverEngine::new(Arc::new(HostCgroups), 16));
+        let service = ProcessTableService::new(16, false)
+            .with_containers(resolver)
+            .with_metadata_enricher(Arc::new(PodEnricher::default()));
+        service.apply(exec(42, 1)).await;
+        assert_eq!(service.refresh_containers().await, 0);
+        assert!(service.get(42).unwrap().container.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_writer_resolves_again_once_the_metadata_settles() {
+        let enricher = PodEnricher::default();
+        let resolver = Arc::new(ContainerResolverEngine::new(Arc::new(ContainerCgroups), 16));
+        let (changes_tx, changes_rx) = watch::channel(0u64);
+        let service = Arc::new(
+            ProcessTableService::new(16, false)
+                .with_containers(resolver)
+                .with_metadata_enricher(Arc::new(enricher.clone()))
+                .with_metadata_changes(changes_rx),
+        );
+        let (tx, rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let writer = tokio::spawn(Arc::clone(&service).run(rx, cancel.clone()));
+        tx.send(exec(42, 1)).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while service.get(42).is_none() {
+            assert!(Instant::now() < deadline, "the exec never landed");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        enricher
+            .0
+            .lock()
+            .unwrap()
+            .push(("app".to_string(), "api".to_string()));
+        changes_tx.send_modify(|generation| *generation += 1);
+
+        let labelled = || {
+            matches!(
+                service.get(42).and_then(|entry| entry.container).and_then(|c| c.metadata),
+                Some(ContainerMetadata::Kubernetes(pod)) if !pod.labels.is_empty()
+            )
+        };
+        assert!(!labelled(), "the exec was resolved before the relabel");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !labelled() {
+            assert!(Instant::now() < deadline, "the writer never resolved again");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        cancel.cancel();
+        writer.await.unwrap();
+    }
+
     fn exec(pid: u32, at: u64) -> ProcessLifecycleEvent {
         ProcessLifecycleEvent {
             kind: ProcessEventKind::Exec,
@@ -362,7 +619,10 @@ mod tests {
 
     /// A workload map port that only remembers which tasks were written.
     #[derive(Clone, Default)]
-    struct TaskMasks(Arc<std::sync::Mutex<Vec<(u32, u64)>>>);
+    struct TaskMasks(
+        Arc<std::sync::Mutex<Vec<(u32, u64)>>>,
+        Arc<std::sync::Mutex<std::collections::HashMap<u64, u64>>>,
+    );
 
     impl ports::secondary::workload_policy_map_port::WorkloadPolicyMapPort for TaskMasks {
         fn rule_denials(&self) -> Result<Vec<u64>, domain::common::error::DomainError> {
@@ -381,9 +641,10 @@ mod tests {
 
         fn set_cgroup_selectors(
             &mut self,
-            _cgroup_id: u64,
-            _mask: u64,
+            cgroup_id: u64,
+            mask: u64,
         ) -> Result<(), domain::common::error::DomainError> {
+            self.1.lock().unwrap().insert(cgroup_id, mask);
             Ok(())
         }
 

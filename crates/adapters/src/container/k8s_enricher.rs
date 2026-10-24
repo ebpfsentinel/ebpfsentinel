@@ -24,7 +24,7 @@ use kube::{
     Api, Client,
     runtime::watcher::{self, Event},
 };
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -39,7 +39,7 @@ const CRI_PREFIXES: &[&str] = &["containerd://", "cri-o://", "docker://", "crio:
 
 /// Cached pod metadata. `Arc`-wrapped so the reverse index can share it
 /// without cloning strings on every lookup.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PodInfo {
     pub uid: String,
     pub name: String,
@@ -93,7 +93,6 @@ impl PodInfo {
 }
 
 /// Thread-safe pod cache with a reverse index from container id → pod uid.
-#[derive(Default)]
 pub struct PodCache {
     /// `pod_uid` → `PodInfo`
     pods: RwLock<HashMap<String, Arc<PodInfo>>>,
@@ -101,11 +100,37 @@ pub struct PodCache {
     reverse_index: RwLock<HashMap<String, String>>,
     /// namespace name → its labels
     namespaces: RwLock<HashMap<String, BTreeMap<String, String>>>,
+    /// Bumped each time what a lookup would answer changes: a pod created,
+    /// relabelled or gone, a namespace relabelled. A resync that replays the
+    /// same objects bumps nothing.
+    changes: watch::Sender<u64>,
+}
+
+impl Default for PodCache {
+    fn default() -> Self {
+        Self {
+            pods: RwLock::default(),
+            reverse_index: RwLock::default(),
+            namespaces: RwLock::default(),
+            changes: watch::Sender::new(0),
+        }
+    }
 }
 
 impl PodCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A receiver that wakes each time the cache's answers change, so what
+    /// was resolved against an older answer can be resolved again.
+    pub fn changes(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    fn changed(&self) {
+        self.changes
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
     pub async fn len(&self) -> usize {
@@ -124,6 +149,10 @@ impl PodCache {
         let mut index = self.reverse_index.write().await;
 
         if let Some(existing) = pods.remove(&info.uid) {
+            if existing == info {
+                pods.insert(info.uid.clone(), existing);
+                return;
+            }
             for cid in &existing.container_ids {
                 index.remove(cid);
             }
@@ -132,6 +161,9 @@ impl PodCache {
             index.insert(cid.clone(), info.uid.clone());
         }
         pods.insert(info.uid.clone(), info);
+        drop(index);
+        drop(pods);
+        self.changed();
     }
 
     /// Remove a pod and all its container ids from the cache.
@@ -142,17 +174,25 @@ impl PodCache {
             for cid in &existing.container_ids {
                 index.remove(cid);
             }
+            drop(index);
+            drop(pods);
+            self.changed();
         }
     }
 
     /// Record a namespace's labels, replacing what was known of it.
     pub async fn upsert_namespace(&self, name: String, labels: BTreeMap<String, String>) {
-        self.namespaces.write().await.insert(name, labels);
+        let previous = self.namespaces.write().await.insert(name, labels.clone());
+        if previous.as_ref() != Some(&labels) {
+            self.changed();
+        }
     }
 
     /// Forget a namespace.
     pub async fn delete_namespace(&self, name: &str) {
-        self.namespaces.write().await.remove(name);
+        if self.namespaces.write().await.remove(name).is_some() {
+            self.changed();
+        }
     }
 
     /// The labels of a namespace, once the watcher has seen it.
@@ -585,6 +625,32 @@ mod tests {
         cache.upsert(pod_info_from(&p).unwrap()).await;
         assert!(cache.get("c1").await.is_some());
         assert!(cache.get("c2").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn the_cache_says_when_its_answers_change_and_not_when_a_resync_replays_them() {
+        let cache = PodCache::new();
+        let changes = cache.changes();
+        let p = pod("uid-1", "app", "prod", "n", &[("app", "containerd://c1")]);
+        cache.upsert(pod_info_from(&p).unwrap()).await;
+        assert_eq!(*changes.borrow(), 1);
+        cache.upsert(pod_info_from(&p).unwrap()).await;
+        assert_eq!(*changes.borrow(), 1, "the same pod again is no change");
+
+        let mut relabelled = pod_info_from(&p).unwrap();
+        relabelled.labels.insert("track".into(), "canary".into());
+        cache.upsert(relabelled).await;
+        assert_eq!(*changes.borrow(), 2);
+
+        let labels = BTreeMap::from([("team".to_string(), "payments".to_string())]);
+        cache.upsert_namespace("prod".into(), labels.clone()).await;
+        cache.upsert_namespace("prod".into(), labels).await;
+        assert_eq!(*changes.borrow(), 3);
+
+        cache.delete_namespace("prod").await;
+        cache.delete("uid-1").await;
+        cache.delete("uid-1").await;
+        assert_eq!(*changes.borrow(), 5);
     }
 
     #[tokio::test]

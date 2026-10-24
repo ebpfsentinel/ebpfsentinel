@@ -3637,6 +3637,10 @@ pub async fn run(
     // ── 10f. Build Kubernetes enricher (optional, auto-detected) ────
     #[cfg(feature = "kubernetes")]
     let mut kubernetes_state = EnricherState::OffByConfiguration;
+    // Moves each time a pod or a namespace the enricher answers from
+    // changes, so the process table can resolve its running containers again.
+    #[cfg(feature = "kubernetes")]
+    let mut kubernetes_changes: Option<tokio::sync::watch::Receiver<u64>> = None;
     #[cfg(feature = "kubernetes")]
     let kubernetes_enricher: Option<
         Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>,
@@ -3647,6 +3651,7 @@ pub async fn run(
             None
         } else if let Some(client) = adapters::container::try_build_client().await {
             let cache = Arc::new(adapters::container::PodCache::new());
+            kubernetes_changes = Some(cache.changes());
             let enricher = adapters::container::KubernetesEnricher::with_cache(Arc::clone(&cache));
             let metrics_handle = enricher.metrics();
             let node_name = if config.container.kubernetes.node_name.is_empty() {
@@ -3686,6 +3691,8 @@ pub async fn run(
     };
     #[cfg(not(feature = "kubernetes"))]
     let kubernetes_state = EnricherState::OffNotBuilt;
+    #[cfg(not(feature = "kubernetes"))]
+    let kubernetes_changes: Option<tokio::sync::watch::Receiver<u64>> = None;
     #[cfg(not(feature = "kubernetes"))]
     let kubernetes_enricher: Option<
         Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>,
@@ -3757,6 +3764,11 @@ pub async fn run(
         }
         if let Some(ref enricher) = kubernetes_enricher {
             svc = svc.with_metadata_enricher(Arc::clone(enricher));
+        }
+        // A pod is labelled, relabelled and its namespace changed while its
+        // processes run, and a selector naming labels must follow it.
+        if let Some(changes) = kubernetes_changes {
+            svc = svc.with_metadata_changes(changes);
         }
         // The table is where an exec is learned of, so it is where the
         // kernel's idea of which workload a task is gets written.
