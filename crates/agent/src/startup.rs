@@ -1758,6 +1758,11 @@ pub async fn run(
     // it cannot perform from its user namespace (conntrack teardown, routes,
     // gratuitous ARP, packet capture) to the warden over that socket.
     let warden_sock = warden_sock_from_env();
+    // Reading a TCX chain back needs a capability this namespace lacks; the
+    // warden answers for it, so every TC attach can verify where it landed.
+    if let Some(sock) = &warden_sock {
+        adapters::ebpf::tcx_order::use_warden(sock.clone());
+    }
 
     check_kernel_version()?;
 

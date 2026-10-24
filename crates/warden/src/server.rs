@@ -527,6 +527,10 @@ fn dispatch(cmd: &Command, host: &dyn HostOps, proc_root: &Path) -> Response {
         Command::RouteAdd { route } => result_to_response(host.route_add(route)),
         Command::RouteDel { route } => result_to_response(host.route_del(route)),
         Command::ArpAnnounce { iface, ip } => result_to_response(host.arp_announce(iface, ip)),
+        Command::TcxChain { iface, egress } => match host.tcx_chain(iface, *egress) {
+            Ok(prog_ids) => Response::TcxChain { prog_ids },
+            Err(message) => Response::Error { message },
+        },
         Command::DlpScan => Response::DlpTargets {
             targets: dlp_scan::scan_dlp_targets(proc_root),
         },
@@ -582,6 +586,12 @@ mod tests {
         }
         fn arp_announce(&self, _iface: &str, _ip: &str) -> Result<(), String> {
             Err("unused".into())
+        }
+        fn tcx_chain(&self, iface: &str, egress: bool) -> Result<Vec<u32>, String> {
+            match (iface, egress) {
+                ("eth0", false) => Ok(vec![41, 7]),
+                _ => Err(format!("no chain on {iface}")),
+            }
         }
     }
 
@@ -680,6 +690,45 @@ mod tests {
     fn extension_unknown_kind_is_unimplemented() {
         let resp = one_extension(Some(Arc::new(FakeExt)), "mystery", vec![]);
         assert_eq!(resp, Response::Unimplemented);
+    }
+
+    /// Send one `TcxChain` and read its response.
+    fn one_tcx_chain(iface: &str, egress: bool) -> Response {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let handle = run_server(server, None);
+        hello(&mut client);
+        write_frame(
+            &mut client,
+            &Command::TcxChain {
+                iface: iface.into(),
+                egress,
+            },
+        )
+        .unwrap();
+        let resp: Response = read_frame(&mut client).unwrap();
+        drop(client);
+        handle.join().unwrap();
+        resp
+    }
+
+    #[test]
+    fn tcx_chain_answers_the_ids_in_run_order() {
+        assert_eq!(
+            one_tcx_chain("eth0", false),
+            Response::TcxChain {
+                prog_ids: vec![41, 7]
+            }
+        );
+    }
+
+    #[test]
+    fn tcx_chain_failure_is_an_error_naming_it() {
+        assert_eq!(
+            one_tcx_chain("eth0", true),
+            Response::Error {
+                message: "no chain on eth0".into()
+            }
+        );
     }
 
     #[test]

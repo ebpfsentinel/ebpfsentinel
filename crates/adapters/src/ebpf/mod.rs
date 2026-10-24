@@ -50,6 +50,7 @@ pub mod self_binding_manager;
 pub mod signal_attach;
 pub mod signal_map_manager;
 pub mod socket_identity_reader;
+pub mod tcx_order;
 pub mod tenant_cgroup_map_manager;
 pub mod tenant_ifindex_map_manager;
 pub mod tenant_subnet_map_manager;

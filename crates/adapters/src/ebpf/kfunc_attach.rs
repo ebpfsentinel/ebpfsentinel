@@ -34,6 +34,13 @@ const BPF_RAW_TRACEPOINT_OPEN: u32 = 17;
 const BPF_XDP: u32 = 37;
 const BPF_TCX_INGRESS: u32 = 46;
 const BPF_TCX_EGRESS: u32 = 47;
+/// `BPF_F_BEFORE` from the multi-program attach API. With no relative program
+/// or link named, the new link goes to the head of the hook's chain.
+const BPF_F_BEFORE: u32 = 1 << 3;
+/// `BPF_F_AFTER`: the new link goes right after the relative program.
+const BPF_F_AFTER: u32 = 1 << 4;
+/// `BPF_F_ID`: the relative program is named by its kernel id, not an fd.
+const BPF_F_ID: u32 = 1 << 5;
 
 /// Subset of `union bpf_attr` for `BPF_LINK_CREATE`.
 ///
@@ -214,11 +221,23 @@ pub fn attach_xdp(
 
 /// Attach a raw TC program fd to `iface` via TCX `BPF_LINK_CREATE`.
 /// `egress` selects `BPF_TCX_EGRESS`, otherwise `BPF_TCX_INGRESS`.
+///
+/// The agent's programs sit together at the head of the chain, in the order
+/// they were attached. A program ahead of ours that returns `TC_ACT_OK` or
+/// redirects ends the chain there, so a CNI attached first would decide what
+/// our classifiers never see; ours return `TCX_NEXT` on a pass and hand every
+/// packet on to whatever runs after them.
+///
+/// `anchors` are the agent's programs already on this hook, most recent
+/// first. The new link goes right after the first of them still attached,
+/// which keeps the load order the chain is documented to run in; with none
+/// left, it goes to the head.
 pub fn attach_tcx(
     program: &str,
     prog_fd: RawFd,
     iface: &str,
     egress: bool,
+    anchors: &[u32],
 ) -> Result<OwnedFd, KfuncAttachError> {
     let ifindex = iface_to_ifindex(iface)?;
     let attach_type = if egress {
@@ -226,7 +245,29 @@ pub fn attach_tcx(
     } else {
         BPF_TCX_INGRESS
     };
-    let fd = link_create(program, prog_fd, ifindex, attach_type, 0)?;
+    let mut placed = None;
+    for &anchor in anchors {
+        match link_create_relative(
+            program,
+            prog_fd,
+            ifindex,
+            attach_type,
+            BPF_F_AFTER | BPF_F_ID,
+            anchor,
+        ) {
+            Ok(fd) => {
+                placed = Some(fd);
+                break;
+            }
+            // That program left the chain since; try the one before it.
+            Err(KfuncAttachError::LinkCreate { errno, .. }) if errno == libc::ENOENT => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let fd = match placed {
+        Some(fd) => fd,
+        None => link_create(program, prog_fd, ifindex, attach_type, BPF_F_BEFORE)?,
+    };
     let dir = if egress { "egress" } else { "ingress" };
     info!(
         program,
@@ -274,12 +315,26 @@ fn link_create(
     attach_type: u32,
     flags: u32,
 ) -> Result<OwnedFd, KfuncAttachError> {
+    link_create_relative(program, prog_fd, ifindex, attach_type, flags, 0)
+}
+
+/// [`link_create`] naming a relative program for the multi-program hooks:
+/// an fd, or with `BPF_F_ID` in `flags` a kernel program id.
+fn link_create_relative(
+    program: &str,
+    prog_fd: RawFd,
+    ifindex: u32,
+    attach_type: u32,
+    flags: u32,
+    relative: u32,
+) -> Result<OwnedFd, KfuncAttachError> {
     let mut attr = LinkCreateAttr {
         #[allow(clippy::cast_sign_loss)]
         prog_fd: prog_fd as u32,
         target_ifindex: ifindex,
         attach_type,
         flags,
+        relative_fd: relative,
         ..Default::default()
     };
     let rc = unsafe {

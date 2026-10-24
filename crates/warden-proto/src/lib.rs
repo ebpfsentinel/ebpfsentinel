@@ -183,6 +183,18 @@ pub enum Command {
         /// Opaque serialized request, defined by the handler for `kind`.
         payload: Vec<u8>,
     },
+    /// Read the programs attached to `iface`'s TCX ingress (or, with
+    /// `egress`, egress) hook, in the order the kernel runs them, answered by
+    /// [`Response::TcxChain`]. `BPF_PROG_QUERY` wants `CAP_NET_ADMIN` in the
+    /// initial user namespace, which the agent's own namespace does not
+    /// confer, so the agent cannot read back where its classifiers landed
+    /// without asking. Read-only: it names program ids and nothing else.
+    TcxChain {
+        /// Interface whose chain is read.
+        iface: String,
+        /// `true` for the egress hook, `false` for ingress.
+        egress: bool,
+    },
 }
 
 /// A reply from the warden to the agent.
@@ -232,6 +244,12 @@ pub enum Response {
     Error {
         /// Human-readable failure reason.
         message: String,
+    },
+    /// The programs on one TCX hook, first to run first, answering
+    /// [`Command::TcxChain`].
+    TcxChain {
+        /// Program ids in run order.
+        prog_ids: Vec<u32>,
     },
 }
 
@@ -319,6 +337,10 @@ mod tests {
                 kind: "enterprise.proc_tls.v1".into(),
                 payload: vec![0x01, 0x02, 0x03],
             },
+            Command::TcxChain {
+                iface: "enp0s2".into(),
+                egress: true,
+            },
         ]
     }
 
@@ -349,6 +371,9 @@ mod tests {
             Response::Unimplemented,
             Response::Error {
                 message: "nope".into(),
+            },
+            Response::TcxChain {
+                prog_ids: vec![41, 7, 112],
             },
         ]
     }
@@ -383,6 +408,24 @@ mod tests {
         let b: Command = read_frame(&mut cur).unwrap();
         assert_eq!(a, Command::Hello { version: 1 });
         assert_eq!(b, Command::ConntrackDump);
+    }
+
+    /// A variant appended at the end keeps every earlier tag where it was, so
+    /// a warden from before it still decodes everything it already served.
+    #[test]
+    fn appended_variants_keep_the_earlier_tags() {
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &Command::DlpScan).unwrap();
+        assert_eq!(buf[4], 11);
+        buf.clear();
+        write_frame(
+            &mut buf,
+            &Response::Error {
+                message: String::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(buf[4], 8);
     }
 
     #[test]

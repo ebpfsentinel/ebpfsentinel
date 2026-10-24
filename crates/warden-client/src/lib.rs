@@ -69,6 +69,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::AttachCgroup { .. } => "AttachCgroup",
         Command::DlpScan => "DlpScan",
         Command::Extension { .. } => "Extension",
+        Command::TcxChain { .. } => "TcxChain",
     }
 }
 
@@ -200,6 +201,18 @@ impl WardenClient {
         })? {
             Response::Extension { payload } => Ok(payload),
             other => Err(unexpected("Extension", &other)),
+        }
+    }
+
+    /// Read the program ids on `iface`'s TCX ingress or egress hook, in run
+    /// order. The agent's own user namespace cannot issue `BPF_PROG_QUERY`.
+    pub fn tcx_chain(&mut self, iface: &str, egress: bool) -> io::Result<Vec<u32>> {
+        match self.call(&Command::TcxChain {
+            iface: iface.to_owned(),
+            egress,
+        })? {
+            Response::TcxChain { prog_ids } => Ok(prog_ids),
+            other => Err(unexpected("TcxChain", &other)),
         }
     }
 
@@ -434,6 +447,12 @@ impl ReconnectingClient {
     /// Read the kernel conntrack table.
     pub fn conntrack_dump(&mut self) -> io::Result<Vec<u8>> {
         self.with_retry(WardenClient::conntrack_dump)
+    }
+
+    /// Read one TCX hook's program ids in run order, reconnecting if the
+    /// warden bounced. A read, so replaying it is harmless.
+    pub fn tcx_chain(&mut self, iface: &str, egress: bool) -> io::Result<Vec<u32>> {
+        self.with_retry(|c| c.tcx_chain(iface, egress))
     }
 
     /// Scan `/proc` for DLP targets through the warden, reconnecting if it bounced.

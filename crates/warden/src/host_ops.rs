@@ -40,6 +40,8 @@ pub trait HostOps: Send + Sync {
     fn route_del(&self, route: &RouteSpec) -> Result<(), String>;
     /// Broadcast a gratuitous ARP for `ip` on `iface` (VIP takeover).
     fn arp_announce(&self, iface: &str, ip: &str) -> Result<(), String>;
+    /// The program ids on `iface`'s TCX ingress or egress hook, in run order.
+    fn tcx_chain(&self, iface: &str, egress: bool) -> Result<Vec<u32>, String>;
 }
 
 /// Performs each op directly, for the warden that holds the capabilities in the
@@ -70,5 +72,8 @@ impl HostOps for LocalHostOps {
     }
     fn arp_announce(&self, iface: &str, ip: &str) -> Result<(), String> {
         net_ops::arp_announce(iface, ip)
+    }
+    fn tcx_chain(&self, iface: &str, egress: bool) -> Result<Vec<u32>, String> {
+        crate::tcx_ops::tcx_chain(iface, egress)
     }
 }

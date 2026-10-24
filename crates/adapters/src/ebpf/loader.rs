@@ -10,6 +10,7 @@ use super::attach_inspect::{self, AttachBlock};
 use super::kfunc_attach;
 use super::kfunc_loader;
 use super::link_handover::{self, AttachedLink, LinkHook};
+use super::tcx_order;
 
 /// Default BPF filesystem pin path for shared maps.
 pub const DEFAULT_BPF_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel";
@@ -361,8 +362,9 @@ impl EbpfLoader {
     /// of the given interface.
     ///
     /// Uses a TCX link only (kernel >= 6.6, no qdisc); there is no clsact
-    /// fallback. The link is appended at the tail of the interface's TCX
-    /// chain, so programs run in the order they were attached.
+    /// fallback. The link goes to the head of the interface's TCX chain, and
+    /// the chain is read back once it is there: a foreign program found ahead
+    /// of the agent's refuses the attach (see [`tcx_order`]).
     pub fn attach_tc_program(
         &mut self,
         program_name: &str,
@@ -373,13 +375,20 @@ impl EbpfLoader {
             if let Some(link) =
                 link_handover::take_over(program_name, interface, LinkHook::TcxIngress, raw)
             {
+                check_tcx_order(program_name, interface, false, raw)?;
                 self.links.push(link);
                 attach_inspect::clear_block(program_name, interface);
                 return Ok(());
             }
             // TCX (kernel >= 6.6) needs no qdisc; the raw helper mirrors aya's
             // ingress attach for programs aya never loaded.
-            let link = match kfunc_attach::attach_tcx(program_name, raw, interface, false) {
+            let link = match kfunc_attach::attach_tcx(
+                program_name,
+                raw,
+                interface,
+                false,
+                &tcx_order::anchors(interface, false),
+            ) {
                 Ok(link) => link,
                 Err(e) => {
                     return Err(record_link_block(
@@ -391,6 +400,7 @@ impl EbpfLoader {
                     ));
                 }
             };
+            check_tcx_order(program_name, interface, false, raw)?;
             self.links.push(AttachedLink::new(
                 program_name,
                 interface,
@@ -427,11 +437,18 @@ impl EbpfLoader {
             if let Some(link) =
                 link_handover::take_over(program_name, interface, LinkHook::TcxEgress, raw)
             {
+                check_tcx_order(program_name, interface, true, raw)?;
                 self.links.push(link);
                 attach_inspect::clear_block(program_name, interface);
                 return Ok(());
             }
-            let link = match kfunc_attach::attach_tcx(program_name, raw, interface, true) {
+            let link = match kfunc_attach::attach_tcx(
+                program_name,
+                raw,
+                interface,
+                true,
+                &tcx_order::anchors(interface, true),
+            ) {
                 Ok(link) => link,
                 Err(e) => {
                     return Err(record_link_block(
@@ -443,6 +460,7 @@ impl EbpfLoader {
                     ));
                 }
             };
+            check_tcx_order(program_name, interface, true, raw)?;
             self.links.push(AttachedLink::new(
                 program_name,
                 interface,
@@ -791,6 +809,29 @@ fn record_link_block(
         nested_xdp: false,
     });
     anyhow::anyhow!("{reason}")
+}
+
+/// Read the TCX chain back after an attach and refuse a position behind a
+/// foreign program. The caller has not kept the link yet, so returning the
+/// error drops it and the program leaves the chain again.
+fn check_tcx_order(
+    program_name: &str,
+    interface: &str,
+    egress: bool,
+    prog_fd: RawFd,
+) -> Result<(), anyhow::Error> {
+    let hook = tcx_order::Hook { interface, egress };
+    let Err(reason) = tcx_order::verify(program_name, hook, prog_fd) else {
+        return Ok(());
+    };
+    warn!(program_name, interface, reason = %reason, "attach refused");
+    attach_inspect::record_block(AttachBlock {
+        program: program_name.to_owned(),
+        interface: interface.to_owned(),
+        reason: reason.clone(),
+        nested_xdp: false,
+    });
+    Err(anyhow::anyhow!("{reason}"))
 }
 
 /// Human-readable label for XDP attachment flags.
