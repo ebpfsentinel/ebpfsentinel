@@ -4278,6 +4278,17 @@ pub async fn cmd_ebpf_coverage(client: &ApiClient, output: OutputFormat) -> Resu
     if resp.links_without_pod > 0 {
         println!("  Links naming no pod: {}", resp.links_without_pod);
     }
+    println!(
+        "  Pod profile:       {}",
+        if resp.pod_profile_recommended == 0 {
+            "not needed, no gap it closes beyond loopback".to_string()
+        } else {
+            format!(
+                "would close a gap in {} pods (marked *)",
+                resp.pod_profile_recommended
+            )
+        }
+    );
     if resp.pods.is_empty() {
         println!("\nNo pod is scheduled on this node.");
         return Ok(());
@@ -4312,7 +4323,12 @@ pub async fn cmd_ebpf_coverage(client: &ApiClient, output: OutputFormat) -> Resu
             .filter_map(|c| c.gap.as_ref().map(|gap| format!("{}: {gap}", c.class)))
             .collect::<Vec<_>>()
             .join(", ");
-        table.row(cells![pod.namespace, pod.name, pod.level, interfaces, gaps]);
+        let name = if pod.pod_profile_recommended {
+            format!("{} *", pod.name)
+        } else {
+            pod.name.clone()
+        };
+        table.row(cells![pod.namespace, name, pod.level, interfaces, gaps]);
     }
     table.print();
     Ok(())

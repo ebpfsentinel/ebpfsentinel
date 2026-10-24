@@ -46,6 +46,7 @@ pub mod cgroup_ops;
 pub mod dlp_scan;
 pub mod host_ops;
 pub mod net_ops;
+pub mod netns_tcx_ops;
 pub mod pcap_slots;
 pub mod server;
 pub mod tcx_ops;

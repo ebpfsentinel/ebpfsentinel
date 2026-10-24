@@ -392,6 +392,9 @@ pub struct AgentMetrics {
     /// Packets workload links had carried, both directions, by the time the
     /// agent's TC chain was attached to them.
     pub link_attach_unguarded_packets_total: Family<LinkKindLabels, Counter>,
+    /// Time workload links were read both by the node agent and by a pod
+    /// profile agent inside the pod, before the node agent stood back.
+    pub link_inspected_twice_seconds: Family<LinkKindLabels, Histogram>,
     /// IDS flow-kill counter - times the IDS pipeline decided to
     /// mark a conntrack entry `IPS_DYING` to terminate a live flow
     /// following a block-mode rule match.
@@ -1031,6 +1034,19 @@ impl AgentMetrics {
             link_attach_unguarded_packets_total.clone(),
         );
 
+        // The node agent reads the claims every fifteen seconds and a claim
+        // lapses after forty-five, so the window starts under a second and a
+        // value past a minute means the claim was read late.
+        let link_inspected_twice_seconds =
+            Family::<LinkKindLabels, Histogram>::new_with_constructor(|| {
+                Histogram::new(exponential_buckets_range(0.5, 300.0, 12))
+            });
+        registry.register(
+            "link_inspected_twice_seconds",
+            "Time workload links were read both by the node agent and by a pod profile agent inside the pod, before the node agent stood back, by link kind",
+            link_inspected_twice_seconds.clone(),
+        );
+
         let ids_ct_dying_total = Counter::default();
         registry.register(
             "ids_ct_dying",
@@ -1140,6 +1156,7 @@ impl AgentMetrics {
             container_resolver_errors_total,
             link_attach_gap_seconds,
             link_attach_unguarded_packets_total,
+            link_inspected_twice_seconds,
             ids_ct_dying_total,
             fingerprints_seen_total,
             bpf_token_used,
@@ -1830,6 +1847,14 @@ impl ports::secondary::metrics_port::ContainerMetrics for AgentMetrics {
             .observe(seconds);
     }
 
+    fn observe_link_inspected_twice(&self, kind: &str, seconds: f64) {
+        self.link_inspected_twice_seconds
+            .get_or_create(&LinkKindLabels {
+                kind: kind.to_owned(),
+            })
+            .observe(seconds);
+    }
+
     fn record_link_unguarded_packets(&self, kind: &str, packets: u64) {
         self.link_attach_unguarded_packets_total
             .get_or_create(&LinkKindLabels {
@@ -2394,6 +2419,7 @@ mod tests {
         ("learning_observations", "counter"),
         ("link_attach_gap_seconds", "histogram"),
         ("link_attach_unguarded_packets", "counter"),
+        ("link_inspected_twice_seconds", "histogram"),
         ("memory_usage_bytes", "gauge"),
         ("open_fds", "gauge"),
         ("packet_processing_duration_seconds", "histogram"),
@@ -2715,6 +2741,11 @@ mod tests {
                 kind: "veth".into(),
             })
             .observe(0.12);
+        m.link_inspected_twice_seconds
+            .get_or_create(&LinkKindLabels {
+                kind: "veth".into(),
+            })
+            .observe(3.0);
     }
 
     #[test]

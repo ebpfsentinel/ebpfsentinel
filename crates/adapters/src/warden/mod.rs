@@ -6,4 +6,5 @@
 pub mod arp;
 pub mod attribution;
 pub mod pcap;
+pub mod pod_tc;
 pub mod uprobe;

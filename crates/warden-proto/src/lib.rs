@@ -195,6 +195,22 @@ pub enum Command {
         /// `true` for the egress hook, `false` for ingress.
         egress: bool,
     },
+    /// Attach the TC program whose fd rides in the accompanying `SCM_RIGHTS`
+    /// cmsg (sent right after this frame) on `iface`'s TCX ingress (or, with
+    /// `egress`, egress) hook inside the network namespace of process `pid`.
+    /// A pod's own interface and its loopback live only in that namespace,
+    /// and entering it wants `CAP_SYS_ADMIN` over the namespace's owner,
+    /// which the agent's user namespace does not hold. The warden refuses a
+    /// process outside a pod's cgroup and a namespace that is the host's or
+    /// its own, then answers [`Response::FdReady`] followed by the link fd.
+    AttachTcxInNetns {
+        /// A process in the pod whose namespace is entered.
+        pid: u32,
+        /// Interface inside that namespace.
+        iface: String,
+        /// `true` for the egress hook, `false` for ingress.
+        egress: bool,
+    },
 }
 
 /// A reply from the warden to the agent.
@@ -340,6 +356,11 @@ mod tests {
             Command::TcxChain {
                 iface: "enp0s2".into(),
                 egress: true,
+            },
+            Command::AttachTcxInNetns {
+                pid: 4242,
+                iface: "eth0".into(),
+                egress: false,
             },
         ]
     }

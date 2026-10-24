@@ -11,6 +11,10 @@
 
 use std::cmp::Ordering;
 
+mod claim;
+
+pub use claim::{CLAIM_LAPSES_AFTER_SECS, Inspector, PodClaim, link_inspector};
+
 /// The classes of traffic a pod can carry, each crossing different links.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TrafficClass {
@@ -60,6 +64,10 @@ pub enum LinkRefusal {
         /// Programs the agent tried.
         of: u32,
     },
+    /// A pod profile agent holds the chain inside the pod, so the node agent
+    /// stands back from the host side of its link rather than read every
+    /// packet of it a second time.
+    InspectedInside,
 }
 
 /// What became of one link a workload brought.
@@ -96,6 +104,8 @@ pub struct PodSubject {
     pub namespace: String,
     /// The pod shares the node's network namespace and brings no link.
     pub host_network: bool,
+    /// The pod's labels, which a pod profile agent selects on.
+    pub labels: std::collections::BTreeMap<String, String>,
 }
 
 /// What the node itself contributes, whatever the pod.
@@ -139,9 +149,23 @@ impl GapReason {
             Self::LinkRefused(LinkRefusal::UnknownKind(_)) => "link_kind_unknown",
             Self::LinkRefused(LinkRefusal::AttachMode(_)) => "attach_mode_skips_kind",
             Self::LinkRefused(LinkRefusal::ProgramsRefused { .. }) => "programs_refused",
+            Self::LinkRefused(LinkRefusal::InspectedInside) => "inspected_inside",
             Self::NoUplinkAttached => "no_uplink_attached",
             Self::EncapsulatedOnUplink => "encapsulated_on_uplink",
         }
+    }
+
+    /// Whether an agent under the pod profile, attached inside the pod's own
+    /// network namespace, would see the traffic this gap leaves out.
+    ///
+    /// Inside the pod the chain sits on the pod's own interfaces, so the
+    /// loopback, the link the host side refused or never found, and the
+    /// inner header of encapsulated traffic are all in front of it. A
+    /// host-network pod has no namespace of its own to attach inside, which
+    /// is the one gap the profile cannot close.
+    #[must_use]
+    pub fn closed_by_pod_profile(&self) -> bool {
+        !matches!(self, Self::HostNetworkStaysOnHost)
     }
 
     /// The reason in a sentence, for the CLI and the logs.
@@ -164,6 +188,11 @@ impl GapReason {
             Self::LinkRefused(LinkRefusal::ProgramsRefused { attached, of }) => format!(
                 "only {attached} of {of} programs went on the pod's link, the rest were refused"
             ),
+            Self::LinkRefused(LinkRefusal::InspectedInside) => {
+                "a pod profile agent inspects inside the pod, so the node agent stands back \
+                 from its link"
+                    .to_string()
+            }
             Self::NoUplinkAttached => {
                 "the pod's link carries no chain and neither do the node's uplinks".to_string()
             }
@@ -231,6 +260,20 @@ pub struct PodCoverage {
 }
 
 impl PodCoverage {
+    /// Whether this verdict argues for the pod profile: a class other than
+    /// loopback is missed for a reason the profile closes.
+    ///
+    /// Loopback alone does not count. Every pod has it and no node agent sees
+    /// it, so counting it would recommend a program in every pod on every
+    /// node, which is the cost the profile exists to avoid paying blindly.
+    #[must_use]
+    pub fn pod_profile_recommended(&self) -> bool {
+        self.classes.iter().any(|c| {
+            c.class != TrafficClass::Loopback
+                && c.gap.as_ref().is_some_and(GapReason::closed_by_pod_profile)
+        })
+    }
+
     /// Uncovered pods first, then partial, then full; by namespace and name
     /// within each.
     #[must_use]
@@ -292,7 +335,14 @@ pub fn pod_verdict(pod: &PodSubject, links: &[&WorkloadLink], node: NodeView) ->
         })
         .collect();
     let own_link = interfaces.iter().any(|i| i.attached);
-    let classes: Vec<ClassCoverage> = if own_link {
+    let inside = interfaces
+        .iter()
+        .any(|i| i.refusal == Some(LinkRefusal::InspectedInside));
+    let classes: Vec<ClassCoverage> = if inside {
+        // The chain sits on the pod's own interfaces, loopback included, so
+        // nothing the pod carries goes past it.
+        TrafficClass::ALL.into_iter().map(observed).collect()
+    } else if own_link {
         TrafficClass::ALL
             .into_iter()
             .map(|class| match class {
@@ -369,6 +419,7 @@ mod tests {
             name: format!("pod-{uid}"),
             namespace: "shop".into(),
             host_network,
+            labels: std::collections::BTreeMap::new(),
         }
     }
 
@@ -393,6 +444,44 @@ mod tests {
         uplinks_attached: true,
         encapsulated: false,
     };
+
+    #[test]
+    fn a_fully_covered_pod_does_not_argue_for_the_pod_profile() {
+        let l = link("a", LinkAttachment::Attached);
+        let v = pod_verdict(&pod("a", false), &[&l], NODE);
+        assert!(GapReason::LoopbackStaysInPod.closed_by_pod_profile());
+        assert!(!v.pod_profile_recommended());
+    }
+
+    #[test]
+    fn a_refused_link_argues_for_the_pod_profile() {
+        let l = link(
+            "a",
+            LinkAttachment::Refused(LinkRefusal::UnknownKind("tun".into())),
+        );
+        let v = pod_verdict(&pod("a", false), &[&l], NODE);
+        assert!(v.pod_profile_recommended());
+    }
+
+    #[test]
+    fn a_pod_inspected_inside_is_full_with_its_loopback_seen() {
+        let l = link("a", LinkAttachment::Refused(LinkRefusal::InspectedInside));
+        let v = pod_verdict(&pod("a", false), &[&l], NodeView::default());
+        assert_eq!(v.level, CoverageLevel::Full);
+        assert!(v.classes.iter().all(|c| c.observed && c.gap.is_none()));
+        assert!(!v.pod_profile_recommended());
+        assert_eq!(
+            GapReason::LinkRefused(LinkRefusal::InspectedInside).code(),
+            "inspected_inside"
+        );
+    }
+
+    #[test]
+    fn a_host_network_pod_is_beyond_the_pod_profile() {
+        assert!(!GapReason::HostNetworkStaysOnHost.closed_by_pod_profile());
+        let v = pod_verdict(&pod("a", true), &[], NODE);
+        assert!(!v.pod_profile_recommended());
+    }
 
     #[test]
     fn an_attached_link_sees_everything_but_loopback() {

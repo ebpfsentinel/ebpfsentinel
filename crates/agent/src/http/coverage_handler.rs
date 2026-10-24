@@ -42,6 +42,10 @@ pub struct CoverageClass {
     /// The same reason in a sentence. Absent when observed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// An agent under the pod profile would see this traffic. Absent when
+    /// observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed_by_pod_profile: Option<bool>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -59,6 +63,9 @@ pub struct PodCoverageEntry {
     pub interfaces: Vec<CoverageInterface>,
     /// One entry per traffic class, in a fixed order.
     pub classes: Vec<CoverageClass>,
+    /// A class other than loopback is missed for a reason the pod profile
+    /// closes. Loopback alone never sets it.
+    pub pod_profile_recommended: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -76,6 +83,8 @@ pub struct EbpfCoverageResponse {
     pub partial: usize,
     /// Pods with every class but loopback observed.
     pub full: usize,
+    /// Pods whose verdict argues for the pod profile.
+    pub pod_profile_recommended: usize,
     /// One verdict per pod, uncovered first.
     pub pods: Vec<PodCoverageEntry>,
 }
@@ -96,12 +105,15 @@ fn class_entry(c: ClassCoverage) -> CoverageClass {
         class: c.class.as_str().to_owned(),
         observed: c.observed,
         reason: c.gap.as_ref().map(GapReason::describe),
+        closed_by_pod_profile: c.gap.as_ref().map(GapReason::closed_by_pod_profile),
         gap: c.gap.map(|g| g.code().to_owned()),
     }
 }
 
 fn pod_entry(p: PodCoverage) -> PodCoverageEntry {
+    let pod_profile_recommended = p.pod_profile_recommended();
     PodCoverageEntry {
+        pod_profile_recommended,
         uid: p.uid,
         name: p.name,
         namespace: p.namespace,
@@ -121,6 +133,11 @@ fn coverage_body(report: NodeCoverage) -> EbpfCoverageResponse {
         uncovered: count(CoverageLevel::None),
         partial: count(CoverageLevel::Partial),
         full: count(CoverageLevel::Full),
+        pod_profile_recommended: report
+            .pods
+            .iter()
+            .filter(|p| p.pod_profile_recommended())
+            .count(),
         pods: report.pods.into_iter().map(pod_entry).collect(),
     }
 }
@@ -177,12 +194,14 @@ mod tests {
                 name: "web".into(),
                 namespace: "shop".into(),
                 host_network: false,
+                labels: std::collections::BTreeMap::new(),
             },
             PodSubject {
                 uid: "b".into(),
                 name: "db".into(),
                 namespace: "shop".into(),
                 host_network: false,
+                labels: std::collections::BTreeMap::new(),
             },
         ];
         let links = vec![
@@ -220,5 +239,10 @@ mod tests {
         let web = &json["pods"][1];
         assert!(web["interfaces"][0].get("refusal").is_none());
         assert_eq!(web["level"], "full");
+        assert_eq!(body.pod_profile_recommended, 1);
+        assert_eq!(db["pod_profile_recommended"], true);
+        assert_eq!(db["classes"][2]["closed_by_pod_profile"], true);
+        assert!(db["classes"][0].get("closed_by_pod_profile").is_none());
+        assert_eq!(web["pod_profile_recommended"], false);
     }
 }

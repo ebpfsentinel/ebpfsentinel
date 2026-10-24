@@ -28,6 +28,7 @@ mod loadbalancer;
 mod management;
 mod nat;
 mod process_table;
+mod profile;
 mod qos;
 mod ratelimit;
 mod response;
@@ -84,6 +85,7 @@ pub use loadbalancer::{
 pub use management::ManagementConfig;
 pub use nat::{HairpinNatConfig, NatConfig, NatRuleConfig, NptV6RuleConfig};
 pub use process_table::ProcessTableConfig;
+pub use profile::{AgentProfile, POD_REFUSED_SECTIONS, PodSelectorConfig};
 pub use qos::{QosClassifierConfig, QosPipeConfig, QosQueueConfig, QosSectionConfig};
 pub use ratelimit::{RateLimitRuleConfig, RateLimitSectionConfig};
 pub use response::{
@@ -342,7 +344,11 @@ impl AgentConfig {
                 ),
             });
         }
-        let config: Self = serde_norway::from_str(yaml)?;
+        let mut config: Self = serde_norway::from_str(yaml)?;
+        if config.agent.profile == AgentProfile::Pod {
+            let raw: serde_norway::Value = serde_norway::from_str(yaml)?;
+            config.apply_pod_profile(&raw)?;
+        }
         config.validate()?;
         Ok(config)
     }
@@ -398,12 +404,7 @@ impl AgentConfig {
     /// Validate the config after deserialization.
     #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.agent.interfaces.is_empty() {
-            return Err(ConfigError::Validation {
-                field: "agent.interfaces".to_string(),
-                message: "at least one interface is required".to_string(),
-            });
-        }
+        self.validate_profile()?;
 
         // Check port conflicts
         let ports = [
@@ -1867,7 +1868,27 @@ impl From<RiskAcceptance> for bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
+    /// The node's uplinks under the `node` profile; empty under `pod`, which
+    /// attaches inside each selected pod instead.
+    #[serde(default)]
     pub interfaces: Vec<String>,
+
+    /// Where this agent attaches: `node` (the default) or `pod`, which runs
+    /// beside a node agent inside the pods `pod_selector` names.
+    #[serde(default)]
+    pub profile: AgentProfile,
+
+    /// The pods a `pod` profile agent attaches inside. Required with that
+    /// profile and refused with the other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_selector: Option<PodSelectorConfig>,
+
+    /// A node directory shared by every agent on the node, through which a
+    /// `pod` profile agent says which pods it inspects inside and a `node`
+    /// profile agent reads it, to stand back from those pods' links rather
+    /// than inspect their traffic a second time. Unset, neither looks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_claims_dir: Option<String>,
 
     #[serde(default = "default_log_level")]
     pub log_level: LogLevel,

@@ -10,6 +10,7 @@ pub mod k8s_enricher;
 #[cfg(feature = "kubernetes")]
 pub mod netpol_watch;
 pub mod pod_cgroups;
+pub mod pod_claims;
 pub mod proc_details;
 pub mod proc_executable;
 pub mod proc_resolver;

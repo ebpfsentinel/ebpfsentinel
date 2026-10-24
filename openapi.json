@@ -9458,6 +9458,13 @@
             "type": "string",
             "description": "`north_south`, `east_west_across_nodes`, `east_west_on_node` or\n`loopback`."
           },
+          "closed_by_pod_profile": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "An agent under the pod profile would see this traffic. Absent when\nobserved."
+          },
           "gap": {
             "type": [
               "string",
@@ -10777,6 +10784,7 @@
           "uncovered",
           "partial",
           "full",
+          "pod_profile_recommended",
           "pods"
         ],
         "properties": {
@@ -10797,6 +10805,11 @@
           "partial": {
             "type": "integer",
             "description": "Pods with some classes observed.",
+            "minimum": 0
+          },
+          "pod_profile_recommended": {
+            "type": "integer",
+            "description": "Pods whose verdict argues for the pod profile.",
             "minimum": 0
           },
           "pods": {
@@ -12933,7 +12946,8 @@
           "host_network",
           "level",
           "interfaces",
-          "classes"
+          "classes",
+          "pod_profile_recommended"
         ],
         "properties": {
           "classes": {
@@ -12963,6 +12977,10 @@
           },
           "namespace": {
             "type": "string"
+          },
+          "pod_profile_recommended": {
+            "type": "boolean",
+            "description": "A class other than loopback is missed for a reason the pod profile\ncloses. Loopback alone never sets it."
           },
           "uid": {
             "type": "string"

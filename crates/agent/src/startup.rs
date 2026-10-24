@@ -179,6 +179,63 @@ fn warden_sock_from_env() -> Option<std::path::PathBuf> {
         .filter(|p| !p.as_os_str().is_empty())
 }
 
+/// Keep the TC chain inside every pod a pod profile selects. The links are
+/// made by the warden, which alone can enter a pod's network namespace, and
+/// the pods come from the Kubernetes pod inventory; without either, or with
+/// no TC program loaded, the reason is said once and nothing is attached.
+fn spawn_pod_tc_attacher(
+    config: &AgentConfig,
+    app_state: &AppState,
+    programs: Vec<(
+        String,
+        std::os::fd::RawFd,
+        adapters::ebpf::link_watcher::HookSide,
+    )>,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    use adapters::warden::pod_tc::{PodTcAttacher, WardenPodLinks};
+
+    if programs.is_empty() {
+        warn!("profile: pod selected no pod chain - no TC program is loaded");
+        return;
+    }
+    let Some(sock) = warden_sock_from_env() else {
+        warn!(
+            "profile: pod attaches nothing - entering a pod's network namespace is brokered by \
+             the warden, and EBPFSENTINEL_WARDEN_SOCK is not set"
+        );
+        return;
+    };
+    let Some(inventory) = app_state.pod_coverage.inventory() else {
+        warn!(
+            "profile: pod attaches nothing - the pods are selected from the Kubernetes pod \
+             inventory, and container.kubernetes is not running"
+        );
+        return;
+    };
+    let selector = config.agent.pod_selector.clone().unwrap_or_default();
+    let count = programs.len();
+    let mut attacher = PodTcAttacher::new(
+        WardenPodLinks::new(&sock),
+        programs,
+        selector,
+        host_proc_root(),
+    );
+    if let Some(dir) = &config.agent.pod_claims_dir {
+        attacher = attacher.with_claims(adapters::container::pod_claims::PodClaimsDir::new(dir));
+    } else {
+        warn!(
+            "profile: pod writes no claim - agent.pod_claims_dir is unset, so the node agent \
+             keeps reading these pods' links and their traffic is counted by both"
+        );
+    }
+    tokio::spawn(adapters::warden::pod_tc::run(attacher, inventory, cancel));
+    info!(
+        programs = count,
+        "pod profile: chain kept inside the selected pods through the warden"
+    );
+}
+
 /// Host proc filesystem root used for cross-container DLP discovery. Defaults to
 /// `/proc`; set `EBPFSENTINEL_HOST_PROC` (e.g. `/host/proc`) when the host proc is
 /// bind-mounted into the agent container so it can resolve neighbouring
@@ -3556,6 +3613,14 @@ pub async fn run(
         }
     }
 
+    // The TC programs a pod profile attaches inside each selected pod, once
+    // the pod inventory exists to select them from.
+    let mut pod_tc_programs: Vec<(
+        String,
+        std::os::fd::RawFd,
+        adapters::ebpf::link_watcher::HookSide,
+    )> = Vec::new();
+
     // ── Build link hot-plug registry + spawn watcher ─────────
     if ebpf_capable {
         use adapters::ebpf::link_watcher::{
@@ -3591,11 +3656,18 @@ pub async fn run(
                 .find_map(|loader| loader.program_fd(name))
             {
                 registry.register(name.to_string(), fd, side);
+                pod_tc_programs.push((name.to_string(), fd, side));
             }
         }
 
         let registered = registry.program_count();
-        if registered > 0 {
+        if config.agent.profile == infrastructure::config::AgentProfile::Pod {
+            // The host side of every workload link belongs to the node agent
+            // this one runs beside; attaching there too would see each packet
+            // twice. The chain goes inside each selected pod instead, once the
+            // pod inventory is up.
+            info!("link hot-plug watcher skipped (profile: pod attaches inside the selected pods)");
+        } else if registered > 0 {
             let policy = match config.agent.attach_mode {
                 AttachMode::Auto => HookPolicy::Auto,
                 AttachMode::Tc => HookPolicy::Tcx,
@@ -3615,6 +3687,12 @@ pub async fn run(
                 owners = owners.with_processes(process_tx.clone());
             }
             registry.report_owners(owners);
+            // A pod profile agent on this node says through the claims
+            // directory which pods it inspects inside; their links are left
+            // to it while its claim holds.
+            if let Some(dir) = &config.agent.pod_claims_dir {
+                registry.stand_back_for(adapters::container::pod_claims::PodClaimsDir::new(dir));
+            }
             registry.report_coverage(Arc::clone(&app_state.pod_coverage)
                 as Arc<dyn ports::secondary::pod_coverage_port::LinkCoverageSink>);
             app_state
@@ -3907,6 +3985,10 @@ pub async fn run(
     let kubernetes_enricher: Option<
         Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>,
     > = None;
+
+    if config.agent.profile == infrastructure::config::AgentProfile::Pod {
+        spawn_pod_tc_attacher(&config, &app_state, pod_tc_programs, cancel_token.clone());
+    }
 
     // A workload rule naming pods, namespaces or a service account is
     // decided against what the Kubernetes enricher read. Without it the rule

@@ -1579,6 +1579,8 @@ pub struct CoverageClass {
     pub gap: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_by_pod_profile: Option<bool>,
 }
 
 /// The verdict for one pod.
@@ -1591,6 +1593,8 @@ pub struct PodCoverageEntry {
     pub level: String,
     pub interfaces: Vec<CoverageInterface>,
     pub classes: Vec<CoverageClass>,
+    #[serde(default)]
+    pub pod_profile_recommended: bool,
 }
 
 /// What the agent sees of each pod on its node.
@@ -1602,6 +1606,8 @@ pub struct EbpfCoverageResponse {
     pub uncovered: usize,
     pub partial: usize,
     pub full: usize,
+    #[serde(default)]
+    pub pod_profile_recommended: usize,
     pub pods: Vec<PodCoverageEntry>,
 }
 

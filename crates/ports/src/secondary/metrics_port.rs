@@ -463,6 +463,11 @@ pub trait ContainerMetrics: Send + Sync {
     /// TC chain was attached to it, from the first message announcing it.
     fn observe_link_attach_gap(&self, _kind: &str, _seconds: f64) {}
 
+    /// Record how long a workload link of `kind` was read by both the node
+    /// agent and a pod profile agent inside the pod, from the pod agent's
+    /// chain going on to the node agent standing back from the link.
+    fn observe_link_inspected_twice(&self, _kind: &str, _seconds: f64) {}
+
     /// Add the packets a workload link of `kind` had carried, both
     /// directions, by the time the agent's TC chain was attached to it.
     fn record_link_unguarded_packets(&self, _kind: &str, _packets: u64) {}

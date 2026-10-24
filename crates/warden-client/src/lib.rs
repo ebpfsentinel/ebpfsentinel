@@ -70,6 +70,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::DlpScan => "DlpScan",
         Command::Extension { .. } => "Extension",
         Command::TcxChain { .. } => "TcxChain",
+        Command::AttachTcxInNetns { .. } => "AttachTcxInNetns",
     }
 }
 
@@ -344,6 +345,35 @@ impl WardenClient {
             other => Err(unexpected("AttachCgroup", &other)),
         }
     }
+
+    /// Ask the warden to attach the agent's TC `prog_fd` (handed over
+    /// `SCM_RIGHTS`) on `iface`'s TCX ingress or egress hook inside the network
+    /// namespace of process `pid`, a pod's. Returns the link fd; the agent owns
+    /// it and dropping it detaches.
+    #[cfg(feature = "fd-pass")]
+    pub fn attach_tcx_in_netns(
+        &mut self,
+        pid: u32,
+        iface: &str,
+        egress: bool,
+        prog_fd: std::os::fd::RawFd,
+    ) -> io::Result<std::os::fd::OwnedFd> {
+        use std::os::fd::AsRawFd;
+        self.send(&Command::AttachTcxInNetns {
+            pid,
+            iface: iface.to_owned(),
+            egress,
+        })?;
+        let sent = fd_pass::send_one_fd(self.stream.as_raw_fd(), prog_fd);
+        self.classify("AttachTcxInNetns", "sending the program fd to", sent)?;
+        match self.recv("AttachTcxInNetns")? {
+            Response::FdReady => {
+                let result = fd_pass::recv_one_fd(&self.stream);
+                self.classify("AttachTcxInNetns", "waiting for the link fd from", result)
+            }
+            other => Err(unexpected("AttachTcxInNetns", &other)),
+        }
+    }
 }
 
 /// Was an error caused by the warden's connection going away (so a reconnect is
@@ -521,6 +551,21 @@ impl ReconnectingClient {
         prog_fd: std::os::fd::RawFd,
     ) -> io::Result<std::os::fd::OwnedFd> {
         self.with_retry(|c| c.attach_cgroup(cgroup_path, attach_type, prog_fd))
+    }
+
+    /// Attach a TC program inside a pod's namespace through the warden,
+    /// reconnecting if it bounced. Replayable for the same reason a cgroup
+    /// attach is: a link the warden made on a connection that died went with
+    /// the warden's copy of its fd.
+    #[cfg(feature = "fd-pass")]
+    pub fn attach_tcx_in_netns(
+        &mut self,
+        pid: u32,
+        iface: &str,
+        egress: bool,
+        prog_fd: std::os::fd::RawFd,
+    ) -> io::Result<std::os::fd::OwnedFd> {
+        self.with_retry(|c| c.attach_tcx_in_netns(pid, iface, egress, prog_fd))
     }
 }
 

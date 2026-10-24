@@ -19,7 +19,10 @@ use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame,
 
 use crate::host_ops::HostOps;
 use crate::pcap_slots::{PcapSlot, PcapSlots};
-use crate::{cgroup_ops, delegate_over_fd, dlp_scan, net_ops, recv_fd, send_msg_fds, uprobe_ops};
+use crate::{
+    cgroup_ops, delegate_over_fd, dlp_scan, net_ops, netns_tcx_ops, recv_fd, send_msg_fds,
+    uprobe_ops,
+};
 
 /// How long a connection may hold a thread without saying `Hello`.
 ///
@@ -375,6 +378,11 @@ fn handle_conn_with_timeouts(
                 cgroup_path,
                 attach_type,
             } => serve_attach_cgroup(&mut writer, cgroup_path, *attach_type),
+            // `AttachTcxInNetns` answers the same way, with a pod's process and
+            // one of its interfaces in place of a cgroup directory.
+            Command::AttachTcxInNetns { pid, iface, egress } => {
+                serve_attach_tcx_in_netns(&mut writer, proc_root, *pid, iface, *egress)
+            }
             // `Extension` is answered by the installed handler (if any); the OSS
             // warden installs none, so it falls through to `Unimplemented`.
             Command::Extension { kind, payload } => {
@@ -503,6 +511,42 @@ fn serve_attach_cgroup(writer: &mut UnixStream, cgroup_path: &str, attach_type: 
     unsafe { libc::close(prog_fd) };
     match result {
         Ok(link) => {
+            let ok = serve_passed_fd(writer, Ok(link));
+            unsafe { libc::close(link) };
+            ok
+        }
+        Err(message) => serve_passed_fd(writer, Err(message)),
+    }
+}
+
+/// Serve an `AttachTcxInNetns`: receive the agent's program fd, create the
+/// TCX link inside the pod's namespace, then reply `FdReady` + the link fd.
+/// The warden closes its own copy of both fds, as for a cgroup attach.
+fn serve_attach_tcx_in_netns(
+    writer: &mut UnixStream,
+    proc_root: &Path,
+    pid: u32,
+    iface: &str,
+    egress: bool,
+) -> bool {
+    let prog_fd = recv_fd(writer.as_raw_fd());
+    if prog_fd < 0 {
+        return write_frame(
+            writer,
+            &Response::Error {
+                message: "no program fd received for a pod namespace attach".into(),
+            },
+        )
+        .is_ok();
+    }
+    let result = netns_tcx_ops::attach_tcx_in_netns(prog_fd, proc_root, pid, iface, egress);
+    unsafe { libc::close(prog_fd) };
+    match result {
+        Ok(link) => {
+            eprintln!(
+                "[warden] tcx {} attached on {iface} inside the namespace of pid {pid}",
+                if egress { "egress" } else { "ingress" }
+            );
             let ok = serve_passed_fd(writer, Ok(link));
             unsafe { libc::close(link) };
             ok
@@ -729,6 +773,35 @@ mod tests {
                 message: "no chain on eth0".into()
             }
         );
+    }
+
+    #[test]
+    fn a_namespace_attach_outside_a_pod_is_refused_over_the_wire() {
+        // The init process: its namespace is the host's, and a broker that
+        // entered it on request would be a host attach service.
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let handle = run_server(server, None);
+        hello(&mut client);
+        write_frame(
+            &mut client,
+            &Command::AttachTcxInNetns {
+                pid: 1,
+                iface: "eth0".into(),
+                egress: false,
+            },
+        )
+        .unwrap();
+        let program = std::fs::File::open("/dev/null").unwrap();
+        assert!(crate::send_fd(client.as_raw_fd(), program.as_raw_fd()));
+        let resp: Response = read_frame(&mut client).unwrap();
+        drop(client);
+        handle.join().unwrap();
+        match resp {
+            Response::Error { message } => {
+                assert!(message.contains("not a pod's process"), "{message}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 
     #[test]

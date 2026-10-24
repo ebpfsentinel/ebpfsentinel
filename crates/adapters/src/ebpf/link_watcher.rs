@@ -52,7 +52,7 @@ use std::time::{Duration, Instant};
 
 use domain::container::engine::parse_cgroup_payload;
 use domain::container::entity::ContainerInfo;
-use domain::coverage::{LinkAttachment, LinkRefusal, WorkloadLink};
+use domain::coverage::{Inspector, LinkAttachment, LinkRefusal, WorkloadLink, link_inspector};
 use domain::process::entity::{ProcessEventKind, ProcessLifecycleEvent};
 use ports::secondary::ids_workload_scope_port::WorkloadLinkSink;
 use ports::secondary::metrics_port::ContainerMetrics;
@@ -67,6 +67,7 @@ use super::netkit::{BPF_NETKIT_PEER, BPF_NETKIT_PRIMARY, netkit_attach};
 use super::ringbuf_observer::boottime_now_ns;
 use super::{kfunc_attach, tcx_order};
 use crate::container::pod_cgroups::pod_uid;
+use crate::container::pod_claims::{PodClaimsDir, now_secs};
 
 /// How long messages are gathered after the first one before the batch is
 /// applied. Long enough to fold a container's create, rename, move and up
@@ -75,6 +76,10 @@ pub const DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// How often the whole link table is read again, whatever the socket said.
 pub const RESYNC_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How often the claims of pod profile agents are read again, well inside
+/// the time a claim takes to lapse.
+pub const CLAIMS_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Messages gathered into one batch at most, so a storm is applied in steps
 /// rather than held back until it ends.
@@ -567,6 +572,10 @@ pub struct LinkHotPlugRegistry {
     links: Mutex<HashMap<u32, Vec<OwnedFd>>>,
     owners: Option<OwnerReporting>,
     coverage: Option<Arc<dyn LinkCoverageSink>>,
+    claims: Option<PodClaimsDir>,
+    /// Every workload link seen while claims are read, attached or stood
+    /// back from, so the decision can be taken again when a claim changes.
+    targets: Mutex<HashMap<u32, (Attach, Option<LinkOwner>)>>,
 }
 
 /// Where the owner of a container link is reported, and how its cgroup is
@@ -669,7 +678,25 @@ impl LinkHotPlugRegistry {
             links: Mutex::new(HashMap::new()),
             owners: None,
             coverage: None,
+            claims: None,
+            targets: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Stand back from the link of every pod a pod profile agent claims in
+    /// `claims`, and take the link back when the claim is withdrawn or
+    /// lapses.
+    pub fn stand_back_for(&mut self, claims: PodClaimsDir) {
+        self.claims = Some(claims);
+    }
+
+    /// Whether the link of `owner` belongs, now, to a pod profile agent.
+    fn claimed(&self, owner: Option<&LinkOwner>) -> Option<domain::coverage::PodClaim> {
+        let claims = self.claims.as_ref()?;
+        let uid = owner_pod_uid(owner)?;
+        let claim = claims.read().remove(&uid)?;
+        (link_inspector(Some(&claim), owner.map(|o| o.ns_inode), now_secs()) == Inspector::Pod)
+            .then_some(claim)
     }
 
     /// Report the owner of every link attached from now on through
@@ -728,6 +755,21 @@ impl LinkHotPlugRegistry {
     /// logged and the others still go on. Returns how many attached.
     pub fn attach(&self, target: &Attach, owner: Option<&LinkOwner>) -> usize {
         let link = &target.link;
+        if self.claims.is_some() {
+            if let Ok(mut targets) = self.targets.lock() {
+                targets.insert(link.ifindex, (target.clone(), owner.cloned()));
+            }
+            if self.claimed(owner).is_some() {
+                info!(
+                    iface = %link.name,
+                    ifindex = link.ifindex,
+                    pod = owner_pod_uid(owner).as_deref(),
+                    "hot-plug: workload link left to the pod profile agent inside the pod"
+                );
+                self.left(link, LinkRefusal::InspectedInside, owner);
+                return 0;
+            }
+        }
         let mut made = Vec::new();
         for (name, fd, side) in &self.programs {
             match attach_one(name, *fd, *side, target) {
@@ -791,6 +833,9 @@ impl LinkHotPlugRegistry {
             .lock()
             .ok()
             .and_then(|mut links| links.remove(&target.ifindex));
+        if let Ok(mut targets) = self.targets.lock() {
+            targets.remove(&target.ifindex);
+        }
         if !target.name.is_empty() {
             tcx_order::forget(&target.name);
         }
@@ -806,6 +851,65 @@ impl LinkHotPlugRegistry {
                 "hot-plug: workload link released"
             );
         }
+    }
+
+    /// Take the decision again for every workload link against the claims
+    /// as they stand: release a link a pod agent now holds from inside, and
+    /// count how long both read it; attach again to one whose claim was
+    /// withdrawn or lapsed.
+    pub fn revisit_claims(&self, metrics: &dyn ContainerMetrics) {
+        let Some(claims) = &self.claims else {
+            return;
+        };
+        let current = claims.read();
+        let now = now_secs();
+        let targets: Vec<(Attach, Option<LinkOwner>)> = self
+            .targets
+            .lock()
+            .map(|t| t.values().cloned().collect())
+            .unwrap_or_default();
+        for (target, owner) in targets {
+            let ifindex = target.link.ifindex;
+            let claim = owner_pod_uid(owner.as_ref()).and_then(|uid| current.get(&uid));
+            let inside =
+                link_inspector(claim, owner.as_ref().map(|o| o.ns_inode), now) == Inspector::Pod;
+            let held = self
+                .links
+                .lock()
+                .ok()
+                .and_then(|mut links| if inside { links.remove(&ifindex) } else { None });
+            match (inside, held) {
+                (true, Some(dropped)) => {
+                    if let Some(claim) = claim {
+                        metrics.observe_link_inspected_twice(
+                            target.kind.as_str(),
+                            Duration::from_secs(now.saturating_sub(claim.since_secs)).as_secs_f64(),
+                        );
+                    }
+                    info!(
+                        iface = %target.link.name,
+                        ifindex,
+                        links = dropped.len(),
+                        "hot-plug: workload link released to the pod profile agent inside the pod"
+                    );
+                    self.left(&target.link, LinkRefusal::InspectedInside, owner.as_ref());
+                }
+                (false, _) if !self.holds(ifindex) => {
+                    let again = Attach {
+                        heard_at: None,
+                        ..target
+                    };
+                    self.attach(&again, owner.as_ref());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn holds(&self, ifindex: u32) -> bool {
+        self.links
+            .lock()
+            .is_ok_and(|links| links.contains_key(&ifindex))
     }
 }
 
@@ -1415,6 +1519,10 @@ impl Worker {
             apply(plan, &self.registry, &mut self.resolver, &*self.metrics);
         }
     }
+
+    fn revisit_claims(&mut self) {
+        self.registry.revisit_claims(&*self.metrics);
+    }
 }
 
 /// Run `job` on the blocking pool: attaching is a run of syscalls per link,
@@ -1463,6 +1571,9 @@ pub async fn watch_links(
     // taken after the subscription so nothing between the two is missed.
     let mut resync = tokio::time::interval(RESYNC_INTERVAL);
     resync.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let reads_claims = worker.lock().is_ok_and(|w| w.registry.claims.is_some());
+    let mut claims = tokio::time::interval(CLAIMS_INTERVAL);
+    claims.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             () = cancel.cancelled() => {
@@ -1470,6 +1581,7 @@ pub async fn watch_links(
                 break;
             }
             _ = resync.tick() => on_worker(&worker, Worker::resync).await,
+            _ = claims.tick(), if reads_claims => on_worker(&worker, Worker::revisit_claims).await,
             batch = gather(&mut sub) => match batch {
                 Batch::Events(events) => on_worker(&worker, move |w| w.observe(events)).await,
                 Batch::Overrun => {
@@ -1597,11 +1709,16 @@ mod tests {
     struct Recorded {
         gaps: Mutex<Vec<(String, f64)>>,
         packets: Mutex<Vec<(String, u64)>>,
+        twice: Mutex<Vec<(String, f64)>>,
     }
 
     impl ContainerMetrics for Recorded {
         fn observe_link_attach_gap(&self, kind: &str, seconds: f64) {
             self.gaps.lock().unwrap().push((kind.to_owned(), seconds));
+        }
+
+        fn observe_link_inspected_twice(&self, kind: &str, seconds: f64) {
+            self.twice.lock().unwrap().push((kind.to_owned(), seconds));
         }
 
         fn record_link_unguarded_packets(&self, kind: &str, packets: u64) {
@@ -1966,6 +2083,53 @@ mod tests {
                 (7, None),
             ]
         );
+    }
+
+    #[test]
+    fn a_claimed_pod_link_is_left_to_the_pod_agent_and_taken_back_when_the_claim_goes() {
+        const POD: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
+        let dir = tempfile::tempdir().unwrap();
+        let claims = PodClaimsDir::new(dir.path());
+        let log = Arc::new(CoverageLog::default());
+        let mut registry = LinkHotPlugRegistry::new();
+        registry.report_coverage(Arc::clone(&log) as Arc<dyn LinkCoverageSink>);
+        registry.stand_back_for(claims.clone());
+        let owner = container_owner(4242, &format!("/kubepods/besteffort/pod{POD}/abc"));
+        let target = Attach {
+            link: link(9, "veth9", Some("veth")),
+            kind: WorkloadKind::Veth,
+            via_netkit: false,
+            heard_at: None,
+        };
+        let metrics = Recorded::default();
+        let inside = Some(LinkAttachment::Refused(LinkRefusal::InspectedInside));
+
+        // Claimed before the link appears: never read twice.
+        claims.claim(POD, owner.ns_inode, now_secs()).unwrap();
+        assert_eq!(registry.attach(&target, Some(&owner)), 0);
+        assert!(!registry.holds(9));
+        assert_eq!(log.0.lock().unwrap().last().unwrap(), &(9, inside.clone()));
+
+        // The claim withdrawn: the link is taken back.
+        claims.release(POD).unwrap();
+        registry.revisit_claims(&metrics);
+        assert!(registry.holds(9));
+        assert_eq!(
+            log.0.lock().unwrap().last().unwrap(),
+            &(9, Some(LinkAttachment::Attached))
+        );
+
+        // Claimed while attached: released, and the overlap counted.
+        claims.claim(POD, owner.ns_inode, now_secs()).unwrap();
+        registry.revisit_claims(&metrics);
+        assert!(!registry.holds(9));
+        assert_eq!(log.0.lock().unwrap().last().unwrap(), &(9, inside));
+        assert_eq!(metrics.twice.lock().unwrap().len(), 1);
+
+        // A claim on another namespace is not this link's.
+        claims.claim(POD, owner.ns_inode + 1, now_secs()).unwrap();
+        registry.revisit_claims(&metrics);
+        assert!(registry.holds(9));
     }
 
     #[test]

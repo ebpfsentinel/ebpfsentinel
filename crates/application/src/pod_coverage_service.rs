@@ -53,6 +53,15 @@ impl PodCoverageService {
             .unwrap_or_else(PoisonError::into_inner) = Some(inventory);
     }
 
+    /// The pod inventory, once installed.
+    #[must_use]
+    pub fn inventory(&self) -> Option<Arc<dyn PodInventoryPort>> {
+        self.inventory
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Whether a pod inventory is installed: without one there is no pod to
     /// give a verdict for.
     #[must_use]
@@ -140,6 +149,7 @@ mod tests {
             name: uid.into(),
             namespace: "shop".into(),
             host_network: false,
+            labels: std::collections::BTreeMap::new(),
         }
     }
 

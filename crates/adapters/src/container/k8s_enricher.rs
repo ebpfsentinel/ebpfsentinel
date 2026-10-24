@@ -226,6 +226,7 @@ impl PodInventoryPort for PodCache {
                 name: p.name.clone(),
                 namespace: p.namespace.clone(),
                 host_network: p.host_network,
+                labels: p.labels.clone(),
             })
             .collect()
     }
