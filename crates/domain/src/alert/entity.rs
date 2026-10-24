@@ -465,7 +465,9 @@ impl Alert {
     /// Create a domain alert from a DNS security event (blocklist, reputation, encrypted DNS).
     pub fn from_dns_alert(dns: &DnsAlert, description: &str) -> Self {
         let mitre_context = match &dns.reason {
-            DnsAlertReason::Blocklist { .. } | DnsAlertReason::EncryptedDns { .. } => {
+            DnsAlertReason::Blocklist { .. }
+            | DnsAlertReason::EncryptedDns { .. }
+            | DnsAlertReason::AllowList { .. } => {
                 MitreContext::Dns(mitre::DnsMitreReason::BlocklistOrEncrypted)
             }
             DnsAlertReason::Reputation { .. } => {
@@ -477,6 +479,9 @@ impl Alert {
             DnsAlertReason::Reputation { score } => RuleId(format!("dns-reputation:{score:.2}")),
             DnsAlertReason::EncryptedDns { protocol, resolver } => {
                 RuleId(format!("dns-encrypted:{protocol}:{resolver}"))
+            }
+            DnsAlertReason::AllowList { container, .. } => {
+                RuleId(format!("dns-allowlist:{container}"))
             }
         };
         Self {

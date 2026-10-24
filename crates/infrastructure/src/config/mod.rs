@@ -905,6 +905,14 @@ impl AgentConfig {
 
         // Validate DNS cache config
         self.dns.validate()?;
+        if self.dns.allowlist.enabled && !self.container.docker.enabled {
+            return Err(ConfigError::Validation {
+                field: "dns.allowlist.enabled".to_string(),
+                message: "a querying container is known by its bridge address, read from the \
+                          Docker socket, so container.docker.enabled must be true"
+                    .to_string(),
+            });
+        }
 
         // Validate load balancer services
         check_limit(

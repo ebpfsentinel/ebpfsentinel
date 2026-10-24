@@ -281,6 +281,11 @@ pub trait DnsMetrics: Send + Sync {
 
     /// Record an encrypted DNS detection (`DoH` or `DoT`).
     fn record_encrypted_dns(&self, _protocol: &str, _resolver: &str) {}
+
+    /// Record a query the agent's resolver answered for a container its
+    /// DNS allow-list names, refused or forwarded. The label is bounded by
+    /// the configuration, which is the only place a governed name comes from.
+    fn record_dns_allowlist_query(&self, _container: &str, _refused: bool) {}
 }
 
 // ── Domain reputation metrics ──────────────────────────────────────

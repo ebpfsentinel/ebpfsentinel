@@ -1,3 +1,4 @@
+pub mod allowlist;
 pub mod blocklist;
 pub mod encrypted_dns;
 pub mod engine;

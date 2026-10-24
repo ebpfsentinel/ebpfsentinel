@@ -731,6 +731,13 @@ impl AlertPipeline {
             DnsAlertReason::EncryptedDns { protocol, resolver } => {
                 format!("Encrypted DNS detected: {protocol} to resolver {resolver}")
             }
+            DnsAlertReason::AllowList { container, source } => {
+                format!(
+                    "DNS allow-list refusal: container {container} ({source}) asked for {}, \
+                     which its list does not carry",
+                    dns_alert.domain,
+                )
+            }
         };
         let mut alert = Alert::from_dns_alert(dns_alert, &description);
 

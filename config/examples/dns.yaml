@@ -130,3 +130,20 @@ dns:
   # doh_resolvers:
   #   - internal-doh.corp.local
   #   - doh.custom-resolver.example.com
+
+  # ── Per-container allow-list ─────────────────────────────────────
+  # A resolver the agent answers itself. Containers pointed at it (compose
+  # `dns:` or the daemon's "dns" setting) and named below may resolve only
+  # the names their list carries; anything else is answered REFUSED, raised
+  # as an alert and counted. Containers not named are forwarded untouched.
+  # Needs container.docker.enabled, since a container is known by its
+  # bridge address.
+  # allowlist:
+  #   enabled: true
+  #   listen: 172.17.0.1:53       # the bridge gateway, never loopback
+  #   upstream: [1.1.1.1:53, 9.9.9.9:53]
+  #   containers:
+  #     - container: web
+  #       domains: [api.github.com, "*.debian.org"]
+  #     - container: db
+  #       domains: []             # resolves nothing

@@ -1572,6 +1572,11 @@ pub async fn run(
     // ── 6. Create cancellation token ────────────────────────────────
     let cancel_token = crate::shutdown::create_shutdown_token();
 
+    // ── 6. DNS allow-list resolver ───────────────────────────────────
+    if config.dns.allowlist.enabled {
+        spawn_dns_allowlist_resolver(&config, &metrics, &alert_tx, cancel_token.clone()).await?;
+    }
+
     // ── 6a. Spawn system metrics collection loop ────────────────────
     let _system_metrics_handle = system_metrics::spawn_collection_loop(
         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
@@ -6937,4 +6942,47 @@ mod tests {
             std::path::PathBuf::from("/proc")
         );
     }
+}
+
+/// Bind the resolver the governed containers are pointed at and serve it.
+/// Validation has already required the listen address, an upstream and the
+/// Docker socket, so what can still fail here is the bind itself, which
+/// stops the agent: a container told to use a resolver that is not there
+/// resolves nothing at all.
+async fn spawn_dns_allowlist_resolver(
+    config: &AgentConfig,
+    metrics: &Arc<AgentMetrics>,
+    alert_tx: &tokio::sync::mpsc::Sender<application::alert_event::AlertEvent>,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    let section = &config.dns.allowlist;
+    let listen = section
+        .listen
+        .context("dns.allowlist.listen is required when the allow-list is enabled")?;
+    let list = section
+        .to_domain_allowlist()
+        .context("dns.allowlist.containers")?;
+    let service = application::dns_allowlist_service::DnsAllowListService::new(
+        list,
+        Arc::new(adapters::container::DockerClient::new(
+            &config.container.docker.socket,
+            config.container.docker.timeout_ms,
+        )),
+        Arc::new(adapters::net::dns_upstream::UpstreamResolver::new(
+            section.upstream.clone(),
+            Duration::from_secs(2),
+        )),
+        Arc::clone(metrics) as Arc<dyn MetricsPort>,
+    )
+    .with_alert_tx(alert_tx.clone());
+    let (udp, tcp) = crate::dns_resolver::bind(listen).await?;
+    info!(
+        %listen,
+        containers = service.governed(),
+        "DNS allow-list resolver listening"
+    );
+    crate::dns_resolver::spawn(Arc::new(service), udp, tcp, cancel);
+    Ok(())
 }

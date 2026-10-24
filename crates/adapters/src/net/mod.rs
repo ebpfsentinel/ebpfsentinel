@@ -5,6 +5,7 @@
 
 pub mod bird;
 pub mod default_route;
+pub mod dns_upstream;
 pub mod gratuitous_arp;
 pub mod iface_addrs;
 pub mod iface_mac;

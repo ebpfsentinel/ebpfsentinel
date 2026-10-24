@@ -206,6 +206,12 @@ pub struct PolicyLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct DnsAllowListLabels {
+    pub container: String,
+    pub verdict: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct EncryptedDnsLabels {
     pub protocol: String,
     pub resolver: String,
@@ -329,6 +335,9 @@ pub struct AgentMetrics {
     /// Encrypted DNS connections detected, by protocol and resolver. The
     /// resolver label is bounded: see [`ENCRYPTED_DNS_RESOLVER_CAP`].
     pub encrypted_dns_detections_total: Family<EncryptedDnsLabels, Counter>,
+    /// Queries the agent's resolver decided for a container its DNS
+    /// allow-list names, by container and verdict.
+    pub dns_allowlist_queries_total: Family<DnsAllowListLabels, Counter>,
     /// Resolver names already given a series, so a value past the cap can be
     /// told from one already on the wire.
     encrypted_dns_resolvers: Mutex<HashSet<String>>,
@@ -776,6 +785,13 @@ impl AgentMetrics {
             encrypted_dns_detections_total.clone(),
         );
 
+        let dns_allowlist_queries_total = Family::<DnsAllowListLabels, Counter>::default();
+        registry.register(
+            "dns_allowlist_queries",
+            "Queries the agent's resolver decided for an allow-listed container, by verdict",
+            dns_allowlist_queries_total.clone(),
+        );
+
         let domain_reputation_high_risk = Gauge::default();
         registry.register(
             "domain_reputation_high_risk",
@@ -1090,6 +1106,7 @@ impl AgentMetrics {
             dns_blocked_domains_total,
             dns_injected_ips,
             encrypted_dns_detections_total,
+            dns_allowlist_queries_total,
             encrypted_dns_resolvers: Mutex::new(HashSet::new()),
             domain_reputation_high_risk,
             domain_auto_blocked_total,
@@ -1533,6 +1550,15 @@ impl DnsMetrics for AgentMetrics {
             .get_or_create(&EncryptedDnsLabels {
                 protocol: protocol.to_string(),
                 resolver: self.bounded_resolver(resolver),
+            })
+            .inc();
+    }
+
+    fn record_dns_allowlist_query(&self, container: &str, refused: bool) {
+        self.dns_allowlist_queries_total
+            .get_or_create(&DnsAllowListLabels {
+                container: container.to_string(),
+                verdict: if refused { "refused" } else { "allowed" }.to_string(),
             })
             .inc();
     }
@@ -2331,6 +2357,7 @@ mod tests {
         ("dlp_matches", "counter"),
         ("dlp_scan_duration_seconds", "histogram"),
         ("dlp_scans", "counter"),
+        ("dns_allowlist_queries", "counter"),
         ("dns_blocked_domains", "counter"),
         ("dns_cache_entries", "gauge"),
         ("dns_cache_evictions", "counter"),
@@ -2503,6 +2530,12 @@ mod tests {
     /// One child in every labelled counter family that counts a
     /// detection or its delivery.
     fn populate_detection_counter_families(m: &AgentMetrics) {
+        m.dns_allowlist_queries_total
+            .get_or_create(&DnsAllowListLabels {
+                container: "web".into(),
+                verdict: "refused".into(),
+            })
+            .inc();
         m.alerts_total
             .get_or_create(&AlertLabels {
                 component: "ids".into(),

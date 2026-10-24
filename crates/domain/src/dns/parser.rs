@@ -53,6 +53,44 @@ pub fn parse_dns_packet(
     }
 }
 
+/// The name a query asks for and the offset its first question ends at.
+///
+/// Only the first question is read, which is the one every resolver
+/// answers: a query carrying more is answered on that one alone.
+///
+/// # Errors
+///
+/// Refuses a response, a query with no question, and a name or question
+/// that runs past the payload.
+pub fn first_question(payload: &[u8]) -> Result<(String, usize), DnsError> {
+    let header_bytes =
+        payload
+            .first_chunk::<DNS_HEADER_LEN>()
+            .ok_or(DnsError::TruncatedPayload {
+                need: DNS_HEADER_LEN,
+                got: payload.len(),
+            })?;
+    let header = parse_header(header_bytes);
+    if header.is_response {
+        return Err(DnsError::MalformedPacket(
+            "a response where a query was expected".to_string(),
+        ));
+    }
+    if header.qdcount == 0 {
+        return Err(DnsError::MalformedPacket(
+            "query with zero questions".to_string(),
+        ));
+    }
+    let (domain, offset) = parse_name(payload, DNS_HEADER_LEN)?;
+    if offset + 4 > payload.len() {
+        return Err(DnsError::TruncatedPayload {
+            need: offset + 4,
+            got: payload.len(),
+        });
+    }
+    Ok((domain, offset + 4))
+}
+
 // ── Header parsing ──────────────────────────────────────────────────
 
 struct DnsHeader {

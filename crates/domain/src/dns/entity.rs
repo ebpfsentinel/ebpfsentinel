@@ -140,6 +140,9 @@ pub enum DnsAlertReason {
     Reputation { score: f64 },
     /// Encrypted DNS (DoH/DoT) traffic detected.
     EncryptedDns { protocol: String, resolver: String },
+    /// A container asked the agent's resolver for a name its allow-list
+    /// does not carry, and was answered `REFUSED`.
+    AllowList { container: String, source: IpAddr },
 }
 
 // ── Domain blocklist entities ──────────────────────────────────────

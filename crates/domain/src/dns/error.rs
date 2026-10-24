@@ -31,4 +31,10 @@ pub enum DnsError {
 
     #[error("blocklist pattern not found: {0}")]
     PatternNotFound(String),
+
+    #[error("invalid DNS allow-list: {0}")]
+    InvalidAllowList(String),
+
+    #[error("no upstream resolver answered: {0}")]
+    Upstream(String),
 }

@@ -15,6 +15,7 @@ pub mod dlp_matcher_port;
 pub mod dlp_scope_map_port;
 pub mod dlp_workload_source_port;
 pub mod dns_cache_port;
+pub mod dns_upstream_port;
 pub mod domain_reputation_port;
 pub mod ebpf_map_port;
 pub mod ebpf_map_write_port;

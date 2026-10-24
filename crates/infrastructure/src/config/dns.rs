@@ -1,5 +1,7 @@
 //! DNS domain configuration structs and conversion logic.
 
+use std::net::SocketAddr;
+
 use serde::{Deserialize, Serialize};
 
 use super::common::{ConfigError, check_limit, default_true};
@@ -26,6 +28,107 @@ pub struct DnsConfig {
     /// Additional `DoH` resolver domains for encrypted DNS detection.
     #[serde(default)]
     pub doh_resolvers: Vec<String>,
+
+    /// A resolver the agent answers itself, refusing each listed container
+    /// the names its list does not carry.
+    #[serde(default)]
+    pub allowlist: DnsAllowListConfig,
+}
+
+/// Most upstream resolvers the allow-list resolver may forward to.
+const MAX_ALLOWLIST_UPSTREAMS: usize = 8;
+
+/// The agent's own resolver and the names each container may resolve
+/// through it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DnsAllowListConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Where the resolver listens, UDP and TCP; the address the containers
+    /// are pointed at, usually the bridge gateway on port 53.
+    #[serde(default)]
+    pub listen: Option<SocketAddr>,
+
+    /// Resolvers queries are forwarded to, tried in order.
+    #[serde(default)]
+    pub upstream: Vec<SocketAddr>,
+
+    /// One entry per governed container.
+    #[serde(default)]
+    pub containers: Vec<DnsAllowListContainerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsAllowListContainerConfig {
+    /// Container name, or full id.
+    pub container: String,
+    /// Exact names and `*.suffix` wildcards it may resolve.
+    #[serde(default)]
+    pub domains: Vec<String>,
+}
+
+impl DnsAllowListConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let Some(listen) = self.listen else {
+            return Err(ConfigError::Validation {
+                field: "dns.allowlist.listen".to_string(),
+                message: "the address the containers are pointed at is required".to_string(),
+            });
+        };
+        if listen.ip().is_loopback() || listen.ip().is_unspecified() {
+            return Err(ConfigError::Validation {
+                field: "dns.allowlist.listen".to_string(),
+                message: "must be an address the containers reach directly, such as the bridge \
+                          gateway: on loopback every query arrives from the host, and on the \
+                          unspecified address the resolver would answer every network"
+                    .to_string(),
+            });
+        }
+        if self.upstream.is_empty() {
+            return Err(ConfigError::Validation {
+                field: "dns.allowlist.upstream".to_string(),
+                message: "at least one upstream resolver is required".to_string(),
+            });
+        }
+        if self.upstream.contains(&listen) {
+            return Err(ConfigError::Validation {
+                field: "dns.allowlist.upstream".to_string(),
+                message: "the resolver cannot forward to itself".to_string(),
+            });
+        }
+        check_limit(
+            "dns.allowlist.upstream",
+            self.upstream.len(),
+            MAX_ALLOWLIST_UPSTREAMS,
+        )?;
+        self.to_domain_allowlist()
+            .map(|_| ())
+            .map_err(|e| ConfigError::Validation {
+                field: "dns.allowlist.containers".to_string(),
+                message: e.to_string(),
+            })
+    }
+
+    /// The allow-list the resolver decides with.
+    ///
+    /// # Errors
+    ///
+    /// Returns the domain's refusal of a repeated container, a bad pattern
+    /// or a list past its bounds.
+    pub fn to_domain_allowlist(
+        &self,
+    ) -> Result<domain::dns::allowlist::DnsAllowList, domain::dns::error::DnsError> {
+        domain::dns::allowlist::DnsAllowList::new(self.containers.iter().map(|entry| {
+            (
+                entry.container.as_str(),
+                entry.domains.iter().map(String::as_str),
+            )
+        }))
+    }
 }
 
 impl Default for DnsConfig {
@@ -36,6 +139,7 @@ impl Default for DnsConfig {
             blocklist: DnsBlocklistSectionConfig::default(),
             reputation: ReputationSectionConfig::default(),
             doh_resolvers: Vec::new(),
+            allowlist: DnsAllowListConfig::default(),
         }
     }
 }
@@ -148,6 +252,7 @@ impl DnsConfig {
         self.cache.validate()?;
         self.blocklist.validate()?;
         self.reputation.validate()?;
+        self.allowlist.validate()?;
         Ok(())
     }
 
@@ -429,6 +534,53 @@ mod tests {
 
     fn valid_dns_config() -> DnsConfig {
         DnsConfig::default()
+    }
+
+    fn allowlist(yaml: &str) -> DnsAllowListConfig {
+        serde_norway::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn an_enabled_allowlist_parses_and_builds() {
+        let cfg = allowlist(
+            "enabled: true\nlisten: 172.17.0.1:53\nupstream: [1.1.1.1:53]\n\
+             containers:\n  - container: web\n    domains: [api.github.com, '*.debian.org']\n",
+        );
+        cfg.validate().unwrap();
+        assert!(cfg.to_domain_allowlist().unwrap().governs("web"));
+    }
+
+    #[test]
+    fn a_disabled_allowlist_needs_nothing() {
+        DnsAllowListConfig::default().validate().unwrap();
+    }
+
+    #[test]
+    fn an_enabled_allowlist_is_refused_without_a_reachable_listen_or_an_upstream() {
+        for yaml in [
+            "enabled: true\nupstream: [1.1.1.1:53]\n",
+            "enabled: true\nlisten: 127.0.0.1:53\nupstream: [1.1.1.1:53]\n",
+            "enabled: true\nlisten: 0.0.0.0:53\nupstream: [1.1.1.1:53]\n",
+            "enabled: true\nlisten: 172.17.0.1:53\n",
+            "enabled: true\nlisten: 172.17.0.1:53\nupstream: [172.17.0.1:53]\n",
+        ] {
+            assert!(allowlist(yaml).validate().is_err(), "{yaml}");
+        }
+    }
+
+    #[test]
+    fn a_bad_pattern_or_a_repeated_container_is_refused() {
+        let base = "enabled: true\nlisten: 172.17.0.1:53\nupstream: [1.1.1.1:53]\n";
+        for containers in [
+            "containers:\n  - container: web\n    domains: ['*.']\n",
+            "containers:\n  - container: web\n  - container: web\n",
+        ] {
+            assert!(
+                allowlist(&format!("{base}{containers}"))
+                    .validate()
+                    .is_err()
+            );
+        }
     }
 
     // ── Default config ─────────────────────────────────────────────
