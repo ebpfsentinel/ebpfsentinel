@@ -97,6 +97,17 @@ const BPF_PROG_TYPE_SOCK_OPS: u32 = bpf_prog_type::BPF_PROG_TYPE_SOCK_OPS as u32
 const BPF_PROG_TYPE_RAW_TRACEPOINT: u32 = bpf_prog_type::BPF_PROG_TYPE_RAW_TRACEPOINT as u32;
 const BPF_PROG_TYPE_CGROUP_SOCK_ADDR: u32 = bpf_prog_type::BPF_PROG_TYPE_CGROUP_SOCK_ADDR as u32;
 const BPF_PROG_TYPE_CGROUP_SKB: u32 = bpf_prog_type::BPF_PROG_TYPE_CGROUP_SKB as u32;
+const BPF_PROG_TYPE_LSM: u32 = bpf_prog_type::BPF_PROG_TYPE_LSM as u32;
+
+/// `BPF_LSM_MAC`, the attach type an LSM program is loaded with. The kernel
+/// takes the hook from `attach_btf_id` rather than from this number, which
+/// only says that the program is an LSM one.
+const BPF_LSM_MAC: u32 = bpf_attach_type::BPF_LSM_MAC as u32;
+
+/// The prefix the kernel gives the function behind each LSM hook, which is
+/// the function `attach_btf_id` names: `bpf_lsm_socket_connect` for the
+/// `socket_connect` hook.
+const BPF_LSM_FUNC_PREFIX: &str = "bpf_lsm_";
 
 /// `BPF_TRACE_UPROBE_MULTI` (`enum bpf_attach_type`). A KPROBE-type program
 /// must be loaded with this `expected_attach_type` to be attachable via a
@@ -170,6 +181,9 @@ pub enum KfuncLoaderError {
 
     #[error("program `{name}` not found among parsed functions")]
     MissingFunction { name: String },
+
+    #[error("LSM program `{name}` names no hook in its section")]
+    MissingLsmHook { name: String },
 
     #[error(
         "BPF_PROG_LOAD `{name}` (prog_type {prog_type}, expected_attach_type \
@@ -413,8 +427,17 @@ pub fn prepatch_vmlinux_kfuncs(
     })
 }
 
-/// `(program name, function key, prog_type, expected_attach_type, prog_flags)`.
-type ProgramMeta = (String, (usize, u64), u32, u32, u32);
+/// One program as the load loop needs it.
+struct ProgramMeta {
+    name: String,
+    key: (usize, u64),
+    prog_type: u32,
+    expected_attach_type: u32,
+    prog_flags: u32,
+    /// The kernel function the program attaches to, for a program whose hook
+    /// is fixed at load rather than at attach. Zero for every other kind.
+    attach_btf_id: u32,
+}
 
 /// The module-BTF `fd_array` plus the bookkeeping to address it: a slot index
 /// per owning module, and the owned fds that must outlive `BPF_PROG_LOAD`.
@@ -426,6 +449,37 @@ struct FdArray {
     /// Owned module BTF fds kept alive through the load. Pre-passed fds (token
     /// mode) are owned elsewhere and are intentionally absent here.
     _owned: Vec<OwnedFd>,
+}
+
+/// The load attributes of every program in `obj`, with the BTF id an LSM
+/// program attaches to resolved against the running kernel.
+fn program_meta(
+    elf: &[u8],
+    obj: &Object,
+    resolver: &KfuncResolver,
+) -> Result<Vec<ProgramMeta>, KfuncLoaderError> {
+    let hooks = lsm_hooks(elf)?;
+    let mut program_meta: Vec<ProgramMeta> = Vec::with_capacity(obj.programs.len());
+    for (name, p) in &obj.programs {
+        let (prog_type, expected_attach_type, prog_flags) = prog_attrs(&p.section);
+        let attach_btf_id = if prog_type == BPF_PROG_TYPE_LSM {
+            let hook = hooks
+                .get(&p.section_index)
+                .ok_or_else(|| KfuncLoaderError::MissingLsmHook { name: name.clone() })?;
+            lsm_attach_btf_id(resolver, hook)?
+        } else {
+            0
+        };
+        program_meta.push(ProgramMeta {
+            name: name.clone(),
+            key: p.function_key(),
+            prog_type,
+            expected_attach_type,
+            prog_flags,
+            attach_btf_id,
+        });
+    }
+    Ok(program_meta)
 }
 
 /// Load every program in a kfunc-using object against the maps aya `hosted`
@@ -477,17 +531,18 @@ pub fn load_kfunc_programs<S: BuildHasher>(
     }
     let fd_array = build_fd_array(resolver, &targets)?;
 
-    let program_meta: Vec<ProgramMeta> = obj
-        .programs
-        .iter()
-        .map(|(name, p)| {
-            let (prog_type, eat, flags) = prog_attrs(&p.section);
-            (name.clone(), p.function_key(), prog_type, eat, flags)
-        })
-        .collect();
+    let program_meta = program_meta(elf, &obj, resolver)?;
 
     let mut loaded = LoadedPrograms::default();
-    for (name, key, prog_type, eat, flags) in program_meta {
+    for ProgramMeta {
+        name,
+        key,
+        prog_type,
+        expected_attach_type: eat,
+        prog_flags: flags,
+        attach_btf_id,
+    } in program_meta
+    {
         if prog_type == 0 {
             return Err(KfuncLoaderError::UnsupportedSection { name });
         }
@@ -532,6 +587,7 @@ pub fn load_kfunc_programs<S: BuildHasher>(
             fd_array: &fd_array.fds,
             has_modules: !fd_array.module_slot.is_empty(),
             dev_bound_ifindex: prog_ifindex,
+            attach_btf_id,
         };
         let fd = match raw_prog_load(&request) {
             Ok(fd) => fd,
@@ -708,8 +764,55 @@ fn prog_attrs(section: &ProgramSection) -> (u32, u32, u32) {
         // programs read the current task through helpers and never walk a
         // kernel structure.
         ProgramSection::RawTracePoint => (BPF_PROG_TYPE_RAW_TRACEPOINT, 0, 0),
+        // An LSM hook. Unlike the raw tracepoint above, the hook is fixed at
+        // load: the kernel reads it from `attach_btf_id`, which the load loop
+        // resolves from the section name, and attaching later names nothing.
+        ProgramSection::Lsm { sleepable } => {
+            let flags = if *sleepable { BPF_F_SLEEPABLE } else { 0 };
+            (BPF_PROG_TYPE_LSM, BPF_LSM_MAC, flags)
+        }
         _ => (0, 0, 0),
     }
+}
+
+/// The hook each LSM section names, keyed by section index.
+///
+/// aya-obj reads `lsm/socket_connect` as an LSM program and keeps nothing of
+/// what follows the slash, so the hook is taken from the ELF section name
+/// itself.
+fn lsm_hooks(elf: &[u8]) -> Result<HashMap<usize, String>, KfuncLoaderError> {
+    let file = object::File::parse(elf).map_err(|e| KfuncLoaderError::ParseElf(e.to_string()))?;
+    Ok(file
+        .sections()
+        .filter_map(|section| {
+            let hook = lsm_hook_of(section.name().ok()?)?;
+            Some((section.index().0, hook.to_owned()))
+        })
+        .collect())
+}
+
+/// The hook an LSM section name carries, `None` for any other section.
+fn lsm_hook_of(section: &str) -> Option<&str> {
+    section
+        .strip_prefix("lsm.s/")
+        .or_else(|| section.strip_prefix("lsm/"))
+        .filter(|hook| !hook.is_empty())
+}
+
+/// The vmlinux BTF id of the function behind an LSM hook.
+///
+/// The BPF LSM hooks are vmlinux functions by construction, so a hook that
+/// resolves into a module is a name collision rather than a hook, and is
+/// refused rather than loaded against the wrong object.
+fn lsm_attach_btf_id(resolver: &KfuncResolver, hook: &str) -> Result<u32, KfuncLoaderError> {
+    let function = format!("{BPF_LSM_FUNC_PREFIX}{hook}");
+    let target = resolver.resolve(&function)?;
+    if target.module_name.is_some() {
+        return Err(KfuncLoaderError::Relocate(format!(
+            "LSM hook `{function}` resolved into a module rather than vmlinux"
+        )));
+    }
+    Ok(target.btf_id)
 }
 
 /// The number the kernel reads for an `enum bpf_attach_type`.
@@ -827,6 +930,8 @@ struct RawProgLoad<'a> {
     /// When `Some`, load the program device-bound to this netdev ifindex
     /// (`prog_ifindex` + `BPF_F_XDP_DEV_BOUND_ONLY`).
     dev_bound_ifindex: Option<u32>,
+    /// The vmlinux function an LSM program attaches to, zero otherwise.
+    attach_btf_id: u32,
 }
 
 /// The kernel requires `line_info` records to have strictly-increasing
@@ -980,6 +1085,7 @@ fn raw_prog_load(req: &RawProgLoad<'_>) -> Result<OwnedFd, KfuncLoaderError> {
         line_info_rec_size: li_rec,
         line_info: li_ptr,
         line_info_cnt: li_cnt,
+        attach_btf_id: req.attach_btf_id,
         // A null fd_array is correct for vmlinux-only programs (every kfunc
         // off == 0); module programs need the real array.
         fd_array: if req.has_modules {
@@ -1952,6 +2058,39 @@ mod tests {
         ] {
             assert!(is_shareable_map(shared as u32));
         }
+    }
+
+    #[test]
+    fn an_lsm_section_loads_as_an_lsm_program_and_keeps_its_hook() {
+        assert_eq!(BPF_PROG_TYPE_LSM, 29);
+        assert_eq!(BPF_LSM_MAC, 27);
+        assert_eq!(
+            prog_attrs(&ProgramSection::Lsm { sleepable: false }),
+            (29, 27, 0)
+        );
+        assert_eq!(
+            prog_attrs(&ProgramSection::Lsm { sleepable: true }),
+            (29, 27, BPF_F_SLEEPABLE)
+        );
+        assert_eq!(lsm_hook_of("lsm/socket_connect"), Some("socket_connect"));
+        assert_eq!(lsm_hook_of("lsm.s/file_open"), Some("file_open"));
+        assert_eq!(lsm_hook_of("lsm/"), None);
+        assert_eq!(lsm_hook_of("raw_tracepoint/sys_enter"), None);
+    }
+
+    #[test]
+    fn the_built_lsm_object_names_both_its_hooks() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/bpfel-unknown-none/release/lsm-exec-network"
+        );
+        // The object exists only once the eBPF programs were built.
+        let Ok(elf) = std::fs::read(path) else {
+            return;
+        };
+        let mut hooks: Vec<String> = lsm_hooks(&elf).expect("parse").into_values().collect();
+        hooks.sort();
+        assert_eq!(hooks, vec!["socket_connect", "socket_create"]);
     }
 
     #[test]

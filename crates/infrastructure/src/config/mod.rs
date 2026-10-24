@@ -556,6 +556,7 @@ impl AgentConfig {
                 &rule_cfg.interfaces,
             )?;
         }
+        self.firewall.network_executables.to_domain()?;
         let dns = self.firewall.workload_dns.to_domain()?;
         if dns.resolvers.is_empty()
             && let Some(idx) = self.firewall.rules.iter().position(|rule| {
@@ -601,6 +602,7 @@ impl AgentConfig {
         // Validate IPS rules
         for (idx, rule_cfg) in self.ips.rules.iter().enumerate() {
             rule_cfg.validate_ips(idx)?;
+            self.validate_ips_kill(idx, rule_cfg)?;
         }
 
         // Validate threat intel feeds and the table they load into
@@ -1132,6 +1134,42 @@ impl AgentConfig {
     /// name are enforced under.
     pub fn workload_dns(&self) -> Result<WorkloadDnsSettings, ConfigError> {
         self.firewall.workload_dns.to_domain()
+    }
+
+    /// A prevention rule asking for the process behind a flow to be stopped
+    /// must block, and the agent must be able to stop one. Either missing,
+    /// the rule would read as a containment that never happens.
+    fn validate_ips_kill(&self, idx: usize, rule: &IpsRuleConfig) -> Result<(), ConfigError> {
+        if !rule.kill_process {
+            return Ok(());
+        }
+        let field = format!("ips.rules[{idx}].kill_process");
+        let mode = rule.mode.as_deref().unwrap_or(&self.ips.mode);
+        if pdm(mode)? != DomainMode::Block {
+            return Err(ConfigError::Validation {
+                field,
+                message: "a rule stops a process only where it blocks the flow; set its \
+                          mode, or the IPS mode, to block"
+                    .to_string(),
+            });
+        }
+        if !self.response.kill_process.enabled {
+            return Err(ConfigError::Validation {
+                field,
+                message: "the rule asks for a process to be stopped and \
+                          response.kill_process is not enabled"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The executables allowed to reach the network, `None` when the list is
+    /// off.
+    pub fn network_executables(
+        &self,
+    ) -> Result<Option<domain::firewall::exec_network::NetworkExecutables>, ConfigError> {
+        self.firewall.network_executables.to_domain()
     }
 
     /// Convert all firewall rule configs to domain rules.
@@ -5448,6 +5486,86 @@ ids:
 ";
         let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
         assert!(err.contains("pattern"), "unexpected error: {err}");
+    }
+
+    fn ips_kill_document(ips_mode: &str, rule_mode: &str, kill_enabled: bool) -> String {
+        format!(
+            "agent:\n  interfaces: [eth0]\nresponse:\n  kill_process:\n    enabled: {kill_enabled}\n\
+             ips:\n  mode: {ips_mode}\n  rules:\n    - id: ips-c2\n      severity: critical\n\
+             {rule_mode}      protocol: tcp\n      dst_port: 4444\n      kill_process: true\n"
+        )
+    }
+
+    #[test]
+    fn a_blocking_rule_may_ask_for_the_process_where_process_kill_is_enabled() {
+        let config = AgentConfig::from_yaml(&ips_kill_document("block", "", true)).unwrap();
+        assert!(config.ips.rules[0].kill_process);
+        let inherited =
+            AgentConfig::from_yaml(&ips_kill_document("alert", "      mode: block\n", true));
+        assert!(inherited.is_ok(), "{inherited:?}");
+    }
+
+    #[test]
+    fn a_rule_asking_for_the_process_without_blocking_or_without_the_kill_is_refused() {
+        for (document, needle) in [
+            (ips_kill_document("alert", "", true), "block"),
+            (
+                ips_kill_document("block", "      mode: alert\n", true),
+                "block",
+            ),
+            (
+                ips_kill_document("block", "", false),
+                "response.kill_process is not enabled",
+            ),
+        ] {
+            let err = AgentConfig::from_yaml(&document).unwrap_err().to_string();
+            assert!(err.contains("kill_process"), "unexpected error: {err}");
+            assert!(err.contains(needle), "unexpected error: {err}");
+        }
+    }
+
+    #[test]
+    fn the_network_executables_list_is_off_until_enabled_and_observes_once_on() {
+        let off = AgentConfig::from_yaml("agent:\n  interfaces: [eth0]\n").unwrap();
+        assert!(off.network_executables().unwrap().is_none());
+
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+firewall:
+  network_executables:
+    enabled: true
+    executables: [/usr/sbin/sshd, /usr/bin/curl]
+";
+        let list = AgentConfig::from_yaml(yaml)
+            .unwrap()
+            .network_executables()
+            .unwrap()
+            .unwrap();
+        assert_eq!(list.mode, domain::firewall::workload::WorkloadMode::Observe);
+        assert_eq!(list.executables.len(), 2);
+    }
+
+    #[test]
+    fn a_network_executables_list_that_cannot_be_applied_refuses_the_document() {
+        for (body, needle) in [
+            ("enabled: true\n    executables: []", "empty"),
+            ("enabled: true\n    executables: [bin/curl]", "absolute"),
+            (
+                "enabled: true\n    mode: block\n    executables: [/bin/curl]",
+                "observe, enforce",
+            ),
+            (
+                "enabled: true\n    executable: [/bin/curl]",
+                "unknown field",
+            ),
+        ] {
+            let yaml = format!(
+                "agent:\n  interfaces: [eth0]\nfirewall:\n  network_executables:\n    {body}\n"
+            );
+            let err = AgentConfig::from_yaml(&yaml).unwrap_err().to_string();
+            assert!(err.contains(needle), "{body}: {err}");
+        }
     }
 
     #[test]

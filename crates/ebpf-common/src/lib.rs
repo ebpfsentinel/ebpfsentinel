@@ -8,6 +8,7 @@ pub mod ddos;
 pub mod dlp;
 pub mod dns;
 pub mod event;
+pub mod exec_network;
 pub mod firewall;
 pub mod ids;
 pub mod interface_group;

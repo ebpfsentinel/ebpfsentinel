@@ -1,0 +1,17 @@
+[package]
+name = "lsm-exec-network"
+version = "0.0.0-dev"
+edition = "2024"
+
+[dependencies]
+aya-ebpf = "0.2.1"
+aya-ebpf-bindings = "0.2.0"
+ebpf-common = { path = "../../ebpf-common", default-features = false }
+ebpf-helpers = { path = "../../ebpf-helpers" }
+
+[build-dependencies]
+aya-build = "0.2.0"
+
+[[bin]]
+name = "lsm-exec-network"
+path = "src/main.rs"

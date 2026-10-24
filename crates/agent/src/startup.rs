@@ -1923,6 +1923,10 @@ pub async fn run(
     // manager: the capability is decided at start-up, because a reload that
     // turned it on would be a reload that granted the right to kill.
     let mut signal_attacher: Option<adapters::ebpf::SignalAttacher> = None;
+    // The two LSM links of the network executables list, held for the life of
+    // the agent for the same reason: a reload that turned an enforcing list
+    // on would be a reload able to cut the node off.
+    let mut exec_network_attacher: Option<adapters::ebpf::exec_network::ExecNetworkAttacher> = None;
     let mut process_signal_svc: Option<
         Arc<application::process_signal_service::ProcessSignalService>,
     > = None;
@@ -3171,6 +3175,105 @@ pub async fn run(
             });
         }
 
+        // 10f-sexies. The executables allowed to reach the network
+        if let Some(list) = config.network_executables()? {
+            let enforce = list.mode == domain::firewall::workload::WorkloadMode::Enforce;
+            match start_exec_network(&ebpf_dir, &list, enforce) {
+                Ok(started) => {
+                    let ExecNetworkStarted {
+                        loader,
+                        metrics_rdr,
+                        maps,
+                        attacher,
+                        reader,
+                    } = started;
+                    exec_network_attacher = Some(attacher);
+                    if let Some(rdr) = metrics_rdr {
+                        metrics_readers.push(rdr);
+                    }
+                    metrics.set_ebpf_program_status("lsm_exec_network", true);
+
+                    let (record_tx, mut record_rx) =
+                        mpsc::channel::<domain::firewall::exec_network::ExecNetworkRecord>(
+                            WORKLOAD_DENIAL_CHANNEL_CAPACITY,
+                        );
+                    let rb_obs = RingBufObserver::new(
+                        adapters::ebpf::exec_network::EXEC_NETWORK_OBJECT,
+                        Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+                    );
+                    let reader_cancel = workload_cancel.clone();
+                    tokio::spawn(async move {
+                        reader.run(record_tx, reader_cancel, rb_obs).await;
+                    });
+                    let exec_alert_tx = alert_tx.clone();
+                    tokio::spawn(async move {
+                        while let Some(record) = record_rx.recv().await {
+                            // Named by the pipeline off the thread group,
+                            // like a workload refusal: the hook has no
+                            // flow to look the workload up by.
+                            let alert = domain::alert::entity::Alert::from_exec_network(&record);
+                            if exec_alert_tx
+                                .send(application::alert_event::AlertEvent::WorkloadDenial(
+                                    Box::new(alert),
+                                ))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                    tokio::spawn(refresh_exec_network(
+                        maps,
+                        list.executables.clone(),
+                        enforce,
+                        workload_cancel.clone(),
+                    ));
+                    ebpf_state.add_loader(loader);
+                    if enforce {
+                        warn!(
+                            executables = list.executables.len(),
+                            "network executables enforce: an executable outside the list is refused an internet socket"
+                        );
+                    } else {
+                        info!(
+                            executables = list.executables.len(),
+                            "network executables observe: an executable outside the list is reported, not refused"
+                        );
+                    }
+                }
+                Err(reason) => {
+                    metrics.set_ebpf_program_status("lsm_exec_network", false);
+                    adapters::ebpf::exec_network::publish_status(
+                        adapters::ebpf::exec_network::ExecNetworkStatus {
+                            reason: Some(reason.clone()),
+                            ..adapters::ebpf::exec_network::ExecNetworkStatus::default()
+                        },
+                    );
+                    if enforce {
+                        // An enforcing list that is not in force is a
+                        // promise the node does not keep, so the agent
+                        // refuses to start rather than run without it.
+                        anyhow::bail!(
+                            "firewall.network_executables is set to enforce and cannot be applied here: {reason}"
+                        );
+                    }
+                    warn!("network executables unavailable, nothing is observed: {reason}");
+                }
+            }
+        } else {
+            metrics.clear_ebpf_program_status("lsm_exec_network");
+            adapters::ebpf::exec_network::publish_status(
+                adapters::ebpf::exec_network::ExecNetworkStatus {
+                    reason: Some(
+                        "the network executables list is turned off in the configuration"
+                            .to_string(),
+                    ),
+                    ..adapters::ebpf::exec_network::ExecNetworkStatus::default()
+                },
+            );
+        }
+
         // 10g. TC ConnTrack
         ct_ok = if config.conntrack.enabled {
             match try_load_tc_conntrack(&ebpf_dir, &config) {
@@ -3409,6 +3512,10 @@ pub async fn run(
         status.insert(
             "tracepoint-signal".to_string(),
             adapters::ebpf::signal_attach::status().attached,
+        );
+        status.insert(
+            "lsm-exec-network".to_string(),
+            adapters::ebpf::exec_network::status().attached,
         );
         status.insert(
             "cgroup-workload-firewall".to_string(),
@@ -4111,6 +4218,16 @@ pub async fn run(
     .with_stream_sender(alert_stream_tx)
     .with_replay_buffer(Arc::clone(&alert_replay_buffer))
     .with_workload_resolver(workloads.clone());
+    if let Some(ref svc) = process_signal_svc {
+        alert_pipeline = alert_pipeline.with_process_kill(Arc::clone(svc));
+    } else if config.ips.rules.iter().any(|r| r.kill_process) {
+        // Validation already refused a rule asking for it while the kill is
+        // off, so this is the kernel program having failed to attach.
+        tracing::warn!(
+            "IPS rules ask for the process behind a blocked flow to be stopped, and process \
+             kill is not running: those flows are blocked and no process is stopped"
+        );
+    }
     // The same resolver behind the connection listing, so a flow an operator
     // reads in `conntrack` and the alert raised on it name the same process.
     conntrack_svc
@@ -4849,6 +4966,10 @@ pub async fn run(
         // signalled, whatever is still in the map on the way out.
         attacher.detach();
     }
+    // Dropping the two LSM links lets every call through again before the
+    // rest of the datapath goes, so an agent on its way out never leaves an
+    // enforcing list behind with nobody to rewrite it.
+    drop(exec_network_attacher.take());
     ebpf_manager.lock().await.detach_all().await;
     drop(ebpf_state); // Drop startup loaders (detaches legacy programs)
 
@@ -6076,6 +6197,119 @@ pub fn try_load_signal(
     let mut attacher = adapters::ebpf::SignalAttacher::new();
     let status = attacher.attach(&loader);
     Ok((loader, metrics_rdr, maps, attacher, status))
+}
+
+/// What a started network executables list hands back to start-up.
+pub struct ExecNetworkStarted {
+    loader: EbpfLoader,
+    metrics_rdr: Option<MetricsReader>,
+    maps: adapters::ebpf::exec_network::ExecNetworkMaps,
+    attacher: adapters::ebpf::exec_network::ExecNetworkAttacher,
+    reader: adapters::ebpf::exec_network::ExecNetworkEventReader,
+}
+
+/// Load the network executables object, write the set and the layout, then
+/// attach both hooks.
+///
+/// The host is asked first, because an LSM program on a kernel not running the
+/// BPF LSM loads and then never runs, and the one sentence that says so is the
+/// probe's. The set and the layout are written before the hooks attach, so the
+/// first call decided is decided against the list as configured.
+///
+/// # Errors
+///
+/// Returns why the list cannot be put in force here, in one sentence.
+pub fn start_exec_network(
+    ebpf_dir: &str,
+    list: &domain::firewall::exec_network::NetworkExecutables,
+    enforce: bool,
+) -> Result<ExecNetworkStarted, String> {
+    let host = adapters::ebpf::lsm_probe::status();
+    if !host.active {
+        let reason = host
+            .reason
+            .clone()
+            .unwrap_or_else(|| "the BPF LSM is not active on this host".to_string());
+        return Err(match &host.remedy {
+            Some(remedy) => format!("{reason}; {remedy}"),
+            None => reason,
+        });
+    }
+    let offsets = adapters::ebpf::exec_network::resolve_offsets()?;
+    let program_bytes =
+        read_ebpf_program(ebpf_dir, adapters::ebpf::exec_network::EXEC_NETWORK_OBJECT)
+            .map_err(|e| format!("the object is missing: {e}"))?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)
+            .map_err(|e| format!("the kernel refused the object: {e}"))?;
+    let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "EXEC_NET_METRICS").ok();
+    let mut maps = adapters::ebpf::exec_network::ExecNetworkMaps::new(loader.ebpf_mut())
+        .map_err(|e| e.to_string())?;
+    let reader = adapters::ebpf::exec_network::ExecNetworkEventReader::new(loader.ebpf_mut())
+        .map_err(|e| e.to_string())?;
+    let (keys, missing) = adapters::ebpf::exec_network::allowed_keys(&list.executables);
+    for entry in &missing {
+        warn!("network executables: {entry}, left out of the set until it exists");
+    }
+    maps.replace(&keys).map_err(|e| e.to_string())?;
+    maps.arm(offsets, enforce).map_err(|e| e.to_string())?;
+    let mut attacher = adapters::ebpf::exec_network::ExecNetworkAttacher::new();
+    attacher.attach(&loader)?;
+    adapters::ebpf::exec_network::publish_status(adapters::ebpf::exec_network::ExecNetworkStatus {
+        attached: true,
+        enforcing: enforce,
+        executables: maps.held(),
+        reason: None,
+    });
+    Ok(ExecNetworkStarted {
+        loader,
+        metrics_rdr,
+        maps,
+        attacher,
+        reader,
+    })
+}
+
+/// How often the configured paths are stat-ed again.
+///
+/// A package upgrade replaces a binary with a new inode, and until the set is
+/// rewritten the upgraded binary is outside it. Thirty seconds is the longest
+/// an enforcing node refuses an upgraded daemon.
+const EXEC_NETWORK_REFRESH: Duration = Duration::from_secs(30);
+
+/// Keep the kernel's set on the files the paths name now.
+async fn refresh_exec_network(
+    mut maps: adapters::ebpf::exec_network::ExecNetworkMaps,
+    paths: Vec<String>,
+    enforce: bool,
+    cancel: CancellationToken,
+) {
+    let mut tick = tokio::time::interval(EXEC_NETWORK_REFRESH);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await;
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            _ = tick.tick() => {
+                let (keys, missing) = adapters::ebpf::exec_network::allowed_keys(&paths);
+                for entry in &missing {
+                    debug!("network executables: {entry}");
+                }
+                if let Err(e) = maps.replace(&keys) {
+                    warn!("network executables refresh failed, the previous set stays: {e}");
+                    continue;
+                }
+                adapters::ebpf::exec_network::publish_status(
+                    adapters::ebpf::exec_network::ExecNetworkStatus {
+                        attached: true,
+                        enforcing: enforce,
+                        executables: maps.held(),
+                        reason: None,
+                    },
+                );
+            }
+        }
+    }
 }
 
 /// Load the uprobe DLP program: attach uprobes to SSL functions, start DLP event reader.

@@ -627,6 +627,7 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
         Some(Command::Ebpf(args)) => {
             let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
             match args.command {
+                EbpfCommand::HostCheck => commands::cmd_ebpf_host_check(output),
                 EbpfCommand::Status => commands::cmd_ebpf_status(&client, output).await,
                 EbpfCommand::Uprobes => commands::cmd_ebpf_uprobes(&client, output).await,
                 EbpfCommand::KernelFeatures => {

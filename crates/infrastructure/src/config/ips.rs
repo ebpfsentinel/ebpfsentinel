@@ -120,6 +120,11 @@ pub struct IpsRuleConfig {
     /// unset keeps single-tenant behaviour.
     #[serde(default)]
     pub tenant_id: u32,
+
+    /// Also stop the process behind a flow this rule blocks. Honoured only
+    /// in block mode and only when `response.kill_process` is enabled.
+    #[serde(default)]
+    pub kill_process: bool,
 }
 
 fn default_protocol_any() -> String {
@@ -223,6 +228,7 @@ impl IpsRuleConfig {
             group_mask: 0,
             tenant_id: self.tenant_id,
             workload: None,
+            kill_process: self.kill_process,
         })
     }
 }
@@ -244,7 +250,16 @@ mod tests {
             enabled: true,
             threshold: None,
             tenant_id: 0,
+            kill_process: false,
         }
+    }
+
+    #[test]
+    fn a_rule_asking_for_the_process_carries_it_to_the_domain() {
+        let mut cfg = valid_rule_config();
+        assert!(!cfg.to_domain_rule("block").unwrap().kill_process);
+        cfg.kill_process = true;
+        assert!(cfg.to_domain_rule("block").unwrap().kill_process);
     }
 
     // ── Default config ─────────────────────────────────────────────

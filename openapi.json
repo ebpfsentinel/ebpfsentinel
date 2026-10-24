@@ -9000,6 +9000,48 @@
           }
         }
       },
+      "BpfLsmReport": {
+        "type": "object",
+        "description": "Whether the BPF LSM runs on this host, and what would make it run.",
+        "required": [
+          "active",
+          "modules"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "`bpf` is among the active security modules."
+          },
+          "built": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the kernel was built with the BPF LSM, read from its BTF.\nAbsent when the BTF could not be read, which proves nothing either way."
+          },
+          "modules": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The active security modules in the order the kernel runs them, empty\nwhen the list could not be read."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why an LSM program cannot attach here, in one sentence."
+          },
+          "remedy": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What would make it attach, in one sentence."
+          }
+        }
+      },
       "BulkTriageRequest": {
         "type": "object",
         "description": "`POST /api/v1/alerts/triage` body: one change applied to many alerts.",
@@ -11540,6 +11582,10 @@
               }
             ]
           },
+          "kill_process": {
+            "type": "boolean",
+            "description": "The rule also stops the process behind a flow it blocks. Present only\nwhen it does."
+          },
           "mode": {
             "type": "string"
           },
@@ -11599,12 +11645,18 @@
           "process_tracing",
           "workload_firewall",
           "process_signal",
-          "quarantine"
+          "quarantine",
+          "bpf_lsm",
+          "network_executables"
         ],
         "properties": {
           "attribution": {
             "$ref": "#/components/schemas/AttributionReport",
             "description": "Whether the socket-attribution hooks are on this host's cgroup, and\nwhy not where they are not. Read from what the attach actually did,\nnot from the probe: a kernel that supports the program type can still\nrefuse the attach, and a flow with no workload on it is the same\nsilence either way."
+          },
+          "bpf_lsm": {
+            "$ref": "#/components/schemas/BpfLsmReport",
+            "description": "Whether an LSM program can attach on this host. Read from the host\nrather than from any attach, because it is asked before anything that\nneeds it is configured, and the kernel version does not answer it."
           },
           "helpers": {
             "type": "array",
@@ -11621,6 +11673,10 @@
             "items": {
               "$ref": "#/components/schemas/MissingHelperEntry"
             }
+          },
+          "network_executables": {
+            "$ref": "#/components/schemas/NetworkExecutablesReport",
+            "description": "Whether the kernel decides which executables reach the network, and\nwhether it refuses or only reports. Reported whether or not the list is\nconfigured, with the reason it is not in force."
           },
           "probed": {
             "type": "boolean"
@@ -12785,6 +12841,37 @@
             "items": {
               "$ref": "#/components/schemas/NetpolRefusedFlow"
             }
+          }
+        }
+      },
+      "NetworkExecutablesReport": {
+        "type": "object",
+        "description": "What became of the network executables list on this host.",
+        "required": [
+          "attached",
+          "enforcing",
+          "executables"
+        ],
+        "properties": {
+          "attached": {
+            "type": "boolean",
+            "description": "Both hooks are attached and deciding."
+          },
+          "enforcing": {
+            "type": "boolean",
+            "description": "An executable outside the list is refused rather than reported."
+          },
+          "executables": {
+            "type": "integer",
+            "description": "How many distinct executables the kernel holds, the agent included.",
+            "minimum": 0
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the list is not in force, in one sentence."
           }
         }
       },

@@ -1023,6 +1023,8 @@ pub enum EbpfCommand {
     KernelFeatures,
     /// Show what the agent sees of each pod on this node, uncovered first
     Coverage,
+    /// Answer for this host, with no agent running: can an LSM program attach
+    HostCheck,
 }
 
 // ── Config ──────────────────────────────────────────────────────────────

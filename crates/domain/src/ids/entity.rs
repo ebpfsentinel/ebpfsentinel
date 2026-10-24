@@ -268,6 +268,12 @@ pub struct IdsRule {
     /// rather than an interface group.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload: Option<WorkloadSelector>,
+    /// A prevention rule in block mode that also stops the process behind
+    /// the flow it matched. Off unless a rule asks for it, and inert unless
+    /// the agent's process kill is enabled; the protected list is checked
+    /// before anything is armed, whatever the rule says.
+    #[serde(default)]
+    pub kill_process: bool,
 }
 
 impl IdsRule {
@@ -517,6 +523,7 @@ mod tests {
             group_mask: 0,
             tenant_id: 0,
             workload: None,
+            kill_process: false,
         }
     }
 

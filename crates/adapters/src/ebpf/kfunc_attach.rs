@@ -177,6 +177,13 @@ pub enum KfuncAttachError {
         message: String,
     },
 
+    #[error("BPF_RAW_TRACEPOINT_OPEN for the LSM program `{program}`: errno={errno} {message}")]
+    LsmAttach {
+        program: String,
+        errno: i32,
+        message: String,
+    },
+
     #[error("kprobe symbol `{symbol}` is not attachable: {message}")]
     KprobeSymbol { symbol: String, message: String },
 
@@ -450,6 +457,47 @@ pub fn attach_raw_tracepoint(
     #[allow(clippy::cast_possible_truncation)]
     let raw = rc as RawFd;
     info!(program, tracepoint, "raw tracepoint attached");
+    // SAFETY: rc >= 0 is a valid link fd owned by this process.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+// ── LSM attach ──────────────────────────────────────────────────────────
+
+/// Attach an LSM program fd to the hook it was loaded for.
+///
+/// The same command as a raw tracepoint, with no name: an LSM program carries
+/// its hook from the load, as `attach_btf_id`, so the kernel routes a nameless
+/// open to the tracing attach and binds the program where the load said. The
+/// returned link fd owns the attachment, so the hook is released when the
+/// agent exits, crashes or is killed.
+///
+/// A kernel whose BPF LSM is built but not active accepts the load and
+/// answers here, which is why the caller asks the host first and reports this
+/// error as the second witness rather than the first.
+pub fn attach_lsm(program: &str, prog_fd: RawFd) -> Result<OwnedFd, KfuncAttachError> {
+    let mut attr = RawTracepointOpenAttr {
+        #[allow(clippy::cast_sign_loss)]
+        prog_fd: prog_fd as u32,
+        ..Default::default()
+    };
+    let rc = unsafe {
+        bpf(
+            BPF_RAW_TRACEPOINT_OPEN,
+            (&raw mut attr).cast(),
+            std::mem::size_of::<RawTracepointOpenAttr>(),
+        )
+    };
+    if rc < 0 {
+        let err = io::Error::last_os_error();
+        return Err(KfuncAttachError::LsmAttach {
+            program: program.to_owned(),
+            errno: err.raw_os_error().unwrap_or(0),
+            message: err.to_string(),
+        });
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let raw = rc as RawFd;
+    info!(program, "LSM program attached");
     // SAFETY: rc >= 0 is a valid link fd owned by this process.
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }

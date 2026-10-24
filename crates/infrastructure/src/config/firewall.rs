@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use domain::common::entity::RuleId;
 use domain::firewall::entity::{FirewallAction, FirewallRule, PortRange, Scope as DomainScope};
+use domain::firewall::exec_network::NetworkExecutables;
 use domain::firewall::fqdn::{DEFAULT_GRACE_SECS, FqdnPattern, WorkloadDnsSettings};
 use domain::firewall::workload::{
     KubernetesMatchers, WorkloadMatch, WorkloadMode, WorkloadSelector,
@@ -52,6 +53,67 @@ pub struct FirewallConfig {
     /// name by DNS name.
     #[serde(default)]
     pub workload_dns: WorkloadDnsConfig,
+
+    /// The executables allowed to reach the network, decided by the kernel
+    /// at socket creation and connection.
+    #[serde(default)]
+    pub network_executables: NetworkExecutablesConfig,
+}
+
+// ── Network executables config ─────────────────────────────────────
+
+/// Which binaries on this host may open an internet socket.
+///
+/// Off by default, and observe once on: a list written for the first time is
+/// a list missing something, and the reports are how it is found before the
+/// kernel starts refusing it. Strict for the reason the workload block is: a
+/// misspelled `executables` is an enforcing list that allows nothing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkExecutablesConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// `observe` reports what would be refused, `enforce` refuses it.
+    #[serde(default = "default_workload_mode")]
+    pub mode: String,
+
+    /// Absolute paths. A symlink names the file it points at.
+    #[serde(default)]
+    pub executables: Vec<String>,
+}
+
+impl Default for NetworkExecutablesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: default_workload_mode(),
+            executables: Vec::new(),
+        }
+    }
+}
+
+impl NetworkExecutablesConfig {
+    /// Read the block into the domain's list, `None` when it is off.
+    pub fn to_domain(&self) -> Result<Option<NetworkExecutables>, ConfigError> {
+        let mode = WorkloadMode::parse(&self.mode).map_err(|value| ConfigError::InvalidValue {
+            field: "firewall.network_executables.mode".to_string(),
+            value: value.to_string(),
+            expected: "observe, enforce".to_string(),
+        })?;
+        if !self.enabled {
+            return Ok(None);
+        }
+        let list = NetworkExecutables {
+            mode,
+            executables: self.executables.clone(),
+        };
+        list.validate().map_err(|e| ConfigError::Validation {
+            field: "firewall.network_executables.executables".to_string(),
+            message: e.to_string(),
+        })?;
+        Ok(Some(list))
+    }
 }
 
 // ── Workload DNS config ────────────────────────────────────────────
@@ -143,6 +205,7 @@ impl Default for FirewallConfig {
             scrub: ScrubConfig::default(),
             schedules: HashMap::new(),
             workload_dns: WorkloadDnsConfig::default(),
+            network_executables: NetworkExecutablesConfig::default(),
         }
     }
 }

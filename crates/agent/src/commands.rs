@@ -4175,6 +4175,72 @@ fn print_process_signal(report: &crate::api_client::ProcessSignalReport) {
     }
 }
 
+/// Print whether an LSM program can attach on the host, and the remedy when
+/// it cannot.
+fn print_bpf_lsm(report: &crate::api_client::BpfLsmReport) {
+    println!("\nBPF LSM");
+    println!("  Active:     {}", yes_no(report.active));
+    let built = match report.built {
+        Some(built) => yes_no(built),
+        None => "unknown",
+    };
+    println!("  Built in:   {built}");
+    if !report.modules.is_empty() {
+        println!("  Modules:    {}", report.modules.join(","));
+    }
+    if let Some(reason) = &report.reason {
+        println!("  Reason:     {reason}");
+    }
+    if let Some(remedy) = &report.remedy {
+        println!("  Remedy:     {remedy}");
+    }
+}
+
+/// Print the two blocks that depend on the BPF LSM, saying so when an older
+/// agent does not report one.
+fn print_lsm_blocks(resp: &crate::api_client::KernelFeaturesResponse) {
+    match &resp.bpf_lsm {
+        Some(report) => print_bpf_lsm(report),
+        None => println!("\nBPF LSM\n  Not reported by this agent."),
+    }
+    match &resp.network_executables {
+        Some(report) => print_network_executables(report),
+        None => println!("\nNetwork executables\n  Not reported by this agent."),
+    }
+}
+
+/// Print whether the kernel decides which executables reach the network.
+fn print_network_executables(report: &crate::api_client::NetworkExecutablesReport) {
+    println!("\nNetwork executables");
+    println!("  Attached:   {}", yes_no(report.attached));
+    if report.attached {
+        let mode = if report.enforcing {
+            "enforce"
+        } else {
+            "observe"
+        };
+        println!("  Mode:       {mode}");
+        println!("  Listed:     {} executables", report.executables);
+    }
+    if let Some(reason) = &report.reason {
+        println!("  Reason:     {reason}");
+    }
+}
+
+/// Answer for the host this runs on, with no agent running and nothing
+/// configured: whether an LSM program could attach here. It reads the same
+/// two files the agent reads, so it cannot disagree with what the agent
+/// would report once installed.
+pub fn cmd_ebpf_host_check(output: OutputFormat) -> Result<()> {
+    let report = crate::api_client::BpfLsmReport::from(adapters::ebpf::lsm_probe::status());
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    print_bpf_lsm(&report);
+    Ok(())
+}
+
 /// Print what the node can do to a workload short of stopping it.
 ///
 /// The window and the protected count are printed only when something is
@@ -4343,6 +4409,7 @@ pub async fn cmd_ebpf_kernel_features(client: &ApiClient, output: OutputFormat) 
 
     print_process_signal(&resp.process_signal);
     print_quarantine(&resp.quarantine);
+    print_lsm_blocks(&resp);
 
     println!("\nSocket attribution");
     println!("  Attached:   {}", yes_no(resp.attribution.attached));
@@ -5140,6 +5207,7 @@ mod tests {
             domain_match_mode: None,
             kernel_slot: None,
             interfaces: Vec::new(),
+            kill_process: false,
         }
     }
 

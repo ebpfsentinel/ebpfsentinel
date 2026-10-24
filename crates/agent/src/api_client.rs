@@ -307,6 +307,9 @@ pub struct IpsRuleResponse {
     /// configuration file used. Empty is a floating rule.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interfaces: Vec<String>,
+    /// The rule also stops the process behind a flow it blocks.
+    #[serde(default)]
+    pub kill_process: bool,
 }
 
 /// Reported by the agent when two rules claim the same kernel map slot.
@@ -1623,6 +1626,51 @@ pub struct KernelFeaturesResponse {
     pub process_signal: ProcessSignalReport,
     #[serde(default)]
     pub quarantine: QuarantineReport,
+    /// Absent from an agent that predates the block, which is a different
+    /// answer from a host where the BPF LSM is inactive.
+    #[serde(default)]
+    pub bpf_lsm: Option<BpfLsmReport>,
+    /// Absent from an agent that predates the list.
+    #[serde(default)]
+    pub network_executables: Option<NetworkExecutablesReport>,
+}
+
+/// What became of the network executables list on the node.
+#[derive(Deserialize, Serialize)]
+pub struct NetworkExecutablesReport {
+    pub attached: bool,
+    #[serde(default)]
+    pub enforcing: bool,
+    #[serde(default)]
+    pub executables: usize,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Whether the BPF LSM runs on the host, and what would make it run.
+#[derive(Deserialize, Serialize)]
+pub struct BpfLsmReport {
+    pub active: bool,
+    #[serde(default)]
+    pub built: Option<bool>,
+    #[serde(default)]
+    pub modules: Vec<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub remedy: Option<String>,
+}
+
+impl From<&adapters::ebpf::BpfLsmStatus> for BpfLsmReport {
+    fn from(status: &adapters::ebpf::BpfLsmStatus) -> Self {
+        Self {
+            active: status.active,
+            built: status.built,
+            modules: status.modules.clone(),
+            reason: status.reason.clone(),
+            remedy: status.remedy.clone(),
+        }
+    }
 }
 
 /// What this node can do to a workload short of stopping it. Defaulted on

@@ -604,6 +604,7 @@ impl IdsRuleConfig {
                 .as_ref()
                 .map(|w| w.to_selector("ids.rules"))
                 .transpose()?,
+            kill_process: false,
         })
     }
 }

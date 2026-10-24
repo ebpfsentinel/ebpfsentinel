@@ -150,6 +150,67 @@ pub struct KernelFeaturesResponse {
     /// Reported whether or not the capability is on, for the same reason as
     /// the block above.
     pub quarantine: QuarantineReport,
+    /// Whether an LSM program can attach on this host. Read from the host
+    /// rather than from any attach, because it is asked before anything that
+    /// needs it is configured, and the kernel version does not answer it.
+    pub bpf_lsm: BpfLsmReport,
+    /// Whether the kernel decides which executables reach the network, and
+    /// whether it refuses or only reports. Reported whether or not the list is
+    /// configured, with the reason it is not in force.
+    pub network_executables: NetworkExecutablesReport,
+}
+
+/// What became of the network executables list on this host.
+#[derive(Serialize, ToSchema)]
+pub struct NetworkExecutablesReport {
+    /// Both hooks are attached and deciding.
+    pub attached: bool,
+    /// An executable outside the list is refused rather than reported.
+    pub enforcing: bool,
+    /// How many distinct executables the kernel holds, the agent included.
+    pub executables: usize,
+    /// Why the list is not in force, in one sentence.
+    pub reason: Option<String>,
+}
+
+impl From<adapters::ebpf::exec_network::ExecNetworkStatus> for NetworkExecutablesReport {
+    fn from(status: adapters::ebpf::exec_network::ExecNetworkStatus) -> Self {
+        Self {
+            attached: status.attached,
+            enforcing: status.enforcing,
+            executables: status.executables,
+            reason: status.reason,
+        }
+    }
+}
+
+/// Whether the BPF LSM runs on this host, and what would make it run.
+#[derive(Serialize, ToSchema)]
+pub struct BpfLsmReport {
+    /// `bpf` is among the active security modules.
+    pub active: bool,
+    /// Whether the kernel was built with the BPF LSM, read from its BTF.
+    /// Absent when the BTF could not be read, which proves nothing either way.
+    pub built: Option<bool>,
+    /// The active security modules in the order the kernel runs them, empty
+    /// when the list could not be read.
+    pub modules: Vec<String>,
+    /// Why an LSM program cannot attach here, in one sentence.
+    pub reason: Option<String>,
+    /// What would make it attach, in one sentence.
+    pub remedy: Option<String>,
+}
+
+impl From<&adapters::ebpf::BpfLsmStatus> for BpfLsmReport {
+    fn from(status: &adapters::ebpf::BpfLsmStatus) -> Self {
+        Self {
+            active: status.active,
+            built: status.built,
+            modules: status.modules.clone(),
+            reason: status.reason.clone(),
+            remedy: status.remedy.clone(),
+        }
+    }
 }
 
 /// What became of the cgroup socket hooks on this host.
@@ -491,6 +552,9 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
         workload_firewall_report(adapters::ebpf::workload_firewall_attach::status());
     let process_signal = process_signal_report(adapters::ebpf::signal_attach::status());
     let quarantine = quarantine_report(adapters::ebpf::quarantine_map_manager::status());
+    let bpf_lsm = BpfLsmReport::from(adapters::ebpf::lsm_probe::status());
+    let network_executables =
+        NetworkExecutablesReport::from(adapters::ebpf::exec_network::status());
 
     let Some(report) = report else {
         return KernelFeaturesResponse {
@@ -505,6 +569,8 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
             workload_firewall,
             process_signal,
             quarantine,
+            bpf_lsm,
+            network_executables,
         };
     };
 
@@ -549,6 +615,8 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
         workload_firewall,
         process_signal,
         quarantine,
+        bpf_lsm,
+        network_executables,
     }
 }
 
@@ -870,6 +938,27 @@ mod tests {
         assert!(!resp.probed);
         assert_eq!(resp.reason.as_deref(), Some("operation not permitted"));
         assert!(resp.missing_required.is_empty());
+    }
+
+    #[test]
+    fn kernel_features_reports_the_network_executables_list_even_unprobed() {
+        let resp = kernel_features_body(None);
+        let held = adapters::ebpf::exec_network::status();
+        assert_eq!(resp.network_executables.attached, held.attached);
+        assert_eq!(resp.network_executables.enforcing, held.enforcing);
+        assert_eq!(resp.network_executables.reason, held.reason);
+    }
+
+    #[test]
+    fn kernel_features_answers_the_bpf_lsm_question_even_unprobed() {
+        // Whether an LSM program can attach is read from the host, not from
+        // the helper probe, so a refused probe must not hide it.
+        let host = adapters::ebpf::lsm_probe::status();
+        let resp = kernel_features_body(None);
+        assert_eq!(resp.bpf_lsm.active, host.active);
+        assert_eq!(resp.bpf_lsm.modules, host.modules);
+        assert_eq!(resp.bpf_lsm.remedy, host.remedy);
+        assert_eq!(resp.bpf_lsm.active, resp.bpf_lsm.remedy.is_none());
     }
 
     #[test]

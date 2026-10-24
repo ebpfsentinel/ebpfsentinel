@@ -1389,6 +1389,7 @@ mod tests {
             detail: "denied by policy".to_string(),
             ja4_fingerprint: None,
             container: None,
+            kill_process: false,
         });
 
         let frame: serde_json::Value =

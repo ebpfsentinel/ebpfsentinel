@@ -49,6 +49,8 @@ pub use domain::common::agent_event::AgentEvent;
 struct PreventionMatch {
     mode: DomainMode,
     severity: domain::common::entity::Severity,
+    /// The rule blocks and asks for the process behind the flow too.
+    kill_process: bool,
 }
 
 /// Routes eBPF events by `event_type` to the correct domain engine.
@@ -693,6 +695,7 @@ impl EventDispatcher {
             let prevention = svc.is_prevention_index(idx).then_some(PreventionMatch {
                 mode: rule.mode,
                 severity: rule.severity,
+                kill_process: rule.kill_process && rule.mode == DomainMode::Block,
             });
             if prevention.is_none() && !svc.enabled() {
                 return;
@@ -770,7 +773,7 @@ impl EventDispatcher {
         // A prevention rule is reported under the IPS component, carrying its
         // own severity rather than the component default.
         if let Some(ref prevention) = prevention {
-            self.emit_packet_security_alert_with_severity(
+            let mut psa = self.packet_security_alert(
                 domain::alert::entity::PacketAlertComponent::Ips,
                 event,
                 &alert.rule_id.0,
@@ -778,6 +781,8 @@ impl EventDispatcher {
                 &detail,
                 prevention.severity,
             );
+            psa.kill_process = prevention.kill_process;
+            let _ = self.alert_tx.try_send(AlertEvent::PacketSecurity(psa));
         } else if self.alert_tx.try_send(AlertEvent::Ids(alert)).is_err() {
             self.metrics.record_event_dropped("alert_channel_full");
         }
@@ -1236,6 +1241,22 @@ impl EventDispatcher {
         detail: &str,
         severity: domain::common::entity::Severity,
     ) {
+        let psa =
+            self.packet_security_alert(component, event, rule_id, action_label, detail, severity);
+        let _ = self.alert_tx.try_send(AlertEvent::PacketSecurity(psa));
+    }
+
+    /// The alert a packet-level decision becomes, with the flow's
+    /// fingerprint and container attached where the datapath captured them.
+    fn packet_security_alert(
+        &self,
+        component: domain::alert::entity::PacketAlertComponent,
+        event: &PacketEvent,
+        rule_id: &str,
+        action_label: &str,
+        detail: &str,
+        severity: domain::common::entity::Severity,
+    ) -> domain::alert::entity::PacketSecurityAlert {
         // Attach the flow's JA4 fingerprint when one was computed for the
         // originating ClientHello (same client→server flow key).
         let ja4_fingerprint = self
@@ -1252,7 +1273,7 @@ impl EventDispatcher {
         // map). No pid is available here, so resolution goes through the
         // cgroup-id path rather than `/proc/<pid>/cgroup`.
         let container = self.resolve_container_by_id(event.cgroup_id);
-        let psa = domain::alert::entity::PacketSecurityAlert {
+        domain::alert::entity::PacketSecurityAlert {
             component,
             src_addr: event.src_addr,
             dst_addr: event.dst_addr,
@@ -1267,8 +1288,8 @@ impl EventDispatcher {
             detail: detail.to_string(),
             ja4_fingerprint,
             container,
-        };
-        let _ = self.alert_tx.try_send(AlertEvent::PacketSecurity(psa));
+            kill_process: false,
+        }
     }
 
     fn check_encrypted_dns(
@@ -1664,6 +1685,7 @@ mod tests {
             group_mask: 0,
             tenant_id: 0,
             workload: None,
+            kill_process: false,
         }
     }
 
@@ -2023,6 +2045,47 @@ mod tests {
             prevention_ids.contains(&"ips-ssh-bruteforce".to_string()),
             "prevention alert missing: {prevention_ids:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_blocking_prevention_rule_asking_for_the_process_says_so_on_its_alert() {
+        for (mode, asks, expected) in [
+            (DomainMode::Block, true, true),
+            (DomainMode::Alert, true, false),
+            (DomainMode::Block, false, false),
+        ] {
+            let ids = make_service_with_rules(vec![make_ids_rule("ids-ssh-bruteforce")]);
+            let mut with_prevention = (**ids.load()).clone();
+            let mut prevention = make_ids_rule("ips-ssh-bruteforce");
+            prevention.mode = mode;
+            prevention.kill_process = asks;
+            with_prevention
+                .set_prevention_rules(vec![prevention])
+                .unwrap();
+            ids.store(Arc::new(with_prevention));
+
+            let ips_metrics: Arc<dyn MetricsPort> = Arc::new(TestMetrics::new());
+            let ips = Arc::new(ArcSwap::from_pointee(IpsAppService::new(
+                domain::ips::engine::IpsEngine::new(domain::ips::entity::IpsPolicy::default()),
+                ips_metrics,
+            )));
+            let metrics = Arc::new(TestMetrics::new());
+            let (alert_tx, mut alert_rx) = mpsc::channel(10);
+            let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+                .with_ips_service(ips);
+
+            dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 1));
+
+            let mut kills = Vec::new();
+            while let Ok(event) = alert_rx.try_recv() {
+                if let AlertEvent::PacketSecurity(a) = event
+                    && a.rule_id == "ips-ssh-bruteforce"
+                {
+                    kills.push(a.kill_process);
+                }
+            }
+            assert_eq!(kills, vec![expected], "mode {mode:?}, asks {asks}");
+        }
     }
 
     #[tokio::test]

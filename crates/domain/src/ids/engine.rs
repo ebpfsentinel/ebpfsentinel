@@ -525,6 +525,7 @@ mod tests {
             group_mask: 0,
             tenant_id: 0,
             workload: None,
+            kill_process: false,
         }
     }
 

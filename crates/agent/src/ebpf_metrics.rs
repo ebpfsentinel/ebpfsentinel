@@ -234,6 +234,19 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
         // delivered and not a process stopped, which is why the service goes
         // and looks afterwards and this counter is never read as a kill
         // count.
+        // Every internet socket created or connected by a task with an
+        // executable, then what the allow-list said. `unreadable` is a call
+        // whose executable the kernel could not read, decided as outside
+        // the list, and `event_lost` is a record the ring had no room for,
+        // the decision itself having been taken either way.
+        "EXEC_NET_METRICS" => &[
+            (0, "checked"),
+            (1, "allowed"),
+            (2, "refused"),
+            (3, "would_refuse"),
+            (4, "unreadable"),
+            (5, "event_lost"),
+        ],
         "SIGNAL_METRICS" => &[
             (0, "sent"),
             (1, "protected"),
@@ -620,6 +633,10 @@ mod tests {
             ebpf_common::workload_policy::WORKLOAD_METRIC_COUNT,
         ),
         ("SIGNAL_METRICS", ebpf_common::signal::SIGNAL_METRIC_COUNT),
+        (
+            "EXEC_NET_METRICS",
+            ebpf_common::exec_network::EXEC_NET_METRIC_COUNT,
+        ),
         (
             "QUARANTINE_METRICS",
             ebpf_common::quarantine::QUARANTINE_METRIC_COUNT,

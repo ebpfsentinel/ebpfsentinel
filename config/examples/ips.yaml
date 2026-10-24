@@ -129,6 +129,9 @@ ips:
       mode: block
       protocol: tcp
       dst_port: 4444
+      # Also stop the local process behind the blocked flow. Needs
+      # response.kill_process.enabled: true, or the config is refused.
+      # kill_process: true
 
     # Block RDP brute-force (Windows Remote Desktop)
     - id: ips-rdp-bruteforce

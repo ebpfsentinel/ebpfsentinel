@@ -11,6 +11,7 @@ pub mod dlp_scope;
 pub mod dns_event_reader;
 pub mod ebpf_map_write_adapter;
 pub mod event_reader;
+pub mod exec_network;
 pub mod feature_gates;
 pub mod geoip_lpm_manager;
 pub mod helper_probe;
@@ -28,6 +29,7 @@ pub mod link_handover;
 pub mod link_watcher;
 pub mod loader;
 pub mod lpm_coordinator;
+pub mod lsm_probe;
 pub mod map_batch;
 pub mod map_fill;
 pub mod map_freeze;
@@ -111,6 +113,7 @@ pub use l7_ports_manager::L7PortsManager;
 pub use lb_map_manager::LbMapManager;
 pub use loader::{DEFAULT_BPF_PIN_PATH, EbpfLoader, xdp_mode_to_flags};
 pub use lpm_coordinator::LpmCoordinator;
+pub use lsm_probe::BpfLsmStatus;
 pub use map_fill::{
     MapFill, clear_all as clear_map_fills, measure as map_fills, register as register_map_fills,
 };

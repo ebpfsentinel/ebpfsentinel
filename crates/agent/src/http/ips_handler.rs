@@ -46,6 +46,10 @@ pub struct IpsRuleResponse {
     /// userspace, so it blocks nothing until the conflict is resolved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kernel_slot: Option<SlotContentionResponse>,
+    /// The rule also stops the process behind a flow it blocks. Present only
+    /// when it does.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub kill_process: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -134,6 +138,7 @@ pub async fn list_ips_rules(State(state): State<Arc<AppState>>) -> Json<Vec<IpsR
             domain_match_mode: r.domain_match_mode.as_ref().map(format_domain_match_mode),
             interfaces: group_mask_words(r.group_mask, &group_bits),
             kernel_slot: shadows.get(&r.id.0).map(SlotContentionResponse::from),
+            kill_process: r.kill_process,
         })
         .collect();
     Json(rules)
@@ -214,6 +219,7 @@ pub async fn patch_ips_rule_mode(
             // Filled after the reinstall below: slot ownership is only settled
             // once the prevention rules are back in the array the IDS owns.
             kernel_slot: None,
+            kill_process: r.kill_process,
         });
 
     // Capture after snapshot and record rule change
@@ -500,6 +506,7 @@ mod tests {
             domain_match_mode: None,
             kernel_slot: None,
             interfaces: Vec::new(),
+            kill_process: false,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "ips-001");
@@ -530,8 +537,10 @@ mod tests {
                 evaluated_in_userspace: false,
             }),
             interfaces: Vec::new(),
+            kill_process: true,
         };
         let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["kill_process"], true);
         assert_eq!(json["kernel_slot"]["shadowed_by"][0], "ips-004");
         assert_eq!(json["kernel_slot"]["evaluated_in_userspace"], false);
     }
@@ -551,6 +560,7 @@ mod tests {
             domain_match_mode: Some("wildcard".to_string()),
             kernel_slot: None,
             interfaces: Vec::new(),
+            kill_process: false,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["domain_pattern"], "*.evil.com");
@@ -610,6 +620,7 @@ mod tests {
             domain_match_mode: None,
             kernel_slot: None,
             interfaces: Vec::new(),
+            kill_process: false,
         };
         assert!(
             serde_json::to_value(&resp)

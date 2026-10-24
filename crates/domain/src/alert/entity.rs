@@ -7,6 +7,7 @@ use crate::common::entity::{DomainMode, RuleId, Severity};
 use crate::ddos::entity::DdosAttack;
 use crate::dlp::entity::DlpAlert;
 use crate::dns::entity::{DnsAlert, DnsAlertReason};
+use crate::firewall::exec_network::{EXEC_NETWORK_EXECUTABLE_SOURCE, ExecNetworkRecord};
 use crate::firewall::workload::{DestinationAddr, WORKLOAD_FIREWALL_COMPONENT, WorkloadDenial};
 use crate::ids::entity::IdsAlert;
 use crate::threatintel::entity::ThreatIntelAlert;
@@ -44,6 +45,9 @@ pub struct PacketSecurityAlert {
     /// Container provenance resolved from the event's `cgroup_id`, when the
     /// datapath captured one and the cgroup resolver matched it.
     pub container: Option<crate::container::entity::ContainerInfo>,
+    /// The rule that fired asks for the process behind the flow to be
+    /// stopped. Only a prevention rule in block mode sets it.
+    pub kill_process: bool,
 }
 
 /// Full-context alert with all FR30 fields.
@@ -862,6 +866,82 @@ impl Alert {
         }
     }
 
+    /// Create an alert from a call by an executable outside the network
+    /// allow-list.
+    ///
+    /// The executable travels as its device and inode, which is what the
+    /// kernel compared; the path is the pipeline's business, off the thread
+    /// group, because a path read here would be read after the fact and an
+    /// inode is not. No ATT&CK technique, for the reason the workload
+    /// firewall gives: this is our own policy talking.
+    #[must_use]
+    pub fn from_exec_network(record: &ExecNetworkRecord) -> Self {
+        let rule_id = ExecNetworkRecord::rule();
+        let (executable_dev, executable_inode) = match record.executable {
+            Some((dev, ino)) => (Some(dev), Some(ino)),
+            None => (None, None),
+        };
+        Self {
+            id: Self::generate_id(record.at_ns, &rule_id),
+            timestamp_ns: record.at_ns,
+            component: WORKLOAD_FIREWALL_COMPONENT.to_string(),
+            severity: Severity::Medium,
+            rule_id,
+            action: if record.refused {
+                DomainMode::Block
+            } else {
+                DomainMode::Alert
+            },
+            src_addr: [0; 4],
+            dst_addr: [0; 4],
+            src_port: 0,
+            dst_port: 0,
+            protocol: 0,
+            is_ipv6: record.ipv6,
+            message: record.message(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: Some(record.tgid),
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: None,
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
+            executable_path: None,
+            executable_dev,
+            executable_inode,
+            executable_source: record
+                .executable
+                .map(|_| EXEC_NETWORK_EXECUTABLE_SOURCE.to_string()),
+            flow_source: None,
+            workload: None,
+        }
+    }
+
     /// Create a domain alert from an AI security detection.
     ///
     /// Used by the enterprise AI security service for shadow AI, AI DLP,
@@ -1378,6 +1458,7 @@ mod tests {
             detail: "test detail".to_string(),
             ja4_fingerprint: None,
             container: None,
+            kill_process: false,
         }
     }
 
@@ -1502,5 +1583,46 @@ mod operational_tests {
         assert_eq!(alert.severity, Severity::Critical);
         assert_eq!(alert.message, "all 2 WAN gateway(s) down: gw0, gw1");
         assert_eq!(alert.timestamp_ns, 7);
+    }
+
+    #[test]
+    fn an_exec_network_refusal_blocks_and_carries_the_kernel_identity() {
+        use crate::firewall::exec_network::{ExecNetworkHook, ExecNetworkRecord};
+        let record = ExecNetworkRecord {
+            at_ns: 9,
+            tgid: 31_337,
+            executable: Some((2049, 77)),
+            hook: ExecNetworkHook::Connect,
+            ipv6: true,
+            refused: true,
+        };
+        let alert = Alert::from_exec_network(&record);
+        assert_eq!(alert.component, "workload-firewall");
+        assert_eq!(alert.rule_id.0, "network-executables");
+        assert_eq!(alert.action, DomainMode::Block);
+        assert_eq!(alert.tgid, Some(31_337));
+        assert_eq!(alert.executable_dev, Some(2049));
+        assert_eq!(alert.executable_inode, Some(77));
+        assert_eq!(alert.executable_source.as_deref(), Some("kernel_task"));
+        assert!(alert.is_ipv6);
+        assert!(alert.mitre_attack.is_none());
+    }
+
+    #[test]
+    fn an_observed_call_with_an_unread_executable_alerts_and_names_nothing() {
+        use crate::firewall::exec_network::{ExecNetworkHook, ExecNetworkRecord};
+        let record = ExecNetworkRecord {
+            at_ns: 9,
+            tgid: 7,
+            executable: None,
+            hook: ExecNetworkHook::Create,
+            ipv6: false,
+            refused: false,
+        };
+        let alert = Alert::from_exec_network(&record);
+        assert_eq!(alert.action, DomainMode::Alert);
+        assert!(alert.executable_dev.is_none());
+        assert!(alert.executable_inode.is_none());
+        assert!(alert.executable_source.is_none());
     }
 }

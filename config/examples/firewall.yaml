@@ -95,6 +95,20 @@ firewall:
     resolvers: ["10.96.0.10"]
     grace_secs: 30
 
+  # ── Executables allowed to reach the network ──────────────────────
+  # The only binaries that may open an internet socket, decided by the
+  # kernel at the socket_create and socket_connect security hooks. Needs
+  # the BPF LSM active at boot: `ebpfsentinel-agent ebpf host-check`
+  # says whether this host has it. Observe reports what would be
+  # refused; enforce refuses it, and refuses to start where the hooks
+  # cannot attach. Off unless `enabled` is set.
+  network_executables:
+    enabled: false
+    mode: observe
+    executables:
+      - /usr/sbin/sshd
+      - /usr/bin/curl
+
   # ── Aliases ────────────────────────────────────────────────────────
   #
   # Named groups of IPs, CIDRs, or ports reusable across rules.

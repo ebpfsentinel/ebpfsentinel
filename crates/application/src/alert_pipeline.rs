@@ -29,6 +29,7 @@ use crate::alert_event::AlertEvent;
 use crate::alert_replay::AlertReplayBuffer;
 use crate::audit_service_impl::AuditAppService;
 use crate::ips_service_impl::IpsAppService;
+use crate::process_signal_service::ProcessSignalService;
 use crate::ratelimit_service_impl::RateLimitAppService;
 use crate::workload_resolver::WorkloadResolver;
 
@@ -66,6 +67,10 @@ pub struct AlertPipeline {
     /// unwired for good on a host whose kernel refused the attribution
     /// hooks, which is why every alert's block is optional.
     workloads: WorkloadResolver,
+    /// Stops the process behind a flow a prevention rule blocked, when the
+    /// rule asks for it. Absent unless the agent's process kill is enabled
+    /// and its kernel program attached.
+    process_kill: Option<Arc<ProcessSignalService>>,
 }
 
 /// Auto-capture trigger: starts a PCAP capture when a high-severity alert fires.
@@ -249,7 +254,16 @@ impl AlertPipeline {
             auto_response: None,
             auto_capture: None,
             workloads: WorkloadResolver::new(),
+            process_kill: None,
         }
+    }
+
+    /// Stop the process behind a flow through `svc` when a blocking
+    /// prevention rule asks for it.
+    #[must_use]
+    pub fn with_process_kill(mut self, svc: Arc<ProcessSignalService>) -> Self {
+        self.process_kill = Some(svc);
+        self
     }
 
     /// Name the workload behind every alert through `resolver`.
@@ -683,6 +697,9 @@ impl AlertPipeline {
         let mut alert = Alert::from_packet_security_alert(psa);
 
         let enrichment = self.enrich(&mut alert);
+        if psa.kill_process {
+            self.kill_flow_process(&alert);
+        }
 
         self.apply_metadata_enrichers(&mut alert).await;
 
@@ -962,6 +979,54 @@ impl AlertPipeline {
             // Only first matching policy applies (no stacking)
             break;
         }
+    }
+
+    /// Stop the process that opened the flow a blocking rule matched.
+    ///
+    /// The process is the one attribution named, so a transited flow, a
+    /// socket opened before the agent started and a host whose kernel
+    /// refused the attribution hooks stop nothing: there is no process to
+    /// name, and none is guessed. The kill runs on its own task because it
+    /// waits for the kernel to catch the target, and the outcome, refusal
+    /// included, is written to the audit log by the service.
+    fn kill_flow_process(&self, alert: &Alert) {
+        let Some(pid) = alert.workload.as_ref().map(|w| w.pid) else {
+            tracing::info!(
+                alert_id = %alert.id,
+                rule_id = %alert.rule_id,
+                "process kill: skipped (no process is attributed to the flow)"
+            );
+            return;
+        };
+        let Some(svc) = self.process_kill.as_ref().map(Arc::clone) else {
+            tracing::warn!(
+                alert_id = %alert.id,
+                rule_id = %alert.rule_id,
+                pid,
+                "process kill: skipped (process kill is not running on this agent)"
+            );
+            return;
+        };
+        let rule_id = alert.rule_id.0.clone();
+        let alert_id = alert.id.clone();
+        tokio::spawn(async move {
+            match svc.kill(pid, &rule_id).await {
+                Ok(outcome) => tracing::info!(
+                    alert_id = %alert_id,
+                    rule_id = %rule_id,
+                    pid,
+                    outcome = %outcome.as_sentence(),
+                    "process kill: decided"
+                ),
+                Err(e) => tracing::warn!(
+                    alert_id = %alert_id,
+                    rule_id = %rule_id,
+                    pid,
+                    error = %e,
+                    "process kill: the signal maps refused"
+                ),
+            }
+        });
     }
 
     /// Evaluate an alert against auto-capture policy.
@@ -1420,6 +1485,144 @@ mod tests {
         let alert = rx.recv().await.unwrap();
         assert!(domain::workload::entity::is_absent(&alert.workload));
         assert!(!serde_json::to_string(&alert).unwrap().contains("workload"));
+    }
+
+    /// Signal maps that record what was armed and report every target as
+    /// signalled, so the service settles at once.
+    struct RecordingSignalMaps {
+        armed: Arc<std::sync::Mutex<Vec<u32>>>,
+        pending: Vec<ebpf_common::signal::SignalEvent>,
+    }
+
+    impl ports::secondary::process_signal_map_port::ProcessSignalMapPort for RecordingSignalMaps {
+        fn set_protected(
+            &mut self,
+            _tgids: &[u32],
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+        fn arm(
+            &mut self,
+            tgid: u32,
+            _signal: u32,
+            _window_ns: u64,
+        ) -> Result<(), domain::common::error::DomainError> {
+            self.armed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(tgid);
+            self.pending.push(ebpf_common::signal::SignalEvent {
+                tgid,
+                outcome: ebpf_common::signal::SIGNAL_OUTCOME_SENT,
+                ..Default::default()
+            });
+            Ok(())
+        }
+        fn disarm(&mut self, _tgid: u32) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+        fn drain_events(
+            &mut self,
+        ) -> Result<Vec<ebpf_common::signal::SignalEvent>, domain::common::error::DomainError>
+        {
+            Ok(std::mem::take(&mut self.pending))
+        }
+    }
+
+    /// A target that runs an unprotected binary until it is signalled, then
+    /// is gone.
+    struct UntilSignalled(std::sync::atomic::AtomicBool);
+
+    impl ports::secondary::process_executable_port::ProcessExecutableReader for UntilSignalled {
+        fn read_executable(&self, _pid: u32) -> Option<domain::dlp::entity::DlpExecutable> {
+            self.0
+                .swap(false, Ordering::Relaxed)
+                .then(|| domain::dlp::entity::DlpExecutable {
+                    path: "/tmp/implant".to_string(),
+                    dev: 0,
+                    inode: 0,
+                    source: domain::dlp::entity::DlpIdentitySource::ProcessAtAlertTime,
+                })
+        }
+    }
+
+    async fn recording_kill() -> (Arc<ProcessSignalService>, Arc<std::sync::Mutex<Vec<u32>>>) {
+        let armed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let maps = RecordingSignalMaps {
+            armed: Arc::clone(&armed),
+            pending: Vec::new(),
+        };
+        let svc = ProcessSignalService::new(
+            Arc::new(tokio::sync::Mutex::new(maps))
+                as Arc<
+                    tokio::sync::Mutex<
+                        dyn ports::secondary::process_signal_map_port::ProcessSignalMapPort,
+                    >,
+                >,
+            Arc::new(UntilSignalled(std::sync::atomic::AtomicBool::new(true))),
+            None,
+            domain::response::signal::ProcessSignalGuard::new(1, &[], &[]),
+            crate::process_signal_service::ProcessSignalSettings {
+                signal: 9,
+                window: Duration::from_millis(50),
+                poll_interval: Duration::from_millis(5),
+            },
+        )
+        .await
+        .unwrap();
+        (Arc::new(svc), armed)
+    }
+
+    fn ips_block(kill_process: bool) -> PacketSecurityAlert {
+        PacketSecurityAlert {
+            component: domain::alert::entity::PacketAlertComponent::Ips,
+            src_addr: [0x0A00_0002, 0, 0, 0],
+            dst_addr: [0xC633_6401, 0, 0, 0],
+            src_port: 40_000,
+            dst_port: 4_444,
+            protocol: 6,
+            is_ipv6: false,
+            timestamp_ns: 1_000,
+            rule_id: "ips-c2".to_string(),
+            action_label: "block".to_string(),
+            severity: Severity::Critical,
+            detail: "IPS rule ips-c2 matched".to_string(),
+            ja4_fingerprint: None,
+            container: None,
+            kill_process,
+        }
+    }
+
+    async fn armed_after(psa: &PacketSecurityAlert, resolver: WorkloadResolver) -> Vec<u32> {
+        let (svc, armed) = recording_kill().await;
+        let mut pipeline = make_pipeline_without_senders(Vec::new(), Arc::new(TestMetrics::new()))
+            .with_workload_resolver(resolver)
+            .with_process_kill(svc);
+        pipeline.process_packet_security_alert(psa).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        armed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn a_blocking_rule_asking_for_the_process_stops_the_one_attribution_named() {
+        assert_eq!(
+            armed_after(&ips_block(true), resolver_naming(4_242)).await,
+            vec![4_242]
+        );
+    }
+
+    #[tokio::test]
+    async fn no_process_is_stopped_unless_the_rule_asks_and_attribution_names_one() {
+        assert!(
+            armed_after(&ips_block(false), resolver_naming(4_242))
+                .await
+                .is_empty()
+        );
+        let unattributed = WorkloadResolver::new().with_sockets(Box::new(FixedOwner(None)));
+        assert!(armed_after(&ips_block(true), unattributed).await.is_empty());
     }
 
     #[tokio::test]
