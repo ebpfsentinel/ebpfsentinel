@@ -117,8 +117,17 @@ impl LearningSession {
             self.unattributed = self.unattributed.saturating_add(1);
             return Observation::Unattributed;
         };
-        self.aggregate
-            .record(key, flow.destination, flow.port, flow.protocol, now_ns)
+        let observation = self.aggregate.record(
+            key.clone(),
+            flow.destination,
+            flow.port,
+            flow.protocol,
+            now_ns,
+        );
+        if matches!(observation, Observation::NewEdge | Observation::KnownEdge) {
+            self.aggregate.note_source(&key, flow.source);
+        }
+        observation
     }
 
     /// Say the session is still observing, even when no flow came.
@@ -410,6 +419,7 @@ mod tests {
                 exe: Some("/usr/sbin/nginx".to_string()),
                 ..ObservedWorkload::default()
             },
+            source: "10.9.0.2".parse().unwrap(),
             destination: dst.parse().unwrap(),
             port,
             protocol: Protocol::Tcp,
@@ -502,6 +512,7 @@ mod tests {
             .unwrap();
         let anonymous = ObservedFlow {
             workload: ObservedWorkload::default(),
+            source: "10.9.0.2".parse().unwrap(),
             destination: "10.0.0.1".parse().unwrap(),
             port: 443,
             protocol: Protocol::Tcp,

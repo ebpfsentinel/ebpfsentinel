@@ -129,6 +129,7 @@ mod tests {
                 unit: Some("nginx.service".to_string()),
                 ..ObservedWorkload::default()
             },
+            source: "10.9.0.2".parse().unwrap(),
             destination: "10.0.0.1".parse().unwrap(),
             port: 443,
             protocol: Protocol::Tcp,

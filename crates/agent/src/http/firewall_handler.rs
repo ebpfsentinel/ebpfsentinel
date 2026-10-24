@@ -10,7 +10,7 @@ use axum::response::IntoResponse;
 use domain::auth::entity::JwtClaims;
 use domain::common::entity::{Protocol, RuleId};
 use domain::firewall::entity::{FirewallAction, FirewallRule, IpCidr, IpNetwork, PortRange, Scope};
-use domain::firewall::workload::WorkloadMode;
+use domain::firewall::workload::{WorkloadMatch, WorkloadMode};
 use infrastructure::config::{group_mask_words, parse_cidr};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -126,6 +126,47 @@ pub struct RuleResponse {
     /// rule, which is the only thing a rule created through this API can be.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub interfaces: Vec<String>,
+    /// The workload the rule is about, when it names one: decided at
+    /// `connect()`, `sendmsg()` or `bind()` rather than on the packet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload: Option<RuleWorkloadResponse>,
+}
+
+/// The workload half of a rule, matcher by matcher.
+#[derive(Serialize, ToSchema)]
+pub struct RuleWorkloadResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    /// Whether the selector also names pod labels, namespace labels or a
+    /// service account, which only a Kubernetes node can resolve.
+    #[serde(skip_serializing_if = "is_false")]
+    pub kubernetes: bool,
+    /// Destinations named by DNS name in place of an address.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fqdn: Vec<String>,
+    /// `observe` or `enforce`.
+    pub mode: &'static str,
+}
+
+impl From<&WorkloadMatch> for RuleWorkloadResponse {
+    fn from(w: &WorkloadMatch) -> Self {
+        let s = &w.selector;
+        Self {
+            exe: s.exe.clone(),
+            unit: s.unit.clone(),
+            cgroup: s.cgroup.clone(),
+            container: s.container.clone(),
+            kubernetes: s.pods.is_some() || s.namespaces.is_some() || s.service_account.is_some(),
+            fqdn: w.fqdn.iter().map(ToString::to_string).collect(),
+            mode: w.mode.as_str(),
+        }
+    }
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -414,6 +455,7 @@ impl From<&FirewallRule> for RuleResponse {
             system: rule.system,
             country_codes: None,
             interfaces: Vec::new(),
+            workload: rule.workload.as_ref().map(RuleWorkloadResponse::from),
         }
     }
 }
@@ -1288,6 +1330,40 @@ mod tests {
         assert_eq!(resp.src_ip.as_deref(), Some("192.168.1.0/24"));
         assert_eq!(resp.dst_port.as_deref(), Some("22"));
         assert_eq!(resp.scope, "global");
+        assert!(resp.workload.is_none());
+    }
+
+    #[test]
+    fn a_workload_rule_names_its_matchers_and_its_mode() {
+        let req = CreateRuleRequest {
+            id: "w-1".to_string(),
+            priority: 10,
+            action: "allow".to_string(),
+            protocol: "tcp".to_string(),
+            src_ip: None,
+            dst_ip: None,
+            src_port: None,
+            dst_port: Some(6379),
+            scope: "global".to_string(),
+            enabled: true,
+            vlan_id: None,
+            src_mac: None,
+            dst_mac: None,
+        };
+        let mut rule = req.into_domain_rule().unwrap();
+        rule.workload = Some(WorkloadMatch {
+            selector: domain::firewall::workload::WorkloadSelector {
+                container: Some("storefront".to_string()),
+                ..Default::default()
+            },
+            mode: WorkloadMode::Enforce,
+            fqdn: Vec::new(),
+        });
+        let value = serde_json::to_value(RuleResponse::from(&rule)).unwrap();
+        assert_eq!(
+            value["workload"],
+            serde_json::json!({"container": "storefront", "mode": "enforce"})
+        );
     }
 
     /// A floating rule and a rule scoped to a group have to read differently,

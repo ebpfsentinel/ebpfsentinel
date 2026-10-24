@@ -5297,6 +5297,76 @@
         ]
       }
     },
+    "/api/v1/learning/sessions/{id}/edges": {
+      "get": {
+        "tags": [
+          "Learning"
+        ],
+        "summary": "`GET /api/v1/learning/sessions/{id}/edges` - what the window saw, edge\nby edge.",
+        "operationId": "get_learning_edges",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The window's id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The edges the window holds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearningEdgesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such window, or learning mode is off",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/learning/sessions/{id}/policy": {
       "get": {
         "tags": [
@@ -12206,6 +12276,82 @@
           }
         }
       },
+      "LearningEdgeBody": {
+        "type": "object",
+        "description": "One thing a workload reached during the window.",
+        "required": [
+          "workload",
+          "destination",
+          "port",
+          "protocol",
+          "first_seen_ns",
+          "last_seen_ns",
+          "observations"
+        ],
+        "properties": {
+          "destination": {
+            "type": "string",
+            "description": "The address it reached."
+          },
+          "first_seen_ns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "last_seen_ns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "observations": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Samples it was seen in: how persistent the edge was, not how many\nconnections were opened.",
+            "minimum": 0
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "protocol": {
+            "type": "string",
+            "description": "`tcp` or `udp`."
+          },
+          "workload": {
+            "$ref": "#/components/schemas/LearningWorkloadBody"
+          }
+        }
+      },
+      "LearningEdgesResponse": {
+        "type": "object",
+        "description": "What a window saw, edge by edge, before anything is rendered from it.",
+        "required": [
+          "session",
+          "edges",
+          "addresses"
+        ],
+        "properties": {
+          "addresses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LearningWorkloadAddressesBody"
+            },
+            "description": "The addresses each workload dialled from, which is how a reader\nholding several nodes' windows recognises an edge's destination as a\nworkload rather than an address."
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LearningEdgeBody"
+            },
+            "description": "Every edge, by workload, then address, then port."
+          },
+          "session": {
+            "$ref": "#/components/schemas/LearningSessionResponse",
+            "description": "The window, as it stood at the reading."
+          }
+        }
+      },
       "LearningPolicyResponse": {
         "type": "object",
         "description": "The allow-list a window describes, with what it took to write it.",
@@ -12423,6 +12569,41 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "LearningWorkloadAddressesBody": {
+        "type": "object",
+        "description": "The local addresses one workload dialled from during the window.",
+        "required": [
+          "workload",
+          "addresses"
+        ],
+        "properties": {
+          "addresses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "workload": {
+            "$ref": "#/components/schemas/LearningWorkloadBody"
+          }
+        }
+      },
+      "LearningWorkloadBody": {
+        "type": "object",
+        "description": "How a window names a workload: `container`, `unit` or `executable`, and\nthe name under that kind.",
+        "required": [
+          "kind",
+          "value"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
           }
         }
       },
@@ -14020,6 +14201,65 @@
             ],
             "format": "int32",
             "minimum": 0
+          },
+          "workload": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RuleWorkloadResponse",
+                "description": "The workload the rule is about, when it names one: decided at\n`connect()`, `sendmsg()` or `bind()` rather than on the packet."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "RuleWorkloadResponse": {
+        "type": "object",
+        "description": "The workload half of a rule, matcher by matcher.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "cgroup": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "container": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exe": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fqdn": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Destinations named by DNS name in place of an address."
+          },
+          "kubernetes": {
+            "type": "boolean",
+            "description": "Whether the selector also names pod labels, namespace labels or a\nservice account, which only a Kubernetes node can resolve."
+          },
+          "mode": {
+            "type": "string",
+            "description": "`observe` or `enforce`."
+          },
+          "unit": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

@@ -288,6 +288,8 @@ impl WorkloadKey {
 pub struct ObservedFlow {
     /// What the agent could resolve about the local task.
     pub workload: ObservedWorkload,
+    /// The local address the task dialled from.
+    pub source: IpAddr,
     /// The address the task reached.
     pub destination: IpAddr,
     /// The port it reached, host order.

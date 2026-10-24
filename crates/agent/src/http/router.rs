@@ -101,8 +101,8 @@ use super::lb_handler::{
     grant_lb_vip_speaker, lb_status, list_lb_services, list_lb_vips,
 };
 use super::learning_handler::{
-    get_learning, get_learning_policy, get_learning_segmentation, list_learning, start_learning,
-    stop_learning,
+    get_learning, get_learning_edges, get_learning_policy, get_learning_segmentation,
+    list_learning, start_learning, stop_learning,
 };
 use super::metrics_handler::metrics;
 use super::middleware::auth::jwt_auth_middleware;
@@ -269,6 +269,10 @@ pub fn build_router(
             .route("/api/v1/firewall/workload/labels", get(workload_labels))
             .route("/api/v1/learning/sessions", get(list_learning))
             .route("/api/v1/learning/sessions/{id}", get(get_learning))
+            .route(
+                "/api/v1/learning/sessions/{id}/edges",
+                get(get_learning_edges),
+            )
             .route(
                 "/api/v1/learning/sessions/{id}/policy",
                 get(get_learning_policy),

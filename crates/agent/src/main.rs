@@ -134,6 +134,9 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
                 LearningCommand::Stop { id } => {
                     commands::cmd_learning_stop(&client, id, output).await
                 }
+                LearningCommand::Edges { id } => {
+                    commands::cmd_learning_edges(&client, id, output).await
+                }
                 LearningCommand::Policy { id, output_file } => {
                     commands::cmd_learning_policy(&client, id, output_file, output).await
                 }

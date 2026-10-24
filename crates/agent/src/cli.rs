@@ -310,6 +310,12 @@ pub enum LearningCommand {
         /// The window's id
         id: Option<String>,
     },
+    /// List what a window saw, edge by edge, with the addresses each
+    /// workload dialled from
+    Edges {
+        /// The window's id
+        id: Option<String>,
+    },
     /// Write the allow-list a window describes, as rules the agent loads
     Policy {
         /// The window's id

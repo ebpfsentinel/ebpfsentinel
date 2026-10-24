@@ -5,8 +5,10 @@ use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
 use domain::auth::entity::JwtClaims;
+use domain::common::entity::Protocol;
 use domain::firewall::workload::WorkloadSelector;
-use domain::learning::entity::{LearningProgress, LearningScope};
+use domain::learning::aggregate::{LearningEdge, WorkloadAddresses};
+use domain::learning::entity::{LearningProgress, LearningScope, WorkloadKey};
 use domain::learning::error::LearningError;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -201,6 +203,97 @@ pub struct LearningSegmentationResponse {
     pub unlearned: Vec<String>,
     /// Containers the window saw under a name no rule can select them by.
     pub unnamed: Vec<String>,
+}
+
+/// How a window names a workload: `container`, `unit` or `executable`, and
+/// the name under that kind.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct LearningWorkloadBody {
+    pub kind: String,
+    pub value: String,
+}
+
+impl From<&WorkloadKey> for LearningWorkloadBody {
+    fn from(key: &WorkloadKey) -> Self {
+        let (kind, value) = match key {
+            WorkloadKey::Container(v) => ("container", v),
+            WorkloadKey::Unit(v) => ("unit", v),
+            WorkloadKey::Executable(v) => ("executable", v),
+        };
+        Self {
+            kind: kind.to_string(),
+            value: value.clone(),
+        }
+    }
+}
+
+/// One thing a workload reached during the window.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct LearningEdgeBody {
+    pub workload: LearningWorkloadBody,
+    /// The address it reached.
+    pub destination: String,
+    pub port: u16,
+    /// `tcp` or `udp`.
+    pub protocol: String,
+    pub first_seen_ns: u64,
+    pub last_seen_ns: u64,
+    /// Samples it was seen in: how persistent the edge was, not how many
+    /// connections were opened.
+    pub observations: u64,
+}
+
+impl From<&LearningEdge> for LearningEdgeBody {
+    fn from(edge: &LearningEdge) -> Self {
+        Self {
+            workload: LearningWorkloadBody::from(&edge.workload),
+            destination: edge.destination.to_string(),
+            port: edge.port,
+            protocol: protocol_word(edge.protocol),
+            first_seen_ns: edge.first_seen_ns,
+            last_seen_ns: edge.last_seen_ns,
+            observations: edge.observations,
+        }
+    }
+}
+
+fn protocol_word(protocol: Protocol) -> String {
+    match protocol {
+        Protocol::Tcp => "tcp".to_string(),
+        Protocol::Udp => "udp".to_string(),
+        Protocol::Icmp => "icmp".to_string(),
+        Protocol::Any => "any".to_string(),
+        Protocol::Other(n) => n.to_string(),
+    }
+}
+
+/// The local addresses one workload dialled from during the window.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct LearningWorkloadAddressesBody {
+    pub workload: LearningWorkloadBody,
+    pub addresses: Vec<String>,
+}
+
+impl From<&WorkloadAddresses> for LearningWorkloadAddressesBody {
+    fn from(held: &WorkloadAddresses) -> Self {
+        Self {
+            workload: LearningWorkloadBody::from(&held.workload),
+            addresses: held.addresses.iter().map(ToString::to_string).collect(),
+        }
+    }
+}
+
+/// What a window saw, edge by edge, before anything is rendered from it.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct LearningEdgesResponse {
+    /// The window, as it stood at the reading.
+    pub session: LearningSessionResponse,
+    /// Every edge, by workload, then address, then port.
+    pub edges: Vec<LearningEdgeBody>,
+    /// The addresses each workload dialled from, which is how a reader
+    /// holding several nodes' windows recognises an edge's destination as a
+    /// workload rather than an address.
+    pub addresses: Vec<LearningWorkloadAddressesBody>,
 }
 
 fn learning(
@@ -447,9 +540,93 @@ pub async fn get_learning_segmentation(
     }))
 }
 
+/// `GET /api/v1/learning/sessions/{id}/edges` - what the window saw, edge
+/// by edge.
+#[utoipa::path(
+    get, path = "/api/v1/learning/sessions/{id}/edges",
+    tag = "Learning",
+    params(("id" = String, Path, description = "The window's id")),
+    responses(
+        (status = 200, description = "The edges the window holds", body = LearningEdgesResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "No such window, or learning mode is off", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key" = []))
+)]
+pub async fn get_learning_edges(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<LearningEdgesResponse>, ApiError> {
+    let service = learning(&state)?;
+    let now = now_ns();
+    let not_found = || ApiError::NotFound {
+        code: "LEARNING_NOT_FOUND",
+        message: format!("no learning window with id '{id}'"),
+    };
+    let session = service.session(&id).ok_or_else(not_found)?;
+    let progress = service.progress(Some(&id), now).ok_or_else(not_found)?;
+    Ok(Json(edges_response(
+        session_response(progress),
+        &session.aggregate.edges(),
+        &session.aggregate.addresses(),
+    )))
+}
+
+fn edges_response(
+    session: LearningSessionResponse,
+    edges: &[LearningEdge],
+    addresses: &[WorkloadAddresses],
+) -> LearningEdgesResponse {
+    LearningEdgesResponse {
+        session,
+        edges: edges.iter().map(LearningEdgeBody::from).collect(),
+        addresses: addresses
+            .iter()
+            .map(LearningWorkloadAddressesBody::from)
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use domain::learning::engine::LearningEngine;
+    use domain::learning::entity::{ObservedFlow, ObservedWorkload};
+
+    #[test]
+    fn edges_carry_the_workload_kind_and_the_addresses_it_dialled_from() {
+        let mut engine = LearningEngine::new(8);
+        engine
+            .start("l-1".to_string(), LearningScope::Node, 600, 0)
+            .expect("the window opens");
+        engine.observe(
+            &ObservedFlow {
+                workload: ObservedWorkload {
+                    container_name: Some("web".to_string()),
+                    ..ObservedWorkload::default()
+                },
+                source: "10.1.0.3".parse().expect("address"),
+                destination: "10.0.0.7".parse().expect("address"),
+                port: 5432,
+                protocol: Protocol::Tcp,
+            },
+            5,
+        );
+        let session = engine.get("l-1").expect("the window is held");
+        let body = serde_json::to_value(edges_response(
+            session_response(session.progress(10)),
+            &session.aggregate.edges(),
+            &session.aggregate.addresses(),
+        ))
+        .expect("serialises");
+        assert_eq!(body["edges"][0]["workload"]["kind"], "container");
+        assert_eq!(body["edges"][0]["workload"]["value"], "web");
+        assert_eq!(body["edges"][0]["destination"], "10.0.0.7");
+        assert_eq!(body["edges"][0]["protocol"], "tcp");
+        assert_eq!(body["addresses"][0]["addresses"][0], "10.1.0.3");
+        assert_eq!(body["session"]["edges"], 1);
+    }
 
     #[test]
     fn a_request_with_no_scope_watches_the_whole_node() {

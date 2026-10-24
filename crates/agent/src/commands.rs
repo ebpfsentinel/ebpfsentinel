@@ -5055,6 +5055,47 @@ pub async fn cmd_learning_segmentation(
     Ok(())
 }
 
+/// What a window saw, one edge per line, then the addresses each workload
+/// dialled from: the raw material a fleet-wide reading groups into segments.
+pub async fn cmd_learning_edges(
+    client: &ApiClient,
+    id: Option<String>,
+    output: OutputFormat,
+) -> Result<()> {
+    let id = resolve_learning_id(client, id).await?;
+    let window = client.learning_edges(&id).await?;
+    if matches!(output, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(&window)?);
+        return Ok(());
+    }
+    println!(
+        "{} edges in window {} ({}s watched)",
+        window.edges.len(),
+        window.session.id,
+        window.session.elapsed_secs
+    );
+    for edge in &window.edges {
+        println!(
+            "{}:{} -> {}:{}/{} seen {} times",
+            edge.workload.kind,
+            edge.workload.value,
+            edge.destination,
+            edge.port,
+            edge.protocol,
+            edge.observations
+        );
+    }
+    for held in &window.addresses {
+        println!(
+            "{}:{} dials from {}",
+            held.workload.kind,
+            held.workload.value,
+            held.addresses.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// An id the caller did not give is the window that is still running.
 ///
 /// Asking the agent rather than remembering locally is what makes the

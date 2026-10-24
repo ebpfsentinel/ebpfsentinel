@@ -149,6 +149,7 @@ impl LearningCollector {
             };
             flows.push(ObservedFlow {
                 workload,
+                source: local_addr,
                 destination: remote_addr,
                 port: connection.dst_port,
                 protocol,

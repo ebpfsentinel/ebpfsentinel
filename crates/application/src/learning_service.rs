@@ -471,6 +471,7 @@ mod tests {
                 None,
                 None,
             ),
+            source: "10.9.0.2".parse::<IpAddr>().expect("a test address parses"),
             destination: dst.parse::<IpAddr>().expect("a test address parses"),
             port,
             protocol: Protocol::Tcp,

@@ -206,6 +206,41 @@ pub struct LearningPolicyResponse {
     pub skipped_edges: usize,
 }
 
+/// How a window names a workload.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LearningWorkload {
+    pub kind: String,
+    pub value: String,
+}
+
+/// One thing a workload reached during a window.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LearningEdge {
+    pub workload: LearningWorkload,
+    pub destination: String,
+    pub port: u16,
+    pub protocol: String,
+    pub first_seen_ns: u64,
+    pub last_seen_ns: u64,
+    pub observations: u64,
+}
+
+/// The local addresses one workload dialled from during a window.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LearningWorkloadAddresses {
+    pub workload: LearningWorkload,
+    pub addresses: Vec<String>,
+}
+
+/// What a window saw, edge by edge.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LearningEdgesResponse {
+    pub session: LearningSessionResponse,
+    pub edges: Vec<LearningEdge>,
+    #[serde(default)]
+    pub addresses: Vec<LearningWorkloadAddresses>,
+}
+
 /// The bridge segmentation a window describes, as the agent renders it.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LearningSegmentationResponse {
@@ -2627,6 +2662,18 @@ impl ApiClient {
             .request(
                 reqwest::Method::POST,
                 &format!("/api/v1/learning/sessions/{id}/stop"),
+            )
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn learning_edges(&self, id: &str) -> anyhow::Result<LearningEdgesResponse> {
+        let resp = self
+            .request(
+                reqwest::Method::GET,
+                &format!("/api/v1/learning/sessions/{id}/edges"),
             )
             .send()
             .await

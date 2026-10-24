@@ -519,6 +519,7 @@ mod tests {
                 container_id: None,
                 container_name: None,
             },
+            source: "10.9.0.2".parse().expect("a test address parses"),
             destination: destination.parse().expect("an address"),
             port,
             protocol: Protocol::Tcp,

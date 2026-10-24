@@ -134,6 +134,7 @@ mod tests {
                     container_id: None,
                     container_name: None,
                 },
+                source: "10.9.0.2".parse().expect("an address"),
                 destination: address.parse().expect("an address"),
                 port: *port,
                 protocol: Protocol::Tcp,

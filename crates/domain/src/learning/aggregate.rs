@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,24 @@ pub struct LearningEdge {
     pub observations: u64,
 }
 
+/// The most addresses a window keeps for one workload.
+///
+/// A workload holds an address per interface it dials from, which is a
+/// handful; a figure past this is a workload being rescheduled across a
+/// pool, and the first ones are enough to recognise it from another node.
+pub const LEARNING_MAX_ADDRESSES_PER_WORKLOAD: usize = 16;
+
+/// The local addresses one workload was seen dialling from.
+///
+/// This is what lets a reader holding several nodes' windows recognise the
+/// destination of one node's edge as a workload another node saw, rather
+/// than as an address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadAddresses {
+    pub workload: WorkloadKey,
+    pub addresses: Vec<IpAddr>,
+}
+
 /// The persisted shape of an aggregate.
 ///
 /// A map keyed by a structure has no representation in the formats the store
@@ -56,6 +74,10 @@ pub struct AggregateRepr {
     pub dropped_edges: u64,
     pub last_new_edge_ns: Option<u64>,
     pub edges: Vec<LearningEdge>,
+    /// Absent from a window stored before addresses were kept, which then
+    /// reads back with none rather than failing to load.
+    #[serde(default)]
+    pub addresses: Vec<WorkloadAddresses>,
 }
 
 /// What a node reached during a window, bounded.
@@ -74,6 +96,7 @@ pub struct LearningAggregate {
     edges: HashMap<EdgeKey, EdgeStat>,
     dropped_edges: u64,
     last_new_edge_ns: Option<u64>,
+    addresses: BTreeMap<WorkloadKey, BTreeSet<IpAddr>>,
 }
 
 impl LearningAggregate {
@@ -83,6 +106,7 @@ impl LearningAggregate {
             edges: HashMap::new(),
             dropped_edges: 0,
             last_new_edge_ns: None,
+            addresses: BTreeMap::new(),
         }
     }
 
@@ -146,6 +170,37 @@ impl LearningAggregate {
         Observation::NewEdge
     }
 
+    /// Remember that `workload` dialled from `source`.
+    ///
+    /// Only a workload the aggregate holds an edge for is remembered, so the
+    /// table is bounded by the edges. A loopback or unspecified address names
+    /// no workload from another node and is left out.
+    pub fn note_source(&mut self, workload: &WorkloadKey, source: IpAddr) {
+        if source.is_loopback() || source.is_unspecified() {
+            return;
+        }
+        if !self.edges.keys().any(|k| &k.workload == workload)
+            && !self.addresses.contains_key(workload)
+        {
+            return;
+        }
+        let held = self.addresses.entry(workload.clone()).or_default();
+        if held.len() < LEARNING_MAX_ADDRESSES_PER_WORKLOAD {
+            held.insert(source);
+        }
+    }
+
+    /// Each workload with the addresses it dialled from, by workload.
+    pub fn addresses(&self) -> Vec<WorkloadAddresses> {
+        self.addresses
+            .iter()
+            .map(|(workload, addresses)| WorkloadAddresses {
+                workload: workload.clone(),
+                addresses: addresses.iter().copied().collect(),
+            })
+            .collect()
+    }
+
     /// Every edge, in a stable order: by workload, then address, then port,
     /// then protocol. A document rendered twice from the same aggregate is
     /// byte for byte the same document, which is what makes it diffable
@@ -182,6 +237,7 @@ impl From<LearningAggregate> for AggregateRepr {
             dropped_edges: aggregate.dropped_edges,
             last_new_edge_ns: aggregate.last_new_edge_ns,
             edges: aggregate.edges(),
+            addresses: aggregate.addresses(),
         }
     }
 }
@@ -204,11 +260,24 @@ impl From<AggregateRepr> for LearningAggregate {
                 },
             );
         }
+        let addresses = repr
+            .addresses
+            .into_iter()
+            .map(|held| {
+                let set: BTreeSet<IpAddr> = held
+                    .addresses
+                    .into_iter()
+                    .take(LEARNING_MAX_ADDRESSES_PER_WORKLOAD)
+                    .collect();
+                (held.workload, set)
+            })
+            .collect();
         Self {
             capacity: repr.capacity.max(edges.len()),
             edges,
             dropped_edges: repr.dropped_edges,
             last_new_edge_ns: repr.last_new_edge_ns,
+            addresses,
         }
     }
 }
@@ -317,5 +386,50 @@ mod tests {
         assert_eq!(back.capacity(), 3);
         assert_eq!(back.last_new_edge_ns(), Some(30));
         assert_eq!(back.edges(), aggregate.edges());
+    }
+
+    #[test]
+    fn a_workload_keeps_the_addresses_it_dialled_from_and_nothing_else() {
+        let mut aggregate = LearningAggregate::new(8);
+        aggregate.note_source(&unit("a.service"), ip("10.1.0.5"));
+        assert!(
+            aggregate.addresses().is_empty(),
+            "no edge held for it, so nothing is remembered"
+        );
+        aggregate.record(unit("a.service"), ip("10.0.0.1"), 443, Protocol::Tcp, 1);
+        aggregate.note_source(&unit("a.service"), ip("10.1.0.5"));
+        aggregate.note_source(&unit("a.service"), ip("10.1.0.5"));
+        aggregate.note_source(&unit("a.service"), ip("127.0.0.1"));
+        aggregate.note_source(&unit("a.service"), ip("::"));
+        let held = aggregate.addresses();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].addresses, vec![ip("10.1.0.5")]);
+    }
+
+    #[test]
+    fn a_workload_keeps_a_bounded_number_of_addresses() {
+        let mut aggregate = LearningAggregate::new(8);
+        aggregate.record(unit("a.service"), ip("10.0.0.1"), 443, Protocol::Tcp, 1);
+        for i in 0..40u8 {
+            aggregate.note_source(&unit("a.service"), IpAddr::from([10, 2, 0, i]));
+        }
+        assert_eq!(
+            aggregate.addresses()[0].addresses.len(),
+            LEARNING_MAX_ADDRESSES_PER_WORKLOAD
+        );
+    }
+
+    #[test]
+    fn addresses_survive_the_stored_shape_and_an_old_window_reads_back_with_none() {
+        let mut aggregate = LearningAggregate::new(4);
+        aggregate.record(unit("a.service"), ip("10.0.0.1"), 443, Protocol::Tcp, 1);
+        aggregate.note_source(&unit("a.service"), ip("10.1.0.5"));
+        let encoded = serde_json::to_string(&aggregate).unwrap();
+        let back: LearningAggregate = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(back.addresses(), aggregate.addresses());
+
+        let old = r#"{"capacity":4,"dropped_edges":0,"last_new_edge_ns":null,"edges":[]}"#;
+        let back: LearningAggregate = serde_json::from_str(old).unwrap();
+        assert!(back.addresses().is_empty());
     }
 }
