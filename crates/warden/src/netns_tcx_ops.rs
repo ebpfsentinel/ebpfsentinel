@@ -63,12 +63,16 @@ pub fn attach_tcx_in_netns(
     };
     let iface = iface.to_string();
     std::thread::spawn(move || {
+        // SAFETY: `setns` takes an fd and a flag, no memory; it moves only this throwaway
+        // thread, which ends with the closure, so no other thread of the warden changes
+        // namespace.
         if unsafe { libc::setns(netns.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
             return Err(format!(
                 "setns into the namespace of pid {pid}: {}",
                 io::Error::last_os_error()
             ));
         }
+        // SAFETY: `name` is a NUL-terminated `CString` that outlives the call.
         let ifindex = unsafe { libc::if_nametoindex(name.as_ptr()) };
         if ifindex == 0 {
             return Err(format!(
@@ -82,6 +86,8 @@ pub fn attach_tcx_in_netns(
             attach_type,
             ..Default::default()
         };
+        // SAFETY: `attr` is a live, correctly sized `bpf_attr` prefix for `BPF_LINK_CREATE`,
+        // and the size passed is its own.
         let rc = unsafe {
             crate::bpf(
                 BPF_LINK_CREATE,

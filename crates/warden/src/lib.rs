@@ -129,6 +129,8 @@ pub fn collect_module_btf_fds() -> Vec<(String, RawFd)> {
             id,
             ..Default::default()
         };
+        // SAFETY: `next` is a live, correctly sized `bpf_attr` prefix for this command, and the
+        // size passed is its own.
         let rc = unsafe {
             bpf(
                 BPF_BTF_GET_NEXT_ID,
@@ -145,6 +147,8 @@ pub fn collect_module_btf_fds() -> Vec<(String, RawFd)> {
             id,
             ..Default::default()
         };
+        // SAFETY: `fda` is a live, correctly sized `bpf_attr` prefix for this command, and the
+        // size passed is its own.
         let fd = unsafe {
             bpf(
                 BPF_BTF_GET_FD_BY_ID,
@@ -158,6 +162,8 @@ pub fn collect_module_btf_fds() -> Vec<(String, RawFd)> {
         let fd = fd as RawFd;
         // BTF_GET_FD_BY_ID returns an O_CLOEXEC fd; clear it so the fd can be
         // passed to the agent over SCM_RIGHTS on delegation.
+        // SAFETY: `fd` was just returned by the kernel and is owned by this function; `fcntl`
+        // on it touches no memory.
         unsafe {
             let flags = libc::fcntl(fd, libc::F_GETFD);
             libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
@@ -174,6 +180,8 @@ pub fn collect_module_btf_fds() -> Vec<(String, RawFd)> {
             info_len: mem::size_of::<BpfBtfInfo>() as u32,
             info: ptr::from_mut(&mut info) as u64,
         };
+        // SAFETY: `ia` and the `info` and `name` buffers it points at all outlive the call, and
+        // each length passed is the size of the buffer it describes.
         let rc = unsafe {
             bpf(
                 BPF_OBJ_GET_INFO_BY_FD,
@@ -182,6 +190,8 @@ pub fn collect_module_btf_fds() -> Vec<(String, RawFd)> {
             )
         };
         if rc < 0 {
+            // SAFETY: `fd` is owned here, was never handed out, and is not used after this
+            // close.
             unsafe { libc::close(fd) };
             continue;
         }
@@ -189,6 +199,8 @@ pub fn collect_module_btf_fds() -> Vec<(String, RawFd)> {
         let nm = String::from_utf8_lossy(&name[..nul]);
         // vmlinux base BTF has an empty name; modules carry theirs.
         if nm.is_empty() || nm == "vmlinux" {
+            // SAFETY: `fd` is owned here, was never handed out, and is not used after this
+            // close.
             unsafe { libc::close(fd) };
             continue;
         }
@@ -218,6 +230,7 @@ pub fn open_pcap_pool() -> Vec<RawFd> {
         .unwrap_or(DEFAULT_PCAP_POOL);
     let mut out: Vec<RawFd> = Vec::new();
     for _ in 0..n {
+        // SAFETY: `socket` takes no pointer; a negative return is handled below.
         let fd = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, 0) };
         if fd < 0 {
             // No CAP_NET_RAW (or AF_PACKET unavailable): leave capture
@@ -225,6 +238,8 @@ pub fn open_pcap_pool() -> Vec<RawFd> {
             perror("socket(AF_PACKET) for pcap pool");
             break;
         }
+        // SAFETY: `fd` was just returned by `socket` and is owned here; `fcntl` on it touches
+        // no memory.
         unsafe {
             let flags = libc::fcntl(fd, libc::F_GETFD);
             libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
@@ -254,14 +269,19 @@ pub fn send_fd(sock: RawFd, fd: RawFd) -> bool {
         iov_base: iov_base.as_mut_ptr().cast(),
         iov_len: 1,
     };
+    // SAFETY: `CMSG_SPACE` is arithmetic on its argument and reads no memory.
     let mut buf = [0u8; unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) } as usize];
+    // SAFETY: `msghdr` is plain old data, for which all-zero is a valid empty header.
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
     msg.msg_iov = ptr::from_mut(&mut iov);
     msg.msg_iovlen = 1;
     msg.msg_control = buf.as_mut_ptr().cast();
     msg.msg_controllen = buf.len() as _;
+    // SAFETY: `msg_control` points at `buf`, sized by `CMSG_SPACE` for exactly one fd, so the
+    // first header and its data both lie inside it; `msg` and the buffers it names outlive
+    // `sendmsg`.
     unsafe {
-        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        let cmsg = libc::CMSG_FIRSTHDR(&raw const msg);
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
         (*cmsg).cmsg_len = libc::CMSG_LEN(mem::size_of::<RawFd>() as u32) as _;
@@ -270,7 +290,7 @@ pub fn send_fd(sock: RawFd, fd: RawFd) -> bool {
             libc::CMSG_DATA(cmsg),
             mem::size_of::<RawFd>(),
         );
-        libc::sendmsg(sock, &msg, 0) >= 0
+        libc::sendmsg(sock, &raw const msg, 0) >= 0
     }
 }
 
@@ -281,14 +301,18 @@ pub fn recv_fd(sock: RawFd) -> RawFd {
         iov_base: m.as_mut_ptr().cast(),
         iov_len: 1,
     };
+    // SAFETY: `CMSG_SPACE` is arithmetic on its argument and reads no memory.
     let mut buf = [0u8; unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) } as usize];
+    // SAFETY: `msghdr` is plain old data, for which all-zero is a valid empty header.
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
     msg.msg_iov = ptr::from_mut(&mut iov);
     msg.msg_iovlen = 1;
     msg.msg_control = buf.as_mut_ptr().cast();
     msg.msg_controllen = buf.len() as _;
+    // SAFETY: `msg` names `iov` and `buf`, both live for the call; the header is checked
+    // non-null, of type `SCM_RIGHTS` and long enough for one fd before its data is read.
     unsafe {
-        if libc::recvmsg(sock, &mut msg, 0) < 0 {
+        if libc::recvmsg(sock, &raw mut msg, 0) < 0 {
             return -1;
         }
         // The kernel dropped the fd because the control buffer was too small;
@@ -296,7 +320,7 @@ pub fn recv_fd(sock: RawFd) -> RawFd {
         if msg.msg_flags & libc::MSG_CTRUNC != 0 {
             return -1;
         }
-        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        let cmsg = libc::CMSG_FIRSTHDR(&raw const msg);
         if cmsg.is_null() {
             return -1;
         }
@@ -330,15 +354,20 @@ pub fn recv_msg_fds(sock: RawFd, max_fds: usize) -> Vec<RawFd> {
         iov_len: 1,
     };
     let cap_bytes = max_fds * mem::size_of::<RawFd>();
+    // SAFETY: `CMSG_SPACE` is arithmetic on its argument and reads no memory.
     let mut cbuf = vec![0u8; unsafe { libc::CMSG_SPACE(cap_bytes as u32) } as usize];
+    // SAFETY: `msghdr` is plain old data, for which all-zero is a valid empty header.
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
     msg.msg_iov = ptr::from_mut(&mut iov);
     msg.msg_iovlen = 1;
     msg.msg_control = cbuf.as_mut_ptr().cast();
     msg.msg_controllen = cbuf.len() as _;
     let mut out: Vec<RawFd> = Vec::new();
+    // SAFETY: `msg` names `iov` and `cbuf`, both live for the call; every header walked comes
+    // from `CMSG_FIRSTHDR`/`CMSG_NXTHDR`, which stay inside `msg_controllen`, and only the
+    // `cmsg_len` the kernel wrote is copied out of it.
     unsafe {
-        if libc::recvmsg(sock, &mut msg, 0) < 0 {
+        if libc::recvmsg(sock, &raw mut msg, 0) < 0 {
             perror("recvmsg fds");
             return out;
         }
@@ -348,7 +377,7 @@ pub fn recv_msg_fds(sock: RawFd, max_fds: usize) -> Vec<RawFd> {
             eprintln!("[warden] SCM_RIGHTS fd set truncated in transit; refusing partial set");
             return out;
         }
-        let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
+        let mut cmsg = libc::CMSG_FIRSTHDR(&raw const msg);
         while !cmsg.is_null() {
             if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
                 let data_len = (*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
@@ -361,7 +390,7 @@ pub fn recv_msg_fds(sock: RawFd, max_fds: usize) -> Vec<RawFd> {
                     out.push(fd);
                 }
             }
-            cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
+            cmsg = libc::CMSG_NXTHDR(&raw const msg, cmsg);
         }
     }
     out
@@ -373,8 +402,10 @@ fn mkdirs(path: &str) {
 }
 
 fn fsconfig_string(fs: RawFd, key: &str, value: &str) {
-    let k = CString::new(key).unwrap();
-    let v = CString::new(value).unwrap();
+    let k = CString::new(key).expect("every fsconfig key is a literal without NUL");
+    let v = CString::new(value).expect("every fsconfig value is a literal without NUL");
+    // SAFETY: `k` and `v` are NUL-terminated and outlive the call; `fsconfig` reads them and
+    // writes nothing back.
     unsafe {
         libc::syscall(
             libc::SYS_fsconfig,
@@ -396,6 +427,7 @@ pub fn delegate_over_fd(fs: RawFd) -> bool {
     fsconfig_string(fs, "delegate_maps", "any");
     fsconfig_string(fs, "delegate_progs", "any");
     fsconfig_string(fs, "delegate_attachs", "any");
+    // SAFETY: `FSCONFIG_CMD_CREATE` takes null key and value; no memory is passed.
     let rc = unsafe {
         libc::syscall(
             libc::SYS_fsconfig,
@@ -421,20 +453,29 @@ pub fn delegate_over_fd(fs: RawFd) -> bool {
 /// The probe runs in a child process so its namespace work never affects the
 /// caller.
 fn root_userns_self_map_ok() -> bool {
+    // SAFETY: the only caller is the self-bootstrap trampoline, which runs before
+    // any runtime or thread exists, so the child inherits no lock held elsewhere
+    // and may allocate; it leaves through `_exit` on every path.
     let pid = unsafe { libc::fork() };
     if pid == 0 {
+        // SAFETY: `unshare` takes no pointer.
         if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
+            // SAFETY: `_exit` ends the child without running the parent's destructors or atexit
+            // handlers twice.
             unsafe { libc::_exit(1) };
         }
         let _ = std::fs::write("/proc/self/setgroups", "deny");
         let ok = std::fs::write("/proc/self/uid_map", "0 0 1").is_ok();
+        // SAFETY: `_exit` ends the child without running the parent's destructors or atexit
+        // handlers twice.
         unsafe { libc::_exit(i32::from(!ok)) };
     }
     if pid < 0 {
         return false;
     }
     let mut st: libc::c_int = 0;
-    unsafe { libc::waitpid(pid, &mut st, 0) };
+    // SAFETY: `st` is a live `c_int` for the kernel to write the status into.
+    unsafe { libc::waitpid(pid, &raw mut st, 0) };
     libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0
 }
 
@@ -449,8 +490,12 @@ fn root_userns_self_map_ok() -> bool {
 /// then runs as host root, preserving the systemd/bare-metal behaviour). No-op
 /// if already running unprivileged. Exits the process on failure.
 pub fn drop_to_unpriv_if_needed() {
+    // SAFETY: `getuid` takes no argument and cannot fail.
     if unsafe { libc::getuid() } == 0 && !root_userns_self_map_ok() {
+        // SAFETY: a zero-length list with a null pointer is the documented way to clear
+        // supplementary groups.
         unsafe { libc::setgroups(0, ptr::null()) };
+        // SAFETY: `setgid` and `setuid` take no pointer; failure is checked.
         if unsafe { libc::setgid(UNPRIV_GID) } != 0 || unsafe { libc::setuid(UNPRIV_UID) } != 0 {
             perror("drop to unprivileged uid before userns");
             std::process::exit(1);
@@ -459,6 +504,7 @@ pub fn drop_to_unpriv_if_needed() {
         // /proc/self/{setgroups,uid_map,gid_map} to root and makes them
         // unwritable by the now-unprivileged process (EACCES). Restore dumpable
         // so enter_userns() can write its id maps.
+        // SAFETY: `PR_SET_DUMPABLE` takes integer arguments only; failure is checked.
         if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) } != 0 {
             perror("PR_SET_DUMPABLE");
             std::process::exit(1);
@@ -470,7 +516,10 @@ pub fn drop_to_unpriv_if_needed() {
 /// namespace. Used by the agent self-bootstrap trampoline; exits the process on
 /// failure. Must run single-threaded (before any runtime).
 pub fn enter_userns() {
+    // SAFETY: `getuid` and `getgid` take no argument and cannot fail.
     let (uid, gid) = (unsafe { libc::getuid() }, unsafe { libc::getgid() });
+    // SAFETY: `unshare` takes no pointer; failure is checked. The caller runs single-threaded,
+    // which `CLONE_NEWUSER` requires.
     if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
         perror("unshare USER");
         std::process::exit(1);
@@ -482,14 +531,18 @@ pub fn enter_userns() {
         eprintln!("[warden] failed to write uid/gid map");
         std::process::exit(1);
     }
+    // SAFETY: `setgid` and `setuid` take no pointer; failure is checked.
     if unsafe { libc::setgid(0) } != 0 || unsafe { libc::setuid(0) } != 0 {
         perror("setid");
         std::process::exit(1);
     }
+    // SAFETY: `unshare` takes no pointer; failure is checked.
     if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
         perror("unshare NS");
         std::process::exit(1);
     }
+    // SAFETY: every string is a NUL-terminated literal, and the null filesystem type and data
+    // are what a propagation-only remount takes.
     unsafe {
         libc::mount(
             c"none".as_ptr(),
@@ -503,6 +556,7 @@ pub fn enter_userns() {
 
 /// `fsopen("bpf")` in the current user namespace; exits on failure.
 pub fn fsopen_bpf() -> RawFd {
+    // SAFETY: `c"bpf"` is a NUL-terminated literal; a negative return is handled below.
     let fs = unsafe { libc::syscall(libc::SYS_fsopen, c"bpf".as_ptr(), 0) } as RawFd;
     if fs < 0 {
         perror("fsopen");
@@ -514,13 +568,18 @@ pub fn fsopen_bpf() -> RawFd {
 /// `fsmount` the (delegated) bpffs `fs_fd` and `move_mount` it at `bpffs`.
 /// Exits the process on failure. Used by the agent self-bootstrap trampoline.
 pub fn mount_bpffs(fs: RawFd, bpffs: &str) {
+    // SAFETY: `fsmount` takes the fd and two integer flags, no memory; a negative return is
+    // handled below.
     let mnt = unsafe { libc::syscall(libc::SYS_fsmount, fs, 0, 0) } as RawFd;
     if mnt < 0 {
         perror("fsmount");
         std::process::exit(1);
     }
     mkdirs(bpffs);
-    let target = CString::new(bpffs).unwrap();
+    let target =
+        CString::new(bpffs).expect("the bpffs path comes from the environment, which holds no NUL");
+    // SAFETY: the empty path and `target` are NUL-terminated and outlive the call; failure is
+    // checked.
     let rc = unsafe {
         libc::syscall(
             libc::SYS_move_mount,
@@ -561,22 +620,29 @@ pub fn send_msg_fds(sock: RawFd, payload: &[u8], fds: &[RawFd]) -> bool {
         iov_len: payload.len(),
     };
     let fd_bytes = std::mem::size_of_val(fds);
+    // SAFETY: `CMSG_SPACE` is arithmetic on its argument and reads no memory.
     let mut cbuf = vec![0u8; unsafe { libc::CMSG_SPACE(fd_bytes as u32) } as usize];
+    // SAFETY: `msghdr` is plain old data, for which all-zero is a valid empty header.
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
     msg.msg_iov = ptr::from_mut(&mut iov);
     msg.msg_iovlen = 1;
     if !fds.is_empty() {
         msg.msg_control = cbuf.as_mut_ptr().cast();
         msg.msg_controllen = cbuf.len() as _;
+        // SAFETY: `cbuf` is sized by `CMSG_SPACE` for exactly `fds.len()` fds, so the first
+        // header and its `fd_bytes` of data lie inside it, and `fds` is a live slice of that
+        // many bytes.
         unsafe {
-            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            let cmsg = libc::CMSG_FIRSTHDR(&raw const msg);
             (*cmsg).cmsg_level = libc::SOL_SOCKET;
             (*cmsg).cmsg_type = libc::SCM_RIGHTS;
             (*cmsg).cmsg_len = libc::CMSG_LEN(fd_bytes as u32) as _;
             ptr::copy_nonoverlapping(fds.as_ptr().cast(), libc::CMSG_DATA(cmsg), fd_bytes);
         }
     }
-    unsafe { libc::sendmsg(sock, &msg, 0) >= 0 }
+    // SAFETY: `msg` names `iov` over `payload` and, when there are fds, `cbuf`; all of them
+    // outlive the call.
+    unsafe { libc::sendmsg(sock, &raw const msg, 0) >= 0 }
 }
 
 /// Keep needed-module BTF fds at the front and cap the set so a single
@@ -594,6 +660,8 @@ pub fn prioritize_and_cap_btf(
             cap
         );
         for (_, fd) in btf.drain(cap..) {
+            // SAFETY: each drained fd is owned by this set and dropped from it here, so nothing
+            // uses it after the close.
             unsafe { libc::close(fd) };
         }
     }

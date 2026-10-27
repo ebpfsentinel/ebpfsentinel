@@ -172,8 +172,10 @@ impl QuarantineMapPort for QuarantineMapManager {
                 warn!(len = bytes.len(), "short quarantine event discarded");
                 continue;
             }
-            // The ring hands out a borrow of its own storage, whose alignment
-            // is the record's and not this type's.
+            // SAFETY: the length was checked against `size_of::<QuarantineEvent>()` above and
+            // the type is `#[repr(C)]` integers only, so every bit pattern is a
+            // value. The ring hands out a borrow of its own storage, whose
+            // alignment is the record's and not this type's, hence `read_unaligned`.
             let event = unsafe { bytes.as_ptr().cast::<QuarantineEvent>().read_unaligned() };
             events.push(event);
         }

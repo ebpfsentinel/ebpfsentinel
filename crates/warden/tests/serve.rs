@@ -2,6 +2,8 @@
 //! protocol handshake over the `AF_UNIX` socket, and assert the peer-credential
 //! and protocol-version gates reject mismatched clients.
 
+#![allow(clippy::panic)]
+
 use std::io::ErrorKind;
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command as Proc, Stdio};

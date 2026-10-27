@@ -1,4 +1,5 @@
 #![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::unwrap_used)]
 
 use std::hint::black_box;
 use std::sync::Arc;

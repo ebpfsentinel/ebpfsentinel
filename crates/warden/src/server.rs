@@ -115,6 +115,10 @@ pub trait ExtHandler: Send + Sync {
 /// `proc_root` is the procfs the DLP scan walks: `/proc` on a host, the
 /// read-only bind mount in a container that was not given the host pid
 /// namespace.
+// The loop never returns, so the shared state is owned here for the life of
+// the process; taking references would only move the same `Arc`s into the
+// caller's frame.
+#[allow(clippy::needless_pass_by_value)]
 pub fn serve_loop(
     listener: &UnixListener,
     btf: Arc<Vec<(String, RawFd)>>,
@@ -170,15 +174,18 @@ pub fn serve_loop(
 /// Confirm the connected peer's uid matches the one the warden serves, read via
 /// `SO_PEERCRED` (the stable-Rust path; `UnixStream::peer_cred` is still nightly).
 fn peer_allowed(conn: &UnixStream, allowed_uid: u32) -> bool {
+    // SAFETY: `ucred` is plain old data, for which all-zero is valid.
     let mut cred: libc::ucred = unsafe { mem::zeroed() };
     let mut len = mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred` and `len` are live and `len` holds the size of `cred`, so the kernel
+    // writes inside it.
     let rc = unsafe {
         libc::getsockopt(
             conn.as_raw_fd(),
             libc::SOL_SOCKET,
             libc::SO_PEERCRED,
             ptr::from_mut(&mut cred).cast(),
-            &mut len,
+            &raw mut len,
         )
     };
     if rc != 0 {
@@ -229,6 +236,9 @@ struct Served<'a> {
 
 /// [`handle_conn`] with both waits given rather than taken from the constants,
 /// so a test can assert the closes without waiting out a production timeout.
+// One connection's whole life, handshake to close, kept in one body so the
+// slots it claims and the timeouts that end it read in the same place.
+#[allow(clippy::too_many_lines)]
 fn handle_conn_with_timeouts(
     conn: UnixStream,
     served: &Served<'_>,
@@ -246,9 +256,8 @@ fn handle_conn_with_timeouts(
     // agent's own pool keeps this connection open for its whole life, so the
     // sockets are in use for exactly as long as it is there to read them.
     let mut claimed: Vec<PcapSlot> = Vec::new();
-    let mut reader = match conn.try_clone() {
-        Ok(c) => c,
-        Err(_) => return,
+    let Ok(mut reader) = conn.try_clone() else {
+        return;
     };
     let fd = conn.as_raw_fd();
     let mut writer = conn;
@@ -439,6 +448,8 @@ fn serve_delegate(writer: &mut UnixStream, btf: &[(String, RawFd)], pcap: &[RawF
         .is_ok();
     }
     let ok = delegate_over_fd(fs);
+    // SAFETY: the fd arrived over `SCM_RIGHTS` for this one request and is owned here; nothing
+    // uses it after this close.
     unsafe { libc::close(fs) };
     if !ok {
         return write_frame(
@@ -481,10 +492,14 @@ fn serve_attach_uprobe(writer: &mut UnixStream, path: &str, offset: u64, is_ret:
         .is_ok();
     }
     let result = uprobe_ops::attach_uprobe_link(prog_fd, path, offset, is_ret);
+    // SAFETY: the fd arrived over `SCM_RIGHTS` for this one request and is owned here; nothing
+    // uses it after this close.
     unsafe { libc::close(prog_fd) };
     match result {
         Ok(link) => {
             let ok = serve_passed_fd(writer, Ok(link));
+            // SAFETY: `link` was created for this request and the agent now holds its own copy,
+            // sent over `SCM_RIGHTS`; this handler uses it no further.
             unsafe { libc::close(link) };
             ok
         }
@@ -508,10 +523,14 @@ fn serve_attach_cgroup(writer: &mut UnixStream, cgroup_path: &str, attach_type: 
         .is_ok();
     }
     let result = cgroup_ops::attach_cgroup_link(prog_fd, cgroup_path, attach_type);
+    // SAFETY: the fd arrived over `SCM_RIGHTS` for this one request and is owned here; nothing
+    // uses it after this close.
     unsafe { libc::close(prog_fd) };
     match result {
         Ok(link) => {
             let ok = serve_passed_fd(writer, Ok(link));
+            // SAFETY: `link` was created for this request and the agent now holds its own copy,
+            // sent over `SCM_RIGHTS`; this handler uses it no further.
             unsafe { libc::close(link) };
             ok
         }
@@ -540,6 +559,8 @@ fn serve_attach_tcx_in_netns(
         .is_ok();
     }
     let result = netns_tcx_ops::attach_tcx_in_netns(prog_fd, proc_root, pid, iface, egress);
+    // SAFETY: the fd arrived over `SCM_RIGHTS` for this one request and is owned here; nothing
+    // uses it after this close.
     unsafe { libc::close(prog_fd) };
     match result {
         Ok(link) => {
@@ -548,6 +569,8 @@ fn serve_attach_tcx_in_netns(
                 if egress { "egress" } else { "ingress" }
             );
             let ok = serve_passed_fd(writer, Ok(link));
+            // SAFETY: `link` was created for this request and the agent now holds its own copy,
+            // sent over `SCM_RIGHTS`; this handler uses it no further.
             unsafe { libc::close(link) };
             ok
         }
@@ -1083,7 +1106,7 @@ mod tests {
             use std::io::Read;
             match reading.read(&mut sink) {
                 // The handshake and the FdReady answer; keep draining.
-                Ok(n) if n > 0 => continue,
+                Ok(n) if n > 0 => {}
                 Ok(_) => panic!("the connection holding a capture socket was closed"),
                 Err(e) => {
                     assert_eq!(

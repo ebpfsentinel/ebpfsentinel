@@ -587,9 +587,10 @@ mod fd_pass {
             iov_base: byte.as_mut_ptr().cast(),
             iov_len: byte.len(),
         };
-        // SAFETY: a zeroed `msghdr` is a valid header; the control buffer is sized
-        // for exactly one fd via `CMSG_SPACE`.
+        // SAFETY: `CMSG_SPACE` is arithmetic on its argument and reads no memory;
+        // it sizes the control buffer for exactly one fd.
         let mut cbuf = [0u8; unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) } as usize];
+        // SAFETY: `msghdr` is plain old data, for which all-zero is a valid empty header.
         let mut msg: libc::msghdr = unsafe { mem::zeroed() };
         msg.msg_iov = ptr::from_mut(&mut iov);
         msg.msg_iovlen = 1;
@@ -625,9 +626,10 @@ mod fd_pass {
             iov_base: byte.as_mut_ptr().cast(),
             iov_len: byte.len(),
         };
-        // SAFETY: a zeroed `msghdr` is a valid empty message header; the control
-        // buffer is sized for exactly one fd via `CMSG_SPACE`.
+        // SAFETY: `CMSG_SPACE` is arithmetic on its argument and reads no memory;
+        // it sizes the control buffer for exactly one fd.
         let mut cbuf = [0u8; unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) } as usize];
+        // SAFETY: `msghdr` is plain old data, for which all-zero is a valid empty header.
         let mut msg: libc::msghdr = unsafe { mem::zeroed() };
         msg.msg_iov = ptr::from_mut(&mut iov);
         msg.msg_iovlen = 1;
@@ -794,18 +796,22 @@ mod fd_pass_tests {
     use std::ptr;
 
     /// Send one fd alongside a single sentinel byte - the warden's wire shape.
-    unsafe fn send_one_fd(sock: RawFd, fd: RawFd) -> bool {
+    fn send_one_fd(sock: RawFd, fd: RawFd) -> bool {
         let mut byte = [0u8; 1];
         let mut iov = libc::iovec {
             iov_base: byte.as_mut_ptr().cast(),
             iov_len: byte.len(),
         };
+        // SAFETY: `CMSG_SPACE` is arithmetic on its argument and reads no memory.
         let mut cbuf = [0u8; unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) } as usize];
+        // SAFETY: `msghdr` is plain old data, for which all-zero is a valid empty header.
         let mut msg: libc::msghdr = unsafe { mem::zeroed() };
         msg.msg_iov = ptr::from_mut(&mut iov);
         msg.msg_iovlen = 1;
         msg.msg_control = cbuf.as_mut_ptr().cast();
         msg.msg_controllen = cbuf.len() as _;
+        // SAFETY: `cbuf` is sized by `CMSG_SPACE` for exactly one fd, so the first header and
+        // its data lie inside it; `msg` and the buffers it names outlive `sendmsg`.
         unsafe {
             let cmsg = libc::CMSG_FIRSTHDR(ptr::from_ref(&msg));
             (*cmsg).cmsg_level = libc::SOL_SOCKET;
@@ -826,15 +832,20 @@ mod fd_pass_tests {
 
         // Pass the read end of a pipe across the socket.
         let mut fds = [0 as RawFd; 2];
+        // SAFETY: `fds` is a live two-element array, the size `pipe` writes.
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         let (read_fd, write_fd) = (fds[0], fds[1]);
 
-        assert!(unsafe { send_one_fd(sender.as_raw_fd(), read_fd) });
+        assert!(send_one_fd(sender.as_raw_fd(), read_fd));
         let received: OwnedFd = recv_one_fd(&receiver).expect("recv fd");
 
         // Drop our copy of the original read end; the received fd must still read
         // bytes written to the write end - proving it is the same pipe.
+        // SAFETY: `read_fd` came from `pipe` above, is owned by this test, and is not used
+        // after this close.
         unsafe { libc::close(read_fd) };
+        // SAFETY: `write_fd` came from `pipe` above and nothing else owns it, so the `File`
+        // becomes its only owner.
         let mut writer = unsafe { std::fs::File::from_raw_fd(write_fd) };
         writer.write_all(b"hi").unwrap();
         drop(writer);

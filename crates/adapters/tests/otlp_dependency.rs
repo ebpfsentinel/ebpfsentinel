@@ -7,6 +7,8 @@
 //! reviewer would read it, and a feature list edited back to the defaults
 //! fails here rather than in production.
 
+#![allow(clippy::panic)]
+
 /// The workspace manifest, which is where every dependency of every crate
 /// in the tree is declared.
 fn workspace_manifest() -> String {

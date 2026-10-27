@@ -462,18 +462,24 @@ mod tests {
     }
 
     fn packet_event_stamped(timestamp_ns: u64) -> PacketEvent {
+        // SAFETY: `PacketEvent` is `#[repr(C)]` integers only, for which all-zero is a valid
+        // value.
         let mut event: PacketEvent = unsafe { std::mem::zeroed() };
         event.timestamp_ns = timestamp_ns;
         event
     }
 
     fn dns_event_stamped(timestamp_ns: u64) -> DnsEvent {
+        // SAFETY: `DnsEvent` is `#[repr(C)]` integers only, for which all-zero is a valid
+        // value.
         let mut event: DnsEvent = unsafe { std::mem::zeroed() };
         event.timestamp_ns = timestamp_ns;
         event
     }
 
     fn dlp_event_stamped(timestamp_ns: u64) -> DlpEvent {
+        // SAFETY: `DlpEvent` is `#[repr(C)]` integers only, for which all-zero is a valid
+        // value.
         let mut event: DlpEvent = unsafe { std::mem::zeroed() };
         event.timestamp_ns = timestamp_ns;
         event

@@ -284,6 +284,9 @@ mod tests {
 
         // Parse the event
         let event: PacketEvent =
+            // SAFETY: the length was checked against `size_of::<PacketEvent>()` above, the type
+            // is `#[repr(C)]` integers only so every bit pattern is a value, and
+            // `read_unaligned` asks nothing of the buffer's alignment.
             unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<PacketEvent>()) };
 
         assert_eq!(event.timestamp_ns, 1_000_000_000);

@@ -62,6 +62,8 @@ fn send_on(ifindex: u32, frame: &[u8]) -> Result<(), DomainError> {
     // SAFETY: `fd` is a valid, freshly-created descriptor we own.
     let sock = unsafe { OwnedFd::from_raw_fd(fd) };
 
+    // SAFETY: `sockaddr_ll` is `#[repr(C)]` integers only, for which all-zero is a
+    // valid value.
     let mut sa: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
     sa.sll_family = libc::AF_PACKET as u16;
     sa.sll_protocol = ETH_P_ARP.to_be();

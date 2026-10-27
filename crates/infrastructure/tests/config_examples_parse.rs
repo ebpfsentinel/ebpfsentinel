@@ -1,3 +1,4 @@
+#![allow(clippy::panic)]
 // Regression guard: every shipped config under `config/` must parse and
 // validate through the real loader, so docs, examples and the host profiles
 // the packages install can never drift into a state that fails

@@ -297,6 +297,9 @@ fn freeze_fd(name: &str, fd: BorrowedFd<'_>) -> Result<(), FreezeError> {
         #[allow(clippy::cast_sign_loss)]
         map_fd: fd.as_raw_fd() as u32,
     };
+    // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as the
+    // union member the kernel reads for this command; every pointer it carries names a buffer
+    // that outlives the call.
     let rc = unsafe {
         super::kfunc_attach::bpf(
             BPF_MAP_FREEZE,

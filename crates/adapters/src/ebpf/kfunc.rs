@@ -611,6 +611,9 @@ fn btf_get_next_id(id: u32) -> Option<u32> {
         id,
         ..Default::default()
     };
+    // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as the
+    // union member the kernel reads for this command; every pointer it carries names a buffer
+    // that outlives the call.
     let rc = unsafe {
         bpf(
             BPF_BTF_GET_NEXT_ID,
@@ -627,6 +630,9 @@ fn btf_get_fd_by_id(id: u32) -> Result<OwnedFd, KfuncError> {
         id,
         ..Default::default()
     };
+    // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as the
+    // union member the kernel reads for this command; every pointer it carries names a buffer
+    // that outlives the call.
     let rc = unsafe {
         bpf(
             BPF_BTF_GET_FD_BY_ID,
@@ -805,6 +811,9 @@ fn enumerate_module_btf_obj_ids() -> HashMap<String, u32> {
             info_len: std::mem::size_of::<BtfInfo>() as u32,
             info: (&raw mut info).cast::<u8>() as u64,
         };
+        // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as
+        // the union member the kernel reads for this command; every pointer it carries names a
+        // buffer that outlives the call.
         let rc = unsafe {
             bpf(
                 BPF_OBJ_GET_INFO_BY_FD,

@@ -853,6 +853,9 @@ fn load_btf(bytes: &[u8]) -> Result<OwnedFd, KfuncLoaderError> {
         attr.btf_flags |= super::bpf_token::BPF_F_TOKEN_FD;
         attr.btf_token_fd = token;
     }
+    // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as the
+    // union member the kernel reads for this command; every pointer it carries names a buffer
+    // that outlives the call.
     let rc = unsafe {
         bpf(
             BPF_BTF_LOAD,
@@ -1173,6 +1176,9 @@ fn issue_prog_load(
         attr.log_size = u32::try_from(log.len()).unwrap_or(u32::MAX);
     }
 
+    // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as the
+    // union member the kernel reads for this command; every pointer it carries names a buffer
+    // that outlives the call.
     let rc = unsafe {
         bpf(
             BPF_PROG_LOAD,
@@ -1449,6 +1455,9 @@ fn raw_map_create(
     let mut attr = map_create_attr(name, def, btf_fd);
     apply_bpf_token(&mut attr, global_token_fd());
 
+    // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as the
+    // union member the kernel reads for this command; every pointer it carries names a buffer
+    // that outlives the call.
     let rc = unsafe {
         bpf(
             BPF_MAP_CREATE,
@@ -1480,6 +1489,9 @@ fn obj_pin(fd: RawFd, path: &str) -> Result<(), KfuncLoaderError> {
         bpf_fd: u32::try_from(fd).unwrap_or_default(),
         ..Default::default()
     };
+    // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as the
+    // union member the kernel reads for this command; every pointer it carries names a buffer
+    // that outlives the call.
     let rc = unsafe {
         bpf(
             BPF_OBJ_PIN,
@@ -1503,6 +1515,9 @@ fn obj_get(path: &str) -> Option<OwnedFd> {
         pathname: c.as_ptr() as u64,
         ..Default::default()
     };
+    // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as the
+    // union member the kernel reads for this command; every pointer it carries names a buffer
+    // that outlives the call.
     let rc = unsafe {
         bpf(
             BPF_OBJ_GET,
@@ -1564,6 +1579,9 @@ pub fn count_map_entries(fd: BorrowedFd<'_>, key_size: u32, max_entries: u32) ->
             next_key: next.as_mut_ptr() as u64,
             ..Default::default()
         };
+        // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as
+        // the union member the kernel reads for this command; every pointer it carries names a
+        // buffer that outlives the call.
         let rc = unsafe {
             bpf(
                 BPF_MAP_GET_NEXT_KEY,

@@ -296,6 +296,9 @@ pub fn prog_array_set(array_fd: RawFd, index: u32, prog_fd: RawFd) -> Result<(),
         flags: 0,
         ..Default::default()
     };
+    // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as the
+    // union member the kernel reads for this command; every pointer it carries names a buffer
+    // that outlives the call.
     let rc = unsafe {
         bpf(
             BPF_MAP_UPDATE_ELEM,
@@ -344,6 +347,9 @@ fn link_create_relative(
         relative_fd: relative,
         ..Default::default()
     };
+    // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as the
+    // union member the kernel reads for this command; every pointer it carries names a buffer
+    // that outlives the call.
     let rc = unsafe {
         bpf(
             BPF_LINK_CREATE,
@@ -392,6 +398,9 @@ pub fn link_update(
         flags: 0,
         old_prog_fd: 0,
     };
+    // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as the
+    // union member the kernel reads for this command; every pointer it carries names a buffer
+    // that outlives the call.
     let rc = unsafe {
         bpf(
             BPF_LINK_UPDATE,
@@ -438,6 +447,9 @@ pub fn attach_raw_tracepoint(
         prog_fd: prog_fd as u32,
         ..Default::default()
     };
+    // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as the
+    // union member the kernel reads for this command; every pointer it carries names a buffer
+    // that outlives the call.
     let rc = unsafe {
         bpf(
             BPF_RAW_TRACEPOINT_OPEN,
@@ -480,6 +492,9 @@ pub fn attach_lsm(program: &str, prog_fd: RawFd) -> Result<OwnedFd, KfuncAttachE
         prog_fd: prog_fd as u32,
         ..Default::default()
     };
+    // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as the
+    // union member the kernel reads for this command; every pointer it carries names a buffer
+    // that outlives the call.
     let rc = unsafe {
         bpf(
             BPF_RAW_TRACEPOINT_OPEN,
@@ -557,6 +572,9 @@ fn cgroup_link_create(
         attach_type,
         ..Default::default()
     };
+    // SAFETY: `attr` is a live `#[repr(C)]` local of exactly the size passed, laid out as the
+    // union member the kernel reads for this command; every pointer it carries names a buffer
+    // that outlives the call.
     let rc = unsafe {
         bpf(
             BPF_LINK_CREATE,

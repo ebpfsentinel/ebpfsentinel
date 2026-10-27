@@ -360,6 +360,9 @@ fn drain(
             observer.dropped("truncated_record");
             continue;
         }
+        // SAFETY: the length was checked against `size_of::<ExecNetEvent>()` above, the type is
+        // `#[repr(C)]` integers only so every bit pattern is a value, and `read_unaligned` asks
+        // nothing of the ring's alignment.
         let raw = unsafe { bytes.as_ptr().cast::<ExecNetEvent>().read_unaligned() };
         let Some(record) = parse(&raw) else {
             observer.dropped("unknown_kind");

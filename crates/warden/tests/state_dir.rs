@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use ebpfsentinel_warden::prepare_state_dir;

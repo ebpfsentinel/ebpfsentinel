@@ -3,6 +3,8 @@
 //! deterministic error paths (a non-existent interface fails cleanly) and that the
 //! connection stays in sync across a run of control commands.
 
+#![allow(clippy::panic)]
+
 use std::process::{Child, Command as Proc, Stdio};
 
 use ebpfsentinel_warden_client::WardenClient;

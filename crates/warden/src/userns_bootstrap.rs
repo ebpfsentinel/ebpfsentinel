@@ -156,8 +156,9 @@ fn bootstrap(bpffs: &str, sock: &str) -> io::Result<()> {
 
 /// `setenv(3)` so the value reaches the re-exec'd image through the C `environ`.
 fn setenv(key: &str, value: &str) {
-    let k = CString::new(key).unwrap();
-    let v = CString::new(value).unwrap();
+    let k = CString::new(key).expect("every variable name here is a literal without NUL");
+    let v =
+        CString::new(value).expect("every value here is module names and fd numbers, never a NUL");
     // SAFETY: single-threaded (pre-runtime); key/value are valid NUL-terminated.
     unsafe { libc::setenv(k.as_ptr(), v.as_ptr(), 1) };
 }
@@ -168,9 +169,10 @@ fn setenv(key: &str, value: &str) {
 fn reexec_self() -> ! {
     let exe =
         std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/proc/self/exe"));
-    let exe_c = CString::new(exe.as_os_str().as_bytes()).unwrap();
+    let exe_c =
+        CString::new(exe.as_os_str().as_bytes()).expect("a path the kernel returned holds no NUL");
     let argv: Vec<CString> = std::env::args_os()
-        .map(|a| CString::new(a.as_bytes()).unwrap())
+        .map(|a| CString::new(a.as_bytes()).expect("argv entries are C strings and hold no NUL"))
         .collect();
     let mut ptrs: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
     ptrs.push(ptr::null());

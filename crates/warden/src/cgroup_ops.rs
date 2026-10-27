@@ -118,6 +118,8 @@ pub fn attach_cgroup_link(
         attach_type,
         ..Default::default()
     };
+    // SAFETY: `attr` is a live, correctly sized `bpf_attr` prefix for `BPF_LINK_CREATE`, and
+    // the size passed is its own.
     let rc = unsafe {
         crate::bpf(
             BPF_LINK_CREATE,

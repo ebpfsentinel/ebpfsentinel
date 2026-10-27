@@ -5,6 +5,8 @@
 //! `SCM_RIGHTS` fd is received (not swallowed by buffering), and a failure is
 //! reported as a typed error.
 
+#![allow(clippy::panic)]
+
 use std::mem;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -44,12 +46,16 @@ fn send_one_fd(sock: RawFd, fd: RawFd) -> bool {
         iov_base: byte.as_mut_ptr().cast(),
         iov_len: byte.len(),
     };
+    // SAFETY: `CMSG_SPACE` is arithmetic on its argument and reads no memory.
     let mut cbuf = [0u8; unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) } as usize];
+    // SAFETY: `msghdr` is plain old data, for which all-zero is a valid empty header.
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
     msg.msg_iov = ptr::from_mut(&mut iov);
     msg.msg_iovlen = 1;
     msg.msg_control = cbuf.as_mut_ptr().cast();
     msg.msg_controllen = cbuf.len() as _;
+    // SAFETY: `cbuf` is sized by `CMSG_SPACE` for exactly one fd, so the first header and its
+    // data lie inside it; `msg` and the buffers it names outlive `sendmsg`.
     unsafe {
         let cmsg = libc::CMSG_FIRSTHDR(ptr::from_ref(&msg));
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
@@ -105,6 +111,7 @@ fn delegate_with_non_bpffs_fd_is_refused() {
 
     // A pipe read end stands in for the bpffs fd: delegation must fail on it.
     let mut fds = [0 as RawFd; 2];
+    // SAFETY: `fds` is a live two-element array, the size `pipe` writes.
     assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
     let (read_fd, write_fd) = (fds[0], fds[1]);
 
@@ -116,6 +123,8 @@ fn delegate_with_non_bpffs_fd_is_refused() {
         other => panic!("expected delegation error, got {other:?}"),
     }
 
+    // SAFETY: both ends came from `pipe` above, are owned by this test, and are not used after
+    // this close.
     unsafe {
         libc::close(read_fd);
         libc::close(write_fd);

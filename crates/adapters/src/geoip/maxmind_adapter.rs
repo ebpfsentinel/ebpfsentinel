@@ -163,9 +163,10 @@ impl MaxMindGeoIpAdapter {
         let opts = WithinOptions::default().skip_empty_values();
 
         // Iterate all IPv4 networks
-        if let Ok(iter) =
-            reader.within(ipnetwork::IpNetwork::V4("0.0.0.0/0".parse().unwrap()), opts)
-        {
+        if let Ok(iter) = reader.within(
+            ipnetwork::IpNetwork::V4("0.0.0.0/0".parse().expect("literal network")),
+            opts,
+        ) {
             for lookup_result in iter.flatten() {
                 if let Ok(Some(city)) = lookup_result.decode::<maxminddb::geoip2::City>()
                     && let Some(iso) = city.country.iso_code
@@ -182,7 +183,10 @@ impl MaxMindGeoIpAdapter {
         }
 
         // Iterate all IPv6 networks
-        if let Ok(iter) = reader.within(ipnetwork::IpNetwork::V6("::/0".parse().unwrap()), opts) {
+        if let Ok(iter) = reader.within(
+            ipnetwork::IpNetwork::V6("::/0".parse().expect("literal network")),
+            opts,
+        ) {
             for lookup_result in iter.flatten() {
                 if let Ok(Some(city)) = lookup_result.decode::<maxminddb::geoip2::City>()
                     && let Some(iso) = city.country.iso_code
@@ -216,9 +220,10 @@ impl MaxMindGeoIpAdapter {
         let mut result = Vec::new();
         let opts = WithinOptions::default().skip_empty_values();
 
-        if let Ok(iter) =
-            reader.within(ipnetwork::IpNetwork::V4("0.0.0.0/0".parse().unwrap()), opts)
-        {
+        if let Ok(iter) = reader.within(
+            ipnetwork::IpNetwork::V4("0.0.0.0/0".parse().expect("literal network")),
+            opts,
+        ) {
             for lookup_result in iter.flatten() {
                 if let Ok(Some(asn_record)) = lookup_result.decode::<maxminddb::geoip2::Asn>()
                     && let Some(asn_num) = asn_record.autonomous_system_number
@@ -234,7 +239,10 @@ impl MaxMindGeoIpAdapter {
             }
         }
 
-        if let Ok(iter) = reader.within(ipnetwork::IpNetwork::V6("::/0".parse().unwrap()), opts) {
+        if let Ok(iter) = reader.within(
+            ipnetwork::IpNetwork::V6("::/0".parse().expect("literal network")),
+            opts,
+        ) {
             for lookup_result in iter.flatten() {
                 if let Ok(Some(asn_record)) = lookup_result.decode::<maxminddb::geoip2::Asn>()
                     && let Some(asn_num) = asn_record.autonomous_system_number

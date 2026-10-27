@@ -1,1 +1,5 @@
 # Clippy lints are configured in workspace Cargo.toml [workspace.lints.clippy]
+
+# A test states its own invariant by failing; `unwrap` and `panic!` are how it fails.
+allow-unwrap-in-tests = true
+allow-panic-in-tests = true

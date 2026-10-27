@@ -81,6 +81,8 @@ pub fn netkit_attach(
     let attr_size = std::mem::size_of::<BpfAttrLinkCreate>() as u32;
     let attr_ptr: *const BpfAttrLinkCreate = &raw const attr;
 
+    // SAFETY: `attr` is a live `#[repr(C)]` local of exactly `attr_size` bytes, laid out as the
+    // `BPF_LINK_CREATE` member of `bpf_attr`, and outlives the call.
     let fd = unsafe {
         libc::syscall(
             libc::SYS_bpf,
@@ -101,6 +103,7 @@ pub fn netkit_attach(
     }
 
     #[allow(clippy::cast_possible_truncation)]
+    // SAFETY: `fd` is the non-negative link fd `bpf` just returned; nothing else owns it.
     let link_fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
 
     let direction = if attach_type == BPF_NETKIT_PRIMARY {

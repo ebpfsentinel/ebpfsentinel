@@ -357,6 +357,7 @@ fn resolve_ifindex(interface: &str) -> Result<i32, String> {
 /// Bind an `AF_PACKET` socket to `(ifindex, ETH_P_ALL)`. The `CAP_NET_RAW` check
 /// already happened at `socket()`; `bind` does not re-check it.
 fn bind_packet(fd: RawFd, ifindex: i32) -> Result<(), String> {
+    // SAFETY: `sockaddr_ll` is `#[repr(C)]` integers only, for which all-zero is a valid value.
     let mut addr: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
     addr.sll_family = libc::AF_PACKET as u16;
     addr.sll_protocol = (libc::ETH_P_ALL as u16).to_be();
@@ -380,6 +381,7 @@ fn bind_packet(fd: RawFd, ifindex: i32) -> Result<(), String> {
 
 /// Add or drop promiscuous-mode membership on `ifindex`.
 fn set_promisc(fd: RawFd, ifindex: i32, on: bool) -> Result<(), String> {
+    // SAFETY: `packet_mreq` is `#[repr(C)]` integers only, for which all-zero is a valid value.
     let mut mreq: libc::packet_mreq = unsafe { std::mem::zeroed() };
     mreq.mr_ifindex = ifindex;
     mreq.mr_type = libc::PACKET_MR_PROMISC as u16;
