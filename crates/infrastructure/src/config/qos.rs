@@ -2,12 +2,14 @@
 
 use std::collections::{HashMap, HashSet};
 
+use domain::qos::cgroup_shaping::{CgroupShapingRule, DEFAULT_HORIZON_MS, validate_rules};
 use domain::qos::entity::{QosClassifier, QosDirection, QosMatchRule, QosPipe, QosQueue};
 use serde::{Deserialize, Serialize};
 
 use domain::firewall::entity::IpNetwork;
 
 use super::common::{ConfigError, default_true, parse_cidr};
+use super::ids::IdsWorkloadConfig;
 
 // ── Security limits ────────────────────────────────────────────────
 
@@ -17,6 +19,8 @@ pub(super) const MAX_QOS_PIPES: usize = 64;
 pub(super) const MAX_QOS_QUEUES: usize = 256;
 /// Maximum `QoS` classifiers.
 pub(super) const MAX_QOS_CLASSIFIERS: usize = 1024;
+/// Maximum per-workload shaping rules.
+pub(super) const MAX_QOS_CGROUP_SHAPING: usize = 256;
 
 // ── Serde defaults ──────────────────────────────────────────────────
 
@@ -30,6 +34,10 @@ fn default_priority() -> u8 {
 
 fn default_direction() -> String {
     "egress".to_string()
+}
+
+fn default_horizon_ms() -> u32 {
+    DEFAULT_HORIZON_MS
 }
 
 // ── Section config ──────────────────────────────────────────────────
@@ -47,6 +55,52 @@ pub struct QosSectionConfig {
 
     #[serde(default)]
     pub classifiers: Vec<QosClassifierConfig>,
+
+    /// Rates the traffic a workload sends is held to, by its cgroup.
+    #[serde(default)]
+    pub cgroup_shaping: Vec<QosCgroupShapingConfig>,
+}
+
+// ── Per-workload shaping config ─────────────────────────────────────
+
+/// One workload's egress traffic held to a rate. The first rule whose
+/// workload matches a cgroup is the one it is held to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QosCgroupShapingConfig {
+    pub id: String,
+
+    /// Which workloads the rate applies to, each cgroup on its own.
+    pub workload: IdsWorkloadConfig,
+
+    /// Rate string: "100mbps", "1gbps", "500kbps", "8000bps".
+    pub rate: String,
+
+    /// How far ahead, in milliseconds, a packet may be scheduled before the
+    /// shaper drops it instead.
+    #[serde(default = "default_horizon_ms")]
+    pub horizon_ms: u32,
+}
+
+impl QosCgroupShapingConfig {
+    fn to_domain(&self, idx: usize) -> Result<CgroupShapingRule, ConfigError> {
+        let prefix = format!("qos.cgroup_shaping[{idx}]");
+        let rate_bps = parse_bandwidth(&self.rate).map_err(|message| ConfigError::Validation {
+            field: format!("{prefix}.rate"),
+            message,
+        })?;
+        let rule = CgroupShapingRule {
+            id: self.id.clone(),
+            selector: self.workload.to_selector(&prefix)?,
+            rate_bps,
+            horizon_ms: self.horizon_ms,
+        };
+        rule.validate().map_err(|e| ConfigError::Validation {
+            field: prefix,
+            message: e.to_string(),
+        })?;
+        Ok(rule)
+    }
 }
 
 // ── Pipe config ─────────────────────────────────────────────────────
@@ -300,6 +354,13 @@ impl QosSectionConfig {
             MAX_QOS_CLASSIFIERS,
         )?;
 
+        super::common::check_limit(
+            "qos.cgroup_shaping",
+            self.cgroup_shaping.len(),
+            MAX_QOS_CGROUP_SHAPING,
+        )?;
+        self.to_domain_cgroup_shaping()?;
+
         // Validate individual pipes
         let mut pipe_ids = HashSet::new();
         for (idx, pipe) in self.pipes.iter().enumerate() {
@@ -374,6 +435,21 @@ impl QosSectionConfig {
             .iter()
             .map(|p| p.to_domain_pipe(group_bits))
             .collect()
+    }
+
+    /// Convert the per-workload shaping rules, in file order.
+    pub fn to_domain_cgroup_shaping(&self) -> Result<Vec<CgroupShapingRule>, ConfigError> {
+        let rules = self
+            .cgroup_shaping
+            .iter()
+            .enumerate()
+            .map(|(idx, rule)| rule.to_domain(idx))
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_rules(&rules).map_err(|e| ConfigError::Validation {
+            field: "qos.cgroup_shaping".to_string(),
+            message: e.to_string(),
+        })?;
+        Ok(rules)
     }
 
     /// Convert all queue configs to domain `QosQueue` entities.
@@ -1212,5 +1288,101 @@ pipe_id: pipe-1
         )
         .unwrap();
         assert!(q.enabled);
+    }
+
+    // ── Per-workload shaping ────────────────────────────────────────
+
+    fn shaping_section(yaml: &str) -> QosSectionConfig {
+        serde_norway::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn cgroup_shaping_parses_with_its_default_horizon() {
+        let section = shaping_section(
+            r"
+enabled: true
+cgroup_shaping:
+  - id: batch
+    workload:
+      cgroup: /system.slice/batch.service
+    rate: 100mbps
+",
+        );
+        section.validate().unwrap();
+        let rules = section.to_domain_cgroup_shaping().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].rate_bps, 100_000_000);
+        assert_eq!(rules[0].horizon_ms, DEFAULT_HORIZON_MS);
+    }
+
+    #[test]
+    fn cgroup_shaping_refuses_a_misspelled_workload_key() {
+        let parsed: Result<QosSectionConfig, _> = serde_norway::from_str(
+            r"
+cgroup_shaping:
+  - id: batch
+    workload:
+      cgroups: /system.slice/batch.service
+    rate: 100mbps
+",
+        );
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn cgroup_shaping_refuses_an_empty_workload() {
+        let section = shaping_section(
+            r"
+cgroup_shaping:
+  - id: batch
+    workload: {}
+    rate: 100mbps
+",
+        );
+        assert!(section.validate().is_err());
+    }
+
+    #[test]
+    fn cgroup_shaping_refuses_a_bad_rate_and_a_bad_horizon() {
+        let section = shaping_section(
+            r"
+cgroup_shaping:
+  - id: batch
+    workload:
+      unit: batch.service
+    rate: fast
+",
+        );
+        assert!(section.validate().is_err());
+
+        let section = shaping_section(
+            r"
+cgroup_shaping:
+  - id: batch
+    workload:
+      unit: batch.service
+    rate: 1mbps
+    horizon_ms: 0
+",
+        );
+        assert!(section.validate().is_err());
+    }
+
+    #[test]
+    fn cgroup_shaping_refuses_a_duplicate_id() {
+        let section = shaping_section(
+            r"
+cgroup_shaping:
+  - id: batch
+    workload:
+      unit: batch.service
+    rate: 1mbps
+  - id: batch
+    workload:
+      unit: other.service
+    rate: 1mbps
+",
+        );
+        assert!(section.validate().is_err());
     }
 }

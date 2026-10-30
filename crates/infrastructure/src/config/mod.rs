@@ -88,7 +88,9 @@ pub use management::ManagementConfig;
 pub use nat::{HairpinNatConfig, NatConfig, NatRuleConfig, NptV6RuleConfig};
 pub use process_table::ProcessTableConfig;
 pub use profile::{AgentProfile, POD_REFUSED_SECTIONS, PodSelectorConfig};
-pub use qos::{QosClassifierConfig, QosPipeConfig, QosQueueConfig, QosSectionConfig};
+pub use qos::{
+    QosCgroupShapingConfig, QosClassifierConfig, QosPipeConfig, QosQueueConfig, QosSectionConfig,
+};
 pub use ratelimit::{RateLimitRuleConfig, RateLimitSectionConfig};
 pub use response::{
     DEFAULT_MAX_RESPONSE_TTL_SECS, KillProcessConfig, MAX_KILL_WINDOW_MS,

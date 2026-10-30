@@ -72,6 +72,8 @@ pub struct AppState {
     pub loadbalancer_service: Option<Arc<RwLock<LbAppService>>>,
     pub vip_announcer_service: Option<Arc<RwLock<VipAnnouncerService>>>,
     pub qos_service: Option<Arc<RwLock<QosAppService>>>,
+    pub cgroup_shaping:
+        Option<Arc<application::qos_cgroup_shaping_service::QosCgroupShapingService>>,
     pub dns_cache_service: Option<Arc<DnsCacheAppService>>,
     pub dns_blocklist_service: Option<Arc<DnsBlocklistAppService>>,
     pub domain_reputation_service: Option<Arc<DomainReputationAppService>>,
@@ -221,6 +223,7 @@ impl AppState {
             loadbalancer_service: None,
             vip_announcer_service: None,
             qos_service: None,
+            cgroup_shaping: None,
             dns_cache_service: None,
             dns_blocklist_service: None,
             domain_reputation_service: None,
@@ -478,6 +481,31 @@ impl AppState {
     pub fn with_qos_service(mut self, svc: Arc<RwLock<QosAppService>>) -> Self {
         self.qos_service = Some(svc);
         self
+    }
+
+    /// Attach the per-workload shaping service.
+    #[must_use]
+    pub fn with_cgroup_shaping(
+        mut self,
+        svc: Arc<application::qos_cgroup_shaping_service::QosCgroupShapingService>,
+    ) -> Self {
+        self.cgroup_shaping = Some(svc);
+        self
+    }
+
+    /// Return the per-workload shaping service, or an API error if not available.
+    pub fn cgroup_shaping_service(
+        &self,
+    ) -> Result<
+        &Arc<application::qos_cgroup_shaping_service::QosCgroupShapingService>,
+        super::error::ApiError,
+    > {
+        self.cgroup_shaping
+            .as_ref()
+            .ok_or(super::error::ApiError::NotFound {
+                code: "SERVICE_NOT_AVAILABLE",
+                message: "per-workload shaping is not available".to_string(),
+            })
     }
 
     /// Return a reference to the `QoS` service, or an API error if not available.

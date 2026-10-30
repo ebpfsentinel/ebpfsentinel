@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use application::qos_cgroup_shaping_service::CgroupShapingReport;
 use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
@@ -192,6 +193,130 @@ impl QosClassifierResponse {
     }
 }
 
+/// What per-workload shaping holds, where it acts, and what it achieved.
+#[derive(Serialize, ToSchema)]
+pub struct QosShapingResponse {
+    /// Whether the loaded tc-qos object carries the shaping tables.
+    pub supported: bool,
+    /// Whether a rule is in force on at least one interface. False with
+    /// rules configured means no attached interface honours a departure
+    /// time, and nothing is shaped.
+    pub active: bool,
+    pub rules: Vec<QosShapingRuleResponse>,
+    pub interfaces: Vec<QosShapingInterfaceResponse>,
+    pub cgroups: Vec<QosShapedCgroupResponse>,
+    /// Why the last read of the kernel counters failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_error: Option<String>,
+}
+
+/// One per-workload shaping rule.
+#[derive(Serialize, ToSchema)]
+pub struct QosShapingRuleResponse {
+    pub id: String,
+    pub rate_bps: u64,
+    pub horizon_ms: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    /// Whether the selector also names pod labels, namespace labels or a
+    /// service account.
+    pub kubernetes: bool,
+}
+
+/// One interface the agent attaches to, and whether shaping acts there.
+#[derive(Serialize, ToSchema)]
+pub struct QosShapingInterfaceResponse {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ifindex: Option<u32>,
+    /// The root qdisc's kind, `none` when the interface has no root qdisc.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_qdisc: Option<String>,
+    /// Whether the qdiscs honour a departure time: `fq` at the root, or
+    /// `mq` with `fq` under every queue. Shaping acts only where this holds.
+    pub honoured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// One cgroup held to a rate.
+#[derive(Serialize, ToSchema)]
+pub struct QosShapedCgroupResponse {
+    pub cgroup_id: u64,
+    pub rule_id: String,
+    pub rate_bps: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    pub bytes: u64,
+    pub packets: u64,
+    /// Packets dropped because their departure time fell past the horizon.
+    pub dropped_horizon: u64,
+    /// Bits per second sent over the last read interval; absent until two
+    /// reads exist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub achieved_bps: Option<u64>,
+}
+
+impl QosShapingResponse {
+    fn from_report(report: CgroupShapingReport) -> Self {
+        Self {
+            supported: report.supported,
+            active: report.active,
+            rules: report
+                .rules
+                .into_iter()
+                .map(|rule| {
+                    let s = rule.selector;
+                    QosShapingRuleResponse {
+                        id: rule.id,
+                        rate_bps: rule.rate_bps,
+                        horizon_ms: rule.horizon_ms,
+                        kubernetes: s.pods.is_some()
+                            || s.namespaces.is_some()
+                            || s.service_account.is_some(),
+                        unit: s.unit,
+                        cgroup: s.cgroup,
+                        container: s.container,
+                    }
+                })
+                .collect(),
+            interfaces: report
+                .interfaces
+                .into_iter()
+                .map(|iface| QosShapingInterfaceResponse {
+                    name: iface.name,
+                    ifindex: iface.ifindex,
+                    root_qdisc: iface.root_qdisc,
+                    honoured: iface.honoured,
+                    error: iface.error,
+                })
+                .collect(),
+            cgroups: report
+                .cgroups
+                .into_iter()
+                .map(|shaped| QosShapedCgroupResponse {
+                    cgroup_id: shaped.cgroup_id,
+                    rule_id: shaped.rule_id,
+                    rate_bps: shaped.rate_bps,
+                    cgroup: shaped.cgroup,
+                    container: shaped.container,
+                    bytes: shaped.counters.bytes,
+                    packets: shaped.counters.packets,
+                    dropped_horizon: shaped.counters.dropped_horizon,
+                    achieved_bps: shaped.achieved_bps,
+                })
+                .collect(),
+            read_error: report.read_error,
+        }
+    }
+}
+
 // ── Handlers ────────────────────────────────────────────────────────
 
 /// `GET /api/v1/qos/status` -- `QoS` service status.
@@ -218,6 +343,28 @@ pub async fn get_qos_status(
         queue_count: svc.queues().len(),
         classifier_count: svc.classifiers().len(),
     }))
+}
+
+/// `GET /api/v1/qos/shaping` -- per-workload rates, where they act, and
+/// what each cgroup achieved.
+#[utoipa::path(
+    get, path = "/api/v1/qos/shaping",
+    tag = "QoS",
+    responses((status = 200, description = "Per-workload shaping state", body = QosShapingResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "Shaping service not available", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn get_qos_shaping(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<QosShapingResponse>, ApiError> {
+    let svc = state.cgroup_shaping_service()?;
+    Ok(Json(QosShapingResponse::from_report(svc.report())))
 }
 
 /// `GET /api/v1/qos/pipes` -- list all `QoS` pipes.
@@ -763,5 +910,57 @@ mod tests {
         resp.interfaces = vec!["wan".to_string()];
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["interfaces"], serde_json::json!(["wan"]));
+    }
+
+    #[test]
+    fn shaping_response_carries_the_report() {
+        use application::qos_cgroup_shaping_service::{InterfaceShaping, ShapedCgroup};
+        use domain::firewall::workload::WorkloadSelector;
+        use domain::qos::cgroup_shaping::{CgroupShapingCounters, CgroupShapingRule};
+
+        let report = CgroupShapingReport {
+            supported: true,
+            active: true,
+            rules: vec![CgroupShapingRule {
+                id: "batch".to_string(),
+                selector: WorkloadSelector::new(
+                    None,
+                    Some("batch.service".to_string()),
+                    None,
+                    None,
+                )
+                .unwrap(),
+                rate_bps: 8_000_000,
+                horizon_ms: 2_000,
+            }],
+            interfaces: vec![InterfaceShaping {
+                name: "eth0".to_string(),
+                ifindex: Some(2),
+                root_qdisc: Some("fq".to_string()),
+                honoured: true,
+                error: None,
+            }],
+            cgroups: vec![ShapedCgroup {
+                cgroup_id: 100,
+                rule_id: "batch".to_string(),
+                rate_bps: 8_000_000,
+                cgroup: Some("/system.slice/batch.service".to_string()),
+                container: None,
+                counters: CgroupShapingCounters {
+                    bytes: 1_000,
+                    packets: 2,
+                    dropped_horizon: 1,
+                },
+                achieved_bps: Some(7_900_000),
+            }],
+            read_error: None,
+        };
+        let json = serde_json::to_value(QosShapingResponse::from_report(report)).unwrap();
+        assert_eq!(json["rules"][0]["unit"], "batch.service");
+        assert_eq!(json["rules"][0]["kubernetes"], false);
+        assert_eq!(json["interfaces"][0]["honoured"], true);
+        assert_eq!(json["cgroups"][0]["dropped_horizon"], 1);
+        assert_eq!(json["cgroups"][0]["achieved_bps"], 7_900_000);
+        assert!(json.get("read_error").is_none());
     }
 }

@@ -4,23 +4,26 @@
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
-    btf_maps::{Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
+    btf_maps::{
+        Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, PerCpuHashMap, RingBuf,
+        lpm_trie::Key,
+    },
     helpers::{bpf_get_prandom_u32, bpf_ktime_get_boot_ns, bpf_ktime_get_ns},
     macros::{btf_map, classifier},
     programs::TcContext,
 };
 use aya_ebpf_bindings::bindings::_bindgen_ty_28::BPF_SKB_TSTAMP_DELIVERY_MONO;
-use aya_ebpf_bindings::helpers::{bpf_skb_ecn_set_ce, bpf_skb_set_tstamp};
+use aya_ebpf_bindings::helpers::{bpf_skb_cgroup_id, bpf_skb_ecn_set_ce, bpf_skb_set_tstamp};
 use ebpf_common::{
     event::{EVENT_TYPE_QOS, FLAG_IPV6, PacketEvent},
     firewall::FW_EMPTY_QOS_CLASSIFIERS,
     qos::{
-        QOS_METRIC_COUNT, QOS_METRIC_DELAYED, QOS_METRIC_DROPPED_LOSS, QOS_METRIC_DROPPED_QUEUE,
+        MAX_QOS_CGROUP_LINKS, MAX_QOS_CGROUP_SHAPES, MAX_QOS_EDT_INTERFACES, QOS_METRIC_COUNT, QOS_METRIC_DELAYED, QOS_METRIC_DROPPED_LOSS, QOS_METRIC_DROPPED_QUEUE,
         QOS_METRIC_ERRORS, QOS_METRIC_EVENTS_DROPPED, QOS_METRIC_SHAPED, QOS_METRIC_TOTAL_SEEN,
         QOS_SCOPE_MASK, QOS_SCOPE_SHAPES_EMPTY, QOS_SCOPE_STRIDE, QOS_SHAPE_CATCHALL,
         QOS_SHAPE_DPORT, QOS_SHAPE_DSCP, QOS_SHAPE_FULL, QOS_SHAPE_HOSTS, QOS_SHAPE_HOSTS_DPORT,
         QOS_SHAPE_NO_DSCP, QOS_SHAPE_PORTS, QOS_SHAPE_PROTO, QOS_SHAPE_SPORT, QosClassifierKey,
-        QosClassifierValue, QosFlowState, QosPipeConfig, QosPipeState, QosQueueConfig, VLAN_ANY,
+        QosCgroupCounters, QosCgroupShape, QosClassifierValue, QosFlowState, QosPipeConfig, QosPipeState, QosQueueConfig, VLAN_ANY,
         qos_direction_matches,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
@@ -122,6 +125,46 @@ static QOS_FLOW_STATE: LruPerCpuHashMap<u32, QosFlowState, 65536> = LruPerCpuHas
 /// Per-CPU packet counters.
 #[btf_map]
 static QOS_METRICS: PerCpuArray<u64, { QOS_METRIC_COUNT as usize }> = PerCpuArray::new();
+
+/// Host-side link -> cgroup v2 id of the workload behind it.
+///
+/// A container's packet reaches the uplink forwarded from its veth, with no
+/// socket left to ask, so `bpf_skb_cgroup_id` reads 0 there. The link it
+/// arrived on is still on the packet, and the agent publishes which cgroup
+/// owns each host-side end it attached to.
+#[btf_map]
+static QOS_CGROUP_LINKS: HashMap<u32, u64, { MAX_QOS_CGROUP_LINKS as usize }> = HashMap::new();
+
+/// Cgroup v2 id -> the rate it is shaped to. Written whole by the agent from
+/// the shaping rules and the workloads they select.
+#[btf_map]
+static QOS_CGROUP_SHAPES: HashMap<u64, QosCgroupShape, { MAX_QOS_CGROUP_SHAPES as usize }> =
+    HashMap::new();
+
+/// Cgroup v2 id -> earliest departure time of its next byte (monotonic ns).
+///
+/// Shared by every CPU because the rate is a cap on everything the cgroup
+/// sends: a per-CPU clock would hand each core the full rate. Two CPUs
+/// advancing it at once can lose one packet's worth of time, which is the
+/// precision a rate measured over seconds can afford.
+#[btf_map]
+static QOS_CGROUP_EDT: HashMap<u64, u64, { MAX_QOS_CGROUP_SHAPES as usize }> = HashMap::new();
+
+/// Cgroup v2 id -> what the shaper did for it, per CPU. The agent sums the
+/// CPUs and measures the achieved rate from the byte count.
+#[btf_map]
+static QOS_CGROUP_COUNTERS: PerCpuHashMap<
+    u64,
+    QosCgroupCounters,
+    { MAX_QOS_CGROUP_SHAPES as usize },
+> = PerCpuHashMap::new();
+
+/// The interfaces, by index, whose qdisc holds a packet until its departure
+/// time. A packet leaving any other interface is not shaped at all: a
+/// departure time there is ignored, and the horizon would turn the shaper
+/// into a policer dropping what it was meant to space out.
+#[btf_map]
+static QOS_EDT_INTERFACES: HashMap<u32, u8, { MAX_QOS_EDT_INTERFACES as usize }> = HashMap::new();
 
 /// Kernel->userspace event ring buffer, 1 MiB: about 7,500 packet events
 /// before backpressure refuses new ones (sizing in `ebpf_helpers::ringbuf`).
@@ -282,6 +325,102 @@ fn dispatch(ctx: &TcContext, is_ingress: bool) -> i32 {
     if action == TC_ACT_OK { -1 } else { action }
 }
 
+// ── Shaping per cgroup ──────────────────────────────────────────────
+
+/// The departure time already on the packet, when it is one: a timestamp of
+/// the monotonic delivery kind set by the sending socket or by an earlier
+/// step. A receive timestamp is on another clock and is never compared.
+#[inline(always)]
+fn delivery_time_on_packet(ctx: &TcContext) -> u64 {
+    let skb = ctx.skb.skb;
+    if unsafe { (*skb).tstamp_type } as u32 == BPF_SKB_TSTAMP_DELIVERY_MONO {
+        unsafe { (*skb).tstamp }
+    } else {
+        0
+    }
+}
+
+/// Earliest-departure-time shaping of the cgroup the packet belongs to.
+///
+/// Returns `true` when the packet is to be dropped, because its departure
+/// would land beyond the cgroup's horizon. Every other packet leaves with a
+/// departure time spaced from the previous one by the time its own bytes take
+/// at the configured rate, and the fq qdisc holds it until then. A packet of
+/// no cgroup, or of a cgroup without a rate, is left as it came.
+#[inline(always)]
+fn shape_cgroup(ctx: &TcContext) -> bool {
+    let skb = ctx.skb.skb;
+    let leaves_on = unsafe { (*skb).ifindex };
+    if unsafe { QOS_EDT_INTERFACES.get(&leaves_on) }.is_none() {
+        return false;
+    }
+    let came_in_on = unsafe { (*skb).ingress_ifindex };
+    let cgroup_id = match unsafe { QOS_CGROUP_LINKS.get(&came_in_on) } {
+        Some(&id) => id,
+        None => unsafe { bpf_skb_cgroup_id(skb as *mut _) },
+    };
+    if cgroup_id == 0 {
+        return false;
+    }
+    let shape = match unsafe { QOS_CGROUP_SHAPES.get(&cgroup_id) } {
+        Some(shape) => *shape,
+        None => return false,
+    };
+
+    let len = u64::from(unsafe { (*skb).len });
+    let now = unsafe { bpf_ktime_get_ns() };
+    let next = match unsafe { QOS_CGROUP_EDT.get(&cgroup_id) } {
+        Some(&next) => next,
+        None => 0,
+    };
+    let departure = if next > now { next } else { now };
+
+    if departure - now > shape.horizon_ns {
+        count_cgroup(cgroup_id, 0, true);
+        return true;
+    }
+
+    let spacing = len.saturating_mul(shape.ps_per_byte) / 1000;
+    let _ = QOS_CGROUP_EDT.insert(&cgroup_id, &departure.saturating_add(spacing), 0);
+
+    if departure > now && departure > delivery_time_on_packet(ctx) {
+        unsafe {
+            bpf_skb_set_tstamp(skb, departure, BPF_SKB_TSTAMP_DELIVERY_MONO);
+        }
+    }
+    count_cgroup(cgroup_id, len, false);
+    false
+}
+
+/// Add one packet to the cgroup's counters on this CPU.
+#[inline(always)]
+fn count_cgroup(cgroup_id: u64, len: u64, dropped: bool) {
+    if let Some(counters) = QOS_CGROUP_COUNTERS.get_ptr_mut(&cgroup_id) {
+        let counters = unsafe { &mut *counters };
+        if dropped {
+            counters.dropped_horizon += 1;
+        } else {
+            counters.bytes += len;
+            counters.packets += 1;
+        }
+        return;
+    }
+    let first = if dropped {
+        QosCgroupCounters {
+            bytes: 0,
+            packets: 0,
+            dropped_horizon: 1,
+        }
+    } else {
+        QosCgroupCounters {
+            bytes: len,
+            packets: 1,
+            dropped_horizon: 0,
+        }
+    };
+    let _ = QOS_CGROUP_COUNTERS.insert(&cgroup_id, &first, 0);
+}
+
 // ── Packet processing ───────────────────────────────────────────────
 
 #[inline(always)]
@@ -290,6 +429,12 @@ fn try_tc_qos(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     // every one of its steps and nothing this program does past the match
     // would fire. The parse goes with it: a program behind this one that
     // needs it does its own.
+    // Shaping per cgroup runs ahead of the classifiers and does not depend
+    // on any being loaded: a workload's rate is a rule of its own.
+    if !is_ingress && shape_cgroup(ctx) {
+        return Ok(TC_ACT_SHOT);
+    }
+
     if feature_empty(empty_features(), FW_EMPTY_QOS_CLASSIFIERS) {
         return Ok(TC_ACT_OK);
     }
@@ -801,7 +946,16 @@ fn apply_qos(
     if pipe_cfg.delay_ns > 0 {
         let now_ns_edt = unsafe { bpf_ktime_get_ns() };
         let fh_edt = flow_hash(src_ip, dst_ip, src_port, dst_port, protocol);
-        let target = now_ns_edt.saturating_add(pipe_cfg.delay_ns);
+        // A departure time already set, by the sending socket or by the
+        // cgroup's own rate, is a floor the delay is added onto rather than
+        // a value to overwrite with an earlier one.
+        let set_before = delivery_time_on_packet(ctx);
+        let base = if set_before > now_ns_edt {
+            set_before
+        } else {
+            now_ns_edt
+        };
+        let target = base.saturating_add(pipe_cfg.delay_ns);
 
         let edt = match QOS_FLOW_STATE.get_ptr_mut(&fh_edt) {
             Some(state_ptr) => {

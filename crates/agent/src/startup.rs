@@ -61,9 +61,10 @@ use domain::ratelimit::engine::RateLimitEngine;
 use domain::threatintel::engine::ThreatIntelEngine;
 use infrastructure::config::AgentConfig;
 use infrastructure::constants::{
-    ALERT_CHANNEL_CAPACITY, CAPTURE_STOP_TIMEOUT, CONTAINER_LABEL_CHANNEL_CAPACITY,
-    EVENT_CHANNEL_CAPACITY, GRACEFUL_SHUTDOWN_TIMEOUT, WORKLOAD_DENIAL_CHANNEL_CAPACITY,
-    WORKLOAD_DENIAL_READ_INTERVAL, WORKLOAD_DNS_CHANNEL_CAPACITY, WORKLOAD_FQDN_SWEEP_INTERVAL,
+    ALERT_CHANNEL_CAPACITY, CAPTURE_STOP_TIMEOUT, CGROUP_SHAPING_READ_INTERVAL,
+    CONTAINER_LABEL_CHANNEL_CAPACITY, EVENT_CHANNEL_CAPACITY, GRACEFUL_SHUTDOWN_TIMEOUT,
+    WORKLOAD_DENIAL_CHANNEL_CAPACITY, WORKLOAD_DENIAL_READ_INTERVAL, WORKLOAD_DNS_CHANNEL_CAPACITY,
+    WORKLOAD_FQDN_SWEEP_INTERVAL,
 };
 use infrastructure::logging::init_logging;
 use infrastructure::retry::RetryConfig;
@@ -275,6 +276,44 @@ pub(crate) fn ids_workload_scope_service(
             Arc::new(adapters::container::ProcContainerResolver::new(&proc_root)),
         ),
     )
+}
+
+/// The service holding workloads to the rates `qos.cgroup_shaping` names,
+/// on the interfaces the agent attaches to.
+pub(crate) fn cgroup_shaping_service(
+    config: &AgentConfig,
+    metrics: &Arc<AgentMetrics>,
+) -> anyhow::Result<Arc<application::qos_cgroup_shaping_service::QosCgroupShapingService>> {
+    let proc_root = resolver_proc_path(&config.container.resolver.proc_path, &host_proc_root());
+    let service =
+        application::qos_cgroup_shaping_service::QosCgroupShapingService::new()
+            .with_qdiscs(Arc::new(adapters::ebpf::NetlinkQdiscReader))
+            .with_cgroups(Arc::new(adapters::container::ProcContainerResolver::new(
+                &proc_root,
+            )))
+            .with_metrics(
+                Arc::clone(metrics) as Arc<dyn ports::secondary::metrics_port::PacketMetrics>
+            );
+    if config.qos.enabled {
+        service.set_rules(config.qos.to_domain_cgroup_shaping()?);
+    }
+    service.set_interfaces(config.agent.interfaces.clone());
+    Ok(Arc::new(service))
+}
+
+/// Hand a freshly loaded tc-qos object's shaping tables to the shaping
+/// service, or tell it there are none, and start reading what they count.
+pub(crate) fn install_cgroup_shaping(
+    shaping: &Arc<application::qos_cgroup_shaping_service::QosCgroupShapingService>,
+    loader: &mut EbpfLoader,
+) {
+    match adapters::ebpf::QosCgroupShapingMaps::new(loader.ebpf_mut()) {
+        Ok(maps) => shaping.set_maps(Box::new(maps)),
+        Err(e) => {
+            shaping.clear_maps();
+            warn!("per-workload shaping tables not available, no workload is held to a rate: {e}");
+        }
+    }
 }
 
 /// Hand a freshly loaded tc-ids object's scope tables to the scope service,
@@ -576,6 +615,7 @@ pub async fn run(
         Arc::new(RwLock::new(svc))
     };
     info!(enabled = config.qos.enabled, "QoS service initialized");
+    let cgroup_shaping = cgroup_shaping_service(&config, &metrics)?;
 
     // ── 5c¾. Build DLP service ──────────────────────────────────────
     let mut dlp_engine = DlpEngine::new();
@@ -1609,6 +1649,7 @@ pub async fn run(
         .with_loadbalancer_service(Arc::clone(&lb_svc))
         .with_vip_announcer_service(Arc::clone(&vip_svc))
         .with_qos_service(Arc::clone(&qos_svc))
+        .with_cgroup_shaping(Arc::clone(&cgroup_shaping))
         .with_zone_service(Arc::clone(&zone_svc));
     if config.container.docker.enabled {
         // Asked only when somebody renders a segmentation document, so a
@@ -1796,6 +1837,7 @@ pub async fn run(
     reload_service.set_loadbalancer_service(Arc::clone(&lb_svc));
     reload_service.set_vip_announcer_service(Arc::clone(&vip_svc));
     reload_service.set_qos_service(Arc::clone(&qos_svc));
+    reload_service.set_cgroup_shaping_service(Arc::clone(&cgroup_shaping));
     reload_service.set_zone_service(Arc::clone(&zone_svc));
     reload_service.set_schedule_service(Arc::clone(&schedule_svc));
     // Clone auth provider for gRPC from the app state
@@ -3539,6 +3581,7 @@ pub async fn run(
                     if let Some(rdr) = qos_rdr {
                         metrics_readers.push(rdr);
                     }
+                    install_cgroup_shaping(&cgroup_shaping, &mut loader);
                     iface_groups_mgr.add_map(loader.ebpf_mut());
                     ebpf_state.add_loader(loader);
                     metrics.set_ebpf_program_status("tc_qos", true);
@@ -3555,6 +3598,24 @@ pub async fn run(
             metrics.clear_ebpf_program_status("tc_qos");
             false
         };
+        if qos_ok && cgroup_shaping.supported() {
+            // The achieved rate is the bytes counted between two reads over
+            // the time between them, on the agent's own monotonic clock.
+            let polling = Arc::clone(&cgroup_shaping);
+            let poll_cancel = readers.clone();
+            tokio::spawn(async move {
+                let started = std::time::Instant::now();
+                let mut ticker = tokio::time::interval(CGROUP_SHAPING_READ_INTERVAL);
+                loop {
+                    tokio::select! {
+                        () = poll_cancel.cancelled() => break,
+                        _ = ticker.tick() => {}
+                    }
+                    let now_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    polling.poll(now_ns);
+                }
+            });
+        }
 
         // 10k. XDP Load Balancer
         // The LB can run standalone (attached to interface) or as a tail-call
@@ -3765,7 +3826,12 @@ pub async fn run(
             // the process holding it is fed to the process table as well, so
             // the scope knows the workload before anything in it execs.
             let mut owners = OwnerReporting::new(
-                Arc::clone(&ids_workload_scope) as Arc<dyn WorkloadLinkSink>,
+                Arc::new(
+                    application::qos_cgroup_shaping_service::WorkloadLinkFanout::new(vec![
+                        Arc::clone(&ids_workload_scope) as Arc<dyn WorkloadLinkSink>,
+                        Arc::clone(&cgroup_shaping) as Arc<dyn WorkloadLinkSink>,
+                    ]),
+                ) as Arc<dyn WorkloadLinkSink>,
                 config.container.resolver.cgroup_root.clone().into(),
                 host_proc_root(),
             );
@@ -4155,6 +4221,7 @@ pub async fn run(
             svc = svc.with_workload_policy(Arc::clone(workload));
         }
         svc = svc.with_ids_workload_scope(Arc::clone(&ids_workload_scope));
+        svc = svc.with_cgroup_shaping(Arc::clone(&cgroup_shaping));
         // Only when a rule names an executable: an exec event carries the
         // binary and nothing else the scope needs, so a scope with no such
         // rule has no reason to hear about every exec on the node.

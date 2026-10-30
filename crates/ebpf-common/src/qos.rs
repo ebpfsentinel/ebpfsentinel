@@ -336,6 +336,75 @@ pub const fn qos_shape_of(
     }
 }
 
+// ── Shaping per cgroup ───────────────────────────────────────────────
+
+/// Host-side links whose traffic is attributed to the cgroup behind them.
+///
+/// A container's packets leave the node through the uplink after being
+/// forwarded from its veth, by which time the socket that sent them is gone
+/// and `bpf_skb_cgroup_id` answers nothing useful. The packet still carries
+/// the index of the link it came in on, so the agent publishes which cgroup
+/// owns each host-side end and the shaper reads that first.
+pub const MAX_QOS_CGROUP_LINKS: u32 = 4096;
+/// Cgroups that carry a shaping rule at once.
+pub const MAX_QOS_CGROUP_SHAPES: u32 = 4096;
+/// Interfaces the shaper may set a departure time on: those whose qdisc
+/// holds a packet until it.
+pub const MAX_QOS_EDT_INTERFACES: u32 = 256;
+
+/// The rate one cgroup is shaped to, as the datapath reads it.
+///
+/// The rate is stored as picoseconds per byte rather than bits per second so
+/// the pacing step is one multiplication and no division: a 1 Gbps rule is
+/// 8000 ps per byte, and the slowest rate a 64-bit field can describe is far
+/// below anything a configuration would ask for.
+///
+/// Size: 16 bytes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QosCgroupShape {
+    /// Time one byte occupies on the wire at the configured rate, in
+    /// picoseconds. Zero is never written: a cgroup without a rate is a
+    /// cgroup without an entry.
+    pub ps_per_byte: u64,
+    /// How far ahead of now a departure time may be scheduled before the
+    /// packet is dropped instead, in nanoseconds. It bounds the queue the
+    /// fq qdisc holds for this cgroup.
+    pub horizon_ns: u64,
+}
+
+/// What the shaper did for one cgroup, counted on each CPU.
+///
+/// Size: 24 bytes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QosCgroupCounters {
+    /// Bytes handed on with a departure time, the bytes the achieved rate is
+    /// measured from.
+    pub bytes: u64,
+    /// Packets handed on.
+    pub packets: u64,
+    /// Packets dropped because their departure time fell beyond the horizon.
+    pub dropped_horizon: u64,
+}
+
+/// Picoseconds a byte occupies on the wire at `rate_bps`, never zero.
+#[must_use]
+pub const fn qos_ps_per_byte(rate_bps: u64) -> u64 {
+    if rate_bps == 0 {
+        return 0;
+    }
+    let ps = 8_000_000_000_000u64 / rate_bps;
+    if ps == 0 { 1 } else { ps }
+}
+
+// SAFETY: both are #[repr(C)], Copy, 'static and made of u64 fields only, so
+// they hold no padding and every bit pattern is a valid value.
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for QosCgroupShape {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for QosCgroupCounters {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,6 +613,23 @@ mod tests {
     }
 
     // ── Constant tests ───────────────────────────────────────────────
+
+    #[test]
+    fn cgroup_shape_layout_is_what_the_datapath_reads() {
+        assert_eq!(mem::size_of::<QosCgroupShape>(), 16);
+        assert_eq!(mem::offset_of!(QosCgroupShape, horizon_ns), 8);
+        assert_eq!(mem::size_of::<QosCgroupCounters>(), 24);
+        assert_eq!(mem::offset_of!(QosCgroupCounters, dropped_horizon), 16);
+    }
+
+    #[test]
+    fn a_rate_becomes_the_time_a_byte_occupies() {
+        assert_eq!(qos_ps_per_byte(1_000_000_000), 8_000);
+        assert_eq!(qos_ps_per_byte(100_000_000), 80_000);
+        assert_eq!(qos_ps_per_byte(8_000_000_000_000), 1);
+        assert_eq!(qos_ps_per_byte(u64::MAX), 1);
+        assert_eq!(qos_ps_per_byte(0), 0);
+    }
 
     #[test]
     fn map_size_constants() {

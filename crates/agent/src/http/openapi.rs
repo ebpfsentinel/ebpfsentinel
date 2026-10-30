@@ -186,6 +186,7 @@ use super::zone_handler;
         process_handler::list_processes,
         process_handler::get_process,
         qos_handler::get_qos_status,
+        qos_handler::get_qos_shaping,
         qos_handler::list_qos_pipes,
         qos_handler::create_qos_pipe,
         qos_handler::delete_qos_pipe,
@@ -380,6 +381,10 @@ use super::zone_handler;
         lb_handler::LbVipRequest,
         // QoS
         qos_handler::QosStatusResponse,
+        qos_handler::QosShapingResponse,
+        qos_handler::QosShapingRuleResponse,
+        qos_handler::QosShapingInterfaceResponse,
+        qos_handler::QosShapedCgroupResponse,
         qos_handler::QosPipeResponse,
         qos_handler::QosQueueResponse,
         qos_handler::QosClassifierResponse,

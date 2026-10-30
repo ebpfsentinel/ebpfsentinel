@@ -45,6 +45,12 @@ pub enum QosError {
 
     #[error("invalid burst for pipe {id}: a rate-limited pipe needs a burst above 0 bytes")]
     InvalidBurst { id: String },
+
+    #[error("invalid cgroup shaping rule: {0}")]
+    InvalidCgroupShaping(String),
+
+    #[error("duplicate cgroup shaping rule: {id}")]
+    DuplicateCgroupShaping { id: String },
 }
 
 impl From<QosError> for DomainError {
@@ -55,10 +61,12 @@ impl From<QosError> for DomainError {
             | QosError::ClassifierNotFound { id } => Self::RuleNotFound(id),
             QosError::DuplicatePipe { id }
             | QosError::DuplicateQueue { id }
-            | QosError::DuplicateClassifier { id } => Self::DuplicateRule(id),
+            | QosError::DuplicateClassifier { id }
+            | QosError::DuplicateCgroupShaping { id } => Self::DuplicateRule(id),
             QosError::InvalidPipe(msg)
             | QosError::InvalidQueue(msg)
-            | QosError::InvalidClassifier(msg) => Self::InvalidRule(msg),
+            | QosError::InvalidClassifier(msg)
+            | QosError::InvalidCgroupShaping(msg) => Self::InvalidRule(msg),
             QosError::OrphanedQueue { .. }
             | QosError::OrphanedClassifier { .. }
             | QosError::InvalidLossPct(_)

@@ -501,7 +501,7 @@ pub struct IdsWorkloadConfig {
 }
 
 impl IdsWorkloadConfig {
-    fn to_selector(&self, prefix: &str) -> Result<WorkloadSelector, ConfigError> {
+    pub(super) fn to_selector(&self, prefix: &str) -> Result<WorkloadSelector, ConfigError> {
         WorkloadSelector::with_kubernetes(
             None,
             self.unit.clone(),

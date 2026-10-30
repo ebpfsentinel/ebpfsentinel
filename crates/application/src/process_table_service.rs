@@ -27,6 +27,7 @@ use tracing::{debug, info, warn};
 
 use crate::dlp_scope_service::DlpScopeService;
 use crate::ids_workload_scope_service::IdsWorkloadScopeService;
+use crate::qos_cgroup_shaping_service::QosCgroupShapingService;
 use crate::workload_policy_service::WorkloadPolicyService;
 
 /// How long the writer lets the metadata settle after it last changed before
@@ -45,6 +46,7 @@ pub struct ProcessTableService {
     workload: Option<Arc<WorkloadPolicyService>>,
     dlp_scope: Option<Arc<DlpScopeService>>,
     ids_scope: Option<Arc<IdsWorkloadScopeService>>,
+    shaping: Option<Arc<QosCgroupShapingService>>,
     metadata_changes: Option<watch::Receiver<u64>>,
     capture_command_line: bool,
 }
@@ -67,6 +69,7 @@ impl ProcessTableService {
             workload: None,
             dlp_scope: None,
             ids_scope: None,
+            shaping: None,
             metadata_changes: None,
             capture_command_line,
         }
@@ -134,6 +137,14 @@ impl ProcessTableService {
         self
     }
 
+    /// Tell `service` which cgroup each task runs in, so a rate written for
+    /// a workload is held by the cgroups that workload holds.
+    #[must_use]
+    pub fn with_cgroup_shaping(mut self, service: Arc<QosCgroupShapingService>) -> Self {
+        self.shaping = Some(service);
+        self
+    }
+
     /// Resolve the running containers again each time `changes` moves.
     ///
     /// An exec is resolved once, against what the enrichers knew at that
@@ -191,6 +202,9 @@ impl ProcessTableService {
             }
             if let Some(scope) = &self.ids_scope {
                 scope.record_exec(&updated);
+            }
+            if let Some(shaping) = &self.shaping {
+                shaping.record_exec(&updated);
             }
             changed += 1;
         }
@@ -251,6 +265,9 @@ impl ProcessTableService {
         if let Some(scope) = &self.ids_scope {
             scope.record_exec(&entry);
         }
+        if let Some(shaping) = &self.shaping {
+            shaping.record_exec(&entry);
+        }
 
         let replaced = self
             .table
@@ -273,6 +290,9 @@ impl ProcessTableService {
         }
         if let Some(scope) = &self.ids_scope {
             scope.record_exit(pid);
+        }
+        if let Some(shaping) = &self.shaping {
+            shaping.record_exit(pid);
         }
         let purged = self
             .table
@@ -755,6 +775,38 @@ mod tests {
         assert_eq!(scope.published_scope(), vec![(777, 0)]);
         service.apply(exit(42)).await;
         assert!(scope.published_scope().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_container_task_holds_a_rate_until_it_exits() {
+        let shaping = Arc::new(QosCgroupShapingService::new());
+        shaping.set_rules(vec![domain::qos::cgroup_shaping::CgroupShapingRule {
+            id: "web".to_string(),
+            selector: domain::firewall::workload::WorkloadSelector::new(
+                None,
+                None,
+                None,
+                Some("3f2a1b4c5d6e".to_string()),
+            )
+            .unwrap(),
+            rate_bps: 8_000_000,
+            horizon_ms: 2_000,
+        }]);
+        let resolver = Arc::new(ContainerResolverEngine::new(Arc::new(ContainerCgroups), 16));
+        let service = ProcessTableService::new(16, false)
+            .with_containers(resolver)
+            .with_cgroup_shaping(Arc::clone(&shaping));
+
+        service.apply(exec(42, 1)).await;
+        let shaped: Vec<u64> = shaping
+            .report()
+            .cgroups
+            .iter()
+            .map(|c| c.cgroup_id)
+            .collect();
+        assert_eq!(shaped, vec![777]);
+        service.apply(exit(42)).await;
+        assert!(shaping.report().cgroups.is_empty());
     }
 
     #[tokio::test]

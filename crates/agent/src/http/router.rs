@@ -119,8 +119,8 @@ use super::ops_handler::{
 use super::process_handler::{get_process, list_processes};
 use super::qos_handler::{
     create_qos_classifier, create_qos_pipe, create_qos_queue, delete_qos_classifier,
-    delete_qos_pipe, delete_qos_queue, get_qos_status, list_qos_classifiers, list_qos_pipes,
-    list_qos_queues,
+    delete_qos_pipe, delete_qos_queue, get_qos_shaping, get_qos_status, list_qos_classifiers,
+    list_qos_pipes, list_qos_queues,
 };
 use super::ratelimit_handler::{
     create_ratelimit_rule, delete_ratelimit_rule, list_ratelimit_rules,
@@ -341,6 +341,7 @@ pub fn build_router(
             .route("/api/v1/geoip/status", get(geoip_status))
             .route("/api/v1/geoip/lookup", get(geoip_lookup))
             .route("/api/v1/qos/status", get(get_qos_status))
+            .route("/api/v1/qos/shaping", get(get_qos_shaping))
             .route("/api/v1/qos/pipes", get(list_qos_pipes))
             .route("/api/v1/qos/queues", get(list_qos_queues))
             .route("/api/v1/qos/classifiers", get(list_qos_classifiers))

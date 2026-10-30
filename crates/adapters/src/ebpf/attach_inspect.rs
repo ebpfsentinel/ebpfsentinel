@@ -28,6 +28,9 @@ use std::sync::{Mutex, OnceLock};
 
 use aya::programs::links::LinkType;
 use aya::programs::loaded_links;
+use domain::common::error::DomainError;
+use domain::qos::cgroup_shaping::QdiscEntry;
+use ports::secondary::qos_cgroup_shaping_port::QdiscReaderPort;
 
 /// `IFLA_XDP` - the XDP nest inside an `RTM_GETLINK` reply.
 const IFLA_XDP: u16 = 43;
@@ -565,6 +568,210 @@ fn parse_xdp_nest(reply: &[u8]) -> Option<XdpAttachment> {
     })
 }
 
+/// `struct tcmsg` from `<linux/rtnetlink.h>`, fields named without their
+/// `tcm_` prefix.
+#[repr(C)]
+#[derive(Default)]
+struct TcMsg {
+    family: u8,
+    pad1: u8,
+    pad2: u16,
+    ifindex: i32,
+    handle: u32,
+    parent: u32,
+    info: u32,
+}
+
+/// `RTM_NEWQDISC` / `RTM_GETQDISC` from `<linux/rtnetlink.h>`.
+const RTM_NEWQDISC: u16 = 36;
+const RTM_GETQDISC: u16 = 38;
+/// `NLM_F_DUMP` (`NLM_F_ROOT | NLM_F_MATCH`) from `<linux/netlink.h>`.
+const NLM_F_DUMP: u16 = 0x300;
+/// `NLMSG_ERROR` / `NLMSG_DONE` from `<linux/netlink.h>`.
+const NLMSG_ERROR: u16 = 2;
+const NLMSG_DONE: u16 = 3;
+/// `TCA_KIND` from `<linux/rtnetlink.h>`: the qdisc's name, NUL-terminated.
+const TCA_KIND: u16 = 1;
+
+/// Every qdisc attached to the interface at `ifindex`, read with an
+/// `RTM_GETQDISC` dump.
+///
+/// Read-only rtnetlink needs no capability, so this answers on the token
+/// path too.
+///
+/// # Errors
+///
+/// A socket the kernel refused, or a dump that answered with an error.
+pub fn qdiscs_of(ifindex: u32) -> Result<Vec<QdiscEntry>, io::Error> {
+    #[repr(C)]
+    struct Request {
+        nlh: NlMsgHdr,
+        tcm: TcMsg,
+    }
+
+    let len = u32::try_from(size_of::<Request>())
+        .map_err(|_| io::Error::other("RTM_GETQDISC request does not fit a u32 length"))?;
+    let mut req = Request {
+        nlh: NlMsgHdr::default(),
+        tcm: TcMsg::default(),
+    };
+    req.nlh.nlmsg_len = len;
+    req.nlh.nlmsg_type = RTM_GETQDISC;
+    req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    req.nlh.nlmsg_seq = 1;
+    req.tcm.family = u8::try_from(libc::AF_UNSPEC).unwrap_or(0);
+    req.tcm.ifindex = i32::try_from(ifindex).unwrap_or(i32::MAX);
+
+    // SAFETY: a plain socket create; the fd is wrapped for RAII immediately.
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            libc::NETLINK_ROUTE,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let sock = OwnedSocket(fd);
+
+    // SAFETY: `req` is a fully-initialised message of the advertised length.
+    let sent = unsafe {
+        libc::send(
+            sock.0,
+            (&raw mut req).cast::<libc::c_void>(),
+            size_of::<Request>(),
+            0,
+        )
+    };
+    if sent < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let mut entries = Vec::new();
+    let mut buf = vec![0u8; 32 * 1024];
+    loop {
+        // SAFETY: `buf` is a live allocation of the advertised length.
+        let got = unsafe {
+            libc::recv(
+                sock.0,
+                buf.as_mut_ptr().cast::<libc::c_void>(),
+                buf.len(),
+                0,
+            )
+        };
+        if got < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if got == 0 {
+            return Ok(entries);
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let part = &buf[..got as usize];
+        if parse_qdisc_dump(part, ifindex, &mut entries)? {
+            return Ok(entries);
+        }
+    }
+}
+
+/// Walk one datagram of an `RTM_GETQDISC` dump, keeping the qdiscs of
+/// `ifindex`. Returns whether the dump is over.
+///
+/// Split from the syscall so the parser is testable against built bytes,
+/// and filtering here rather than trusting the request because a qdisc dump
+/// walks every device whatever index it was asked for.
+fn parse_qdisc_dump(
+    mut datagram: &[u8],
+    ifindex: u32,
+    out: &mut Vec<QdiscEntry>,
+) -> Result<bool, io::Error> {
+    let hdr_len = size_of::<NlMsgHdr>();
+    while datagram.len() >= hdr_len {
+        let read_u32 = |bytes: &[u8], at: usize| {
+            bytes
+                .get(at..at + 4)
+                .and_then(|b| b.try_into().ok())
+                .map(u32::from_ne_bytes)
+        };
+        let msg_len = read_u32(datagram, 0).unwrap_or(0) as usize;
+        let msg_type = datagram
+            .get(4..6)
+            .and_then(|b| b.try_into().ok())
+            .map_or(0, u16::from_ne_bytes);
+        if msg_len < hdr_len || msg_len > datagram.len() {
+            return Err(io::Error::other("malformed RTM_GETQDISC reply"));
+        }
+        let msg = &datagram[..msg_len];
+        match msg_type {
+            NLMSG_DONE => return Ok(true),
+            NLMSG_ERROR => {
+                let errno = msg
+                    .get(hdr_len..hdr_len + 4)
+                    .and_then(|b| b.try_into().ok())
+                    .map_or(0, i32::from_ne_bytes);
+                if errno != 0 {
+                    return Err(io::Error::from_raw_os_error(-errno));
+                }
+                return Ok(true);
+            }
+            RTM_NEWQDISC => {
+                let tcm = hdr_len;
+                let index = msg
+                    .get(tcm + 4..tcm + 8)
+                    .and_then(|b| b.try_into().ok())
+                    .map_or(-1, i32::from_ne_bytes);
+                if u32::try_from(index).ok() == Some(ifindex) {
+                    let handle = read_u32(msg, tcm + 8).unwrap_or(0);
+                    let parent = read_u32(msg, tcm + 12).unwrap_or(0);
+                    let attrs = msg
+                        .get(nla_align(tcm + size_of::<TcMsg>())..)
+                        .unwrap_or_default();
+                    let kind = find_attr(attrs, TCA_KIND)
+                        .map(|raw| {
+                            let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+                            String::from_utf8_lossy(&raw[..end]).into_owned()
+                        })
+                        .unwrap_or_default();
+                    out.push(QdiscEntry {
+                        handle,
+                        parent,
+                        kind,
+                    });
+                }
+            }
+            _ => {}
+        }
+        let step = nla_align(msg_len);
+        if step >= datagram.len() {
+            break;
+        }
+        datagram = &datagram[step..];
+    }
+    Ok(false)
+}
+
+/// Reads an interface's qdiscs by name, resolving the index through sysfs.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NetlinkQdiscReader;
+
+impl QdiscReaderPort for NetlinkQdiscReader {
+    fn qdiscs(&self, interface: &str) -> Result<(u32, Vec<QdiscEntry>), DomainError> {
+        if interface.is_empty() || interface.contains('/') || interface.starts_with('.') {
+            return Err(DomainError::InvalidConfig(format!(
+                "'{interface}' is not an interface name"
+            )));
+        }
+        let raw = std::fs::read_to_string(format!("/sys/class/net/{interface}/ifindex"))
+            .map_err(|e| DomainError::EngineError(format!("interface {interface}: {e}")))?;
+        let ifindex = raw.trim().parse::<u32>().map_err(|e| {
+            DomainError::EngineError(format!("interface {interface}: ifindex unreadable: {e}"))
+        })?;
+        qdiscs_of(ifindex)
+            .map(|entries| (ifindex, entries))
+            .map_err(|e| DomainError::EngineError(format!("qdisc dump on {interface} failed: {e}")))
+    }
+}
+
 /// Netlink attributes are padded to a 4-byte boundary.
 pub(super) const fn nla_align(len: usize) -> usize {
     (len + 3) & !3
@@ -629,6 +836,86 @@ mod tests {
                 "{mode} is exported as a label nothing reads"
             );
         }
+    }
+
+    /// One `RTM_NEWQDISC` message for `ifindex` naming `kind`.
+    fn qdisc_msg(ifindex: i32, handle: u32, parent: u32, kind: &str) -> Vec<u8> {
+        let head = nla_align(size_of::<NlMsgHdr>() + size_of::<TcMsg>());
+        let mut kind_bytes = kind.as_bytes().to_vec();
+        kind_bytes.push(0);
+        let attrs = attr(TCA_KIND, &kind_bytes);
+        let total = head + attrs.len();
+        let mut out = vec![0u8; head];
+        out[..4].copy_from_slice(&u32::try_from(total).unwrap().to_ne_bytes());
+        out[4..6].copy_from_slice(&RTM_NEWQDISC.to_ne_bytes());
+        let tcm = size_of::<NlMsgHdr>();
+        out[tcm + 4..tcm + 8].copy_from_slice(&ifindex.to_ne_bytes());
+        out[tcm + 8..tcm + 12].copy_from_slice(&handle.to_ne_bytes());
+        out[tcm + 12..tcm + 16].copy_from_slice(&parent.to_ne_bytes());
+        out.extend_from_slice(&attrs);
+        out
+    }
+
+    fn control(kind: u16, errno: i32) -> Vec<u8> {
+        let mut out = vec![0u8; size_of::<NlMsgHdr>() + 4];
+        let total = u32::try_from(out.len()).unwrap();
+        out[..4].copy_from_slice(&total.to_ne_bytes());
+        out[4..6].copy_from_slice(&kind.to_ne_bytes());
+        out[16..20].copy_from_slice(&errno.to_ne_bytes());
+        out
+    }
+
+    #[test]
+    fn the_tcmsg_header_matches_the_kernel_layout() {
+        assert_eq!(size_of::<TcMsg>(), 20);
+    }
+
+    #[test]
+    fn a_qdisc_dump_keeps_the_interface_asked_for_and_reads_the_kind() {
+        let mut datagram = qdisc_msg(2, 0x8001_0000, 0xFFFF_FFFF, "mq");
+        datagram.extend(qdisc_msg(2, 0, 0x8001_0001, "fq"));
+        datagram.extend(qdisc_msg(3, 0, 0xFFFF_FFFF, "noqueue"));
+        let mut out = Vec::new();
+        let done = parse_qdisc_dump(&datagram, 2, &mut out).unwrap();
+        assert!(!done);
+        assert_eq!(
+            out,
+            vec![
+                QdiscEntry {
+                    handle: 0x8001_0000,
+                    parent: 0xFFFF_FFFF,
+                    kind: "mq".to_string()
+                },
+                QdiscEntry {
+                    handle: 0,
+                    parent: 0x8001_0001,
+                    kind: "fq".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_qdisc_dump_ends_on_done_and_reports_an_error() {
+        let mut out = Vec::new();
+        assert!(parse_qdisc_dump(&control(NLMSG_DONE, 0), 2, &mut out).unwrap());
+        let err = parse_qdisc_dump(&control(NLMSG_ERROR, -libc::EPERM), 2, &mut out);
+        assert_eq!(err.unwrap_err().raw_os_error(), Some(libc::EPERM));
+    }
+
+    #[test]
+    fn a_truncated_qdisc_dump_is_refused_rather_than_read() {
+        let mut datagram = qdisc_msg(2, 0, 0xFFFF_FFFF, "fq");
+        datagram.truncate(datagram.len() - 4);
+        let mut out = Vec::new();
+        assert!(parse_qdisc_dump(&datagram, 2, &mut out).is_err());
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_path_is_not_an_interface_name() {
+        assert!(NetlinkQdiscReader.qdiscs("../etc").is_err());
+        assert!(NetlinkQdiscReader.qdiscs("").is_err());
     }
 
     #[test]

@@ -358,6 +358,7 @@ pub const REQUIREMENTS: &[ObjectRequirements] = &[
             BPF_FUNC_get_socket_cookie,
             BPF_FUNC_ktime_get_boot_ns,
             BPF_FUNC_ktime_get_ns,
+            BPF_FUNC_skb_cgroup_id,
             BPF_FUNC_skb_ecn_set_ce,
             BPF_FUNC_skb_set_tstamp,
         ],

@@ -333,6 +333,15 @@ pub struct AgentMetrics {
     /// and a security figure that loses it reads as a rule that stopped
     /// matching.
     pub workload_denials_total: Family<WorkloadRuleLabels, Counter>,
+    /// Bytes the kernel counted leaving cgroups each per-workload shaping
+    /// rule holds to a rate, summed over the rule's cgroups.
+    pub cgroup_shaping_bytes_total: Family<RuleIdLabels, Counter>,
+    /// Packets each shaping rule's cgroups had dropped because their
+    /// departure time fell past the rule's horizon.
+    pub cgroup_shaping_dropped_horizon_total: Family<RuleIdLabels, Counter>,
+    /// What each shaping rule's cgroups sent over the last read interval,
+    /// in bits per second: the figure to hold against the configured rate.
+    pub cgroup_shaping_achieved_bps: Family<RuleIdLabels, Gauge>,
     /// Distinct edges the open learning window holds, zero when none is
     /// open: an operator decides the window was long enough by watching
     /// this stop growing, which a counter cannot show.
@@ -700,6 +709,25 @@ impl AgentMetrics {
             "workload_denials",
             "Socket operations refused by each workload firewall rule, by rule_id and mode",
             workload_denials_total.clone(),
+        );
+
+        let cgroup_shaping_bytes_total = Family::<RuleIdLabels, Counter>::default();
+        registry.register(
+            "cgroup_shaping_bytes",
+            "Bytes sent by the cgroups each per-workload shaping rule holds to a rate, by rule_id",
+            cgroup_shaping_bytes_total.clone(),
+        );
+        let cgroup_shaping_dropped_horizon_total = Family::<RuleIdLabels, Counter>::default();
+        registry.register(
+            "cgroup_shaping_dropped_horizon",
+            "Packets dropped because their departure time fell past the rule's horizon, by rule_id",
+            cgroup_shaping_dropped_horizon_total.clone(),
+        );
+        let cgroup_shaping_achieved_bps = Family::<RuleIdLabels, Gauge>::default();
+        registry.register(
+            "cgroup_shaping_achieved_bps",
+            "Bits per second each per-workload shaping rule's cgroups sent over the last read interval",
+            cgroup_shaping_achieved_bps.clone(),
         );
 
         let flows_exported_total = Family::<FlowSinkLabels, Counter>::default();
@@ -1195,6 +1223,9 @@ impl AgentMetrics {
             auto_responses_total,
             alerts_by_rule_total,
             workload_denials_total,
+            cgroup_shaping_bytes_total,
+            cgroup_shaping_dropped_horizon_total,
+            cgroup_shaping_achieved_bps,
             learning_edges,
             learning_observations_total,
             flows_exported_total,
@@ -1382,6 +1413,26 @@ impl PacketMetrics for AgentMetrics {
                 })
                 .observe(seconds);
         }
+    }
+
+    fn record_cgroup_shaping(&self, rule_id: &str, bytes: u64, dropped_horizon: u64) {
+        let labels = RuleIdLabels {
+            rule_id: rule_id.to_string(),
+        };
+        self.cgroup_shaping_bytes_total
+            .get_or_create(&labels)
+            .inc_by(bytes);
+        self.cgroup_shaping_dropped_horizon_total
+            .get_or_create(&labels)
+            .inc_by(dropped_horizon);
+    }
+
+    fn set_cgroup_shaping_achieved(&self, rule_id: &str, bps: u64) {
+        self.cgroup_shaping_achieved_bps
+            .get_or_create(&RuleIdLabels {
+                rule_id: rule_id.to_string(),
+            })
+            .set(i64::try_from(bps).unwrap_or(i64::MAX));
     }
 }
 
@@ -2538,6 +2589,9 @@ mod tests {
         ("audit_failures", "counter"),
         ("auto_responses", "counter"),
         ("bpf_token_used", "gauge"),
+        ("cgroup_shaping_achieved_bps", "gauge"),
+        ("cgroup_shaping_bytes", "counter"),
+        ("cgroup_shaping_dropped_horizon", "counter"),
         ("container_resolver_cache_hits", "counter"),
         ("container_resolver_cache_misses", "counter"),
         ("container_resolver_errors", "counter"),
@@ -2792,6 +2846,8 @@ mod tests {
             })
             .inc();
         m.record_workload_denials("workload-001", true, 1);
+        m.record_cgroup_shaping("batch", 1_500, 1);
+        m.set_cgroup_shaping_achieved("batch", 8_000_000);
         m.set_learning_edges(3);
         m.record_learning_observation("new_edge");
         m.record_flows_exported("ipfix-udp-127.0.0.1:4739", 1);

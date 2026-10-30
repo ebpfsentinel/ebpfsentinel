@@ -834,6 +834,8 @@ pub enum LbCommand {
 pub enum QosCommand {
     /// Show `QoS` / traffic shaping status
     Status,
+    /// Show per-workload rates, where they act and what each cgroup achieved
+    Shaping,
     /// List all `QoS` pipes
     Pipes,
     /// List all `QoS` queues
@@ -2004,6 +2006,18 @@ mod tests {
             cli.command,
             Some(Command::Qos(DomainArgs {
                 command: QosCommand::Status,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_qos_shaping() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "qos", "shaping"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Qos(DomainArgs {
+                command: QosCommand::Shaping,
                 ..
             }))
         ));

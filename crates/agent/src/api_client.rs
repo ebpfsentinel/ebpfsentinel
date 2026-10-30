@@ -1095,6 +1095,63 @@ pub struct QosStatusResponse {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct QosShapingResponse {
+    pub supported: bool,
+    pub active: bool,
+    #[serde(default)]
+    pub rules: Vec<QosShapingRuleResponse>,
+    #[serde(default)]
+    pub interfaces: Vec<QosShapingInterfaceResponse>,
+    #[serde(default)]
+    pub cgroups: Vec<QosShapedCgroupResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_error: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct QosShapingRuleResponse {
+    pub id: String,
+    pub rate_bps: u64,
+    pub horizon_ms: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    #[serde(default)]
+    pub kubernetes: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct QosShapingInterfaceResponse {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ifindex: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_qdisc: Option<String>,
+    pub honoured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct QosShapedCgroupResponse {
+    pub cgroup_id: u64,
+    pub rule_id: String,
+    pub rate_bps: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    pub bytes: u64,
+    pub packets: u64,
+    pub dropped_horizon: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub achieved_bps: Option<u64>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct QosPipeResponse {
     pub id: String,
     pub rate_bps: u64,
@@ -3019,6 +3076,15 @@ impl ApiClient {
     pub async fn qos_status(&self) -> anyhow::Result<QosStatusResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/qos/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn qos_shaping(&self) -> anyhow::Result<QosShapingResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/qos/shaping")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

@@ -56,6 +56,14 @@ pub trait PacketMetrics: Send + Sync {
         _duration_seconds: Option<f64>,
     ) {
     }
+
+    /// Add what the cgroups under one shaping rule sent, and what the
+    /// shaper dropped for them past the horizon, since the last reading.
+    fn record_cgroup_shaping(&self, _rule_id: &str, _bytes: u64, _dropped_horizon: u64) {}
+
+    /// Set the rate the cgroups under one shaping rule achieved over the
+    /// last reading, in bits per second.
+    fn set_cgroup_shaping_achieved(&self, _rule_id: &str, _bps: u64) {}
 }
 
 // ── Firewall / eBPF program metrics ────────────────────────────────

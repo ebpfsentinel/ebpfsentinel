@@ -46,6 +46,7 @@ pub mod process_attach;
 pub mod process_event_reader;
 pub mod prog_test_run;
 pub mod program_name;
+pub mod qos_cgroup_shaping;
 pub mod qos_map_manager;
 pub mod quarantine_map_manager;
 pub mod ratelimit_lpm_manager;
@@ -70,8 +71,8 @@ pub mod workload_policy_map_manager;
 pub mod zone_map_manager;
 
 pub use attach_inspect::{
-    AttachBlock, XDP_ATTACH_MODES, XdpAttachMode, XdpAttachment, blocked_attaches,
-    clear_all_blocks as clear_attach_blocks, xdp_attachment,
+    AttachBlock, NetlinkQdiscReader, XDP_ATTACH_MODES, XdpAttachMode, XdpAttachment,
+    blocked_attaches, clear_all_blocks as clear_attach_blocks, xdp_attachment,
 };
 pub use attribution_attach::{ATTRIBUTION_JOIN_HOOK, AttributionAttacher, AttributionStatus};
 pub use bpf_token::{
@@ -126,6 +127,7 @@ pub use netpol_map_manager::NetpolMapManager;
 pub use process_attach::{ProcessTracingAttacher, ProcessTracingStatus};
 pub use process_event_reader::ProcessEventReader;
 pub use program_name::published_program_name;
+pub use qos_cgroup_shaping::QosCgroupShapingMaps;
 pub use qos_map_manager::QosMapManager;
 pub use quarantine_map_manager::{QuarantineMapManager, QuarantineStatus};
 pub use ratelimit_lpm_manager::RateLimitLpmManager;

@@ -452,6 +452,7 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
             let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
             match args.command {
                 QosCommand::Status => commands::cmd_qos_status(&client, output).await,
+                QosCommand::Shaping => commands::cmd_qos_shaping(&client, output).await,
                 QosCommand::Pipes => commands::cmd_qos_pipes(&client, output).await,
                 QosCommand::Queues => commands::cmd_qos_queues(&client, output).await,
                 QosCommand::Classifiers => commands::cmd_qos_classifiers(&client, output).await,

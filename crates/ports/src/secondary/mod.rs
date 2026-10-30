@@ -42,6 +42,7 @@ pub mod pod_coverage_port;
 pub mod process_details_port;
 pub mod process_executable_port;
 pub mod process_signal_map_port;
+pub mod qos_cgroup_shaping_port;
 pub mod qos_map_port;
 pub mod quarantine_map_port;
 pub mod ratelimit_lpm_port;

@@ -6834,6 +6834,65 @@
         ]
       }
     },
+    "/api/v1/qos/shaping": {
+      "get": {
+        "tags": [
+          "QoS"
+        ],
+        "summary": "`GET /api/v1/qos/shaping` -- per-workload rates, where they act, and\nwhat each cgroup achieved.",
+        "operationId": "get_qos_shaping",
+        "responses": {
+          "200": {
+            "description": "Per-workload shaping state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QosShapingResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Shaping service not available",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/qos/status": {
       "get": {
         "tags": [
@@ -13921,6 +13980,201 @@
           },
           "pipe_id": {
             "type": "string"
+          }
+        }
+      },
+      "QosShapedCgroupResponse": {
+        "type": "object",
+        "description": "One cgroup held to a rate.",
+        "required": [
+          "cgroup_id",
+          "rule_id",
+          "rate_bps",
+          "bytes",
+          "packets",
+          "dropped_horizon"
+        ],
+        "properties": {
+          "achieved_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Bits per second sent over the last read interval; absent until two\nreads exist.",
+            "minimum": 0
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "cgroup": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cgroup_id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "container": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dropped_horizon": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Packets dropped because their departure time fell past the horizon.",
+            "minimum": 0
+          },
+          "packets": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "rate_bps": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "rule_id": {
+            "type": "string"
+          }
+        }
+      },
+      "QosShapingInterfaceResponse": {
+        "type": "object",
+        "description": "One interface the agent attaches to, and whether shaping acts there.",
+        "required": [
+          "name",
+          "honoured"
+        ],
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "honoured": {
+            "type": "boolean",
+            "description": "Whether the qdiscs honour a departure time: `fq` at the root, or\n`mq` with `fq` under every queue. Shaping acts only where this holds."
+          },
+          "ifindex": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "root_qdisc": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The root qdisc's kind, `none` when the interface has no root qdisc."
+          }
+        }
+      },
+      "QosShapingResponse": {
+        "type": "object",
+        "description": "What per-workload shaping holds, where it acts, and what it achieved.",
+        "required": [
+          "supported",
+          "active",
+          "rules",
+          "interfaces",
+          "cgroups"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "Whether a rule is in force on at least one interface. False with\nrules configured means no attached interface honours a departure\ntime, and nothing is shaped."
+          },
+          "cgroups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QosShapedCgroupResponse"
+            }
+          },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QosShapingInterfaceResponse"
+            }
+          },
+          "read_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last read of the kernel counters failed."
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QosShapingRuleResponse"
+            }
+          },
+          "supported": {
+            "type": "boolean",
+            "description": "Whether the loaded tc-qos object carries the shaping tables."
+          }
+        }
+      },
+      "QosShapingRuleResponse": {
+        "type": "object",
+        "description": "One per-workload shaping rule.",
+        "required": [
+          "id",
+          "rate_bps",
+          "horizon_ms",
+          "kubernetes"
+        ],
+        "properties": {
+          "cgroup": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "container": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "horizon_ms": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "kubernetes": {
+            "type": "boolean",
+            "description": "Whether the selector also names pod labels, namespace labels or a\nservice account."
+          },
+          "rate_bps": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "unit": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

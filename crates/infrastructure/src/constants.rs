@@ -34,6 +34,12 @@ pub const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// enough that a policy at its ceiling costs one map walk a tick.
 pub const WORKLOAD_DENIAL_READ_INTERVAL: Duration = Duration::from_secs(10);
 
+/// How often the per-workload shaping counters are read, which is also the
+/// window the achieved rate is measured over. Each read also re-reads every
+/// attached interface's qdiscs, so a qdisc replaced under the agent moves
+/// shaping on or off within one interval.
+pub const CGROUP_SHAPING_READ_INTERVAL: Duration = Duration::from_secs(5);
+
 /// How many DNS packets of named workloads wait between the ring buffer and
 /// the policy service.
 ///

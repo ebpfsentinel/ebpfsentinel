@@ -87,6 +87,7 @@ pub struct ConfigReloadService {
     loadbalancer_service: Option<Arc<RwLock<LbAppService>>>,
     vip_announcer_service: Option<Arc<RwLock<VipAnnouncerService>>>,
     qos_service: Option<Arc<RwLock<crate::qos_service_impl::QosAppService>>>,
+    cgroup_shaping: Option<Arc<crate::qos_cgroup_shaping_service::QosCgroupShapingService>>,
     zone_service: Option<Arc<RwLock<ZoneAppService>>>,
     schedule_service: Option<Arc<RwLock<ScheduleService>>>,
     workload_service: Option<Arc<crate::workload_policy_service::WorkloadPolicyService>>,
@@ -124,6 +125,7 @@ impl ConfigReloadService {
             loadbalancer_service: None,
             vip_announcer_service: None,
             qos_service: None,
+            cgroup_shaping: None,
             zone_service: None,
             schedule_service: None,
             workload_service: None,
@@ -206,6 +208,14 @@ impl ConfigReloadService {
     /// Set the `QoS` service for reload integration.
     pub fn set_qos_service(&mut self, svc: Arc<RwLock<crate::qos_service_impl::QosAppService>>) {
         self.qos_service = Some(svc);
+    }
+
+    /// Set the per-workload shaping service, whose rules follow `qos`.
+    pub fn set_cgroup_shaping_service(
+        &mut self,
+        svc: Arc<crate::qos_cgroup_shaping_service::QosCgroupShapingService>,
+    ) {
+        self.cgroup_shaping = Some(svc);
     }
 
     /// Set the zone service for reload integration.
@@ -368,18 +378,23 @@ impl ConfigReloadService {
         Ok(())
     }
 
-    /// Reload `QoS` pipes, queues, and classifiers.
+    /// Reload `QoS` pipes, queues, classifiers and per-workload rates.
     pub async fn reload_qos(
         &self,
         pipes: Vec<domain::qos::entity::QosPipe>,
         queues: Vec<domain::qos::entity::QosQueue>,
         classifiers: Vec<domain::qos::entity::QosClassifier>,
+        cgroup_shaping: Vec<domain::qos::cgroup_shaping::CgroupShapingRule>,
         enabled: bool,
     ) -> Result<(), anyhow::Error> {
         let Some(ref qos_svc) = self.qos_service else {
             return Ok(());
         };
         let _guard = self.reload_locks.qos.lock().await;
+
+        if let Some(shaping) = &self.cgroup_shaping {
+            shaping.set_rules(if enabled { cgroup_shaping } else { Vec::new() });
+        }
 
         let mut svc = qos_svc.write().await;
         svc.set_enabled(enabled);

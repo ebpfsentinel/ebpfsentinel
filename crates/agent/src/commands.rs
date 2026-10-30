@@ -2177,6 +2177,103 @@ pub async fn cmd_qos_status(client: &ApiClient, output: OutputFormat) -> Result<
     Ok(())
 }
 
+pub async fn cmd_qos_shaping(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let shaping = client.qos_shaping().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&shaping)?);
+        return Ok(());
+    }
+
+    println!("Per-workload shaping");
+    println!("  Supported: {}", yes_no(shaping.supported));
+    println!("  Active:    {}", yes_no(shaping.active));
+    if let Some(err) = &shaping.read_error {
+        println!("  Read error: {err}");
+    }
+
+    if !shaping.interfaces.is_empty() {
+        println!();
+        let mut table = Table::new(&[
+            ("INTERFACE", Align::Left),
+            ("ROOT QDISC", Align::Left),
+            ("HONOURED", Align::Left),
+            ("ERROR", Align::Left),
+        ]);
+        for iface in &shaping.interfaces {
+            table.row(cells![
+                iface.name,
+                iface.root_qdisc.as_deref().unwrap_or("-"),
+                yes_no(iface.honoured),
+                iface.error.as_deref().unwrap_or("-")
+            ]);
+        }
+        table.print();
+    }
+
+    if shaping.rules.is_empty() {
+        println!("\nNo shaping rules configured.");
+        return Ok(());
+    }
+
+    println!();
+    let mut table = Table::new(&[
+        ("RULE", Align::Left),
+        ("RATE (bps)", Align::Right),
+        ("HORIZON(ms)", Align::Right),
+        ("WORKLOAD", Align::Left),
+    ]);
+    for rule in &shaping.rules {
+        let workload = [
+            rule.unit.as_deref().map(|u| format!("unit={u}")),
+            rule.cgroup.as_deref().map(|c| format!("cgroup={c}")),
+            rule.container.as_deref().map(|c| format!("container={c}")),
+            rule.kubernetes.then(|| "kubernetes".to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+        table.row(cells![rule.id, rule.rate_bps, rule.horizon_ms, workload]);
+    }
+    table.print();
+
+    if shaping.cgroups.is_empty() {
+        println!("\nNo cgroup is held to a rate.");
+        return Ok(());
+    }
+
+    println!();
+    let mut table = Table::new(&[
+        ("CGROUP", Align::Left),
+        ("RULE", Align::Left),
+        ("RATE (bps)", Align::Right),
+        ("ACHIEVED (bps)", Align::Right),
+        ("BYTES", Align::Right),
+        ("DROPPED", Align::Right),
+    ]);
+    for shaped in &shaping.cgroups {
+        let name = shaped
+            .container
+            .clone()
+            .or_else(|| shaped.cgroup.clone())
+            .unwrap_or_else(|| shaped.cgroup_id.to_string());
+        let achieved = shaped
+            .achieved_bps
+            .map_or_else(|| "-".to_string(), |bps| bps.to_string());
+        table.row(cells![
+            name,
+            shaped.rule_id,
+            shaped.rate_bps,
+            achieved,
+            shaped.bytes,
+            shaped.dropped_horizon
+        ]);
+    }
+    table.print();
+    Ok(())
+}
+
 pub async fn cmd_qos_pipes(client: &ApiClient, output: OutputFormat) -> Result<()> {
     let pipes = client.list_qos_pipes().await?;
 

@@ -639,6 +639,14 @@ pub async fn apply_config_file_prepared(
         }
     };
 
+    let qos_cgroup_shaping = match config.qos.to_domain_cgroup_shaping() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid per-workload shaping");
+            return None;
+        }
+    };
+
     let ips_rules = match config.ips_rules() {
         Ok(r) => r,
         Err(e) => {
@@ -905,7 +913,13 @@ pub async fn apply_config_file_prepared(
 
     // Phase 6f¾: QoS reload
     if let Err(e) = reload_service
-        .reload_qos(qos_pipes, qos_queues, qos_classifiers, config.qos.enabled)
+        .reload_qos(
+            qos_pipes,
+            qos_queues,
+            qos_classifiers,
+            qos_cgroup_shaping,
+            config.qos.enabled,
+        )
         .await
     {
         tracing::warn!(error = %e, "QoS config reload failed at application level");
