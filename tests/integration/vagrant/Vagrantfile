@@ -339,7 +339,7 @@ SYSCTL
         rustup toolchain install nightly --component rust-src
         # Same pinned version as the install-bpf-linker action: --locked freezes
         # the linker's dependencies, not the linker itself.
-        cargo +nightly install bpf-linker --version 0.11.1 --locked
+        cargo +nightly install bpf-linker --version 0.12.0 --locked
       fi
     SHELL
 

@@ -16,7 +16,7 @@ runs:
     - name: Install LLVM and bpf-linker
       shell: bash
       # The version is pinned rather than taken from the distribution: Ubuntu
-      # 24.04 packages LLVM 18 and bpf-linker 0.11.1 links against 21, 22 or 23,
+      # 24.04 packages LLVM 18 and bpf-linker 0.12.0 links against 21, 22 or 23,
       # 23 by default. Nothing catches
       # the mismatch while installing - bpf-linker pulls llvm-sys with
       # `no-llvm-linking` and does the linking itself, so no build step compares
@@ -32,7 +32,7 @@ runs:
       # version and move with this one.
       env:
         LLVM_VERSION: "23"
-        BPF_LINKER_VERSION: "0.11.1"
+        BPF_LINKER_VERSION: "0.12.0"
         SOURCE_ROOT: ${{ inputs.source-root }}
       run: |
         set -euo pipefail
