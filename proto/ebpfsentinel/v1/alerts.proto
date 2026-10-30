@@ -140,6 +140,29 @@ message Workload {
   string service_account = 10;
   // systemd unit, for a host process placed in one. Empty if absent.
   string unit = 11;
+  // The processes above this one, parent first, at most eight. Empty where
+  // the process table holds no parent for it.
+  repeated WorkloadAncestor ancestors = 12;
+  // The chain goes on past the last ancestor listed.
+  bool ancestry_truncated = 13;
+  // The chain stops at an ancestor that was named and that the table does
+  // not hold, rather than at the root.
+  bool ancestry_incomplete = 14;
+}
+
+// One process above the one behind a flow.
+message WorkloadAncestor {
+  uint32 pid = 1;
+  // The executable path, where the table read one. Empty if absent.
+  string exe = 2;
+  // The kernel's 16-byte command name.
+  string name = 3;
+  // The uid it execed as.
+  uint32 uid = 4;
+  // Kernel monotonic start time in nanoseconds, 0 where it was not read.
+  uint64 start_ns = 5;
+  // It has exited and is kept because this process descends from it.
+  bool exited = 6;
 }
 
 // Container and Kubernetes provenance for an alert, resolved from the

@@ -37,6 +37,7 @@ pub const NETWORK_TRANSPORT: &str = "network.transport";
 pub const NETWORK_TYPE: &str = "network.type";
 pub const PROCESS_PID: &str = "process.pid";
 pub const PROCESS_EXECUTABLE_PATH: &str = "process.executable.path";
+pub const PROCESS_PARENT_PID: &str = "process.parent_pid";
 pub const CONTAINER_ID: &str = "container.id";
 pub const CONTAINER_IMAGE_NAME: &str = "container.image.name";
 pub const K8S_POD_NAME: &str = "k8s.pod.name";
@@ -59,6 +60,9 @@ pub const WORKLOAD_UID: &str = "ebpfsentinel.workload.uid";
 pub const WORKLOAD_CGROUP_ID: &str = "ebpfsentinel.workload.cgroup_id";
 pub const WORKLOAD_UNIT: &str = "ebpfsentinel.workload.unit";
 pub const WORKLOAD_SERVICE_ACCOUNT: &str = "ebpfsentinel.workload.service_account";
+pub const WORKLOAD_ANCESTRY: &str = "ebpfsentinel.workload.ancestry";
+pub const WORKLOAD_ANCESTRY_TRUNCATED: &str = "ebpfsentinel.workload.ancestry_truncated";
+pub const WORKLOAD_ANCESTRY_INCOMPLETE: &str = "ebpfsentinel.workload.ancestry_incomplete";
 
 /// The attributes of one flow record, in the order they are written.
 ///
@@ -156,6 +160,19 @@ fn push_workload(attributes: &mut Vec<(&'static str, String)>, workload: &Worklo
         workload.service_account.as_deref(),
     );
     push_text(attributes, WORKLOAD_UNIT, workload.unit.as_deref());
+    if let Some(ancestry) = workload.ancestry.as_ref() {
+        if let Some(parent) = ancestry.parent() {
+            attributes.push((PROCESS_PARENT_PID, parent.pid.to_string()));
+        }
+        push_text(attributes, WORKLOAD_ANCESTRY, Some(&ancestry.chain_text()));
+        // A flag is written only when it says something.
+        if ancestry.truncated {
+            attributes.push((WORKLOAD_ANCESTRY_TRUNCATED, "true".to_string()));
+        }
+        if ancestry.incomplete {
+            attributes.push((WORKLOAD_ANCESTRY_INCOMPLETE, "true".to_string()));
+        }
+    }
 }
 
 /// Write a text attribute, skipping both absence and the empty string: a
@@ -205,6 +222,7 @@ mod tests {
             namespace: Some("shop".to_string()),
             service_account: Some("web".to_string()),
             unit: Some("nginx.service".to_string()),
+            ancestry: None,
         }
     }
 
@@ -361,5 +379,25 @@ mod tests {
             attributes(&full),
             "a format whose output varies between two runs of one input is not a contract"
         );
+    }
+
+    #[test]
+    fn an_ancestry_rides_as_the_parent_pid_and_one_line() {
+        let mut w = workload();
+        w.ancestry = Some(crate::workload::entity::sample_ancestry());
+        let attributes = attributes(&FlowRecord {
+            workload: Some(w),
+            ..record()
+        });
+        assert_eq!(value(&attributes, PROCESS_PARENT_PID), Some("900"));
+        assert_eq!(
+            value(&attributes, WORKLOAD_ANCESTRY),
+            Some("900 /bin/sh < 120 [nginx]")
+        );
+        assert_eq!(
+            value(&attributes, WORKLOAD_ANCESTRY_INCOMPLETE),
+            Some("true")
+        );
+        assert_eq!(value(&attributes, WORKLOAD_ANCESTRY_TRUNCATED), None);
     }
 }

@@ -659,6 +659,9 @@ impl OwnerReporting {
             cgroup_id,
             comm: comm.trim_end().to_owned(),
             at_ns: boottime_now_ns(),
+            start_ns: None,
+            parent_pid: None,
+            parent_start_ns: None,
         })
     }
 }

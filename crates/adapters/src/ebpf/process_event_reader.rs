@@ -5,7 +5,9 @@ use crate::ebpf::map_store::MapStore;
 use crate::ebpf::ringbuf_observer::{DrainTrigger, RingBufObserver};
 use aya::maps::{MapData, RingBuf};
 use domain::process::entity::{ProcessEventKind, ProcessLifecycleEvent};
-use ebpf_common::process::{PROCESS_EVENT_EXEC, PROCESS_EVENT_EXIT, ProcessEvent};
+use ebpf_common::process::{
+    PROCESS_EVENT_EXEC, PROCESS_EVENT_EXIT, PROCESS_EVENT_FORK, ProcessEvent,
+};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -115,9 +117,13 @@ fn drain(
 fn parse(raw: &ProcessEvent) -> Option<ProcessLifecycleEvent> {
     let kind = match raw.kind {
         PROCESS_EVENT_EXEC => ProcessEventKind::Exec,
+        PROCESS_EVENT_FORK => ProcessEventKind::Fork,
         PROCESS_EVENT_EXIT => ProcessEventKind::Exit,
         _ => return None,
     };
+    // Zero is what the kernel side leaves where a read failed, and no process
+    // the table can name has pid 0 for a parent or started at instant 0.
+    let known_u64 = |v: u64| (v != 0).then_some(v);
     Some(ProcessLifecycleEvent {
         kind,
         pid: raw.pid,
@@ -127,6 +133,9 @@ fn parse(raw: &ProcessEvent) -> Option<ProcessLifecycleEvent> {
         cgroup_id: raw.cgroup_id,
         comm: comm_to_string(&raw.comm),
         at_ns: raw.at_ns,
+        start_ns: known_u64(raw.start_ns),
+        parent_pid: (raw.parent_tgid != 0).then_some(raw.parent_tgid),
+        parent_start_ns: known_u64(raw.parent_start_ns),
     })
 }
 
@@ -152,13 +161,16 @@ mod tests {
         ProcessEvent {
             at_ns: 1_000,
             cgroup_id: 777,
+            start_ns: 900,
+            parent_start_ns: 0,
             pid: 42,
             tgid: 42,
             uid: 1000,
             gid: 1000,
-            comm,
+            parent_tgid: 7,
             kind,
-            _pad: [0u8; 7],
+            _pad: [0u8; 3],
+            comm,
         }
     }
 
@@ -169,6 +181,26 @@ mod tests {
         assert_eq!(event.tgid, 42);
         assert_eq!(event.comm, "curl");
         assert_eq!(event.cgroup_id, 777);
+    }
+
+    #[test]
+    fn a_fork_record_carries_the_lineage_the_kernel_read() {
+        let event = parse(&raw(PROCESS_EVENT_FORK)).unwrap();
+        assert_eq!(event.kind, ProcessEventKind::Fork);
+        assert_eq!(event.start_ns, Some(900));
+        assert_eq!(event.parent_pid, Some(7));
+        // A zero start is a failed read, not instant zero.
+        assert_eq!(event.parent_start_ns, None);
+    }
+
+    #[test]
+    fn a_record_with_no_parent_says_so() {
+        let mut r = raw(PROCESS_EVENT_EXEC);
+        r.parent_tgid = 0;
+        r.start_ns = 0;
+        let event = parse(&r).unwrap();
+        assert_eq!(event.parent_pid, None);
+        assert_eq!(event.start_ns, None);
     }
 
     #[test]

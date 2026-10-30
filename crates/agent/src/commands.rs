@@ -876,6 +876,9 @@ pub async fn cmd_alerts_show(client: &ApiClient, id: &str, output: OutputFormat)
     }
     if let Some(workload) = alert.workload.as_ref() {
         println!("  Workload:       {}", workload.summary());
+        if let Some(ancestry) = workload.ancestry.as_ref() {
+            println!("  Started by:     {}", ancestry.chain());
+        }
     }
     println!("  Message:        {}", alert.message);
     for note in &alert.notes {
@@ -1285,6 +1288,10 @@ pub async fn cmd_processes_list(
     if let Some(reason) = &resp.tracing.reason {
         println!("  Reason:       {reason}");
     }
+    println!("  Lineage:      {}", yes_no(resp.tracing.lineage));
+    if let Some(reason) = &resp.tracing.lineage_reason {
+        println!("  Why not:      {reason}");
+    }
     println!(
         "  Entries:      {} of {}",
         resp.stats.entries, resp.stats.capacity
@@ -1294,6 +1301,13 @@ pub async fn cmd_processes_list(
     println!(
         "  Recorded:     {}  replaced {}  evicted {}  purged {}",
         resp.stats.recorded, resp.stats.replaced, resp.stats.evicted, resp.stats.purged
+    );
+    println!(
+        "  Forks:        {}  ancestors kept {} of {}  evicted {}",
+        resp.stats.forks,
+        resp.stats.ancestors,
+        resp.stats.ancestor_capacity,
+        resp.stats.ancestors_evicted
     );
 
     if resp.processes.is_empty() {
@@ -1369,7 +1383,38 @@ pub async fn cmd_processes_show(client: &ApiClient, pid: u32, output: OutputForm
         }
     }
     println!("  Started at:   {} ns", resp.started_at_ns);
+    if let Some(ancestry) = &resp.ancestry {
+        print_ancestry(ancestry);
+    }
     Ok(())
+}
+
+/// Print the chain above a process, parent first, marking the ancestors
+/// kept after their exit and saying when the chain was cut short.
+fn print_ancestry(ancestry: &crate::api_client::ProcessAncestryResponse) {
+    if ancestry.ancestors.is_empty() && !ancestry.incomplete && !ancestry.truncated {
+        return;
+    }
+    println!("  Ancestry:");
+    for ancestor in &ancestry.ancestors {
+        let name = ancestor
+            .identity
+            .path
+            .clone()
+            .unwrap_or_else(|| format!("[{}]", ancestor.comm));
+        let exited = if ancestor.exited_at_ns.is_some() {
+            "  (exited)"
+        } else {
+            ""
+        };
+        println!("    {:>7}  {name}{exited}", ancestor.pid);
+    }
+    if ancestry.incomplete {
+        println!("    ...      the table no longer holds the next ancestor");
+    }
+    if ancestry.truncated {
+        println!("    ...      further ancestors are not shown");
+    }
 }
 
 // ── Fingerprints ────────────────────────────────────────────────────
@@ -4801,6 +4846,10 @@ pub async fn cmd_ebpf_kernel_features(client: &ApiClient, output: OutputFormat) 
     }
     if let Some(reason) = &resp.process_tracing.reason {
         println!("  Reason:     {reason}");
+    }
+    println!("  Lineage:    {}", yes_no(resp.process_tracing.lineage));
+    if let Some(reason) = &resp.process_tracing.lineage_reason {
+        println!("  Why not:    {reason}");
     }
 
     println!("\nWorkload firewall");

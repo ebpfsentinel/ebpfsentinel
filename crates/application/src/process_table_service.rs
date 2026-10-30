@@ -1,19 +1,24 @@
 //! Keeping the process table filled, and keeping it honest.
 //!
 //! The kernel notifies; this service decides what that notification is worth.
-//! An exec gets one `/proc` pass - the executable, the parent, the command
-//! line where the configuration allows it - and one container resolution, and
-//! whatever that pass could not read stays absent. An exit removes the pid
-//! immediately, which is the only eviction that is correct: a pid is reused,
-//! and a table that let a dead entry linger would name the wrong binary on
-//! the next flow rather than naming none.
+//! An exec gets one `/proc` pass - the executable, the command line where the
+//! configuration allows it, and the parent where the kernel could not read
+//! it - and one container resolution, and whatever that pass could not read
+//! stays absent. A fork gets no `/proc` pass at all: the child runs its
+//! parent's image until it execs, so it inherits the parent's entry, and a
+//! read made at that instant would race the exec that usually follows. An
+//! exit removes the pid immediately, which is the only eviction that is
+//! correct: a pid is reused, and a table that let a dead entry linger would
+//! name the wrong binary on the next flow rather than naming none. An exited
+//! process something still descends from is kept apart, by the table, so the
+//! lineage of a flow survives the shell that launched it.
 
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use domain::container::engine::ContainerResolverEngine;
 use domain::container::entity::ContainerContext;
-use domain::process::engine::ProcessTable;
+use domain::process::engine::{Lineage, ProcessTable, PurgeOutcome};
 use domain::process::entity::{
     ProcessEntry, ProcessEventKind, ProcessIdentity, ProcessLifecycleEvent, ProcessTableStats,
 };
@@ -221,7 +226,8 @@ impl ProcessTableService {
     pub async fn apply(&self, event: ProcessLifecycleEvent) {
         match event.kind {
             ProcessEventKind::Exec => self.record_exec(event).await,
-            ProcessEventKind::Exit => self.record_exit(event.tgid),
+            ProcessEventKind::Fork => self.record_fork(event).await,
+            ProcessEventKind::Exit => self.record_exit(&event),
         }
     }
 
@@ -231,6 +237,9 @@ impl ProcessTableService {
         entry.uid = event.uid;
         entry.gid = event.gid;
         entry.cgroup_id = event.cgroup_id;
+        entry.start_ns = event.start_ns;
+        entry.parent_pid = event.parent_pid;
+        entry.parent_start_ns = event.parent_start_ns;
 
         if let Some(reader) = &self.executables
             && let Some(executable) = reader.read_executable(pid)
@@ -245,7 +254,11 @@ impl ProcessTableService {
         if let Some(reader) = &self.details
             && let Some(details) = reader.read_details(pid)
         {
-            entry.parent_pid = details.parent_pid;
+            // The kernel's parent wins: it was read before the parent had a
+            // chance to exit and hand the child to a reaper.
+            if entry.parent_pid.is_none() {
+                entry.parent_pid = details.parent_pid;
+            }
             if self.capture_command_line {
                 entry.command_line = details.command_line;
             }
@@ -253,21 +266,7 @@ impl ProcessTableService {
 
         entry.container = self.resolve_container(pid, event.cgroup_id).await;
 
-        // Before the table write rather than after: the entry moves into the
-        // table, and the sooner the task's bit is set the shorter the window
-        // in which it connects unresolved.
-        if let Some(workload) = &self.workload {
-            workload.record_exec(&entry);
-        }
-        if let Some(scope) = &self.dlp_scope {
-            scope.record_exec(&entry);
-        }
-        if let Some(scope) = &self.ids_scope {
-            scope.record_exec(&entry);
-        }
-        if let Some(shaping) = &self.shaping {
-            shaping.record_exec(&entry);
-        }
+        self.notify_exec(&entry);
 
         let replaced = self
             .table
@@ -281,7 +280,90 @@ impl ProcessTableService {
         );
     }
 
-    fn record_exit(&self, pid: u32) {
+    /// A new process running its parent's image. The entry is the parent's,
+    /// renamed: same executable, same command line, same container, since
+    /// nothing has replaced any of them yet, and the exec that usually
+    /// follows rewrites it. A parent the table does not hold leaves a
+    /// minimal entry, still worth keeping for the lineage it names.
+    async fn record_fork(&self, event: ProcessLifecycleEvent) {
+        let pid = event.tgid;
+        let inherited = event.parent_pid.and_then(|parent| {
+            let table = self
+                .table
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            table
+                .find(domain::process::entity::ProcessKey {
+                    pid: parent,
+                    start_ns: event.parent_start_ns.unwrap_or(0),
+                })
+                .filter(|held| held.exited_at_ns.is_none())
+                .cloned()
+        });
+        let mut entry = ProcessEntry::new(pid, event.comm, event.at_ns);
+        if let Some(parent) = inherited {
+            entry.identity = parent.identity;
+            entry.command_line = parent.command_line;
+            entry.container = parent.container;
+        } else {
+            entry.container = self.resolve_container(pid, event.cgroup_id).await;
+        }
+        entry.uid = event.uid;
+        entry.gid = event.gid;
+        entry.cgroup_id = event.cgroup_id;
+        entry.start_ns = event.start_ns;
+        entry.parent_pid = event.parent_pid;
+        entry.parent_start_ns = event.parent_start_ns;
+
+        // The child runs the parent's binary, so the policies that name the
+        // binary apply to it now and not at an exec that may never come.
+        self.notify_exec(&entry);
+
+        self.table
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_fork(entry);
+        debug!(pid, "process table recorded a fork");
+    }
+
+    /// Tell every service keyed on the task about an entry it should now
+    /// hold. Before the table write rather than after: the entry moves into
+    /// the table, and the sooner the task's bit is set the shorter the window
+    /// in which it connects unresolved.
+    fn notify_exec(&self, entry: &ProcessEntry) {
+        if let Some(workload) = &self.workload {
+            workload.record_exec(entry);
+        }
+        if let Some(scope) = &self.dlp_scope {
+            scope.record_exec(entry);
+        }
+        if let Some(scope) = &self.ids_scope {
+            scope.record_exec(entry);
+        }
+        if let Some(shaping) = &self.shaping {
+            shaping.record_exec(entry);
+        }
+    }
+
+    fn record_exit(&self, event: &ProcessLifecycleEvent) {
+        let pid = event.tgid;
+        let outcome = self
+            .table
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .purge(pid, event.start_ns, event.at_ns);
+        match outcome {
+            PurgeOutcome::Purged => {}
+            PurgeOutcome::Missing => {
+                debug!(pid, "process table saw an exit for a pid it never held");
+            }
+            // The pid already belongs to a later process, whose selectors
+            // must survive the late news of its predecessor.
+            PurgeOutcome::Stale => {
+                debug!(pid, "process table saw a late exit for a reused pid");
+                return;
+            }
+        }
         if let Some(workload) = &self.workload {
             workload.record_exit(pid);
         }
@@ -293,14 +375,6 @@ impl ProcessTableService {
         }
         if let Some(shaping) = &self.shaping {
             shaping.record_exit(pid);
-        }
-        let purged = self
-            .table
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .purge(pid);
-        if purged.is_none() {
-            debug!(pid, "process table saw an exit for a pid it never held");
         }
     }
 
@@ -349,6 +423,16 @@ impl ProcessTableService {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(pid)
             .cloned()
+    }
+
+    /// The ancestors of the live process `pid`, parent first, live or kept
+    /// after their exit, and how the walk ended.
+    #[must_use]
+    pub fn lineage(&self, pid: u32) -> Lineage {
+        self.table
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lineage(pid)
     }
 
     /// The table's counters.
@@ -654,6 +738,9 @@ mod tests {
             cgroup_id: 777,
             comm: "curl".to_string(),
             at_ns: at,
+            start_ns: None,
+            parent_pid: None,
+            parent_start_ns: None,
         }
     }
 
@@ -733,6 +820,9 @@ mod tests {
             cgroup_id: 777,
             comm: "curl".to_string(),
             at_ns: 10,
+            start_ns: None,
+            parent_pid: None,
+            parent_start_ns: None,
         }
     }
 
@@ -850,6 +940,75 @@ mod tests {
         service.apply(exit(42)).await;
         assert!(service.get(42).is_none());
         assert_eq!(service.stats().purged, 1);
+    }
+
+    fn lineage(
+        mut event: ProcessLifecycleEvent,
+        start: u64,
+        parent: (u32, u64),
+    ) -> ProcessLifecycleEvent {
+        event.start_ns = Some(start);
+        event.parent_pid = Some(parent.0);
+        event.parent_start_ns = Some(parent.1);
+        event
+    }
+
+    #[tokio::test]
+    async fn the_kernel_parent_wins_over_the_one_read_from_proc() {
+        let service = ProcessTableService::new(16, false).with_details(Arc::new(FixedDetails));
+        service.apply(lineage(exec(42, 1), 5, (7, 3))).await;
+        let entry = service.get(42).unwrap();
+        assert_eq!(entry.parent_pid, Some(7));
+        assert_eq!(entry.parent_start_ns, Some(3));
+        assert_eq!(entry.start_ns, Some(5));
+    }
+
+    #[tokio::test]
+    async fn a_fork_inherits_its_parent_without_reading_proc() {
+        let service = ProcessTableService::new(16, true)
+            .with_executables(Arc::new(FixedExecutable))
+            .with_details(Arc::new(FixedDetails));
+        service.apply(lineage(exec(10, 1), 1, (1, 0))).await;
+        let mut fork = lineage(exec(11, 2), 2, (10, 1));
+        fork.kind = ProcessEventKind::Fork;
+        service.apply(fork).await;
+        let child = service.get(11).unwrap();
+        assert_eq!(child.identity.path(), Some("/usr/bin/curl"));
+        assert_eq!(
+            child.command_line.as_deref(),
+            Some("curl -u user:secret https://example.test")
+        );
+        assert_eq!(child.parent_pid, Some(10));
+        assert_eq!(service.stats().forks, 1);
+        assert_eq!(service.stats().recorded, 1);
+    }
+
+    #[tokio::test]
+    async fn an_exited_parent_stays_readable_as_the_ancestor_of_its_child() {
+        let service = ProcessTableService::new(16, false);
+        service.apply(lineage(exec(10, 1), 1, (0, 0))).await;
+        let mut fork = lineage(exec(11, 2), 2, (10, 1));
+        fork.kind = ProcessEventKind::Fork;
+        service.apply(fork).await;
+        let mut gone = exit(10);
+        gone.start_ns = Some(1);
+        service.apply(gone).await;
+        assert!(service.get(10).is_none());
+        let lineage = service.lineage(11);
+        assert_eq!(lineage.ancestors[0].pid, 10);
+        assert!(lineage.ancestors[0].exited_at_ns.is_some());
+        assert!(!lineage.incomplete);
+    }
+
+    #[tokio::test]
+    async fn a_late_exit_for_a_reused_pid_leaves_the_new_process() {
+        let service = ProcessTableService::new(16, false);
+        service.apply(lineage(exec(42, 1), 50, (1, 0))).await;
+        let mut late = exit(42);
+        late.start_ns = Some(20);
+        service.apply(late).await;
+        assert!(service.get(42).is_some());
+        assert_eq!(service.stats().missing_exit, 1);
     }
 
     #[tokio::test]

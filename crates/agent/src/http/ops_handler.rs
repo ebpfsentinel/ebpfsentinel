@@ -250,7 +250,7 @@ pub struct WorkloadFirewallReport {
 /// What became of the two process tracepoints on this host.
 #[derive(Serialize, ToSchema)]
 pub struct ProcessTracingReport {
-    /// True only when both tracepoints attached. One of the two is reported
+    /// True only when every tracepoint attached. A partial set is reported
     /// as not attached: a table fed by exec alone never forgets a process,
     /// and one fed by exit alone never learns of one.
     pub attached: bool,
@@ -261,6 +261,12 @@ pub struct ProcessTracingReport {
     /// Whether the table keeps command lines, which is off unless the
     /// configuration asked for it.
     pub command_line: bool,
+    /// The kernel reads each process's parent and start time, and forks are
+    /// followed. False on a kernel whose BTF does not describe the fields,
+    /// where the parent comes from `/proc` once the process is seen.
+    pub lineage: bool,
+    /// Why the kernel does not read the parent, in one sentence.
+    pub lineage_reason: Option<String>,
 }
 
 /// What this node can do to the process behind a flow.
@@ -662,6 +668,8 @@ fn process_tracing_report(status: adapters::ebpf::ProcessTracingStatus) -> Proce
         tracepoints: status.tracepoints,
         reason: status.reason,
         command_line: status.command_line,
+        lineage: status.lineage,
+        lineage_reason: status.lineage_reason,
     }
 }
 

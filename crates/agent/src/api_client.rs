@@ -528,6 +528,62 @@ pub struct WorkloadResponse {
     pub service_account: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ancestry: Option<WorkloadAncestryResponse>,
+}
+
+/// One process above the one behind a flow.
+#[derive(Deserialize, Serialize)]
+pub struct WorkloadAncestorResponse {
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
+    pub name: String,
+    pub uid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_ns: Option<u64>,
+    #[serde(default)]
+    pub exited: bool,
+}
+
+/// The chain above the process behind a flow, parent first.
+#[derive(Deserialize, Serialize)]
+pub struct WorkloadAncestryResponse {
+    pub ancestors: Vec<WorkloadAncestorResponse>,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub incomplete: bool,
+}
+
+impl WorkloadAncestryResponse {
+    /// The chain on one line, closest ancestor first, saying where it stops
+    /// short of the root.
+    #[must_use]
+    pub fn chain(&self) -> String {
+        let mut out = self
+            .ancestors
+            .iter()
+            .map(|a| {
+                let what = a
+                    .exe
+                    .as_deref()
+                    .map_or_else(|| format!("[{}]", a.name), str::to_string);
+                if a.exited {
+                    format!("{what} ({}, exited)", a.pid)
+                } else {
+                    format!("{what} ({})", a.pid)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" < ");
+        if self.truncated {
+            out.push_str(" < ...");
+        } else if self.incomplete {
+            out.push_str(" < (not held)");
+        }
+        out
+    }
 }
 
 impl WorkloadResponse {
@@ -1937,6 +1993,10 @@ pub struct ProcessTracingReport {
     pub reason: Option<String>,
     #[serde(default)]
     pub command_line: bool,
+    #[serde(default)]
+    pub lineage: bool,
+    #[serde(default)]
+    pub lineage_reason: Option<String>,
 }
 
 // ── Processes ────────────────────────────────
@@ -1958,6 +2018,36 @@ pub struct ProcessTableStatsResponse {
     pub evicted: u64,
     pub purged: u64,
     pub missing_exit: u64,
+    #[serde(default)]
+    pub forks: u64,
+    #[serde(default)]
+    pub ancestors: usize,
+    #[serde(default)]
+    pub ancestor_capacity: usize,
+    #[serde(default)]
+    pub ancestors_evicted: u64,
+}
+
+/// One ancestor of a process, live or kept after its exit.
+#[derive(Deserialize, Serialize)]
+pub struct ProcessAncestorResponse {
+    pub pid: u32,
+    #[serde(default)]
+    pub start_ns: Option<u64>,
+    pub comm: String,
+    pub identity: ProcessIdentityResponse,
+    pub uid: u32,
+    #[serde(default)]
+    pub exited_at_ns: Option<u64>,
+}
+
+/// The chain above a process, parent first.
+#[derive(Deserialize, Serialize)]
+pub struct ProcessAncestryResponse {
+    pub ancestors: Vec<ProcessAncestorResponse>,
+    pub incomplete: bool,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1975,6 +2065,12 @@ pub struct ProcessEntryResponse {
     #[serde(default)]
     pub container: Option<ProcessContainerResponse>,
     pub started_at_ns: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_start_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ancestry: Option<ProcessAncestryResponse>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -4560,6 +4656,19 @@ mod tests {
         assert_eq!(
             set,
             serde_json::json!({ "assignee": "bob", "author": "alice" })
+        );
+    }
+
+    #[test]
+    fn an_ancestry_reads_closest_first_and_says_where_it_stops() {
+        let ancestry: super::WorkloadAncestryResponse = serde_json::from_str(
+            r#"{"ancestors":[{"pid":900,"exe":"/bin/sh","name":"sh","uid":33,"exited":true},
+                {"pid":120,"name":"nginx","uid":0}],"truncated":false,"incomplete":true}"#,
+        )
+        .expect("the agent's ancestry block parses");
+        assert_eq!(
+            ancestry.chain(),
+            "/bin/sh (900, exited) < [nginx] (120) < (not held)"
         );
     }
 }

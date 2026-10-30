@@ -13596,6 +13596,78 @@
           }
         }
       },
+      "ProcessAncestorResponse": {
+        "type": "object",
+        "description": "One ancestor of a process, live or exited.",
+        "required": [
+          "pid",
+          "comm",
+          "identity",
+          "uid"
+        ],
+        "properties": {
+          "comm": {
+            "type": "string"
+          },
+          "exited_at_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When it exited, for an ancestor kept after its exit.",
+            "minimum": 0
+          },
+          "identity": {
+            "$ref": "#/components/schemas/ProcessIdentityResponse"
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "start_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When it started, on the agent's boot clock. With the pid, the name a\nreused pid cannot take.",
+            "minimum": 0
+          },
+          "uid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "ProcessAncestryResponse": {
+        "type": "object",
+        "description": "The chain above a process, parent first.",
+        "required": [
+          "ancestors",
+          "incomplete",
+          "truncated"
+        ],
+        "properties": {
+          "ancestors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProcessAncestorResponse"
+            },
+            "description": "At most eight, parent first."
+          },
+          "incomplete": {
+            "type": "boolean",
+            "description": "The chain stops at an ancestor that was named and that the table no\nlonger holds, rather than at the root."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "The chain goes on past the eighth ancestor and was cut there."
+          }
+        }
+      },
       "ProcessContainerResponse": {
         "type": "object",
         "description": "The container a process runs in, where it runs in one. Absent means the\nhost, which is why the field is omitted rather than filled with a name.",
@@ -13640,6 +13712,17 @@
           "started_at_ns"
         ],
         "properties": {
+          "ancestry": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProcessAncestryResponse",
+                "description": "The ancestors, on the single-process route only."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "cgroup_id": {
             "type": "integer",
             "format": "int64",
@@ -13680,9 +13763,27 @@
             "format": "int32",
             "minimum": 0
           },
+          "parent_start_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the parent started, read in the kernel with its pid.",
+            "minimum": 0
+          },
           "pid": {
             "type": "integer",
             "format": "int32",
+            "minimum": 0
+          },
+          "start_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the process started, which precedes `started_at_ns` for a\nprocess that forked before it exec'd.",
             "minimum": 0
           },
           "started_at_ns": {
@@ -13791,9 +13892,29 @@
           "replaced",
           "evicted",
           "purged",
-          "missing_exit"
+          "missing_exit",
+          "forks",
+          "ancestors",
+          "ancestor_capacity",
+          "ancestors_evicted"
         ],
         "properties": {
+          "ancestor_capacity": {
+            "type": "integer",
+            "description": "The ceiling on those, a quarter of `capacity`.",
+            "minimum": 0
+          },
+          "ancestors": {
+            "type": "integer",
+            "description": "Exited processes kept because something they started still runs.",
+            "minimum": 0
+          },
+          "ancestors_evicted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Exited ancestors dropped at that ceiling. Nonzero means some chains\nend early.",
+            "minimum": 0
+          },
           "capacity": {
             "type": "integer",
             "minimum": 0
@@ -13805,6 +13926,12 @@
           "evicted": {
             "type": "integer",
             "format": "int64",
+            "minimum": 0
+          },
+          "forks": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Forks recorded, each a process that had not exec'd yet.",
             "minimum": 0
           },
           "missing_exit": {
@@ -13835,16 +13962,28 @@
         "required": [
           "attached",
           "tracepoints",
-          "command_line"
+          "command_line",
+          "lineage"
         ],
         "properties": {
           "attached": {
             "type": "boolean",
-            "description": "True only when both tracepoints attached. One of the two is reported\nas not attached: a table fed by exec alone never forgets a process,\nand one fed by exit alone never learns of one."
+            "description": "True only when every tracepoint attached. A partial set is reported\nas not attached: a table fed by exec alone never forgets a process,\nand one fed by exit alone never learns of one."
           },
           "command_line": {
             "type": "boolean",
             "description": "Whether the table keeps command lines, which is off unless the\nconfiguration asked for it."
+          },
+          "lineage": {
+            "type": "boolean",
+            "description": "The kernel reads each process's parent and start time, and forks are\nfollowed. False on a kernel whose BTF does not describe the fields,\nwhere the parent comes from `/proc` once the process is seen."
+          },
+          "lineage_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the kernel does not read the parent, in one sentence."
           },
           "reason": {
             "type": [
@@ -13868,16 +14007,28 @@
         "required": [
           "attached",
           "tracepoints",
-          "command_line"
+          "command_line",
+          "lineage"
         ],
         "properties": {
           "attached": {
             "type": "boolean",
-            "description": "Both tracepoints are attached and the table is being filled."
+            "description": "Every tracepoint is attached and the table is being filled."
           },
           "command_line": {
             "type": "boolean",
             "description": "Command lines are being kept. Off by default: an argument vector\ncarries secrets often enough that keeping it is a decision."
+          },
+          "lineage": {
+            "type": "boolean",
+            "description": "The kernel reads each process's parent and start time, and forks are\nfollowed. False on a kernel whose BTF does not describe the fields,\nwhere the parent comes from `/proc` once the process is seen."
+          },
+          "lineage_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the kernel does not read the parent, in one sentence."
           },
           "reason": {
             "type": [
@@ -15610,6 +15761,80 @@
           }
         }
       },
+      "WorkloadAncestorResponse": {
+        "type": "object",
+        "description": "One process above the one behind a flow.",
+        "required": [
+          "pid",
+          "name",
+          "uid",
+          "exited"
+        ],
+        "properties": {
+          "exe": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The executable path, where the process table read one."
+          },
+          "exited": {
+            "type": "boolean",
+            "description": "It has exited and is kept because this process descends from it."
+          },
+          "name": {
+            "type": "string",
+            "description": "The kernel's 16-byte command name."
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The ancestor's pid when it ran.",
+            "minimum": 0
+          },
+          "start_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Kernel monotonic start time in nanoseconds, where the kernel read it.",
+            "minimum": 0
+          },
+          "uid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The uid it execed as.",
+            "minimum": 0
+          }
+        }
+      },
+      "WorkloadAncestryResponse": {
+        "type": "object",
+        "description": "The chain above the process behind a flow, parent first, at most eight.",
+        "required": [
+          "ancestors",
+          "truncated",
+          "incomplete"
+        ],
+        "properties": {
+          "ancestors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkloadAncestorResponse"
+            },
+            "description": "Parent first."
+          },
+          "incomplete": {
+            "type": "boolean",
+            "description": "The chain stops at an ancestor that was named and that the table does\nnot hold, rather than at the root."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "The chain goes on past the last ancestor listed."
+          }
+        }
+      },
       "WorkloadFirewallReport": {
         "type": "object",
         "description": "What became of the workload firewall hooks on this host.",
@@ -15762,6 +15987,17 @@
           "source"
         ],
         "properties": {
+          "ancestry": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkloadAncestryResponse",
+                "description": "The processes above this one, where the process table holds any."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "cgroup": {
             "type": [
               "integer",

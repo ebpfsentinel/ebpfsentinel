@@ -3179,6 +3179,8 @@ pub async fn run(
                             tracepoints: Vec::new(),
                             reason: Some(e.to_string()),
                             command_line: config.process_table.capture_command_line,
+                            lineage: false,
+                            lineage_reason: None,
                         },
                     );
                     metrics.set_ebpf_program_status("tracepoint_process", false);
@@ -3192,6 +3194,8 @@ pub async fn run(
                 tracepoints: Vec::new(),
                 reason: Some("the process table is turned off in the configuration".to_string()),
                 command_line: false,
+                lineage: false,
+                lineage_reason: None,
             });
             false
         };
@@ -6520,11 +6524,31 @@ pub fn try_load_process_tracing(
     let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "PROCESS_METRICS").ok();
     let reader = adapters::ebpf::ProcessEventReader::new(loader.ebpf_mut())?;
 
-    // The tracepoints read the current task and nothing else, so no cgroup
-    // path is resolved and the warden has nothing to broker: the BPF token
-    // the agent loaded with is what the attach is checked against.
+    // The parent walk's offsets come from the running kernel's BTF. A kernel
+    // that does not describe them still gets the table, with the parent read
+    // from /proc afterwards and forks not followed, and the status says so.
+    let lineage_reason = match adapters::ebpf::process_attach::resolve_layout() {
+        Ok(layout) => adapters::ebpf::process_attach::write_layout(loader.ebpf_mut(), &layout)
+            .err()
+            .map(|e| e.to_string()),
+        Err(reason) => Some(reason),
+    };
+    if let Some(reason) = &lineage_reason {
+        warn!(
+            reason,
+            "process lineage off: the parent is read from /proc instead"
+        );
+    }
+
+    // The tracepoints read tasks and nothing else, so no cgroup path is
+    // resolved and the warden has nothing to broker: the BPF token the agent
+    // loaded with is what the attach is checked against.
     let mut attacher = adapters::ebpf::ProcessTracingAttacher::new();
-    let status = attacher.attach_all(&loader, config.process_table.capture_command_line);
+    let status = attacher.attach_all(
+        &loader,
+        config.process_table.capture_command_line,
+        lineage_reason,
+    );
     Ok((loader, metrics_rdr, reader, attacher, status))
 }
 

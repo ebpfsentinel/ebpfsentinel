@@ -2,12 +2,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::container::entity::ContainerContext;
 
-/// Which of the two kernel notifications a lifecycle event carries.
+/// Which of the kernel notifications a lifecycle event carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProcessEventKind {
     /// A task replaced its image: the pid now stands for a new binary.
     Exec,
+    /// A process created another, which runs its parent's image until it
+    /// execs, if it ever does. The event describes the child.
+    Fork,
     /// A thread group leader is gone: the pid stands for nothing.
     Exit,
 }
@@ -31,6 +34,36 @@ pub struct ProcessLifecycleEvent {
     pub comm: String,
     /// `bpf_ktime_get_boot_ns` at the tracepoint.
     pub at_ns: u64,
+    /// When the process itself started, on the same boot clock: with the
+    /// pid, the identity a reused pid cannot take over. `None` where the
+    /// kernel could not read it.
+    pub start_ns: Option<u64>,
+    /// The parent's pid as the kernel saw it at the event. `None` on an exit,
+    /// which carries no parent, and wherever the kernel could not read it.
+    pub parent_pid: Option<u32>,
+    /// When the parent started, read with its pid.
+    pub parent_start_ns: Option<u64>,
+}
+
+impl ProcessLifecycleEvent {
+    /// An event about `tgid` carrying nothing the kernel read beyond the
+    /// calling task's own helpers, for a source that has no lineage to give.
+    #[must_use]
+    pub fn bare(kind: ProcessEventKind, tgid: u32, comm: impl Into<String>, at_ns: u64) -> Self {
+        Self {
+            kind,
+            pid: tgid,
+            tgid,
+            uid: 0,
+            gid: 0,
+            cgroup_id: 0,
+            comm: comm.into(),
+            at_ns,
+            start_ns: None,
+            parent_pid: None,
+            parent_start_ns: None,
+        }
+    }
 }
 
 /// What a table entry claims about the binary behind a pid, and how good the
@@ -91,14 +124,26 @@ pub struct ProcessDetails {
     pub command_line: Option<String>,
 }
 
-/// One live process, as the table knows it.
+/// One process, as the table knows it: live, or exited and kept because a
+/// process it started is still running.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessEntry {
     /// Process id. The key, and the only field that is never absent.
     pub pid: u32,
-    /// The parent at the moment of the exec, where `/proc` still had one.
+    /// The parent. Read in the kernel at the exec or the fork where the
+    /// running kernel describes the fields, from `/proc` afterwards where it
+    /// does not, and absent where neither answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_pid: Option<u32>,
+    /// When the parent started, which is what tells the parent apart from a
+    /// later process that took its pid. Only the kernel read gives it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_start_ns: Option<u64>,
+    /// When this process started, on the boot clock `started_at_ns` uses.
+    /// Earlier than `started_at_ns` for a process that forked and then
+    /// exec'd, and absent where the kernel could not read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_ns: Option<u64>,
     /// The kernel's `comm`: sixteen bytes, truncated by the kernel, a hint.
     pub comm: String,
     /// What the entry claims about the binary, and how good the claim is.
@@ -116,9 +161,14 @@ pub struct ProcessEntry {
     /// could add. Absent on a host process and on a node with no resolver.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<ContainerContext>,
-    /// `bpf_ktime_get_boot_ns` at the exec. A boot clock, so it survives a
-    /// wall-clock change, and it is what orders the table for eviction.
+    /// `bpf_ktime_get_boot_ns` at the exec or the fork that recorded the
+    /// entry. A boot clock, so it survives a wall-clock change, and it is
+    /// what orders the table for eviction.
     pub started_at_ns: u64,
+    /// When the kernel said the process exited. Only an entry kept as an
+    /// ancestor carries one; a live entry never does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exited_at_ns: Option<u64>,
 }
 
 impl ProcessEntry {
@@ -128,6 +178,8 @@ impl ProcessEntry {
         Self {
             pid,
             parent_pid: None,
+            parent_start_ns: None,
+            start_ns: None,
             comm: comm.into(),
             identity: ProcessIdentity::Unknown,
             command_line: None,
@@ -136,8 +188,36 @@ impl ProcessEntry {
             cgroup_id: 0,
             container: None,
             started_at_ns,
+            exited_at_ns: None,
         }
     }
+
+    /// The pair that names this process and no later holder of its pid.
+    /// An unknown start is zero, which no process the kernel timed has.
+    #[must_use]
+    pub fn key(&self) -> ProcessKey {
+        ProcessKey {
+            pid: self.pid,
+            start_ns: self.start_ns.unwrap_or(0),
+        }
+    }
+
+    /// The key of the parent, where the entry names one.
+    #[must_use]
+    pub fn parent_key(&self) -> Option<ProcessKey> {
+        self.parent_pid.map(|pid| ProcessKey {
+            pid,
+            start_ns: self.parent_start_ns.unwrap_or(0),
+        })
+    }
+}
+
+/// A process named so that pid reuse cannot impersonate it: the pid and the
+/// boot-clock instant the process started, zero where the start is unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ProcessKey {
+    pub pid: u32,
+    pub start_ns: u64,
 }
 
 /// What the table has done since the agent started.
@@ -161,8 +241,20 @@ pub struct ProcessTableStats {
     pub evicted: u64,
     /// Entries removed because the kernel said the process exited.
     pub purged: u64,
-    /// Exit notifications for a pid the table did not hold.
+    /// Exit notifications for a pid the table did not hold, or held for a
+    /// later process than the one that exited.
     pub missing_exit: u64,
+    /// Forks recorded, each a new entry for a process that had not exec'd.
+    pub forks: u64,
+    /// Exited processes kept right now because something they started still
+    /// runs.
+    pub ancestors: usize,
+    /// The ceiling on exited processes kept, a quarter of `capacity`.
+    pub ancestor_capacity: usize,
+    /// Exited ancestors dropped because that ceiling was reached. Nonzero
+    /// means some chains end early with an ancestor the table no longer
+    /// holds.
+    pub ancestors_evicted: u64,
 }
 
 #[cfg(test)]
@@ -197,6 +289,40 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("command_line"));
         assert!(!json.contains("parent_pid"));
+        assert!(!json.contains("start_ns"));
+        assert!(!json.contains("exited_at_ns"));
         assert!(json.contains("\"kind\":\"unknown\""));
+    }
+
+    #[test]
+    fn a_key_tells_a_process_from_a_later_holder_of_its_pid() {
+        let mut first = ProcessEntry::new(42, "sh", 1_000);
+        first.start_ns = Some(900);
+        let mut second = ProcessEntry::new(42, "sh", 9_000);
+        second.start_ns = Some(8_900);
+        assert_ne!(first.key(), second.key());
+        assert_eq!(ProcessEntry::new(42, "sh", 1).key().start_ns, 0);
+    }
+
+    #[test]
+    fn a_parent_key_needs_a_parent() {
+        let mut entry = ProcessEntry::new(42, "curl", 1_000);
+        assert!(entry.parent_key().is_none());
+        entry.parent_pid = Some(7);
+        assert_eq!(
+            entry.parent_key(),
+            Some(ProcessKey {
+                pid: 7,
+                start_ns: 0
+            })
+        );
+        entry.parent_start_ns = Some(55);
+        assert_eq!(
+            entry.parent_key(),
+            Some(ProcessKey {
+                pid: 7,
+                start_ns: 55
+            })
+        );
     }
 }

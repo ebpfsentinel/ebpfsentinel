@@ -21,7 +21,7 @@ use super::state::AppState;
 /// What the agent can say about the two tracepoints behind the table.
 #[derive(Serialize, ToSchema)]
 pub struct ProcessTracingResponse {
-    /// Both tracepoints are attached and the table is being filled.
+    /// Every tracepoint is attached and the table is being filled.
     pub attached: bool,
     /// The tracepoints that did attach, in attach order.
     pub tracepoints: Vec<String>,
@@ -31,6 +31,12 @@ pub struct ProcessTracingResponse {
     /// Command lines are being kept. Off by default: an argument vector
     /// carries secrets often enough that keeping it is a decision.
     pub command_line: bool,
+    /// The kernel reads each process's parent and start time, and forks are
+    /// followed. False on a kernel whose BTF does not describe the fields,
+    /// where the parent comes from `/proc` once the process is seen.
+    pub lineage: bool,
+    /// Why the kernel does not read the parent, in one sentence.
+    pub lineage_reason: Option<String>,
 }
 
 /// The bound and what it cost, so a reader can tell an empty table from a
@@ -44,6 +50,43 @@ pub struct ProcessTableStatsResponse {
     pub evicted: u64,
     pub purged: u64,
     pub missing_exit: u64,
+    /// Forks recorded, each a process that had not exec'd yet.
+    pub forks: u64,
+    /// Exited processes kept because something they started still runs.
+    pub ancestors: usize,
+    /// The ceiling on those, a quarter of `capacity`.
+    pub ancestor_capacity: usize,
+    /// Exited ancestors dropped at that ceiling. Nonzero means some chains
+    /// end early.
+    pub ancestors_evicted: u64,
+}
+
+/// One ancestor of a process, live or exited.
+#[derive(Serialize, ToSchema)]
+pub struct ProcessAncestorResponse {
+    pub pid: u32,
+    /// When it started, on the agent's boot clock. With the pid, the name a
+    /// reused pid cannot take.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_ns: Option<u64>,
+    pub comm: String,
+    pub identity: ProcessIdentityResponse,
+    pub uid: u32,
+    /// When it exited, for an ancestor kept after its exit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exited_at_ns: Option<u64>,
+}
+
+/// The chain above a process, parent first.
+#[derive(Serialize, ToSchema)]
+pub struct ProcessAncestryResponse {
+    /// At most eight, parent first.
+    pub ancestors: Vec<ProcessAncestorResponse>,
+    /// The chain stops at an ancestor that was named and that the table no
+    /// longer holds, rather than at the root.
+    pub incomplete: bool,
+    /// The chain goes on past the eighth ancestor and was cut there.
+    pub truncated: bool,
 }
 
 /// What the table knows a process by. `kind` is `path` or `unknown`; the
@@ -90,6 +133,16 @@ pub struct ProcessEntryResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<ProcessContainerResponse>,
     pub started_at_ns: u64,
+    /// When the process started, which precedes `started_at_ns` for a
+    /// process that forked before it exec'd.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_ns: Option<u64>,
+    /// When the parent started, read in the kernel with its pid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_start_ns: Option<u64>,
+    /// The ancestors, on the single-process route only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ancestry: Option<ProcessAncestryResponse>,
 }
 
 /// `GET /api/v1/processes`.
@@ -110,6 +163,8 @@ fn tracing_response() -> ProcessTracingResponse {
         tracepoints: status.tracepoints,
         reason: status.reason,
         command_line: status.command_line,
+        lineage: status.lineage,
+        lineage_reason: status.lineage_reason,
     }
 }
 
@@ -122,6 +177,38 @@ fn stats_response(stats: &domain::process::entity::ProcessTableStats) -> Process
         evicted: stats.evicted,
         purged: stats.purged,
         missing_exit: stats.missing_exit,
+        forks: stats.forks,
+        ancestors: stats.ancestors,
+        ancestor_capacity: stats.ancestor_capacity,
+        ancestors_evicted: stats.ancestors_evicted,
+    }
+}
+
+fn identity_response(
+    identity: &domain::process::entity::ProcessIdentity,
+) -> ProcessIdentityResponse {
+    ProcessIdentityResponse {
+        kind: identity.kind().to_string(),
+        path: identity.path().map(ToString::to_string),
+    }
+}
+
+fn ancestry_response(lineage: &domain::process::engine::Lineage) -> ProcessAncestryResponse {
+    ProcessAncestryResponse {
+        ancestors: lineage
+            .ancestors
+            .iter()
+            .map(|a| ProcessAncestorResponse {
+                pid: a.pid,
+                start_ns: a.start_ns,
+                comm: a.comm.clone(),
+                identity: identity_response(&a.identity),
+                uid: a.uid,
+                exited_at_ns: a.exited_at_ns,
+            })
+            .collect(),
+        incomplete: lineage.incomplete,
+        truncated: lineage.truncated,
     }
 }
 
@@ -130,16 +217,16 @@ fn entry_response(entry: &domain::process::entity::ProcessEntry) -> ProcessEntry
         pid: entry.pid,
         parent_pid: entry.parent_pid,
         comm: entry.comm.clone(),
-        identity: ProcessIdentityResponse {
-            kind: entry.identity.kind().to_string(),
-            path: entry.identity.path().map(ToString::to_string),
-        },
+        identity: identity_response(&entry.identity),
         command_line: entry.command_line.clone(),
         uid: entry.uid,
         gid: entry.gid,
         cgroup_id: entry.cgroup_id,
         container: entry.container.as_ref().and_then(container_response),
         started_at_ns: entry.started_at_ns,
+        start_ns: entry.start_ns,
+        parent_start_ns: entry.parent_start_ns,
+        ancestry: None,
     }
 }
 
@@ -233,14 +320,16 @@ pub async fn get_process(
     Path(pid): Path<u32>,
 ) -> Result<Json<ProcessEntryResponse>, ApiError> {
     let svc = table(&state)?;
-    // An exited process is purged rather than kept, so a pid the table does
-    // not carry is a pid that is gone and not a lookup that failed.
-    svc.get(pid)
-        .map(|entry| Json(entry_response(&entry)))
-        .ok_or_else(|| ApiError::NotFound {
-            code: "process_not_found",
-            message: format!("no process {pid} in the table"),
-        })
+    // An exited process leaves the live table, so a pid the table does not
+    // carry is a pid that is gone and not a lookup that failed. Its entry
+    // survives only as somebody's ancestor, which is where it is shown.
+    let entry = svc.get(pid).ok_or_else(|| ApiError::NotFound {
+        code: "process_not_found",
+        message: format!("no process {pid} in the table"),
+    })?;
+    let mut body = entry_response(&entry);
+    body.ancestry = Some(ancestry_response(&svc.lineage(pid)));
+    Ok(Json(body))
 }
 
 #[cfg(test)]
@@ -282,6 +371,10 @@ mod tests {
             evicted: 2,
             purged: 1,
             missing_exit: 3,
+            forks: 4,
+            ancestors: 1,
+            ancestor_capacity: 2,
+            ancestors_evicted: 6,
         };
         let json = serde_json::to_value(stats_response(&stats)).unwrap();
         assert_eq!(json["capacity"], 8);
@@ -291,5 +384,32 @@ mod tests {
         assert_eq!(json["evicted"], 2);
         assert_eq!(json["purged"], 1);
         assert_eq!(json["missing_exit"], 3);
+        assert_eq!(json["forks"], 4);
+        assert_eq!(json["ancestors"], 1);
+        assert_eq!(json["ancestor_capacity"], 2);
+        assert_eq!(json["ancestors_evicted"], 6);
+    }
+
+    #[test]
+    fn an_ancestry_names_exited_ancestors_and_a_lost_link() {
+        let mut shell = ProcessEntry::new(10, "sh", 5);
+        shell.start_ns = Some(4);
+        shell.exited_at_ns = Some(9);
+        let body = ancestry_response(&domain::process::engine::Lineage {
+            ancestors: vec![shell],
+            truncated: false,
+            incomplete: true,
+        });
+        let json = serde_json::to_value(body).unwrap();
+        assert_eq!(json["ancestors"][0]["pid"], 10);
+        assert_eq!(json["ancestors"][0]["exited_at_ns"], 9);
+        assert_eq!(json["incomplete"], true);
+        assert_eq!(json["truncated"], false);
+    }
+
+    #[test]
+    fn a_listed_entry_carries_no_ancestry() {
+        let json = serde_json::to_value(entry_response(&ProcessEntry::new(1, "init", 0))).unwrap();
+        assert!(json.get("ancestry").is_none());
     }
 }

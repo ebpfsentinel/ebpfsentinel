@@ -10,7 +10,7 @@
 //! no block at all, so the key is missing from the document instead of
 //! holding a pid of zero.
 
-use domain::workload::entity::Workload;
+use domain::workload::entity::{Workload, WorkloadAncestry};
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -54,6 +54,59 @@ pub struct WorkloadResponse {
     /// systemd unit, for a host process the agent could place in one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
+    /// The processes above this one, where the process table holds any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ancestry: Option<WorkloadAncestryResponse>,
+}
+
+/// One process above the one behind a flow.
+#[derive(Serialize, ToSchema)]
+pub struct WorkloadAncestorResponse {
+    /// The ancestor's pid when it ran.
+    pub pid: u32,
+    /// The executable path, where the process table read one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
+    /// The kernel's 16-byte command name.
+    pub name: String,
+    /// The uid it execed as.
+    pub uid: u32,
+    /// Kernel monotonic start time in nanoseconds, where the kernel read it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_ns: Option<u64>,
+    /// It has exited and is kept because this process descends from it.
+    pub exited: bool,
+}
+
+/// The chain above the process behind a flow, parent first, at most eight.
+#[derive(Serialize, ToSchema)]
+pub struct WorkloadAncestryResponse {
+    /// Parent first.
+    pub ancestors: Vec<WorkloadAncestorResponse>,
+    /// The chain goes on past the last ancestor listed.
+    pub truncated: bool,
+    /// The chain stops at an ancestor that was named and that the table does
+    /// not hold, rather than at the root.
+    pub incomplete: bool,
+}
+
+fn ancestry_response(ancestry: WorkloadAncestry) -> WorkloadAncestryResponse {
+    WorkloadAncestryResponse {
+        ancestors: ancestry
+            .ancestors
+            .into_iter()
+            .map(|a| WorkloadAncestorResponse {
+                pid: a.pid,
+                exe: a.exe,
+                name: a.name,
+                uid: a.uid,
+                start_ns: a.start_ns,
+                exited: a.exited,
+            })
+            .collect(),
+        truncated: ancestry.truncated,
+        incomplete: ancestry.incomplete,
+    }
 }
 
 /// Map a resolved workload onto the wire, or nothing where there was none.
@@ -71,6 +124,7 @@ pub fn workload_response(workload: Option<Workload>) -> Option<WorkloadResponse>
         namespace: w.namespace,
         service_account: w.service_account,
         unit: w.unit,
+        ancestry: w.ancestry.map(ancestry_response),
     })
 }
 
@@ -98,5 +152,31 @@ mod tests {
         let json = serde_json::to_string(&workload_response(Some(w)).expect("a block"))
             .expect("the block serialises");
         assert_eq!(json, r#"{"pid":4242,"source":"flow"}"#);
+    }
+
+    #[test]
+    fn an_ancestry_carries_both_flags_whatever_their_value() {
+        use domain::workload::entity::WorkloadAncestor;
+
+        let mut w = Workload::new(4242, WorkloadSource::Socket).expect("a pid builds a block");
+        w.ancestry = Some(WorkloadAncestry {
+            ancestors: vec![WorkloadAncestor {
+                pid: 900,
+                exe: Some("/bin/sh".to_string()),
+                name: "sh".to_string(),
+                uid: 33,
+                start_ns: None,
+                exited: false,
+            }],
+            truncated: true,
+            incomplete: false,
+        });
+        let json = serde_json::to_value(workload_response(Some(w)).expect("a block"))
+            .expect("the block serialises");
+        assert_eq!(json["ancestry"]["ancestors"][0]["exe"], "/bin/sh");
+        assert_eq!(json["ancestry"]["ancestors"][0]["exited"], false);
+        assert!(json["ancestry"]["ancestors"][0].get("start_ns").is_none());
+        assert_eq!(json["ancestry"]["truncated"], true);
+        assert_eq!(json["ancestry"]["incomplete"], false);
     }
 }

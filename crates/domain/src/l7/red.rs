@@ -590,6 +590,7 @@ mod tests {
             namespace: None,
             service_account: None,
             unit: None,
+            ancestry: None,
         }
     }
 

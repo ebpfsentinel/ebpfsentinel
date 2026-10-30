@@ -123,8 +123,13 @@ impl WorkloadResolver {
     #[must_use]
     pub fn by_pid(&self, pid: u32) -> Option<Workload> {
         let base = Workload::new(pid, WorkloadSource::Process)?;
-        let entry = self.processes.load().as_ref()?.get(pid)?;
-        Some(base.with_process(&entry))
+        let processes = self.processes.load();
+        let processes = processes.as_ref()?;
+        let entry = processes.get(pid)?;
+        Some(
+            base.with_process(&entry)
+                .with_lineage(&processes.lineage(pid)),
+        )
     }
 
     /// Everything the process table can add to a socket owner.
@@ -138,17 +143,19 @@ impl WorkloadResolver {
             .unwrap_or_else(|| unreachable_owner(owner))
             .with_uid(owner.uid)
             .with_cgroup(owner.cgroup_id);
-        if let Some(entry) = self
-            .processes
-            .load()
-            .as_ref()
-            .and_then(|p| p.get(owner.pid))
-        {
+        let processes = self.processes.load();
+        let Some(processes) = processes.as_ref() else {
+            return workload;
+        };
+        if let Some(entry) = processes.get(owner.pid) {
             let uid = workload.uid;
             let cgroup = workload.cgroup;
             workload = workload.with_process(&entry);
             workload.uid = uid;
             workload.cgroup = cgroup.or(workload.cgroup);
+            // The chain is read only for a process the table holds: a pid it
+            // never saw has no parent recorded to start the walk from.
+            workload = workload.with_lineage(&processes.lineage(owner.pid));
         }
         workload
     }
@@ -171,6 +178,7 @@ fn unreachable_owner(owner: SocketOwner) -> Workload {
         namespace: None,
         service_account: None,
         unit: None,
+        ancestry: None,
     }
 }
 
@@ -218,16 +226,12 @@ mod tests {
     async fn table_with_exec(pid: u32) -> Arc<ProcessTableService> {
         let service = ProcessTableService::new(16, false);
         service
-            .apply(ProcessLifecycleEvent {
-                kind: ProcessEventKind::Exec,
+            .apply(ProcessLifecycleEvent::bare(
+                ProcessEventKind::Exec,
                 pid,
-                tgid: pid,
-                uid: 0,
-                gid: 0,
-                cgroup_id: 0,
-                comm: "curl".to_string(),
-                at_ns: 1,
-            })
+                "curl",
+                1,
+            ))
             .await;
         Arc::new(service)
     }

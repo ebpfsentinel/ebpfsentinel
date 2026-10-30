@@ -16,6 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::container::entity::{ContainerContext, ContainerInfo, ContainerMetadata};
+use crate::process::engine::Lineage;
 use crate::process::entity::ProcessEntry;
 
 /// How good the join is: read off the socket, or matched on the five-tuple.
@@ -65,6 +66,104 @@ impl std::fmt::Display for WorkloadSource {
     }
 }
 
+/// One process above the one behind a flow.
+///
+/// What a reader needs to tell a shell started by `sshd` from one started by
+/// `nginx`: the executable where the table read one, the kernel's name for
+/// the task otherwise, who it ran as and when it started. The start time is
+/// what keeps the pid meaningful after it is handed to somebody else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadAncestor {
+    /// The ancestor's pid when it ran.
+    pub pid: u32,
+    /// The executable path, where the process table read one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
+    /// The kernel's 16-byte command name, always present.
+    pub name: String,
+    /// The uid it execed as.
+    pub uid: u32,
+    /// Kernel monotonic start time, where the kernel read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_ns: Option<u64>,
+    /// Whether it has exited and is kept because this process descends from
+    /// it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exited: bool,
+}
+
+/// The chain above the process behind a flow, parent first.
+///
+/// Bounded at eight. The two flags say why it stops where it does, when that
+/// is not the root: `truncated` when the chain went on past the bound,
+/// `incomplete` when a named ancestor was never seen by the table or has been
+/// dropped from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkloadAncestry {
+    /// Parent first.
+    pub ancestors: Vec<WorkloadAncestor>,
+    /// The chain goes on past the last ancestor shown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    /// The chain stops at an ancestor that was named and that the table does
+    /// not hold.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub incomplete: bool,
+}
+
+impl WorkloadAncestry {
+    /// The parent, which is the first ancestor where there is one.
+    #[must_use]
+    pub fn parent(&self) -> Option<&WorkloadAncestor> {
+        self.ancestors.first()
+    }
+
+    /// The chain as one line, for a format whose fields hold text and not
+    /// lists: parent first, each ancestor as its pid and its executable, or
+    /// its kernel name in brackets where no path was read, joined by ` < `
+    /// so the line reads from the closest ancestor outwards.
+    ///
+    /// The uid and the start time are not in it. A format that can nest
+    /// carries them per ancestor; this one carries what a correlation rule
+    /// matches on.
+    #[must_use]
+    pub fn chain_text(&self) -> String {
+        self.ancestors
+            .iter()
+            .map(|a| match a.exe.as_deref().filter(|exe| !exe.is_empty()) {
+                Some(exe) => format!("{} {exe}", a.pid),
+                None => format!("{} [{}]", a.pid, a.name),
+            })
+            .collect::<Vec<_>>()
+            .join(" < ")
+    }
+
+    /// The chain a lineage walk found, or nothing where it found nothing to
+    /// say.
+    #[must_use]
+    pub fn from_lineage(lineage: &Lineage) -> Option<Self> {
+        if lineage.is_empty() {
+            return None;
+        }
+        Some(Self {
+            ancestors: lineage
+                .ancestors
+                .iter()
+                .map(|entry| WorkloadAncestor {
+                    pid: entry.pid,
+                    exe: entry.identity.path().map(ToOwned::to_owned),
+                    name: entry.comm.clone(),
+                    uid: entry.uid,
+                    start_ns: entry.start_ns,
+                    exited: entry.exited_at_ns.is_some(),
+                })
+                .collect(),
+            truncated: lineage.truncated,
+            incomplete: lineage.incomplete,
+        })
+    }
+}
+
 /// The workload a flow belongs to.
 ///
 /// `pid` and `source` are the two fields that are never absent, because a
@@ -111,6 +210,9 @@ pub struct Workload {
     /// systemd unit, for a host process the agent could place in one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
+    /// The processes above this one, where the process table holds any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ancestry: Option<WorkloadAncestry>,
 }
 
 impl Workload {
@@ -137,6 +239,7 @@ impl Workload {
             namespace: None,
             service_account: None,
             unit: None,
+            ancestry: None,
         })
     }
 
@@ -155,6 +258,13 @@ impl Workload {
         if let Some(container) = entry.container.as_ref() {
             self.fill_container(container);
         }
+        self
+    }
+
+    /// The chain above the process, from a walk of the process table.
+    #[must_use]
+    pub fn with_lineage(mut self, lineage: &Lineage) -> Self {
+        self.ancestry = WorkloadAncestry::from_lineage(lineage);
         self
     }
 
@@ -215,6 +325,34 @@ impl Workload {
             }
             _ => {}
         }
+    }
+}
+
+/// A two-level chain with the shell's path read and its parent known only
+/// by name, cut short at a lost ancestor, for the format tests.
+#[cfg(test)]
+pub(crate) fn sample_ancestry() -> WorkloadAncestry {
+    WorkloadAncestry {
+        ancestors: vec![
+            WorkloadAncestor {
+                pid: 900,
+                exe: Some("/bin/sh".to_string()),
+                name: "sh".to_string(),
+                uid: 33,
+                start_ns: Some(1_000),
+                exited: true,
+            },
+            WorkloadAncestor {
+                pid: 120,
+                exe: None,
+                name: "nginx".to_string(),
+                uid: 0,
+                start_ns: None,
+                exited: false,
+            },
+        ],
+        truncated: false,
+        incomplete: true,
     }
 }
 
@@ -300,6 +438,7 @@ mod tests {
             namespace: None,
             service_account: None,
             unit: None,
+            ancestry: None,
         });
         assert!(is_absent(&forged));
         assert!(present(&forged).is_none());
@@ -400,5 +539,52 @@ mod tests {
         assert!(WorkloadSource::Socket.is_read());
         assert!(WorkloadSource::Process.is_read());
         assert_eq!(WorkloadSource::Flow.to_string(), "flow");
+    }
+
+    #[test]
+    fn an_ancestry_reads_from_the_parent_outwards() {
+        let ancestry = sample_ancestry();
+        assert_eq!(ancestry.parent().map(|a| a.pid), Some(900));
+        assert_eq!(ancestry.chain_text(), "900 /bin/sh < 120 [nginx]");
+    }
+
+    #[test]
+    fn a_walk_that_found_nothing_adds_no_ancestry() {
+        let w = Workload::new(4242, WorkloadSource::Socket)
+            .expect("a pid builds a block")
+            .with_lineage(&Lineage::default());
+        assert!(w.ancestry.is_none());
+        let json = serde_json::to_string(&w).unwrap();
+        assert!(!json.contains("ancestry"));
+    }
+
+    #[test]
+    fn a_lineage_becomes_the_block_with_its_flags() {
+        let mut shell = ProcessEntry::new(900, "sh", 5);
+        shell.identity = ProcessIdentity::Path {
+            path: "/bin/sh".to_string(),
+            dev: 1,
+            inode: 2,
+        };
+        shell.uid = 33;
+        shell.start_ns = Some(4);
+        shell.exited_at_ns = Some(9);
+        let lineage = Lineage {
+            ancestors: vec![shell],
+            truncated: true,
+            incomplete: false,
+        };
+        let w = Workload::new(4242, WorkloadSource::Socket)
+            .expect("a pid builds a block")
+            .with_lineage(&lineage);
+        let json = serde_json::to_value(&w).unwrap();
+        let ancestor = &json["ancestry"]["ancestors"][0];
+        assert_eq!(ancestor["pid"], 900);
+        assert_eq!(ancestor["exe"], "/bin/sh");
+        assert_eq!(ancestor["uid"], 33);
+        assert_eq!(ancestor["start_ns"], 4);
+        assert_eq!(ancestor["exited"], true);
+        assert_eq!(json["ancestry"]["truncated"], true);
+        assert!(json["ancestry"].get("incomplete").is_none());
     }
 }

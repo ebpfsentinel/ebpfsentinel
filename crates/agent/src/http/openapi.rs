@@ -288,6 +288,8 @@ use super::zone_handler;
         alert_handler::AlertResponse,
         // Workload attribution, shared by the alert and conntrack routes
         workload_dto::WorkloadResponse,
+        workload_dto::WorkloadAncestryResponse,
+        workload_dto::WorkloadAncestorResponse,
         alert_handler::FalsePositiveResponse,
         alert_handler::AlertNoteResponse,
         alert_handler::TriageRequest,
@@ -410,6 +412,8 @@ use super::zone_handler;
         // Fingerprints
         process_handler::ProcessListResponse,
         process_handler::ProcessEntryResponse,
+        process_handler::ProcessAncestorResponse,
+        process_handler::ProcessAncestryResponse,
         process_handler::ProcessIdentityResponse,
         process_handler::ProcessContainerResponse,
         process_handler::ProcessTableStatsResponse,

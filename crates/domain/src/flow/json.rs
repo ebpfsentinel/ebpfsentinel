@@ -105,6 +105,18 @@ fn write_workload(out: &mut String, workload: &Workload) {
         workload.service_account.as_deref(),
     );
     optional_text(out, otlp::WORKLOAD_UNIT, workload.unit.as_deref());
+    if let Some(ancestry) = workload.ancestry.as_ref() {
+        if let Some(parent) = ancestry.parent() {
+            number(out, otlp::PROCESS_PARENT_PID, u64::from(parent.pid));
+        }
+        optional_text(out, otlp::WORKLOAD_ANCESTRY, Some(&ancestry.chain_text()));
+        if ancestry.truncated {
+            flag(out, otlp::WORKLOAD_ANCESTRY_TRUNCATED);
+        }
+        if ancestry.incomplete {
+            flag(out, otlp::WORKLOAD_ANCESTRY_INCOMPLETE);
+        }
+    }
 }
 
 /// The transport word the conventions define, or nothing for a protocol they
@@ -139,6 +151,13 @@ fn number(out: &mut String, key: &str, value: u64) {
     push_string(out, key);
     out.push(':');
     out.push_str(&value.to_string());
+}
+
+/// A boolean member, written only when it is true.
+fn flag(out: &mut String, key: &str) {
+    separate(out);
+    push_string(out, key);
+    out.push_str(":true");
 }
 
 /// A comma, where something has already been written.
@@ -263,6 +282,7 @@ mod tests {
                 namespace: Some("shop".to_string()),
                 service_account: None,
                 unit: Some("nginx.service".to_string()),
+                ancestry: None,
             }),
             ..transited()
         };
@@ -321,5 +341,27 @@ mod tests {
     fn the_same_record_renders_the_same_line_twice() {
         let record = transited();
         assert_eq!(line(&record, 1), line(&record, 1));
+    }
+
+    #[test]
+    fn an_ancestry_is_written_on_the_otlp_names() {
+        let mut w = Workload::new(4_242, WorkloadSource::Socket).expect("a pid builds a block");
+        w.ancestry = Some(crate::workload::entity::sample_ancestry());
+        let record = FlowRecord {
+            workload: Some(w),
+            ..transited()
+        };
+        let value = parse(&line(&record, 1));
+        assert_eq!(value["process.parent_pid"], 900);
+        assert_eq!(
+            value["ebpfsentinel.workload.ancestry"],
+            "900 /bin/sh < 120 [nginx]"
+        );
+        assert_eq!(value["ebpfsentinel.workload.ancestry_incomplete"], true);
+        assert!(
+            value
+                .get("ebpfsentinel.workload.ancestry_truncated")
+                .is_none()
+        );
     }
 }

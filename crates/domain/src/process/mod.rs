@@ -8,8 +8,9 @@
 //! when it is wrong.
 //!
 //! It is bounded and it is not a cache. An entry arrives when the kernel says
-//! a task replaced its image and leaves when the kernel says that task is
-//! gone, which is why nothing here ages out on a timer: a process that has
+//! a process was forked or replaced its image and leaves when the kernel says
+//! that process is gone - or, when something it started still runs, moves to
+//! a smaller bounded set of exited ancestors until its last descendant goes - which is why nothing here ages out on a timer: a process that has
 //! run for a year is not stale, and a pid freed a millisecond ago must not be
 //! readable as the process that held it. The bound exists for the case the
 //! kernel cannot help with - a lost exit notification - and the eviction it

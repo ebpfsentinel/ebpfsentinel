@@ -63,6 +63,10 @@ pub const KEY_POD_NAME: &str = "podName";
 pub const KEY_POD_NAMESPACE: &str = "podNamespace";
 pub const KEY_SERVICE_ACCOUNT: &str = "serviceAccount";
 pub const KEY_SYSTEMD_UNIT: &str = "systemdUnit";
+pub const KEY_PARENT_PID: &str = "parentPid";
+pub const KEY_ANCESTRY: &str = "workloadAncestry";
+pub const KEY_ANCESTRY_TRUNCATED: &str = "workloadAncestryTruncated";
+pub const KEY_ANCESTRY_INCOMPLETE: &str = "workloadAncestryIncomplete";
 
 /// The vendor and product a reader keys its parser on. They are the strings
 /// the enterprise exporters already send, because a SIEM that learned to
@@ -154,6 +158,18 @@ fn push_workload(fields: &mut Vec<(&'static str, String)>, workload: &Workload) 
         workload.service_account.as_deref(),
     );
     push_text(fields, KEY_SYSTEMD_UNIT, workload.unit.as_deref());
+    if let Some(ancestry) = workload.ancestry.as_ref() {
+        if let Some(parent) = ancestry.parent() {
+            fields.push((KEY_PARENT_PID, parent.pid.to_string()));
+        }
+        push_text(fields, KEY_ANCESTRY, Some(&ancestry.chain_text()));
+        if ancestry.truncated {
+            fields.push((KEY_ANCESTRY_TRUNCATED, "true".to_string()));
+        }
+        if ancestry.incomplete {
+            fields.push((KEY_ANCESTRY_INCOMPLETE, "true".to_string()));
+        }
+    }
 }
 
 /// The executable's own name, which is what CEF's `sproc` holds while the
@@ -360,6 +376,7 @@ mod tests {
                 namespace: Some("shop".to_string()),
                 service_account: Some("web".to_string()),
                 unit: Some("nginx.service".to_string()),
+                ancestry: None,
             }),
             ..transited()
         }
@@ -592,5 +609,27 @@ mod tests {
         assert!(!message.contains("CEF:0"), "{message}");
         assert!(message.starts_with("rt="), "{message}");
         assert!(message.contains("flowEndReason=idle_timeout"), "{message}");
+    }
+
+    #[test]
+    fn an_ancestry_rides_as_the_parent_pid_and_one_field() {
+        let mut record = resolved();
+        if let Some(workload) = record.workload.as_mut() {
+            workload.ancestry = Some(crate::workload::entity::sample_ancestry());
+        }
+        let fields = fields(&record);
+        let get = |key: &str| {
+            fields
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(get(KEY_PARENT_PID).as_deref(), Some("900"));
+        assert_eq!(
+            get(KEY_ANCESTRY).as_deref(),
+            Some("900 /bin/sh < 120 [nginx]")
+        );
+        assert_eq!(get(KEY_ANCESTRY_INCOMPLETE).as_deref(), Some("true"));
+        assert!(get(KEY_ANCESTRY_TRUNCATED).is_none());
     }
 }

@@ -65,6 +65,7 @@ fn alert_to_event(alert: &Alert) -> proto::AlertEvent {
 /// are what make it exist, everything else is what the node could add.
 fn workload_block(alert: &Alert) -> Option<proto::Workload> {
     let w = alert.workload.as_ref().filter(|w| w.pid != 0)?;
+    let ancestry = w.ancestry.as_ref();
     Some(proto::Workload {
         pid: w.pid,
         source: w.source.as_str().to_string(),
@@ -77,6 +78,23 @@ fn workload_block(alert: &Alert) -> Option<proto::Workload> {
         namespace: w.namespace.clone().unwrap_or_default(),
         service_account: w.service_account.clone().unwrap_or_default(),
         unit: w.unit.clone().unwrap_or_default(),
+        ancestors: ancestry
+            .map(|a| {
+                a.ancestors
+                    .iter()
+                    .map(|a| proto::WorkloadAncestor {
+                        pid: a.pid,
+                        exe: a.exe.clone().unwrap_or_default(),
+                        name: a.name.clone(),
+                        uid: a.uid,
+                        start_ns: a.start_ns.unwrap_or(0),
+                        exited: a.exited,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        ancestry_truncated: ancestry.is_some_and(|a| a.truncated),
+        ancestry_incomplete: ancestry.is_some_and(|a| a.incomplete),
     })
 }
 
@@ -347,6 +365,40 @@ mod tests {
         // What the node could not add is empty rather than invented.
         assert_eq!(block.namespace, "");
         assert_eq!(block.cgroup, 0);
+        assert!(block.ancestors.is_empty());
+    }
+
+    #[test]
+    fn the_ancestry_rides_the_stream_parent_first() {
+        use domain::workload::entity::{
+            Workload, WorkloadAncestor, WorkloadAncestry, WorkloadSource,
+        };
+
+        let mut alert = make_alert("ids", Severity::High, "ids-001");
+        let mut workload = Workload::new(4242, WorkloadSource::Socket).expect("a pid builds one");
+        workload.ancestry = Some(WorkloadAncestry {
+            ancestors: vec![WorkloadAncestor {
+                pid: 900,
+                exe: None,
+                name: "sh".to_string(),
+                uid: 33,
+                start_ns: Some(7),
+                exited: true,
+            }],
+            truncated: false,
+            incomplete: true,
+        });
+        alert.workload = Some(workload);
+
+        let block = alert_to_event(&alert).workload.expect("the block travels");
+        assert_eq!(block.ancestors.len(), 1);
+        assert_eq!(block.ancestors[0].pid, 900);
+        assert_eq!(block.ancestors[0].name, "sh");
+        assert_eq!(block.ancestors[0].exe, "");
+        assert_eq!(block.ancestors[0].start_ns, 7);
+        assert!(block.ancestors[0].exited);
+        assert!(block.ancestry_incomplete);
+        assert!(!block.ancestry_truncated);
     }
 
     #[test]

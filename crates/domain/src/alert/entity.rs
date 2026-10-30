@@ -1294,6 +1294,7 @@ mod tests {
             namespace: None,
             service_account: None,
             unit: None,
+            ancestry: None,
         });
         let alert =
             Alert::from_dlp_alert(&sample_dlp_alert(), "Visa card detected").with_workload(zeroed);
