@@ -60,6 +60,7 @@ pub mod alias_service_impl;
 pub mod audit_service_impl;
 pub mod config_reload;
 pub mod conntrack_service_impl;
+pub mod crowdsec_signal_report;
 pub mod ddos_service_impl;
 pub mod dlp_scope_service;
 pub mod dlp_service_impl;

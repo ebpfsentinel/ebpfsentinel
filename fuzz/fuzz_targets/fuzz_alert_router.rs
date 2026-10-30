@@ -159,6 +159,7 @@ fuzz_target!(|data: &[u8]| {
             executable_inode: None,
             executable_source: None,
             flow_source: None,
+            workload: None,
         };
 
         let _ = router.process_alert(&alert);
@@ -227,6 +228,7 @@ fuzz_target!(|data: &[u8]| {
             executable_inode: None,
             executable_source: None,
             flow_source: None,
+            workload: None,
         };
         let _ = router.process_alert(&alert);
     }

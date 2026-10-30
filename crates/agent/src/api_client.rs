@@ -1415,6 +1415,41 @@ pub struct IdsThresholdResponse {
     pub track_by: String,
 }
 
+/// What the imported Suricata rulesets compiled to.
+#[derive(Deserialize, Serialize)]
+pub struct SuricataReportResponse {
+    pub rulesets: Vec<SuricataRulesetResponse>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct SuricataRulesetResponse {
+    pub source: String,
+    pub total: usize,
+    pub compiled: usize,
+    pub native_rules: usize,
+    pub disabled: usize,
+    pub refused_share: f64,
+    #[serde(default)]
+    pub refused_by_keyword: Vec<SuricataKeywordCount>,
+    #[serde(default)]
+    pub refused: Vec<SuricataRefusalResponse>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct SuricataKeywordCount {
+    pub keyword: String,
+    pub count: usize,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct SuricataRefusalResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<u32>,
+    pub line: usize,
+    pub keyword: String,
+    pub reason: String,
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct IdsRuleResponse {
     pub id: String,
@@ -3278,6 +3313,15 @@ impl ApiClient {
     pub async fn list_ids_rules(&self) -> anyhow::Result<Vec<IdsRuleResponse>> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/ids/rules")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn ids_suricata_report(&self) -> anyhow::Result<SuricataReportResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ids/suricata/report")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

@@ -1,10 +1,13 @@
 //! IDS domain configuration structs and conversion logic.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
+use std::sync::Arc;
 
 use domain::common::entity::RuleId;
 use domain::firewall::workload::{KubernetesMatchers, WorkloadSelector};
 use domain::ids::entity::{IdsRule, SamplingMode, ThresholdConfig, ThresholdType, TrackBy};
+use domain::ids::suricata::{ImportedRulesets, SuricataVars, compile_rulesets};
 use domain::netpol::LabelSelector;
 use serde::{Deserialize, Serialize};
 
@@ -241,6 +244,15 @@ pub struct IdsConfig {
 
     #[serde(default)]
     pub rules: Vec<IdsRuleConfig>,
+
+    /// Suricata rulesets compiled into detection rules at load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suricata: Option<SuricataImportConfig>,
+
+    /// What the rulesets compiled to, read when the configuration is loaded
+    /// so that every reader of this configuration sees the same rules.
+    #[serde(skip)]
+    pub imported: Arc<ImportedRulesets>,
 }
 
 impl Default for IdsConfig {
@@ -251,8 +263,143 @@ impl Default for IdsConfig {
             sampling: None,
             inspect_egress: false,
             rules: Vec::new(),
+            suricata: None,
+            imported: Arc::default(),
         }
     }
+}
+
+// ── Suricata import ───────────────────────────────────────────────
+
+/// The largest ruleset file read, in bytes. The whole ET Open corpus in one
+/// file is about 40 MB.
+const MAX_RULESET_BYTES: u64 = 128 * 1024 * 1024;
+
+/// The largest number of ruleset files one import names.
+const MAX_RULESETS: usize = 256;
+
+fn default_max_refused_share() -> f64 {
+    0.5
+}
+
+/// Suricata rulesets to compile into detection rules.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuricataImportConfig {
+    /// Ruleset files, read in this order. A sid is one rule across all of
+    /// them.
+    #[serde(default)]
+    pub rulesets: Vec<String>,
+
+    /// Address and port variables laid over the stock `suricata.yaml` ones.
+    #[serde(default)]
+    pub vars: SuricataVarsConfig,
+
+    /// The share of a ruleset's enabled rules that may be refused before the
+    /// import fails, from 0 to 1. Above it the configuration is rejected and
+    /// the one already running stays in place.
+    #[serde(default = "default_max_refused_share")]
+    pub max_refused_share: f64,
+}
+
+/// Variable overrides, by name without the `$`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuricataVarsConfig {
+    #[serde(default)]
+    pub addresses: BTreeMap<String, String>,
+    #[serde(default)]
+    pub ports: BTreeMap<String, String>,
+}
+
+impl SuricataImportConfig {
+    pub(super) fn validate(&self) -> Result<(), ConfigError> {
+        if !(0.0..=1.0).contains(&self.max_refused_share) {
+            return Err(ConfigError::Validation {
+                field: "ids.suricata.max_refused_share".to_string(),
+                message: format!("{} is not between 0 and 1", self.max_refused_share),
+            });
+        }
+        if self.rulesets.len() > MAX_RULESETS {
+            return Err(ConfigError::Validation {
+                field: "ids.suricata.rulesets".to_string(),
+                message: format!(
+                    "count {} exceeds maximum {MAX_RULESETS}",
+                    self.rulesets.len()
+                ),
+            });
+        }
+        for (idx, path) in self.rulesets.iter().enumerate() {
+            if path.trim().is_empty() {
+                return Err(ConfigError::Validation {
+                    field: format!("ids.suricata.rulesets[{idx}]"),
+                    message: "is empty".to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Read and compile every ruleset. A file that cannot be read, or a
+    /// ruleset refusing more than the allowed share, fails the import.
+    pub(super) fn import(&self) -> Result<ImportedRulesets, ConfigError> {
+        let mut texts = Vec::with_capacity(self.rulesets.len());
+        for (idx, path) in self.rulesets.iter().enumerate() {
+            texts.push(read_ruleset(idx, Path::new(path))?);
+        }
+        let vars = SuricataVars::with_overrides(&self.vars.addresses, &self.vars.ports);
+        let imported = compile_rulesets(
+            self.rulesets
+                .iter()
+                .cloned()
+                .zip(texts.iter().map(String::as_str)),
+            &vars,
+        );
+        if let Some(over) = imported.over_share(self.max_refused_share) {
+            let report = &over.report;
+            let worst = report
+                .refusals_by_keyword()
+                .into_iter()
+                .take(3)
+                .map(|(keyword, count)| format!("{keyword} {count}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(ConfigError::Validation {
+                field: "ids.suricata.max_refused_share".to_string(),
+                message: format!(
+                    "{} refuses {} of {} rules ({:.1}%, above {:.1}%); most refused keywords: {worst}",
+                    over.source,
+                    report.refused.len(),
+                    report.total,
+                    report.refused_share() * 100.0,
+                    self.max_refused_share * 100.0,
+                ),
+            });
+        }
+        Ok(imported)
+    }
+}
+
+fn read_ruleset(idx: usize, path: &Path) -> Result<String, ConfigError> {
+    let field = format!("ids.suricata.rulesets[{idx}]");
+    let unreadable = |e: std::io::Error| ConfigError::Validation {
+        field: field.clone(),
+        message: format!("{} cannot be read: {e}", path.display()),
+    };
+    let size = std::fs::metadata(path).map_err(unreadable)?.len();
+    if size > MAX_RULESET_BYTES {
+        return Err(ConfigError::Validation {
+            field,
+            message: format!(
+                "{} is {size} bytes, above the {MAX_RULESET_BYTES} a ruleset may be",
+                path.display()
+            ),
+        });
+    }
+    let bytes = std::fs::read(path).map_err(unreadable)?;
+    // A ruleset is text, but a stray byte in a comment should not cost the
+    // whole file, so it is read lossily and the rule holding it is refused.
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -605,6 +752,7 @@ impl IdsRuleConfig {
                 .map(|w| w.to_selector("ids.rules"))
                 .transpose()?,
             kill_process: false,
+            imported: None,
         })
     }
 }

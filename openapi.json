@@ -4166,6 +4166,65 @@
         ]
       }
     },
+    "/api/v1/ids/suricata/report": {
+      "get": {
+        "tags": [
+          "IDS"
+        ],
+        "summary": "`GET /api/v1/ids/suricata/report` - what the imported Suricata rulesets\ncompiled to.",
+        "operationId": "suricata_report",
+        "responses": {
+          "200": {
+            "description": "One report per imported ruleset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuricataReportResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "IDS not available",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/ips/blacklist": {
       "get": {
         "tags": [
@@ -14726,6 +14785,130 @@
           "scope": {
             "$ref": "#/components/schemas/ScopeBody",
             "description": "What to watch. Omitted means the whole node."
+          }
+        }
+      },
+      "SuricataKeywordCount": {
+        "type": "object",
+        "required": [
+          "keyword",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "keyword": {
+            "type": "string"
+          }
+        }
+      },
+      "SuricataRefusalResponse": {
+        "type": "object",
+        "description": "One refused rule.",
+        "required": [
+          "line",
+          "keyword",
+          "reason"
+        ],
+        "properties": {
+          "keyword": {
+            "type": "string",
+            "description": "The keyword, or part of the rule header, that stopped it."
+          },
+          "line": {
+            "type": "integer",
+            "description": "The line of the ruleset the rule starts on, counted from 1.",
+            "minimum": 0
+          },
+          "reason": {
+            "type": "string",
+            "description": "One sentence of why."
+          },
+          "sid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The rule's sid, absent when the rule was refused before one was read.",
+            "minimum": 0
+          }
+        }
+      },
+      "SuricataReportResponse": {
+        "type": "object",
+        "description": "What the configured Suricata rulesets compiled to.",
+        "required": [
+          "rulesets"
+        ],
+        "properties": {
+          "rulesets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SuricataRulesetResponse"
+            },
+            "description": "One entry per ruleset, in the order the configuration names them.\nEmpty when no ruleset is imported."
+          }
+        }
+      },
+      "SuricataRulesetResponse": {
+        "type": "object",
+        "description": "One ruleset's import: what loaded, and every refusal with its reason.",
+        "required": [
+          "source",
+          "total",
+          "compiled",
+          "native_rules",
+          "disabled",
+          "refused_share",
+          "refused_by_keyword",
+          "refused"
+        ],
+        "properties": {
+          "compiled": {
+            "type": "integer",
+            "description": "Rules that compiled.",
+            "minimum": 0
+          },
+          "disabled": {
+            "type": "integer",
+            "description": "Rules present but commented out, which are not read.",
+            "minimum": 0
+          },
+          "native_rules": {
+            "type": "integer",
+            "description": "Detection rules the compiled ones became, one per port they name.",
+            "minimum": 0
+          },
+          "refused": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SuricataRefusalResponse"
+            },
+            "description": "Every refused rule."
+          },
+          "refused_by_keyword": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SuricataKeywordCount"
+            },
+            "description": "Refusals counted by the keyword that caused them, most frequent first."
+          },
+          "refused_share": {
+            "type": "number",
+            "format": "double",
+            "description": "The share of enabled rules refused, from 0 to 1."
+          },
+          "source": {
+            "type": "string",
+            "description": "The ruleset file, as the configuration names it."
+          },
+          "total": {
+            "type": "integer",
+            "description": "Rules the ruleset enables, compiled or not.",
+            "minimum": 0
           }
         }
       },

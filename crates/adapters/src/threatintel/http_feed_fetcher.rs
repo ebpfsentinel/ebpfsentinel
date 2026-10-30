@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use domain::common::error::DomainError;
-use domain::threatintel::entity::FeedConfig;
+use domain::threatintel::entity::{FeedConfig, FeedFormat};
 use ports::secondary::feed_source::FeedSource;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
@@ -52,6 +52,12 @@ impl Resolve for SsrfGuardResolver {
 /// for downloading threat intelligence feeds from any HTTP/HTTPS source.
 pub struct HttpFeedFetcher {
     client: reqwest::Client,
+    /// Client for a CrowdSec local API, which sits on the host or the local
+    /// network and so cannot pass the address guard. Only a feed in the
+    /// CrowdSec format reaches it, and only the configuration's CrowdSec block
+    /// produces one. It follows no redirect either, so the local API cannot
+    /// send the agent anywhere else.
+    local_client: reqwest::Client,
 }
 
 impl HttpFeedFetcher {
@@ -64,17 +70,34 @@ impl HttpFeedFetcher {
             .dns_resolver(Arc::new(SsrfGuardResolver))
             .build()
             .map_err(|e| DomainError::EngineError(format!("HTTP client init failed: {e}")))?;
+        let local_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent("ebpfsentinel-agent/0.1")
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| DomainError::EngineError(format!("HTTP client init failed: {e}")))?;
 
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            local_client,
+        })
     }
 
     /// Create with a custom reqwest client (for testing or advanced config).
     pub fn with_client(client: reqwest::Client) -> Self {
-        Self { client }
+        Self {
+            local_client: client.clone(),
+            client,
+        }
     }
 
     async fn do_fetch(&self, config: &FeedConfig) -> Result<Vec<u8>, DomainError> {
-        let mut request = self.client.get(&config.url);
+        let client = if config.format == FeedFormat::Crowdsec {
+            &self.local_client
+        } else {
+            &self.client
+        };
+        let mut request = client.get(&config.url);
 
         // Apply optional auth header (validated at config load; re-check with typed API)
         if let Some(ref auth) = config.auth_header

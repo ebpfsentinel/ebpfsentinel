@@ -2,11 +2,13 @@
 #![allow(clippy::unwrap_used)]
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::fmt::Write as _;
 use std::hint::black_box;
 
 use domain::common::entity::{DomainMode, Protocol, RuleId, Severity};
 use domain::ids::engine::IdsEngine;
 use domain::ids::entity::IdsRule;
+use domain::ids::suricata::{SuricataVars, compile_ruleset};
 use ebpf_common::event::{EVENT_TYPE_IDS, PacketEvent};
 
 fn make_rule(id: usize) -> IdsRule {
@@ -28,6 +30,7 @@ fn make_rule(id: usize) -> IdsRule {
         tenant_id: 0,
         workload: None,
         kill_process: false,
+        imported: None,
     }
 }
 
@@ -142,5 +145,49 @@ fn bench_reload(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_evaluate_event, bench_add_rule, bench_reload);
+/// An imported ruleset of `n` content rules, all on one port so that every
+/// rule is a candidate for every segment: the worst case of the payload scan.
+fn imported_engine(n: usize) -> IdsEngine {
+    let mut text = String::new();
+    for i in 0..n {
+        writeln!(
+            text,
+            "alert tcp any any -> any 80 (msg:\"rule {i}\"; \
+             flow:to_server,established; content:\"needle-{i:05}\"; nocase; \
+             content:\"/admin\"; distance:0; sid:{};)",
+            i + 1
+        )
+        .unwrap();
+    }
+    let compiled = compile_ruleset(&text, &SuricataVars::default());
+    assert_eq!(compiled.report.compiled, n);
+    let mut engine = IdsEngine::new();
+    engine.reload(compiled.rules).unwrap();
+    engine
+}
+
+fn bench_imported_payload(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ids_imported_payload");
+    let mut event = make_event(0);
+    event.dst_port = 80;
+    // A request no rule matches walks every candidate rule.
+    let miss = b"GET /index.html HTTP/1.1\r\nHost: example.test\r\nUser-Agent: bench\r\n\r\n";
+
+    for &n in &[100, 1_000, 5_000] {
+        let engine = imported_engine(n);
+        group.bench_with_input(BenchmarkId::new("miss", n), &n, |b, _| {
+            b.iter(|| black_box(engine.evaluate_payload_with_context(&event, miss, None)));
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_evaluate_event,
+    bench_add_rule,
+    bench_reload,
+    bench_imported_payload
+);
 criterion_main!(benches);

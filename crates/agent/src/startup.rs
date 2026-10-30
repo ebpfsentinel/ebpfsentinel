@@ -432,6 +432,9 @@ pub async fn run(
     ids_svc.set_mode(ids_mode);
     ids_svc.set_enabled(config.ids.enabled);
     ids_svc.set_sampling(config.ids_sampling()?);
+    if config.ids.enabled {
+        ids_svc.set_suricata_imports(config.ids_suricata_reports());
+    }
     let ids_svc = Arc::new(ArcSwap::from_pointee(ids_svc));
 
     let ips_mode = config.ips_mode()?;
@@ -979,7 +982,7 @@ pub async fn run(
     // Manual threat-intel feed re-fetch channel. Only wired into AppState
     // when the feed fetcher task actually runs (threat intel enabled with
     // ≥1 feed); otherwise the refresh endpoint reports the feature off.
-    let ti_feeds_active = config.threatintel.enabled && !config.threatintel.feeds.is_empty();
+    let ti_feeds_active = config.threatintel.enabled && config.threatintel.has_feeds();
     let mut feed_refresh_rx: Option<mpsc::Receiver<()>> = None;
     let feed_refresh_tx = if ti_feeds_active {
         let (tx, rx) = mpsc::channel::<()>(4);
@@ -1799,6 +1802,28 @@ pub async fn run(
     let grpc_auth: Option<Arc<dyn AuthProvider>> = app_state.auth_provider.clone();
 
     // reload_handle is spawned after eBPF loading (step 10) to include EbpfMapHolder
+
+    // ── 8a. Report the agent's own blocks to a CrowdSec local API ─────
+    let crowdsec = &config.threatintel.crowdsec;
+    if config.threatintel.enabled && crowdsec.enabled && crowdsec.report.enabled {
+        let reporter = adapters::threatintel::LapiSignalReporter::new(
+            &crowdsec.lapi_url,
+            crowdsec.report.machine_id.clone(),
+            crowdsec.report.password.clone(),
+            crowdsec.report.decision_duration.clone(),
+        )?;
+        info!(
+            interval_secs = crowdsec.report.interval_secs,
+            decides = crowdsec.report.decision_duration.is_some(),
+            "CrowdSec signal reporter starting"
+        );
+        tokio::spawn(application::crowdsec_signal_report::run_signal_reporter(
+            alert_stream_tx.subscribe(),
+            Arc::new(reporter),
+            Duration::from_secs(crowdsec.report.interval_secs),
+            cancel_token.clone(),
+        ));
+    }
 
     // ── 8b. Spawn gRPC alert streaming server ─────────────────────────
     let grpc_port = config.agent.grpc_port;
@@ -4752,7 +4777,7 @@ pub async fn run(
     });
 
     // ── 11c. Spawn threat intel feed fetcher (periodic) ───────────────
-    let _feed_fetch_handle = if config.threatintel.enabled && !config.threatintel.feeds.is_empty() {
+    let _feed_fetch_handle = if ti_feeds_active {
         let fetcher = adapters::threatintel::HttpFeedFetcher::default();
         let feed_ti_svc = Arc::clone(&ti_svc);
         let feed_metrics = Arc::clone(&metrics) as Arc<dyn MetricsPort>;
@@ -4765,6 +4790,13 @@ pub async fn run(
             .iter()
             .filter(|f| f.enabled)
             .map(|f| f.refresh_interval_secs)
+            .chain(
+                config
+                    .threatintel
+                    .crowdsec
+                    .enabled
+                    .then_some(config.threatintel.crowdsec.refresh_interval_secs),
+            )
             .filter(|s| *s > 0)
             .min()
             .unwrap_or(3600)
@@ -4772,6 +4804,7 @@ pub async fn run(
         info!(
             refresh_interval_secs = refresh_secs,
             feed_count = config.threatintel.feeds.len(),
+            crowdsec = config.threatintel.crowdsec.enabled,
             "threat intel feed fetcher starting"
         );
         let mut refresh_rx = feed_refresh_rx

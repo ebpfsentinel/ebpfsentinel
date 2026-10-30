@@ -104,6 +104,7 @@ fuzz_target!(|data: &[u8]| {
             backends,
             enabled: chunk[8] & 1 == 0,
             health_check: None,
+            listen_addr: None,
         };
         services.push(service);
     }

@@ -91,7 +91,7 @@ use super::firewall_handler::{
 use super::flow_handler::flow_export_status;
 use super::geoip_handler::{geoip_lookup, geoip_status};
 use super::health_handler::{healthz, readyz};
-use super::ids_handler::{ids_status, list_ids_rules};
+use super::ids_handler::{ids_status, list_ids_rules, suricata_report};
 use super::ips_handler::{
     add_ips_blacklist, delete_ips_blacklist, list_ips_blacklist, list_ips_domain_blocks,
     list_ips_rules, patch_ips_rule_mode,
@@ -288,6 +288,7 @@ pub fn build_router(
             .route("/api/v1/ips/domain-blocks", get(list_ips_domain_blocks))
             .route("/api/v1/ids/status", get(ids_status))
             .route("/api/v1/ids/rules", get(list_ids_rules))
+            .route("/api/v1/ids/suricata/report", get(suricata_report))
             .route("/api/v1/ratelimit/rules", get(list_ratelimit_rules))
             .route("/api/v1/threatintel/status", get(threatintel_status))
             .route("/api/v1/threatintel/iocs", get(list_iocs))

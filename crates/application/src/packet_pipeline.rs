@@ -1805,6 +1805,7 @@ mod tests {
             tenant_id: 0,
             workload: None,
             kill_process: false,
+            imported: None,
         }
     }
 

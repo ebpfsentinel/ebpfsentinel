@@ -11,6 +11,7 @@ use domain::ddos::entity::DdosPolicy;
 use domain::dlp::entity::DlpPattern;
 use domain::firewall::entity::FirewallRule;
 use domain::ids::entity::{IdsRule, SamplingMode};
+use domain::ids::suricata::RulesetImport;
 use domain::ips::entity::{IpsPolicy, WhitelistEntry};
 use domain::l7::entity::L7Rule;
 use domain::nat::entity::NatRule;
@@ -675,6 +676,7 @@ impl ConfigReloadService {
     pub async fn reload_ids(
         &self,
         rules: Vec<IdsRule>,
+        suricata_imports: Vec<RulesetImport>,
         enabled: bool,
         mode: DomainMode,
         sampling: SamplingMode,
@@ -696,6 +698,11 @@ impl ConfigReloadService {
         svc.set_mode(mode);
         svc.set_enabled(enabled);
         svc.set_sampling(sampling);
+        svc.set_suricata_imports(if enabled {
+            suricata_imports
+        } else {
+            Vec::new()
+        });
 
         let effective_rules = if enabled { rules } else { Vec::new() };
         let rule_count = effective_rules.len();
@@ -1279,6 +1286,7 @@ mod tests {
             tenant_id: 0,
             workload: None,
             kill_process: false,
+            imported: None,
         }
     }
 
@@ -1519,7 +1527,13 @@ mod tests {
 
         let rules = vec![make_ids_rule("ids-001"), make_ids_rule("ids-002")];
         reload
-            .reload_ids(rules, true, DomainMode::Alert, SamplingMode::None)
+            .reload_ids(
+                rules,
+                Vec::new(),
+                true,
+                DomainMode::Alert,
+                SamplingMode::None,
+            )
             .await
             .unwrap();
 
@@ -1547,6 +1561,7 @@ mod tests {
         reload
             .reload_ids(
                 vec![make_ids_rule("ids-001")],
+                Vec::new(),
                 true,
                 DomainMode::Alert,
                 SamplingMode::None,
@@ -1558,6 +1573,7 @@ mod tests {
         reload
             .reload_ids(
                 vec![make_ids_rule("ids-001")],
+                Vec::new(),
                 false,
                 DomainMode::Alert,
                 SamplingMode::None,
@@ -1586,7 +1602,13 @@ mod tests {
         // Duplicate IDs should fail
         let rules = vec![make_ids_rule("ids-001"), make_ids_rule("ids-001")];
         let result = reload
-            .reload_ids(rules, true, DomainMode::Alert, SamplingMode::None)
+            .reload_ids(
+                rules,
+                Vec::new(),
+                true,
+                DomainMode::Alert,
+                SamplingMode::None,
+            )
             .await;
 
         assert!(result.is_err());
@@ -1612,6 +1634,7 @@ mod tests {
         reload
             .reload_ids(
                 vec![make_ids_rule("ids-001")],
+                Vec::new(),
                 true,
                 DomainMode::Alert,
                 SamplingMode::None,
@@ -1623,6 +1646,7 @@ mod tests {
         reload
             .reload_ids(
                 vec![make_ids_rule("ids-001")],
+                Vec::new(),
                 true,
                 DomainMode::Block,
                 SamplingMode::None,
@@ -1653,6 +1677,7 @@ mod tests {
             tenant_id: 0,
             workload: None,
             kill_process: false,
+            imported: None,
         }
     }
 

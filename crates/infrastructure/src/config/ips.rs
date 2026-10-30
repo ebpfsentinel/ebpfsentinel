@@ -229,6 +229,7 @@ impl IpsRuleConfig {
             tenant_id: self.tenant_id,
             workload: None,
             kill_process: self.kill_process,
+            imported: None,
         })
     }
 }

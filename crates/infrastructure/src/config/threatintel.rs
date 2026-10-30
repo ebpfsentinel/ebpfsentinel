@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use domain::threatintel::crowdsec::CROWDSEC_FEED_ID;
 use domain::threatintel::entity::{FeedConfig, FeedFormat, FieldMapping};
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +30,208 @@ pub struct ThreatIntelConfig {
     /// the next agent start: a pinned map keeps the size it was created with.
     #[serde(default)]
     pub max_entries: Option<u32>,
+
+    /// A CrowdSec local API to read decisions from and, optionally, to write
+    /// the agent's own blocks back to. Absent or disabled, nothing is asked
+    /// of it and nothing is sent.
+    #[serde(default)]
+    pub crowdsec: CrowdsecConfig,
+}
+
+/// The CrowdSec local API, read as a bouncer and written as a machine.
+///
+/// Reading is the bouncer half: the agent pulls the bans in force and loads
+/// each banned address as an indicator, the way any other feed is loaded.
+/// Writing is the machine half, off unless `report.enabled` is set too.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrowdsecConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Base address of the local API, e.g. `http://127.0.0.1:8080`. Unlike
+    /// an internet feed it may be on the host or the local network.
+    #[serde(default)]
+    pub lapi_url: String,
+
+    /// Key of a bouncer registered with `cscli bouncers add`.
+    #[serde(default)]
+    pub bouncer_key: String,
+
+    /// How often the decision list is read again, in seconds.
+    #[serde(default = "default_crowdsec_refresh_secs")]
+    pub refresh_interval_secs: u64,
+
+    /// Most decisions loaded at once.
+    #[serde(default = "default_crowdsec_max_decisions")]
+    pub max_decisions: usize,
+
+    /// `alert` or `block` for a banned address. Inherits `threatintel.mode`
+    /// when absent.
+    #[serde(default)]
+    pub default_action: Option<String>,
+
+    #[serde(default)]
+    pub report: CrowdsecReportConfig,
+}
+
+/// Writing the agent's blocks back to the local API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrowdsecReportConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Machine registered with `cscli machines add`.
+    #[serde(default)]
+    pub machine_id: String,
+
+    #[serde(default)]
+    pub password: String,
+
+    /// How often the blocks seen since the last report are sent, in seconds.
+    #[serde(default = "default_crowdsec_report_secs")]
+    pub interval_secs: u64,
+
+    /// When set, each reported source also carries a ban of this length
+    /// (`4h`, `30m`), which the local API hands to every bouncer it serves.
+    /// Absent, the report is recorded and decides nothing.
+    #[serde(default)]
+    pub decision_duration: Option<String>,
+}
+
+fn default_crowdsec_refresh_secs() -> u64 {
+    60
+}
+fn default_crowdsec_max_decisions() -> usize {
+    100_000
+}
+fn default_crowdsec_report_secs() -> u64 {
+    60
+}
+
+impl Default for CrowdsecConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            lapi_url: String::new(),
+            bouncer_key: String::new(),
+            refresh_interval_secs: default_crowdsec_refresh_secs(),
+            max_decisions: default_crowdsec_max_decisions(),
+            default_action: None,
+            report: CrowdsecReportConfig::default(),
+        }
+    }
+}
+
+impl Default for CrowdsecReportConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            machine_id: String::new(),
+            password: String::new(),
+            interval_secs: default_crowdsec_report_secs(),
+            decision_duration: None,
+        }
+    }
+}
+
+/// A CrowdSec duration: digits followed by `s`, `m` or `h`, possibly
+/// repeated (`1h30m`).
+fn is_crowdsec_duration(s: &str) -> bool {
+    let mut digits = false;
+    let mut any = false;
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            digits = true;
+        } else if matches!(c, 's' | 'm' | 'h') && digits {
+            digits = false;
+            any = true;
+        } else {
+            return false;
+        }
+    }
+    any && !digits
+}
+
+impl CrowdsecConfig {
+    fn invalid(field: &str, message: &str) -> ConfigError {
+        ConfigError::Validation {
+            field: format!("threatintel.crowdsec.{field}"),
+            message: message.to_string(),
+        }
+    }
+
+    /// Checked only when enabled, so a block left in place and switched off
+    /// does not stop the agent.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        FeedConfig::validate_local_api_url(&self.lapi_url)
+            .map_err(|m| Self::invalid("lapi_url", m))?;
+        if self.bouncer_key.trim().is_empty() {
+            return Err(Self::invalid("bouncer_key", "must not be empty"));
+        }
+        if self.bouncer_key.contains(['\r', '\n']) {
+            return Err(Self::invalid("bouncer_key", "must be one line"));
+        }
+        if self.refresh_interval_secs < 60 {
+            return Err(Self::invalid(
+                "refresh_interval_secs",
+                "must be at least 60",
+            ));
+        }
+        if self.max_decisions == 0 {
+            return Err(Self::invalid("max_decisions", "must be > 0"));
+        }
+        if let Some(ref action) = self.default_action {
+            parse_domain_mode(action)?;
+        }
+        let report = &self.report;
+        if report.enabled {
+            if report.machine_id.trim().is_empty() {
+                return Err(Self::invalid("report.machine_id", "must not be empty"));
+            }
+            if report.password.is_empty() {
+                return Err(Self::invalid("report.password", "must not be empty"));
+            }
+            if report.interval_secs < 10 {
+                return Err(Self::invalid("report.interval_secs", "must be at least 10"));
+            }
+            if let Some(ref d) = report.decision_duration
+                && !is_crowdsec_duration(d)
+            {
+                return Err(Self::invalid(
+                    "report.decision_duration",
+                    "must look like 4h, 30m or 1h30m",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The decision list as a feed, when reading is enabled.
+    #[must_use]
+    pub fn to_domain_feed_config(&self) -> Option<FeedConfig> {
+        if !self.enabled {
+            return None;
+        }
+        Some(FeedConfig {
+            id: CROWDSEC_FEED_ID.to_string(),
+            name: "CrowdSec local API".to_string(),
+            url: format!(
+                "{}/v1/decisions?type=ban",
+                self.lapi_url.trim_end_matches('/')
+            ),
+            format: FeedFormat::Crowdsec,
+            enabled: true,
+            refresh_interval_secs: self.refresh_interval_secs,
+            max_iocs: self.max_decisions,
+            default_action: self.default_action.clone(),
+            min_confidence: 0,
+            field_mapping: None,
+            auth_header: Some(format!("X-Api-Key: {}", self.bouncer_key.trim())),
+        })
+    }
 }
 
 /// Smallest capacity the IOC tables are ever created with.
@@ -37,6 +240,13 @@ pub const THREATINTEL_MIN_CAPACITY: u32 = 4_096;
 pub const THREATINTEL_MAX_CAPACITY: u32 = 4_194_304;
 
 impl ThreatIntelConfig {
+    /// Whether anything is configured to be fetched: a feed, or the CrowdSec
+    /// decision list.
+    #[must_use]
+    pub fn has_feeds(&self) -> bool {
+        !self.feeds.is_empty() || self.crowdsec.enabled
+    }
+
     /// The capacity the kernel IOC tables are created with.
     ///
     /// `max_entries` when set; otherwise the enabled feeds' `max_iocs` added
@@ -55,7 +265,12 @@ impl ThreatIntelConfig {
             .iter()
             .filter(|f| f.enabled)
             .map(|f| f.max_iocs as u64)
-            .sum();
+            .sum::<u64>()
+            + if self.crowdsec.enabled {
+                self.crowdsec.max_decisions as u64
+            } else {
+                0
+            };
         let wanted = wanted.clamp(
             u64::from(THREATINTEL_MIN_CAPACITY),
             u64::from(THREATINTEL_MAX_CAPACITY),
@@ -89,6 +304,7 @@ impl Default for ThreatIntelConfig {
             feeds: Vec::new(),
             country_confidence_boost: None,
             max_entries: None,
+            crowdsec: CrowdsecConfig::default(),
         }
     }
 }
@@ -200,6 +416,13 @@ impl ThreatIntelFeedConfig {
             });
         }
 
+        if self.id == CROWDSEC_FEED_ID {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.id"),
+                message: format!("`{CROWDSEC_FEED_ID}` is reserved for threatintel.crowdsec"),
+            });
+        }
+
         // Validate format string
         parse_feed_format(&self.format).map_err(|()| ConfigError::InvalidValue {
             field: format!("{prefix}.format"),
@@ -269,6 +492,74 @@ pub(super) fn parse_feed_format(s: &str) -> Result<FeedFormat, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── CrowdSec ─────────────────────────────────────────────────────
+
+    fn crowdsec() -> CrowdsecConfig {
+        CrowdsecConfig {
+            enabled: true,
+            lapi_url: "http://127.0.0.1:8080/".to_string(),
+            bouncer_key: "k3y".to_string(),
+            ..CrowdsecConfig::default()
+        }
+    }
+
+    #[test]
+    fn crowdsec_is_off_by_default_and_unchecked_while_off() {
+        let cfg = CrowdsecConfig::default();
+        assert!(!cfg.enabled && !cfg.report.enabled);
+        assert!(cfg.validate().is_ok());
+        assert!(cfg.to_domain_feed_config().is_none());
+    }
+
+    #[test]
+    fn crowdsec_becomes_a_local_feed() {
+        let feed = crowdsec().to_domain_feed_config().unwrap();
+        assert_eq!(feed.id, CROWDSEC_FEED_ID);
+        assert_eq!(feed.format, FeedFormat::Crowdsec);
+        assert_eq!(feed.url, "http://127.0.0.1:8080/v1/decisions?type=ban");
+        assert_eq!(feed.auth_header.as_deref(), Some("X-Api-Key: k3y"));
+        assert!(feed.validate().is_ok());
+    }
+
+    #[test]
+    fn crowdsec_validation() {
+        assert!(crowdsec().validate().is_ok());
+        let mut cfg = crowdsec();
+        cfg.lapi_url = "http://169.254.169.254".to_string();
+        assert!(cfg.validate().is_err());
+        let mut cfg = crowdsec();
+        cfg.bouncer_key = "a\nb".to_string();
+        assert!(cfg.validate().is_err());
+        let mut cfg = crowdsec();
+        cfg.report.enabled = true;
+        assert!(cfg.validate().is_err());
+        cfg.report.machine_id = "agent".to_string();
+        cfg.report.password = "pw".to_string();
+        assert!(cfg.validate().is_ok());
+        cfg.report.decision_duration = Some("1h30m".to_string());
+        assert!(cfg.validate().is_ok());
+        cfg.report.decision_duration = Some("4 hours".to_string());
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn crowdsec_is_not_a_feed_format_and_its_id_is_reserved() {
+        assert!(parse_feed_format("crowdsec").is_err());
+        let mut feed = valid_feed();
+        feed.id = CROWDSEC_FEED_ID.to_string();
+        assert!(feed.validate(0).is_err());
+    }
+
+    #[test]
+    fn crowdsec_decisions_count_toward_capacity() {
+        let mut cfg = ThreatIntelConfig {
+            crowdsec: crowdsec(),
+            ..ThreatIntelConfig::default()
+        };
+        cfg.crowdsec.max_decisions = 600_000;
+        assert_eq!(cfg.capacity(), 1_048_576);
+    }
 
     // ── Default config ───────────────────────────────────────────────
 

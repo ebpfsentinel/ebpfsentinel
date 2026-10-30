@@ -143,3 +143,8 @@ doc = false
 name = "fuzz_alerts_sse_filter"
 path = "fuzz_targets/fuzz_alerts_sse_filter.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_suricata"
+path = "fuzz_targets/fuzz_suricata.rs"
+doc = false

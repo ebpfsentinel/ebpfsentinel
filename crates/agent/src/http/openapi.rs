@@ -98,6 +98,7 @@ use super::zone_handler;
         // IDS
         ids_handler::ids_status,
         ids_handler::list_ids_rules,
+        ids_handler::suricata_report,
         // Rate Limiting
         ratelimit_handler::list_ratelimit_rules,
         ratelimit_handler::create_ratelimit_rule,
@@ -271,6 +272,10 @@ use super::zone_handler;
         // IDS
         ids_handler::IdsStatusResponse,
         ids_handler::IdsRuleResponse,
+        ids_handler::SuricataReportResponse,
+        ids_handler::SuricataRulesetResponse,
+        ids_handler::SuricataKeywordCount,
+        ids_handler::SuricataRefusalResponse,
         ids_handler::SlotContentionResponse,
         // Rate Limiting
         ratelimit_handler::CreateRateLimitRuleRequest,

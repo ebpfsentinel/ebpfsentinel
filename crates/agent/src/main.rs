@@ -617,6 +617,21 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
             match args.command {
                 IdsCommand::Status => commands::cmd_ids_status(&client, output).await,
                 IdsCommand::Rules => commands::cmd_ids_rules(&client, output).await,
+                IdsCommand::Suricata { refusals } => {
+                    commands::cmd_ids_suricata(&client, refusals, output).await
+                }
+                IdsCommand::SuricataCheck {
+                    file,
+                    address_vars,
+                    port_vars,
+                    refusals,
+                } => commands::cmd_ids_suricata_check(
+                    &file,
+                    &address_vars,
+                    &port_vars,
+                    refusals,
+                    output,
+                ),
             }
         }
 

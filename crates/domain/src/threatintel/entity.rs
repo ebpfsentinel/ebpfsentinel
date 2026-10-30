@@ -178,6 +178,12 @@ pub enum FeedFormat {
     Stix,
     /// One IP per line. Lines starting with `comment_prefix` are skipped.
     Plaintext,
+    /// The decision list of a CrowdSec local API (`GET /v1/decisions`).
+    ///
+    /// Only the configuration's `threatintel.crowdsec` block produces a feed
+    /// in this format, which is what allows its address to be on the host or
+    /// the local network: a generic feed can never name it.
+    Crowdsec,
 }
 
 // ── Field mapping ───────────────────────────────────────────────────
@@ -299,7 +305,11 @@ impl FeedConfig {
         if self.url.is_empty() {
             return Err("feed url must not be empty");
         }
-        Self::validate_url(&self.url)?;
+        if self.format == FeedFormat::Crowdsec {
+            Self::validate_local_api_url(&self.url)?;
+        } else {
+            Self::validate_url(&self.url)?;
+        }
         if self.refresh_interval_secs == 0 {
             return Err("refresh_interval_secs must be > 0");
         }
@@ -308,6 +318,29 @@ impl FeedConfig {
         }
         if let Some(ref auth) = self.auth_header {
             Self::validate_auth_header(auth)?;
+        }
+        Ok(())
+    }
+
+    /// Validate the address of a CrowdSec local API.
+    ///
+    /// The local API runs on the host or beside it, so the address guard every
+    /// other feed is held to would refuse it by design. What is kept is the
+    /// scheme and a host, plus the refusal of cloud metadata endpoints, which
+    /// no CrowdSec installation is.
+    pub fn validate_local_api_url(url: &str) -> Result<(), &'static str> {
+        let rest = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+            .ok_or("feed url must use http:// or https:// scheme")?;
+        let host_port = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        if host_port.is_empty() || host_port.contains('@') {
+            return Err("local api url must name a host and carry no credentials");
+        }
+        let host = host_port.to_ascii_lowercase();
+        if host.starts_with("169.254.") || host.starts_with("[fe80:") || host.contains(".internal")
+        {
+            return Err("local api url must not target a metadata endpoint");
         }
         Ok(())
     }

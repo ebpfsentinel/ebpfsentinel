@@ -5,6 +5,7 @@ use domain::common::entity::{DomainMode, RuleId};
 use domain::common::error::DomainError;
 use domain::ids::engine::IdsEngine;
 use domain::ids::entity::{IdsRule, SamplingMode, ThresholdConfig};
+use domain::ids::suricata::RulesetImport;
 use ebpf_common::event::PacketEvent;
 use ebpf_common::ids::{
     IDS_ACTION_ALERT, IDS_SAMPLING_NONE, IDS_SAMPLING_RANDOM, IdsPatternKey, IdsSamplingConfig,
@@ -69,6 +70,8 @@ pub struct IdsAppService {
     /// the kernel: installing it unscoped would inspect every workload under
     /// a rule written for one.
     workload_scope: Option<Arc<IdsWorkloadScopeService>>,
+    /// What each imported Suricata ruleset compiled to, as of the last load.
+    suricata_imports: Arc<Vec<RulesetImport>>,
 }
 
 impl IdsAppService {
@@ -91,7 +94,19 @@ impl IdsAppService {
             prevention_offset,
             contested_slots,
             workload_scope: None,
+            suricata_imports: Arc::default(),
         }
+    }
+
+    /// Record what the imported Suricata rulesets compiled to.
+    pub fn set_suricata_imports(&mut self, imports: Vec<RulesetImport>) {
+        self.suricata_imports = Arc::new(imports);
+    }
+
+    /// One report per imported Suricata ruleset, empty when none is loaded.
+    #[must_use]
+    pub fn suricata_imports(&self) -> &[RulesetImport] {
+        &self.suricata_imports
     }
 
     /// Register the service that compiles workload scopes, and sync again
@@ -643,6 +658,7 @@ mod tests {
             tenant_id: 0,
             workload: None,
             kill_process: false,
+            imported: None,
         }
     }
 

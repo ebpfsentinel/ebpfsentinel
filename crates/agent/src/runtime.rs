@@ -308,6 +308,9 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     ids_svc.set_mode(ids_mode);
     ids_svc.set_enabled(config.ids.enabled);
     ids_svc.set_sampling(config.ids_sampling()?);
+    if config.ids.enabled {
+        ids_svc.set_suricata_imports(config.ids_suricata_reports());
+    }
     let ids_svc = Arc::new(ArcSwap::from_pointee(ids_svc));
     info!(
         enabled = config.ids.enabled,

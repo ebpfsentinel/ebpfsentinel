@@ -1,0 +1,1 @@
+alert tcp $HOME_NET 5631:5632 -> $EXTERNAL_NET any (msg:"GPL INFO PCAnywhere Failed Login"; flow:established,to_client; content:"Invalid login"; depth:16; reference:arachnids,240; classtype:unsuccessful-user; sid:2100512; rev:6; metadata:created_at 2010_09_23, confidence Medium, signature_severity Informational, updated_at 2024_03_08;)

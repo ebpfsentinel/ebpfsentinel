@@ -731,7 +731,13 @@ pub async fn apply_config_file(
     // Phase 4: IDS reload
 
     if let Err(e) = reload_service
-        .reload_ids(ids_rules, config.ids.enabled, ids_mode, ids_sampling)
+        .reload_ids(
+            ids_rules,
+            config.ids_suricata_reports(),
+            config.ids.enabled,
+            ids_mode,
+            ids_sampling,
+        )
         .await
     {
         tracing::warn!(error = %e, "IDS config reload failed at application level");

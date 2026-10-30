@@ -5,6 +5,7 @@ use axum::Json;
 use axum::extract::State;
 use domain::firewall::workload::WorkloadSelector;
 use domain::ids::entity::ThresholdConfig;
+use domain::ids::suricata::RulesetImport;
 use infrastructure::config::group_mask_words;
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -106,6 +107,84 @@ impl From<&ThresholdConfig> for ThresholdResponse {
     }
 }
 
+/// What the configured Suricata rulesets compiled to.
+#[derive(Serialize, ToSchema)]
+pub struct SuricataReportResponse {
+    /// One entry per ruleset, in the order the configuration names them.
+    /// Empty when no ruleset is imported.
+    pub rulesets: Vec<SuricataRulesetResponse>,
+}
+
+/// One ruleset's import: what loaded, and every refusal with its reason.
+#[derive(Serialize, ToSchema)]
+pub struct SuricataRulesetResponse {
+    /// The ruleset file, as the configuration names it.
+    pub source: String,
+    /// Rules the ruleset enables, compiled or not.
+    pub total: usize,
+    /// Rules that compiled.
+    pub compiled: usize,
+    /// Detection rules the compiled ones became, one per port they name.
+    pub native_rules: usize,
+    /// Rules present but commented out, which are not read.
+    pub disabled: usize,
+    /// The share of enabled rules refused, from 0 to 1.
+    pub refused_share: f64,
+    /// Refusals counted by the keyword that caused them, most frequent first.
+    pub refused_by_keyword: Vec<SuricataKeywordCount>,
+    /// Every refused rule.
+    pub refused: Vec<SuricataRefusalResponse>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SuricataKeywordCount {
+    pub keyword: String,
+    pub count: usize,
+}
+
+/// One refused rule.
+#[derive(Serialize, ToSchema)]
+pub struct SuricataRefusalResponse {
+    /// The rule's sid, absent when the rule was refused before one was read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sid: Option<u32>,
+    /// The line of the ruleset the rule starts on, counted from 1.
+    pub line: usize,
+    /// The keyword, or part of the rule header, that stopped it.
+    pub keyword: String,
+    /// One sentence of why.
+    pub reason: String,
+}
+
+impl From<&RulesetImport> for SuricataRulesetResponse {
+    fn from(import: &RulesetImport) -> Self {
+        let report = &import.report;
+        Self {
+            source: import.source.clone(),
+            total: report.total,
+            compiled: report.compiled,
+            native_rules: report.native_rules,
+            disabled: report.disabled,
+            refused_share: report.refused_share(),
+            refused_by_keyword: report
+                .refusals_by_keyword()
+                .into_iter()
+                .map(|(keyword, count)| SuricataKeywordCount { keyword, count })
+                .collect(),
+            refused: report
+                .refused
+                .iter()
+                .map(|refusal| SuricataRefusalResponse {
+                    sid: refusal.sid,
+                    line: refusal.line,
+                    keyword: refusal.keyword.clone(),
+                    reason: refusal.reason.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
 // ── Handlers ────────────────────────────────────────────────────────
 
 /// `GET /api/v1/ids/status` - IDS service status.
@@ -194,6 +273,39 @@ pub async fn list_ids_rules(
         })
         .collect();
     Ok(Json(rules))
+}
+
+/// `GET /api/v1/ids/suricata/report` - what the imported Suricata rulesets
+/// compiled to.
+#[utoipa::path(
+    get, path = "/api/v1/ids/suricata/report",
+    tag = "IDS",
+    responses(
+        (status = 200, description = "One report per imported ruleset", body = SuricataReportResponse),
+        (status = 404, description = "IDS not available", body = ErrorBody),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn suricata_report(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<SuricataReportResponse>, ApiError> {
+    let svc_arc = state.ids_service.as_ref().ok_or(ApiError::NotFound {
+        code: "SERVICE_NOT_AVAILABLE",
+        message: "IDS service is not enabled".to_string(),
+    })?;
+    let svc = svc_arc.load();
+    Ok(Json(SuricataReportResponse {
+        rulesets: svc
+            .suricata_imports()
+            .iter()
+            .map(SuricataRulesetResponse::from)
+            .collect(),
+    }))
 }
 
 // ── Formatting helpers ──────────────────────────────────────────────

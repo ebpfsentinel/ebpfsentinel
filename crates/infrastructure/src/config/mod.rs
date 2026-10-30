@@ -103,6 +103,7 @@ pub use zone::{ZoneEntryConfig, ZonePairConfig, ZoneSectionConfig};
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use domain::alert::entity::AlertRoute;
 use domain::alias::entity::Alias;
@@ -113,6 +114,7 @@ use domain::dlp::entity::DlpPattern;
 use domain::firewall::entity::{FirewallRule, IpNetwork, Scope};
 use domain::firewall::fqdn::WorkloadDnsSettings;
 use domain::ids::entity::{IdsRule, SamplingMode};
+use domain::ids::suricata::RulesetImport;
 use domain::ips::entity::{IpsPolicy, WhitelistEntry};
 use domain::l7::entity::L7Rule;
 use domain::nat::entity::{NatRule, NptV6Rule};
@@ -357,7 +359,25 @@ impl AgentConfig {
             config.apply_pod_profile(&raw)?;
         }
         config.validate()?;
+        config.import_suricata()?;
         Ok(config)
+    }
+
+    /// Compile the configured Suricata rulesets and check that what they
+    /// add still fits the limits the rules written here are held to.
+    fn import_suricata(&mut self) -> Result<(), ConfigError> {
+        let Some(import) = &self.ids.suricata else {
+            return Ok(());
+        };
+        let imported = import.import()?;
+        check_limit(
+            "ids.rules",
+            self.ids.rules.len() + imported.rules.len(),
+            MAX_IDS_RULES,
+        )?;
+        self.ids.imported = Arc::new(imported);
+        check_limit("l7.ports", self.l7_ports().len(), MAX_L7_PORTS)?;
+        Ok(())
     }
 
     /// Return a copy of the config with sensitive values masked.
@@ -385,6 +405,14 @@ impl AgentConfig {
             if feed.auth_header.is_some() {
                 feed.auth_header = Some("***".to_string());
             }
+        }
+        // Mask the CrowdSec bouncer key and machine password
+        let crowdsec = &mut sanitized.threatintel.crowdsec;
+        if !crowdsec.bouncer_key.is_empty() {
+            crowdsec.bouncer_key = "***".to_string();
+        }
+        if !crowdsec.report.password.is_empty() {
+            crowdsec.report.password = "***".to_string();
         }
         // Mask webhook header values - they commonly carry an `Authorization`
         // bearer token or API key. Keep the header names so the sanitized view
@@ -589,6 +617,9 @@ impl AgentConfig {
         }
 
         // Validate IDS sampling
+        if let Some(ref suricata) = self.ids.suricata {
+            suricata.validate()?;
+        }
         if let Some(ref sampling) = self.ids.sampling {
             sampling.validate("ids")?;
         }
@@ -618,6 +649,7 @@ impl AgentConfig {
         for (idx, feed_cfg) in self.threatintel.feeds.iter().enumerate() {
             feed_cfg.validate(idx)?;
         }
+        self.threatintel.crowdsec.validate()?;
         self.threatintel.validate_capacity()?;
 
         // Validate DLP patterns
@@ -1222,7 +1254,14 @@ impl AgentConfig {
             .rules
             .iter()
             .map(|r| r.to_domain_rule(&self.ids.mode, &group_bits))
+            .chain(self.ids.imported.rules.iter().cloned().map(Ok))
             .collect()
+    }
+
+    /// One report per imported Suricata ruleset, empty when none is
+    /// configured.
+    pub fn ids_suricata_reports(&self) -> Vec<RulesetImport> {
+        self.ids.imported.rulesets.clone()
     }
 
     /// Convert IDS sampling config to domain `SamplingMode`.
@@ -1313,11 +1352,14 @@ impl AgentConfig {
 
     /// Convert all threat intel feed configs to domain `FeedConfig` entries.
     pub fn threatintel_feeds(&self) -> Result<Vec<FeedConfig>, ConfigError> {
-        self.threatintel
+        let mut feeds = self
+            .threatintel
             .feeds
             .iter()
             .map(|f| f.to_domain_feed_config(&self.threatintel.mode))
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        feeds.extend(self.threatintel.crowdsec.to_domain_feed_config());
+        Ok(feeds)
     }
 
     /// Parse the DLP mode from config to domain enum.
@@ -1396,7 +1438,19 @@ impl AgentConfig {
             })
             .filter(|rule| is_tcp_or_any(&rule.protocol))
             .map(|rule| rule.dst_port);
-        ids_ports.chain(ips_ports).flatten().collect()
+        // An imported rule carrying content is decided on the payload too.
+        let imported_ports = self
+            .ids
+            .imported
+            .rules
+            .iter()
+            .filter(|rule| self.ids.enabled && rule.enabled && !rule.pattern.is_empty())
+            .flat_map(|rule| [rule.dst_port, rule.src_port]);
+        ids_ports
+            .chain(ips_ports)
+            .chain(imported_ports)
+            .flatten()
+            .collect()
     }
 
     /// Convert alerting route configs to domain `AlertRoute` vec.
@@ -4516,6 +4570,35 @@ threatintel:
     }
 
     #[test]
+    fn crowdsec_block_loads_validates_and_is_masked() {
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+threatintel:
+  enabled: true
+  crowdsec:
+    enabled: true
+    lapi_url: "http://127.0.0.1:8080"
+    bouncer_key: "bouncer-secret"
+    report:
+      enabled: true
+      machine_id: agent-1
+      password: "machine-secret"
+      decision_duration: 4h
+"#;
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let feeds = config.threatintel_feeds().unwrap();
+        assert_eq!(feeds.len(), 1);
+        assert_eq!(feeds[0].format, FeedFormat::Crowdsec);
+        let sanitized = config.sanitized();
+        assert_eq!(sanitized.threatintel.crowdsec.bouncer_key, "***");
+        assert_eq!(sanitized.threatintel.crowdsec.report.password, "***");
+
+        let bad = yaml.replace("http://127.0.0.1:8080", "ftp://127.0.0.1");
+        assert!(AgentConfig::from_yaml(&bad).is_err());
+    }
+
+    #[test]
     fn sanitized_no_smtp_no_panic() {
         let yaml = r"
 agent:
@@ -5358,6 +5441,106 @@ ids:
         let config = AgentConfig::from_yaml(yaml).unwrap();
         // 853 rides along: L7 inspection is on and the DNS engine with it.
         assert_eq!(config.l7_ports(), vec![22, 80, 853, 2222]);
+    }
+
+    /// A ruleset written to a file of its own, removed when dropped.
+    struct RulesetFile(std::path::PathBuf);
+
+    impl RulesetFile {
+        fn new(name: &str, text: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("ebpfsentinel-{}-{name}.rules", std::process::id()));
+            std::fs::write(&path, text).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> String {
+            self.0.display().to_string()
+        }
+    }
+
+    impl Drop for RulesetFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    const SMTP_EXPN: &str = r#"alert tcp $EXTERNAL_NET any -> $SMTP_SERVERS 25 (msg:"GPL SMTP expn root"; flow:to_server,established; content:"expn"; nocase; content:"root"; distance:1; nocase; classtype:attempted-recon; sid:2100660; rev:9;)"#;
+    const FLOWBITS: &str = r#"alert tcp any any -> any 80 (msg:"needs state"; flowbits:isset,seen; content:"abc"; sid:9000001; rev:1;)"#;
+
+    fn suricata_yaml(paths: &[String], share: &str) -> String {
+        let list: Vec<String> = paths.iter().map(|p| format!("      - {p}")).collect();
+        format!(
+            "agent:\n  interfaces: [eth0]\nids:\n  suricata:\n    rulesets:\n{}\n    max_refused_share: {share}\n    vars:\n      addresses:\n        HOME_NET: 10.0.0.0/8\n",
+            list.join("\n")
+        )
+    }
+
+    #[test]
+    fn a_suricata_ruleset_loads_its_rules_and_its_report() {
+        let file = RulesetFile::new("load", &format!("{SMTP_EXPN}\n{FLOWBITS}\n"));
+        let config = AgentConfig::from_yaml(&suricata_yaml(&[file.path()], "0.5")).unwrap();
+        let rules = config.ids_rules().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id.0, "suricata-2100660");
+        let reports = config.ids_suricata_reports();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].source, file.path());
+        assert_eq!(reports[0].report.compiled, 1);
+        assert_eq!(reports[0].report.refused[0].keyword, "flowbits");
+        // The content rule is decided on the payload, so its port is captured.
+        assert!(config.l7_ports().contains(&25));
+    }
+
+    #[test]
+    fn a_ruleset_refusing_more_than_the_share_fails_the_load() {
+        let file = RulesetFile::new("share", &format!("{SMTP_EXPN}\n{FLOWBITS}\n"));
+        let err = AgentConfig::from_yaml(&suricata_yaml(&[file.path()], "0.4")).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("ids.suricata.max_refused_share"),
+            "{message}"
+        );
+        assert!(message.contains("refuses 1 of 2 rules"), "{message}");
+        assert!(message.contains("flowbits 1"), "{message}");
+    }
+
+    #[test]
+    fn a_ruleset_that_cannot_be_read_fails_the_load() {
+        let missing = std::env::temp_dir()
+            .join("ebpfsentinel-no-such-ruleset.rules")
+            .display()
+            .to_string();
+        let err = AgentConfig::from_yaml(&suricata_yaml(&[missing], "0.5")).unwrap_err();
+        assert!(
+            err.to_string().contains("ids.suricata.rulesets[0]"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_refused_share_is_a_fraction() {
+        let file = RulesetFile::new("fraction", SMTP_EXPN);
+        let err = AgentConfig::from_yaml(&suricata_yaml(&[file.path()], "1.5")).unwrap_err();
+        assert!(err.to_string().contains("not between 0 and 1"), "{err}");
+    }
+
+    #[test]
+    fn a_sid_in_two_rulesets_loads_once() {
+        let first = RulesetFile::new("first", SMTP_EXPN);
+        let second = RulesetFile::new("second", SMTP_EXPN);
+        let config =
+            AgentConfig::from_yaml(&suricata_yaml(&[first.path(), second.path()], "1")).unwrap();
+        assert_eq!(config.ids_rules().unwrap().len(), 1);
+        let reports = config.ids_suricata_reports();
+        assert_eq!(reports[1].report.refused[0].keyword, "sid");
+    }
+
+    #[test]
+    fn no_suricata_block_imports_nothing() {
+        let config = AgentConfig::from_yaml("agent:\n  interfaces: [eth0]\n").unwrap();
+        assert!(config.ids_suricata_reports().is_empty());
+        assert!(config.ids_rules().unwrap().is_empty());
     }
 
     #[test]

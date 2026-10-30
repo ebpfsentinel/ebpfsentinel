@@ -103,6 +103,7 @@ fn sample_alert(seed: u8) -> Alert {
         executable_inode: None,
         executable_source: None,
         flow_source: None,
+        workload: None,
     }
 }
 

@@ -18,7 +18,7 @@ pub fn parse_feed(
     let raw_iocs = match config.format {
         FeedFormat::Plaintext => parse_plaintext(&text, config),
         FeedFormat::Csv => parse_csv(&text, config),
-        FeedFormat::Json => json_parser(&text, config)?,
+        FeedFormat::Json | FeedFormat::Crowdsec => json_parser(&text, config)?,
         FeedFormat::Stix => {
             return Err(DomainError::EngineError(
                 "Use parse_stix_feed() for STIX 2.1 bundles".to_string(),

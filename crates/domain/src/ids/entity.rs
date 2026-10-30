@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::common::entity::{DomainMode, Protocol, RuleId, Severity};
+use crate::firewall::entity::IpNetwork;
 use crate::firewall::workload::WorkloadSelector;
 use ebpf_common::event::PacketEvent;
 use ebpf_common::ids::{
@@ -220,6 +221,70 @@ impl TrackBy {
     }
 }
 
+// ── Imported rules ───────────────────────────────────────────────
+
+/// The addresses a rule names on one side of a flow.
+///
+/// Native rules key on port and protocol alone; a rule compiled from another
+/// engine's syntax also names the networks either side must sit in, and the
+/// match is decided in userspace on the addresses the event carries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddressMatch {
+    /// Networks the address must fall in. Empty means any address.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub within: Vec<IpNetwork>,
+    /// Networks the address must not fall in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outside: Vec<IpNetwork>,
+}
+
+impl AddressMatch {
+    /// `true` when the side names no network at all.
+    pub fn is_any(&self) -> bool {
+        self.within.is_empty() && self.outside.is_empty()
+    }
+
+    /// Whether an address, in the event's `[u32; 4]` encoding, satisfies
+    /// this side.
+    pub fn matches(&self, addr: &[u32; 4], is_ipv6: bool) -> bool {
+        (self.within.is_empty() || self.within.iter().any(|n| n.contains_addr(addr, is_ipv6)))
+            && !self.outside.iter().any(|n| n.contains_addr(addr, is_ipv6))
+    }
+}
+
+/// What a rule compiled from Suricata syntax carries beyond the native
+/// fields: where it came from, the addresses it names, and the content
+/// groups that must all match beside the rule's own `pattern`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportedRule {
+    /// The signature id the rule carries in its ruleset.
+    pub sid: u32,
+    /// The revision of that signature.
+    pub rev: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classtype: Option<String>,
+    /// References as written, `type,value`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<String>,
+    #[serde(default, skip_serializing_if = "AddressMatch::is_any")]
+    pub src: AddressMatch,
+    #[serde(default, skip_serializing_if = "AddressMatch::is_any")]
+    pub dst: AddressMatch,
+    /// Byte patterns that must each match the payload as well as `pattern`.
+    /// Two contents that are not anchored to each other are independent in
+    /// the source syntax, and a single expression would impose an order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also_patterns: Vec<String>,
+}
+
+impl ImportedRule {
+    /// Whether the event's addresses satisfy both sides.
+    pub fn addresses_match(&self, event: &PacketEvent) -> bool {
+        let v6 = event.is_ipv6();
+        self.src.matches(&event.src_addr, v6) && self.dst.matches(&event.dst_addr, v6)
+    }
+}
+
 /// An IDS rule defining what traffic to detect and how to respond.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdsRule {
@@ -274,6 +339,10 @@ pub struct IdsRule {
     /// before anything is armed, whatever the rule says.
     #[serde(default)]
     pub kill_process: bool,
+    /// Set when the rule was compiled from a Suricata ruleset rather than
+    /// written in this agent's configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported: Option<Box<ImportedRule>>,
 }
 
 impl IdsRule {
@@ -332,6 +401,12 @@ impl IdsRule {
     /// expanded into the protocols it stands for: installed as its own byte
     /// it would be a key no packet can produce.
     fn ebpf_protocols(&self) -> Vec<u8> {
+        // An imported rule carrying content is decided on the captured
+        // payload alone. Holding a kernel slot would make it fire on nothing
+        // and take the port from a rule written here.
+        if self.imported.is_some() && !self.pattern.is_empty() {
+            return Vec::new();
+        }
         match self.protocol {
             Protocol::Any => vec![
                 Protocol::Tcp.to_u8(),
@@ -524,6 +599,7 @@ mod tests {
             tenant_id: 0,
             workload: None,
             kill_process: false,
+            imported: None,
         }
     }
 

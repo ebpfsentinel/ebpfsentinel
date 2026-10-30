@@ -52,6 +52,9 @@ pub struct IdsEngine {
     rules: Vec<IdsRule>,
     compiled_patterns: Vec<Option<BytesRegex>>,
     compiled_domain_patterns: Vec<Option<CompiledDomainMatcher>>,
+    /// The further content groups an imported rule requires, each of which
+    /// must match the payload beside the rule's own pattern.
+    compiled_also_patterns: Vec<Vec<BytesRegex>>,
     sampling: SamplingMode,
     threshold_tracker: Arc<Mutex<HashMap<(RuleId, u64), ThresholdState>>>,
 }
@@ -62,6 +65,7 @@ impl IdsEngine {
             rules: Vec::new(),
             compiled_patterns: Vec::new(),
             compiled_domain_patterns: Vec::new(),
+            compiled_also_patterns: Vec::new(),
             sampling: SamplingMode::default(),
             threshold_tracker: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -92,9 +96,11 @@ impl IdsEngine {
 
         let compiled = compile_pattern(&rule.pattern)?;
         let domain_compiled = compile_domain_pattern(&rule)?;
+        let also = compile_also_patterns(&rule)?;
         self.rules.push(rule);
         self.compiled_patterns.push(compiled);
         self.compiled_domain_patterns.push(domain_compiled);
+        self.compiled_also_patterns.push(also);
         Ok(())
     }
 
@@ -108,6 +114,7 @@ impl IdsEngine {
         self.rules.remove(pos);
         self.compiled_patterns.remove(pos);
         self.compiled_domain_patterns.remove(pos);
+        self.compiled_also_patterns.remove(pos);
         Ok(())
     }
 
@@ -133,15 +140,18 @@ impl IdsEngine {
         // Compile all patterns
         let mut compiled = Vec::with_capacity(rules.len());
         let mut domain_compiled = Vec::with_capacity(rules.len());
+        let mut also_compiled = Vec::with_capacity(rules.len());
         for rule in &rules {
             compiled.push(compile_pattern(&rule.pattern)?);
             domain_compiled.push(compile_domain_pattern(rule)?);
+            also_compiled.push(compile_also_patterns(rule)?);
         }
 
         // Atomic replace
         self.rules = rules;
         self.compiled_patterns = compiled;
         self.compiled_domain_patterns = domain_compiled;
+        self.compiled_also_patterns = also_compiled;
         self.threshold_tracker
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -259,6 +269,15 @@ impl IdsEngine {
         if !rule.enabled {
             return None;
         }
+        // An imported rule names the networks on either side as well as the
+        // port; the kernel slot keys on the port alone.
+        if rule
+            .imported
+            .as_ref()
+            .is_some_and(|imported| !imported.addresses_match(event))
+        {
+            return None;
+        }
 
         // A content rule is decided on the payload, which this event does not
         // carry: the kernel classifier keys on port and protocol alone. Firing
@@ -314,8 +333,9 @@ impl IdsEngine {
         self.rules
             .iter()
             .zip(self.compiled_patterns.iter())
+            .zip(self.compiled_also_patterns.iter())
             .enumerate()
-            .find(|(_, (rule, pattern))| {
+            .find(|(_, ((rule, pattern), also))| {
                 let Some(pattern) = pattern else {
                     return false;
                 };
@@ -323,9 +343,14 @@ impl IdsEngine {
                     && matches!(rule.protocol, Protocol::Tcp | Protocol::Any)
                     && (rule.dst_port == Some(event.dst_port)
                         || rule.src_port == Some(event.src_port))
+                    && rule
+                        .imported
+                        .as_ref()
+                        .is_none_or(|imported| imported.addresses_match(event))
                     && pattern.is_match(payload)
+                    && also.iter().all(|re| re.is_match(payload))
             })
-            .map(|(idx, (rule, _))| (idx, rule))
+            .map(|(idx, ((rule, _), _))| (idx, rule))
     }
 
     /// Check whether an alert for the matched rule should be emitted
@@ -453,7 +478,7 @@ const REGEX_NEST_LIMIT: u32 = 200;
 ///
 /// Uses `RegexBuilder` with size and nesting limits to prevent
 /// denial-of-service via malicious patterns.
-fn compile_pattern(pattern: &str) -> Result<Option<BytesRegex>, DomainError> {
+pub(crate) fn compile_pattern(pattern: &str) -> Result<Option<BytesRegex>, DomainError> {
     if pattern.is_empty() {
         return Ok(None);
     }
@@ -463,6 +488,33 @@ fn compile_pattern(pattern: &str) -> Result<Option<BytesRegex>, DomainError> {
         .build()
         .map(Some)
         .map_err(|e| DomainError::InvalidRule(format!("invalid regex pattern '{pattern}': {e}")))
+}
+
+/// Compile the further content groups an imported rule carries. A native
+/// rule carries none. A group that is empty would match every payload and
+/// is refused rather than silently widening the rule.
+fn compile_also_patterns(rule: &IdsRule) -> Result<Vec<BytesRegex>, DomainError> {
+    let Some(imported) = rule.imported.as_ref() else {
+        return Ok(Vec::new());
+    };
+    if !imported.also_patterns.is_empty() && rule.pattern.is_empty() {
+        return Err(DomainError::InvalidRule(format!(
+            "rule '{}' carries further content groups but no pattern",
+            rule.id.0
+        )));
+    }
+    imported
+        .also_patterns
+        .iter()
+        .map(|pattern| {
+            compile_pattern(pattern)?.ok_or_else(|| {
+                DomainError::InvalidRule(format!(
+                    "rule '{}' carries an empty content group",
+                    rule.id.0
+                ))
+            })
+        })
+        .collect()
 }
 
 /// Compile a rule's domain pattern into a `CompiledDomainMatcher`.
@@ -526,6 +578,7 @@ mod tests {
             tenant_id: 0,
             workload: None,
             kill_process: false,
+            imported: None,
         }
     }
 

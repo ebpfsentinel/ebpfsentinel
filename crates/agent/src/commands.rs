@@ -6,6 +6,7 @@ use crate::api_client::{
     AlertResponse, ApiClient, ConnectionResponse, ConntrackEventFrame, IdsRuleResponse,
     IpsRuleResponse, LearningScopeBody, LearningSelector, LearningSessionResponse,
     NetpolReplayBody, NetpolReplayResponse, StartLearningBody, StreamOpenError,
+    SuricataKeywordCount, SuricataRefusalResponse, SuricataReportResponse, SuricataRulesetResponse,
 };
 use crate::cli::OutputFormat;
 use crate::table::{Align, Table, cells};
@@ -4016,6 +4017,159 @@ pub async fn cmd_ids_rules(client: &ApiClient, output: OutputFormat) -> Result<(
     print_ids_thresholds(&rules);
     print_ids_slot_conflicts(&rules);
     Ok(())
+}
+
+pub async fn cmd_ids_suricata(
+    client: &ApiClient,
+    refusals: bool,
+    output: OutputFormat,
+) -> Result<()> {
+    let report = client.ids_suricata_report().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    if report.rulesets.is_empty() {
+        println!("No Suricata ruleset imported.");
+        return Ok(());
+    }
+    print_suricata_rulesets(&report.rulesets, refusals);
+    Ok(())
+}
+
+/// Compile a ruleset file the way the agent would, with no agent involved,
+/// so a ruleset can be judged before it is configured.
+pub fn cmd_ids_suricata_check(
+    file: &std::path::Path,
+    address_vars: &[String],
+    port_vars: &[String],
+    refusals: bool,
+    output: OutputFormat,
+) -> Result<()> {
+    let text = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    let text = String::from_utf8_lossy(&text);
+    let vars = domain::ids::suricata::SuricataVars::with_overrides(
+        &parse_vars("--address-var", address_vars)?,
+        &parse_vars("--port-var", port_vars)?,
+    );
+    let import = domain::ids::suricata::compile_rulesets(
+        [(file.display().to_string(), text.as_ref())],
+        &vars,
+    );
+    let rulesets: Vec<SuricataRulesetResponse> = import
+        .rulesets
+        .iter()
+        .map(suricata_ruleset_response)
+        .collect();
+
+    if output == OutputFormat::Json {
+        let report = SuricataReportResponse { rulesets };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    print_suricata_rulesets(&rulesets, refusals);
+    Ok(())
+}
+
+fn parse_vars(flag: &str, raw: &[String]) -> Result<std::collections::BTreeMap<String, String>> {
+    raw.iter()
+        .map(|entry| {
+            let Some((name, value)) = entry.split_once('=') else {
+                bail!("{flag} {entry}: expected NAME=VALUE");
+            };
+            let name = name.trim().trim_start_matches('$');
+            if name.is_empty() {
+                bail!("{flag} {entry}: the variable has no name");
+            }
+            Ok((name.to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+fn suricata_ruleset_response(
+    import: &domain::ids::suricata::RulesetImport,
+) -> SuricataRulesetResponse {
+    let report = &import.report;
+    SuricataRulesetResponse {
+        source: import.source.clone(),
+        total: report.total,
+        compiled: report.compiled,
+        native_rules: report.native_rules,
+        disabled: report.disabled,
+        refused_share: report.refused_share(),
+        refused_by_keyword: report
+            .refusals_by_keyword()
+            .into_iter()
+            .map(|(keyword, count)| SuricataKeywordCount { keyword, count })
+            .collect(),
+        refused: report
+            .refused
+            .iter()
+            .map(|refusal| SuricataRefusalResponse {
+                sid: refusal.sid,
+                line: refusal.line,
+                keyword: refusal.keyword.clone(),
+                reason: refusal.reason.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn print_suricata_rulesets(rulesets: &[SuricataRulesetResponse], refusals: bool) {
+    let mut table = Table::new(&[
+        ("RULESET", Align::Left),
+        ("ENABLED", Align::Right),
+        ("COMPILED", Align::Right),
+        ("NATIVE", Align::Right),
+        ("REFUSED", Align::Right),
+        ("SHARE", Align::Right),
+        ("DISABLED", Align::Right),
+    ]);
+    for ruleset in rulesets {
+        table.row(cells![
+            ruleset.source,
+            ruleset.total,
+            ruleset.compiled,
+            ruleset.native_rules,
+            ruleset.refused.len(),
+            format!("{:.1}%", ruleset.refused_share * 100.0),
+            ruleset.disabled
+        ]);
+    }
+    table.print();
+
+    for ruleset in rulesets {
+        if ruleset.refused_by_keyword.is_empty() {
+            continue;
+        }
+        println!("\nRefused in {}, by keyword:", ruleset.source);
+        let mut by_keyword = Table::new(&[("KEYWORD", Align::Left), ("RULES", Align::Right)]);
+        for row in &ruleset.refused_by_keyword {
+            by_keyword.row(cells![row.keyword, row.count]);
+        }
+        by_keyword.print();
+        if refusals {
+            let mut each = Table::new(&[
+                ("LINE", Align::Right),
+                ("SID", Align::Right),
+                ("KEYWORD", Align::Left),
+                ("REASON", Align::Left),
+            ]);
+            for refusal in &ruleset.refused {
+                each.row(cells![
+                    refusal.line,
+                    refusal
+                        .sid
+                        .map_or_else(|| "-".to_string(), |sid| sid.to_string()),
+                    refusal.keyword,
+                    refusal.reason
+                ]);
+            }
+            each.print();
+        }
+    }
 }
 
 /// What a rule narrows on, so a rule watching a reply port or a resolved name

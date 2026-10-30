@@ -2,6 +2,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use domain::common::error::DomainError;
+use domain::threatintel::crowdsec::{Decision, decisions_to_iocs};
 use domain::threatintel::entity::{
     CtiDomain, CtiIndicators, CtiUrl, FeedConfig, FeedFormat, Ioc, ThreatType,
 };
@@ -170,11 +171,69 @@ pub fn parse_feed_data(
                 urls: indicators.urls,
             })
         }
+        FeedFormat::Crowdsec => Ok(FeedUpdateResult {
+            iocs: parse_feed(raw_data, feed, parse_crowdsec_decisions)?,
+            ..FeedUpdateResult::default()
+        }),
         _ => Ok(FeedUpdateResult {
             iocs: parse_feed(raw_data, feed, parse_json_feed)?,
             ..FeedUpdateResult::default()
         }),
     }
+}
+
+// ── CrowdSec decision list ────────────────────────────────────────────
+
+/// Parse the answer of a CrowdSec local API `GET /v1/decisions`.
+///
+/// The local API answers `null` rather than `[]` when nothing is in force,
+/// which is an empty list here and not an error. Decisions that do not become
+/// indicators are counted and logged by reason, so a range or a captcha left
+/// out is never silent.
+fn parse_crowdsec_decisions(text: &str, config: &FeedConfig) -> Result<Vec<Ioc>, DomainError> {
+    let parsed: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| DomainError::EngineError(format!("CrowdSec decisions parse error: {e}")))?;
+    check_json_depth(&parsed, MAX_JSON_DEPTH)?;
+    let items = match &parsed {
+        serde_json::Value::Null => return Ok(Vec::new()),
+        serde_json::Value::Array(arr) => arr.as_slice(),
+        _ => {
+            return Err(DomainError::EngineError(
+                "CrowdSec decisions must be a top-level array".to_string(),
+            ));
+        }
+    };
+    let field = |item: &serde_json::Value, key: &str| -> String {
+        item.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let decisions: Vec<Decision> = items
+        .iter()
+        .map(|item| Decision {
+            scope: field(item, "scope"),
+            value: field(item, "value"),
+            kind: field(item, "type"),
+            scenario: field(item, "scenario"),
+        })
+        .collect();
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+    let (iocs, skips) = decisions_to_iocs(&decisions, config, now_ns);
+    if skips.total() > 0 {
+        tracing::info!(
+            feed_id = %config.id,
+            loaded = iocs.len(),
+            not_ban = skips.not_ban,
+            ranges = skips.ranges,
+            other_scope = skips.other_scope,
+            unreadable = skips.unreadable,
+            "CrowdSec decisions left out: only a ban on one address is enforced"
+        );
+    }
+    Ok(iocs)
 }
 
 // ── JSON depth guard ──────────────────────────────────────────────────
@@ -607,6 +666,40 @@ fn parse_json_feed(text: &str, config: &FeedConfig) -> Result<Vec<Ioc>, DomainEr
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn crowdsec_decisions_become_indicators() {
+        let mut feed = crowdsec_feed();
+        let body = br#"[
+            {"id":1,"origin":"crowdsec","scenario":"crowdsecurity/ssh-bf","scope":"Ip","type":"ban","value":"203.0.113.9","duration":"3h59m"},
+            {"id":2,"origin":"cscli","scenario":"manual","scope":"Range","type":"ban","value":"198.51.100.0/24","duration":"4h"},
+            {"id":3,"origin":"crowdsec","scenario":"crowdsecurity/http-probing","scope":"Ip","type":"captcha","value":"203.0.113.10","duration":"4h"}
+        ]"#;
+        let parsed = parse_feed_data(&feed, body).unwrap();
+        assert_eq!(parsed.iocs.len(), 1);
+        assert_eq!(parsed.iocs[0].ip.to_string(), "203.0.113.9");
+        assert_eq!(parsed.iocs[0].feed_id, "crowdsec");
+
+        feed.max_iocs = 1;
+        assert_eq!(parse_feed_data(&feed, b"null").unwrap().iocs.len(), 0);
+        assert!(parse_feed_data(&feed, br#"{"new":[]}"#).is_err());
+    }
+
+    fn crowdsec_feed() -> FeedConfig {
+        FeedConfig {
+            id: "crowdsec".to_string(),
+            name: "CrowdSec local API".to_string(),
+            url: "http://127.0.0.1:8080/v1/decisions?type=ban".to_string(),
+            format: FeedFormat::Crowdsec,
+            enabled: true,
+            refresh_interval_secs: 60,
+            max_iocs: 100,
+            default_action: None,
+            min_confidence: 0,
+            field_mapping: None,
+            auth_header: None,
+        }
+    }
+
     use super::*;
     use domain::threatintel::entity::FeedFormat;
     use ports::secondary::metrics_port::{

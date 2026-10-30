@@ -232,3 +232,21 @@ threatintel:
 #   reputation:
 #     enabled: true
 #     auto_block_threshold: 0.8   # Auto-block domains above this score
+
+# ── CrowdSec local API ──────────────────────────────────────────────
+#
+# Read the bans a CrowdSec local API holds (as a bouncer) and, optionally,
+# write this agent's own blocks back to it (as a machine). Both are off by
+# default. A report carries the blocked source address, the scenario
+# `ebpfsentinel/<component>`, a count and the first and last time, and
+# nothing else about this host. Add the threatintel.crowdsec block:
+
+#   crowdsec:
+#     enabled: true
+#     lapi_url: "http://127.0.0.1:8080"
+#     bouncer_key: "from cscli bouncers add ebpfsentinel"
+#     report:
+#       enabled: true
+#       machine_id: "ebpfsentinel"
+#       password: "from cscli machines add ebpfsentinel"
+#       decision_duration: "4h"

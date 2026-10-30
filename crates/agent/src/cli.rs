@@ -1008,6 +1008,26 @@ pub enum IdsCommand {
     Status,
     /// List IDS rules
     Rules,
+    /// Show what the imported Suricata rulesets compiled to
+    Suricata {
+        /// List every refused rule, not only the count per keyword
+        #[arg(long)]
+        refusals: bool,
+    },
+    /// Compile a Suricata ruleset file locally and report, without an agent
+    SuricataCheck {
+        /// The ruleset file to compile
+        file: std::path::PathBuf,
+        /// Override an address variable, as NAME=VALUE (repeatable)
+        #[arg(long = "address-var", value_name = "NAME=VALUE")]
+        address_vars: Vec<String>,
+        /// Override a port variable, as NAME=VALUE (repeatable)
+        #[arg(long = "port-var", value_name = "NAME=VALUE")]
+        port_vars: Vec<String>,
+        /// List every refused rule, not only the count per keyword
+        #[arg(long)]
+        refusals: bool,
+    },
 }
 
 // ── GeoIP ───────────────────────────────────────────────────────────────
@@ -2526,6 +2546,49 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn cli_ids_suricata() {
+        let cli =
+            Cli::try_parse_from(["ebpfsentinel-agent", "ids", "suricata", "--refusals"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ids(DomainArgs {
+                command: IdsCommand::Suricata { refusals: true },
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_ids_suricata_check() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "ids",
+            "suricata-check",
+            "emerging-scan.rules",
+            "--address-var",
+            "HOME_NET=10.0.0.0/8",
+        ])
+        .unwrap();
+        let Some(Command::Ids(DomainArgs {
+            command:
+                IdsCommand::SuricataCheck {
+                    file,
+                    address_vars,
+                    port_vars,
+                    refusals,
+                },
+            ..
+        })) = cli.command
+        else {
+            panic!("expected ids suricata-check");
+        };
+        assert_eq!(file, std::path::PathBuf::from("emerging-scan.rules"));
+        assert_eq!(address_vars, ["HOME_NET=10.0.0.0/8"]);
+        assert!(port_vars.is_empty());
+        assert!(!refusals);
     }
 
     #[test]
