@@ -83,7 +83,7 @@ impl TenantSubnetMapManager {
         for map in &mut self.maps {
             for &(ip_nbo, prefix_len, tenant_id) in entries {
                 let key = Key::new(u32::from(prefix_len), ip_nbo.to_be_bytes());
-                map.insert(&key, tenant_id, 0)
+                map.insert(&key, &tenant_id, 0)
                     .map_err(|e| anyhow::anyhow!("TENANT_SUBNET_V4 insert failed: {e}"))?;
             }
         }
@@ -115,7 +115,7 @@ impl TenantSubnetMapManager {
         for map in &mut self.v6_maps {
             for &(addr, prefix_len, tenant_id) in entries {
                 let key = Key::new(u32::from(prefix_len), addr.octets());
-                map.insert(&key, tenant_id, 0)
+                map.insert(&key, &tenant_id, 0)
                     .map_err(|e| anyhow::anyhow!("TENANT_SUBNET_V6 insert failed: {e}"))?;
             }
         }

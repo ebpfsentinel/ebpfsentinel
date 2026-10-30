@@ -6,6 +6,17 @@ rust-version = "1.99"
 
 [dependencies]
 aya-ebpf = "0.2.1"
+# aya-ebpf-bindings stays on 0.2 while aya-ebpf is 0.2.1. 0.3.0 is published,
+# but aya-ebpf 0.2.1 pins bindings ^0.2 (and macros ^0.2, cty ^0.3), so taking
+# 0.3 here alone puts two copies of every kernel type in each program: the
+# contexts aya-ebpf hands us are built on 0.2, the raw helpers and structs we
+# pass them would come from 0.3, and the two meet in every call that gives a
+# helper a context's pointer. That does not type-check, and where it does by
+# accident it is two layouts for one kernel struct. cargo-deny only warns on
+# duplicate versions, so this paragraph is the guard rather than the tool. It
+# lifts when aya-ebpf publishes a release pinning aya-ebpf-bindings 0.3; then
+# aya-ebpf, its bindings, macros and cty move together in every program crate
+# and here, and the objects are diffed against the previous build.
 aya-ebpf-bindings = "0.2.0"
 ebpf-common = { path = "../ebpf-common", default-features = false }
 

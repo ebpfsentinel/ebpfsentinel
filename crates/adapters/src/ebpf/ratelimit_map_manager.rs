@@ -48,7 +48,7 @@ impl RateLimitMapManager {
             let key = policy.to_ebpf_key();
             let config = policy.to_ebpf_config();
             self.config_map
-                .insert(key, config, 0)
+                .insert(&key, &config, 0)
                 .map_err(|e| anyhow::anyhow!("RATELIMIT_CONFIG insert failed: {e}"))?;
         }
 
@@ -61,7 +61,7 @@ impl RateLimitMapManager {
             let default_config =
                 build_default_config(default_rate, default_burst, default_algorithm);
             self.config_map
-                .insert(default_key, default_config, 0)
+                .insert(&default_key, &default_config, 0)
                 .map_err(|e| anyhow::anyhow!("RATELIMIT_CONFIG default insert failed: {e}"))?;
         }
 
@@ -109,7 +109,7 @@ impl RateLimitMapPort for RateLimitMapManager {
         key: RateLimitKey,
         config: RateLimitConfig,
     ) -> Result<(), DomainError> {
-        self.config_map.insert(key, config, 0).map_err(|e| {
+        self.config_map.insert(&key, &config, 0).map_err(|e| {
             DomainError::EngineError(format!("RATELIMIT_CONFIG tenant upsert failed: {e}"))
         })?;
         Ok(())

@@ -186,7 +186,7 @@ static FW_HASH_PORT: HashMap<FwHashKeyPort, FwHashValue, { MAX_FW_HASH_PORT as u
     HashMap::new();
 
 // NOTE: User RingBuf (BPF_MAP_TYPE_USER_RINGBUF, type 31) is available since
-// kernel 6.1, but aya 0.14.0 still classifies this map type as unsupported
+// kernel 6.1, but aya 0.16.0 still classifies this map type as unsupported
 // ("Unsupported map type found 31"), so a loaded object carrying it is
 // unusable from userspace. Config push uses bpf_map_update_elem via map
 // managers.

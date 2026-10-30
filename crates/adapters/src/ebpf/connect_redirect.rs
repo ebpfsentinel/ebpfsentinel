@@ -266,12 +266,12 @@ impl ConnectRedirectMaps {
             );
         }
         for id in exempt {
-            self.exempt.insert(id, 1u8, 0)?;
+            self.exempt.insert(id, &1u8, 0)?;
         }
         for port in ports {
-            self.ports.insert(port, 1u8, 0)?;
+            self.ports.insert(port, &1u8, 0)?;
         }
-        self.target.set(0, listener.to_target(), 0)?;
+        self.target.set(0, &listener.to_target(), 0)?;
         info!(
             ipv4 = ?listener.ipv4,
             ipv6 = ?listener.ipv6,
@@ -309,7 +309,7 @@ impl DlpScopeMapPort for ConnectRedirectMaps {
             }
         }
         for id in wanted {
-            self.cgroups.insert(id, 1u8, 0).map_err(|e| {
+            self.cgroups.insert(id, &1u8, 0).map_err(|e| {
                 DomainError::EngineError(format!("REDIRECT_CGROUPS write failed: {e}"))
             })?;
         }

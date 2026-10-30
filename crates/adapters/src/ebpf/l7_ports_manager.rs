@@ -42,7 +42,7 @@ impl L7PortsManager {
         // Insert new ports
         for &port in ports {
             self.ports_map
-                .insert(port, 1u8, 0)
+                .insert(&port, &1u8, 0)
                 .map_err(|e| anyhow::anyhow!("L7_PORTS insert port={port} failed: {e}"))?;
         }
 

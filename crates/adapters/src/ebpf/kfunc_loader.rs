@@ -2,12 +2,13 @@
 
 //! kfunc-aware eBPF program loader (kernel 5.18+ for module kfuncs).
 //!
-//! aya 0.14.0 cannot relocate kfunc calls: a kfunc call is a
-//! `BPF_PSEUDO_KFUNC_CALL` instruction whose `imm` must hold the kfunc's
-//! kernel BTF id and whose `off` indexes a program-load `fd_array` of module
-//! BTF fds - neither of which aya emits. This module fills that gap outside
-//! aya, the same way [`super::bpf_token`] adds features aya lacks via raw
-//! syscalls. `CONTRIBUTING.md` records the full upstream surface this loader
+//! aya 0.16.0 relocates a kfunc call only when the kfunc lives in vmlinux: a
+//! kfunc call is a `BPF_PSEUDO_KFUNC_CALL` instruction whose `imm` must hold
+//! the kfunc's kernel BTF id and whose `off` indexes a program-load `fd_array`
+//! of module BTF fds, and aya always writes `off = 0` and loads no `fd_array`,
+//! so a module kfunc such as the conntrack family cannot load through it.
+//! This module fills that gap outside aya, the same way [`super::bpf_token`]
+//! adds features aya lacks via raw syscalls. `CONTRIBUTING.md` records the full upstream surface this loader
 //! depends on and what a future aya bump costs.
 //!
 //! The loader is deliberately surgical so the rest of the agent is untouched:
@@ -42,7 +43,6 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use aya::maps::{Map as AyaMap, MapData};
-use aya_obj::btf::BtfFeatures;
 use aya_obj::generated::{bpf_attach_type, bpf_prog_type};
 use aya_obj::{Object, ProgramSection};
 use object::{Object as _, ObjectSection, ObjectSymbol, RelocationTarget};
@@ -502,8 +502,11 @@ pub fn load_kfunc_programs<S: BuildHasher>(
     let names = unique_names(&find_kfunc_sites(elf)?);
 
     let mut obj = Object::parse(elf).map_err(|e| KfuncLoaderError::ParseObject(e.to_string()))?;
-    let features = BtfFeatures::new(true, true, true, true, true, true, true, true);
-    obj.fixup_and_sanitize_btf(&features)
+    // Every BTF feature is answered as supported: the kernel floor carries all
+    // eight `BtfFeature` kinds, so nothing in the program BTF is rewritten
+    // into an older form. A kind added upstream is answered the same way until
+    // somebody reads the enum and decides otherwise.
+    obj.fixup_and_sanitize_btf(|| Some(|_| true))
         .map_err(|e| KfuncLoaderError::SanitizeBtf(e.to_string()))?;
 
     // Relocate against aya's hosted maps, matched by full ELF name.
@@ -1227,8 +1230,9 @@ const BPF_MAP_GET_NEXT_KEY: u32 = 4;
 const BPF_OBJ_PIN: u32 = 6;
 const BPF_OBJ_GET: u32 = 7;
 
-/// Kernel-matching `union bpf_attr` `map_create` member (6.9+ layout, ending
-/// in `map_token_fd`). Mirrors `aya_obj::generated::bpf_attr__bindgen_ty_1`.
+/// Kernel-matching `union bpf_attr` `map_create` member, ending in
+/// `map_token_fd`. Mirrors `aya_obj::generated::bpf_attr__bindgen_ty_1` up to
+/// that field; what later kernels append after it is never set here.
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 struct MapCreateAttr {
@@ -1276,6 +1280,12 @@ pub struct TokenLoadedObject {
     pub hosted: HashMap<String, OwnedFd>,
 }
 
+/// What a prog-id probe answered, an error read as unsupported - the reading
+/// the typed `DevMap` and `CpuMap` wrappers give their own cached probe.
+fn prog_id_supported(probe: fn() -> std::io::Result<bool>) -> bool {
+    probe().unwrap_or(false)
+}
+
 /// The `value_size` this loader forces for a map type, or `None` to keep the
 /// size the object declares.
 ///
@@ -1287,7 +1297,7 @@ pub struct TokenLoadedObject {
 /// and the redirect target is left unpopulated (DSR silently falls back to
 /// `XDP_TX`). aya's own loader resolves this by overriding `value_size` from the
 /// same feature probe (`bpf.rs`: `value_size_override`); mirror it against the
-/// identical `aya::features()` the wrapper reads so the two never disagree -
+/// identical probe the wrapper reads so the two never disagree -
 /// notably under token loading, where the probe cannot run without `CAP_BPF`
 /// and reports the legacy 4-byte layout. The BTF definition does not change
 /// this: `bpf_devmap_val` is 8 bytes on every kernel, so on a kernel without
@@ -1301,18 +1311,20 @@ fn value_size_override(map_type: u32) -> Option<u32> {
     use aya_obj::generated::bpf_map_type;
 
     match map_type.try_into() {
-        Ok(bpf_map_type::BPF_MAP_TYPE_DEVMAP | bpf_map_type::BPF_MAP_TYPE_DEVMAP_HASH) => {
-            Some(if aya::features().devmap_prog_id() {
+        Ok(bpf_map_type::BPF_MAP_TYPE_DEVMAP | bpf_map_type::BPF_MAP_TYPE_DEVMAP_HASH) => Some(
+            if prog_id_supported(aya::sys::is_devmap_prog_id_supported) {
                 8
             } else {
                 4
-            })
-        }
-        Ok(bpf_map_type::BPF_MAP_TYPE_CPUMAP) => Some(if aya::features().cpumap_prog_id() {
-            8
-        } else {
-            4
-        }),
+            },
+        ),
+        Ok(bpf_map_type::BPF_MAP_TYPE_CPUMAP) => Some(
+            if prog_id_supported(aya::sys::is_cpumap_prog_id_supported) {
+                8
+            } else {
+                4
+            },
+        ),
         Ok(bpf_map_type::BPF_MAP_TYPE_RINGBUF) => Some(0),
         _ => None,
     }
@@ -1328,9 +1340,9 @@ struct BtfMapIds {
 
 /// Decide which BTF ids a BTF-defined map may pass to `BPF_MAP_CREATE`.
 ///
-/// Re-derived from `aya::sys::bpf::bpf_create_map` in aya 0.14.0. The
-/// fourteen-type deny-list is unchanged from 0.13.1, but 0.14.0 added the
-/// bloom-filter carve-out: a bloom filter is keyless, so the kernel demands
+/// Re-derived from `aya::sys::bpf::bpf_create_map` in aya 0.16.0, which
+/// carries the same fourteen-type deny-list as 0.13.1 and the bloom-filter
+/// carve-out added in 0.14.0: a bloom filter is keyless, so the kernel demands
 /// `key_size` 0 and rejects a key BTF type id, while still accepting and
 /// validating the value type. Sending both ids fails `BPF_MAP_CREATE`
 /// outright, which under BTF-defined maps would leave the threat-intel filters
@@ -1804,9 +1816,8 @@ pub fn load_object_token(
     // kernel dedups identical BTF, and both fds are dropped after load.
     let mut probe =
         Object::parse(&patched).map_err(|e| KfuncLoaderError::ParseObject(e.to_string()))?;
-    let features = BtfFeatures::new(true, true, true, true, true, true, true, true);
     probe
-        .fixup_and_sanitize_btf(&features)
+        .fixup_and_sanitize_btf(|| Some(|_| true))
         .map_err(|e| KfuncLoaderError::SanitizeBtf(e.to_string()))?;
     let btf_bytes = probe.btf.as_ref().map(aya_obj::btf::Btf::to_bytes);
     let btf_fd = match btf_bytes {
@@ -2010,12 +2021,12 @@ mod tests {
 
         // The typed DevMap / CpuMap wrappers read the same feature probe, so
         // whatever it reports here, map and wrapper must agree on the size.
-        let devmap_expected = if aya::features().devmap_prog_id() {
+        let devmap_expected = if prog_id_supported(aya::sys::is_devmap_prog_id_supported) {
             8
         } else {
             4
         };
-        let cpumap_expected = if aya::features().cpumap_prog_id() {
+        let cpumap_expected = if prog_id_supported(aya::sys::is_cpumap_prog_id_supported) {
             8
         } else {
             4
@@ -2170,7 +2181,6 @@ mod tests {
     fn kfunc_call_sentinel(name_index: i32) -> aya_obj::generated::bpf_insn {
         aya_obj::generated::bpf_insn {
             code: INSN_CALL,
-            _bitfield_align_1: [],
             _bitfield_1: aya_obj::generated::bpf_insn::new_bitfield_1(0, BPF_PSEUDO_KFUNC_CALL),
             off: 0,
             imm: name_index,
@@ -2226,11 +2236,29 @@ mod tests {
     #[test]
     fn map_create_attr_matches_kernel_layout() {
         // The raw map_create attr must byte-match the kernel's bpf_attr
-        // map_create union member (ending in map_token_fd); a layout drift
-        // would corrupt every BPF_MAP_CREATE.
+        // map_create union member up to and including map_token_fd; a layout
+        // drift would corrupt every BPF_MAP_CREATE. Newer kernels append
+        // fields after it, which this attr never sets: the kernel reads a
+        // shorter attr as zero past its end, and a kernel at the floor would
+        // refuse a longer one carrying a field it does not know.
+        use aya_obj::generated::bpf_attr__bindgen_ty_1 as Kernel;
+        use std::mem::{offset_of, size_of};
+
         assert_eq!(
-            std::mem::size_of::<MapCreateAttr>(),
-            std::mem::size_of::<aya_obj::generated::bpf_attr__bindgen_ty_1>(),
+            size_of::<MapCreateAttr>(),
+            offset_of!(Kernel, map_token_fd) + size_of::<i32>(),
+        );
+        assert_eq!(
+            offset_of!(MapCreateAttr, map_extra),
+            offset_of!(Kernel, map_extra)
+        );
+        assert_eq!(
+            offset_of!(MapCreateAttr, value_type_btf_obj_fd),
+            offset_of!(Kernel, value_type_btf_obj_fd),
+        );
+        assert_eq!(
+            offset_of!(MapCreateAttr, map_token_fd),
+            offset_of!(Kernel, map_token_fd),
         );
     }
 }

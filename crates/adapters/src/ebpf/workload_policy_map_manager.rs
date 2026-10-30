@@ -114,7 +114,7 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
                 continue;
             };
             let entry = entry_for(rule, bit);
-            self.rules.set(written as u32, entry, 0).map_err(|e| {
+            self.rules.set(written as u32, &entry, 0).map_err(|e| {
                 DomainError::EngineError(format!("WORKLOAD_RULES write failed: {e}"))
             })?;
             written += 1;
@@ -125,7 +125,7 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
         // force, and still ahead of the walk's end.
         for index in written..WORKLOAD_POLICY_MAX_RULES {
             self.rules
-                .set(index as u32, WorkloadRuleEntry::default(), 0)
+                .set(index as u32, &WorkloadRuleEntry::default(), 0)
                 .map_err(|e| {
                     DomainError::EngineError(format!("WORKLOAD_RULES clear failed: {e}"))
                 })?;
@@ -135,7 +135,7 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
             let _ = self.fqdn.remove(&key);
         }
         self.capture
-            .set(0, u32::from(policy.names_destinations()), 0)
+            .set(0, &u32::from(policy.names_destinations()), 0)
             .map_err(|e| {
                 DomainError::EngineError(format!("WORKLOAD_DNS_CAPTURE write failed: {e}"))
             })?;
@@ -166,7 +166,7 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
             let _ = self.cgroups.remove(&cgroup_id);
             return Ok(());
         }
-        self.cgroups.insert(cgroup_id, mask, 0).map_err(|e| {
+        self.cgroups.insert(&cgroup_id, &mask, 0).map_err(|e| {
             DomainError::EngineError(format!("WORKLOAD_CGROUP_SELECTORS insert failed: {e}"))
         })
     }
@@ -175,7 +175,7 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
         if mask == 0 {
             return self.forget_task(tgid);
         }
-        self.tasks.insert(tgid, mask, 0).map_err(|e| {
+        self.tasks.insert(&tgid, &mask, 0).map_err(|e| {
             DomainError::EngineError(format!("WORKLOAD_TASK_SELECTORS insert failed: {e}"))
         })
     }
@@ -198,9 +198,11 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
     }
 
     fn grant_fqdn(&mut self, key: &FqdnGrantKey, expires_ns: u64) -> Result<(), DomainError> {
-        self.fqdn.insert(fqdn_key(key), expires_ns, 0).map_err(|e| {
-            DomainError::EngineError(format!("WORKLOAD_FQDN_ALLOWED insert failed: {e}"))
-        })
+        self.fqdn
+            .insert(&fqdn_key(key), &expires_ns, 0)
+            .map_err(|e| {
+                DomainError::EngineError(format!("WORKLOAD_FQDN_ALLOWED insert failed: {e}"))
+            })
     }
 
     fn revoke_fqdn(&mut self, key: &FqdnGrantKey) -> Result<(), DomainError> {

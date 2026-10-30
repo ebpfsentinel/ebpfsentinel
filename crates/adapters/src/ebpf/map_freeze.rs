@@ -283,7 +283,7 @@ where
     let map = ebpf
         .map_mut(name)
         .ok_or_else(|| anyhow::anyhow!("{name} map not found"))?;
-    aya::maps::Array::<_, V>::try_from(map)?.set(0, value, 0)?;
+    aya::maps::Array::<_, V>::try_from(map)?.set(0, &value, 0)?;
     freeze_after_init(ebpf, name);
     Ok(())
 }

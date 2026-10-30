@@ -233,7 +233,7 @@ fn measure_ids_scope(
 
     sampling.set(
         0,
-        IdsSamplingConfig {
+        &IdsSamplingConfig {
             mode: IDS_SAMPLING_RANDOM,
             _padding: [0; 3],
             rate_threshold: 0,
@@ -263,12 +263,12 @@ fn measure_ids_scope(
         _padding: 0,
     };
 
-    patterns.insert(key, rule(IDS_SCOPE_ALL), 0)?;
+    patterns.insert(&key, &rule(IDS_SCOPE_ALL), 0)?;
     let unscoped = measure(program, packet)?;
 
-    patterns.insert(key, rule(IDS_SCOPE_WORKLOAD), 0)?;
-    links.insert(TEST_RUN_IFINDEX, SCOPE_CGROUP, 0)?;
-    scope.insert(scope_key, 1u8, 0)?;
+    patterns.insert(&key, &rule(IDS_SCOPE_WORKLOAD), 0)?;
+    links.insert(&TEST_RUN_IFINDEX, &SCOPE_CGROUP, 0)?;
+    scope.insert(&scope_key, &1u8, 0)?;
     let scoped_hit = measure(program, packet)?;
 
     scope.remove(&scope_key)?;
@@ -305,7 +305,7 @@ fn memlock(map: &AyaMap) -> Option<u64> {
 /// absence is silent rather than an error.
 fn publish_gates(gates: Option<&mut Array<MapData, u32>>, mask: u32) {
     if let Some(array) = gates {
-        let _ = array.set(0, mask, 0);
+        let _ = array.set(0, &mask, 0);
     }
 }
 

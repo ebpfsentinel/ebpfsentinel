@@ -56,7 +56,7 @@ impl TenantVlanMapManager {
         }
         for map in &mut self.maps {
             for &(vlan_id, tenant_id) in entries {
-                map.insert(u32::from(vlan_id), tenant_id, 0)
+                map.insert(&u32::from(vlan_id), &tenant_id, 0)
                     .map_err(|e| anyhow::anyhow!("TENANT_VLAN_MAP insert failed: {e}"))?;
             }
         }

@@ -16,14 +16,23 @@ runs:
     - name: Install LLVM and bpf-linker
       shell: bash
       # The version is pinned rather than taken from the distribution: Ubuntu
-      # 24.04 packages LLVM 18 and bpf-linker 0.11 targets 23. Nothing catches
+      # 24.04 packages LLVM 18 and bpf-linker 0.11.1 links against 21, 22 or 23,
+      # 23 by default. Nothing catches
       # the mismatch while installing - bpf-linker pulls llvm-sys with
       # `no-llvm-linking` and does the linking itself, so no build step compares
       # the two - and it surfaces later as an undefined symbol, or as a crash
       # while linking a kernel program. Moving bpf-linker to a new major means
       # moving this too.
+      #
+      # bpf-linker itself is pinned to an exact version for the same reason the
+      # LLVM is: `--locked` freezes its dependencies, not the linker, and a
+      # linker that changes what lands in a program object while no file in
+      # this tree changed is a build that cannot be reproduced from its commit.
+      # The enterprise image and its Vagrant provisioner install the same
+      # version and move with this one.
       env:
         LLVM_VERSION: "23"
+        BPF_LINKER_VERSION: "0.11.1"
         SOURCE_ROOT: ${{ inputs.source-root }}
       run: |
         set -euo pipefail
@@ -57,5 +66,5 @@ runs:
         fi
         echo "bpf-linker toolchain: $channel"
 
-        cargo "+${channel}" install bpf-linker --locked
+        cargo "+${channel}" install bpf-linker --version "${BPF_LINKER_VERSION}" --locked
         bpf-linker --version

@@ -70,7 +70,7 @@ impl SignalMapManager {
     /// Write the armed count the kernel reads before anything else.
     fn set_armed(&mut self, count: u64) -> Result<(), DomainError> {
         self.armed
-            .set(SIGNAL_ARMED_SLOT, count, 0)
+            .set(SIGNAL_ARMED_SLOT, &count, 0)
             .map_err(|e| DomainError::EngineError(format!("SIGNAL_ARMED write failed: {e}")))
     }
 
@@ -93,7 +93,7 @@ impl ProcessSignalMapPort for SignalMapManager {
             }
         }
         for tgid in tgids {
-            self.protected.insert(tgid, 1u8, 0).map_err(|e| {
+            self.protected.insert(tgid, &1u8, 0).map_err(|e| {
                 DomainError::EngineError(format!("SIGNAL_PROTECTED insert failed: {e}"))
             })?;
         }
@@ -110,7 +110,7 @@ impl ProcessSignalMapPort for SignalMapManager {
             signal,
             _pad: 0,
         };
-        if let Err(e) = self.targets.insert(tgid, target, 0) {
+        if let Err(e) = self.targets.insert(&tgid, &target, 0) {
             // Put the count back where the map actually is, so a refused
             // insert does not leave every syscall on the node paying for a
             // lookup that can never match.

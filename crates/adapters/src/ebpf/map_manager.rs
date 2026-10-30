@@ -160,7 +160,7 @@ impl FirewallMapManager {
     fn sync_ct_gate(&mut self) {
         let open = self.v4_needs_ct || self.v6_needs_ct || self.policy_needs_ct;
         if let Some(ref mut map) = self.ct_gate {
-            if let Err(e) = map.set(0, u8::from(open), 0) {
+            if let Err(e) = map.set(0, &u8::from(open), 0) {
                 info!(error = %e, "conntrack gate not written, datapath keeps probing");
                 return;
             }
@@ -256,7 +256,7 @@ impl FirewallArrayMapPort for FirewallMapManager {
                         action: rule.action,
                         _pad: [0; 3],
                     };
-                    let _ = map.insert(key, val, 0);
+                    let _ = map.insert(&key, &val, 0);
                     hash_5tuple_count += 1;
                     continue;
                 }
@@ -276,7 +276,7 @@ impl FirewallArrayMapPort for FirewallMapManager {
                         action: rule.action,
                         _pad: [0; 3],
                     };
-                    let _ = map.insert(key, val, 0);
+                    let _ = map.insert(&key, &val, 0);
                     hash_port_count += 1;
                     continue;
                 }
@@ -292,17 +292,17 @@ impl FirewallArrayMapPort for FirewallMapManager {
         let count = array_rules.len().min(MAX_FIREWALL_RULES as usize);
 
         self.rule_count_v4
-            .set(0, 0u32, 0)
+            .set(0, &0u32, 0)
             .map_err(|e| DomainError::EngineError(format!("set V4 count=0 failed: {e}")))?;
 
         for (i, rule) in array_rules.iter().take(count).enumerate() {
             self.rules_v4
-                .set(i as u32, *rule, 0)
+                .set(i as u32, rule, 0)
                 .map_err(|e| DomainError::EngineError(format!("set V4 rule[{i}] failed: {e}")))?;
         }
 
         self.rule_count_v4
-            .set(0, count as u32, 0)
+            .set(0, &(count as u32), 0)
             .map_err(|e| DomainError::EngineError(format!("set V4 count={count} failed: {e}")))?;
 
         self.cached_v4_count = count + hash_5tuple_count as usize + hash_port_count as usize;
@@ -326,17 +326,17 @@ impl FirewallArrayMapPort for FirewallMapManager {
         let count = rules.len().min(MAX_FIREWALL_RULES as usize);
 
         self.rule_count_v6
-            .set(0, 0u32, 0)
+            .set(0, &0u32, 0)
             .map_err(|e| DomainError::EngineError(format!("set V6 count=0 failed: {e}")))?;
 
         for (i, rule) in rules.iter().take(count).enumerate() {
             self.rules_v6
-                .set(i as u32, *rule, 0)
+                .set(i as u32, rule, 0)
                 .map_err(|e| DomainError::EngineError(format!("set V6 rule[{i}] failed: {e}")))?;
         }
 
         self.rule_count_v6
-            .set(0, count as u32, 0)
+            .set(0, &(count as u32), 0)
             .map_err(|e| DomainError::EngineError(format!("set V6 count={count} failed: {e}")))?;
 
         self.cached_v6_count = count;
@@ -350,7 +350,7 @@ impl FirewallArrayMapPort for FirewallMapManager {
 
     fn set_default_policy(&mut self, policy: u8) -> Result<(), DomainError> {
         self.default_policy
-            .set(0, policy, 0)
+            .set(0, &policy, 0)
             .map_err(|e| DomainError::EngineError(format!("set default policy failed: {e}")))?;
         self.policy_needs_ct = policy != ACTION_PASS;
         self.sync_ct_gate();

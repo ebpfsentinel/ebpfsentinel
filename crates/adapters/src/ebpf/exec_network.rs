@@ -214,7 +214,7 @@ impl ExecNetworkMaps {
     pub fn replace(&mut self, keys: &HashSet<ExecNetKey>) -> Result<(), anyhow::Error> {
         for key in keys.difference(&self.held) {
             self.allowed
-                .insert(*key, 1, 0)
+                .insert(key, &1, 0)
                 .map_err(|e| anyhow::anyhow!("EXEC_NET_ALLOWED write failed: {e}"))?;
         }
         for key in self.held.difference(keys) {
@@ -248,7 +248,7 @@ impl ExecNetworkMaps {
             ..offsets
         };
         self.config
-            .set(EXEC_NET_CONFIG_SLOT, slot, 0)
+            .set(EXEC_NET_CONFIG_SLOT, &slot, 0)
             .map_err(|e| anyhow::anyhow!("EXEC_NET_CONFIG write failed: {e}"))
     }
 }

@@ -82,7 +82,7 @@ impl QosMapManager {
     /// a value that walks at least the steps the table needs.
     fn publish_shapes(&mut self, mask: u32) {
         if let Some(shapes) = self.empty_shapes.as_mut()
-            && let Err(e) = shapes.set(0, mask, 0)
+            && let Err(e) = shapes.set(0, &mask, 0)
         {
             info!(error = %e, "QOS_EMPTY_SHAPES publish failed, shaper walks every shape");
         }
@@ -168,7 +168,7 @@ impl QosMapManager {
         for (i, pipe) in pipes.iter().enumerate() {
             let config = Self::pipe_to_ebpf(pipe, i as u8);
             self.pipe_config
-                .set(i as u32, config, 0)
+                .set(i as u32, &config, 0)
                 .map_err(|e| anyhow::anyhow!("QOS_PIPE_CONFIG set at index {i} failed: {e}"))?;
         }
         info!(count = pipes.len(), "QoS pipes loaded into eBPF map");
@@ -189,7 +189,7 @@ impl QosMapManager {
                 .unwrap_or(0) as u8;
             let config = Self::queue_to_ebpf(queue, pipe_index);
             self.queue_config
-                .set(i as u32, config, 0)
+                .set(i as u32, &config, 0)
                 .map_err(|e| anyhow::anyhow!("QOS_QUEUE_CONFIG set at index {i} failed: {e}"))?;
         }
         info!(count = queues.len(), "QoS queues loaded into eBPF map");
@@ -228,7 +228,7 @@ impl QosMapManager {
                 .unwrap_or(0) as u8;
             let (key, value) = Self::classifier_to_ebpf(cls, queue_index);
             self.classifiers
-                .insert(key, value, 0)
+                .insert(&key, &value, 0)
                 .map_err(|e| anyhow::anyhow!("QOS_CLASSIFIERS insert failed: {e}"))?;
             written.push(key);
             loaded += 1;
@@ -264,7 +264,7 @@ impl QosMapManager {
             _pad: [0; 3],
         };
         for i in 0..count {
-            let _ = self.pipe_config.set(i, zero, 0);
+            let _ = self.pipe_config.set(i, &zero, 0);
         }
     }
 
@@ -276,7 +276,7 @@ impl QosMapManager {
             _padding: [0; 2],
         };
         for i in 0..count {
-            let _ = self.queue_config.set(i, zero, 0);
+            let _ = self.queue_config.set(i, &zero, 0);
         }
     }
 

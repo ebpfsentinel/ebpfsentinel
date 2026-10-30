@@ -71,7 +71,7 @@ impl GeoIpLpmPort for GeoIpLpmManager {
                 _padding: [0; 3],
             };
             self.lpm_src_v4
-                .insert(&key, value, 0)
+                .insert(&key, &value, 0)
                 .map_err(|e| DomainError::EngineError(format!("LPM src V4 insert failed: {e}")))?;
         }
 
@@ -88,7 +88,7 @@ impl GeoIpLpmPort for GeoIpLpmManager {
                 _padding: [0; 3],
             };
             self.lpm_dst_v4
-                .insert(&key, value, 0)
+                .insert(&key, &value, 0)
                 .map_err(|e| DomainError::EngineError(format!("LPM dst V4 insert failed: {e}")))?;
         }
 
@@ -118,7 +118,7 @@ impl GeoIpLpmPort for GeoIpLpmManager {
                 _padding: [0; 3],
             };
             self.lpm_src_v6
-                .insert(&key, value, 0)
+                .insert(&key, &value, 0)
                 .map_err(|e| DomainError::EngineError(format!("LPM src V6 insert failed: {e}")))?;
         }
 
@@ -135,7 +135,7 @@ impl GeoIpLpmPort for GeoIpLpmManager {
                 _padding: [0; 3],
             };
             self.lpm_dst_v6
-                .insert(&key, value, 0)
+                .insert(&key, &value, 0)
                 .map_err(|e| DomainError::EngineError(format!("LPM dst V6 insert failed: {e}")))?;
         }
 

@@ -351,7 +351,7 @@ fn insert_v4(
         action: entry.action,
         _padding: [0; 3],
     };
-    map.insert(&key, value, 0)
+    map.insert(&key, &value, 0)
         .map_err(|e| DomainError::EngineError(format!("{label} insert failed: {e}")))
 }
 
@@ -365,7 +365,7 @@ fn insert_v6(
         action: entry.action,
         _padding: [0; 3],
     };
-    map.insert(&key, value, 0)
+    map.insert(&key, &value, 0)
         .map_err(|e| DomainError::EngineError(format!("{label} insert failed: {e}")))
 }
 

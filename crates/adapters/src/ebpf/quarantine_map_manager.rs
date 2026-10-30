@@ -112,7 +112,7 @@ impl QuarantineMapPort for QuarantineMapManager {
             _pad: 0,
         };
         self.cgroups
-            .insert(cgroup_id, entry, 0)
+            .insert(&cgroup_id, &entry, 0)
             .map_err(|e| DomainError::EngineError(format!("QUARANTINE_CGROUPS insert failed: {e}")))
     }
 

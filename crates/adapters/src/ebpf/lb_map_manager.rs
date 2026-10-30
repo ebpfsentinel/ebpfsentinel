@@ -99,7 +99,7 @@ impl LbMapManager {
         // Heap-allocate the 128 KiB ring to keep it off the stack.
         let mut lookup = Box::new(MaglevLookup::empty());
         lookup.entries.copy_from_slice(table);
-        map.insert(svc_index, lookup.as_ref(), 0)
+        map.insert(&svc_index, lookup.as_ref(), 0)
             .map_err(|e| anyhow::anyhow!("LB_MAGLEV insert failed: {e}"))?;
         Ok(())
     }
@@ -119,7 +119,7 @@ impl LbMapManager {
         let Some(ref mut map) = self.backend_mac_map else {
             return Ok(());
         };
-        map.insert(backend_id, BackendMac::new(mac), 0)
+        map.insert(&backend_id, &BackendMac::new(mac), 0)
             .map_err(|e| anyhow::anyhow!("LB_BACKEND_MAC insert failed: {e}"))?;
         Ok(())
     }
@@ -141,7 +141,7 @@ impl LbMapManager {
         config: &LbServiceConfigV2,
     ) -> Result<(), anyhow::Error> {
         self.services_map
-            .insert(*key, *config, 0)
+            .insert(key, config, 0)
             .map_err(|e| anyhow::anyhow!("LB_SERVICES insert failed: {e}"))?;
         Ok(())
     }
@@ -162,7 +162,7 @@ impl LbMapManager {
         entry: &LbBackendEntry,
     ) -> Result<(), anyhow::Error> {
         self.backends_map
-            .insert(backend_id, *entry, 0)
+            .insert(&backend_id, entry, 0)
             .map_err(|e| anyhow::anyhow!("LB_BACKENDS insert failed: {e}"))?;
 
         // Populate DevMap for XDP redirect. Resolve ifindex from the backend IP.
@@ -233,7 +233,7 @@ impl LbMapManager {
         let mut updated = existing;
         updated.healthy = u8::from(healthy);
         self.backends_map
-            .insert(backend_id, updated, 0)
+            .insert(&backend_id, &updated, 0)
             .map_err(|e| anyhow::anyhow!("LB_BACKENDS health update failed: {e}"))?;
         Ok(())
     }

@@ -133,19 +133,19 @@ impl NatMapPort for NatMapManager {
 
         // Step 1: Set count to 0
         self.dnat_count
-            .set(0, 0u32, 0)
+            .set(0, &0u32, 0)
             .map_err(|e| DomainError::EngineError(format!("set DNAT count=0 failed: {e}")))?;
 
         // Step 2: Write entries
         for (i, rule) in rules.iter().take(count).enumerate() {
             self.dnat_rules
-                .set(i as u32, *rule, 0)
+                .set(i as u32, rule, 0)
                 .map_err(|e| DomainError::EngineError(format!("set DNAT rule[{i}] failed: {e}")))?;
         }
 
         // Step 3: Set count to n
         self.dnat_count
-            .set(0, count as u32, 0)
+            .set(0, &(count as u32), 0)
             .map_err(|e| DomainError::EngineError(format!("set DNAT count={count} failed: {e}")))?;
 
         self.cached_dnat_count = count;
@@ -159,19 +159,19 @@ impl NatMapPort for NatMapManager {
 
         // Step 1: Set count to 0
         self.snat_count
-            .set(0, 0u32, 0)
+            .set(0, &0u32, 0)
             .map_err(|e| DomainError::EngineError(format!("set SNAT count=0 failed: {e}")))?;
 
         // Step 2: Write entries
         for (i, rule) in rules.iter().take(count).enumerate() {
             self.snat_rules
-                .set(i as u32, *rule, 0)
+                .set(i as u32, rule, 0)
                 .map_err(|e| DomainError::EngineError(format!("set SNAT rule[{i}] failed: {e}")))?;
         }
 
         // Step 3: Set count to n
         self.snat_count
-            .set(0, count as u32, 0)
+            .set(0, &(count as u32), 0)
             .map_err(|e| DomainError::EngineError(format!("set SNAT count={count} failed: {e}")))?;
 
         self.cached_snat_count = count;
@@ -184,16 +184,16 @@ impl NatMapPort for NatMapManager {
         let count = rules.len().min(ebpf_common::nat::MAX_NAT_RULES_V6 as usize);
 
         self.dnat_count_v6
-            .set(0, 0u32, 0)
+            .set(0, &0u32, 0)
             .map_err(|e| DomainError::EngineError(format!("set DNAT V6 count=0 failed: {e}")))?;
 
         for (i, rule) in rules.iter().take(count).enumerate() {
-            self.dnat_rules_v6.set(i as u32, *rule, 0).map_err(|e| {
+            self.dnat_rules_v6.set(i as u32, rule, 0).map_err(|e| {
                 DomainError::EngineError(format!("set DNAT V6 rule[{i}] failed: {e}"))
             })?;
         }
 
-        self.dnat_count_v6.set(0, count as u32, 0).map_err(|e| {
+        self.dnat_count_v6.set(0, &(count as u32), 0).map_err(|e| {
             DomainError::EngineError(format!("set DNAT V6 count={count} failed: {e}"))
         })?;
 
@@ -207,16 +207,16 @@ impl NatMapPort for NatMapManager {
         let count = rules.len().min(ebpf_common::nat::MAX_NAT_RULES_V6 as usize);
 
         self.snat_count_v6
-            .set(0, 0u32, 0)
+            .set(0, &0u32, 0)
             .map_err(|e| DomainError::EngineError(format!("set SNAT V6 count=0 failed: {e}")))?;
 
         for (i, rule) in rules.iter().take(count).enumerate() {
-            self.snat_rules_v6.set(i as u32, *rule, 0).map_err(|e| {
+            self.snat_rules_v6.set(i as u32, rule, 0).map_err(|e| {
                 DomainError::EngineError(format!("set SNAT V6 rule[{i}] failed: {e}"))
             })?;
         }
 
-        self.snat_count_v6.set(0, count as u32, 0).map_err(|e| {
+        self.snat_count_v6.set(0, &(count as u32), 0).map_err(|e| {
             DomainError::EngineError(format!("set SNAT V6 count={count} failed: {e}"))
         })?;
 
@@ -230,35 +230,35 @@ impl NatMapPort for NatMapManager {
         let count = rules.len().min(ebpf_common::nat::MAX_NPTV6_RULES as usize);
 
         // Ingress: count=0 -> write entries -> count=n
-        self.nptv6_count_ingress.set(0, 0u32, 0).map_err(|e| {
+        self.nptv6_count_ingress.set(0, &0u32, 0).map_err(|e| {
             DomainError::EngineError(format!("set NPTv6 ingress count=0 failed: {e}"))
         })?;
         for (i, rule) in rules.iter().take(count).enumerate() {
             self.nptv6_rules_ingress
-                .set(i as u32, *rule, 0)
+                .set(i as u32, rule, 0)
                 .map_err(|e| {
                     DomainError::EngineError(format!("set NPTv6 ingress rule[{i}] failed: {e}"))
                 })?;
         }
         self.nptv6_count_ingress
-            .set(0, count as u32, 0)
+            .set(0, &(count as u32), 0)
             .map_err(|e| {
                 DomainError::EngineError(format!("set NPTv6 ingress count={count} failed: {e}"))
             })?;
 
         // Egress: count=0 -> write entries -> count=n
-        self.nptv6_count_egress.set(0, 0u32, 0).map_err(|e| {
+        self.nptv6_count_egress.set(0, &0u32, 0).map_err(|e| {
             DomainError::EngineError(format!("set NPTv6 egress count=0 failed: {e}"))
         })?;
         for (i, rule) in rules.iter().take(count).enumerate() {
             self.nptv6_rules_egress
-                .set(i as u32, *rule, 0)
+                .set(i as u32, rule, 0)
                 .map_err(|e| {
                     DomainError::EngineError(format!("set NPTv6 egress rule[{i}] failed: {e}"))
                 })?;
         }
         self.nptv6_count_egress
-            .set(0, count as u32, 0)
+            .set(0, &(count as u32), 0)
             .map_err(|e| {
                 DomainError::EngineError(format!("set NPTv6 egress count={count} failed: {e}"))
             })?;
@@ -273,7 +273,7 @@ impl NatMapPort for NatMapManager {
 
     fn load_hairpin_config(&mut self, config: &HairpinConfig) -> Result<(), DomainError> {
         self.hairpin_config
-            .set(0, *config, 0)
+            .set(0, config, 0)
             .map_err(|e| DomainError::EngineError(format!("set NAT_HAIRPIN_CONFIG failed: {e}")))?;
         info!(
             enabled = config.enabled,
@@ -286,21 +286,21 @@ impl NatMapPort for NatMapManager {
         if !enabled {
             // Disable by setting all counts to 0
             self.dnat_count
-                .set(0, 0u32, 0)
+                .set(0, &0u32, 0)
                 .map_err(|e| DomainError::EngineError(format!("disable DNAT failed: {e}")))?;
             self.snat_count
-                .set(0, 0u32, 0)
+                .set(0, &0u32, 0)
                 .map_err(|e| DomainError::EngineError(format!("disable SNAT failed: {e}")))?;
             self.dnat_count_v6
-                .set(0, 0u32, 0)
+                .set(0, &0u32, 0)
                 .map_err(|e| DomainError::EngineError(format!("disable DNAT V6 failed: {e}")))?;
             self.snat_count_v6
-                .set(0, 0u32, 0)
+                .set(0, &0u32, 0)
                 .map_err(|e| DomainError::EngineError(format!("disable SNAT V6 failed: {e}")))?;
-            self.nptv6_count_ingress.set(0, 0u32, 0).map_err(|e| {
+            self.nptv6_count_ingress.set(0, &0u32, 0).map_err(|e| {
                 DomainError::EngineError(format!("disable NPTv6 ingress failed: {e}"))
             })?;
-            self.nptv6_count_egress.set(0, 0u32, 0).map_err(|e| {
+            self.nptv6_count_egress.set(0, &0u32, 0).map_err(|e| {
                 DomainError::EngineError(format!("disable NPTv6 egress failed: {e}"))
             })?;
             self.cached_dnat_count = 0;

@@ -103,7 +103,7 @@ pub fn push_dlp_scope(ebpf: &mut dyn MapStore, scope: &ResolvedScope) -> anyhow:
         .ok_or_else(|| anyhow::anyhow!("DLP_CGROUP_ALLOW map not found"))?;
     let mut allow = aya::maps::HashMap::<_, u64, u8>::try_from(map)?;
     for cgroup in &scope.cgroups {
-        allow.insert(cgroup.id, 1u8, 0)?;
+        allow.insert(&cgroup.id, &1u8, 0)?;
     }
 
     // The mode goes in last: until it does, the probes read every cgroup, and a
@@ -176,7 +176,7 @@ impl DlpScopeMapPort for DlpScopeMapManager {
             let _ = self.allow.remove(&key);
         }
         for id in cgroup_ids {
-            self.allow.insert(id, 1u8, 0).map_err(|e| {
+            self.allow.insert(id, &1u8, 0).map_err(|e| {
                 DomainError::EngineError(format!("DLP_CGROUP_ALLOW write failed: {e}"))
             })?;
         }
@@ -192,7 +192,7 @@ impl DlpScopeMapPort for DlpScopeMapManager {
             DLP_SCOPE_MODE_ALL
         };
         self.mode
-            .set(0, mode, 0)
+            .set(0, &mode, 0)
             .map_err(|e| DomainError::EngineError(format!("DLP_SCOPE write failed: {e}")))?;
         Ok(())
     }
@@ -207,7 +207,7 @@ fn write_mode(ebpf: &mut dyn MapStore, mode: u32) -> anyhow::Result<()> {
         .map_mut("DLP_SCOPE")
         .ok_or_else(|| anyhow::anyhow!("DLP_SCOPE map not found"))?;
     let mut arr = aya::maps::Array::<_, u32>::try_from(map)?;
-    arr.set(0, mode, 0)?;
+    arr.set(0, &mode, 0)?;
     Ok(())
 }
 

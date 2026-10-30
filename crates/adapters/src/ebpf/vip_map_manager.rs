@@ -63,7 +63,7 @@ impl VipMapPort for VipMapManager {
             return Ok(());
         };
         self.vip_set
-            .insert(key, VipEntry::new(), 0)
+            .insert(&key, &VipEntry::new(), 0)
             .map_err(|e| DomainError::EngineError(format!("VIP_SET insert failed: {e}")))
     }
 
@@ -89,7 +89,7 @@ impl VipMapPort for VipMapManager {
 
     fn sync_iface_mac(&mut self, ifindex: u32, mac: [u8; 6]) -> Result<(), DomainError> {
         self.iface_mac
-            .insert(ifindex, IfaceMac::new(mac), 0)
+            .insert(&ifindex, &IfaceMac::new(mac), 0)
             .map_err(|e| DomainError::EngineError(format!("IFACE_MAC insert failed: {e}")))
     }
 

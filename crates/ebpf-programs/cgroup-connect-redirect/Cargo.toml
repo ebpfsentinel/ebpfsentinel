@@ -9,7 +9,7 @@ ebpf-common = { path = "../../ebpf-common", default-features = false }
 ebpf-helpers = { path = "../../ebpf-helpers" }
 
 [build-dependencies]
-aya-build = "0.2.0"
+aya-build = "0.2.1"
 
 [[bin]]
 name = "cgroup-connect-redirect"

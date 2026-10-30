@@ -83,7 +83,7 @@ impl RateLimitLpmPort for RateLimitLpmManager {
                 _padding: [0; 3],
             };
             self.lpm_src_v4
-                .insert(&key, value, 0)
+                .insert(&key, &value, 0)
                 .map_err(|e| DomainError::EngineError(format!("RL LPM V4 insert failed: {e}")))?;
         }
         info!(count = entries.len(), "rate limit LPM V4 CIDRs loaded");
@@ -102,7 +102,7 @@ impl RateLimitLpmPort for RateLimitLpmManager {
                 _padding: [0; 3],
             };
             self.lpm_src_v6
-                .insert(&key, value, 0)
+                .insert(&key, &value, 0)
                 .map_err(|e| DomainError::EngineError(format!("RL LPM V6 insert failed: {e}")))?;
         }
         info!(count = entries.len(), "rate limit LPM V6 CIDRs loaded");
@@ -113,7 +113,7 @@ impl RateLimitLpmPort for RateLimitLpmManager {
     fn load_tier_configs(&mut self, configs: &[(u8, RateLimitConfig)]) -> Result<(), DomainError> {
         for &(tier_id, ref config) in configs {
             self.tier_config
-                .set(u32::from(tier_id), *config, 0)
+                .set(u32::from(tier_id), config, 0)
                 .map_err(|e| {
                     DomainError::EngineError(format!(
                         "RL tier config set failed for tier {tier_id}: {e}"

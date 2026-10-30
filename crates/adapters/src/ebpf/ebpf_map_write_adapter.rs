@@ -59,14 +59,14 @@ impl EbpfMapWritePort for EbpfMapWriteAdapter {
                 let mut map = self.threatintel_v4.lock().map_err(|e| {
                     DomainError::EngineError(format!("threatintel V4 map lock poisoned: {e}"))
                 })?;
-                map.insert(key, value, 0).map_err(|e| {
+                map.insert(&key, &value, 0).map_err(|e| {
                     DomainError::EngineError(format!("threatintel V4 insert failed: {e}"))
                 })?;
                 // Best-effort bloom filter insert.
                 if let Some(ref bloom) = self.bloom_v4
                     && let Ok(mut b) = bloom.lock()
                 {
-                    let _ = b.insert(key, 0);
+                    let _ = b.insert(&key, 0);
                 }
             }
             IpAddr::V6(v6) => {
@@ -87,14 +87,14 @@ impl EbpfMapWritePort for EbpfMapWriteAdapter {
                 let mut map = v6_map.lock().map_err(|e| {
                     DomainError::EngineError(format!("threatintel V6 map lock poisoned: {e}"))
                 })?;
-                map.insert(key, value, 0).map_err(|e| {
+                map.insert(&key, &value, 0).map_err(|e| {
                     DomainError::EngineError(format!("threatintel V6 insert failed: {e}"))
                 })?;
                 // Best-effort bloom filter insert.
                 if let Some(ref bloom) = self.bloom_v6
                     && let Ok(mut b) = bloom.lock()
                 {
-                    let _ = b.insert(key, 0);
+                    let _ = b.insert(&key, 0);
                 }
             }
         }

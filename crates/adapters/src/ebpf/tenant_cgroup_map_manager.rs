@@ -67,7 +67,7 @@ impl TenantCgroupMapManager {
         }
         for map in &mut self.maps {
             for &(cgroup_id, tenant_id) in entries {
-                map.insert(cgroup_id, tenant_id, 0)
+                map.insert(&cgroup_id, &tenant_id, 0)
                     .map_err(|e| anyhow::anyhow!("TENANT_CGROUP_MAP insert failed: {e}"))?;
             }
         }

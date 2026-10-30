@@ -52,8 +52,8 @@ rust-version = "1.99"
 
 [workspace.dependencies]
 # eBPF
-aya = "0.14.0"
-aya-obj = "0.3.0"
+aya = "0.16.0"
+aya-obj = "0.6.0"
 object = { version = "0.40", default-features = false, features = ["elf", "read_core", "std"] }
 
 # Async runtime

@@ -11,6 +11,3 @@ ebpf-helpers = { path = "../../ebpf-helpers" }
 [[bin]]
 name = "tracepoint-process"
 path = "src/main.rs"
-
-[build-dependencies]
-aya-build = "0.2.0"

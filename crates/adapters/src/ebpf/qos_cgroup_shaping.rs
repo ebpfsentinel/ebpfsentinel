@@ -135,7 +135,7 @@ impl QosCgroupShapingMapPort for QosCgroupShapingMaps {
             }
         }
         for ifindex in &wanted {
-            self.interfaces.insert(ifindex, 1u8, 0).map_err(|e| {
+            self.interfaces.insert(ifindex, &1u8, 0).map_err(|e| {
                 DomainError::EngineError(format!("QOS_EDT_INTERFACES write failed: {e}"))
             })?;
         }

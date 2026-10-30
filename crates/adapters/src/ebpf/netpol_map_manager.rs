@@ -164,7 +164,7 @@ impl NetpolMapPort for NetpolMapManager {
                 continue;
             }
             self.rules
-                .insert(&Key::new(key.0, key.1), *entry, 0)
+                .insert(&Key::new(key.0, key.1), entry, 0)
                 .map_err(|e| {
                     DomainError::EngineError(format!("NETPOL_RULES insert failed: {e}"))
                 })?;
@@ -174,7 +174,7 @@ impl NetpolMapPort for NetpolMapManager {
             if self.held_cgroups.get(cgroup) == Some(entry) {
                 continue;
             }
-            self.cgroups.insert(*cgroup, *entry, 0).map_err(|e| {
+            self.cgroups.insert(cgroup, entry, 0).map_err(|e| {
                 DomainError::EngineError(format!("NETPOL_CGROUPS insert failed: {e}"))
             })?;
             self.held_cgroups.insert(*cgroup, *entry);

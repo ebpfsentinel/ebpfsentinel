@@ -57,7 +57,7 @@ impl ConnTrackMapPort for ConnTrackMapManager {
             feature_gates::publish(Feature::SourceLimits, false);
         }
         self.config
-            .set(0, cfg, 0)
+            .set(0, &cfg, 0)
             .map_err(|e| DomainError::EngineError(format!("set CT_CONFIG failed: {e}")))?;
         if limits_off {
             feature_gates::publish(Feature::SourceLimits, true);

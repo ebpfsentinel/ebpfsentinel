@@ -54,9 +54,9 @@ impl IdsMirrorMapManager {
             .map
             .lock()
             .map_err(|e| anyhow::anyhow!("IDS_MIRROR_CONFIG lock poisoned: {e}"))?;
-        map.set(0, ifindex, 0)
+        map.set(0, &ifindex, 0)
             .map_err(|e| anyhow::anyhow!("IDS_MIRROR_CONFIG[0] (ifindex) write failed: {e}"))?;
-        map.set(1, 1u32, 0)
+        map.set(1, &1u32, 0)
             .map_err(|e| anyhow::anyhow!("IDS_MIRROR_CONFIG[1] (enabled) write failed: {e}"))?;
         info!(ifindex, "IDS_MIRROR_CONFIG: mirroring enabled");
         Ok(())
@@ -74,7 +74,7 @@ impl IdsMirrorMapManager {
             .map
             .lock()
             .map_err(|e| anyhow::anyhow!("IDS_MIRROR_CONFIG lock poisoned: {e}"))?;
-        map.set(1, 0u32, 0)
+        map.set(1, &0u32, 0)
             .map_err(|e| anyhow::anyhow!("IDS_MIRROR_CONFIG[1] (enabled) write failed: {e}"))?;
         info!("IDS_MIRROR_CONFIG: mirroring disabled");
         Ok(())

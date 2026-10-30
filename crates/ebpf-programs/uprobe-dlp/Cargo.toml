@@ -13,4 +13,4 @@ name = "uprobe-dlp"
 path = "src/main.rs"
 
 [build-dependencies]
-aya-build = "0.2.0"
+aya-build = "0.2.1"

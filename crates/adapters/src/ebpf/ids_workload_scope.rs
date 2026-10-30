@@ -109,7 +109,7 @@ impl IdsWorkloadScopeMapPort for IdsWorkloadScopeMaps {
             }
         }
         for key in &wanted {
-            self.scope.insert(key, 1u8, 0).map_err(|e| {
+            self.scope.insert(key, &1u8, 0).map_err(|e| {
                 DomainError::EngineError(format!("IDS_WORKLOAD_SCOPE write failed: {e}"))
             })?;
         }

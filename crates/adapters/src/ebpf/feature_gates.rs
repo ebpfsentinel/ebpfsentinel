@@ -269,7 +269,7 @@ pub fn mask() -> u32 {
 
 fn write(gates: &mut Gates, mask: u32) {
     if let Some(ref mut map) = gates.map
-        && let Err(e) = map.set(0, mask, 0)
+        && let Err(e) = map.set(0, &mask, 0)
     {
         // The datapath keeps whatever it last read, which is at worst the
         // slower path, so this is worth a line and nothing more.

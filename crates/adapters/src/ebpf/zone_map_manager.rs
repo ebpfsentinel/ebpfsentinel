@@ -121,7 +121,7 @@ impl ZoneMapPort for ZoneMapManager {
                 ))
             })?;
             self.defaults
-                .insert(zone_id, policy_byte(zone.default_policy), 0)
+                .insert(&zone_id, &policy_byte(zone.default_policy), 0)
                 .map_err(|e| {
                     DomainError::EngineError(format!(
                         "ZONE_DEFAULT_POLICY insert failed for '{}': {e}",
@@ -140,7 +140,7 @@ impl ZoneMapPort for ZoneMapManager {
                     );
                     continue;
                 };
-                self.zones.insert(ifindex, zone_id, 0).map_err(|e| {
+                self.zones.insert(&ifindex, &zone_id, 0).map_err(|e| {
                     DomainError::EngineError(format!(
                         "ZONE_MAP insert failed for '{iface}' in zone '{}': {e}",
                         zone.id
@@ -172,7 +172,7 @@ impl ZoneMapPort for ZoneMapManager {
                 continue;
             };
             self.pairs
-                .insert(zone_pair_key(from, to), policy_byte(pair.policy), 0)
+                .insert(&zone_pair_key(from, to), &policy_byte(pair.policy), 0)
                 .map_err(|e| {
                     DomainError::EngineError(format!(
                         "ZONE_POLICY_MAP insert failed for '{}' -> '{}': {e}",

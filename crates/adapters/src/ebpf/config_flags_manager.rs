@@ -31,7 +31,7 @@ impl ConfigFlagsManager {
     /// Write the full `ConfigFlags` struct to index 0.
     pub fn set_flags(&mut self, flags: &ConfigFlags) -> Result<(), anyhow::Error> {
         self.flags_map
-            .set(0, *flags, 0)
+            .set(0, flags, 0)
             .map_err(|e| anyhow::anyhow!("CONFIG_FLAGS set failed: {e}"))?;
         info!("CONFIG_FLAGS updated");
         Ok(())
@@ -68,7 +68,7 @@ impl ScrubConfigManager {
     /// Write the `ScrubFlags` struct to index 0.
     pub fn set_flags(&mut self, flags: &ScrubFlags) -> Result<(), anyhow::Error> {
         self.flags_map
-            .set(0, *flags, 0)
+            .set(0, flags, 0)
             .map_err(|e| anyhow::anyhow!("SCRUB_CONFIG set failed: {e}"))?;
         info!("SCRUB_CONFIG updated");
         Ok(())
@@ -99,7 +99,7 @@ impl DdosSynConfigManager {
     /// Write the `DdosSynConfig` struct to index 0.
     pub fn set_config(&mut self, config: &DdosSynConfig) -> Result<(), anyhow::Error> {
         self.config_map
-            .set(0, *config, 0)
+            .set(0, config, 0)
             .map_err(|e| anyhow::anyhow!("DDOS_SYN_CONFIG set failed: {e}"))?;
         info!(
             enabled = config.enabled,
@@ -135,7 +135,7 @@ impl IcmpConfigManager {
     /// Write the `IcmpConfig` struct to index 0.
     pub fn set_config(&mut self, config: &IcmpConfig) -> Result<(), anyhow::Error> {
         self.config_map
-            .set(0, *config, 0)
+            .set(0, config, 0)
             .map_err(|e| anyhow::anyhow!("ICMP_CONFIG set failed: {e}"))?;
         info!(
             enabled = config.enabled,
@@ -171,7 +171,7 @@ impl DdosConnTrackConfigManager {
     /// Write the `DdosConnTrackConfig` struct to index 0.
     pub fn set_config(&mut self, config: &DdosConnTrackConfig) -> Result<(), anyhow::Error> {
         self.config_map
-            .set(0, *config, 0)
+            .set(0, config, 0)
             .map_err(|e| anyhow::anyhow!("CONNTRACK_CONFIG set failed: {e}"))?;
         info!(
             enabled = config.enabled,
@@ -233,7 +233,7 @@ impl AmpProtectConfigManager {
             false,
         );
         self.config_map
-            .insert(key, cfg, 0)
+            .insert(&key, &cfg, 0)
             .map_err(|e| anyhow::anyhow!("AMP_PROTECT_CONFIG insert failed: {e}"))?;
         info!(port, protocol, max_pps, "AMP_PROTECT_CONFIG port armed");
         Ok(())
@@ -306,7 +306,7 @@ impl InterfaceGroupsManager {
                     let _ = map.remove(&ifindex);
                     continue;
                 }
-                map.insert(ifindex, groups, 0)
+                map.insert(&ifindex, &groups, 0)
                     .map_err(|e| anyhow::anyhow!("INTERFACE_GROUPS insert failed: {e}"))?;
             }
         }

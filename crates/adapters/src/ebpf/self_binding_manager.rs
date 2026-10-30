@@ -48,7 +48,7 @@ impl L2BindingPort for SelfBindingManager {
             return Ok(());
         };
         self.bindings
-            .insert(key, SelfBinding::new(binding.mac()), 0)
+            .insert(&key, &SelfBinding::new(binding.mac()), 0)
             .map_err(|e| {
                 DomainError::EngineError(format!("SELF_OWNED_BINDINGS insert failed: {e}"))
             })

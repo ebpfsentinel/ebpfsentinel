@@ -194,7 +194,7 @@ impl DropReasonCounter {
             ebpf.take_map("DROP_CONFIG")
                 .ok_or_else(|| anyhow::anyhow!("map 'DROP_CONFIG' not found"))?,
         )?;
-        config_map.set(0, config, 0)?;
+        config_map.set(0, &config, 0)?;
         let counts = PerCpuHashMap::try_from(
             ebpf.take_map("DROP_COUNTS")
                 .ok_or_else(|| anyhow::anyhow!("map 'DROP_COUNTS' not found"))?,

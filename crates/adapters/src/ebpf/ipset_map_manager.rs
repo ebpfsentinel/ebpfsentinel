@@ -42,7 +42,7 @@ impl IpSetMapPort for IpSetMapManager {
                 _pad: [0; 2],
                 addr,
             };
-            self.ipset_v4.insert(key, 1, 0).map_err(|e| {
+            self.ipset_v4.insert(&key, &1, 0).map_err(|e| {
                 DomainError::EngineError(format!("ipset V4 insert set_id={set_id} failed: {e}"))
             })?;
         }
