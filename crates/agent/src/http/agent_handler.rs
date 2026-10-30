@@ -73,7 +73,59 @@ pub struct ContainerCoverage {
     /// The cgroup-id resolver is running, so an alert carries a container id.
     pub resolver: bool,
     pub docker: EnricherState,
+    pub podman: EnricherState,
     pub kubernetes: EnricherState,
+    /// Each Podman runtime the agent has gone to, root's and each user's,
+    /// and what it found there. A rootless container whose owner's runtime
+    /// is not reachable stays unnamed, and this is where that is said.
+    pub podman_runtimes: Vec<PodmanRuntimeReport>,
+}
+
+/// One Podman runtime and whether the agent reached it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, ToSchema)]
+pub struct PodmanRuntimeReport {
+    /// The user whose runtime this is, absent for root's.
+    pub uid: Option<u32>,
+    pub socket: String,
+    pub reach: PodmanReach,
+}
+
+/// What the agent found at a Podman socket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PodmanReach {
+    /// Answered: this owner's containers are named.
+    Reachable,
+    /// No socket there: the user's `podman.socket` unit is not enabled, or
+    /// the directory is not mounted into the agent.
+    NoSocket,
+    /// The socket refused the agent, which a user's socket does to anybody
+    /// but root and that user.
+    Refused,
+    /// The socket did not answer in time.
+    Unavailable,
+    /// Rootless runtimes are turned off in the configuration.
+    RootlessOff,
+}
+
+impl From<adapters::container::PodmanRuntime> for PodmanRuntimeReport {
+    fn from(runtime: adapters::container::PodmanRuntime) -> Self {
+        use adapters::container::{PodmanOwner, PodmanReach as Found};
+        Self {
+            uid: match runtime.owner {
+                PodmanOwner::Root => None,
+                PodmanOwner::User(uid) => Some(uid),
+            },
+            socket: runtime.socket,
+            reach: match runtime.reach {
+                Found::Reachable => PodmanReach::Reachable,
+                Found::NoSocket => PodmanReach::NoSocket,
+                Found::Refused => PodmanReach::Refused,
+                Found::Unavailable => PodmanReach::Unavailable,
+                Found::RootlessOff => PodmanReach::RootlessOff,
+            },
+        }
+    }
 }
 
 impl ContainerCoverage {
@@ -85,7 +137,9 @@ impl ContainerCoverage {
             host_proc: false,
             resolver: false,
             docker: EnricherState::Starting,
+            podman: EnricherState::Starting,
             kubernetes: EnricherState::Starting,
+            podman_runtimes: Vec::new(),
         }
     }
 }
@@ -179,7 +233,15 @@ pub async fn agent_status(State(state): State<Arc<AppState>>) -> Json<AgentStatu
         rule_count,
         firewall_enabled,
         firewall_mode,
-        container_coverage: state.container_coverage.load().as_ref().clone(),
+        container_coverage: {
+            let mut coverage = state.container_coverage.load().as_ref().clone();
+            // Read live: a user's runtime is gone to the first time one of
+            // their containers is seen, long after startup decided the rest.
+            if let Some(podman) = state.podman_enricher.load().as_ref() {
+                coverage.podman_runtimes = podman.runtimes().into_iter().map(Into::into).collect();
+            }
+            coverage
+        },
         config: infrastructure::config::provenance::provenance().into(),
     })
 }
@@ -374,8 +436,27 @@ mod tests {
             host_proc: true,
             resolver: true,
             docker: EnricherState::OffNoSocket,
+            podman: EnricherState::On,
             kubernetes: EnricherState::On,
+            podman_runtimes: Vec::new(),
         }));
+        let dir = tempfile::tempdir().unwrap();
+        let podman = Arc::new(adapters::container::PodmanEnricher::new(
+            dir.path().join("podman.sock"),
+            Some(dir.path().to_path_buf()),
+            100,
+            Arc::new(adapters::container::DockerCache::with_defaults()),
+        ));
+        let rootless = domain::container::entity::ContainerInfo::Container {
+            container_id: "ab".repeat(32),
+            runtime: domain::container::entity::ContainerRuntime::Podman,
+            cgroup_path: "/user.slice/user-1000.slice/user@1000.service/x".to_string(),
+            pid: 1,
+        };
+        ports::secondary::metadata_enricher_port::MetadataEnricher::enrich(&*podman, &rootless)
+            .await
+            .unwrap();
+        state.podman_enricher.store(Some(podman));
 
         let Json(resp) = agent_status(State(state)).await;
         let coverage = &resp.container_coverage;
@@ -389,5 +470,9 @@ mod tests {
         assert_eq!(wire["container_coverage"]["docker"], "off_no_socket");
         assert_eq!(wire["container_coverage"]["kubernetes"], "on");
         assert_eq!(wire["container_coverage"]["proc_root"], "/host/proc");
+        assert_eq!(wire["container_coverage"]["podman"], "on");
+        let runtime = &wire["container_coverage"]["podman_runtimes"][0];
+        assert_eq!(runtime["uid"], 1000);
+        assert_eq!(runtime["reach"], "no_socket");
     }
 }

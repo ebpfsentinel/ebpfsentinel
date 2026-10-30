@@ -3266,6 +3266,45 @@ fn enricher_state(state: &str) -> &str {
     }
 }
 
+fn print_container_coverage(coverage: &crate::api_client::ContainerCoverage) {
+    let procfs = if coverage.host_proc {
+        "host procfs"
+    } else {
+        "own procfs"
+    };
+    println!(
+        "  Containers {} ({procfs}), ids {}, docker {}, podman {}, kubernetes {}",
+        coverage.proc_root,
+        if coverage.resolver { "yes" } else { "no" },
+        enricher_state(&coverage.docker),
+        coverage
+            .podman
+            .as_deref()
+            .map_or("not reported", enricher_state),
+        enricher_state(&coverage.kubernetes),
+    );
+    for runtime in &coverage.podman_runtimes {
+        println!("             {}", podman_runtime_line(runtime));
+    }
+}
+
+/// One Podman runtime, as the status line under the containers names it.
+fn podman_runtime_line(runtime: &crate::api_client::PodmanRuntime) -> String {
+    let owner = runtime.uid.map_or_else(
+        || "podman root".to_string(),
+        |uid| format!("podman uid {uid}"),
+    );
+    let reach = match runtime.reach.as_str() {
+        "reachable" => "named",
+        "no_socket" => "unnamed, no socket (podman.socket not enabled, or not mounted)",
+        "refused" => "unnamed, the socket refused the agent",
+        "unavailable" => "unnamed, the socket did not answer",
+        "rootless_off" => "unnamed, rootless runtimes are off by configuration",
+        other => other,
+    };
+    format!("{owner}: {reach} ({})", runtime.socket)
+}
+
 pub async fn cmd_status_enhanced(client: &ApiClient, output: OutputFormat) -> Result<()> {
     // Fetch all data sources in parallel
     let (status, ebpf, alerts, conntrack, ddos) = tokio::join!(
@@ -3336,18 +3375,7 @@ pub async fn cmd_status_enhanced(client: &ApiClient, output: OutputFormat) -> Re
     // Containers: what this agent can actually say about them, which is what
     // the deployment matrix claims mode by mode.
     if let Some(coverage) = &status.container_coverage {
-        let procfs = if coverage.host_proc {
-            "host procfs"
-        } else {
-            "own procfs"
-        };
-        println!(
-            "  Containers {} ({procfs}), ids {}, docker {}, kubernetes {}",
-            coverage.proc_root,
-            if coverage.resolver { "yes" } else { "no" },
-            enricher_state(&coverage.docker),
-            enricher_state(&coverage.kubernetes),
-        );
+        print_container_coverage(coverage);
     }
 
     // Recent alerts
@@ -5554,6 +5582,26 @@ fn print_learning_session(session: &LearningSessionResponse, output: OutputForma
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_podman_runtime_says_whose_it_is_and_why_it_names_nothing() {
+        let line = podman_runtime_line(&crate::api_client::PodmanRuntime {
+            uid: Some(1000),
+            socket: "/run/user/1000/podman/podman.sock".to_string(),
+            reach: "refused".to_string(),
+        });
+        assert_eq!(
+            line,
+            "podman uid 1000: unnamed, the socket refused the agent \
+             (/run/user/1000/podman/podman.sock)"
+        );
+        let root = podman_runtime_line(&crate::api_client::PodmanRuntime {
+            uid: None,
+            socket: "/run/podman/podman.sock".to_string(),
+            reach: "reachable".to_string(),
+        });
+        assert!(root.starts_with("podman root: named"), "{root}");
+    }
 
     #[test]
     fn format_uptime_seconds_only() {

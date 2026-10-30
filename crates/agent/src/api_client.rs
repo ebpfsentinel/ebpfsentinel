@@ -48,7 +48,20 @@ pub struct ContainerCoverage {
     pub host_proc: bool,
     pub resolver: bool,
     pub docker: String,
+    /// Absent from an agent that predates Podman.
+    #[serde(default)]
+    pub podman: Option<String>,
     pub kubernetes: String,
+    #[serde(default)]
+    pub podman_runtimes: Vec<PodmanRuntime>,
+}
+
+/// One Podman runtime the agent has gone to.
+#[derive(Deserialize, Serialize)]
+pub struct PodmanRuntime {
+    pub uid: Option<u32>,
+    pub socket: String,
+    pub reach: String,
 }
 
 #[derive(Deserialize, Serialize)]

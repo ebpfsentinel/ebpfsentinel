@@ -150,6 +150,22 @@ fn docker_legacy_id(cgroup_path: &str) -> Option<String> {
     None
 }
 
+/// The user a rootless container belongs to, read from its cgroup path.
+///
+/// systemd gives every user manager its own slice, `user@<uid>.service`, and
+/// a container a user started without a daemon is placed beneath it, so the
+/// owner is in the path and needs no runtime to be asked. Returns `None` for
+/// a container a system service started.
+pub fn rootless_uid(cgroup_path: &str) -> Option<u32> {
+    cgroup_path.split('/').find_map(|segment| {
+        segment
+            .strip_prefix("user@")?
+            .strip_suffix(".service")?
+            .parse()
+            .ok()
+    })
+}
+
 fn is_valid_container_id(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -413,6 +429,21 @@ mod tests {
     #[test]
     fn parse_v1_empty_input() {
         assert!(parse_cgroup_v1(&[], 1).is_none());
+    }
+
+    #[test]
+    fn a_rootless_container_names_its_user_and_a_rootful_one_none() {
+        let rootless = format!(
+            "/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-{HEX64}.scope"
+        );
+        assert_eq!(rootless_uid(&rootless), Some(1000));
+        assert_eq!(
+            extract_container_id(&rootless, detect_runtime(&rootless)).as_deref(),
+            Some(HEX64)
+        );
+        let rootful = format!("/machine.slice/libpod-{HEX64}.scope");
+        assert_eq!(rootless_uid(&rootful), None);
+        assert_eq!(rootless_uid("/user.slice/user@x.service/a"), None);
     }
 
     #[test]

@@ -4074,6 +4074,15 @@ pub async fn run(
         None
     };
 
+    // ── 10e-bis. Build Podman metadata enricher (optional) ──────────
+    let (podman_state, podman_enricher) = crate::runtime::build_podman_enricher(&config);
+    if let Some(ref podman) = podman_enricher {
+        app_state.podman_enricher.store(Some(Arc::clone(podman)));
+    }
+    let podman_enricher: Option<
+        Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>,
+    > = podman_enricher.map(|podman| podman as _);
+
     // ── 10f. Build Kubernetes enricher (optional, auto-detected) ────
     #[cfg(feature = "kubernetes")]
     let mut kubernetes_state = EnricherState::OffByConfiguration;
@@ -4178,7 +4187,9 @@ pub async fn run(
         host_proc: coverage_proc != std::path::Path::new("/proc"),
         resolver: container_resolver.is_some(),
         docker: docker_state,
+        podman: podman_state,
         kubernetes: kubernetes_state,
+        podman_runtimes: Vec::new(),
     }));
 
     // ── 10f-bis. The process table ──────────────────────────────────
@@ -4206,6 +4217,9 @@ pub async fn run(
             svc = svc.with_containers(Arc::clone(resolver));
         }
         if let Some(ref enricher) = docker_enricher {
+            svc = svc.with_metadata_enricher(Arc::clone(enricher));
+        }
+        if let Some(ref enricher) = podman_enricher {
             svc = svc.with_metadata_enricher(Arc::clone(enricher));
         }
         if let Some(ref enricher) = kubernetes_enricher {
@@ -4268,6 +4282,9 @@ pub async fn run(
         let mut scanner =
             adapters::container::CgroupWorkloadScanner::new(&config.container.resolver.cgroup_root);
         if let Some(ref enricher) = docker_enricher {
+            scanner = scanner.with_enricher(Arc::clone(enricher));
+        }
+        if let Some(ref enricher) = podman_enricher {
             scanner = scanner.with_enricher(Arc::clone(enricher));
         }
         if let Some(ref enricher) = kubernetes_enricher {
@@ -4579,6 +4596,9 @@ pub async fn run(
         alert_pipeline = alert_pipeline.with_metadata_enricher(enricher);
     }
     if let Some(enricher) = docker_enricher.clone() {
+        alert_pipeline = alert_pipeline.with_metadata_enricher(enricher);
+    }
+    if let Some(enricher) = podman_enricher.clone() {
         alert_pipeline = alert_pipeline.with_metadata_enricher(enricher);
     }
 

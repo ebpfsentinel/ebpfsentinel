@@ -9658,7 +9658,9 @@
           "host_proc",
           "resolver",
           "docker",
-          "kubernetes"
+          "podman",
+          "kubernetes",
+          "podman_runtimes"
         ],
         "properties": {
           "docker": {
@@ -9670,6 +9672,16 @@
           },
           "kubernetes": {
             "$ref": "#/components/schemas/EnricherState"
+          },
+          "podman": {
+            "$ref": "#/components/schemas/EnricherState"
+          },
+          "podman_runtimes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PodmanRuntimeReport"
+            },
+            "description": "Each Podman runtime the agent has gone to, root's and each user's,\nand what it found there. A rootless container whose owner's runtime\nis not reachable stays unnamed, and this is where that is said."
           },
           "proc_root": {
             "type": "string",
@@ -13545,6 +13557,42 @@
           },
           "uid": {
             "type": "string"
+          }
+        }
+      },
+      "PodmanReach": {
+        "type": "string",
+        "description": "What the agent found at a Podman socket.",
+        "enum": [
+          "reachable",
+          "no_socket",
+          "refused",
+          "unavailable",
+          "rootless_off"
+        ]
+      },
+      "PodmanRuntimeReport": {
+        "type": "object",
+        "description": "One Podman runtime and whether the agent reached it.",
+        "required": [
+          "socket",
+          "reach"
+        ],
+        "properties": {
+          "reach": {
+            "$ref": "#/components/schemas/PodmanReach"
+          },
+          "socket": {
+            "type": "string"
+          },
+          "uid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The user whose runtime this is, absent for root's.",
+            "minimum": 0
           }
         }
       },

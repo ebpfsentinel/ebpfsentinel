@@ -140,6 +140,9 @@ pub struct AppState {
     /// decided it. Swapped once the resolver and the enrichers are built, so
     /// a status read before that says `starting` rather than guessing.
     pub container_coverage: Arc<ArcSwap<ContainerCoverage>>,
+    /// The Podman enricher, read on every status request for the runtimes
+    /// it has gone to so far. Empty when Podman is not enabled.
+    pub podman_enricher: Arc<ArcSwapOption<adapters::container::PodmanEnricher>>,
     /// The process table, where the exec and exit tracepoints attached.
     /// Empty when the table is turned off or the kernel refused the hooks, in
     /// which case the route says so rather than answering with an empty list
@@ -250,6 +253,7 @@ impl AppState {
             alert_stream_tx: None,
             alert_replay_buffer: None,
             container_coverage: Arc::new(ArcSwap::from_pointee(ContainerCoverage::starting())),
+            podman_enricher: Arc::new(ArcSwapOption::empty()),
         }
     }
 

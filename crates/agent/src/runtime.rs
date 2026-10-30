@@ -230,6 +230,11 @@ pub async fn build_workload_source(
         named = true;
     }
 
+    if let (_, Some(podman)) = build_podman_enricher(config) {
+        scanner = scanner.with_enricher(podman);
+        named = true;
+    }
+
     #[cfg(feature = "kubernetes")]
     if config.container.kubernetes.enabled
         && adapters::container::is_running_in_kubernetes()
@@ -266,6 +271,56 @@ pub async fn build_workload_source(
         );
     }
     scanner
+}
+
+/// The Podman enricher, and what it means for the node.
+///
+/// Built without asking the runtime anything: a user's socket appears when
+/// they log in or enable `podman.socket`, long after the agent started, so
+/// each one is gone to the first time one of that user's containers is seen.
+/// Root's socket missing with rootless turned off is the one case decided
+/// here, because then nothing could ever be named.
+pub fn build_podman_enricher(
+    config: &AgentConfig,
+) -> (
+    crate::http::agent_handler::EnricherState,
+    Option<Arc<adapters::container::PodmanEnricher>>,
+) {
+    use crate::http::agent_handler::EnricherState;
+    let podman = &config.container.podman;
+    if !podman.enabled {
+        return (EnricherState::OffByConfiguration, None);
+    }
+    if !podman.rootless && !Path::new(&podman.socket).exists() {
+        warn!(
+            socket = %podman.socket,
+            "Podman container enrichment is off: the socket is not there and rootless \
+             runtimes are not asked. Alerts keep their container id and lose the container \
+             name, image and labels. Enable podman.socket, mount it read-only, or set \
+             container.podman.enabled to false to stop asking for it"
+        );
+        return (EnricherState::OffNoSocket, None);
+    }
+    let cache = Arc::new(adapters::container::DockerCache::new(
+        podman.cache_size,
+        std::time::Duration::from_secs(podman.cache_ttl_seconds),
+    ));
+    let enricher = adapters::container::PodmanEnricher::new(
+        &podman.socket,
+        podman
+            .rootless
+            .then(|| std::path::PathBuf::from(&podman.run_user_root)),
+        podman.timeout_ms,
+        cache,
+    );
+    info!(
+        socket = %podman.socket,
+        rootless = podman.rootless,
+        run_user_root = %podman.run_user_root,
+        "Podman metadata enricher initialized: each owner's runtime is reached the first time \
+         one of their containers is seen"
+    );
+    (EnricherState::On, Some(Arc::new(enricher)))
 }
 
 #[allow(clippy::too_many_lines, clippy::similar_names)]

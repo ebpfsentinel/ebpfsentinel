@@ -32,6 +32,14 @@ fn default_docker_timeout_ms() -> u64 {
     2_000
 }
 
+fn default_podman_socket() -> String {
+    "/run/podman/podman.sock".to_string()
+}
+
+fn default_run_user_root() -> String {
+    "/run/user".to_string()
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContainerConfig {
     #[serde(default)]
@@ -39,6 +47,9 @@ pub struct ContainerConfig {
 
     #[serde(default)]
     pub docker: DockerEnricherConfig,
+
+    #[serde(default)]
+    pub podman: PodmanEnricherConfig,
 
     #[serde(default)]
     pub kubernetes: KubernetesEnricherConfig,
@@ -113,6 +124,53 @@ impl Default for DockerEnricherConfig {
     }
 }
 
+/// Podman containers, named through the socket of whoever started them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PodmanEnricherConfig {
+    /// Off by default, like Docker: it needs the runtime's socket mounted
+    /// into the agent.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// The system socket, serving the containers root started.
+    #[serde(default = "default_podman_socket")]
+    pub socket: String,
+
+    /// Also name the containers users started, through each user's own
+    /// socket under `run_user_root`. Those sockets answer only root and
+    /// their owner, and exist only while the user's `podman.socket` unit is
+    /// enabled.
+    #[serde(default = "default_true")]
+    pub rootless: bool,
+
+    /// Where users' runtime directories are mounted in the agent.
+    #[serde(default = "default_run_user_root")]
+    pub run_user_root: String,
+
+    #[serde(default = "default_docker_cache_size")]
+    pub cache_size: usize,
+
+    #[serde(default = "default_docker_cache_ttl_seconds")]
+    pub cache_ttl_seconds: u64,
+
+    #[serde(default = "default_docker_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for PodmanEnricherConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            socket: default_podman_socket(),
+            rootless: true,
+            run_user_root: default_run_user_root(),
+            cache_size: default_docker_cache_size(),
+            cache_ttl_seconds: default_docker_cache_ttl_seconds(),
+            timeout_ms: default_docker_timeout_ms(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct KubernetesEnricherConfig {
     /// Enables the Kubernetes pod metadata enricher.
@@ -153,6 +211,39 @@ pub enum NetworkPolicyMode {
 pub struct NetworkPolicyConfig {
     #[serde(default)]
     pub mode: NetworkPolicyMode,
+}
+
+impl PodmanEnricherConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.enabled {
+            let empty = [
+                ("socket", self.socket.is_empty()),
+                (
+                    "run_user_root",
+                    self.rootless && self.run_user_root.is_empty(),
+                ),
+            ];
+            if let Some((name, _)) = empty.iter().find(|(_, is_empty)| *is_empty) {
+                return Err(ConfigError::Validation {
+                    field: format!("container.podman.{name}"),
+                    message: "path must not be empty".to_string(),
+                });
+            }
+            if self.cache_size == 0 {
+                return Err(ConfigError::Validation {
+                    field: "container.podman.cache_size".to_string(),
+                    message: "cache_size must be at least 1".to_string(),
+                });
+            }
+            if self.timeout_ms == 0 {
+                return Err(ConfigError::Validation {
+                    field: "container.podman.timeout_ms".to_string(),
+                    message: "timeout_ms must be at least 1".to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 impl ContainerConfig {
@@ -203,6 +294,7 @@ impl ContainerConfig {
                     .to_string(),
             });
         }
+        self.podman.validate()?;
         if self.kubernetes.enabled {
             // The entries are joined into the label selector the API server
             // parses. A malformed one is rejected there, at watch time, in a
@@ -259,6 +351,30 @@ mod tests {
         assert_eq!(cfg.docker.cache_size, 1024);
         assert_eq!(cfg.docker.cache_ttl_seconds, 300);
         assert_eq!(cfg.docker.timeout_ms, 2_000);
+    }
+
+    #[test]
+    fn podman_is_off_and_rootless_on_once_enabled() {
+        let cfg: ContainerConfig = serde_norway::from_str("podman:\n  enabled: true\n").unwrap();
+        assert!(cfg.podman.enabled);
+        assert!(cfg.podman.rootless);
+        assert_eq!(cfg.podman.socket, "/run/podman/podman.sock");
+        assert_eq!(cfg.podman.run_user_root, "/run/user");
+        assert!(cfg.validate().is_ok());
+        assert!(!ContainerConfig::default().podman.enabled);
+    }
+
+    #[test]
+    fn validate_names_the_podman_field_it_refuses() {
+        let mut cfg = ContainerConfig::default();
+        cfg.podman.enabled = true;
+        cfg.podman.run_user_root = String::new();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("container.podman.run_user_root"), "{err}");
+        cfg.podman.rootless = false;
+        assert!(cfg.validate().is_ok());
+        cfg.podman.timeout_ms = 0;
+        assert!(cfg.validate().is_err());
     }
 
     #[test]
