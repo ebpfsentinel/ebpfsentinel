@@ -15,6 +15,7 @@ use super::ddos_handler;
 use super::dlp_handler;
 use super::dns_handler;
 use super::domain_handler;
+use super::drop_reason_handler;
 use super::error;
 use super::fingerprint_handler;
 use super::firewall_handler;
@@ -36,6 +37,7 @@ use super::qos_handler;
 use super::ratelimit_handler;
 use super::response_handler;
 use super::routing_handler;
+use super::service_graph_handler;
 use super::threatintel_handler;
 use super::tls_handler;
 use super::workload_dto;
@@ -125,6 +127,7 @@ use super::zone_handler;
         ops_handler::get_kernel_features,
         coverage_handler::get_ebpf_coverage,
         ops_handler::get_uprobes,
+        drop_reason_handler::get_drop_reasons,
         // DNS
         dns_handler::dns_status,
         dns_handler::list_dns_cache,
@@ -148,6 +151,7 @@ use super::zone_handler;
         conntrack_handler::flush_connections,
         conntrack_handler::conntrack_events,
         flow_handler::flow_export_status,
+        service_graph_handler::service_graph,
         // DLP
         dlp_handler::dlp_status,
         dlp_handler::list_dlp_patterns,
@@ -330,6 +334,11 @@ use super::zone_handler;
         conntrack_handler::ConnTrackStatusResponse,
         flow_handler::FlowExportStatusResponse,
         flow_handler::FlowSinkStatusResponse,
+        drop_reason_handler::DropReasonsResponse,
+        drop_reason_handler::DropReasonBody,
+        service_graph_handler::ServiceGraphResponse,
+        service_graph_handler::ServiceEdgeBody,
+        service_graph_handler::ServiceEndBody,
         conntrack_handler::ConnectionResponse,
         // DLP
         dlp_handler::DlpStatusResponse,
@@ -424,6 +433,7 @@ use super::zone_handler;
         (name = "DDoS", description = "DDoS detection, mitigation, and policy management"),
         (name = "ConnTrack", description = "Connection tracking status and management"),
         (name = "Flows", description = "Flow record export status"),
+        (name = "Services", description = "Requests between services, read from L7 traffic"),
         (name = "DLP", description = "Data loss prevention status and patterns"),
         (name = "NAT", description = "Network address translation rules"),
         (name = "Aliases", description = "IP/port alias management"),

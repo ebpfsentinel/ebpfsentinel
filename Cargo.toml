@@ -38,6 +38,7 @@ exclude = [
     "crates/ebpf-programs/cgroup-connect-redirect",
     "crates/ebpf-programs/tracepoint-process",
     "crates/ebpf-programs/tracepoint-signal",
+    "crates/ebpf-programs/tracepoint-drop-reason",
     "crates/ebpf-programs/lsm-exec-network",
 ]
 

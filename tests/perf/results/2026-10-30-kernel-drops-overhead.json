@@ -1,0 +1,17 @@
+{
+  "program": "drop_reason_kfree_skb",
+  "tracepoint": "kfree_skb",
+  "attach": "raw_tracepoint",
+  "drops_per_run": 200000,
+  "drop_reason": "NO_SOCKET",
+  "drop_rate_per_s": [470000, 445000, 450000],
+  "run_cnt": [200006, 200006, 200006],
+  "run_time_ns": [10192213, 10061844, 10622290],
+  "ns_per_run": [51.0, 50.3, 53.1],
+  "uncounted": [0, 0, 0],
+  "bytes_jited": 1037,
+  "kernel": "7.0.0-42-generic",
+  "cpu": "13th Gen Intel(R) Core(TM) i7-1370P",
+  "cpus": 20,
+  "load_mode": "bpf-token through the warden broker"
+}

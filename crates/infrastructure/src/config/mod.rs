@@ -22,6 +22,7 @@ mod flow_export;
 mod geoip;
 mod ids;
 mod ips;
+mod kernel_drops;
 mod l7;
 mod learning;
 mod loadbalancer;
@@ -77,6 +78,7 @@ pub use flow_export::{
 pub use geoip::{GeoIpConfig, GeoIpSource};
 pub use ids::{IdsConfig, IdsRuleConfig, SamplingConfig, ThresholdRuleConfig};
 pub use ips::{IpsConfig, IpsRuleConfig};
+pub use kernel_drops::KernelDropsConfig;
 pub use l7::{L7Config, L7RuleConfig};
 pub use learning::LearningConfig;
 pub use loadbalancer::{
@@ -271,6 +273,11 @@ pub struct AgentConfig {
     #[serde(default)]
     pub telemetry: TelemetryConfig,
 
+    /// The packets the kernel drops, counted by the reason it gives and the
+    /// interface the packet was on. On by default.
+    #[serde(default)]
+    pub kernel_drops: KernelDropsConfig,
+
     /// Enterprise configuration block. The OSS agent never reads this - the
     /// enterprise edition parses it with its own loader. It is declared here
     /// only so a *combined* agent+enterprise config file (the enterprise
@@ -461,6 +468,7 @@ impl AgentConfig {
 
         // Validate the telemetry block
         self.telemetry.validate()?;
+        self.kernel_drops.validate()?;
 
         // Validate container resolver config
         self.container.validate()?;
@@ -732,6 +740,7 @@ impl AgentConfig {
 
         // Validate L7 stream reassembly tunables.
         self.l7.reassembly.validate()?;
+        self.l7.port_mismatch.validate()?;
 
         // Validate auth config
         if self.auth.enabled {

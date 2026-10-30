@@ -9,6 +9,53 @@ Nothing in this directory is a target. A guest with four vCPUs is not a
 production node, and the suite says so in its own output: the bounds it
 asserts are what the lane can hold, not what the product promises.
 
+## `2026-10-30-l7-port-promise.json`
+
+The check comparing a connection's protocol with its port, timed by criterion
+in three runs on a developer workstation, kernel 7.0.0-42-generic, i7-1370P,
+with a desktop session running. Each run times protocol detection alone on an
+SSH banner, then detection plus the check on a connection already judged, then
+detection plus the check on the first payload of a new connection to port 443.
+
+| run | detection alone | already judged | new connection |
+|---|---|---|---|
+| 1 | 51.1 ns | 81.3 ns | 176.9 ns |
+| 2 | 49.1 ns | 82.1 ns | 178.2 ns |
+| 3 | 49.5 ns | 88.2 ns | 185.5 ns |
+
+**What to quote.** Detection already ran on every L7 payload before the check
+existed, so the check itself is the difference: about 30 ns on a payload of a
+connection already judged, which is nearly all of them, and about 130 ns on
+the first payload of a connection, when it is judged and remembered. The
+uncontended lock the dispatch workers share around the table is not in these
+figures.
+
+## `2026-10-30-kernel-drops-overhead.json`
+
+The drop counter's tracepoint, timed by the kernel itself, three runs on a
+developer workstation, kernel 7.0.0-42-generic, i7-1370P, with a desktop
+session running. The agent ran with eBPF loaded through the BPF token and the
+warden broker, `kernel_drops` on and everything else off; with
+`kernel.bpf_stats_enabled=1`, 200000 UDP datagrams were sent to a closed port
+on the loopback, each one dropped by the kernel as `NO_SOCKET`, and
+`bpftool prog show name drop_reason_kfree_skb` was read before and after.
+
+| run | drop rate | runs | kernel time | per drop |
+|---|---|---|---|---|
+| 1 | about 470000/s | 200006 | 10192213 ns | 51.0 ns |
+| 2 | about 445000/s | 200006 | 10061844 ns | 50.3 ns |
+| 3 | about 450000/s | 200006 | 10622290 ns | 53.1 ns |
+
+Every one of the 200000 drops was counted under its reason and interface, and
+none was left uncounted. The six runs beyond the 200000 are the drops the rest
+of the host made in the same window.
+
+**What to quote.** The tracepoint costs about 50 ns per packet the kernel
+drops, measured at about 450000 drops a second, and nothing on a packet the
+kernel delivers: `kfree_skb` fires on a drop and a consumed packet goes through
+`consume_skb`, which the counter does not hook. A host dropping 10000 packets
+a second spends about half a millisecond of CPU per second in it.
+
 ## `2026-10-24-ids-workload-scope.json`
 
 `cargo xtask ebpf-cost`, run twice through `BPF_PROG_TEST_RUN` on a developer

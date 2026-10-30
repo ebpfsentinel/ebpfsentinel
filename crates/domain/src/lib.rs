@@ -12,6 +12,7 @@ pub mod coverage;
 pub mod ddos;
 pub mod dlp;
 pub mod dns;
+pub mod drops;
 pub mod firewall;
 pub mod flow;
 pub mod ids;

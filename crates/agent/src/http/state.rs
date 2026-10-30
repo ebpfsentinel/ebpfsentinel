@@ -167,6 +167,11 @@ pub struct AppState {
     /// case the routes say the node does not learn rather than answering
     /// that it learnt nothing.
     pub learning_service: ArcSwapOption<LearningAppService>,
+    /// The L7 request meter, read by the service map. Empty until the event
+    /// dispatcher starts.
+    pub service_graph: ArcSwapOption<application::l7_red_meter::L7RedMeter>,
+    /// The kernel's drop counts, once the counter is attached.
+    pub kernel_drops: ArcSwapOption<application::kernel_drop_service::KernelDropService>,
 }
 
 impl AppState {
@@ -205,6 +210,8 @@ impl AppState {
             netpol_replay: ArcSwapOption::empty(),
             pod_coverage: Arc::new(application::pod_coverage_service::PodCoverageService::new()),
             learning_service: ArcSwapOption::empty(),
+            service_graph: ArcSwapOption::empty(),
+            kernel_drops: ArcSwapOption::empty(),
             nat_service: None,
             alias_service: None,
             routing_service: None,
@@ -395,6 +402,19 @@ impl AppState {
     /// Hand learning mode over, once whatever stores its windows is open.
     pub fn install_learning_service(&self, svc: Arc<LearningAppService>) {
         self.learning_service.store(Some(svc));
+    }
+
+    /// Hand the L7 request meter over once the dispatcher holding it exists.
+    pub fn install_service_graph(&self, meter: Arc<application::l7_red_meter::L7RedMeter>) {
+        self.service_graph.store(Some(meter));
+    }
+
+    /// Hand the kernel drop counter over once it is attached.
+    pub fn install_kernel_drops(
+        &self,
+        service: Arc<application::kernel_drop_service::KernelDropService>,
+    ) {
+        self.kernel_drops.store(Some(service));
     }
 
     /// Attach a NAT service.

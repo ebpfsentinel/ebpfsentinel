@@ -4,4 +4,7 @@ pub mod entity;
 pub mod error;
 pub mod ja4;
 pub mod parser;
+pub mod port_promise;
 pub mod reassembler;
+pub mod red;
+pub mod service_graph;

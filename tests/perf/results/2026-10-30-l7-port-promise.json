@@ -1,0 +1,11 @@
+{
+  "bench": "cargo bench -p ebpfsentinel-domain --bench l7_parsers -- port_promise",
+  "payload": "SSH-2.0-OpenSSH_9.6\\r\\n to port 443",
+  "detection_alone_ns": [51.1, 49.1, 49.5],
+  "already_judged_ns": [81.3, 82.1, 88.2],
+  "new_connection_ns": [176.9, 178.2, 185.5],
+  "tracker_capacity": 65536,
+  "kernel": "7.0.0-42-generic",
+  "cpu": "13th Gen Intel(R) Core(TM) i7-1370P",
+  "cpus": 20
+}

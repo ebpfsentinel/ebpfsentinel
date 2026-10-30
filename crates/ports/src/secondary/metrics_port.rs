@@ -22,6 +22,40 @@ pub trait PacketMetrics: Send + Sync {
 
     /// Observe a packet processing duration in seconds.
     fn observe_processing_duration(&self, _program: &str, _duration_seconds: f64) {}
+
+    /// Add `count` packets the kernel dropped for `reason` on `interface`.
+    ///
+    /// Fed with the difference between two readings of the kernel's own
+    /// counter, like `record_packets_by`.
+    fn record_kernel_drops(&self, _reason: &str, _interface: &str, _count: u64) {}
+
+    /// Add `count` drops the kernel saw but could not count under a reason
+    /// and interface, because its pair map was full.
+    fn record_kernel_drops_uncounted(&self, _count: u64) {}
+
+    /// Count one connection whose first payload was compared with the
+    /// protocol its well-known `port` promises. `verdict` is `match`,
+    /// `mismatch` or `unclassified`.
+    fn record_l7_port_promise(&self, _port: u16, _verdict: &str) {}
+
+    /// Count one connection left unjudged because the table of judged
+    /// connections was full.
+    fn record_l7_port_promise_uncounted(&self) {}
+
+    /// Record one L7 request that finished, against the service it is
+    /// counted under and the side of the connection that service was on.
+    ///
+    /// `outcome` is `ok`, `error` or `unanswered`; `duration_seconds` is
+    /// absent for an unanswered request, which has no duration to observe.
+    fn record_l7_request(
+        &self,
+        _service: &str,
+        _role: &str,
+        _protocol: &str,
+        _outcome: &str,
+        _duration_seconds: Option<f64>,
+    ) {
+    }
 }
 
 // ── Firewall / eBPF program metrics ────────────────────────────────

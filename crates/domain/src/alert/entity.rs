@@ -10,6 +10,7 @@ use crate::dns::entity::{DnsAlert, DnsAlertReason};
 use crate::firewall::exec_network::{EXEC_NETWORK_EXECUTABLE_SOURCE, ExecNetworkRecord};
 use crate::firewall::workload::{DestinationAddr, WORKLOAD_FIREWALL_COMPONENT, WorkloadDenial};
 use crate::ids::entity::IdsAlert;
+use crate::l7::port_promise::PORT_MISMATCH_RULE_ID;
 use crate::threatintel::entity::ThreatIntelAlert;
 use crate::workload::entity::Workload;
 
@@ -646,6 +647,9 @@ impl Alert {
         let mitre_component = match psa.component {
             PacketAlertComponent::Firewall => mitre::PacketSecurityComponent::Firewall,
             PacketAlertComponent::Ratelimit => mitre::PacketSecurityComponent::Ratelimit,
+            PacketAlertComponent::L7 if psa.rule_id == PORT_MISMATCH_RULE_ID => {
+                mitre::PacketSecurityComponent::L7PortMismatch
+            }
             PacketAlertComponent::L7 => mitre::PacketSecurityComponent::L7,
             PacketAlertComponent::Ips => mitre::PacketSecurityComponent::Ips,
         };
@@ -1504,6 +1508,17 @@ mod tests {
             alert.mitre_attack.as_ref().unwrap().technique_id,
             "T1071.001"
         );
+    }
+
+    #[test]
+    fn a_port_mismatch_alerts_under_non_standard_port() {
+        let mut psa = sample_psa(PacketAlertComponent::L7, "alert");
+        psa.rule_id = PORT_MISMATCH_RULE_ID.to_string();
+        let alert = Alert::from_packet_security_alert(&psa);
+
+        assert_eq!(alert.component, "l7");
+        assert_eq!(alert.action, DomainMode::Alert);
+        assert_eq!(alert.mitre_attack.as_ref().unwrap().technique_id, "T1571");
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub mod conntrack;
 pub mod ddos;
 pub mod dlp;
 pub mod dns;
+pub mod drop_reason;
 pub mod event;
 pub mod exec_network;
 pub mod firewall;

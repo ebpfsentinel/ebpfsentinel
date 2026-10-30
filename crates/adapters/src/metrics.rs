@@ -164,6 +164,40 @@ pub struct GatewayLabels {
     pub gateway: String,
 }
 
+/// Labels for the per-service request counter. Every value is bounded:
+/// `service` by the cap on distinct names, the other three by fixed sets.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct L7RequestLabels {
+    pub service: String,
+    pub role: String,
+    pub protocol: String,
+    pub outcome: String,
+}
+
+/// Labels for the kernel drop counter. `reason` is a member of an
+/// enumeration the running kernel defines, `interface` a device name of at
+/// most fifteen bytes, and the kernel-side map caps the pairs at 4096.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct KernelDropLabels {
+    pub reason: String,
+    pub interface: String,
+}
+
+/// Labels for `l7_port_promise`: a port from the agent's fixed table of
+/// promises and one of three verdicts, so the series are bounded by the table.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct PortPromiseLabels {
+    pub port: String,
+    pub verdict: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct L7DurationLabels {
+    pub service: String,
+    pub role: String,
+    pub protocol: String,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct WorkerLabels {
     pub worker_id: String,
@@ -383,6 +417,19 @@ pub struct AgentMetrics {
     /// Delay between the kernel committing a record and userspace draining
     /// it. Both ends read `CLOCK_BOOTTIME`, so the timestamps are comparable.
     pub ringbuf_latency_seconds: Family<RingBufLabels, Histogram>,
+    pub l7_requests_total: Family<L7RequestLabels, Counter>,
+    pub l7_request_duration_seconds: Family<L7DurationLabels, Histogram>,
+    /// Packets the kernel freed without delivering, by the reason it gave
+    /// and the interface the packet was on.
+    pub kernel_drops_total: Family<KernelDropLabels, Counter>,
+    /// Drops the kernel-side counter saw but had no room to count under a
+    /// reason and interface.
+    pub kernel_drops_uncounted_total: Counter,
+    /// Connections compared with the protocol their port promises, by port
+    /// and verdict.
+    pub l7_port_promise_total: Family<PortPromiseLabels, Counter>,
+    /// Connections left unjudged because the table of judged ones was full.
+    pub l7_port_promise_uncounted_total: Counter,
     pub container_resolver_cache_hits_total: Counter,
     pub container_resolver_cache_misses_total: Counter,
     pub container_resolver_errors_total: Counter,
@@ -993,6 +1040,51 @@ impl AgentMetrics {
             ringbuf_latency_seconds.clone(),
         );
 
+        let kernel_drops_total = Family::<KernelDropLabels, Counter>::default();
+        registry.register(
+            "kernel_drops",
+            "Packets the kernel dropped, by the reason it gave and the interface the packet was on",
+            kernel_drops_total.clone(),
+        );
+
+        let kernel_drops_uncounted_total = Counter::default();
+        registry.register(
+            "kernel_drops_uncounted",
+            "Kernel drops seen but not counted under a reason, because the pair map was full",
+            kernel_drops_uncounted_total.clone(),
+        );
+
+        let l7_port_promise_total = Family::<PortPromiseLabels, Counter>::default();
+        registry.register(
+            "l7_port_promise",
+            "Connections whose first payload was compared with the protocol their port promises, by port and verdict",
+            l7_port_promise_total.clone(),
+        );
+
+        let l7_port_promise_uncounted_total = Counter::default();
+        registry.register(
+            "l7_port_promise_uncounted",
+            "Connections left unjudged because the table of judged connections was full",
+            l7_port_promise_uncounted_total.clone(),
+        );
+
+        let l7_requests_total = Family::<L7RequestLabels, Counter>::default();
+        registry.register(
+            "l7_requests",
+            "L7 requests finished per service, side of the connection, protocol and outcome",
+            l7_requests_total.clone(),
+        );
+
+        let l7_request_duration_seconds =
+            Family::<L7DurationLabels, Histogram>::new_with_constructor(|| {
+                Histogram::new(domain::l7::red::DURATION_BUCKETS_SECONDS)
+            });
+        registry.register(
+            "l7_request_duration_seconds",
+            "Time from an L7 request to the first byte of its answer",
+            l7_request_duration_seconds.clone(),
+        );
+
         let container_resolver_cache_hits_total = Counter::default();
         registry.register(
             "container_resolver_cache_hits",
@@ -1151,6 +1243,12 @@ impl AgentMetrics {
             ringbuf_events_dropped_total,
             ringbuf_drains_total,
             ringbuf_latency_seconds,
+            l7_requests_total,
+            l7_request_duration_seconds,
+            kernel_drops_total,
+            kernel_drops_uncounted_total,
+            l7_port_promise_total,
+            l7_port_promise_uncounted_total,
             container_resolver_cache_hits_total,
             container_resolver_cache_misses_total,
             container_resolver_errors_total,
@@ -1225,12 +1323,65 @@ impl PacketMetrics for AgentMetrics {
             .inc_by(count);
     }
 
+    fn record_kernel_drops(&self, reason: &str, interface: &str, count: u64) {
+        self.kernel_drops_total
+            .get_or_create(&KernelDropLabels {
+                reason: reason.to_string(),
+                interface: interface.to_string(),
+            })
+            .inc_by(count);
+    }
+
+    fn record_kernel_drops_uncounted(&self, count: u64) {
+        self.kernel_drops_uncounted_total.inc_by(count);
+    }
+
+    fn record_l7_port_promise(&self, port: u16, verdict: &str) {
+        self.l7_port_promise_total
+            .get_or_create(&PortPromiseLabels {
+                port: port.to_string(),
+                verdict: verdict.to_string(),
+            })
+            .inc();
+    }
+
+    fn record_l7_port_promise_uncounted(&self) {
+        self.l7_port_promise_uncounted_total.inc();
+    }
+
     fn observe_processing_duration(&self, program: &str, duration_seconds: f64) {
         self.packet_processing_duration
             .get_or_create(&ProgramLabels {
                 program: program.to_string(),
             })
             .observe(duration_seconds);
+    }
+
+    fn record_l7_request(
+        &self,
+        service: &str,
+        role: &str,
+        protocol: &str,
+        outcome: &str,
+        duration_seconds: Option<f64>,
+    ) {
+        self.l7_requests_total
+            .get_or_create(&L7RequestLabels {
+                service: service.to_string(),
+                role: role.to_string(),
+                protocol: protocol.to_string(),
+                outcome: outcome.to_string(),
+            })
+            .inc();
+        if let Some(seconds) = duration_seconds {
+            self.l7_request_duration_seconds
+                .get_or_create(&L7DurationLabels {
+                    service: service.to_string(),
+                    role: role.to_string(),
+                    protocol: protocol.to_string(),
+                })
+                .observe(seconds);
+        }
     }
 }
 
@@ -2344,6 +2495,22 @@ mod tests {
         assert!(encoded.contains("result=\"failure\""));
     }
 
+    #[test]
+    fn l7_request_counts_every_outcome_and_times_only_the_answered() {
+        let metrics = AgentMetrics::new();
+        metrics.record_l7_request("shop/api", "server", "http", "ok", Some(0.003));
+        metrics.record_l7_request("shop/api", "server", "http", "unanswered", None);
+
+        let encoded = metrics.encode();
+        assert!(encoded.contains(
+            "ebpfsentinel_l7_requests_total{service=\"shop/api\",role=\"server\",protocol=\"http\",outcome=\"unanswered\"} 1"
+        ));
+        assert!(encoded.contains(
+            "ebpfsentinel_l7_request_duration_seconds_count{service=\"shop/api\",role=\"server\",protocol=\"http\"} 1"
+        ));
+        assert!(encoded.contains("le=\"0.005\""));
+    }
+
     /// Every metric this registry holds, as the name it is registered under
     /// and the metric type it encodes as.
     ///
@@ -2410,11 +2577,17 @@ mod tests {
         ("ids_domain_matches", "counter"),
         ("ips_blacklist_size", "gauge"),
         ("ips_blocks", "counter"),
+        ("kernel_drops", "counter"),
+        ("kernel_drops_uncounted", "counter"),
         ("lb_backends_healthy", "gauge"),
         ("lb_vip_arp_replies", "gauge"),
         ("lb_vip_bgp_session_established", "gauge"),
         ("lb_vip_speaker", "gauge"),
         ("lb_vip_takeovers", "counter"),
+        ("l7_request_duration_seconds", "histogram"),
+        ("l7_requests", "counter"),
+        ("l7_port_promise", "counter"),
+        ("l7_port_promise_uncounted", "counter"),
         ("learning_edges", "gauge"),
         ("learning_observations", "counter"),
         ("link_attach_gap_seconds", "histogram"),
@@ -2735,6 +2908,9 @@ mod tests {
                 source: "tc-ids".into(),
             })
             .observe(0.000_01);
+        m.record_l7_request("shop/api", "server", "http", "ok", Some(0.001));
+        m.record_kernel_drops("NO_SOCKET", "eth0", 1);
+        m.record_l7_port_promise(443, "mismatch");
         m.dlp_scan_duration_seconds.observe(0.000_01);
         m.link_attach_gap_seconds
             .get_or_create(&LinkKindLabels {

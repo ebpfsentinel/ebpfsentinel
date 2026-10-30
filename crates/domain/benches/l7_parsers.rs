@@ -3,10 +3,12 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
+use domain::l7::entity::DetectedProtocol;
 use domain::l7::parser::{
     detect_protocol, parse_ftp, parse_http, parse_payload, parse_smb, parse_smtp,
     parse_tls_client_hello,
 };
+use domain::l7::port_promise::{PortPromiseConfig, PortPromiseTracker};
 
 // ── HTTP payloads ──────────────────────────────────────────────────────
 
@@ -212,8 +214,56 @@ fn bench_parse_payload(c: &mut Criterion) {
     group.finish();
 }
 
+/// Detection alone, then detection plus the port-promise check as the L7 path
+/// runs them on every payload: a connection already judged, which is almost every payload, and
+/// the first payload of a new connection on a listed port.
+fn bench_port_promise(c: &mut Criterion) {
+    let mut group = c.benchmark_group("port_promise");
+    let ssh = b"SSH-2.0-OpenSSH_9.6\r\n";
+    let client = [0x0a00_0001, 0, 0, 0];
+    let server = ([0x0a00_0002, 0, 0, 0], 443);
+
+    group.bench_function("detection_alone", |b| {
+        b.iter(|| detect_protocol(black_box(ssh)));
+    });
+
+    let mut warm = PortPromiseTracker::new(PortPromiseConfig::default());
+    let _ = warm.offer(
+        (client, 50_000),
+        server,
+        false,
+        DetectedProtocol::Ssh,
+        ssh.len(),
+        0,
+    );
+    group.bench_function("already_judged", |b| {
+        b.iter(|| {
+            let spoken = detect_protocol(black_box(ssh));
+            warm.offer((client, 50_000), server, false, spoken, ssh.len(), 1)
+        });
+    });
+
+    group.bench_function("new_connection", |b| {
+        let mut tracker = PortPromiseTracker::new(PortPromiseConfig::default());
+        let mut n: u32 = 0;
+        b.iter(|| {
+            n = n.wrapping_add(1);
+            let src = ([0x0a00_0000 | (n >> 16), 0, 0, 0], (n & 0xffff) as u16);
+            let spoken = detect_protocol(black_box(ssh));
+            let offer = tracker.offer(src, server, false, spoken, ssh.len(), u64::from(n));
+            if tracker.remembered() >= 60_000 {
+                tracker = PortPromiseTracker::new(PortPromiseConfig::default());
+            }
+            offer
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_port_promise,
     bench_detect_protocol,
     bench_parse_http,
     bench_parse_tls,

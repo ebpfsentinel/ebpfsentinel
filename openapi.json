@@ -2859,6 +2859,55 @@
         ]
       }
     },
+    "/api/v1/ebpf/drop-reasons": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "`GET /api/v1/ebpf/drop-reasons` - why the kernel dropped packets.",
+        "operationId": "get_drop_reasons",
+        "responses": {
+          "200": {
+            "description": "Kernel drop counts by reason and interface",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DropReasonsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/ebpf/kernel-features": {
       "get": {
         "tags": [
@@ -7438,6 +7487,91 @@
         ]
       }
     },
+    "/api/v1/services/graph": {
+      "get": {
+        "tags": [
+          "Services"
+        ],
+        "summary": "`GET /api/v1/services/graph` - who called whom over the last minutes.",
+        "operationId": "service_graph",
+        "parameters": [
+          {
+            "name": "minutes",
+            "in": "query",
+            "description": "How many minutes back the reading covers, the current one included,\nfrom 1 to 60. Defaults to 15.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Service graph",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceGraphResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Window out of range",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The L7 dispatcher is not running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/threatintel/feeds": {
       "get": {
         "tags": [
@@ -10842,6 +10976,87 @@
           "score": {
             "type": "number",
             "format": "double"
+          }
+        }
+      },
+      "DropReasonBody": {
+        "type": "object",
+        "description": "Packets the kernel dropped for one reason on one interface.",
+        "required": [
+          "reason",
+          "interface",
+          "packets"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the reason means, in plain language. Absent for a reason the\nagent does not describe, which is still counted under its own name."
+          },
+          "interface": {
+            "type": "string",
+            "description": "The device name the packet was on, `if<index>` when the packet had no\ndevice left but remembered the index it arrived on, `none` when it had\nneither."
+          },
+          "packets": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Drops counted since the counter was loaded.",
+            "minimum": 0
+          },
+          "reason": {
+            "type": "string",
+            "description": "The reason as the running kernel names it, for instance `NO_SOCKET`."
+          }
+        }
+      },
+      "DropReasonsResponse": {
+        "type": "object",
+        "description": "The kernel's drop counts on this node.",
+        "required": [
+          "counting",
+          "total",
+          "uncounted",
+          "drops"
+        ],
+        "properties": {
+          "counting": {
+            "type": "boolean",
+            "description": "Whether the counter is attached."
+          },
+          "drops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DropReasonBody"
+            },
+            "description": "Counts, busiest first."
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last read of the counter failed. Absent when it succeeded;\nthe counts are then the last ones read."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it is not, in one sentence. Absent when it is."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Drops counted under a reason and an interface.",
+            "minimum": 0
+          },
+          "uncounted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Drops seen but not counted under a pair, because the kernel-side map\nheld as many pairs as it can.",
+            "minimum": 0
           }
         }
       },
@@ -14324,6 +14539,124 @@
         ],
         "description": "What the window is asked to watch."
       },
+      "ServiceEdgeBody": {
+        "type": "object",
+        "description": "Who called whom over the window, and how it went.",
+        "required": [
+          "client",
+          "server",
+          "server_port",
+          "protocol",
+          "observed_from",
+          "requests",
+          "errors",
+          "unanswered",
+          "answered",
+          "duration_ns_sum"
+        ],
+        "properties": {
+          "answered": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Requests answered, which are the ones timed.",
+            "minimum": 0
+          },
+          "client": {
+            "$ref": "#/components/schemas/ServiceEndBody"
+          },
+          "duration_ns_sum": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sum of the answered requests' durations, request to first answer\nbyte, in nanoseconds. Divided by `answered` it is the mean.",
+            "minimum": 0
+          },
+          "errors": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Answered with a failure the protocol states.",
+            "minimum": 0
+          },
+          "observed_from": {
+            "type": "string",
+            "description": "The side of the connection this node was on: `server` when the\nserver process runs here, `client` when only the client does,\n`transit` when neither does. A request whose two ends both run here\nis counted once, from the server side."
+          },
+          "protocol": {
+            "type": "string",
+            "description": "`http`, `redis`, `postgres`, `mysql` or `dns-tcp`."
+          },
+          "requests": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "server": {
+            "$ref": "#/components/schemas/ServiceEndBody"
+          },
+          "server_port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "unanswered": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Never answered within the timeout.",
+            "minimum": 0
+          }
+        }
+      },
+      "ServiceEndBody": {
+        "type": "object",
+        "description": "One end of a call.",
+        "required": [
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "service": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The service this node named the end as. Absent when the process at\nthat end does not run on this node, so only its address is known."
+          }
+        }
+      },
+      "ServiceGraphResponse": {
+        "type": "object",
+        "description": "The service graph seen from this node.",
+        "required": [
+          "minutes",
+          "dropped",
+          "max_edges_per_minute",
+          "edges"
+        ],
+        "properties": {
+          "dropped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Requests left out because their minute already held as many edges\nas `max_edges_per_minute`.",
+            "minimum": 0
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServiceEdgeBody"
+            }
+          },
+          "max_edges_per_minute": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "minutes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "SlotContentionResponse": {
         "type": "object",
         "description": "A kernel map slot holds one rule, so two rules watching the same port and\nprotocol cannot both be installed. This says which rule took the slot and\nwhether the loser is still evaluated.",
@@ -15168,6 +15501,10 @@
     {
       "name": "Flows",
       "description": "Flow record export status"
+    },
+    {
+      "name": "Services",
+      "description": "Requests between services, read from L7 traffic"
     },
     {
       "name": "DLP",

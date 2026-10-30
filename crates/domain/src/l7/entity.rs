@@ -28,6 +28,29 @@ pub enum DetectedProtocol {
     Unknown,
 }
 
+impl DetectedProtocol {
+    /// The name the protocol is labelled with in metrics, alerts and the API.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Tls => "tls",
+            Self::Grpc => "grpc",
+            Self::Smtp => "smtp",
+            Self::Ftp => "ftp",
+            Self::Smb => "smb",
+            Self::Ssh => "ssh",
+            Self::Redis => "redis",
+            Self::MySql => "mysql",
+            Self::Postgres => "postgres",
+            Self::DnsTcp => "dns-tcp",
+            Self::Imap => "imap",
+            Self::Pop3 => "pop3",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 // ── Parsed protocol data ───────────────────────────────────────────
 
 /// Parsed HTTP request from the first bytes of a TCP payload.

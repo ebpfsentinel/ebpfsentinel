@@ -27,5 +27,9 @@ criterion = { workspace = true }
 name = "service_overhead"
 harness = false
 
+[[bench]]
+name = "l7_red_meter"
+harness = false
+
 [lints]
 workspace = true

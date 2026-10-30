@@ -946,6 +946,38 @@ pub struct FlowExportStatusResponse {
     pub sinks: Vec<FlowSinkStatusResponse>,
 }
 
+// ── Service graph ───────────────────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct ServiceEndBody {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    pub address: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ServiceEdgeBody {
+    pub client: ServiceEndBody,
+    pub server: ServiceEndBody,
+    pub server_port: u16,
+    pub protocol: String,
+    pub observed_from: String,
+    pub requests: u64,
+    pub errors: u64,
+    pub unanswered: u64,
+    pub answered: u64,
+    pub duration_ns_sum: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ServiceGraphResponse {
+    pub minutes: u64,
+    pub dropped: u64,
+    pub max_edges_per_minute: usize,
+    #[serde(default)]
+    pub edges: Vec<ServiceEdgeBody>,
+}
+
 // ── Connection Tracking ──────────────────────────────────────────────
 
 #[derive(Deserialize, Serialize)]
@@ -1570,6 +1602,27 @@ pub struct UprobeEntry {
 pub struct UprobeInventoryResponse {
     pub libraries: usize,
     pub probes: Vec<UprobeEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct DropReasonEntry {
+    pub reason: String,
+    pub interface: String,
+    pub packets: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct DropReasonsResponse {
+    pub counting: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub total: u64,
+    pub uncounted: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    pub drops: Vec<DropReasonEntry>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -2585,6 +2638,18 @@ impl ApiClient {
         handle_response(resp).await
     }
 
+    // ── Service graph ───────────────────────────────────────────────
+
+    pub async fn service_graph(&self, minutes: u64) -> anyhow::Result<ServiceGraphResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/services/graph")
+            .query(&[("minutes", minutes.to_string())])
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
     // ── Connection Tracking ─────────────────────────────────────────
 
     pub async fn conntrack_status(&self) -> anyhow::Result<ConnTrackStatusResponse> {
@@ -3313,6 +3378,15 @@ impl ApiClient {
     pub async fn list_uprobes(&self) -> anyhow::Result<UprobeInventoryResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/ebpf/uprobes")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn drop_reasons(&self) -> anyhow::Result<DropReasonsResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ebpf/drop-reasons")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

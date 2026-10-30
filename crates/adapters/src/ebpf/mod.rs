@@ -10,6 +10,7 @@ pub mod dlp_attach;
 pub mod dlp_event_reader;
 pub mod dlp_scope;
 pub mod dns_event_reader;
+pub mod drop_reason;
 pub mod ebpf_map_write_adapter;
 pub mod event_reader;
 pub mod exec_network;

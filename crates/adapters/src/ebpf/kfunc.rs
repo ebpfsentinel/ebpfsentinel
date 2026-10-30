@@ -378,7 +378,27 @@ impl BtfBlob {
         enum_name: &str,
         names: &[&str],
     ) -> Result<Option<Vec<Option<i64>>>, KfuncError> {
-        let mut found: Option<Vec<Option<i64>>> = None;
+        Ok(self.enum_members(base, enum_name)?.map(|members| {
+            names
+                .iter()
+                .map(|wanted| {
+                    members
+                        .iter()
+                        .find(|(name, _)| name == wanted)
+                        .map(|(_, value)| *value)
+                })
+                .collect()
+        }))
+    }
+
+    /// Every enumerator of the first non-empty `ENUM` or `ENUM64` called
+    /// `enum_name`, in declaration order. `None` means no such enum.
+    fn enum_members(
+        &self,
+        base: Option<&BtfBlob>,
+        enum_name: &str,
+    ) -> Result<Option<Vec<(String, i64)>>, KfuncError> {
+        let mut found: Option<Vec<(String, i64)>> = None;
         for_each_type(&self.data, &self.header, |rec| {
             if found.is_some()
                 || !matches!(rec.kind, BTF_KIND_ENUM | BTF_KIND_ENUM64)
@@ -388,15 +408,10 @@ impl BtfBlob {
             {
                 return;
             }
-            let mut values = vec![None; names.len()];
+            let mut members = Vec::with_capacity(rec.vlen as usize);
             let mut record = |name_off: u32, value: i64| {
-                let Some(name) = self.string_at(name_off, base) else {
-                    return;
-                };
-                for (slot, wanted) in values.iter_mut().zip(names) {
-                    if slot.is_none() && name == *wanted {
-                        *slot = Some(value);
-                    }
+                if let Some(name) = self.string_at(name_off, base) {
+                    members.push((name.to_owned(), value));
                 }
             };
             if rec.kind == BTF_KIND_ENUM {
@@ -416,7 +431,7 @@ impl BtfBlob {
                     );
                 }
             }
-            found = Some(values);
+            found = Some(members);
         })?;
         Ok(found)
     }
@@ -479,6 +494,24 @@ pub fn vmlinux_enum_values(
     let vmlinux = BtfBlob::parse_base(data)?;
     vmlinux
         .enum_values(None, enum_name, names)?
+        .ok_or_else(|| KfuncError::EnumNotFound(enum_name.to_owned()))
+}
+
+/// Every enumerator of `enum_name` in the running kernel, name and value, in
+/// the order the kernel declares them.
+///
+/// The packet drop counter names reasons this way: `enum skb_drop_reason`
+/// gains members in the middle from one release to the next, so the agent
+/// learns the names the running kernel uses rather than carrying a table
+/// that is right for one of them.
+pub fn vmlinux_enum_members(enum_name: &str) -> Result<Vec<(String, i64)>, KfuncError> {
+    let data = std::fs::read(VMLINUX_BTF_PATH).map_err(|source| KfuncError::ReadVmlinux {
+        path: VMLINUX_BTF_PATH.to_owned(),
+        source,
+    })?;
+    let vmlinux = BtfBlob::parse_base(data)?;
+    vmlinux
+        .enum_members(None, enum_name)?
         .ok_or_else(|| KfuncError::EnumNotFound(enum_name.to_owned()))
 }
 
@@ -1033,6 +1066,13 @@ mod tests {
             .expect("walk")
             .expect("iter_type defined");
         assert_eq!(values, vec![Some(1), Some(0), None]);
+        assert_eq!(
+            parsed
+                .enum_members(None, "iter_type")
+                .expect("walk")
+                .expect("iter_type defined"),
+            vec![("ITER_UBUF".to_owned(), 0), ("ITER_IOVEC".to_owned(), 1)]
+        );
         assert_eq!(
             parsed
                 .enum_values(None, "other_enum", &["ITER_UBUF"])

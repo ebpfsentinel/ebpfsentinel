@@ -270,6 +270,12 @@ pub struct DomainArgs<T: Subcommand> {
 pub enum FlowsAction {
     /// Show flow record export status: the table's counters and every sink
     Export,
+    /// Show who called whom over the last minutes, read from L7 requests
+    Services {
+        /// How many minutes back, from 1 to 60
+        #[arg(short, long, default_value_t = 15)]
+        minutes: u64,
+    },
 }
 
 // ── Learning ────────────────────────────────────────────
@@ -1031,6 +1037,8 @@ pub enum EbpfCommand {
     Coverage,
     /// Answer for this host, with no agent running: can an LSM program attach
     HostCheck,
+    /// Show why the kernel dropped packets, by reason and interface
+    Drops,
 }
 
 // ── Config ──────────────────────────────────────────────────────────────
@@ -2564,6 +2572,18 @@ mod tests {
             cli.command,
             Some(Command::Ebpf(DomainArgs {
                 command: EbpfCommand::Uprobes,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_ebpf_drops() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "ebpf", "drops"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ebpf(DomainArgs {
+                command: EbpfCommand::Drops,
                 ..
             }))
         ));

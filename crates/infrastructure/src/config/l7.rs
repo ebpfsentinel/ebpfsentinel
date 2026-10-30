@@ -26,6 +26,65 @@ pub struct L7Config {
     /// JA4 / JA4S fingerprint cache persistence.
     #[serde(default)]
     pub fingerprints: FingerprintsConfig,
+
+    /// Alert on a connection speaking a protocol other than the one its
+    /// well-known port promises.
+    #[serde(default)]
+    pub port_mismatch: PortMismatchConfig,
+}
+
+/// Port-promise checking: the first payload of each connection on a listed
+/// port is compared with the protocols that port promises.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortMismatchConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Listed ports left out on purpose, such as 443 on a host that
+    /// multiplexes SSH and TLS on it.
+    #[serde(default)]
+    pub ignore_ports: Vec<u16>,
+}
+
+impl Default for PortMismatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ignore_ports: Vec::new(),
+        }
+    }
+}
+
+impl PortMismatchConfig {
+    /// Refuse an ignored port that promises nothing, which ignores nothing
+    /// and is most likely a typo for one that does.
+    pub(super) fn validate(&self) -> Result<(), ConfigError> {
+        use domain::l7::port_promise::{PROMISES, promise_of};
+        if let Some(port) = self
+            .ignore_ports
+            .iter()
+            .find(|port| promise_of(**port).is_none())
+        {
+            let listed: Vec<String> = PROMISES.iter().map(|p| p.port.to_string()).collect();
+            return Err(ConfigError::Validation {
+                field: "l7.port_mismatch.ignore_ports".into(),
+                message: format!(
+                    "port {port} promises no protocol, so there is nothing to ignore; the ports checked are {}",
+                    listed.join(", ")
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// The tracker's configuration, or `None` when the check is off.
+    pub fn to_domain(&self) -> Option<domain::l7::port_promise::PortPromiseConfig> {
+        self.enabled
+            .then(|| domain::l7::port_promise::PortPromiseConfig {
+                ignore_ports: self.ignore_ports.clone(),
+                ..domain::l7::port_promise::PortPromiseConfig::default()
+            })
+    }
 }
 
 /// JA4 / JA4S fingerprint cache persistence configuration.
@@ -419,6 +478,41 @@ mod tests {
         assert!(!cfg.enabled);
         assert!(cfg.ports.is_empty());
         assert!(cfg.rules.is_empty());
+    }
+
+    #[test]
+    fn the_port_mismatch_check_is_on_by_default() {
+        let cfg: L7Config = serde_norway::from_str("enabled: true\nports: [443]").unwrap();
+        assert!(cfg.port_mismatch.enabled);
+        assert!(cfg.port_mismatch.validate().is_ok());
+        assert!(cfg.port_mismatch.to_domain().is_some());
+    }
+
+    #[test]
+    fn a_disabled_port_mismatch_check_builds_no_tracker() {
+        let cfg: L7Config = serde_norway::from_str("port_mismatch:\n  enabled: false").unwrap();
+        assert!(cfg.port_mismatch.to_domain().is_none());
+    }
+
+    #[test]
+    fn an_ignored_port_reaches_the_tracker() {
+        let cfg = PortMismatchConfig {
+            enabled: true,
+            ignore_ports: vec![443],
+        };
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.to_domain().unwrap().ignore_ports, vec![443]);
+    }
+
+    #[test]
+    fn ignoring_a_port_that_promises_nothing_is_refused() {
+        let cfg = PortMismatchConfig {
+            enabled: true,
+            ignore_ports: vec![2222],
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("l7.port_mismatch.ignore_ports"), "{err}");
+        assert!(err.contains("2222"), "{err}");
     }
 
     // ── Helpers ──────────────────────────────────────────────────────

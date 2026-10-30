@@ -82,6 +82,7 @@ use super::dns_handler::{
     dns_stats, dns_status, flush_dns_cache, list_dns_blocklist, list_dns_cache,
 };
 use super::domain_handler::{add_to_blocklist, list_domain_reputations, remove_from_blocklist};
+use super::drop_reason_handler::get_drop_reasons;
 use super::fingerprint_handler::{fingerprint_summary, ja4s_summary};
 use super::firewall_handler::{
     create_rule, delete_rule, list_rules, list_workload_rules, workload_fqdn, workload_labels,
@@ -130,6 +131,7 @@ use super::response_handler::{
 use super::routing_handler::{
     create_gateway, delete_gateway, list_gateways, list_routes, routing_status,
 };
+use super::service_graph_handler::service_graph;
 use super::state::AppState;
 use super::threatintel_handler::{
     list_feeds, list_iocs, list_url_iocs, refresh_feeds, threatintel_status,
@@ -302,6 +304,7 @@ pub fn build_router(
             .route("/api/v1/ebpf/kernel-features", get(get_kernel_features))
             .route("/api/v1/ebpf/coverage", get(get_ebpf_coverage))
             .route("/api/v1/ebpf/uprobes", get(get_uprobes))
+            .route("/api/v1/ebpf/drop-reasons", get(get_drop_reasons))
             .route("/api/v1/dns/status", get(dns_status))
             .route("/api/v1/dns/cache", get(list_dns_cache))
             .route("/api/v1/dns/stats", get(dns_stats))
@@ -315,6 +318,7 @@ pub fn build_router(
             .route("/api/v1/conntrack/connections", get(list_connections))
             .route("/api/v1/conntrack/events", get(conntrack_events))
             .route("/api/v1/flows/export", get(flow_export_status))
+            .route("/api/v1/services/graph", get(service_graph))
             .route("/api/v1/dlp/status", get(dlp_status))
             .route("/api/v1/dlp/patterns", get(list_dlp_patterns))
             .route("/api/v1/dlp/scope", get(dlp_scope))

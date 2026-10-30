@@ -3232,6 +3232,63 @@ pub async fn run(
             });
         }
 
+        // 10f-quinquies-b. Why the kernel drops packets
+        if config.kernel_drops.enabled {
+            match try_load_drop_reasons(&ebpf_dir) {
+                Ok((loader, counter, mut attacher)) => {
+                    let status = attacher.attach(&loader);
+                    if status.attached {
+                        let service =
+                            Arc::new(application::kernel_drop_service::KernelDropService::new(
+                                Box::new(counter),
+                                Arc::clone(&metrics)
+                                    as Arc<dyn ports::secondary::metrics_port::PacketMetrics>,
+                            ));
+                        app_state.install_kernel_drops(Arc::clone(&service));
+                        ebpf_state.add_loader(loader);
+                        metrics.set_ebpf_program_status("tracepoint_drop_reason", true);
+                        let interval = Duration::from_secs(config.kernel_drops.poll_interval_secs);
+                        let drops_cancel = cancel_token.clone();
+                        tokio::spawn(async move {
+                            // The link lives as long as the loop reading what
+                            // it counts.
+                            let _attacher = attacher;
+                            let mut tick = tokio::time::interval(interval);
+                            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                            loop {
+                                tokio::select! {
+                                    () = drops_cancel.cancelled() => break,
+                                    _ = tick.tick() => service.poll(),
+                                }
+                            }
+                        });
+                    } else {
+                        metrics.set_ebpf_program_status("tracepoint_drop_reason", false);
+                    }
+                }
+                Err(e) => {
+                    warn!("kernel drop reasons not counted: {e}");
+                    metrics.set_ebpf_program_status("tracepoint_drop_reason", false);
+                    adapters::ebpf::drop_reason::publish_status(
+                        adapters::ebpf::drop_reason::DropReasonStatus {
+                            attached: false,
+                            reason: Some(e.to_string()),
+                        },
+                    );
+                }
+            }
+        } else {
+            metrics.clear_ebpf_program_status("tracepoint_drop_reason");
+            adapters::ebpf::drop_reason::publish_status(
+                adapters::ebpf::drop_reason::DropReasonStatus {
+                    attached: false,
+                    reason: Some(
+                        "counting kernel drops is turned off in the configuration".to_string(),
+                    ),
+                },
+            );
+        }
+
         // 10f-sexies. The executables allowed to reach the network
         if let Some(list) = config.network_executables()? {
             let enforce = list.mode == domain::firewall::workload::WorkloadMode::Enforce;
@@ -3569,6 +3626,10 @@ pub async fn run(
         status.insert(
             "tracepoint-signal".to_string(),
             adapters::ebpf::signal_attach::status().attached,
+        );
+        status.insert(
+            "tracepoint-drop-reason".to_string(),
+            adapters::ebpf::drop_reason::status().attached,
         );
         status.insert(
             "lsm-exec-network".to_string(),
@@ -4198,6 +4259,8 @@ pub async fn run(
         alert_tx.clone(),
         dns_cache_for_ids,
     )
+    .with_workload_resolver(workloads.clone())
+    .with_port_promise(config.l7.port_mismatch.to_domain())
     .with_ips_service(Arc::clone(&ips_svc))
     .with_ddos_service(Arc::clone(&ddos_svc))
     .with_dlp_service(Arc::clone(&dlp_svc))
@@ -4226,6 +4289,7 @@ pub async fn run(
         adapters::container::ProcExecutableResolver::new(&coverage_proc),
     )
         as Arc<dyn ports::secondary::process_executable_port::ProcessExecutableReader>);
+    app_state.install_service_graph(dispatcher.red_meter());
 
     // ── 10g. Build L7 stream reassembler (optional) ─────────────────
     let stream_reassembler: Option<Arc<domain::l7::reassembler::StreamReassembler>> =
@@ -4263,9 +4327,9 @@ pub async fn run(
                 tokio::select! {
                     () = sweep_cancel.cancelled() => break,
                     _ = ticker.tick() => {
-                        let now_ns = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+                        // The kernel stamps L7 events on the boot clock, so the
+                        // idle timeout is measured on that clock too.
+                        let now_ns = adapters::ebpf::ringbuf_observer::boottime_now_ns();
                         let count = sweep_dispatcher.flush_reassembled(now_ns);
                         if count > 0 {
                             tracing::debug!(count, "l7 reassembler flushed + parsed idle flows");
@@ -6352,6 +6416,37 @@ pub fn try_load_signal(
     let mut attacher = adapters::ebpf::SignalAttacher::new();
     let status = attacher.attach(&loader);
     Ok((loader, metrics_rdr, maps, attacher, status))
+}
+
+/// Load the drop reason object, write the layout it reads and take its maps.
+///
+/// The running kernel's BTF is read first: where `sk_buff` keeps its device,
+/// where `net_device` keeps its name and which reason is the first drop. A
+/// kernel that does not name its drop reasons is refused here, in one
+/// sentence, before anything loads.
+///
+/// # Errors
+///
+/// Returns why the counter cannot run on this host.
+pub fn try_load_drop_reasons(
+    ebpf_dir: &str,
+) -> anyhow::Result<(
+    EbpfLoader,
+    adapters::ebpf::drop_reason::DropReasonCounter,
+    adapters::ebpf::drop_reason::DropReasonAttacher,
+)> {
+    let (layout, names) =
+        adapters::ebpf::drop_reason::resolve_from_btf().map_err(|e| anyhow::anyhow!(e))?;
+    let program_bytes = read_ebpf_program(ebpf_dir, "tracepoint-drop-reason")?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    let counter =
+        adapters::ebpf::drop_reason::DropReasonCounter::new(loader.ebpf_mut(), layout, names)?;
+    Ok((
+        loader,
+        counter,
+        adapters::ebpf::drop_reason::DropReasonAttacher::new(),
+    ))
 }
 
 /// What a started network executables list hands back to start-up.

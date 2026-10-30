@@ -25,6 +25,7 @@ pub(crate) const EBPF_PROGRAMS: &[&str] = &[
     "cgroup-connect-redirect",
     "tracepoint-process",
     "tracepoint-signal",
+    "tracepoint-drop-reason",
     "lsm-exec-network",
 ];
 

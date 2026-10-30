@@ -21,6 +21,8 @@ pub enum PacketSecurityComponent {
     Ratelimit,
     L7,
     Ips,
+    /// A connection speaking a protocol other than the one its port promises.
+    L7PortMismatch,
 }
 
 /// Context for port-aware MITRE mapping on packet-level security alerts.
@@ -307,6 +309,9 @@ fn lookup_packet_security(ctx: &PacketSecurityMitreContext) -> MitreAttackInfo {
             445 | 139 => info("T1021.002", "SMB/Windows Admin Shares", "lateral-movement"),
             _ => info("T1071", "Application Layer Protocol", "command-and-control"),
         },
+        PacketSecurityComponent::L7PortMismatch => {
+            info("T1571", "Non-Standard Port", "command-and-control")
+        }
     }
 }
 
@@ -375,7 +380,7 @@ pub fn feature_index_to_ml_anomaly_type(feature_idx: usize) -> MlAnomalyType {
 }
 
 fn all_coverage_entries() -> Vec<CoverageEntry> {
-    let mut entries = Vec::with_capacity(74);
+    let mut entries = Vec::with_capacity(75);
     entries.extend(firewall_coverage_entries());
     entries.extend(ips_coverage_entries());
     entries.extend(ratelimit_coverage_entries());
@@ -741,6 +746,13 @@ fn l7_coverage_entries() -> Vec<CoverageEntry> {
             "Application Layer Protocol",
             "command-and-control",
             "L7 deny on other protocols",
+        ),
+        entry(
+            "l7",
+            "T1571",
+            "Non-Standard Port",
+            "command-and-control",
+            "Protocol spoken differs from the one the port promises",
         ),
     ]
 }
@@ -1350,9 +1362,19 @@ mod tests {
     }
 
     #[test]
+    fn a_protocol_on_the_wrong_port_maps_to_non_standard_port() {
+        let info = lookup(&MitreContext::PacketSecurity(psa(
+            PacketSecurityComponent::L7PortMismatch,
+            443,
+        )));
+        assert_eq!(info.technique_id, "T1571");
+        assert_eq!(info.tactic, "command-and-control");
+    }
+
+    #[test]
     fn coverage_report_packet_security_components() {
         let report = coverage_report(&["firewall", "ratelimit", "l7", "ips"]);
-        assert_eq!(report.total_techniques, 27);
+        assert_eq!(report.total_techniques, 28);
     }
 
     #[test]
@@ -1438,7 +1460,7 @@ mod tests {
             "ai-security",
         ]);
         assert_eq!(report.attack_version, "v18");
-        assert_eq!(report.total_techniques, 59);
+        assert_eq!(report.total_techniques, 60);
         assert!(!report.by_tactic.is_empty());
     }
 
@@ -1751,6 +1773,17 @@ mod tests {
 
     /// Every technique a lookup can return, paired with the component name
     /// the coverage table files it under.
+    /// Every packet-security component, under the name its alerts carry.
+    fn packet_security_components() -> [(PacketSecurityComponent, &'static str); 5] {
+        [
+            (PacketSecurityComponent::Firewall, "firewall"),
+            (PacketSecurityComponent::Ips, "ips"),
+            (PacketSecurityComponent::Ratelimit, "ratelimit"),
+            (PacketSecurityComponent::L7, "l7"),
+            (PacketSecurityComponent::L7PortMismatch, "l7"),
+        ]
+    }
+
     fn techniques_every_lookup_can_raise() -> BTreeSet<(String, String)> {
         let mut raised = BTreeSet::new();
         let mut record = |component: &str, i: MitreAttackInfo| {
@@ -1758,12 +1791,7 @@ mod tests {
         };
 
         for port in 0..=u16::MAX {
-            for (component, name) in [
-                (PacketSecurityComponent::Firewall, "firewall"),
-                (PacketSecurityComponent::Ips, "ips"),
-                (PacketSecurityComponent::Ratelimit, "ratelimit"),
-                (PacketSecurityComponent::L7, "l7"),
-            ] {
+            for (component, name) in packet_security_components() {
                 record(
                     name,
                     lookup(&MitreContext::PacketSecurity(PacketSecurityMitreContext {

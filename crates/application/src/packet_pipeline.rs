@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use domain::audit::entity::{AuditAction, AuditComponent};
 use domain::common::entity::DomainMode;
@@ -94,6 +94,11 @@ pub struct EventDispatcher {
     /// detector returned [`DetectedProtocol::Unknown`].
     extended_l7_parser:
         Option<Arc<dyn ports::secondary::l7_extended_parser_port::L7ExtendedParser>>,
+    /// Rate, errors and duration per service, measured on every L7 payload.
+    red_meter: Arc<crate::l7_red_meter::L7RedMeter>,
+    /// Connections already compared with the protocol their port promises.
+    /// `None` when the check is off.
+    port_promise: Option<Arc<Mutex<domain::l7::port_promise::PortPromiseTracker>>>,
 }
 
 impl EventDispatcher {
@@ -111,7 +116,6 @@ impl EventDispatcher {
             l7_service,
             threatintel_service,
             audit_service,
-            metrics,
             alert_tx,
             dns_cache,
             dns_cache_svc: None,
@@ -132,7 +136,57 @@ impl EventDispatcher {
             executable_reader: None,
             stream_reassembler: None,
             extended_l7_parser: None,
+            red_meter: Arc::new(crate::l7_red_meter::L7RedMeter::new(
+                domain::l7::red::RedConfig::default(),
+                domain::l7::red::ServiceNames::default(),
+                crate::workload_resolver::WorkloadResolver::new(),
+                Arc::clone(&metrics),
+            )),
+            port_promise: Some(Arc::new(Mutex::new(
+                domain::l7::port_promise::PortPromiseTracker::new(
+                    domain::l7::port_promise::PortPromiseConfig::default(),
+                ),
+            ))),
+            metrics,
         }
+    }
+
+    /// The meter counting requests per service, which the service map reads.
+    #[must_use]
+    pub fn red_meter(&self) -> Arc<crate::l7_red_meter::L7RedMeter> {
+        Arc::clone(&self.red_meter)
+    }
+
+    /// Compare each connection's first payload with the protocol its port
+    /// promises under `config`, or not at all when it is `None`.
+    #[must_use]
+    pub fn with_port_promise(
+        mut self,
+        config: Option<domain::l7::port_promise::PortPromiseConfig>,
+    ) -> Self {
+        self.port_promise = config.map(|config| {
+            Arc::new(Mutex::new(
+                domain::l7::port_promise::PortPromiseTracker::new(config),
+            ))
+        });
+        self
+    }
+
+    /// Name the services behind L7 requests from the agent's socket and
+    /// process tables. Without it every request is counted against the
+    /// `unattributed` service.
+    #[must_use]
+    pub fn with_workload_resolver(
+        mut self,
+        workloads: crate::workload_resolver::WorkloadResolver,
+    ) -> Self {
+        self.red_meter = Arc::new(crate::l7_red_meter::L7RedMeter::new(
+            domain::l7::red::RedConfig::default(),
+            domain::l7::red::ServiceNames::default(),
+            workloads,
+            Arc::clone(&self.metrics),
+        ));
+        self
     }
 
     /// Inject an extended L7 parser. The dispatcher consults it whenever
@@ -996,22 +1050,8 @@ impl EventDispatcher {
         self.process_ids_content(header, payload);
 
         let protocol = detect_protocol(payload);
-        let mut protocol_label = match protocol {
-            DetectedProtocol::Http => "http",
-            DetectedProtocol::Tls => "tls",
-            DetectedProtocol::Grpc => "grpc",
-            DetectedProtocol::Smtp => "smtp",
-            DetectedProtocol::Ftp => "ftp",
-            DetectedProtocol::Smb => "smb",
-            DetectedProtocol::Ssh => "ssh",
-            DetectedProtocol::Redis => "redis",
-            DetectedProtocol::MySql => "mysql",
-            DetectedProtocol::Postgres => "postgres",
-            DetectedProtocol::DnsTcp => "dns-tcp",
-            DetectedProtocol::Imap => "imap",
-            DetectedProtocol::Pop3 => "pop3",
-            DetectedProtocol::Unknown => "unknown",
-        };
+        let mut protocol_label = protocol.label();
+        self.check_port_promise(header, protocol, payload.len());
 
         // Consult the optional extended L7 parser (enterprise protocols
         // like MQTT / AMQP / NATS / Cassandra). When the built-in
@@ -1022,6 +1062,8 @@ impl EventDispatcher {
         {
             protocol_label = label;
         }
+
+        self.red_meter.observe(header, protocol_label, payload);
 
         // Reuse the protocol detected above instead of re-scanning the payload.
         let parsed = parse_payload_with(protocol, payload);
@@ -1062,6 +1104,74 @@ impl EventDispatcher {
         drop(l7_svc);
 
         self.apply_l7_rule_result(header, protocol_label, l7_result);
+    }
+
+    /// Compare a TCP connection's first payload with the protocol its port
+    /// promises, count the verdict, and raise an alert on a mismatch.
+    fn check_port_promise(&self, header: &PacketEvent, spoken: DetectedProtocol, len: usize) {
+        use domain::l7::port_promise::{Offer, PORT_MISMATCH_RULE_ID, Verdict};
+
+        const TCP: u8 = 6;
+        let Some(ref tracker) = self.port_promise else {
+            return;
+        };
+        if header.protocol != TCP {
+            return;
+        }
+        // A poisoned lock leaves a table of connection keys and timestamps,
+        // each written whole, so the table stays usable.
+        let offer = tracker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .offer(
+                (header.src_addr, header.src_port),
+                (header.dst_addr, header.dst_port),
+                header.is_ipv6(),
+                spoken,
+                len,
+                header.timestamp_ns,
+            );
+        let judgement = match offer {
+            Offer::Judged(judgement) => judgement,
+            Offer::Uncounted => {
+                self.metrics.record_l7_port_promise_uncounted();
+                return;
+            }
+            Offer::AlreadyJudged | Offer::NoPromise => return,
+        };
+        let port = judgement.promise.port;
+        self.metrics
+            .record_l7_port_promise(port, judgement.verdict.as_str());
+        if judgement.verdict != Verdict::Mismatch {
+            return;
+        }
+        let promised: Vec<&str> = judgement
+            .promise
+            .protocols
+            .iter()
+            .map(|p| p.label())
+            .collect();
+        let detail = format!(
+            "{} spoken on port {port}, which promises {}",
+            spoken.label(),
+            promised.join(" or ")
+        );
+        tracing::info!(
+            src_ip = %header.src_ip(),
+            dst_ip = %header.dst_ip(),
+            src_port = header.src_port,
+            dst_port = header.dst_port,
+            l7_protocol = spoken.label(),
+            promised_port = port,
+            "protocol does not match its port"
+        );
+        self.emit_packet_security_alert(
+            domain::alert::entity::PacketAlertComponent::L7,
+            header,
+            PORT_MISMATCH_RULE_ID,
+            "alert",
+            &detail,
+        );
     }
 
     /// Log, audit, alert, and record metrics for the outcome of evaluating
@@ -1609,6 +1719,7 @@ mod tests {
         last_action: std::sync::Mutex<String>,
         last_fingerprint: std::sync::Mutex<String>,
         last_encrypted_dns: std::sync::Mutex<(String, String)>,
+        port_promises: std::sync::Mutex<Vec<(u16, String)>>,
     }
 
     impl TestMetrics {
@@ -1622,6 +1733,7 @@ mod tests {
                 last_action: std::sync::Mutex::new(String::new()),
                 last_fingerprint: std::sync::Mutex::new(String::new()),
                 last_encrypted_dns: std::sync::Mutex::new((String::new(), String::new())),
+                port_promises: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -1631,6 +1743,13 @@ mod tests {
             self.packet_calls.fetch_add(1, Ordering::Relaxed);
             *self.last_component.lock().unwrap() = interface.to_string();
             *self.last_action.lock().unwrap() = action.to_string();
+        }
+
+        fn record_l7_port_promise(&self, port: u16, verdict: &str) {
+            self.port_promises
+                .lock()
+                .unwrap()
+                .push((port, verdict.to_string()));
         }
     }
     impl FirewallMetrics for TestMetrics {}
@@ -2337,6 +2456,95 @@ mod tests {
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "l7");
         assert_eq!(*metrics.last_action.lock().unwrap(), "http");
+    }
+
+    fn l7_event_to(dst_port: u16) -> PacketEvent {
+        PacketEvent {
+            dst_port,
+            ..make_event(EVENT_TYPE_L7, 0)
+        }
+    }
+
+    fn port_mismatch_alerts(alert_rx: &mut mpsc::Receiver<AlertEvent>) -> Vec<String> {
+        let mut details = Vec::new();
+        while let Ok(event) = alert_rx.try_recv() {
+            if let AlertEvent::PacketSecurity(a) = event
+                && a.rule_id == domain::l7::port_promise::PORT_MISMATCH_RULE_ID
+            {
+                assert_eq!(a.component, domain::alert::entity::PacketAlertComponent::L7);
+                assert_eq!(a.action_label, "alert");
+                details.push(a.detail);
+            }
+        }
+        details
+    }
+
+    #[tokio::test]
+    async fn ssh_on_443_raises_one_port_mismatch_alert_per_connection() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
+
+        let payload = b"SSH-2.0-OpenSSH_9.6\r\n".to_vec();
+        for _ in 0..3 {
+            dispatcher.dispatch_agent_event(AgentEvent::L7 {
+                header: l7_event_to(443),
+                payload: payload.clone(),
+            });
+        }
+
+        assert_eq!(
+            port_mismatch_alerts(&mut alert_rx),
+            ["ssh spoken on port 443, which promises tls"]
+        );
+        assert_eq!(
+            *metrics.port_promises.lock().unwrap(),
+            [(443, "mismatch".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_promised_protocol_and_a_short_payload_raise_nothing() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
+
+        dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            header: l7_event_to(22),
+            payload: b"SSH-2.0-OpenSSH_9.6\r\n".to_vec(),
+        });
+        dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            header: PacketEvent {
+                src_port: 23_456,
+                ..l7_event_to(443)
+            },
+            payload: b"GET".to_vec(),
+        });
+
+        assert!(port_mismatch_alerts(&mut alert_rx).is_empty());
+        assert_eq!(
+            *metrics.port_promises.lock().unwrap(),
+            [(22, "match".to_string()), (443, "unclassified".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_disabled_port_promise_check_judges_nothing() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_port_promise(None);
+
+        dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            header: l7_event_to(443),
+            payload: b"SSH-2.0-OpenSSH_9.6\r\n".to_vec(),
+        });
+
+        assert!(port_mismatch_alerts(&mut alert_rx).is_empty());
+        assert!(metrics.port_promises.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -2652,6 +2652,70 @@ pub async fn cmd_flow_export(client: &ApiClient, output: OutputFormat) -> Result
     Ok(())
 }
 
+pub async fn cmd_service_graph(
+    client: &ApiClient,
+    minutes: u64,
+    output: OutputFormat,
+) -> Result<()> {
+    let resp = client.service_graph(minutes).await?;
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!(
+        "last {} min, {} edges, {} requests dropped by a full minute (bound {} edges)",
+        resp.minutes,
+        resp.edges.len(),
+        resp.dropped,
+        resp.max_edges_per_minute
+    );
+    if resp.edges.is_empty() {
+        println!("\nNo request seen.");
+        return Ok(());
+    }
+
+    let end = |end: &crate::api_client::ServiceEndBody| match &end.service {
+        Some(service) => format!("{service} ({})", end.address),
+        None => end.address.clone(),
+    };
+    let mut table = Table::new(&[
+        ("CLIENT", Align::Left),
+        ("SERVER", Align::Left),
+        ("PORT", Align::Right),
+        ("PROTO", Align::Left),
+        ("SEEN FROM", Align::Left),
+        ("REQUESTS", Align::Right),
+        ("ERRORS", Align::Right),
+        ("UNANSWERED", Align::Right),
+        ("MEAN MS", Align::Right),
+    ]);
+    for edge in &resp.edges {
+        let mean = edge.duration_ns_sum.checked_div(edge.answered).map_or_else(
+            || "-".to_string(),
+            |ns| {
+                format!(
+                    "{:.2}",
+                    std::time::Duration::from_nanos(ns).as_secs_f64() * 1_000.0
+                )
+            },
+        );
+        table.row(cells![
+            end(&edge.client),
+            end(&edge.server),
+            edge.server_port,
+            edge.protocol,
+            edge.observed_from,
+            edge.requests,
+            edge.errors,
+            edge.unanswered,
+            mean
+        ]);
+    }
+    table.print();
+    Ok(())
+}
+
 pub async fn cmd_flows(client: &ApiClient, limit: usize, output: OutputFormat) -> Result<()> {
     use std::collections::HashMap;
 
@@ -4154,6 +4218,54 @@ pub async fn cmd_ebpf_uprobes(client: &ApiClient, output: OutputFormat) -> Resul
     table.print();
 
     println!("\n{} probe(s) attached.", resp.probes.len());
+    Ok(())
+}
+
+/// Print why the kernel dropped packets on this node, busiest first.
+pub async fn cmd_ebpf_drops(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.drop_reasons().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    if !resp.counting {
+        println!("Kernel drops are not counted on this node.");
+        if let Some(reason) = &resp.reason {
+            println!("Reason: {reason}");
+        }
+        return Ok(());
+    }
+    if let Some(error) = &resp.last_error {
+        println!("Last read failed, counts below are the previous ones: {error}");
+    }
+    if resp.drops.is_empty() {
+        println!("No drop counted since the counter was loaded.");
+    } else {
+        let mut table = Table::new(&[
+            ("REASON", Align::Left),
+            ("INTERFACE", Align::Left),
+            ("PACKETS", Align::Right),
+            ("MEANING", Align::Left),
+        ]);
+        for drop in &resp.drops {
+            table.row(cells![
+                drop.reason,
+                drop.interface,
+                drop.packets,
+                drop.description.as_deref().unwrap_or("-")
+            ]);
+        }
+        table.print();
+    }
+    println!("\n{} drop(s) counted.", resp.total);
+    if resp.uncounted > 0 {
+        println!(
+            "{} drop(s) seen but not counted: the kernel-side table is full.",
+            resp.uncounted
+        );
+    }
     Ok(())
 }
 
