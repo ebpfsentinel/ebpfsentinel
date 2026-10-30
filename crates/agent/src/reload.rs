@@ -425,8 +425,8 @@ pub async fn apply_config_file_prepared(
     prepare: impl FnOnce(&mut AgentConfig) -> Result<(), String>,
 ) -> Option<AgentConfig> {
     // Phase 1: serde deserialization
-    let mut config = match AgentConfig::load(Path::new(config_path)) {
-        Ok(c) => c,
+    let (mut config, digest) = match AgentConfig::load_with_digest(Path::new(config_path)) {
+        Ok(loaded) => loaded,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid YAML");
             return None;
@@ -1019,6 +1019,7 @@ pub async fn apply_config_file_prepared(
         }
     }
 
+    infrastructure::config::provenance::record_load(digest);
     Some(config)
 }
 

@@ -103,6 +103,51 @@ pub struct AgentStatusResponse {
     pub firewall_mode: String,
     /// What the agent sees of the containers on this node.
     pub container_coverage: ContainerCoverage,
+    /// Which document is running and what changed the policy since.
+    pub config: ConfigProvenanceDto,
+}
+
+/// Which configuration document the agent is running, and the policy writes
+/// its API accepted outside that document since the process started.
+///
+/// Whoever wrote the document compares `document_sha256` with the digest of
+/// what they wrote: a difference is a node still on an older document. A
+/// non-zero `runtime_writes` is a node whose policy was changed by hand; a
+/// reload does not clear it, a restart does.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ConfigProvenanceDto {
+    /// Lowercase hex SHA-256 of the document's bytes as last loaded.
+    pub document_sha256: Option<String>,
+    /// When that document was loaded, in seconds since the Unix epoch.
+    pub loaded_at: Option<u64>,
+    /// Policy writes accepted through the API since the process started.
+    pub runtime_writes: u64,
+    /// The last of those writes.
+    pub last_runtime_write: Option<RuntimeWriteDto>,
+}
+
+/// One policy write accepted outside the document.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RuntimeWriteDto {
+    pub method: String,
+    pub path: String,
+    /// Seconds since the Unix epoch.
+    pub at: u64,
+}
+
+impl From<infrastructure::config::provenance::ConfigProvenance> for ConfigProvenanceDto {
+    fn from(record: infrastructure::config::provenance::ConfigProvenance) -> Self {
+        Self {
+            document_sha256: record.document_sha256,
+            loaded_at: record.loaded_at,
+            runtime_writes: record.runtime_writes,
+            last_runtime_write: record.last_runtime_write.map(|write| RuntimeWriteDto {
+                method: write.method,
+                path: write.path,
+                at: write.at,
+            }),
+        }
+    }
 }
 
 /// Returns the current agent status including version, uptime, and eBPF state.
@@ -135,6 +180,7 @@ pub async fn agent_status(State(state): State<Arc<AppState>>) -> Json<AgentStatu
         firewall_enabled,
         firewall_mode,
         container_coverage: state.container_coverage.load().as_ref().clone(),
+        config: infrastructure::config::provenance::provenance().into(),
     })
 }
 

@@ -420,6 +420,7 @@ pub fn build_router(
             .route("/api/v1/responses/{id}", delete(revoke_response_action))
             .route("/api/v1/captures/manual", post(start_capture))
             .route("/api/v1/captures/{id}", delete(stop_capture))
+            .layer(middleware::from_fn(record_policy_write))
             .layer(middleware::from_fn(
                 move |req: Request, next: middleware::Next| {
                     let limiter = Arc::clone(&write_limiter);
@@ -496,6 +497,42 @@ pub fn build_router(
     };
 
     router.with_state(state)
+}
+
+/// Writes that change no policy the document owns: triage, a feed refresh,
+/// a reload of the document itself, a flush of state the datapath rebuilds,
+/// a learning session or replay that only observes, a capture, and the
+/// speaker grant an orchestrator renews on its own.
+const NOT_POLICY_WRITES: &[&str] = &[
+    "/api/v1/alerts/",
+    "/api/v1/threatintel/feeds/refresh",
+    "/api/v1/config/reload",
+    "/api/v1/conntrack/flush",
+    "/api/v1/dns/cache",
+    "/api/v1/learning/",
+    "/api/v1/netpol/replay",
+    "/api/v1/captures/",
+    "/api/v1/lb/vips/grant",
+];
+
+/// Whether an accepted write changed the policy outside the document.
+fn is_policy_write(path: &str) -> bool {
+    !NOT_POLICY_WRITES
+        .iter()
+        .any(|prefix| path == prefix.trim_end_matches('/') || path.starts_with(prefix))
+}
+
+/// Count every policy write the API accepted, so whoever wrote the document
+/// can tell a node that still runs it from one somebody changed by hand.
+/// Only an accepted write counts: a refusal changed nothing.
+async fn record_policy_write(req: Request, next: middleware::Next) -> Response {
+    let method = req.method().to_string();
+    let path = req.uri().path().to_owned();
+    let response = next.run(req).await;
+    if response.status().is_success() && is_policy_write(&path) {
+        infrastructure::config::provenance::record_runtime_write(&method, &path);
+    }
+    response
 }
 
 /// Build the `/metrics` route group: rate-limited (scrape-DoS guard, applied
@@ -1035,6 +1072,19 @@ mod tests {
             .expect("write block end marker")
             + start;
         start..end
+    }
+
+    #[test]
+    fn a_rule_write_is_policy_and_a_reload_or_a_capture_is_not() {
+        assert!(is_policy_write("/api/v1/firewall/rules"));
+        assert!(is_policy_write("/api/v1/firewall/rules/r-1"));
+        assert!(is_policy_write("/api/v1/config/firewall"));
+        assert!(is_policy_write("/api/v1/ips/blacklist"));
+        assert!(!is_policy_write("/api/v1/config/reload"));
+        assert!(!is_policy_write("/api/v1/captures/manual"));
+        assert!(!is_policy_write("/api/v1/alerts/a-1/triage"));
+        assert!(!is_policy_write("/api/v1/lb/vips/grant"));
+        assert!(!is_policy_write("/api/v1/learning/sessions"));
     }
 
     #[test]

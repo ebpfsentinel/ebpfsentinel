@@ -8603,9 +8603,14 @@
           "rule_count",
           "firewall_enabled",
           "firewall_mode",
-          "container_coverage"
+          "container_coverage",
+          "config"
         ],
         "properties": {
+          "config": {
+            "$ref": "#/components/schemas/ConfigProvenanceDto",
+            "description": "Which document is running and what changed the policy since."
+          },
           "container_coverage": {
             "$ref": "#/components/schemas/ContainerCoverage",
             "description": "What the agent sees of the containers on this node."
@@ -9489,6 +9494,48 @@
           },
           "status": {
             "type": "string"
+          }
+        }
+      },
+      "ConfigProvenanceDto": {
+        "type": "object",
+        "description": "Which configuration document the agent is running, and the policy writes\nits API accepted outside that document since the process started.\n\nWhoever wrote the document compares `document_sha256` with the digest of\nwhat they wrote: a difference is a node still on an older document. A\nnon-zero `runtime_writes` is a node whose policy was changed by hand; a\nreload does not clear it, a restart does.",
+        "required": [
+          "runtime_writes"
+        ],
+        "properties": {
+          "document_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Lowercase hex SHA-256 of the document's bytes as last loaded."
+          },
+          "last_runtime_write": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeWriteDto",
+                "description": "The last of those writes."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "loaded_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When that document was loaded, in seconds since the Unix epoch.",
+            "minimum": 0
+          },
+          "runtime_writes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Policy writes accepted through the API since the process started.",
+            "minimum": 0
           }
         }
       },
@@ -14788,6 +14835,29 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "RuntimeWriteDto": {
+        "type": "object",
+        "description": "One policy write accepted outside the document.",
+        "required": [
+          "method",
+          "path",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds since the Unix epoch.",
+            "minimum": 0
+          },
+          "method": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
           }
         }
       },

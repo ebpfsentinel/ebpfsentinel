@@ -229,6 +229,8 @@ use super::zone_handler;
         health_handler::ReadyResponse,
         // Agent
         agent_handler::AgentStatusResponse,
+        agent_handler::ConfigProvenanceDto,
+        agent_handler::RuntimeWriteDto,
         agent_handler::AgentIdentityResponse,
         // Firewall
         firewall_handler::CreateRuleRequest,

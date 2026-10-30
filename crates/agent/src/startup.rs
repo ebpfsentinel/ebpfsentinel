@@ -360,7 +360,8 @@ pub async fn run(
     adapters::system::set_restrictive_umask();
 
     // ── 1. Load config ──────────────────────────────────────────────
-    let config = AgentConfig::load(Path::new(config_path))?;
+    let (config, digest) = AgentConfig::load_with_digest(Path::new(config_path))?;
+    infrastructure::config::provenance::record_load(digest);
 
     // ── 2. Initialize logging ───────────────────────────────────────
     // CLI flags take precedence over config file

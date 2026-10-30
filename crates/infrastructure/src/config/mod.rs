@@ -30,6 +30,7 @@ mod management;
 mod nat;
 mod process_table;
 mod profile;
+pub mod provenance;
 mod qos;
 mod ratelimit;
 mod response;
@@ -320,8 +321,16 @@ impl AgentConfig {
     /// may contain sensitive values like auth headers and API keys, and
     /// does the same for the TLS private key and the JWT public key.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        Self::load_with_digest(path).map(|(config, _)| config)
+    }
+
+    /// [`AgentConfig::load`], with the digest of the very bytes it parsed,
+    /// so a caller recording which document is running never reads the
+    /// file a second time and risks digesting a newer one.
+    pub fn load_with_digest(path: &Path) -> Result<(Self, String), ConfigError> {
         reject_if_world_readable(path, "config file")?;
         let content = std::fs::read_to_string(path)?;
+        let digest = provenance::document_digest(&content);
         let config = Self::from_yaml(&content)?;
 
         // Reject if TLS key file is world-readable
@@ -337,7 +346,7 @@ impl AgentConfig {
             )?;
         }
 
-        Ok(config)
+        Ok((config, digest))
     }
 
     /// Maximum config YAML size (10 MiB). Prevents `DoS` via oversized payloads.
