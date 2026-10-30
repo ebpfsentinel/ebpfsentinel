@@ -912,7 +912,9 @@ fn parse_addresses(token: &str, vars: &SuricataVars, depth: usize) -> Compiled<A
     })
 }
 
-fn parse_network(text: &str) -> Option<IpNetwork> {
+/// Parses an address or a CIDR network, masking the host bits away.
+#[must_use]
+pub fn parse_network(text: &str) -> Option<IpNetwork> {
     let (address, prefix) = match text.split_once('/') {
         Some((address, prefix)) => (address, Some(prefix)),
         None => (text, None),

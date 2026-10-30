@@ -29,6 +29,7 @@ pub mod ids_workload_scope_port;
 pub mod ips_blacklist_port;
 pub mod l2_binding_port;
 pub mod l7_extended_parser_port;
+pub mod l7_observer_port;
 pub mod learning_store_port;
 pub mod loadbalancer_map_port;
 pub mod lpm_coordinator_port;

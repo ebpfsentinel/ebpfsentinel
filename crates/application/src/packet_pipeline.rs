@@ -99,6 +99,11 @@ pub struct EventDispatcher {
     /// Connections already compared with the protocol their port promises.
     /// `None` when the check is off.
     port_promise: Option<Arc<Mutex<domain::l7::port_promise::PortPromiseTracker>>>,
+    /// Names the workload behind a flow for the L7 observers. The same
+    /// resolver the meter reads, empty until the socket tables are wired.
+    workloads: crate::workload_resolver::WorkloadResolver,
+    /// Extensions handed every parsed L7 payload after the rules have run.
+    l7_observers: Vec<Arc<dyn ports::secondary::l7_observer_port::L7Observer>>,
 }
 
 impl EventDispatcher {
@@ -147,6 +152,8 @@ impl EventDispatcher {
                     domain::l7::port_promise::PortPromiseConfig::default(),
                 ),
             ))),
+            workloads: crate::workload_resolver::WorkloadResolver::new(),
+            l7_observers: Vec::new(),
             metrics,
         }
     }
@@ -183,9 +190,22 @@ impl EventDispatcher {
         self.red_meter = Arc::new(crate::l7_red_meter::L7RedMeter::new(
             domain::l7::red::RedConfig::default(),
             domain::l7::red::ServiceNames::default(),
-            workloads,
+            workloads.clone(),
             Arc::clone(&self.metrics),
         ));
+        self.workloads = workloads;
+        self
+    }
+
+    /// Hand every parsed L7 payload to `observer` once the rules have run,
+    /// with the workload that opened the connection when it can be named.
+    #[must_use]
+    pub fn with_l7_observer(
+        mut self,
+        observer: Arc<dyn ports::secondary::l7_observer_port::L7Observer>,
+    ) -> Self {
+        tracing::info!(observer = observer.name(), "L7 observer registered");
+        self.l7_observers.push(observer);
         self
     }
 
@@ -1104,6 +1124,50 @@ impl EventDispatcher {
         drop(l7_svc);
 
         self.apply_l7_rule_result(header, protocol_label, l7_result);
+        self.notify_l7_observers(header, protocol_label, &parsed, payload.len());
+    }
+
+    /// Hand one parsed payload to every registered observer, naming the
+    /// workload that opened the connection once rather than once per observer.
+    fn notify_l7_observers(
+        &self,
+        header: &PacketEvent,
+        protocol: &'static str,
+        parsed: &ParsedProtocol,
+        payload_len: usize,
+    ) {
+        use ports::secondary::l7_observer_port::L7Exchange;
+
+        if self.l7_observers.is_empty() {
+            return;
+        }
+        let ipv6 = header.is_ipv6();
+        let client = crate::addr_to_ip(header.src_addr, ipv6);
+        let server = crate::addr_to_ip(header.dst_addr, ipv6);
+        let workload = self.workloads.by_originated_flow(
+            &ports::secondary::socket_identity_port::FlowEndpoints {
+                local_addr: client,
+                remote_addr: server,
+                local_port: header.src_port,
+                remote_port: header.dst_port,
+                protocol: header.protocol,
+            },
+        );
+        let exchange = L7Exchange {
+            timestamp_ns: header.timestamp_ns,
+            client,
+            server,
+            client_port: header.src_port,
+            server_port: header.dst_port,
+            ip_protocol: header.protocol,
+            protocol,
+            parsed,
+            payload_len,
+            workload: workload.as_ref(),
+        };
+        for observer in &self.l7_observers {
+            observer.observe(&exchange);
+        }
     }
 
     /// Compare a TCP connection's first payload with the protocol its port
@@ -2457,6 +2521,103 @@ mod tests {
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "l7");
         assert_eq!(*metrics.last_action.lock().unwrap(), "http");
+    }
+
+    /// Protocol, payload length, HTTP host and process id of one exchange.
+    type Seen = (&'static str, usize, Option<String>, Option<u32>);
+
+    /// Keeps what each exchange lent it, as an extension would.
+    #[derive(Default)]
+    struct RecordingObserver {
+        seen: Mutex<Vec<Seen>>,
+    }
+
+    impl ports::secondary::l7_observer_port::L7Observer for RecordingObserver {
+        fn observe(&self, exchange: &ports::secondary::l7_observer_port::L7Exchange<'_>) {
+            let host = match exchange.parsed {
+                ParsedProtocol::Http(req) => req.host.clone(),
+                _ => None,
+            };
+            self.seen.lock().unwrap().push((
+                exchange.protocol,
+                exchange.payload_len,
+                host,
+                exchange.workload.map(|w| w.pid),
+            ));
+        }
+    }
+
+    struct OwnedBy(u32);
+
+    impl ports::secondary::socket_identity_port::SocketIdentityReader for OwnedBy {
+        fn by_cookie(
+            &self,
+            _cookie: u64,
+        ) -> Option<ports::secondary::socket_identity_port::SocketOwner> {
+            None
+        }
+        fn by_flow(
+            &self,
+            _flow: &ports::secondary::socket_identity_port::FlowEndpoints,
+        ) -> Option<ports::secondary::socket_identity_port::SocketOwner> {
+            None
+        }
+        fn by_originated_flow(
+            &self,
+            _flow: &ports::secondary::socket_identity_port::FlowEndpoints,
+        ) -> Option<ports::secondary::socket_identity_port::SocketOwner> {
+            Some(ports::secondary::socket_identity_port::SocketOwner {
+                pid: self.0,
+                tgid: self.0,
+                uid: 1_000,
+                cgroup_id: 7,
+                source: domain::workload::entity::WorkloadSource::Socket,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn an_l7_observer_sees_each_parsed_payload_without_a_workload_by_default() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        let observer = Arc::new(RecordingObserver::default());
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_l7_observer(Arc::clone(&observer) as _);
+
+        let payload = b"POST /v1/messages HTTP/1.1\r\nHost: api.example.com\r\n\r\n".to_vec();
+        let len = payload.len();
+        dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            header: make_event(EVENT_TYPE_L7, 0),
+            payload,
+        });
+
+        let seen = observer.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "http");
+        assert_eq!(seen[0].1, len);
+        assert_eq!(seen[0].2.as_deref(), Some("api.example.com"));
+        assert_eq!(seen[0].3, None);
+    }
+
+    #[tokio::test]
+    async fn an_l7_observer_is_told_the_workload_that_opened_the_connection() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        let observer = Arc::new(RecordingObserver::default());
+        let workloads = crate::workload_resolver::WorkloadResolver::new()
+            .with_sockets(Box::new(OwnedBy(4_242)));
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_workload_resolver(workloads)
+            .with_l7_observer(Arc::clone(&observer) as _);
+
+        dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            header: make_event(EVENT_TYPE_L7, 0),
+            payload: b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec(),
+        });
+
+        assert_eq!(observer.seen.lock().unwrap()[0].3, Some(4_242));
     }
 
     fn l7_event_to(dst_port: u16) -> PacketEvent {

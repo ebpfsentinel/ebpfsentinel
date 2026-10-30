@@ -89,6 +89,12 @@ pub struct ServiceHandles {
     /// cannot quarantine anything.
     pub quarantine_svc: Option<Arc<application::quarantine_service::QuarantineService>>,
 
+    /// Which workload sits behind a socket, shared with every reader of a
+    /// flow. Empty until a load attaches the attribution hooks and hands it
+    /// the kernel tables, and emptied again when that generation goes, so a
+    /// holder never answers from a map the kernel has freed.
+    pub workloads: application::workload_resolver::WorkloadResolver,
+
     // ── Infrastructure ───────────────────────────────────────────
     pub metrics: Arc<AgentMetrics>,
     pub ebpf_loaded: Arc<AtomicBool>,
@@ -635,6 +641,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         // capability exists only where the object was loaded and attached.
         process_signal_svc: None,
         quarantine_svc: None,
+        workloads: application::workload_resolver::WorkloadResolver::new(),
         metrics,
         ebpf_loaded,
     })
@@ -1149,6 +1156,63 @@ pub async fn load_ebpf_programs(
         false
     };
     program_status.insert("uprobe_dlp".to_string(), dlp_ok);
+
+    // ── Socket attribution ──────────────────────────────────────
+    // Loaded here as well as at start-up, so a binary that drives the
+    // datapath through this function names the workload behind a flow too.
+    // The links and the socket tables belong to this generation: the state
+    // holds the attacher and empties the resolver when it is dropped.
+    let attribution_ok = if config.attribution.enabled {
+        match startup::try_load_cgroup_attribution(&ebpf_dir, config) {
+            Ok((loader, metrics_rdr, socket_reader, attacher, status)) => {
+                if status.attached {
+                    if let Some(rdr) = metrics_rdr {
+                        metrics_readers.push(rdr);
+                    }
+                    if let Some(reader) = socket_reader {
+                        services.workloads.install_sockets(Box::new(reader));
+                        ebpf_state.workloads = Some(services.workloads.clone());
+                    }
+                    ebpf_state.attribution = Some(attacher);
+                    ebpf_state.add_loader(loader);
+                    services
+                        .metrics
+                        .set_ebpf_program_status("cgroup_attribution", true);
+                    true
+                } else {
+                    services
+                        .metrics
+                        .set_ebpf_program_status("cgroup_attribution", false);
+                    false
+                }
+            }
+            Err(e) => {
+                warn!("cgroup-attribution load failed (degraded mode): {e}");
+                adapters::ebpf::attribution_attach::publish_status(
+                    adapters::ebpf::AttributionStatus {
+                        attached: false,
+                        cgroup: config.attribution.cgroup_root.clone(),
+                        hooks: Vec::new(),
+                        reason: Some(e.to_string()),
+                        brokered: false,
+                    },
+                );
+                services
+                    .metrics
+                    .set_ebpf_program_status("cgroup_attribution", false);
+                false
+            }
+        }
+    } else {
+        services
+            .metrics
+            .clear_ebpf_program_status("cgroup_attribution");
+        adapters::ebpf::attribution_attach::publish_status(
+            adapters::ebpf::AttributionStatus::default(),
+        );
+        false
+    };
+    program_status.insert("cgroup_attribution".to_string(), attribution_ok);
 
     // ── TC ConnTrack ────────────────────────────────────────────
     let ct_ok = if config.conntrack.enabled {

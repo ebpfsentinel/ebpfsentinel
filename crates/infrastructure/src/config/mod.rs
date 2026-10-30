@@ -380,6 +380,45 @@ impl AgentConfig {
         Ok(())
     }
 
+    /// Adds rules compiled from a source this crate does not read to the
+    /// imported ones, held to the limits the rules written here are held to.
+    ///
+    /// Every rule must carry its imported half, which is what keeps it off the
+    /// kernel slots the rules written here hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, leaving the configuration as it was, when a rule is
+    /// not an imported one or the rules no longer fit the limits.
+    pub fn add_imported_rules(&mut self, rules: Vec<IdsRule>) -> Result<(), ConfigError> {
+        if let Some(rule) = rules.iter().find(|rule| rule.imported.is_none()) {
+            return Err(ConfigError::Validation {
+                field: "ids.rules".to_string(),
+                message: format!(
+                    "{} is added as imported and carries no imported half",
+                    rule.id.0
+                ),
+            });
+        }
+        if rules.is_empty() {
+            return Ok(());
+        }
+        check_limit(
+            "ids.rules",
+            self.ids.rules.len() + self.ids.imported.rules.len() + rules.len(),
+            MAX_IDS_RULES,
+        )?;
+        let previous = Arc::clone(&self.ids.imported);
+        let mut imported = (*previous).clone();
+        imported.rules.extend(rules);
+        self.ids.imported = Arc::new(imported);
+        if let Err(e) = check_limit("l7.ports", self.l7_ports().len(), MAX_L7_PORTS) {
+            self.ids.imported = previous;
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Return a copy of the config with sensitive values masked.
     /// Masks: API key secrets, TLS key paths, JWT key paths.
     #[must_use]
@@ -5540,6 +5579,50 @@ ids:
     fn no_suricata_block_imports_nothing() {
         let config = AgentConfig::from_yaml("agent:\n  interfaces: [eth0]\n").unwrap();
         assert!(config.ids_suricata_reports().is_empty());
+        assert!(config.ids_rules().unwrap().is_empty());
+    }
+
+    fn added_rule(id: &str, imported: bool) -> IdsRule {
+        IdsRule {
+            id: domain::common::entity::RuleId(id.to_string()),
+            description: id.to_string(),
+            severity: domain::common::entity::Severity::High,
+            mode: DomainMode::Alert,
+            protocol: domain::common::entity::Protocol::Tcp,
+            dst_port: Some(4444),
+            src_port: None,
+            pattern: String::new(),
+            enabled: true,
+            threshold: None,
+            domain_pattern: None,
+            domain_match_mode: None,
+            country_thresholds: None,
+            group_mask: 0,
+            tenant_id: 0,
+            workload: None,
+            kill_process: false,
+            imported: imported.then(Box::default),
+        }
+    }
+
+    #[test]
+    fn added_imported_rules_reach_the_rule_list() {
+        let mut config = AgentConfig::from_yaml("agent:\n  interfaces: [eth0]\n").unwrap();
+        config
+            .add_imported_rules(vec![added_rule("sigma-a", true)])
+            .unwrap();
+        let rules = config.ids_rules().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id.0, "sigma-a");
+    }
+
+    #[test]
+    fn a_rule_added_without_its_imported_half_is_refused_and_nothing_is_added() {
+        let mut config = AgentConfig::from_yaml("agent:\n  interfaces: [eth0]\n").unwrap();
+        let err = config
+            .add_imported_rules(vec![added_rule("a", true), added_rule("b", false)])
+            .unwrap_err();
+        assert!(err.to_string().contains("b is added as imported"));
         assert!(config.ids_rules().unwrap().is_empty());
     }
 

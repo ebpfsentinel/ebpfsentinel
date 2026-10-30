@@ -3833,6 +3833,7 @@ pub async fn run(
                 dns_cache_svc: dns_cache_svc_concrete.clone(),
                 process_signal_svc: process_signal_svc.clone(),
                 quarantine_svc: quarantine_svc.clone(),
+                workloads: workloads.clone(),
                 metrics: Arc::clone(&metrics),
                 ebpf_loaded: Arc::clone(&ebpf_loaded),
             }),
@@ -5183,6 +5184,12 @@ pub struct EbpfState {
     /// its readers behind and the map descriptors would pile up for the
     /// lifetime of the agent.
     pub readers: CancellationToken,
+    /// The cgroup links of the attribution hooks, when this generation
+    /// attached them. Dropped with the state, which detaches them.
+    pub attribution: Option<adapters::ebpf::AttributionAttacher>,
+    /// The resolver this generation handed its socket tables to. Emptied when
+    /// the state goes, because those tables die with the loaders.
+    pub workloads: Option<application::workload_resolver::WorkloadResolver>,
 }
 
 impl Default for EbpfState {
@@ -5196,6 +5203,12 @@ impl Drop for EbpfState {
         // Readers first: they hold map handles this generation handed them, and
         // a still-running reader keeps those descriptors open past the detach.
         self.readers.cancel();
+        // Nobody may read the socket tables past this point, and the cgroup
+        // links go before the programs they point at.
+        if let Some(workloads) = self.workloads.take() {
+            workloads.clear_sockets();
+        }
+        self.attribution = None;
         // Loaders are dropped next (aya detaches programs via link FDs).
         // Then clean up any pinned maps left on the BPF filesystem.
         self.loaders.clear();
@@ -5212,6 +5225,8 @@ impl EbpfState {
             loaders: Vec::new(),
             bpf_handle: None,
             readers: CancellationToken::new(),
+            attribution: None,
+            workloads: None,
         }
     }
 

@@ -402,20 +402,40 @@ pub fn sync_kernel_maps(
 /// keys rotated, and the parsed configuration is returned for the caller to
 /// apply to whatever datapath it owns: this touches no kernel map that is
 /// written straight off the configuration, and loads or unloads no program.
-#[allow(clippy::too_many_lines, clippy::similar_names)] // reload is inherently sequential with many phases
 pub async fn apply_config_file(
     config_path: &str,
     reload_service: &ConfigReloadService,
     auth_handle: Option<&AuthProviderHandle>,
 ) -> Option<AgentConfig> {
+    apply_config_file_prepared(config_path, reload_service, auth_handle, |_| Ok(())).await
+}
+
+/// [`apply_config_file`], with `prepare` run on the parsed configuration
+/// before anything is converted or applied.
+///
+/// A binary that adds rules of its own to the configuration, compiled from
+/// sources this agent does not read, adds them here so they are validated
+/// and applied with the rest. A `prepare` that fails rejects the file like
+/// any other refusal, and the running rules stay whole.
+#[allow(clippy::too_many_lines, clippy::similar_names)] // reload is inherently sequential with many phases
+pub async fn apply_config_file_prepared(
+    config_path: &str,
+    reload_service: &ConfigReloadService,
+    auth_handle: Option<&AuthProviderHandle>,
+    prepare: impl FnOnce(&mut AgentConfig) -> Result<(), String>,
+) -> Option<AgentConfig> {
     // Phase 1: serde deserialization
-    let config = match AgentConfig::load(Path::new(config_path)) {
+    let mut config = match AgentConfig::load(Path::new(config_path)) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "config reload rejected: invalid YAML");
             return None;
         }
     };
+    if let Err(e) = prepare(&mut config) {
+        tracing::warn!(error = %e, "config reload rejected");
+        return None;
+    }
 
     // Phase 2: domain validation (convert config rules to domain entities)
     let rules = match config.firewall_rules() {
@@ -1080,5 +1100,64 @@ mod tests {
             Some("Visa re-tuned"),
             "a reload must load the patterns startup loads, not the built-in set alone"
         );
+    }
+
+    #[tokio::test]
+    async fn a_prepared_reload_applies_the_rules_prepare_adds_or_rejects_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(&path, "agent:\n  interfaces: [lo]\n").unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+
+        let mut config = AgentConfig::load(&path).unwrap();
+        config.audit.storage_path = dir.path().join("audit.redb").display().to_string();
+        let services = crate::runtime::build_services(&config).unwrap();
+        let reload_service = services.config_reload_service();
+        let has_added = |services: &crate::runtime::ServiceHandles| {
+            services
+                .ids_svc
+                .load()
+                .list_rules()
+                .iter()
+                .any(|r| r.id.0 == "added-by-prepare")
+        };
+
+        let rejected =
+            apply_config_file_prepared(path.to_str().unwrap(), &reload_service, None, |_| {
+                Err("the added rules did not compile".to_string())
+            })
+            .await;
+        assert!(rejected.is_none());
+
+        let applied =
+            apply_config_file_prepared(path.to_str().unwrap(), &reload_service, None, |config| {
+                let mut imported = (*config.ids.imported).clone();
+                imported.rules.push(domain::ids::entity::IdsRule {
+                    id: domain::common::entity::RuleId("added-by-prepare".to_string()),
+                    description: "added".to_string(),
+                    severity: domain::common::entity::Severity::High,
+                    mode: domain::common::entity::DomainMode::Alert,
+                    protocol: domain::common::entity::Protocol::Tcp,
+                    dst_port: Some(4444),
+                    src_port: None,
+                    pattern: String::new(),
+                    enabled: true,
+                    threshold: None,
+                    domain_pattern: None,
+                    domain_match_mode: None,
+                    country_thresholds: None,
+                    group_mask: 0,
+                    tenant_id: 0,
+                    workload: None,
+                    kill_process: false,
+                    imported: Some(Box::default()),
+                });
+                config.ids.imported = std::sync::Arc::new(imported);
+                Ok(())
+            })
+            .await;
+        assert!(applied.is_some());
+        assert!(has_added(&services));
     }
 }
