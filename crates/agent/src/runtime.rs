@@ -235,6 +235,11 @@ pub async fn build_workload_source(
         named = true;
     }
 
+    if let (_, Some(lxc)) = build_lxc_enricher(config) {
+        scanner = scanner.with_enricher(lxc);
+        named = true;
+    }
+
     #[cfg(feature = "kubernetes")]
     if config.container.kubernetes.enabled
         && adapters::container::is_running_in_kubernetes()
@@ -319,6 +324,37 @@ pub fn build_podman_enricher(
         run_user_root = %podman.run_user_root,
         "Podman metadata enricher initialized: each owner's runtime is reached the first time \
          one of their containers is seen"
+    );
+    (EnricherState::On, Some(Arc::new(enricher)))
+}
+
+/// The LXC enricher: Proxmox CTs, Incus instances and plain LXC.
+///
+/// Nothing is asked here. The name is in the cgroup path, so the enricher
+/// names every LXC container whether or not a source is mounted, and the
+/// Proxmox directory and the Incus socket are each read the first time a
+/// container needs them, which is how a node that is neither still names
+/// its containers.
+pub fn build_lxc_enricher(
+    config: &AgentConfig,
+) -> (
+    crate::http::agent_handler::EnricherState,
+    Option<Arc<adapters::container::LxcEnricher>>,
+) {
+    use crate::http::agent_handler::EnricherState;
+    let lxc = &config.container.lxc;
+    if !lxc.enabled {
+        return (EnricherState::OffByConfiguration, None);
+    }
+    let path = |p: &str| (!p.is_empty()).then(|| std::path::PathBuf::from(p));
+    let enricher = adapters::container::LxcEnricher::new(
+        path(&lxc.proxmox_dir),
+        path(&lxc.incus_socket),
+        lxc.timeout_ms,
+        adapters::container::DockerCache::new(
+            lxc.cache_size,
+            std::time::Duration::from_secs(lxc.cache_ttl_seconds),
+        ),
     );
     (EnricherState::On, Some(Arc::new(enricher)))
 }

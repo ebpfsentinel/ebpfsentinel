@@ -284,7 +284,7 @@ where
 pub struct ContainerIdentity {
     /// Always `container`: a host-namespace process carries no identity.
     pub kind: String,
-    /// Detected runtime (docker, containerd, crio, podman, unknown).
+    /// Detected runtime (docker, containerd, crio, podman, lxc, unknown).
     pub runtime: String,
     /// Container ID.
     pub id: String,

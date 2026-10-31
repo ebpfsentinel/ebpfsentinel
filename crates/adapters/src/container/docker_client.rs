@@ -94,6 +94,24 @@ impl DockerClient {
         parse_inspect_response(&raw, id)
     }
 
+    /// `GET {path}`, and the body when the answer is 200.
+    ///
+    /// The transport is plain HTTP/1.1 over a unix socket, which the Incus
+    /// daemon speaks as well as Docker's, so this is how either is asked a
+    /// question the typed calls above do not cover. A 404 is
+    /// [`ContainerError::ContainerNotFound`] carrying the path.
+    pub async fn get_body(&self, path: &str) -> Result<Vec<u8>, ContainerError> {
+        let raw = self.get(path, MAX_BODY_BYTES).await?;
+        let (status, body) = split_response(&raw)?;
+        match status {
+            200 => Ok(body),
+            404 => Err(ContainerError::ContainerNotFound {
+                id: path.to_string(),
+            }),
+            status => Err(ContainerError::DockerApi { status }),
+        }
+    }
+
     /// `GET /v1.43/containers/json` - every running container, with its
     /// labels.
     pub async fn list_containers(&self) -> Result<Vec<ListedContainer>, ContainerError> {

@@ -51,6 +51,9 @@ pub struct ContainerCoverage {
     /// Absent from an agent that predates Podman.
     #[serde(default)]
     pub podman: Option<String>,
+    /// Absent from an agent that predates LXC.
+    #[serde(default)]
+    pub lxc: Option<String>,
     pub kubernetes: String,
     #[serde(default)]
     pub podman_runtimes: Vec<PodmanRuntime>,

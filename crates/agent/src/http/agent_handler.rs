@@ -74,6 +74,8 @@ pub struct ContainerCoverage {
     pub resolver: bool,
     pub docker: EnricherState,
     pub podman: EnricherState,
+    /// LXC containers: Proxmox CTs, Incus instances and plain LXC.
+    pub lxc: EnricherState,
     pub kubernetes: EnricherState,
     /// Each Podman runtime the agent has gone to, root's and each user's,
     /// and what it found there. A rootless container whose owner's runtime
@@ -138,6 +140,7 @@ impl ContainerCoverage {
             resolver: false,
             docker: EnricherState::Starting,
             podman: EnricherState::Starting,
+            lxc: EnricherState::Starting,
             kubernetes: EnricherState::Starting,
             podman_runtimes: Vec::new(),
         }
@@ -437,6 +440,7 @@ mod tests {
             resolver: true,
             docker: EnricherState::OffNoSocket,
             podman: EnricherState::On,
+            lxc: EnricherState::On,
             kubernetes: EnricherState::On,
             podman_runtimes: Vec::new(),
         }));

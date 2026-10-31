@@ -9,6 +9,8 @@ pub enum ContainerRuntime {
     Containerd,
     CriO,
     Podman,
+    /// LXC, and what is built on it: Incus, LXD and a Proxmox CT.
+    Lxc,
     Unknown,
 }
 
@@ -19,6 +21,7 @@ impl fmt::Display for ContainerRuntime {
             Self::Containerd => "containerd",
             Self::CriO => "crio",
             Self::Podman => "podman",
+            Self::Lxc => "lxc",
             Self::Unknown => "unknown",
         };
         f.write_str(s)

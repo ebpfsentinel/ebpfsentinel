@@ -4204,6 +4204,9 @@ pub async fn run(
     let podman_enricher: Option<
         Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>,
     > = podman_enricher.map(|podman| podman as _);
+    let (lxc_state, lxc_enricher) = crate::runtime::build_lxc_enricher(&config);
+    let lxc_enricher: Option<Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>> =
+        lxc_enricher.map(|lxc| lxc as _);
 
     // ── 10f. Build Kubernetes enricher (optional, auto-detected) ────
     #[cfg(feature = "kubernetes")]
@@ -4310,6 +4313,7 @@ pub async fn run(
         resolver: container_resolver.is_some(),
         docker: docker_state,
         podman: podman_state,
+        lxc: lxc_state,
         kubernetes: kubernetes_state,
         podman_runtimes: Vec::new(),
     }));
@@ -4342,6 +4346,9 @@ pub async fn run(
             svc = svc.with_metadata_enricher(Arc::clone(enricher));
         }
         if let Some(ref enricher) = podman_enricher {
+            svc = svc.with_metadata_enricher(Arc::clone(enricher));
+        }
+        if let Some(ref enricher) = lxc_enricher {
             svc = svc.with_metadata_enricher(Arc::clone(enricher));
         }
         if let Some(ref enricher) = kubernetes_enricher {
@@ -4407,6 +4414,9 @@ pub async fn run(
             scanner = scanner.with_enricher(Arc::clone(enricher));
         }
         if let Some(ref enricher) = podman_enricher {
+            scanner = scanner.with_enricher(Arc::clone(enricher));
+        }
+        if let Some(ref enricher) = lxc_enricher {
             scanner = scanner.with_enricher(Arc::clone(enricher));
         }
         if let Some(ref enricher) = kubernetes_enricher {
@@ -4813,6 +4823,9 @@ pub async fn run(
         alert_pipeline = alert_pipeline.with_metadata_enricher(enricher);
     }
     if let Some(enricher) = podman_enricher.clone() {
+        alert_pipeline = alert_pipeline.with_metadata_enricher(enricher);
+    }
+    if let Some(enricher) = lxc_enricher.clone() {
         alert_pipeline = alert_pipeline.with_metadata_enricher(enricher);
     }
 

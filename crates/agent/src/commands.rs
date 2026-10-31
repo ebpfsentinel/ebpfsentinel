@@ -3363,12 +3363,16 @@ fn print_container_coverage(coverage: &crate::api_client::ContainerCoverage) {
         "own procfs"
     };
     println!(
-        "  Containers {} ({procfs}), ids {}, docker {}, podman {}, kubernetes {}",
+        "  Containers {} ({procfs}), ids {}, docker {}, podman {}, lxc {}, kubernetes {}",
         coverage.proc_root,
         if coverage.resolver { "yes" } else { "no" },
         enricher_state(&coverage.docker),
         coverage
             .podman
+            .as_deref()
+            .map_or("not reported", enricher_state),
+        coverage
+            .lxc
             .as_deref()
             .map_or("not reported", enricher_state),
         enricher_state(&coverage.kubernetes),

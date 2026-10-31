@@ -10048,6 +10048,7 @@
           "resolver",
           "docker",
           "podman",
+          "lxc",
           "kubernetes",
           "podman_runtimes"
         ],
@@ -10061,6 +10062,10 @@
           },
           "kubernetes": {
             "$ref": "#/components/schemas/EnricherState"
+          },
+          "lxc": {
+            "$ref": "#/components/schemas/EnricherState",
+            "description": "LXC containers: Proxmox CTs, Incus instances and plain LXC."
           },
           "podman": {
             "$ref": "#/components/schemas/EnricherState"
@@ -10141,7 +10146,7 @@
           },
           "runtime": {
             "type": "string",
-            "description": "Detected runtime (docker, containerd, crio, podman, unknown)."
+            "description": "Detected runtime (docker, containerd, crio, podman, lxc, unknown)."
           }
         }
       },

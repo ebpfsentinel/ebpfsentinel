@@ -7,6 +7,7 @@ pub mod docker_enricher;
 pub mod docker_events;
 #[cfg(feature = "kubernetes")]
 pub mod k8s_enricher;
+pub mod lxc_enricher;
 #[cfg(feature = "kubernetes")]
 pub mod netpol_watch;
 pub mod pod_cgroups;
@@ -33,6 +34,10 @@ pub use k8s_enricher::{
     K8sEnricherMetrics, KubernetesEnricher, PodCache, PodInfo, is_running_in_kubernetes,
     pod_info_from, resolve_node_name, spawn_namespace_watcher, spawn_pod_watcher, strip_cri_prefix,
     try_build_client,
+};
+pub use lxc_enricher::{
+    DEFAULT_INCUS_SOCKET as LXC_DEFAULT_INCUS_SOCKET,
+    DEFAULT_PROXMOX_DIR as LXC_DEFAULT_PROXMOX_DIR, LxcEnricher,
 };
 #[cfg(feature = "kubernetes")]
 pub use netpol_watch::{NetpolClusterCache, NetworkPolicyManifests, spawn_netpol_watchers};

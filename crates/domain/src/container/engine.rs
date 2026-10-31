@@ -86,7 +86,45 @@ pub fn detect_runtime(cgroup_path: &str) -> ContainerRuntime {
     if cgroup_path.contains("/docker/") {
         return ContainerRuntime::Docker;
     }
+    // Last, so a runtime nested inside a system container (Docker in an
+    // Incus instance) names the innermost workload rather than its host.
+    if lxc_name(cgroup_path).is_some() {
+        return ContainerRuntime::Lxc;
+    }
     ContainerRuntime::Unknown
+}
+
+/// The name of the LXC container a cgroup path sits in.
+///
+/// Two layouts exist. LXC 4 and everything built on it since, Incus and LXD
+/// among them, place a container's processes under `lxc.payload.<name>`,
+/// where an Incus instance outside the default project is
+/// `<project>_<name>`. Proxmox places a CT under `lxc/<vmid>`, its processes
+/// one level down in `ns`, which is also the layout older LXC used with a
+/// name instead of a number. The monitor, `lxc.monitor.<name>` or
+/// `lxc.monitor/<vmid>`, is the host's process watching the container and
+/// is never the container itself.
+pub fn lxc_name(cgroup_path: &str) -> Option<&str> {
+    let mut segments = cgroup_path.split('/').filter(|s| !s.is_empty());
+    while let Some(segment) = segments.next() {
+        if let Some(name) = segment.strip_prefix("lxc.payload.") {
+            return is_valid_lxc_name(name).then_some(name);
+        }
+        if segment == "lxc" {
+            let name = segments.next()?;
+            return is_valid_lxc_name(name).then_some(name);
+        }
+    }
+    None
+}
+
+/// What LXC, Incus and Proxmox accept in a container name or a vmid, and a
+/// project prefix joined by an underscore.
+fn is_valid_lxc_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
 /// Extract the 64-character hex ID from a path segment matching the
@@ -97,6 +135,7 @@ pub fn extract_container_id(cgroup_path: &str, runtime: ContainerRuntime) -> Opt
         ContainerRuntime::Containerd => "cri-containerd-",
         ContainerRuntime::CriO => "crio-",
         ContainerRuntime::Podman => "libpod-",
+        ContainerRuntime::Lxc => return lxc_name(cgroup_path).map(ToOwned::to_owned),
         ContainerRuntime::Unknown => return docker_legacy_id(cgroup_path),
     };
 
@@ -429,6 +468,57 @@ mod tests {
     #[test]
     fn parse_v1_empty_input() {
         assert!(parse_cgroup_v1(&[], 1).is_none());
+    }
+
+    #[test]
+    fn an_lxc_container_is_named_from_either_layout() {
+        for (path, name) in [
+            ("/lxc.payload.web", "web"),
+            ("/lxc.payload.web/system.slice/nginx.service", "web"),
+            ("/lxc.payload.prod_db/init.scope", "prod_db"),
+            ("/lxc/101/ns/system.slice/sshd.service", "101"),
+            ("/lxc/101/ns", "101"),
+            ("/lxc/legacy", "legacy"),
+        ] {
+            assert_eq!(detect_runtime(path), ContainerRuntime::Lxc, "{path}");
+            assert_eq!(
+                extract_container_id(path, ContainerRuntime::Lxc).as_deref(),
+                Some(name),
+                "{path}"
+            );
+            assert_eq!(
+                parse_cgroup_v2(&format!("0::{path}"), 7)
+                    .and_then(|i| i.container_id().map(ToOwned::to_owned))
+                    .as_deref(),
+                Some(name)
+            );
+        }
+    }
+
+    #[test]
+    fn the_lxc_monitor_and_a_bare_lxc_slice_are_the_host() {
+        for path in [
+            "/lxc.monitor.web",
+            "/lxc.monitor/101",
+            "/lxc",
+            "/lxc.payload.",
+        ] {
+            assert_eq!(detect_runtime(path), ContainerRuntime::Unknown, "{path}");
+            assert_eq!(
+                parse_cgroup_v2(&format!("0::{path}"), 7),
+                Some(ContainerInfo::Host)
+            );
+        }
+    }
+
+    #[test]
+    fn a_runtime_nested_in_a_system_container_names_the_inner_workload() {
+        let path = format!("/lxc.payload.ci/system.slice/docker-{HEX64}.scope");
+        assert_eq!(detect_runtime(&path), ContainerRuntime::Docker);
+        assert_eq!(
+            extract_container_id(&path, ContainerRuntime::Docker).as_deref(),
+            Some(HEX64)
+        );
     }
 
     #[test]

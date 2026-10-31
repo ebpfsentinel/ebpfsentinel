@@ -324,6 +324,25 @@ SYSCTL
     SHELL
 
     # ----------------------------------------------------------
+    # Provisioner: lxc
+    # The LXC tools the container suites start a system container with,
+    # which is what a Proxmox CT and an Incus instance are underneath.
+    # The default bridge is left off: a test container shares the node's
+    # network, and its identity comes from its cgroup alone.
+    # ----------------------------------------------------------
+    agent.vm.provision "shell", name: "lxc", inline: <<-SHELL
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      if ! command -v lxc-execute &>/dev/null; then
+        apt-get update
+        apt-get install -y --no-install-recommends lxc
+      fi
+      echo 'USE_LXC_BRIDGE="false"' > /etc/default/lxc-net
+      systemctl disable --now lxc-net 2>/dev/null || true
+    SHELL
+
+    # ----------------------------------------------------------
     # Provisioner: kubernetes-tools (kubectl + minikube)
     # Installs the binaries the 10-kubernetes suite needs. minikube runs
     # with the docker driver (no nested VM), and conntrack - required by the

@@ -40,6 +40,14 @@ fn default_run_user_root() -> String {
     "/run/user".to_string()
 }
 
+fn default_proxmox_dir() -> String {
+    "/etc/pve/lxc".to_string()
+}
+
+fn default_incus_socket() -> String {
+    "/var/lib/incus/unix.socket".to_string()
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContainerConfig {
     #[serde(default)]
@@ -50,6 +58,9 @@ pub struct ContainerConfig {
 
     #[serde(default)]
     pub podman: PodmanEnricherConfig,
+
+    #[serde(default)]
+    pub lxc: LxcEnricherConfig,
 
     #[serde(default)]
     pub kubernetes: KubernetesEnricherConfig,
@@ -168,6 +179,68 @@ impl Default for PodmanEnricherConfig {
             cache_ttl_seconds: default_docker_cache_ttl_seconds(),
             timeout_ms: default_docker_timeout_ms(),
         }
+    }
+}
+
+/// LXC containers - Proxmox CTs, Incus instances and plain LXC - named from
+/// their cgroup, and labelled from whichever source the node keeps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LxcEnricherConfig {
+    /// On by default: the name is in the cgroup path and costs no socket,
+    /// and each source below is read only where it exists.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Where Proxmox keeps one `<vmid>.conf` per CT, giving its hostname,
+    /// tags and OS type. Empty to never read it.
+    #[serde(default = "default_proxmox_dir")]
+    pub proxmox_dir: String,
+
+    /// The Incus daemon's socket, giving an instance's `user.*` keys as
+    /// labels. Empty to never ask it.
+    #[serde(default = "default_incus_socket")]
+    pub incus_socket: String,
+
+    #[serde(default = "default_docker_cache_size")]
+    pub cache_size: usize,
+
+    #[serde(default = "default_docker_cache_ttl_seconds")]
+    pub cache_ttl_seconds: u64,
+
+    #[serde(default = "default_docker_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for LxcEnricherConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            proxmox_dir: default_proxmox_dir(),
+            incus_socket: default_incus_socket(),
+            cache_size: default_docker_cache_size(),
+            cache_ttl_seconds: default_docker_cache_ttl_seconds(),
+            timeout_ms: default_docker_timeout_ms(),
+        }
+    }
+}
+
+impl LxcEnricherConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.enabled {
+            if self.cache_size == 0 {
+                return Err(ConfigError::Validation {
+                    field: "container.lxc.cache_size".to_string(),
+                    message: "cache_size must be at least 1".to_string(),
+                });
+            }
+            if self.timeout_ms == 0 {
+                return Err(ConfigError::Validation {
+                    field: "container.lxc.timeout_ms".to_string(),
+                    message: "timeout_ms must be at least 1".to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -295,6 +368,7 @@ impl ContainerConfig {
             });
         }
         self.podman.validate()?;
+        self.lxc.validate()?;
         if self.kubernetes.enabled {
             // The entries are joined into the label selector the API server
             // parses. A malformed one is rejected there, at watch time, in a
