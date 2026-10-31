@@ -167,8 +167,13 @@ fn dns_feed_specs(
 
 /// Distinct bpffs pin path for uprobe-dlp, so its `EVENTS` ring buffer is a
 /// separate kernel object from the shared packet `EVENTS` (same ELF map name).
-/// uprobe-dlp's other maps (`SSL_READ_ARGS`, `DLP_METRICS`) are DLP-internal and
-/// shared with nothing, so an isolated pin path is strictly correct.
+///
+/// cgroup-attribution is loaded under the same path, because the one map it
+/// shares with anybody is `DLP_TASK_SOCKET`, the join it writes and uprobe-dlp
+/// reads. Under the default path the two objects would each create their own
+/// copy and every TLS alert would miss the socket the kernel established.
+/// Nothing else uprobe-dlp or cgroup-attribution declares is named by a third
+/// object, so the isolation from the packet programs still holds.
 pub(crate) const DLP_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel-dlp";
 
 /// The warden control socket path when the agent runs against a privilege broker,
@@ -6236,7 +6241,7 @@ pub fn try_load_cgroup_attribution(
     // refusal costs instead of the object failing whole.
     let mut loader = EbpfLoader::load_with_pin_path_optional(
         &program_bytes,
-        adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+        DLP_PIN_PATH,
         &[adapters::ebpf::ATTRIBUTION_JOIN_HOOK],
     )?;
     let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "ATTRIBUTION_METRICS").ok();
