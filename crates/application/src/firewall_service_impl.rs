@@ -496,6 +496,19 @@ impl FirewallAppService {
         self.deny_all.is_some()
     }
 
+    /// What the packet firewall decides right now, as a listener's reach is
+    /// read against it: the rules in evaluation order, whether it enforces,
+    /// and whether a packet no rule matched is dropped.
+    #[must_use]
+    pub fn posture(&self) -> domain::exposure::reach::FirewallPosture {
+        domain::exposure::reach::FirewallPosture {
+            rules: self.list_rules().to_vec(),
+            enabled: self.enabled(),
+            mode: self.mode(),
+            default_drop: self.is_deny_all() || self.default_policy() == DEFAULT_POLICY_DROP,
+        }
+    }
+
     /// Install the deny-all posture: nothing crosses this node except the
     /// anti-lockout ports.
     ///
@@ -1123,6 +1136,21 @@ mod tests {
         );
         svc.clear_map_port();
         assert!(svc.trace_index().is_empty());
+    }
+
+    #[test]
+    fn the_posture_a_listener_is_read_against_follows_the_rules_and_the_catch_all() {
+        let mut svc = make_service();
+        svc.add_rule(make_rule("first", 10)).unwrap();
+        let open = svc.posture();
+        assert_eq!(open.rules.len(), 1);
+        assert_eq!(open.enabled, svc.enabled());
+        assert!(!open.default_drop);
+        svc.set_default_policy(DEFAULT_POLICY_DROP);
+        assert!(svc.posture().default_drop);
+        svc.set_default_policy(DEFAULT_POLICY_PASS);
+        svc.enter_deny_all().unwrap();
+        assert!(svc.posture().default_drop);
     }
 
     #[test]

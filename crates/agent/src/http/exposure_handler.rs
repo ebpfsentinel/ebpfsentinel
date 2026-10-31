@@ -3,7 +3,7 @@ use std::sync::Arc;
 use application::exposure_service::Listener;
 use axum::Json;
 use axum::extract::State;
-use domain::exposure::reach::{FirewallPosture, ReachDecision};
+use domain::exposure::reach::ReachDecision;
 use domain::firewall::entity::FirewallAction;
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -95,22 +95,17 @@ pub struct ListenersResponse {
 )]
 pub async fn get_listeners(State(state): State<Arc<AppState>>) -> Json<ListenersResponse> {
     let Some(service) = state.exposure.load_full() else {
-        return Json(response(None));
+        return Json(listeners_response(None));
     };
-    let posture = {
-        let firewall = state.firewall_service.read().await;
-        FirewallPosture {
-            rules: firewall.list_rules().to_vec(),
-            enabled: firewall.enabled(),
-            mode: firewall.mode(),
-            default_drop: firewall.is_deny_all()
-                || firewall.default_policy() == ebpf_common::firewall::DEFAULT_POLICY_DROP,
-        }
-    };
-    Json(response(service.listeners(&posture)))
+    let posture = state.firewall_service.read().await.posture();
+    Json(listeners_response(service.listeners(&posture)))
 }
 
-fn response(listeners: Option<Vec<Listener>>) -> ListenersResponse {
+/// The body of the route from a reading of the listeners, `None` when the
+/// socket hooks are not attached. Shared with the enterprise agent, so one
+/// query answers in the same words whichever edition serves it.
+#[must_use]
+pub fn listeners_response(listeners: Option<Vec<Listener>>) -> ListenersResponse {
     let Some(listeners) = listeners else {
         return ListenersResponse {
             reading: false,
@@ -180,14 +175,14 @@ mod tests {
 
     #[test]
     fn hooks_not_attached_read_as_unknown_and_a_listener_names_its_scope_and_owner() {
-        let json = serde_json::to_value(response(None)).unwrap();
+        let json = serde_json::to_value(listeners_response(None)).unwrap();
         assert_eq!(json["reading"], false);
 
         let mut workload = Workload::new(42, WorkloadSource::Socket).unwrap();
         workload.exe = Some("/usr/bin/redis-server".into());
         workload.namespace = Some("cache".into());
         workload.pod = Some("redis-0".into());
-        let json = serde_json::to_value(response(Some(vec![Listener {
+        let json = serde_json::to_value(listeners_response(Some(vec![Listener {
             address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             port: 6379,
             protocol: ListenerProtocol::Tcp,
