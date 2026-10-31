@@ -3153,6 +3153,55 @@
         ]
       }
     },
+    "/api/v1/exposure/listeners": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "`GET /api/v1/exposure/listeners` - what this node listens on, and who for.",
+        "operationId": "get_listeners",
+        "responses": {
+          "200": {
+            "description": "Sockets accepting traffic on the node, with the workload that bound each",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListenersResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/fingerprints/ja4s": {
       "get": {
         "tags": [
@@ -13386,6 +13435,114 @@
           },
           "value": {
             "type": "string"
+          }
+        }
+      },
+      "ListenerBody": {
+        "type": "object",
+        "description": "One address and port a process accepts traffic on.",
+        "required": [
+          "address",
+          "port",
+          "protocol",
+          "scope",
+          "sockets",
+          "pid",
+          "bound_at_boot_ns"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The bound address, `0.0.0.0` or `::` for every address."
+          },
+          "bound_at_boot_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the first of its sockets was bound, in nanoseconds since boot.",
+            "minimum": 0
+          },
+          "container": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The container holding it, where it runs in one."
+          },
+          "executable": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its executable, where the process table holds it."
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The process that bound it.",
+            "minimum": 0
+          },
+          "pod": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The pod holding it, as `namespace/name`, where it runs in one."
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "protocol": {
+            "type": "string",
+            "description": "`tcp` or `udp`."
+          },
+          "scope": {
+            "type": "string",
+            "description": "`all_addresses` when bound on every address of the namespace,\n`address` for one interface address, `loopback` when nothing off the\nnode reaches it."
+          },
+          "sockets": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Sockets the process holds on this address and port, more than one\nfor a server spread over `SO_REUSEPORT`.",
+            "minimum": 0
+          },
+          "uid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The user it bound as.",
+            "minimum": 0
+          },
+          "unit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The systemd unit holding it, for a host process."
+          }
+        }
+      },
+      "ListenersResponse": {
+        "type": "object",
+        "description": "The sockets this node accepts traffic on, and who bound them.",
+        "required": [
+          "reading",
+          "listeners"
+        ],
+        "properties": {
+          "listeners": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ListenerBody"
+            },
+            "description": "Widest scope first: every address, then one address, then loopback."
+          },
+          "reading": {
+            "type": "boolean",
+            "description": "Whether the socket hooks are attached. When they are not, the node's\nlisteners are unknown rather than absent."
           }
         }
       },

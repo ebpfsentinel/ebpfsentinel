@@ -11,7 +11,11 @@
 //! identity silently partial exactly where it matters.
 //!
 //! All six write one entry into `SOCKET_IDENTITY`, keyed by the socket cookie
-//! the kernel also hands to a packet hook holding the `skb`. Nothing is
+//! the kernel also hands to a packet hook holding the `skb`. The two post-bind
+//! hooks also write the address and port taken into `LISTENING_SOCKETS`, the
+//! `sockops` listen callback marks a TCP socket that became a server, and
+//! `sock_release` takes the socket out again when it is closed, so the table
+//! is the node's listeners as the kernel holds them and not a history. Nothing is
 //! enforced, nothing is dropped, and no verdict depends on what is recorded:
 //! every program returns allow unconditionally, so a failure here costs
 //! attribution and never connectivity.
@@ -34,7 +38,9 @@ use ebpf_common::attribution::{
     ATTRIBUTION_MAX_FLOWS, ATTRIBUTION_MAX_SOCKETS, ATTRIBUTION_METRIC_CONNECT,
     ATTRIBUTION_METRIC_COUNT, ATTRIBUTION_METRIC_FLOW, ATTRIBUTION_METRIC_INSERT_FAILED,
     ATTRIBUTION_METRIC_NO_COOKIE, ATTRIBUTION_METRIC_POST_BIND, ATTRIBUTION_METRIC_SENDMSG,
-    ATTRIBUTION_METRIC_SOCK_OPS, FlowIdentityKey, SocketIdentity,
+    ATTRIBUTION_METRIC_LISTENER, ATTRIBUTION_METRIC_LISTENER_GONE, ATTRIBUTION_METRIC_SOCK_OPS,
+    ATTRIBUTION_MAX_LISTENERS, FlowIdentityKey, LISTENER_STATE_BOUND, LISTENER_STATE_LISTEN,
+    ListeningSocket, SocketIdentity,
 };
 use ebpf_common::dlp::{
     DLP_FLOW_FAMILY_IPV4, DLP_FLOW_FAMILY_IPV6, DLP_FLOW_PROTOCOL_TCP,
@@ -80,6 +86,20 @@ static DLP_TASK_SOCKET: LruHashMap<u64, DlpTaskSocket, { DLP_TASK_SOCKET_MAX_TAS
 #[btf_map]
 static SOCKET_FLOW: LruHashMap<FlowIdentityKey, SocketIdentity, { ATTRIBUTION_MAX_FLOWS as usize }> =
     LruHashMap::new();
+
+/// Socket cookie -> a socket holding a local address, and who bound it.
+///
+/// Written by the post-bind hooks, promoted by the `sockops` listen callback
+/// and deleted by `sock_release`, so a reader lists what is bound now. A TCP
+/// socket bound before it connects is taken out when its connection comes up,
+/// since it was a client all along. LRU so a node binding more than the table
+/// holds loses its coldest entry rather than its newest listener.
+#[btf_map]
+static LISTENING_SOCKETS: LruHashMap<
+    u64,
+    ListeningSocket,
+    { ATTRIBUTION_MAX_LISTENERS as usize },
+> = LruHashMap::new();
 
 /// Per-CPU counters, read by the agent and exported as metrics. Nothing here
 /// is an alert: they are how an operator sees that the hooks are attached and
@@ -128,12 +148,27 @@ pub fn attribution_post_bind6(ctx: SockContext) -> i32 {
     record_sock(&ctx)
 }
 
+/// A socket being closed: it holds no address any more, so it leaves the
+/// listening table. A socket that never bound is simply not found there.
+#[cgroup_sock(sock_release)]
+pub fn attribution_sock_release(ctx: SockContext) -> i32 {
+    let cookie = unsafe { generated::bpf_get_socket_cookie(ctx.sock.cast()) };
+    if cookie != 0 && LISTENING_SOCKETS.remove(&cookie).is_ok() {
+        increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_LISTENER_GONE);
+    }
+    ALLOW
+}
+
 // ── Recording ───────────────────────────────────────────────────────
 
 /// `BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB`: a connection this node opened is up.
 const SOCK_OPS_ACTIVE_ESTABLISHED: u32 = 4;
 /// `BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB`: a connection this node accepted is up.
 const SOCK_OPS_PASSIVE_ESTABLISHED: u32 = 5;
+/// `BPF_SOCK_OPS_TCP_LISTEN_CB`: a socket has called `listen()`. Unlike the
+/// state and retransmit callbacks it is not gated by a callback flag, so it
+/// reaches this program with nothing asked for.
+const SOCK_OPS_TCP_LISTEN: u32 = 11;
 
 /// A TCP connection has come up: join the socket's own five-tuple to the task
 /// the socket hooks recorded against its cookie.
@@ -145,11 +180,37 @@ const SOCK_OPS_PASSIVE_ESTABLISHED: u32 = 5;
 /// completes a handshake belongs to nobody.
 #[sock_ops]
 pub fn attribution_sockops(ctx: SockOpsContext) -> u32 {
+    track_listener(&ctx);
     join_socket(&ctx);
     // The return value of a sock_ops program feeds `bpf_sock_ops_cb_flags_set`
     // and the TCP stack's own callbacks. Zero asks for nothing, which is the
     // whole posture: this program observes a connection, it never shapes one.
     0
+}
+
+/// Keep the listening table to servers: promote a socket that called
+/// `listen()`, and drop one whose own connection has just come up, which was a
+/// client that happened to bind first.
+#[inline(always)]
+fn track_listener(ctx: &SockOpsContext) {
+    let op = ctx.op();
+    if op != SOCK_OPS_TCP_LISTEN && op != SOCK_OPS_ACTIVE_ESTABLISHED {
+        return;
+    }
+    let cookie = unsafe { generated::bpf_get_socket_cookie(ctx.ops.cast()) };
+    if cookie == 0 {
+        return;
+    }
+    if op == SOCK_OPS_ACTIVE_ESTABLISHED {
+        if LISTENING_SOCKETS.remove(&cookie).is_ok() {
+            increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_LISTENER_GONE);
+        }
+        return;
+    }
+    let Some(entry) = LISTENING_SOCKETS.get_ptr_mut(&cookie) else {
+        return;
+    };
+    unsafe { (*entry).state = LISTENER_STATE_LISTEN };
 }
 
 /// Write the established socket against the task that opened it.
@@ -263,7 +324,7 @@ fn record_sock_addr(ctx: &SockAddrContext, hook: u8, metric: u32) -> i32 {
     // members of the kernel's own socket, so nothing is probe-read.
     let family = unsafe { (*ctx.sock_addr).family };
     let protocol = unsafe { (*ctx.sock_addr).protocol };
-    insert(cookie, hook, family, protocol, metric);
+    let _ = insert(cookie, hook, family, protocol, metric);
     ALLOW
 }
 
@@ -274,26 +335,60 @@ fn record_sock(ctx: &SockContext) -> i32 {
     let cookie = unsafe { generated::bpf_get_socket_cookie(ctx.sock.cast()) };
     let family = unsafe { (*ctx.sock).family };
     let protocol = unsafe { (*ctx.sock).protocol };
-    insert(
+    let Some(identity) = insert(
         cookie,
         ATTRIBUTION_HOOK_POST_BIND,
         family,
         protocol,
         ATTRIBUTION_METRIC_POST_BIND,
-    );
+    ) else {
+        return ALLOW;
+    };
+    record_listener(ctx, cookie, identity);
     ALLOW
 }
 
-/// Write one identity, or count why there was nothing to write.
+/// Write the address and port a socket has just taken, against the task that
+/// took them. `src_port` is handed over in host order and the addresses in
+/// network order, converted here into the encoding of the flow key.
+#[inline(always)]
+fn record_listener(ctx: &SockContext, cookie: u64, identity: SocketIdentity) {
+    let mut listener = ListeningSocket {
+        identity,
+        port: unsafe { (*ctx.sock).src_port } as u16,
+        state: LISTENER_STATE_BOUND,
+        ..ListeningSocket::default()
+    };
+    if identity.family == ATTRIBUTION_FAMILY_IPV4 {
+        listener.local_addr[0] = u32::from_be(unsafe { (*ctx.sock).src_ip4 });
+    } else if identity.family == ATTRIBUTION_FAMILY_IPV6 {
+        let words = unsafe { (*ctx.sock).src_ip6 };
+        let mut word = 0usize;
+        while word < 4 {
+            listener.local_addr[word] = u32::from_be(words[word]);
+            word += 1;
+        }
+    } else {
+        return;
+    }
+    if LISTENING_SOCKETS.insert(&cookie, &listener, 0).is_err() {
+        increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_INSERT_FAILED);
+        return;
+    }
+    increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_LISTENER);
+}
+
+/// Write one identity, or count why there was nothing to write. The identity
+/// written is handed back so a hook with more to record reads the task once.
 ///
 /// A cookie of zero is the kernel saying this socket has none, which happens
 /// before a socket is fully set up. There is no key then, and inventing one
 /// would attribute the next flow to whoever ran last.
 #[inline(always)]
-fn insert(cookie: u64, hook: u8, family: u32, protocol: u32, metric: u32) {
+fn insert(cookie: u64, hook: u8, family: u32, protocol: u32, metric: u32) -> Option<SocketIdentity> {
     if cookie == 0 {
         increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_NO_COOKIE);
-        return;
+        return None;
     }
     let pid_tgid = bpf_get_current_pid_tgid();
     let uid_gid = bpf_get_current_uid_gid();
@@ -311,9 +406,10 @@ fn insert(cookie: u64, hook: u8, family: u32, protocol: u32, metric: u32) {
     };
     if SOCKET_IDENTITY.insert(&cookie, &identity, 0).is_err() {
         increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_INSERT_FAILED);
-        return;
+        return None;
     }
     increment_metric!(ATTRIBUTION_METRICS, metric);
+    Some(identity)
 }
 
 #[cfg(not(test))]

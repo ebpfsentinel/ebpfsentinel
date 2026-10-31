@@ -4,7 +4,8 @@
 //! socket cookie that a packet event already carries, which is the kernel's
 //! own handle and therefore the exact join. `SOCKET_FLOW` answers a reader
 //! holding only a five-tuple, which is all a row of `/proc/net/nf_conntrack`
-//! ever is.
+//! ever is. `LISTENING_SOCKETS` answers the third question, what this node
+//! has bound and who bound it, and is listed rather than looked up.
 //!
 //! Every lookup can legitimately miss, and a miss is returned rather than
 //! smoothed over: the hooks may not be attached, the socket may predate the
@@ -13,30 +14,32 @@
 //! it, because a cookie is reused and a stale record names the wrong process.
 
 use aya::maps::{HashMap as AyaHashMap, MapData};
+use domain::exposure::entity::{BoundSocket, ListenerProtocol};
 use domain::workload::entity::WorkloadSource;
 use ebpf_common::attribution::{
     ATTRIBUTION_FAMILY_IPV4, ATTRIBUTION_FAMILY_IPV6, ATTRIBUTION_IDENTITY_TTL_NS, FlowIdentityKey,
-    SocketIdentity,
+    LISTENER_STATE_LISTEN, ListeningSocket, SocketIdentity,
 };
 use ports::secondary::socket_identity_port::{FlowEndpoints, SocketIdentityReader, SocketOwner};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tracing::info;
 
 use crate::ebpf::map_store::MapStore;
 use crate::ebpf::ringbuf_observer::boottime_now_ns;
 
-/// Reads `SOCKET_IDENTITY` and `SOCKET_FLOW`.
+/// Reads `SOCKET_IDENTITY`, `SOCKET_FLOW` and `LISTENING_SOCKETS`.
 pub struct EbpfSocketIdentityReader {
     sockets: AyaHashMap<MapData, u64, SocketIdentity>,
     flows: AyaHashMap<MapData, FlowIdentityKey, SocketIdentity>,
+    listeners: AyaHashMap<MapData, u64, ListeningSocket>,
 }
 
 impl EbpfSocketIdentityReader {
-    /// Take both tables out of a loaded attribution object.
+    /// Take the three tables out of a loaded attribution object.
     ///
-    /// Both or neither: a reader holding one of the two would answer one kind
-    /// of caller and silently fail the other, which is exactly the asymmetry
-    /// the flow index was added to remove.
+    /// All or none: a reader holding some of them would answer one kind of
+    /// caller and silently fail another, which is exactly the asymmetry the
+    /// flow index was added to remove.
     pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let sockets = AyaHashMap::try_from(
             ebpf.take_map("SOCKET_IDENTITY")
@@ -46,8 +49,18 @@ impl EbpfSocketIdentityReader {
             ebpf.take_map("SOCKET_FLOW")
                 .ok_or_else(|| anyhow::anyhow!("map 'SOCKET_FLOW' not found"))?,
         )?;
-        info!("socket attribution tables acquired (SOCKET_IDENTITY, SOCKET_FLOW)");
-        Ok(Self { sockets, flows })
+        let listeners = AyaHashMap::try_from(
+            ebpf.take_map("LISTENING_SOCKETS")
+                .ok_or_else(|| anyhow::anyhow!("map 'LISTENING_SOCKETS' not found"))?,
+        )?;
+        info!(
+            "socket attribution tables acquired (SOCKET_IDENTITY, SOCKET_FLOW, LISTENING_SOCKETS)"
+        );
+        Ok(Self {
+            sockets,
+            flows,
+            listeners,
+        })
     }
 
     /// An entry is usable when the clock agrees it is recent.
@@ -174,6 +187,48 @@ impl SocketIdentityReader for EbpfSocketIdentityReader {
         let identity = Self::fresh(identity, boottime_now_ns())?;
         owner_of(identity, WorkloadSource::Flow)
     }
+
+    fn bound_sockets(&self) -> Vec<BoundSocket> {
+        // No time-to-live here: a listener lives as long as its socket, and
+        // the close is what takes it out. A server up for a month is still
+        // listening, and refusing its record on age would hide exactly the
+        // long-lived exposure this table exists to show.
+        self.listeners
+            .iter()
+            .filter_map(Result::ok)
+            .filter_map(|(_, listener)| bound_socket(&listener))
+            .collect()
+    }
+}
+
+/// The domain's reading of one table entry, or `None` for an entry that names
+/// no process or carries a protocol that is not a listener.
+fn bound_socket(listener: &ListeningSocket) -> Option<BoundSocket> {
+    let identity = listener.identity;
+    if identity.tgid == 0 {
+        return None;
+    }
+    let address = match identity.family {
+        ATTRIBUTION_FAMILY_IPV4 => IpAddr::V4(Ipv4Addr::from(listener.local_addr[0])),
+        ATTRIBUTION_FAMILY_IPV6 => {
+            let mut octets = [0u8; 16];
+            for (i, word) in listener.local_addr.iter().enumerate() {
+                octets[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+            }
+            IpAddr::V6(Ipv6Addr::from(octets))
+        }
+        _ => return None,
+    };
+    Some(BoundSocket {
+        address,
+        port: listener.port,
+        protocol: ListenerProtocol::from_ip_protocol(identity.protocol)?,
+        listening: listener.state == LISTENER_STATE_LISTEN,
+        pid: identity.tgid,
+        uid: identity.uid,
+        cgroup_id: identity.cgroup_id,
+        bound_at_ns: identity.at_ns,
+    })
 }
 
 #[cfg(test)]
@@ -189,6 +244,65 @@ mod tests {
             remote_port: 443,
             protocol: 6,
         }
+    }
+
+    fn listener(family: u8, protocol: u8, local_addr: [u32; 4], state: u8) -> ListeningSocket {
+        ListeningSocket {
+            identity: SocketIdentity {
+                at_ns: 9,
+                cgroup_id: 77,
+                pid: 101,
+                tgid: 100,
+                uid: 33,
+                family,
+                protocol,
+                ..SocketIdentity::default()
+            },
+            local_addr,
+            port: 8443,
+            state,
+            _pad: [0; 5],
+        }
+    }
+
+    #[test]
+    fn a_listener_reads_back_in_the_encoding_the_flow_key_writes() {
+        let v4 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7));
+        let read = bound_socket(&listener(
+            ATTRIBUTION_FAMILY_IPV4,
+            6,
+            addr_words(v4),
+            LISTENER_STATE_LISTEN,
+        ));
+        let read = read.unwrap();
+        assert_eq!(read.address, v4);
+        assert_eq!(read.port, 8443);
+        assert_eq!(read.pid, 100);
+        assert_eq!(read.cgroup_id, 77);
+        assert!(read.listening);
+
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        let read = bound_socket(&listener(
+            ATTRIBUTION_FAMILY_IPV6,
+            17,
+            addr_words(v6),
+            ebpf_common::attribution::LISTENER_STATE_BOUND,
+        ));
+        let read = read.unwrap();
+        assert_eq!(read.address, v6);
+        assert_eq!(read.protocol, ListenerProtocol::Udp);
+        assert!(!read.listening);
+    }
+
+    #[test]
+    fn a_listener_naming_no_process_or_no_known_protocol_is_not_listed() {
+        let mut nobody = listener(ATTRIBUTION_FAMILY_IPV4, 6, [0; 4], LISTENER_STATE_LISTEN);
+        nobody.identity.tgid = 0;
+        assert!(bound_socket(&nobody).is_none());
+        let sctp = listener(ATTRIBUTION_FAMILY_IPV4, 132, [0; 4], LISTENER_STATE_LISTEN);
+        assert!(bound_socket(&sctp).is_none());
+        let unknown_family = listener(0, 6, [0; 4], LISTENER_STATE_LISTEN);
+        assert!(bound_socket(&unknown_family).is_none());
     }
 
     #[test]

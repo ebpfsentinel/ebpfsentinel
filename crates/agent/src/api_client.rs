@@ -2002,6 +2002,33 @@ pub struct RawSocketsResponse {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct ListenerEntry {
+    pub address: String,
+    pub port: u16,
+    pub protocol: String,
+    pub scope: String,
+    pub sockets: u32,
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    pub bound_at_boot_ns: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ListenersResponse {
+    pub reading: bool,
+    pub listeners: Vec<ListenerEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct ProgramTypeSupport {
     pub program_type: String,
     pub supported: bool,
@@ -3895,6 +3922,15 @@ impl ApiClient {
     pub async fn foreign_programs(&self) -> anyhow::Result<NetworkProgramsResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/ebpf/foreign-programs")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn exposure_listeners(&self) -> anyhow::Result<ListenersResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/exposure/listeners")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

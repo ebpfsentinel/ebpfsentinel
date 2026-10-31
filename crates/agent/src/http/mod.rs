@@ -12,6 +12,7 @@ pub mod dns_handler;
 pub mod domain_handler;
 pub mod drop_reason_handler;
 pub mod error;
+pub mod exposure_handler;
 pub mod fingerprint_handler;
 pub mod firewall_handler;
 pub mod flow_handler;

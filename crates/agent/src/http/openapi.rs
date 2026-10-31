@@ -17,6 +17,7 @@ use super::dns_handler;
 use super::domain_handler;
 use super::drop_reason_handler;
 use super::error;
+use super::exposure_handler;
 use super::fingerprint_handler;
 use super::firewall_handler;
 use super::flow_handler;
@@ -136,6 +137,7 @@ use super::zone_handler;
         ops_handler::get_uprobes,
         drop_reason_handler::get_drop_reasons,
         raw_socket_handler::get_raw_sockets,
+        exposure_handler::get_listeners,
         network_program_handler::get_foreign_programs,
         // DNS
         dns_handler::dns_status,
@@ -367,6 +369,8 @@ use super::zone_handler;
         drop_reason_handler::DropReasonsResponse,
         drop_reason_handler::DropReasonBody,
         raw_socket_handler::RawSocketsResponse,
+        exposure_handler::ListenersResponse,
+        exposure_handler::ListenerBody,
         raw_socket_handler::RawSocketBody,
         network_program_handler::NetworkProgramsResponse,
         network_program_handler::NetworkProgramBody,

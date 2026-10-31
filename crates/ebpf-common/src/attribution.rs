@@ -78,8 +78,27 @@ pub const ATTRIBUTION_METRIC_INSERT_FAILED: u32 = 5;
 /// lets a connection read out of the kernel's own conntrack table name a
 /// process the agent never saw a packet for.
 pub const ATTRIBUTION_METRIC_FLOW: u32 = 6;
+/// Metric index: sockets recorded in `LISTENING_SOCKETS` by a bind or
+/// promoted there by a `listen()`.
+pub const ATTRIBUTION_METRIC_LISTENER: u32 = 7;
+/// Metric index: listening sockets taken out of the table because the socket
+/// was closed or turned into an outgoing connection.
+pub const ATTRIBUTION_METRIC_LISTENER_GONE: u32 = 8;
 /// Total number of attribution metric slots (one past the last index).
-pub const ATTRIBUTION_METRIC_COUNT: u32 = 7;
+pub const ATTRIBUTION_METRIC_COUNT: u32 = 9;
+
+/// Ceiling of the listening-socket table. A node rarely holds more than a few
+/// hundred listeners; the headroom is for UDP sockets, every one of which is
+/// recorded by its bind, and for a client socket that binds before it
+/// connects, which sits here until its connection comes up.
+pub const ATTRIBUTION_MAX_LISTENERS: u32 = 16_384;
+
+/// A socket that has taken a local address and has not called `listen()`.
+/// For UDP this is the whole of listening; for TCP it is a socket that may
+/// still become a server or a client.
+pub const LISTENER_STATE_BOUND: u8 = 1;
+/// A TCP socket that has called `listen()`.
+pub const LISTENER_STATE_LISTEN: u8 = 2;
 
 /// The task that owned a socket at the moment the kernel first saw it used.
 ///
@@ -153,6 +172,32 @@ pub struct FlowIdentityKey {
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for FlowIdentityKey {}
 
+/// A socket holding a local address, keyed by its cookie in
+/// `LISTENING_SOCKETS`.
+///
+/// Written by the post-bind hooks in the binding task's own context, so the
+/// owner is read rather than guessed, promoted to `LISTENER_STATE_LISTEN` by
+/// the `sockops` listen callback, and deleted when the socket is released.
+/// The address is the one the task asked for: all zeroes is a socket bound on
+/// every address of its namespace.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ListeningSocket {
+    /// The binding task, exactly as `SOCKET_IDENTITY` records it.
+    pub identity: SocketIdentity,
+    /// The bound address, in the encoding of `FlowIdentityKey`: IPv4 in the
+    /// first word, the rest zero.
+    pub local_addr: [u32; 4],
+    /// The bound port, host order.
+    pub port: u16,
+    /// `LISTENER_STATE_*`.
+    pub state: u8,
+    pub _pad: [u8; 5],
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for ListeningSocket {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +233,18 @@ mod tests {
         assert_eq!(mem::offset_of!(FlowIdentityKey, remote_port), 34);
         assert_eq!(mem::offset_of!(FlowIdentityKey, protocol), 36);
         assert_eq!(mem::offset_of!(FlowIdentityKey, family), 37);
+    }
+
+    #[test]
+    fn the_listening_socket_is_sixty_four_bytes_with_no_implicit_padding() {
+        assert_eq!(mem::size_of::<ListeningSocket>(), 64);
+        assert_eq!(mem::align_of::<ListeningSocket>(), 8);
+        assert_eq!(mem::offset_of!(ListeningSocket, identity), 0);
+        assert_eq!(mem::offset_of!(ListeningSocket, local_addr), 40);
+        assert_eq!(mem::offset_of!(ListeningSocket, port), 56);
+        assert_eq!(mem::offset_of!(ListeningSocket, state), 58);
+        assert_ne!(LISTENER_STATE_BOUND, LISTENER_STATE_LISTEN);
+        assert_ne!(LISTENER_STATE_BOUND, 0);
     }
 
     #[test]
@@ -228,9 +285,14 @@ mod tests {
 
     #[test]
     fn the_metric_count_is_one_past_the_last_slot() {
-        assert_eq!(ATTRIBUTION_METRIC_COUNT, ATTRIBUTION_METRIC_FLOW + 1);
+        assert_eq!(
+            ATTRIBUTION_METRIC_COUNT,
+            ATTRIBUTION_METRIC_LISTENER_GONE + 1
+        );
         const {
             assert!(ATTRIBUTION_METRIC_INSERT_FAILED < ATTRIBUTION_METRIC_FLOW);
+            assert!(ATTRIBUTION_METRIC_FLOW < ATTRIBUTION_METRIC_LISTENER);
+            assert!(ATTRIBUTION_METRIC_LISTENER < ATTRIBUTION_METRIC_LISTENER_GONE);
         }
     }
 }

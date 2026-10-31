@@ -24,6 +24,7 @@ const ALLOWED_ATTACH_TYPES: &[u32] = &[
     BPF_CGROUP_UDP4_SENDMSG,
     BPF_CGROUP_UDP6_SENDMSG,
     BPF_CGROUP_SOCK_OPS,
+    BPF_CGROUP_INET_SOCK_RELEASE,
 ];
 
 /// `BPF_CGROUP_INET_INGRESS` from `enum bpf_attach_type`.
@@ -54,6 +55,11 @@ pub const BPF_CGROUP_INET6_POST_BIND: u32 = 13;
 pub const BPF_CGROUP_UDP4_SENDMSG: u32 = 14;
 /// `BPF_CGROUP_UDP6_SENDMSG` from `enum bpf_attach_type`.
 pub const BPF_CGROUP_UDP6_SENDMSG: u32 = 15;
+/// `BPF_CGROUP_INET_SOCK_RELEASE` from `enum bpf_attach_type`.
+///
+/// The close of a socket, which is what takes a listener out of the table the
+/// post-bind hooks fill.
+pub const BPF_CGROUP_INET_SOCK_RELEASE: u32 = 34;
 
 /// Where a cgroup v2 hierarchy is allowed to be. A path outside it is refused
 /// before anything is opened: the warden runs as root in the init namespaces,
@@ -171,6 +177,14 @@ mod tests {
         assert!(ALLOWED_ATTACH_TYPES.contains(&BPF_CGROUP_INET6_BIND));
         assert_ne!(BPF_CGROUP_INET4_BIND, BPF_CGROUP_INET4_POST_BIND);
         assert_ne!(BPF_CGROUP_INET6_BIND, BPF_CGROUP_INET6_POST_BIND);
+    }
+
+    #[test]
+    fn the_close_of_a_socket_is_attachable_so_a_listener_leaves_the_table() {
+        assert!(ALLOWED_ATTACH_TYPES.contains(&BPF_CGROUP_INET_SOCK_RELEASE));
+        // `BPF_CGROUP_INET_SOCK_CREATE` is 2 and decides whether a socket
+        // may exist at all, which nothing here has any business doing.
+        assert!(!ALLOWED_ATTACH_TYPES.contains(&2));
     }
 
     #[test]

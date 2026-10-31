@@ -4594,6 +4594,50 @@ pub async fn cmd_ebpf_drops(client: &ApiClient, output: OutputFormat) -> Result<
     Ok(())
 }
 
+/// Print the sockets this node accepts traffic on and the workload that
+/// bound each, every address first.
+pub async fn cmd_exposure_listeners(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.exposure_listeners().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    if !resp.reading {
+        println!("The socket hooks are not attached on this node, so its listeners are unknown.");
+        return Ok(());
+    }
+    if resp.listeners.is_empty() {
+        println!("No listener recorded since the socket hooks attached.");
+        return Ok(());
+    }
+    let mut table = Table::new(&[
+        ("PROTO", Align::Left),
+        ("ADDRESS", Align::Left),
+        ("PORT", Align::Right),
+        ("SCOPE", Align::Left),
+        ("PID", Align::Right),
+        ("EXECUTABLE", Align::Left),
+        ("POD", Align::Left),
+        ("UNIT", Align::Left),
+    ]);
+    for listener in &resp.listeners {
+        table.row(cells![
+            listener.protocol,
+            listener.address,
+            listener.port.to_string(),
+            listener.scope,
+            listener.pid.to_string(),
+            listener.executable.as_deref().unwrap_or("-"),
+            listener.pod.as_deref().unwrap_or("-"),
+            listener.unit.as_deref().unwrap_or("-")
+        ]);
+    }
+    table.print();
+    Ok(())
+}
+
 /// Print the packet sockets open on this node, who holds them and what
 /// filter is attached to them.
 pub async fn cmd_ebpf_raw_sockets(client: &ApiClient, output: OutputFormat) -> Result<()> {

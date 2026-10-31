@@ -185,6 +185,8 @@ pub struct AppState {
     pub crypto_posture: ArcSwapOption<application::crypto_posture_meter::CryptoPostureMeter>,
     /// The kernel's drop counts, once the counter is attached.
     pub kernel_drops: ArcSwapOption<application::kernel_drop_service::KernelDropService>,
+    /// The node's listeners, read from the socket hooks' tables.
+    pub exposure: ArcSwapOption<application::exposure_service::ExposureService>,
     /// The inventory of the node's packet sockets, once it reads.
     pub raw_sockets: ArcSwapOption<application::raw_socket_service::RawSocketWatcher>,
     /// The inventory of the other eBPF programs on the network path, once
@@ -237,6 +239,7 @@ impl AppState {
             service_graph: ArcSwapOption::empty(),
             crypto_posture: ArcSwapOption::empty(),
             kernel_drops: ArcSwapOption::empty(),
+            exposure: ArcSwapOption::empty(),
             raw_sockets: ArcSwapOption::empty(),
             network_programs: ArcSwapOption::empty(),
             nat_service: None,
@@ -468,6 +471,12 @@ impl AppState {
         service: Arc<application::kernel_drop_service::KernelDropService>,
     ) {
         self.kernel_drops.store(Some(service));
+    }
+
+    /// Hand the listener inventory over. It shares the workload resolver,
+    /// so it reads nothing until the socket hooks attach.
+    pub fn install_exposure(&self, service: Arc<application::exposure_service::ExposureService>) {
+        self.exposure.store(Some(service));
     }
 
     /// Hand the packet socket inventory over once it reads.

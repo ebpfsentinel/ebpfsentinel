@@ -1,10 +1,10 @@
 //! Attaching the socket-attribution hooks, and saying so when they cannot be.
 //!
-//! The seven programs of the attribution object sit on a cgroup rather than
+//! The eight programs of the attribution object sit on a cgroup rather than
 //! on an interface: `connect4`/`connect6` and `sendmsg4`/`sendmsg6` fire in
 //! the syscall of the task that opens the socket, `post_bind4`/`post_bind6`
-//! when it binds one, and the `sock_ops` join fires once the connection is
-//! established. Attaching to the root of the v2 hierarchy covers every task
+//! when it binds one, `sock_release` when it closes one, and the `sock_ops`
+//! join fires once the connection is established. Attaching to the root of the v2 hierarchy covers every task
 //! on the node, which is what a node agent wants.
 //!
 //! Nothing here enforces. Every program returns the allow verdict and the
@@ -37,10 +37,15 @@ pub const BPF_CGROUP_INET6_POST_BIND: u32 = 13;
 pub const BPF_CGROUP_UDP4_SENDMSG: u32 = 14;
 /// `BPF_CGROUP_UDP6_SENDMSG` from `enum bpf_attach_type`.
 pub const BPF_CGROUP_UDP6_SENDMSG: u32 = 15;
+/// `BPF_CGROUP_INET_SOCK_RELEASE` from `enum bpf_attach_type`.
+///
+/// The close of a socket, which is what takes a listener out of the table the
+/// post-bind hooks fill.
+pub const BPF_CGROUP_INET_SOCK_RELEASE: u32 = 34;
 
 /// The one hook of the object that may be absent on its own.
 ///
-/// It joins the socket the other six recorded to the connection the datapath
+/// It joins the socket the other hooks recorded to the connection the datapath
 /// sees, and it is the only program of the object that calls
 /// `bpf_get_socket_cookie` from a `sock_ops` context. A kernel can take every
 /// other hook and refuse that one helper to that one program type, so the
@@ -61,6 +66,7 @@ pub const ATTRIBUTION_HOOKS: &[(&str, u32)] = &[
     ("attribution_connect6", BPF_CGROUP_INET6_CONNECT),
     ("attribution_post_bind4", BPF_CGROUP_INET4_POST_BIND),
     ("attribution_post_bind6", BPF_CGROUP_INET6_POST_BIND),
+    ("attribution_sock_release", BPF_CGROUP_INET_SOCK_RELEASE),
     ("attribution_sendmsg4", BPF_CGROUP_UDP4_SENDMSG),
     ("attribution_sendmsg6", BPF_CGROUP_UDP6_SENDMSG),
     ("attribution_sockops", BPF_CGROUP_SOCK_OPS),

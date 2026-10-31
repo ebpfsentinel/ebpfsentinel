@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
+use domain::exposure::entity::BoundSocket;
 use domain::workload::entity::{Workload, WorkloadSource};
 use ports::secondary::socket_identity_port::{FlowEndpoints, SocketIdentityReader, SocketOwner};
 
@@ -129,6 +130,32 @@ impl WorkloadResolver {
         Some(
             base.with_process(&entry)
                 .with_lineage(&processes.lineage(pid)),
+        )
+    }
+
+    /// Every socket this node holds bound now, each with the workload that
+    /// bound it, or `None` when no socket table is installed: a node with the
+    /// hooks refused does not know its listeners, which is not the same as
+    /// having none.
+    #[must_use]
+    pub fn bound_sockets(&self) -> Option<Vec<(BoundSocket, Workload)>> {
+        let sockets = self.sockets.load();
+        let reader = sockets.as_ref()?;
+        Some(
+            reader
+                .bound_sockets()
+                .into_iter()
+                .map(|socket| {
+                    let owner = SocketOwner {
+                        pid: socket.pid,
+                        tgid: socket.pid,
+                        uid: socket.uid,
+                        cgroup_id: socket.cgroup_id,
+                        source: WorkloadSource::Socket,
+                    };
+                    (socket, self.enrich(owner))
+                })
+                .collect(),
         )
     }
 

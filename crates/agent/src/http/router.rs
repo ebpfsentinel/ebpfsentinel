@@ -83,6 +83,7 @@ use super::dns_handler::{
 };
 use super::domain_handler::{add_to_blocklist, list_domain_reputations, remove_from_blocklist};
 use super::drop_reason_handler::get_drop_reasons;
+use super::exposure_handler::get_listeners;
 use super::fingerprint_handler::{fingerprint_summary, ja4s_summary};
 use super::firewall_handler::{
     create_rule, delete_rule, list_rules, list_workload_rules, workload_fqdn, workload_labels,
@@ -312,6 +313,7 @@ pub fn build_router(
             .route("/api/v1/ebpf/uprobes", get(get_uprobes))
             .route("/api/v1/ebpf/drop-reasons", get(get_drop_reasons))
             .route("/api/v1/ebpf/raw-sockets", get(get_raw_sockets))
+            .route("/api/v1/exposure/listeners", get(get_listeners))
             .route("/api/v1/ebpf/foreign-programs", get(get_foreign_programs))
             .route("/api/v1/dns/status", get(dns_status))
             .route("/api/v1/dns/cache", get(list_dns_cache))

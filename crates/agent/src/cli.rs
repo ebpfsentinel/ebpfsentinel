@@ -276,6 +276,9 @@ pub enum Command {
     /// eBPF programs, uprobes and kernel feature support
     Ebpf(DomainArgs<EbpfCommand>),
 
+    /// What this node exposes: listening sockets and who bound them
+    Exposure(DomainArgs<ExposureCommand>),
+
     /// Running configuration: show and reload
     Config(DomainArgs<ConfigCommand>),
 
@@ -1146,6 +1149,15 @@ pub enum TlsCommand {
     },
     /// Show the cryptographic posture of each edge between workloads
     Posture,
+}
+
+// ── Exposure ────────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum ExposureCommand {
+    /// List the sockets the node accepts traffic on and the workload that
+    /// bound each
+    Listeners,
 }
 
 // ── Aliases ─────────────────────────────────────────────────────────────
@@ -2708,6 +2720,18 @@ mod tests {
             cli.command,
             Some(Command::Ebpf(DomainArgs {
                 command: EbpfCommand::Drops,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_exposure_listeners() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "exposure", "listeners"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Exposure(DomainArgs {
+                command: ExposureCommand::Listeners,
                 ..
             }))
         ));

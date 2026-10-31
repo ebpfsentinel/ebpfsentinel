@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 
+use domain::exposure::entity::BoundSocket;
 use domain::workload::entity::WorkloadSource;
 
 /// The two ends of a connection as a reader of the kernel tables states them.
@@ -64,4 +65,15 @@ pub trait SocketIdentityReader: Send + Sync {
     /// answers only when the local end given is the end the socket was
     /// opened from.
     fn by_originated_flow(&self, flow: &FlowEndpoints) -> Option<SocketOwner>;
+
+    /// Every socket holding a local address now, with the task that bound it.
+    ///
+    /// The post-bind hooks write the table and the close of the socket
+    /// empties it, so this is the node's bound sockets as the kernel holds
+    /// them rather than a history. A socket bound before the hooks attached
+    /// is not in it. The default is the answer of a reader with no such
+    /// table, which is every reader but the kernel's.
+    fn bound_sockets(&self) -> Vec<BoundSocket> {
+        Vec::new()
+    }
 }

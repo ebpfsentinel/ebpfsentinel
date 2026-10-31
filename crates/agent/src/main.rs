@@ -11,11 +11,11 @@ use anyhow::Result;
 use api_client::ApiClient;
 use cli::{
     AlertsCommand, AliasesCommand, AuditCommand, BlacklistAction, CaptureCommand, Command,
-    ConfigCommand, DdosCommand, DlpCommand, DnsCommand, DomainsCommand, EbpfCommand, FeedsAction,
-    FingerprintsCommand, FirewallCommand, FlowsAction, GeoipCommand, IdsCommand, IpsCommand,
-    L7Command, LbCommand, LearningCommand, MitreCommand, NatCommand, NetpolCommand, NptV6Command,
-    ProcessesCommand, QosCommand, RatelimitCommand, ResponsesCommand, RoutingCommand,
-    ThreatintelCommand, TlsCommand, ZonesCommand,
+    ConfigCommand, DdosCommand, DlpCommand, DnsCommand, DomainsCommand, EbpfCommand,
+    ExposureCommand, FeedsAction, FingerprintsCommand, FirewallCommand, FlowsAction, GeoipCommand,
+    IdsCommand, IpsCommand, L7Command, LbCommand, LearningCommand, MitreCommand, NatCommand,
+    NetpolCommand, NptV6Command, ProcessesCommand, QosCommand, RatelimitCommand, ResponsesCommand,
+    RoutingCommand, ThreatintelCommand, TlsCommand, ZonesCommand,
 };
 
 fn main() -> Result<()> {
@@ -704,6 +704,15 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
                 DlpCommand::Status => commands::cmd_dlp_status(&client, output).await,
                 DlpCommand::Patterns => commands::cmd_dlp_patterns(&client, output).await,
                 DlpCommand::Scope => commands::cmd_dlp_scope(&client, output).await,
+            }
+        }
+
+        Some(Command::Exposure(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                ExposureCommand::Listeners => {
+                    commands::cmd_exposure_listeners(&client, output).await
+                }
             }
         }
 
