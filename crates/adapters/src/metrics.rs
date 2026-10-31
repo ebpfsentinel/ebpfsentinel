@@ -1,4 +1,5 @@
 use crate::ebpf::XDP_ATTACH_MODES;
+use domain::tcp_health::TcpCounts;
 use ports::secondary::metrics_port::{
     AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
     DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics,
@@ -181,6 +182,34 @@ pub struct L7RequestLabels {
 pub struct KernelDropLabels {
     pub reason: String,
     pub interface: String,
+}
+
+/// Labels for the TCP retransmission counter. `service` and `peer` are
+/// bounded by the cap on distinct service names, `role` by a fixed pair.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct TcpEdgeLabels {
+    pub service: String,
+    pub peer: String,
+    pub role: String,
+}
+
+/// Labels for the TCP reset counter: an edge and `sent` or `received`.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct TcpResetLabels {
+    pub service: String,
+    pub peer: String,
+    pub role: String,
+    pub direction: String,
+}
+
+/// Labels for the TCP connection counter: an edge and `opened`, `failed` or
+/// `closed`.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct TcpConnectionLabels {
+    pub service: String,
+    pub peer: String,
+    pub role: String,
+    pub outcome: String,
 }
 
 /// Labels for `l7_port_promise`: a port from the agent's fixed table of
@@ -434,6 +463,10 @@ pub struct AgentMetrics {
     /// Drops the kernel-side counter saw but had no room to count under a
     /// reason and interface.
     pub kernel_drops_uncounted_total: Counter,
+    pub tcp_retransmits_total: Family<TcpEdgeLabels, Counter>,
+    pub tcp_resets_total: Family<TcpResetLabels, Counter>,
+    pub tcp_connections_total: Family<TcpConnectionLabels, Counter>,
+    pub tcp_health_uncounted_total: Counter,
     /// Connections compared with the protocol their port promises, by port
     /// and verdict.
     pub l7_port_promise_total: Family<PortPromiseLabels, Counter>,
@@ -1082,6 +1115,34 @@ impl AgentMetrics {
             kernel_drops_uncounted_total.clone(),
         );
 
+        let tcp_retransmits_total = Family::<TcpEdgeLabels, Counter>::default();
+        registry.register(
+            "tcp_retransmits",
+            "TCP segments sent again, by the local service, its peer and the local end's role",
+            tcp_retransmits_total.clone(),
+        );
+
+        let tcp_resets_total = Family::<TcpResetLabels, Counter>::default();
+        registry.register(
+            "tcp_resets",
+            "TCP resets sent or received, by the local service, its peer and the local end's role",
+            tcp_resets_total.clone(),
+        );
+
+        let tcp_connections_total = Family::<TcpConnectionLabels, Counter>::default();
+        registry.register(
+            "tcp_connections",
+            "TCP connections opened, failed before they were established, or closed, by edge",
+            tcp_connections_total.clone(),
+        );
+
+        let tcp_health_uncounted_total = Counter::default();
+        registry.register(
+            "tcp_health_uncounted",
+            "TCP events seen but not counted under an edge, because the edge map was full or the socket could not be read",
+            tcp_health_uncounted_total.clone(),
+        );
+
         let l7_port_promise_total = Family::<PortPromiseLabels, Counter>::default();
         registry.register(
             "l7_port_promise",
@@ -1278,6 +1339,10 @@ impl AgentMetrics {
             l7_request_duration_seconds,
             kernel_drops_total,
             kernel_drops_uncounted_total,
+            tcp_retransmits_total,
+            tcp_resets_total,
+            tcp_connections_total,
+            tcp_health_uncounted_total,
             l7_port_promise_total,
             l7_port_promise_uncounted_total,
             container_resolver_cache_hits_total,
@@ -1365,6 +1430,53 @@ impl PacketMetrics for AgentMetrics {
 
     fn record_kernel_drops_uncounted(&self, count: u64) {
         self.kernel_drops_uncounted_total.inc_by(count);
+    }
+
+    fn record_tcp_edge(&self, service: &str, peer: &str, role: &str, counts: &TcpCounts) {
+        if counts.retransmits > 0 {
+            self.tcp_retransmits_total
+                .get_or_create(&TcpEdgeLabels {
+                    service: service.to_string(),
+                    peer: peer.to_string(),
+                    role: role.to_string(),
+                })
+                .inc_by(counts.retransmits);
+        }
+        for (direction, added) in [
+            ("sent", counts.resets_sent),
+            ("received", counts.resets_received),
+        ] {
+            if added > 0 {
+                self.tcp_resets_total
+                    .get_or_create(&TcpResetLabels {
+                        service: service.to_string(),
+                        peer: peer.to_string(),
+                        role: role.to_string(),
+                        direction: direction.to_string(),
+                    })
+                    .inc_by(added);
+            }
+        }
+        for (outcome, added) in [
+            ("opened", counts.opened),
+            ("failed", counts.failed),
+            ("closed", counts.closed),
+        ] {
+            if added > 0 {
+                self.tcp_connections_total
+                    .get_or_create(&TcpConnectionLabels {
+                        service: service.to_string(),
+                        peer: peer.to_string(),
+                        role: role.to_string(),
+                        outcome: outcome.to_string(),
+                    })
+                    .inc_by(added);
+            }
+        }
+    }
+
+    fn record_tcp_health_uncounted(&self, count: u64) {
+        self.tcp_health_uncounted_total.inc_by(count);
     }
 
     fn record_l7_port_promise(&self, port: u16, verdict: &str) {
@@ -2662,6 +2774,10 @@ mod tests {
         ("routing_gateways", "gauge"),
         ("rules_loaded", "gauge"),
         ("rules_reloads", "counter"),
+        ("tcp_connections", "counter"),
+        ("tcp_health_uncounted", "counter"),
+        ("tcp_resets", "counter"),
+        ("tcp_retransmits", "counter"),
         ("thread_count", "gauge"),
         ("threatintel_feed_indicators", "gauge"),
         ("threatintel_feed_last_refresh_timestamp_seconds", "gauge"),
@@ -2966,6 +3082,17 @@ mod tests {
             .observe(0.000_01);
         m.record_l7_request("shop/api", "server", "http", "ok", Some(0.001));
         m.record_kernel_drops("NO_SOCKET", "eth0", 1);
+        m.record_tcp_edge(
+            "shop/api",
+            "off_node",
+            "server",
+            &TcpCounts {
+                retransmits: 1,
+                resets_sent: 1,
+                opened: 1,
+                ..TcpCounts::default()
+            },
+        );
         m.record_l7_port_promise(443, "mismatch");
         m.dlp_scan_duration_seconds.observe(0.000_01);
         m.link_attach_gap_seconds

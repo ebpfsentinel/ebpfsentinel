@@ -133,6 +133,30 @@ impl WorkloadResolver {
         )
     }
 
+    /// The workload holding a cgroup, named after the oldest live process
+    /// the table holds in it, which in a container or a systemd unit is the
+    /// one that started it rather than a short-lived child. `None` for the
+    /// root cgroup's zero, for a cgroup the table holds no process in, and
+    /// when no process table is installed.
+    #[must_use]
+    pub fn by_cgroup(&self, cgroup_id: u64) -> Option<Workload> {
+        if cgroup_id == 0 {
+            return None;
+        }
+        let pid = {
+            let processes = self.processes.load();
+            let processes = processes.as_ref()?;
+            processes
+                .list()
+                .into_iter()
+                .filter(|entry| entry.cgroup_id == cgroup_id)
+                .min_by_key(|entry| (entry.started_at_ns, entry.pid))?
+                .pid
+        };
+        self.by_pid(pid)
+            .map(|workload| workload.with_cgroup(cgroup_id))
+    }
+
     /// The connections this node accepted per local address and port, or
     /// `None` when no socket table is installed.
     #[must_use]
@@ -281,6 +305,23 @@ mod tests {
         assert!(!held.is_wired());
         resolver.install_sockets(Box::new(FixedSocket(Some(owner()))));
         assert!(held.by_cookie(42).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_cgroup_is_named_after_the_oldest_process_in_it() {
+        let service = ProcessTableService::new(16, false);
+        for (pid, comm, at) in [(300, "worker", 9), (200, "postgres", 3), (400, "other", 1)] {
+            let mut event = ProcessLifecycleEvent::bare(ProcessEventKind::Exec, pid, comm, at);
+            event.cgroup_id = if pid == 400 { 55 } else { 77 };
+            service.apply(event).await;
+        }
+        let resolver = WorkloadResolver::new().with_processes(Arc::new(service));
+        let workload = resolver.by_cgroup(77).expect("two processes sit in it");
+        assert_eq!(workload.pid, 200);
+        assert_eq!(workload.cgroup, Some(77));
+        assert!(resolver.by_cgroup(99).is_none());
+        assert!(resolver.by_cgroup(0).is_none());
+        assert!(WorkloadResolver::new().by_cgroup(77).is_none());
     }
 
     #[test]

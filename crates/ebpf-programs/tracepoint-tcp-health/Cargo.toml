@@ -1,0 +1,15 @@
+[package]
+name = "tracepoint-tcp-health"
+version = "0.0.0-dev"
+edition = "2024"
+
+[dependencies]
+aya-ebpf = "0.2.1"
+# Held on 0.2 with aya-ebpf; why, and what lifts it: crates/ebpf-helpers/Cargo.toml.
+aya-ebpf-bindings = "0.2.0"
+ebpf-common = { path = "../../ebpf-common", default-features = false }
+ebpf-helpers = { path = "../../ebpf-helpers" }
+
+[[bin]]
+name = "tracepoint-tcp-health"
+path = "src/main.rs"

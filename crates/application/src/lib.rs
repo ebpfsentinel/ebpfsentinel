@@ -105,6 +105,7 @@ pub mod raw_socket_service;
 pub mod reputation_enforcement;
 pub mod routing_service_impl;
 pub mod schedule_service_impl;
+pub mod tcp_health_service;
 pub mod telemetry_service;
 pub mod threatintel_service_impl;
 pub mod vip_announcer_service_impl;

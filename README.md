@@ -81,7 +81,7 @@ A snapshot of the capabilities below - see the [Features guide](https://github.c
 
 ```mermaid
 flowchart TB
-    subgraph kernel["Linux Kernel (24 eBPF programs)"]
+    subgraph kernel["Linux Kernel (25 eBPF programs)"]
         direction TB
         subgraph xdp["XDP - first hook on the receive path"]
             fw["xdp-firewall\n(stateful L3/L4)"]
@@ -104,6 +104,7 @@ flowchart TB
         end
         uprobe["uprobe-dlp\n(SSL/TLS intercept)"]
         drops["tracepoint-drop-reason\n(why the kernel dropped a packet)"]
+        tcphealth["tracepoint-tcp-health\n(retransmits and resets per edge)"]
         subgraph off_wire["Off the wire - who, not what"]
             attr["cgroup-attribution\n(connect/bind/sendmsg + sock_ops)"]
             wl["cgroup-workload-firewall\n(connect/sendmsg/bind verdict)"]

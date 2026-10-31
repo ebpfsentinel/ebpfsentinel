@@ -39,6 +39,7 @@ exclude = [
     "crates/ebpf-programs/tracepoint-process",
     "crates/ebpf-programs/tracepoint-signal",
     "crates/ebpf-programs/tracepoint-drop-reason",
+    "crates/ebpf-programs/tracepoint-tcp-health",
     "crates/ebpf-programs/lsm-exec-network",
     "crates/ebpf-programs/lsm-bpf-guard",
 ]

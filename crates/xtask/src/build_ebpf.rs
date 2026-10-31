@@ -26,6 +26,7 @@ pub(crate) const EBPF_PROGRAMS: &[&str] = &[
     "tracepoint-process",
     "tracepoint-signal",
     "tracepoint-drop-reason",
+    "tracepoint-tcp-health",
     "lsm-exec-network",
     "lsm-bpf-guard",
 ];

@@ -36,6 +36,7 @@ mod qos;
 mod ratelimit;
 mod response;
 mod routing;
+mod tcp_health;
 mod telemetry;
 mod threatintel;
 mod zone;
@@ -100,6 +101,7 @@ pub use response::{
     MAX_RESPONSE_TTL_CEILING_SECS, MAX_SIGNAL_NUMBER, ResponseConfig,
 };
 pub use routing::{GatewayConfig, HealthCheckConfig, RoutingConfig};
+pub use tcp_health::TcpHealthConfig;
 pub use telemetry::{DISABLE_ENV as TELEMETRY_DISABLE_ENV, TelemetryConfig};
 pub use threatintel::{
     THREATINTEL_MAX_CAPACITY, THREATINTEL_MIN_CAPACITY, ThreatIntelConfig, ThreatIntelFeedConfig,
@@ -284,6 +286,11 @@ pub struct AgentConfig {
     /// interface the packet was on. On by default.
     #[serde(default)]
     pub kernel_drops: KernelDropsConfig,
+
+    /// Retransmissions, resets and connections opened, failed and closed,
+    /// counted per edge between two services. On by default.
+    #[serde(default)]
+    pub tcp_health: TcpHealthConfig,
 
     /// The packet sockets open on the node, who holds them and what filter
     /// is attached to them. On by default.
@@ -554,6 +561,7 @@ impl AgentConfig {
         // Validate the telemetry block
         self.telemetry.validate()?;
         self.kernel_drops.validate()?;
+        self.tcp_health.validate()?;
         self.network_inventory.validate()?;
 
         // Validate container resolver config

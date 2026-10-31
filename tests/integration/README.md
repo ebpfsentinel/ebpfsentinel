@@ -204,6 +204,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `tc-scrub` | 23, 40, 46, 67 | 3vm | 6.9 | pr | Packet normalization; spoofed-source amplification drop in 40; byte-level pcap assertions (TTL floor, MSS clamp, DF clear, IP-ID rand) in 46 |
 | `tc-threatintel` | 17, 33, 67 | 2vm | 6.9 | pr | OSINT feed IOC matching (TC) |
 | `tracepoint-drop-reason` | TBD | none | 6.12 | manual | Counts the packets the kernel frees undelivered, under the skb_drop_reason it gives. No suite yet: nothing provokes a drop of a known reason and reads the counter back |
+| `tracepoint-tcp-health` | 71 | none | 6.12 | nightly | Retransmissions, resets and connections opened, failed and closed, counted per pair of ends at the TCP stack's own tracepoints; 71 provokes resets to a closed port and full connections, and reads both ends back |
 | `tracepoint-process` | 67, 70, perf/07 | none | 6.12 | pr | Exec, fork and exit feeding the process table; 67 reads a program that execed after the hooks attached, 70 decides workload rules on the chain of parents it records, exec() cost measured in perf/07 |
 | `tracepoint-signal` | TBD | none | 6.12 | manual | Signals the task behind a flow from inside that task, for the process response. No suite yet: nothing asserts a named process is stopped |
 | `uprobe-dlp` | 27, 60, 62, perf/06, 67 | 2vm | 6.9 | pr | SSL/TLS DLP via uprobes; per-container uprobe attach across cgroups in suite 60; TLS-MITM inspection is enterprise-only; uprobe SSL-inspection goodput cost (loopback libssl) measured in perf/06 |
@@ -291,6 +292,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `ratelimit` | 04, 14, 38 | 2vm | 6.9 | pr | Token bucket + variants; exhaustion under flood in 38 |
 | `response` | 48 | 2vm | 6.9 | nightly | In-memory ResponseEngine create/list/revoke + TTL auto-expire asserted in 48; auto_response → IpsService → firewall-map mirroring exercised separately by the auto-response pipeline (not in 48) |
 | `routing` | 32, 53 | 2vm | 6.9 | nightly | Multi-WAN routing; failover ordering + REST + metrics surface asserted in 53 (priority-ordered list, gateways_total gauge, failovers_total counter, SIGHUP-driven priority swap). Active health probe loop + WAN_ALL_DOWN alert + real link-down egress reroute tracked as deferred ACs in the suite header |
+| `tcp_health` | 71 | none | 6.12 | nightly | TCP health per edge as named counters, fed by tracepoint-tcp-health; 71 reads the no_listener resets and both ends of a connection |
 | `telemetry` | TBD | none | n/a | manual | Anonymous heartbeat of version and eBPF load state. No suite exercises it: the destination is a build-time constant that no test build carries, so a community or CI binary has nowhere to send one and there is nothing to receive it |
 | `threatintel` | 16, 17, 33 | 2vm | 6.9 | pr | OSINT feeds + IOC + STIX |
 | `workload` | 67, 70 | none | 6.12 | nightly | The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry |

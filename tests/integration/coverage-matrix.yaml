@@ -127,6 +127,7 @@ suite_profiles:
   # every 20 ms; it needs root and an eBPF lane, so nightly.
   "68": nightly
   "70": nightly
+  "71": nightly
   "perf/01": nightly
   "perf/02": nightly
   "perf/03": nightly
@@ -313,6 +314,14 @@ coverage:
     kernel_min: "6.12"
     profile: manual
     notes: "Counts the packets the kernel frees undelivered, under the skb_drop_reason it gives. No suite yet: nothing provokes a drop of a known reason and reads the counter back"
+
+  - kind: ebpf_program
+    feature: tracepoint-tcp-health
+    suites: ["71"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "Retransmissions, resets and connections opened, failed and closed, counted per pair of ends at the TCP stack's own tracepoints; 71 provokes resets to a closed port and full connections, and reads both ends back"
 
   - kind: ebpf_program
     feature: tracepoint-process
@@ -867,6 +876,14 @@ coverage:
     kernel_min: "6.12"
     profile: manual
     notes: "Kernel drop reasons as readable counts, fed by tracepoint-drop-reason. Untested for the same reason as that program"
+
+  - kind: domain_module
+    feature: tcp_health
+    suites: ["71"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "TCP health per edge as named counters, fed by tracepoint-tcp-health; 71 reads the no_listener resets and both ends of a connection"
 
   - kind: domain_module
     feature: flow

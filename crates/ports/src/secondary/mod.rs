@@ -56,6 +56,7 @@ pub mod redirect_origin_port;
 pub mod rule_change_store;
 pub mod signal_report_port;
 pub mod socket_identity_port;
+pub mod tcp_health_port;
 pub mod telemetry_port;
 pub mod threatintel_map_port;
 pub mod vip_announcer_port;

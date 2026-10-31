@@ -3383,6 +3383,63 @@ pub async fn run(
             );
         }
 
+        // 10f-quinquies-c. TCP health per edge
+        if config.tcp_health.enabled {
+            match try_load_tcp_health(&ebpf_dir) {
+                Ok((loader, counter, mut attacher)) => {
+                    let status = attacher.attach(&loader);
+                    if status.attached {
+                        let service =
+                            Arc::new(application::tcp_health_service::TcpHealthService::new(
+                                Box::new(counter),
+                                Arc::clone(&metrics)
+                                    as Arc<dyn ports::secondary::metrics_port::PacketMetrics>,
+                                workloads.clone(),
+                            ));
+                        ebpf_state.add_loader(loader);
+                        metrics.set_ebpf_program_status("tracepoint_tcp_health", true);
+                        let interval = Duration::from_secs(config.tcp_health.poll_interval_secs);
+                        let tcp_cancel = cancel_token.clone();
+                        tokio::spawn(async move {
+                            // The links live as long as the loop reading what
+                            // they count.
+                            let _attacher = attacher;
+                            let mut tick = tokio::time::interval(interval);
+                            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                            loop {
+                                tokio::select! {
+                                    () = tcp_cancel.cancelled() => break,
+                                    _ = tick.tick() => service.poll(),
+                                }
+                            }
+                        });
+                    } else {
+                        metrics.set_ebpf_program_status("tracepoint_tcp_health", false);
+                    }
+                }
+                Err(e) => {
+                    warn!("TCP health not counted: {e}");
+                    metrics.set_ebpf_program_status("tracepoint_tcp_health", false);
+                    adapters::ebpf::tcp_health::publish_status(
+                        adapters::ebpf::tcp_health::TcpHealthStatus {
+                            attached: false,
+                            reason: Some(e.to_string()),
+                        },
+                    );
+                }
+            }
+        } else {
+            metrics.clear_ebpf_program_status("tracepoint_tcp_health");
+            adapters::ebpf::tcp_health::publish_status(
+                adapters::ebpf::tcp_health::TcpHealthStatus {
+                    attached: false,
+                    reason: Some(
+                        "counting TCP health is turned off in the configuration".to_string(),
+                    ),
+                },
+            );
+        }
+
         // 10f-sexies. The executables allowed to reach the network
         if let Some(list) = config.network_executables()? {
             let enforce = list.mode == domain::firewall::workload::WorkloadMode::Enforce;
@@ -3777,6 +3834,10 @@ pub async fn run(
         status.insert(
             "tracepoint-drop-reason".to_string(),
             adapters::ebpf::drop_reason::status().attached,
+        );
+        status.insert(
+            "tracepoint-tcp-health".to_string(),
+            adapters::ebpf::tcp_health::status().attached,
         );
         status.insert(
             "lsm-exec-network".to_string(),
@@ -6798,6 +6859,35 @@ pub fn try_load_drop_reasons(
         loader,
         counter,
         adapters::ebpf::drop_reason::DropReasonAttacher::new(),
+    ))
+}
+
+/// Load the TCP health object and write the layout its programs read.
+///
+/// The running kernel's BTF is read first: where `sock_common` keeps the
+/// family, the ports, the addresses and the state, where a socket keeps its
+/// cgroup, and where `sk_buff` keeps its headers. A kernel missing one of
+/// them is refused here, in one sentence, before anything loads.
+///
+/// # Errors
+///
+/// Returns why the counter cannot run on this host.
+pub fn try_load_tcp_health(
+    ebpf_dir: &str,
+) -> anyhow::Result<(
+    EbpfLoader,
+    adapters::ebpf::tcp_health::TcpHealthCounter,
+    adapters::ebpf::tcp_health::TcpHealthAttacher,
+)> {
+    let layout = adapters::ebpf::tcp_health::resolve_from_btf().map_err(|e| anyhow::anyhow!(e))?;
+    let program_bytes = read_ebpf_program(ebpf_dir, "tracepoint-tcp-health")?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    let counter = adapters::ebpf::tcp_health::TcpHealthCounter::new(loader.ebpf_mut(), layout)?;
+    Ok((
+        loader,
+        counter,
+        adapters::ebpf::tcp_health::TcpHealthAttacher::new(),
     ))
 }
 

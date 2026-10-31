@@ -6,6 +6,8 @@
 // Default implementations are no-ops, allowing test mocks to implement
 // only the sub-traits relevant to the service under test.
 
+use domain::tcp_health::TcpCounts;
+
 // ── Packet processing metrics ──────────────────────────────────────
 
 pub trait PacketMetrics: Send + Sync {
@@ -32,6 +34,15 @@ pub trait PacketMetrics: Send + Sync {
     /// Add `count` drops the kernel saw but could not count under a reason
     /// and interface, because its pair map was full.
     fn record_kernel_drops_uncounted(&self, _count: u64) {}
+
+    /// Add what one TCP edge counted since the last reading, under the
+    /// service of its local end, the service of its peer and the local end's
+    /// `role` (`client` or `server`).
+    fn record_tcp_edge(&self, _service: &str, _peer: &str, _role: &str, _counts: &TcpCounts) {}
+
+    /// Add `count` TCP events the kernel saw but could not count under an
+    /// edge, because the edge map was full or the socket could not be read.
+    fn record_tcp_health_uncounted(&self, _count: u64) {}
 
     /// Count one connection whose first payload was compared with the
     /// protocol its well-known `port` promises. `verdict` is `match`,

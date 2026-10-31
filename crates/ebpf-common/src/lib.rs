@@ -25,6 +25,7 @@ pub mod ratelimit;
 pub mod redirect;
 pub mod scrub;
 pub mod signal;
+pub mod tcp_health;
 pub mod tenant;
 pub mod threatintel;
 pub mod trace;

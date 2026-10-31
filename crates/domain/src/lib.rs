@@ -31,6 +31,7 @@ pub mod ratelimit;
 pub mod raw_socket;
 pub mod response;
 pub mod routing;
+pub mod tcp_health;
 pub mod telemetry;
 pub mod threatintel;
 pub mod trace;
