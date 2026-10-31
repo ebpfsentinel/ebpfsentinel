@@ -343,6 +343,29 @@ SYSCTL
     SHELL
 
     # ----------------------------------------------------------
+    # Provisioner: libvirt (QEMU guests for the hypervisor lane)
+    # The guest suites need a real hypervisor making real taps and writing
+    # its own status files. The VM exposes no /dev/kvm, so the guests run
+    # under TCG; they boot from the network through the iPXE ROM QEMU ships,
+    # which sends DHCP the moment the firmware starts and needs no disk
+    # image. libvirt's default network is left undefined so it never claims
+    # a subnet the lab uses; the suites define their own.
+    # ----------------------------------------------------------
+    agent.vm.provision "shell", name: "libvirt", inline: <<-SHELL
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      if ! command -v virsh &>/dev/null || ! command -v qemu-system-x86_64 &>/dev/null; then
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          libvirt-daemon-system libvirt-clients qemu-system-x86 ipxe-qemu dnsmasq-base
+      fi
+      systemctl enable --now libvirtd
+      virsh net-destroy default 2>/dev/null || true
+      virsh net-autostart default --disable 2>/dev/null || true
+    SHELL
+
+    # ----------------------------------------------------------
     # Provisioner: kubernetes-tools (kubectl + minikube)
     # Installs the binaries the 10-kubernetes suite needs. minikube runs
     # with the docker driver (no nested VM), and conntrack - required by the

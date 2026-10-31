@@ -1,0 +1,71 @@
+# config-ebpf-libvirt-guest.yaml - one blocking IDS rule scoped to a real
+# libvirt guest, decided on the tap libvirt made for it.
+#
+# The guest is named from the status file libvirtd itself writes under
+# /run/libvirt/qemu, and the rule drops the DHCP requests its firmware sends.
+# A second guest on the same network is not named by the rule and must get
+# its lease, so the drop is shown to be the guest's and not the network's.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  allow_plaintext_api: true
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+container:
+  guests:
+    proxmox_dir: ""
+    libvirt_dir: /run/libvirt/qemu
+
+firewall:
+  enabled: true
+  mode: alert
+  default_policy: pass
+
+ids:
+  enabled: true
+  mode: block
+  rules:
+    - id: ids-guest-dhcp-deny
+      description: "DHCP from the libvirt guest es-pxe-a, dropped on its tap"
+      severity: high
+      mode: block
+      protocol: udp
+      dst_port: 67
+      workload:
+        guest: es-pxe-a
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
+
+# The suites drive the datapath, not the control plane's identity: the
+# agent answers unauthenticated plaintext here, which the two opt-outs
+# above are what make legal on a non-loopback bind.
+auth:
+  enabled: false
