@@ -563,6 +563,29 @@ mod tests {
     }
 
     #[test]
+    fn a_resolver_a_workload_asked_is_one_of_its_destinations() {
+        let dns = ObservedFlow {
+            protocol: Protocol::Udp,
+            ..flow("api.service", "10.96.0.10", 53)
+        };
+        let document = render_policy(
+            &session_of(&[dns, flow("api.service", "10.0.0.1", 443)]),
+            10_000_000_000,
+        );
+        let resolver = document
+            .yaml
+            .find("dst_ip: 10.96.0.10/32")
+            .expect("the resolver is learned");
+        let deny = document.yaml.find("action: deny").expect("a closing deny");
+        assert!(
+            resolver < deny,
+            "the resolver is allowed before the rest is refused"
+        );
+        assert!(document.yaml.contains("dst_port: 53"));
+        assert!(document.yaml.contains("protocol: udp"));
+    }
+
+    #[test]
     fn every_generated_rule_is_in_observe_mode() {
         let document = render_policy(
             &session_of(&[flow("nginx.service", "10.0.0.1", 443)]),

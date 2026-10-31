@@ -1,4 +1,5 @@
 pub mod container_labels;
+pub mod dns_clients;
 pub mod engine;
 pub mod entity;
 pub mod error;

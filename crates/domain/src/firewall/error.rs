@@ -77,6 +77,9 @@ pub enum FirewallError {
 
     #[error("invalid workload_dns: {reason}")]
     InvalidWorkloadDns { reason: String },
+
+    #[error("invalid dns_clients: {reason}")]
+    InvalidDnsClients { reason: String },
 }
 
 impl From<FirewallError> for DomainError {

@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use domain::common::entity::RuleId;
+use domain::firewall::dns_clients::{DEFAULT_DNS_CLIENTS_PRIORITY, DnsClients};
 use domain::firewall::entity::{FirewallAction, FirewallRule, PortRange, Scope as DomainScope};
 use domain::firewall::exec_network::NetworkExecutables;
 use domain::firewall::fqdn::{DEFAULT_GRACE_SECS, FqdnPattern, WorkloadDnsSettings};
@@ -58,6 +59,11 @@ pub struct FirewallConfig {
     /// at socket creation and connection.
     #[serde(default)]
     pub network_executables: NetworkExecutablesConfig,
+
+    /// The processes allowed to send DNS anywhere, and the resolvers every
+    /// other process must go through.
+    #[serde(default)]
+    pub dns_clients: DnsClientsConfig,
 }
 
 // ── Network executables config ─────────────────────────────────────
@@ -113,6 +119,120 @@ impl NetworkExecutablesConfig {
             message: e.to_string(),
         })?;
         Ok(Some(list))
+    }
+}
+
+// ── DNS clients config ─────────────────────────────────────────────
+
+/// Which processes may speak DNS to the network.
+///
+/// Off by default, and observe once on, for the reason every workload rule
+/// starts there: the first list misses the probe nobody remembered. Strict
+/// because a misspelled `clients` is an enforcing block that lets nobody
+/// resolve.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsClientsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// `observe` reports what would be refused, `enforce` refuses it.
+    #[serde(default = "default_workload_mode")]
+    pub mode: String,
+
+    /// Priority of the allowances; the refusal takes the next one.
+    #[serde(default = "default_dns_clients_priority")]
+    pub priority: u32,
+
+    /// Addresses or networks every process may send DNS to, such as the
+    /// node's stub resolver or the cluster DNS Service.
+    #[serde(default)]
+    pub resolvers: Vec<String>,
+
+    /// Workloads that may send DNS anywhere, in the shape of a rule's
+    /// `workload` block without `mode` or `fqdn`.
+    #[serde(default)]
+    pub clients: Vec<WorkloadMatchConfig>,
+}
+
+impl Default for DnsClientsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: default_workload_mode(),
+            priority: DEFAULT_DNS_CLIENTS_PRIORITY,
+            resolvers: Vec::new(),
+            clients: Vec::new(),
+        }
+    }
+}
+
+fn default_dns_clients_priority() -> u32 {
+    DEFAULT_DNS_CLIENTS_PRIORITY
+}
+
+impl DnsClientsConfig {
+    /// Read the block into the domain's, `None` when it is off.
+    pub fn to_domain(&self) -> Result<Option<DnsClients>, ConfigError> {
+        let mode = WorkloadMode::parse(&self.mode).map_err(|value| ConfigError::InvalidValue {
+            field: "firewall.dns_clients.mode".to_string(),
+            value: value.to_string(),
+            expected: "observe, enforce".to_string(),
+        })?;
+        if !self.enabled {
+            return Ok(None);
+        }
+        let resolvers = self
+            .resolvers
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| {
+                parse_cidr(value).map_err(|_| ConfigError::InvalidValue {
+                    field: format!("firewall.dns_clients.resolvers[{idx}]"),
+                    value: value.clone(),
+                    expected: "an IP address or a CIDR".to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let clients = self
+            .clients
+            .iter()
+            .enumerate()
+            .map(|(idx, client)| {
+                let prefix = format!("firewall.dns_clients.clients[{idx}]");
+                // A client is a selector and nothing else: the block's own
+                // mode governs it, and it may resolve any name anywhere.
+                if !client.fqdn.is_empty() || client.mode != default_workload_mode() {
+                    return Err(ConfigError::Validation {
+                        field: prefix,
+                        message: "a client names a workload; mode is the block's and fqdn has \
+                                  no meaning here"
+                            .to_string(),
+                    });
+                }
+                client
+                    .to_domain(&prefix)
+                    .map(|workload| workload.selector)
+                    .map_err(|e| match e {
+                        ConfigError::Validation { field, message } => ConfigError::Validation {
+                            field: field.replace(".workload", ""),
+                            message,
+                        },
+                        other => other,
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let block = DnsClients {
+            mode,
+            priority: self.priority,
+            resolvers,
+            clients,
+        };
+        block.validate().map_err(|e| ConfigError::Validation {
+            field: "firewall.dns_clients".to_string(),
+            message: e.to_string(),
+        })?;
+        Ok(Some(block))
     }
 }
 
@@ -206,6 +326,7 @@ impl Default for FirewallConfig {
             schedules: HashMap::new(),
             workload_dns: WorkloadDnsConfig::default(),
             network_executables: NetworkExecutablesConfig::default(),
+            dns_clients: DnsClientsConfig::default(),
         }
     }
 }

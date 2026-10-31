@@ -652,6 +652,20 @@ impl AgentConfig {
             )?;
         }
         self.firewall.network_executables.to_domain()?;
+        if self.firewall.dns_clients.to_domain()?.is_some()
+            && let Some(idx) = self.firewall.rules.iter().position(|rule| {
+                rule.id
+                    .starts_with(domain::firewall::dns_clients::DNS_CLIENTS_RULE_PREFIX)
+            })
+        {
+            return Err(ConfigError::Validation {
+                field: format!("firewall.rules[{idx}].id"),
+                message: format!(
+                    "ids starting with {} name the rules firewall.dns_clients expands into",
+                    domain::firewall::dns_clients::DNS_CLIENTS_RULE_PREFIX
+                ),
+            });
+        }
         let dns = self.firewall.workload_dns.to_domain()?;
         if dns.resolvers.is_empty()
             && let Some(idx) = self.firewall.rules.iter().position(|rule| {
@@ -1297,7 +1311,35 @@ impl AgentConfig {
                 }
                 Ok(rule)
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|mut rules| {
+                rules.extend(self.dns_clients_rules()?);
+                Ok(rules)
+            })
+    }
+
+    /// The workload rules `firewall.dns_clients` stands for, none while it is
+    /// off.
+    ///
+    /// The agent is allowed by its own executable, because it resolves its
+    /// feeds and endpoints itself and a block written without it in mind
+    /// would otherwise cut it off the moment the mode is enforce.
+    pub fn dns_clients_rules(&self) -> Result<Vec<FirewallRule>, ConfigError> {
+        let Some(block) = self.firewall.dns_clients.to_domain()? else {
+            return Ok(Vec::new());
+        };
+        let agent = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.to_str().map(str::to_string))
+            .and_then(|exe| {
+                domain::firewall::workload::WorkloadSelector::new(Some(exe), None, None, None).ok()
+            });
+        block
+            .rules(agent.as_ref())
+            .map_err(|e| ConfigError::Validation {
+                field: "firewall.dns_clients".to_string(),
+                message: e.to_string(),
+            })
     }
 
     /// Parse the IDS mode from config to domain enum.
@@ -5853,6 +5895,95 @@ ids:
             .to_string();
         assert!(
             err.contains("process_table.detections.kill_process"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn the_dns_clients_block_expands_into_workload_rules_once_enabled() {
+        let off = AgentConfig::from_yaml("agent:\n  interfaces: [eth0]\n").unwrap();
+        assert!(off.dns_clients_rules().unwrap().is_empty());
+
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+firewall:
+  rules:
+    - id: allow-web
+      priority: 10
+      action: allow
+      dst_port: 443
+  dns_clients:
+    enabled: true
+    resolvers: [127.0.0.53, 10.96.0.10/32]
+    clients:
+      - exe: /usr/lib/systemd/systemd-resolved
+";
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let rules = config.firewall_rules().unwrap();
+        assert_eq!(rules[0].id.0, "allow-web");
+        let generated: Vec<&str> = rules[1..].iter().map(|r| r.id.0.as_str()).collect();
+        assert!(generated.contains(&"dns-clients-resolver-1-53"));
+        assert!(generated.contains(&"dns-clients-client-0-853"));
+        assert!(generated.contains(&"dns-clients-agent-53"));
+        assert_eq!(generated.last(), Some(&"dns-clients-rest-853"));
+        assert!(rules[1..].iter().all(|r| {
+            r.workload
+                .as_ref()
+                .is_some_and(|w| w.mode == domain::firewall::workload::WorkloadMode::Observe)
+        }));
+        // The kernel holds it as a policy of its own.
+        assert!(domain::firewall::workload::WorkloadPolicy::from_rules(&rules).is_ok());
+    }
+
+    #[test]
+    fn a_dns_clients_block_that_cannot_be_applied_refuses_the_document() {
+        for (body, needle) in [
+            ("enabled: true", "firewall.dns_clients"),
+            ("enabled: true\n    resolvers: [nope]", "resolvers[0]"),
+            (
+                "enabled: true\n    mode: block\n    resolvers: [127.0.0.53]",
+                "mode",
+            ),
+            (
+                "enabled: true\n    priority: 0\n    resolvers: [127.0.0.53]",
+                "priority",
+            ),
+            (
+                "enabled: true\n    clients:\n      - exe: relative/path",
+                "clients[0]",
+            ),
+            (
+                "enabled: true\n    clients:\n      - exe: /usr/bin/dig\n        mode: enforce",
+                "clients[0]",
+            ),
+            ("enabled: true\n    resolver: [127.0.0.53]", "resolver"),
+        ] {
+            let document =
+                format!("agent:\n  interfaces: [eth0]\nfirewall:\n  dns_clients:\n    {body}\n");
+            let err = AgentConfig::from_yaml(&document).unwrap_err().to_string();
+            assert!(err.contains(needle), "{body}: unexpected error: {err}");
+        }
+    }
+
+    #[test]
+    fn an_operator_rule_may_not_take_an_id_the_dns_clients_block_writes() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+firewall:
+  rules:
+    - id: dns-clients-rest-53
+      priority: 10
+      action: allow
+      dst_port: 53
+  dns_clients:
+    enabled: true
+    resolvers: [127.0.0.53]
+";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("firewall.rules[0].id"),
             "unexpected error: {err}"
         );
     }
