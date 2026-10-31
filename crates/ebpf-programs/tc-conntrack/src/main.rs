@@ -23,6 +23,7 @@ use ebpf_helpers::net::{
 };
 use ebpf_helpers::pktmeta;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::trace::{self, reason, stage};
 use ebpf_helpers::{copy_16b_asm, increment_metric};
 use network_types::{ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
 
@@ -45,7 +46,9 @@ static CT_NF_CONN_OFFSETS: Array<NfConnOffsets, 1> = Array::new();
 
 #[classifier]
 pub fn tc_conntrack(ctx: TcContext) -> i32 {
-    increment_metric(CT_METRIC_TOTAL_SEEN);
+    // A traced packet is decided like any other and moves no counter.
+    let traced = trace::tc(&ctx);
+    increment_metric(traced, CT_METRIC_TOTAL_SEEN);
     // Capture the trusted skb pointer by value in the entry frame, where
     // `ctx` is owned (guaranteed `PTR_TO_CTX`). Threading it by value through
     // every subprogram keeps it in a register, so the verifier preserves the
@@ -53,10 +56,11 @@ pub fn tc_conntrack(ctx: TcContext) -> i32 {
     // Reloading it from `&TcContext` in an outlined subprogram would yield a
     // plain scalar and the kfunc call would be rejected.
     let skb_raw: *mut core::ffi::c_void = ctx.skb.skb.cast();
-    let action = match try_tc_conntrack(&ctx, skb_raw) {
+    let action = match try_tc_conntrack(&ctx, skb_raw, traced) {
         Ok(action) => action,
         Err(()) => {
-            increment_metric(CT_METRIC_ERRORS);
+            increment_metric(traced, CT_METRIC_ERRORS);
+            trace::tc_record(&ctx, stage::CONNTRACK, reason::MALFORMED, 0, 0);
             TC_ACT_OK
         }
     };
@@ -69,23 +73,30 @@ pub fn tc_conntrack(ctx: TcContext) -> i32 {
 // ── Helpers ─────────────────────────────────────────────────────────
 
 #[inline(always)]
-fn increment_metric(index: u32) {
-    increment_metric!(CT_METRICS, index);
+fn increment_metric(traced: bool, index: u32) {
+    if !traced {
+        increment_metric!(CT_METRICS, index);
+    }
 }
 
 // ── Packet processing ───────────────────────────────────────────────
 
 #[inline(always)]
-fn try_tc_conntrack(ctx: &TcContext, skb_raw: *mut core::ffi::c_void) -> Result<i32, ()> {
+fn try_tc_conntrack(
+    ctx: &TcContext,
+    skb_raw: *mut core::ffi::c_void,
+    traced: bool,
+) -> Result<i32, ()> {
     // The parse the chain already holds, or this program's own if it is
     // first.
     let meta = pktmeta::resolve(ctx)?;
 
     if meta.is_ipv4() {
-        process_conntrack_v4(ctx, skb_raw, meta.l3())
+        process_conntrack_v4(ctx, skb_raw, meta.l3(), traced)
     } else if meta.is_ipv6() {
-        process_conntrack_v6(ctx, skb_raw, meta.l3())
+        process_conntrack_v6(ctx, skb_raw, meta.l3(), traced)
     } else {
+        trace::tc_record(ctx, stage::CONNTRACK, reason::MALFORMED, 0, 0);
         Ok(TC_ACT_OK)
     }
 }
@@ -105,12 +116,14 @@ fn process_conntrack_v4(
     ctx: &TcContext,
     skb_raw: *mut core::ffi::c_void,
     l3_offset: usize,
+    traced: bool,
 ) -> Result<i32, ()> {
     let ct_config = match CT_CONFIG.get(0) {
         Some(cfg) => cfg,
         None => return Ok(TC_ACT_OK),
     };
     if ct_config.enabled == 0 {
+        trace::tc_record(ctx, stage::CONNTRACK, reason::DISABLED, 0, 0);
         return Ok(TC_ACT_OK);
     }
 
@@ -147,11 +160,13 @@ fn process_conntrack_v4(
         _ => return Ok(TC_ACT_OK),
     };
 
-    kfunc_ct_probe(
+    let status = kfunc_ct_probe(
         skb_raw,
         CtTuple::v4(src_ip, dst_ip, src_port, dst_port),
         protocol,
+        traced,
     );
+    record_state(ctx, status);
     Ok(TC_ACT_OK)
 }
 
@@ -161,12 +176,14 @@ fn process_conntrack_v6(
     ctx: &TcContext,
     skb_raw: *mut core::ffi::c_void,
     l3_offset: usize,
+    traced: bool,
 ) -> Result<i32, ()> {
     let ct_config = match CT_CONFIG.get(0) {
         Some(cfg) => cfg,
         None => return Ok(TC_ACT_OK),
     };
     if ct_config.enabled == 0 {
+        trace::tc_record(ctx, stage::CONNTRACK, reason::DISABLED, 0, 0);
         return Ok(TC_ACT_OK);
     }
 
@@ -215,20 +232,47 @@ fn process_conntrack_v6(
     let src_addr = ipv6_addr_to_u32x4(&src_bytes);
     let dst_addr = ipv6_addr_to_u32x4(&dst_bytes);
 
-    kfunc_ct_probe(
+    let status = kfunc_ct_probe(
         skb_raw,
         CtTuple::v6(src_addr, dst_addr, src_port, dst_port),
         protocol,
+        traced,
     );
+    record_state(ctx, status);
     Ok(TC_ACT_OK)
+}
+
+/// What the kernel's connection table says about a flow, as a traced packet
+/// reports it.
+const STATE_UNTRACKED: u32 = 0;
+const STATE_NEW: u32 = 1;
+const STATE_ESTABLISHED: u32 = 2;
+const STATE_RELATED: u32 = 3;
+const STATE_INVALID: u32 = 4;
+const STATE_UNREADABLE: u32 = 5;
+
+/// Report the flow's state for a traced packet. An established or related
+/// flow is a verdict that depends on state the packet does not carry.
+#[inline(always)]
+fn record_state(ctx: &TcContext, state: u32) {
+    let why = match state {
+        STATE_ESTABLISHED | STATE_RELATED => reason::ESTABLISHED,
+        _ => reason::DEFAULT,
+    };
+    trace::tc_record(ctx, stage::CONNTRACK, why, 0, state);
 }
 
 /// Probe kernel netfilter CT for a flow. Reads `nf_conn->status` and
 /// `nf_conn->mark` via `bpf_probe_read_kernel` at runtime BTF offsets.
-/// Increments kfunc hit/miss metrics.
+/// Increments kfunc hit/miss metrics, and returns the state it read.
 #[inline(always)]
-fn kfunc_ct_probe(skb_raw: *mut core::ffi::c_void, tuple: CtTuple, protocol: u8) {
-    increment_metric(CT_METRIC_KFUNC_LOOKUPS);
+fn kfunc_ct_probe(
+    skb_raw: *mut core::ffi::c_void,
+    tuple: CtTuple,
+    protocol: u8,
+    traced: bool,
+) -> u32 {
+    increment_metric(traced, CT_METRIC_KFUNC_LOOKUPS);
     let mut opts = if protocol == PROTO_TCP {
         BpfCtOpts::tcp()
     } else {
@@ -236,14 +280,15 @@ fn kfunc_ct_probe(skb_raw: *mut core::ffi::c_void, tuple: CtTuple, protocol: u8)
     };
     let found = unsafe {
         with_skb_ct_lookup(skb_raw, tuple, &mut opts, |ct| {
-            read_nf_conn_fields(ct);
-            true
+            read_nf_conn_fields(ct, traced)
         })
     };
-    if found == Some(true) {
-        increment_metric(CT_METRIC_KFUNC_HITS);
+    if let Some(state) = found {
+        increment_metric(traced, CT_METRIC_KFUNC_HITS);
+        state
     } else {
-        increment_metric(CT_METRIC_KFUNC_MISSES);
+        increment_metric(traced, CT_METRIC_KFUNC_MISSES);
+        STATE_UNTRACKED
     }
 }
 
@@ -257,10 +302,10 @@ fn kfunc_ct_probe(skb_raw: *mut core::ffi::c_void, tuple: CtTuple, protocol: u8)
 /// separately so a non-zero `kfunc_read_errors` says the state counters are
 /// undercounting rather than the traffic being idle.
 #[inline(always)]
-fn read_nf_conn_fields(ct: *mut ebpf_helpers::kfuncs::nf_conn) {
+fn read_nf_conn_fields(ct: *mut ebpf_helpers::kfuncs::nf_conn, traced: bool) -> u32 {
     let offsets = match CT_NF_CONN_OFFSETS.get(0) {
         Some(o) if o.valid != 0 => o,
-        _ => return,
+        _ => return STATE_UNREADABLE,
     };
     let base = ct as *const u8;
     let mut status: u64 = 0;
@@ -280,23 +325,29 @@ fn read_nf_conn_fields(ct: *mut ebpf_helpers::kfuncs::nf_conn) {
         )
     };
 
-    if status_read < 0 {
-        increment_metric(CT_METRIC_KFUNC_READ_ERRORS);
+    let state = if status_read < 0 {
+        increment_metric(traced, CT_METRIC_KFUNC_READ_ERRORS);
+        STATE_UNREADABLE
     } else if status & IPS_DYING != 0 {
-        increment_metric(CT_METRIC_KFUNC_STATE_INVALID);
+        increment_metric(traced, CT_METRIC_KFUNC_STATE_INVALID);
+        STATE_INVALID
     } else if status & IPS_EXPECTED != 0 {
-        increment_metric(CT_METRIC_KFUNC_STATE_RELATED);
+        increment_metric(traced, CT_METRIC_KFUNC_STATE_RELATED);
+        STATE_RELATED
     } else if status & (IPS_CONFIRMED | IPS_SEEN_REPLY) != 0 {
-        increment_metric(CT_METRIC_KFUNC_STATE_ESTABLISHED);
+        increment_metric(traced, CT_METRIC_KFUNC_STATE_ESTABLISHED);
+        STATE_ESTABLISHED
     } else {
-        increment_metric(CT_METRIC_KFUNC_STATE_NEW);
-    }
+        increment_metric(traced, CT_METRIC_KFUNC_STATE_NEW);
+        STATE_NEW
+    };
 
     if mark_read < 0 {
-        increment_metric(CT_METRIC_KFUNC_READ_ERRORS);
+        increment_metric(traced, CT_METRIC_KFUNC_READ_ERRORS);
     } else if mark != 0 {
-        increment_metric(CT_METRIC_KFUNC_MARKED);
+        increment_metric(traced, CT_METRIC_KFUNC_MARKED);
     }
+    state
 }
 
 #[panic_handler]

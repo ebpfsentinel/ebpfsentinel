@@ -23,6 +23,7 @@ use ebpf_helpers::increment_metric;
 use ebpf_helpers::net::{IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP};
 use ebpf_helpers::pktmeta;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::trace::{self, reason, stage};
 use network_types::ip::Ipv4Hdr;
 
 // ── Constants ───────────────────────────────────────────────────────
@@ -66,11 +67,12 @@ static SCRUB_METRICS: PerCpuArray<u64, { SCRUB_METRIC_COUNT as usize }> = PerCpu
 
 #[classifier]
 pub fn tc_scrub(mut ctx: TcContext) -> i32 {
-    increment_metric(SCRUB_METRIC_TOTAL_SEEN);
+    increment_metric(&ctx, SCRUB_METRIC_TOTAL_SEEN);
     let action = match try_tc_scrub(&mut ctx) {
         Ok(action) => action,
         Err(()) => {
-            increment_metric(SCRUB_METRIC_ERRORS);
+            increment_metric(&ctx, SCRUB_METRIC_ERRORS);
+            trace::tc_record(&ctx, stage::SCRUB, reason::MALFORMED, 0, 0);
             TC_ACT_OK
         }
     };
@@ -84,9 +86,14 @@ pub fn tc_scrub(mut ctx: TcContext) -> i32 {
 
 // ptr_at, skip_ipv6_ext_headers imported from ebpf_helpers::tc
 
+/// Count what the program did, unless the packet is a trace: a traced
+/// packet is normalised like any other, and the copy the test run holds is
+/// the only thing that changes.
 #[inline(always)]
-fn increment_metric(index: u32) {
-    increment_metric!(SCRUB_METRICS, index);
+fn increment_metric(ctx: &TcContext, index: u32) {
+    if !trace::tc(ctx) {
+        increment_metric!(SCRUB_METRICS, index);
+    }
 }
 
 #[inline(always)]
@@ -100,7 +107,10 @@ fn get_config() -> Option<ScrubFlags> {
 fn try_tc_scrub(ctx: &mut TcContext) -> Result<i32, ()> {
     let cfg = match get_config() {
         Some(cfg) if cfg.enabled != 0 => cfg,
-        _ => return Ok(TC_ACT_OK),
+        _ => {
+            trace::tc_record(ctx, stage::SCRUB, reason::DISABLED, 0, 0);
+            return Ok(TC_ACT_OK);
+        }
     };
 
     // The parse the chain already holds, or this program's own if it is
@@ -118,17 +128,19 @@ fn try_tc_scrub(ctx: &mut TcContext) -> Result<i32, ()> {
             let frag_off = u16::from_be_bytes(unsafe { (*ipv4hdr).frags });
             // 0x2000 = More-Fragments, 0x1FFF = fragment offset; 0x4000 (DF) ignored.
             if frag_off & 0x3FFF != 0 {
-                increment_metric(SCRUB_METRIC_FRAGMENTS_DROPPED);
+                increment_metric(ctx, SCRUB_METRIC_FRAGMENTS_DROPPED);
+                trace::tc_record(ctx, stage::SCRUB, reason::RULE, 0, 0);
                 return Ok(TC_ACT_SHOT);
             }
         }
         scrub_ipv4(ctx, &cfg, l3_offset)?;
-        increment_metric(SCRUB_METRIC_PACKETS);
+        increment_metric(ctx, SCRUB_METRIC_PACKETS);
     } else if meta.is_ipv6() {
         scrub_ipv6(ctx, &cfg, l3_offset)?;
-        increment_metric(SCRUB_METRIC_PACKETS);
+        increment_metric(ctx, SCRUB_METRIC_PACKETS);
     }
 
+    trace::tc_record(ctx, stage::SCRUB, reason::REWRITE, 0, 0);
     Ok(TC_ACT_OK)
 }
 
@@ -201,7 +213,7 @@ fn scrub_ipv6(ctx: &mut TcContext, cfg: &ScrubFlags, l3_offset: usize) -> Result
             let hop_offset = l3_offset + 7;
             ctx.store(hop_offset, &cfg.min_hop_limit, 0)
                 .map_err(|_| ())?;
-            increment_metric(SCRUB_METRIC_HOP_FIXED);
+            increment_metric(ctx, SCRUB_METRIC_HOP_FIXED);
         }
     }
 
@@ -323,13 +335,13 @@ fn scrub_ipv4_header_fields(
     }
 
     if ttl_changed {
-        increment_metric(SCRUB_METRIC_TTL_FIXED);
+        increment_metric(ctx, SCRUB_METRIC_TTL_FIXED);
     }
     if df_changed {
-        increment_metric(SCRUB_METRIC_DF_CLEARED);
+        increment_metric(ctx, SCRUB_METRIC_DF_CLEARED);
     }
     if id_changed {
-        increment_metric(SCRUB_METRIC_IPID_RANDOMIZED);
+        increment_metric(ctx, SCRUB_METRIC_IPID_RANDOMIZED);
     }
     Ok(())
 }
@@ -444,7 +456,7 @@ fn clamp_mss(ctx: &mut TcContext, pos: usize, tcp_csum_offset: u32, max_mss: u16
     unsafe {
         bpf_l4_csum_replace(ctx.as_ptr() as *mut _, tcp_csum_offset, 0, diff as u64, 0);
     }
-    increment_metric(SCRUB_METRIC_MSS_CLAMPED);
+    increment_metric(ctx, SCRUB_METRIC_MSS_CLAMPED);
 }
 
 /// One step of the TCP option walk, invoked by `bpf_loop`.
@@ -499,7 +511,7 @@ unsafe extern "C" fn scrub_opt_step(_index: u32, ctx: *mut c_void) -> i64 {
             // Overwrite all 10 bytes (the kind/len header + four timestamp
             // words) with NOP (kind=1) in one coalesced rewrite.
             let _ = strip_ts_option(&mut tctx, pos, lctx.tcp_csum_offset);
-            increment_metric(SCRUB_METRIC_TCP_TS_STRIPPED);
+            increment_metric(&tctx, SCRUB_METRIC_TCP_TS_STRIPPED);
         }
 
         lctx.scanned = (scanned + opt_len as usize) as u32;
@@ -608,7 +620,7 @@ fn scrub_tcp_reserved_flags(ctx: &mut TcContext, l4_offset: usize) -> Result<(),
         );
     }
 
-    increment_metric(SCRUB_METRIC_TCP_FLAGS_SCRUBBED);
+    increment_metric(ctx, SCRUB_METRIC_TCP_FLAGS_SCRUBBED);
     Ok(())
 }
 
@@ -639,7 +651,7 @@ fn scrub_strip_ecn_v4(ctx: &mut TcContext, l3_offset: usize) -> Result<(), ()> {
         );
     }
 
-    increment_metric(SCRUB_METRIC_ECN_STRIPPED);
+    increment_metric(ctx, SCRUB_METRIC_ECN_STRIPPED);
     Ok(())
 }
 
@@ -663,7 +675,7 @@ fn scrub_strip_ecn_v6(ctx: &mut TcContext, l3_offset: usize) -> Result<(), ()> {
     let new_byte1 = byte1 & !0x30;
     ctx.store(l3_offset + 1, &new_byte1, 0).map_err(|_| ())?;
 
-    increment_metric(SCRUB_METRIC_ECN_STRIPPED);
+    increment_metric(ctx, SCRUB_METRIC_ECN_STRIPPED);
     Ok(())
 }
 
@@ -691,7 +703,7 @@ fn scrub_normalize_tos_v4(ctx: &mut TcContext, l3_offset: usize, tos_value: u8) 
         );
     }
 
-    increment_metric(SCRUB_METRIC_TOS_NORMALIZED);
+    increment_metric(ctx, SCRUB_METRIC_TOS_NORMALIZED);
     Ok(())
 }
 
@@ -723,7 +735,7 @@ fn scrub_normalize_tos_v6(ctx: &mut TcContext, l3_offset: usize, tos_value: u8) 
     ctx.store(l3_offset, &new_byte0, 0).map_err(|_| ())?;
     ctx.store(l3_offset + 1, &new_byte1, 0).map_err(|_| ())?;
 
-    increment_metric(SCRUB_METRIC_TOS_NORMALIZED);
+    increment_metric(ctx, SCRUB_METRIC_TOS_NORMALIZED);
     Ok(())
 }
 

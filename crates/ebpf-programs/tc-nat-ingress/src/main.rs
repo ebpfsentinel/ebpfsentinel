@@ -32,6 +32,7 @@ use ebpf_helpers::net::{
 };
 use ebpf_helpers::pktmeta;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::trace::{self, reason, stage};
 use network_types::{ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
 
 // ── Constants ───────────────────────────────────────────────────────
@@ -186,7 +187,9 @@ fn chain_tenant(ctx: &TcContext, resolve: impl FnOnce() -> u32) -> u32 {
         return t;
     }
     let t = resolve();
-    pktmeta::write_tenant(ctx, t);
+    if !trace::tc(ctx) {
+        pktmeta::write_tenant(ctx, t);
+    }
     t
 }
 
@@ -194,11 +197,14 @@ fn chain_tenant(ctx: &TcContext, resolve: impl FnOnce() -> u32) -> u32 {
 
 #[classifier]
 pub fn tc_nat_ingress(ctx: TcContext) -> i32 {
-    increment_metric(NAT_METRIC_TOTAL_SEEN);
+    increment_metric(&ctx, NAT_METRIC_TOTAL_SEEN);
+    // A translation below overwrites this; a packet none applies to keeps it.
+    trace::tc_record(&ctx, stage::NAT_INGRESS, reason::DEFAULT, 0, 0);
     let action = match try_nat_ingress(&ctx) {
         Ok(action) => action,
         Err(()) => {
-            increment_metric(NAT_METRIC_ERRORS);
+            increment_metric(&ctx, NAT_METRIC_ERRORS);
+            trace::tc_record(&ctx, stage::NAT_INGRESS, reason::MALFORMED, 0, 0);
             TC_ACT_OK
         }
     };
@@ -210,9 +216,13 @@ pub fn tc_nat_ingress(ctx: TcContext) -> i32 {
 
 // ptr_at, skip_ipv6_ext_headers imported from ebpf_helpers::tc
 
+/// Count what the program did, unless the packet is a trace: a traced
+/// packet is translated in the copy the test run holds and nowhere else.
 #[inline(always)]
-fn increment_metric(index: u32) {
-    increment_metric!(NAT_METRICS, index);
+fn increment_metric(ctx: &TcContext, index: u32) {
+    if !trace::tc(ctx) {
+        increment_metric!(NAT_METRICS, index);
+    }
 }
 
 // ── Interface group helpers ──────────────────────────────────────────
@@ -529,7 +539,14 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
             let (orig_ip, orig_port) = (orig.addr, orig.port);
             rewrite_dst_ip(ctx, l3_offset, l4_offset, protocol, dst_ip, orig_ip)?;
             rewrite_dst_port(ctx, l4_offset, protocol, dst_port, orig_port)?;
-            increment_metric(NAT_METRIC_REVERSE_APPLIED);
+            increment_metric(ctx, NAT_METRIC_REVERSE_APPLIED);
+            trace::tc_record(
+                ctx,
+                stage::NAT_INGRESS,
+                reason::REWRITE,
+                0,
+                NAT_METRIC_REVERSE_APPLIED,
+            );
             return Ok(TC_ACT_OK);
         }
     }
@@ -562,7 +579,14 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
             src_ip,
             hp_val.orig_dst_ip,
         )?;
-        increment_metric(NAT_METRIC_HAIRPIN_APPLIED);
+        increment_metric(ctx, NAT_METRIC_HAIRPIN_APPLIED);
+        trace::tc_record(
+            ctx,
+            stage::NAT_INGRESS,
+            reason::REWRITE,
+            0,
+            NAT_METRIC_HAIRPIN_APPLIED,
+        );
         return Ok(TC_ACT_OK);
     }
 
@@ -624,7 +648,14 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
             rewrite_dst_port(ctx, l4_offset, protocol, dst_port, new_dst_port)?;
         }
 
-        increment_metric(NAT_METRIC_DNAT_APPLIED);
+        increment_metric(ctx, NAT_METRIC_DNAT_APPLIED);
+        trace::tc_record(
+            ctx,
+            stage::NAT_INGRESS,
+            reason::REWRITE,
+            0,
+            NAT_METRIC_DNAT_APPLIED,
+        );
 
         let mut hairpinned = false;
 
@@ -667,9 +698,18 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
                         orig_src_port: src_port,
                         _pad: 0,
                     };
-                    let _ = NAT_HAIRPIN_CT.insert(&post_key, &hp_val, 0);
+                    if !trace::tc(ctx) {
+                        let _ = NAT_HAIRPIN_CT.insert(&post_key, &hp_val, 0);
+                    }
 
-                    increment_metric(NAT_METRIC_HAIRPIN_APPLIED);
+                    increment_metric(ctx, NAT_METRIC_HAIRPIN_APPLIED);
+                    trace::tc_record(
+                        ctx,
+                        stage::NAT_INGRESS,
+                        reason::REWRITE,
+                        0,
+                        NAT_METRIC_HAIRPIN_APPLIED,
+                    );
                     hairpinned = true;
                 }
             }
@@ -693,7 +733,9 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
                 port: dst_port,
                 _pad: 0,
             };
-            track_reverse_v4(&NAT_DNAT_REVERSE, &reply, &orig);
+            if !trace::tc(ctx) {
+                track_reverse_v4(&NAT_DNAT_REVERSE, &reply, &orig);
+            }
         }
     }
 
@@ -784,7 +826,14 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
             let (orig_addr, orig_port) = (orig.addr, orig.port);
             rewrite_dst_ip_v6(ctx, ipv6_dst_off, l4_csum_off, &dst_addr, &orig_addr)?;
             rewrite_dst_port(ctx, l4_offset, protocol, dst_port, orig_port)?;
-            increment_metric(NAT_METRIC_REVERSE_APPLIED);
+            increment_metric(ctx, NAT_METRIC_REVERSE_APPLIED);
+            trace::tc_record(
+                ctx,
+                stage::NAT_INGRESS,
+                reason::REWRITE,
+                0,
+                NAT_METRIC_REVERSE_APPLIED,
+            );
             return Ok(TC_ACT_OK);
         }
     }
@@ -840,7 +889,14 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
             rewrite_dst_port(ctx, l4_offset, protocol, dst_port, new_dst_port)?;
         }
 
-        increment_metric(NAT_METRIC_DNAT_APPLIED);
+        increment_metric(ctx, NAT_METRIC_DNAT_APPLIED);
+        trace::tc_record(
+            ctx,
+            stage::NAT_INGRESS,
+            reason::REWRITE,
+            0,
+            NAT_METRIC_DNAT_APPLIED,
+        );
 
         let reply = NatReverseKeyV6 {
             src_addr: new_dst_addr,
@@ -855,7 +911,9 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
             port: dst_port,
             _pad: 0,
         };
-        track_reverse_v6(&NAT_DNAT_REVERSE_V6, &reply, &orig);
+        if !trace::tc(ctx) {
+            track_reverse_v6(&NAT_DNAT_REVERSE_V6, &reply, &orig);
+        }
     }
 
     Ok(TC_ACT_OK)
@@ -1190,7 +1248,14 @@ fn try_nptv6_ingress(ctx: &TcContext, l3_offset: usize, dst_addr: &[u32; 4]) -> 
                 }
                 if matches {
                     apply_nptv6_dst(ctx, l3_offset, dst_addr, rule)?;
-                    increment_metric(NAT_METRIC_NPTV6_TRANSLATED);
+                    increment_metric(ctx, NAT_METRIC_NPTV6_TRANSLATED);
+                    trace::tc_record(
+                        ctx,
+                        stage::NAT_INGRESS,
+                        reason::REWRITE,
+                        0,
+                        NAT_METRIC_NPTV6_TRANSLATED,
+                    );
                     return Ok(true);
                 }
             }
@@ -1345,11 +1410,11 @@ fn track_reverse_v4(
 ) {
     match unsafe { map.get(reply) } {
         Some(held) if held == orig => return,
-        Some(_) => increment_metric(NAT_METRIC_PORT_ALLOC_FAIL),
+        Some(_) => increment_metric!(NAT_METRICS, NAT_METRIC_PORT_ALLOC_FAIL),
         None => {}
     }
     if map.insert(reply, orig, 0).is_err() {
-        increment_metric(NAT_METRIC_REVERSE_UNTRACKED);
+        increment_metric!(NAT_METRICS, NAT_METRIC_REVERSE_UNTRACKED);
     }
 }
 
@@ -1362,11 +1427,11 @@ fn track_reverse_v6(
 ) {
     match unsafe { map.get(reply) } {
         Some(held) if held == orig => return,
-        Some(_) => increment_metric(NAT_METRIC_PORT_ALLOC_FAIL),
+        Some(_) => increment_metric!(NAT_METRICS, NAT_METRIC_PORT_ALLOC_FAIL),
         None => {}
     }
     if map.insert(reply, orig, 0).is_err() {
-        increment_metric(NAT_METRIC_REVERSE_UNTRACKED);
+        increment_metric!(NAT_METRICS, NAT_METRIC_REVERSE_UNTRACKED);
     }
 }
 

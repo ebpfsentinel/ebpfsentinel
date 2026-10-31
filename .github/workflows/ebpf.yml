@@ -96,6 +96,23 @@ jobs:
           fi
           sudo -E "$binary" --nocapture --test-threads=1
 
+      # A trace runs a crafted packet through the programs that decide live
+      # traffic, so asking must change nothing: every map a program reads is
+      # compared before and after a traced packet, and no ring buffer may move.
+      - name: Trace a packet without touching a map
+        env:
+          EBPFSENTINEL_EBPF_DIR: ${{ github.workspace }}/target/bpfel-unknown-none/release
+        run: |
+          set -eu
+          binary="$(cargo test -p adapters --test ebpf_trace_side_effects --no-run --message-format=json |
+            jq -r 'select(.executable != null and .target.name == "ebpf_trace_side_effects") | .executable' |
+            tail -1)"
+          if [ -z "$binary" ]; then
+            echo "::error::cargo built no ebpf_trace_side_effects binary"
+            exit 1
+          fi
+          sudo -E "$binary" --nocapture --test-threads=1
+
       - uses: actions/upload-artifact@v7
         with:
           name: ebpf-programs

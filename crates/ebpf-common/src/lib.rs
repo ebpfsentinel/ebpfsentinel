@@ -26,6 +26,7 @@ pub mod scrub;
 pub mod signal;
 pub mod tenant;
 pub mod threatintel;
+pub mod trace;
 pub mod vip;
 pub mod vlan;
 pub mod workload_policy;

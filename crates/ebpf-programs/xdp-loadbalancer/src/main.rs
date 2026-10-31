@@ -18,8 +18,7 @@ use ebpf_common::{
     loadbalancer::{
         BackendMac, EVENT_TYPE_LB, LB_ACTION_FORWARD, LB_ACTION_NO_BACKEND, LB_ALG_IP_HASH,
         LB_ALG_MAGLEV, LB_ALG_ROUND_ROBIN, LB_ALG_WEIGHTED, LB_FAMILY_V4, LB_FAMILY_V6,
-        LB_MAX_BACKENDS_V2,
-        LB_METRIC_BYTES_FORWARDED, LB_METRIC_COUNT, LB_METRIC_EVENTS_DROPPED,
+        LB_MAX_BACKENDS_V2, LB_METRIC_BYTES_FORWARDED, LB_METRIC_COUNT, LB_METRIC_EVENTS_DROPPED,
         LB_METRIC_MTU_EXCEEDED, LB_METRIC_PACKETS_FORWARDED, LB_METRIC_PACKETS_NO_BACKEND,
         LB_METRIC_TOTAL_SEEN, LB_MODE_L2DSR, LbBackendEntry, LbServiceConfigV2, LbServiceKey,
         MAGLEV_EMPTY, MAGLEV_RING_SIZE, MAX_LB_BACKEND_MAC, MAX_LB_BACKENDS_TOTAL, MAX_LB_SERVICES,
@@ -33,10 +32,10 @@ use ebpf_helpers::net::{
 };
 use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::ringbuf::{avail_data, submit_flags};
+use ebpf_helpers::trace::{self, NO_RULE, reason, stage};
 use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
 use ebpf_helpers::{
-    add_metric, copy_16b_asm, copy_mac_asm, increment_metric, opaque_usize,
-    ringbuf_has_backpressure,
+    add_metric, copy_16b_asm, copy_mac_asm, opaque_usize, ringbuf_has_backpressure,
 };
 use network_types::{
     eth::EthHdr,
@@ -117,17 +116,34 @@ static EVENTS: RingBuf<PacketEvent, { 256 * 4096 }> = RingBuf::new();
 
 #[xdp]
 pub fn xdp_loadbalancer(ctx: XdpContext) -> u32 {
-    increment_metric(LB_METRIC_TOTAL_SEEN);
+    let traced = trace::xdp(&ctx);
+    increment_metric(traced, LB_METRIC_TOTAL_SEEN);
     // Capture the trusted XDP context pointer by value in the entry frame so
     // the `KF_TRUSTED_ARGS` kfuncs (conntrack lookup, RX-metadata) keep their
     // trusted arg#0 across outlined bpf-to-bpf calls. Reloading it from a
     // `&XdpContext` in a subprogram drops the trusted flag and the verifier
     // rejects the call with "arg#0 ... got scalar".
     let ctx_raw: *mut core::ffi::c_void = ctx.ctx.cast();
-    match try_xdp_loadbalancer(&ctx, ctx_raw) {
+    let action = match try_xdp_loadbalancer(&ctx, ctx_raw) {
         Ok(action) => action,
         Err(()) => xdp_action::XDP_PASS,
-    }
+    };
+    // A packet sent on to a backend leaves rewritten; one addressed to no
+    // service, or to a service with no healthy backend, passes untouched.
+    let why = match action {
+        xdp_action::XDP_PASS => reason::DEFAULT,
+        xdp_action::XDP_DROP => reason::MALFORMED,
+        _ => reason::REWRITE,
+    };
+    trace::xdp_record(&ctx, stage::LOADBALANCER, action as u8, why, NO_RULE);
+    action
+}
+
+/// Whether this invocation is a trace, read from the raw context the entry
+/// captured.
+#[inline(always)]
+fn is_traced(ctx_raw: *mut core::ffi::c_void) -> bool {
+    trace::xdp(&XdpContext::new(ctx_raw.cast()))
 }
 
 #[inline(always)]
@@ -157,6 +173,7 @@ fn process_v4(
     l3_offset: usize,
     vlan_id: u16,
 ) -> Result<u32, ()> {
+    let traced = is_traced(ctx_raw);
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let proto = unsafe { (*ipv4hdr).proto() }.unwrap_or(IpProto::Reserved);
     let protocol = proto as u8;
@@ -196,7 +213,7 @@ fn process_v4(
     let (backend_id, backend) = match select_backend(ctx_raw, svc_config, src_ip, svc_idx) {
         Some(b) => b,
         None => {
-            increment_metric(LB_METRIC_PACKETS_NO_BACKEND);
+            increment_metric(traced, LB_METRIC_PACKETS_NO_BACKEND);
             emit_event(
                 ctx_raw,
                 &src_addr,
@@ -260,8 +277,8 @@ fn process_v4(
     );
 
     // Metrics + event
-    increment_metric(LB_METRIC_PACKETS_FORWARDED);
-    add_metric(LB_METRIC_BYTES_FORWARDED, pkt_len);
+    increment_metric(traced, LB_METRIC_PACKETS_FORWARDED);
+    add_metric(traced, LB_METRIC_BYTES_FORWARDED, pkt_len);
 
     emit_event(
         ctx_raw,
@@ -282,7 +299,7 @@ fn process_v4(
     // negative return is a helper error → pass (NFR15), otherwise forwarded
     // IPv6 transit packets get silently blackholed.
     if mtu_ret > 0 {
-        increment_metric(LB_METRIC_MTU_EXCEEDED);
+        increment_metric(traced, LB_METRIC_MTU_EXCEEDED);
         return Ok(xdp_action::XDP_DROP);
     }
 
@@ -301,6 +318,7 @@ fn process_v6(
     l3_offset: usize,
     vlan_id: u16,
 ) -> Result<u32, ()> {
+    let traced = is_traced(ctx_raw);
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let raw_next_hdr = unsafe { (*ipv6hdr).next_hdr };
 
@@ -337,7 +355,7 @@ fn process_v6(
     let (backend_id, backend) = match select_backend(ctx_raw, svc_config, src_ip_folded, svc_idx) {
         Some(b) => b,
         None => {
-            increment_metric(LB_METRIC_PACKETS_NO_BACKEND);
+            increment_metric(traced, LB_METRIC_PACKETS_NO_BACKEND);
             emit_event(
                 ctx_raw,
                 &src_addr,
@@ -410,8 +428,8 @@ fn process_v6(
         update_l4_checksum_port_only(ctx, l4_offset, next_hdr, old_dst_port, new_dst_port);
     }
 
-    increment_metric(LB_METRIC_PACKETS_FORWARDED);
-    add_metric(LB_METRIC_BYTES_FORWARDED, pkt_len);
+    increment_metric(traced, LB_METRIC_PACKETS_FORWARDED);
+    add_metric(traced, LB_METRIC_BYTES_FORWARDED, pkt_len);
 
     emit_event(
         ctx_raw,
@@ -432,7 +450,7 @@ fn process_v6(
     // negative return is a helper error → pass (NFR15), otherwise forwarded
     // IPv6 transit packets get silently blackholed.
     if mtu_ret > 0 {
-        increment_metric(LB_METRIC_MTU_EXCEEDED);
+        increment_metric(traced, LB_METRIC_MTU_EXCEEDED);
         return Ok(xdp_action::XDP_DROP);
     }
 
@@ -480,6 +498,7 @@ fn try_dsr_forward(
     vlan_id: u16,
     pkt_len: u64,
 ) -> Option<u32> {
+    let traced = is_traced(ctx_raw);
     // Resolve backend MAC; absent → caller falls back to DNAT.
     let mac = unsafe { LB_BACKEND_MAC.get(&backend_id) }?.mac;
 
@@ -496,8 +515,8 @@ fn try_dsr_forward(
         copy_mac_asm!(p, mac.as_ptr());
     }
 
-    increment_metric(LB_METRIC_PACKETS_FORWARDED);
-    add_metric(LB_METRIC_BYTES_FORWARDED, pkt_len);
+    increment_metric(traced, LB_METRIC_PACKETS_FORWARDED);
+    add_metric(traced, LB_METRIC_BYTES_FORWARDED, pkt_len);
     emit_event(
         ctx_raw,
         src_addr,
@@ -517,7 +536,7 @@ fn try_dsr_forward(
     // negative return is a helper error → pass (NFR15), otherwise forwarded
     // IPv6 transit packets get silently blackholed.
     if mtu_ret > 0 {
-        increment_metric(LB_METRIC_MTU_EXCEEDED);
+        increment_metric(traced, LB_METRIC_MTU_EXCEEDED);
         return Some(xdp_action::XDP_DROP);
     }
 
@@ -649,6 +668,7 @@ fn select_backend<'a>(
     src_ip: u32,
     svc_index: u32,
 ) -> Option<(u32, &'a LbBackendEntry)> {
+    let traced = is_traced(ctx_raw);
     let count = svc.backend_count as usize;
     if count == 0 {
         return None;
@@ -666,7 +686,7 @@ fn select_backend<'a>(
             let rr_ptr = LB_RR_STATE.get_ptr_mut(svc_index)?;
             let rr = unsafe { *rr_ptr };
             unsafe {
-                *rr_ptr = rr.wrapping_add(1);
+                *rr_ptr = rr.wrapping_add(live(traced));
             }
             rr as usize
         }
@@ -680,7 +700,7 @@ fn select_backend<'a>(
             let rr_ptr = LB_RR_STATE.get_ptr_mut(svc_index)?;
             let rr = unsafe { *rr_ptr };
             unsafe {
-                *rr_ptr = rr.wrapping_add(1);
+                *rr_ptr = rr.wrapping_add(live(traced));
             }
             (rr ^ src_ip) as usize
         }
@@ -713,7 +733,7 @@ fn select_backend<'a>(
                 let rr_ptr = LB_RR_STATE.get_ptr_mut(svc_index)?;
                 let rr = unsafe { *rr_ptr };
                 unsafe {
-                    *rr_ptr = rr.wrapping_add(1);
+                    *rr_ptr = rr.wrapping_add(live(traced));
                 }
                 rr as usize
             }
@@ -723,7 +743,7 @@ fn select_backend<'a>(
             let rr_ptr = LB_RR_STATE.get_ptr_mut(svc_index)?;
             let rr = unsafe { *rr_ptr };
             unsafe {
-                *rr_ptr = rr.wrapping_add(1);
+                *rr_ptr = rr.wrapping_add(live(traced));
             }
             rr as usize
         }
@@ -912,13 +932,26 @@ fn update_l4_checksum_v6_dnat(
 // ipv6_addr_to_u32x4, u32x4_to_ipv6_bytes imported from ebpf_helpers::net
 
 #[inline(always)]
-fn increment_metric(index: u32) {
-    increment_metric!(LB_METRICS, index);
+fn increment_metric(traced: bool, index: u32) {
+    add_metric!(LB_METRICS, index, u64::from(live(traced)));
 }
 
 #[inline(always)]
-fn add_metric(index: u32, value: u64) {
-    add_metric!(LB_METRICS, index, value);
+fn add_metric(traced: bool, index: u32, value: u64) {
+    add_metric!(
+        LB_METRICS,
+        index,
+        value & u64::from(live(traced)).wrapping_neg()
+    );
+}
+
+/// 1 for live traffic and 0 for a trace, so a write adds nothing to a traced
+/// packet's counters without a branch. A branch on the trace flag keeps the
+/// verifier from merging the two paths that follow it, and across the
+/// backend selection that is enough states to exhaust its budget.
+#[inline(always)]
+fn live(traced: bool) -> u32 {
+    u32::from(!traced)
 }
 
 // ── Event Emission ──────────────────────────────────────────────────
@@ -940,15 +973,18 @@ fn emit_event(
     flags: u8,
     vlan_id: u16,
 ) {
+    if is_traced(ctx_raw) {
+        return;
+    }
     if ringbuf_has_backpressure() {
-        increment_metric(LB_METRIC_EVENTS_DROPPED);
+        increment_metric(false, LB_METRIC_EVENTS_DROPPED);
         return;
     }
 
     let mut event = match EVENTS.reserve_untyped::<PacketEvent>(0) {
         Some(e) => e,
         None => {
-            increment_metric(LB_METRIC_EVENTS_DROPPED);
+            increment_metric(false, LB_METRIC_EVENTS_DROPPED);
             return;
         }
     };

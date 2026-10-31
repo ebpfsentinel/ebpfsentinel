@@ -24,6 +24,7 @@ use ebpf_helpers::net::{
 };
 use ebpf_helpers::pktmeta;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::trace::{self, reason, stage};
 use ebpf_helpers::{emit_packet_event, increment_metric};
 use network_types::{
     ip::{IpProto, Ipv4Hdr},
@@ -115,11 +116,15 @@ fn feature_empty(gates: u32, bit: u32) -> bool {
 /// returns TC_ACT_OK (NFR15: default-to-pass on internal error).
 #[classifier]
 pub fn tc_threatintel(ctx: TcContext) -> i32 {
-    increment_metric(THREATINTEL_METRIC_TOTAL_SEEN);
+    // A traced packet is decided like any other, moves no counter and
+    // raises no event.
+    let traced = trace::tc(&ctx);
+    increment_metric(traced, THREATINTEL_METRIC_TOTAL_SEEN);
     let action = match try_tc_threatintel(&ctx) {
         Ok(action) => action,
         Err(()) => {
-            increment_metric(THREATINTEL_METRIC_ERRORS);
+            increment_metric(traced, THREATINTEL_METRIC_ERRORS);
+            trace::tc_record(&ctx, stage::THREATINTEL, reason::MALFORMED, 0, 0);
             TC_ACT_OK
         }
     };
@@ -136,6 +141,7 @@ fn try_tc_threatintel(ctx: &TcContext) -> Result<i32, ()> {
     // Check if threat intel is enabled via config flags (0 = disabled).
     if let Some(flags) = CONFIG_FLAGS.get(0) {
         if flags.threatintel_enabled == 0 {
+            trace::tc_record(ctx, stage::THREATINTEL, reason::DISABLED, 0, 0);
             return Ok(TC_ACT_OK);
         }
     }
@@ -147,6 +153,7 @@ fn try_tc_threatintel(ctx: &TcContext) -> Result<i32, ()> {
     if feature_empty(gates, FW_EMPTY_THREAT_IOCS_V4)
         && feature_empty(gates, FW_EMPTY_THREAT_IOCS_V6)
     {
+        trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
         return Ok(TC_ACT_OK);
     }
 
@@ -157,15 +164,18 @@ fn try_tc_threatintel(ctx: &TcContext) -> Result<i32, ()> {
 
     if meta.is_ipv4() {
         if feature_empty(gates, FW_EMPTY_THREAT_IOCS_V4) {
+            trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
             return Ok(TC_ACT_OK);
         }
         process_threatintel_v4(ctx, meta.l3(), meta.vlan_id, pkt_flags)
     } else if meta.is_ipv6() {
         if feature_empty(gates, FW_EMPTY_THREAT_IOCS_V6) {
+            trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
             return Ok(TC_ACT_OK);
         }
         process_threatintel_v6(ctx, meta.l3(), meta.vlan_id, pkt_flags)
     } else {
+        trace::tc_record(ctx, stage::THREATINTEL, reason::MALFORMED, 0, 0);
         Ok(TC_ACT_OK)
     }
 }
@@ -215,6 +225,7 @@ fn process_threatintel_v4(
     let dst_maybe = THREATINTEL_BLOOM_V4.contains(&dst_key).is_ok();
 
     if !src_maybe && !dst_maybe {
+        trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
         return Ok(TC_ACT_OK); // guaranteed no match
     }
 
@@ -230,7 +241,11 @@ fn process_threatintel_v4(
     };
 
     let matched = match (src_match, dst_match) {
-        (None, None) => return Ok(TC_ACT_OK), // bloom false positive
+        (None, None) => {
+            // bloom false positive
+            trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
+            return Ok(TC_ACT_OK);
+        }
         (Some(v), None) | (None, Some(v)) => v,
         (Some(s), Some(d)) => {
             if d.action > s.action {
@@ -298,6 +313,7 @@ fn process_threatintel_v6(
     let dst_maybe = THREATINTEL_BLOOM_V6.contains(&dst_key).is_ok();
 
     if !src_maybe && !dst_maybe {
+        trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
         return Ok(TC_ACT_OK); // guaranteed no match
     }
 
@@ -313,7 +329,11 @@ fn process_threatintel_v6(
     };
 
     let matched = match (src_match, dst_match) {
-        (None, None) => return Ok(TC_ACT_OK), // bloom false positive
+        (None, None) => {
+            // bloom false positive
+            trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
+            return Ok(TC_ACT_OK);
+        }
         (Some(v), None) | (None, Some(v)) => v,
         (Some(s), Some(d)) => {
             if d.action > s.action {
@@ -332,7 +352,7 @@ fn process_threatintel_v6(
 /// Apply threat intel action (shared by v4/v6 paths).
 #[inline(always)]
 fn apply_threatintel_action(
-    _ctx: &TcContext,
+    ctx: &TcContext,
     matched: &ThreatIntelValue,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
@@ -342,15 +362,25 @@ fn apply_threatintel_action(
     flags: u8,
     vlan_id: u16,
 ) -> Result<i32, ()> {
-    increment_metric(THREATINTEL_METRIC_MATCHED);
-    (|| {
-        emit_packet_event!(EVENTS, THREATINTEL_METRICS, THREATINTEL_METRIC_EVENTS_DROPPED,
-            src_addr, dst_addr, src_port, dst_port, protocol,
-            EVENT_TYPE_THREATINTEL, matched.action, matched.feed_id as u32, flags, vlan_id; tc _ctx);
-    })();
+    let traced = trace::tc(ctx);
+    trace::tc_record(
+        ctx,
+        stage::THREATINTEL,
+        reason::LIST,
+        matched.feed_id as u32,
+        u32::from(matched.action),
+    );
+    increment_metric(traced, THREATINTEL_METRIC_MATCHED);
+    if !traced {
+        (|| {
+            emit_packet_event!(EVENTS, THREATINTEL_METRICS, THREATINTEL_METRIC_EVENTS_DROPPED,
+                src_addr, dst_addr, src_port, dst_port, protocol,
+                EVENT_TYPE_THREATINTEL, matched.action, matched.feed_id as u32, flags, vlan_id; tc ctx);
+        })();
+    }
 
     if matched.action == THREATINTEL_ACTION_DROP {
-        increment_metric(THREATINTEL_METRIC_DROPPED);
+        increment_metric(traced, THREATINTEL_METRIC_DROPPED);
         Ok(TC_ACT_SHOT)
     } else {
         Ok(TC_ACT_OK)
@@ -363,8 +393,10 @@ fn apply_threatintel_action(
 
 /// Increment a per-CPU metric counter.
 #[inline(always)]
-fn increment_metric(index: u32) {
-    increment_metric!(THREATINTEL_METRICS, index);
+fn increment_metric(traced: bool, index: u32) {
+    if !traced {
+        increment_metric!(THREATINTEL_METRICS, index);
+    }
 }
 
 #[panic_handler]

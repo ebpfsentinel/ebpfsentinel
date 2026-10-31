@@ -27,6 +27,7 @@ use ebpf_common::ddos::{DDOS_METRIC_COUNT, DDOS_METRIC_SYNCOOKIE_SENT, Syncookie
 use ebpf_common::event::FLAG_IPV6;
 use ebpf_helpers::checksum::{compute_ipv4_csum, compute_tcp_csum_v4_24, compute_tcp_csum_v6_24};
 use ebpf_helpers::net::{IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP};
+use ebpf_helpers::trace;
 use ebpf_helpers::xdp::{ptr_at, ptr_at_mut};
 use ebpf_helpers::{barrier, copy_mac_asm};
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr};
@@ -64,7 +65,9 @@ fn try_syncookie(ctx: &XdpContext) -> Result<u32, ()> {
         send_syn_ack_v4(ctx, sctx)
     };
 
-    if result.is_ok() {
+    // A trace forges the reply in the copy the test run holds, which is what
+    // it asks to see, and counts nothing.
+    if result.is_ok() && !trace::xdp(ctx) {
         increment_ddos_metric(DDOS_METRIC_SYNCOOKIE_SENT);
     }
     result

@@ -58,6 +58,7 @@ use ebpf_helpers::net::{
 };
 use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::ringbuf::{avail_data, submit_flags};
+use ebpf_helpers::trace::{self, NO_RULE, reason, stage};
 use ebpf_helpers::xdp::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::{increment_metric, ringbuf_has_backpressure};
 use network_types::{eth::EthHdr, ip::Ipv4Hdr};
@@ -338,7 +339,10 @@ static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32, { MAX_TENANT_SUBNET_V6_LPM_ENTRI
 
 /// Increment a DDoS-specific per-CPU metric counter.
 #[inline(always)]
-fn increment_ddos_metric(index: u32) {
+fn increment_ddos_metric(traced: bool, index: u32) {
+    if traced {
+        return;
+    }
     increment_metric!(DDOS_METRICS, index);
 }
 
@@ -444,14 +448,22 @@ unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4], 
 #[xdp]
 #[inline(always)]
 pub fn xdp_ratelimit(ctx: XdpContext) -> u32 {
-    increment_metric(METRIC_TOTAL_SEEN);
+    let traced = trace::xdp(&ctx);
+    increment_metric(traced, METRIC_TOTAL_SEEN);
     let action = match try_xdp_ratelimit(&ctx) {
         Ok(action) => action,
         Err(()) => {
-            increment_metric(METRIC_ERRORS);
+            increment_metric(traced, METRIC_ERRORS);
             xdp_action::XDP_PASS
         }
     };
+    // A rate, a flood threshold or a size budget is what stops a packet here,
+    // and a SYN answered with a cookie leaves as the forged reply.
+    match action {
+        XDP_ACTION_SYNCOOKIE => record(&ctx, xdp_action::XDP_TX, reason::RATE),
+        xdp_action::XDP_DROP => record(&ctx, xdp_action::XDP_DROP, reason::RATE),
+        _ => record(&ctx, xdp_action::XDP_PASS, reason::DEFAULT),
+    }
     // Tail calls must happen in the XDP entry point (kernel 6.17+).
     if action == XDP_ACTION_SYNCOOKIE {
         // SYNCOOKIE_CTX already populated by check_syn_flood_v4/v6.
@@ -478,11 +490,18 @@ pub fn xdp_ratelimit(ctx: XdpContext) -> u32 {
         // a negative return is a helper error → pass (NFR15), otherwise
         // forwarded IPv6 transit packets get silently blackholed.
         if mtu_ret > 0 {
-            increment_metric(METRIC_MTU_EXCEEDED);
+            record(&ctx, xdp_action::XDP_DROP, reason::MALFORMED);
+            increment_metric(traced, METRIC_MTU_EXCEEDED);
             return xdp_action::XDP_DROP;
         }
     }
     action
+}
+
+/// Leave this stage's decision in a traced packet's metadata.
+#[inline(always)]
+fn record(ctx: &XdpContext, action: u32, why: u8) {
+    trace::xdp_record(ctx, stage::RATELIMIT, action as u8, why, NO_RULE);
 }
 
 /// Hash an IPv6 source address to a u32 for rate limit bucket lookup.
@@ -496,6 +515,7 @@ fn hash_ipv6_src(addr: &[u32; 4]) -> u32 {
 
 #[inline(always)]
 fn try_xdp_ratelimit(ctx: &XdpContext) -> Result<u32, ()> {
+    let traced = trace::xdp(ctx);
     // Parse Ethernet header
     let ethhdr: *const EthHdr = unsafe { ptr_at(ctx, 0)? };
     let mut ether_type = u16::from_be(unsafe { (*ethhdr).ether_type });
@@ -515,7 +535,7 @@ fn try_xdp_ratelimit(ctx: &XdpContext) -> Result<u32, ()> {
     } else if ether_type == ETH_P_IPV6 {
         process_ratelimit_v6(ctx, l3_offset, vlan_id, flags | FLAG_IPV6)
     } else {
-        increment_metric(METRIC_PASSED);
+        increment_metric(traced, METRIC_PASSED);
         Ok(xdp_action::XDP_PASS)
     }
 }
@@ -528,6 +548,7 @@ fn process_ratelimit_v4(
     vlan_id: u16,
     flags: u8,
 ) -> Result<u32, ()> {
+    let traced = trace::xdp(ctx);
     // Read the empty-feature bitmask once: every gate below reads this copy.
     let gates = empty_features();
     let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(ctx, l3_offset)? };
@@ -586,9 +607,9 @@ fn process_ratelimit_v4(
     {
         let key = RateLimitKey { tenant_id, src_ip };
         let now = unsafe { bpf_ktime_get_coarse_ns() };
-        let passed = dispatch_algorithm(&key, tier_cfg, now);
+        let passed = dispatch_algorithm(traced, &key, tier_cfg, now);
         if passed {
-            increment_metric(METRIC_PASSED);
+            increment_metric(traced, METRIC_PASSED);
             return Ok(xdp_action::XDP_PASS);
         }
         let src_addr = [src_ip, 0, 0, 0];
@@ -609,29 +630,29 @@ fn process_ratelimit_v4(
         // limit is being sized against real traffic, so the verdict the
         // operator asked for is the one taken.
         if tier_cfg.action == RATELIMIT_ACTION_PASS {
-            increment_metric(METRIC_THROTTLED_PASSED);
+            increment_metric(traced, METRIC_THROTTLED_PASSED);
             return Ok(xdp_action::XDP_PASS);
         }
-        increment_metric(METRIC_THROTTLED);
+        increment_metric(traced, METRIC_THROTTLED);
         return Ok(xdp_action::XDP_DROP);
     }
 
     // ── Existing: generic rate limiting ────────────────────────────
     let key = RateLimitKey { tenant_id, src_ip };
-    let config = lookup_config(&key)?;
+    let config = lookup_config(traced, &key)?;
 
     // Check interface group membership before applying rate limit.
     let iface_groups = get_iface_groups(ctx, gates);
     if !group_matches(config.group_mask, iface_groups) {
-        increment_metric(METRIC_PASSED);
+        increment_metric(traced, METRIC_PASSED);
         return Ok(xdp_action::XDP_PASS);
     }
 
     let now = unsafe { bpf_ktime_get_coarse_ns() };
-    let passed = dispatch_algorithm(&key, config, now);
+    let passed = dispatch_algorithm(traced, &key, config, now);
 
     if passed {
-        increment_metric(METRIC_PASSED);
+        increment_metric(traced, METRIC_PASSED);
         Ok(xdp_action::XDP_PASS)
     } else {
         let src_addr = [src_ip, 0, 0, 0];
@@ -653,10 +674,10 @@ fn process_ratelimit_v4(
         // limit is being sized against real traffic, so the verdict the
         // operator asked for is the one taken.
         if config.action == RATELIMIT_ACTION_PASS {
-            increment_metric(METRIC_THROTTLED_PASSED);
+            increment_metric(traced, METRIC_THROTTLED_PASSED);
             return Ok(xdp_action::XDP_PASS);
         }
-        increment_metric(METRIC_THROTTLED);
+        increment_metric(traced, METRIC_THROTTLED);
         Ok(xdp_action::XDP_DROP)
     }
 }
@@ -669,6 +690,7 @@ fn process_ratelimit_v6(
     vlan_id: u16,
     flags: u8,
 ) -> Result<u32, ()> {
+    let traced = trace::xdp(ctx);
     let gates = empty_features();
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
     let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
@@ -736,9 +758,9 @@ fn process_ratelimit_v6(
             src_ip: src_hash,
         };
         let now = unsafe { bpf_ktime_get_coarse_ns() };
-        let passed = dispatch_algorithm(&key, tier_cfg, now);
+        let passed = dispatch_algorithm(traced, &key, tier_cfg, now);
         if passed {
-            increment_metric(METRIC_PASSED);
+            increment_metric(traced, METRIC_PASSED);
             return Ok(xdp_action::XDP_PASS);
         }
         let (src_port, dst_port) = read_l4_ports_raw(ctx, l4_offset, next_hdr);
@@ -757,10 +779,10 @@ fn process_ratelimit_v6(
         // limit is being sized against real traffic, so the verdict the
         // operator asked for is the one taken.
         if tier_cfg.action == RATELIMIT_ACTION_PASS {
-            increment_metric(METRIC_THROTTLED_PASSED);
+            increment_metric(traced, METRIC_THROTTLED_PASSED);
             return Ok(xdp_action::XDP_PASS);
         }
-        increment_metric(METRIC_THROTTLED);
+        increment_metric(traced, METRIC_THROTTLED);
         return Ok(xdp_action::XDP_DROP);
     }
 
@@ -769,20 +791,20 @@ fn process_ratelimit_v6(
         tenant_id,
         src_ip: src_hash,
     };
-    let config = lookup_config(&key)?;
+    let config = lookup_config(traced, &key)?;
 
     // Check interface group membership before applying rate limit.
     let iface_groups = get_iface_groups(ctx, gates);
     if !group_matches(config.group_mask, iface_groups) {
-        increment_metric(METRIC_PASSED);
+        increment_metric(traced, METRIC_PASSED);
         return Ok(xdp_action::XDP_PASS);
     }
 
     let now = unsafe { bpf_ktime_get_coarse_ns() };
-    let passed = dispatch_algorithm(&key, config, now);
+    let passed = dispatch_algorithm(traced, &key, config, now);
 
     if passed {
-        increment_metric(METRIC_PASSED);
+        increment_metric(traced, METRIC_PASSED);
         Ok(xdp_action::XDP_PASS)
     } else {
         let (src_port, dst_port) = read_l4_ports_raw(ctx, l4_offset, next_hdr);
@@ -802,10 +824,10 @@ fn process_ratelimit_v6(
         // limit is being sized against real traffic, so the verdict the
         // operator asked for is the one taken.
         if config.action == RATELIMIT_ACTION_PASS {
-            increment_metric(METRIC_THROTTLED_PASSED);
+            increment_metric(traced, METRIC_THROTTLED_PASSED);
             return Ok(xdp_action::XDP_PASS);
         }
-        increment_metric(METRIC_THROTTLED);
+        increment_metric(traced, METRIC_THROTTLED);
         Ok(xdp_action::XDP_DROP)
     }
 }
@@ -816,7 +838,7 @@ fn process_ratelimit_v6(
 /// resolves tenant 0, so this collapses to the original `src_ip → 0` chain.
 /// Returns Err(()) if no config is found (no rate limit → pass).
 #[inline(always)]
-fn lookup_config(key: &RateLimitKey) -> Result<&'static RateLimitConfig, ()> {
+fn lookup_config(traced: bool, key: &RateLimitKey) -> Result<&'static RateLimitConfig, ()> {
     let config = match unsafe { RATELIMIT_CONFIG.get(key) } {
         Some(cfg) => cfg,
         None => {
@@ -847,7 +869,7 @@ fn lookup_config(key: &RateLimitKey) -> Result<&'static RateLimitConfig, ()> {
             match found {
                 Some(cfg) => cfg,
                 None => {
-                    increment_metric(METRIC_PASSED);
+                    increment_metric(traced, METRIC_PASSED);
                     return Err(());
                 }
             }
@@ -856,7 +878,7 @@ fn lookup_config(key: &RateLimitKey) -> Result<&'static RateLimitConfig, ()> {
 
     // Disabled config (ns_per_token == 0) → pass
     if config.ns_per_token == 0 {
-        increment_metric(METRIC_PASSED);
+        increment_metric(traced, METRIC_PASSED);
         return Err(());
     }
 
@@ -865,12 +887,17 @@ fn lookup_config(key: &RateLimitKey) -> Result<&'static RateLimitConfig, ()> {
 
 /// Dispatch to the appropriate rate limiting algorithm.
 #[inline(always)]
-fn dispatch_algorithm(key: &RateLimitKey, config: &RateLimitConfig, now: u64) -> bool {
+fn dispatch_algorithm(
+    traced: bool,
+    key: &RateLimitKey,
+    config: &RateLimitConfig,
+    now: u64,
+) -> bool {
     match config.algorithm {
-        ALGO_FIXED_WINDOW => check_fixed_window(key, config, now),
-        ALGO_SLIDING_WINDOW => check_sliding_window(key, config, now),
-        ALGO_LEAKY_BUCKET => check_leaky_bucket(key, config, now),
-        _ => check_token_bucket(key, config, now),
+        ALGO_FIXED_WINDOW => check_fixed_window(traced, key, config, now),
+        ALGO_SLIDING_WINDOW => check_sliding_window(traced, key, config, now),
+        ALGO_LEAKY_BUCKET => check_leaky_bucket(traced, key, config, now),
+        _ => check_token_bucket(traced, key, config, now),
     }
 }
 
@@ -922,6 +949,7 @@ fn check_syn_flood_v4(
     flags: u8,
     vlan_id: u16,
 ) -> Option<u32> {
+    let traced = trace::xdp(ctx);
     let cfg = DDOS_SYN_CONFIG.get(0)?;
     if cfg.enabled == 0 {
         return None;
@@ -935,7 +963,7 @@ fn check_syn_flood_v4(
         return None;
     }
 
-    increment_ddos_metric(DDOS_METRIC_SYN_RECEIVED);
+    increment_ddos_metric(traced, DDOS_METRIC_SYN_RECEIVED);
 
     let src_port = u16::from_be(unsafe { (*tcphdr).src_port });
     let dst_port = u16::from_be(unsafe { (*tcphdr).dst_port });
@@ -947,7 +975,7 @@ fn check_syn_flood_v4(
             tenant_id: 0,
             src_ip,
         };
-        if !syn_rate_exceeds_threshold(&key, cfg.threshold_pps, now) {
+        if !syn_rate_exceeds_threshold(traced, &key, cfg.threshold_pps, now) {
             return None; // Below threshold - let kernel handle normally
         }
     }
@@ -1001,6 +1029,7 @@ fn check_syn_flood_v6(
     flags: u8,
     vlan_id: u16,
 ) -> Option<u32> {
+    let traced = trace::xdp(ctx);
     let cfg = DDOS_SYN_CONFIG.get(0)?;
     if cfg.enabled == 0 {
         return None;
@@ -1013,7 +1042,7 @@ fn check_syn_flood_v6(
         return None;
     }
 
-    increment_ddos_metric(DDOS_METRIC_SYN_RECEIVED);
+    increment_ddos_metric(traced, DDOS_METRIC_SYN_RECEIVED);
 
     let src_port = u16::from_be(unsafe { (*tcphdr).src_port });
     let dst_port = u16::from_be(unsafe { (*tcphdr).dst_port });
@@ -1024,7 +1053,7 @@ fn check_syn_flood_v6(
             tenant_id: 0,
             src_ip: src_hash,
         };
-        if !syn_rate_exceeds_threshold(&key, cfg.threshold_pps, now) {
+        if !syn_rate_exceeds_threshold(traced, &key, cfg.threshold_pps, now) {
             return None;
         }
     }
@@ -1072,9 +1101,19 @@ fn check_syn_flood_v6(
 /// Check if the SYN rate for a source exceeds the configured threshold.
 /// Uses a fixed 1-second window per source IP.
 #[inline(always)]
-fn syn_rate_exceeds_threshold(key: &RateLimitKey, threshold_pps: u64, now: u64) -> bool {
+fn syn_rate_exceeds_threshold(
+    traced: bool,
+    key: &RateLimitKey,
+    threshold_pps: u64,
+    now: u64,
+) -> bool {
     if let Some(state) = SYN_RATE_TRACKER.get_ptr_mut(key) {
-        let state = unsafe { &mut *state };
+        let mut state_shadow = unsafe { *state };
+        let state = if traced {
+            &mut state_shadow
+        } else {
+            unsafe { &mut *state }
+        };
         if now.saturating_sub(state.window_start) >= NS_PER_SEC {
             // New window
             state.count = 1;
@@ -1089,7 +1128,9 @@ fn syn_rate_exceeds_threshold(key: &RateLimitKey, threshold_pps: u64, now: u64) 
             count: 1,
             window_start: now,
         };
-        let _ = SYN_RATE_TRACKER.insert(key, &new_state, 0);
+        if !traced {
+            let _ = SYN_RATE_TRACKER.insert(key, &new_state, 0);
+        }
         false
     }
 }
@@ -1106,17 +1147,18 @@ fn process_icmp_v4(
     flags: u8,
     vlan_id: u16,
 ) -> Result<u32, ()> {
+    let traced = trace::xdp(ctx);
     let cfg = match ICMP_CONFIG.get(0) {
         Some(c) => c,
         None => {
             // No ICMP config → pass through to generic rate limiting
-            increment_metric(METRIC_PASSED);
+            increment_metric(traced, METRIC_PASSED);
             return Ok(xdp_action::XDP_PASS);
         }
     };
 
     if cfg.enabled == 0 {
-        increment_metric(METRIC_PASSED);
+        increment_metric(traced, METRIC_PASSED);
         return Ok(xdp_action::XDP_PASS);
     }
 
@@ -1125,7 +1167,7 @@ fn process_icmp_v4(
 
     // Only rate limit echo requests - pass other ICMP types through
     if icmp_type != ICMP_ECHO_REQUEST {
-        increment_metric(METRIC_PASSED);
+        increment_metric(traced, METRIC_PASSED);
         return Ok(xdp_action::XDP_PASS);
     }
 
@@ -1149,7 +1191,7 @@ fn process_icmp_v4(
             flags,
             vlan_id,
         );
-        increment_ddos_metric(DDOS_METRIC_OVERSIZED_ICMP);
+        increment_ddos_metric(traced, DDOS_METRIC_OVERSIZED_ICMP);
         return Ok(xdp_action::XDP_DROP);
     }
 
@@ -1159,8 +1201,8 @@ fn process_icmp_v4(
         tenant_id: 0,
         src_ip,
     };
-    if icmp_rate_check(&key, cfg.max_pps as u64, now) {
-        increment_ddos_metric(DDOS_METRIC_ICMP_PASSED);
+    if icmp_rate_check(traced, &key, cfg.max_pps as u64, now) {
+        increment_ddos_metric(traced, DDOS_METRIC_ICMP_PASSED);
         Ok(xdp_action::XDP_PASS)
     } else {
         let src_addr = [src_ip, 0, 0, 0];
@@ -1177,7 +1219,7 @@ fn process_icmp_v4(
             flags,
             vlan_id,
         );
-        increment_ddos_metric(DDOS_METRIC_ICMP_DROPPED);
+        increment_ddos_metric(traced, DDOS_METRIC_ICMP_DROPPED);
         Ok(xdp_action::XDP_DROP)
     }
 }
@@ -1193,16 +1235,17 @@ fn process_icmp_v6(
     flags: u8,
     vlan_id: u16,
 ) -> Result<u32, ()> {
+    let traced = trace::xdp(ctx);
     let cfg = match ICMP_CONFIG.get(0) {
         Some(c) => c,
         None => {
-            increment_metric(METRIC_PASSED);
+            increment_metric(traced, METRIC_PASSED);
             return Ok(xdp_action::XDP_PASS);
         }
     };
 
     if cfg.enabled == 0 {
-        increment_metric(METRIC_PASSED);
+        increment_metric(traced, METRIC_PASSED);
         return Ok(xdp_action::XDP_PASS);
     }
 
@@ -1211,7 +1254,7 @@ fn process_icmp_v6(
 
     // Only rate limit ICMPv6 echo requests (type 128)
     if icmp_type != ICMPV6_ECHO_REQUEST {
-        increment_metric(METRIC_PASSED);
+        increment_metric(traced, METRIC_PASSED);
         return Ok(xdp_action::XDP_PASS);
     }
 
@@ -1233,7 +1276,7 @@ fn process_icmp_v6(
             flags,
             vlan_id,
         );
-        increment_ddos_metric(DDOS_METRIC_OVERSIZED_ICMP);
+        increment_ddos_metric(traced, DDOS_METRIC_OVERSIZED_ICMP);
         return Ok(xdp_action::XDP_DROP);
     }
 
@@ -1242,8 +1285,8 @@ fn process_icmp_v6(
         tenant_id: 0,
         src_ip: src_hash,
     };
-    if icmp_rate_check(&key, cfg.max_pps as u64, now) {
-        increment_ddos_metric(DDOS_METRIC_ICMP_PASSED);
+    if icmp_rate_check(traced, &key, cfg.max_pps as u64, now) {
+        increment_ddos_metric(traced, DDOS_METRIC_ICMP_PASSED);
         Ok(xdp_action::XDP_PASS)
     } else {
         emit_ddos_event(
@@ -1258,16 +1301,21 @@ fn process_icmp_v6(
             flags,
             vlan_id,
         );
-        increment_ddos_metric(DDOS_METRIC_ICMP_DROPPED);
+        increment_ddos_metric(traced, DDOS_METRIC_ICMP_DROPPED);
         Ok(xdp_action::XDP_DROP)
     }
 }
 
 /// Fixed-window rate check for ICMP. Returns `true` if under limit.
 #[inline(always)]
-fn icmp_rate_check(key: &RateLimitKey, max_pps: u64, now: u64) -> bool {
+fn icmp_rate_check(traced: bool, key: &RateLimitKey, max_pps: u64, now: u64) -> bool {
     if let Some(bucket) = ICMP_RATE_BUCKETS.get_ptr_mut(key) {
-        let bucket = unsafe { &mut *bucket };
+        let mut bucket_shadow = unsafe { *bucket };
+        let bucket = if traced {
+            &mut bucket_shadow
+        } else {
+            unsafe { &mut *bucket }
+        };
         if now.saturating_sub(bucket.window_start) >= NS_PER_SEC {
             bucket.pkt_count = 1;
             bucket.window_start = now;
@@ -1283,7 +1331,9 @@ fn icmp_rate_check(key: &RateLimitKey, max_pps: u64, now: u64) -> bool {
             pkt_count: 1,
             window_start: now,
         };
-        let _ = ICMP_RATE_BUCKETS.insert(key, &new_val, 0);
+        if !traced {
+            let _ = ICMP_RATE_BUCKETS.insert(key, &new_val, 0);
+        }
         true
     }
 }
@@ -1301,6 +1351,7 @@ fn check_udp_amplification(
     flags: u8,
     vlan_id: u16,
 ) -> Option<u32> {
+    let traced = trace::xdp(ctx);
     let ports = unsafe { ptr_at::<[u8; 4]>(ctx, l4_offset).ok()? };
     let ports = unsafe { &*ports };
     let src_port = u16::from_be_bytes([ports[0], ports[1]]);
@@ -1321,8 +1372,8 @@ fn check_udp_amplification(
     let bucket_key = amp_bucket_key(src_ip, src_port);
     let now = unsafe { bpf_ktime_get_coarse_ns() };
 
-    if amp_rate_check(bucket_key, amp_cfg.max_pps as u64, now) {
-        increment_ddos_metric(DDOS_METRIC_AMP_PASSED);
+    if amp_rate_check(traced, bucket_key, amp_cfg.max_pps as u64, now) {
+        increment_ddos_metric(traced, DDOS_METRIC_AMP_PASSED);
         None // Under limit - fall through
     } else {
         let src_addr = [src_ip, 0, 0, 0];
@@ -1339,7 +1390,7 @@ fn check_udp_amplification(
             flags,
             vlan_id,
         );
-        increment_ddos_metric(DDOS_METRIC_AMP_DROPPED);
+        increment_ddos_metric(traced, DDOS_METRIC_AMP_DROPPED);
         Some(xdp_action::XDP_DROP)
     }
 }
@@ -1355,6 +1406,7 @@ fn check_udp_amp_v6(
     flags: u8,
     vlan_id: u16,
 ) -> Option<u32> {
+    let traced = trace::xdp(ctx);
     let ports = unsafe { ptr_at::<[u8; 4]>(ctx, l4_offset).ok()? };
     let ports = unsafe { &*ports };
     let src_port = u16::from_be_bytes([ports[0], ports[1]]);
@@ -1373,8 +1425,8 @@ fn check_udp_amp_v6(
     let bucket_key = amp_bucket_key(src_hash, src_port);
     let now = unsafe { bpf_ktime_get_coarse_ns() };
 
-    if amp_rate_check(bucket_key, amp_cfg.max_pps as u64, now) {
-        increment_ddos_metric(DDOS_METRIC_AMP_PASSED);
+    if amp_rate_check(traced, bucket_key, amp_cfg.max_pps as u64, now) {
+        increment_ddos_metric(traced, DDOS_METRIC_AMP_PASSED);
         None
     } else {
         emit_ddos_event(
@@ -1389,7 +1441,7 @@ fn check_udp_amp_v6(
             flags,
             vlan_id,
         );
-        increment_ddos_metric(DDOS_METRIC_AMP_DROPPED);
+        increment_ddos_metric(traced, DDOS_METRIC_AMP_DROPPED);
         Some(xdp_action::XDP_DROP)
     }
 }
@@ -1402,9 +1454,14 @@ fn amp_bucket_key(src_ip: u32, src_port: u16) -> u64 {
 
 /// Fixed-window rate check for amplification. Returns `true` if under limit.
 #[inline(always)]
-fn amp_rate_check(key: u64, max_pps: u64, now: u64) -> bool {
+fn amp_rate_check(traced: bool, key: u64, max_pps: u64, now: u64) -> bool {
     if let Some(bucket) = AMP_RATE_BUCKETS.get_ptr_mut(&key) {
-        let bucket = unsafe { &mut *bucket };
+        let mut bucket_shadow = unsafe { *bucket };
+        let bucket = if traced {
+            &mut bucket_shadow
+        } else {
+            unsafe { &mut *bucket }
+        };
         if now.saturating_sub(bucket.window_start) >= NS_PER_SEC {
             bucket.pkt_count = 1;
             bucket.window_start = now;
@@ -1420,7 +1477,9 @@ fn amp_rate_check(key: u64, max_pps: u64, now: u64) -> bool {
             pkt_count: 1,
             window_start: now,
         };
-        let _ = AMP_RATE_BUCKETS.insert(&key, &new_val, 0);
+        if !traced {
+            let _ = AMP_RATE_BUCKETS.insert(&key, &new_val, 0);
+        }
         true
     }
 }
@@ -1508,6 +1567,7 @@ fn process_conntrack_tcp(
     flags: u8,
     vlan_id: u16,
 ) -> Option<u32> {
+    let traced = trace::xdp(ctx);
     let is_syn = tcp_flags & TCP_FLAG_SYN != 0 && tcp_flags & TCP_FLAG_ACK == 0;
     let is_ack = tcp_flags & TCP_FLAG_ACK != 0 && tcp_flags & TCP_FLAG_SYN == 0;
     let is_rst = tcp_flags & TCP_FLAG_RST != 0;
@@ -1515,7 +1575,13 @@ fn process_conntrack_tcp(
 
     // ── RST flood detection ──────────────────────────────────────
     if is_rst {
-        if check_flood_rate(src_ip, FLOOD_TYPE_RST, cfg.rst_threshold as u64, now) {
+        if check_flood_rate(
+            traced,
+            src_ip,
+            FLOOD_TYPE_RST,
+            cfg.rst_threshold as u64,
+            now,
+        ) {
             emit_ddos_event(
                 ctx,
                 src_addr,
@@ -1528,7 +1594,7 @@ fn process_conntrack_tcp(
                 flags,
                 vlan_id,
             );
-            increment_ddos_metric(DDOS_METRIC_RST_FLOOD_DROPS);
+            increment_ddos_metric(traced, DDOS_METRIC_RST_FLOOD_DROPS);
             return Some(xdp_action::XDP_DROP);
         }
         // Remove connection entry on RST
@@ -1538,13 +1604,21 @@ fn process_conntrack_tcp(
             src_port,
             dst_port,
         };
-        let _ = CONN_TABLE.remove(&key);
+        if !traced {
+            let _ = CONN_TABLE.remove(&key);
+        }
         return None;
     }
 
     // ── FIN flood detection ──────────────────────────────────────
     if is_fin {
-        if check_flood_rate(src_ip, FLOOD_TYPE_FIN, cfg.fin_threshold as u64, now) {
+        if check_flood_rate(
+            traced,
+            src_ip,
+            FLOOD_TYPE_FIN,
+            cfg.fin_threshold as u64,
+            now,
+        ) {
             emit_ddos_event(
                 ctx,
                 src_addr,
@@ -1557,7 +1631,7 @@ fn process_conntrack_tcp(
                 flags,
                 vlan_id,
             );
-            increment_ddos_metric(DDOS_METRIC_FIN_FLOOD_DROPS);
+            increment_ddos_metric(traced, DDOS_METRIC_FIN_FLOOD_DROPS);
             return Some(xdp_action::XDP_DROP);
         }
         // Remove connection entry on FIN
@@ -1567,7 +1641,9 @@ fn process_conntrack_tcp(
             src_port,
             dst_port,
         };
-        let _ = CONN_TABLE.remove(&key);
+        if !traced {
+            let _ = CONN_TABLE.remove(&key);
+        }
         return None;
     }
 
@@ -1575,7 +1651,12 @@ fn process_conntrack_tcp(
     if is_syn {
         // Check half-open threshold before adding
         if let Some(count) = HALF_OPEN_COUNTERS.get_ptr_mut(&src_ip) {
-            let count = unsafe { &mut *count };
+            let mut count_shadow = unsafe { *count };
+            let count = if traced {
+                &mut count_shadow
+            } else {
+                unsafe { &mut *count }
+            };
             if *count >= cfg.half_open_threshold as u64 {
                 // Too many half-open connections from this source
                 emit_ddos_event(
@@ -1590,13 +1671,15 @@ fn process_conntrack_tcp(
                     flags,
                     vlan_id,
                 );
-                increment_ddos_metric(DDOS_METRIC_HALF_OPEN_DROPS);
+                increment_ddos_metric(traced, DDOS_METRIC_HALF_OPEN_DROPS);
                 return Some(xdp_action::XDP_DROP);
             }
             *count += 1;
         } else {
             let initial: u64 = 1;
-            let _ = HALF_OPEN_COUNTERS.insert(&src_ip, &initial, 0);
+            if !traced {
+                let _ = HALF_OPEN_COUNTERS.insert(&src_ip, &initial, 0);
+            }
         }
 
         // Insert NEW connection
@@ -1612,8 +1695,10 @@ fn process_conntrack_tcp(
             first_seen_ns: now,
             last_seen_ns: now,
         };
-        let _ = CONN_TABLE.insert(&key, &val, 0);
-        increment_ddos_metric(DDOS_METRIC_CONN_TRACKED);
+        if !traced {
+            let _ = CONN_TABLE.insert(&key, &val, 0);
+        }
+        increment_ddos_metric(traced, DDOS_METRIC_CONN_TRACKED);
         return None;
     }
 
@@ -1635,13 +1720,23 @@ fn process_conntrack_tcp(
 
         // Try forward key first, then reverse
         let found_forward = if let Some(entry) = CONN_TABLE.get_ptr_mut(&key) {
-            let entry = unsafe { &mut *entry };
+            let mut entry_shadow = unsafe { *entry };
+            let entry = if traced {
+                &mut entry_shadow
+            } else {
+                unsafe { &mut *entry }
+            };
             entry.last_seen_ns = now;
             if entry.state == CONN_NEW {
                 entry.state = CONN_ESTABLISHED;
                 // Decrement half-open counter
                 if let Some(count) = HALF_OPEN_COUNTERS.get_ptr_mut(&src_ip) {
-                    let count = unsafe { &mut *count };
+                    let mut count_shadow = unsafe { *count };
+                    let count = if traced {
+                        &mut count_shadow
+                    } else {
+                        unsafe { &mut *count }
+                    };
                     *count = count.saturating_sub(1);
                 }
             }
@@ -1653,19 +1748,35 @@ fn process_conntrack_tcp(
         if !found_forward {
             // Check reverse direction
             if let Some(entry) = CONN_TABLE.get_ptr_mut(&rev_key) {
-                let entry = unsafe { &mut *entry };
+                let mut entry_shadow = unsafe { *entry };
+                let entry = if traced {
+                    &mut entry_shadow
+                } else {
+                    unsafe { &mut *entry }
+                };
                 entry.last_seen_ns = now;
                 if entry.state == CONN_NEW {
                     entry.state = CONN_ESTABLISHED;
                     // Decrement half-open counter for the original SYN sender
                     if let Some(count) = HALF_OPEN_COUNTERS.get_ptr_mut(&dst_ip) {
-                        let count = unsafe { &mut *count };
+                        let mut count_shadow = unsafe { *count };
+                        let count = if traced {
+                            &mut count_shadow
+                        } else {
+                            unsafe { &mut *count }
+                        };
                         *count = count.saturating_sub(1);
                     }
                 }
             } else {
                 // ACK to non-existent connection - potential ACK flood
-                if check_flood_rate(src_ip, FLOOD_TYPE_ACK, cfg.ack_threshold as u64, now) {
+                if check_flood_rate(
+                    traced,
+                    src_ip,
+                    FLOOD_TYPE_ACK,
+                    cfg.ack_threshold as u64,
+                    now,
+                ) {
                     emit_ddos_event(
                         ctx,
                         src_addr,
@@ -1678,7 +1789,7 @@ fn process_conntrack_tcp(
                         flags,
                         vlan_id,
                     );
-                    increment_ddos_metric(DDOS_METRIC_ACK_FLOOD_DROPS);
+                    increment_ddos_metric(traced, DDOS_METRIC_ACK_FLOOD_DROPS);
                     return Some(xdp_action::XDP_DROP);
                 }
             }
@@ -1695,7 +1806,12 @@ fn process_conntrack_tcp(
         dst_port,
     };
     if let Some(entry) = CONN_TABLE.get_ptr_mut(&key) {
-        let entry = unsafe { &mut *entry };
+        let mut entry_shadow = unsafe { *entry };
+        let entry = if traced {
+            &mut entry_shadow
+        } else {
+            unsafe { &mut *entry }
+        };
         entry.last_seen_ns = now;
     }
 
@@ -1705,7 +1821,7 @@ fn process_conntrack_tcp(
 /// Check if a flood rate threshold is exceeded for a given source and flood type.
 /// Uses fixed 1-second window. Returns `true` if rate exceeds threshold (should drop).
 #[inline(always)]
-fn check_flood_rate(src_ip: u32, flood_type: u8, threshold: u64, now: u64) -> bool {
+fn check_flood_rate(traced: bool, src_ip: u32, flood_type: u8, threshold: u64, now: u64) -> bool {
     if threshold == 0 {
         return false; // Disabled
     }
@@ -1717,7 +1833,12 @@ fn check_flood_rate(src_ip: u32, flood_type: u8, threshold: u64, now: u64) -> bo
     };
 
     if let Some(bucket) = FLOOD_COUNTERS.get_ptr_mut(&key) {
-        let bucket = unsafe { &mut *bucket };
+        let mut bucket_shadow = unsafe { *bucket };
+        let bucket = if traced {
+            &mut bucket_shadow
+        } else {
+            unsafe { &mut *bucket }
+        };
         if now.saturating_sub(bucket.window_start) >= NS_PER_SEC {
             // New window
             bucket.pkt_count = 1;
@@ -1734,7 +1855,9 @@ fn check_flood_rate(src_ip: u32, flood_type: u8, threshold: u64, now: u64) -> bo
             pkt_count: 1,
             window_start: now,
         };
-        let _ = FLOOD_COUNTERS.insert(&key, &new_val, 0);
+        if !traced {
+            let _ = FLOOD_COUNTERS.insert(&key, &new_val, 0);
+        }
         false
     }
 }
@@ -1750,6 +1873,7 @@ fn check_flood_rate(src_ip: u32, flood_type: u8, threshold: u64, now: u64) -> bo
 /// Returns `Some(XDP_PASS)` if valid, `None` if not a cookie ACK.
 #[inline(always)]
 fn validate_syncookie_ack_v4(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Option<u32> {
+    let traced = trace::xdp(ctx);
     let flags_ptr: *const u8 = unsafe { ptr_at::<u8>(ctx, l4_off + 13).ok()? };
     let flags = unsafe { *flags_ptr };
     if flags != TCP_FLAG_ACK {
@@ -1765,10 +1889,10 @@ fn validate_syncookie_ack_v4(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> 
         bpf_tcp_raw_check_syncookie_ipv4(iphdr as *mut iphdr, tcphdr as *mut tcphdr) >= 0
     };
     if valid {
-        increment_ddos_metric(DDOS_METRIC_SYNCOOKIE_VALID);
+        increment_ddos_metric(traced, DDOS_METRIC_SYNCOOKIE_VALID);
         Some(xdp_action::XDP_PASS)
     } else {
-        increment_ddos_metric(DDOS_METRIC_SYNCOOKIE_INVALID);
+        increment_ddos_metric(traced, DDOS_METRIC_SYNCOOKIE_INVALID);
         None
     }
 }
@@ -1777,6 +1901,7 @@ fn validate_syncookie_ack_v4(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> 
 /// Returns `Some(XDP_PASS)` if valid, `None` if not a cookie ACK.
 #[inline(always)]
 fn validate_syncookie_ack_v6(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> Option<u32> {
+    let traced = trace::xdp(ctx);
     let flags_ptr: *const u8 = unsafe { ptr_at::<u8>(ctx, l4_off + 13).ok()? };
     let flags = unsafe { *flags_ptr };
     if flags != TCP_FLAG_ACK {
@@ -1791,10 +1916,10 @@ fn validate_syncookie_ack_v6(ctx: &XdpContext, l3_off: usize, l4_off: usize) -> 
         bpf_tcp_raw_check_syncookie_ipv6(ipv6hdr as *mut ipv6hdr, tcphdr as *mut tcphdr) >= 0
     };
     if valid {
-        increment_ddos_metric(DDOS_METRIC_SYNCOOKIE_VALID);
+        increment_ddos_metric(traced, DDOS_METRIC_SYNCOOKIE_VALID);
         Some(xdp_action::XDP_PASS)
     } else {
-        increment_ddos_metric(DDOS_METRIC_SYNCOOKIE_INVALID);
+        increment_ddos_metric(traced, DDOS_METRIC_SYNCOOKIE_INVALID);
         None
     }
 }
@@ -1817,8 +1942,12 @@ fn emit_ddos_event(
     flags: u8,
     vlan_id: u16,
 ) {
+    let traced = trace::xdp(ctx);
+    if traced {
+        return;
+    }
     if ringbuf_has_backpressure() {
-        increment_ddos_metric(DDOS_METRIC_EVENTS_DROPPED);
+        increment_ddos_metric(traced, DDOS_METRIC_EVENTS_DROPPED);
         return;
     }
     let (rss_hash, rss_hash_type) = unsafe { xdp_rx_hash(ctx.ctx.cast()) }.unwrap_or((0, 0));
@@ -1847,7 +1976,7 @@ fn emit_ddos_event(
         }
         entry.submit(submit_flags(avail_data(&EVENTS)));
     } else {
-        increment_ddos_metric(DDOS_METRIC_EVENTS_DROPPED);
+        increment_ddos_metric(traced, DDOS_METRIC_EVENTS_DROPPED);
     }
 }
 
@@ -1856,9 +1985,19 @@ fn emit_ddos_event(
 /// Token bucket algorithm: refill tokens based on elapsed time, consume 1.
 /// Returns `true` if packet should pass, `false` if throttled.
 #[inline(always)]
-fn check_token_bucket(key: &RateLimitKey, config: &RateLimitConfig, now: u64) -> bool {
+fn check_token_bucket(
+    traced: bool,
+    key: &RateLimitKey,
+    config: &RateLimitConfig,
+    now: u64,
+) -> bool {
     if let Some(union_ptr) = RL_BUCKETS.get_ptr_mut(key) {
-        let union_bucket = unsafe { &mut *union_ptr };
+        let mut union_bucket_shadow = unsafe { *union_ptr };
+        let union_bucket = if traced {
+            &mut union_bucket_shadow
+        } else {
+            unsafe { &mut *union_ptr }
+        };
         // If algorithm changed, treat as new bucket
         if union_bucket.algorithm != ALGO_TOKEN_BUCKET {
             let val = RateLimitValue {
@@ -1866,7 +2005,9 @@ fn check_token_bucket(key: &RateLimitKey, config: &RateLimitConfig, now: u64) ->
                 last_refill_ns: now,
             };
             let new_bucket = RateLimitBucketUnion::new_token_bucket(&val);
-            let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+            if !traced {
+                let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+            }
             return true;
         }
         let bucket = unsafe { &mut *(union_bucket.data.as_mut_ptr() as *mut RateLimitValue) };
@@ -1877,7 +2018,9 @@ fn check_token_bucket(key: &RateLimitKey, config: &RateLimitConfig, now: u64) ->
             last_refill_ns: now,
         };
         let new_bucket = RateLimitBucketUnion::new_token_bucket(&val);
-        let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+        if !traced {
+            let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+        }
         true
     }
 }
@@ -1910,18 +2053,30 @@ fn token_bucket_check(bucket: &mut RateLimitValue, config: &RateLimitConfig, now
 // ── Fixed Window ────────────────────────────────────────────────────
 
 #[inline(always)]
-fn check_fixed_window(key: &RateLimitKey, config: &RateLimitConfig, now: u64) -> bool {
+fn check_fixed_window(
+    traced: bool,
+    key: &RateLimitKey,
+    config: &RateLimitConfig,
+    now: u64,
+) -> bool {
     let limit = config.ns_per_token;
 
     if let Some(union_ptr) = RL_BUCKETS.get_ptr_mut(key) {
-        let union_bucket = unsafe { &mut *union_ptr };
+        let mut union_bucket_shadow = unsafe { *union_ptr };
+        let union_bucket = if traced {
+            &mut union_bucket_shadow
+        } else {
+            unsafe { &mut *union_ptr }
+        };
         if union_bucket.algorithm != ALGO_FIXED_WINDOW {
             let val = FixedWindowValue {
                 pkt_count: 1,
                 window_start: now,
             };
             let new_bucket = RateLimitBucketUnion::new_fixed_window(&val);
-            let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+            if !traced {
+                let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+            }
             return true;
         }
         let bucket = unsafe { &mut *(union_bucket.data.as_mut_ptr() as *mut FixedWindowValue) };
@@ -1943,7 +2098,9 @@ fn check_fixed_window(key: &RateLimitKey, config: &RateLimitConfig, now: u64) ->
             window_start: now,
         };
         let new_bucket = RateLimitBucketUnion::new_fixed_window(&val);
-        let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+        if !traced {
+            let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+        }
         true
     }
 }
@@ -1951,11 +2108,21 @@ fn check_fixed_window(key: &RateLimitKey, config: &RateLimitConfig, now: u64) ->
 // ── Sliding Window ──────────────────────────────────────────────────
 
 #[inline(always)]
-fn check_sliding_window(key: &RateLimitKey, config: &RateLimitConfig, now: u64) -> bool {
+fn check_sliding_window(
+    traced: bool,
+    key: &RateLimitKey,
+    config: &RateLimitConfig,
+    now: u64,
+) -> bool {
     let max_packets = config.ns_per_token;
 
     if let Some(union_ptr) = RL_BUCKETS.get_ptr_mut(key) {
-        let union_bucket = unsafe { &mut *union_ptr };
+        let mut union_bucket_shadow = unsafe { *union_ptr };
+        let union_bucket = if traced {
+            &mut union_bucket_shadow
+        } else {
+            unsafe { &mut *union_ptr }
+        };
         if union_bucket.algorithm != ALGO_SLIDING_WINDOW {
             let mut sw = SlidingWindowValue {
                 slots: [0; SLIDING_WINDOW_NUM_SLOTS],
@@ -1978,7 +2145,9 @@ fn check_sliding_window(key: &RateLimitKey, config: &RateLimitConfig, now: u64) 
                     core::mem::size_of::<SlidingWindowValue>(),
                 );
             }
-            let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+            if !traced {
+                let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+            }
             return true;
         }
         let bucket = unsafe { &mut *(union_bucket.data.as_mut_ptr() as *mut SlidingWindowValue) };
@@ -2015,7 +2184,9 @@ fn check_sliding_window(key: &RateLimitKey, config: &RateLimitConfig, now: u64) 
                 core::mem::size_of::<SlidingWindowValue>(),
             );
         }
-        let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+        if !traced {
+            let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+        }
         true
     }
 }
@@ -2062,19 +2233,31 @@ fn sliding_window_update(bucket: &mut SlidingWindowValue, now: u64) {
 // ── Leaky Bucket ────────────────────────────────────────────────────
 
 #[inline(always)]
-fn check_leaky_bucket(key: &RateLimitKey, config: &RateLimitConfig, now: u64) -> bool {
+fn check_leaky_bucket(
+    traced: bool,
+    key: &RateLimitKey,
+    config: &RateLimitConfig,
+    now: u64,
+) -> bool {
     let drain_rate = config.ns_per_token;
     let capacity = config.burst;
 
     if let Some(union_ptr) = RL_BUCKETS.get_ptr_mut(key) {
-        let union_bucket = unsafe { &mut *union_ptr };
+        let mut union_bucket_shadow = unsafe { *union_ptr };
+        let union_bucket = if traced {
+            &mut union_bucket_shadow
+        } else {
+            unsafe { &mut *union_ptr }
+        };
         if union_bucket.algorithm != ALGO_LEAKY_BUCKET {
             let val = LeakyBucketValue {
                 level: 1,
                 last_update_ns: now,
             };
             let new_bucket = RateLimitBucketUnion::new_leaky_bucket(&val);
-            let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+            if !traced {
+                let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+            }
             return true;
         }
         let bucket = unsafe { &mut *(union_bucket.data.as_mut_ptr() as *mut LeakyBucketValue) };
@@ -2100,7 +2283,9 @@ fn check_leaky_bucket(key: &RateLimitKey, config: &RateLimitConfig, now: u64) ->
             last_update_ns: now,
         };
         let new_bucket = RateLimitBucketUnion::new_leaky_bucket(&val);
-        let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+        if !traced {
+            let _ = RL_BUCKETS.insert(key, &new_bucket, 0);
+        }
         true
     }
 }
@@ -2111,7 +2296,10 @@ fn check_leaky_bucket(key: &RateLimitKey, config: &RateLimitConfig, now: u64) ->
 
 /// Increment a per-CPU metric counter.
 #[inline(always)]
-fn increment_metric(index: u32) {
+fn increment_metric(traced: bool, index: u32) {
+    if traced {
+        return;
+    }
     increment_metric!(RATELIMIT_METRICS, index);
 }
 
@@ -2136,8 +2324,12 @@ fn emit_ratelimit_event(
     vlan_id: u16,
     action: u8,
 ) {
+    let traced = trace::xdp(ctx);
+    if traced {
+        return;
+    }
     if ringbuf_has_backpressure() {
-        increment_metric(METRIC_EVENTS_DROPPED);
+        increment_metric(traced, METRIC_EVENTS_DROPPED);
         return;
     }
 
@@ -2167,7 +2359,7 @@ fn emit_ratelimit_event(
         }
         entry.submit(submit_flags(avail_data(&EVENTS)));
     } else {
-        increment_metric(METRIC_EVENTS_DROPPED);
+        increment_metric(traced, METRIC_EVENTS_DROPPED);
     }
 }
 

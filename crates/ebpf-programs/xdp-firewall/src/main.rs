@@ -52,6 +52,7 @@ use ebpf_helpers::net::{
 };
 use ebpf_helpers::parse_vlan_tags;
 use ebpf_helpers::ringbuf::{avail_data, submit_flags};
+use ebpf_helpers::trace::{self, NO_RULE, fast_path, reason, stage};
 use ebpf_helpers::xdp::{ptr_at, ptr_at_mut, skip_ipv6_ext_headers};
 use ebpf_helpers::{copy_mac_asm, increment_metric, ringbuf_has_backpressure};
 use network_types::{
@@ -657,7 +658,6 @@ unsafe extern "C" fn scan_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
 /// drops so unparseable packets cannot bypass inspection).
 #[xdp]
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
-    increment_metric(METRIC_TOTAL_SEEN);
     // Capture the trusted XDP context pointer by value in the entry frame,
     // where `ctx` is owned (guaranteed `PTR_TO_CTX` with the trusted flag).
     // The `KF_TRUSTED_ARGS` kfuncs (conntrack, xfrm, dynptr, RX-metadata)
@@ -668,6 +668,7 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
     // the pointer by value keeps it in a register so the trusted flag
     // survives every bpf-to-bpf call down to the kfunc site.
     let ctx_raw: *mut core::ffi::c_void = ctx.ctx.cast();
+    increment_metric(ctx_raw, METRIC_TOTAL_SEEN);
     let action = match try_xdp_firewall(&ctx, ctx_raw) {
         Ok(action) => action,
         Err(()) => {
@@ -678,11 +679,13 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
             // closes a fail-open inspection bypass. Default-allow still passes
             // on error (NFR15). No event is emitted because PKT_CTX may be
             // unpopulated on an early parse failure - only metrics are bumped.
-            increment_metric(METRIC_ERRORS);
+            increment_metric(ctx_raw, METRIC_ERRORS);
             if read_default_policy() == DEFAULT_POLICY_DROP {
-                increment_metric(METRIC_DROPPED);
+                increment_metric(ctx_raw, METRIC_DROPPED);
+                record(ctx_raw, ACTION_DROP, reason::MALFORMED, NO_RULE);
                 xdp_action::XDP_DROP
             } else {
+                record(ctx_raw, ACTION_PASS, reason::MALFORMED, NO_RULE);
                 xdp_action::XDP_PASS
             }
         }
@@ -740,7 +743,7 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
         let mut mtu: u32 = 0;
         let mtu_ret = unsafe { bpf_check_mtu(ctx.ctx as *mut _, 0, &mut mtu as *mut u32, 0, 0) };
         if mtu_ret > 0 {
-            increment_metric(METRIC_MTU_EXCEEDED);
+            increment_metric(ctx_raw, METRIC_MTU_EXCEEDED);
             return xdp_action::XDP_DROP;
         }
     }
@@ -870,7 +873,10 @@ fn interzone_policy(from_zone: u8, to_zone: u8) -> Option<u8> {
 /// Count a packet against its zone. Bounded by the map size, so an out-of
 /// range zone id is dropped rather than clamped into another zone's slot.
 #[inline(always)]
-fn count_zone(zone: u8, dropped: bool) {
+fn count_zone(ctx_raw: *mut core::ffi::c_void, zone: u8, dropped: bool) {
+    if traced(ctx_raw) {
+        return;
+    }
     let idx = u32::from(zone);
     if idx >= ZONE_METRIC_SLOTS {
         return;
@@ -944,12 +950,14 @@ fn apply_default_policy(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void) -> Re
 
     if drop {
         emit_event(ctx_raw, ACTION_DROP);
-        increment_metric(METRIC_DROPPED);
-        count_zone(zone, true);
+        increment_metric(ctx_raw, METRIC_DROPPED);
+        count_zone(ctx_raw, zone, true);
+        record(ctx_raw, ACTION_DROP, reason::DEFAULT, NO_RULE);
         Ok(xdp_action::XDP_DROP)
     } else {
-        increment_metric(METRIC_PASSED);
-        count_zone(zone, false);
+        increment_metric(ctx_raw, METRIC_PASSED);
+        count_zone(ctx_raw, zone, false);
+        record(ctx_raw, ACTION_PASS, reason::DEFAULT, NO_RULE);
         Ok(xdp_action::XDP_PASS)
     }
 }
@@ -996,7 +1004,8 @@ fn try_xdp_firewall(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void) -> Result
         // reaches the host normally.
         Ok(XDP_ACTION_ARP_VIP)
     } else {
-        increment_metric(METRIC_PASSED);
+        increment_metric(ctx_raw, METRIC_PASSED);
+        record(ctx_raw, ACTION_PASS, reason::DEFAULT, NO_RULE);
         Ok(xdp_action::XDP_PASS)
     }
 }
@@ -1129,10 +1138,13 @@ fn process_firewall_v4(
         };
         if unsafe { FW_IPSET_V4.get(&overload_key) }.is_some() {
             if overload_still_stands(SrcCounterKey::from_v4(src_ip)) {
-                increment_metric(METRIC_DROPPED);
+                increment_metric(ctx_raw, METRIC_DROPPED);
+                record(ctx_raw, ACTION_DROP, reason::LIST, NO_RULE);
                 return Ok(xdp_action::XDP_DROP);
             }
-            let _ = FW_IPSET_V4.remove(&overload_key);
+            if !traced(ctx_raw) {
+                let _ = FW_IPSET_V4.remove(&overload_key);
+            }
         }
     }
 
@@ -1166,6 +1178,7 @@ fn process_firewall_v4(
                 ct_state,
                 SrcCounterKey::from_v4(src_ip),
                 gates,
+                fast_path::LPM_SRC,
             );
         }
         let dst_key = Key::new(32, dst_ip.to_be_bytes());
@@ -1176,6 +1189,7 @@ fn process_firewall_v4(
                 ct_state,
                 SrcCounterKey::from_v4(src_ip),
                 gates,
+                fast_path::LPM_DST,
             );
         }
     }
@@ -1197,6 +1211,7 @@ fn process_firewall_v4(
                 ct_state,
                 SrcCounterKey::from_v4(src_ip),
                 gates,
+                fast_path::HASH_5TUPLE,
             );
         }
     }
@@ -1215,6 +1230,7 @@ fn process_firewall_v4(
                 ct_state,
                 SrcCounterKey::from_v4(src_ip),
                 gates,
+                fast_path::HASH_PORT,
             );
         }
     }
@@ -1309,10 +1325,12 @@ fn process_firewall_v4(
                 SrcCounterKey::from_v4(src_ip),
                 matched_rule_idx,
                 matched_max_states,
+                traced(ctx_raw),
             ) {
                 // Connection limit exceeded → DROP.
                 emit_event(ctx_raw, ACTION_DROP);
-                increment_metric(METRIC_DROPPED);
+                increment_metric(ctx_raw, METRIC_DROPPED);
+                record(ctx_raw, ACTION_DROP, reason::RATE, matched_rule_idx as u32);
                 return Ok(xdp_action::XDP_DROP);
             }
         }
@@ -1324,7 +1342,7 @@ fn process_firewall_v4(
                 mark_dscp_v4(ctx, l3_offset, mark)?;
             }
         }
-        return apply_action(ctx_raw, action);
+        return apply_action(ctx_raw, action, reason::RULE, matched_rule_idx as u32);
     }
 
     // No explicit rule matched. ESTABLISHED/RELATED flows were already granted
@@ -1332,7 +1350,8 @@ fn process_firewall_v4(
     // must not tear down live connections that no longer match any rule. Only
     // NEW/unknown flows fall through to the default policy.
     if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
-        increment_metric(METRIC_PASSED);
+        increment_metric(ctx_raw, METRIC_PASSED);
+        record(ctx_raw, ACTION_PASS, reason::ESTABLISHED, NO_RULE);
         return Ok(xdp_action::XDP_PASS);
     }
 
@@ -1505,8 +1524,16 @@ fn overload_still_stands(src_key: SrcCounterKey) -> bool {
 ///
 /// Only called for NEW connections (ct_state == CT_STATE_NEW or 0xFF)
 /// that matched an ALLOW rule.
+///
+/// A traced packet is measured against the same counters and writes none of
+/// them back: the answer is the one the next live packet would get.
 #[inline(never)]
-fn check_connection_limits(src_key: SrcCounterKey, rule_idx: i32, max_rule_states: u16) -> bool {
+fn check_connection_limits(
+    src_key: SrcCounterKey,
+    rule_idx: i32,
+    max_rule_states: u16,
+    traced: bool,
+) -> bool {
     // Read conntrack config for global limits.
     let cfg = match CT_CONFIG.get(0) {
         Some(c) => c,
@@ -1546,6 +1573,9 @@ fn check_connection_limits(src_key: SrcCounterKey, rule_idx: i32, max_rule_state
                     // Insert may fail if map is full - acceptable: the overload
                     // flag is best-effort. The packet is still dropped below.
                     // No logging available in eBPF context.
+                    if traced {
+                        return false;
+                    }
                     let _ = CT_SRC_COUNTERS.insert(&src_key, &overloaded, 0);
                     // Add to the overload IP set for fast-path rejection.
                     // That set is IPv4-only, so an IPv6 source is refused by
@@ -1608,7 +1638,9 @@ fn check_connection_limits(src_key: SrcCounterKey, rule_idx: i32, max_rule_state
                 overloaded_at_ns: 0,
             }
         };
-        let _ = CT_SRC_COUNTERS.insert(&src_key, &new_counter, 0);
+        if !traced {
+            let _ = CT_SRC_COUNTERS.insert(&src_key, &new_counter, 0);
+        }
     }
 
     // Check per-rule state limit.
@@ -1618,9 +1650,10 @@ fn check_connection_limits(src_key: SrcCounterKey, rule_idx: i32, max_rule_state
             if current >= max_rule_states as u32 {
                 return false;
             }
-            // Increment atomically.
-            unsafe {
-                *count_ptr = current + 1;
+            if !traced {
+                unsafe {
+                    *count_ptr = current + 1;
+                }
             }
         }
     }
@@ -1772,6 +1805,10 @@ fn read_kernel_ct_state(ct: *mut ebpf_helpers::kfuncs::nf_conn) -> u8 {
 }
 
 /// Perform IPv6 LPM trie lookup for source and destination CIDRs.
+/// Set in what [`lpm_lookup_v6`] returns when the destination trie answered,
+/// so a trace can say which of the two did.
+const LPM_V6_DST_HIT: i32 = 0x100;
+
 /// Returns the matched action (>=0) or -1 if no LPM match.
 /// Reads raw IPv6 bytes from the `PacketCtx` pointer.
 #[inline(never)]
@@ -1784,7 +1821,7 @@ fn lpm_lookup_v6(pkt_ctx: *const PacketCtx) -> i32 {
     let dst_bytes = unsafe { (*pkt_ctx).dst_bytes_v6 };
     let dst_key_v6 = Key::new(128, dst_bytes);
     if let Some(val) = FW_LPM_DST_V6.get(&dst_key_v6) {
-        return val.action as i32;
+        return val.action as i32 | LPM_V6_DST_HIT;
     }
     -1
 }
@@ -1897,12 +1934,18 @@ fn process_firewall_v6(
         lpm_lookup_v6(pkt_ctx)
     };
     if lpm_action >= 0 {
+        let which = if lpm_action & LPM_V6_DST_HIT != 0 {
+            fast_path::LPM_DST
+        } else {
+            fast_path::LPM_SRC
+        };
         return apply_fast_path_action(
             ctx_raw,
-            lpm_action as u8,
+            (lpm_action & 0xFF) as u8,
             ct_state,
             SrcCounterKey::from_v6(src_addr),
             gates,
+            which,
         );
     }
 
@@ -1993,9 +2036,11 @@ fn process_firewall_v6(
                 SrcCounterKey::from_v6(src_addr),
                 matched_rule_idx,
                 matched_max_states,
+                traced(ctx_raw),
             ) {
                 emit_event(ctx_raw, ACTION_DROP);
-                increment_metric(METRIC_DROPPED);
+                increment_metric(ctx_raw, METRIC_DROPPED);
+                record(ctx_raw, ACTION_DROP, reason::RATE, matched_rule_idx as u32);
                 return Ok(xdp_action::XDP_DROP);
             }
         }
@@ -2007,7 +2052,7 @@ fn process_firewall_v6(
                 mark_dscp_v6(ctx, l3_offset, mark)?;
             }
         }
-        return apply_action(ctx_raw, action);
+        return apply_action(ctx_raw, action, reason::RULE, matched_rule_idx as u32);
     }
 
     // No explicit rule matched. ESTABLISHED/RELATED flows were already granted
@@ -2015,7 +2060,8 @@ fn process_firewall_v6(
     // must not tear down live connections that no longer match any rule. Only
     // NEW/unknown flows fall through to the default policy.
     if ct_state == CT_STATE_ESTABLISHED || ct_state == CT_STATE_RELATED {
-        increment_metric(METRIC_PASSED);
+        increment_metric(ctx_raw, METRIC_PASSED);
+        record(ctx_raw, ACTION_PASS, reason::ESTABLISHED, NO_RULE);
         return Ok(xdp_action::XDP_PASS);
     }
 
@@ -2152,6 +2198,7 @@ fn apply_fast_path_action(
     ct_state: u8,
     src_key: SrcCounterKey,
     gates: u32,
+    rule_id: u32,
 ) -> Result<u32, ()> {
     // With no per-source ceiling configured the probe below reads the config,
     // finds both ceilings at zero and answers yes, so the gate that already
@@ -2159,13 +2206,14 @@ fn apply_fast_path_action(
     if (action == ACTION_PASS || action == ACTION_LOG)
         && !feature_empty(gates, FW_EMPTY_SRC_LIMITS)
         && (ct_state == CT_STATE_NEW || ct_state == 0xFF)
-        && !check_connection_limits(src_key, -1, 0)
+        && !check_connection_limits(src_key, -1, 0, traced(ctx_raw))
     {
         emit_event(ctx_raw, ACTION_DROP);
-        increment_metric(METRIC_DROPPED);
+        increment_metric(ctx_raw, METRIC_DROPPED);
+        record(ctx_raw, ACTION_DROP, reason::RATE, rule_id);
         return Ok(xdp_action::XDP_DROP);
     }
-    apply_action(ctx_raw, action)
+    apply_action(ctx_raw, action, reason::RULE, rule_id)
 }
 
 /// Rewrite the DSCP of a passed IPv4 packet, keeping its two ECN bits.
@@ -2224,11 +2272,20 @@ fn mark_dscp_v6(ctx: &XdpContext, l3_offset: usize, dscp: u8) -> Result<(), ()> 
 /// `XDP_PASS` - this satisfies the kernel 6.17+ verifier requirement
 /// that tail_call only happens in functions returning `int`.
 #[inline(always)]
-fn apply_action(ctx_raw: *mut core::ffi::c_void, action: u8) -> Result<u32, ()> {
+fn apply_action(
+    ctx_raw: *mut core::ffi::c_void,
+    action: u8,
+    why: u8,
+    rule_id: u32,
+) -> Result<u32, ()> {
+    record(ctx_raw, action, why, rule_id);
     match action {
         ACTION_DROP => {
             emit_event(ctx_raw, ACTION_DROP);
-            increment_metric(METRIC_DROPPED);
+            increment_metric(ctx_raw, METRIC_DROPPED);
+            if traced(ctx_raw) {
+                return Ok(xdp_action::XDP_DROP);
+            }
 
             // Tear the kernel netfilter CT entry behind this flow
             // down by collapsing its timeout, which is the only
@@ -2263,18 +2320,18 @@ fn apply_action(ctx_raw: *mut core::ffi::c_void, action: u8) -> Result<u32, ()> 
         }
         ACTION_REJECT => {
             emit_event(ctx_raw, ACTION_REJECT);
-            increment_metric(METRIC_REJECTED);
+            increment_metric(ctx_raw, METRIC_REJECTED);
             // Return sentinel - the entry point will tail-call to
             // xdp-firewall-reject which has its own 512B stack.
             Ok(XDP_ACTION_REJECT)
         }
         ACTION_LOG => {
             emit_event(ctx_raw, ACTION_LOG);
-            increment_metric(METRIC_PASSED);
+            increment_metric(ctx_raw, METRIC_PASSED);
             Ok(xdp_action::XDP_PASS)
         }
         ACTION_PASS | _ => {
-            increment_metric(METRIC_PASSED);
+            increment_metric(ctx_raw, METRIC_PASSED);
             Ok(xdp_action::XDP_PASS)
         }
     }
@@ -2293,10 +2350,31 @@ fn apply_action(ctx_raw: *mut core::ffi::c_void, action: u8) -> Result<u32, ()> 
 
 // increment_metric! imported from ebpf_helpers
 
-/// Increment a per-CPU metric counter.
+/// Whether the packet in hand is a trace, read from the context pointer the
+/// subprograms carry.
 #[inline(always)]
-fn increment_metric(index: u32) {
-    increment_metric!(FIREWALL_METRICS, index);
+fn traced(ctx_raw: *mut core::ffi::c_void) -> bool {
+    trace::xdp(&XdpContext::new(ctx_raw.cast()))
+}
+
+/// Record what the firewall decided for a traced packet.
+#[inline(always)]
+fn record(ctx_raw: *mut core::ffi::c_void, action: u8, why: u8, rule_id: u32) {
+    trace::xdp_record(
+        &XdpContext::new(ctx_raw.cast()),
+        stage::FIREWALL,
+        action,
+        why,
+        rule_id,
+    );
+}
+
+/// Increment a per-CPU metric counter, unless the packet is a trace.
+#[inline(always)]
+fn increment_metric(ctx_raw: *mut core::ffi::c_void, index: u32) {
+    if !traced(ctx_raw) {
+        increment_metric!(FIREWALL_METRICS, index);
+    }
 }
 
 /// Emit a `PacketEvent` to the EVENTS RingBuf. Reads packet metadata
@@ -2312,8 +2390,11 @@ fn increment_metric(index: u32) {
 /// `PacketEvent::has_hw_rss_hash` / `has_hw_timestamp`.
 #[inline(always)]
 fn emit_event(ctx_raw: *mut core::ffi::c_void, action: u8) {
+    if traced(ctx_raw) {
+        return;
+    }
     if ringbuf_has_backpressure() {
-        increment_metric(METRIC_EVENTS_DROPPED);
+        increment_metric(ctx_raw, METRIC_EVENTS_DROPPED);
         return;
     }
     let pkt = match PKT_CTX.get_ptr(0) {
@@ -2350,7 +2431,7 @@ fn emit_event(ctx_raw: *mut core::ffi::c_void, action: u8) {
         }
         entry.submit(submit_flags(avail_data(&EVENTS)));
     } else {
-        increment_metric(METRIC_EVENTS_DROPPED);
+        increment_metric(ctx_raw, METRIC_EVENTS_DROPPED);
     }
 }
 

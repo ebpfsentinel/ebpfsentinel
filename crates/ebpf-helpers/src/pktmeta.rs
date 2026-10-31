@@ -177,6 +177,11 @@ pub fn read_cb(ctx: &TcContext) -> Option<PktMeta> {
 /// Leave the parse in the control block for the programs behind this one.
 #[inline(always)]
 pub fn write_cb(ctx: &TcContext, meta: &PktMeta) {
+    // A traced packet runs through one classifier at a time and carries
+    // that classifier's verdict in the control block instead.
+    if crate::trace::tc(ctx) {
+        return;
+    }
     let w = pack(meta);
     let check = check_word(ctx, w);
     let skb = ctx.skb.skb;
@@ -195,6 +200,9 @@ pub fn write_cb(ctx: &TcContext, meta: &PktMeta) {
 /// packet again. Called after a rewrite.
 #[inline(always)]
 pub fn invalidate(ctx: &TcContext) {
+    if crate::trace::tc(ctx) {
+        return;
+    }
     let skb = ctx.skb.skb;
     // SAFETY: as in [`write_cb`].
     unsafe {
@@ -208,6 +216,9 @@ pub fn invalidate(ctx: &TcContext) {
 /// none of which a program in the chain changes without invalidating.
 #[inline(always)]
 pub fn write_tenant(ctx: &TcContext, tenant_id: u32) {
+    if crate::trace::tc(ctx) {
+        return;
+    }
     let skb = ctx.skb.skb;
     // SAFETY: as in [`read_cb`] and [`write_cb`].
     let w = unsafe { (*skb).cb };

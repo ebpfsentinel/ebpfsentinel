@@ -12,6 +12,8 @@
 //!   `XdpContext`.
 //! - [`tc`] -- `ptr_at` and `skip_ipv6_ext_headers` for `TcContext`.
 //! - [`metrics`] -- `increment_metric!` and `add_metric!` macros.
+//! - [`trace`] -- The marker a crafted packet carries so it is decided as
+//!   live traffic is and writes nothing.
 //! - [`ringbuf`] -- Backpressure constants and `ringbuf_has_backpressure!`
 //!   macro.
 
@@ -27,6 +29,7 @@ pub mod net;
 pub mod pktmeta;
 pub mod ringbuf;
 pub mod tc;
+pub mod trace;
 pub mod xdp;
 
 /// Compiler barrier: prevents LLVM from reordering memory accesses across this

@@ -21,13 +21,15 @@ use aya_ebpf::{
 };
 use ebpf_common::event::FLAG_IPV6;
 use ebpf_common::firewall::{
-    FIREWALL_METRIC_COUNT, FIREWALL_METRIC_REJECT_THROTTLED, FIREWALL_METRIC_REJECTED, PacketCtx,
+    ACTION_DROP, FIREWALL_METRIC_COUNT, FIREWALL_METRIC_REJECT_THROTTLED, FIREWALL_METRIC_REJECTED,
+    PacketCtx,
 };
 use ebpf_helpers::checksum::{
     compute_icmp_csum, compute_icmpv6_csum, compute_ipv4_csum, compute_tcp_csum_v4,
     compute_tcp_csum_v6,
 };
 use ebpf_helpers::net::{Ipv6Hdr, PROTO_ICMPV6, PROTO_TCP};
+use ebpf_helpers::trace::{self, NO_RULE, reason, stage};
 use ebpf_helpers::xdp::{ptr_at, ptr_at_mut};
 use ebpf_helpers::{barrier, copy_mac_asm};
 use network_types::{
@@ -78,11 +80,18 @@ static REJECT_RATELIMIT: LruHashMap<u32, RejectBucket, 65536> = LruHashMap::new(
 
 /// Returns `true` if a reject reply may be forged for `src_key`, consuming a
 /// token. Returns `false` once the source's bucket is empty.
+///
+/// A trace reads the bucket as the next live packet would find it and takes
+/// nothing from it.
 #[inline(always)]
-fn reject_allowed(src_key: u32) -> bool {
+fn reject_allowed(src_key: u32, traced: bool) -> bool {
     let now = unsafe { bpf_ktime_get_boot_ns() };
     if let Some(bucket) = REJECT_RATELIMIT.get_ptr_mut(&src_key) {
         unsafe {
+            if traced {
+                let elapsed = now.saturating_sub((*bucket).last_refill_ns);
+                return (*bucket).tokens > 0 || elapsed >= REJECT_RL_REFILL_NS;
+            }
             let elapsed = now.saturating_sub((*bucket).last_refill_ns);
             let refill = (elapsed / REJECT_RL_REFILL_NS) as u32;
             if refill > 0 {
@@ -95,6 +104,9 @@ fn reject_allowed(src_key: u32) -> bool {
             }
         }
         return false;
+    }
+    if traced {
+        return true;
     }
     // First reply seen for this source: seed a full bucket minus this token.
     let bucket = RejectBucket {
@@ -130,6 +142,7 @@ pub fn xdp_firewall_reject(ctx: XdpContext) -> u32 {
 
 #[inline(always)]
 fn try_reject(ctx: &XdpContext) -> Result<u32, ()> {
+    let traced = trace::xdp(ctx);
     let pkt = match PKT_CTX.get_ptr(0) {
         Some(p) => p,
         None => return Err(()),
@@ -144,8 +157,9 @@ fn try_reject(ctx: &XdpContext) -> Result<u32, ()> {
     // families share one bucket scheme.
     let src = unsafe { (*pkt).src_addr };
     let src_key = src[0] ^ src[1] ^ src[2] ^ src[3];
-    if !reject_allowed(src_key) {
-        increment_metric(FIREWALL_METRIC_REJECT_THROTTLED);
+    if !reject_allowed(src_key, traced) {
+        increment_metric(traced, FIREWALL_METRIC_REJECT_THROTTLED);
+        trace::xdp_record(ctx, stage::FIREWALL, ACTION_DROP, reason::RATE, NO_RULE);
         return Ok(xdp_action::XDP_DROP);
     }
 
@@ -169,7 +183,7 @@ fn try_reject(ctx: &XdpContext) -> Result<u32, ()> {
     };
 
     if result.is_ok() {
-        increment_metric(FIREWALL_METRIC_REJECTED);
+        increment_metric(traced, FIREWALL_METRIC_REJECTED);
     }
     result
 }
@@ -177,7 +191,10 @@ fn try_reject(ctx: &XdpContext) -> Result<u32, ()> {
 // ── Metric helper ───────────────────────────────────────────────────
 
 #[inline(always)]
-fn increment_metric(index: u32) {
+fn increment_metric(traced: bool, index: u32) {
+    if traced {
+        return;
+    }
     if let Some(cnt) = FIREWALL_METRICS.get_ptr_mut(index) {
         unsafe { *cnt += 1 };
     }

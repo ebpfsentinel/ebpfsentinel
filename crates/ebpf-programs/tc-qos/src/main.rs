@@ -35,6 +35,7 @@ use ebpf_helpers::net::{
 };
 use ebpf_helpers::pktmeta;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::trace::{self, reason, stage};
 use ebpf_helpers::{emit_packet_event, increment_metric};
 use network_types::{
     ip::{IpProto, Ipv4Hdr},
@@ -207,8 +208,10 @@ const ACTION_DROPPED: u8 = 2;
 // ── Helper wrappers ─────────────────────────────────────────────────
 
 #[inline(always)]
-fn increment_qos_metric(index: u32) {
-    increment_metric!(QOS_METRICS, index);
+fn increment_qos_metric(traced: bool, index: u32) {
+    if !traced {
+        increment_metric!(QOS_METRICS, index);
+    }
 }
 
 // ── Interface group helpers ──────────────────────────────────────────
@@ -312,11 +315,15 @@ pub fn tc_qos_ingress(ctx: TcContext) -> i32 {
 
 #[inline(always)]
 fn dispatch(ctx: &TcContext, is_ingress: bool) -> i32 {
-    increment_qos_metric(QOS_METRIC_TOTAL_SEEN);
-    let action = match try_tc_qos(ctx, is_ingress) {
+    // A traced packet is classified and shaped like any other, against
+    // buckets and departure times it reads and never writes back.
+    let traced = trace::tc(ctx);
+    increment_qos_metric(traced, QOS_METRIC_TOTAL_SEEN);
+    let action = match try_tc_qos(ctx, is_ingress, traced) {
         Ok(action) => action,
         Err(()) => {
-            increment_qos_metric(QOS_METRIC_ERRORS);
+            increment_qos_metric(traced, QOS_METRIC_ERRORS);
+            trace::tc_record(ctx, stage::QOS, reason::MALFORMED, 0, 0);
             TC_ACT_OK
         }
     };
@@ -349,7 +356,7 @@ fn delivery_time_on_packet(ctx: &TcContext) -> u64 {
 /// at the configured rate, and the fq qdisc holds it until then. A packet of
 /// no cgroup, or of a cgroup without a rate, is left as it came.
 #[inline(always)]
-fn shape_cgroup(ctx: &TcContext) -> bool {
+fn shape_cgroup(ctx: &TcContext, traced: bool) -> bool {
     let skb = ctx.skb.skb;
     let leaves_on = unsafe { (*skb).ifindex };
     if unsafe { QOS_EDT_INTERFACES.get(&leaves_on) }.is_none() {
@@ -378,8 +385,13 @@ fn shape_cgroup(ctx: &TcContext) -> bool {
     let departure = if next > now { next } else { now };
 
     if departure - now > shape.horizon_ns {
-        count_cgroup(cgroup_id, 0, true);
+        if !traced {
+            count_cgroup(cgroup_id, 0, true);
+        }
         return true;
+    }
+    if traced {
+        return false;
     }
 
     let spacing = qos_spacing_ns(wire_len, shape.ps_per_byte);
@@ -426,18 +438,20 @@ fn count_cgroup(cgroup_id: u64, len: u64, dropped: bool) {
 // ── Packet processing ───────────────────────────────────────────────
 
 #[inline(always)]
-fn try_tc_qos(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
+fn try_tc_qos(ctx: &TcContext, is_ingress: bool, traced: bool) -> Result<i32, ()> {
     // No rule is loaded, so the classification ladder below can only miss on
     // every one of its steps and nothing this program does past the match
     // would fire. The parse goes with it: a program behind this one that
     // needs it does its own.
     // Shaping per cgroup runs ahead of the classifiers and does not depend
     // on any being loaded: a workload's rate is a rule of its own.
-    if !is_ingress && shape_cgroup(ctx) {
+    if !is_ingress && shape_cgroup(ctx, traced) {
+        trace::tc_record(ctx, stage::QOS, reason::RATE, 0, 0);
         return Ok(TC_ACT_SHOT);
     }
 
     if feature_empty(empty_features(), FW_EMPTY_QOS_CLASSIFIERS) {
+        trace::tc_record(ctx, stage::QOS, reason::DEFAULT, 0, 0);
         return Ok(TC_ACT_OK);
     }
 
@@ -451,6 +465,7 @@ fn try_tc_qos(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     } else if meta.is_ipv6() {
         process_qos_v6(ctx, meta.l3(), meta.vlan_id, flags, is_ingress)
     } else {
+        trace::tc_record(ctx, stage::QOS, reason::MALFORMED, 0, 0);
         Ok(TC_ACT_OK)
     }
 }
@@ -799,6 +814,11 @@ fn apply_qos(
     flags: u8,
     is_ingress: bool,
 ) -> Result<i32, ()> {
+    let traced = trace::tc(ctx);
+    // A pass anywhere below is the default: nothing classified the packet
+    // into a pipe that shapes it.
+    trace::tc_record(ctx, stage::QOS, reason::DEFAULT, 0, 0);
+
     // Step 1: Classify the packet
     let classifier_val = match classify(src_ip, dst_ip, src_port, dst_port, protocol, dscp, vlan_id)
     {
@@ -824,7 +844,9 @@ fn apply_qos(
             } else {
                 unsafe { resolve_tenant_id(ifindex, vlan_id, src_ip) }
             };
-            pktmeta::write_tenant(ctx, t);
+            if !traced {
+                pktmeta::write_tenant(ctx, t);
+            }
             t
         }
     };
@@ -870,11 +892,13 @@ fn apply_qos(
         return Ok(TC_ACT_OK); // tenant mismatch -> pass
     }
 
-    // Step 3: Loss emulation - random drop
-    if pipe_cfg.loss_rate > 0 {
+    // Step 3: Loss emulation - random drop. A trace asks what the pipe does
+    // to the packet, not what a die roll did to it, so the roll is skipped
+    // and the pipe reported below with its loss rate.
+    if pipe_cfg.loss_rate > 0 && !traced {
         let rand = unsafe { bpf_get_prandom_u32() } % 10000;
         if rand < u32::from(pipe_cfg.loss_rate) {
-            increment_qos_metric(QOS_METRIC_DROPPED_LOSS);
+            increment_qos_metric(traced, QOS_METRIC_DROPPED_LOSS);
             (|| {
                 emit_packet_event!(EVENTS, QOS_METRICS, QOS_METRIC_EVENTS_DROPPED,
                     src_addr, dst_addr, src_port, dst_port, protocol,
@@ -902,24 +926,31 @@ fn apply_qos(
                 // bucket to the brim, which is where a fresh pipe should start.
                 let elapsed_ns = now_ns.saturating_sub(state.last_refill_ns);
                 let new_tokens = elapsed_ns / pipe_cfg.ns_per_byte;
-                state.tokens = state
+                let tokens = state
                     .tokens
                     .saturating_add(new_tokens)
                     .min(pipe_cfg.burst_bytes);
-                state.last_refill_ns = now_ns;
 
-                // Check if we can consume tokens
-                if state.tokens >= pkt_len {
-                    state.tokens -= pkt_len;
+                // Check if we can consume tokens. A trace reads the bucket
+                // as it stands and takes nothing from it.
+                if tokens >= pkt_len {
+                    if !traced {
+                        state.tokens = tokens - pkt_len;
+                        state.last_refill_ns = now_ns;
+                    }
                     // ECN Congestion Experienced: when token bucket is below 25% of burst,
                     // mark the packet with CE to signal the sender to slow down proactively.
                     // This provides early congestion signalling without dropping the packet,
                     // allowing TCP to reduce its window before the queue overflows.
-                    if state.tokens < pipe_cfg.burst_bytes / 4 {
+                    if tokens - pkt_len < pipe_cfg.burst_bytes / 4 {
                         unsafe { bpf_skb_ecn_set_ce(ctx.skb.skb) };
                     }
                     false
                 } else {
+                    if !traced {
+                        state.tokens = tokens;
+                        state.last_refill_ns = now_ns;
+                    }
                     true // over bandwidth
                 }
             }
@@ -929,7 +960,11 @@ fn apply_qos(
         };
 
         if should_drop {
-            increment_qos_metric(QOS_METRIC_DROPPED_QUEUE);
+            increment_qos_metric(traced, QOS_METRIC_DROPPED_QUEUE);
+            trace::tc_record(ctx, stage::QOS, reason::RATE, pipe_id, queue_id);
+            if traced {
+                return Ok(TC_ACT_SHOT);
+            }
             (|| {
                 emit_packet_event!(EVENTS, QOS_METRICS, QOS_METRIC_EVENTS_DROPPED,
                     src_addr, dst_addr, src_port, dst_port, protocol,
@@ -967,7 +1002,9 @@ fn apply_qos(
                 } else {
                     target
                 };
-                state.last_edt_ns = departure;
+                if !traced {
+                    state.last_edt_ns = departure;
+                }
                 departure
             }
             None => {
@@ -977,7 +1014,9 @@ fn apply_qos(
                     queue_id: queue_id as u8,
                     _padding: [0; 6],
                 };
-                let _ = QOS_FLOW_STATE.insert(&fh_edt, &new_state, 0);
+                if !traced {
+                    let _ = QOS_FLOW_STATE.insert(&fh_edt, &new_state, 0);
+                }
                 target
             }
         };
@@ -986,16 +1025,19 @@ fn apply_qos(
             bpf_skb_set_tstamp(ctx.skb.skb, edt, BPF_SKB_TSTAMP_DELIVERY_MONO);
         }
 
-        increment_qos_metric(QOS_METRIC_DELAYED);
-        (|| {
-            emit_packet_event!(EVENTS, QOS_METRICS, QOS_METRIC_EVENTS_DROPPED,
-                src_addr, dst_addr, src_port, dst_port, protocol,
-                EVENT_TYPE_QOS, ACTION_SHAPED, pipe_id, flags, vlan_id; tc ctx);
-        })();
+        increment_qos_metric(traced, QOS_METRIC_DELAYED);
+        if !traced {
+            (|| {
+                emit_packet_event!(EVENTS, QOS_METRICS, QOS_METRIC_EVENTS_DROPPED,
+                    src_addr, dst_addr, src_port, dst_port, protocol,
+                    EVENT_TYPE_QOS, ACTION_SHAPED, pipe_id, flags, vlan_id; tc ctx);
+            })();
+        }
     }
 
     // Mark as shaped if any shaping was applied
-    increment_qos_metric(QOS_METRIC_SHAPED);
+    increment_qos_metric(traced, QOS_METRIC_SHAPED);
+    trace::tc_record(ctx, stage::QOS, reason::REWRITE, pipe_id, queue_id);
 
     Ok(TC_ACT_OK)
 }

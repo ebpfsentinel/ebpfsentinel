@@ -22,6 +22,7 @@ use ebpf_helpers::net::{
 };
 use ebpf_helpers::pktmeta;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::trace::{self, reason, stage};
 use ebpf_helpers::{increment_metric, opaque_usize};
 use network_types::{
     ip::{IpProto, Ipv4Hdr},
@@ -60,6 +61,12 @@ static DNS_METRICS: PerCpuArray<u64, 5> = PerCpuArray::new();
 /// (passthrough - observation only, no blocking).
 #[classifier]
 pub fn tc_dns(ctx: TcContext) -> i32 {
+    // This program only observes, so a traced packet is passed on as every
+    // packet is, without being captured or counted.
+    if trace::tc(&ctx) {
+        trace::tc_record(&ctx, stage::DNS, reason::DEFAULT, 0, 0);
+        return -1;
+    }
     increment_metric(DNS_METRIC_TOTAL_SEEN);
     let action = match try_tc_dns(&ctx) {
         Ok(action) => action,

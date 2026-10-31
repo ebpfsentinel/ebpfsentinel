@@ -44,6 +44,7 @@ use ebpf_helpers::net::{
 use ebpf_helpers::pktmeta;
 use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
+use ebpf_helpers::trace::{self, reason, stage};
 use ebpf_helpers::{emit_packet_event, increment_metric, opaque_usize, ringbuf_has_backpressure};
 use network_types::{
     ip::{IpProto, Ipv4Hdr},
@@ -134,8 +135,7 @@ static INTERFACE_GROUPS: HashMap<u32, u32, 64> = HashMap::new();
 /// of a packet crossing a veth has been released by the time it reaches the
 /// host side, so `bpf_skb_cgroup_id` reads 0 there.
 #[btf_map]
-static WORKLOAD_LINKS: HashMap<u32, u64, { WORKLOAD_LINK_MAX_ENTRIES as usize }> =
-    HashMap::new();
+static WORKLOAD_LINKS: HashMap<u32, u64, { WORKLOAD_LINK_MAX_ENTRIES as usize }> = HashMap::new();
 
 /// (cgroup v2 id, rule id) pairs for the rules scoped to workloads. A scoped
 /// rule applies when the pair is present; presence is the answer and the
@@ -292,7 +292,13 @@ fn group_matches(rule_group_mask: u32, iface_groups: u32) -> bool {
 /// Resolve the tenant ID for the current packet.
 /// Priority: VLAN-based > interface-based > subnet (LPM) > default (0).
 #[inline(always)]
-unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32, gates: u32) -> u32 {
+unsafe fn resolve_tenant_id(
+    ifindex: u32,
+    vlan_id: u16,
+    src_ip: u32,
+    gates: u32,
+    traced: bool,
+) -> u32 {
     // Nothing maps a tenant, so the four lookups below can only miss and the
     // answer is the default tenant.
     if feature_empty(gates, FW_EMPTY_TENANTS) {
@@ -322,7 +328,7 @@ unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32, gates: u32)
         if cgroup_id != 0
             && let Some(&tid) = TENANT_CGROUP_MAP.get(&cgroup_id)
         {
-            increment_metric(METRIC_CGROUP_TENANT_RESOLVED);
+            increment_metric(traced, METRIC_CGROUP_TENANT_RESOLVED);
             return tid;
         }
         // Default tenant
@@ -333,7 +339,13 @@ unsafe fn resolve_tenant_id(ifindex: u32, vlan_id: u16, src_ip: u32, gates: u32)
 /// Resolve the tenant ID for an IPv6 packet.
 /// Priority: VLAN-based > interface-based > subnet V6 (LPM) > default (0).
 #[inline(always)]
-unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4], gates: u32) -> u32 {
+unsafe fn resolve_tenant_id_v6(
+    ifindex: u32,
+    vlan_id: u16,
+    src_addr: &[u32; 4],
+    gates: u32,
+    traced: bool,
+) -> u32 {
     if feature_empty(gates, FW_EMPTY_TENANTS) {
         return 0;
     }
@@ -360,7 +372,7 @@ unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4], 
         if cgroup_id != 0
             && let Some(&tid) = TENANT_CGROUP_MAP.get(&cgroup_id)
         {
-            increment_metric(METRIC_CGROUP_TENANT_RESOLVED);
+            increment_metric(traced, METRIC_CGROUP_TENANT_RESOLVED);
             return tid;
         }
         // Default tenant
@@ -413,7 +425,7 @@ unsafe fn resolve_skb_cgroup_id(ctx: &TcContext) -> u64 {
     unsafe {
         let from_skb = bpf_skb_cgroup_id(ctx.skb.skb as *mut _);
         if from_skb != 0 {
-            increment_metric(METRIC_CGROUP_ATTRIBUTED);
+            increment_metric(trace::tc(ctx), METRIC_CGROUP_ATTRIBUTED);
             return from_skb;
         }
         bpf_get_current_cgroup_id()
@@ -426,11 +438,15 @@ unsafe fn resolve_skb_cgroup_id(ctx: &TcContext) -> u64 {
 /// (NFR15: default-to-pass on internal error).
 #[classifier]
 pub fn tc_ids(ctx: TcContext) -> i32 {
-    increment_metric(METRIC_TOTAL_SEEN);
+    // A traced packet is matched like any other, and moves no counter,
+    // raises no event, mirrors nothing and tears no flow down.
+    let traced = trace::tc(&ctx);
+    increment_metric(traced, METRIC_TOTAL_SEEN);
     let action = match try_tc_ids(&ctx) {
         Ok(action) => action,
         Err(()) => {
-            increment_metric(METRIC_ERRORS);
+            increment_metric(traced, METRIC_ERRORS);
+            trace::tc_record(&ctx, stage::IDS, reason::MALFORMED, 0, 0);
             TC_ACT_OK
         }
     };
@@ -456,6 +472,7 @@ fn try_tc_ids(ctx: &TcContext) -> Result<i32, ()> {
     } else if meta.is_ipv6() {
         process_ids_v6(ctx, meta.l3(), meta.vlan_id, flags)
     } else {
+        trace::tc_record(ctx, stage::IDS, reason::MALFORMED, 0, 0);
         Ok(TC_ACT_OK)
     }
 }
@@ -642,12 +659,14 @@ fn process_ids_pattern(
     let dst_port = flow.dst_port;
     let flags = flow.flags;
     let vlan_id = flow.vlan_id;
+    let traced = trace::tc(_ctx);
 
     // No rule is loaded on either leg, so both lookups can only miss and
     // nothing this program does below would fire.
     if feature_empty(gates, FW_EMPTY_IDS_PATTERNS)
         && feature_empty(gates, FW_EMPTY_IDS_SRC_PATTERNS)
     {
+        trace::tc_record(_ctx, stage::IDS, reason::DEFAULT, 0, 0);
         return Ok(TC_ACT_OK);
     }
 
@@ -660,9 +679,9 @@ fn process_ids_pattern(
         None => {
             let ifindex = unsafe { (*_ctx.skb.skb).ifindex };
             let t = if (flags & FLAG_IPV6) != 0 {
-                unsafe { resolve_tenant_id_v6(ifindex, vlan_id, src_addr, gates) }
+                unsafe { resolve_tenant_id_v6(ifindex, vlan_id, src_addr, gates, traced) }
             } else {
-                unsafe { resolve_tenant_id(ifindex, vlan_id, src_addr[0], gates) }
+                unsafe { resolve_tenant_id(ifindex, vlan_id, src_addr[0], gates, traced) }
             };
             pktmeta::write_tenant(_ctx, t);
             t
@@ -680,11 +699,15 @@ fn process_ids_pattern(
         Some(p) => p,
         None => {
             if feature_empty(gates, FW_EMPTY_IDS_SRC_PATTERNS) {
+                trace::tc_record(_ctx, stage::IDS, reason::DEFAULT, 0, 0);
                 return Ok(TC_ACT_OK);
             }
             match unsafe { lookup_ids_pattern(&IDS_SRC_PATTERNS, tenant_id, src_port, protocol) } {
                 Some(p) => p,
-                None => return Ok(TC_ACT_OK),
+                None => {
+                    trace::tc_record(_ctx, stage::IDS, reason::DEFAULT, 0, 0);
+                    return Ok(TC_ACT_OK);
+                }
             }
         }
     };
@@ -692,17 +715,26 @@ fn process_ids_pattern(
     // Check interface group membership before applying IDS action.
     let iface_groups = get_iface_groups(_ctx, gates);
     if !group_matches(pattern.group_mask, iface_groups) {
+        trace::tc_record(_ctx, stage::IDS, reason::DEFAULT, 0, 0);
         return Ok(TC_ACT_OK); // group mismatch -> pass
     }
     if pattern.scope == IDS_SCOPE_WORKLOAD && !workload_scope_matches(_ctx, pattern.rule_id) {
+        trace::tc_record(_ctx, stage::IDS, reason::DEFAULT, 0, 0);
         return Ok(TC_ACT_OK); // workload outside the rule's scope -> pass
     }
 
-    increment_metric(METRIC_MATCHED);
+    increment_metric(traced, METRIC_MATCHED);
+    trace::tc_record(
+        _ctx,
+        stage::IDS,
+        reason::RULE,
+        pattern.rule_id,
+        u32::from(pattern.action),
+    );
 
     // Kernel-side sampling: skip event emission probabilistically,
     // but always enforce the drop action for IPS mode.
-    if !should_skip_by_sampling() {
+    if !traced && !should_skip_by_sampling() {
         emit_ids_event(_ctx, flow, protocol, pattern.action, pattern.rule_id);
 
         // Packet mirroring for forensics (enterprise feature, controlled by config map)
@@ -752,11 +784,11 @@ fn process_ids_pattern(
         // The helper reports whether an entry was found and the kernel
         // accepted the tear-down, which is the kernel's own word on the
         // enforcement rather than ours.
-        if unsafe { kill_flow_via_skb_ct(_ctx.skb.skb as *mut _, tuple, &mut opts) } {
-            increment_metric(METRIC_CT_KILL_CONFIRMED);
+        if !traced && unsafe { kill_flow_via_skb_ct(_ctx.skb.skb as *mut _, tuple, &mut opts) } {
+            increment_metric(traced, METRIC_CT_KILL_CONFIRMED);
         }
 
-        increment_metric(METRIC_DROPPED);
+        increment_metric(traced, METRIC_DROPPED);
         Ok(TC_ACT_SHOT)
     } else {
         Ok(TC_ACT_OK)
@@ -792,8 +824,10 @@ fn emit_ids_event(ctx: &TcContext, flow: &FlowMeta, protocol: u8, action: u8, ru
 
 /// Increment a per-CPU metric counter.
 #[inline(always)]
-fn increment_metric(index: u32) {
-    increment_metric!(IDS_METRICS, index);
+fn increment_metric(traced: bool, index: u32) {
+    if !traced {
+        increment_metric!(IDS_METRICS, index);
+    }
 }
 
 /// Emit an L7 event: `PacketEvent` header + raw payload bytes from the packet.
@@ -810,8 +844,12 @@ fn increment_metric(index: u32) {
 /// `ctx.len()` if the dynptr creation fails (should not happen on 6.9+).
 #[inline(always)]
 fn emit_l7_event(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize) {
+    // A traced packet is nobody's traffic, so its payload is not captured.
+    if trace::tc(ctx) {
+        return;
+    }
     if ringbuf_has_backpressure() {
-        increment_metric(METRIC_EVENTS_DROPPED);
+        increment_metric(false, METRIC_EVENTS_DROPPED);
         return;
     }
 
@@ -882,12 +920,12 @@ fn emit_l7_small(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_ava
         // the record rather than hand userspace someone else's traffic.
         if loaded < 0 {
             entry.discard(0);
-            increment_metric(METRIC_ERRORS);
+            increment_metric(false, METRIC_ERRORS);
         } else {
             entry.submit(submit_flags(avail_data(&EVENTS)));
         }
     } else {
-        increment_metric(METRIC_EVENTS_DROPPED);
+        increment_metric(false, METRIC_EVENTS_DROPPED);
     }
 }
 
@@ -940,12 +978,12 @@ fn emit_l7_full(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_avai
         // ring's previous contents to userspace under this packet's header.
         if loaded < 0 {
             entry.discard(0);
-            increment_metric(METRIC_ERRORS);
+            increment_metric(false, METRIC_ERRORS);
         } else {
             entry.submit(submit_flags(avail_data(&EVENTS)));
         }
     } else {
-        increment_metric(METRIC_EVENTS_DROPPED);
+        increment_metric(false, METRIC_EVENTS_DROPPED);
     }
 }
 
