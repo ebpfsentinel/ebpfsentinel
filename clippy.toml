@@ -5,4 +5,4 @@ allow-unwrap-in-tests = true
 allow-panic-in-tests = true
 
 # Product names written as their makers write them; ".." keeps the defaults.
-doc-valid-idents = ["CrowdSec", ".."]
+doc-valid-idents = ["CrowdSec", "KubeVirt", ".."]

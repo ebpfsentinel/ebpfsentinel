@@ -10,6 +10,15 @@
 //! A device no hypervisor record names is reported as unnamed with the
 //! reason, never given a placeholder: a policy written against a guest's
 //! name must not match a device that only looks like one.
+//!
+//! A KubeVirt guest is the other shape: its tap is inside the launcher pod,
+//! so what crosses the host is the pod's link, and the guest is named from
+//! the labels KubeVirt puts on that pod. The cluster names the same machine
+//! through the pod, and both names reach the one device.
+
+use std::collections::BTreeMap;
+
+use crate::coverage::PodSubject;
 
 /// The hypervisor record a guest's name was read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -19,6 +28,9 @@ pub enum GuestSource {
     Libvirt,
     /// A Proxmox VE virtual machine, named in its configuration file.
     Proxmox,
+    /// A KubeVirt virtual machine, named from the labels of its launcher
+    /// pod.
+    Kubevirt,
 }
 
 impl GuestSource {
@@ -28,6 +40,7 @@ impl GuestSource {
         match self {
             Self::Libvirt => "libvirt",
             Self::Proxmox => "proxmox",
+            Self::Kubevirt => "kubevirt",
         }
     }
 }
@@ -36,9 +49,10 @@ impl GuestSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestIdentity {
     /// The name the hypervisor shows: the libvirt domain name, the Proxmox
-    /// VM name.
+    /// VM name, the KubeVirt `namespace/name`.
     pub name: String,
-    /// The hypervisor's own identifier: the libvirt UUID, the Proxmox VMID.
+    /// The hypervisor's own identifier: the libvirt UUID, the Proxmox VMID,
+    /// the KubeVirt instance's UID.
     pub id: String,
     /// Where the name was read.
     pub source: GuestSource,
@@ -186,6 +200,55 @@ pub fn is_guest_kind(kind: &str) -> bool {
     matches!(kind, "tap" | "macvtap")
 }
 
+/// The label KubeVirt sets to `virt-launcher` on the pod running a guest.
+pub const KUBEVIRT_APP_LABEL: &str = "kubevirt.io";
+/// The label carrying the name of the `VirtualMachine` the guest belongs to.
+pub const KUBEVIRT_VM_LABEL: &str = "vm.kubevirt.io/name";
+/// The label carrying the name of the `VirtualMachineInstance`.
+pub const KUBEVIRT_DOMAIN_LABEL: &str = "kubevirt.io/domain";
+/// The label carrying the UID of the `VirtualMachineInstance`.
+pub const KUBEVIRT_CREATED_BY_LABEL: &str = "kubevirt.io/created-by";
+
+/// The guest a KubeVirt launcher pod runs, or `None` for any other pod.
+///
+/// The name is the `VirtualMachine`'s, else the instance's, prefixed with the
+/// namespace because the cluster only keeps a name unique within one; the
+/// identifier is the instance's UID. A launcher pod carrying neither name is
+/// a guest without one, never a guest named after its pod.
+#[must_use]
+pub fn kubevirt_guest(pod: &PodSubject) -> Option<GuestNaming> {
+    let label = |key: &str| {
+        pod.labels
+            .get(key)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+    };
+    if label(KUBEVIRT_APP_LABEL) != Some("virt-launcher") {
+        return None;
+    }
+    let Some(name) = label(KUBEVIRT_VM_LABEL).or_else(|| label(KUBEVIRT_DOMAIN_LABEL)) else {
+        return Some(GuestNaming::Unnamed(UnnamedReason::RecordWithoutName {
+            path: format!("pod {}/{}", pod.namespace, pod.name),
+        }));
+    };
+    Some(GuestNaming::Named(GuestIdentity {
+        name: format!("{}/{name}", pod.namespace),
+        id: label(KUBEVIRT_CREATED_BY_LABEL)
+            .unwrap_or_default()
+            .to_owned(),
+        source: GuestSource::Kubevirt,
+        tags: Vec::new(),
+    }))
+}
+
+/// The KubeVirt guests among `pods`, by pod UID.
+#[must_use]
+pub fn kubevirt_guests(pods: &[PodSubject]) -> BTreeMap<String, GuestNaming> {
+    pods.iter()
+        .filter_map(|pod| kubevirt_guest(pod).map(|naming| (pod.uid.clone(), naming)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +281,83 @@ mod tests {
         assert_eq!(protection.covered.len(), 0);
         assert_eq!(protection.not_covered, ["network", "process", "dlp"]);
         assert!(protection.reason.contains("not even its packets"));
+    }
+
+    fn launcher(labels: &[(&str, &str)]) -> PodSubject {
+        PodSubject {
+            uid: "pod-uid".into(),
+            name: "virt-launcher-db-x7k2p".into(),
+            namespace: "prod".into(),
+            host_network: false,
+            labels: labels
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_launcher_pod_names_its_guest_by_namespace_and_vm() {
+        let pod = launcher(&[
+            ("kubevirt.io", "virt-launcher"),
+            ("vm.kubevirt.io/name", "db"),
+            ("kubevirt.io/domain", "db-instance"),
+            ("kubevirt.io/created-by", "9d1e7c4a"),
+        ]);
+        assert_eq!(
+            kubevirt_guest(&pod),
+            Some(GuestNaming::Named(GuestIdentity {
+                name: "prod/db".into(),
+                id: "9d1e7c4a".into(),
+                source: GuestSource::Kubevirt,
+                tags: Vec::new(),
+            }))
+        );
+    }
+
+    #[test]
+    fn a_launcher_without_a_vm_falls_back_to_the_instance_name() {
+        let pod = launcher(&[
+            ("kubevirt.io", "virt-launcher"),
+            ("kubevirt.io/domain", "scratch"),
+        ]);
+        let Some(GuestNaming::Named(identity)) = kubevirt_guest(&pod) else {
+            panic!("named");
+        };
+        assert_eq!(identity.name, "prod/scratch");
+        assert_eq!(identity.id, "");
+    }
+
+    #[test]
+    fn a_launcher_carrying_no_name_is_unnamed_and_never_named_after_its_pod() {
+        let pod = launcher(&[("kubevirt.io", "virt-launcher")]);
+        assert_eq!(
+            kubevirt_guest(&pod),
+            Some(GuestNaming::Unnamed(UnnamedReason::RecordWithoutName {
+                path: "pod prod/virt-launcher-db-x7k2p".into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn a_pod_that_is_not_a_launcher_is_no_guest() {
+        assert_eq!(kubevirt_guest(&launcher(&[("app", "db")])), None);
+        assert_eq!(
+            kubevirt_guest(&launcher(&[
+                ("kubevirt.io", "virt-handler"),
+                ("vm.kubevirt.io/name", "db")
+            ])),
+            None
+        );
+        let guests = kubevirt_guests(&[
+            launcher(&[("app", "db")]),
+            launcher(&[
+                ("kubevirt.io", "virt-launcher"),
+                ("vm.kubevirt.io/name", "db"),
+            ]),
+        ]);
+        assert_eq!(guests.len(), 1);
+        assert!(guests.contains_key("pod-uid"));
     }
 
     #[test]
@@ -265,5 +405,6 @@ mod tests {
         );
         assert_eq!(GuestSource::Proxmox.as_str(), "proxmox");
         assert_eq!(GuestSource::Libvirt.as_str(), "libvirt");
+        assert_eq!(GuestSource::Kubevirt.as_str(), "kubevirt");
     }
 }

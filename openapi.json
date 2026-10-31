@@ -2962,7 +2962,7 @@
         "tags": [
           "Operations"
         ],
-        "summary": "`GET /api/v1/ebpf/guests` - the virtual machines whose tap or macvtap\ndevices the agent found on this host, each named from the hypervisor's\nrecords or reported unnamed with the reason.",
+        "summary": "`GET /api/v1/ebpf/guests` - the virtual machines whose tap or macvtap\ndevices the agent found on this host, and the KubeVirt guests whose\nlauncher pod's link it holds, each named from the hypervisor's records or\nthe pod's labels, or reported unnamed with the reason.",
         "operationId": "get_guests",
         "responses": {
           "200": {
@@ -12338,7 +12338,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "`tap` or `macvtap`."
+            "description": "`tap` or `macvtap`, or `veth` for the link into a KubeVirt launcher\npod."
           },
           "protection": {
             "$ref": "#/components/schemas/GuestProtectionEntry",
@@ -12372,22 +12372,22 @@
         "properties": {
           "id": {
             "type": "string",
-            "description": "The libvirt UUID, or the Proxmox VMID."
+            "description": "The libvirt UUID, the Proxmox VMID, or the KubeVirt instance's UID."
           },
           "name": {
             "type": "string",
-            "description": "The libvirt domain name, or the Proxmox VM name."
+            "description": "The libvirt domain name, the Proxmox VM name, or the KubeVirt\n`namespace/name`."
           },
           "source": {
             "type": "string",
-            "description": "`libvirt` or `proxmox`."
+            "description": "`libvirt`, `proxmox` or `kubevirt`."
           },
           "tags": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "The hypervisor's tags for the guest; libvirt keeps none."
+            "description": "The hypervisor's tags for the guest; libvirt and KubeVirt keep none."
           }
         }
       },

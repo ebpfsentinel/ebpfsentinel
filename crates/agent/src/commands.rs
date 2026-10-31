@@ -5072,7 +5072,7 @@ pub async fn cmd_ebpf_guests(client: &ApiClient, output: OutputFormat) -> Result
         resp.named, resp.unnamed
     );
     if resp.guests.is_empty() {
-        println!("\nNo tap or macvtap device is on this host.");
+        println!("\nNo tap, macvtap or KubeVirt launcher link is on this host.");
         return Ok(());
     }
 

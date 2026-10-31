@@ -1095,7 +1095,7 @@ pub enum EbpfCommand {
     KernelFeatures,
     /// Show what the agent sees of each pod on this node, uncovered first
     Coverage,
-    /// List the virtual machines whose tap or macvtap devices are on this host
+    /// List the virtual machines whose devices are on this host: taps, macvtaps, KubeVirt launcher links
     Guests,
     /// Answer for this host, with no agent running: can an LSM program attach
     HostCheck,

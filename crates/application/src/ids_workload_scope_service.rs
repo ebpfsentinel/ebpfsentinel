@@ -22,6 +22,12 @@
 //! of its own, and the guest key replaces it: what crosses a tap is the
 //! guest's traffic, never the emulator's.
 //!
+//! A KubeVirt guest is the exception to that exception. Its link leads into
+//! the launcher pod, which is how the cluster names the same machine, so a
+//! rule selecting that pod by its labels stays on the guest's key beside the
+//! rules naming the guest: the cluster's view and the hypervisor's reach the
+//! one device.
+//!
 //! What this cannot see is stated rather than papered over: a cgroup is
 //! known once a task in it has been recorded, which is an exec after the
 //! agent started or the process holding a container link, so a rule covers a
@@ -32,7 +38,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use domain::container::engine::CgroupReader;
 use domain::firewall::workload::{WorkloadSelector, cgroup_path_of, unit_of};
-use domain::guest::{GuestIdentity, guest_scope_key};
+use domain::guest::{GuestIdentity, GuestSource, guest_scope_key};
 use domain::process::entity::ProcessEntry;
 use ports::secondary::ids_workload_scope_port::{
     GuestScopeSink, IdsWorkloadScopeMapPort, WorkloadLinkSink,
@@ -87,8 +93,17 @@ impl ScopeState {
             }
         }
         for (&ifindex, guest) in &self.guests {
+            // The launcher pod is the cluster's name for a KubeVirt guest;
+            // any other guest's device owner is its emulator.
+            let owner = (guest.source == GuestSource::Kubevirt)
+                .then(|| self.links.get(&ifindex))
+                .flatten()
+                .and_then(|cgroup_id| self.cgroups.get(cgroup_id))
+                .map(|seen| seen.workload.facts());
             for (rule, selector) in &self.rules {
-                if selector.matches_guest(guest) {
+                if selector.matches_guest(guest)
+                    || owner.as_ref().is_some_and(|facts| selector.matches(facts))
+                {
                     entries.insert((guest_scope_key(ifindex), *rule));
                 }
             }
@@ -417,6 +432,41 @@ mod tests {
         let recorded = recorded.lock().unwrap();
         assert_eq!(recorded.scope.len(), 0);
         assert_eq!(recorded.links, vec![(9, 500)]);
+    }
+
+    #[test]
+    fn a_kubevirt_guest_keeps_the_rules_selecting_its_launcher_pod() {
+        let (svc, recorded) = service();
+        svc.set_rules(vec![
+            (1, by_cgroup("/system.slice/docker-launcher.scope")),
+            (2, by_guest("prod/db")),
+            (3, by_cgroup("/system.slice/docker-other.scope")),
+        ]);
+        svc.record_exec(&container_entry(40, 700, "launcher"));
+        svc.link_owned(9, 700);
+        svc.guests_named(vec![(
+            9,
+            GuestIdentity {
+                source: GuestSource::Kubevirt,
+                ..guest("prod/db", "vmi-uid")
+            },
+        )]);
+        let recorded = recorded.lock().unwrap();
+        assert_eq!(recorded.links, vec![(9, guest_scope_key(9))]);
+        assert_eq!(
+            recorded.scope,
+            vec![(700, 1), (guest_scope_key(9), 1), (guest_scope_key(9), 2)]
+        );
+    }
+
+    #[test]
+    fn an_emulator_owning_a_tap_lends_the_guest_none_of_its_rules() {
+        let (svc, recorded) = service();
+        svc.set_rules(vec![(1, by_cgroup("/system.slice/docker-qemu.scope"))]);
+        svc.record_exec(&container_entry(40, 700, "qemu"));
+        svc.link_owned(9, 700);
+        svc.guests_named(vec![(9, guest("web01", "uuid-1"))]);
+        assert_eq!(recorded.lock().unwrap().scope, vec![(700, 1)]);
     }
 
     #[test]

@@ -3969,8 +3969,12 @@ pub async fn run(
             // A rule naming a guest is decided on the name its hypervisor
             // gives it now, which is written after the device exists and can
             // change, so the names are read again on a timer.
+            // A KubeVirt guest is named from its launcher pod, so the pods the
+            // inventory holds, once Kubernetes is read, go along on the same
+            // timer.
             {
                 let guests = Arc::clone(&guests);
+                let pods = Arc::clone(&app_state.pod_coverage);
                 let cancel = cancel_token.clone();
                 tokio::spawn(async move {
                     let mut tick = tokio::time::interval(GUEST_NAMES_REFRESH);
@@ -3979,9 +3983,18 @@ pub async fn run(
                         tokio::select! {
                             () = cancel.cancelled() => break,
                             _ = tick.tick() => {
+                                let seen = match pods.inventory() {
+                                    Some(inventory) => Some(inventory.pods().await),
+                                    None => None,
+                                };
                                 let guests = Arc::clone(&guests);
-                                if let Err(err) =
-                                    tokio::task::spawn_blocking(move || guests.refresh_scope()).await
+                                if let Err(err) = tokio::task::spawn_blocking(move || {
+                                    if let Some(seen) = seen {
+                                        guests.pods_seen(&seen);
+                                    }
+                                    guests.refresh_scope();
+                                })
+                                .await
                                 {
                                     warn!(error = %err, "guest names refresh failed");
                                 }

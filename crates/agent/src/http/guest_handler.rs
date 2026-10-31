@@ -14,13 +14,14 @@ use super::state::AppState;
 /// A guest as its hypervisor names it.
 #[derive(Serialize, ToSchema)]
 pub struct GuestIdentityEntry {
-    /// The libvirt domain name, or the Proxmox VM name.
+    /// The libvirt domain name, the Proxmox VM name, or the KubeVirt
+    /// `namespace/name`.
     pub name: String,
-    /// The libvirt UUID, or the Proxmox VMID.
+    /// The libvirt UUID, the Proxmox VMID, or the KubeVirt instance's UID.
     pub id: String,
-    /// `libvirt` or `proxmox`.
+    /// `libvirt`, `proxmox` or `kubevirt`.
     pub source: String,
-    /// The hypervisor's tags for the guest; libvirt keeps none.
+    /// The hypervisor's tags for the guest; libvirt and KubeVirt keep none.
     pub tags: Vec<String>,
 }
 
@@ -43,7 +44,8 @@ pub struct GuestEntry {
     /// The device in the host namespace.
     pub interface: String,
     pub ifindex: u32,
-    /// `tap` or `macvtap`.
+    /// `tap` or `macvtap`, or `veth` for the link into a KubeVirt launcher
+    /// pod.
     pub kind: String,
     /// Every program of the chain is on the device.
     pub attached: bool,
@@ -120,8 +122,9 @@ fn guests_body(links: Vec<GuestLink>) -> GuestsResponse {
 // ── Handlers ──────────────────────────────────────────────────────
 
 /// `GET /api/v1/ebpf/guests` - the virtual machines whose tap or macvtap
-/// devices the agent found on this host, each named from the hypervisor's
-/// records or reported unnamed with the reason.
+/// devices the agent found on this host, and the KubeVirt guests whose
+/// launcher pod's link it holds, each named from the hypervisor's records or
+/// the pod's labels, or reported unnamed with the reason.
 #[utoipa::path(
     get, path = "/api/v1/ebpf/guests",
     tag = "Operations",

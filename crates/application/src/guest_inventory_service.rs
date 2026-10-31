@@ -7,12 +7,16 @@
 //! after it made the device: whatever enforces a policy naming a guest is
 //! told the named guests again on a timer, so a record written late is
 //! picked up on the next refresh.
+//!
+//! A KubeVirt guest's tap is inside its launcher pod, so the device the host
+//! sees is the pod's own link. The pod inventory is handed over on the same
+//! timer, and a link leading into a launcher pod is held as that guest's.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use domain::coverage::{LinkAttachment, WorkloadLink};
-use domain::guest::{GuestLink, GuestNaming, is_guest_kind};
+use domain::coverage::{LinkAttachment, PodSubject, WorkloadLink};
+use domain::guest::{GuestLink, GuestNaming, is_guest_kind, kubevirt_guests};
 use ports::secondary::guest_naming_port::GuestNamingPort;
 use ports::secondary::ids_workload_scope_port::GuestScopeSink;
 use ports::secondary::pod_coverage_port::LinkCoverageSink;
@@ -20,7 +24,11 @@ use ports::secondary::pod_coverage_port::LinkCoverageSink;
 /// Holds the guests' devices and names them on demand.
 pub struct GuestInventoryService {
     namer: Arc<dyn GuestNamingPort>,
+    /// Guest devices, and every link leading into a pod, which is a guest's
+    /// once that pod is known to be a KubeVirt launcher.
     links: Mutex<HashMap<u32, WorkloadLink>>,
+    /// The KubeVirt guests on this node, by launcher pod UID.
+    launchers: Mutex<BTreeMap<String, GuestNaming>>,
     scope: Option<Arc<dyn GuestScopeSink>>,
 }
 
@@ -30,6 +38,7 @@ impl GuestInventoryService {
         Self {
             namer,
             links: Mutex::new(HashMap::new()),
+            launchers: Mutex::new(BTreeMap::new()),
             scope: None,
         }
     }
@@ -63,6 +72,24 @@ impl GuestInventoryService {
         scope.guests_named(named);
     }
 
+    /// Take the pods on this node as the inventory now reads them, and tell
+    /// the scope if a KubeVirt guest came, went or was renamed.
+    pub fn pods_seen(&self, pods: &[PodSubject]) {
+        let launchers = kubevirt_guests(pods);
+        let changed = {
+            let mut held = self
+                .launchers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let changed = *held != launchers;
+            *held = launchers;
+            changed
+        };
+        if changed {
+            self.refresh_scope();
+        }
+    }
+
     /// Every guest device held, by interface name, each with the guest it
     /// belongs to or the reason none is named.
     #[must_use]
@@ -74,14 +101,26 @@ impl GuestInventoryService {
             .values()
             .cloned()
             .collect();
+        let launchers = self
+            .launchers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         let mut guests: Vec<GuestLink> = links
             .into_iter()
-            .map(|link| GuestLink {
-                naming: self.namer.name_guest(&link.name),
-                attached: link.attachment == LinkAttachment::Attached,
-                ifindex: link.ifindex,
-                interface: link.name,
-                kind: link.kind,
+            .filter_map(|link| {
+                let naming = if is_guest_kind(&link.kind) {
+                    self.namer.name_guest(&link.name)
+                } else {
+                    launchers.get(link.pod_uid.as_deref()?)?.clone()
+                };
+                Some(GuestLink {
+                    naming,
+                    attached: link.attachment == LinkAttachment::Attached,
+                    ifindex: link.ifindex,
+                    interface: link.name,
+                    kind: link.kind,
+                })
             })
             .collect();
         guests.sort_by(|a, b| a.interface.cmp(&b.interface));
@@ -92,11 +131,11 @@ impl GuestInventoryService {
 impl LinkCoverageSink for GuestInventoryService {
     fn link_seen(&self, link: WorkloadLink) {
         let mut links = self.links.lock().unwrap_or_else(PoisonError::into_inner);
-        let changed = if is_guest_kind(&link.kind) {
+        let changed = if is_guest_kind(&link.kind) || link.pod_uid.is_some() {
             links.insert(link.ifindex, link).is_none()
         } else {
-            // An index reused by a device of another kind is no longer a
-            // guest's.
+            // An index reused by a device of another kind, leading into no
+            // pod, is no longer a guest's.
             links.remove(&link.ifindex).is_some()
         };
         drop(links);
@@ -180,6 +219,72 @@ mod tests {
         service.link_forgotten(7);
         service.link_seen(link(9, "veth9", "veth", LinkAttachment::Attached));
         assert_eq!(service.guests().len(), 0);
+    }
+
+    fn pod(uid: &str, labels: &[(&str, &str)]) -> PodSubject {
+        PodSubject {
+            uid: uid.into(),
+            name: format!("pod-{uid}"),
+            namespace: "prod".into(),
+            host_network: false,
+            labels: labels
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+        }
+    }
+
+    fn pod_link(ifindex: u32, name: &str, uid: &str) -> WorkloadLink {
+        WorkloadLink {
+            pod_uid: Some(uid.into()),
+            ..link(ifindex, name, "veth", LinkAttachment::Attached)
+        }
+    }
+
+    #[test]
+    fn a_link_into_a_kubevirt_launcher_pod_is_that_guest() {
+        let scope = Arc::new(Scope::default());
+        let service = GuestInventoryService::new(Arc::new(Namer))
+            .with_scope(Arc::clone(&scope) as Arc<dyn GuestScopeSink>);
+        service.link_seen(pod_link(11, "veth11", "uid-db"));
+        service.link_seen(pod_link(12, "veth12", "uid-web"));
+        assert_eq!(service.guests().len(), 0, "no launcher known yet");
+
+        let pods = [
+            pod(
+                "uid-db",
+                &[
+                    ("kubevirt.io", "virt-launcher"),
+                    ("vm.kubevirt.io/name", "db"),
+                ],
+            ),
+            pod("uid-web", &[("app", "web")]),
+        ];
+        service.pods_seen(&pods);
+        let guests = service.guests();
+        assert_eq!(guests.len(), 1);
+        assert_eq!(guests[0].interface, "veth11");
+        assert_eq!(guests[0].kind, "veth");
+        assert!(matches!(
+            &guests[0].naming,
+            GuestNaming::Named(g) if g.name == "prod/db" && g.source == GuestSource::Kubevirt
+        ));
+        assert_eq!(
+            scope.0.lock().unwrap().last().cloned(),
+            Some(vec![(11, "prod/db".to_string())])
+        );
+
+        let told = scope.0.lock().unwrap().len();
+        service.pods_seen(&pods);
+        assert_eq!(
+            scope.0.lock().unwrap().len(),
+            told,
+            "the same pods tell nothing"
+        );
+
+        service.pods_seen(&[]);
+        assert_eq!(service.guests().len(), 0);
+        assert_eq!(scope.0.lock().unwrap().last().cloned(), Some(Vec::new()));
     }
 
     #[derive(Default)]
