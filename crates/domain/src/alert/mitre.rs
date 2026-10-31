@@ -391,6 +391,13 @@ fn all_coverage_entries() -> Vec<CoverageEntry> {
     entries.extend(ai_security_coverage_entries());
     entries.extend(tls_intelligence_coverage_entries());
     entries.extend(process_coverage_entries());
+    entries.push(entry(
+        "tcp_health",
+        "T1046",
+        "Network Service Scanning",
+        "discovery",
+        "Resets drawn from closed ports above the line",
+    ));
     entries
 }
 
@@ -1080,6 +1087,7 @@ fn info(id: &'static str, name: &'static str, tactic: &'static str) -> MitreAtta
 
 #[cfg(test)]
 mod tests {
+    use crate::tcp_health::reset_scan::ResetScan;
     use std::collections::BTreeSet;
 
     use super::*;
@@ -1914,6 +1922,7 @@ mod tests {
         for kind in crate::process::detection::ProcessDetectionKind::ALL {
             record("process", kind.mitre());
         }
+        record("tcp_health", ResetScan::mitre());
 
         raised
     }

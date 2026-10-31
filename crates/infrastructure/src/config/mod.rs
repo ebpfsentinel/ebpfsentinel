@@ -101,7 +101,7 @@ pub use response::{
     MAX_RESPONSE_TTL_CEILING_SECS, MAX_SIGNAL_NUMBER, ResponseConfig,
 };
 pub use routing::{GatewayConfig, HealthCheckConfig, RoutingConfig};
-pub use tcp_health::TcpHealthConfig;
+pub use tcp_health::{ResetScanConfig, TcpHealthConfig};
 pub use telemetry::{DISABLE_ENV as TELEMETRY_DISABLE_ENV, TelemetryConfig};
 pub use threatintel::{
     THREATINTEL_MAX_CAPACITY, THREATINTEL_MIN_CAPACITY, ThreatIntelConfig, ThreatIntelFeedConfig,

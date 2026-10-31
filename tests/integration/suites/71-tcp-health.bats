@@ -15,6 +15,8 @@
 #     the client end and on the server end.
 #   * The connections made carry their smoothed round trip into the
 #     edge's histogram, on the client end and on the server end.
+#   * A sweep of closed ports drawing more resets than the line raises
+#     one reset scan alert naming the prober.
 #   * No event was lost to a full table, an unwritten layout or an
 #     unreadable socket.
 
@@ -151,6 +153,27 @@ _listen() {
     [ "$status" -eq 0 ] || { echo "client round-trip samples: ${output}, want at least 3" >&2; return 1; }
     run _wait_sum ebpfsentinel_tcp_rtt_seconds_count 'role="server"' 3
     [ "$status" -eq 0 ] || { echo "server round-trip samples: ${output}, want at least 3" >&2; return 1; }
+}
+
+@test "a sweep of closed ports above the line raises a reset scan alert" {
+    wait_for_ebpf_program "tracepoint-tcp-health" 30 || { echo "the TCP health counter did not attach" >&2; return 1; }
+
+    local port
+    for port in $(seq 7200 7239); do
+        ncat -w 1 "${EBPF_NS_IP}" "$port" </dev/null >/dev/null 2>&1 || true
+    done
+
+    local attempt=0 body alert=""
+    while [ "$attempt" -lt 10 ]; do
+        body="$(api_get /api/v1/alerts)"
+        alert="$(echo "$body" | jq -c '[.alerts[]? | select(.rule_id == "tcp-reset-scan")][0] // empty' 2>/dev/null)" || true
+        [ -n "$alert" ] && break
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+    [ -n "$alert" ] || { echo "no tcp-reset-scan alert; alerts: ${body}" >&2; return 1; }
+    echo "$alert" | jq -e '.message | test("resets from closed ports|refused")' >/dev/null \
+        || { echo "unexpected message: ${alert}" >&2; return 1; }
 }
 
 @test "the hooks lost no event to a full table or an unwritten layout" {

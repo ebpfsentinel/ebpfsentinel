@@ -3,6 +3,8 @@
 # The counter is on by default; the block is written out so the poll runs
 # every second and the suite reads a change without waiting ten. Nothing
 # else is enforced, so every connection the suite makes reaches its end.
+# The reset scan line sits at 20 so the handful of refused connects the
+# earlier tests make stays under it and the sweep of 40 ports crosses it.
 
 agent:
   interfaces:
@@ -24,6 +26,10 @@ firewall:
 tcp_health:
   enabled: true
   poll_interval_secs: 1
+  reset_scan:
+    enabled: true
+    window_secs: 60
+    resets: 20
 
 ids:
   enabled: false
@@ -41,7 +47,9 @@ l7:
   enabled: false
 
 alerting:
-  enabled: false
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
 
 audit:
   enabled: true

@@ -11,20 +11,32 @@
 //! The round-trip times are also kept by pair of addresses, minute by
 //! minute, for the service map: its edges are keyed by address and port, and
 //! it reads the samples of the window it shows.
+//!
+//! The resets that answered probes are also summed per source over a
+//! sliding window and handed to a judge; a source above its line raises a
+//! scan alert, carrying the workload of the refused socket where the source
+//! runs on this node.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use domain::alert::entity::Alert;
 use domain::exposure::entity::ListenerProtocol;
 use domain::l7::red::{ServiceNames, UNATTRIBUTED_SERVICE, service_name};
+use domain::tcp_health::reset_scan::{
+    ResetRates, ResetScan, ResetVerdict, SourceRate, observations,
+};
 use domain::tcp_health::{
     EdgeRole, NO_LISTENER, RawTcpEdge, RttPair, RttWindow, TcpEdgeDeltas, TcpEdgeId, TcpRtt,
 };
 use ports::secondary::metrics_port::PacketMetrics;
-use ports::secondary::tcp_health_port::TcpHealthPort;
+use ports::secondary::tcp_health_port::{ResetRateJudge, TcpHealthPort};
+use tokio::sync::mpsc;
 use tracing::warn;
 
+use crate::alert_event::AlertEvent;
+use crate::learning_service::now_ns;
 use crate::workload_resolver::WorkloadResolver;
 
 /// The peer of an edge whose other end does not run on this node. The
@@ -35,12 +47,27 @@ struct State {
     deltas: TcpEdgeDeltas,
     names: ServiceNames,
     round_trips: RttWindow,
+    resets: Option<ResetRates>,
+}
+
+/// The same fixed line for every source.
+pub struct FixedResetLine(pub u64);
+
+impl ResetRateJudge for FixedResetLine {
+    fn judge(&self, rate: &SourceRate) -> Option<ResetVerdict> {
+        (rate.resets > self.0).then(|| ResetVerdict {
+            threshold: f64::from(u32::try_from(self.0).unwrap_or(u32::MAX)),
+            expected: None,
+        })
+    }
 }
 
 pub struct TcpHealthService {
     source: Box<dyn TcpHealthPort>,
     metrics: Arc<dyn PacketMetrics>,
     workloads: WorkloadResolver,
+    judge: Option<Arc<dyn ResetRateJudge>>,
+    alerts: Mutex<Option<mpsc::Sender<AlertEvent>>>,
     state: Mutex<State>,
 }
 
@@ -85,12 +112,41 @@ impl TcpHealthService {
             source,
             metrics,
             workloads,
+            judge: None,
+            alerts: Mutex::new(None),
             state: Mutex::new(State {
                 deltas: TcpEdgeDeltas::default(),
                 names: ServiceNames::default(),
                 round_trips: RttWindow::default(),
+                resets: None,
             }),
         }
+    }
+
+    /// Sum each source's resets over `window_secs` and hand them to
+    /// `judge`, raising a scan alert for a source above its line.
+    #[must_use]
+    pub fn with_reset_scan(mut self, window_secs: u64, judge: Arc<dyn ResetRateJudge>) -> Self {
+        self.judge = Some(judge);
+        self.state
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .resets = Some(ResetRates::new(window_secs));
+        self
+    }
+
+    /// Whether a judge reads each source's resets, so the scan alert can be
+    /// raised.
+    #[must_use]
+    pub fn scans_resets(&self) -> bool {
+        self.judge.is_some()
+    }
+
+    /// Where the scan alerts go. A datapath generation that opens a new
+    /// alert channel hands its sender here; until one is set the sources
+    /// are still judged, so a baseline keeps learning, and nothing is sent.
+    pub fn set_alerts(&self, alerts: mpsc::Sender<AlertEvent>) {
+        *self.alerts.lock().unwrap_or_else(PoisonError::into_inner) = Some(alerts);
     }
 
     /// The round-trip times sampled over the last `minutes` minutes up to
@@ -171,6 +227,56 @@ impl TcpHealthService {
         if increments.uncounted > 0 {
             self.metrics
                 .record_tcp_health_uncounted(increments.uncounted);
+        }
+        let scans = self.judge_resets(&mut state, now_ns, &increments.edges);
+        drop(state);
+        self.raise(&scans);
+    }
+
+    fn judge_resets(&self, state: &mut State, now_ns: u64, moved: &[RawTcpEdge]) -> Vec<ResetScan> {
+        let (Some(judge), Some(rates)) = (self.judge.as_ref(), state.resets.as_mut()) else {
+            return Vec::new();
+        };
+        let window_secs = rates.window_secs();
+        let mut scans = Vec::new();
+        for rate in rates.record(now_ns, &observations(moved)) {
+            let Some(verdict) = judge.judge(&rate) else {
+                continue;
+            };
+            if rates.quiet(rate.source, now_ns) {
+                continue;
+            }
+            rates.alerted(rate.source, now_ns);
+            scans.push(ResetScan {
+                rate,
+                window_secs,
+                verdict,
+            });
+        }
+        scans
+    }
+
+    fn raise(&self, scans: &[ResetScan]) {
+        if scans.is_empty() {
+            return;
+        }
+        let Some(alerts) = self
+            .alerts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        else {
+            return;
+        };
+        let at = now_ns();
+        for scan in scans {
+            let workload = (scan.rate.cgroup != 0)
+                .then(|| self.workloads.by_cgroup(scan.rate.cgroup))
+                .flatten();
+            let alert = Alert::from_reset_scan(scan, workload, at);
+            if let Err(e) = alerts.try_send(AlertEvent::System(Box::new(alert))) {
+                warn!(source = %scan.rate.source, error = %e, "reset scan alert dropped");
+            }
         }
     }
 }
@@ -316,6 +422,55 @@ mod tests {
         held.cgroup = 99;
         assert_eq!(without_cgroup(&held), mirror);
         assert!(mirror_of(&edge(1, 2, 0, EdgeRole::Server, TcpCounts::default()).id).is_none());
+    }
+
+    fn probes(from: u8, resets: u64) -> RawTcpEdge {
+        edge(
+            1,
+            from,
+            0,
+            EdgeRole::Server,
+            TcpCounts {
+                resets_sent: resets,
+                ..TcpCounts::default()
+            },
+        )
+    }
+
+    #[test]
+    fn a_source_above_its_line_raises_one_scan_alert_per_window() {
+        // Cumulative readings: 30, then 130, then 260 resets from 10.0.0.9.
+        let (service, _) = service(vec![
+            (vec![probes(9, 30)], 0),
+            (vec![probes(9, 130)], 0),
+            (vec![probes(9, 260)], 0),
+        ]);
+        let service = service.with_reset_scan(60, Arc::new(FixedResetLine(100)));
+        let (tx, mut rx) = mpsc::channel(8);
+        service.set_alerts(tx);
+        let sec = 1_000_000_000;
+        service.poll(0);
+        assert!(rx.try_recv().is_err());
+        service.poll(10 * sec);
+        let Ok(AlertEvent::System(alert)) = rx.try_recv() else {
+            panic!("a source above its line raises an alert");
+        };
+        assert_eq!(alert.component, "tcp_health");
+        assert_eq!(alert.rule_id.0, "tcp-reset-scan");
+        assert_eq!(alert.src_addr[0], u32::from(Ipv4Addr::new(10, 0, 0, 9)));
+        assert!(alert.message.contains("drew 130 resets"));
+        service.poll(20 * sec);
+        assert!(rx.try_recv().is_err(), "one sweep, one alert");
+    }
+
+    #[test]
+    fn a_source_within_its_line_raises_nothing() {
+        let (service, _) = service(vec![(vec![probes(9, 100)], 0)]);
+        let service = service.with_reset_scan(60, Arc::new(FixedResetLine(100)));
+        let (tx, mut rx) = mpsc::channel(8);
+        service.set_alerts(tx);
+        service.poll(0);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

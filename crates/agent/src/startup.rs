@@ -3384,63 +3384,20 @@ pub async fn run(
         }
 
         // 10f-quinquies-c. TCP health per edge
-        if config.tcp_health.enabled {
-            match try_load_tcp_health(&ebpf_dir) {
-                Ok((loader, counter, mut attacher)) => {
-                    let status = attacher.attach(&loader);
-                    if status.attached {
-                        let service =
-                            Arc::new(application::tcp_health_service::TcpHealthService::new(
-                                Box::new(counter),
-                                Arc::clone(&metrics)
-                                    as Arc<dyn ports::secondary::metrics_port::PacketMetrics>,
-                                workloads.clone(),
-                            ));
-                        app_state.install_tcp_health(Arc::clone(&service));
-                        ebpf_state.add_loader(loader);
-                        metrics.set_ebpf_program_status("tracepoint_tcp_health", true);
-                        let interval = Duration::from_secs(config.tcp_health.poll_interval_secs);
-                        let tcp_cancel = cancel_token.clone();
-                        tokio::spawn(async move {
-                            // The links live as long as the loop reading what
-                            // they count.
-                            let _attacher = attacher;
-                            let mut tick = tokio::time::interval(interval);
-                            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                            loop {
-                                tokio::select! {
-                                    () = tcp_cancel.cancelled() => break,
-                                    _ = tick.tick() => service.poll(
-                                        adapters::ebpf::ringbuf_observer::boottime_now_ns(),
-                                    ),
-                                }
-                            }
-                        });
-                    } else {
-                        metrics.set_ebpf_program_status("tracepoint_tcp_health", false);
-                    }
-                }
-                Err(e) => {
-                    warn!("TCP health not counted: {e}");
-                    metrics.set_ebpf_program_status("tracepoint_tcp_health", false);
-                    adapters::ebpf::tcp_health::publish_status(
-                        adapters::ebpf::tcp_health::TcpHealthStatus {
-                            attached: false,
-                            reason: Some(e.to_string()),
-                        },
-                    );
-                }
-            }
-        } else {
-            metrics.clear_ebpf_program_status("tracepoint_tcp_health");
-            adapters::ebpf::tcp_health::publish_status(
-                adapters::ebpf::tcp_health::TcpHealthStatus {
-                    attached: false,
-                    reason: Some(
-                        "counting TCP health is turned off in the configuration".to_string(),
-                    ),
-                },
-            );
+        let reset_line: Arc<dyn ports::secondary::tcp_health_port::ResetRateJudge> = Arc::new(
+            application::tcp_health_service::FixedResetLine(config.tcp_health.reset_scan.resets),
+        );
+        if let Some((service, loader)) = start_tcp_health(
+            &config.tcp_health,
+            &ebpf_dir,
+            &metrics,
+            workloads.clone(),
+            reset_line,
+            cancel_token.clone(),
+        ) {
+            service.set_alerts(alert_tx.clone());
+            app_state.install_tcp_health(service);
+            ebpf_state.add_loader(loader);
         }
 
         // 10f-sexies. The executables allowed to reach the network
@@ -6892,6 +6849,80 @@ pub fn try_load_tcp_health(
         counter,
         adapters::ebpf::tcp_health::TcpHealthAttacher::new(),
     ))
+}
+
+/// Load the TCP health counter, attach it and spawn the loop reading it,
+/// publishing why it does not run when it does not.
+///
+/// `reset_line` judges each source's resets over the window when the scan
+/// alert is on; the alerts go wherever the caller points
+/// [`TcpHealthService::set_alerts`](application::tcp_health_service::TcpHealthService::set_alerts).
+/// The loader handed back holds the program: dropping it detaches it.
+pub fn start_tcp_health(
+    config: &infrastructure::config::TcpHealthConfig,
+    ebpf_dir: &str,
+    metrics: &Arc<AgentMetrics>,
+    workloads: application::workload_resolver::WorkloadResolver,
+    reset_line: Arc<dyn ports::secondary::tcp_health_port::ResetRateJudge>,
+    cancel: CancellationToken,
+) -> Option<(
+    Arc<application::tcp_health_service::TcpHealthService>,
+    EbpfLoader,
+)> {
+    if !config.enabled {
+        metrics.clear_ebpf_program_status("tracepoint_tcp_health");
+        adapters::ebpf::tcp_health::publish_status(adapters::ebpf::tcp_health::TcpHealthStatus {
+            attached: false,
+            reason: Some("counting TCP health is turned off in the configuration".to_string()),
+        });
+        return None;
+    }
+    let (loader, counter, mut attacher) = match try_load_tcp_health(ebpf_dir) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            warn!("TCP health not counted: {e}");
+            metrics.set_ebpf_program_status("tracepoint_tcp_health", false);
+            adapters::ebpf::tcp_health::publish_status(
+                adapters::ebpf::tcp_health::TcpHealthStatus {
+                    attached: false,
+                    reason: Some(e.to_string()),
+                },
+            );
+            return None;
+        }
+    };
+    let status = attacher.attach(&loader);
+    if !status.attached {
+        metrics.set_ebpf_program_status("tracepoint_tcp_health", false);
+        return None;
+    }
+    let mut service = application::tcp_health_service::TcpHealthService::new(
+        Box::new(counter),
+        Arc::clone(metrics) as Arc<dyn ports::secondary::metrics_port::PacketMetrics>,
+        workloads,
+    );
+    if config.reset_scan.enabled {
+        service = service.with_reset_scan(config.reset_scan.window_secs, reset_line);
+    }
+    let service = Arc::new(service);
+    metrics.set_ebpf_program_status("tracepoint_tcp_health", true);
+    let interval = Duration::from_secs(config.poll_interval_secs);
+    let polled = Arc::clone(&service);
+    tokio::spawn(async move {
+        // The links live as long as the loop reading what they count.
+        let _attacher = attacher;
+        let mut tick = tokio::time::interval(interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => break,
+                _ = tick.tick() => polled.poll(
+                    adapters::ebpf::ringbuf_observer::boottime_now_ns(),
+                ),
+            }
+        }
+    });
+    Some((service, loader))
 }
 
 /// What a started network executables list hands back to start-up.

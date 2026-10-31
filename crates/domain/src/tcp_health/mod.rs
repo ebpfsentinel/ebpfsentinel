@@ -10,6 +10,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 
+pub mod reset_scan;
+
 /// The service a reset is counted under when it answered a segment no
 /// socket was there to take: a connection attempt to a closed port.
 pub const NO_LISTENER: &str = "no_listener";

@@ -16,6 +16,7 @@ use crate::process::detection::{
     PROCESS_DETECTION_COMPONENT, ProcessDetection, ProcessDetectionKind,
 };
 use crate::raw_socket::entity::{FilterState, RAW_SOCKET_COMPONENT, RawSocket};
+use crate::tcp_health::reset_scan::{ResetScan, TCP_HEALTH_COMPONENT};
 use crate::threatintel::entity::ThreatIntelAlert;
 use crate::workload::entity::Workload;
 
@@ -966,22 +967,9 @@ impl Alert {
     ) -> Self {
         let rule_id = detection.kind.rule_id();
         let (dst_addr, dst_port, protocol, is_ipv6) = match destination {
-            Some((std::net::IpAddr::V4(addr), port, protocol)) => {
-                ([u32::from(addr), 0, 0, 0], port, protocol, false)
-            }
-            Some((std::net::IpAddr::V6(addr), port, protocol)) => {
-                let o = addr.octets();
-                (
-                    [
-                        u32::from_be_bytes([o[0], o[1], o[2], o[3]]),
-                        u32::from_be_bytes([o[4], o[5], o[6], o[7]]),
-                        u32::from_be_bytes([o[8], o[9], o[10], o[11]]),
-                        u32::from_be_bytes([o[12], o[13], o[14], o[15]]),
-                    ],
-                    port,
-                    protocol,
-                    true,
-                )
+            Some((addr, port, protocol)) => {
+                let (words, is_ipv6) = addr_words(addr);
+                (words, port, protocol, is_ipv6)
             }
             None => ([0; 4], 0, 0, false),
         };
@@ -1096,6 +1084,74 @@ impl Alert {
             mitigation_status: None,
             total_packets: None,
             mitre_attack: Some(RawSocket::mitre()),
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
+            executable_path,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
+            workload,
+        }
+    }
+
+    /// Create an alert for a reset rate above its line. The source of the
+    /// probes is the alert's source and the host that answered them its
+    /// destination; `workload` is the local socket that was refused, where
+    /// the source runs on this node.
+    #[must_use]
+    pub fn from_reset_scan(scan: &ResetScan, workload: Option<Workload>, at_ns: u64) -> Self {
+        let rule_id = ResetScan::rule_id();
+        let (src_addr, src_v6) = addr_words(scan.rate.source);
+        let (dst_addr, dst_v6) = addr_words(scan.rate.target);
+        let (tgid, executable_path) = match &workload {
+            Some(w) => (Some(w.pid), w.exe.clone()),
+            None => (None, None),
+        };
+        Self {
+            id: Self::generate_id(at_ns, &rule_id),
+            timestamp_ns: at_ns,
+            component: TCP_HEALTH_COMPONENT.to_string(),
+            severity: scan.severity(),
+            rule_id,
+            action: DomainMode::Alert,
+            src_addr,
+            dst_addr,
+            src_port: 0,
+            dst_port: 0,
+            protocol: 6,
+            is_ipv6: src_v6 || dst_v6,
+            message: scan.message(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: Some(ResetScan::mitre()),
             ja4_fingerprint: None,
             ml_anomaly_score: None,
             ml_top_feature: None,
@@ -1334,6 +1390,26 @@ pub struct AlertRoute {
     /// If `None`, matches all component types. If `Some`, only routes alerts
     /// whose `component` field is in the list (e.g. `["ids"]`).
     pub event_types: Option<Vec<String>>,
+}
+
+/// An address as an alert carries it: an IPv4 address in the first word,
+/// an IPv6 one across all four in network order.
+fn addr_words(addr: std::net::IpAddr) -> ([u32; 4], bool) {
+    match addr {
+        std::net::IpAddr::V4(v4) => ([u32::from(v4), 0, 0, 0], false),
+        std::net::IpAddr::V6(v6) => {
+            let o = v6.octets();
+            (
+                [
+                    u32::from_be_bytes([o[0], o[1], o[2], o[3]]),
+                    u32::from_be_bytes([o[4], o[5], o[6], o[7]]),
+                    u32::from_be_bytes([o[8], o[9], o[10], o[11]]),
+                    u32::from_be_bytes([o[12], o[13], o[14], o[15]]),
+                ],
+                true,
+            )
+        }
+    }
 }
 
 #[cfg(test)]

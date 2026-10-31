@@ -93,6 +93,14 @@ async fn active_components(state: &AppState) -> Vec<&'static str> {
                 .process_detections
                 .load(std::sync::atomic::Ordering::Relaxed),
         ),
+        (
+            "tcp_health",
+            state
+                .tcp_health
+                .load()
+                .as_ref()
+                .is_some_and(|s| s.scans_resets()),
+        ),
     ];
 
     running
@@ -105,7 +113,7 @@ async fn active_components(state: &AppState) -> Vec<&'static str> {
 ///
 /// A word here that the mapping is not keyed on filters the matrix down to
 /// nothing without saying so, which is what the test beside it asserts against.
-const REPORTABLE_COMPONENTS: [&str; 10] = [
+const REPORTABLE_COMPONENTS: [&str; 11] = [
     "firewall",
     "ips",
     "ratelimit",
@@ -116,6 +124,7 @@ const REPORTABLE_COMPONENTS: [&str; 10] = [
     "ddos",
     "dns",
     "process",
+    "tcp_health",
 ];
 
 /// `GET /api/v1/mitre/coverage` - MITRE ATT&CK coverage matrix.
