@@ -26,6 +26,7 @@ pub mod feed_source;
 pub mod flow_sink_port;
 pub mod geoip_lpm_port;
 pub mod geoip_port;
+pub mod guest_naming_port;
 pub mod ids_map_port;
 pub mod ids_workload_scope_port;
 pub mod ips_blacklist_port;

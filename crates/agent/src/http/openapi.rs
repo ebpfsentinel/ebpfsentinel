@@ -22,6 +22,7 @@ use super::fingerprint_handler;
 use super::firewall_handler;
 use super::flow_handler;
 use super::geoip_handler;
+use super::guest_handler;
 use super::health_handler;
 use super::ids_handler;
 use super::ips_handler;
@@ -134,6 +135,7 @@ use super::zone_handler;
         ops_handler::get_ebpf_status,
         ops_handler::get_kernel_features,
         coverage_handler::get_ebpf_coverage,
+        guest_handler::get_guests,
         ops_handler::get_uprobes,
         drop_reason_handler::get_drop_reasons,
         raw_socket_handler::get_raw_sockets,
@@ -271,6 +273,9 @@ use super::zone_handler;
         coverage_handler::PodCoverageEntry,
         coverage_handler::CoverageInterface,
         coverage_handler::CoverageClass,
+        guest_handler::GuestsResponse,
+        guest_handler::GuestEntry,
+        guest_handler::GuestIdentityEntry,
         netpol_handler::NetpolReplayRequest,
         netpol_handler::NetpolReplayResponse,
         netpol_handler::NetpolWorkloadReplay,

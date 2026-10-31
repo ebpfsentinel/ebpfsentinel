@@ -44,6 +44,14 @@ fn default_proxmox_dir() -> String {
     "/etc/pve/lxc".to_string()
 }
 
+fn default_proxmox_qemu_dir() -> String {
+    "/etc/pve/qemu-server".to_string()
+}
+
+fn default_libvirt_status_dir() -> String {
+    "/run/libvirt/qemu".to_string()
+}
+
 fn default_incus_socket() -> String {
     "/var/lib/incus/unix.socket".to_string()
 }
@@ -61,6 +69,9 @@ pub struct ContainerConfig {
 
     #[serde(default)]
     pub lxc: LxcEnricherConfig,
+
+    #[serde(default)]
+    pub guests: GuestNamingConfig,
 
     #[serde(default)]
     pub kubernetes: KubernetesEnricherConfig,
@@ -241,6 +252,32 @@ impl LxcEnricherConfig {
             }
         }
         Ok(())
+    }
+}
+
+/// Virtual machines named from the hypervisor's records, read for each tap
+/// or macvtap device the link watcher finds. Each source is read only where
+/// it exists, and when asked: nothing is cached, so there is nothing to size.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuestNamingConfig {
+    /// Where Proxmox keeps one `<vmid>.conf` per virtual machine, giving its
+    /// name and tags. Empty to never read it.
+    #[serde(default = "default_proxmox_qemu_dir")]
+    pub proxmox_dir: String,
+
+    /// Where libvirt keeps one status file per running domain, giving its
+    /// name, its UUID and the host device behind each interface. Empty to
+    /// never read it.
+    #[serde(default = "default_libvirt_status_dir")]
+    pub libvirt_dir: String,
+}
+
+impl Default for GuestNamingConfig {
+    fn default() -> Self {
+        Self {
+            proxmox_dir: default_proxmox_qemu_dir(),
+            libvirt_dir: default_libvirt_status_dir(),
+        }
     }
 }
 
@@ -425,6 +462,17 @@ mod tests {
         assert_eq!(cfg.docker.cache_size, 1024);
         assert_eq!(cfg.docker.cache_ttl_seconds, 300);
         assert_eq!(cfg.docker.timeout_ms, 2_000);
+    }
+
+    #[test]
+    fn guests_are_read_from_proxmox_and_libvirt_unless_emptied() {
+        let cfg = ContainerConfig::default();
+        assert_eq!(cfg.guests.proxmox_dir, "/etc/pve/qemu-server");
+        assert_eq!(cfg.guests.libvirt_dir, "/run/libvirt/qemu");
+        let cfg: ContainerConfig =
+            serde_norway::from_str("guests:\n  proxmox_dir: \"\"\n").unwrap();
+        assert_eq!(cfg.guests.proxmox_dir, "");
+        assert_eq!(cfg.guests.libvirt_dir, "/run/libvirt/qemu");
     }
 
     #[test]

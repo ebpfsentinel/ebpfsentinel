@@ -2126,6 +2126,39 @@ pub struct EbpfCoverageResponse {
     pub pods: Vec<PodCoverageEntry>,
 }
 
+/// A guest as its hypervisor names it.
+#[derive(Deserialize, Serialize)]
+pub struct GuestIdentityEntry {
+    pub name: String,
+    pub id: String,
+    pub source: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// One guest device on the agent's host.
+#[derive(Deserialize, Serialize)]
+pub struct GuestEntry {
+    pub interface: String,
+    pub ifindex: u32,
+    pub kind: String,
+    pub attached: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest: Option<GuestIdentityEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unnamed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The virtual machines whose devices the agent found on its host.
+#[derive(Deserialize, Serialize)]
+pub struct GuestsResponse {
+    pub named: usize,
+    pub unnamed: usize,
+    pub guests: Vec<GuestEntry>,
+}
+
 /// What the kernel answered when the agent probed it at startup.
 ///
 /// `probed = false` means the probe could not run, not that the kernel lacks
@@ -3982,6 +4015,15 @@ impl ApiClient {
     pub async fn ebpf_coverage(&self) -> anyhow::Result<EbpfCoverageResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/ebpf/coverage")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn guests(&self) -> anyhow::Result<GuestsResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ebpf/guests")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

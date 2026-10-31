@@ -128,6 +128,39 @@ impl LinkCoverageSink for PodCoverageService {
     }
 }
 
+/// Hands every link report to several sinks: the pod verdicts and the guest
+/// inventory each keep the links they need from one watcher.
+pub struct LinkCoverageFanout {
+    sinks: Vec<Arc<dyn LinkCoverageSink>>,
+}
+
+impl LinkCoverageFanout {
+    #[must_use]
+    pub fn new(sinks: Vec<Arc<dyn LinkCoverageSink>>) -> Self {
+        Self { sinks }
+    }
+}
+
+impl LinkCoverageSink for LinkCoverageFanout {
+    fn link_seen(&self, link: WorkloadLink) {
+        for sink in &self.sinks {
+            sink.link_seen(link.clone());
+        }
+    }
+
+    fn link_forgotten(&self, ifindex: u32) {
+        for sink in &self.sinks {
+            sink.link_forgotten(ifindex);
+        }
+    }
+
+    fn node_encapsulates(&self, encapsulated: bool) {
+        for sink in &self.sinks {
+            sink.node_encapsulates(encapsulated);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +240,29 @@ mod tests {
         svc.node_encapsulates(true);
         let report = svc.verdicts().await.unwrap_or_else(|| unreachable!());
         assert!(report.node.encapsulated);
+    }
+
+    #[tokio::test]
+    async fn the_fanout_hands_every_report_to_every_sink() {
+        let first = Arc::new(PodCoverageService::new());
+        let second = Arc::new(PodCoverageService::new());
+        first.install_inventory(Arc::new(Pods(vec![pod("a")])));
+        second.install_inventory(Arc::new(Pods(vec![pod("a")])));
+        let fanout = LinkCoverageFanout::new(vec![
+            Arc::clone(&first) as Arc<dyn LinkCoverageSink>,
+            Arc::clone(&second) as Arc<dyn LinkCoverageSink>,
+        ]);
+        fanout.link_seen(link(1, Some("a"), LinkAttachment::Attached));
+        fanout.node_encapsulates(true);
+        for svc in [&first, &second] {
+            let report = svc.verdicts().await.unwrap_or_else(|| unreachable!());
+            assert!(report.node.encapsulated);
+            assert_eq!(report.pods[0].interfaces.len(), 1);
+        }
+        fanout.link_forgotten(1);
+        for svc in [&first, &second] {
+            let report = svc.verdicts().await.unwrap_or_else(|| unreachable!());
+            assert_eq!(report.pods[0].interfaces.len(), 0);
+        }
     }
 }

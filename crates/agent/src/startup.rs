@@ -197,6 +197,7 @@ fn spawn_pod_tc_attacher(
         std::os::fd::RawFd,
         adapters::ebpf::link_watcher::HookSide,
     )>,
+    held: Arc<Vec<std::os::fd::OwnedFd>>,
     cancel: tokio_util::sync::CancellationToken,
 ) {
     use adapters::warden::pod_tc::{PodTcAttacher, WardenPodLinks};
@@ -235,7 +236,11 @@ fn spawn_pod_tc_attacher(
              keeps reading these pods' links and their traffic is counted by both"
         );
     }
-    tokio::spawn(adapters::warden::pod_tc::run(attacher, inventory, cancel));
+    let task = adapters::warden::pod_tc::run(attacher, inventory, cancel);
+    tokio::spawn(async move {
+        task.await;
+        drop(held);
+    });
     info!(
         programs = count,
         "pod profile: chain kept inside the selected pods through the warden"
@@ -3853,6 +3858,9 @@ pub async fn run(
         std::os::fd::RawFd,
         adapters::ebpf::link_watcher::HookSide,
     )> = Vec::new();
+    // The program fds those raw numbers name, held for as long as a task
+    // attaches with them.
+    let mut held_tc_programs: Arc<Vec<std::os::fd::OwnedFd>> = Arc::new(Vec::new());
 
     // ── Build link hot-plug registry + spawn watcher ─────────
     if ebpf_capable {
@@ -3878,20 +3886,28 @@ pub async fn run(
             ("tc_qos", qos_ok, HookSide::Egress),
         ];
 
+        // Every program but tc-qos is handed to the lifecycle manager below,
+        // and a reload may swap its loader out, so the watcher holds its own
+        // duplicate of each fd rather than one a swap would close under it.
         let mut registry = LinkHotPlugRegistry::new();
+        let mut held_tc_fds: Vec<std::os::fd::OwnedFd> = Vec::new();
         for &(name, ok, side) in &tc_programs {
             if !ok {
                 continue;
             }
-            if let Some(fd) = ebpf_state
-                .loaders
+            if let Some(fd) = managed
                 .iter()
-                .find_map(|loader| loader.program_fd(name))
+                .map(|(_, loader, _)| loader)
+                .chain(ebpf_state.loaders.iter())
+                .find_map(|loader| loader.program_fd_owned(name))
             {
-                registry.register(name.to_string(), fd, side);
-                pod_tc_programs.push((name.to_string(), fd, side));
+                let raw = std::os::fd::AsRawFd::as_raw_fd(&fd);
+                held_tc_fds.push(fd);
+                registry.register(name.to_string(), raw, side);
+                pod_tc_programs.push((name.to_string(), raw, side));
             }
         }
+        held_tc_programs = Arc::new(held_tc_fds);
 
         let registered = registry.program_count();
         if config.agent.profile == infrastructure::config::AgentProfile::Pod {
@@ -3931,25 +3947,47 @@ pub async fn run(
             if let Some(dir) = &config.agent.pod_claims_dir {
                 registry.stand_back_for(adapters::container::pod_claims::PodClaimsDir::new(dir));
             }
-            registry.report_coverage(Arc::clone(&app_state.pod_coverage)
-                as Arc<dyn ports::secondary::pod_coverage_port::LinkCoverageSink>);
+            // A guest's tap or macvtap device is a workload link like any
+            // other, and the guest behind it is named from the hypervisor's
+            // records when asked.
+            let guests = Arc::new(
+                application::guest_inventory_service::GuestInventoryService::new(Arc::new(
+                    adapters::hypervisor::HypervisorGuestNamer::new(
+                        &config.container.guests.proxmox_dir,
+                        &config.container.guests.libvirt_dir,
+                    ),
+                )),
+            );
+            app_state.install_guest_inventory(Arc::clone(&guests));
+            registry.report_coverage(Arc::new(
+                application::pod_coverage_service::LinkCoverageFanout::new(vec![
+                    Arc::clone(&app_state.pod_coverage)
+                        as Arc<dyn ports::secondary::pod_coverage_port::LinkCoverageSink>,
+                    guests as Arc<dyn ports::secondary::pod_coverage_port::LinkCoverageSink>,
+                ]),
+            ));
             app_state
                 .pod_coverage
                 .set_uplinks_attached(!config.agent.interfaces.is_empty());
             // Workload namespaces are found through the host procfs, which is
             // a mount rather than a shared pid namespace in a pod that runs
             // without hostPID.
-            tokio::spawn(adapters::ebpf::link_watcher::watch_links(
+            let watcher = adapters::ebpf::link_watcher::watch_links(
                 Arc::new(registry),
                 table,
                 host_proc_root(),
                 Arc::clone(&metrics) as Arc<dyn ContainerMetrics>,
                 cancel_token.clone(),
-            ));
+            );
+            let held = Arc::clone(&held_tc_programs);
+            tokio::spawn(async move {
+                watcher.await;
+                drop(held);
+            });
             info!(
                 programs = registered,
                 ?policy,
-                "link hot-plug watcher started (rtnetlink, veth/netkit/macvlan/ipvlan/bridge members)"
+                "link hot-plug watcher started (rtnetlink, veth/netkit/macvlan/ipvlan/tap/macvtap/bridge members)"
             );
         } else {
             info!("link hot-plug watcher skipped (no TC programs loaded)");
@@ -4275,7 +4313,13 @@ pub async fn run(
     > = None;
 
     if config.agent.profile == infrastructure::config::AgentProfile::Pod {
-        spawn_pod_tc_attacher(&config, &app_state, pod_tc_programs, cancel_token.clone());
+        spawn_pod_tc_attacher(
+            &config,
+            &app_state,
+            pod_tc_programs,
+            held_tc_programs,
+            cancel_token.clone(),
+        );
     }
 
     // A workload rule naming pods, namespaces or a service account is

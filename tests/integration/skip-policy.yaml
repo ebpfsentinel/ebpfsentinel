@@ -84,6 +84,7 @@ env:
   - "suite 70 runs its clients beside the agent (local lane only)"
   - "suite 71 runs its clients beside the agent (local lane only)"
   - "suite 72 runs its containers beside the agent (local lane only)"
+  - "suite 73 makes its guest devices beside the agent (local lane only)"
   - "suite 39 requires EBPF_2VM_MODE=true (attacker VM driving real slow flood)"
   - "suite 40 requires EBPF_2VM_MODE=true (attacker VM crafting spoofed packets)"
   - "suite 41 requires EBPF_2VM_MODE=true (TLS target on agent VM)"

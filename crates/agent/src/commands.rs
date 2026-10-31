@@ -5059,6 +5059,71 @@ pub async fn cmd_ebpf_coverage(client: &ApiClient, output: OutputFormat) -> Resu
     Ok(())
 }
 
+pub async fn cmd_ebpf_guests(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.guests().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!(
+        "Guests on this host: {} named, {} unnamed",
+        resp.named, resp.unnamed
+    );
+    if resp.guests.is_empty() {
+        println!("\nNo tap or macvtap device is on this host.");
+        return Ok(());
+    }
+
+    println!();
+    let mut table = Table::new(&[
+        ("INTERFACE", Align::Left),
+        ("KIND", Align::Left),
+        ("ATTACHED", Align::Left),
+        ("GUEST", Align::Left),
+        ("ID", Align::Left),
+        ("SOURCE", Align::Left),
+        ("TAGS", Align::Left),
+    ]);
+    for entry in &resp.guests {
+        let (name, id, source, tags) = match &entry.guest {
+            Some(g) => (
+                g.name.clone(),
+                g.id.clone(),
+                g.source.clone(),
+                if g.tags.is_empty() {
+                    "-".to_string()
+                } else {
+                    g.tags.join(",")
+                },
+            ),
+            None => (
+                format!("unnamed: {}", entry.unnamed.as_deref().unwrap_or("-")),
+                "-".to_string(),
+                "-".to_string(),
+                "-".to_string(),
+            ),
+        };
+        table.row(cells![
+            entry.interface,
+            entry.kind,
+            yes_no(entry.attached),
+            name,
+            id,
+            source,
+            tags
+        ]);
+    }
+    table.print();
+    for entry in &resp.guests {
+        if let Some(reason) = &entry.reason {
+            println!("  {}: {reason}", entry.interface);
+        }
+    }
+    Ok(())
+}
+
 pub async fn cmd_ebpf_kernel_features(client: &ApiClient, output: OutputFormat) -> Result<()> {
     let resp = client.kernel_features().await?;
 

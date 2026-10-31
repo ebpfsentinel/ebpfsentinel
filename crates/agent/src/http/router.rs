@@ -91,6 +91,7 @@ use super::firewall_handler::{
 };
 use super::flow_handler::flow_export_status;
 use super::geoip_handler::{geoip_lookup, geoip_status};
+use super::guest_handler::get_guests;
 use super::health_handler::{healthz, readyz};
 use super::ids_handler::{ids_status, list_ids_rules, suricata_report};
 use super::ips_handler::{
@@ -310,6 +311,7 @@ pub fn build_router(
             .route("/api/v1/ebpf/status", get(get_ebpf_status))
             .route("/api/v1/ebpf/kernel-features", get(get_kernel_features))
             .route("/api/v1/ebpf/coverage", get(get_ebpf_coverage))
+            .route("/api/v1/ebpf/guests", get(get_guests))
             .route("/api/v1/ebpf/uprobes", get(get_uprobes))
             .route("/api/v1/ebpf/drop-reasons", get(get_drop_reasons))
             .route("/api/v1/ebpf/raw-sockets", get(get_raw_sockets))

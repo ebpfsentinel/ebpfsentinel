@@ -684,6 +684,7 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
                     commands::cmd_ebpf_kernel_features(&client, output).await
                 }
                 EbpfCommand::Coverage => commands::cmd_ebpf_coverage(&client, output).await,
+                EbpfCommand::Guests => commands::cmd_ebpf_guests(&client, output).await,
             }
         }
 

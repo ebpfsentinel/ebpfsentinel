@@ -1095,6 +1095,8 @@ pub enum EbpfCommand {
     KernelFeatures,
     /// Show what the agent sees of each pod on this node, uncovered first
     Coverage,
+    /// List the virtual machines whose tap or macvtap devices are on this host
+    Guests,
     /// Answer for this host, with no agent running: can an LSM program attach
     HostCheck,
     /// Show why the kernel dropped packets, by reason and interface
@@ -2768,6 +2770,18 @@ mod tests {
             cli.command,
             Some(Command::Ebpf(DomainArgs {
                 command: EbpfCommand::Coverage,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_ebpf_guests() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "ebpf", "guests"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ebpf(DomainArgs {
+                command: EbpfCommand::Guests,
                 ..
             }))
         ));

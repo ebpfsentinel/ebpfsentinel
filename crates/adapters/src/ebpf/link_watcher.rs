@@ -7,6 +7,8 @@
 //! it: a veth whose peer sits in the container's namespace (Docker, most
 //! CNIs), a netkit device (Cilium 1.16 and later), a macvlan or ipvlan left in
 //! the host namespace, or a tap or other virtual device enslaved to a bridge.
+//! A virtual machine's traffic crosses the host on its tap or macvtap device,
+//! which is attached the same way and reported as a guest's link.
 //! The watcher subscribes to rtnetlink's link group, so it hears
 //! `RTM_NEWLINK` and `RTM_DELLINK` the moment the kernel emits them, and
 //! attaches the agent's TC chain to each such link through the hook that
@@ -114,7 +116,12 @@ const IFLA_LINKINFO: u16 = 18;
 const IFLA_LINK_NETNSID: u16 = 37;
 /// Members of the `IFLA_LINKINFO` nest.
 const IFLA_INFO_KIND: u16 = 1;
+const IFLA_INFO_DATA: u16 = 2;
 const IFLA_INFO_SLAVE_KIND: u16 = 4;
+/// `IFLA_TUN_TYPE` inside a `tun` device's `IFLA_INFO_DATA`, and the value
+/// it takes for a device carrying Ethernet frames.
+const IFLA_TUN_TYPE: u16 = 3;
+const IFF_TAP: u8 = 2;
 /// `NETNSA_*` attributes of a namespace id message.
 const NETNSA_NSID: u16 = 1;
 const NETNSA_FD: u16 = 3;
@@ -186,6 +193,10 @@ pub struct LinkInfo {
     pub slave_kind: Option<String>,
     /// `IFLA_MASTER`: the ifindex of the device the link is enslaved to.
     pub master: Option<u32>,
+    /// For a `tun` device, whether it carries Ethernet frames, which is what
+    /// a hypervisor hands a guest, rather than IP packets, which is what a
+    /// VPN reads.
+    pub tap: bool,
     /// `IFLA_LINK`: the peer's ifindex, in the peer's own namespace.
     pub peer_ifindex: Option<u32>,
     /// `IFLA_LINK_NETNSID`: the id, as seen from here, of the namespace the
@@ -227,8 +238,14 @@ pub enum WorkloadKind {
     Macvlan,
     /// An ipvlan device in the host namespace.
     Ipvlan,
-    /// A virtual device enslaved to a bridge: a tap, an overlay port.
+    /// A virtual device enslaved to a bridge: an overlay port, a device of a
+    /// kind the watcher does not name.
     BridgeMember,
+    /// A tap device: the host side of a virtual machine's interface.
+    Tap,
+    /// A macvtap device: a virtual machine's interface stacked on a host
+    /// device.
+    Macvtap,
 }
 
 impl WorkloadKind {
@@ -241,6 +258,8 @@ impl WorkloadKind {
             Self::Macvlan => "macvlan",
             Self::Ipvlan => "ipvlan",
             Self::BridgeMember => "bridge-member",
+            Self::Tap => "tap",
+            Self::Macvtap => "macvtap",
         }
     }
 }
@@ -261,7 +280,9 @@ pub enum LinkClass {
 ///
 /// A link enslaved to a bridge is a workload's when it is virtual, which is
 /// what a kind says; a physical device enslaved to a bridge is the bridge's
-/// uplink and carries every workload's traffic at once.
+/// uplink and carries every workload's traffic at once. A tap is a guest's
+/// whether or not it is bridged, and a `tun` device carrying IP packets is a
+/// VPN's, left to the kind it reports.
 #[must_use]
 pub fn classify(info: &LinkInfo) -> LinkClass {
     match info.kind.as_deref() {
@@ -269,6 +290,8 @@ pub fn classify(info: &LinkInfo) -> LinkClass {
         Some("netkit") => LinkClass::Workload(WorkloadKind::Netkit),
         Some("macvlan") => LinkClass::Workload(WorkloadKind::Macvlan),
         Some("ipvlan") => LinkClass::Workload(WorkloadKind::Ipvlan),
+        Some("tun") if info.tap => LinkClass::Workload(WorkloadKind::Tap),
+        Some("macvtap") => LinkClass::Workload(WorkloadKind::Macvtap),
         Some(kind) if INFRASTRUCTURE_KINDS.contains(&kind) => LinkClass::Infrastructure,
         Some(_) if info.slave_kind.as_deref() == Some("bridge") => {
             LinkClass::Workload(WorkloadKind::BridgeMember)
@@ -565,8 +588,8 @@ pub struct LinkOwner {
 /// fd live until the fd is closed, so holding them for the life of the agent
 /// would leak one fd per program per workload ever scheduled.
 ///
-/// The stored program fds stay valid as long as the loaders that own them;
-/// the agent cancels the watcher before dropping them.
+/// The stored program fds are borrowed: the caller keeps a descriptor for
+/// each one open for as long as the watcher runs.
 pub struct LinkHotPlugRegistry {
     programs: Vec<(String, RawFd, HookSide)>,
     links: Mutex<HashMap<u32, Vec<OwnedFd>>>,
@@ -720,7 +743,10 @@ impl LinkHotPlugRegistry {
             sink.link_seen(WorkloadLink {
                 ifindex: link.ifindex,
                 name: link.name.clone(),
-                kind: link.kind.clone().unwrap_or_default(),
+                kind: match classify(link) {
+                    LinkClass::Workload(kind) => kind.as_str().to_owned(),
+                    _ => link.kind.clone().unwrap_or_default(),
+                },
                 attachment: LinkAttachment::Refused(refusal),
                 pod_uid: owner_pod_uid(owner),
             });
@@ -1313,6 +1339,11 @@ fn parse_link(msg_type: u16, payload: &[u8]) -> Option<LinkEvent> {
         kind: info.and_then(|i| attr_str(i, IFLA_INFO_KIND)),
         slave_kind: info.and_then(|i| attr_str(i, IFLA_INFO_SLAVE_KIND)),
         master: attr_u32(attrs, IFLA_MASTER).filter(|m| *m != 0),
+        tap: info
+            .and_then(|i| find_attr(i, IFLA_INFO_DATA))
+            .and_then(|data| find_attr(data, IFLA_TUN_TYPE))
+            .and_then(<[u8]>::first)
+            .is_some_and(|kind| *kind == IFF_TAP),
         peer_ifindex: attr_u32(attrs, IFLA_LINK).filter(|p| *p != 0 && *p != ifindex),
         link_netnsid: attr_u32(attrs, IFLA_LINK_NETNSID)
             .map(u32::cast_signed)
@@ -1739,6 +1770,7 @@ mod tests {
             kind: kind.map(str::to_owned),
             slave_kind: None,
             master: None,
+            tap: false,
             peer_ifindex: None,
             link_netnsid: None,
         }
@@ -1787,6 +1819,12 @@ mod tests {
             k.push(0);
             info.extend(attr(IFLA_INFO_SLAVE_KIND, &k));
         }
+        if l.tap {
+            info.extend(attr(
+                IFLA_INFO_DATA | 0x8000,
+                &attr(IFLA_TUN_TYPE, &[IFF_TAP]),
+            ));
+        }
         if !info.is_empty() {
             attrs.extend(attr(IFLA_LINKINFO | 0x8000, &info));
         }
@@ -1797,6 +1835,19 @@ mod tests {
     }
 
     #[test]
+    fn a_tap_message_is_told_from_a_tun_message() {
+        let mut sent = link(52, "tap4101i0", Some("tun"));
+        sent.tap = true;
+        let (events, _) = parse_link_messages(&wire(RTM_NEWLINK, &sent));
+        assert_eq!(events, vec![LinkEvent::New(sent)]);
+
+        let tun = link(53, "tun0", Some("tun"));
+        let (events, _) = parse_link_messages(&wire(RTM_NEWLINK, &tun));
+        assert_eq!(events, vec![LinkEvent::New(tun.clone())]);
+        assert_eq!(classify(&tun), LinkClass::Unknown("tun".into()));
+    }
+
+    #[test]
     fn a_veth_message_is_read_with_its_peer_and_its_namespace() {
         let sent = LinkInfo {
             ifindex: 41,
@@ -1804,6 +1855,7 @@ mod tests {
             kind: Some("veth".into()),
             slave_kind: Some("bridge".into()),
             master: Some(4),
+            tap: false,
             peer_ifindex: Some(2),
             link_netnsid: Some(7),
         };
@@ -1860,6 +1912,17 @@ mod tests {
         let mut uplink = link(2, "eth0", None);
         uplink.slave_kind = Some("bridge".into());
         assert_eq!(classify(&uplink), LinkClass::Infrastructure);
+
+        // A tun device carrying Ethernet frames is a guest's, bridged or not.
+        let mut guest = link(3, "vnet0", Some("tun"));
+        guest.tap = true;
+        assert_eq!(classify(&guest), LinkClass::Workload(WorkloadKind::Tap));
+        guest.slave_kind = Some("bridge".into());
+        assert_eq!(classify(&guest), LinkClass::Workload(WorkloadKind::Tap));
+        assert_eq!(
+            classify(&link(4, "macvtap0", Some("macvtap"))),
+            LinkClass::Workload(WorkloadKind::Macvtap)
+        );
 
         for (kind, want) in [
             ("veth", WorkloadKind::Veth),

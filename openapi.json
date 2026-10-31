@@ -2957,6 +2957,65 @@
         ]
       }
     },
+    "/api/v1/ebpf/guests": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "`GET /api/v1/ebpf/guests` - the virtual machines whose tap or macvtap\ndevices the agent found on this host, each named from the hypervisor's\nrecords or reported unnamed with the reason.",
+        "operationId": "get_guests",
+        "responses": {
+          "200": {
+            "description": "One entry per guest device on this host, by interface name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GuestsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The link watcher does not run on this agent, so no guest device is watched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/ebpf/kernel-features": {
       "get": {
         "tags": [
@@ -12239,6 +12298,118 @@
           "ready": {
             "type": "boolean",
             "description": "Whether an mmdb-backed lookup database is loaded and ready."
+          }
+        }
+      },
+      "GuestEntry": {
+        "type": "object",
+        "description": "One guest device on this host.",
+        "required": [
+          "interface",
+          "ifindex",
+          "kind",
+          "attached"
+        ],
+        "properties": {
+          "attached": {
+            "type": "boolean",
+            "description": "Every program of the chain is on the device."
+          },
+          "guest": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GuestIdentityEntry",
+                "description": "The guest behind the device. Absent when no record names it."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ifindex": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "interface": {
+            "type": "string",
+            "description": "The device in the host namespace."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`tap` or `macvtap`."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The same reason in a sentence. Absent when named."
+          },
+          "unnamed": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why no guest is named, as a stable code: `no_source`, `no_record`,\n`record_without_name` or `record_unreadable`. Absent when named."
+          }
+        }
+      },
+      "GuestIdentityEntry": {
+        "type": "object",
+        "description": "A guest as its hypervisor names it.",
+        "required": [
+          "name",
+          "id",
+          "source",
+          "tags"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The libvirt UUID, or the Proxmox VMID."
+          },
+          "name": {
+            "type": "string",
+            "description": "The libvirt domain name, or the Proxmox VM name."
+          },
+          "source": {
+            "type": "string",
+            "description": "`libvirt` or `proxmox`."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The hypervisor's tags for the guest; libvirt keeps none."
+          }
+        }
+      },
+      "GuestsResponse": {
+        "type": "object",
+        "required": [
+          "named",
+          "unnamed",
+          "guests"
+        ],
+        "properties": {
+          "guests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GuestEntry"
+            },
+            "description": "One entry per guest device, by interface name."
+          },
+          "named": {
+            "type": "integer",
+            "description": "Devices whose guest is named.",
+            "minimum": 0
+          },
+          "unnamed": {
+            "type": "integer",
+            "description": "Devices whose guest is not.",
+            "minimum": 0
           }
         }
       },

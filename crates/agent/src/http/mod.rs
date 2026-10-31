@@ -17,6 +17,7 @@ pub mod fingerprint_handler;
 pub mod firewall_handler;
 pub mod flow_handler;
 pub mod geoip_handler;
+pub mod guest_handler;
 pub mod health_handler;
 pub mod ids_handler;
 pub mod ips_handler;

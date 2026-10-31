@@ -10,6 +10,7 @@ pub mod ebpf;
 pub mod flow;
 pub mod geoip;
 pub mod grpc;
+pub mod hypervisor;
 pub mod metrics;
 pub mod net;
 pub mod netfilter;

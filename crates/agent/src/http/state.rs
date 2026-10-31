@@ -173,6 +173,10 @@ pub struct AppState {
     /// link watcher reports into it from startup, and it answers only once a
     /// pod inventory is installed, which needs Kubernetes.
     pub pod_coverage: Arc<application::pod_coverage_service::PodCoverageService>,
+    /// The virtual machines whose tap or macvtap devices the link watcher
+    /// found. Empty when the link watcher does not run, in which case the
+    /// route says so rather than answering that the host carries no guest.
+    pub guest_inventory: ArcSwapOption<application::guest_inventory_service::GuestInventoryService>,
     /// Learning mode. Empty when the configuration turns it off, in which
     /// case the routes say the node does not learn rather than answering
     /// that it learnt nothing.
@@ -237,6 +241,7 @@ impl AppState {
             netpol_replay: ArcSwapOption::empty(),
             datapath_trace: ArcSwapOption::empty(),
             pod_coverage: Arc::new(application::pod_coverage_service::PodCoverageService::new()),
+            guest_inventory: ArcSwapOption::empty(),
             learning_service: ArcSwapOption::empty(),
             process_detections: AtomicBool::new(false),
             service_graph: ArcSwapOption::empty(),
@@ -444,6 +449,13 @@ impl AppState {
     }
 
     /// Hand the packet trace over, once the programs it runs are loaded.
+    pub fn install_guest_inventory(
+        &self,
+        svc: Arc<application::guest_inventory_service::GuestInventoryService>,
+    ) {
+        self.guest_inventory.store(Some(svc));
+    }
+
     pub fn install_datapath_trace(
         &self,
         svc: Arc<application::datapath_trace_service::DatapathTraceService>,
