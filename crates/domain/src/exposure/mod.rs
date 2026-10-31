@@ -5,5 +5,8 @@
 //! says what listens. This module holds the second half as the socket hooks
 //! record it: every socket holding a local address, the task that bound it,
 //! and whether that address was one interface, the loopback, or all of them.
+//! `reach` reads the packet firewall's rules for who may get to each of them,
+//! and the handshakes the kernel counted say whether anybody did.
 
 pub mod entity;
+pub mod reach;

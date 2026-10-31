@@ -15,7 +15,10 @@
 //! hooks also write the address and port taken into `LISTENING_SOCKETS`, the
 //! `sockops` listen callback marks a TCP socket that became a server, and
 //! `sock_release` takes the socket out again when it is closed, so the table
-//! is the node's listeners as the kernel holds them and not a history. Nothing is
+//! is the node's listeners as the kernel holds them and not a history. Every
+//! connection the node accepts is counted in `LISTENER_ACCEPTS` against the
+//! address and port it arrived on, which is what says whether anybody uses a
+//! listener rather than only that it exists. Nothing is
 //! enforced, nothing is dropped, and no verdict depends on what is recorded:
 //! every program returns allow unconditionally, so a failure here costs
 //! attribution and never connectivity.
@@ -24,7 +27,7 @@
 #![no_main]
 
 use aya_ebpf::{
-    btf_maps::{LruHashMap, PerCpuArray},
+    btf_maps::{LruHashMap, LruPerCpuHashMap, PerCpuArray},
     helpers::{
         bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_get_current_uid_gid,
         bpf_ktime_get_boot_ns, generated,
@@ -39,8 +42,8 @@ use ebpf_common::attribution::{
     ATTRIBUTION_METRIC_COUNT, ATTRIBUTION_METRIC_FLOW, ATTRIBUTION_METRIC_INSERT_FAILED,
     ATTRIBUTION_METRIC_NO_COOKIE, ATTRIBUTION_METRIC_POST_BIND, ATTRIBUTION_METRIC_SENDMSG,
     ATTRIBUTION_METRIC_LISTENER, ATTRIBUTION_METRIC_LISTENER_GONE, ATTRIBUTION_METRIC_SOCK_OPS,
-    ATTRIBUTION_MAX_LISTENERS, FlowIdentityKey, LISTENER_STATE_BOUND, LISTENER_STATE_LISTEN,
-    ListeningSocket, SocketIdentity,
+    ATTRIBUTION_MAX_LISTENERS, ATTRIBUTION_METRIC_ACCEPT, FlowIdentityKey, LISTENER_STATE_BOUND,
+    LISTENER_STATE_LISTEN, ListenerAcceptKey, ListenerAccepts, ListeningSocket, SocketIdentity,
 };
 use ebpf_common::dlp::{
     DLP_FLOW_FAMILY_IPV4, DLP_FLOW_FAMILY_IPV6, DLP_FLOW_PROTOCOL_TCP,
@@ -100,6 +103,19 @@ static LISTENING_SOCKETS: LruHashMap<
     ListeningSocket,
     { ATTRIBUTION_MAX_LISTENERS as usize },
 > = LruHashMap::new();
+
+/// Local address and port -> the TCP connections accepted on it.
+///
+/// Counted at the handshake by the `sockops` hook, against the address the
+/// peer actually reached, so a reader can say whether anybody uses a listener
+/// and not only that it exists. Per-CPU so the count needs no atomic, LRU so
+/// a node accepting on more addresses than the table holds loses its coldest.
+#[btf_map]
+static LISTENER_ACCEPTS: LruPerCpuHashMap<
+    ListenerAcceptKey,
+    ListenerAccepts,
+    { ATTRIBUTION_MAX_LISTENERS as usize },
+> = LruPerCpuHashMap::new();
 
 /// Per-CPU counters, read by the agent and exported as metrics. Nothing here
 /// is an alert: they are how an operator sees that the hooks are attached and
@@ -181,6 +197,7 @@ const SOCK_OPS_TCP_LISTEN: u32 = 11;
 #[sock_ops]
 pub fn attribution_sockops(ctx: SockOpsContext) -> u32 {
     track_listener(&ctx);
+    count_accept(&ctx);
     join_socket(&ctx);
     // The return value of a sock_ops program feeds `bpf_sock_ops_cb_flags_set`
     // and the TCP stack's own callbacks. Zero asks for nothing, which is the
@@ -211,6 +228,55 @@ fn track_listener(ctx: &SockOpsContext) {
         return;
     };
     unsafe { (*entry).state = LISTENER_STATE_LISTEN };
+}
+
+/// Count a connection this node accepted against the local address and port
+/// it arrived on. The accepted socket is the kernel's child of the listener,
+/// opened in softirq by nobody, so it is keyed by where it landed rather than
+/// by a cookie the listener table would know.
+#[inline(always)]
+fn count_accept(ctx: &SockOpsContext) {
+    if ctx.op() != SOCK_OPS_PASSIVE_ESTABLISHED {
+        return;
+    }
+    let family = ctx.family();
+    let mut key = ListenerAcceptKey {
+        local_addr: [0; 4],
+        port: ctx.local_port() as u16,
+        family: 0,
+        _pad: 0,
+    };
+    if family == u32::from(ATTRIBUTION_FAMILY_IPV4) {
+        key.local_addr[0] = u32::from_be(ctx.local_ip4());
+        key.family = ATTRIBUTION_FAMILY_IPV4;
+    } else if family == u32::from(ATTRIBUTION_FAMILY_IPV6) {
+        let local = ctx.local_ip6();
+        let mut word = 0usize;
+        while word < 4 {
+            key.local_addr[word] = u32::from_be(local[word]);
+            word += 1;
+        }
+        key.family = ATTRIBUTION_FAMILY_IPV6;
+    } else {
+        return;
+    }
+    let now = unsafe { bpf_ktime_get_boot_ns() };
+    if let Some(entry) = LISTENER_ACCEPTS.get_ptr_mut(&key) {
+        unsafe {
+            (*entry).count += 1;
+            (*entry).last_ns = now;
+        }
+    } else {
+        let first = ListenerAccepts {
+            count: 1,
+            last_ns: now,
+        };
+        if LISTENER_ACCEPTS.insert(&key, &first, 0).is_err() {
+            increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_INSERT_FAILED);
+            return;
+        }
+    }
+    increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_ACCEPT);
 }
 
 /// Write the established socket against the task that opened it.

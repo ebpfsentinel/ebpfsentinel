@@ -3162,7 +3162,7 @@
         "operationId": "get_listeners",
         "responses": {
           "200": {
-            "description": "Sockets accepting traffic on the node, with the workload that bound each",
+            "description": "Sockets accepting traffic on the node, with the workload that bound each, the sources the firewall lets through and the connections accepted",
             "content": {
               "application/json": {
                 "schema": {
@@ -13448,18 +13448,41 @@
           "scope",
           "sockets",
           "pid",
-          "bound_at_boot_ns"
+          "bound_at_boot_ns",
+          "class",
+          "reachable",
+          "decided_by"
         ],
         "properties": {
+          "accepted": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "TCP connections accepted on it since the hooks attached. Absent for\nUDP, which has no handshake to count.",
+            "minimum": 0
+          },
           "address": {
             "type": "string",
             "description": "The bound address, `0.0.0.0` or `::` for every address."
+          },
+          "allowed_from": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The sources let through, when only some are. Absent means every\nsource when `reachable`, and none when not."
           },
           "bound_at_boot_ns": {
             "type": "integer",
             "format": "int64",
             "description": "When the first of its sockets was bound, in nanoseconds since boot.",
             "minimum": 0
+          },
+          "class": {
+            "type": "string",
+            "description": "`exposed_used`, `exposed_unused`, `exposed_unmeasured` (UDP, whose use\nis not counted), `closed_by_policy` or `loopback_only`."
           },
           "container": {
             "type": [
@@ -13468,12 +13491,25 @@
             ],
             "description": "The container holding it, where it runs in one."
           },
+          "decided_by": {
+            "type": "string",
+            "description": "What decided `reachable`: `rule`, `default_policy`,\n`firewall_not_enforcing` (disabled or in alert mode) or `loopback`."
+          },
           "executable": {
             "type": [
               "string",
               "null"
             ],
             "description": "Its executable, where the process table holds it."
+          },
+          "last_accepted_boot_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the last of them was accepted, in nanoseconds since boot.",
+            "minimum": 0
           },
           "pid": {
             "type": "integer",
@@ -13496,6 +13532,17 @@
           "protocol": {
             "type": "string",
             "description": "`tcp` or `udp`."
+          },
+          "reachable": {
+            "type": "boolean",
+            "description": "Whether the packet firewall lets anything off the node through to it."
+          },
+          "rule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The deciding rule, when `decided_by` is `rule`."
           },
           "scope": {
             "type": "string",
@@ -13527,7 +13574,7 @@
       },
       "ListenersResponse": {
         "type": "object",
-        "description": "The sockets this node accepts traffic on, and who bound them.",
+        "description": "The sockets this node accepts traffic on, who bound them, who may reach\nthem and whether anybody did.",
         "required": [
           "reading",
           "listeners"

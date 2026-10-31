@@ -178,6 +178,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (6, "flow_indexed"),
             (7, "listener"),
             (8, "listener_gone"),
+            (9, "accept"),
         ],
         // One exec, one exit, and the two ways the table loses a line: a
         // ring buffer with nobody draining it fast enough, and a thread exit

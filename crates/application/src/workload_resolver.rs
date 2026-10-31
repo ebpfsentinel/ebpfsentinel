@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use domain::exposure::entity::BoundSocket;
+use domain::exposure::entity::{AcceptedConnections, BoundSocket};
 use domain::workload::entity::{Workload, WorkloadSource};
 use ports::secondary::socket_identity_port::{FlowEndpoints, SocketIdentityReader, SocketOwner};
 
@@ -131,6 +131,14 @@ impl WorkloadResolver {
             base.with_process(&entry)
                 .with_lineage(&processes.lineage(pid)),
         )
+    }
+
+    /// The connections this node accepted per local address and port, or
+    /// `None` when no socket table is installed.
+    #[must_use]
+    pub fn accepted_connections(&self) -> Option<Vec<AcceptedConnections>> {
+        let sockets = self.sockets.load();
+        Some(sockets.as_ref()?.accepted_connections())
     }
 
     /// Every socket this node holds bound now, each with the workload that

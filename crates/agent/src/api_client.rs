@@ -2020,6 +2020,17 @@ pub struct ListenerEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
     pub bound_at_boot_ns: u64,
+    pub class: String,
+    pub reachable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_from: Vec<String>,
+    pub decided_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_accepted_boot_ns: Option<u64>,
 }
 
 #[derive(Deserialize, Serialize)]

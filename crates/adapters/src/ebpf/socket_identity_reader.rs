@@ -6,6 +6,7 @@
 //! holding only a five-tuple, which is all a row of `/proc/net/nf_conntrack`
 //! ever is. `LISTENING_SOCKETS` answers the third question, what this node
 //! has bound and who bound it, and is listed rather than looked up.
+//! `LISTENER_ACCEPTS` says whether anybody connected to it.
 //!
 //! Every lookup can legitimately miss, and a miss is returned rather than
 //! smoothed over: the hooks may not be attached, the socket may predate the
@@ -13,12 +14,12 @@
 //! table's time-to-live is treated as gone even when the kernel still holds
 //! it, because a cookie is reused and a stale record names the wrong process.
 
-use aya::maps::{HashMap as AyaHashMap, MapData};
-use domain::exposure::entity::{BoundSocket, ListenerProtocol};
+use aya::maps::{HashMap as AyaHashMap, MapData, PerCpuHashMap, PerCpuValues};
+use domain::exposure::entity::{AcceptedConnections, BoundSocket, ListenerProtocol};
 use domain::workload::entity::WorkloadSource;
 use ebpf_common::attribution::{
     ATTRIBUTION_FAMILY_IPV4, ATTRIBUTION_FAMILY_IPV6, ATTRIBUTION_IDENTITY_TTL_NS, FlowIdentityKey,
-    LISTENER_STATE_LISTEN, ListeningSocket, SocketIdentity,
+    LISTENER_STATE_LISTEN, ListenerAcceptKey, ListenerAccepts, ListeningSocket, SocketIdentity,
 };
 use ports::secondary::socket_identity_port::{FlowEndpoints, SocketIdentityReader, SocketOwner};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -27,15 +28,17 @@ use tracing::info;
 use crate::ebpf::map_store::MapStore;
 use crate::ebpf::ringbuf_observer::boottime_now_ns;
 
-/// Reads `SOCKET_IDENTITY`, `SOCKET_FLOW` and `LISTENING_SOCKETS`.
+/// Reads `SOCKET_IDENTITY`, `SOCKET_FLOW`, `LISTENING_SOCKETS` and
+/// `LISTENER_ACCEPTS`.
 pub struct EbpfSocketIdentityReader {
     sockets: AyaHashMap<MapData, u64, SocketIdentity>,
     flows: AyaHashMap<MapData, FlowIdentityKey, SocketIdentity>,
     listeners: AyaHashMap<MapData, u64, ListeningSocket>,
+    accepts: PerCpuHashMap<MapData, ListenerAcceptKey, ListenerAccepts>,
 }
 
 impl EbpfSocketIdentityReader {
-    /// Take the three tables out of a loaded attribution object.
+    /// Take the four tables out of a loaded attribution object.
     ///
     /// All or none: a reader holding some of them would answer one kind of
     /// caller and silently fail another, which is exactly the asymmetry the
@@ -53,13 +56,18 @@ impl EbpfSocketIdentityReader {
             ebpf.take_map("LISTENING_SOCKETS")
                 .ok_or_else(|| anyhow::anyhow!("map 'LISTENING_SOCKETS' not found"))?,
         )?;
+        let accepts = PerCpuHashMap::try_from(
+            ebpf.take_map("LISTENER_ACCEPTS")
+                .ok_or_else(|| anyhow::anyhow!("map 'LISTENER_ACCEPTS' not found"))?,
+        )?;
         info!(
-            "socket attribution tables acquired (SOCKET_IDENTITY, SOCKET_FLOW, LISTENING_SOCKETS)"
+            "socket attribution tables acquired (SOCKET_IDENTITY, SOCKET_FLOW, LISTENING_SOCKETS, LISTENER_ACCEPTS)"
         );
         Ok(Self {
             sockets,
             flows,
             listeners,
+            accepts,
         })
     }
 
@@ -199,6 +207,47 @@ impl SocketIdentityReader for EbpfSocketIdentityReader {
             .filter_map(|(_, listener)| bound_socket(&listener))
             .collect()
     }
+
+    fn accepted_connections(&self) -> Vec<AcceptedConnections> {
+        self.accepts
+            .iter()
+            .filter_map(Result::ok)
+            .filter_map(|(key, per_cpu)| accepted(&key, &per_cpu))
+            .collect()
+    }
+}
+
+/// One address and port's count, summed over the CPUs that took the
+/// handshakes, or `None` for a key of no known family.
+fn accepted(
+    key: &ListenerAcceptKey,
+    per_cpu: &PerCpuValues<ListenerAccepts>,
+) -> Option<AcceptedConnections> {
+    let (accepted, last_at_ns) = per_cpu.iter().fold((0u64, 0u64), |(sum, last), cpu| {
+        (sum.saturating_add(cpu.count), last.max(cpu.last_ns))
+    });
+    Some(AcceptedConnections {
+        address: address_of(key.family, &key.local_addr)?,
+        port: key.port,
+        accepted,
+        last_at_ns,
+    })
+}
+
+/// The address a pair of family byte and words encodes, the inverse of
+/// `addr_words`.
+fn address_of(family: u8, words: &[u32; 4]) -> Option<IpAddr> {
+    match family {
+        ATTRIBUTION_FAMILY_IPV4 => Some(IpAddr::V4(Ipv4Addr::from(words[0]))),
+        ATTRIBUTION_FAMILY_IPV6 => {
+            let mut octets = [0u8; 16];
+            for (i, word) in words.iter().enumerate() {
+                octets[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+            }
+            Some(IpAddr::V6(Ipv6Addr::from(octets)))
+        }
+        _ => None,
+    }
 }
 
 /// The domain's reading of one table entry, or `None` for an entry that names
@@ -208,19 +257,8 @@ fn bound_socket(listener: &ListeningSocket) -> Option<BoundSocket> {
     if identity.tgid == 0 {
         return None;
     }
-    let address = match identity.family {
-        ATTRIBUTION_FAMILY_IPV4 => IpAddr::V4(Ipv4Addr::from(listener.local_addr[0])),
-        ATTRIBUTION_FAMILY_IPV6 => {
-            let mut octets = [0u8; 16];
-            for (i, word) in listener.local_addr.iter().enumerate() {
-                octets[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
-            }
-            IpAddr::V6(Ipv6Addr::from(octets))
-        }
-        _ => return None,
-    };
     Some(BoundSocket {
-        address,
+        address: address_of(identity.family, &listener.local_addr)?,
         port: listener.port,
         protocol: ListenerProtocol::from_ip_protocol(identity.protocol)?,
         listening: listener.state == LISTENER_STATE_LISTEN,
@@ -292,6 +330,51 @@ mod tests {
         assert_eq!(read.address, v6);
         assert_eq!(read.protocol, ListenerProtocol::Udp);
         assert!(!read.listening);
+    }
+
+    #[test]
+    fn the_count_is_the_sum_of_every_cpu_and_the_last_is_the_latest_of_them() {
+        let cpus = usize::try_from(aya::util::nr_cpus().unwrap().get()).unwrap();
+        let mut values = vec![ListenerAccepts::default(); cpus];
+        values[0] = ListenerAccepts {
+            count: 3,
+            last_ns: 50,
+        };
+        if cpus > 1 {
+            values[cpus - 1] = ListenerAccepts {
+                count: 4,
+                last_ns: 90,
+            };
+        }
+        let per_cpu = PerCpuValues::try_from(values).unwrap();
+        let key = ListenerAcceptKey {
+            local_addr: addr_words(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7))),
+            port: 443,
+            family: ATTRIBUTION_FAMILY_IPV4,
+            _pad: 0,
+        };
+        let read = accepted(&key, &per_cpu).unwrap();
+        assert_eq!(read.address, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)));
+        assert_eq!(read.port, 443);
+        if cpus > 1 {
+            assert_eq!((read.accepted, read.last_at_ns), (7, 90));
+        } else {
+            assert_eq!((read.accepted, read.last_at_ns), (3, 50));
+        }
+    }
+
+    #[test]
+    fn an_address_reads_back_from_the_words_it_was_written_as() {
+        for address in ["10.0.0.7", "2001:db8::1", "::ffff:10.0.0.8"] {
+            let address: IpAddr = address.parse().unwrap();
+            let family = if address.is_ipv4() {
+                ATTRIBUTION_FAMILY_IPV4
+            } else {
+                ATTRIBUTION_FAMILY_IPV6
+            };
+            assert_eq!(address_of(family, &addr_words(address)), Some(address));
+        }
+        assert_eq!(address_of(0, &[1, 0, 0, 0]), None);
     }
 
     #[test]

@@ -3,6 +3,8 @@ use std::sync::Arc;
 use application::exposure_service::Listener;
 use axum::Json;
 use axum::extract::State;
+use domain::exposure::reach::{FirewallPosture, ReachDecision};
+use domain::firewall::entity::FirewallAction;
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -43,9 +45,32 @@ pub struct ListenerBody {
     pub unit: Option<String>,
     /// When the first of its sockets was bound, in nanoseconds since boot.
     pub bound_at_boot_ns: u64,
+    /// `exposed_used`, `exposed_unused`, `exposed_unmeasured` (UDP, whose use
+    /// is not counted), `closed_by_policy` or `loopback_only`.
+    pub class: &'static str,
+    /// Whether the packet firewall lets anything off the node through to it.
+    pub reachable: bool,
+    /// The sources let through, when only some are. Absent means every
+    /// source when `reachable`, and none when not.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allowed_from: Vec<String>,
+    /// What decided `reachable`: `rule`, `default_policy`,
+    /// `firewall_not_enforcing` (disabled or in alert mode) or `loopback`.
+    pub decided_by: &'static str,
+    /// The deciding rule, when `decided_by` is `rule`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+    /// TCP connections accepted on it since the hooks attached. Absent for
+    /// UDP, which has no handshake to count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<u64>,
+    /// When the last of them was accepted, in nanoseconds since boot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_accepted_boot_ns: Option<u64>,
 }
 
-/// The sockets this node accepts traffic on, and who bound them.
+/// The sockets this node accepts traffic on, who bound them, who may reach
+/// them and whether anybody did.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ListenersResponse {
     /// Whether the socket hooks are attached. When they are not, the node's
@@ -59,7 +84,7 @@ pub struct ListenersResponse {
 #[utoipa::path(
     get, path = "/api/v1/exposure/listeners",
     tag = "Operations",
-    responses((status = 200, description = "Sockets accepting traffic on the node, with the workload that bound each", body = ListenersResponse),
+    responses((status = 200, description = "Sockets accepting traffic on the node, with the workload that bound each, the sources the firewall lets through and the connections accepted", body = ListenersResponse),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -69,11 +94,20 @@ pub struct ListenersResponse {
     )
 )]
 pub async fn get_listeners(State(state): State<Arc<AppState>>) -> Json<ListenersResponse> {
-    let listeners = state
-        .exposure
-        .load_full()
-        .and_then(|service| service.listeners());
-    Json(response(listeners))
+    let Some(service) = state.exposure.load_full() else {
+        return Json(response(None));
+    };
+    let posture = {
+        let firewall = state.firewall_service.read().await;
+        FirewallPosture {
+            rules: firewall.list_rules().to_vec(),
+            enabled: firewall.enabled(),
+            mode: firewall.mode(),
+            default_drop: firewall.is_deny_all()
+                || firewall.default_policy() == ebpf_common::firewall::DEFAULT_POLICY_DROP,
+        }
+    };
+    Json(response(service.listeners(&posture)))
 }
 
 fn response(listeners: Option<Vec<Listener>>) -> ListenersResponse {
@@ -108,13 +142,39 @@ fn body(listener: &Listener) -> ListenerBody {
         },
         unit: w.unit.clone(),
         bound_at_boot_ns: listener.bound_at_ns,
+        class: listener.class.as_str(),
+        reachable: listener.reach.open,
+        allowed_from: listener.reach.allowed_from.clone(),
+        decided_by: match listener.reach.decided_by {
+            ReachDecision::Rule { .. } => "rule",
+            ReachDecision::DefaultPolicy { .. } => "default_policy",
+            ReachDecision::NotEnforcing => "firewall_not_enforcing",
+            ReachDecision::Loopback => "loopback",
+        },
+        rule: match &listener.reach.decided_by {
+            ReachDecision::Rule { id, action } => Some(format!("{id} ({})", action_name(*action))),
+            _ => None,
+        },
+        accepted: listener.accepted,
+        last_accepted_boot_ns: listener.last_accepted_at_ns,
+    }
+}
+
+fn action_name(action: FirewallAction) -> &'static str {
+    match action {
+        FirewallAction::Allow => "allow",
+        FirewallAction::Deny => "deny",
+        FirewallAction::Log => "log",
+        FirewallAction::Reject => "reject",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::exposure::entity::{ListenerProtocol, ListenerScope};
+    use domain::common::entity::RuleId;
+    use domain::exposure::entity::{ExposureClass, ListenerProtocol, ListenerScope};
+    use domain::exposure::reach::Reach;
     use domain::workload::entity::{Workload, WorkloadSource};
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -135,6 +195,17 @@ mod tests {
             sockets: 1,
             bound_at_ns: 7,
             workload,
+            reach: Reach {
+                open: true,
+                allowed_from: vec!["10.0.0.0/8".into()],
+                decided_by: ReachDecision::Rule {
+                    id: RuleId("drop-rest".into()),
+                    action: FirewallAction::Deny,
+                },
+            },
+            accepted: Some(0),
+            last_accepted_at_ns: None,
+            class: ExposureClass::ExposedUnused,
         }])))
         .unwrap();
         assert_eq!(json["reading"], true);
@@ -145,5 +216,12 @@ mod tests {
         assert_eq!(row["pod"], "cache/redis-0");
         assert_eq!(row["executable"], "/usr/bin/redis-server");
         assert!(row.get("unit").is_none());
+        assert_eq!(row["class"], "exposed_unused");
+        assert_eq!(row["reachable"], true);
+        assert_eq!(row["allowed_from"][0], "10.0.0.0/8");
+        assert_eq!(row["decided_by"], "rule");
+        assert_eq!(row["rule"], "drop-rest (deny)");
+        assert_eq!(row["accepted"], 0);
+        assert!(row.get("last_accepted_boot_ns").is_none());
     }
 }

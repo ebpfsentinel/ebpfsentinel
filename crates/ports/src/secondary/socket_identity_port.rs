@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use domain::exposure::entity::BoundSocket;
+use domain::exposure::entity::{AcceptedConnections, BoundSocket};
 use domain::workload::entity::WorkloadSource;
 
 /// The two ends of a connection as a reader of the kernel tables states them.
@@ -74,6 +74,13 @@ pub trait SocketIdentityReader: Send + Sync {
     /// is not in it. The default is the answer of a reader with no such
     /// table, which is every reader but the kernel's.
     fn bound_sockets(&self) -> Vec<BoundSocket> {
+        Vec::new()
+    }
+
+    /// The TCP connections this node accepted, per local address and port,
+    /// counted at the handshake since the hooks attached. Empty from a reader
+    /// with no such table, for the same reason as `bound_sockets`.
+    fn accepted_connections(&self) -> Vec<AcceptedConnections> {
         Vec::new()
     }
 }

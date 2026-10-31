@@ -84,8 +84,11 @@ pub const ATTRIBUTION_METRIC_LISTENER: u32 = 7;
 /// Metric index: listening sockets taken out of the table because the socket
 /// was closed or turned into an outgoing connection.
 pub const ATTRIBUTION_METRIC_LISTENER_GONE: u32 = 8;
+/// Metric index: TCP connections this node accepted, counted against the
+/// local address and port they arrived on.
+pub const ATTRIBUTION_METRIC_ACCEPT: u32 = 9;
 /// Total number of attribution metric slots (one past the last index).
-pub const ATTRIBUTION_METRIC_COUNT: u32 = 9;
+pub const ATTRIBUTION_METRIC_COUNT: u32 = 10;
 
 /// Ceiling of the listening-socket table. A node rarely holds more than a few
 /// hundred listeners; the headroom is for UDP sockets, every one of which is
@@ -198,6 +201,42 @@ pub struct ListeningSocket {
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for ListeningSocket {}
 
+/// A local address and port that accepted connections, the key of
+/// `LISTENER_ACCEPTS`.
+///
+/// The address is the one the peer reached, never the unspecified one a
+/// socket may be bound on, which is why a reader matches it against the
+/// listener rather than looking the listener up: a server bound on every
+/// address has one entry here per address somebody connected to.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ListenerAcceptKey {
+    /// In the encoding of `FlowIdentityKey`: IPv4 in the first word.
+    pub local_addr: [u32; 4],
+    /// Host order.
+    pub port: u16,
+    /// `ATTRIBUTION_FAMILY_*`.
+    pub family: u8,
+    pub _pad: u8,
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for ListenerAcceptKey {}
+
+/// What one CPU counted for a `ListenerAcceptKey`. The map is per-CPU, so
+/// the count is incremented without an atomic and the reader sums the CPUs.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ListenerAccepts {
+    /// Connections accepted on this CPU.
+    pub count: u64,
+    /// `bpf_ktime_get_boot_ns` of the last of them.
+    pub last_ns: u64,
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for ListenerAccepts {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +287,15 @@ mod tests {
     }
 
     #[test]
+    fn the_accept_key_and_count_carry_no_implicit_padding() {
+        assert_eq!(mem::size_of::<ListenerAcceptKey>(), 20);
+        assert_eq!(mem::offset_of!(ListenerAcceptKey, port), 16);
+        assert_eq!(mem::offset_of!(ListenerAcceptKey, family), 18);
+        assert_eq!(mem::size_of::<ListenerAccepts>(), 16);
+        assert_eq!(mem::offset_of!(ListenerAccepts, last_ns), 8);
+    }
+
+    #[test]
     fn a_flow_key_is_the_same_key_whichever_side_built_it() {
         // Two readers building the key from the same connection must produce
         // the same bytes, padding included, or the lookup misses on one of
@@ -285,14 +333,12 @@ mod tests {
 
     #[test]
     fn the_metric_count_is_one_past_the_last_slot() {
-        assert_eq!(
-            ATTRIBUTION_METRIC_COUNT,
-            ATTRIBUTION_METRIC_LISTENER_GONE + 1
-        );
+        assert_eq!(ATTRIBUTION_METRIC_COUNT, ATTRIBUTION_METRIC_ACCEPT + 1);
         const {
             assert!(ATTRIBUTION_METRIC_INSERT_FAILED < ATTRIBUTION_METRIC_FLOW);
             assert!(ATTRIBUTION_METRIC_FLOW < ATTRIBUTION_METRIC_LISTENER);
             assert!(ATTRIBUTION_METRIC_LISTENER < ATTRIBUTION_METRIC_LISTENER_GONE);
+            assert!(ATTRIBUTION_METRIC_LISTENER_GONE < ATTRIBUTION_METRIC_ACCEPT);
         }
     }
 }

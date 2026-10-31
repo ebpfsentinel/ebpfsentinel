@@ -4617,6 +4617,9 @@ pub async fn cmd_exposure_listeners(client: &ApiClient, output: OutputFormat) ->
         ("ADDRESS", Align::Left),
         ("PORT", Align::Right),
         ("SCOPE", Align::Left),
+        ("CLASS", Align::Left),
+        ("ALLOWED", Align::Left),
+        ("ACCEPTED", Align::Right),
         ("PID", Align::Right),
         ("EXECUTABLE", Align::Left),
         ("POD", Align::Left),
@@ -4628,6 +4631,11 @@ pub async fn cmd_exposure_listeners(client: &ApiClient, output: OutputFormat) ->
             listener.address,
             listener.port.to_string(),
             listener.scope,
+            listener.class,
+            allowed_sources(listener),
+            listener
+                .accepted
+                .map_or_else(|| "-".to_string(), |n| n.to_string()),
             listener.pid.to_string(),
             listener.executable.as_deref().unwrap_or("-"),
             listener.pod.as_deref().unwrap_or("-"),
@@ -4636,6 +4644,17 @@ pub async fn cmd_exposure_listeners(client: &ApiClient, output: OutputFormat) ->
     }
     table.print();
     Ok(())
+}
+
+/// Who the packet firewall lets through to a listener, in one cell.
+fn allowed_sources(listener: &crate::api_client::ListenerEntry) -> String {
+    if !listener.reachable {
+        return "none".to_string();
+    }
+    if listener.allowed_from.is_empty() {
+        return "any".to_string();
+    }
+    listener.allowed_from.join(", ")
 }
 
 /// Print the packet sockets open on this node, who holds them and what
