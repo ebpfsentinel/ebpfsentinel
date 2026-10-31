@@ -1785,6 +1785,45 @@ pub struct TlsStatusResponse {
     pub post_quantum: bool,
 }
 
+#[derive(Deserialize, Serialize)]
+pub struct CertificateBody {
+    /// `not_observable`, `not_captured` or `read`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_after: Option<i64>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct TlsHandshakeBody {
+    pub client: String,
+    pub client_port: u16,
+    pub server: String,
+    pub server_port: u16,
+    pub observed_at_ns: u64,
+    pub version: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_name: Option<String>,
+    pub cipher: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cipher_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_name: Option<String>,
+    pub key_exchange: String,
+    pub posture: String,
+    pub certificate: CertificateBody,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct TlsHandshakesResponse {
+    pub recording: bool,
+    pub capacity: usize,
+    pub handshakes: Vec<TlsHandshakeBody>,
+}
+
 // ── Aliases ──────────────────────────────────
 
 #[derive(Deserialize, Serialize)]
@@ -3737,6 +3776,16 @@ impl ApiClient {
     pub async fn tls_status(&self) -> anyhow::Result<TlsStatusResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/tls/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn tls_handshakes(&self, limit: usize) -> anyhow::Result<TlsHandshakesResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/tls/handshakes")
+            .query(&[("limit", limit.to_string())])
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

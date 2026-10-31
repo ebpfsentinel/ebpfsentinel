@@ -711,6 +711,9 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
             let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
             match args.command {
                 TlsCommand::Status => commands::cmd_tls_status(&client, output).await,
+                TlsCommand::Handshakes { limit } => {
+                    commands::cmd_tls_handshakes(&client, output, limit).await
+                }
             }
         }
 

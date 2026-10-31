@@ -2,6 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
+use domain::l7::handshake::read_server_flight;
 use domain::l7::parser::{
     detect_protocol, parse_ftp, parse_grpc, parse_http, parse_payload, parse_smb, parse_smtp,
     parse_tls_client_hello,
@@ -19,4 +20,5 @@ fuzz_target!(|data: &[u8]| {
     let _ = parse_smtp(data);
     let _ = parse_ftp(data);
     let _ = parse_smb(data);
+    let _ = read_server_flight(data);
 });

@@ -43,6 +43,9 @@ use crate::threatintel_service_impl::ThreatIntelAppService;
 /// Defined in the domain layer; re-exported here for existing call sites.
 pub use domain::common::agent_event::AgentEvent;
 
+/// How many handshakes the log keeps before dropping the oldest.
+pub const HANDSHAKE_LOG_CAPACITY: usize = 4096;
+
 /// What a match against a prevention (IPS) rule carries into the alert and
 /// escalation decisions that follow it.
 #[derive(Debug, Clone, Copy)]
@@ -79,6 +82,8 @@ pub struct EventDispatcher {
     dns_blocklist_svc: Option<Arc<DnsBlocklistAppService>>,
     fingerprint_cache: Arc<FingerprintCache>,
     ja4s_fingerprint_cache: Arc<Ja4sFingerprintCache>,
+    /// What the most recent TLS handshakes negotiated.
+    handshake_log: Arc<domain::l7::handshake::HandshakeLog>,
     encrypted_dns_detector: EncryptedDnsDetector,
     container_resolver: Option<Arc<domain::container::engine::ContainerResolverEngine>>,
     /// Reads the executable behind a DLP event's pid. Optional, because an
@@ -137,6 +142,9 @@ impl EventDispatcher {
             ja4s_fingerprint_cache: Arc::new(Ja4sFingerprintCache::new(
                 10_000,
                 std::time::Duration::from_mins(5),
+            )),
+            handshake_log: Arc::new(domain::l7::handshake::HandshakeLog::new(
+                HANDSHAKE_LOG_CAPACITY,
             )),
             encrypted_dns_detector: EncryptedDnsDetector::default(),
             container_resolver: None,
@@ -333,6 +341,18 @@ impl EventDispatcher {
     /// Return a shared reference to the JA4S fingerprint cache.
     pub fn ja4s_fingerprint_cache(&self) -> Arc<Ja4sFingerprintCache> {
         Arc::clone(&self.ja4s_fingerprint_cache)
+    }
+
+    /// Return a shared reference to the log of recent TLS handshakes.
+    pub fn handshake_log(&self) -> Arc<domain::l7::handshake::HandshakeLog> {
+        Arc::clone(&self.handshake_log)
+    }
+
+    /// Replace the dispatcher's handshake log with one the API also reads.
+    #[must_use]
+    pub fn with_handshake_log(mut self, log: Arc<domain::l7::handshake::HandshakeLog>) -> Self {
+        self.handshake_log = log;
+        self
     }
 
     /// Replace the dispatcher's JA4 fingerprint cache with an externally
@@ -1132,6 +1152,7 @@ impl EventDispatcher {
                 dst_port: header.src_port,
             };
             self.ja4s_fingerprint_cache.insert(flow_key, fp);
+            self.record_handshake(header, payload);
         }
 
         // Evaluate L7 rules against parsed content
@@ -1141,6 +1162,27 @@ impl EventDispatcher {
 
         self.apply_l7_rule_result(header, protocol_label, l7_result);
         self.notify_l7_observers(header, protocol_label, &parsed, payload.len());
+    }
+
+    /// Keep what a server's flight negotiated. The packet runs from the
+    /// server to the client, so the client is its destination.
+    fn record_handshake(&self, header: &PacketEvent, payload: &[u8]) {
+        let Some(handshake) = domain::l7::handshake::read_server_flight(payload) else {
+            return;
+        };
+        let ipv6 = header.is_ipv6();
+        let observed_at_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        self.handshake_log
+            .record(domain::l7::handshake::HandshakeRecord {
+                client: addr_to_ip(header.dst_addr, ipv6),
+                client_port: header.dst_port,
+                server: addr_to_ip(header.src_addr, ipv6),
+                server_port: header.src_port,
+                observed_at_ns,
+                handshake,
+            });
     }
 
     /// Hand one parsed payload to every registered observer, naming the
@@ -2603,6 +2645,42 @@ mod tests {
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "l7");
         assert_eq!(*metrics.last_action.lock().unwrap(), "http");
+    }
+
+    #[tokio::test]
+    async fn a_server_flight_lands_in_the_handshake_log_with_the_client_as_destination() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
+
+        let header = PacketEvent {
+            src_port: 443,
+            dst_port: 51_000,
+            ..make_event(EVENT_TYPE_L7, 0)
+        };
+        // TLS 1.3 ServerHello: TLS_AES_128_GCM_SHA256 over X25519MLKEM768.
+        let mut body = vec![0x03, 0x03];
+        body.extend_from_slice(&[7; 32]);
+        body.extend_from_slice(&[0, 0x13, 0x01, 0, 0, 16]);
+        body.extend_from_slice(&[0x00, 0x2B, 0x00, 0x02, 0x03, 0x04]);
+        body.extend_from_slice(&[0x00, 0x33, 0x00, 0x06, 0x11, 0xEC, 0x00, 0x02, 0xAA, 0xBB]);
+        let mut hs = vec![0x02, 0, 0, u8::try_from(body.len()).unwrap()];
+        hs.extend(body);
+        let mut payload = vec![0x16, 0x03, 0x03, 0, u8::try_from(hs.len()).unwrap()];
+        payload.extend(hs);
+
+        dispatcher.dispatch_agent_event(AgentEvent::L7 { header, payload });
+
+        let log = dispatcher.handshake_log().recent();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].server_port, 443);
+        assert_eq!(log[0].client_port, 51_000);
+        assert_eq!(log[0].handshake.group, Some(0x11EC));
+        assert_eq!(
+            log[0].handshake.posture(),
+            domain::l7::handshake::CryptoPosture::PostQuantum
+        );
     }
 
     /// Protocol, payload length, HTTP host and process id of one exchange.

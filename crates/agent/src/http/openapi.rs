@@ -122,6 +122,7 @@ use super::zone_handler;
         threatintel_handler::list_iocs,
         threatintel_handler::list_url_iocs,
         tls_handler::tls_status,
+        tls_handler::tls_handshakes,
         threatintel_handler::list_feeds,
         threatintel_handler::refresh_feeds,
         // Ops
@@ -316,6 +317,9 @@ use super::zone_handler;
         threatintel_handler::IocResponse,
         threatintel_handler::UrlIocResponse,
         tls_handler::TlsStatusResponse,
+        tls_handler::TlsHandshakesResponse,
+        tls_handler::TlsHandshakeBody,
+        tls_handler::CertificateBody,
         threatintel_handler::FeedResponse,
         threatintel_handler::RefreshFeedRequest,
         threatintel_handler::RefreshResponse,

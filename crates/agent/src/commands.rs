@@ -5247,6 +5247,79 @@ pub async fn cmd_tls_status(client: &ApiClient, output: OutputFormat) -> Result<
     Ok(())
 }
 
+pub async fn cmd_tls_handshakes(
+    client: &ApiClient,
+    output: OutputFormat,
+    limit: usize,
+) -> Result<()> {
+    let resp = client.tls_handshakes(limit).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    if !resp.recording {
+        println!("This agent does not read TLS handshakes.");
+        return Ok(());
+    }
+    if resp.handshakes.is_empty() {
+        println!("No TLS handshake seen yet.");
+        return Ok(());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    let mut table = Table::new(&[
+        ("CLIENT", Align::Left),
+        ("SERVER", Align::Left),
+        ("VERSION", Align::Left),
+        ("GROUP", Align::Left),
+        ("CIPHER", Align::Left),
+        ("POSTURE", Align::Left),
+        ("CERTIFICATE", Align::Left),
+    ]);
+    for hs in &resp.handshakes {
+        let group = match (&hs.group_name, hs.group) {
+            (Some(name), _) => name.clone(),
+            (None, Some(code)) => format!("0x{code:04x}"),
+            (None, None) => "-".to_string(),
+        };
+        table.row(cells![
+            format!("{}:{}", hs.client, hs.client_port),
+            format!("{}:{}", hs.server, hs.server_port),
+            hs.version_name
+                .clone()
+                .unwrap_or_else(|| format!("0x{:04x}", hs.version)),
+            group,
+            hs.cipher_name
+                .clone()
+                .unwrap_or_else(|| format!("0x{:04x}", hs.cipher)),
+            hs.posture,
+            certificate_cell(&hs.certificate, now),
+        ]);
+    }
+    table.print();
+    Ok(())
+}
+
+/// What the certificate column says: why nothing is known, or how far its
+/// end of validity is from now.
+fn certificate_cell(cert: &crate::api_client::CertificateBody, now: i64) -> String {
+    match (cert.state.as_str(), cert.not_after) {
+        ("not_observable", _) => "not observable (TLS 1.3)".to_string(),
+        ("read", Some(not_after)) => {
+            let days = (not_after - now).div_euclid(86_400);
+            if not_after < now {
+                format!("expired {} days ago", -days)
+            } else {
+                format!("expires in {days} days")
+            }
+        }
+        _ => "not captured".to_string(),
+    }
+}
+
 // ── Aliases ─────────────────────────────────────────────────────────────
 
 pub async fn cmd_aliases_status(client: &ApiClient, output: OutputFormat) -> Result<()> {
@@ -5874,6 +5947,31 @@ fn print_learning_session(session: &LearningSessionResponse, output: OutputForma
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_certificate_cell_says_why_nothing_is_known_or_how_far_the_end_is() {
+        let cert = |state: &str, not_after: Option<i64>| crate::api_client::CertificateBody {
+            state: state.to_string(),
+            not_before: None,
+            not_after,
+        };
+        assert_eq!(
+            certificate_cell(&cert("not_observable", None), 0),
+            "not observable (TLS 1.3)"
+        );
+        assert_eq!(
+            certificate_cell(&cert("not_captured", None), 0),
+            "not captured"
+        );
+        assert_eq!(
+            certificate_cell(&cert("read", Some(10 * 86_400)), 0),
+            "expires in 10 days"
+        );
+        assert_eq!(
+            certificate_cell(&cert("read", Some(0)), 3 * 86_400),
+            "expired 3 days ago"
+        );
+    }
 
     #[test]
     fn a_podman_runtime_says_whose_it_is_and_why_it_names_nothing() {

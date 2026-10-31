@@ -8072,6 +8072,70 @@
         ]
       }
     },
+    "/api/v1/tls/handshakes": {
+      "get": {
+        "tags": [
+          "TLS"
+        ],
+        "summary": "`GET /api/v1/tls/handshakes` - what the TLS handshakes seen on the node\nnegotiated: version, cipher suite, key exchange group and, in TLS 1.2,\nthe certificate's validity.",
+        "operationId": "tls_handshakes",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Most handshakes to return, newest first (default 100, at most the\nlog's capacity).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent TLS handshakes, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TlsHandshakesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/tls/status": {
       "get": {
         "tags": [
@@ -9682,6 +9746,35 @@
           },
           "status": {
             "type": "string"
+          }
+        }
+      },
+      "CertificateBody": {
+        "type": "object",
+        "description": "What the server's certificate shows from the wire.",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "not_after": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "End of validity, in seconds since the epoch, when read."
+          },
+          "not_before": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Start of validity, in seconds since the epoch, when read."
+          },
+          "state": {
+            "type": "string",
+            "description": "`not_observable` in TLS 1.3, where the certificate is encrypted;\n`not_captured` in TLS 1.2 when it was not in the bytes read, which is\nalso what a resumed session gives; `read` when the window below is the\nleaf certificate's."
           }
         }
       },
@@ -16150,6 +16243,126 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "TlsHandshakeBody": {
+        "type": "object",
+        "description": "One TLS handshake seen on the node.",
+        "required": [
+          "client",
+          "client_port",
+          "server",
+          "server_port",
+          "observed_at_ns",
+          "version",
+          "cipher",
+          "key_exchange",
+          "posture",
+          "certificate"
+        ],
+        "properties": {
+          "certificate": {
+            "$ref": "#/components/schemas/CertificateBody"
+          },
+          "cipher": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The selected cipher suite's code point.",
+            "minimum": 0
+          },
+          "cipher_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its IANA name, absent for a suite this agent does not name."
+          },
+          "client": {
+            "type": "string"
+          },
+          "client_port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "group": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The selected key exchange group's code point, absent when the\nexchange has none or it was not in the bytes read.",
+            "minimum": 0
+          },
+          "group_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its IANA name, absent for a group this agent does not name."
+          },
+          "key_exchange": {
+            "type": "string",
+            "description": "`post_quantum_hybrid`, `post_quantum`, `classical`,\n`rsa_key_transport` or `unknown`."
+          },
+          "observed_at_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the server's flight was read, in nanoseconds since the epoch.",
+            "minimum": 0
+          },
+          "posture": {
+            "type": "string",
+            "description": "`post_quantum`, `classical` or `legacy_tls` (below TLS 1.2)."
+          },
+          "server": {
+            "type": "string"
+          },
+          "server_port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The negotiated version as the wire carries it (`772` is TLS 1.3).",
+            "minimum": 0
+          },
+          "version_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its name, absent for a value this agent does not name."
+          }
+        }
+      },
+      "TlsHandshakesResponse": {
+        "type": "object",
+        "description": "The handshakes the log holds.",
+        "required": [
+          "recording",
+          "capacity",
+          "handshakes"
+        ],
+        "properties": {
+          "capacity": {
+            "type": "integer",
+            "description": "How many handshakes the log keeps before dropping the oldest.",
+            "minimum": 0
+          },
+          "handshakes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TlsHandshakeBody"
+            },
+            "description": "Newest first."
+          },
+          "recording": {
+            "type": "boolean",
+            "description": "Whether this agent reads TLS handshakes at all."
           }
         }
       },

@@ -1054,6 +1054,12 @@ pub async fn run(
     let ebpf_program_status: Arc<RwLock<std::collections::HashMap<String, bool>>> =
         Arc::new(RwLock::new(std::collections::HashMap::new()));
 
+    // What recent TLS handshakes negotiated, written by the dispatcher and
+    // read by the API.
+    let handshake_log = Arc::new(domain::l7::handshake::HandshakeLog::new(
+        application::packet_pipeline::HANDSHAKE_LOG_CAPACITY,
+    ));
+
     // ── JA4 / JA4S fingerprint caches (optionally redb-backed) ──────
     let fingerprint_cache_ttl = std::time::Duration::from_mins(5);
     let fingerprint_cache_max = 10_000;
@@ -1261,7 +1267,8 @@ pub async fn run(
     // Wire JA4 + JA4S caches built earlier so handlers can report counts
     app_state = app_state
         .with_fingerprint_cache(Arc::clone(&ja4_cache))
-        .with_ja4s_fingerprint_cache(Arc::clone(&ja4s_cache));
+        .with_ja4s_fingerprint_cache(Arc::clone(&ja4s_cache))
+        .with_handshake_log(Arc::clone(&handshake_log));
 
     // Real-time alert plumbing (broadcast + replay buffer). Created here
     // so AppState can hand them to the SSE handler and the agent can
@@ -4558,7 +4565,8 @@ pub async fn run(
     .with_dlp_service(Arc::clone(&dlp_svc))
     .with_doh_resolvers(&config.dns.doh_resolvers)
     .with_fingerprint_cache(Arc::clone(&ja4_cache))
-    .with_ja4s_fingerprint_cache(Arc::clone(&ja4s_cache));
+    .with_ja4s_fingerprint_cache(Arc::clone(&ja4s_cache))
+    .with_handshake_log(Arc::clone(&handshake_log));
     // Wire DNS services into the dispatcher for DNS response processing
     let dispatcher = if let Some(ref svc) = dns_cache_svc_concrete {
         dispatcher.with_dns_cache_svc(Arc::clone(svc))

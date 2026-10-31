@@ -110,6 +110,8 @@ pub struct AppState {
     pub ebpf_program_status: Arc<RwLock<HashMap<String, bool>>>,
     pub fingerprint_cache: Option<Arc<domain::l7::ja4::FingerprintCache>>,
     pub ja4s_fingerprint_cache: Option<Arc<domain::l7::ja4::Ja4sFingerprintCache>>,
+    /// What recent TLS handshakes negotiated.
+    pub handshake_log: Option<Arc<domain::l7::handshake::HandshakeLog>>,
     pub response_engine: Option<Arc<RwLock<domain::response::engine::ResponseEngine>>>,
     /// Where a containment decision is written down so that it is still in
     /// force after a restart. `None` when the store could not be opened, which
@@ -260,6 +262,7 @@ impl AppState {
             ebpf_program_status,
             fingerprint_cache: None,
             ja4s_fingerprint_cache: None,
+            handshake_log: None,
             response_engine: None,
             mitigation_store: None,
             capture_engine: None,
@@ -342,6 +345,13 @@ impl AppState {
         cache: Arc<domain::l7::ja4::Ja4sFingerprintCache>,
     ) -> Self {
         self.ja4s_fingerprint_cache = Some(cache);
+        self
+    }
+
+    /// Attach the log of recent TLS handshakes.
+    #[must_use]
+    pub fn with_handshake_log(mut self, log: Arc<domain::l7::handshake::HandshakeLog>) -> Self {
+        self.handshake_log = Some(log);
         self
     }
 

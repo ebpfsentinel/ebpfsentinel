@@ -2,6 +2,7 @@ pub mod domain_matcher;
 pub mod engine;
 pub mod entity;
 pub mod error;
+pub mod handshake;
 pub mod ja4;
 pub mod parser;
 pub mod port_promise;

@@ -1138,6 +1138,12 @@ pub enum DlpCommand {
 pub enum TlsCommand {
     /// Show the TLS posture of the API listener
     Status,
+    /// List what recent TLS handshakes on the node negotiated
+    Handshakes {
+        /// Most handshakes to list, newest first
+        #[arg(short = 'n', long, default_value_t = 100)]
+        limit: usize,
+    },
 }
 
 // ── Aliases ─────────────────────────────────────────────────────────────
@@ -2808,6 +2814,19 @@ mod tests {
             cli.command,
             Some(Command::Tls(DomainArgs {
                 command: TlsCommand::Status,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_tls_handshakes() {
+        let cli =
+            Cli::try_parse_from(["ebpfsentinel-agent", "tls", "handshakes", "-n", "5"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Tls(DomainArgs {
+                command: TlsCommand::Handshakes { limit: 5 },
                 ..
             }))
         ));
