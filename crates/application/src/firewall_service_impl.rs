@@ -267,7 +267,9 @@ impl FirewallAppService {
         let Some(ref kill_port) = self.kill_port else {
             return;
         };
-        if self.mode == DomainMode::Alert || !rule.enabled {
+        // A workload rule refuses one task's connect(), and the conntrack
+        // table cannot tell that task's flows from anybody else's.
+        if self.mode == DomainMode::Alert || !rule.enabled || rule.workload.is_some() {
             return;
         }
         if !matches!(rule.action, FirewallAction::Deny | FirewallAction::Reject) {
@@ -871,6 +873,12 @@ impl FirewallAppService {
         let mut v6_entries = Vec::new();
 
         for rule in rules {
+            // A workload rule is decided in the socket hooks. The packet path
+            // cannot tell which task a frame belongs to, so installing it
+            // there would apply it to every task on the node.
+            if rule.workload.is_some() {
+                continue;
+            }
             // In alert mode: override deny/reject -> log (observe without blocking)
             let mut effective_rule = if self.mode == DomainMode::Alert
                 && (rule.action == FirewallAction::Deny || rule.action == FirewallAction::Reject)
@@ -1081,6 +1089,32 @@ mod tests {
 
         let installed: Vec<&str> = svc.list_rules().iter().map(|r| r.id.0.as_str()).collect();
         assert_eq!(installed, vec![DENY_ALL_RULE_ID_V4, DENY_ALL_RULE_ID_V6]);
+    }
+
+    #[test]
+    fn a_workload_rule_never_reaches_the_packet_path() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(map.clone()));
+        let mut dns = make_rule("dns", 10);
+        dns.protocol = Protocol::Udp;
+        dns.dst_port = Some(PortRange { start: 53, end: 53 });
+        dns.workload = Some(domain::firewall::workload::WorkloadMatch::enforcing(
+            domain::firewall::workload::WorkloadSelector::new(
+                Some("/usr/bin/curl".to_string()),
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+        ));
+        svc.reload_rules(vec![dns, make_rule("plain", 20)]).unwrap();
+
+        // Both rules are the engine's, and only the one naming no workload is
+        // the kernel array's: the other would refuse port 53 to every task.
+        assert_eq!(svc.list_rules().len(), 2);
+        assert_eq!(map.v4.lock().unwrap().len(), 1);
+        assert!(map.v6.lock().unwrap().is_empty());
     }
 
     #[test]
