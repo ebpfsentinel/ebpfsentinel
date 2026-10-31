@@ -1980,6 +1980,23 @@ pub struct WorkloadFirewallReport {
     pub reason: Option<String>,
     #[serde(default)]
     pub brokered: bool,
+    #[serde(default)]
+    pub dns_rule: Option<DnsRuleReport>,
+}
+
+/// Which processes may resolve, and what the rule leaves out. Absent from an
+/// agent that predates it, and while the block is off.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DnsRuleReport {
+    pub mode: String,
+    #[serde(default)]
+    pub ports: Vec<u16>,
+    #[serde(default)]
+    pub resolvers: Vec<String>,
+    #[serde(default)]
+    pub clients: usize,
+    #[serde(default)]
+    pub not_covered: Vec<String>,
 }
 
 /// What became of the two process tracepoints. Defaulted on decode, so an

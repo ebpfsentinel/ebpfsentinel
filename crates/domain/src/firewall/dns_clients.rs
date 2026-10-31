@@ -30,6 +30,19 @@ pub const DNS_PORTS: [u16; 2] = [53, 853];
 /// The priority the allowances take when the block does not say.
 pub const DEFAULT_DNS_CLIENTS_PRIORITY: u32 = 1;
 
+/// What a rule decided by the DNS port does not see, one sentence each.
+///
+/// Published beside the block wherever its state is reported, so a policy
+/// on the DNS ports never reads as a policy on DNS as a whole.
+pub const DNS_CLIENTS_NOT_COVERED: [&str; 4] = [
+    "DNS over HTTPS is HTTPS on port 443, decided by the rules on that port and not by this block",
+    "a query handed to a proxy leaves the node as the proxy's own connection, so this block \
+     decides the proxy and not the process that asked it",
+    "a resolver listening on a port other than 53 or 853 is not recognised as one",
+    "a listed resolver forwards whatever names it is asked, so what goes out through it is \
+     decided by the resolver and not by this block",
+];
+
 /// The cgroup every task on the node sits under.
 const EVERY_TASK: &str = "/";
 

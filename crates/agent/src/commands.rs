@@ -4593,6 +4593,37 @@ pub async fn cmd_ebpf_drops(client: &ApiClient, output: OutputFormat) -> Result<
     Ok(())
 }
 
+/// The workload firewall's hooks, and the rule on the DNS ports when one is
+/// configured.
+fn print_workload_firewall(wf: &crate::api_client::WorkloadFirewallReport) {
+    println!("\nWorkload firewall");
+    println!("  Attached:   {}", yes_no(wf.attached));
+    println!("  Cgroup:     {}", wf.cgroup);
+    println!("  Brokered:   {}", yes_no(wf.brokered));
+    if !wf.hooks.is_empty() {
+        println!("  Hooks:      {}", wf.hooks.join(", "));
+    }
+    if let Some(reason) = &wf.reason {
+        println!("  Reason:     {reason}");
+    }
+    if let Some(dns) = &wf.dns_rule {
+        print_dns_rule(dns);
+    }
+}
+
+/// Which processes may resolve, and what a rule on the DNS ports leaves out.
+fn print_dns_rule(dns: &crate::api_client::DnsRuleReport) {
+    let ports: Vec<String> = dns.ports.iter().map(u16::to_string).collect();
+    println!("  DNS rule:   {} on ports {}", dns.mode, ports.join(", "));
+    if !dns.resolvers.is_empty() {
+        println!("  Resolvers:  {}", dns.resolvers.join(", "));
+    }
+    println!("  Clients:    {}", dns.clients);
+    for sentence in &dns.not_covered {
+        println!("  Not seen:   {sentence}");
+    }
+}
+
 /// Print what this node can do to the process behind a flow.
 ///
 /// The signal, the window and the size of the protected set are printed only
@@ -4852,16 +4883,7 @@ pub async fn cmd_ebpf_kernel_features(client: &ApiClient, output: OutputFormat) 
         println!("  Why not:    {reason}");
     }
 
-    println!("\nWorkload firewall");
-    println!("  Attached:   {}", yes_no(resp.workload_firewall.attached));
-    println!("  Cgroup:     {}", resp.workload_firewall.cgroup);
-    println!("  Brokered:   {}", yes_no(resp.workload_firewall.brokered));
-    if !resp.workload_firewall.hooks.is_empty() {
-        println!("  Hooks:      {}", resp.workload_firewall.hooks.join(", "));
-    }
-    if let Some(reason) = &resp.workload_firewall.reason {
-        println!("  Reason:     {reason}");
-    }
+    print_workload_firewall(&resp.workload_firewall);
 
     print_process_signal(&resp.process_signal);
     print_quarantine(&resp.quarantine);

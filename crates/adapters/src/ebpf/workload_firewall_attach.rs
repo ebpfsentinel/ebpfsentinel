@@ -24,6 +24,8 @@ use std::os::fd::{OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+use domain::firewall::dns_clients::{DNS_CLIENTS_NOT_COVERED, DNS_PORTS, DnsClients};
+use domain::firewall::entity::IpNetwork;
 use tracing::{info, warn};
 
 use super::kfunc_attach;
@@ -100,6 +102,76 @@ pub fn publish_status(status: WorkloadFirewallStatus) {
 #[must_use]
 pub fn status() -> WorkloadFirewallStatus {
     status_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// What the agent says about the rule on the DNS ports, beside the hooks
+/// that decide it: what it lets through and, in the same answer, what it
+/// does not see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnsRuleStatus {
+    /// `observe` or `enforce`.
+    pub mode: String,
+    /// The destination ports the rule is decided on.
+    pub ports: Vec<u16>,
+    /// The resolvers every task may send DNS to, as CIDRs.
+    pub resolvers: Vec<String>,
+    /// How many workloads may send DNS anywhere, the agent not counted.
+    pub clients: usize,
+    /// What a rule on these ports does not decide, one sentence each.
+    pub not_covered: Vec<String>,
+}
+
+impl DnsRuleStatus {
+    /// The status of a configured block.
+    #[must_use]
+    pub fn of(block: &DnsClients) -> Self {
+        Self {
+            mode: block.mode.as_str().to_string(),
+            ports: DNS_PORTS.to_vec(),
+            resolvers: block.resolvers.iter().map(cidr).collect(),
+            clients: block.clients.len(),
+            not_covered: DNS_CLIENTS_NOT_COVERED
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        }
+    }
+}
+
+fn cidr(network: &IpNetwork) -> String {
+    match *network {
+        IpNetwork::V4 { addr, prefix_len } => {
+            format!("{}/{prefix_len}", std::net::Ipv4Addr::from(addr))
+        }
+        IpNetwork::V6 { addr, prefix_len } => {
+            format!("{}/{prefix_len}", std::net::Ipv6Addr::from(addr))
+        }
+    }
+}
+
+/// The one DNS rule status the whole process reports.
+static DNS_RULE: OnceLock<Mutex<Option<DnsRuleStatus>>> = OnceLock::new();
+
+fn dns_rule_cell() -> &'static Mutex<Option<DnsRuleStatus>> {
+    DNS_RULE.get_or_init(|| Mutex::new(None))
+}
+
+/// Publish the rule on the DNS ports, `None` while the block is off.
+pub fn publish_dns_rule(rule: Option<DnsRuleStatus>) {
+    let mut held = dns_rule_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *held = rule;
+}
+
+/// The rule on the DNS ports currently in force, `None` while the block is
+/// off.
+#[must_use]
+pub fn dns_rule() -> Option<DnsRuleStatus> {
+    dns_rule_cell()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
@@ -277,6 +349,34 @@ mod tests {
         let sentence = enforcement_unavailable("connect4: Operation not permitted (os error 1)");
         assert!(sentence.contains("nothing enforcing it"));
         assert!(sentence.contains("Operation not permitted"));
+    }
+
+    #[test]
+    fn the_dns_rule_says_what_it_does_not_see_beside_what_it_allows() {
+        use domain::firewall::workload::WorkloadMode;
+        let block = DnsClients {
+            mode: WorkloadMode::Observe,
+            priority: 1,
+            resolvers: vec![
+                IpNetwork::V4 {
+                    addr: u32::from_be_bytes([127, 0, 0, 53]),
+                    prefix_len: 32,
+                },
+                IpNetwork::V6 {
+                    addr: std::net::Ipv6Addr::LOCALHOST.octets(),
+                    prefix_len: 128,
+                },
+            ],
+            clients: Vec::new(),
+        };
+        let rule = DnsRuleStatus::of(&block);
+        assert_eq!(rule.mode, "observe");
+        assert_eq!(rule.ports, vec![53, 853]);
+        assert_eq!(rule.resolvers, vec!["127.0.0.53/32", "::1/128"]);
+        assert_eq!(rule.clients, 0);
+        let said = rule.not_covered.join(" ");
+        assert!(said.contains("DNS over HTTPS"));
+        assert!(said.contains("proxy"));
     }
 
     #[test]

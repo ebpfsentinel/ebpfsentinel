@@ -245,6 +245,27 @@ pub struct WorkloadFirewallReport {
     pub reason: Option<String>,
     /// Whether the warden created the links, which is the rootless posture.
     pub brokered: bool,
+    /// The rule on the DNS ports, absent while `firewall.dns_clients` is
+    /// off. Carries what it does not see in the same answer, so a policy on
+    /// two ports never reads as a policy on DNS as a whole.
+    pub dns_rule: Option<DnsRuleReport>,
+}
+
+/// Which processes may resolve, and what a rule on the DNS ports leaves out.
+#[derive(Serialize, ToSchema)]
+pub struct DnsRuleReport {
+    /// `observe` or `enforce`.
+    pub mode: String,
+    /// The destination ports the rule is decided on.
+    pub ports: Vec<u16>,
+    /// The resolvers every process may send DNS to, as CIDRs.
+    pub resolvers: Vec<String>,
+    /// How many workloads may send DNS anywhere, the agent not counted.
+    pub clients: usize,
+    /// What the rule does not decide, one sentence each: DNS over HTTPS, a
+    /// query handed to a proxy, a resolver on another port, and what a
+    /// listed resolver forwards.
+    pub not_covered: Vec<String>,
 }
 
 /// What became of the two process tracepoints on this host.
@@ -658,6 +679,13 @@ fn workload_firewall_report(
         hooks: status.hooks,
         reason: status.reason,
         brokered: status.brokered,
+        dns_rule: adapters::ebpf::workload_firewall_attach::dns_rule().map(|rule| DnsRuleReport {
+            mode: rule.mode,
+            ports: rule.ports,
+            resolvers: rule.resolvers,
+            clients: rule.clients,
+            not_covered: rule.not_covered,
+        }),
     }
 }
 

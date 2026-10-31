@@ -472,6 +472,15 @@ pub async fn apply_config_file_prepared(
             return None;
         }
     };
+    let dns_rule = match config.dns_clients() {
+        Ok(block) => block
+            .as_ref()
+            .map(adapters::ebpf::workload_firewall_attach::DnsRuleStatus::of),
+        Err(e) => {
+            tracing::warn!(error = %e, "config reload rejected: invalid dns_clients");
+            return None;
+        }
+    };
     if workload_policy.enforces() && !adapters::ebpf::workload_firewall_attach::status().attached {
         let reason = adapters::ebpf::workload_firewall_attach::status()
             .reason
@@ -827,8 +836,11 @@ pub async fn apply_config_file_prepared(
     // After the firewall's own rules rather than before: the two come out of
     // the same list, and a policy in force naming rules the engine has not
     // got yet is a window where the kernel refuses what no rule explains.
-    if let Err(e) = reload_service.reload_workload(workload_policy).await {
-        tracing::warn!(error = %e, "workload policy reload failed at application level");
+    match reload_service.reload_workload(workload_policy).await {
+        Ok(()) => adapters::ebpf::workload_firewall_attach::publish_dns_rule(dns_rule),
+        Err(e) => {
+            tracing::warn!(error = %e, "workload policy reload failed at application level");
+        }
     }
 
     // Phase 6c: ConnTrack reload

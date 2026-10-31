@@ -421,6 +421,15 @@ pub async fn run(
     // that carries it out is loaded only when the document holds one.
     let workload_policy = domain::firewall::workload::WorkloadPolicy::from_rules(&domain_rules)?
         .with_dns(config.workload_dns()?)?;
+    // Published whether or not the hooks attach: what the rule on the DNS
+    // ports does not see is true of the configuration, and the hooks'
+    // own status says separately whether anything is deciding it.
+    adapters::ebpf::workload_firewall_attach::publish_dns_rule(
+        config
+            .dns_clients()?
+            .as_ref()
+            .map(adapters::ebpf::workload_firewall_attach::DnsRuleStatus::of),
+    );
 
     // ── 3b. Convert and load IDS rules ──────────────────────────────
     let ids_mode = config.ids_mode()?;

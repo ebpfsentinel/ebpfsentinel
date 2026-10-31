@@ -1318,6 +1318,13 @@ impl AgentConfig {
             })
     }
 
+    /// The `firewall.dns_clients` block, `None` while it is off.
+    pub fn dns_clients(
+        &self,
+    ) -> Result<Option<domain::firewall::dns_clients::DnsClients>, ConfigError> {
+        self.firewall.dns_clients.to_domain()
+    }
+
     /// The workload rules `firewall.dns_clients` stands for, none while it is
     /// off.
     ///
@@ -1325,7 +1332,7 @@ impl AgentConfig {
     /// feeds and endpoints itself and a block written without it in mind
     /// would otherwise cut it off the moment the mode is enforce.
     pub fn dns_clients_rules(&self) -> Result<Vec<FirewallRule>, ConfigError> {
-        let Some(block) = self.firewall.dns_clients.to_domain()? else {
+        let Some(block) = self.dns_clients()? else {
             return Ok(Vec::new());
         };
         let agent = std::env::current_exe()
