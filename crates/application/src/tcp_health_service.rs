@@ -7,6 +7,10 @@
 //! is the service holding the socket, the peer is a service only when it
 //! runs on this node too, and every name passes the same cap the request
 //! meter uses.
+//!
+//! The round-trip times are also kept by pair of addresses, minute by
+//! minute, for the service map: its edges are keyed by address and port, and
+//! it reads the samples of the window it shows.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -14,7 +18,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use domain::exposure::entity::ListenerProtocol;
 use domain::l7::red::{ServiceNames, UNATTRIBUTED_SERVICE, service_name};
-use domain::tcp_health::{EdgeRole, NO_LISTENER, RawTcpEdge, TcpEdgeDeltas, TcpEdgeId};
+use domain::tcp_health::{
+    EdgeRole, NO_LISTENER, RawTcpEdge, RttPair, RttWindow, TcpEdgeDeltas, TcpEdgeId, TcpRtt,
+};
 use ports::secondary::metrics_port::PacketMetrics;
 use ports::secondary::tcp_health_port::TcpHealthPort;
 use tracing::warn;
@@ -28,6 +34,7 @@ pub const OFF_NODE_PEER: &str = "off_node";
 struct State {
     deltas: TcpEdgeDeltas,
     names: ServiceNames,
+    round_trips: RttWindow,
 }
 
 pub struct TcpHealthService {
@@ -81,12 +88,24 @@ impl TcpHealthService {
             state: Mutex::new(State {
                 deltas: TcpEdgeDeltas::default(),
                 names: ServiceNames::default(),
+                round_trips: RttWindow::default(),
             }),
         }
     }
 
-    /// Read the counter once and publish what moved.
-    pub fn poll(&self) {
+    /// The round-trip times sampled over the last `minutes` minutes up to
+    /// `now_ns`, by pair. `now_ns` is on the clock `poll` is handed.
+    #[must_use]
+    pub fn round_trips(&self, now_ns: u64, minutes: u64) -> HashMap<RttPair, TcpRtt> {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .round_trips
+            .read(now_ns, minutes)
+    }
+
+    /// Read the counter once and publish what moved, as of `now_ns`.
+    pub fn poll(&self, now_ns: u64) {
         let (edges, uncounted) = match self.source.read() {
             Ok(read) => read,
             Err(e) => {
@@ -129,6 +148,9 @@ impl TcpHealthService {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let increments = state.deltas.advance(&edges, uncounted);
         for RawTcpEdge { id, counts } in &increments.edges {
+            if let Some(pair) = RttPair::of(id) {
+                state.round_trips.record(now_ns, pair, &counts.rtt);
+            }
             let local = named
                 .get(id)
                 .cloned()
@@ -256,10 +278,10 @@ mod tests {
             (vec![edge(1, 2, 443, EdgeRole::Client, opened)], 3),
             (vec![edge(1, 2, 443, EdgeRole::Client, opened)], 3),
         ]);
-        service.poll();
-        service.poll();
+        service.poll(0);
+        service.poll(0);
         // A failed read publishes nothing and keeps the deltas.
-        service.poll();
+        service.poll(0);
         let edges = recorder.edges.lock().unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].0, UNATTRIBUTED_SERVICE);
@@ -276,7 +298,7 @@ mod tests {
             ..TcpCounts::default()
         };
         let (service, recorder) = service(vec![(vec![edge(1, 9, 0, EdgeRole::Server, reset)], 0)]);
-        service.poll();
+        service.poll(0);
         let edges = recorder.edges.lock().unwrap();
         assert_eq!(edges[0].0, NO_LISTENER);
         assert_eq!(edges[0].1, OFF_NODE_PEER);
@@ -294,5 +316,25 @@ mod tests {
         held.cgroup = 99;
         assert_eq!(without_cgroup(&held), mirror);
         assert!(mirror_of(&edge(1, 2, 0, EdgeRole::Server, TcpCounts::default()).id).is_none());
+    }
+
+    #[test]
+    fn round_trips_are_kept_by_pair_for_the_window_the_map_reads() {
+        let mut rtt = TcpRtt::default();
+        rtt.buckets[3] = 2;
+        rtt.sum_us = 900;
+        rtt.count = 2;
+        let sampled = TcpCounts {
+            opened: 1,
+            rtt,
+            ..TcpCounts::default()
+        };
+        let (service, _) = service(vec![(vec![edge(1, 2, 5432, EdgeRole::Client, sampled)], 0)]);
+        let minute = 60_000_000_000;
+        service.poll(minute * 2);
+        let pair = RttPair::of(&edge(1, 2, 5432, EdgeRole::Client, sampled).id)
+            .expect("a client edge has a pair");
+        assert_eq!(service.round_trips(minute * 2, 1)[&pair], rtt);
+        assert_eq!(service.round_trips(minute * 4, 2).len(), 0);
     }
 }

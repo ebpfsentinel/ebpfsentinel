@@ -13,6 +13,8 @@
 #     under `no_listener`, and the connect it ends is counted as failed.
 #   * A connection made and closed is counted as opened and as closed, on
 #     the client end and on the server end.
+#   * The connections made carry their smoothed round trip into the
+#     edge's histogram, on the client end and on the server end.
 #   * No event was lost to a full table, an unwritten layout or an
 #     unreadable socket.
 
@@ -138,6 +140,17 @@ _listen() {
     [ "$status" -eq 0 ] || { echo "client connections closed: ${output}, want at least 3" >&2; return 1; }
     run _wait_sum ebpfsentinel_tcp_connections_total 'role="server".*outcome="closed"' 3
     [ "$status" -eq 0 ] || { echo "server connections closed: ${output}, want at least 3" >&2; return 1; }
+}
+
+@test "an established connection samples its round trip at both ends" {
+    wait_for_ebpf_program "tracepoint-tcp-health" 30 || { echo "the TCP health counter did not attach" >&2; return 1; }
+
+    # The previous test's connections were established and closed: each
+    # crossed into and out of the established state on both sockets.
+    run _wait_sum ebpfsentinel_tcp_rtt_seconds_count 'role="client"' 3
+    [ "$status" -eq 0 ] || { echo "client round-trip samples: ${output}, want at least 3" >&2; return 1; }
+    run _wait_sum ebpfsentinel_tcp_rtt_seconds_count 'role="server"' 3
+    [ "$status" -eq 0 ] || { echo "server round-trip samples: ${output}, want at least 3" >&2; return 1; }
 }
 
 @test "the hooks lost no event to a full table or an unwritten layout" {

@@ -2833,8 +2833,15 @@ pub async fn cmd_service_graph(
         ("ERRORS", Align::Right),
         ("UNANSWERED", Align::Right),
         ("MEAN MS", Align::Right),
+        ("RTT P50 MS", Align::Right),
+        ("RTT P99 MS", Align::Right),
     ]);
     for edge in &resp.edges {
+        let rtt = |quantile| {
+            edge.round_trip
+                .as_ref()
+                .map_or_else(|| "-".to_string(), |rt| rtt_quantile_ms(rt, quantile))
+        };
         let mean = edge.duration_ns_sum.checked_div(edge.answered).map_or_else(
             || "-".to_string(),
             |ns| {
@@ -2853,11 +2860,48 @@ pub async fn cmd_service_graph(
             edge.requests,
             edge.errors,
             edge.unanswered,
-            mean
+            mean,
+            rtt(0.5),
+            rtt(0.99)
         ]);
     }
     table.print();
     Ok(())
+}
+
+/// The round-trip time below which `quantile` of the samples fall, read as
+/// the upper bound of the bucket crossing it, in milliseconds. A quantile in
+/// the last bucket is above its lower bound and is written so.
+fn rtt_quantile_ms(rt: &crate::api_client::RoundTripBody, quantile: f64) -> String {
+    let total: u64 = rt.buckets.iter().sum();
+    if total == 0 {
+        return "-".to_string();
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let rank = ((total as f64) * quantile).ceil().max(1.0) as u64;
+    let ms = |us: u64| std::time::Duration::from_micros(us).as_secs_f64() * 1_000.0;
+    let mut seen = 0_u64;
+    let last = rt.buckets.len().saturating_sub(1);
+    for (bucket, count) in rt.buckets.iter().enumerate() {
+        seen = seen.saturating_add(*count);
+        if seen >= rank {
+            let shift = u32::try_from(bucket).unwrap_or(u32::MAX);
+            if bucket == last {
+                let floor = rt
+                    .first_bound_us
+                    .checked_shl(shift.saturating_sub(1))
+                    .unwrap_or(u64::MAX);
+                return format!(">{:.2}", ms(floor));
+            }
+            let bound = rt.first_bound_us.checked_shl(shift).unwrap_or(u64::MAX);
+            return format!("{:.2}", ms(bound));
+        }
+    }
+    "-".to_string()
 }
 
 pub async fn cmd_flows(client: &ApiClient, limit: usize, output: OutputFormat) -> Result<()> {
@@ -6096,6 +6140,29 @@ fn print_learning_session(session: &LearningSessionResponse, output: OutputForma
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_round_trip_quantile_is_the_bound_of_the_bucket_crossing_it() {
+        let mut buckets = vec![0; 16];
+        buckets[4] = 98; // below 1.024 ms
+        buckets[15] = 2; // above the last bound
+        let rt = crate::api_client::RoundTripBody {
+            buckets,
+            first_bound_us: 64,
+            sum_us: 0,
+            count: 100,
+        };
+        assert_eq!(rtt_quantile_ms(&rt, 0.5), "1.02");
+        assert_eq!(rtt_quantile_ms(&rt, 0.98), "1.02");
+        assert_eq!(rtt_quantile_ms(&rt, 0.99), ">1048.58");
+        let empty = crate::api_client::RoundTripBody {
+            buckets: vec![0; 16],
+            first_bound_us: 64,
+            sum_us: 0,
+            count: 0,
+        };
+        assert_eq!(rtt_quantile_ms(&empty, 0.5), "-");
+    }
 
     #[test]
     fn the_certificate_cell_says_why_nothing_is_known_or_how_far_the_end_is() {

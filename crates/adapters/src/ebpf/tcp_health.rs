@@ -7,16 +7,20 @@
 //! `sock_common` is read where it put it, and a kernel missing one is refused
 //! here in one sentence.
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::{OwnedFd, RawFd};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use aya::maps::{Array, MapData, PerCpuArray, PerCpuHashMap, PerCpuValues};
+use aya::maps::{Array, HashMap, MapData, PerCpuArray, PerCpuHashMap, PerCpuValues};
 use domain::common::error::DomainError;
-use domain::tcp_health::{EdgeRole, RawTcpEdge, TcpCounts, TcpEdgeId};
+use domain::tcp_health::{
+    EdgeRole, RTT_BUCKETS, RTT_FIRST_BOUND_US, RawTcpEdge, TcpCounts, TcpEdgeId, TcpRtt,
+};
 use ebpf_common::tcp_health::{
     TCP_HEALTH_AF_INET6, TCP_HEALTH_METRIC_KEYS_FULL, TCP_HEALTH_METRIC_UNCONFIGURED,
-    TCP_HEALTH_METRIC_UNREADABLE, TcpEdgeCounts, TcpEdgeKey, TcpHealthConfig,
+    TCP_HEALTH_METRIC_UNREADABLE, TCP_RTT_BUCKETS, TCP_RTT_FIRST_BOUND_US, TcpEdgeCounts,
+    TcpEdgeKey, TcpEdgeRtt, TcpHealthConfig,
 };
 use ports::secondary::tcp_health_port::TcpHealthPort;
 use tracing::{info, warn};
@@ -25,6 +29,10 @@ use super::kfunc::vmlinux_struct_member_offsets;
 use super::kfunc_attach;
 use super::loader::EbpfLoader;
 use super::map_store::MapStore;
+
+// The domain reads the kernel's buckets one for one.
+const _: () =
+    assert!(RTT_BUCKETS == TCP_RTT_BUCKETS && RTT_FIRST_BOUND_US == TCP_RTT_FIRST_BOUND_US);
 
 /// Each program of the object and the tracepoint it attaches to.
 pub const TCP_HEALTH_HOOKS: [(&str, &str); 4] = [
@@ -100,6 +108,7 @@ pub fn resolve_from_btf() -> Result<TcpHealthConfig, String> {
     let kn = offsets("kernfs_node", &["id"])?;
     let skb = offsets("sk_buff", &["head", "network_header", "transport_header"])?;
     let inet = offsets("inet_sock", &["inet_sport"])?;
+    let tcp = offsets("tcp_sock", &["srtt_us"])?;
     Ok(TcpHealthConfig {
         ready: 1,
         sk_common: sock[0],
@@ -120,6 +129,7 @@ pub fn resolve_from_btf() -> Result<TcpHealthConfig, String> {
         skb_network_header: skb[1],
         skb_transport_header: skb[2],
         inet_sport: inet[0],
+        tcp_srtt_us: tcp[0],
     })
 }
 
@@ -136,8 +146,9 @@ fn key_address(family: u8, words: &[u32; 4]) -> IpAddr {
     }
 }
 
-/// One kernel key and its counts, summed over the CPUs, in domain words.
-fn raw_edge(key: &TcpEdgeKey, per_cpu: &[TcpEdgeCounts]) -> RawTcpEdge {
+/// One kernel key, its counts summed over the CPUs and its round-trip time
+/// samples, in domain words.
+fn raw_edge(key: &TcpEdgeKey, per_cpu: &[TcpEdgeCounts], rtt: Option<&TcpEdgeRtt>) -> RawTcpEdge {
     let mut counts = TcpCounts::default();
     for c in per_cpu {
         counts.add(&TcpCounts {
@@ -147,7 +158,15 @@ fn raw_edge(key: &TcpEdgeKey, per_cpu: &[TcpEdgeCounts]) -> RawTcpEdge {
             opened: c.opened,
             closed: c.closed,
             failed: c.failed,
+            rtt: TcpRtt::default(),
         });
+    }
+    if let Some(rtt) = rtt {
+        counts.rtt = TcpRtt {
+            buckets: rtt.buckets,
+            sum_us: rtt.sum_us,
+            count: rtt.count,
+        };
     }
     RawTcpEdge {
         id: TcpEdgeId {
@@ -165,9 +184,10 @@ fn raw_edge(key: &TcpEdgeKey, per_cpu: &[TcpEdgeCounts]) -> RawTcpEdge {
     }
 }
 
-/// The three maps of the TCP health object.
+/// The maps of the TCP health object the agent reads.
 pub struct TcpHealthCounter {
     edges: PerCpuHashMap<MapData, TcpEdgeKey, TcpEdgeCounts>,
+    rtt: HashMap<MapData, TcpEdgeKey, TcpEdgeRtt>,
     metrics: PerCpuArray<MapData, u64>,
 }
 
@@ -189,11 +209,19 @@ impl TcpHealthCounter {
             ebpf.take_map("TCP_EDGES")
                 .ok_or_else(|| anyhow::anyhow!("map 'TCP_EDGES' not found"))?,
         )?;
+        let rtt = HashMap::try_from(
+            ebpf.take_map("TCP_RTT")
+                .ok_or_else(|| anyhow::anyhow!("map 'TCP_RTT' not found"))?,
+        )?;
         let metrics = PerCpuArray::try_from(
             ebpf.take_map("TCP_HEALTH_METRICS")
                 .ok_or_else(|| anyhow::anyhow!("map 'TCP_HEALTH_METRICS' not found"))?,
         )?;
-        Ok(Self { edges, metrics })
+        Ok(Self {
+            edges,
+            rtt,
+            metrics,
+        })
     }
 
     fn metric(&self, slot: u32) -> u64 {
@@ -205,12 +233,23 @@ impl TcpHealthCounter {
 
 impl TcpHealthPort for TcpHealthCounter {
     fn read(&self) -> Result<(Vec<RawTcpEdge>, u64), DomainError> {
+        let mut rtts = BTreeMap::new();
+        for entry in &self.rtt {
+            let (key, rtt) =
+                entry.map_err(|e| DomainError::EngineError(format!("TCP_RTT read failed: {e}")))?;
+            rtts.insert(key, rtt);
+        }
         let mut raw = Vec::new();
         for entry in &self.edges {
             let (key, values) = entry
                 .map_err(|e| DomainError::EngineError(format!("TCP_EDGES read failed: {e}")))?;
             let per_cpu: Vec<TcpEdgeCounts> = values.iter().copied().collect();
-            raw.push(raw_edge(&key, &per_cpu));
+            raw.push(raw_edge(&key, &per_cpu, rtts.remove(&key).as_ref()));
+        }
+        // An edge sampled for its round-trip time after the counter map was
+        // full still carries its samples.
+        for (key, rtt) in &rtts {
+            raw.push(raw_edge(key, &[], Some(rtt)));
         }
         let uncounted = self
             .metric(TCP_HEALTH_METRIC_KEYS_FULL)
@@ -312,7 +351,17 @@ mod tests {
                 ..TcpEdgeCounts::default()
             },
         ];
-        let edge = raw_edge(&key, &per_cpu);
+        let mut buckets = [0; TCP_RTT_BUCKETS];
+        buckets[2] = 3;
+        let rtt = TcpEdgeRtt {
+            buckets,
+            sum_us: 600,
+            count: 3,
+        };
+        let edge = raw_edge(&key, &per_cpu, Some(&rtt));
+        assert_eq!(edge.counts.rtt.buckets[2], 3);
+        assert_eq!(edge.counts.rtt.sum_us, 600);
+        assert_eq!(edge.counts.rtt.count, 3);
         assert_eq!(edge.id.local, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         assert_eq!(edge.id.remote, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
         assert_eq!(edge.id.role, EdgeRole::Server);
@@ -339,7 +388,7 @@ mod tests {
             port_is_local: 0,
             ..TcpEdgeKey::default()
         };
-        let edge = raw_edge(&key, &[]);
+        let edge = raw_edge(&key, &[], None);
         assert_eq!(edge.id.local, IpAddr::V6(addr));
         assert_eq!(edge.id.role, EdgeRole::Client);
         assert!(edge.counts.is_zero());

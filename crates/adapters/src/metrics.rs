@@ -1,15 +1,16 @@
 use crate::ebpf::XDP_ATTACH_MODES;
-use domain::tcp_health::TcpCounts;
+use domain::tcp_health::{RTT_BUCKETS, TcpCounts, TcpRtt, rtt_bucket_bound_us};
 use ports::secondary::metrics_port::{
     AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, DdosMetrics, DlpMetrics,
     DnsMetrics, DomainMetrics, EventMetrics, FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics,
     RoutingMetrics, SystemMetrics, ThreatIntelMetrics, ZoneMetrics,
 };
-use prometheus_client::encoding::EncodeLabelSet;
+use prometheus_client::encoding::{EncodeLabelSet, EncodeMetric, MetricEncoder, NoLabelSet};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::{Histogram, exponential_buckets_range};
+use prometheus_client::metrics::{MetricType, TypedMetric};
 use prometheus_client::registry::Registry;
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -191,6 +192,50 @@ pub struct TcpEdgeLabels {
     pub service: String,
     pub peer: String,
     pub role: String,
+}
+
+/// A histogram whose samples were already bucketed in the kernel: what the
+/// agent adds is a batch of bucket counts, never one observation, so the
+/// bounds are the kernel's and the series is fed without replaying samples.
+#[derive(Debug, Default)]
+pub struct RttHistogram {
+    samples: Mutex<TcpRtt>,
+}
+
+impl RttHistogram {
+    /// Add a batch of round-trip time samples.
+    pub fn add(&self, rtt: &TcpRtt) {
+        self.samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .add(rtt);
+    }
+}
+
+impl TypedMetric for RttHistogram {
+    const TYPE: MetricType = MetricType::Histogram;
+}
+
+impl EncodeMetric for RttHistogram {
+    fn encode(&self, mut encoder: MetricEncoder) -> Result<(), std::fmt::Error> {
+        let samples = *self
+            .samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut buckets = [(0.0, 0); RTT_BUCKETS];
+        for (bucket, (slot, count)) in buckets.iter_mut().zip(samples.buckets).enumerate() {
+            #[allow(clippy::cast_precision_loss)] // bounds are powers of two far below 2^52
+            let bound = rtt_bucket_bound_us(bucket).map_or(f64::MAX, |us| us as f64 / 1e6);
+            *slot = (bound, count);
+        }
+        #[allow(clippy::cast_precision_loss)] // a sum of microseconds, read as seconds
+        let sum = samples.sum_us as f64 / 1e6;
+        encoder.encode_histogram::<NoLabelSet>(sum, samples.count, &buckets, None)
+    }
+
+    fn metric_type(&self) -> MetricType {
+        Self::TYPE
+    }
 }
 
 /// Labels for the TCP reset counter: an edge and `sent` or `received`.
@@ -467,6 +512,7 @@ pub struct AgentMetrics {
     pub tcp_resets_total: Family<TcpResetLabels, Counter>,
     pub tcp_connections_total: Family<TcpConnectionLabels, Counter>,
     pub tcp_health_uncounted_total: Counter,
+    pub tcp_rtt_seconds: Family<TcpEdgeLabels, RttHistogram>,
     /// Connections compared with the protocol their port promises, by port
     /// and verdict.
     pub l7_port_promise_total: Family<PortPromiseLabels, Counter>,
@@ -1136,6 +1182,13 @@ impl AgentMetrics {
             tcp_connections_total.clone(),
         );
 
+        let tcp_rtt_seconds = Family::<TcpEdgeLabels, RttHistogram>::default();
+        registry.register(
+            "tcp_rtt_seconds",
+            "Smoothed TCP round-trip time sampled when a connection is established and when it leaves that state, by edge",
+            tcp_rtt_seconds.clone(),
+        );
+
         let tcp_health_uncounted_total = Counter::default();
         registry.register(
             "tcp_health_uncounted",
@@ -1343,6 +1396,7 @@ impl AgentMetrics {
             tcp_resets_total,
             tcp_connections_total,
             tcp_health_uncounted_total,
+            tcp_rtt_seconds,
             l7_port_promise_total,
             l7_port_promise_uncounted_total,
             container_resolver_cache_hits_total,
@@ -1433,6 +1487,15 @@ impl PacketMetrics for AgentMetrics {
     }
 
     fn record_tcp_edge(&self, service: &str, peer: &str, role: &str, counts: &TcpCounts) {
+        if counts.rtt.count > 0 {
+            self.tcp_rtt_seconds
+                .get_or_create(&TcpEdgeLabels {
+                    service: service.to_string(),
+                    peer: peer.to_string(),
+                    role: role.to_string(),
+                })
+                .add(&counts.rtt);
+        }
         if counts.retransmits > 0 {
             self.tcp_retransmits_total
                 .get_or_create(&TcpEdgeLabels {
@@ -2646,6 +2709,59 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_samples_encode_as_cumulative_buckets_in_seconds() {
+        let metrics = AgentMetrics::new();
+        let mut buckets = [0; RTT_BUCKETS];
+        buckets[0] = 2; // below 64 us
+        buckets[4] = 1; // below 1024 us
+        buckets[RTT_BUCKETS - 1] = 1; // above the last bound
+        let counts = TcpCounts {
+            rtt: TcpRtt {
+                buckets,
+                sum_us: 2_000_100,
+                count: 4,
+            },
+            ..TcpCounts::default()
+        };
+        metrics.record_tcp_edge("shop/api", "shop/db", "client", &counts);
+        metrics.record_tcp_edge("shop/api", "shop/db", "client", &counts);
+
+        let encoded = metrics.encode();
+        let edge = "service=\"shop/api\",peer=\"shop/db\",role=\"client\"";
+        for line in [
+            format!("ebpfsentinel_tcp_rtt_seconds_count{{{edge}}} 8"),
+            format!("ebpfsentinel_tcp_rtt_seconds_sum{{{edge}}} 4.0002"),
+            format!("ebpfsentinel_tcp_rtt_seconds_bucket{{le=\"0.000064\",{edge}}} 4"),
+            format!("ebpfsentinel_tcp_rtt_seconds_bucket{{le=\"0.001024\",{edge}}} 6"),
+            format!("ebpfsentinel_tcp_rtt_seconds_bucket{{le=\"+Inf\",{edge}}} 8"),
+        ] {
+            assert!(
+                encoded.lines().any(|l| l == line),
+                "{line} missing from\n{encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_edge_without_round_trip_samples_writes_no_histogram() {
+        let metrics = AgentMetrics::new();
+        metrics.record_tcp_edge(
+            "shop/api",
+            "shop/db",
+            "client",
+            &TcpCounts {
+                opened: 1,
+                ..TcpCounts::default()
+            },
+        );
+        assert!(
+            !metrics
+                .encode()
+                .contains("ebpfsentinel_tcp_rtt_seconds_count")
+        );
+    }
+
+    #[test]
     fn config_reload_counter() {
         let metrics = AgentMetrics::new();
         metrics.record_config_reload("firewall", "success");
@@ -2778,6 +2894,7 @@ mod tests {
         ("tcp_health_uncounted", "counter"),
         ("tcp_resets", "counter"),
         ("tcp_retransmits", "counter"),
+        ("tcp_rtt_seconds", "histogram"),
         ("thread_count", "gauge"),
         ("threatintel_feed_indicators", "gauge"),
         ("threatintel_feed_last_refresh_timestamp_seconds", "gauge"),
@@ -3090,6 +3207,15 @@ mod tests {
                 retransmits: 1,
                 resets_sent: 1,
                 opened: 1,
+                rtt: TcpRtt {
+                    buckets: {
+                        let mut b = [0; RTT_BUCKETS];
+                        b[4] = 1;
+                        b
+                    },
+                    sum_us: 700,
+                    count: 1,
+                },
                 ..TcpCounts::default()
             },
         );

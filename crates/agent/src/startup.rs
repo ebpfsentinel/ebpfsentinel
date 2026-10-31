@@ -3396,6 +3396,7 @@ pub async fn run(
                                     as Arc<dyn ports::secondary::metrics_port::PacketMetrics>,
                                 workloads.clone(),
                             ));
+                        app_state.install_tcp_health(Arc::clone(&service));
                         ebpf_state.add_loader(loader);
                         metrics.set_ebpf_program_status("tracepoint_tcp_health", true);
                         let interval = Duration::from_secs(config.tcp_health.poll_interval_secs);
@@ -3409,7 +3410,9 @@ pub async fn run(
                             loop {
                                 tokio::select! {
                                     () = tcp_cancel.cancelled() => break,
-                                    _ = tick.tick() => service.poll(),
+                                    _ = tick.tick() => service.poll(
+                                        adapters::ebpf::ringbuf_observer::boottime_now_ns(),
+                                    ),
                                 }
                             }
                         });

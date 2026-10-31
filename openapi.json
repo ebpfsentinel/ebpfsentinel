@@ -15808,6 +15808,44 @@
           }
         }
       },
+      "RoundTripBody": {
+        "type": "object",
+        "description": "The smoothed TCP round-trip times sampled on an edge's connections over\nthe window: once when each was established and once when it left that\nstate.",
+        "required": [
+          "buckets",
+          "first_bound_us",
+          "sum_us",
+          "count"
+        ],
+        "properties": {
+          "buckets": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Samples per bucket, not cumulative. Bucket `i` closes at\n`first_bound_us` times two to the power `i`; the last one has no\nbound. Two readings add bucket by bucket."
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "first_bound_us": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Upper bound of the first bucket, in microseconds.",
+            "minimum": 0
+          },
+          "sum_us": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sum of every sample, in microseconds.",
+            "minimum": 0
+          }
+        }
+      },
       "RouteResponse": {
         "type": "object",
         "description": "A resolved default route derived from the active gateway selection.",
@@ -16339,6 +16377,17 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "round_trip": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RoundTripBody",
+                "description": "The TCP round-trip time between the two ends, read off the socket on\nthe side this node observed from. Absent when TCP health is off, on\na transit edge, or when no connection of the pair was sampled."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "server": {
             "$ref": "#/components/schemas/ServiceEndBody"

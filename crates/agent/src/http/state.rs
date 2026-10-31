@@ -185,6 +185,9 @@ pub struct AppState {
     pub crypto_posture: ArcSwapOption<application::crypto_posture_meter::CryptoPostureMeter>,
     /// The kernel's drop counts, once the counter is attached.
     pub kernel_drops: ArcSwapOption<application::kernel_drop_service::KernelDropService>,
+    /// TCP health per edge, once its tracepoints are attached. The service
+    /// map reads the round-trip times it keeps.
+    pub tcp_health: ArcSwapOption<application::tcp_health_service::TcpHealthService>,
     /// The node's listeners, read from the socket hooks' tables.
     pub exposure: ArcSwapOption<application::exposure_service::ExposureService>,
     /// The inventory of the node's packet sockets, once it reads.
@@ -239,6 +242,7 @@ impl AppState {
             service_graph: ArcSwapOption::empty(),
             crypto_posture: ArcSwapOption::empty(),
             kernel_drops: ArcSwapOption::empty(),
+            tcp_health: ArcSwapOption::empty(),
             exposure: ArcSwapOption::empty(),
             raw_sockets: ArcSwapOption::empty(),
             network_programs: ArcSwapOption::empty(),
@@ -450,6 +454,14 @@ impl AppState {
     /// Hand learning mode over, once whatever stores its windows is open.
     pub fn install_learning_service(&self, svc: Arc<LearningAppService>) {
         self.learning_service.store(Some(svc));
+    }
+
+    /// Hand the TCP health service over once its tracepoints are attached.
+    pub fn install_tcp_health(
+        &self,
+        service: Arc<application::tcp_health_service::TcpHealthService>,
+    ) {
+        self.tcp_health.store(Some(service));
     }
 
     /// Hand the L7 request meter over once the dispatcher holding it exists.

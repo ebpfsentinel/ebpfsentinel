@@ -377,6 +377,7 @@ use super::zone_handler;
         network_program_handler::ProgramHolderBody,
         service_graph_handler::ServiceGraphResponse,
         service_graph_handler::ServiceEdgeBody,
+        service_graph_handler::RoundTripBody,
         service_graph_handler::ServiceEndBody,
         conntrack_handler::ConnectionResponse,
         // DLP

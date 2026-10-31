@@ -17,6 +17,13 @@
 //! the local end is named after the workload that holds it whether it is the
 //! client or the server.
 //!
+//! The round-trip time rides the same state changes: the kernel's smoothed
+//! estimate is read off the socket when a connection reaches `ESTABLISHED`,
+//! which is the handshake's own measure, and again when it leaves it, which
+//! is the estimate the connection ended its life with. Each sample lands in a
+//! log-scale bucket of a histogram kept beside the counters under the same
+//! edge, so a percentile is a reading of the map rather than of every packet.
+//!
 //! The structure reads all come from the running kernel's BTF through the
 //! configuration, and a program handed none counts nothing.
 
@@ -38,6 +45,13 @@ pub const TCP_HEALTH_METRIC_UNCONFIGURED: u32 = 2;
 pub const TCP_HEALTH_METRIC_UNREADABLE: u32 = 3;
 /// Total number of metric slots (one past the last index).
 pub const TCP_HEALTH_METRIC_COUNT: u32 = 4;
+
+/// Buckets of the round-trip time histogram.
+pub const TCP_RTT_BUCKETS: usize = 16;
+/// Upper bound of the first bucket, in microseconds. Each next bucket doubles
+/// it, so the fifteenth closes at about 1.05 seconds and the last one holds
+/// everything above.
+pub const TCP_RTT_FIRST_BOUND_US: u64 = 64;
 
 /// `AF_INET`, as `sock_common.skc_family` holds it.
 pub const TCP_HEALTH_AF_INET: u8 = 2;
@@ -106,6 +120,48 @@ pub struct TcpEdgeCounts {
     pub failed: u64,
 }
 
+/// The round-trip times sampled on one edge.
+///
+/// Shared by every CPU rather than kept per CPU, because sixteen buckets per
+/// CPU per edge would cost more memory than the counters themselves; the
+/// program adds to it atomically.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TcpEdgeRtt {
+    /// Samples per bucket, not cumulative. Bucket `i` holds the samples below
+    /// `TCP_RTT_FIRST_BOUND_US << i` and at or above the previous bound; the
+    /// last one holds the rest.
+    pub buckets: [u64; TCP_RTT_BUCKETS],
+    /// Sum of every sample, in microseconds.
+    pub sum_us: u64,
+    /// Number of samples.
+    pub count: u64,
+}
+
+/// The bucket a round-trip time of `us` microseconds falls in.
+#[inline(always)]
+#[must_use]
+pub const fn rtt_bucket(us: u64) -> usize {
+    let mut bucket = 0;
+    while bucket < TCP_RTT_BUCKETS - 1 {
+        if us < TCP_RTT_FIRST_BOUND_US << bucket {
+            return bucket;
+        }
+        bucket += 1;
+    }
+    TCP_RTT_BUCKETS - 1
+}
+
+/// The upper bound of `bucket` in microseconds, `None` for the last one.
+#[must_use]
+pub const fn rtt_bucket_bound_us(bucket: usize) -> Option<u64> {
+    if bucket + 1 >= TCP_RTT_BUCKETS {
+        None
+    } else {
+        Some(TCP_RTT_FIRST_BOUND_US << bucket)
+    }
+}
+
 /// What the program needs from the running kernel before it counts.
 ///
 /// Every field is a byte offset read off BTF. `ready` is written last and
@@ -155,6 +211,9 @@ pub struct TcpHealthConfig {
     /// `skc_num` reads zero on the transition that ends a connection; the
     /// source port of the full socket is still set there.
     pub inet_sport: u32,
+    /// `tcp_sock.srtt_us`, the smoothed round-trip time in microseconds
+    /// shifted left by three.
+    pub tcp_srtt_us: u32,
 }
 
 #[cfg(feature = "userspace")]
@@ -162,6 +221,9 @@ unsafe impl aya::Pod for TcpEdgeKey {}
 
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for TcpEdgeCounts {}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for TcpEdgeRtt {}
 
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for TcpHealthConfig {}
@@ -213,7 +275,27 @@ mod tests {
     fn the_shared_types_carry_no_implicit_padding() {
         assert_eq!(mem::size_of::<TcpEdgeKey>(), 48);
         assert_eq!(mem::size_of::<TcpEdgeCounts>(), 48);
-        assert_eq!(mem::size_of::<TcpHealthConfig>(), 76);
+        assert_eq!(mem::size_of::<TcpHealthConfig>(), 80);
+        assert_eq!(mem::size_of::<TcpEdgeRtt>(), 144);
+    }
+
+    #[test]
+    fn a_round_trip_time_lands_in_the_bucket_its_bound_closes() {
+        assert_eq!(rtt_bucket(0), 0);
+        assert_eq!(rtt_bucket(63), 0);
+        assert_eq!(rtt_bucket(64), 1);
+        assert_eq!(rtt_bucket(127), 1);
+        assert_eq!(rtt_bucket(128), 2);
+        let last_bound = TCP_RTT_FIRST_BOUND_US << (TCP_RTT_BUCKETS - 2);
+        assert_eq!(rtt_bucket(last_bound - 1), TCP_RTT_BUCKETS - 2);
+        assert_eq!(rtt_bucket(last_bound), TCP_RTT_BUCKETS - 1);
+        assert_eq!(rtt_bucket(u64::MAX), TCP_RTT_BUCKETS - 1);
+        for bucket in 0..TCP_RTT_BUCKETS - 1 {
+            let bound = rtt_bucket_bound_us(bucket).unwrap_or(0);
+            assert_eq!(rtt_bucket(bound - 1), bucket);
+            assert_eq!(rtt_bucket(bound), bucket + 1);
+        }
+        assert_eq!(rtt_bucket_bound_us(TCP_RTT_BUCKETS - 1), None);
     }
 
     #[test]

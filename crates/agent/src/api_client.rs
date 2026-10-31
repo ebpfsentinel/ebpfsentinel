@@ -1086,6 +1086,16 @@ pub struct ServiceEdgeBody {
     pub unanswered: u64,
     pub answered: u64,
     pub duration_ns_sum: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round_trip: Option<RoundTripBody>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct RoundTripBody {
+    pub buckets: Vec<u64>,
+    pub first_bound_us: u64,
+    pub sum_us: u64,
+    pub count: u64,
 }
 
 #[derive(Deserialize, Serialize)]
