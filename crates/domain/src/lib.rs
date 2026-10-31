@@ -30,5 +30,6 @@ pub mod response;
 pub mod routing;
 pub mod telemetry;
 pub mod threatintel;
+pub mod trace;
 pub mod workload;
 pub mod zone;

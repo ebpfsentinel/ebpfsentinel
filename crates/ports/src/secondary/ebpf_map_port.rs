@@ -1,4 +1,5 @@
 use domain::common::error::DomainError;
+use domain::trace::RulePlacement;
 use ebpf_common::firewall::{FirewallRuleEntry, FirewallRuleEntryV6};
 
 /// Secondary port for array-based eBPF firewall map operations.
@@ -14,10 +15,19 @@ use ebpf_common::firewall::{FirewallRuleEntry, FirewallRuleEntryV6};
 pub trait FirewallArrayMapPort: Send + Sync {
     /// Bulk-load IPv4 rules into the `FIREWALL_RULES` array.
     /// Rules must already be sorted by priority (lowest index = highest priority).
-    fn load_v4_rules(&mut self, rules: &[FirewallRuleEntry]) -> Result<(), DomainError>;
+    /// Returns where each rule went, one placement per rule in order, so a
+    /// trace can name the rule behind an array slot or a fast-path hit.
+    fn load_v4_rules(
+        &mut self,
+        rules: &[FirewallRuleEntry],
+    ) -> Result<Vec<RulePlacement>, DomainError>;
 
-    /// Bulk-load IPv6 rules into the `FIREWALL_RULES_V6` array.
-    fn load_v6_rules(&mut self, rules: &[FirewallRuleEntryV6]) -> Result<(), DomainError>;
+    /// Bulk-load IPv6 rules into the `FIREWALL_RULES_V6` array, returning
+    /// where each rule went.
+    fn load_v6_rules(
+        &mut self,
+        rules: &[FirewallRuleEntryV6],
+    ) -> Result<Vec<RulePlacement>, DomainError>;
 
     /// Set the default policy applied when no rule matches.
     fn set_default_policy(&mut self, policy: u8) -> Result<(), DomainError>;

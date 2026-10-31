@@ -6,6 +6,7 @@ pub mod attribution_attach;
 pub mod config_flags_manager;
 pub mod connect_redirect;
 pub mod conntrack_map_manager;
+pub mod datapath_trace;
 pub mod dlp_attach;
 pub mod dlp_event_reader;
 pub mod dlp_scope;

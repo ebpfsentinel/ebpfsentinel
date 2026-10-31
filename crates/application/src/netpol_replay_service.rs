@@ -27,6 +27,12 @@ impl NetpolReplayService {
         Self { cluster, manifests }
     }
 
+    /// The cluster the replay reads, which other questions about a workload
+    /// read as well.
+    pub fn cluster(&self) -> Arc<dyn ClusterViewPort> {
+        Arc::clone(&self.cluster)
+    }
+
     /// Replay the policies in `manifests` against `connections`.
     ///
     /// # Errors

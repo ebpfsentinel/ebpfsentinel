@@ -115,6 +115,56 @@ pub struct WorkloadReachResponse {
     pub rules: Vec<WorkloadReachEntry>,
 }
 
+/// The body of `POST /api/v1/trace`.
+#[derive(Debug, Clone, Serialize)]
+pub struct TraceBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_ip: Option<String>,
+    pub dst_ip: String,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub protocol: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload: Option<String>,
+}
+
+/// One stage a traced packet crossed.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TraceStage {
+    pub stage: String,
+    pub hook: String,
+    pub verdict: String,
+    pub reason: String,
+    pub rule_id: Option<u32>,
+    pub rule: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// A verdict that holds for this packet now and not for every packet.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TraceStateDependence {
+    pub stage: String,
+    pub depends_on: String,
+}
+
+/// The answer of `POST /api/v1/trace`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TraceResponse {
+    pub src_ip: String,
+    pub dst_ip: String,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub protocol: String,
+    pub direction: String,
+    pub stages: Vec<TraceStage>,
+    pub stopped_at: Option<String>,
+    pub verdict: String,
+    pub state_dependent: Vec<TraceStateDependence>,
+    pub not_loaded: Vec<String>,
+}
+
 /// The body of `POST /api/v1/netpol/replay`.
 #[derive(Debug, Clone, Serialize)]
 pub struct NetpolReplayBody {
@@ -2897,6 +2947,18 @@ impl ApiClient {
     ) -> anyhow::Result<NetpolReplayResponse> {
         let resp = self
             .request(reqwest::Method::POST, "/api/v1/netpol/replay")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    // ── Packet trace ───────────────────────────────
+
+    pub async fn trace(&self, body: &TraceBody) -> anyhow::Result<TraceResponse> {
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/trace")
             .json(body)
             .send()
             .await

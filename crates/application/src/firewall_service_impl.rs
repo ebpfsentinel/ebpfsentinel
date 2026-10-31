@@ -14,6 +14,7 @@ use ebpf_common::firewall::{DEFAULT_POLICY_DROP, DEFAULT_POLICY_PASS};
 use ebpf_common::interface_group::group_matches;
 
 use crate::firewall_aliases::AliasBindings;
+use domain::trace::FirewallTraceIndex;
 use ports::secondary::conntrack_kill_port::ConnTrackKillPort;
 use ports::secondary::ebpf_map_port::FirewallArrayMapPort;
 use ports::secondary::metrics_port::MetricsPort;
@@ -158,6 +159,9 @@ pub struct FirewallAppService {
     default_policy: u8,
     /// `Some` while the deny-all posture is in force, carrying what to restore.
     deny_all: Option<DenyAllSnapshot>,
+    /// Which rule each kernel slot and fast-path key holds, as of the last
+    /// sync, so a trace names the rule behind what the datapath reports.
+    trace_index: FirewallTraceIndex,
 }
 
 impl FirewallAppService {
@@ -178,7 +182,13 @@ impl FirewallAppService {
             interface_scope: InterfaceScopeBits::default(),
             default_policy: DEFAULT_POLICY_PASS,
             deny_all: None,
+            trace_index: FirewallTraceIndex::default(),
         }
+    }
+
+    /// Which rule each kernel slot and fast-path key holds.
+    pub fn trace_index(&self) -> &FirewallTraceIndex {
+        &self.trace_index
     }
 
     /// Publish what the aliases resolve to and re-project the rules onto the
@@ -244,6 +254,7 @@ impl FirewallAppService {
     /// Clear the eBPF map port (program unloaded).
     pub fn clear_map_port(&mut self) {
         self.map_port = None;
+        self.trace_index = FirewallTraceIndex::default();
     }
 
     /// Set the kernel-conntrack kill port.
@@ -871,6 +882,8 @@ impl FirewallAppService {
         // Partition into V4 and V6, applying alert-mode override
         let mut v4_entries = Vec::new();
         let mut v6_entries = Vec::new();
+        let mut v4_ids = Vec::new();
+        let mut v6_ids = Vec::new();
 
         for rule in rules {
             // A workload rule is decided in the socket hooks. The packet path
@@ -938,7 +951,9 @@ impl FirewallAppService {
             for kernel_rule in kernel_rules {
                 if kernel_rule.rule.is_v6() {
                     v6_entries.push(kernel_rule.rule.to_ebpf_entry_v6());
+                    v6_ids.push(effective_rule.id.clone());
                 } else {
+                    v4_ids.push(effective_rule.id.clone());
                     v4_entries.push(
                         kernel_rule.rule.to_ebpf_entry_with_sets(
                             kernel_rule.src_set_id,
@@ -949,15 +964,29 @@ impl FirewallAppService {
             }
         }
 
+        let mut index = FirewallTraceIndex::default();
+
         // Bulk-load V4
-        if let Err(e) = map.load_v4_rules(&v4_entries) {
-            tracing::warn!("failed to load V4 rules into eBPF map: {e}");
+        match map.load_v4_rules(&v4_entries) {
+            Ok(placements) => {
+                for ((id, entry), placement) in v4_ids.into_iter().zip(&v4_entries).zip(placements)
+                {
+                    index.record_v4(id, entry, placement);
+                }
+            }
+            Err(e) => tracing::warn!("failed to load V4 rules into eBPF map: {e}"),
         }
 
         // Bulk-load V6
-        if let Err(e) = map.load_v6_rules(&v6_entries) {
-            tracing::warn!("failed to load V6 rules into eBPF map: {e}");
+        match map.load_v6_rules(&v6_entries) {
+            Ok(placements) => {
+                for (id, placement) in v6_ids.into_iter().zip(placements) {
+                    index.record_v6(id, placement);
+                }
+            }
+            Err(e) => tracing::warn!("failed to load V6 rules into eBPF map: {e}"),
         }
+        self.trace_index = index;
     }
 
     fn update_metrics(&self) {
@@ -971,6 +1000,7 @@ mod tests {
     use super::*;
     use domain::common::entity::Protocol;
     use domain::firewall::entity::{FirewallAction, Scope};
+    use domain::trace::RulePlacement;
     use ports::test_utils::NoopMetrics;
 
     fn make_rule(id: &str, priority: u32) -> FirewallRule {
@@ -1024,17 +1054,21 @@ mod tests {
         fn load_v4_rules(
             &mut self,
             rules: &[ebpf_common::firewall::FirewallRuleEntry],
-        ) -> Result<(), DomainError> {
+        ) -> Result<Vec<RulePlacement>, DomainError> {
             *self.v4.lock().unwrap() = rules.to_vec();
-            Ok(())
+            Ok((0..rules.len())
+                .map(|i| RulePlacement::Array(u32::try_from(i).unwrap()))
+                .collect())
         }
 
         fn load_v6_rules(
             &mut self,
             rules: &[ebpf_common::firewall::FirewallRuleEntryV6],
-        ) -> Result<(), DomainError> {
+        ) -> Result<Vec<RulePlacement>, DomainError> {
             *self.v6.lock().unwrap() = rules.to_vec();
-            Ok(())
+            Ok((0..rules.len())
+                .map(|i| RulePlacement::Array(u32::try_from(i).unwrap()))
+                .collect())
         }
 
         fn set_default_policy(&mut self, policy: u8) -> Result<(), DomainError> {
@@ -1067,6 +1101,28 @@ mod tests {
             ports: Vec::new(),
         });
         svc
+    }
+
+    #[test]
+    fn a_synced_rule_is_named_by_the_slot_it_was_loaded_into() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(map.clone()));
+        svc.add_rule(make_rule("first", 10)).unwrap();
+        svc.add_rule(make_rule("second", 20)).unwrap();
+        let src = "10.0.0.1".parse().unwrap();
+        let dst = "10.0.0.2".parse().unwrap();
+        let index = svc.trace_index();
+        assert_eq!(
+            index.name(0, src, dst, 1, 2, 6),
+            Some(&RuleId("first".to_string()))
+        );
+        assert_eq!(
+            index.name(1, src, dst, 1, 2, 6),
+            Some(&RuleId("second".to_string()))
+        );
+        svc.clear_map_port();
+        assert!(svc.trace_index().is_empty());
     }
 
     #[test]

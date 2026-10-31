@@ -3965,8 +3965,45 @@ pub async fn run(
         if let Some(ig) = ebpf_map_holder.iface_groups {
             mgr.iface_groups = ig;
         }
+        // tc-qos stays in `ebpf_state`, so a trace reaches it through a
+        // duplicate of its fds rather than through the manager's loaders.
+        for (name, hook) in [
+            ("tc_qos_ingress", domain::trace::TraceHook::TcIngress),
+            ("tc_qos", domain::trace::TraceHook::TcEgress),
+        ] {
+            if let Some(fd) = ebpf_state
+                .loaders
+                .iter()
+                .find_map(|loader| loader.program_fd_owned(name))
+            {
+                mgr.qos_trace.push((name, hook, fd));
+            }
+        }
         Arc::new(tokio::sync::Mutex::new(mgr))
     };
+
+    // A trace runs whatever the manager holds when it is asked, so a program
+    // a reload loads or unloads is traced as it now is. It is asked from a
+    // blocking task, which is what lets it take the manager's lock and read
+    // the configuration without awaiting either.
+    {
+        let manager = Arc::clone(&ebpf_manager);
+        let traced_config = Arc::clone(&shared_config);
+        let tracer =
+            adapters::ebpf::datapath_trace::EbpfDatapathTracer::new(Box::new(move |direction| {
+                let ids_egress = {
+                    let config = traced_config.blocking_read();
+                    config.ids.inspect_egress || config.container.resolver.enabled
+                };
+                manager.blocking_lock().trace_plan(direction, ids_egress)
+            }));
+        app_state.install_datapath_trace(Arc::new(
+            application::datapath_trace_service::DatapathTraceService::new(
+                Arc::new(tracer),
+                netpol_replay.as_ref().map(|replay| replay.cluster()),
+            ),
+        ));
+    }
 
     // The screen and the command answering "what may this workload reach"
     // read the policy in force rather than the document, because a rule the

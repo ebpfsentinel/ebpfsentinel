@@ -7,6 +7,7 @@ use crate::api_client::{
     IpsRuleResponse, LearningScopeBody, LearningSelector, LearningSessionResponse,
     NetpolReplayBody, NetpolReplayResponse, StartLearningBody, StreamOpenError,
     SuricataKeywordCount, SuricataRefusalResponse, SuricataReportResponse, SuricataRulesetResponse,
+    TraceBody, TraceResponse,
 };
 use crate::cli::OutputFormat;
 use crate::table::{Align, Table, cells};
@@ -5270,6 +5271,80 @@ pub async fn cmd_conntrack_flush(client: &ApiClient, output: OutputFormat) -> Re
     }
 
     println!("Conntrack table flushed: {} entry(ies).", resp.flushed);
+    Ok(())
+}
+
+// ── Packet trace ─────────────────────────────────────────
+
+/// `trace` - what the loaded programs decide for one crafted packet.
+pub async fn cmd_trace(client: &ApiClient, body: &TraceBody, output: OutputFormat) -> Result<()> {
+    let report = client.trace(body).await?;
+    print_trace(&report, output)
+}
+
+fn print_trace(report: &TraceResponse, output: OutputFormat) -> Result<()> {
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+
+    let ports = if report.protocol == "icmp" {
+        String::new()
+    } else {
+        format!(" {} -> {}", report.src_port, report.dst_port)
+    };
+    println!(
+        "{} {} -> {}{} ({})",
+        report.protocol.to_uppercase(),
+        report.src_ip,
+        report.dst_ip,
+        ports,
+        report.direction
+    );
+    if report.stages.is_empty() {
+        println!("No stage recorded a verdict for this packet.");
+    } else {
+        let mut table = Table::new(&[
+            ("STAGE", Align::Left),
+            ("HOOK", Align::Left),
+            ("VERDICT", Align::Left),
+            ("REASON", Align::Left),
+            ("RULE", Align::Left),
+            ("DETAIL", Align::Left),
+        ]);
+        for stage in &report.stages {
+            let rule = match (&stage.rule, stage.rule_id) {
+                (Some(name), _) => name.clone(),
+                (None, Some(id)) => format!("#{id}"),
+                (None, None) => "-".to_string(),
+            };
+            table.row(cells![
+                stage.stage,
+                stage.hook,
+                stage.verdict,
+                stage.reason,
+                rule,
+                stage.detail.as_deref().unwrap_or("-")
+            ]);
+        }
+        table.print();
+    }
+    match &report.stopped_at {
+        Some(stage) => println!("Stopped at {stage}: {}.", report.verdict),
+        None => println!("Went through every loaded stage."),
+    }
+    for dep in &report.state_dependent {
+        println!(
+            "Depends on state at {}: {}. Another packet of this five-tuple may be decided otherwise.",
+            dep.stage, dep.depends_on
+        );
+    }
+    if !report.not_loaded.is_empty() {
+        println!(
+            "Not loaded, so not asked: {}.",
+            report.not_loaded.join(", ")
+        );
+    }
     Ok(())
 }
 

@@ -163,6 +163,41 @@ pub enum Command {
     /// Kubernetes network policy - what a proposed policy would refuse
     Netpol(DomainArgs<NetpolCommand>),
 
+    /// Trace one packet through the loaded eBPF programs - each stage's
+    /// verdict, the rule that decided and where the packet stopped. Sends
+    /// nothing on the wire and changes no state.
+    Trace {
+        #[command(flatten)]
+        conn: ConnectionArgs,
+
+        /// Destination address, IPv4 or IPv6
+        dst: String,
+
+        /// Destination port, required for tcp and udp
+        #[arg(long, default_value_t = 0)]
+        dport: u16,
+
+        /// Source address; leave out when --workload names the source
+        #[arg(long)]
+        src: Option<String>,
+
+        /// Source port; an ephemeral one when left out
+        #[arg(long, default_value_t = 0)]
+        sport: u16,
+
+        /// tcp, udp or icmp
+        #[arg(long, default_value = "tcp")]
+        proto: String,
+
+        /// ingress or egress
+        #[arg(long, default_value = "ingress")]
+        direction: String,
+
+        /// A pod as namespace/name, whose address becomes the source
+        #[arg(long)]
+        workload: Option<String>,
+    },
+
     /// Connection tracking - live flow events and status
     Conntrack {
         #[command(subcommand)]

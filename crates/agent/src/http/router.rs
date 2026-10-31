@@ -137,6 +137,7 @@ use super::threatintel_handler::{
     list_feeds, list_iocs, list_url_iocs, refresh_feeds, threatintel_status,
 };
 use super::tls_handler::tls_status;
+use super::trace_handler::trace_packet;
 use super::zone_handler::{
     create_zone, create_zone_policy, delete_zone, delete_zone_policy, list_zone_policies,
     list_zones, zone_status,
@@ -364,6 +365,7 @@ pub fn build_router(
             .route("/api/v1/firewall/l7-rules/{id}", delete(delete_l7_rule))
             .route("/api/v1/learning/sessions", post(start_learning))
             .route("/api/v1/netpol/replay", post(replay_netpol))
+            .route("/api/v1/trace", post(trace_packet))
             .route("/api/v1/learning/sessions/{id}/stop", post(stop_learning))
             .route("/api/v1/ips/rules/{id}", patch(patch_ips_rule_mode))
             .route("/api/v1/ips/blacklist", post(add_ips_blacklist))
@@ -511,6 +513,7 @@ const NOT_POLICY_WRITES: &[&str] = &[
     "/api/v1/dns/cache",
     "/api/v1/learning/",
     "/api/v1/netpol/replay",
+    "/api/v1/trace",
     "/api/v1/captures/",
     "/api/v1/lb/vips/grant",
 ];

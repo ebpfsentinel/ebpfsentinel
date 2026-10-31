@@ -8023,6 +8023,96 @@
         ]
       }
     },
+    "/api/v1/trace": {
+      "post": {
+        "tags": [
+          "Trace"
+        ],
+        "summary": "`POST /api/v1/trace` - what the loaded programs decide for one packet.",
+        "description": "A packet is crafted from the five-tuple and run through the programs in\nthe order the hooks run them, with no interface and no traffic. Every\nprogram reads its maps and skips its writes, so a trace changes no state.\nA verdict that depends on state the crafted packet does not carry, an\nestablished connection or a rate already spent, is reported as such.",
+        "operationId": "trace_packet",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TraceRequestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Each stage the packet crossed and where it stopped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request does not describe one packet, or the workload has no address",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No eBPF program is loaded on this node",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The kernel refused to run the programs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/zones": {
       "get": {
         "tags": [
@@ -15641,6 +15731,194 @@
           }
         }
       },
+      "TraceRequestBody": {
+        "type": "object",
+        "required": [
+          "dst_ip",
+          "protocol"
+        ],
+        "properties": {
+          "direction": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`ingress` (default) or `egress`."
+          },
+          "dst_ip": {
+            "type": "string",
+            "description": "Destination address, IPv4 or IPv6."
+          },
+          "dst_port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Destination port, required for TCP and UDP.",
+            "minimum": 0
+          },
+          "protocol": {
+            "type": "string",
+            "description": "`tcp`, `udp` or `icmp`."
+          },
+          "src_ip": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Source address. Left out when `workload` names the source."
+          },
+          "src_port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Source port; zero or absent picks an ephemeral port. Ignored for ICMP.",
+            "minimum": 0
+          },
+          "workload": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A pod as `namespace/name`, whose address becomes the source."
+          }
+        }
+      },
+      "TraceResponse": {
+        "type": "object",
+        "required": [
+          "src_ip",
+          "dst_ip",
+          "src_port",
+          "dst_port",
+          "protocol",
+          "direction",
+          "stages",
+          "verdict",
+          "state_dependent",
+          "not_loaded"
+        ],
+        "properties": {
+          "direction": {
+            "type": "string"
+          },
+          "dst_ip": {
+            "type": "string"
+          },
+          "dst_port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "not_loaded": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Programs of this direction that are not loaded, so the trace could\nnot ask them."
+          },
+          "protocol": {
+            "type": "string"
+          },
+          "src_ip": {
+            "type": "string",
+            "description": "The source address the packet was crafted from."
+          },
+          "src_port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "stages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TraceStage"
+            },
+            "description": "Each stage the packet crossed, in the order it crossed them."
+          },
+          "state_dependent": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TraceStateDependence"
+            },
+            "description": "Verdicts that hold for this packet now and not for every packet of\nthe five-tuple."
+          },
+          "stopped_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The stage the packet stopped at, absent when it went through."
+          },
+          "verdict": {
+            "type": "string",
+            "description": "The verdict at that stage, or `pass` when the packet went through."
+          }
+        }
+      },
+      "TraceStage": {
+        "type": "object",
+        "required": [
+          "stage",
+          "hook",
+          "verdict",
+          "reason"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the stage adds in its own terms."
+          },
+          "hook": {
+            "type": "string",
+            "description": "`xdp`, `tc_ingress` or `tc_egress`."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the stage decided: `default`, `rule`, `established`, `rate`,\n`list`, `malformed`, `disabled`, `rewrite` or `unrecorded`."
+          },
+          "rule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The rule's name, where the agent could name it."
+          },
+          "rule_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The rule identifier as the stage numbers its rules.",
+            "minimum": 0
+          },
+          "stage": {
+            "type": "string",
+            "description": "The stage, as `firewall`, `rate_limit`, `ids`, `nat_egress`..."
+          },
+          "verdict": {
+            "type": "string",
+            "description": "`pass`, `log`, `drop`, `reject`, `bounce`, `redirect`, `abort` or `other`."
+          }
+        }
+      },
+      "TraceStateDependence": {
+        "type": "object",
+        "required": [
+          "stage",
+          "depends_on"
+        ],
+        "properties": {
+          "depends_on": {
+            "type": "string",
+            "description": "The state the verdict depends on, in a sentence."
+          },
+          "stage": {
+            "type": "string"
+          }
+        }
+      },
       "TriageRequest": {
         "type": "object",
         "description": "`PATCH /api/v1/alerts/{id}/triage` body. A field left out stays as it\nwas; `assignee: null` takes the alert off whoever held it.",
@@ -16318,6 +16596,10 @@
     {
       "name": "NetworkPolicy",
       "description": "What proposed Kubernetes NetworkPolicy would refuse, replayed against tracked connections"
+    },
+    {
+      "name": "Trace",
+      "description": "What the loaded programs decide for one crafted packet, stage by stage, without changing any state"
     },
     {
       "name": "IDS",

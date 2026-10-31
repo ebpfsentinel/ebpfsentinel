@@ -158,6 +158,29 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
             }
         }
 
+        Some(Command::Trace {
+            conn,
+            dst,
+            dport,
+            src,
+            sport,
+            proto,
+            direction,
+            workload,
+        }) => {
+            let client = ApiClient::new(&conn.host, conn.port, cli.token);
+            let body = api_client::TraceBody {
+                src_ip: src,
+                dst_ip: dst,
+                src_port: sport,
+                dst_port: dport,
+                protocol: proto,
+                direction: Some(direction),
+                workload,
+            };
+            commands::cmd_trace(&client, &body, output).await
+        }
+
         Some(Command::Conntrack { action, conn }) => {
             let client = ApiClient::new(&conn.host, conn.port, cli.token);
             match action {

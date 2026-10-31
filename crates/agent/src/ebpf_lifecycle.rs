@@ -1,13 +1,16 @@
 use std::collections::HashMap;
+use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::time::Duration;
 
+use adapters::ebpf::datapath_trace::{TracePlan, TracedProgram};
 use adapters::ebpf::{
     ConfigFlagsManager, EbpfLoader, InterfaceGroupsManager, L7PortsManager, MetricsReader,
     RingBufObserver, TenantCgroupMapManager, TenantIfindexMapManager, TenantSubnetMapManager,
     TenantVlanMapManager,
 };
 use application::packet_pipeline::AgentEvent;
+use domain::trace::{TraceDirection, TraceHook};
 use infrastructure::config::AgentConfig;
 use ports::secondary::lpm_coordinator_port::LpmCoordinatorPort;
 use ports::secondary::metrics_port::{FirewallMetrics, MetricsPort};
@@ -90,7 +93,23 @@ pub struct EbpfProgramManager {
     /// life of the agent, so a reload that loads the tracepoints again only
     /// has to hand the new reader a clone of this sender.
     pub process_events: Option<mpsc::Sender<domain::process::entity::ProcessLifecycleEvent>>,
+    /// The traffic-shaping classifiers, which have no lifecycle of their own:
+    /// their loader stays with start-up, so a trace runs them through these
+    /// duplicates of their fds.
+    pub qos_trace: Vec<(&'static str, TraceHook, OwnedFd)>,
 }
+
+/// The programs a trace can run, in the order the hooks run them: the
+/// manager's key, the program's name inside its loader, and the hook.
+const XDP_ROOTS: [&str; 3] = ["xdp_firewall", "xdp_ratelimit", "xdp_loadbalancer"];
+const TC_INGRESS: [(&str, &str); 6] = [
+    ("tc_ids", "tc_ids"),
+    ("tc_threatintel", "tc_threatintel"),
+    ("tc_dns", "tc_dns"),
+    ("tc_conntrack", "tc_conntrack"),
+    ("tc_nat", "tc_nat_ingress"),
+    ("tc_scrub", "tc_scrub"),
+];
 
 impl EbpfProgramManager {
     pub fn new(
@@ -120,7 +139,76 @@ impl EbpfProgramManager {
             workloads: application::workload_resolver::WorkloadResolver::new(),
             process_tracing: None,
             process_events: None,
+            qos_trace: Vec::new(),
         }
+    }
+
+    /// What a trace in `direction` runs: duplicates of the loaded programs'
+    /// fds, so the trace holds no lock while the kernel runs them, and the
+    /// programs of that direction that are not loaded. `ids_egress` is
+    /// whether the IDS classifier is attached on egress as well.
+    pub fn trace_plan(&self, direction: TraceDirection, ids_egress: bool) -> TracePlan {
+        let mut plan = TracePlan::default();
+        let take = |key: &str, name: &str, hook: TraceHook, plan: &mut TracePlan| match self
+            .programs
+            .get(key)
+            .and_then(|handle| handle.loader.program_fd_owned(name))
+        {
+            Some(fd) => plan.programs.push(TracedProgram {
+                name: name.to_string(),
+                hook,
+                fd,
+            }),
+            None => plan.not_loaded.push(name.to_string()),
+        };
+        let qos_hook = match direction {
+            TraceDirection::Ingress => {
+                // The XDP entry program follows the tail calls itself, so
+                // only the first one attached is run.
+                match XDP_ROOTS
+                    .iter()
+                    .find(|key| self.programs.contains_key(**key))
+                {
+                    Some(root) => take(root, root, TraceHook::Xdp, &mut plan),
+                    None => plan.not_loaded.push(XDP_ROOTS[0].to_string()),
+                }
+                for (key, name) in TC_INGRESS {
+                    take(key, name, TraceHook::TcIngress, &mut plan);
+                }
+                TraceHook::TcIngress
+            }
+            TraceDirection::Egress => {
+                if ids_egress {
+                    take("tc_ids", "tc_ids", TraceHook::TcEgress, &mut plan);
+                }
+                take(
+                    "tc_nat_egress",
+                    "tc_nat_egress",
+                    TraceHook::TcEgress,
+                    &mut plan,
+                );
+                TraceHook::TcEgress
+            }
+        };
+        let qos_name = if qos_hook == TraceHook::TcIngress {
+            "tc_qos_ingress"
+        } else {
+            "tc_qos"
+        };
+        match self
+            .qos_trace
+            .iter()
+            .find(|(name, hook, _)| *name == qos_name && *hook == qos_hook)
+            .and_then(|(name, hook, fd)| Some((*name, *hook, fd.try_clone().ok()?)))
+        {
+            Some((name, hook, fd)) => plan.programs.push(TracedProgram {
+                name: name.to_string(),
+                hook,
+                fd,
+            }),
+            None => plan.not_loaded.push(qos_name.to_string()),
+        }
+        plan
     }
 
     /// Record a program's load state everywhere it is published: the

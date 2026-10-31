@@ -2,6 +2,7 @@ use crate::ebpf::feature_gates::{self, Feature};
 use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, HashMap, MapData};
 use domain::common::error::DomainError;
+use domain::trace::RulePlacement;
 use ebpf_common::firewall::{
     ACTION_PASS, DSCP_MARK_NONE, FirewallRuleEntry, FirewallRuleEntryV6, FwHashKey5Tuple,
     FwHashKeyPort, FwHashValue, MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT, MATCH_PROTO,
@@ -204,7 +205,10 @@ fn has_extended_match(rule: &FirewallRuleEntry) -> bool {
 
 impl FirewallArrayMapPort for FirewallMapManager {
     #[allow(clippy::cast_possible_truncation)] // count ≤ MAX_FIREWALL_RULES (4096)
-    fn load_v4_rules(&mut self, rules: &[FirewallRuleEntry]) -> Result<(), DomainError> {
+    fn load_v4_rules(
+        &mut self,
+        rules: &[FirewallRuleEntry],
+    ) -> Result<Vec<RulePlacement>, DomainError> {
         // Say both fast paths may hold something before touching them, so a
         // load that fails part way leaves the datapath reading them rather
         // than skipping entries it has just written.
@@ -225,6 +229,7 @@ impl FirewallArrayMapPort for FirewallMapManager {
         // Once the first array-bound rule is seen, every subsequent fast-path
         // candidate is demoted to the array so priority order is preserved.
         let mut array_rules: Vec<FirewallRuleEntry> = Vec::new();
+        let mut placements = Vec::with_capacity(rules.len());
         let mut hash_5tuple_count = 0u32;
         let mut hash_port_count = 0u32;
         let mut seen_array_rule = false;
@@ -256,7 +261,11 @@ impl FirewallArrayMapPort for FirewallMapManager {
                         action: rule.action,
                         _pad: [0; 3],
                     };
-                    let _ = map.insert(&key, &val, 0);
+                    placements.push(if map.insert(&key, &val, 0).is_ok() {
+                        RulePlacement::Hash5Tuple
+                    } else {
+                        RulePlacement::NotInstalled
+                    });
                     hash_5tuple_count += 1;
                     continue;
                 }
@@ -276,7 +285,11 @@ impl FirewallArrayMapPort for FirewallMapManager {
                         action: rule.action,
                         _pad: [0; 3],
                     };
-                    let _ = map.insert(&key, &val, 0);
+                    placements.push(if map.insert(&key, &val, 0).is_ok() {
+                        RulePlacement::HashPort
+                    } else {
+                        RulePlacement::NotInstalled
+                    });
                     hash_port_count += 1;
                     continue;
                 }
@@ -284,6 +297,11 @@ impl FirewallArrayMapPort for FirewallMapManager {
 
             // Fallback: complex rule (or a fast-path candidate demoted because a
             // higher-priority rule already went to the array) → linear scan.
+            placements.push(if array_rules.len() < MAX_FIREWALL_RULES as usize {
+                RulePlacement::Array(array_rules.len() as u32)
+            } else {
+                RulePlacement::NotInstalled
+            });
             array_rules.push(*rule);
             seen_array_rule = true;
         }
@@ -318,11 +336,14 @@ impl FirewallArrayMapPort for FirewallMapManager {
             hash_port = hash_port_count,
             "V4 firewall rules loaded (multi-level)"
         );
-        Ok(())
+        Ok(placements)
     }
 
     #[allow(clippy::cast_possible_truncation)] // count ≤ MAX_FIREWALL_RULES (4096)
-    fn load_v6_rules(&mut self, rules: &[FirewallRuleEntryV6]) -> Result<(), DomainError> {
+    fn load_v6_rules(
+        &mut self,
+        rules: &[FirewallRuleEntryV6],
+    ) -> Result<Vec<RulePlacement>, DomainError> {
         let count = rules.len().min(MAX_FIREWALL_RULES as usize);
 
         self.rule_count_v6
@@ -345,7 +366,15 @@ impl FirewallArrayMapPort for FirewallMapManager {
             .any(|r| rule_reads_ct(r.match_flags, r.max_states));
         self.sync_ct_gate();
         info!(count, "V6 firewall rules loaded into eBPF array");
-        Ok(())
+        Ok((0..rules.len())
+            .map(|i| {
+                if i < count {
+                    RulePlacement::Array(i as u32)
+                } else {
+                    RulePlacement::NotInstalled
+                }
+            })
+            .collect())
     }
 
     fn set_default_policy(&mut self, policy: u8) -> Result<(), DomainError> {

@@ -164,6 +164,9 @@ pub struct AppState {
     /// agent was built without Kubernetes support, in which case the route
     /// says so rather than answering that nothing would be refused.
     pub netpol_replay: ArcSwapOption<application::netpol_replay_service::NetpolReplayService>,
+    /// Runs a crafted packet through the loaded programs. Installed once the
+    /// programs are, so a request before then is told the datapath is not up.
+    pub datapath_trace: ArcSwapOption<application::datapath_trace_service::DatapathTraceService>,
     /// What the agent sees of each pod on this node. Always present: the
     /// link watcher reports into it from startup, and it answers only once a
     /// pod inventory is installed, which needs Kubernetes.
@@ -216,6 +219,7 @@ impl AppState {
             dlp_scope_service: ArcSwapOption::empty(),
             workload_policy_service: ArcSwapOption::empty(),
             netpol_replay: ArcSwapOption::empty(),
+            datapath_trace: ArcSwapOption::empty(),
             pod_coverage: Arc::new(application::pod_coverage_service::PodCoverageService::new()),
             learning_service: ArcSwapOption::empty(),
             process_detections: AtomicBool::new(false),
@@ -408,6 +412,14 @@ impl AppState {
         svc: Arc<application::netpol_replay_service::NetpolReplayService>,
     ) {
         self.netpol_replay.store(Some(svc));
+    }
+
+    /// Hand the packet trace over, once the programs it runs are loaded.
+    pub fn install_datapath_trace(
+        &self,
+        svc: Arc<application::datapath_trace_service::DatapathTraceService>,
+    ) {
+        self.datapath_trace.store(Some(svc));
     }
 
     /// Hand learning mode over, once whatever stores its windows is open.

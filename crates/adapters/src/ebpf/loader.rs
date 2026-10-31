@@ -649,6 +649,15 @@ impl EbpfLoader {
         self.kfunc_progs.get(program_name).map(AsRawFd::as_raw_fd)
     }
 
+    /// A duplicate of a loaded program's fd, which stays valid after this
+    /// loader is dropped or swapped, so a caller can run the program without
+    /// holding the lock the loader sits behind.
+    ///
+    /// Returns `None` if the program is not loaded or the duplicate failed.
+    pub fn program_fd_owned(&self, program_name: &str) -> Option<OwnedFd> {
+        self.kfunc_progs.get(program_name)?.try_clone().ok()
+    }
+
     /// Why an optional program is absent, when the kernel refused it.
     ///
     /// `None` both when the program loaded and when it was never declared

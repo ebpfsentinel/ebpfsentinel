@@ -40,6 +40,7 @@ use super::routing_handler;
 use super::service_graph_handler;
 use super::threatintel_handler;
 use super::tls_handler;
+use super::trace_handler;
 use super::workload_dto;
 use super::zone_handler;
 
@@ -88,6 +89,7 @@ use super::zone_handler;
         learning_handler::get_learning_policy,
         learning_handler::get_learning_segmentation,
         netpol_handler::replay_netpol,
+        trace_handler::trace_packet,
         // IPS
         ips_handler::list_ips_rules,
         ips_handler::patch_ips_rule_mode,
@@ -265,6 +267,10 @@ use super::zone_handler;
         netpol_handler::NetpolReplayResponse,
         netpol_handler::NetpolWorkloadReplay,
         netpol_handler::NetpolRefusedFlow,
+        trace_handler::TraceRequestBody,
+        trace_handler::TraceResponse,
+        trace_handler::TraceStage,
+        trace_handler::TraceStateDependence,
         // IPS
         ips_handler::IpsRuleResponse,
         ips_handler::BlacklistEntryResponse,
@@ -438,6 +444,7 @@ use super::zone_handler;
         (name = "IPS", description = "Intrusion prevention rules and blacklist"),
         (name = "Learning", description = "Learning mode: what this node reached, for a declared window and scope"),
         (name = "NetworkPolicy", description = "What proposed Kubernetes NetworkPolicy would refuse, replayed against tracked connections"),
+        (name = "Trace", description = "What the loaded programs decide for one crafted packet, stage by stage, without changing any state"),
         (name = "IDS", description = "Intrusion detection status and rules"),
         (name = "Rate Limiting", description = "Rate limit policy management"),
         (name = "Alerts", description = "Alert queries and false-positive marking"),
