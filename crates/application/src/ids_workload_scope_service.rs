@@ -13,6 +13,15 @@
 //! cgroup ids are reused, and an entry left behind is a workload nobody
 //! selected being inspected under a rule written for someone else.
 //!
+//! A guest is the one workload that is not a cgroup: it runs its own
+//! kernel, and the host sees only its tap or macvtap device. Its device is
+//! keyed under [`guest_scope_key`] instead, a value no cgroup id reaches, and
+//! a rule naming the guest is written against that key, so the classifier
+//! decides it on the device exactly as it decides a container on its veth.
+//! The hypervisor's process holding the device is a host task with a cgroup
+//! of its own, and the guest key replaces it: what crosses a tap is the
+//! guest's traffic, never the emulator's.
+//!
 //! What this cannot see is stated rather than papered over: a cgroup is
 //! known once a task in it has been recorded, which is an exec after the
 //! agent started or the process holding a container link, so a rule covers a
@@ -23,8 +32,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use domain::container::engine::CgroupReader;
 use domain::firewall::workload::{WorkloadSelector, cgroup_path_of, unit_of};
+use domain::guest::{GuestIdentity, guest_scope_key};
 use domain::process::entity::ProcessEntry;
-use ports::secondary::ids_workload_scope_port::{IdsWorkloadScopeMapPort, WorkloadLinkSink};
+use ports::secondary::ids_workload_scope_port::{
+    GuestScopeSink, IdsWorkloadScopeMapPort, WorkloadLinkSink,
+};
 use tracing::{debug, warn};
 
 use crate::workload_policy_service::{ResolvedWorkload, workload_of};
@@ -45,13 +57,21 @@ struct ScopeState {
     /// decrements the entry its exec incremented.
     pids: HashMap<u32, u64>,
     links: HashMap<u32, u64>,
+    /// Named guests, by the interface index of their device.
+    guests: HashMap<u32, GuestIdentity>,
     published_links: Vec<(u32, u64)>,
     published_scope: Vec<(u64, u32)>,
 }
 
 impl ScopeState {
     fn wanted_links(&self) -> Vec<(u32, u64)> {
-        let mut links: Vec<(u32, u64)> = self.links.iter().map(|(&i, &c)| (i, c)).collect();
+        let mut links: Vec<(u32, u64)> = self
+            .links
+            .iter()
+            .filter(|(ifindex, _)| !self.guests.contains_key(ifindex))
+            .map(|(&i, &c)| (i, c))
+            .chain(self.guests.keys().map(|&i| (i, guest_scope_key(i))))
+            .collect();
         links.sort_unstable();
         links
     }
@@ -63,6 +83,13 @@ impl ScopeState {
             for (rule, selector) in &self.rules {
                 if selector.matches(&facts) {
                     entries.insert((cgroup_id, *rule));
+                }
+            }
+        }
+        for (&ifindex, guest) in &self.guests {
+            for (rule, selector) in &self.rules {
+                if selector.matches_guest(guest) {
+                    entries.insert((guest_scope_key(ifindex), *rule));
                 }
             }
         }
@@ -264,6 +291,17 @@ impl WorkloadLinkSink for IdsWorkloadScopeService {
     }
 }
 
+impl GuestScopeSink for IdsWorkloadScopeService {
+    fn guests_named(&self, guests: Vec<(u32, GuestIdentity)>) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let guests: HashMap<u32, GuestIdentity> = guests.into_iter().collect();
+        if guests != state.guests {
+            state.guests = guests;
+            self.publish(&mut state);
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -319,6 +357,76 @@ mod tests {
 
     fn by_cgroup(cgroup: &str) -> WorkloadSelector {
         WorkloadSelector::new(None, None, Some(cgroup.to_string()), None).unwrap()
+    }
+
+    fn guest(name: &str, id: &str) -> GuestIdentity {
+        GuestIdentity {
+            name: name.into(),
+            id: id.into(),
+            source: domain::guest::GuestSource::Libvirt,
+            tags: Vec::new(),
+        }
+    }
+
+    fn by_guest(name: &str) -> WorkloadSelector {
+        WorkloadSelector::with_guest(
+            None,
+            None,
+            None,
+            None,
+            domain::firewall::workload::KubernetesMatchers::default(),
+            domain::firewall::workload::LineageMatchers::default(),
+            Some(name.to_string()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_named_guest_is_keyed_on_its_device_and_scoped_to_the_rules_naming_it() {
+        let (svc, recorded) = service();
+        svc.set_rules(vec![
+            (2, by_guest("web01")),
+            (3, by_cgroup("/machine.slice")),
+        ]);
+        // The emulator holding the tap is a host task with a cgroup of its
+        // own; the guest key replaces it.
+        svc.link_owned(9, 500);
+        svc.guests_named(vec![
+            (9, guest("web01", "uuid-1")),
+            (11, guest("db01", "uuid-2")),
+        ]);
+        let recorded = recorded.lock().unwrap();
+        assert_eq!(
+            recorded.links,
+            vec![(9, guest_scope_key(9)), (11, guest_scope_key(11))]
+        );
+        assert_eq!(recorded.scope, vec![(guest_scope_key(9), 2)]);
+    }
+
+    #[test]
+    fn a_guest_no_longer_named_takes_its_scope_with_it() {
+        let (svc, recorded) = service();
+        svc.set_rules(vec![(0, by_guest("uuid-1"))]);
+        svc.link_owned(9, 500);
+        svc.guests_named(vec![(9, guest("web01", "uuid-1"))]);
+        assert_eq!(
+            recorded.lock().unwrap().scope,
+            vec![(guest_scope_key(9), 0)]
+        );
+        svc.guests_named(Vec::new());
+        let recorded = recorded.lock().unwrap();
+        assert_eq!(recorded.scope.len(), 0);
+        assert_eq!(recorded.links, vec![(9, 500)]);
+    }
+
+    #[test]
+    fn the_same_guests_again_write_nothing() {
+        let (svc, recorded) = service();
+        svc.set_rules(vec![(0, by_guest("web01"))]);
+        svc.guests_named(vec![(9, guest("web01", "uuid-1"))]);
+        let writes = recorded.lock().unwrap().scope_writes;
+        svc.guests_named(vec![(9, guest("web01", "uuid-1"))]);
+        assert_eq!(recorded.lock().unwrap().scope_writes, writes);
     }
 
     #[test]

@@ -24,6 +24,19 @@ pub struct GuestIdentityEntry {
     pub tags: Vec<String>,
 }
 
+/// What the agent protects of a guest from the host, and why no more.
+#[derive(Serialize, ToSchema)]
+pub struct GuestProtectionEntry {
+    /// What is covered: `network` once the chain is on the device, nothing
+    /// before.
+    pub covered: Vec<String>,
+    /// What is not: `process` and `dlp` always, `network` too while the
+    /// device is not attached.
+    pub not_covered: Vec<String>,
+    /// Why, in a sentence.
+    pub reason: String,
+}
+
 /// One guest device on this host.
 #[derive(Serialize, ToSchema)]
 pub struct GuestEntry {
@@ -44,6 +57,8 @@ pub struct GuestEntry {
     /// The same reason in a sentence. Absent when named.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// What the agent protects of this guest from the host.
+    pub protection: GuestProtectionEntry,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -57,6 +72,16 @@ pub struct GuestsResponse {
 }
 
 fn guest_entry(link: GuestLink) -> GuestEntry {
+    let protection = link.protection();
+    let protection = GuestProtectionEntry {
+        covered: protection.covered.iter().map(|&s| s.to_owned()).collect(),
+        not_covered: protection
+            .not_covered
+            .iter()
+            .map(|&s| s.to_owned())
+            .collect(),
+        reason: protection.reason,
+    };
     let (guest, unnamed, reason) = match link.naming {
         GuestNaming::Named(g) => (
             Some(GuestIdentityEntry {
@@ -78,6 +103,7 @@ fn guest_entry(link: GuestLink) -> GuestEntry {
         guest,
         unnamed,
         reason,
+        protection,
     }
 }
 
@@ -166,6 +192,20 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("no libvirt domain")
+        );
+        assert_eq!(
+            json["guests"][0]["protection"]["covered"],
+            serde_json::json!(["network"])
+        );
+        assert_eq!(
+            json["guests"][0]["protection"]["not_covered"],
+            serde_json::json!(["process", "dlp"])
+        );
+        assert!(
+            json["guests"][0]["protection"]["reason"]
+                .as_str()
+                .unwrap()
+                .starts_with("network only")
         );
     }
 }

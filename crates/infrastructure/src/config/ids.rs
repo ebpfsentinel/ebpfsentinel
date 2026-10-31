@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use domain::common::entity::RuleId;
-use domain::firewall::workload::{KubernetesMatchers, WorkloadSelector};
+use domain::firewall::workload::{KubernetesMatchers, LineageMatchers, WorkloadSelector};
 use domain::ids::entity::{IdsRule, SamplingMode, ThresholdConfig, ThresholdType, TrackBy};
 use domain::ids::suricata::{ImportedRulesets, SuricataVars, compile_rulesets};
 use domain::netpol::LabelSelector;
@@ -498,11 +498,16 @@ pub struct IdsWorkloadConfig {
     /// Name of the service account the pod runs as.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_account: Option<String>,
+
+    /// A virtual machine, by the name or the identifier its hypervisor gives
+    /// it, decided on its tap or macvtap device. Named alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest: Option<String>,
 }
 
 impl IdsWorkloadConfig {
     pub(super) fn to_selector(&self, prefix: &str) -> Result<WorkloadSelector, ConfigError> {
-        WorkloadSelector::with_kubernetes(
+        WorkloadSelector::with_guest(
             None,
             self.unit.clone(),
             self.cgroup.clone(),
@@ -512,6 +517,8 @@ impl IdsWorkloadConfig {
                 namespaces: self.namespaces.clone(),
                 service_account: self.service_account.clone(),
             },
+            LineageMatchers::default(),
+            self.guest.clone(),
         )
         .map_err(|e| ConfigError::Validation {
             field: format!("{prefix}.workload"),

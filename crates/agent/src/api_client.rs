@@ -2136,6 +2136,14 @@ pub struct GuestIdentityEntry {
     pub tags: Vec<String>,
 }
 
+/// What the agent protects of a guest from the host.
+#[derive(Deserialize, Serialize)]
+pub struct GuestProtectionEntry {
+    pub covered: Vec<String>,
+    pub not_covered: Vec<String>,
+    pub reason: String,
+}
+
 /// One guest device on the agent's host.
 #[derive(Deserialize, Serialize)]
 pub struct GuestEntry {
@@ -2149,6 +2157,7 @@ pub struct GuestEntry {
     pub unnamed: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    pub protection: GuestProtectionEntry,
 }
 
 /// The virtual machines whose devices the agent found on its host.

@@ -12308,7 +12308,8 @@
           "interface",
           "ifindex",
           "kind",
-          "attached"
+          "attached",
+          "protection"
         ],
         "properties": {
           "attached": {
@@ -12338,6 +12339,10 @@
           "kind": {
             "type": "string",
             "description": "`tap` or `macvtap`."
+          },
+          "protection": {
+            "$ref": "#/components/schemas/GuestProtectionEntry",
+            "description": "What the agent protects of this guest from the host."
           },
           "reason": {
             "type": [
@@ -12383,6 +12388,35 @@
               "type": "string"
             },
             "description": "The hypervisor's tags for the guest; libvirt keeps none."
+          }
+        }
+      },
+      "GuestProtectionEntry": {
+        "type": "object",
+        "description": "What the agent protects of a guest from the host, and why no more.",
+        "required": [
+          "covered",
+          "not_covered",
+          "reason"
+        ],
+        "properties": {
+          "covered": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What is covered: `network` once the chain is on the device, nothing\nbefore."
+          },
+          "not_covered": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What is not: `process` and `dlp` always, `network` too while the\ndevice is not attached."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why, in a sentence."
           }
         }
       },

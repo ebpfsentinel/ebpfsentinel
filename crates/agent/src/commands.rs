@@ -5085,6 +5085,7 @@ pub async fn cmd_ebpf_guests(client: &ApiClient, output: OutputFormat) -> Result
         ("ID", Align::Left),
         ("SOURCE", Align::Left),
         ("TAGS", Align::Left),
+        ("PROTECTED", Align::Left),
     ]);
     for entry in &resp.guests {
         let (name, id, source, tags) = match &entry.guest {
@@ -5112,13 +5113,26 @@ pub async fn cmd_ebpf_guests(client: &ApiClient, output: OutputFormat) -> Result
             name,
             id,
             source,
-            tags
+            tags,
+            if entry.protection.covered.is_empty() {
+                "none".to_string()
+            } else {
+                entry.protection.covered.join(",")
+            }
         ]);
     }
     table.print();
     for entry in &resp.guests {
         if let Some(reason) = &entry.reason {
             println!("  {}: {reason}", entry.interface);
+        }
+    }
+    let mut said: Vec<&str> = Vec::new();
+    for entry in &resp.guests {
+        let reason = entry.protection.reason.as_str();
+        if !said.contains(&reason) {
+            println!("  Protection: {reason}");
+            said.push(reason);
         }
     }
     Ok(())

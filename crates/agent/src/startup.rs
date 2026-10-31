@@ -176,6 +176,11 @@ fn dns_feed_specs(
 /// object, so the isolation from the packet programs still holds.
 pub(crate) const DLP_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel-dlp";
 
+/// How often the guests' names are read again from the hypervisor records,
+/// which is how long a rule naming a guest waits for one defined late or
+/// renamed.
+const GUEST_NAMES_REFRESH: Duration = Duration::from_secs(5);
+
 /// The warden control socket path when the agent runs against a privilege broker,
 /// or `None` when it runs standalone (host root). A set-but-empty value is treated
 /// as unset.
@@ -3956,9 +3961,35 @@ pub async fn run(
                         &config.container.guests.proxmox_dir,
                         &config.container.guests.libvirt_dir,
                     ),
-                )),
+                ))
+                .with_scope(Arc::clone(&ids_workload_scope)
+                    as Arc<dyn ports::secondary::ids_workload_scope_port::GuestScopeSink>),
             );
             app_state.install_guest_inventory(Arc::clone(&guests));
+            // A rule naming a guest is decided on the name its hypervisor
+            // gives it now, which is written after the device exists and can
+            // change, so the names are read again on a timer.
+            {
+                let guests = Arc::clone(&guests);
+                let cancel = cancel_token.clone();
+                tokio::spawn(async move {
+                    let mut tick = tokio::time::interval(GUEST_NAMES_REFRESH);
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    loop {
+                        tokio::select! {
+                            () = cancel.cancelled() => break,
+                            _ = tick.tick() => {
+                                let guests = Arc::clone(&guests);
+                                if let Err(err) =
+                                    tokio::task::spawn_blocking(move || guests.refresh_scope()).await
+                                {
+                                    warn!(error = %err, "guest names refresh failed");
+                                }
+                            }
+                        }
+                    }
+                });
+            }
             registry.report_coverage(Arc::new(
                 application::pod_coverage_service::LinkCoverageFanout::new(vec![
                     Arc::clone(&app_state.pod_coverage)

@@ -1,4 +1,5 @@
 use domain::common::error::DomainError;
+use domain::guest::GuestIdentity;
 
 /// Secondary port for the two maps the IDS classifier reads to decide a rule
 /// scoped to workloads: which cgroup owns each container link, and which
@@ -51,6 +52,20 @@ pub trait WorkloadLinkSink: Send + Sync {
     fn link_gone(&self, ifindex: u32);
 }
 
+/// Told which guest each tap or macvtap device belongs to.
+///
+/// A guest has no cgroup on the host, so the device is its key; whatever
+/// decides scoped rules learns the guests named at the moment, replaced
+/// whole, each as its device's interface index and the hypervisor's
+/// identity. A device whose guest is not named is absent, so no rule
+/// written against a name matches a device that only looks like one.
+///
+/// Implemented by `IdsWorkloadScopeService` in the application layer.
+pub trait GuestScopeSink: Send + Sync {
+    /// These are the named guests now, by interface index.
+    fn guests_named(&self, guests: Vec<(u32, GuestIdentity)>);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,6 +74,13 @@ mod tests {
     fn ids_workload_scope_map_port_is_object_safe() {
         fn _check(port: &mut dyn IdsWorkloadScopeMapPort) {
             let _ = port.publish_links(&[]);
+        }
+    }
+
+    #[test]
+    fn guest_scope_sink_is_object_safe() {
+        fn _check(sink: &dyn GuestScopeSink) {
+            sink.guests_named(Vec::new());
         }
     }
 

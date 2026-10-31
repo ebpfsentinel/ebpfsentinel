@@ -646,6 +646,14 @@ impl FirewallRule {
             return Ok(());
         };
         workload.selector.validate()?;
+        if workload.selector.names_guest() {
+            return Err(FirewallError::WorkloadMatcherUnsupported {
+                matcher: "workload.guest",
+                reason: "a workload rule is decided at the socket hooks of a host task, and a \
+                         guest's sockets are in its own kernel; scope an IDS rule to the guest \
+                         instead, which is decided on its tap or macvtap device",
+            });
+        }
 
         let unsupported: [(&'static str, bool, &'static str); 10] = [
             (

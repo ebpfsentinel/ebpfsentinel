@@ -127,6 +127,59 @@ pub struct GuestLink {
     pub naming: GuestNaming,
 }
 
+/// The bit that marks a guest's key in the tables the packet path otherwise
+/// keys on a cgroup id.
+///
+/// A guest has no cgroup on the host, so its device stands in for one: the
+/// key is the interface index under this bit, which no cgroup id reaches
+/// because the kernel numbers cgroups upward from one.
+pub const GUEST_SCOPE_KEY_BIT: u64 = 1 << 63;
+
+/// The key a guest's device carries where a host workload's cgroup id would.
+#[must_use]
+pub fn guest_scope_key(ifindex: u32) -> u64 {
+    GUEST_SCOPE_KEY_BIT | u64::from(ifindex)
+}
+
+/// What the agent can protect of a guest from the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestProtection {
+    /// What is covered: `network` once the chain is on the device, nothing
+    /// before.
+    pub covered: Vec<&'static str>,
+    /// What is not, and never is from the host.
+    pub not_covered: Vec<&'static str>,
+    /// Why, in a sentence.
+    pub reason: String,
+}
+
+impl GuestLink {
+    /// What the agent protects of this guest, and why no more.
+    #[must_use]
+    pub fn protection(&self) -> GuestProtection {
+        let reason = "the guest runs its own kernel, so its processes, sockets and TLS \
+                      sessions are inside it and the host sees only the packets on its \
+                      device; process attribution and data loss prevention need an agent \
+                      inside the guest";
+        if self.attached {
+            GuestProtection {
+                covered: vec!["network"],
+                not_covered: vec!["process", "dlp"],
+                reason: format!("network only: {reason}"),
+            }
+        } else {
+            GuestProtection {
+                covered: Vec::new(),
+                not_covered: vec!["network", "process", "dlp"],
+                reason: format!(
+                    "the programs are not on this device yet, so not even its packets are \
+                     inspected; and {reason}"
+                ),
+            }
+        }
+    }
+}
+
 /// Whether a link kind, as the link watcher reports it, is a guest's.
 #[must_use]
 pub fn is_guest_kind(kind: &str) -> bool {
@@ -136,6 +189,42 @@ pub fn is_guest_kind(kind: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn link(attached: bool) -> GuestLink {
+        GuestLink {
+            ifindex: 9,
+            interface: "vnet0".into(),
+            kind: "tap".into(),
+            attached,
+            naming: GuestNaming::Unnamed(UnnamedReason::NoRecord),
+        }
+    }
+
+    #[test]
+    fn an_attached_guest_is_protected_on_the_network_only() {
+        let protection = link(true).protection();
+        assert_eq!(protection.covered, ["network"]);
+        assert_eq!(protection.not_covered, ["process", "dlp"]);
+        assert!(
+            protection
+                .reason
+                .starts_with("network only: the guest runs its own kernel")
+        );
+    }
+
+    #[test]
+    fn a_guest_whose_device_is_not_attached_is_not_protected() {
+        let protection = link(false).protection();
+        assert_eq!(protection.covered.len(), 0);
+        assert_eq!(protection.not_covered, ["network", "process", "dlp"]);
+        assert!(protection.reason.contains("not even its packets"));
+    }
+
+    #[test]
+    fn a_guest_key_never_collides_with_a_cgroup_id() {
+        assert_eq!(guest_scope_key(7), (1 << 63) | 7);
+        assert_ne!(guest_scope_key(7) & GUEST_SCOPE_KEY_BIT, 0);
+    }
 
     #[test]
     fn only_tap_and_macvtap_are_guest_kinds() {

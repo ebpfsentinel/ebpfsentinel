@@ -709,6 +709,25 @@ mod tests {
     }
 
     #[test]
+    fn ids_rule_scoped_to_a_guest_validates() {
+        let mut rule = sample_rule();
+        rule.workload = Some(
+            WorkloadSelector::with_guest(
+                None,
+                None,
+                None,
+                None,
+                crate::firewall::workload::KubernetesMatchers::default(),
+                crate::firewall::workload::LineageMatchers::default(),
+                Some("web01".to_string()),
+            )
+            .unwrap(),
+        );
+        assert!(rule.validate().is_ok());
+        assert_eq!(rule.to_ebpf_value(1).scope, IDS_SCOPE_WORKLOAD);
+    }
+
+    #[test]
     fn ids_rule_workload_and_interfaces_are_disjoint() {
         let mut rule = sample_rule();
         rule.workload = Some(pod_selector());

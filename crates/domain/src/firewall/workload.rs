@@ -37,6 +37,7 @@ use ebpf_common::workload_policy::{
 };
 
 use crate::common::entity::{Protocol, RuleId};
+use crate::guest::GuestIdentity;
 use crate::netpol::LabelSelector;
 
 use super::entity::{FirewallAction, FirewallRule, IpNetwork, PortRange};
@@ -113,6 +114,17 @@ pub struct WorkloadSelector {
     /// break the chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ancestor: Option<String>,
+    /// A virtual machine, by the name or the identifier its hypervisor
+    /// gives it: the libvirt domain name or UUID, the Proxmox VM name or
+    /// VMID.
+    ///
+    /// A guest runs its own kernel, so none of its processes, units or
+    /// cgroups exist on the host, and the only thing of it the host sees is
+    /// the tap or macvtap device its traffic crosses. A guest is therefore
+    /// named alone, decided on that device by the packet path, and never by
+    /// a hook that runs on a host task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest: Option<String>,
 }
 
 /// The lineage half of a selector: what the task was started under.
@@ -212,6 +224,25 @@ impl WorkloadSelector {
         kubernetes: KubernetesMatchers,
         lineage: LineageMatchers,
     ) -> Result<Self, FirewallError> {
+        Self::with_guest(exe, unit, cgroup, container, kubernetes, lineage, None)
+    }
+
+    /// Build a selector that may also name a virtual machine.
+    ///
+    /// # Errors
+    ///
+    /// The refusals [`Self::with_lineage`] documents, plus a guest named
+    /// beside anything else: what else a selector can name lives inside the
+    /// guest's own kernel, where the host sees none of it.
+    pub fn with_guest(
+        exe: Option<String>,
+        unit: Option<String>,
+        cgroup: Option<String>,
+        container: Option<String>,
+        kubernetes: KubernetesMatchers,
+        lineage: LineageMatchers,
+        guest: Option<String>,
+    ) -> Result<Self, FirewallError> {
         let selector = Self {
             exe: trimmed(exe),
             unit: trimmed(unit),
@@ -222,6 +253,7 @@ impl WorkloadSelector {
             service_account: trimmed(kubernetes.service_account),
             parent: trimmed(lineage.parent),
             ancestor: trimmed(lineage.ancestor),
+            guest: trimmed(guest),
         };
         selector.validate()?;
         Ok(selector)
@@ -236,7 +268,8 @@ impl WorkloadSelector {
         if self.is_empty() {
             return Err(FirewallError::InvalidWorkloadSelector {
                 reason: "a workload selector must name at least one of exe, unit, cgroup, \
-                         container, pods, namespaces, service_account, parent or ancestor"
+                         container, pods, namespaces, service_account, parent, ancestor or \
+                         guest"
                     .to_string(),
             });
         }
@@ -260,6 +293,15 @@ impl WorkloadSelector {
                     reason: format!("{field} contains a control character"),
                 });
             }
+        }
+        if self.guest.is_some()
+            && (self.matchers().count() > 1 || self.label_selectors().next().is_some())
+        {
+            return Err(FirewallError::InvalidWorkloadSelector {
+                reason: "a guest is named alone: its processes, units, cgroups and containers \
+                         run in its own kernel, where the host sees none of them"
+                    .to_string(),
+            });
         }
         if self.parent.is_some() && self.ancestor.is_some() {
             return Err(FirewallError::InvalidWorkloadSelector {
@@ -388,9 +430,26 @@ impl WorkloadSelector {
             ("service_account", self.service_account.as_deref()),
             ("parent", self.parent.as_deref()),
             ("ancestor", self.ancestor.as_deref()),
+            ("guest", self.guest.as_deref()),
         ]
         .into_iter()
         .filter_map(|(field, value)| value.map(|value| (field, value)))
+    }
+
+    /// Whether the selector names a virtual machine, which is decided on the
+    /// guest's device and never against a host task.
+    #[must_use]
+    pub fn names_guest(&self) -> bool {
+        self.guest.is_some()
+    }
+
+    /// Whether this selector names `guest`, by its name or by the
+    /// identifier its hypervisor gives it.
+    #[must_use]
+    pub fn matches_guest(&self, guest: &GuestIdentity) -> bool {
+        self.guest
+            .as_deref()
+            .is_some_and(|wanted| wanted == guest.name || wanted == guest.id)
     }
 
     /// Whether `facts` satisfy every matcher this selector carries.
@@ -423,6 +482,10 @@ impl WorkloadSelector {
     /// at the call.
     #[must_use]
     pub fn matches_besides_lineage(&self, facts: &WorkloadFacts<'_>) -> bool {
+        // A host task is never a guest.
+        if self.guest.is_some() {
+            return false;
+        }
         if let Some(exe) = self.exe.as_deref()
             && facts.exe != Some(exe)
         {
@@ -1333,6 +1396,65 @@ mod tests {
             container_name: None,
             ..WorkloadFacts::default()
         }
+    }
+
+    fn guest_selector(guest: &str) -> Result<WorkloadSelector, FirewallError> {
+        WorkloadSelector::with_guest(
+            None,
+            None,
+            None,
+            None,
+            KubernetesMatchers::default(),
+            LineageMatchers::default(),
+            Some(guest.to_string()),
+        )
+    }
+
+    fn web01() -> GuestIdentity {
+        GuestIdentity {
+            name: "web01".into(),
+            id: "102".into(),
+            source: crate::guest::GuestSource::Proxmox,
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_guest_selector_matches_the_guest_by_name_or_by_id() {
+        assert!(guest_selector("web01").unwrap().matches_guest(&web01()));
+        assert!(guest_selector("102").unwrap().matches_guest(&web01()));
+        assert!(!guest_selector("db01").unwrap().matches_guest(&web01()));
+        assert!(!selector("/usr/sbin/nginx").matches_guest(&web01()));
+        assert_eq!(guest_selector("web01").unwrap().describe(), "guest=web01");
+    }
+
+    #[test]
+    fn a_guest_selector_never_matches_a_host_task() {
+        assert!(!guest_selector("web01").unwrap().matches(&nginx()));
+    }
+
+    #[test]
+    fn a_guest_is_named_alone() {
+        let err = WorkloadSelector::with_guest(
+            None,
+            Some("qemu.service".into()),
+            None,
+            None,
+            KubernetesMatchers::default(),
+            LineageMatchers::default(),
+            Some("web01".into()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("a guest is named alone"), "{err}");
+        assert!(guest_selector("  ").is_err());
+    }
+
+    #[test]
+    fn a_firewall_workload_rule_refuses_a_guest() {
+        let mut rule = rule("vm", 10, FirewallAction::Deny);
+        rule.workload = Some(WorkloadMatch::enforcing(guest_selector("web01").unwrap()));
+        let err = rule.validate_workload().unwrap_err();
+        assert!(err.to_string().contains("tap or macvtap"), "{err}");
     }
 
     fn to(addr: [u8; 4], port: u16) -> WorkloadDestination {
