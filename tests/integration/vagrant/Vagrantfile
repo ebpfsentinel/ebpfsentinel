@@ -106,7 +106,37 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
       v.vmx["ethernet0.virtualDev"] = "vmxnet3"
       v.vmx["ethernet1.virtualDev"] = "vmxnet3"
       v.vmx["ethernet2.virtualDev"] = "vmxnet3"
+      # The guest console goes to a file on the host. A guest that hangs
+      # under a flood takes its network and its journal with it, so the
+      # oops or lockup it printed is only readable from outside the VM.
+      # The kernel side is the console= argument the serial-console
+      # provisioner adds.
+      v.vmx["serial0.present"] = "TRUE"
+      v.vmx["serial0.fileType"] = "file"
+      v.vmx["serial0.fileName"] = File.join(__dir__, ".vagrant", "agent-console.log")
+      v.vmx["serial0.startConnected"] = "TRUE"
+      v.vmx["serial0.tryNoRxLoss"] = "FALSE"
     end
+
+    # ----------------------------------------------------------
+    # Provisioner: serial-console
+    #
+    # Sends kernel messages to the first serial port as well as the
+    # screen, so the VMware provider's console file catches a hang the
+    # journal never gets to write. Takes effect on the next boot. It
+    # extends GRUB_CMDLINE_LINUX because the box's _DEFAULT line carries
+    # an unquoted `ds=nocloud-net;s=...`, and grub reads that semicolon
+    # as the end of the command, dropping whatever follows it.
+    # ----------------------------------------------------------
+    agent.vm.provision "shell", name: "serial-console", reboot: true, inline: <<-SHELL
+      set -euxo pipefail
+      conf=/etc/default/grub.d/90-serial-console.cfg
+      want='GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX console=tty0 console=ttyS0,115200n8"'
+      if [ "$(cat "$conf" 2>/dev/null)" != "$want" ]; then
+        printf '%s\\n' "$want" > "$conf"
+        update-grub
+      fi
+    SHELL
 
     # ----------------------------------------------------------
     # Provisioner: base-packages
@@ -335,12 +365,34 @@ SYSCTL
 
       if ! command -v rustc &>/dev/null; then
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-        source "$HOME/.cargo/env"
-        rustup toolchain install nightly --component rust-src
-        # Same pinned version as the install-bpf-linker action: --locked freezes
-        # the linker's dependencies, not the linker itself.
-        cargo +nightly install bpf-linker --version 0.12.0 --locked
       fi
+      source "$HOME/.cargo/env"
+
+      # Same LLVM, same linker version and same dated nightly as the
+      # install-bpf-linker action, for the reasons written there: the box
+      # packages LLVM 18 and bpf-linker 0.12.0 links against 21 to 23, and
+      # without LLVM_PREFIX its build script stops at /usr/lib64, which holds
+      # no libLLVM, and the link fails. --locked freezes the linker's
+      # dependencies, not the linker itself. Checked separately from rustc so a
+      # machine whose first run stopped here finishes on the next provision.
+      LLVM_VERSION=23
+      BPF_LINKER_VERSION=0.12.0
+      channel="$(awk -F'"' '/^channel/ {print $2}' \
+        /home/vagrant/ebpfsentinel/crates/ebpf-programs/rust-toolchain.toml)"
+      test -n "$channel"
+      rustup toolchain install "$channel" --component rust-src
+      if [ "$(bpf-linker --version 2>/dev/null | awk '{print $2}')" != "$BPF_LINKER_VERSION" ]; then
+        codename="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
+        curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
+          | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/llvm.gpg
+        echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-${LLVM_VERSION} main" \
+          | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "llvm-${LLVM_VERSION}-dev"
+        LLVM_PREFIX="/usr/lib/llvm-${LLVM_VERSION}" \
+          cargo "+${channel}" install bpf-linker --version "$BPF_LINKER_VERSION" --locked --force
+      fi
+      bpf-linker --version
     SHELL
 
     # ----------------------------------------------------------

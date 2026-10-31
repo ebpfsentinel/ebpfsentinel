@@ -73,9 +73,13 @@ _on_agent() {
     fi
 }
 
+# The attached program's id as `ip link` prints it: `prog/xdp id N` from
+# iproute2 5.x on, `xdp/id:N` (or `xdpgeneric/id:N`) before that.
+_XDP_ID_PATTERN='(prog/xdp id |xdp[a-z]*/id:)[0-9]+'
+
 _xdp_program_id() {
     _on_agent "ip link show dev ${EBPF_VETH_HOST} \
-        | grep -oE 'xdp[a-z]*/id:[0-9]+' | head -1 | cut -d: -f2"
+        | grep -oE '${_XDP_ID_PATTERN}' | head -1 | grep -oE '[0-9]+\$'"
 }
 
 _agent_pid_local() {
@@ -135,7 +139,7 @@ hupped=0
 started=\$(date +%s)
 while [ "\$(date +%s)" -lt "\$deadline" ]; do
     id=\$(ip link show dev ${EBPF_VETH_HOST} 2>/dev/null \
-        | grep -oE 'xdp[a-z]*/id:[0-9]+' | head -1 | cut -d: -f2)
+        | grep -oE '${_XDP_ID_PATTERN}' | head -1 | grep -oE '[0-9]+\$')
     echo "\${id:-none}" >>"\$out"
     if [ "\$hupped" -eq 0 ] && [ "\$(date +%s)" -gt "\$started" ]; then
         kill -HUP ${pid} 2>/dev/null || true
@@ -168,7 +172,7 @@ _metric_or_zero() {
 
     local id_before
     id_before="$(_xdp_program_id)"
-    [ -n "${id_before}" ] || skip "no XDP program attached to ${EBPF_VETH_HOST}"
+    [ -n "${id_before}" ] || soft_skip "no XDP program attached to ${EBPF_VETH_HOST}"
 
     _flip_chain_root
 
@@ -224,7 +228,8 @@ _metric_or_zero() {
     # The rate limiter is the root now, and it is the program the interface
     # carries.
     run bash -c "curl -sf --max-time 5 \
-        'http://${AGENT_HOST}:${AGENT_HTTP_PORT}/api/v1/ebpf/programs'"
+        'http://${AGENT_HOST}:${AGENT_HTTP_PORT}/api/v1/ebpf/status'"
     [ "$status" -eq 0 ]
-    echo "$output" | grep -q "xdp_ratelimit"
+    echo "$output" | jq -e '[.programs[] | select(.name == "xdp-ratelimit" and .loaded)] | length == 1' >/dev/null
+    echo "$output" | jq -e '[.programs[] | select(.name == "xdp-firewall" and .loaded)] | length == 0' >/dev/null
 }

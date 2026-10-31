@@ -203,7 +203,7 @@ vagrant ssh attacker -c '
     [ -f ~/.ssh/agent_key ] || ssh-keygen -t ed25519 -f ~/.ssh/agent_key -N "" -q
     if command -v sshpass >/dev/null 2>&1; then
       sshpass -p vagrant ssh-copy-id -i ~/.ssh/agent_key.pub \
-        -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o BatchMode=yes \
+        -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
         vagrant@192.168.56.10 >/dev/null 2>&1 \
         && echo "agent SSH trust established" \
         || echo "WARN: could not establish agent SSH trust"
@@ -244,6 +244,12 @@ AGENT_CTL_IP="$(vagrant ssh agent -c "ip -4 -o addr show eth0" 2>/dev/null |
     awk '{ sub(/\/.*/, "", $4); print $4; exit }' | tr -d '\r')" || AGENT_CTL_IP=""
 echo "  Agent control address: ${AGENT_CTL_IP:-192.168.56.10 (eth0 not resolved)}"
 
+# One lane at a time drives the agent. The suites start and stop the agent VM's
+# only agent, so a second run sharing it kills the first one's agent between
+# two tests and both report failures neither caused. A run whose host side dies
+# (a timeout, a closed terminal) leaves its bats running on the attacker, and
+# the next run would meet it exactly that way, so the lock is taken there, not
+# here: it is held for as long as that bats lives, wherever it was started from.
 vagrant ssh attacker -c \
     "cd /home/vagrant/ebpfsentinel/tests/integration && \
      export EBPF_2VM_MODE=true && \
@@ -252,6 +258,8 @@ vagrant ssh attacker -c \
      export ATTACKER_VM_IP=192.168.56.20 && \
      export AGENT_SSH_KEY=~/.ssh/agent_key && \
      export EBPFSENTINEL_STRICT_SKIPS=${EBPFSENTINEL_STRICT_SKIPS:-0} && \
+     exec 9>/tmp/ebpfsentinel-lane.lock && \
+     { flock -n 9 || { echo 'another lane run still drives the agent from this VM:' >&2; pgrep -af bats >&2; exit 1; }; } && \
      bats --timing ${REMOTE_SUITES}"
 
 echo ""

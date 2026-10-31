@@ -184,8 +184,13 @@ teardown_file() {
 _start_tls_echo_server() {
     openssl req -x509 -newkey rsa:2048 -keyout "$DATA_DIR/tls.key" \
         -out "$DATA_DIR/tls.crt" -days 1 -nodes -subj '/CN=localhost' 2>/dev/null
+    # s_server closes every connection once its own stdin reaches EOF, which
+    # under nohup is at once, so the writer would be gone before its alert.
+    # A FIFO opened read-write never reaches EOF and never delivers a byte.
+    rm -f "$DATA_DIR/tls_server.in"
+    mkfifo "$DATA_DIR/tls_server.in"
     nohup openssl s_server -accept 9443 -cert "$DATA_DIR/tls.crt" \
-        -key "$DATA_DIR/tls.key" -quiet >/dev/null 2>&1 &
+        -key "$DATA_DIR/tls.key" -quiet <>"$DATA_DIR/tls_server.in" >/dev/null 2>&1 &
     echo $! > "$DATA_DIR/tls_server.pid"
     sleep 1
 }
@@ -197,7 +202,32 @@ _stop_tls_echo_server() {
 _send_tls_data() {
     # Local TLS send - uprobe on libssl captures the plaintext from s_client
     local data="$1"
-    echo "$data" | timeout 3 openssl s_client -connect 127.0.0.1:9443 -quiet 2>/dev/null || true
+    echo "$data" | timeout 3 openssl s_client -connect 127.0.0.1:9443 -quiet -no_ign_eof 2>/dev/null || true
+}
+
+_send_ktls_data() {
+    # OpenSSL 3.0 has no -ktls switch: offload is asked for through the
+    # library configuration, and only for this one client, so every other
+    # send in the suite stays a userspace TLS write.
+    local data="$1" conf="$DATA_DIR/ktls.cnf"
+    printf '%s\n' 'openssl_conf = o' '[o]' 'ssl_conf = s' '[s]' \
+        'system_default = d' '[d]' 'Options = KTLS' > "$conf"
+    { echo "$data"; sleep 1; } \
+        | OPENSSL_CONF="$conf" timeout 4 openssl s_client -connect 127.0.0.1:9443 -quiet -no_ign_eof 2>/dev/null || true
+}
+
+_tls_tx_offloads() {
+    awk '$1 == "TlsTxSw" || $1 == "TlsTxDevice" { n += $2 } END { print n + 0 }' \
+        /proc/net/tls_stat 2>/dev/null || echo 0
+}
+
+_send_tls_data_and_linger() {
+    # The same send, with stdin held open afterwards: s_client exits at EOF
+    # of its stdin, and an alert raised after the writer exited names no
+    # binary by design,
+    # so a test about the binary keeps the writer alive past the alert.
+    local data="$1"
+    { echo "$data"; sleep 3; } | timeout 5 openssl s_client -connect 127.0.0.1:9443 -quiet -no_ign_eof 2>/dev/null || true
 }
 
 @test "TLS echo server starts for DLP tests" {
@@ -369,8 +399,8 @@ _send_tls_data() {
     require_root
     [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
 
-    _send_tls_data "payment card: 4111111111111111 for the audit"
-    sleep 3
+    _send_tls_data_and_linger "payment card: 4111111111111111 for the audit"
+    sleep 1
 
     local body
     body="$(api_get /api/v1/alerts)"
@@ -379,7 +409,7 @@ _send_tls_data() {
 
     local path
     path="$(echo "$body" | jq -r '[(.alerts // .)[] | select(.component == "dlp") | .executable_path // empty] | last // empty' 2>/dev/null)" || path=""
-    [ -n "$path" ] || soft_skip "no DLP alert carried an executable path (process gone before the read)"
+    [ -n "$path" ] || soft_skip "no DLP alert carried an executable path"
 
     # The writer was openssl s_client, so the agent must have read its binary
     # and said that is where the name came from.
@@ -423,8 +453,12 @@ _send_tls_data() {
     modprobe tls 2>/dev/null || true
     grep -qw tls /proc/modules 2>/dev/null || soft_skip "kernel TLS module not loaded"
 
-    _send_tls_data "payment card: 5105105105105100 over kernel TLS"
-    sleep 3
+    local before
+    before="$(_tls_tx_offloads)"
+    _send_ktls_data "payment card: 5105105105105100 over kernel TLS"
+    [ "$(_tls_tx_offloads)" -gt "$before" ] \
+        || soft_skip "openssl did not offload this connection to kernel TLS"
+    sleep 2
 
     local body
     body="$(api_get /api/v1/alerts)"
@@ -433,7 +467,7 @@ _send_tls_data() {
 
     local port
     port="$(echo "$body" | jq -r '[(.alerts // .)[] | select(.component == "dlp") | select(.flow_source == "kernel_socket") | .dst_port] | last // empty' 2>/dev/null)" || port=""
-    [ -n "$port" ] || soft_skip "no kernel TLS write was observed (openssl did not offload)"
+    [ -n "$port" ] || soft_skip "no kernel TLS write was observed"
     [ "$port" = "9443" ]
 }
 
@@ -465,15 +499,6 @@ _dlp_flow_sources_since() {
         | jq -r '[(.alerts // .)[] | .flow_source // "absent"] | join(" ")' 2>/dev/null || echo ""
 }
 
-_ktls_offloaded() {
-    local metrics value
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || return 1
-    value="$(echo "$metrics" \
-        | grep -F 'ebpfsentinel_packets_total{interface="DLP_METRICS",action="ktls_events"}' \
-        | awk '{print $NF}' | tail -1)"
-    [ -n "$value" ] && [ "${value%%.*}" -gt 0 ] 2>/dev/null
-}
-
 @test "a TLS write names its socket through the kernel socket join" {
     require_root
     [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
@@ -496,17 +521,19 @@ _ktls_offloaded() {
     [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
     [ "$(_attribution_attached)" = "true" ] \
         || soft_skip "the cgroup socket hooks are not attached on this host"
-    ! _ktls_offloaded \
-        || soft_skip "this host offloads to kernel TLS, where the probe reads the socket itself"
-
     _set_attribution false
     [ "$HTTP_STATUS" = "200" ] || soft_skip "this agent refuses configuration writes"
     [ "$(_attribution_attached)" = "false" ]
 
-    local since
+    local since offloads
     since="$(date +%s%N)"
+    offloads="$(_tls_tx_offloads)"
     _send_tls_data "payment card: 4111111111111111 with nothing attributing it"
     sleep 3
+    if [ "$(_tls_tx_offloads)" -gt "$offloads" ]; then
+        _set_attribution true
+        soft_skip "this host offloads to kernel TLS, where the probe reads the socket itself"
+    fi
 
     local sources
     sources="$(_dlp_flow_sources_since "$since")"

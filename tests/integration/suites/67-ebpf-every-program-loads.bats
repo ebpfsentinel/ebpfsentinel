@@ -187,6 +187,9 @@ _wait_for_program_set() {
     sleep 30 &
     local target=$!
     # The event crosses a ring buffer and a channel before the table holds it.
+    # The fork lands first and carries the parent's identity, which for a
+    # shell that started before the agent is unknown; the exec that follows
+    # rewrites it, so the wait is for the exec rather than for any entry.
     local waited=0 body="" entry=""
     while [ "$waited" -lt 10 ]; do
         body="$(api_get /api/v1/processes)"
@@ -194,7 +197,7 @@ _wait_for_program_set() {
         [ "$HTTP_STATUS" = "200" ]
         entry="$(echo "$body" | jq -c --argjson pid "$target" \
             '.processes[] | select(.pid == $pid)')"
-        [ -z "$entry" ] || break
+        [ "$(echo "$entry" | jq -r '.identity.kind // empty' 2>/dev/null)" = "path" ] && break
         sleep 1
         waited=$((waited + 1))
     done
@@ -205,8 +208,12 @@ _wait_for_program_set() {
         echo "$body" | jq -c '.tracing, .stats' >&3
         false
     fi
+    if [ "$(echo "$entry" | jq -r '.identity.kind')" != "path" ]; then
+        echo "# pid ${target} never got its exec resolved: ${entry}" >&3
+        echo "$body" | jq -c '.tracing, .stats' >&3
+        false
+    fi
 
-    [ "$(echo "$entry" | jq -r '.identity.kind')" = "path" ]
     assert_contains "$(echo "$entry" | jq -r '.identity.path')" "sleep"
 }
 
