@@ -18,7 +18,7 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
-use super::handshake::CryptoPosture;
+use super::handshake::{CertificateValidity, CryptoPosture, KeyExchangeClass, TlsHandshake};
 use super::service_graph::GraphEnd;
 
 /// How many distinct edges are kept before the least recently seen one goes.
@@ -29,6 +29,9 @@ pub const DEFAULT_MAX_COUNTED_FLOWS: usize = 65_536;
 
 /// How long a connection stays remembered after its last counted payload.
 pub const COUNTED_FLOW_IDLE_NS: u64 = 120_000_000_000;
+
+/// How many distinct negotiated suites an edge lists before it only counts.
+pub const MAX_SUITES_PER_EDGE: usize = 16;
 
 /// A protocol read in clear text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -54,10 +57,52 @@ impl ClearTextProtocol {
     }
 }
 
+/// What a TLS handshake settled on: the version, the key exchange group
+/// where one was read, and the cipher suite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct NegotiatedSuite {
+    pub version: u16,
+    pub group: Option<u16>,
+    pub cipher: u16,
+}
+
+impl NegotiatedSuite {
+    /// The suite a handshake settled on.
+    #[must_use]
+    pub fn of(handshake: &TlsHandshake) -> Self {
+        Self {
+            version: handshake.version,
+            group: handshake.group,
+            cipher: handshake.cipher,
+        }
+    }
+
+    /// The posture this suite gives its connection.
+    #[must_use]
+    pub fn posture(self) -> CryptoPosture {
+        self.handshake().posture()
+    }
+
+    /// How this suite's key exchange stands against a quantum adversary.
+    #[must_use]
+    pub fn key_exchange(self) -> KeyExchangeClass {
+        self.handshake().key_exchange()
+    }
+
+    fn handshake(self) -> TlsHandshake {
+        TlsHandshake {
+            version: self.version,
+            cipher: self.cipher,
+            group: self.group,
+            certificate: CertificateValidity::NotObservable,
+        }
+    }
+}
+
 /// What one connection is counted as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowPosture {
-    Tls(CryptoPosture),
+    Tls(NegotiatedSuite),
     ClearText(ClearTextProtocol),
 }
 
@@ -196,6 +241,11 @@ pub struct EdgePosture {
     pub legacy_tls: u64,
     /// Connections in clear text, by protocol.
     pub clear_text: BTreeMap<ClearTextProtocol, u64>,
+    /// TLS connections by the suite they negotiated, up to
+    /// [`MAX_SUITES_PER_EDGE`] distinct suites.
+    pub suites: BTreeMap<NegotiatedSuite, u64>,
+    /// TLS connections whose suite came after the list was full.
+    pub unlisted_suites: u64,
     /// Wall-clock nanoseconds of the first and the last counted connection.
     pub first_seen_ns: u64,
     pub last_seen_ns: u64,
@@ -221,9 +271,21 @@ impl EdgePosture {
 
     fn add(&mut self, posture: FlowPosture) {
         let slot = match posture {
-            FlowPosture::Tls(CryptoPosture::PostQuantum) => &mut self.post_quantum,
-            FlowPosture::Tls(CryptoPosture::Classical) => &mut self.classical,
-            FlowPosture::Tls(CryptoPosture::LegacyTls) => &mut self.legacy_tls,
+            FlowPosture::Tls(suite) => {
+                let listed = if self.suites.len() < MAX_SUITES_PER_EDGE
+                    || self.suites.contains_key(&suite)
+                {
+                    self.suites.entry(suite).or_default()
+                } else {
+                    &mut self.unlisted_suites
+                };
+                *listed = listed.saturating_add(1);
+                match suite.posture() {
+                    CryptoPosture::PostQuantum => &mut self.post_quantum,
+                    CryptoPosture::Classical => &mut self.classical,
+                    CryptoPosture::LegacyTls => &mut self.legacy_tls,
+                }
+            }
             FlowPosture::ClearText(protocol) => self.clear_text.entry(protocol).or_default(),
         };
         *slot = slot.saturating_add(1);
@@ -366,6 +428,74 @@ mod tests {
         }
     }
 
+    /// A suite that gives `posture`.
+    fn tls(posture: CryptoPosture) -> FlowPosture {
+        FlowPosture::Tls(match posture {
+            CryptoPosture::PostQuantum => NegotiatedSuite {
+                version: 0x0304,
+                group: Some(0x11ec),
+                cipher: 0x1301,
+            },
+            CryptoPosture::Classical => NegotiatedSuite {
+                version: 0x0304,
+                group: Some(0x001d),
+                cipher: 0x1301,
+            },
+            CryptoPosture::LegacyTls => NegotiatedSuite {
+                version: 0x0301,
+                group: None,
+                cipher: 0x002f,
+            },
+        })
+    }
+
+    #[test]
+    fn a_suite_names_its_key_exchange() {
+        let hybrid = NegotiatedSuite {
+            version: 0x0304,
+            group: Some(0x11ec),
+            cipher: 0x1301,
+        };
+        let rsa = NegotiatedSuite {
+            version: 0x0303,
+            group: None,
+            cipher: 0x002f,
+        };
+        assert_eq!(hybrid.key_exchange(), KeyExchangeClass::PostQuantumHybrid);
+        assert_eq!(rsa.key_exchange(), KeyExchangeClass::RsaKeyTransport);
+    }
+
+    #[test]
+    fn a_suite_is_listed_until_the_edge_holds_enough_of_them() {
+        let mut table = PostureTable::default();
+        let cipher = |n: u16| {
+            FlowPosture::Tls(NegotiatedSuite {
+                version: 0x0303,
+                group: Some(0x0017),
+                cipher: n,
+            })
+        };
+        for n in 0..=u16::try_from(MAX_SUITES_PER_EDGE).unwrap_or(u16::MAX) {
+            table.record(key(443), flow(n, 443), cipher(0xc02f + n), 1);
+        }
+        table.record(key(443), flow(1_000, 443), cipher(0xc02f), 1);
+        let edge = &table.read().edges[0].1;
+        assert_eq!(edge.suites.len(), MAX_SUITES_PER_EDGE);
+        assert_eq!(edge.unlisted_suites, 1);
+        assert_eq!(
+            edge.suites[&NegotiatedSuite {
+                version: 0x0303,
+                group: Some(0x0017),
+                cipher: 0xc02f
+            }],
+            2
+        );
+        assert_eq!(
+            edge.classical,
+            u64::try_from(MAX_SUITES_PER_EDGE).unwrap_or(0) + 2
+        );
+    }
+
     fn key(server_port: u16) -> PostureEdgeKey {
         PostureEdgeKey {
             client: end(1),
@@ -485,7 +615,7 @@ mod tests {
     #[test]
     fn a_connection_idle_past_its_memory_counts_again() {
         let mut table = PostureTable::default();
-        let posture = FlowPosture::Tls(CryptoPosture::Classical);
+        let posture = tls(CryptoPosture::Classical);
         assert!(table.record(key(443), flow(40_000, 443), posture, 0));
         assert!(!table.record(
             key(443),
@@ -511,18 +641,8 @@ mod tests {
     #[test]
     fn each_posture_lands_in_its_own_count_on_its_own_port() {
         let mut table = PostureTable::default();
-        table.record(
-            key(443),
-            flow(1, 443),
-            FlowPosture::Tls(CryptoPosture::PostQuantum),
-            1,
-        );
-        table.record(
-            key(443),
-            flow(2, 443),
-            FlowPosture::Tls(CryptoPosture::LegacyTls),
-            1,
-        );
+        table.record(key(443), flow(1, 443), tls(CryptoPosture::PostQuantum), 1);
+        table.record(key(443), flow(2, 443), tls(CryptoPosture::LegacyTls), 1);
         table.record(
             key(6379),
             flow(3, 6379),
@@ -540,7 +660,7 @@ mod tests {
     #[test]
     fn a_full_table_drops_the_edge_seen_least_recently() {
         let mut table = PostureTable::new(2, 16);
-        let posture = FlowPosture::Tls(CryptoPosture::Classical);
+        let posture = tls(CryptoPosture::Classical);
         table.record(key(1), flow(1, 1), posture, 10);
         table.record(key(2), flow(2, 2), posture, 5);
         table.record(key(3), flow(3, 3), posture, 20);
@@ -553,7 +673,7 @@ mod tests {
     #[test]
     fn a_full_flow_memory_forgets_the_oldest_connection() {
         let mut table = PostureTable::new(16, 2);
-        let posture = FlowPosture::Tls(CryptoPosture::Classical);
+        let posture = tls(CryptoPosture::Classical);
         table.record(key(1), flow(1, 1), posture, 1);
         table.record(key(1), flow(2, 1), posture, 2);
         table.record(key(1), flow(3, 1), posture, 3);

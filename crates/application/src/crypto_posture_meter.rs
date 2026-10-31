@@ -9,7 +9,8 @@
 use std::sync::{Mutex, PoisonError};
 
 use domain::l7::crypto_posture::{
-    FlowPosture, FlowTuple, PostureEdgeKey, PostureReading, PostureTable, clear_text_request,
+    FlowPosture, FlowTuple, NegotiatedSuite, PostureEdgeKey, PostureReading, PostureTable,
+    clear_text_request,
 };
 use domain::l7::handshake::TlsHandshake;
 use domain::l7::red::service_name;
@@ -70,7 +71,7 @@ impl CryptoPostureMeter {
         self.record(
             flow,
             header.protocol,
-            FlowPosture::Tls(handshake.posture()),
+            FlowPosture::Tls(NegotiatedSuite::of(handshake)),
             now_ns,
         );
     }

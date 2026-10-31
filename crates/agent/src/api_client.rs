@@ -1852,6 +1852,10 @@ pub struct PostureEdgeBody {
     pub server_port: u16,
     #[serde(flatten)]
     pub counts: PostureCountsBody,
+    #[serde(default)]
+    pub suites: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub unlisted_suites: u64,
     pub first_seen_ns: u64,
     pub last_seen_ns: u64,
 }

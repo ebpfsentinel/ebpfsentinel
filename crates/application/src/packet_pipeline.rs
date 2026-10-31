@@ -369,6 +369,18 @@ impl EventDispatcher {
         self
     }
 
+    /// Count into a posture meter that outlives this dispatcher, so the
+    /// counts survive a datapath reloaded under a new dispatcher. Call it
+    /// after [`Self::with_workload_resolver`], which installs a fresh one.
+    #[must_use]
+    pub fn with_crypto_posture(
+        mut self,
+        meter: Arc<crate::crypto_posture_meter::CryptoPostureMeter>,
+    ) -> Self {
+        self.crypto_posture = meter;
+        self
+    }
+
     /// Replace the dispatcher's JA4 fingerprint cache with an externally
     /// supplied one. Used when the agent wires a redb-backed cache so it
     /// survives restarts (the same `Arc` is also handed to `AppState`).
@@ -2730,6 +2742,36 @@ mod tests {
             .find(|(key, _)| key.server_port == 6379)
             .map(|(_, edge)| edge.clear_text_connections());
         assert_eq!(redis, Some(1));
+    }
+
+    #[tokio::test]
+    async fn a_shared_posture_meter_keeps_its_counts_across_dispatchers() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let meter = Arc::new(crate::crypto_posture_meter::CryptoPostureMeter::new(
+            crate::workload_resolver::WorkloadResolver::new(),
+        ));
+        let request = || AgentEvent::L7 {
+            header: PacketEvent {
+                src_port: 51_001,
+                dst_port: 6379,
+                ..make_event(EVENT_TYPE_L7, 0)
+            },
+            payload: b"*1\r\n$4\r\nPING\r\n".to_vec(),
+        };
+        let (first_tx, _first_rx) = mpsc::channel(10);
+        let first = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), first_tx)
+            .with_workload_resolver(crate::workload_resolver::WorkloadResolver::new())
+            .with_crypto_posture(Arc::clone(&meter));
+        first.dispatch_agent_event(request());
+        drop(first);
+
+        let (second_tx, _second_rx) = mpsc::channel(10);
+        let second = make_dispatcher(ids, metrics, second_tx)
+            .with_workload_resolver(crate::workload_resolver::WorkloadResolver::new())
+            .with_crypto_posture(Arc::clone(&meter));
+        assert!(Arc::ptr_eq(&second.crypto_posture(), &meter));
+        assert_eq!(meter.reading().edges.len(), 1);
     }
 
     /// Protocol, payload length, HTTP host and process id of one exchange.

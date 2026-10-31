@@ -323,6 +323,7 @@ use super::zone_handler;
         tls_handler::CertificateBody,
         tls_handler::TlsPostureResponse,
         tls_handler::PostureEdgeBody,
+        tls_handler::NegotiatedSuiteBody,
         tls_handler::PostureCountsBody,
         tls_handler::PostureSharesBody,
         threatintel_handler::FeedResponse,

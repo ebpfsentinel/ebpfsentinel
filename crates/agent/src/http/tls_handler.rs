@@ -289,6 +289,24 @@ pub struct PostureSharesBody {
     pub clear_text: f64,
 }
 
+/// One suite TLS connections on an edge negotiated, and how many did.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct NegotiatedSuiteBody {
+    /// The version as the wire carries it (`772` is TLS 1.3).
+    pub version: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_name: Option<&'static str>,
+    pub cipher: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cipher_name: Option<&'static str>,
+    /// Absent when the exchange has none or it was not in the bytes read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_name: Option<&'static str>,
+    pub connections: u64,
+}
+
 /// One edge between two workloads, on one server port.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PostureEdgeBody {
@@ -297,6 +315,10 @@ pub struct PostureEdgeBody {
     pub server_port: u16,
     #[serde(flatten)]
     pub counts: PostureCountsBody,
+    /// The suites its TLS connections negotiated, most connections first.
+    pub suites: Vec<NegotiatedSuiteBody>,
+    /// TLS connections whose suite came after the edge listed sixteen.
+    pub unlisted_suites: u64,
     /// When the first and the last connection were counted, in nanoseconds
     /// since the epoch.
     pub first_seen_ns: u64,
@@ -364,11 +386,27 @@ fn posture_response(reading: &PostureReading) -> TlsPostureResponse {
             totals.add(edge);
             let mut counts = PostureCountsBody::default();
             counts.add(edge);
+            let mut suites: Vec<NegotiatedSuiteBody> = edge
+                .suites
+                .iter()
+                .map(|(suite, connections)| NegotiatedSuiteBody {
+                    version: suite.version,
+                    version_name: version_name(suite.version),
+                    cipher: suite.cipher,
+                    cipher_name: cipher_name(suite.cipher),
+                    group: suite.group,
+                    group_name: suite.group.and_then(domain::l7::handshake::group_name),
+                    connections: *connections,
+                })
+                .collect();
+            suites.sort_by_key(|suite| std::cmp::Reverse(suite.connections));
             PostureEdgeBody {
                 client: end_body(&key.client),
                 server: end_body(&key.server),
                 server_port: key.server_port,
                 counts,
+                suites,
+                unlisted_suites: edge.unlisted_suites,
                 first_seen_ns: edge.first_seen_ns,
                 last_seen_ns: edge.last_seen_ns,
             }
@@ -413,7 +451,7 @@ pub async fn tls_posture(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::l7::crypto_posture::{ClearTextProtocol, PostureEdgeKey};
+    use domain::l7::crypto_posture::{ClearTextProtocol, NegotiatedSuite, PostureEdgeKey};
     use domain::l7::handshake::TlsHandshake;
     use std::net::IpAddr;
 
@@ -506,8 +544,14 @@ mod tests {
             service: service.map(str::to_string),
             address: IpAddr::from([10, 0, 0, last]),
         };
+        let hybrid = NegotiatedSuite {
+            version: 0x0304,
+            group: Some(0x11ec),
+            cipher: 0x1301,
+        };
         let quiet = EdgePosture {
             post_quantum: 1,
+            suites: BTreeMap::from([(hybrid, 1)]),
             first_seen_ns: 1,
             last_seen_ns: 2,
             ..EdgePosture::default()
@@ -550,6 +594,9 @@ mod tests {
         assert_eq!(json["post_quantum"], 1);
         assert_eq!(json["client"]["service"], "shop/web");
         assert!(json["server"].get("service").is_none());
+        assert_eq!(json["suites"][0]["group_name"], "X25519MLKEM768");
+        assert_eq!(json["suites"][0]["cipher_name"], "TLS_AES_128_GCM_SHA256");
+        assert_eq!(json["suites"][0]["connections"], 1);
     }
 
     #[test]
