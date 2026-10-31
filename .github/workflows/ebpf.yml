@@ -59,6 +59,24 @@ jobs:
       - name: Build all eBPF kernel programs
         run: cargo xtask ebpf-build
 
+      # The loader resolves every kfunc itself because aya-obj resolves none
+      # of the ones these objects call. This asks aya-obj again on every build
+      # and fails the day it agrees, so the duplicate is dropped on purpose
+      # rather than kept out of habit. Reading kernel BTF needs no privilege.
+      - name: Compare kfunc resolution with aya-obj
+        env:
+          EBPFSENTINEL_EBPF_DIR: ${{ github.workspace }}/target/bpfel-unknown-none/release
+        run: cargo test -p adapters --test kfunc_upstream_resolution -- --nocapture
+
+      # Whether a program body stays in its entry or becomes a subprogram is
+      # the compiler's call, and a tail call issued from a subprogram is one
+      # some x86 JITs mishandle at the first packet, in softirq. This fails
+      # the build on any tail call outside an entry function.
+      - name: Keep every tail call in an entry function
+        env:
+          EBPFSENTINEL_EBPF_DIR: ${{ github.workspace }}/target/bpfel-unknown-none/release
+        run: cargo test -p adapters --test tail_call_placement
+
       # Loading a program is what asks the verifier, and nothing before this
       # step has asked it. The harness loads every object just built and runs
       # its entry program with BPF_PROG_TEST_RUN, so a rejection fails here

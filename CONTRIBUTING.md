@@ -205,11 +205,17 @@ Two kernel features force it, and aya 0.16.0 supports neither in full:
   fd. aya has no field for either, so no aya call can load anything here.
 - **kfunc relocation.** A kfunc call is a `BPF_PSEUDO_KFUNC_CALL` instruction
   whose `imm` holds a kernel BTF id and whose `off` indexes a program-load
-  `fd_array` of module BTF fds. Since `aya-obj` 0.5 upstream relocates a kfunc
-  that lives in vmlinux (`resolve_externs`, `relocate_externs`), but it always
-  writes `off = 0`: it reads no module BTF, keeps no split BTF and builds no
-  `fd_array`, so the conntrack kfuncs from `nf_conntrack` still cannot be
-  reached through it, and it has no token either.
+  `fd_array` of module BTF fds. `aya-obj` resolves typed ksyms against vmlinux
+  (`resolve_externs`, `relocate_externs`) but always writes `off = 0`: it reads
+  no module BTF, keeps no split BTF and builds no `fd_array`, so the conntrack
+  kfuncs from `nf_conntrack` cannot be reached through it. Nor can the vmlinux
+  ones we call, the dynptr and XDP receive-metadata families: upstream resolves
+  only externs a `.ksyms` BTF section declares, `bpf-linker` emits no such
+  section for an `extern "C"` item, and `relocate_externs` stops on the first
+  call site with `ExternNotFound`. `crates/adapters/tests/kfunc_upstream_resolution.rs`
+  asserts that against the built objects and fails the day upstream agrees with
+  `kfunc.rs`, which is the day the vmlinux half can be handed back; the module
+  half and the token stay ours either way.
 
 #### Upstream surface we depend on
 

@@ -238,11 +238,6 @@ const ALLOW: i32 = 1;
 /// What it returns to refuse it. The caller sees `EPERM`.
 const REFUSE: i32 = 0;
 
-/// `AF_INET`, as the socket carries it.
-const AF_INET: u32 = 2;
-/// `AF_INET6`.
-const AF_INET6: u32 = 10;
-
 /// What a `cgroup_skb` program returns to let the packet through.
 const SKB_PASS: i32 = 1;
 /// What it returns to drop it.
@@ -271,26 +266,26 @@ const IPV6_HEADER_LEN: usize = 40;
 /// A workload asking for an IPv4 connection.
 #[cgroup_sock_addr(connect4)]
 pub fn workload_connect4(ctx: SockAddrContext) -> i32 {
-    answer(&ctx, WORKLOAD_HOOK_CONNECT)
+    answer::<false>(&ctx, WORKLOAD_HOOK_CONNECT)
 }
 
 /// A workload asking for an IPv6 connection.
 #[cgroup_sock_addr(connect6)]
 pub fn workload_connect6(ctx: SockAddrContext) -> i32 {
-    answer(&ctx, WORKLOAD_HOOK_CONNECT)
+    answer::<true>(&ctx, WORKLOAD_HOOK_CONNECT)
 }
 
 /// A workload sending a datagram with no connection, the path almost all DNS
 /// takes.
 #[cgroup_sock_addr(sendmsg4)]
 pub fn workload_sendmsg4(ctx: SockAddrContext) -> i32 {
-    answer(&ctx, WORKLOAD_HOOK_SENDMSG)
+    answer::<false>(&ctx, WORKLOAD_HOOK_SENDMSG)
 }
 
 /// The same, over IPv6.
 #[cgroup_sock_addr(sendmsg6)]
 pub fn workload_sendmsg6(ctx: SockAddrContext) -> i32 {
-    answer(&ctx, WORKLOAD_HOOK_SENDMSG)
+    answer::<true>(&ctx, WORKLOAD_HOOK_SENDMSG)
 }
 
 /// A workload taking an IPv4 local address, before the kernel assigns it.
@@ -300,13 +295,13 @@ pub fn workload_sendmsg6(ctx: SockAddrContext) -> i32 {
 /// listener may sit.
 #[cgroup_sock_addr(bind4)]
 pub fn workload_bind4(ctx: SockAddrContext) -> i32 {
-    answer(&ctx, WORKLOAD_HOOK_BIND)
+    answer::<false>(&ctx, WORKLOAD_HOOK_BIND)
 }
 
 /// The same, over IPv6.
 #[cgroup_sock_addr(bind6)]
 pub fn workload_bind6(ctx: SockAddrContext) -> i32 {
-    answer(&ctx, WORKLOAD_HOOK_BIND)
+    answer::<true>(&ctx, WORKLOAD_HOOK_BIND)
 }
 
 /// A packet leaving a socket, which is where a workload's DNS query is seen
@@ -466,14 +461,22 @@ fn capture(ctx: &SkBuffContext, direction: u8) {
 /// where a policy was loaded would be a response that does nothing on most
 /// nodes. So the cut-off check runs before the array is read at all, and only
 /// a cgroup that is not cut off ever reaches a rule.
-fn answer(ctx: &SockAddrContext, hook: u8) -> i32 {
+///
+/// `V6` is the family of the hook, fixed by the entry point rather than read
+/// from the context. The verifier checks every context field a program reads
+/// against the hook it is attached to, whether or not the read is reachable,
+/// and refuses `user_ip4` in an IPv6 hook as surely as `user_ip6` in an IPv4
+/// one. A family read at run time leaves both reads in all six programs, so
+/// none of them loads; a family fixed at compile time leaves each program
+/// only the one its hook allows.
+fn answer<const V6: bool>(ctx: &SockAddrContext, hook: u8) -> i32 {
     if let Some(verdict) = quarantined(hook) {
         return verdict;
     }
-    if let Some(verdict) = netpol_egress(ctx, hook) {
+    if let Some(verdict) = netpol_egress::<V6>(ctx, hook) {
         return verdict;
     }
-    decide(ctx, hook)
+    decide::<V6>(ctx, hook)
 }
 
 /// Whether this task's cgroup is cut off, and what that means for this
@@ -525,7 +528,7 @@ fn record_quarantine(cgroup: u64, hook: u8, outcome: u32) {
 /// Nothing is counted on a node with no policy: the hooks stay attached when
 /// the last rule is removed, and a counter climbing on an empty policy would
 /// be a figure about the attachment rather than about the product.
-fn decide(ctx: &SockAddrContext, hook: u8) -> i32 {
+fn decide<const V6: bool>(ctx: &SockAddrContext, hook: u8) -> i32 {
     let Some(first) = WORKLOAD_RULES.get(0) else {
         return ALLOW;
     };
@@ -544,10 +547,9 @@ fn decide(ctx: &SockAddrContext, hook: u8) -> i32 {
         return ALLOW;
     }
 
-    let family = unsafe { (*ctx.sock_addr).family };
     let port = u16::from_be(unsafe { (*ctx.sock_addr).user_port } as u16);
     let protocol = unsafe { (*ctx.sock_addr).protocol } as u8;
-    let (addr, family) = address_of(ctx, family);
+    let (addr, family) = address_of::<V6>(ctx);
     let cgroup = unsafe { bpf_get_current_cgroup_id() };
     let operation = Operation {
         addr: &addr,
@@ -659,25 +661,26 @@ fn selectors() -> u64 {
 /// a rule written about that address is a rule about IPv4. Unmapping it here
 /// is what stops the same destination being matchable under one family and
 /// not the other depending on how the caller opened its socket.
-fn address_of(ctx: &SockAddrContext, family: u32) -> ([u32; 4], u8) {
-    if family == AF_INET {
+///
+/// The family is the hook's: an IPv4 hook only ever sees an `AF_INET` socket
+/// and an IPv6 hook an `AF_INET6` one, so the context field read is the one
+/// the hook allows and no other.
+fn address_of<const V6: bool>(ctx: &SockAddrContext) -> ([u32; 4], u8) {
+    if !V6 {
         let word = u32::from_be(unsafe { (*ctx.sock_addr).user_ip4 });
         return ([word, 0, 0, 0], WORKLOAD_FAMILY_IPV4);
     }
-    if family == AF_INET6 {
-        let raw = unsafe { (*ctx.sock_addr).user_ip6 };
-        let words = [
-            u32::from_be(raw[0]),
-            u32::from_be(raw[1]),
-            u32::from_be(raw[2]),
-            u32::from_be(raw[3]),
-        ];
-        if words[0] == 0 && words[1] == 0 && words[2] == 0x0000_ffff {
-            return ([words[3], 0, 0, 0], WORKLOAD_FAMILY_IPV4);
-        }
-        return (words, WORKLOAD_FAMILY_IPV6);
+    let raw = unsafe { (*ctx.sock_addr).user_ip6 };
+    let words = [
+        u32::from_be(raw[0]),
+        u32::from_be(raw[1]),
+        u32::from_be(raw[2]),
+        u32::from_be(raw[3]),
+    ];
+    if words[0] == 0 && words[1] == 0 && words[2] == 0x0000_ffff {
+        return ([words[3], 0, 0, 0], WORKLOAD_FAMILY_IPV4);
     }
-    ([0; 4], WORKLOAD_FAMILY_ANY)
+    (words, WORKLOAD_FAMILY_IPV6)
 }
 
 /// One socket operation, as a rule is compared against it.
@@ -811,7 +814,7 @@ fn netpol_target(cgroup: u64, flag: u8) -> Option<NetpolCgroup> {
 ///
 /// `Some(REFUSE)` only when enforcing; `None` lets the workload rules decide
 /// next, so a connection must be allowed by both.
-fn netpol_egress(ctx: &SockAddrContext, hook: u8) -> Option<i32> {
+fn netpol_egress<const V6: bool>(ctx: &SockAddrContext, hook: u8) -> Option<i32> {
     if hook == WORKLOAD_HOOK_BIND {
         return None;
     }
@@ -819,10 +822,7 @@ fn netpol_egress(ctx: &SockAddrContext, hook: u8) -> Option<i32> {
         unsafe { bpf_get_current_cgroup_id() },
         NETPOL_FLAG_EGRESS_ISOLATED,
     )?;
-    let (words, family) = address_of(ctx, unsafe { (*ctx.sock_addr).family });
-    if family == WORKLOAD_FAMILY_ANY {
-        return None;
-    }
+    let (words, family) = address_of::<V6>(ctx);
     increment_metric!(NETPOL_METRICS, NETPOL_METRIC_EGRESS_CHECKED);
     let v6 = family == WORKLOAD_FAMILY_IPV6;
     let port = u16::from_be(unsafe { (*ctx.sock_addr).user_port } as u16);

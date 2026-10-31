@@ -435,7 +435,14 @@ unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4], 
 // ── Entry point ─────────────────────────────────────────────────────
 
 /// XDP entry point. Default-to-pass on internal error (NFR15).
+///
+/// `#[xdp]` wraps this body in a separate function, and `#[inline(always)]`
+/// is what keeps it inside the program's own section. Left to the compiler,
+/// a body this large becomes a subprogram, the tail calls below then leave
+/// from a bpf-to-bpf callee rather than from the entry, and the x86 JIT of
+/// some kernels reads a stale tail-call counter there and oopses in softirq.
 #[xdp]
+#[inline(always)]
 pub fn xdp_ratelimit(ctx: XdpContext) -> u32 {
     increment_metric(METRIC_TOTAL_SEEN);
     let action = match try_xdp_ratelimit(&ctx) {

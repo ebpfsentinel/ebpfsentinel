@@ -18,13 +18,14 @@ use ebpf_common::{
     event::{EVENT_TYPE_QOS, FLAG_IPV6, PacketEvent},
     firewall::FW_EMPTY_QOS_CLASSIFIERS,
     qos::{
-        MAX_QOS_CGROUP_LINKS, MAX_QOS_CGROUP_SHAPES, MAX_QOS_EDT_INTERFACES, QOS_METRIC_COUNT, QOS_METRIC_DELAYED, QOS_METRIC_DROPPED_LOSS, QOS_METRIC_DROPPED_QUEUE,
-        QOS_METRIC_ERRORS, QOS_METRIC_EVENTS_DROPPED, QOS_METRIC_SHAPED, QOS_METRIC_TOTAL_SEEN,
-        QOS_SCOPE_MASK, QOS_SCOPE_SHAPES_EMPTY, QOS_SCOPE_STRIDE, QOS_SHAPE_CATCHALL,
-        QOS_SHAPE_DPORT, QOS_SHAPE_DSCP, QOS_SHAPE_FULL, QOS_SHAPE_HOSTS, QOS_SHAPE_HOSTS_DPORT,
-        QOS_SHAPE_NO_DSCP, QOS_SHAPE_PORTS, QOS_SHAPE_PROTO, QOS_SHAPE_SPORT, QosClassifierKey,
-        QosCgroupCounters, QosCgroupShape, QosClassifierValue, QosFlowState, QosPipeConfig, QosPipeState, QosQueueConfig, VLAN_ANY,
-        qos_direction_matches,
+        MAX_QOS_CGROUP_LINKS, MAX_QOS_CGROUP_SHAPES, MAX_QOS_EDT_INTERFACES, QOS_METRIC_COUNT,
+        QOS_METRIC_DELAYED, QOS_METRIC_DROPPED_LOSS, QOS_METRIC_DROPPED_QUEUE, QOS_METRIC_ERRORS,
+        QOS_METRIC_EVENTS_DROPPED, QOS_METRIC_SHAPED, QOS_METRIC_TOTAL_SEEN, QOS_SCOPE_MASK,
+        QOS_SCOPE_SHAPES_EMPTY, QOS_SCOPE_STRIDE, QOS_SHAPE_CATCHALL, QOS_SHAPE_DPORT,
+        QOS_SHAPE_DSCP, QOS_SHAPE_FULL, QOS_SHAPE_HOSTS, QOS_SHAPE_HOSTS_DPORT, QOS_SHAPE_NO_DSCP,
+        QOS_SHAPE_PORTS, QOS_SHAPE_PROTO, QOS_SHAPE_SPORT, QosCgroupCounters, QosCgroupShape,
+        QosClassifierKey, QosClassifierValue, QosFlowState, QosPipeConfig, QosPipeState,
+        QosQueueConfig, VLAN_ANY, qos_direction_matches, qos_spacing_ns,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
@@ -367,7 +368,8 @@ fn shape_cgroup(ctx: &TcContext) -> bool {
         None => return false,
     };
 
-    let len = u64::from(unsafe { (*skb).len });
+    let wire_len = unsafe { (*skb).len };
+    let len = u64::from(wire_len);
     let now = unsafe { bpf_ktime_get_ns() };
     let next = match unsafe { QOS_CGROUP_EDT.get(&cgroup_id) } {
         Some(&next) => next,
@@ -380,7 +382,7 @@ fn shape_cgroup(ctx: &TcContext) -> bool {
         return true;
     }
 
-    let spacing = len.saturating_mul(shape.ps_per_byte) / 1000;
+    let spacing = qos_spacing_ns(wire_len, shape.ps_per_byte);
     let _ = QOS_CGROUP_EDT.insert(&cgroup_id, &departure.saturating_add(spacing), 0);
 
     if departure > now && departure > delivery_time_on_packet(ctx) {

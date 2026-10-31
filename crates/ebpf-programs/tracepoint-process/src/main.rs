@@ -99,10 +99,11 @@ pub fn process_fork(ctx: RawTracePointContext) -> i32 {
         increment_metric!(PROCESS_METRICS, PROCESS_METRIC_UNRESOLVED);
         return 0;
     };
-    let Some(child_tgid) = read::<u32>(child, layout.task_tgid) else {
+    let (child_tgid, read_tgid) = read::<u32>(child, layout.task_tgid);
+    if !read_tgid {
         increment_metric!(PROCESS_METRICS, PROCESS_METRIC_UNRESOLVED);
         return 0;
-    };
+    }
     let parent_tgid = (bpf_get_current_pid_tgid() >> 32) as u32;
     if child_tgid == parent_tgid {
         increment_metric!(PROCESS_METRICS, PROCESS_METRIC_THREAD_FORK);
@@ -140,7 +141,7 @@ pub fn process_exit(_ctx: RawTracePointContext) -> i32 {
     let mut event = current_event(PROCESS_EVENT_EXIT, pid, tgid);
     if let Some(layout) = layout() {
         let task = unsafe { bpf_get_current_task() };
-        event.start_ns = start_of(task, &layout).unwrap_or(0);
+        event.start_ns = start_of(task, &layout).0;
     }
     if submit(event) {
         increment_metric!(PROCESS_METRICS, PROCESS_METRIC_EXIT);
@@ -178,23 +179,28 @@ fn with_lineage(event: &mut ProcessEvent, task: u64) -> bool {
     let Some(layout) = layout() else {
         return false;
     };
-    let start = start_of(task, &layout);
-    event.start_ns = start.unwrap_or(0);
-    let Some(parent) = read::<u64>(task, layout.task_real_parent).filter(|p| *p != 0) else {
+    let (start, read_start) = start_of(task, &layout);
+    event.start_ns = start;
+    let (parent, read_parent) = read::<u64>(task, layout.task_real_parent);
+    if !read_parent || parent == 0 {
         return false;
-    };
-    let parent_tgid = read::<u32>(parent, layout.task_tgid);
-    let parent_start = start_of(parent, &layout);
-    event.parent_tgid = parent_tgid.unwrap_or(0);
-    event.parent_start_ns = parent_start.unwrap_or(0);
-    start.is_some() && parent_tgid.is_some() && parent_start.is_some()
+    }
+    let (parent_tgid, read_parent_tgid) = read::<u32>(parent, layout.task_tgid);
+    let (parent_start, read_parent_start) = start_of(parent, &layout);
+    event.parent_tgid = parent_tgid;
+    event.parent_start_ns = parent_start;
+    read_start && read_parent_tgid && read_parent_start
 }
 
 /// The start of the process `task` belongs to: its thread group leader's
 /// `start_boottime`, because a thread's own start is not the process's.
+/// Zero and `false` when either read failed.
 #[inline(always)]
-fn start_of(task: u64, layout: &ProcessLayout) -> Option<u64> {
-    let leader = read::<u64>(task, layout.task_group_leader).filter(|l| *l != 0)?;
+fn start_of(task: u64, layout: &ProcessLayout) -> (u64, bool) {
+    let (leader, read_leader) = read::<u64>(task, layout.task_group_leader);
+    if !read_leader || leader == 0 {
+        return (0, false);
+    }
     read::<u64>(leader, layout.task_start_boottime)
 }
 
@@ -204,14 +210,23 @@ fn layout() -> Option<ProcessLayout> {
     PROCESS_LAYOUT.get(0).copied().filter(|l| l.valid != 0)
 }
 
-/// Read a `T` at `offset` into the kernel object at `base`.
+/// Read a `T` at `offset` into the kernel object at `base`, with whether the
+/// read succeeded.
+///
+/// A failed read answers zero rather than nothing. An `Option` carried across
+/// the next helper call leaves its payload register undefined on the `None`
+/// path, the compiler is free to spill that register anyway, and the verifier
+/// refuses a program that stores a register it never saw written.
 #[inline(always)]
-fn read<T>(base: u64, offset: u32) -> Option<T> {
+fn read<T: Default>(base: u64, offset: u32) -> (T, bool) {
     if base == 0 {
-        return None;
+        return (T::default(), false);
     }
     let at = (base + u64::from(offset)) as *const T;
-    unsafe { bpf_probe_read_kernel(at) }.ok()
+    match unsafe { bpf_probe_read_kernel(at) } {
+        Ok(value) => (value, true),
+        Err(_) => (T::default(), false),
+    }
 }
 
 /// Write one record, returning whether it went.

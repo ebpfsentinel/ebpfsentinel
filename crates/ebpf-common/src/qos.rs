@@ -398,6 +398,30 @@ pub const fn qos_ps_per_byte(rate_bps: u64) -> u64 {
     if ps == 0 { 1 } else { ps }
 }
 
+/// Nanoseconds `len` bytes occupy on the wire at `ps_per_byte`.
+///
+/// Written so that no product can overflow, rather than with an overflow
+/// check: `u64::saturating_mul`, and a hand-written `len > u64::MAX / ps`
+/// guard just the same, are recognised by LLVM as a checked multiply and
+/// lowered to a 128-bit one, which the BPF target emits as a call to the
+/// `__multi3` libcall, a symbol no kernel provides, so the program would not
+/// load. Splitting the rate into whole nanoseconds and the picosecond
+/// remainder keeps both products inside 64 bits once the whole part is held
+/// to `u32::MAX` nanoseconds per byte, which only a rate under 2 bit/s
+/// reaches, and such a rate is paced as 2 bit/s.
+#[must_use]
+pub const fn qos_spacing_ns(len: u32, ps_per_byte: u64) -> u64 {
+    let len = len as u64;
+    let whole = ps_per_byte / 1000;
+    let whole = if whole > u32::MAX as u64 {
+        u32::MAX as u64
+    } else {
+        whole
+    };
+    let rest = ps_per_byte % 1000;
+    len * whole + len * rest / 1000
+}
+
 // SAFETY: both are #[repr(C)], Copy, 'static and made of u64 fields only, so
 // they hold no padding and every bit pattern is a valid value.
 #[cfg(feature = "userspace")]
@@ -629,6 +653,27 @@ mod tests {
         assert_eq!(qos_ps_per_byte(8_000_000_000_000), 1);
         assert_eq!(qos_ps_per_byte(u64::MAX), 1);
         assert_eq!(qos_ps_per_byte(0), 0);
+    }
+
+    #[test]
+    fn a_packet_is_spaced_by_the_time_its_bytes_occupy() {
+        // 1500 bytes at 1 Gbit/s take 12 microseconds.
+        assert_eq!(qos_spacing_ns(1500, qos_ps_per_byte(1_000_000_000)), 12_000);
+        // Sub-nanosecond bytes still add up: 1500 bytes at 10 Gbit/s.
+        assert_eq!(qos_spacing_ns(1500, qos_ps_per_byte(10_000_000_000)), 1_200);
+        assert_eq!(qos_spacing_ns(1, 1), 0);
+        assert_eq!(qos_spacing_ns(1000, 1), 1);
+        assert_eq!(qos_spacing_ns(1500, 0), 0);
+        assert_eq!(qos_spacing_ns(0, 8_000), 0);
+        // The largest skb at the slowest rate stays inside 64 bits.
+        let slowest = qos_ps_per_byte(1);
+        let expected = u64::from(u32::MAX) * u64::from(u32::MAX)
+            + u64::from(u32::MAX) * (slowest % 1000) / 1000;
+        assert_eq!(qos_spacing_ns(u32::MAX, slowest), expected);
+        // A rate under 2 bit/s is paced as 2 bit/s rather than wrapping.
+        let held = u64::from(u32::MAX) * u64::from(u32::MAX)
+            + u64::from(u32::MAX) * (u64::MAX % 1000) / 1000;
+        assert_eq!(qos_spacing_ns(u32::MAX, u64::MAX), held);
     }
 
     #[test]

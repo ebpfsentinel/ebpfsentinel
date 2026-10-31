@@ -2,14 +2,21 @@
 
 //! kfunc-aware eBPF program loader (kernel 5.18+ for module kfuncs).
 //!
-//! aya 0.16.0 relocates a kfunc call only when the kfunc lives in vmlinux: a
-//! kfunc call is a `BPF_PSEUDO_KFUNC_CALL` instruction whose `imm` must hold
+//! A kfunc call is a `BPF_PSEUDO_KFUNC_CALL` instruction whose `imm` must hold
 //! the kfunc's kernel BTF id and whose `off` indexes a program-load `fd_array`
-//! of module BTF fds, and aya always writes `off = 0` and loads no `fd_array`,
-//! so a module kfunc such as the conntrack family cannot load through it.
-//! This module fills that gap outside aya, the same way [`super::bpf_token`]
-//! adds features aya lacks via raw syscalls. `CONTRIBUTING.md` records the full upstream surface this loader
-//! depends on and what a future aya bump costs.
+//! of module BTF fds. `aya-obj` 0.6 resolves typed ksyms against vmlinux and
+//! always writes `off = 0`, so a module kfunc such as the conntrack family is
+//! out of its reach by design. It does not reach our vmlinux kfuncs either:
+//! it resolves only externs declared in a `.ksyms` BTF section, and the BTF
+//! `bpf-linker` emits for an `extern "C"` item carries none, so its relocation
+//! pass stops on the first call site with `ExternNotFound`. That is asserted
+//! against the built objects by `tests/kfunc_upstream_resolution.rs`, which
+//! fails the day upstream starts answering, and until then every kfunc,
+//! vmlinux or module, is resolved by [`super::kfunc::KfuncResolver`] and
+//! relocated here. The token path needs this loader regardless, the same way
+//! [`super::bpf_token`] adds what aya lacks via raw syscalls.
+//! `CONTRIBUTING.md` records the full upstream surface this loader depends on
+//! and what a future aya bump costs.
 //!
 //! The loader is deliberately surgical so the rest of the agent is untouched:
 //!
@@ -139,8 +146,7 @@ const NEG_EOPNOTSUPP: i32 = -95;
 
 /// Device-bound-only XDP receive-metadata kfuncs. The verifier rejects these
 /// unless the program is loaded device-bound, so an object calling any of them
-/// must route through this loader even when it uses no module kfuncs - aya can
-/// neither set `prog_ifindex` nor neutralize the calls.
+/// is loaded with `prog_ifindex` set, or with the calls neutralized.
 const DEV_BOUND_METADATA_KFUNCS: &[&str] = &[
     "bpf_xdp_metadata_rx_hash",
     "bpf_xdp_metadata_rx_timestamp",
@@ -283,9 +289,12 @@ pub fn find_kfunc_sites(elf: &[u8]) -> Result<Vec<KfuncSite>, KfuncLoaderError> 
     Ok(sites)
 }
 
-/// Whether the object calls any kfunc (and thus needs this loader).
-pub fn has_kfunc_calls(elf: &[u8]) -> bool {
-    find_kfunc_sites(elf).is_ok_and(|s| !s.is_empty())
+/// Distinct kfunc names the object calls, in first-seen order. Every one of
+/// them is resolved by [`KfuncResolver`] and relocated by this loader, vmlinux
+/// and module alike: `aya-obj` finds no extern to resolve in an object
+/// `bpf-linker` produced, because that BTF carries no `.ksyms` section.
+pub fn called_kfuncs(elf: &[u8]) -> Result<Vec<String>, KfuncLoaderError> {
+    Ok(unique_names(&find_kfunc_sites(elf)?))
 }
 
 /// Distinct kfunc names in first-seen order. The index of a name here is the
@@ -300,50 +309,11 @@ fn unique_names(sites: &[KfuncSite]) -> Vec<String> {
     names
 }
 
-/// How an object's kfunc usage decides its load strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KfuncClass {
-    /// No kfunc calls - load with plain aya.
-    None,
-    /// Only vmlinux kfuncs (`off == 0`, no `fd_array`) **and** none that require
-    /// a device-bound program - prepatch the resolved btf ids and let aya load
-    /// **and** attach the program unchanged.
-    VmlinuxOnly,
-    /// Needs the raw loader because aya cannot emit what the object requires: a
-    /// module-kfunc `fd_array`, or a device-bound load (`prog_ifindex` +
-    /// `BPF_F_XDP_DEV_BOUND_ONLY`) / neutralization for device-bound-only
-    /// metadata kfuncs. Also needs a raw attach.
-    HasModule,
-}
-
 /// Whether the object calls any device-bound-only XDP metadata kfunc, which
-/// forces the raw loader (aya can neither neutralize the call nor bind the
-/// program to a device).
+/// is loaded device-bound first and neutralized when the device refuses.
 pub fn uses_dev_bound_metadata_kfuncs(elf: &[u8]) -> bool {
     find_kfunc_sites(elf)
         .is_ok_and(|sites| sites.iter().any(|s| is_dev_bound_metadata_kfunc(&s.name)))
-}
-
-/// Classify an object by the kfuncs it calls, resolving each against the
-/// running kernel. Drives whether a program loads via aya or the raw path.
-pub fn classify(elf: &[u8], resolver: &KfuncResolver) -> Result<KfuncClass, KfuncLoaderError> {
-    let names = unique_names(&find_kfunc_sites(elf)?);
-    if names.is_empty() {
-        return Ok(KfuncClass::None);
-    }
-    let mut needs_raw = false;
-    for name in &names {
-        // A module kfunc needs the fd_array; a device-bound metadata kfunc
-        // needs prog_ifindex or neutralization - neither is expressible in aya.
-        if resolver.resolve(name)?.module_name.is_some() || is_dev_bound_metadata_kfunc(name) {
-            needs_raw = true;
-        }
-    }
-    Ok(if needs_raw {
-        KfuncClass::HasModule
-    } else {
-        KfuncClass::VmlinuxOnly
-    })
 }
 
 /// Rewrite every kfunc call site in `elf`, deriving each instruction's `imm`
@@ -393,37 +363,17 @@ fn patch_sites(
 }
 
 /// Rewrite every kfunc call in `elf` to a sentinel name-index (in `imm`) so
-/// aya's loader will host the maps and skip these calls, while
+/// `aya-obj`'s call relocation skips these calls, while
 /// [`load_kfunc_programs`] later rewrites each sentinel to its real
-/// `(btf_id, fd_array index)`. Use for [`KfuncClass::HasModule`] objects.
+/// `(btf_id, fd_array index)`.
 pub fn prepatch_kfunc_calls(elf: &[u8]) -> Result<Vec<u8>, KfuncLoaderError> {
-    let names = unique_names(&find_kfunc_sites(elf)?);
+    let names = called_kfuncs(elf)?;
     patch_sites(elf, |name| {
         let idx = names
             .iter()
             .position(|n| n == name)
             .expect("site name is in names");
         Ok((i32::try_from(idx).expect("site index fits i32"), 0))
-    })
-}
-
-/// Rewrite every kfunc call in `elf` to its resolved vmlinux `btf_id`
-/// (`off == 0`), producing an object aya can load **and** attach unchanged.
-/// Errors if any site resolves to a module kfunc - those must route through
-/// [`prepatch_kfunc_calls`] + [`load_kfunc_programs`] instead. Use for
-/// [`KfuncClass::VmlinuxOnly`] objects.
-pub fn prepatch_vmlinux_kfuncs(
-    elf: &[u8],
-    resolver: &KfuncResolver,
-) -> Result<Vec<u8>, KfuncLoaderError> {
-    patch_sites(elf, |name| {
-        let target = resolver.resolve(name)?;
-        if target.module_name.is_some() {
-            return Err(KfuncLoaderError::Relocate(format!(
-                "kfunc `{name}` is a module kfunc; needs the fd_array loader"
-            )));
-        }
-        Ok((i32::try_from(target.btf_id).expect("btf id fits i32"), 0))
     })
 }
 
