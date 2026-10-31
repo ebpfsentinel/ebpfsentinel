@@ -101,6 +101,14 @@ impl LearningScope {
                         .map_err(|e| LearningError::InvalidScope {
                             reason: e.to_string(),
                         })?;
+                    if selector.names_lineage() {
+                        return Err(LearningError::InvalidScope {
+                            reason: "a learning scope is matched on the flows the agent \
+                                     observed, which carry no chain of parents, so it names \
+                                     no parent or ancestor"
+                                .to_string(),
+                        });
+                    }
                 }
                 Ok(())
             }
@@ -434,6 +442,30 @@ mod tests {
         };
         assert!(scope.admits(&facts(None, Some("nginx.service"), None)));
         assert!(!scope.admits(&facts(None, Some("sshd.service"), None)));
+    }
+
+    #[test]
+    fn a_workload_scope_names_no_lineage() {
+        let scope = LearningScope::Workloads {
+            selectors: vec![
+                WorkloadSelector::with_lineage(
+                    None,
+                    None,
+                    None,
+                    None,
+                    crate::firewall::workload::KubernetesMatchers::default(),
+                    crate::firewall::workload::LineageMatchers {
+                        parent: None,
+                        ancestor: Some("/usr/sbin/nginx".to_string()),
+                    },
+                )
+                .unwrap(),
+            ],
+        };
+        assert!(matches!(
+            scope.validate(),
+            Err(LearningError::InvalidScope { .. })
+        ));
     }
 
     #[test]

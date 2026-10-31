@@ -5990,4 +5990,79 @@ firewall:
                 .is_err()
         );
     }
+
+    #[test]
+    fn a_rule_names_the_parent_or_the_ancestor_its_tasks_were_started_under() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+firewall:
+  rules:
+    - id: fw-nginx-children
+      priority: 10
+      action: deny
+      workload:
+        ancestor: /usr/sbin/nginx
+    - id: fw-shell-curl
+      priority: 20
+      action: deny
+      workload:
+        exe: /usr/bin/curl
+        parent: /usr/bin/bash
+";
+        let rules = AgentConfig::from_yaml(yaml)
+            .and_then(|config| config.firewall_rules())
+            .unwrap();
+        let first = &rules[0].workload.as_ref().unwrap().selector;
+        assert_eq!(first.ancestor.as_deref(), Some("/usr/sbin/nginx"));
+        assert!(first.lineage_only());
+        let second = &rules[1].workload.as_ref().unwrap().selector;
+        assert_eq!(second.parent.as_deref(), Some("/usr/bin/bash"));
+        assert_eq!(second.exe.as_deref(), Some("/usr/bin/curl"));
+    }
+
+    #[test]
+    fn a_selector_naming_both_a_parent_and_an_ancestor_is_refused() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+firewall:
+  rules:
+    - id: fw-both
+      priority: 10
+      action: deny
+      workload:
+        parent: /usr/bin/bash
+        ancestor: /usr/sbin/nginx
+";
+        assert!(
+            AgentConfig::from_yaml(yaml)
+                .and_then(|config| config.firewall_rules())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_rule_naming_a_destination_by_name_names_no_lineage() {
+        let yaml = r"
+agent:
+  interfaces: [eth0]
+firewall:
+  workload_dns:
+    resolvers: [10.96.0.10]
+  rules:
+    - id: fw-api
+      priority: 10
+      action: allow
+      workload:
+        container: payments
+        ancestor: /usr/sbin/nginx
+        fqdn: [api.example.com]
+";
+        let err = AgentConfig::from_yaml(yaml)
+            .and_then(|config| config.firewall_rules())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ancestor"), "unexpected error: {err}");
+    }
 }

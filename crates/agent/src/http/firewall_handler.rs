@@ -147,6 +147,12 @@ pub struct RuleWorkloadResponse {
     /// service account, which only a Kubernetes node can resolve.
     #[serde(skip_serializing_if = "is_false")]
     pub kubernetes: bool,
+    /// Executable the task's direct parent must run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Executable some ancestor of the task must run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ancestor: Option<String>,
     /// Destinations named by DNS name in place of an address.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fqdn: Vec<String>,
@@ -163,6 +169,8 @@ impl From<&WorkloadMatch> for RuleWorkloadResponse {
             cgroup: s.cgroup.clone(),
             container: s.container.clone(),
             kubernetes: s.pods.is_some() || s.namespaces.is_some() || s.service_account.is_some(),
+            parent: s.parent.clone(),
+            ancestor: s.ancestor.clone(),
             fqdn: w.fqdn.iter().map(ToString::to_string).collect(),
             mode: w.mode.as_str(),
         }
@@ -1000,7 +1008,7 @@ fn resolve_workload(
                 message: format!("no task {pid} in the process table"),
             });
         };
-        return Ok(service.resolve(&entry));
+        return Ok(service.resolve(&entry).with_ancestry(&table.lineage(pid)));
     }
 
     facts_from_query(query)

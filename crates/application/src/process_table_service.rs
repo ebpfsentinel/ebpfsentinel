@@ -799,6 +799,15 @@ mod tests {
             Ok(())
         }
 
+        fn note_lineage_executable(
+            &mut self,
+            _path: &str,
+            _dev: u64,
+            _inode: u64,
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+
         fn forget_task(&mut self, tgid: u32) -> Result<(), domain::common::error::DomainError> {
             self.0.lock().unwrap().retain(|(held, _)| *held != tgid);
             Ok(())

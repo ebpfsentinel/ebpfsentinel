@@ -45,7 +45,8 @@ use domain::firewall::workload::{
     WorkloadDenial, WorkloadDenialRecord, WorkloadFacts, WorkloadPolicy, WorkloadReach,
     cgroup_path_of, unit_of,
 };
-use domain::process::entity::ProcessEntry;
+use domain::process::engine::Lineage;
+use domain::process::entity::{ProcessEntry, ProcessIdentity};
 use ebpf_common::workload_policy::WORKLOAD_POLICY_MAX_RULES;
 use ports::secondary::workload_policy_map_port::WorkloadPolicyMapPort;
 use tracing::{debug, info, warn};
@@ -73,9 +74,31 @@ pub struct ResolvedWorkload {
     pub namespace_labels: Option<BTreeMap<String, String>>,
     /// Service account the pod runs as.
     pub service_account: Option<String>,
+    /// Executables of the processes above this one, parent first, where the
+    /// process table was asked. The kernel walks the live chain itself at
+    /// the call; this is the same chain as the table remembers it, for an
+    /// answer about a task rather than for a decision.
+    pub ancestry: Option<Vec<String>>,
 }
 
 impl ResolvedWorkload {
+    /// This workload, with the chain the process table holds above it.
+    ///
+    /// An ancestor whose executable the table never read is kept as an empty
+    /// path rather than dropped, so the parent stays first: an empty path
+    /// matches no rule, while dropping it would promote the grandparent.
+    #[must_use]
+    pub fn with_ancestry(mut self, lineage: &Lineage) -> Self {
+        self.ancestry = Some(
+            lineage
+                .ancestors
+                .iter()
+                .map(|a| a.identity.path().unwrap_or_default().to_owned())
+                .collect(),
+        );
+        self
+    }
+
     /// The borrowed form a selector is matched against.
     #[must_use]
     pub fn facts(&self) -> WorkloadFacts<'_> {
@@ -88,6 +111,7 @@ impl ResolvedWorkload {
             pod_labels: self.pod_labels.as_ref(),
             namespace_labels: self.namespace_labels.as_ref(),
             service_account: self.service_account.as_deref(),
+            ancestry: self.ancestry.as_deref(),
         }
     }
 }
@@ -449,7 +473,11 @@ impl WorkloadPolicyService {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut masks = SelectorMasks::default();
         for (bit, selector) in policy.selectors().enumerate() {
-            if !selector.matches(facts) {
+            // The lineage half of a selector is the kernel's to check, at the
+            // call and against the live parent chain, so it is left out here.
+            // A selector naming nothing else is satisfied by every task but
+            // for that half, which the kernel already knows without a mask.
+            if selector.lineage_only() || !selector.matches_besides_lineage(facts) {
                 continue;
             }
             let bit = 1u64 << (bit & 63);
@@ -502,6 +530,16 @@ impl WorkloadPolicyService {
         }
         if let Err(err) = maps.set_task_selectors(entry.pid, masks.task) {
             warn!(pid = entry.pid, error = %err, "a task's workload selectors were not written");
+        }
+        if let ProcessIdentity::Path { path, dev, inode } = &entry.identity
+            && let Err(err) = maps.note_lineage_executable(path, *dev, *inode)
+        {
+            warn!(
+                pid = entry.pid,
+                path,
+                error = %err,
+                "an executable a lineage rule names was not recorded"
+            );
         }
         if !masks.is_empty() {
             debug!(
@@ -927,11 +965,10 @@ mod tests {
     use domain::firewall::entity::{FirewallAction, IpNetwork};
     use domain::firewall::fqdn::{DnsDirection, FqdnPattern, WorkloadDnsSettings};
     use domain::firewall::workload::{
-        DestinationAddr, KubernetesMatchers, WorkloadDestination, WorkloadHook, WorkloadMode,
-        WorkloadRule, WorkloadSelector,
+        DestinationAddr, KubernetesMatchers, LineageMatchers, WorkloadDestination, WorkloadHook,
+        WorkloadMode, WorkloadRule, WorkloadSelector,
     };
     use domain::netpol::LabelSelector;
-    use domain::process::entity::ProcessIdentity;
 
     use super::*;
 
@@ -942,6 +979,7 @@ mod tests {
         published: usize,
         denials: Vec<u64>,
         grants: HashMap<FqdnGrantKey, u64>,
+        executables: Vec<(String, u64, u64)>,
     }
 
     #[derive(Clone, Default)]
@@ -990,6 +1028,20 @@ mod tests {
             let mut held = self.0.lock().unwrap();
             held.cgroups.clear();
             held.tasks.clear();
+            Ok(())
+        }
+
+        fn note_lineage_executable(
+            &mut self,
+            path: &str,
+            dev: u64,
+            inode: u64,
+        ) -> Result<(), DomainError> {
+            self.0
+                .lock()
+                .unwrap()
+                .executables
+                .push((path.to_string(), dev, inode));
             Ok(())
         }
     }
@@ -1083,6 +1135,93 @@ mod tests {
         let held = maps.0.lock().unwrap();
         assert_eq!(held.tasks.get(&99), Some(&0b01));
         assert_eq!(held.cgroups.get(&4242), Some(&0b10));
+    }
+
+    fn lineage_rule(id: &str, exe: Option<&str>, ancestor: &str) -> WorkloadRule {
+        rule(
+            id,
+            WorkloadSelector::with_lineage(
+                exe.map(str::to_string),
+                None,
+                None,
+                None,
+                KubernetesMatchers::default(),
+                LineageMatchers {
+                    parent: None,
+                    ancestor: Some(ancestor.to_string()),
+                },
+            )
+            .expect("a valid lineage selector"),
+        )
+    }
+
+    #[test]
+    fn a_lineage_is_left_to_the_kernel_and_the_rest_of_the_selector_is_not() {
+        // A selector naming only a lineage has nothing for a mask to say:
+        // the kernel gates it on the chain it walks at the call. One naming
+        // an executable as well lands on the task by the executable, and the
+        // kernel narrows it by the chain the same way.
+        let maps = SharedMaps::default();
+        let service = service(
+            vec![
+                lineage_rule("alone", None, "/usr/sbin/nginx"),
+                lineage_rule("curl", Some("/usr/bin/curl"), "/usr/sbin/nginx"),
+            ],
+            maps.clone(),
+        );
+
+        service.record_exec(&entry(21, "/usr/bin/curl"));
+        service.record_exec(&entry(22, "/usr/bin/wget"));
+
+        let held = maps.0.lock().unwrap();
+        assert_eq!(held.tasks.get(&21), Some(&0b10));
+        assert_eq!(held.tasks.get(&22), Some(&0));
+        assert_eq!(held.cgroups.get(&4242), Some(&0));
+    }
+
+    #[test]
+    fn every_exec_offers_the_file_it_ran_for_a_lineage_to_recognise() {
+        let maps = SharedMaps::default();
+        let service = service(
+            vec![lineage_rule("alone", None, "/usr/sbin/nginx")],
+            maps.clone(),
+        );
+
+        service.record_exec(&entry(30, "/usr/sbin/nginx"));
+
+        assert_eq!(
+            maps.0.lock().unwrap().executables,
+            vec![("/usr/sbin/nginx".to_string(), 1, 2)]
+        );
+    }
+
+    #[test]
+    fn the_chain_the_table_holds_answers_which_rules_reach_a_task() {
+        let service = service(
+            vec![
+                lineage_rule("under-nginx", None, "/usr/sbin/nginx"),
+                exe_rule("curl", "/usr/bin/curl"),
+            ],
+            SharedMaps::default(),
+        );
+        let lineage = Lineage {
+            ancestors: vec![entry(2, "/usr/bin/bash"), entry(1, "/usr/sbin/nginx")],
+            truncated: false,
+            incomplete: false,
+        };
+        let resolved = workload_of(&entry(3, "/usr/bin/curl")).with_ancestry(&lineage);
+        assert_eq!(
+            resolved.ancestry.as_deref(),
+            Some(&["/usr/bin/bash".to_string(), "/usr/sbin/nginx".to_string()][..])
+        );
+        let reach = service.reach_for(&resolved.facts()).unwrap();
+        let ids: Vec<_> = reach.iter().map(|r| r.rule.0.as_str()).collect();
+        assert_eq!(ids, ["under-nginx", "curl"]);
+
+        let orphan = workload_of(&entry(3, "/usr/bin/curl"));
+        let reach = service.reach_for(&orphan.facts()).unwrap();
+        let ids: Vec<_> = reach.iter().map(|r| r.rule.0.as_str()).collect();
+        assert_eq!(ids, ["curl"]);
     }
 
     #[test]

@@ -135,7 +135,7 @@ pub fn key_of(path: &str) -> std::io::Result<ExecNetKey> {
 
 /// Convert the `stat(2)` device encoding into the kernel's.
 #[must_use]
-fn key_from_stat(dev: u64, ino: u64) -> ExecNetKey {
+pub fn key_from_stat(dev: u64, ino: u64) -> ExecNetKey {
     ExecNetKey {
         ino,
         dev: kernel_dev(libc::major(dev), libc::minor(dev)),

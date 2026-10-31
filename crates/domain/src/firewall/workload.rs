@@ -101,7 +101,41 @@ pub struct WorkloadSelector {
     /// two accounts, and `namespaces` is what tells them apart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_account: Option<String>,
+    /// Absolute path of the executable the task's parent runs, compared on
+    /// the file rather than on the name: the kernel resolves the path to its
+    /// device and inode when the policy is loaded and compares those against
+    /// the parent's executable at the moment of the call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Absolute path of an executable that any ancestor of the task runs,
+    /// the parent included, compared the same way as `parent`. This is how
+    /// "`curl` under `nginx`" is written: the shell between them does not
+    /// break the chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ancestor: Option<String>,
 }
+
+/// The lineage half of a selector: what the task was started under.
+///
+/// Decided by the kernel at the socket hook, from the task's own chain of
+/// parents, so a task matched this way is matched before its first packet
+/// and not after userspace has read its exec.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineageMatchers {
+    /// Executable of the direct parent.
+    pub parent: Option<String>,
+    /// Executable of any ancestor.
+    pub ancestor: Option<String>,
+}
+
+/// How many generations the kernel walks up from the task to find an
+/// ancestor.
+///
+/// A process tree deeper than this between a service and the program it
+/// started is a tree nobody wrote a rule about; the walk is bounded because
+/// it runs inside every `connect()` of a task a lineage rule could name, and
+/// an ancestor above the bound is not seen.
+pub const WORKLOAD_LINEAGE_MAX_DEPTH: usize = 16;
 
 /// The Kubernetes half of a selector: what a pod is, rather than what runs
 /// in it.
@@ -152,6 +186,32 @@ impl WorkloadSelector {
         container: Option<String>,
         kubernetes: KubernetesMatchers,
     ) -> Result<Self, FirewallError> {
+        Self::with_lineage(
+            exe,
+            unit,
+            cgroup,
+            container,
+            kubernetes,
+            LineageMatchers::default(),
+        )
+    }
+
+    /// Build a selector that may also name what the task was started under.
+    ///
+    /// # Errors
+    ///
+    /// The refusals [`Self::with_kubernetes`] documents, plus a lineage path
+    /// that is not absolute and a selector naming both a parent and an
+    /// ancestor: the kernel carries one lineage condition per selector, and
+    /// the parent is an ancestor already.
+    pub fn with_lineage(
+        exe: Option<String>,
+        unit: Option<String>,
+        cgroup: Option<String>,
+        container: Option<String>,
+        kubernetes: KubernetesMatchers,
+        lineage: LineageMatchers,
+    ) -> Result<Self, FirewallError> {
         let selector = Self {
             exe: trimmed(exe),
             unit: trimmed(unit),
@@ -160,6 +220,8 @@ impl WorkloadSelector {
             pods: kubernetes.pods,
             namespaces: kubernetes.namespaces,
             service_account: trimmed(kubernetes.service_account),
+            parent: trimmed(lineage.parent),
+            ancestor: trimmed(lineage.ancestor),
         };
         selector.validate()?;
         Ok(selector)
@@ -174,7 +236,7 @@ impl WorkloadSelector {
         if self.is_empty() {
             return Err(FirewallError::InvalidWorkloadSelector {
                 reason: "a workload selector must name at least one of exe, unit, cgroup, \
-                         container, pods, namespaces or service_account"
+                         container, pods, namespaces, service_account, parent or ancestor"
                     .to_string(),
             });
         }
@@ -199,9 +261,18 @@ impl WorkloadSelector {
                 });
             }
         }
+        if self.parent.is_some() && self.ancestor.is_some() {
+            return Err(FirewallError::InvalidWorkloadSelector {
+                reason: "a workload selector names a parent or an ancestor, not both: the \
+                         parent is an ancestor already, so write the narrower one"
+                    .to_string(),
+            });
+        }
         for (field, value) in [
             ("exe", self.exe.as_deref()),
             ("cgroup", self.cgroup.as_deref()),
+            ("parent", self.parent.as_deref()),
+            ("ancestor", self.ancestor.as_deref()),
         ] {
             if let Some(value) = value
                 && !value.starts_with('/')
@@ -284,6 +355,29 @@ impl WorkloadSelector {
         self.exe.is_some()
     }
 
+    /// Whether this selector names what the task was started under.
+    ///
+    /// Such a selector is decided in two halves: everything else it names is
+    /// resolved in userspace like any other selector, and the lineage is
+    /// checked by the kernel at the call, which is what keeps a task from
+    /// slipping out in the moment between its exec and userspace reading it.
+    #[must_use]
+    pub fn names_lineage(&self) -> bool {
+        self.parent.is_some() || self.ancestor.is_some()
+    }
+
+    /// Whether the lineage is the only thing this selector names, so the
+    /// kernel can decide it alone for every task on the node.
+    #[must_use]
+    pub fn lineage_only(&self) -> bool {
+        self.names_lineage()
+            && self.exe.is_none()
+            && self.unit.is_none()
+            && self.cgroup.is_none()
+            && self.container.is_none()
+            && !self.names_kubernetes()
+    }
+
     /// The matchers that are set, as field name and value.
     pub fn matchers(&self) -> impl Iterator<Item = (&'static str, &str)> {
         [
@@ -292,6 +386,8 @@ impl WorkloadSelector {
             ("cgroup", self.cgroup.as_deref()),
             ("container", self.container.as_deref()),
             ("service_account", self.service_account.as_deref()),
+            ("parent", self.parent.as_deref()),
+            ("ancestor", self.ancestor.as_deref()),
         ]
         .into_iter()
         .filter_map(|(field, value)| value.map(|value| (field, value)))
@@ -303,6 +399,30 @@ impl WorkloadSelector {
     /// match: see the module header for why absence is read that way.
     #[must_use]
     pub fn matches(&self, facts: &WorkloadFacts<'_>) -> bool {
+        if let Some(parent) = self.parent.as_deref()
+            && facts
+                .ancestry
+                .and_then(<[String]>::first)
+                .map(String::as_str)
+                != Some(parent)
+        {
+            return false;
+        }
+        if let Some(ancestor) = self.ancestor.as_deref()
+            && !facts
+                .ancestry
+                .is_some_and(|chain| chain.iter().any(|exe| exe == ancestor))
+        {
+            return false;
+        }
+        self.matches_besides_lineage(facts)
+    }
+
+    /// Whether `facts` satisfy every matcher but the parent and the
+    /// ancestor, which the kernel checks against the live chain of parents
+    /// at the call.
+    #[must_use]
+    pub fn matches_besides_lineage(&self, facts: &WorkloadFacts<'_>) -> bool {
         if let Some(exe) = self.exe.as_deref()
             && facts.exe != Some(exe)
         {
@@ -471,6 +591,9 @@ pub struct WorkloadFacts<'a> {
     pub namespace_labels: Option<&'a BTreeMap<String, String>>,
     /// Service account the pod runs as.
     pub service_account: Option<&'a str>,
+    /// Executables of the task's ancestors, the parent first, as far up as
+    /// they were read.
+    pub ancestry: Option<&'a [String]>,
 }
 
 /// Where a task is trying to go, as the socket hook sees it.
@@ -1234,6 +1357,98 @@ mod tests {
             refused,
             Err(FirewallError::InvalidWorkloadSelector { .. })
         ));
+    }
+
+    fn under(parent: Option<&str>, ancestor: Option<&str>, exe: Option<&str>) -> WorkloadSelector {
+        WorkloadSelector::with_lineage(
+            exe.map(str::to_string),
+            None,
+            None,
+            None,
+            KubernetesMatchers::default(),
+            LineageMatchers {
+                parent: parent.map(str::to_string),
+                ancestor: ancestor.map(str::to_string),
+            },
+        )
+        .expect("a valid lineage selector")
+    }
+
+    #[test]
+    fn a_lineage_alone_is_a_selector_and_names_no_other_fact() {
+        let alone = under(None, Some("/usr/sbin/nginx"), None);
+        assert!(alone.names_lineage());
+        assert!(alone.lineage_only());
+        let narrowed = under(Some("/usr/sbin/nginx"), None, Some("/usr/bin/curl"));
+        assert!(narrowed.names_lineage());
+        assert!(!narrowed.lineage_only());
+        assert!(!selector("/usr/bin/curl").names_lineage());
+    }
+
+    #[test]
+    fn a_selector_names_a_parent_or_an_ancestor_and_never_both() {
+        let both = WorkloadSelector::with_lineage(
+            None,
+            None,
+            None,
+            None,
+            KubernetesMatchers::default(),
+            LineageMatchers {
+                parent: Some("/usr/sbin/nginx".to_string()),
+                ancestor: Some("/usr/sbin/sshd".to_string()),
+            },
+        );
+        assert!(matches!(
+            both,
+            Err(FirewallError::InvalidWorkloadSelector { .. })
+        ));
+        let relative = WorkloadSelector::with_lineage(
+            None,
+            None,
+            None,
+            None,
+            KubernetesMatchers::default(),
+            LineageMatchers {
+                parent: Some("nginx".to_string()),
+                ancestor: None,
+            },
+        );
+        assert!(relative.is_err());
+    }
+
+    #[test]
+    fn a_parent_is_the_first_link_and_an_ancestor_is_any_of_them() {
+        let chain = ["/usr/bin/bash".to_string(), "/usr/sbin/nginx".to_string()];
+        let facts = WorkloadFacts {
+            exe: Some("/usr/bin/curl"),
+            ancestry: Some(&chain),
+            ..WorkloadFacts::default()
+        };
+        assert!(under(Some("/usr/bin/bash"), None, None).matches(&facts));
+        assert!(!under(Some("/usr/sbin/nginx"), None, None).matches(&facts));
+        assert!(under(None, Some("/usr/sbin/nginx"), None).matches(&facts));
+        assert!(under(None, Some("/usr/bin/bash"), None).matches(&facts));
+        assert!(!under(None, Some("/usr/sbin/sshd"), None).matches(&facts));
+        // The other matchers still apply on top of the lineage.
+        assert!(!under(None, Some("/usr/sbin/nginx"), Some("/usr/bin/wget")).matches(&facts));
+        assert!(
+            under(None, Some("/usr/sbin/nginx"), Some("/usr/bin/wget")).matches_besides_lineage(
+                &WorkloadFacts {
+                    exe: Some("/usr/bin/wget"),
+                    ..WorkloadFacts::default()
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn a_chain_the_agent_could_not_read_satisfies_no_lineage() {
+        let facts = WorkloadFacts {
+            exe: Some("/usr/bin/curl"),
+            ..WorkloadFacts::default()
+        };
+        assert!(!under(None, Some("/usr/sbin/nginx"), None).matches(&facts));
+        assert!(!under(Some("/usr/sbin/nginx"), None, None).matches(&facts));
     }
 
     #[test]

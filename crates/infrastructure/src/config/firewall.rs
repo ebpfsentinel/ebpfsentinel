@@ -7,7 +7,7 @@ use domain::firewall::entity::{FirewallAction, FirewallRule, PortRange, Scope as
 use domain::firewall::exec_network::NetworkExecutables;
 use domain::firewall::fqdn::{DEFAULT_GRACE_SECS, FqdnPattern, WorkloadDnsSettings};
 use domain::firewall::workload::{
-    KubernetesMatchers, WorkloadMatch, WorkloadMode, WorkloadSelector,
+    KubernetesMatchers, LineageMatchers, WorkloadMatch, WorkloadMode, WorkloadSelector,
 };
 use domain::netpol::LabelSelector;
 use serde::{Deserialize, Serialize};
@@ -462,6 +462,18 @@ pub struct WorkloadMatchConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_account: Option<String>,
 
+    /// Absolute path of the executable the task's direct parent runs.
+    /// Checked by the kernel at the call against the live parent, so a task
+    /// is named before its first packet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+
+    /// Absolute path of an executable any ancestor of the task runs, the
+    /// parent included: `curl` started by a shell started by `nginx` is under
+    /// `nginx`. Exclusive with `parent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ancestor: Option<String>,
+
     /// `observe`, the default, or `enforce`. A rule says this for itself
     /// rather than inheriting it, because the first policy anybody writes is
     /// wrong and a kernel refusing a connection is not something a deployment
@@ -492,7 +504,7 @@ impl WorkloadMatchConfig {
             expected: "observe, enforce".to_string(),
         })?;
 
-        let selector = WorkloadSelector::with_kubernetes(
+        let selector = WorkloadSelector::with_lineage(
             self.exe.clone(),
             self.unit.clone(),
             self.cgroup.clone(),
@@ -501,6 +513,10 @@ impl WorkloadMatchConfig {
                 pods: self.pods.clone(),
                 namespaces: self.namespaces.clone(),
                 service_account: self.service_account.clone(),
+            },
+            LineageMatchers {
+                parent: self.parent.clone(),
+                ancestor: self.ancestor.clone(),
             },
         )
         .map_err(|e| ConfigError::Validation {

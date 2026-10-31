@@ -120,8 +120,15 @@ pub const WORKLOAD_METRIC_EVENT_LOST: u32 = 8;
 /// that follows is refused as if the name had never resolved. Counting it is
 /// what tells that apart from a resolver answering nothing.
 pub const WORKLOAD_METRIC_DNS_LOST: u32 = 9;
+/// Metric index: lineage walks that reached the depth bound with a parent
+/// still above them.
+///
+/// An ancestor past the bound is not seen, so a rule naming it does not name
+/// the task. The count says whether that ever happens on this node rather
+/// than leaving it to be inferred from a rule that did not fire.
+pub const WORKLOAD_METRIC_LINEAGE_TRUNCATED: u32 = 10;
 /// How many counters the metrics array holds.
-pub const WORKLOAD_METRIC_COUNT: u32 = 10;
+pub const WORKLOAD_METRIC_COUNT: u32 = 11;
 
 /// `hook` on a denial record: the workload was connecting.
 pub const WORKLOAD_HOOK_CONNECT: u8 = 0;
@@ -173,6 +180,88 @@ pub const WORKLOAD_DNS_RESPONSE: u8 = 1;
 /// `fqdn` on a rule: the destination is the set of addresses learned for
 /// this rule from DNS, per cgroup, rather than `dst_addr`.
 pub const WORKLOAD_RULE_FQDN: u8 = 1;
+
+/// How many generations the hook walks up from the calling task looking for
+/// a parent or an ancestor a rule names.
+///
+/// The walk runs inside the `connect()` of every task a lineage rule could
+/// name, so it is bounded: sixteen generations is deeper than any service
+/// tree a rule is written about, and a walk that reaches the bound is
+/// counted under `WORKLOAD_METRIC_LINEAGE_TRUNCATED`.
+pub const WORKLOAD_LINEAGE_MAX_DEPTH: u32 = 16;
+
+/// Capacity of `WORKLOAD_LINEAGE_EXES`, the executables lineage rules name.
+///
+/// One selector names one path, so a full policy names at most sixty-four
+/// files; the rest is room for the inode an upgraded binary leaves behind,
+/// which a running parent still carries until it restarts.
+pub const WORKLOAD_LINEAGE_MAX_EXECUTABLES: u32 = 256;
+
+/// One executable, as the lineage walk names it: the inode of
+/// `mm->exe_file` and the kernel's encoding of its superblock's device.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct WorkloadExeKey {
+    pub ino: u64,
+    pub dev: u32,
+    pub _pad: u32,
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for WorkloadExeKey {}
+
+/// Which selectors an executable satisfies when it is found above a task.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WorkloadLineageBits {
+    /// Selectors whose `parent` is this executable: they hold when it is
+    /// the task's direct parent.
+    pub parent: u64,
+    /// Selectors whose `ancestor` is this executable: they hold when it is
+    /// anywhere above the task.
+    pub ancestor: u64,
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for WorkloadLineageBits {}
+
+/// The single slot of `WORKLOAD_LINEAGE_CONFIG`: which selectors carry a
+/// lineage condition and the offsets the walk reads, from the running
+/// kernel's BTF.
+///
+/// A selector bit in `lineage` holds only when the walk found its parent or
+/// ancestor, whatever the cgroup and task tables say: those carry the rest
+/// of the selector, resolved in userspace. While `valid` is zero the walk
+/// does not run and every lineage bit is withheld, so a rule naming a parent
+/// matches nothing rather than matching without its parent.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WorkloadLineageConfig {
+    /// Selectors carrying a parent or an ancestor condition.
+    pub lineage: u64,
+    /// Selectors naming a lineage and nothing else, which every task on the
+    /// node satisfies but for the walk.
+    pub unconditional: u64,
+    /// `task_struct.real_parent`
+    pub task_real_parent: u32,
+    /// `task_struct.mm`
+    pub task_mm: u32,
+    /// `mm_struct.exe_file`
+    pub mm_exe_file: u32,
+    /// `file.f_inode`
+    pub file_inode: u32,
+    /// `inode.i_ino`
+    pub inode_ino: u32,
+    /// `inode.i_sb`
+    pub inode_sb: u32,
+    /// `super_block.s_dev`
+    pub sb_dev: u32,
+    /// Non-zero once the offsets are complete.
+    pub valid: u32,
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for WorkloadLineageConfig {}
 
 /// One workload rule, in the form the kernel walks.
 ///
@@ -377,6 +466,18 @@ mod tests {
     }
 
     #[test]
+    fn the_lineage_types_are_the_size_both_sides_compiled_against() {
+        assert_eq!(mem::size_of::<WorkloadExeKey>(), 16);
+        assert_eq!(mem::size_of::<WorkloadLineageBits>(), 16);
+        assert_eq!(mem::size_of::<WorkloadLineageConfig>(), 48);
+    }
+
+    #[test]
+    fn a_full_policy_fits_the_lineage_table_with_room_for_upgrades() {
+        assert!(WORKLOAD_LINEAGE_MAX_EXECUTABLES as usize >= 2 * WORKLOAD_POLICY_MAX_SELECTORS);
+    }
+
+    #[test]
     fn every_rule_slot_fits_the_byte_the_fqdn_key_carries_it_in() {
         assert!(WORKLOAD_POLICY_MAX_RULES <= usize::from(u8::MAX) + 1);
     }
@@ -413,6 +514,7 @@ mod tests {
             WORKLOAD_METRIC_NO_RULE,
             WORKLOAD_METRIC_EVENT_LOST,
             WORKLOAD_METRIC_DNS_LOST,
+            WORKLOAD_METRIC_LINEAGE_TRUNCATED,
         ];
         assert_eq!(indices.len(), WORKLOAD_METRIC_COUNT as usize);
         for (position, index) in indices.iter().enumerate() {

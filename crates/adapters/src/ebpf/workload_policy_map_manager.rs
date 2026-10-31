@@ -20,23 +20,35 @@
 //! and `WORKLOAD_DNS_CAPTURE` turns on the reading of the workloads' DNS
 //! packets that fills it. Grants are keyed by slot too, so a publish clears
 //! them for the same reason it clears the masks.
+//!
+//! The last two serve selectors naming a parent or an ancestor, which no mask
+//! can carry: a task is under `nginx` because of the chain above it at the
+//! moment it connects, and that chain is the kernel's to read.
+//! `WORKLOAD_LINEAGE_EXES` maps each named executable, by inode and device,
+//! to the selectors it satisfies, and `WORKLOAD_LINEAGE_CONFIG` says which
+//! selectors are gated on the walk and where in the running kernel's
+//! structures the walk reads.
 
 use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, PerCpuValues};
 use domain::common::error::DomainError;
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use domain::firewall::entity::IpNetwork;
 use domain::firewall::fqdn::FqdnGrantKey;
-use domain::firewall::workload::{WorkloadPolicy, WorkloadRule};
+use domain::firewall::workload::{WorkloadPolicy, WorkloadRule, WorkloadSelector};
+use ebpf_common::exec_network::ExecNetKey;
 use ebpf_common::workload_policy::{
     WORKLOAD_ACTION_ALLOW, WORKLOAD_ACTION_DENY, WORKLOAD_FAMILY_ANY, WORKLOAD_FAMILY_IPV4,
     WORKLOAD_FAMILY_IPV6, WORKLOAD_MODE_ENFORCE, WORKLOAD_MODE_OBSERVE, WORKLOAD_POLICY_MAX_RULES,
-    WORKLOAD_RULE_FQDN, WorkloadFqdnKey, WorkloadRuleEntry,
+    WORKLOAD_RULE_FQDN, WorkloadExeKey, WorkloadFqdnKey, WorkloadLineageBits,
+    WorkloadLineageConfig, WorkloadRuleEntry,
 };
 use ports::secondary::workload_policy_map_port::WorkloadPolicyMapPort;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::ebpf::map_store::MapStore;
+use crate::ebpf::{exec_network, process_attach};
 
 /// Holds the three maps of the workload firewall object.
 pub struct WorkloadPolicyMapManager {
@@ -46,6 +58,81 @@ pub struct WorkloadPolicyMapManager {
     denials: PerCpuArray<MapData, u64>,
     fqdn: AyaHashMap<MapData, WorkloadFqdnKey, u64>,
     capture: Array<MapData, u32>,
+    lineage_exes: AyaHashMap<MapData, WorkloadExeKey, WorkloadLineageBits>,
+    lineage_config: Array<MapData, WorkloadLineageConfig>,
+    /// The offsets the walk reads, or why the running kernel's BTF did not
+    /// give them.
+    offsets: Result<WorkloadLineageConfig, String>,
+    /// The paths the policy in force names as a parent or an ancestor, with
+    /// the selectors each satisfies, so an exec can be checked against them.
+    lineage_paths: BTreeMap<String, WorkloadLineageBits>,
+}
+
+/// What a policy asks of the lineage walk.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct LineagePlan {
+    /// Bits of the selectors naming a parent or an ancestor.
+    pub lineage: u64,
+    /// Bits of those naming nothing else.
+    pub unconditional: u64,
+    /// Each named path, with the selectors it satisfies as a parent and as
+    /// an ancestor.
+    pub paths: BTreeMap<String, WorkloadLineageBits>,
+}
+
+/// The lineage half of `selectors`, by bit, a selector's bit being its
+/// position in the list.
+#[must_use]
+pub fn lineage_plan(selectors: &[WorkloadSelector]) -> LineagePlan {
+    let mut plan = LineagePlan::default();
+    for (index, selector) in selectors.iter().enumerate() {
+        let bit = 1u64 << (index & 63);
+        let (path, as_parent) = match (&selector.parent, &selector.ancestor) {
+            (Some(path), _) => (path, true),
+            (None, Some(path)) => (path, false),
+            (None, None) => continue,
+        };
+        plan.lineage |= bit;
+        if selector.lineage_only() {
+            plan.unconditional |= bit;
+        }
+        let bits = plan.paths.entry(path.clone()).or_default();
+        if as_parent {
+            bits.parent |= bit;
+        } else {
+            bits.ancestor |= bit;
+        }
+    }
+    plan
+}
+
+/// The offsets the walk reads, from the running kernel's BTF.
+///
+/// # Errors
+///
+/// The struct or member the kernel's BTF does not describe.
+fn lineage_offsets() -> Result<WorkloadLineageConfig, String> {
+    let exe = exec_network::resolve_offsets()?;
+    let task = process_attach::resolve_layout()?;
+    Ok(WorkloadLineageConfig {
+        task_real_parent: task.task_real_parent,
+        task_mm: exe.task_mm,
+        mm_exe_file: exe.mm_exe_file,
+        file_inode: exe.file_inode,
+        inode_ino: exe.inode_ino,
+        inode_sb: exe.inode_sb,
+        sb_dev: exe.sb_dev,
+        valid: 1,
+        ..WorkloadLineageConfig::default()
+    })
+}
+
+fn exe_key(key: ExecNetKey) -> WorkloadExeKey {
+    WorkloadExeKey {
+        ino: key.ino,
+        dev: key.dev,
+        _pad: 0,
+    }
 }
 
 impl WorkloadPolicyMapManager {
@@ -84,6 +171,14 @@ impl WorkloadPolicyMapManager {
             ebpf.take_map("WORKLOAD_DNS_CAPTURE")
                 .ok_or_else(|| anyhow::anyhow!("map 'WORKLOAD_DNS_CAPTURE' not found"))?,
         )?;
+        let lineage_exes = AyaHashMap::try_from(
+            ebpf.take_map("WORKLOAD_LINEAGE_EXES")
+                .ok_or_else(|| anyhow::anyhow!("map 'WORKLOAD_LINEAGE_EXES' not found"))?,
+        )?;
+        let lineage_config = Array::try_from(
+            ebpf.take_map("WORKLOAD_LINEAGE_CONFIG")
+                .ok_or_else(|| anyhow::anyhow!("map 'WORKLOAD_LINEAGE_CONFIG' not found"))?,
+        )?;
         info!("workload policy tables acquired");
         Ok(Self {
             rules,
@@ -92,6 +187,10 @@ impl WorkloadPolicyMapManager {
             denials,
             fqdn,
             capture,
+            lineage_exes,
+            lineage_config,
+            offsets: lineage_offsets(),
+            lineage_paths: BTreeMap::new(),
         })
     }
 
@@ -100,9 +199,96 @@ impl WorkloadPolicyMapManager {
     /// Collected before the first removal because the iterator borrows the
     /// map, and an entry the kernel evicted mid-walk is not an error: it is
     /// an LRU doing its job.
-    fn keys<K: aya::Pod + Copy>(map: &AyaHashMap<MapData, K, u64>) -> Vec<K> {
+    fn keys<K: aya::Pod + Copy, V: aya::Pod>(map: &AyaHashMap<MapData, K, V>) -> Vec<K> {
         map.keys().filter_map(Result::ok).collect()
     }
+
+    /// Write what `selectors` ask of the lineage walk.
+    ///
+    /// The executables go in before the configuration that gates on them, so
+    /// a hook never reads a gate whose table is still being filled. A named
+    /// path that does not exist on this node is said once and left out: a
+    /// policy shared across a fleet names binaries some nodes do not carry,
+    /// and the exec of one installed later is recorded when it happens.
+    fn publish_lineage(&mut self, selectors: &[WorkloadSelector]) -> Result<(), DomainError> {
+        let plan = lineage_plan(selectors);
+        for key in Self::keys(&self.lineage_exes) {
+            let _ = self.lineage_exes.remove(&key);
+        }
+        let mut missing = Vec::new();
+        let mut links = Vec::new();
+        let mut keys: BTreeMap<(u64, u32), WorkloadLineageBits> = BTreeMap::new();
+        for (path, bits) in &plan.paths {
+            if let Some(target) = through_link(path) {
+                links.push(format!("{path} -> {target}"));
+                continue;
+            }
+            match exec_network::key_of(path) {
+                Ok(key) => {
+                    let held = keys.entry((key.ino, key.dev)).or_default();
+                    held.parent |= bits.parent;
+                    held.ancestor |= bits.ancestor;
+                }
+                Err(_) => missing.push(path.as_str()),
+            }
+        }
+        for ((ino, dev), bits) in &keys {
+            let key = WorkloadExeKey {
+                ino: *ino,
+                dev: *dev,
+                _pad: 0,
+            };
+            self.lineage_exes.insert(&key, bits, 0).map_err(|e| {
+                DomainError::EngineError(format!("WORKLOAD_LINEAGE_EXES insert failed: {e}"))
+            })?;
+        }
+        if !missing.is_empty() {
+            warn!(
+                paths = %missing.join(","),
+                "workload rules name a parent or an ancestor not installed on this node: \
+                 no task is under it until it is executed"
+            );
+        }
+        if !links.is_empty() {
+            warn!(
+                paths = %links.join(","),
+                "workload rules name a parent or an ancestor through a link: a process is \
+                 known by the file it runs, so those rules match no task until they name it"
+            );
+        }
+        let mut config = WorkloadLineageConfig::default();
+        if plan.lineage != 0 {
+            match &self.offsets {
+                Ok(offsets) => config = *offsets,
+                Err(reason) => warn!(
+                    reason,
+                    "workload rules name a parent or an ancestor and the kernel's BTF does \
+                     not describe the parent chain: those rules match no task"
+                ),
+            }
+        }
+        config.lineage = plan.lineage;
+        config.unconditional = plan.unconditional;
+        self.lineage_config.set(0, &config, 0).map_err(|e| {
+            DomainError::EngineError(format!("WORKLOAD_LINEAGE_CONFIG write failed: {e}"))
+        })?;
+        self.lineage_paths = plan.paths;
+        Ok(())
+    }
+}
+
+/// The file `path` reaches, when it reaches it through a link.
+///
+/// A process is known by the file it runs, under the path the kernel reports
+/// for it, which is never a link: `/usr/bin/python3` runs as
+/// `/usr/bin/python3.12`, and on a merged `/usr` `/bin/bash` runs as
+/// `/usr/bin/bash`. A lineage path reaching its file through a link would
+/// match in the kernel, which compares files, and nowhere the agent answers
+/// from, which compares paths, so it is named and left out, the way an `exe`
+/// naming a link matches nothing.
+fn through_link(path: &str) -> Option<String> {
+    let target = std::fs::canonicalize(path).ok()?;
+    (target.as_os_str() != path).then(|| target.display().to_string())
 }
 
 impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
@@ -131,6 +317,7 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
                 })?;
         }
         self.clear_selectors()?;
+        self.publish_lineage(&selectors)?;
         for key in Self::keys(&self.fqdn) {
             let _ = self.fqdn.remove(&key);
         }
@@ -208,6 +395,29 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
     fn revoke_fqdn(&mut self, key: &FqdnGrantKey) -> Result<(), DomainError> {
         let _ = self.fqdn.remove(&fqdn_key(key));
         Ok(())
+    }
+
+    fn note_lineage_executable(
+        &mut self,
+        path: &str,
+        dev: u64,
+        inode: u64,
+    ) -> Result<(), DomainError> {
+        let Some(bits) = self.lineage_paths.get(path).copied() else {
+            return Ok(());
+        };
+        let key = exe_key(exec_network::key_from_stat(dev, inode));
+        let held = self.lineage_exes.get(&key, 0).unwrap_or_default();
+        let merged = WorkloadLineageBits {
+            parent: held.parent | bits.parent,
+            ancestor: held.ancestor | bits.ancestor,
+        };
+        if merged == held {
+            return Ok(());
+        }
+        self.lineage_exes.insert(&key, &merged, 0).map_err(|e| {
+            DomainError::EngineError(format!("WORKLOAD_LINEAGE_EXES insert failed: {e}"))
+        })
     }
 }
 
@@ -389,6 +599,87 @@ mod tests {
             entry_for(&rule(FirewallAction::Deny, WorkloadMode::Enforce), 0).fqdn,
             0
         );
+    }
+
+    fn lineage(
+        parent: Option<&str>,
+        ancestor: Option<&str>,
+        exe: Option<&str>,
+    ) -> WorkloadSelector {
+        WorkloadSelector::with_lineage(
+            exe.map(str::to_string),
+            None,
+            None,
+            None,
+            domain::firewall::workload::KubernetesMatchers::default(),
+            domain::firewall::workload::LineageMatchers {
+                parent: parent.map(str::to_string),
+                ancestor: ancestor.map(str::to_string),
+            },
+        )
+        .expect("a lineage selector is valid")
+    }
+
+    #[test]
+    fn a_policy_naming_no_lineage_asks_nothing_of_the_walk() {
+        let plain = WorkloadSelector::new(Some("/usr/bin/curl".to_string()), None, None, None)
+            .expect("valid");
+        assert_eq!(lineage_plan(&[plain]), LineagePlan::default());
+    }
+
+    #[test]
+    fn each_lineage_selector_gates_its_own_bit_under_the_path_it_names() {
+        let plain = WorkloadSelector::new(Some("/usr/bin/curl".to_string()), None, None, None)
+            .expect("valid");
+        let selectors = [
+            plain,
+            lineage(Some("/usr/sbin/nginx"), None, Some("/usr/bin/curl")),
+            lineage(None, Some("/usr/sbin/nginx"), None),
+            lineage(None, Some("/usr/sbin/sshd"), None),
+        ];
+        let plan = lineage_plan(&selectors);
+        assert_eq!(plan.lineage, 0b1110);
+        // Only the selectors naming nothing but a lineage are unconditional:
+        // the one also naming curl stays behind its task mask.
+        assert_eq!(plan.unconditional, 0b1100);
+        assert_eq!(
+            plan.paths.get("/usr/sbin/nginx"),
+            Some(&WorkloadLineageBits {
+                parent: 0b0010,
+                ancestor: 0b0100
+            })
+        );
+        assert_eq!(
+            plan.paths.get("/usr/sbin/sshd"),
+            Some(&WorkloadLineageBits {
+                parent: 0,
+                ancestor: 0b1000
+            })
+        );
+    }
+
+    #[test]
+    fn a_lineage_path_reaching_its_file_through_a_link_is_named_with_the_file() {
+        let dir = std::env::temp_dir().join(format!("lineage-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("python3.12");
+        let link = dir.join("python3");
+        std::fs::write(&file, b"").expect("file");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&file, &link).expect("link");
+        let file = std::fs::canonicalize(&file).expect("canonical");
+        let file = file.to_str().expect("utf-8");
+        let link = dir.canonicalize().expect("canonical").join("python3");
+
+        assert_eq!(through_link(file), None);
+        assert_eq!(
+            through_link(link.to_str().expect("utf-8")).as_deref(),
+            Some(file)
+        );
+        // A path that does not resolve is not a link: it is missing, and
+        // said so elsewhere.
+        assert_eq!(through_link("/nonexistent/lineage/path"), None);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]

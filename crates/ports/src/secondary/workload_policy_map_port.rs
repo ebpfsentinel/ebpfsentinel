@@ -68,6 +68,28 @@ pub trait WorkloadPolicyMapPort: Send + Sync {
 
     /// Close one address opened by name. A miss is not an error.
     fn revoke_fqdn(&mut self, key: &FqdnGrantKey) -> Result<(), DomainError>;
+
+    /// A process was seen running `path`, read as the file `dev`/`inode`.
+    ///
+    /// The kernel recognises a parent or an ancestor by the inode its
+    /// address space maps, and the publish resolved each named path once. An
+    /// upgrade replaces the file under the path and a parent started after
+    /// it runs an inode the publish never saw, so every exec of a path a
+    /// lineage rule names offers its inode here. A path no rule names, or an
+    /// inode already known, changes nothing; an old inode is kept, since the
+    /// parents started before the upgrade still run it.
+    ///
+    /// # Errors
+    ///
+    /// Whatever writing the map refused, a full table among them: the new
+    /// inode then names no parent, and the processes it starts are not under
+    /// it until the next publish.
+    fn note_lineage_executable(
+        &mut self,
+        path: &str,
+        dev: u64,
+        inode: u64,
+    ) -> Result<(), DomainError>;
 }
 
 #[cfg(test)]

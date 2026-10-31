@@ -749,6 +749,13 @@ impl FirewallRule {
                          inside it, so the selector names a cgroup, a unit or a container",
             });
         }
+        if workload.selector.names_lineage() {
+            return Err(FirewallError::WorkloadMatcherUnsupported {
+                matcher: "fqdn",
+                reason: "an answer is attributed to the cgroup that asked, not to the tasks a \
+                         parent started inside it, so the selector names no parent or ancestor",
+            });
+        }
         Ok(())
     }
 

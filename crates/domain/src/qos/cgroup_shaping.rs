@@ -78,6 +78,13 @@ impl CgroupShapingRule {
                 self.id
             )));
         }
+        if self.selector.names_lineage() {
+            return Err(QosError::InvalidCgroupShaping(format!(
+                "rule {}: the rate belongs to a cgroup, so the selector names no parent or \
+                 ancestor",
+                self.id
+            )));
+        }
         self.selector
             .validate()
             .map_err(|e| QosError::InvalidCgroupShaping(format!("rule {}: {e}", self.id)))
@@ -265,6 +272,25 @@ mod tests {
         .unwrap_or_default();
         let err = r.validate().map_err(|e| e.to_string());
         assert!(err.is_err_and(|e| e.contains("executable")));
+    }
+
+    #[test]
+    fn a_selector_naming_a_lineage_is_refused() {
+        let mut r = rule("api", "/x", MIN_RATE_BPS);
+        r.selector = WorkloadSelector::with_lineage(
+            None,
+            None,
+            None,
+            None,
+            KubernetesMatchers::default(),
+            crate::firewall::workload::LineageMatchers {
+                parent: None,
+                ancestor: Some("/usr/sbin/nginx".to_string()),
+            },
+        )
+        .unwrap_or_default();
+        let err = r.validate().map_err(|e| e.to_string());
+        assert!(err.is_err_and(|e| e.contains("ancestor")));
     }
 
     #[test]

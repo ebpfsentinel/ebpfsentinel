@@ -168,7 +168,7 @@ _metric_or_zero() {
 @test "the XDP chain root changes without the interface ever going bare" {
     local pid
     pid="$(_agent_pid_local)"
-    [ -n "${pid}" ] || skip "agent pid unknown"
+    [ -n "${pid}" ] || soft_skip "agent pid unknown"
 
     local id_before
     id_before="$(_xdp_program_id)"

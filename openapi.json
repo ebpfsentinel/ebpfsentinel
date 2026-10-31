@@ -14996,6 +14996,13 @@
           "mode"
         ],
         "properties": {
+          "ancestor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Executable some ancestor of the task must run."
+          },
           "cgroup": {
             "type": [
               "string",
@@ -15028,6 +15035,13 @@
           "mode": {
             "type": "string",
             "description": "`observe` or `enforce`."
+          },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Executable the task's direct parent must run."
           },
           "unit": {
             "type": [

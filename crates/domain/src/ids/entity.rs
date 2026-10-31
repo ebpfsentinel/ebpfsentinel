@@ -381,6 +381,11 @@ impl IdsRule {
                     "workload cannot name an executable: a link belongs to a cgroup, not to a task",
                 );
             }
+            if selector.names_lineage() {
+                return Err(
+                    "workload cannot name a parent or an ancestor: a link belongs to a cgroup, not to a task",
+                );
+            }
             if self.group_mask != 0 {
                 return Err("workload and interfaces cannot both scope one rule");
             }
@@ -681,6 +686,26 @@ mod tests {
             WorkloadSelector::new(Some("/usr/bin/curl".to_string()), None, None, None).unwrap(),
         );
         assert!(rule.validate().unwrap_err().contains("executable"));
+    }
+
+    #[test]
+    fn ids_rule_workload_refuses_a_lineage() {
+        let mut rule = sample_rule();
+        rule.workload = Some(
+            WorkloadSelector::with_lineage(
+                None,
+                None,
+                None,
+                None,
+                crate::firewall::workload::KubernetesMatchers::default(),
+                crate::firewall::workload::LineageMatchers {
+                    parent: Some("/usr/sbin/nginx".to_string()),
+                    ancestor: None,
+                },
+            )
+            .unwrap(),
+        );
+        assert!(rule.validate().unwrap_err().contains("parent"));
     }
 
     #[test]

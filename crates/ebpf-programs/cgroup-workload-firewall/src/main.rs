@@ -58,8 +58,9 @@
 use aya_ebpf::{
     btf_maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
     helpers::{
-        bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_get_current_uid_gid,
-        bpf_ktime_get_boot_ns, bpf_skb_cgroup_id, bpf_skb_load_bytes,
+        bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_get_current_task,
+        bpf_get_current_uid_gid, bpf_ktime_get_boot_ns, bpf_probe_read_kernel, bpf_skb_cgroup_id,
+        bpf_skb_load_bytes,
     },
     macros::{btf_map, cgroup_skb, cgroup_sock_addr},
     programs::{SkBuffContext, SockAddrContext},
@@ -84,13 +85,14 @@ use ebpf_common::workload_policy::{
     WORKLOAD_ACTION_DENY, WORKLOAD_DNS_MAX_PAYLOAD, WORKLOAD_DNS_QUERY, WORKLOAD_DNS_RESPONSE,
     WORKLOAD_DNS_RINGBUF_BYTES, WORKLOAD_EVENTS_RINGBUF_BYTES, WORKLOAD_FAMILY_ANY,
     WORKLOAD_FAMILY_IPV4, WORKLOAD_FAMILY_IPV6, WORKLOAD_FQDN_MAX_ALLOWED, WORKLOAD_HOOK_BIND,
-    WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_SENDMSG, WORKLOAD_METRIC_ALLOWED, WORKLOAD_METRIC_BIND,
+    WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_SENDMSG, WORKLOAD_LINEAGE_MAX_DEPTH,
+    WORKLOAD_LINEAGE_MAX_EXECUTABLES, WORKLOAD_METRIC_ALLOWED, WORKLOAD_METRIC_BIND,
     WORKLOAD_METRIC_CONNECT, WORKLOAD_METRIC_COUNT, WORKLOAD_METRIC_DNS_LOST,
-    WORKLOAD_METRIC_EVENT_LOST, WORKLOAD_METRIC_NO_RULE, WORKLOAD_METRIC_REFUSED,
+    WORKLOAD_METRIC_EVENT_LOST, WORKLOAD_METRIC_LINEAGE_TRUNCATED, WORKLOAD_METRIC_NO_RULE, WORKLOAD_METRIC_REFUSED,
     WORKLOAD_METRIC_SENDMSG, WORKLOAD_METRIC_UNRESOLVED, WORKLOAD_METRIC_WOULD_REFUSE,
     WORKLOAD_MODE_ENFORCE, WORKLOAD_POLICY_MAX_CGROUPS, WORKLOAD_POLICY_MAX_RULES,
     WORKLOAD_POLICY_MAX_TASKS, WORKLOAD_PROTOCOL_ANY, WorkloadDenialEvent, WorkloadDnsEvent,
-    WorkloadFqdnKey, WorkloadRuleEntry,
+    WorkloadExeKey, WorkloadFqdnKey, WorkloadLineageBits, WorkloadLineageConfig, WorkloadRuleEntry,
 };
 use ebpf_helpers::{increment_metric, opaque_usize};
 
@@ -125,6 +127,23 @@ static WORKLOAD_CGROUP_SELECTORS: HashMap<u64, u64, { WORKLOAD_POLICY_MAX_CGROUP
 #[btf_map]
 static WORKLOAD_TASK_SELECTORS: LruHashMap<u32, u64, { WORKLOAD_POLICY_MAX_TASKS as usize }> =
     LruHashMap::new();
+
+/// Executable -> the selectors it satisfies when found above a task, as its
+/// direct parent or as any ancestor.
+///
+/// Keyed by inode and device rather than by path, because the walk reads
+/// what the parent is running, and a path is only what it was started as.
+#[btf_map]
+static WORKLOAD_LINEAGE_EXES: HashMap<
+    WorkloadExeKey,
+    WorkloadLineageBits,
+    { WORKLOAD_LINEAGE_MAX_EXECUTABLES as usize },
+> = HashMap::new();
+
+/// Which selectors carry a lineage condition, and the kernel offsets the
+/// walk reads. Zeroed, it costs a policy naming no lineage one array read.
+#[btf_map]
+static WORKLOAD_LINEAGE_CONFIG: Array<WorkloadLineageConfig, 1> = Array::new();
 
 /// What the policy did, per CPU.
 #[btf_map]
@@ -537,8 +556,9 @@ fn decide<const V6: bool>(ctx: &SockAddrContext, hook: u8) -> i32 {
     }
     increment_metric!(WORKLOAD_METRICS, hook_metric(hook));
 
-    let mask = selectors();
-    if mask == 0 {
+    let resolved = selectors();
+    let mask = with_lineage(resolved);
+    if resolved == 0 && mask == 0 {
         // A task userspace has not placed in any selector yet. Counting it is
         // the honest version of the race: the process table resolves an exec
         // a moment after the kernel saw it, and a connection inside that
@@ -652,6 +672,112 @@ fn selectors() -> u64 {
     let by_task = unsafe { WORKLOAD_TASK_SELECTORS.get(&tgid) }.copied();
 
     by_cgroup.unwrap_or(0) | by_task.unwrap_or(0)
+}
+
+/// The selectors that still hold once their lineage condition is checked.
+///
+/// A selector naming a parent or an ancestor is in the cgroup or task table
+/// when the rest of it matched, and in `unconditional` when there is no rest.
+/// Either way its bit stands only if the walk finds the executable above the
+/// calling task. Without the offsets the walk cannot run, and every lineage
+/// bit is withheld: a rule about tasks under `nginx` must not apply to every
+/// task because the kernel could not be asked where it was started.
+#[inline(always)]
+fn with_lineage(resolved: u64) -> u64 {
+    let Some(config) = WORKLOAD_LINEAGE_CONFIG.get(0) else {
+        return resolved;
+    };
+    if config.lineage == 0 {
+        return resolved;
+    }
+    if config.valid == 0 {
+        return resolved & !config.lineage;
+    }
+    let candidates = resolved | config.unconditional;
+    let gated = candidates & config.lineage;
+    if gated == 0 {
+        return candidates;
+    }
+    (candidates & !config.lineage) | (gated & ancestry(gated, config))
+}
+
+/// The lineage selectors satisfied by the processes above the calling task,
+/// stopping as soon as every gated one is.
+///
+/// `real_parent` is followed rather than `parent`: a traced task's `parent`
+/// is its tracer, and a debugger attaching is not the task being started by
+/// it. The walk ends at the idle task, whose parent is itself, at a null
+/// pointer, or at the depth bound, which is counted when a parent remains.
+#[inline(always)]
+fn ancestry(gated: u64, config: &WorkloadLineageConfig) -> u64 {
+    let mut task = unsafe { bpf_get_current_task() };
+    let mut satisfied = 0u64;
+    for depth in 0..WORKLOAD_LINEAGE_MAX_DEPTH {
+        let (parent, read_parent) = read::<u64>(task, config.task_real_parent);
+        if !read_parent || parent == 0 || parent == task {
+            return satisfied;
+        }
+        if let Some(bits) = executable_bits(parent, config) {
+            satisfied |= bits.ancestor;
+            if depth == 0 {
+                satisfied |= bits.parent;
+            }
+            if satisfied & gated == gated {
+                return satisfied;
+            }
+        }
+        task = parent;
+    }
+    let (parent, read_parent) = read::<u64>(task, config.task_real_parent);
+    if read_parent && parent != 0 && parent != task {
+        increment_metric!(WORKLOAD_METRICS, WORKLOAD_METRIC_LINEAGE_TRUNCATED);
+    }
+    satisfied
+}
+
+/// What a lineage rule says about the executable `task` runs, if it names it.
+/// A kernel thread has no address space and runs nothing a rule can name.
+#[inline(always)]
+fn executable_bits(task: u64, config: &WorkloadLineageConfig) -> Option<WorkloadLineageBits> {
+    let (mm, read_mm) = read::<u64>(task, config.task_mm);
+    if !read_mm || mm == 0 {
+        return None;
+    }
+    let (exe_file, read_exe) = read::<u64>(mm, config.mm_exe_file);
+    if !read_exe || exe_file == 0 {
+        return None;
+    }
+    let (inode, read_inode) = read::<u64>(exe_file, config.file_inode);
+    if !read_inode || inode == 0 {
+        return None;
+    }
+    let (sb, read_sb) = read::<u64>(inode, config.inode_sb);
+    let (ino, read_ino) = read::<u64>(inode, config.inode_ino);
+    let (dev, read_dev) = read::<u32>(sb, config.sb_dev);
+    if !(read_sb && read_ino && read_dev) {
+        return None;
+    }
+    let key = WorkloadExeKey { ino, dev, _pad: 0 };
+    unsafe { WORKLOAD_LINEAGE_EXES.get(&key) }.copied()
+}
+
+/// Read a `T` at `offset` into the kernel object at `base`, with whether the
+/// read succeeded.
+///
+/// A failed read answers zero rather than nothing: an `Option` carried across
+/// the next helper call leaves its payload register undefined on the `None`
+/// path, and the verifier refuses a program that stores a register it never
+/// saw written.
+#[inline(always)]
+fn read<T: Default>(base: u64, offset: u32) -> (T, bool) {
+    if base == 0 {
+        return (T::default(), false);
+    }
+    let at = (base + u64::from(offset)) as *const T;
+    match unsafe { bpf_probe_read_kernel(at) } {
+        Ok(value) => (value, true),
+        Err(_) => (T::default(), false),
+    }
 }
 
 /// The address this hook is about, in the host-order words the rules store,
