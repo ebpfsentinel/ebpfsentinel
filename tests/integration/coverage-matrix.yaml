@@ -123,6 +123,9 @@ suite_profiles:
   "69": pr
   # 70 needs root and a 6.12 kernel, nothing the hosted runner lacks, but it
   # loads one program off one config, so nightly is where it belongs.
+  # 68 swaps the XDP chain root under live traffic, sampling the interface
+  # every 20 ms; it needs root and an eBPF lane, so nightly.
+  "68": nightly
   "70": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -130,6 +133,7 @@ suite_profiles:
   "perf/04": nightly
   "perf/05": nightly
   "perf/06": nightly
+  "perf/07": nightly
   # The performance suites (perf/01-06) live in tests/perf/, run via `make test-perf`.
 
 coverage:
@@ -269,6 +273,54 @@ coverage:
     kernel_min: "6.12"
     profile: nightly
     notes: "Workload rules decided at connect/sendmsg/bind; suite 70 refuses a connect by the executable of the direct parent and of any ancestor, read from the live chain of parents"
+
+  - kind: ebpf_program
+    feature: cgroup-attribution
+    suites: ["67", "perf/07"]
+    topology: none
+    kernel_min: "6.12"
+    profile: pr
+    notes: "Socket hooks naming the cgroup and the process behind a connection; loaded on its defaults in 67, connect() cost with and without it measured in perf/07"
+
+  - kind: ebpf_program
+    feature: cgroup-connect-redirect
+    suites: ["TBD"]
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "Steers the TCP connections of selected cgroups to a local listener at connect4/connect6. No suite yet: nothing asserts a steered connection lands on the listener"
+
+  - kind: ebpf_program
+    feature: lsm-exec-network
+    suites: ["TBD"]
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "Only the executables in the set reach the network, at socket_create and socket_connect. Needs the BPF LSM active at boot (lsm=bpf), which no lane's kernel command line sets yet"
+
+  - kind: ebpf_program
+    feature: tracepoint-drop-reason
+    suites: ["TBD"]
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "Counts the packets the kernel frees undelivered, under the skb_drop_reason it gives. No suite yet: nothing provokes a drop of a known reason and reads the counter back"
+
+  - kind: ebpf_program
+    feature: tracepoint-process
+    suites: ["67", "70", "perf/07"]
+    topology: none
+    kernel_min: "6.12"
+    profile: pr
+    notes: "Exec, fork and exit feeding the process table; 67 reads a program that execed after the hooks attached, 70 decides workload rules on the chain of parents it records, exec() cost measured in perf/07"
+
+  - kind: ebpf_program
+    feature: tracepoint-signal
+    suites: ["TBD"]
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "Signals the task behind a flow from inside that task, for the process response. No suite yet: nothing asserts a named process is stopped"
 
   # ── CLI subcommands (37) ────────────────────────────────────────
   - kind: cli_subcommand
@@ -575,6 +627,30 @@ coverage:
     profile: nightly
     notes: "NPTv6 prefix-translation CRUD + listing asserted via REST + `nat nptv6 list` CLI parity in 50; prefix-rule add control-plane latency (10/100) benched in perf/03"
 
+  - kind: cli_subcommand
+    feature: learning
+    suites: ["TBD"]
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "Learning window start, status and result. No suite drives the CLI or the window it opens"
+
+  - kind: cli_subcommand
+    feature: netpol
+    suites: ["TBD"]
+    topology: k8s
+    kernel_min: "6.12"
+    profile: manual
+    notes: "NetworkPolicy compiled for the pods of one node. No suite yet: the kubernetes lane does not apply a policy and read the compiled rules back"
+
+  - kind: cli_subcommand
+    feature: processes
+    suites: ["TBD"]
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "What a pid is, from its exec to its exit. The REST route it reads is asserted in 67; the CLI itself is not driven by any suite"
+
   # ── Domain modules (24, excl. common) ───────────────────────────
   - kind: domain_module
     feature: alert
@@ -767,6 +843,62 @@ coverage:
     kernel_min: "6.9"
     profile: pr
     notes: "Zone-based policy"
+
+  - kind: domain_module
+    feature: coverage
+    suites: ["TBD"]
+    topology: k8s
+    kernel_min: "6.12"
+    profile: manual
+    notes: "What the node agent sees of each pod and why it misses what it misses. No suite reads the per-pod coverage report"
+
+  - kind: domain_module
+    feature: drops
+    suites: ["TBD"]
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "Kernel drop reasons as readable counts, fed by tracepoint-drop-reason. Untested for the same reason as that program"
+
+  - kind: domain_module
+    feature: flow
+    suites: ["TBD"]
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "Flow records and their IPFIX, OTLP, JSON and SIEM encodings. No suite exports a flow and decodes it at a collector; 61 asserts the alert sinks, not the flow export"
+
+  - kind: domain_module
+    feature: learning
+    suites: ["TBD"]
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "Watching a node for a window and holding what it reached. No suite opens a window"
+
+  - kind: domain_module
+    feature: netpol
+    suites: ["TBD"]
+    topology: k8s
+    kernel_min: "6.12"
+    profile: manual
+    notes: "Kubernetes NetworkPolicy compiled for the pods of one node. No suite applies a policy"
+
+  - kind: domain_module
+    feature: process
+    suites: ["67", "70"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "The process table: a pid from exec to exit with its chain of ancestors; read through REST in 67, the chain decides workload rules in 70"
+
+  - kind: domain_module
+    feature: workload
+    suites: ["67", "70"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry"
 
 # ── Attack suites (per-suite tagging) ────────────────────────────────
 # Rows above map features → suites. The block below tags each Wave-2
