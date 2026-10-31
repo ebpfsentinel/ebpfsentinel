@@ -109,6 +109,56 @@ pub struct PacketSocket {
     pub filter_instructions: Option<u32>,
 }
 
+/// One eBPF program on the node's network path, and where it is attached.
+///
+/// Read from the kernel's own lists: every BPF link, the XDP program and the
+/// classic `tc` filters of each host interface, and every program of a
+/// network type that none of those place. The warden reads identities and
+/// never hands out a descriptor on a program.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkProgram {
+    /// The program's id.
+    pub prog_id: u32,
+    /// The program type, as a slug (`xdp`, `sched_cls`, `cgroup_sock_addr`...).
+    pub prog_type: String,
+    /// The name the loader gave it, at most 15 bytes.
+    pub name: String,
+    /// The kernel's tag over its instructions, in hex.
+    pub tag: String,
+    /// The link holding it there, `None` for a legacy attachment or a
+    /// program found on no hook.
+    pub link_id: Option<u32>,
+    /// The hook, as a slug: `xdp`, `tc_ingress`, `tc_egress`, `tcx_ingress`,
+    /// `tcx_egress`, `netkit_primary`, `netkit_peer`, `cgroup`, `netfilter`,
+    /// `netns`, or `unplaced` for a program of a network type found on no
+    /// hook the warden reads.
+    pub hook: String,
+    /// The interface index the hook is on, for the interface hooks.
+    pub ifindex: Option<u32>,
+    /// The interface's name, when it is a host interface carrying this
+    /// program. `None` with an `ifindex` is an interface in another network
+    /// namespace.
+    pub interface: Option<String>,
+    /// The cgroup the program is attached to, for the cgroup hooks.
+    pub cgroup_id: Option<u64>,
+    /// What else places it: the cgroup attach type, the netfilter family,
+    /// hook and priority, the network namespace hook.
+    pub detail: Option<String>,
+    /// The uid that loaded it.
+    pub created_by_uid: Option<u32>,
+    /// The processes holding a descriptor on the program or its link.
+    pub holders: Vec<u32>,
+}
+
+/// The program and link ids one process holds descriptors on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldBpfObjects {
+    /// Programs held directly, and the programs behind each link held.
+    pub prog_ids: Vec<u32>,
+    /// Links held.
+    pub link_ids: Vec<u32>,
+}
+
 /// A routing-table entry, used by multi-WAN failover.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteSpec {
@@ -272,6 +322,12 @@ pub enum Command {
     /// attached. Read-only, and it takes no argument: the warden decides
     /// which namespaces it reads from what `/proc` shows it.
     PacketSockets,
+    /// List every eBPF program on the node's network path: the BPF links,
+    /// the XDP program and classic `tc` filters of each host interface, and
+    /// the programs of a network type found on none of those, each with the
+    /// processes holding it. Enumerating programs and links by id needs
+    /// `CAP_SYS_ADMIN`, which no BPF token grants. Read-only.
+    NetworkPrograms,
 }
 
 /// A reply from the warden to the agent.
@@ -340,6 +396,12 @@ pub enum Response {
         /// One entry per socket, in no particular order.
         sockets: Vec<PacketSocket>,
     },
+    /// Every eBPF program on the network path, answering
+    /// [`Command::NetworkPrograms`].
+    NetworkPrograms {
+        /// One entry per program and hook, in no particular order.
+        programs: Vec<NetworkProgram>,
+    },
 }
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
@@ -373,8 +435,8 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, ConntrackTuple, DlpTarget, ExecutableIdentity, MAX_FRAME_LEN, PacketSocket,
-        Response, RouteSpec, read_frame, write_frame,
+        Command, ConntrackTuple, DlpTarget, ExecutableIdentity, MAX_FRAME_LEN, NetworkProgram,
+        PacketSocket, Response, RouteSpec, read_frame, write_frame,
     };
     use std::io::Cursor;
 
@@ -437,6 +499,7 @@ mod tests {
             },
             Command::ReadExecutable { pid: 4242 },
             Command::PacketSockets,
+            Command::NetworkPrograms,
         ]
     }
 
@@ -491,6 +554,22 @@ mod tests {
                     host_netns: true,
                     pid: Some(812),
                     filter_instructions: Some(30),
+                }],
+            },
+            Response::NetworkPrograms {
+                programs: vec![NetworkProgram {
+                    prog_id: 812,
+                    prog_type: "sched_cls".into(),
+                    name: "cil_from_netdev".into(),
+                    tag: "0a1b2c3d4e5f6071".into(),
+                    link_id: Some(14),
+                    hook: "tcx_ingress".into(),
+                    ifindex: Some(2),
+                    interface: Some("eth0".into()),
+                    cgroup_id: None,
+                    detail: None,
+                    created_by_uid: Some(0),
+                    holders: vec![1312],
                 }],
             },
         ]

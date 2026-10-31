@@ -31,6 +31,7 @@ use super::metrics_handler;
 use super::mitre_handler;
 use super::nat_handler;
 use super::netpol_handler;
+use super::network_program_handler;
 use super::ops_handler;
 use super::process_handler;
 use super::qos_handler;
@@ -133,6 +134,7 @@ use super::zone_handler;
         ops_handler::get_uprobes,
         drop_reason_handler::get_drop_reasons,
         raw_socket_handler::get_raw_sockets,
+        network_program_handler::get_foreign_programs,
         // DNS
         dns_handler::dns_status,
         dns_handler::list_dns_cache,
@@ -356,6 +358,9 @@ use super::zone_handler;
         drop_reason_handler::DropReasonBody,
         raw_socket_handler::RawSocketsResponse,
         raw_socket_handler::RawSocketBody,
+        network_program_handler::NetworkProgramsResponse,
+        network_program_handler::NetworkProgramBody,
+        network_program_handler::ProgramHolderBody,
         service_graph_handler::ServiceGraphResponse,
         service_graph_handler::ServiceEdgeBody,
         service_graph_handler::ServiceEndBody,

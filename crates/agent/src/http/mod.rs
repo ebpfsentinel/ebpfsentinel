@@ -27,6 +27,7 @@ pub mod middleware;
 pub mod mitre_handler;
 pub mod nat_handler;
 pub mod netpol_handler;
+pub mod network_program_handler;
 pub mod openapi;
 pub mod ops_handler;
 pub mod process_handler;

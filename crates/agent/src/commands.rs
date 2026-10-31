@@ -4656,6 +4656,69 @@ pub async fn cmd_ebpf_raw_sockets(client: &ApiClient, output: OutputFormat) -> R
     Ok(())
 }
 
+/// Print the eBPF programs on the network path that the agent did not load,
+/// where they run and who holds them.
+pub async fn cmd_ebpf_foreign_programs(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.foreign_programs().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    if !resp.reading {
+        println!("The network program inventory is turned off on this node.");
+        return Ok(());
+    }
+    if let Some(error) = &resp.last_error {
+        println!("Last reading failed, programs below are the previous ones: {error}");
+    }
+    if resp.programs.is_empty() {
+        println!(
+            "No eBPF program on the network path besides the agent's own {}.",
+            resp.own_programs
+        );
+        return Ok(());
+    }
+    let mut table = Table::new(&[
+        ("PROG", Align::Right),
+        ("NAME", Align::Left),
+        ("TYPE", Align::Left),
+        ("PLACE", Align::Left),
+        ("HELD BY", Align::Left),
+    ]);
+    for program in &resp.programs {
+        let held_by = if program.holders.is_empty() {
+            "-".to_string()
+        } else {
+            program
+                .holders
+                .iter()
+                .map(|h| {
+                    let who = h.pod.as_deref().or(h.executable.as_deref()).unwrap_or("?");
+                    format!("{} ({who})", h.pid)
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        table.row(cells![
+            program.prog_id.to_string(),
+            program.name,
+            program.prog_type,
+            program.place,
+            held_by
+        ]);
+    }
+    table.print();
+    println!(
+        "\n{} foreign program(s) and {} of the agent's own, read through {}.",
+        resp.programs.len(),
+        resp.own_programs,
+        resp.source.as_deref().unwrap_or("-")
+    );
+    Ok(())
+}
+
 /// The workload firewall's hooks, and the rule on the DNS ports when one is
 /// configured.
 fn print_workload_firewall(wf: &crate::api_client::WorkloadFirewallReport) {

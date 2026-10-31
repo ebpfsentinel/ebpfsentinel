@@ -29,7 +29,8 @@ use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame,
 // Re-exported under their real names so callers of the typed control methods can
 // build request values without taking a direct dependency on the protocol crate.
 pub use ebpfsentinel_warden_proto::{
-    ConntrackTuple, DlpTarget, ExecutableIdentity, PacketSocket, RouteSpec,
+    ConntrackTuple, DlpTarget, ExecutableIdentity, HeldBpfObjects, NetworkProgram, PacketSocket,
+    RouteSpec,
 };
 
 /// How long one warden call may take before the client gives up on it.
@@ -75,6 +76,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::AttachTcxInNetns { .. } => "AttachTcxInNetns",
         Command::ReadExecutable { .. } => "ReadExecutable",
         Command::PacketSockets => "PacketSockets",
+        Command::NetworkPrograms => "NetworkPrograms",
     }
 }
 
@@ -236,6 +238,15 @@ impl WardenClient {
         match self.call(&Command::PacketSockets)? {
             Response::PacketSockets { sockets } => Ok(sockets),
             other => Err(unexpected("PacketSockets", &other)),
+        }
+    }
+
+    /// List every eBPF program on the node's network path, with where it is
+    /// attached and who holds it.
+    pub fn network_programs(&mut self) -> io::Result<Vec<NetworkProgram>> {
+        match self.call(&Command::NetworkPrograms)? {
+            Response::NetworkPrograms { programs } => Ok(programs),
+            other => Err(unexpected("NetworkPrograms", &other)),
         }
     }
 
@@ -517,6 +528,12 @@ impl ReconnectingClient {
     /// if it bounced.
     pub fn packet_sockets(&mut self) -> io::Result<Vec<PacketSocket>> {
         self.with_retry(WardenClient::packet_sockets)
+    }
+
+    /// List every eBPF program on the network path through the warden,
+    /// reconnecting if it bounced.
+    pub fn network_programs(&mut self) -> io::Result<Vec<NetworkProgram>> {
+        self.with_retry(WardenClient::network_programs)
     }
 
     /// Scan `/proc` for DLP targets through the warden, reconnecting if it bounced.

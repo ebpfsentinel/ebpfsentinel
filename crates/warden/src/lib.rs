@@ -42,6 +42,7 @@ use std::mem;
 use std::os::fd::RawFd;
 use std::ptr;
 
+pub mod bpf_inventory;
 pub mod cgroup_ops;
 pub mod dlp_scan;
 pub mod exe_read;

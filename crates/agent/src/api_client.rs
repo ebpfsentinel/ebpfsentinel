@@ -1837,6 +1837,54 @@ pub struct DropReasonsResponse {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct ProgramHolderEntry {
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct NetworkProgramEntry {
+    pub prog_id: u32,
+    pub prog_type: String,
+    pub name: String,
+    pub tag: String,
+    pub hook: String,
+    pub place: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ifindex: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_uid: Option<u32>,
+    #[serde(default)]
+    pub holders: Vec<ProgramHolderEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct NetworkProgramsResponse {
+    pub reading: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub scanned_at_ns: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    pub own_programs: usize,
+    #[serde(default)]
+    pub programs: Vec<NetworkProgramEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct RawSocketEntry {
     pub inode: u64,
     pub kind: String,
@@ -3718,6 +3766,15 @@ impl ApiClient {
     pub async fn drop_reasons(&self) -> anyhow::Result<DropReasonsResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/ebpf/drop-reasons")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn foreign_programs(&self) -> anyhow::Result<NetworkProgramsResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ebpf/foreign-programs")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

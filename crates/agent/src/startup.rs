@@ -4473,6 +4473,31 @@ pub async fn run(
         tokio::spawn(async move {
             watcher.run(interval, inventory_cancel).await;
         });
+
+        // The other eBPF programs on the network path, read the same way
+        // and on the same interval.
+        let scanner = Arc::new(
+            adapters::warden::network_programs::NetworkProgramScanner::new(
+                ebpfsentinel_warden::bpf_inventory::scan,
+                ebpfsentinel_warden::bpf_inventory::held_by,
+                coverage_proc.clone(),
+            ),
+        );
+        let programs = Arc::new(
+            application::network_program_service::NetworkProgramWatcher::new(
+                scanner,
+                workloads.clone(),
+            ),
+        );
+        app_state.install_network_programs(Arc::clone(&programs));
+        let programs_cancel = cancel_token.clone();
+        info!(
+            source = programs.source(),
+            "network eBPF program inventory running"
+        );
+        tokio::spawn(async move {
+            programs.run(interval, programs_cancel).await;
+        });
     }
 
     // ── 11. Spawn event dispatcher (replaces flat event consumer) ───

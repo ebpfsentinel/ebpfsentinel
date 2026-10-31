@@ -2908,6 +2908,55 @@
         ]
       }
     },
+    "/api/v1/ebpf/foreign-programs": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "`GET /api/v1/ebpf/foreign-programs` - who else has a program on the\nnetwork path.",
+        "operationId": "get_foreign_programs",
+        "responses": {
+          "200": {
+            "description": "eBPF programs on the network path that the agent did not load, where they run and who holds them",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkProgramsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/ebpf/kernel-features": {
       "get": {
         "tags": [
@@ -13645,6 +13694,151 @@
           }
         }
       },
+      "NetworkProgramBody": {
+        "type": "object",
+        "description": "One eBPF program on the network path that the agent did not load.",
+        "required": [
+          "prog_id",
+          "prog_type",
+          "name",
+          "tag",
+          "hook",
+          "place",
+          "holders"
+        ],
+        "properties": {
+          "cgroup_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The cgroup a cgroup link sits on, by id.",
+            "minimum": 0
+          },
+          "created_by_uid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The uid that loaded it.",
+            "minimum": 0
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cgroup attach point, the netfilter hook, or the namespace hook."
+          },
+          "holders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProgramHolderBody"
+            },
+            "description": "The processes holding it. Empty when only a pin or an attachment\nkeeps it alive."
+          },
+          "hook": {
+            "type": "string",
+            "description": "`xdp`, `tc_ingress`, `tc_egress`, `tcx_ingress`, `tcx_egress`,\n`netkit_primary`, `netkit_peer`, `cgroup`, `netfilter`, `netns`, or\n`unplaced` for a program of a network type found on none of them."
+          },
+          "ifindex": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The interface index the attachment names.",
+            "minimum": 0
+          },
+          "interface": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The host interface carrying it. Absent with an index set, the index\nbelongs to another network namespace."
+          },
+          "link_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The link attaching it, absent for a legacy attachment.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "The name its loader gave it, at most fifteen bytes."
+          },
+          "place": {
+            "type": "string",
+            "description": "Where it runs, as a person reads it."
+          },
+          "prog_id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "prog_type": {
+            "type": "string",
+            "description": "The program type, as the kernel names it."
+          },
+          "tag": {
+            "type": "string",
+            "description": "The hash of its instructions, in hex."
+          }
+        }
+      },
+      "NetworkProgramsResponse": {
+        "type": "object",
+        "description": "The eBPF programs on this node's network path, the agent's own set apart.",
+        "required": [
+          "reading",
+          "scanned_at_ns",
+          "own_programs",
+          "programs"
+        ],
+        "properties": {
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last reading failed. The programs are then those of the\nreading before."
+          },
+          "own_programs": {
+            "type": "integer",
+            "description": "How many programs on the network path are the agent's own.",
+            "minimum": 0
+          },
+          "programs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NetworkProgramBody"
+            },
+            "description": "Every other program on the network path."
+          },
+          "reading": {
+            "type": "boolean",
+            "description": "Whether the inventory is being read."
+          },
+          "scanned_at_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the last reading was made, in nanoseconds since the epoch, `0`\nbefore the first.",
+            "minimum": 0
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the readings come from: `warden` or `local`. Absent when the\ninventory is off."
+          }
+        }
+      },
       "NptV6RuleResponse": {
         "type": "object",
         "description": "Response DTO for an `NPTv6` prefix translation rule.",
@@ -14227,6 +14421,41 @@
               "type": "string"
             },
             "description": "The tracepoints that did attach, in attach order."
+          }
+        }
+      },
+      "ProgramHolderBody": {
+        "type": "object",
+        "description": "One process holding a program or the link attaching it.",
+        "required": [
+          "pid"
+        ],
+        "properties": {
+          "container": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The container it runs in, where it runs in one."
+          },
+          "executable": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its executable, where it resolved."
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "pod": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The pod it runs in, as `namespace/name`, where it runs in one."
           }
         }
       },

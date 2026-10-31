@@ -4,8 +4,8 @@ use std::io;
 /// `BPF_PROG_QUERY` from `enum bpf_cmd`.
 const BPF_PROG_QUERY: libc::c_int = 16;
 /// `BPF_TCX_INGRESS` and `BPF_TCX_EGRESS` from `enum bpf_attach_type`.
-const BPF_TCX_INGRESS: u32 = 46;
-const BPF_TCX_EGRESS: u32 = 47;
+pub(crate) const BPF_TCX_INGRESS: u32 = 46;
+pub(crate) const BPF_TCX_EGRESS: u32 = 47;
 
 /// Programs read on the first attempt. A hook carrying more is answered with
 /// `ENOSPC` and the count it really holds, and the read is repeated at that
@@ -57,6 +57,15 @@ pub fn tcx_chain(iface: &str, egress: bool) -> Result<Vec<u32>, String> {
     } else {
         BPF_TCX_INGRESS
     };
+    prog_query(ifindex, attach_type).map_err(|err| {
+        let hook = if egress { "egress" } else { "ingress" };
+        format!("BPF_PROG_QUERY(TCX {hook} on {iface}): {err}")
+    })
+}
+
+/// The program ids on one multi-program hook of interface `ifindex` (TCX or
+/// netkit), first to run first.
+pub(crate) fn prog_query(ifindex: u32, attach_type: u32) -> io::Result<Vec<u32>> {
     let mut capacity = FIRST_READ;
     loop {
         let mut ids = vec![0u32; capacity];
@@ -86,8 +95,7 @@ pub fn tcx_chain(iface: &str, egress: bool) -> Result<Vec<u32>, String> {
             capacity = held;
             continue;
         }
-        let hook = if egress { "egress" } else { "ingress" };
-        return Err(format!("BPF_PROG_QUERY(TCX {hook} on {iface}): {err}"));
+        return Err(err);
     }
 }
 

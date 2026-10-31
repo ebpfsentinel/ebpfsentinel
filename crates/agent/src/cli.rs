@@ -1098,6 +1098,8 @@ pub enum EbpfCommand {
     Drops,
     /// List the packet sockets open on this node, their holder and filter
     RawSockets,
+    /// List the eBPF programs on the network path that the agent did not load
+    ForeignPrograms,
 }
 
 // ── Config ──────────────────────────────────────────────────────────────
@@ -2710,6 +2712,18 @@ mod tests {
             cli.command,
             Some(Command::Ebpf(DomainArgs {
                 command: EbpfCommand::RawSockets,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_ebpf_foreign_programs() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "ebpf", "foreign-programs"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ebpf(DomainArgs {
+                command: EbpfCommand::ForeignPrograms,
                 ..
             }))
         ));

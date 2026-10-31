@@ -112,6 +112,7 @@ use super::nat_handler::{
     create_nptv6_rule, delete_nptv6_rule, list_nat_rules, list_nptv6_rules, nat_status,
 };
 use super::netpol_handler::replay_netpol;
+use super::network_program_handler::get_foreign_programs;
 use super::openapi::ApiDoc;
 use super::ops_handler::{
     get_config, get_ebpf_status, get_kernel_features, get_uprobes, reload_config,
@@ -309,6 +310,7 @@ pub fn build_router(
             .route("/api/v1/ebpf/uprobes", get(get_uprobes))
             .route("/api/v1/ebpf/drop-reasons", get(get_drop_reasons))
             .route("/api/v1/ebpf/raw-sockets", get(get_raw_sockets))
+            .route("/api/v1/ebpf/foreign-programs", get(get_foreign_programs))
             .route("/api/v1/dns/status", get(dns_status))
             .route("/api/v1/dns/cache", get(list_dns_cache))
             .route("/api/v1/dns/stats", get(dns_stats))

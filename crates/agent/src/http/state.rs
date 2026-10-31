@@ -182,6 +182,10 @@ pub struct AppState {
     pub kernel_drops: ArcSwapOption<application::kernel_drop_service::KernelDropService>,
     /// The inventory of the node's packet sockets, once it reads.
     pub raw_sockets: ArcSwapOption<application::raw_socket_service::RawSocketWatcher>,
+    /// The inventory of the other eBPF programs on the network path, once
+    /// it reads.
+    pub network_programs:
+        ArcSwapOption<application::network_program_service::NetworkProgramWatcher>,
     /// Whether the process-tree detections are sampling, for the coverage
     /// matrix.
     pub process_detections: AtomicBool,
@@ -228,6 +232,7 @@ impl AppState {
             service_graph: ArcSwapOption::empty(),
             kernel_drops: ArcSwapOption::empty(),
             raw_sockets: ArcSwapOption::empty(),
+            network_programs: ArcSwapOption::empty(),
             nat_service: None,
             alias_service: None,
             routing_service: None,
@@ -449,6 +454,14 @@ impl AppState {
         watcher: Arc<application::raw_socket_service::RawSocketWatcher>,
     ) {
         self.raw_sockets.store(Some(watcher));
+    }
+
+    /// Hand the network program inventory over once it reads.
+    pub fn install_network_programs(
+        &self,
+        watcher: Arc<application::network_program_service::NetworkProgramWatcher>,
+    ) {
+        self.network_programs.store(Some(watcher));
     }
 
     /// Attach a NAT service.
