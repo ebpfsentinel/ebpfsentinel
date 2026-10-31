@@ -92,7 +92,7 @@ agent:
   interfaces:
     - __INTERFACE__
   bind_address: "127.0.0.1"
-  log_level: warn
+  log_level: info
   http_port: 8080
   grpc_port: 50051
   metrics_port: 9090
@@ -129,13 +129,18 @@ conntrack:
   fin_threshold: 50
   ack_threshold: 200
 
+# The DDoS guards run inside the rate-limit program, which this suite does
+# not measure; the conntrack arm is tc-conntrack alone.
 ddos:
-  enabled: ${conntrack}
-  policies: []
+  enabled: false
 
 alerting:
   enabled: false
 audit:
+  enabled: false
+  storage_path: __DATA_DIR__/audit.redb
+
+auth:
   enabled: false
 EOF
     echo "$cfg"

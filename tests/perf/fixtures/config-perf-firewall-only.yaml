@@ -5,7 +5,7 @@ agent:
   interfaces:
     - __INTERFACE__
   bind_address: "127.0.0.1"
-  log_level: warn
+  log_level: info
   log_format: json
   http_port: 8080
   grpc_port: 50051
@@ -53,3 +53,6 @@ alerting:
 audit:
   enabled: true
   storage_path: __DATA_DIR__/audit.redb
+
+auth:
+  enabled: false

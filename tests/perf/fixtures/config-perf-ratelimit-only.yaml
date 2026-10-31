@@ -5,7 +5,7 @@ agent:
   interfaces:
     - __INTERFACE__
   bind_address: "127.0.0.1"
-  log_level: warn
+  log_level: info
   log_format: json
   http_port: 8080
   grpc_port: 50051
@@ -30,14 +30,9 @@ ratelimit:
   default_rate: 1000000
   default_burst: 2000000
   default_algorithm: token_bucket
-  rules:
-    - id: rl-perf-global-1m
-      rate: 1000000
-      burst: 2000000
-      scope: global
-      algorithm: token_bucket
-      action: drop
-      enabled: true
+  # A rule limits one exact source address; the whole traffic is held
+  # to default_rate and default_burst above.
+  rules: []
 
 threatintel:
   enabled: false
@@ -51,3 +46,6 @@ alerting:
 audit:
   enabled: true
   storage_path: __DATA_DIR__/audit.redb
+
+auth:
+  enabled: false

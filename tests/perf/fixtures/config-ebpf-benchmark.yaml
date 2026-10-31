@@ -5,11 +5,17 @@ agent:
   interfaces:
     - __INTERFACE__
   bind_address: "127.0.0.1"
-  log_level: warn
+  log_level: info
   log_format: json
   http_port: 8080
   grpc_port: 50051
   metrics_port: 9090
+  # The map-operation benchmarks drive hundreds of writes from the traffic
+  # VM, which is not loopback; they time the write path, not the API's
+  # per-client write limit, so the bucket is sized out of their way.
+  api_rate_limit:
+    write_per_second: 10000
+    write_burst: 10000
 
 firewall:
   enabled: true
@@ -118,3 +124,6 @@ alerting:
 audit:
   enabled: true
   storage_path: __DATA_DIR__/audit.redb
+
+auth:
+  enabled: false

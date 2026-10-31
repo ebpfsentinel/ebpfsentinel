@@ -46,6 +46,12 @@ MAX_CONNECT_OVERHEAD_NS="${MAX_CONNECT_OVERHEAD_NS:-5000}"
 MAX_EXEC_OVERHEAD_NS="${MAX_EXEC_OVERHEAD_NS:-200000}"
 
 setup_file() {
+    # The driver's own connect() and execve() are what the hooks are timed on,
+    # so the driver has to run on the host the agent attached to. From the
+    # traffic VM it would time an unhooked kernel and report no overhead.
+    if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
+        env_skip "attribution overhead is timed on the agent host itself (local lane only)"
+    fi
     require_root
     require_kernel 6 9
     require_tool cc

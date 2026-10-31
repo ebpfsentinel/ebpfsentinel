@@ -124,7 +124,7 @@ agent:
     - __INTERFACE__
   bind_address: "0.0.0.0"
   allow_unauthenticated_api: true
-  log_level: warn
+  log_level: info
   http_port: 8080
   grpc_port: 50051
   metrics_port: 9090
@@ -159,6 +159,7 @@ ratelimit:
   default_algorithm: token_bucket
   rules:
     - id: rl-bench-1
+      src_ip: __NS_IP__
       rate: 100000
       burst: 200000
       scope: global
@@ -180,12 +181,22 @@ conntrack:
 
 ddos:
   enabled: ${enable_conntrack}
+  # The SYN guard is armed so the path is walked; its threshold sits above
+  # what the link carries, so it never fires during the measurement.
+  syn_protection:
+    enabled: true
+    threshold_mode: true
+    threshold_pps: 1000000
   policies: []
 
 alerting:
   enabled: false
 
 audit:
+  enabled: false
+  storage_path: __DATA_DIR__/audit.redb
+
+auth:
   enabled: false
 EOF
 

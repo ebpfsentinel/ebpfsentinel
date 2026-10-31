@@ -551,8 +551,8 @@ _bench_nptv6_rules() {
 
 # ── NAT NPTv6 prefix-rule benchmarks ───────────────────────────────
 #
-# create_nptv6_rule is served under the read governor (burst 200), so up to
-# ~200 ops/burst land; 10 and 100 both stay within it and must all succeed.
+# create_nptv6_rule is a write route; the benchmark config sizes the write
+# limit out of the way, so 10 and 100 must all succeed.
 
 @test "nat: NPTv6 add 10 rules" {
     [ "${EBPF_2VM_MODE:-false}" = "true" ] || require_root

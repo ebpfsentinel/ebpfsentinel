@@ -101,7 +101,7 @@ _make_nat_config() {
     esac
     case "$variant" in
         ingress|full)
-            dnat=$'  dnat_rules:\n    - id: bench-dnat\n      type: dnat\n      translated_addr: "10.200.0.1"\n      translated_port: 5201\n      match_dst_port: 5201\n      match_protocol: tcp' ;;
+            dnat=$'  dnat_rules:\n    - id: bench-dnat\n      type: dnat\n      translated_addr: "__HOST_IP__"\n      translated_port: 5201\n      match_dst_port: 5201\n      match_protocol: tcp' ;;
     esac
     local cfg="${DATA_DIR}/config-nat-${variant}-$$.yaml"
     cat > "$cfg" <<EOF
@@ -109,7 +109,7 @@ agent:
   interfaces:
     - __INTERFACE__
   bind_address: "127.0.0.1"
-  log_level: warn
+  log_level: info
   http_port: 8080
   grpc_port: 50051
   metrics_port: 9090
@@ -135,6 +135,10 @@ alerting:
   enabled: false
 audit:
   enabled: false
+  storage_path: __DATA_DIR__/audit.redb
+
+auth:
+  enabled: false
 EOF
     echo "$cfg"
 }
@@ -147,7 +151,7 @@ agent:
   interfaces:
     - __INTERFACE__
   bind_address: "127.0.0.1"
-  log_level: warn
+  log_level: info
   http_port: 8080
   grpc_port: 50051
   metrics_port: 9090
@@ -164,6 +168,10 @@ dlp:
 alerting:
   enabled: false
 audit:
+  enabled: false
+  storage_path: __DATA_DIR__/audit.redb
+
+auth:
   enabled: false
 EOF
     echo "$cfg"
