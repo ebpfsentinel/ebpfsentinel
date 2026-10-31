@@ -390,7 +390,37 @@ fn all_coverage_entries() -> Vec<CoverageEntry> {
     entries.extend(ml_anomaly_coverage_entries());
     entries.extend(ai_security_coverage_entries());
     entries.extend(tls_intelligence_coverage_entries());
+    entries.extend(process_coverage_entries());
     entries
+}
+
+/// The three detections on the process tree, one technique each. Written out
+/// rather than built from the detection kinds, so the documentation reads the
+/// table off this file; the test on raised techniques holds the two together.
+fn process_coverage_entries() -> Vec<CoverageEntry> {
+    vec![
+        entry(
+            "process",
+            "T1059",
+            "Command and Scripting Interpreter",
+            "execution",
+            "Shell or interpreter on a socket, or dialling out under a server",
+        ),
+        entry(
+            "process",
+            "T1620",
+            "Reflective Code Loading",
+            "defense-evasion",
+            "Process with no file on disk holding a connection",
+        ),
+        entry(
+            "process",
+            "T1190",
+            "Exploit Public-Facing Application",
+            "initial-access",
+            "Unexpected descendant of a server connecting out",
+        ),
+    ]
 }
 
 fn ai_security_coverage_entries() -> Vec<CoverageEntry> {
@@ -1880,6 +1910,9 @@ mod tests {
                 "tls-intelligence",
                 lookup(&MitreContext::TlsIntelligence(reason)),
             );
+        }
+        for kind in crate::process::detection::ProcessDetectionKind::ALL {
+            record("process", kind.mitre());
         }
 
         raised

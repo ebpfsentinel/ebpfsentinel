@@ -87,7 +87,7 @@ pub use loadbalancer::{
 };
 pub use management::ManagementConfig;
 pub use nat::{HairpinNatConfig, NatConfig, NatRuleConfig, NptV6RuleConfig};
-pub use process_table::ProcessTableConfig;
+pub use process_table::{ProcessDetectionConfig, ProcessTableConfig};
 pub use profile::{AgentProfile, POD_REFUSED_SECTIONS, PodSelectorConfig};
 pub use qos::{
     QosCgroupShapingConfig, QosClassifierConfig, QosPipeConfig, QosQueueConfig, QosSectionConfig,
@@ -556,6 +556,14 @@ impl AgentConfig {
 
         // Validate the process-table block
         self.process_table.validate()?;
+        if self.process_table.detections.kill_process && !self.response.kill_process.enabled {
+            return Err(ConfigError::Validation {
+                field: "process_table.detections.kill_process".to_string(),
+                message: "the detections ask for a process to be stopped and \
+                          response.kill_process is not enabled"
+                    .to_string(),
+            });
+        }
         self.learning.validate()?;
 
         // Validate flow export, sinks included
@@ -5829,6 +5837,24 @@ ids:
             assert!(err.contains("kill_process"), "unexpected error: {err}");
             assert!(err.contains(needle), "unexpected error: {err}");
         }
+    }
+
+    #[test]
+    fn the_process_detections_stop_a_process_only_where_process_kill_is_enabled() {
+        let document = |enabled: bool| {
+            format!(
+                "agent:\n  interfaces: [eth0]\nresponse:\n  kill_process:\n    enabled: {enabled}\n\
+                 process_table:\n  detections:\n    kill_process: true\n"
+            )
+        };
+        assert!(AgentConfig::from_yaml(&document(true)).is_ok());
+        let err = AgentConfig::from_yaml(&document(false))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("process_table.detections.kill_process"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

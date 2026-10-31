@@ -177,6 +177,9 @@ pub struct AppState {
     pub service_graph: ArcSwapOption<application::l7_red_meter::L7RedMeter>,
     /// The kernel's drop counts, once the counter is attached.
     pub kernel_drops: ArcSwapOption<application::kernel_drop_service::KernelDropService>,
+    /// Whether the process-tree detections are sampling, for the coverage
+    /// matrix.
+    pub process_detections: AtomicBool,
 }
 
 impl AppState {
@@ -215,6 +218,7 @@ impl AppState {
             netpol_replay: ArcSwapOption::empty(),
             pod_coverage: Arc::new(application::pod_coverage_service::PodCoverageService::new()),
             learning_service: ArcSwapOption::empty(),
+            process_detections: AtomicBool::new(false),
             service_graph: ArcSwapOption::empty(),
             kernel_drops: ArcSwapOption::empty(),
             nat_service: None,

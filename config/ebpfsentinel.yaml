@@ -221,6 +221,19 @@ process_table:
   enabled: true
   capacity: 8192
   capture_command_line: false
+  # Three detections read off the table where a process touches the network:
+  # a shell or interpreter on a socket, a binary with no file on disk, and a
+  # server's descendant connecting out. They alert and stop nothing unless
+  # kill_process is set, which needs response.kill_process enabled.
+  detections:
+    enabled: true
+    interval_secs: 10
+    kinds:
+      reverse_shell: true
+      fileless: true
+      server_descendant: true
+    expected: []
+    kill_process: false
 
 # Learning mode: what this node reached, for a window an operator declares.
 # Nothing is observed until a window is opened, so enabled here only means

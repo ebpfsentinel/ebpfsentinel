@@ -1,3 +1,6 @@
+use domain::process::detection::{
+    DEFAULT_INTERPRETERS, DEFAULT_SERVERS, ProcessDetectionPolicy, validate_entry,
+};
 use serde::{Deserialize, Serialize};
 
 use super::common::{ConfigError, default_true};
@@ -46,6 +49,11 @@ pub struct ProcessTableConfig {
     /// an operator's decision about their own node.
     #[serde(default)]
     pub capture_command_line: bool,
+
+    /// The three detections read off the table where a process touches the
+    /// network.
+    #[serde(default)]
+    pub detections: ProcessDetectionConfig,
 }
 
 impl Default for ProcessTableConfig {
@@ -54,7 +62,153 @@ impl Default for ProcessTableConfig {
             enabled: true,
             capacity: default_capacity(),
             capture_command_line: false,
+            detections: ProcessDetectionConfig::default(),
         }
+    }
+}
+
+/// How often the detections read the connection and process tables.
+fn default_detection_interval_secs() -> u64 {
+    10
+}
+
+const MIN_DETECTION_INTERVAL_SECS: u64 = 1;
+const MAX_DETECTION_INTERVAL_SECS: u64 = 3_600;
+
+fn default_interpreters() -> Vec<String> {
+    DEFAULT_INTERPRETERS
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn default_servers() -> Vec<String> {
+    DEFAULT_SERVERS.iter().map(ToString::to_string).collect()
+}
+
+/// A reverse shell, a binary with no file and an unexpected descendant of a
+/// server, each tested on every process holding a connection this node
+/// opened.
+///
+/// On by default, raising alerts and stopping nothing: the three are rare on
+/// an ordinary node and each is worth an operator's look, while killing a
+/// process on a list somebody else wrote is the operator's decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessDetectionConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Seconds between two reads of the tables. A connection that opens and
+    /// closes between two reads is not tested.
+    #[serde(default = "default_detection_interval_secs")]
+    pub interval_secs: u64,
+
+    /// Which of the three detections run.
+    #[serde(default)]
+    pub kinds: ProcessDetectionKinds,
+
+    /// The shells and interpreters a reverse shell is made of. A name, a full
+    /// path when it carries a `/`, either ending in `*` for a prefix.
+    #[serde(default = "default_interpreters")]
+    pub interpreters: Vec<String>,
+
+    /// The servers whose descendants should answer rather than dial out.
+    #[serde(default = "default_servers")]
+    pub servers: Vec<String>,
+
+    /// Programs a server is expected to start and that may connect out, such
+    /// as the client a PHP application calls.
+    #[serde(default)]
+    pub expected: Vec<String>,
+
+    /// Stop each process an alert names, through the process kill the
+    /// `response.kill_process` section configures.
+    #[serde(default)]
+    pub kill_process: bool,
+}
+
+impl Default for ProcessDetectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_secs: default_detection_interval_secs(),
+            kinds: ProcessDetectionKinds::default(),
+            interpreters: default_interpreters(),
+            servers: default_servers(),
+            expected: Vec::new(),
+            kill_process: false,
+        }
+    }
+}
+
+/// One switch per detection, each on by default.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ProcessDetectionKinds {
+    /// A shell or interpreter talking to the network, through its own
+    /// standard streams or from under a server.
+    #[serde(default = "default_true")]
+    pub reverse_shell: bool,
+
+    /// A process holding a connection whose binary is gone from disk or was
+    /// never on it.
+    #[serde(default = "default_true")]
+    pub fileless: bool,
+
+    /// A process a server started that connects out and is not expected.
+    #[serde(default = "default_true")]
+    pub server_descendant: bool,
+}
+
+impl Default for ProcessDetectionKinds {
+    fn default() -> Self {
+        Self {
+            reverse_shell: true,
+            fileless: true,
+            server_descendant: true,
+        }
+    }
+}
+
+impl ProcessDetectionConfig {
+    /// The domain policy these settings describe.
+    #[must_use]
+    pub fn to_policy(&self) -> ProcessDetectionPolicy {
+        ProcessDetectionPolicy {
+            reverse_shell: self.kinds.reverse_shell,
+            fileless: self.kinds.fileless,
+            server_descendant: self.kinds.server_descendant,
+            interpreters: self.interpreters.clone(),
+            servers: self.servers.clone(),
+            expected: self.expected.clone(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !(MIN_DETECTION_INTERVAL_SECS..=MAX_DETECTION_INTERVAL_SECS)
+            .contains(&self.interval_secs)
+        {
+            return Err(ConfigError::Validation {
+                field: "process_table.detections.interval_secs".to_string(),
+                message: format!(
+                    "must be between {MIN_DETECTION_INTERVAL_SECS} and \
+                     {MAX_DETECTION_INTERVAL_SECS}, got {}",
+                    self.interval_secs
+                ),
+            });
+        }
+        for (field, entries) in [
+            ("interpreters", &self.interpreters),
+            ("servers", &self.servers),
+            ("expected", &self.expected),
+        ] {
+            for entry in entries {
+                validate_entry(entry).map_err(|message| ConfigError::Validation {
+                    field: format!("process_table.detections.{field}"),
+                    message,
+                })?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -69,7 +223,7 @@ impl ProcessTableConfig {
                 ),
             });
         }
-        Ok(())
+        self.detections.validate()
     }
 }
 
@@ -114,6 +268,36 @@ mod tests {
         assert_eq!(cfg.capacity, 1024);
         assert!(cfg.capture_command_line);
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn the_detections_are_on_alerting_and_stopping_nothing() {
+        let cfg = ProcessTableConfig::default().detections;
+        assert!(cfg.enabled);
+        assert!(cfg.kinds.reverse_shell && cfg.kinds.fileless && cfg.kinds.server_descendant);
+        assert!(!cfg.kill_process);
+        assert_eq!(cfg.to_policy(), ProcessDetectionPolicy::default());
+    }
+
+    #[test]
+    fn a_detection_list_entry_with_a_star_inside_is_refused() {
+        let mut cfg = ProcessTableConfig::default();
+        cfg.detections.expected = vec!["cu*rl".to_string()];
+        assert!(cfg.validate().is_err());
+        cfg.detections.expected = vec!["curl".to_string()];
+        cfg.detections.interval_secs = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn the_detections_read_from_yaml() {
+        let yaml = "detections:\n  expected: [curl]\n  kill_process: true\n  kinds:\n    fileless: false\n";
+        let cfg: ProcessTableConfig = serde_norway::from_str(yaml).unwrap();
+        assert_eq!(cfg.detections.expected, vec!["curl".to_string()]);
+        assert!(cfg.detections.kill_process);
+        assert!(!cfg.detections.kinds.fileless);
+        assert!(cfg.detections.kinds.reverse_shell);
+        assert_eq!(cfg.detections.servers, default_servers());
     }
 
     #[test]

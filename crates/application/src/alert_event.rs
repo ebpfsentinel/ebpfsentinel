@@ -32,6 +32,13 @@ pub enum AlertEvent {
     /// because the workload block is what makes it readable, and the
     /// pipeline fills that from the task the kernel reported.
     WorkloadDenial(Box<Alert>),
+    /// A process one of the process-tree detections named, already carrying
+    /// its workload block and ancestry. `kill_process` stops that process
+    /// through the same kill an IPS rule asks for.
+    ProcessDetection {
+        alert: Box<Alert>,
+        kill_process: bool,
+    },
     /// A pre-built system alert (e.g. multi-WAN total failure) that does not
     /// originate from a kernel security event. Boxed to keep the envelope small.
     System(Box<Alert>),

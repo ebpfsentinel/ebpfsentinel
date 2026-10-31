@@ -847,6 +847,10 @@ impl AlertPipeline {
                 self.process_packet_security_alert(&psa).await;
             }
             AlertEvent::WorkloadDenial(alert) => self.process_workload_denial(*alert).await,
+            AlertEvent::ProcessDetection {
+                alert,
+                kill_process,
+            } => self.process_detection(*alert, kill_process).await,
             AlertEvent::System(alert) => self.process_system_alert(*alert).await,
         }
     }
@@ -859,6 +863,16 @@ impl AlertPipeline {
     /// reported, before the alert takes the system path like any other.
     pub async fn process_workload_denial(&mut self, mut alert: Alert) {
         self.attribute(&mut alert);
+        self.process_system_alert(alert).await;
+    }
+
+    /// A process the process-tree detections named. The workload block is
+    /// already filled; what is left is the kill, when the configuration asks
+    /// for it, before the alert takes the system path like any other.
+    pub async fn process_detection(&mut self, alert: Alert, kill_process: bool) {
+        if kill_process {
+            self.kill_flow_process(&alert);
+        }
         self.process_system_alert(alert).await;
     }
 

@@ -87,6 +87,12 @@ async fn active_components(state: &AppState) -> Vec<&'static str> {
             "dns",
             state.dns_blocklist_service.is_some() || state.domain_reputation_service.is_some(),
         ),
+        (
+            "process",
+            state
+                .process_detections
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ),
     ];
 
     running
@@ -99,7 +105,7 @@ async fn active_components(state: &AppState) -> Vec<&'static str> {
 ///
 /// A word here that the mapping is not keyed on filters the matrix down to
 /// nothing without saying so, which is what the test beside it asserts against.
-const REPORTABLE_COMPONENTS: [&str; 9] = [
+const REPORTABLE_COMPONENTS: [&str; 10] = [
     "firewall",
     "ips",
     "ratelimit",
@@ -109,6 +115,7 @@ const REPORTABLE_COMPONENTS: [&str; 9] = [
     "dlp",
     "ddos",
     "dns",
+    "process",
 ];
 
 /// `GET /api/v1/mitre/coverage` - MITRE ATT&CK coverage matrix.
@@ -289,6 +296,11 @@ mod tests {
         assert!(active.contains(&"firewall"));
         assert!(active.contains(&"ids"));
         assert!(active.contains(&"ddos"));
+        assert!(!active.contains(&"process"));
+        state
+            .process_detections
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(active_components(&state).await.contains(&"process"));
     }
 
     /// Every word this handler activates has to be a word the mapping knows,

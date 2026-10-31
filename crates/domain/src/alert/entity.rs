@@ -11,6 +11,9 @@ use crate::firewall::exec_network::{EXEC_NETWORK_EXECUTABLE_SOURCE, ExecNetworkR
 use crate::firewall::workload::{DestinationAddr, WORKLOAD_FIREWALL_COMPONENT, WorkloadDenial};
 use crate::ids::entity::IdsAlert;
 use crate::l7::port_promise::PORT_MISMATCH_RULE_ID;
+use crate::process::detection::{
+    PROCESS_DETECTION_COMPONENT, ProcessDetection, ProcessDetectionKind,
+};
 use crate::threatintel::entity::ThreatIntelAlert;
 use crate::workload::entity::Workload;
 
@@ -943,6 +946,100 @@ impl Alert {
                 .map(|_| EXEC_NETWORK_EXECUTABLE_SOURCE.to_string()),
             flow_source: None,
             workload: None,
+        }
+    }
+
+    /// Create an alert from a detection on the process tree.
+    ///
+    /// The process is the workload block, ancestry included, because that is
+    /// the whole of the evidence: the chain is what says a shell was started by
+    /// a web server. The destination is the connection the process was found
+    /// holding, where it was found through one.
+    #[must_use]
+    pub fn from_process_detection(
+        detection: &ProcessDetection,
+        workload: Workload,
+        destination: Option<(std::net::IpAddr, u16, u8)>,
+        at_ns: u64,
+    ) -> Self {
+        let rule_id = detection.kind.rule_id();
+        let (dst_addr, dst_port, protocol, is_ipv6) = match destination {
+            Some((std::net::IpAddr::V4(addr), port, protocol)) => {
+                ([u32::from(addr), 0, 0, 0], port, protocol, false)
+            }
+            Some((std::net::IpAddr::V6(addr), port, protocol)) => {
+                let o = addr.octets();
+                (
+                    [
+                        u32::from_be_bytes([o[0], o[1], o[2], o[3]]),
+                        u32::from_be_bytes([o[4], o[5], o[6], o[7]]),
+                        u32::from_be_bytes([o[8], o[9], o[10], o[11]]),
+                        u32::from_be_bytes([o[12], o[13], o[14], o[15]]),
+                    ],
+                    port,
+                    protocol,
+                    true,
+                )
+            }
+            None => ([0; 4], 0, 0, false),
+        };
+        Self {
+            id: Self::generate_id(at_ns, &rule_id),
+            timestamp_ns: at_ns,
+            component: PROCESS_DETECTION_COMPONENT.to_string(),
+            severity: match detection.kind {
+                ProcessDetectionKind::ReverseShell | ProcessDetectionKind::Fileless => {
+                    Severity::Critical
+                }
+                ProcessDetectionKind::ServerDescendant => Severity::High,
+            },
+            rule_id,
+            action: DomainMode::Alert,
+            src_addr: [0; 4],
+            dst_addr,
+            src_port: 0,
+            dst_port,
+            protocol,
+            is_ipv6,
+            message: detection.message.clone(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: Some(workload.pid),
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: Some(detection.kind.mitre()),
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
+            executable_path: workload.exe.clone(),
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
+            workload: Some(workload),
         }
     }
 

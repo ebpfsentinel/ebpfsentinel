@@ -90,6 +90,7 @@ pub mod netpol_replay_service;
 pub mod netpol_service;
 pub mod packet_pipeline;
 pub mod pod_coverage_service;
+pub mod process_detection_service;
 pub mod process_signal_service;
 pub mod process_table_service;
 pub mod qos_cgroup_shaping_service;

@@ -4369,6 +4369,40 @@ pub async fn run(
         );
     }
 
+    // The three process detections read the same tables the learning window
+    // does, and need the process table for the ancestry they judge.
+    let detections = &config.process_table.detections;
+    if detections.enabled {
+        if let Some(ref table) = process_table_for_learning {
+            let detector = Arc::new(
+                application::process_detection_service::ProcessDetector::new(
+                    detections.to_policy(),
+                    Arc::clone(&conntrack_svc),
+                    workloads.clone(),
+                    Arc::clone(table),
+                    Arc::new(adapters::container::ProcFactsReader::new(&coverage_proc)),
+                    alert_tx.clone(),
+                )
+                .with_kill_process(detections.kill_process),
+            );
+            let interval = Duration::from_secs(detections.interval_secs);
+            let detection_cancel = cancel_token.clone();
+            tokio::spawn(async move {
+                detector.run(interval, detection_cancel).await;
+            });
+            app_state
+                .process_detections
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            info!(
+                interval_secs = detections.interval_secs,
+                kill_process = detections.kill_process,
+                "process detections running"
+            );
+        } else {
+            info!("process detections off: they read the process table, which is disabled");
+        }
+    }
+
     // ── 11. Spawn event dispatcher (replaces flat event consumer) ───
     let dispatcher = EventDispatcher::new(
         Arc::clone(&ids_svc),
