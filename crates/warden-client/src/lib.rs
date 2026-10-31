@@ -28,7 +28,9 @@ use std::time::Duration;
 use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
 // Re-exported under their real names so callers of the typed control methods can
 // build request values without taking a direct dependency on the protocol crate.
-pub use ebpfsentinel_warden_proto::{ConntrackTuple, DlpTarget, ExecutableIdentity, RouteSpec};
+pub use ebpfsentinel_warden_proto::{
+    ConntrackTuple, DlpTarget, ExecutableIdentity, PacketSocket, RouteSpec,
+};
 
 /// How long one warden call may take before the client gives up on it.
 ///
@@ -72,6 +74,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::TcxChain { .. } => "TcxChain",
         Command::AttachTcxInNetns { .. } => "AttachTcxInNetns",
         Command::ReadExecutable { .. } => "ReadExecutable",
+        Command::PacketSockets => "PacketSockets",
     }
 }
 
@@ -225,6 +228,14 @@ impl WardenClient {
         match self.call(&Command::ReadExecutable { pid })? {
             Response::Executable { executable } => Ok(executable),
             other => Err(unexpected("ReadExecutable", &other)),
+        }
+    }
+
+    /// List every packet socket on the node, with its holder and its filter.
+    pub fn packet_sockets(&mut self) -> io::Result<Vec<PacketSocket>> {
+        match self.call(&Command::PacketSockets)? {
+            Response::PacketSockets { sockets } => Ok(sockets),
+            other => Err(unexpected("PacketSockets", &other)),
         }
     }
 
@@ -500,6 +511,12 @@ impl ReconnectingClient {
     /// bounced. A read, so replaying it is harmless.
     pub fn read_executable(&mut self, pid: u32) -> io::Result<Option<ExecutableIdentity>> {
         self.with_retry(|c| c.read_executable(pid))
+    }
+
+    /// List every packet socket on the node through the warden, reconnecting
+    /// if it bounced.
+    pub fn packet_sockets(&mut self) -> io::Result<Vec<PacketSocket>> {
+        self.with_retry(WardenClient::packet_sockets)
     }
 
     /// Scan `/proc` for DLP targets through the warden, reconnecting if it bounced.

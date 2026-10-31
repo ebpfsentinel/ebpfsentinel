@@ -35,6 +35,7 @@ use super::ops_handler;
 use super::process_handler;
 use super::qos_handler;
 use super::ratelimit_handler;
+use super::raw_socket_handler;
 use super::response_handler;
 use super::routing_handler;
 use super::service_graph_handler;
@@ -131,6 +132,7 @@ use super::zone_handler;
         coverage_handler::get_ebpf_coverage,
         ops_handler::get_uprobes,
         drop_reason_handler::get_drop_reasons,
+        raw_socket_handler::get_raw_sockets,
         // DNS
         dns_handler::dns_status,
         dns_handler::list_dns_cache,
@@ -352,6 +354,8 @@ use super::zone_handler;
         flow_handler::FlowSinkStatusResponse,
         drop_reason_handler::DropReasonsResponse,
         drop_reason_handler::DropReasonBody,
+        raw_socket_handler::RawSocketsResponse,
+        raw_socket_handler::RawSocketBody,
         service_graph_handler::ServiceGraphResponse,
         service_graph_handler::ServiceEdgeBody,
         service_graph_handler::ServiceEndBody,

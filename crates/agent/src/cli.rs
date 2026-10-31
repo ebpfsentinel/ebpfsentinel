@@ -1096,6 +1096,8 @@ pub enum EbpfCommand {
     HostCheck,
     /// Show why the kernel dropped packets, by reason and interface
     Drops,
+    /// List the packet sockets open on this node, their holder and filter
+    RawSockets,
 }
 
 // ── Config ──────────────────────────────────────────────────────────────
@@ -2696,6 +2698,18 @@ mod tests {
             cli.command,
             Some(Command::Ebpf(DomainArgs {
                 command: EbpfCommand::Drops,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_ebpf_raw_sockets() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "ebpf", "raw-sockets"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ebpf(DomainArgs {
+                command: EbpfCommand::RawSockets,
                 ..
             }))
         ));

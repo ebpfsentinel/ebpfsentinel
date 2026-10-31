@@ -4449,6 +4449,32 @@ pub async fn run(
         }
     }
 
+    // Who else reads the node's traffic: the packet sockets open on it, read
+    // through the warden when there is one and from the host's /proc
+    // otherwise.
+    if config.network_inventory.enabled {
+        let reader = Arc::new(adapters::warden::packet_sockets::PacketSocketReader::new(
+            ebpfsentinel_warden::packet_sockets::scan,
+            coverage_proc.clone(),
+        ));
+        let watcher = Arc::new(application::raw_socket_service::RawSocketWatcher::new(
+            reader,
+            workloads.clone(),
+            alert_tx.clone(),
+        ));
+        app_state.install_raw_sockets(Arc::clone(&watcher));
+        let interval = Duration::from_secs(config.network_inventory.interval_secs);
+        let inventory_cancel = cancel_token.clone();
+        info!(
+            interval_secs = config.network_inventory.interval_secs,
+            source = watcher.source(),
+            "packet socket inventory running"
+        );
+        tokio::spawn(async move {
+            watcher.run(interval, inventory_cancel).await;
+        });
+    }
+
     // ── 11. Spawn event dispatcher (replaces flat event consumer) ───
     let dispatcher = EventDispatcher::new(
         Arc::clone(&ids_svc),

@@ -4594,6 +4594,68 @@ pub async fn cmd_ebpf_drops(client: &ApiClient, output: OutputFormat) -> Result<
     Ok(())
 }
 
+/// Print the packet sockets open on this node, who holds them and what
+/// filter is attached to them.
+pub async fn cmd_ebpf_raw_sockets(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.raw_sockets().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    if !resp.reading {
+        println!("The packet socket inventory is turned off on this node.");
+        return Ok(());
+    }
+    if let Some(error) = &resp.last_error {
+        println!("Last reading failed, sockets below are the previous ones: {error}");
+    }
+    if resp.sockets.is_empty() {
+        println!("No packet socket open on this node.");
+        return Ok(());
+    }
+    let mut table = Table::new(&[
+        ("PID", Align::Right),
+        ("EXECUTABLE", Align::Left),
+        ("POD", Align::Left),
+        ("KIND", Align::Left),
+        ("PROTOCOL", Align::Left),
+        ("INTERFACE", Align::Left),
+        ("NETNS", Align::Left),
+        ("FILTER", Align::Left),
+    ]);
+    for socket in &resp.sockets {
+        let filter = match socket.filter_instructions {
+            Some(n) => format!("{} ({n} insns)", socket.filter),
+            None => socket.filter.clone(),
+        };
+        table.row(cells![
+            socket
+                .pid
+                .map_or_else(|| "-".to_string(), |p| p.to_string()),
+            socket.executable.as_deref().unwrap_or("-"),
+            socket.pod.as_deref().unwrap_or("-"),
+            socket.kind,
+            socket.protocol,
+            socket.interface,
+            if socket.host_netns {
+                "host".to_string()
+            } else {
+                socket.netns.to_string()
+            },
+            filter
+        ]);
+    }
+    table.print();
+    println!(
+        "\n{} packet socket(s), read through {}.",
+        resp.sockets.len(),
+        resp.source.as_deref().unwrap_or("-")
+    );
+    Ok(())
+}
+
 /// The workload firewall's hooks, and the rule on the DNS ports when one is
 /// configured.
 fn print_workload_firewall(wf: &crate::api_client::WorkloadFirewallReport) {

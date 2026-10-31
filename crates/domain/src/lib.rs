@@ -26,6 +26,7 @@ pub mod netpol;
 pub mod process;
 pub mod qos;
 pub mod ratelimit;
+pub mod raw_socket;
 pub mod response;
 pub mod routing;
 pub mod telemetry;

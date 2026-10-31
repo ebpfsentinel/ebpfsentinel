@@ -50,6 +50,7 @@ pub mod qos_map_port;
 pub mod quarantine_map_port;
 pub mod ratelimit_lpm_port;
 pub mod ratelimit_map_port;
+pub mod raw_socket_port;
 pub mod redirect_origin_port;
 pub mod rule_change_store;
 pub mod signal_report_port;

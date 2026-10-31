@@ -75,6 +75,40 @@ pub struct ExecutableIdentity {
     pub ino: u64,
 }
 
+/// One `AF_PACKET` socket open on the node, as the kernel lists it.
+///
+/// A packet socket sees frames before the network stack does, which is what a
+/// capture tool needs and what a backdoor listening for a magic packet needs
+/// too. The kernel lists them per network namespace; the holder is found by
+/// matching the socket's inode against every process's descriptors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PacketSocket {
+    /// The socket's inode, unique within its namespace.
+    pub inode: u64,
+    /// `SOCK_RAW` (3) delivers frames with their link-layer header,
+    /// `SOCK_DGRAM` (2) without.
+    pub socket_type: u16,
+    /// The ethertype the socket receives, in host order; `0x0003` is every
+    /// protocol, `0` is none until the socket is bound.
+    pub protocol: u16,
+    /// The interface it is bound to, `0` for every interface.
+    pub ifindex: u32,
+    /// The interface's name, where the scanner shares the namespace it lives
+    /// in.
+    pub interface: Option<String>,
+    /// The uid that opened it.
+    pub uid: u32,
+    /// The inode of its network namespace.
+    pub netns: u64,
+    /// Whether that namespace is the host's.
+    pub host_netns: bool,
+    /// The process holding it, `None` when no descriptor names it.
+    pub pid: Option<u32>,
+    /// Classic BPF instructions in the filter attached to it: `Some(0)` for
+    /// no filter, `None` when the kernel could not be asked.
+    pub filter_instructions: Option<u32>,
+}
+
 /// A routing-table entry, used by multi-WAN failover.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteSpec {
@@ -233,6 +267,11 @@ pub enum Command {
         /// The process whose executable is named.
         pid: u32,
     },
+    /// List every `AF_PACKET` socket on the node, in every network namespace,
+    /// with the process holding it and whether a classic BPF filter is
+    /// attached. Read-only, and it takes no argument: the warden decides
+    /// which namespaces it reads from what `/proc` shows it.
+    PacketSockets,
 }
 
 /// A reply from the warden to the agent.
@@ -296,6 +335,11 @@ pub enum Response {
         /// What `/proc/<pid>/exe` named, when it named anything.
         executable: Option<ExecutableIdentity>,
     },
+    /// Every packet socket on the node, answering [`Command::PacketSockets`].
+    PacketSockets {
+        /// One entry per socket, in no particular order.
+        sockets: Vec<PacketSocket>,
+    },
 }
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
@@ -329,8 +373,8 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, ConntrackTuple, DlpTarget, ExecutableIdentity, MAX_FRAME_LEN, Response, RouteSpec,
-        read_frame, write_frame,
+        Command, ConntrackTuple, DlpTarget, ExecutableIdentity, MAX_FRAME_LEN, PacketSocket,
+        Response, RouteSpec, read_frame, write_frame,
     };
     use std::io::Cursor;
 
@@ -392,6 +436,7 @@ mod tests {
                 egress: false,
             },
             Command::ReadExecutable { pid: 4242 },
+            Command::PacketSockets,
         ]
     }
 
@@ -434,6 +479,20 @@ mod tests {
                 }),
             },
             Response::Executable { executable: None },
+            Response::PacketSockets {
+                sockets: vec![PacketSocket {
+                    inode: 31_337,
+                    socket_type: 3,
+                    protocol: 0x0003,
+                    ifindex: 0,
+                    interface: None,
+                    uid: 0,
+                    netns: 4_026_531_840,
+                    host_netns: true,
+                    pid: Some(812),
+                    filter_instructions: Some(30),
+                }],
+            },
         ]
     }
 

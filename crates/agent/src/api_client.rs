@@ -1837,6 +1837,39 @@ pub struct DropReasonsResponse {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct RawSocketEntry {
+    pub inode: u64,
+    pub kind: String,
+    pub protocol: String,
+    pub interface: String,
+    pub uid: u32,
+    pub netns: u64,
+    pub host_netns: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod: Option<String>,
+    pub filter: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_instructions: Option<u32>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct RawSocketsResponse {
+    pub reading: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub scanned_at_ns: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    pub sockets: Vec<RawSocketEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct ProgramTypeSupport {
     pub program_type: String,
     pub supported: bool,
@@ -3685,6 +3718,15 @@ impl ApiClient {
     pub async fn drop_reasons(&self) -> anyhow::Result<DropReasonsResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/ebpf/drop-reasons")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn raw_sockets(&self) -> anyhow::Result<RawSocketsResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ebpf/raw-sockets")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

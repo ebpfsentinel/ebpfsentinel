@@ -125,6 +125,7 @@ use super::qos_handler::{
 use super::ratelimit_handler::{
     create_ratelimit_rule, delete_ratelimit_rule, list_ratelimit_rules,
 };
+use super::raw_socket_handler::get_raw_sockets;
 use super::response_handler::{
     create_response_action, list_response_actions, revoke_response_action,
 };
@@ -307,6 +308,7 @@ pub fn build_router(
             .route("/api/v1/ebpf/coverage", get(get_ebpf_coverage))
             .route("/api/v1/ebpf/uprobes", get(get_uprobes))
             .route("/api/v1/ebpf/drop-reasons", get(get_drop_reasons))
+            .route("/api/v1/ebpf/raw-sockets", get(get_raw_sockets))
             .route("/api/v1/dns/status", get(dns_status))
             .route("/api/v1/dns/cache", get(list_dns_cache))
             .route("/api/v1/dns/stats", get(dns_stats))

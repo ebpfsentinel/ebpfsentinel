@@ -20,8 +20,8 @@ use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame,
 use crate::host_ops::HostOps;
 use crate::pcap_slots::{PcapSlot, PcapSlots};
 use crate::{
-    cgroup_ops, delegate_over_fd, dlp_scan, exe_read, net_ops, netns_tcx_ops, recv_fd,
-    send_msg_fds, uprobe_ops,
+    cgroup_ops, delegate_over_fd, dlp_scan, exe_read, net_ops, netns_tcx_ops, packet_sockets,
+    recv_fd, send_msg_fds, uprobe_ops,
 };
 
 /// How long a connection may hold a thread without saying `Hello`.
@@ -603,6 +603,9 @@ fn dispatch(cmd: &Command, host: &dyn HostOps, proc_root: &Path) -> Response {
         },
         Command::ReadExecutable { pid } => Response::Executable {
             executable: exe_read::read_executable(proc_root, *pid),
+        },
+        Command::PacketSockets => Response::PacketSockets {
+            sockets: packet_sockets::scan(proc_root),
         },
         Command::Hello { .. } => Response::Error {
             message: "Hello already completed".into(),

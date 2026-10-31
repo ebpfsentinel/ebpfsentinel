@@ -14,6 +14,7 @@ use crate::l7::port_promise::PORT_MISMATCH_RULE_ID;
 use crate::process::detection::{
     PROCESS_DETECTION_COMPONENT, ProcessDetection, ProcessDetectionKind,
 };
+use crate::raw_socket::entity::{FilterState, RAW_SOCKET_COMPONENT, RawSocket};
 use crate::threatintel::entity::ThreatIntelAlert;
 use crate::workload::entity::Workload;
 
@@ -1040,6 +1041,78 @@ impl Alert {
             executable_source: None,
             flow_source: None,
             workload: Some(workload),
+        }
+    }
+
+    /// Create an alert for a packet socket that appeared on the node.
+    ///
+    /// A socket carrying a classic filter is high severity: a filter is how a
+    /// backdoor sleeps until its magic packet arrives, and a capture tool
+    /// rarely needs one for long. Without one it is medium, since a capture or
+    /// a DHCP client opening a socket is ordinary and still worth a line.
+    #[must_use]
+    pub fn from_raw_socket(socket: &RawSocket, workload: Option<Workload>, at_ns: u64) -> Self {
+        let rule_id = RawSocket::rule_id();
+        let (tgid, executable_path) = match &workload {
+            Some(w) => (Some(w.pid), w.exe.clone()),
+            None => (socket.pid, None),
+        };
+        Self {
+            id: Self::generate_id(at_ns, &rule_id),
+            timestamp_ns: at_ns,
+            component: RAW_SOCKET_COMPONENT.to_string(),
+            severity: if matches!(socket.filter, FilterState::Classic { .. }) {
+                Severity::High
+            } else {
+                Severity::Medium
+            },
+            rule_id,
+            action: DomainMode::Alert,
+            src_addr: [0; 4],
+            dst_addr: [0; 4],
+            src_port: 0,
+            dst_port: 0,
+            protocol: 0,
+            is_ipv6: false,
+            message: socket.message(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: Some(RawSocket::mitre()),
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
+            executable_path,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
+            workload,
         }
     }
 

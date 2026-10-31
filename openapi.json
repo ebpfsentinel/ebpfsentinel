@@ -2957,6 +2957,55 @@
         ]
       }
     },
+    "/api/v1/ebpf/raw-sockets": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "`GET /api/v1/ebpf/raw-sockets` - who else reads the node's traffic.",
+        "operationId": "get_raw_sockets",
+        "responses": {
+          "200": {
+            "description": "Packet sockets open on the node, their holder and their filter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RawSocketsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/ebpf/status": {
       "get": {
         "tags": [
@@ -14666,6 +14715,140 @@
           },
           "src_ip": {
             "type": "string"
+          }
+        }
+      },
+      "RawSocketBody": {
+        "type": "object",
+        "description": "One packet socket open on the node.",
+        "required": [
+          "inode",
+          "kind",
+          "protocol",
+          "interface",
+          "uid",
+          "netns",
+          "host_netns",
+          "filter"
+        ],
+        "properties": {
+          "container": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The container holding it, where it runs in one."
+          },
+          "executable": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "That process's executable, where it resolved."
+          },
+          "filter": {
+            "type": "string",
+            "description": "`absent` when no filter is attached, `classic` when one is, and\n`unknown` when the kernel withheld the answer."
+          },
+          "filter_instructions": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The length of the attached classic filter, in instructions.",
+            "minimum": 0
+          },
+          "host_netns": {
+            "type": "boolean",
+            "description": "Whether that namespace is the host's."
+          },
+          "inode": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The socket's inode, unique within its network namespace.",
+            "minimum": 0
+          },
+          "interface": {
+            "type": "string",
+            "description": "The interface it is bound to, `any` when it is bound to none."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`raw` when the holder sees link-layer headers, `dgram` when the\nkernel strips them."
+          },
+          "netns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The network namespace it lives in, as an inode number.",
+            "minimum": 0
+          },
+          "pid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "A process holding it, absent when none could be found.",
+            "minimum": 0
+          },
+          "pod": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The pod holding it, as `namespace/name`, where it runs in one."
+          },
+          "protocol": {
+            "type": "string",
+            "description": "The protocol the socket receives, `all` for every one."
+          },
+          "uid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The user that opened it.",
+            "minimum": 0
+          }
+        }
+      },
+      "RawSocketsResponse": {
+        "type": "object",
+        "description": "The packet sockets on this node.",
+        "required": [
+          "reading",
+          "scanned_at_ns",
+          "sockets"
+        ],
+        "properties": {
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last reading failed. The sockets are then those of the\nreading before."
+          },
+          "reading": {
+            "type": "boolean",
+            "description": "Whether the inventory is being read."
+          },
+          "scanned_at_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the last reading was made, in nanoseconds since the epoch, `0`\nbefore the first.",
+            "minimum": 0
+          },
+          "sockets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RawSocketBody"
+            }
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the readings come from: `warden` or `local`. Absent when the\ninventory is off."
           }
         }
       },

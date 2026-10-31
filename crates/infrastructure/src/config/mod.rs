@@ -28,6 +28,7 @@ mod learning;
 mod loadbalancer;
 mod management;
 mod nat;
+mod network_inventory;
 mod process_table;
 mod profile;
 pub mod provenance;
@@ -87,6 +88,7 @@ pub use loadbalancer::{
 };
 pub use management::ManagementConfig;
 pub use nat::{HairpinNatConfig, NatConfig, NatRuleConfig, NptV6RuleConfig};
+pub use network_inventory::NetworkInventoryConfig;
 pub use process_table::{ProcessDetectionConfig, ProcessTableConfig};
 pub use profile::{AgentProfile, POD_REFUSED_SECTIONS, PodSelectorConfig};
 pub use qos::{
@@ -282,6 +284,11 @@ pub struct AgentConfig {
     /// interface the packet was on. On by default.
     #[serde(default)]
     pub kernel_drops: KernelDropsConfig,
+
+    /// The packet sockets open on the node, who holds them and what filter
+    /// is attached to them. On by default.
+    #[serde(default)]
+    pub network_inventory: NetworkInventoryConfig,
 
     /// Enterprise configuration block. The OSS agent never reads this - the
     /// enterprise edition parses it with its own loader. It is declared here
@@ -547,6 +554,7 @@ impl AgentConfig {
         // Validate the telemetry block
         self.telemetry.validate()?;
         self.kernel_drops.validate()?;
+        self.network_inventory.validate()?;
 
         // Validate container resolver config
         self.container.validate()?;

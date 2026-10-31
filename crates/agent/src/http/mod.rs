@@ -32,6 +32,7 @@ pub mod ops_handler;
 pub mod process_handler;
 pub mod qos_handler;
 pub mod ratelimit_handler;
+pub mod raw_socket_handler;
 pub mod response_handler;
 pub mod router;
 pub mod routing_handler;

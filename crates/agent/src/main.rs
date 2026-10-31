@@ -676,6 +676,7 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
                 EbpfCommand::Status => commands::cmd_ebpf_status(&client, output).await,
                 EbpfCommand::Uprobes => commands::cmd_ebpf_uprobes(&client, output).await,
                 EbpfCommand::Drops => commands::cmd_ebpf_drops(&client, output).await,
+                EbpfCommand::RawSockets => commands::cmd_ebpf_raw_sockets(&client, output).await,
                 EbpfCommand::KernelFeatures => {
                     commands::cmd_ebpf_kernel_features(&client, output).await
                 }
