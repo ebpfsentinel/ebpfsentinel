@@ -13776,6 +13776,15 @@
             "type": "string",
             "description": "Where it runs, as a person reads it."
           },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Where it runs among the programs on the same hook of the same host\ninterface, the first being `0`, for `tc_*`, `tcx_*` and `netkit_*`.",
+            "minimum": 0
+          },
           "prog_id": {
             "type": "integer",
             "format": "int32",

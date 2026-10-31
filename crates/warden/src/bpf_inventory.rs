@@ -544,6 +544,8 @@ fn host_interfaces() -> io::Result<Vec<HostInterface>> {
         .collect())
 }
 
+/// The `cls_bpf` programs on one parent, in the order the kernel runs them:
+/// the dump lists filters by priority, then by handle.
 fn tc_filters(ifindex: u32, parent: u32) -> Vec<u32> {
     let mut body = [0u8; TCMSG_LEN];
     body[4..8].copy_from_slice(&ifindex.to_ne_bytes());
@@ -551,12 +553,28 @@ fn tc_filters(ifindex: u32, parent: u32) -> Vec<u32> {
     let Ok(messages) = rtnl_dump(RTM_GETTFILTER, &body) else {
         return Vec::new();
     };
-    let ids: BTreeSet<u32> = messages
-        .into_iter()
-        .filter(|(kind, _)| *kind == RTM_NEWTFILTER)
-        .filter_map(|(_, payload)| parse_filter_message(&payload))
-        .collect();
-    ids.into_iter().collect()
+    first_occurrences(
+        messages
+            .into_iter()
+            .filter(|(kind, _)| *kind == RTM_NEWTFILTER)
+            .filter_map(|(_, payload)| parse_filter_message(&payload)),
+    )
+}
+
+/// `ids` in order, each kept at its first place.
+#[must_use]
+pub fn first_occurrences(ids: impl IntoIterator<Item = u32>) -> Vec<u32> {
+    let mut seen = HashSet::new();
+    ids.into_iter().filter(|id| seen.insert(*id)).collect()
+}
+
+/// Where `prog_id` runs in `chain`, the first program being `0`.
+#[must_use]
+pub fn chain_position(chain: &[u32], prog_id: u32) -> Option<u32> {
+    chain
+        .iter()
+        .position(|id| *id == prog_id)
+        .and_then(|at| u32::try_from(at).ok())
 }
 
 /// The program and link ids the descriptors under `fd_dir` name, read from
@@ -659,7 +677,8 @@ pub fn scan(proc_root: &Path) -> Result<Vec<NetworkProgram>, String> {
     let mut slots: Vec<Slot> = placed
         .into_iter()
         .map(|place| Slot {
-            interface: names.get(&place.link_id).cloned(),
+            interface: names.get(&place.link_id).map(|(name, _)| name.clone()),
+            position: names.get(&place.link_id).and_then(|(_, at)| *at),
             prog_id: place.prog_id,
             link_id: Some(place.link_id),
             hook: place.hook,
@@ -690,6 +709,7 @@ pub fn scan(proc_root: &Path) -> Result<Vec<NetworkProgram>, String> {
                 hook: "unplaced",
                 ifindex: None,
                 interface: None,
+                position: None,
                 cgroup_id: None,
                 detail: None,
             });
@@ -720,6 +740,7 @@ pub fn scan(proc_root: &Path) -> Result<Vec<NetworkProgram>, String> {
                 hook: slot.hook.to_owned(),
                 ifindex: slot.ifindex,
                 interface: slot.interface,
+                position: slot.position,
                 cgroup_id: slot.cgroup_id,
                 detail: slot.detail,
                 created_by_uid: Some(info.created_by_uid),
@@ -730,13 +751,18 @@ pub fn scan(proc_root: &Path) -> Result<Vec<NetworkProgram>, String> {
 }
 
 /// The interface name of each link whose program the host's own reading of
-/// that interface carries: an index from another namespace names nothing here.
-fn host_names(placed: &[LinkPlace], interfaces: &[HostInterface]) -> HashMap<u32, String> {
+/// that interface carries, an index from another namespace naming nothing
+/// here, and the program's place in that interface's chain where the hook
+/// runs several in turn.
+fn host_names(
+    placed: &[LinkPlace],
+    interfaces: &[HostInterface],
+) -> HashMap<u32, (String, Option<u32>)> {
     let by_index: HashMap<u32, &HostInterface> =
         interfaces.iter().map(|i| (i.ifindex, i)).collect();
 
     let mut chains: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
-    let mut names: HashMap<u32, String> = HashMap::new();
+    let mut names: HashMap<u32, (String, Option<u32>)> = HashMap::new();
     for place in placed {
         let Some(ifindex) = place.ifindex else {
             continue;
@@ -753,14 +779,17 @@ fn host_names(placed: &[LinkPlace], interfaces: &[HostInterface]) -> HashMap<u32
             _ => continue,
         };
         let on_host = match attach_type {
-            None => iface.xdp.contains(&place.prog_id),
-            Some(attach) => chains
-                .entry((ifindex, attach))
-                .or_insert_with(|| prog_query(ifindex, attach).unwrap_or_default())
-                .contains(&place.prog_id),
+            None => iface.xdp.contains(&place.prog_id).then_some(None),
+            Some(attach) => chain_position(
+                chains
+                    .entry((ifindex, attach))
+                    .or_insert_with(|| prog_query(ifindex, attach).unwrap_or_default()),
+                place.prog_id,
+            )
+            .map(Some),
         };
-        if on_host {
-            names.insert(place.link_id, iface.name.clone());
+        if let Some(position) = on_host {
+            names.insert(place.link_id, (iface.name.clone(), position));
         }
     }
     names
@@ -771,26 +800,28 @@ fn host_names(placed: &[LinkPlace], interfaces: &[HostInterface]) -> HashMap<u32
 fn legacy_slots(interfaces: &[HostInterface], linked_xdp: &HashSet<(u32, u32)>) -> Vec<Slot> {
     let mut slots = Vec::new();
     for iface in interfaces {
-        let legacy = |prog_id: u32, hook: &'static str| Slot {
+        let legacy = |prog_id: u32, hook: &'static str, position: Option<u32>| Slot {
             prog_id,
             link_id: None,
             hook,
             ifindex: Some(iface.ifindex),
             interface: Some(iface.name.clone()),
+            position,
             cgroup_id: None,
             detail: None,
         };
         for &prog_id in &iface.xdp {
             if !linked_xdp.contains(&(iface.ifindex, prog_id)) {
-                slots.push(legacy(prog_id, "xdp"));
+                slots.push(legacy(prog_id, "xdp", None));
             }
         }
         for (parent, hook) in [
             (TC_PARENT_INGRESS, "tc_ingress"),
             (TC_PARENT_EGRESS, "tc_egress"),
         ] {
-            for prog_id in tc_filters(iface.ifindex, parent) {
-                slots.push(legacy(prog_id, hook));
+            let chain = tc_filters(iface.ifindex, parent);
+            for &prog_id in &chain {
+                slots.push(legacy(prog_id, hook, chain_position(&chain, prog_id)));
             }
         }
     }
@@ -804,6 +835,7 @@ struct Slot {
     hook: &'static str,
     ifindex: Option<u32>,
     interface: Option<String>,
+    position: Option<u32>,
     cgroup_id: Option<u64>,
     detail: Option<String>,
 }
@@ -926,6 +958,15 @@ mod tests {
         msg.extend_from_slice(&(-libc::EPERM).to_ne_bytes());
         let mut into = Vec::new();
         assert!(split_messages(&msg, &mut into).is_err());
+    }
+
+    #[test]
+    fn a_chain_keeps_its_order_and_each_program_its_first_place() {
+        let chain = first_occurrences([30, 12, 30, 7]);
+        assert_eq!(chain, vec![30, 12, 7]);
+        assert_eq!(chain_position(&chain, 30), Some(0));
+        assert_eq!(chain_position(&chain, 7), Some(2));
+        assert_eq!(chain_position(&chain, 99), None);
     }
 
     #[test]

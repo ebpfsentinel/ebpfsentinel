@@ -89,6 +89,10 @@ pub struct NetworkProgram {
     /// index carries the program: an index from a pod's namespace names a
     /// different interface on the host.
     pub interface: Option<String>,
+    /// Where it runs among the programs on the same hook of the same host
+    /// interface, the first being `0`, for the hooks that run several in
+    /// turn.
+    pub position: Option<u32>,
     /// The cgroup a cgroup link sits on, by its id.
     pub cgroup_id: Option<u64>,
     /// What the hook does not say alone: the cgroup attach point, the
@@ -136,17 +140,14 @@ pub struct OwnBpfObjects {
     pub link_ids: HashSet<u32>,
 }
 
-/// Split `programs` into those the agent does not own, and the count of
-/// those it does.
+/// Split `programs` into those the agent does not own and those it does.
 #[must_use]
 pub fn split_own(
     programs: Vec<NetworkProgram>,
     own: &OwnBpfObjects,
-) -> (Vec<NetworkProgram>, usize) {
-    let total = programs.len();
-    let foreign: Vec<NetworkProgram> = programs.into_iter().filter(|p| !p.is_own(own)).collect();
-    let own_count = total - foreign.len();
-    (foreign, own_count)
+) -> (Vec<NetworkProgram>, Vec<NetworkProgram>) {
+    let (mine, foreign): (Vec<_>, Vec<_>) = programs.into_iter().partition(|p| p.is_own(own));
+    (foreign, mine)
 }
 
 #[cfg(test)]
@@ -163,6 +164,7 @@ mod tests {
             hook: NetworkHook::from_slug(hook),
             ifindex: Some(2),
             interface: Some("eth0".to_string()),
+            position: None,
             cgroup_id: None,
             detail: None,
             created_by_uid: Some(0),
@@ -201,8 +203,8 @@ mod tests {
             program(11, Some(7), "tcx_ingress"),
             program(12, Some(8), "tcx_ingress"),
         ];
-        let (foreign, own_count) = split_own(programs, &own);
-        assert_eq!(own_count, 2);
+        let (foreign, mine) = split_own(programs, &own);
+        assert_eq!(mine.len(), 2);
         assert_eq!(foreign.len(), 1);
         assert_eq!(foreign[0].prog_id, 12);
     }

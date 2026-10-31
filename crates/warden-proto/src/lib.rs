@@ -139,6 +139,11 @@ pub struct NetworkProgram {
     /// program. `None` with an `ifindex` is an interface in another network
     /// namespace.
     pub interface: Option<String>,
+    /// Where the program runs among those on the same hook of the same host
+    /// interface, the first being `0`, for the hooks that run several in
+    /// turn: `tc_*`, `tcx_*` and `netkit_*`.
+    #[serde(default)]
+    pub position: Option<u32>,
     /// The cgroup the program is attached to, for the cgroup hooks.
     pub cgroup_id: Option<u64>,
     /// What else places it: the cgroup attach type, the netfilter family,
@@ -566,6 +571,7 @@ mod tests {
                     hook: "tcx_ingress".into(),
                     ifindex: Some(2),
                     interface: Some("eth0".into()),
+                    position: Some(1),
                     cgroup_id: None,
                     detail: None,
                     created_by_uid: Some(0),

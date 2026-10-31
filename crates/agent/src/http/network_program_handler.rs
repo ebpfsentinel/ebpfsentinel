@@ -49,6 +49,10 @@ pub struct NetworkProgramBody {
     /// belongs to another network namespace.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interface: Option<String>,
+    /// Where it runs among the programs on the same hook of the same host
+    /// interface, the first being `0`, for `tc_*`, `tcx_*` and `netkit_*`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<u32>,
     /// The cgroup a cgroup link sits on, by id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cgroup_id: Option<u64>,
@@ -135,6 +139,7 @@ fn body(entry: &application::network_program_service::NetworkProgramEntry) -> Ne
         link_id: program.link_id,
         ifindex: program.ifindex,
         interface: program.interface.clone(),
+        position: program.position,
         cgroup_id: program.cgroup_id,
         detail: program.detail.clone(),
         created_by_uid: program.created_by_uid,
@@ -176,6 +181,7 @@ mod tests {
                 hook: NetworkHook::NetkitPeer,
                 ifindex: Some(14),
                 interface: None,
+                position: None,
                 cgroup_id: None,
                 detail: None,
                 created_by_uid: Some(0),

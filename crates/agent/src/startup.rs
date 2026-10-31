@@ -4475,7 +4475,8 @@ pub async fn run(
         });
 
         // The other eBPF programs on the network path, read the same way
-        // and on the same interval.
+        // and on the same interval; a change bearing on the agent's own
+        // programs is an alert.
         let scanner = Arc::new(
             adapters::warden::network_programs::NetworkProgramScanner::new(
                 ebpfsentinel_warden::bpf_inventory::scan,
@@ -4487,6 +4488,7 @@ pub async fn run(
             application::network_program_service::NetworkProgramWatcher::new(
                 scanner,
                 workloads.clone(),
+                alert_tx.clone(),
             ),
         );
         app_state.install_network_programs(Arc::clone(&programs));

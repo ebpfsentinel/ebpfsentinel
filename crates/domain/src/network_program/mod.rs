@@ -6,6 +6,8 @@
 //! `CAP_NET_ADMIN`. This module holds the inventory of those programs, with
 //! the agent's own set apart.
 
+pub mod change;
 pub mod entity;
 
+pub use change::{NETWORK_PATH_COMPONENT, PathChange, PathChangeKind, PathReading, path_changes};
 pub use entity::{NetworkHook, NetworkProgram, OwnBpfObjects, split_own};

@@ -4705,7 +4705,10 @@ pub async fn cmd_ebpf_foreign_programs(client: &ApiClient, output: OutputFormat)
             program.prog_id.to_string(),
             program.name,
             program.prog_type,
-            program.place,
+            program.position.map_or_else(
+                || program.place.clone(),
+                |at| format!("{} (position {at})", program.place)
+            ),
             held_by
         ]);
     }

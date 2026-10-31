@@ -11,6 +11,7 @@ use crate::firewall::exec_network::{EXEC_NETWORK_EXECUTABLE_SOURCE, ExecNetworkR
 use crate::firewall::workload::{DestinationAddr, WORKLOAD_FIREWALL_COMPONENT, WorkloadDenial};
 use crate::ids::entity::IdsAlert;
 use crate::l7::port_promise::PORT_MISMATCH_RULE_ID;
+use crate::network_program::change::{NETWORK_PATH_COMPONENT, PathChange};
 use crate::process::detection::{
     PROCESS_DETECTION_COMPONENT, ProcessDetection, ProcessDetectionKind,
 };
@@ -1095,6 +1096,77 @@ impl Alert {
             mitigation_status: None,
             total_packets: None,
             mitre_attack: Some(RawSocket::mitre()),
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
+            executable_path,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
+            workload,
+        }
+    }
+
+    /// Create an alert for a change on the network path that bears on the
+    /// agent's programs. Always high severity: each kind changes what the
+    /// agent sees. `workload` is the holder of the other program, where one
+    /// resolved.
+    #[must_use]
+    pub fn from_path_change(
+        change: &PathChange,
+        holder: Option<u32>,
+        workload: Option<Workload>,
+        at_ns: u64,
+    ) -> Self {
+        let rule_id = change.kind.rule_id();
+        let (tgid, executable_path) = match &workload {
+            Some(w) => (Some(w.pid), w.exe.clone()),
+            None => (holder, None),
+        };
+        Self {
+            id: Self::generate_id(at_ns, &rule_id),
+            timestamp_ns: at_ns,
+            component: NETWORK_PATH_COMPONENT.to_string(),
+            severity: Severity::High,
+            rule_id,
+            action: DomainMode::Alert,
+            src_addr: [0; 4],
+            dst_addr: [0; 4],
+            src_port: 0,
+            dst_port: 0,
+            protocol: 0,
+            is_ipv6: false,
+            message: change.message(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: Some(change.kind.mitre()),
             ja4_fingerprint: None,
             ml_anomaly_score: None,
             ml_top_feature: None,

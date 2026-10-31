@@ -5,17 +5,26 @@
 //! so the inventory is read on an interval, and a program attached and
 //! detached between two readings is never seen. The agent's own programs are
 //! set apart by the descriptors it holds: what it holds is what it loaded.
+//!
+//! Each reading is compared with the one before, and a change bearing on the
+//! agent's own programs raises an alert: another program now running before
+//! one of them, one of them replaced, or one of them taken off while the
+//! agent still holds it. The first reading only primes, since the agent
+//! cannot say what was there before it.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use domain::network_program::{NetworkProgram, split_own};
+use domain::alert::entity::Alert;
+use domain::network_program::{NetworkProgram, PathReading, path_changes, split_own};
 use domain::workload::entity::Workload;
 use ports::secondary::network_program_port::NetworkProgramReader;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::alert_event::AlertEvent;
 use crate::learning_service::now_ns;
 use crate::workload_resolver::WorkloadResolver;
 
@@ -50,16 +59,25 @@ pub struct NetworkProgramInventory {
 pub struct NetworkProgramWatcher {
     reader: Arc<dyn NetworkProgramReader>,
     workloads: WorkloadResolver,
+    alerts: mpsc::Sender<AlertEvent>,
     inventory: ArcSwap<NetworkProgramInventory>,
+    /// The last successful reading, `None` until the first one primes.
+    last: std::sync::Mutex<Option<PathReading>>,
 }
 
 impl NetworkProgramWatcher {
     #[must_use]
-    pub fn new(reader: Arc<dyn NetworkProgramReader>, workloads: WorkloadResolver) -> Self {
+    pub fn new(
+        reader: Arc<dyn NetworkProgramReader>,
+        workloads: WorkloadResolver,
+        alerts: mpsc::Sender<AlertEvent>,
+    ) -> Self {
         Self {
             reader,
             workloads,
+            alerts,
             inventory: ArcSwap::from_pointee(NetworkProgramInventory::default()),
+            last: std::sync::Mutex::new(None),
         }
     }
 
@@ -75,13 +93,20 @@ impl NetworkProgramWatcher {
         self.reader.source()
     }
 
-    /// Read the programs once and replace the inventory. Returns whether the
-    /// reading succeeded.
-    pub async fn sample(self: &Arc<Self>) -> bool {
+    /// Read the programs once, replace the inventory and alert on each change
+    /// bearing on the agent's programs since the reading before. Returns the
+    /// number of alerts raised, `None` when the reading failed.
+    pub async fn sample(self: &Arc<Self>) -> Option<usize> {
         let me = Arc::clone(self);
         let read = tokio::task::spawn_blocking(move || {
             let programs = me.reader.list()?;
-            let (foreign, own_programs) = split_own(programs, &me.reader.own());
+            let own = me.reader.own();
+            let (foreign, mine) = split_own(programs, &own);
+            let reading = PathReading {
+                own: mine,
+                foreign: foreign.clone(),
+                own_links: own.link_ids,
+            };
             let entries = foreign
                 .into_iter()
                 .map(|program| {
@@ -96,19 +121,27 @@ impl NetworkProgramWatcher {
                     NetworkProgramEntry { program, holders }
                 })
                 .collect::<Vec<_>>();
-            Ok::<_, domain::common::error::DomainError>((entries, own_programs))
+            Ok::<_, domain::common::error::DomainError>((entries, reading))
         })
         .await;
         let now = now_ns();
         match read {
-            Ok(Ok((programs, own_programs))) => {
+            Ok(Ok((programs, reading))) => {
                 self.inventory.store(Arc::new(NetworkProgramInventory {
                     programs,
-                    own_programs,
+                    own_programs: reading.own.len(),
                     scanned_at_ns: now,
                     error: None,
                 }));
-                true
+                let events = self.compare(reading, now);
+                let raised = events.len();
+                for event in events {
+                    if self.alerts.send(event).await.is_err() {
+                        debug!("alert pipeline closed, network path watch stops sending");
+                        break;
+                    }
+                }
+                Some(raised)
             }
             Ok(Err(err)) => {
                 warn!(error = %err, "eBPF programs on the network path could not be listed");
@@ -119,13 +152,36 @@ impl NetworkProgramWatcher {
                     scanned_at_ns: now,
                     error: Some(err.to_string()),
                 }));
-                false
+                None
             }
             Err(err) => {
                 warn!(error = %err, "eBPF program reading did not run");
-                false
+                None
             }
         }
+    }
+
+    /// Keep `reading` as the last one and build an alert for each change
+    /// since the one before, none on the first.
+    fn compare(&self, reading: PathReading, now: u64) -> Vec<AlertEvent> {
+        let mut last = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let events = last.as_ref().map_or_else(Vec::new, |previous| {
+            path_changes(previous, &reading)
+                .into_iter()
+                .map(|change| {
+                    let holder = change.other.as_ref().and_then(foreign_holder);
+                    let workload = holder.and_then(|pid| self.workloads.by_pid(pid));
+                    AlertEvent::System(Box::new(Alert::from_path_change(
+                        &change, holder, workload, now,
+                    )))
+                })
+                .collect()
+        });
+        *last = Some(reading);
+        events
     }
 
     /// Read on `interval` until `cancel` fires.
@@ -144,6 +200,13 @@ impl NetworkProgramWatcher {
             }
         }
     }
+}
+
+/// The first process other than the agent holding `program`: a program put
+/// in the agent's own link is held by the agent too.
+fn foreign_holder(program: &NetworkProgram) -> Option<u32> {
+    let me = std::process::id();
+    program.holders.iter().copied().find(|pid| *pid != me)
 }
 
 #[cfg(test)]
@@ -193,6 +256,7 @@ mod tests {
             hook: NetworkHook::Xdp,
             ifindex: Some(2),
             interface: Some("eth0".to_string()),
+            position: None,
             cgroup_id: None,
             detail: None,
             created_by_uid: Some(0),
@@ -200,19 +264,33 @@ mod tests {
         }
     }
 
-    fn watcher(
+    fn watcher_with_alerts(
         readings: Vec<Result<Vec<NetworkProgram>, DomainError>>,
-    ) -> Arc<NetworkProgramWatcher> {
+    ) -> (Arc<NetworkProgramWatcher>, mpsc::Receiver<AlertEvent>) {
+        let (tx, rx) = mpsc::channel(16);
         let reader = Arc::new(Scripted {
             readings: Mutex::new(readings),
         });
-        Arc::new(NetworkProgramWatcher::new(reader, WorkloadResolver::new()))
+        (
+            Arc::new(NetworkProgramWatcher::new(
+                reader,
+                WorkloadResolver::new(),
+                tx,
+            )),
+            rx,
+        )
+    }
+
+    fn watcher(
+        readings: Vec<Result<Vec<NetworkProgram>, DomainError>>,
+    ) -> Arc<NetworkProgramWatcher> {
+        watcher_with_alerts(readings).0
     }
 
     #[tokio::test]
     async fn the_agent_own_programs_are_counted_and_not_listed() {
         let watcher = watcher(vec![Ok(vec![program(1), program(2)])]);
-        assert!(watcher.sample().await);
+        assert_eq!(watcher.sample().await, Some(0));
         let inventory = watcher.inventory();
         assert_eq!(inventory.own_programs, 1);
         assert_eq!(inventory.programs.len(), 1);
@@ -229,7 +307,7 @@ mod tests {
             Ok(vec![program(2)]),
         ]);
         watcher.sample().await;
-        assert!(!watcher.sample().await);
+        assert_eq!(watcher.sample().await, None);
         let inventory = watcher.inventory();
         assert_eq!(inventory.programs.len(), 1);
         assert!(
@@ -238,7 +316,28 @@ mod tests {
                 .as_deref()
                 .is_some_and(|e| e.contains("warden down"))
         );
-        assert!(watcher.sample().await);
+        assert_eq!(watcher.sample().await, Some(0));
         assert!(watcher.inventory().error.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_first_reading_primes_and_a_replacement_alerts() {
+        let mut ours_off = program(1);
+        ours_off.hook = NetworkHook::Unplaced;
+        ours_off.ifindex = None;
+        ours_off.interface = None;
+        let (watcher, mut rx) = watcher_with_alerts(vec![
+            Ok(vec![program(1), program(2)]),
+            Ok(vec![ours_off, program(3)]),
+        ]);
+        assert_eq!(watcher.sample().await, Some(0));
+        assert_eq!(watcher.sample().await, Some(1));
+        let Some(AlertEvent::System(alert)) = rx.recv().await else {
+            panic!("expected a system alert");
+        };
+        assert_eq!(alert.component, "network_path");
+        assert_eq!(alert.rule_id.0, "network-path-program-replaced");
+        assert_eq!(alert.tgid, Some(4242));
+        assert!(alert.message.contains("replaced on xdp on eth0"));
     }
 }
