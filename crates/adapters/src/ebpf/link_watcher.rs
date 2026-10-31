@@ -1324,7 +1324,17 @@ fn attr_u32(attrs: &[u8], kind: u16) -> Option<u32> {
 }
 
 /// Read one `RTM_NEWLINK` or `RTM_DELLINK` payload.
+///
+/// A bridge announces its ports a second time under `AF_BRIDGE`, on the
+/// same multicast group, with no link info at all: read as a link, a tap
+/// joining a bridge would look like a device of the host's and be released
+/// the moment it was attached, and one leaving a bridge would look removed.
+/// Those messages speak about the bridge port, never the link, so they are
+/// skipped.
 fn parse_link(msg_type: u16, payload: &[u8]) -> Option<LinkEvent> {
+    if i32::from(*payload.first()?) == libc::AF_BRIDGE {
+        return None;
+    }
     let ifindex = i32::from_ne_bytes(payload.get(4..8)?.try_into().ok()?);
     let ifindex = u32::try_from(ifindex).ok()?;
     let attrs = payload.get(nla_align(IFINFOMSG_LEN)..).unwrap_or_default();
@@ -1873,6 +1883,21 @@ mod tests {
         let (events, trailer) = parse_link_messages(&buf);
         assert_eq!(events, vec![new(5, "nk0", "netkit"), gone(6, "veth1")]);
         assert!(trailer.done);
+    }
+
+    #[test]
+    fn a_bridge_port_announcement_is_not_read_as_the_link() {
+        let mut tap = link(9, "vnet0", Some("tun"));
+        tap.tap = true;
+        let mut buf = wire(RTM_NEWLINK, &tap);
+        let mut port = wire(RTM_NEWLINK, &link(9, "vnet0", None));
+        port[NLMSG_HDR_LEN] = u8::try_from(libc::AF_BRIDGE).unwrap();
+        buf.extend(port.clone());
+        let mut left = wire(RTM_DELLINK, &link(9, "vnet0", None));
+        left[NLMSG_HDR_LEN] = u8::try_from(libc::AF_BRIDGE).unwrap();
+        buf.extend(left);
+        let (events, _) = parse_link_messages(&buf);
+        assert_eq!(events, vec![LinkEvent::New(tap)]);
     }
 
     #[test]
