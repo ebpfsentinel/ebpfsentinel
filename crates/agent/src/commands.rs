@@ -4803,6 +4803,24 @@ fn print_lsm_blocks(resp: &crate::api_client::KernelFeaturesResponse) {
         Some(report) => print_network_executables(report),
         None => println!("\nNetwork executables\n  Not reported by this agent."),
     }
+    match &resp.self_protection {
+        Some(report) => print_self_protection(report),
+        None => println!("\nSelf-protection\n  Not reported by this agent."),
+    }
+}
+
+/// Print whether other tasks are refused the agent's maps and links.
+fn print_self_protection(report: &crate::api_client::SelfProtectionReport) {
+    println!("\nSelf-protection");
+    println!("  Protected:  {}", yes_no(report.protected));
+    if report.protected {
+        println!("  Maps:       {}", report.maps);
+        println!("  Links:      {}", report.links);
+        println!("  Allowed:    {} thread groups", report.tasks);
+    }
+    if let Some(reason) = &report.reason {
+        println!("  Reason:     {reason}");
+    }
 }
 
 /// Print whether the kernel decides which executables reach the network.

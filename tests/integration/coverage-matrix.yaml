@@ -299,6 +299,14 @@ coverage:
     notes: "Only the executables in the set reach the network, at socket_create and socket_connect. Needs the BPF LSM active at boot (lsm=bpf), which no lane's kernel command line sets yet"
 
   - kind: ebpf_program
+    feature: lsm-bpf-guard
+    suites: ["TBD"]
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks. Needs the BPF LSM active at boot (lsm=bpf), which no lane's kernel command line sets yet"
+
+  - kind: ebpf_program
     feature: tracepoint-drop-reason
     suites: ["TBD"]
     topology: none

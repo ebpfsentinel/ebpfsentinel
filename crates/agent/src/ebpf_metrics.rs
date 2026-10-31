@@ -251,6 +251,10 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (4, "unreadable"),
             (5, "event_lost"),
         ],
+        // Every descriptor asked for on one of the agent's own maps or
+        // links that the guard decided, then the refusals: a writable map
+        // descriptor, or a link descriptor, asked for by another task.
+        "BPF_GUARD_METRICS" => &[(0, "checked"), (1, "refused_map"), (2, "refused_link")],
         "REDIRECT_METRICS" => &[
             (0, "redirected"),
             (1, "refused"),
@@ -647,6 +651,10 @@ mod tests {
         (
             "EXEC_NET_METRICS",
             ebpf_common::exec_network::EXEC_NET_METRIC_COUNT,
+        ),
+        (
+            "BPF_GUARD_METRICS",
+            ebpf_common::bpf_guard::BPF_GUARD_METRIC_COUNT,
         ),
         (
             "REDIRECT_METRICS",

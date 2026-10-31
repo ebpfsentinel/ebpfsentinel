@@ -2073,6 +2073,36 @@ mod tests {
     }
 
     #[test]
+    fn the_built_guard_object_names_the_bpf_hooks() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/bpfel-unknown-none/release/lsm-bpf-guard"
+        );
+        // The object exists only once the eBPF programs were built.
+        let Ok(elf) = std::fs::read(path) else {
+            return;
+        };
+        // Both arities of the `bpf` hook share its section, so each program
+        // is resolved to its hook through the section it sits in.
+        let hooks = lsm_hooks(&elf).expect("parse");
+        let obj = Object::parse(&elf).expect("object");
+        let mut by_program: Vec<(String, String)> = obj
+            .programs
+            .iter()
+            .map(|(name, p)| (name.clone(), hooks[&p.section_index].clone()))
+            .collect();
+        by_program.sort();
+        assert_eq!(
+            by_program,
+            vec![
+                ("bpf_guard_cmd3".to_string(), "bpf".to_string()),
+                ("bpf_guard_cmd4".to_string(), "bpf".to_string()),
+                ("bpf_guard_map".to_string(), "bpf_map".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn prog_attrs_maps_sections() {
         assert_eq!(
             prog_attrs(&ProgramSection::SchedClassifier),

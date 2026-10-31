@@ -2,6 +2,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod attribution;
+pub mod bpf_guard;
 pub mod config_flags;
 pub mod conntrack;
 pub mod ddos;

@@ -333,6 +333,39 @@ pub enum Command {
     /// processes holding it. Enumerating programs and links by id needs
     /// `CAP_SYS_ADMIN`, which no BPF token grants. Read-only.
     NetworkPrograms,
+    /// Name the warden's own thread group and the pid namespace it is
+    /// numbered in, so the agent can let it read the agent's links once the
+    /// kernel refuses them to everybody else. Read-only.
+    Identity,
+}
+
+/// A thread group as one pid namespace numbers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskIdentity {
+    /// The thread group, as `getpid(2)` answers inside the namespace.
+    pub tgid: u32,
+    /// `st_dev` of `/proc/self/ns/pid`, in the encoding `stat(2)` returns.
+    pub pid_ns_dev: u64,
+    /// `st_ino` of `/proc/self/ns/pid`.
+    pub pid_ns_ino: u64,
+}
+
+impl TaskIdentity {
+    /// The calling process, as its own pid namespace numbers it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the `stat` of `/proc/self/ns/pid`, which fails
+    /// where no procfs is mounted.
+    pub fn of_self() -> io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let ns = std::fs::metadata("/proc/self/ns/pid")?;
+        Ok(Self {
+            tgid: std::process::id(),
+            pid_ns_dev: ns.dev(),
+            pid_ns_ino: ns.ino(),
+        })
+    }
 }
 
 /// A reply from the warden to the agent.
@@ -407,6 +440,11 @@ pub enum Response {
         /// One entry per program and hook, in no particular order.
         programs: Vec<NetworkProgram>,
     },
+    /// The warden's own thread group, answering [`Command::Identity`].
+    Identity {
+        /// The warden, as its pid namespace numbers it.
+        identity: TaskIdentity,
+    },
 }
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
@@ -441,7 +479,7 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
 mod tests {
     use super::{
         Command, ConntrackTuple, DlpTarget, ExecutableIdentity, MAX_FRAME_LEN, NetworkProgram,
-        PacketSocket, Response, RouteSpec, read_frame, write_frame,
+        PacketSocket, Response, RouteSpec, TaskIdentity, read_frame, write_frame,
     };
     use std::io::Cursor;
 
@@ -505,6 +543,7 @@ mod tests {
             Command::ReadExecutable { pid: 4242 },
             Command::PacketSockets,
             Command::NetworkPrograms,
+            Command::Identity,
         ]
     }
 
@@ -578,7 +617,21 @@ mod tests {
                     holders: vec![1312],
                 }],
             },
+            Response::Identity {
+                identity: TaskIdentity {
+                    tgid: 4242,
+                    pid_ns_dev: 4,
+                    pid_ns_ino: 4_026_531_836,
+                },
+            },
         ]
+    }
+
+    #[test]
+    fn a_process_names_its_own_thread_group_and_pid_namespace() {
+        let me = TaskIdentity::of_self().expect("procfs is mounted");
+        assert_eq!(me.tgid, std::process::id());
+        assert_ne!(me.pid_ns_ino, 0);
     }
 
     #[test]

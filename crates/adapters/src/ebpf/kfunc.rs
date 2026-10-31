@@ -33,6 +33,9 @@ const BPF_BTF_GET_NEXT_ID: u32 = 23;
 
 /// `BTF_KIND_FUNC` from `include/uapi/linux/btf.h`: the kind kfuncs are.
 const BTF_KIND_FUNC: u32 = 12;
+/// `BTF_KIND_FUNC_PROTO`: a function's signature, one `btf_param` per
+/// parameter.
+const BTF_KIND_FUNC_PROTO: u32 = 13;
 /// `BTF_KIND_STRUCT` from the same header: the kind member offsets are read off.
 const BTF_KIND_STRUCT: u32 = 4;
 /// `BTF_KIND_UNION`: the other kind an anonymous member can be.
@@ -255,6 +258,37 @@ impl BtfBlob {
             id += 1;
         })?;
         Ok(out)
+    }
+
+    /// How many parameters the `FUNC` called `name` takes, read off its
+    /// prototype. `None` when no such function is defined in this blob.
+    fn func_param_count(
+        &self,
+        base: Option<&BtfBlob>,
+        name: &str,
+    ) -> Result<Option<u32>, KfuncError> {
+        let index = self.type_index()?;
+        let Some(func) = index.iter().find(|rec| {
+            rec.kind == BTF_KIND_FUNC
+                && rec.name_off != 0
+                && self.string_at(rec.name_off, base) == Some(name)
+        }) else {
+            return Ok(None);
+        };
+        // The prototype's id sits in the common header's last word, just in
+        // front of the record's body.
+        let at = func.body.start;
+        let Some(raw) = at.checked_sub(4).and_then(|from| self.data.get(from..at)) else {
+            return Err(KfuncError::MalformedBtf("FUNC record without a type"));
+        };
+        let proto_id = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+        let Some(proto) = self.index_of(&index, proto_id).map(|i| &index[i]) else {
+            return Err(KfuncError::MalformedBtf("FUNC prototype outside the blob"));
+        };
+        if proto.kind != BTF_KIND_FUNC_PROTO {
+            return Err(KfuncError::MalformedBtf("FUNC type is not a FUNC_PROTO"));
+        }
+        Ok(Some(proto.vlen))
     }
 
     /// Index every type record by id, so a member's type can be followed.
@@ -495,6 +529,23 @@ pub fn vmlinux_enum_values(
     vmlinux
         .enum_values(None, enum_name, names)?
         .ok_or_else(|| KfuncError::EnumNotFound(enum_name.to_owned()))
+}
+
+/// How many parameters the kernel function `name` takes in the running
+/// kernel, read off the vmlinux BTF. `None` when the kernel has no such
+/// function.
+///
+/// An LSM program reads the previous program's verdict from the argument
+/// after the hook's own parameters, and a hook that gains a parameter in a
+/// later kernel moves that argument along, so the index is learned here
+/// rather than compiled in.
+pub fn vmlinux_func_param_count(name: &str) -> Result<Option<u32>, KfuncError> {
+    let data = std::fs::read(VMLINUX_BTF_PATH).map_err(|source| KfuncError::ReadVmlinux {
+        path: VMLINUX_BTF_PATH.to_owned(),
+        source,
+    })?;
+    let vmlinux = BtfBlob::parse_base(data)?;
+    vmlinux.func_param_count(None, name)
 }
 
 /// Every enumerator of `enum_name` in the running kernel, name and value, in
@@ -1079,6 +1130,53 @@ mod tests {
                 .expect("walk"),
             None
         );
+    }
+
+    #[test]
+    fn a_function_parameter_count_is_read_off_its_prototype() {
+        // strings: "\0bpf_lsm_bpf\0"
+        let strings = b"\0bpf_lsm_bpf\0";
+        let mut types = Vec::new();
+        // type 1: INT, the parameters' type
+        types.extend_from_slice(&0u32.to_le_bytes());
+        types.extend_from_slice(&(1u32 << 24).to_le_bytes());
+        types.extend_from_slice(&4u32.to_le_bytes());
+        types.extend_from_slice(&32u32.to_le_bytes());
+        // type 2: FUNC_PROTO returning type 1, four parameters of type 1
+        types.extend_from_slice(&0u32.to_le_bytes());
+        types.extend_from_slice(&((13u32 << 24) | 4).to_le_bytes());
+        types.extend_from_slice(&1u32.to_le_bytes());
+        for _ in 0..4 {
+            types.extend_from_slice(&0u32.to_le_bytes());
+            types.extend_from_slice(&1u32.to_le_bytes());
+        }
+        // type 3: FUNC bpf_lsm_bpf of prototype 2
+        types.extend_from_slice(&1u32.to_le_bytes());
+        types.extend_from_slice(&(12u32 << 24).to_le_bytes());
+        types.extend_from_slice(&2u32.to_le_bytes());
+
+        let parsed = BtfBlob::parse_base(blob(&types, strings)).expect("parse");
+        assert_eq!(
+            parsed.func_param_count(None, "bpf_lsm_bpf").expect("walk"),
+            Some(4)
+        );
+        assert_eq!(
+            parsed
+                .func_param_count(None, "bpf_lsm_other")
+                .expect("walk"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_running_kernel_names_the_bpf_hook_with_three_or_four_parameters() {
+        // A host without BTF has nothing to say, which proves nothing.
+        let Ok(count) = vmlinux_func_param_count("bpf_lsm_bpf") else {
+            return;
+        };
+        if let Some(count) = count {
+            assert!((3..=4).contains(&count), "{count}");
+        }
     }
 
     #[test]

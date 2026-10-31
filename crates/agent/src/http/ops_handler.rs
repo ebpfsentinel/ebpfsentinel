@@ -158,6 +158,43 @@ pub struct KernelFeaturesResponse {
     /// whether it refuses or only reports. Reported whether or not the list is
     /// configured, with the reason it is not in force.
     pub network_executables: NetworkExecutablesReport,
+    /// Whether the kernel refuses every other task a writable descriptor to
+    /// the agent's maps and a descriptor to its links. A node without the
+    /// BPF LSM says it is unprotected and why, rather than saying nothing.
+    pub self_protection: SelfProtectionReport,
+}
+
+/// Whether the agent's own maps and links are guarded on this host.
+#[derive(Serialize, ToSchema)]
+pub struct SelfProtectionReport {
+    /// Both hooks are attached and the agent's objects are in the sets.
+    pub protected: bool,
+    /// How many of the agent's maps no other task may open for writing.
+    pub maps: usize,
+    /// How many of the agent's links no other task may open.
+    pub links: usize,
+    /// How many thread groups are allowed past the guard: the agent, and
+    /// the warden when the agent runs rootless.
+    pub tasks: usize,
+    /// Why the node is unprotected, in one sentence.
+    pub reason: Option<String>,
+}
+
+impl From<adapters::ebpf::bpf_guard::BpfGuardStatus> for SelfProtectionReport {
+    fn from(status: adapters::ebpf::bpf_guard::BpfGuardStatus) -> Self {
+        let reason = match (status.protected, status.reason) {
+            (true, _) => None,
+            (false, Some(reason)) => Some(reason),
+            (false, None) => Some("the agent has not loaded the guard yet".to_string()),
+        };
+        Self {
+            protected: status.protected,
+            maps: status.maps,
+            links: status.links,
+            tasks: status.tasks,
+            reason,
+        }
+    }
 }
 
 /// What became of the network executables list on this host.
@@ -582,6 +619,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
     let bpf_lsm = BpfLsmReport::from(adapters::ebpf::lsm_probe::status());
     let network_executables =
         NetworkExecutablesReport::from(adapters::ebpf::exec_network::status());
+    let self_protection = SelfProtectionReport::from(adapters::ebpf::bpf_guard::status());
 
     let Some(report) = report else {
         return KernelFeaturesResponse {
@@ -598,6 +636,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
             quarantine,
             bpf_lsm,
             network_executables,
+            self_protection,
         };
     };
 
@@ -644,6 +683,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
         quarantine,
         bpf_lsm,
         network_executables,
+        self_protection,
     }
 }
 
@@ -983,6 +1023,26 @@ mod tests {
         assert_eq!(resp.network_executables.attached, held.attached);
         assert_eq!(resp.network_executables.enforcing, held.enforcing);
         assert_eq!(resp.network_executables.reason, held.reason);
+    }
+
+    #[test]
+    fn an_unprotected_node_always_says_why() {
+        let report =
+            SelfProtectionReport::from(adapters::ebpf::bpf_guard::BpfGuardStatus::default());
+        assert!(!report.protected);
+        assert!(report.reason.is_some());
+        let report = SelfProtectionReport::from(adapters::ebpf::bpf_guard::BpfGuardStatus {
+            protected: true,
+            maps: 300,
+            links: 12,
+            tasks: 2,
+            reason: Some("stale".to_string()),
+        });
+        assert!(report.protected);
+        assert_eq!((report.maps, report.links, report.tasks), (300, 12, 2));
+        assert_eq!(report.reason, None);
+        let resp = kernel_features_body(None);
+        assert!(resp.self_protection.protected || resp.self_protection.reason.is_some());
     }
 
     #[test]

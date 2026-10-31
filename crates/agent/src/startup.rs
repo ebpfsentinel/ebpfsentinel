@@ -2066,6 +2066,7 @@ pub async fn run(
     // the agent for the same reason: a reload that turned an enforcing list
     // on would be a reload able to cut the node off.
     let mut exec_network_attacher: Option<adapters::ebpf::exec_network::ExecNetworkAttacher> = None;
+    let mut bpf_guard_attacher: Option<adapters::ebpf::bpf_guard::BpfGuardAttacher> = None;
     let mut process_signal_svc: Option<
         Arc<application::process_signal_service::ProcessSignalService>,
     > = None;
@@ -3703,6 +3704,40 @@ pub async fn run(
         }
         // Store the manager for config reload
         ebpf_map_holder.iface_groups = Some(iface_groups_mgr);
+
+        // 10zz. The guard on the agent's own maps and links, loaded last so
+        // that the first reading of the agent's descriptors already names
+        // every object the start-up loaded.
+        match start_bpf_guard(&ebpf_dir) {
+            Ok(started) => {
+                let BpfGuardStarted {
+                    loader,
+                    metrics_rdr,
+                    maps,
+                    attacher,
+                    tasks,
+                } = started;
+                bpf_guard_attacher = Some(attacher);
+                if let Some(rdr) = metrics_rdr {
+                    metrics_readers.push(rdr);
+                }
+                metrics.set_ebpf_program_status("lsm_bpf_guard", true);
+                tokio::spawn(refresh_bpf_guard(maps, tasks, readers.child_token()));
+                ebpf_state.add_loader(loader);
+            }
+            Err(reason) => {
+                metrics.set_ebpf_program_status("lsm_bpf_guard", false);
+                warn!(
+                    "the agent's maps and links are unprotected: any task holding CAP_SYS_ADMIN can detach or rewrite them; {reason}"
+                );
+                adapters::ebpf::bpf_guard::publish_status(
+                    adapters::ebpf::bpf_guard::BpfGuardStatus {
+                        reason: Some(reason),
+                        ..adapters::ebpf::bpf_guard::BpfGuardStatus::default()
+                    },
+                );
+            }
+        }
     } // end if ebpf_capable
 
     // Populate eBPF program status for the ops endpoint and the heartbeat.
@@ -3739,6 +3774,10 @@ pub async fn run(
         status.insert(
             "lsm-exec-network".to_string(),
             adapters::ebpf::exec_network::status().attached,
+        );
+        status.insert(
+            "lsm-bpf-guard".to_string(),
+            adapters::ebpf::bpf_guard::status().protected,
         );
         status.insert(
             "cgroup-workload-firewall".to_string(),
@@ -5382,6 +5421,9 @@ pub async fn run(
     drop(exec_network_attacher.take());
     ebpf_manager.lock().await.detach_all().await;
     drop(ebpf_state); // Drop startup loaders (detaches legacy programs)
+    // The guard goes last: until here every descriptor to the agent's
+    // objects is still refused to anybody else.
+    drop(bpf_guard_attacher.take());
 
     info!("shutdown phase 6: draining events and alerts");
     drop(event_tx); // close event channel so dispatcher sees channel closed
@@ -6855,6 +6897,129 @@ async fn refresh_exec_network(
                         reason: None,
                     },
                 );
+            }
+        }
+    }
+}
+
+/// What a started guard hands back to start-up.
+pub struct BpfGuardStarted {
+    loader: EbpfLoader,
+    metrics_rdr: Option<MetricsReader>,
+    maps: adapters::ebpf::bpf_guard::BpfGuardMaps,
+    attacher: adapters::ebpf::bpf_guard::BpfGuardAttacher,
+    tasks: adapters::ebpf::bpf_guard::GuardTasks,
+}
+
+/// Load the guard, write the allowed tasks and the agent's own ids, arm it,
+/// then attach both hooks.
+///
+/// # Errors
+///
+/// Returns why the node is unprotected, in one sentence.
+pub fn start_bpf_guard(ebpf_dir: &str) -> Result<BpfGuardStarted, String> {
+    let host = adapters::ebpf::lsm_probe::status();
+    if !host.active {
+        let reason = host
+            .reason
+            .clone()
+            .unwrap_or_else(|| "the BPF LSM is not active on this host".to_string());
+        return Err(match &host.remedy {
+            Some(remedy) => format!("{reason}; {remedy}"),
+            None => reason,
+        });
+    }
+    let layout = adapters::ebpf::bpf_guard::resolve_layout()?;
+    let program_bytes = read_ebpf_program(ebpf_dir, adapters::ebpf::bpf_guard::BPF_GUARD_OBJECT)
+        .map_err(|e| format!("the object is missing: {e}"))?;
+    // One of the two `bpf` programs reads past the arguments this kernel's
+    // hook takes and is refused by the verifier, which is expected.
+    let mut loader = EbpfLoader::load_with_pin_path_optional(
+        &program_bytes,
+        adapters::ebpf::DEFAULT_BPF_PIN_PATH,
+        &[
+            adapters::ebpf::bpf_guard::BPF_GUARD_CMD_PROGRAM_3,
+            adapters::ebpf::bpf_guard::BPF_GUARD_CMD_PROGRAM_4,
+        ],
+    )
+    .map_err(|e| format!("the kernel refused the object: {e}"))?;
+    let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "BPF_GUARD_METRICS").ok();
+    let mut maps = adapters::ebpf::bpf_guard::BpfGuardMaps::new(loader.ebpf_mut())
+        .map_err(|e| e.to_string())?;
+    let mut tasks = adapters::ebpf::bpf_guard::GuardTasks::from_env();
+    maps.set_tasks(&tasks.read()?).map_err(|e| e.to_string())?;
+    let mut attacher = adapters::ebpf::bpf_guard::BpfGuardAttacher::new();
+    attacher.attach(&loader, layout.cmd_program)?;
+    // Read after the attach so the guard's own links are among the ids.
+    maps.replace(&adapters::ebpf::bpf_guard::own_ids())
+        .map_err(|e| e.to_string())?;
+    maps.arm(layout.config).map_err(|e| e.to_string())?;
+    publish_guard_status(&maps);
+    Ok(BpfGuardStarted {
+        loader,
+        metrics_rdr,
+        maps,
+        attacher,
+        tasks,
+    })
+}
+
+fn publish_guard_status(maps: &adapters::ebpf::bpf_guard::BpfGuardMaps) {
+    let (maps, links, tasks) = maps.counts();
+    adapters::ebpf::bpf_guard::publish_status(adapters::ebpf::bpf_guard::BpfGuardStatus {
+        protected: true,
+        maps,
+        links,
+        tasks,
+        reason: None,
+    });
+}
+
+/// How often the agent's own descriptors and the warden's identity are read
+/// again. An object loaded after start-up is unprotected for at most this
+/// long, and so is a warden that restarted.
+const BPF_GUARD_REFRESH: Duration = Duration::from_secs(30);
+
+/// Keep the guard on what the agent holds now and on the warden as it runs
+/// now.
+async fn refresh_bpf_guard(
+    mut maps: adapters::ebpf::bpf_guard::BpfGuardMaps,
+    mut tasks: adapters::ebpf::bpf_guard::GuardTasks,
+    cancel: CancellationToken,
+) {
+    let mut tick = tokio::time::interval(BPF_GUARD_REFRESH);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await;
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            _ = tick.tick() => {
+                let ids = adapters::ebpf::bpf_guard::own_ids();
+                if let Err(e) = maps.replace(&ids) {
+                    warn!("guard refresh failed, the previous ids stay: {e}");
+                    continue;
+                }
+                // The warden answers over a blocking socket, so it is asked
+                // off the runtime's worker threads.
+                let asked = tokio::task::spawn_blocking(move || {
+                    let read = tasks.read();
+                    (tasks, read)
+                })
+                .await;
+                let Ok((back, read)) = asked else {
+                    warn!("guard refresh lost the allowed tasks, the previous ones stay");
+                    break;
+                };
+                tasks = back;
+                match read {
+                    Ok(read) => {
+                        if let Err(e) = maps.set_tasks(&read) {
+                            warn!("guard refresh could not write the allowed tasks: {e}");
+                        }
+                    }
+                    Err(e) => warn!("guard refresh: {e}"),
+                }
+                publish_guard_status(&maps);
             }
         }
     }

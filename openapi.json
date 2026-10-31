@@ -12355,7 +12355,8 @@
           "process_signal",
           "quarantine",
           "bpf_lsm",
-          "network_executables"
+          "network_executables",
+          "self_protection"
         ],
         "properties": {
           "attribution": {
@@ -12412,6 +12413,10 @@
               "string",
               "null"
             ]
+          },
+          "self_protection": {
+            "$ref": "#/components/schemas/SelfProtectionReport",
+            "description": "Whether the kernel refuses every other task a writable descriptor to\nthe agent's maps and a descriptor to its links. A node without the\nBPF LSM says it is unprotected and why, rather than saying nothing."
           },
           "workload_firewall": {
             "$ref": "#/components/schemas/WorkloadFirewallReport",
@@ -15690,6 +15695,44 @@
           }
         ],
         "description": "What the window is asked to watch."
+      },
+      "SelfProtectionReport": {
+        "type": "object",
+        "description": "Whether the agent's own maps and links are guarded on this host.",
+        "required": [
+          "protected",
+          "maps",
+          "links",
+          "tasks"
+        ],
+        "properties": {
+          "links": {
+            "type": "integer",
+            "description": "How many of the agent's links no other task may open.",
+            "minimum": 0
+          },
+          "maps": {
+            "type": "integer",
+            "description": "How many of the agent's maps no other task may open for writing.",
+            "minimum": 0
+          },
+          "protected": {
+            "type": "boolean",
+            "description": "Both hooks are attached and the agent's objects are in the sets."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the node is unprotected, in one sentence."
+          },
+          "tasks": {
+            "type": "integer",
+            "description": "How many thread groups are allowed past the guard: the agent, and\nthe warden when the agent runs rootless.",
+            "minimum": 0
+          }
+        }
       },
       "ServiceEdgeBody": {
         "type": "object",

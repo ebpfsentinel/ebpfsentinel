@@ -30,7 +30,7 @@ use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame,
 // build request values without taking a direct dependency on the protocol crate.
 pub use ebpfsentinel_warden_proto::{
     ConntrackTuple, DlpTarget, ExecutableIdentity, HeldBpfObjects, NetworkProgram, PacketSocket,
-    RouteSpec,
+    RouteSpec, TaskIdentity,
 };
 
 /// How long one warden call may take before the client gives up on it.
@@ -77,6 +77,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::ReadExecutable { .. } => "ReadExecutable",
         Command::PacketSockets => "PacketSockets",
         Command::NetworkPrograms => "NetworkPrograms",
+        Command::Identity => "Identity",
     }
 }
 
@@ -247,6 +248,14 @@ impl WardenClient {
         match self.call(&Command::NetworkPrograms)? {
             Response::NetworkPrograms { programs } => Ok(programs),
             other => Err(unexpected("NetworkPrograms", &other)),
+        }
+    }
+
+    /// Name the warden's own thread group and pid namespace.
+    pub fn identity(&mut self) -> io::Result<TaskIdentity> {
+        match self.call(&Command::Identity)? {
+            Response::Identity { identity } => Ok(identity),
+            other => Err(unexpected("Identity", &other)),
         }
     }
 
@@ -534,6 +543,12 @@ impl ReconnectingClient {
     /// reconnecting if it bounced.
     pub fn network_programs(&mut self) -> io::Result<Vec<NetworkProgram>> {
         self.with_retry(WardenClient::network_programs)
+    }
+
+    /// Name the warden's thread group through the connection, reconnecting
+    /// if it bounced, which is exactly when the answer changes.
+    pub fn identity(&mut self) -> io::Result<TaskIdentity> {
+        self.with_retry(WardenClient::identity)
     }
 
     /// Scan `/proc` for DLP targets through the warden, reconnecting if it bounced.

@@ -2021,6 +2021,23 @@ pub struct KernelFeaturesResponse {
     /// Absent from an agent that predates the list.
     #[serde(default)]
     pub network_executables: Option<NetworkExecutablesReport>,
+    /// Absent from an agent that predates the guard.
+    #[serde(default)]
+    pub self_protection: Option<SelfProtectionReport>,
+}
+
+/// Whether the agent's own maps and links are guarded on the node.
+#[derive(Deserialize, Serialize)]
+pub struct SelfProtectionReport {
+    pub protected: bool,
+    #[serde(default)]
+    pub maps: usize,
+    #[serde(default)]
+    pub links: usize,
+    #[serde(default)]
+    pub tasks: usize,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// What became of the network executables list on the node.

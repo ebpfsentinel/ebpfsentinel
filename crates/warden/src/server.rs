@@ -15,7 +15,9 @@ use std::ptr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
+use ebpfsentinel_warden_proto::{
+    Command, PROTOCOL_VERSION, Response, TaskIdentity, read_frame, write_frame,
+};
 
 use crate::host_ops::HostOps;
 use crate::pcap_slots::{PcapSlot, PcapSlots};
@@ -610,6 +612,12 @@ fn dispatch(cmd: &Command, host: &dyn HostOps, proc_root: &Path) -> Response {
         Command::NetworkPrograms => match bpf_inventory::scan(proc_root) {
             Ok(programs) => Response::NetworkPrograms { programs },
             Err(message) => Response::Error { message },
+        },
+        Command::Identity => match TaskIdentity::of_self() {
+            Ok(identity) => Response::Identity { identity },
+            Err(e) => Response::Error {
+                message: format!("the warden's pid namespace is unreadable: {e}"),
+            },
         },
         Command::Hello { .. } => Response::Error {
             message: "Hello already completed".into(),

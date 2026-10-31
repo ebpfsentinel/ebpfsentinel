@@ -27,6 +27,7 @@ pub(crate) const EBPF_PROGRAMS: &[&str] = &[
     "tracepoint-signal",
     "tracepoint-drop-reason",
     "lsm-exec-network",
+    "lsm-bpf-guard",
 ];
 
 // Kernel kfuncs called by the eBPF programs. These resolve to undefined
