@@ -17,6 +17,7 @@ dependencies = [
  "ebpf-common",
  "ebpfsentinel-domain",
  "ebpfsentinel-warden-client",
+ "ebpfsentinel-warden-proto",
  "flate2",
  "futures-util",
  "governor",

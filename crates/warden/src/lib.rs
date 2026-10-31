@@ -44,6 +44,7 @@ use std::ptr;
 
 pub mod cgroup_ops;
 pub mod dlp_scan;
+pub mod exe_read;
 pub mod host_ops;
 pub mod net_ops;
 pub mod netns_tcx_ops;

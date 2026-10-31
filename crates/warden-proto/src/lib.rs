@@ -64,6 +64,17 @@ pub struct DlpTarget {
     pub ssl_read_offset: u64,
 }
 
+/// The executable a process runs, as `/proc/<pid>/exe` names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutableIdentity {
+    /// The link's target, with the kernel's ` (deleted)` suffix removed.
+    pub path: String,
+    /// Block device of the file the link points at.
+    pub dev: u64,
+    /// Inode of the file the link points at.
+    pub ino: u64,
+}
+
 /// A routing-table entry, used by multi-WAN failover.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteSpec {
@@ -211,6 +222,17 @@ pub enum Command {
         /// `true` for the egress hook, `false` for ingress.
         egress: bool,
     },
+    /// Name the executable process `pid` runs, answered by
+    /// [`Response::Executable`]. Reading another process's `/proc/<pid>/exe`
+    /// is a ptrace access check, and a task in the agent's user namespace
+    /// holds no `CAP_SYS_PTRACE` over a process outside it, so the rootless
+    /// agent cannot name a single binary on the host without asking.
+    /// Read-only: a path, a device and an inode, nothing from the process's
+    /// memory or environment.
+    ReadExecutable {
+        /// The process whose executable is named.
+        pid: u32,
+    },
 }
 
 /// A reply from the warden to the agent.
@@ -267,6 +289,13 @@ pub enum Response {
         /// Program ids in run order.
         prog_ids: Vec<u32>,
     },
+    /// The executable behind one process, answering
+    /// [`Command::ReadExecutable`]; `None` when the process is gone or its
+    /// link is unreadable.
+    Executable {
+        /// What `/proc/<pid>/exe` named, when it named anything.
+        executable: Option<ExecutableIdentity>,
+    },
 }
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
@@ -300,8 +329,8 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, ConntrackTuple, DlpTarget, MAX_FRAME_LEN, Response, RouteSpec, read_frame,
-        write_frame,
+        Command, ConntrackTuple, DlpTarget, ExecutableIdentity, MAX_FRAME_LEN, Response, RouteSpec,
+        read_frame, write_frame,
     };
     use std::io::Cursor;
 
@@ -362,6 +391,7 @@ mod tests {
                 iface: "eth0".into(),
                 egress: false,
             },
+            Command::ReadExecutable { pid: 4242 },
         ]
     }
 
@@ -396,6 +426,14 @@ mod tests {
             Response::TcxChain {
                 prog_ids: vec![41, 7, 112],
             },
+            Response::Executable {
+                executable: Some(ExecutableIdentity {
+                    path: "/usr/bin/sleep".into(),
+                    dev: 2049,
+                    ino: 131_072,
+                }),
+            },
+            Response::Executable { executable: None },
         ]
     }
 

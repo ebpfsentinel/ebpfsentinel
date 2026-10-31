@@ -28,7 +28,7 @@ use std::time::Duration;
 use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
 // Re-exported under their real names so callers of the typed control methods can
 // build request values without taking a direct dependency on the protocol crate.
-pub use ebpfsentinel_warden_proto::{ConntrackTuple, DlpTarget, RouteSpec};
+pub use ebpfsentinel_warden_proto::{ConntrackTuple, DlpTarget, ExecutableIdentity, RouteSpec};
 
 /// How long one warden call may take before the client gives up on it.
 ///
@@ -71,6 +71,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::Extension { .. } => "Extension",
         Command::TcxChain { .. } => "TcxChain",
         Command::AttachTcxInNetns { .. } => "AttachTcxInNetns",
+        Command::ReadExecutable { .. } => "ReadExecutable",
     }
 }
 
@@ -214,6 +215,16 @@ impl WardenClient {
         })? {
             Response::TcxChain { prog_ids } => Ok(prog_ids),
             other => Err(unexpected("TcxChain", &other)),
+        }
+    }
+
+    /// Name the executable process `pid` runs. `None` when the process is
+    /// gone or its link is unreadable; the agent's own user namespace cannot
+    /// pass the ptrace check `/proc/<pid>/exe` asks for.
+    pub fn read_executable(&mut self, pid: u32) -> io::Result<Option<ExecutableIdentity>> {
+        match self.call(&Command::ReadExecutable { pid })? {
+            Response::Executable { executable } => Ok(executable),
+            other => Err(unexpected("ReadExecutable", &other)),
         }
     }
 
@@ -483,6 +494,12 @@ impl ReconnectingClient {
     /// warden bounced. A read, so replaying it is harmless.
     pub fn tcx_chain(&mut self, iface: &str, egress: bool) -> io::Result<Vec<u32>> {
         self.with_retry(|c| c.tcx_chain(iface, egress))
+    }
+
+    /// Name one process's executable through the warden, reconnecting if it
+    /// bounced. A read, so replaying it is harmless.
+    pub fn read_executable(&mut self, pid: u32) -> io::Result<Option<ExecutableIdentity>> {
+        self.with_retry(|c| c.read_executable(pid))
     }
 
     /// Scan `/proc` for DLP targets through the warden, reconnecting if it bounced.

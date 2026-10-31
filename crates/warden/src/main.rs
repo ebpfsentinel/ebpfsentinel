@@ -36,15 +36,15 @@ const DEFAULT_UID: u32 = 65534;
 ///
 /// The same name the agent and the enterprise warden already read. A container
 /// that was not given the host pid namespace sees only its own processes under
-/// `/proc`, so the DLP scan is pointed at the read-only bind mount of the
-/// host's instead. Nothing else in the warden needs it: a uprobe link is
-/// created by path and offset over the whole system, never against a pid.
+/// `/proc`, so every read keyed on a host pid - the DLP scan, a pod's network
+/// namespace, a process's executable - is pointed at the read-only bind mount
+/// of the host's instead.
 const HOST_PROC_ENV: &str = "EBPFSENTINEL_HOST_PROC";
 
 const USAGE: &str =
     "usage: warden serve <socket> [--uid <n>]\n       warden prepare-state <dir> [--uid <n>]";
 
-/// The procfs the DLP scan walks: `EBPFSENTINEL_HOST_PROC` when it is set and
+/// The procfs host pids are read from: `EBPFSENTINEL_HOST_PROC` when it is set and
 /// not empty, `/proc` otherwise.
 fn host_proc_root() -> std::path::PathBuf {
     std::env::var_os(HOST_PROC_ENV)
@@ -152,7 +152,7 @@ fn serve(sockpath: &str, allowed_uid: u32) -> ExitCode {
     let proc_root = host_proc_root();
     if proc_root != Path::new("/proc") {
         eprintln!(
-            "[warden] DLP scan reads the procfs at {} ({HOST_PROC_ENV})",
+            "[warden] host pids are read from the procfs at {} ({HOST_PROC_ENV})",
             proc_root.display()
         );
     }
