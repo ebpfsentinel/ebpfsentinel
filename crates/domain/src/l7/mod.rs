@@ -1,3 +1,4 @@
+pub mod crypto_posture;
 pub mod domain_matcher;
 pub mod engine;
 pub mod entity;

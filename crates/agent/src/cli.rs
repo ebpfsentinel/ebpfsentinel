@@ -1144,6 +1144,8 @@ pub enum TlsCommand {
         #[arg(short = 'n', long, default_value_t = 100)]
         limit: usize,
     },
+    /// Show the cryptographic posture of each edge between workloads
+    Posture,
 }
 
 // ── Aliases ─────────────────────────────────────────────────────────────
@@ -2827,6 +2829,18 @@ mod tests {
             cli.command,
             Some(Command::Tls(DomainArgs {
                 command: TlsCommand::Handshakes { limit: 5 },
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_tls_posture() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "tls", "posture"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Tls(DomainArgs {
+                command: TlsCommand::Posture,
                 ..
             }))
         ));

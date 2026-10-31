@@ -180,6 +180,9 @@ pub struct AppState {
     /// The L7 request meter, read by the service map. Empty until the event
     /// dispatcher starts.
     pub service_graph: ArcSwapOption<application::l7_red_meter::L7RedMeter>,
+    /// The cryptographic posture of each edge. Empty until the event
+    /// dispatcher starts.
+    pub crypto_posture: ArcSwapOption<application::crypto_posture_meter::CryptoPostureMeter>,
     /// The kernel's drop counts, once the counter is attached.
     pub kernel_drops: ArcSwapOption<application::kernel_drop_service::KernelDropService>,
     /// The inventory of the node's packet sockets, once it reads.
@@ -232,6 +235,7 @@ impl AppState {
             learning_service: ArcSwapOption::empty(),
             process_detections: AtomicBool::new(false),
             service_graph: ArcSwapOption::empty(),
+            crypto_posture: ArcSwapOption::empty(),
             kernel_drops: ArcSwapOption::empty(),
             raw_sockets: ArcSwapOption::empty(),
             network_programs: ArcSwapOption::empty(),
@@ -448,6 +452,14 @@ impl AppState {
     /// Hand the L7 request meter over once the dispatcher holding it exists.
     pub fn install_service_graph(&self, meter: Arc<application::l7_red_meter::L7RedMeter>) {
         self.service_graph.store(Some(meter));
+    }
+
+    /// Hand the posture meter over once the dispatcher holding it exists.
+    pub fn install_crypto_posture(
+        &self,
+        meter: Arc<application::crypto_posture_meter::CryptoPostureMeter>,
+    ) {
+        self.crypto_posture.store(Some(meter));
     }
 
     /// Hand the kernel drop counter over once it is attached.

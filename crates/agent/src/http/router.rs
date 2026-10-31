@@ -138,7 +138,7 @@ use super::state::AppState;
 use super::threatintel_handler::{
     list_feeds, list_iocs, list_url_iocs, refresh_feeds, threatintel_status,
 };
-use super::tls_handler::{tls_handshakes, tls_status};
+use super::tls_handler::{tls_handshakes, tls_posture, tls_status};
 use super::trace_handler::trace_packet;
 use super::zone_handler::{
     create_zone, create_zone_policy, delete_zone, delete_zone_policy, list_zone_policies,
@@ -298,6 +298,7 @@ pub fn build_router(
             .route("/api/v1/threatintel/urls", get(list_url_iocs))
             .route("/api/v1/tls/status", get(tls_status))
             .route("/api/v1/tls/handshakes", get(tls_handshakes))
+            .route("/api/v1/tls/posture", get(tls_posture))
             .route("/api/v1/threatintel/feeds", get(list_feeds))
             .route("/api/v1/alerts", get(list_alerts))
             .route("/api/v1/alerts/stream", get(stream_alerts))

@@ -1824,6 +1824,45 @@ pub struct TlsHandshakesResponse {
     pub handshakes: Vec<TlsHandshakeBody>,
 }
 
+#[derive(Deserialize, Serialize, Default)]
+pub struct PostureSharesBody {
+    pub post_quantum: f64,
+    pub classical: f64,
+    pub legacy_tls: f64,
+    pub clear_text: f64,
+}
+
+#[derive(Deserialize, Serialize, Default)]
+pub struct PostureCountsBody {
+    pub connections: u64,
+    pub post_quantum: u64,
+    pub classical: u64,
+    pub legacy_tls: u64,
+    pub clear_text: u64,
+    #[serde(default)]
+    pub clear_text_protocols: std::collections::BTreeMap<String, u64>,
+    #[serde(default)]
+    pub shares: PostureSharesBody,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct PostureEdgeBody {
+    pub client: ServiceEndBody,
+    pub server: ServiceEndBody,
+    pub server_port: u16,
+    #[serde(flatten)]
+    pub counts: PostureCountsBody,
+    pub first_seen_ns: u64,
+    pub last_seen_ns: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct TlsPostureResponse {
+    pub totals: PostureCountsBody,
+    pub evicted_edges: u64,
+    pub edges: Vec<PostureEdgeBody>,
+}
+
 // ── Aliases ──────────────────────────────────
 
 #[derive(Deserialize, Serialize)]
@@ -3776,6 +3815,15 @@ impl ApiClient {
     pub async fn tls_status(&self) -> anyhow::Result<TlsStatusResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/tls/status")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn tls_posture(&self) -> anyhow::Result<TlsPostureResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/tls/posture")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

@@ -4590,6 +4590,7 @@ pub async fn run(
     )
         as Arc<dyn ports::secondary::process_executable_port::ProcessExecutableReader>);
     app_state.install_service_graph(dispatcher.red_meter());
+    app_state.install_crypto_posture(dispatcher.crypto_posture());
 
     // ── 10g. Build L7 stream reassembler (optional) ─────────────────
     let stream_reassembler: Option<Arc<domain::l7::reassembler::StreamReassembler>> =

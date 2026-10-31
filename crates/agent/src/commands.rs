@@ -5303,6 +5303,92 @@ pub async fn cmd_tls_handshakes(
     Ok(())
 }
 
+pub async fn cmd_tls_posture(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.tls_posture().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    let totals = &resp.totals;
+    println!("Network Cryptography");
+    println!("  Connections:   {}", totals.connections);
+    println!(
+        "  Post-quantum:  {}",
+        count_cell(totals.post_quantum, totals.shares.post_quantum)
+    );
+    println!(
+        "  Classical:     {}",
+        count_cell(totals.classical, totals.shares.classical)
+    );
+    println!(
+        "  Legacy TLS:    {}",
+        count_cell(totals.legacy_tls, totals.shares.legacy_tls)
+    );
+    println!("  Clear text:    {}", clear_text_cell(totals));
+    if resp.evicted_edges > 0 {
+        println!(
+            "  {} edge(s) dropped to make room for newer ones.",
+            resp.evicted_edges
+        );
+    }
+    if resp.edges.is_empty() {
+        println!("\nNo connection counted yet.");
+        return Ok(());
+    }
+
+    let end = |end: &crate::api_client::ServiceEndBody| match &end.service {
+        Some(service) => format!("{service} ({})", end.address),
+        None => end.address.clone(),
+    };
+    let mut table = Table::new(&[
+        ("CLIENT", Align::Left),
+        ("SERVER", Align::Left),
+        ("PORT", Align::Right),
+        ("CONNS", Align::Right),
+        ("POST-QUANTUM", Align::Right),
+        ("CLASSICAL", Align::Right),
+        ("LEGACY TLS", Align::Right),
+        ("CLEAR TEXT", Align::Left),
+    ]);
+    for edge in &resp.edges {
+        let c = &edge.counts;
+        table.row(cells![
+            end(&edge.client),
+            end(&edge.server),
+            edge.server_port,
+            c.connections,
+            count_cell(c.post_quantum, c.shares.post_quantum),
+            count_cell(c.classical, c.shares.classical),
+            count_cell(c.legacy_tls, c.shares.legacy_tls),
+            clear_text_cell(c),
+        ]);
+    }
+    println!();
+    table.print();
+    Ok(())
+}
+
+/// A count with its share of the connections, as a whole percentage.
+fn count_cell(count: u64, share: f64) -> String {
+    format!("{count} ({:.0}%)", share * 100.0)
+}
+
+/// The clear-text count with its share and the protocols it was read in.
+fn clear_text_cell(counts: &crate::api_client::PostureCountsBody) -> String {
+    let cell = count_cell(counts.clear_text, counts.shares.clear_text);
+    if counts.clear_text_protocols.is_empty() {
+        return cell;
+    }
+    let protocols: Vec<String> = counts
+        .clear_text_protocols
+        .iter()
+        .map(|(protocol, n)| format!("{protocol} {n}"))
+        .collect();
+    format!("{cell} {}", protocols.join(", "))
+}
+
 /// What the certificate column says: why nothing is known, or how far its
 /// end of validity is from now.
 fn certificate_cell(cert: &crate::api_client::CertificateBody, now: i64) -> String {
@@ -5971,6 +6057,19 @@ mod tests {
             certificate_cell(&cert("read", Some(0)), 3 * 86_400),
             "expired 3 days ago"
         );
+    }
+
+    #[test]
+    fn the_clear_text_cell_names_its_protocols() {
+        let mut counts = crate::api_client::PostureCountsBody {
+            clear_text: 3,
+            ..Default::default()
+        };
+        counts.shares.clear_text = 0.75;
+        assert_eq!(clear_text_cell(&counts), "3 (75%)");
+        counts.clear_text_protocols.insert("http".to_string(), 2);
+        counts.clear_text_protocols.insert("ldap".to_string(), 1);
+        assert_eq!(clear_text_cell(&counts), "3 (75%) http 2, ldap 1");
     }
 
     #[test]

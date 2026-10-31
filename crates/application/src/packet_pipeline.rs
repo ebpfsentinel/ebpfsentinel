@@ -101,6 +101,8 @@ pub struct EventDispatcher {
         Option<Arc<dyn ports::secondary::l7_extended_parser_port::L7ExtendedParser>>,
     /// Rate, errors and duration per service, measured on every L7 payload.
     red_meter: Arc<crate::l7_red_meter::L7RedMeter>,
+    /// The cryptographic posture of each edge, counted per connection.
+    crypto_posture: Arc<crate::crypto_posture_meter::CryptoPostureMeter>,
     /// Connections already compared with the protocol their port promises.
     /// `None` when the check is off.
     port_promise: Option<Arc<Mutex<domain::l7::port_promise::PortPromiseTracker>>>,
@@ -157,6 +159,9 @@ impl EventDispatcher {
                 crate::workload_resolver::WorkloadResolver::new(),
                 Arc::clone(&metrics),
             )),
+            crypto_posture: Arc::new(crate::crypto_posture_meter::CryptoPostureMeter::new(
+                crate::workload_resolver::WorkloadResolver::new(),
+            )),
             port_promise: Some(Arc::new(Mutex::new(
                 domain::l7::port_promise::PortPromiseTracker::new(
                     domain::l7::port_promise::PortPromiseConfig::default(),
@@ -173,6 +178,12 @@ impl EventDispatcher {
     #[must_use]
     pub fn red_meter(&self) -> Arc<crate::l7_red_meter::L7RedMeter> {
         Arc::clone(&self.red_meter)
+    }
+
+    /// The meter counting each edge's cryptographic posture.
+    #[must_use]
+    pub fn crypto_posture(&self) -> Arc<crate::crypto_posture_meter::CryptoPostureMeter> {
+        Arc::clone(&self.crypto_posture)
     }
 
     /// Compare each connection's first payload with the protocol its port
@@ -203,6 +214,9 @@ impl EventDispatcher {
             domain::l7::red::ServiceNames::default(),
             workloads.clone(),
             Arc::clone(&self.metrics),
+        ));
+        self.crypto_posture = Arc::new(crate::crypto_posture_meter::CryptoPostureMeter::new(
+            workloads.clone(),
         ));
         self.workloads = workloads;
         self
@@ -1120,6 +1134,8 @@ impl EventDispatcher {
         }
 
         self.red_meter.observe(header, protocol_label, payload);
+        self.crypto_posture
+            .observe_payload(header, protocol_label, payload, wall_clock_ns());
 
         // Reuse the protocol detected above instead of re-scanning the payload.
         let parsed = parse_payload_with(protocol, payload);
@@ -1171,9 +1187,9 @@ impl EventDispatcher {
             return;
         };
         let ipv6 = header.is_ipv6();
-        let observed_at_ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        let observed_at_ns = wall_clock_ns();
+        self.crypto_posture
+            .observe_handshake(header, &handshake, observed_at_ns);
         self.handshake_log
             .record(domain::l7::handshake::HandshakeRecord {
                 client: addr_to_ip(header.dst_addr, ipv6),
@@ -1845,6 +1861,14 @@ impl EventDispatcher {
             "load balancer event"
         );
     }
+}
+
+/// Nanoseconds since the epoch, the clock the handshake log and the posture
+/// table are read on.
+fn wall_clock_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
 fn action_label(action: u8) -> &'static str {
@@ -2681,6 +2705,31 @@ mod tests {
             log[0].handshake.posture(),
             domain::l7::handshake::CryptoPosture::PostQuantum
         );
+
+        // The same connection counts once on its edge, and a clear request
+        // to another port counts as clear text there.
+        dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            header: PacketEvent {
+                src_port: 51_001,
+                dst_port: 6379,
+                ..make_event(EVENT_TYPE_L7, 0)
+            },
+            payload: b"*1\r\n$4\r\nPING\r\n".to_vec(),
+        });
+        let reading = dispatcher.crypto_posture().reading();
+        assert_eq!(reading.edges.len(), 2);
+        let tls = reading
+            .edges
+            .iter()
+            .find(|(key, _)| key.server_port == 443)
+            .map(|(_, edge)| edge.post_quantum);
+        assert_eq!(tls, Some(1));
+        let redis = reading
+            .edges
+            .iter()
+            .find(|(key, _)| key.server_port == 6379)
+            .map(|(_, edge)| edge.clear_text_connections());
+        assert_eq!(redis, Some(1));
     }
 
     /// Protocol, payload length, HTTP host and process id of one exchange.

@@ -2,6 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
+use domain::l7::crypto_posture::clear_text_request;
 use domain::l7::handshake::read_server_flight;
 use domain::l7::parser::{
     detect_protocol, parse_ftp, parse_grpc, parse_http, parse_payload, parse_smb, parse_smtp,
@@ -21,4 +22,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = parse_ftp(data);
     let _ = parse_smb(data);
     let _ = read_server_flight(data);
+    for label in ["http", "redis", "smtp", "postgres", "unknown"] {
+        let _ = clear_text_request(label, data);
+    }
 });

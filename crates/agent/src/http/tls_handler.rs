@@ -3,15 +3,19 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::request::Parts;
+use domain::l7::crypto_posture::{EdgePosture, PostureReading};
 use domain::l7::handshake::{
     CertificateValidity, CryptoPosture, HandshakeRecord, KeyExchangeClass, cipher_name,
     version_name,
 };
+use domain::l7::service_graph::GraphEnd;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use tokio_rustls::rustls::NamedGroup;
 use utoipa::{IntoParams, ToSchema};
 
-use super::error::ErrorBody;
+use super::error::{ApiError, ErrorBody};
+use super::service_graph_handler::ServiceEndBody;
 use super::state::AppState;
 use super::tls::TlsConnectInfo;
 
@@ -256,9 +260,160 @@ fn list_handshakes(
     }
 }
 
+/// Connections counted on an edge, or over the node, by posture.
+#[derive(Debug, Default, Serialize, ToSchema)]
+pub struct PostureCountsBody {
+    /// Every connection counted.
+    pub connections: u64,
+    /// TLS 1.2 or 1.3 over a post-quantum or hybrid group.
+    pub post_quantum: u64,
+    /// TLS 1.2 or 1.3 over a classical exchange.
+    pub classical: u64,
+    /// Below TLS 1.2.
+    pub legacy_tls: u64,
+    /// Requests read in clear text, whatever the protocol.
+    pub clear_text: u64,
+    /// The clear-text connections by protocol: `http`, `ldap`, `smtp`,
+    /// `redis` or `postgres`. A protocol with none is absent.
+    pub clear_text_protocols: BTreeMap<&'static str, u64>,
+    /// Each class's share of `connections`, from 0 to 1.
+    pub shares: PostureSharesBody,
+}
+
+/// Each posture's share of the connections counted.
+#[derive(Debug, Default, Serialize, ToSchema)]
+pub struct PostureSharesBody {
+    pub post_quantum: f64,
+    pub classical: f64,
+    pub legacy_tls: f64,
+    pub clear_text: f64,
+}
+
+/// One edge between two workloads, on one server port.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PostureEdgeBody {
+    pub client: ServiceEndBody,
+    pub server: ServiceEndBody,
+    pub server_port: u16,
+    #[serde(flatten)]
+    pub counts: PostureCountsBody,
+    /// When the first and the last connection were counted, in nanoseconds
+    /// since the epoch.
+    pub first_seen_ns: u64,
+    pub last_seen_ns: u64,
+}
+
+/// The cryptographic posture of each edge since the agent started.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TlsPostureResponse {
+    /// The node's connections, every edge summed.
+    pub totals: PostureCountsBody,
+    /// Edges dropped, least recently seen first, to make room for new ones.
+    pub evicted_edges: u64,
+    /// Most connections first.
+    pub edges: Vec<PostureEdgeBody>,
+}
+
+impl PostureCountsBody {
+    fn add(&mut self, edge: &EdgePosture) {
+        self.post_quantum = self.post_quantum.saturating_add(edge.post_quantum);
+        self.classical = self.classical.saturating_add(edge.classical);
+        self.legacy_tls = self.legacy_tls.saturating_add(edge.legacy_tls);
+        for (protocol, n) in &edge.clear_text {
+            let slot = self
+                .clear_text_protocols
+                .entry(protocol.as_str())
+                .or_default();
+            *slot = slot.saturating_add(*n);
+        }
+        self.clear_text = self
+            .clear_text
+            .saturating_add(edge.clear_text_connections());
+        self.connections = self.connections.saturating_add(edge.connections());
+        self.shares = PostureSharesBody {
+            post_quantum: share(self.post_quantum, self.connections),
+            classical: share(self.classical, self.connections),
+            legacy_tls: share(self.legacy_tls, self.connections),
+            clear_text: share(self.clear_text, self.connections),
+        };
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn share(part: u64, whole: u64) -> f64 {
+    if whole == 0 {
+        0.0
+    } else {
+        part as f64 / whole as f64
+    }
+}
+
+fn end_body(end: &GraphEnd) -> ServiceEndBody {
+    ServiceEndBody {
+        service: end.service.clone(),
+        address: end.address.to_string(),
+    }
+}
+
+fn posture_response(reading: &PostureReading) -> TlsPostureResponse {
+    let mut totals = PostureCountsBody::default();
+    let mut edges: Vec<PostureEdgeBody> = reading
+        .edges
+        .iter()
+        .map(|(key, edge)| {
+            totals.add(edge);
+            let mut counts = PostureCountsBody::default();
+            counts.add(edge);
+            PostureEdgeBody {
+                client: end_body(&key.client),
+                server: end_body(&key.server),
+                server_port: key.server_port,
+                counts,
+                first_seen_ns: edge.first_seen_ns,
+                last_seen_ns: edge.last_seen_ns,
+            }
+        })
+        .collect();
+    edges.sort_by_key(|edge| std::cmp::Reverse(edge.counts.connections));
+    TlsPostureResponse {
+        totals,
+        evicted_edges: reading.evicted_edges,
+        edges,
+    }
+}
+
+/// `GET /api/v1/tls/posture` - the cryptographic posture of each edge
+/// between two workloads: how many connections ran over a post-quantum
+/// group, a classical exchange, a TLS version below 1.2, or in clear text,
+/// with the clear-text protocols named.
+#[utoipa::path(
+    get, path = "/api/v1/tls/posture",
+    tag = "TLS",
+    responses(
+        (status = 200, description = "Each edge's posture since the agent started", body = TlsPostureResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "The L7 dispatcher is not running on this node", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn tls_posture(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<TlsPostureResponse>, ApiError> {
+    let meter = state.crypto_posture.load_full().ok_or(ApiError::NotFound {
+        code: "SERVICE_NOT_AVAILABLE",
+        message: "the L7 dispatcher is not running on this node".to_string(),
+    })?;
+    Ok(Json(posture_response(&meter.reading())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use domain::l7::crypto_posture::{ClearTextProtocol, PostureEdgeKey};
     use domain::l7::handshake::TlsHandshake;
     use std::net::IpAddr;
 
@@ -343,6 +498,58 @@ mod tests {
         assert!(listed.recording);
         assert_eq!(listed.capacity, 8);
         assert_eq!(listed.handshakes.len(), 2);
+    }
+
+    #[test]
+    fn the_posture_sums_every_edge_and_puts_the_busiest_first() {
+        let end = |last: u8, service: Option<&str>| GraphEnd {
+            service: service.map(str::to_string),
+            address: IpAddr::from([10, 0, 0, last]),
+        };
+        let quiet = EdgePosture {
+            post_quantum: 1,
+            first_seen_ns: 1,
+            last_seen_ns: 2,
+            ..EdgePosture::default()
+        };
+        let busy = EdgePosture {
+            classical: 1,
+            legacy_tls: 1,
+            clear_text: BTreeMap::from([(ClearTextProtocol::Ldap, 2)]),
+            ..EdgePosture::default()
+        };
+        let reading = PostureReading {
+            edges: vec![
+                (
+                    PostureEdgeKey {
+                        client: end(1, Some("shop/web")),
+                        server: end(2, None),
+                        server_port: 443,
+                    },
+                    quiet,
+                ),
+                (
+                    PostureEdgeKey {
+                        client: end(1, Some("shop/web")),
+                        server: end(3, None),
+                        server_port: 389,
+                    },
+                    busy,
+                ),
+            ],
+            evicted_edges: 0,
+        };
+        let response = posture_response(&reading);
+        assert_eq!(response.totals.connections, 5);
+        assert_eq!(response.totals.clear_text_protocols["ldap"], 2);
+        assert!((response.totals.shares.clear_text - 0.4).abs() < 1e-9);
+        assert!((response.totals.shares.post_quantum - 0.2).abs() < 1e-9);
+        assert_eq!(response.edges[0].server_port, 389);
+        assert_eq!(response.edges[0].counts.connections, 4);
+        let json = serde_json::to_value(&response.edges[1]).unwrap();
+        assert_eq!(json["post_quantum"], 1);
+        assert_eq!(json["client"]["service"], "shop/web");
+        assert!(json["server"].get("service").is_none());
     }
 
     #[test]

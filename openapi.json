@@ -8136,6 +8136,65 @@
         ]
       }
     },
+    "/api/v1/tls/posture": {
+      "get": {
+        "tags": [
+          "TLS"
+        ],
+        "summary": "`GET /api/v1/tls/posture` - the cryptographic posture of each edge\nbetween two workloads: how many connections ran over a post-quantum\ngroup, a classical exchange, a TLS version below 1.2, or in clear text,\nwith the clear-text protocols named.",
+        "operationId": "tls_posture",
+        "responses": {
+          "200": {
+            "description": "Each edge's posture since the agent started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TlsPostureResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The L7 dispatcher is not running on this node",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/tls/status": {
       "get": {
         "tags": [
@@ -14081,6 +14140,137 @@
           }
         }
       },
+      "PostureCountsBody": {
+        "type": "object",
+        "description": "Connections counted on an edge, or over the node, by posture.",
+        "required": [
+          "connections",
+          "post_quantum",
+          "classical",
+          "legacy_tls",
+          "clear_text",
+          "clear_text_protocols",
+          "shares"
+        ],
+        "properties": {
+          "classical": {
+            "type": "integer",
+            "format": "int64",
+            "description": "TLS 1.2 or 1.3 over a classical exchange.",
+            "minimum": 0
+          },
+          "clear_text": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Requests read in clear text, whatever the protocol.",
+            "minimum": 0
+          },
+          "clear_text_protocols": {
+            "type": "object",
+            "description": "The clear-text connections by protocol: `http`, `ldap`, `smtp`,\n`redis` or `postgres`. A protocol with none is absent.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "connections": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Every connection counted.",
+            "minimum": 0
+          },
+          "legacy_tls": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Below TLS 1.2.",
+            "minimum": 0
+          },
+          "post_quantum": {
+            "type": "integer",
+            "format": "int64",
+            "description": "TLS 1.2 or 1.3 over a post-quantum or hybrid group.",
+            "minimum": 0
+          },
+          "shares": {
+            "$ref": "#/components/schemas/PostureSharesBody",
+            "description": "Each class's share of `connections`, from 0 to 1."
+          }
+        }
+      },
+      "PostureEdgeBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PostureCountsBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "client",
+              "server",
+              "server_port",
+              "first_seen_ns",
+              "last_seen_ns"
+            ],
+            "properties": {
+              "client": {
+                "$ref": "#/components/schemas/ServiceEndBody"
+              },
+              "first_seen_ns": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When the first and the last connection were counted, in nanoseconds\nsince the epoch.",
+                "minimum": 0
+              },
+              "last_seen_ns": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "server": {
+                "$ref": "#/components/schemas/ServiceEndBody"
+              },
+              "server_port": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "One edge between two workloads, on one server port."
+      },
+      "PostureSharesBody": {
+        "type": "object",
+        "description": "Each posture's share of the connections counted.",
+        "required": [
+          "post_quantum",
+          "classical",
+          "legacy_tls",
+          "clear_text"
+        ],
+        "properties": {
+          "classical": {
+            "type": "number",
+            "format": "double"
+          },
+          "clear_text": {
+            "type": "number",
+            "format": "double"
+          },
+          "legacy_tls": {
+            "type": "number",
+            "format": "double"
+          },
+          "post_quantum": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
       "ProcessAncestorResponse": {
         "type": "object",
         "description": "One ancestor of a process, live or exited.",
@@ -16363,6 +16553,34 @@
           "recording": {
             "type": "boolean",
             "description": "Whether this agent reads TLS handshakes at all."
+          }
+        }
+      },
+      "TlsPostureResponse": {
+        "type": "object",
+        "description": "The cryptographic posture of each edge since the agent started.",
+        "required": [
+          "totals",
+          "evicted_edges",
+          "edges"
+        ],
+        "properties": {
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PostureEdgeBody"
+            },
+            "description": "Most connections first."
+          },
+          "evicted_edges": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Edges dropped, least recently seen first, to make room for new ones.",
+            "minimum": 0
+          },
+          "totals": {
+            "$ref": "#/components/schemas/PostureCountsBody",
+            "description": "The node's connections, every edge summed."
           }
         }
       },
