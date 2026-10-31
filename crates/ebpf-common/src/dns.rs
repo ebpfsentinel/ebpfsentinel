@@ -56,8 +56,12 @@ pub struct DnsEvent {
     pub flags: u8,
     /// 802.1Q VLAN ID (0 = no VLAN).
     pub vlan_id: u16,
+    /// Source port, host order.
+    pub src_port: u16,
+    /// Destination port, host order.
+    pub dst_port: u16,
     /// Explicit padding so `cgroup_id` is 8-byte aligned.
-    pub _padding: [u8; 8],
+    pub _padding: [u8; 4],
     /// cgroup v2 ID from `bpf_get_current_cgroup_id`.
     /// 0 = not available. TC programs run in softirq context, so this is
     /// only populated for egress packets where the sending task is current.
@@ -131,6 +135,8 @@ mod tests {
         assert_eq!(mem::offset_of!(DnsEvent, direction), 44);
         assert_eq!(mem::offset_of!(DnsEvent, flags), 45);
         assert_eq!(mem::offset_of!(DnsEvent, vlan_id), 46);
+        assert_eq!(mem::offset_of!(DnsEvent, src_port), 48);
+        assert_eq!(mem::offset_of!(DnsEvent, dst_port), 50);
         assert_eq!(mem::offset_of!(DnsEvent, cgroup_id), 56);
     }
 

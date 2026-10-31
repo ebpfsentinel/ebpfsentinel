@@ -104,6 +104,8 @@ pub struct EventDispatcher {
     workloads: crate::workload_resolver::WorkloadResolver,
     /// Extensions handed every parsed L7 payload after the rules have run.
     l7_observers: Vec<Arc<dyn ports::secondary::l7_observer_port::L7Observer>>,
+    /// Extensions handed every DNS query with the workload that sent it.
+    dns_query_observers: Vec<Arc<dyn ports::secondary::dns_query_observer_port::DnsQueryObserver>>,
 }
 
 impl EventDispatcher {
@@ -154,6 +156,7 @@ impl EventDispatcher {
             ))),
             workloads: crate::workload_resolver::WorkloadResolver::new(),
             l7_observers: Vec::new(),
+            dns_query_observers: Vec::new(),
             metrics,
         }
     }
@@ -206,6 +209,19 @@ impl EventDispatcher {
     ) -> Self {
         tracing::info!(observer = observer.name(), "L7 observer registered");
         self.l7_observers.push(observer);
+        self
+    }
+
+    /// Hand every DNS query to `observer`, with the workload whose socket
+    /// sent it. An alert the observer returns is completed with the flow,
+    /// the workload and the container, and raised like any other.
+    #[must_use]
+    pub fn with_dns_query_observer(
+        mut self,
+        observer: Arc<dyn ports::secondary::dns_query_observer_port::DnsQueryObserver>,
+    ) -> Self {
+        tracing::info!(observer = observer.name(), "DNS query observer registered");
+        self.dns_query_observers.push(observer);
         self
     }
 
@@ -1507,6 +1523,70 @@ impl EventDispatcher {
         }
     }
 
+    /// Resolve the socket that sent a query once, and hand the query to every
+    /// observer with it.
+    fn notify_dns_query_observers(&self, header: &DnsEvent, payload: &[u8]) {
+        use ports::secondary::dns_query_observer_port::DnsQuery;
+
+        if self.dns_query_observers.is_empty() {
+            return;
+        }
+        let is_ipv6 = (header.flags & ebpf_common::event::FLAG_IPV6) != 0;
+        let client = addr_to_ip(header.src_addr, is_ipv6);
+        let server = addr_to_ip(header.dst_addr, is_ipv6);
+        let Ok(domain::dns::entity::DnsPacket::Query(query)) =
+            domain::dns::parser::parse_dns_packet(payload, client, header.timestamp_ns)
+        else {
+            return;
+        };
+        // IP protocol numbers: 6 for a query over TCP, 17 over UDP.
+        let protocol: u8 = if ebpf_common::event::is_tcp(header.flags) {
+            6
+        } else {
+            17
+        };
+        let workload = self.workloads.by_originated_flow(
+            &ports::secondary::socket_identity_port::FlowEndpoints {
+                local_addr: client,
+                remote_addr: server,
+                local_port: header.src_port,
+                remote_port: header.dst_port,
+                protocol,
+            },
+        );
+        let exchange = DnsQuery {
+            timestamp_ns: header.timestamp_ns,
+            client,
+            server,
+            client_port: header.src_port,
+            server_port: header.dst_port,
+            ip_protocol: protocol,
+            domain: &query.domain,
+            workload: workload.as_ref(),
+        };
+        for observer in &self.dns_query_observers {
+            let Some(mut alert) = observer.observe(&exchange) else {
+                continue;
+            };
+            alert.src_addr = header.src_addr;
+            alert.dst_addr = header.dst_addr;
+            alert.src_port = header.src_port;
+            alert.dst_port = header.dst_port;
+            alert.protocol = protocol;
+            alert.is_ipv6 = is_ipv6;
+            if alert.matched_domain.is_none() {
+                alert.matched_domain = Some(query.domain.clone());
+            }
+            if alert.workload.is_none() {
+                alert.workload.clone_from(&workload);
+            }
+            if alert.container.is_none() {
+                alert.container = self.resolve_container_by_id(header.cgroup_id);
+            }
+            let _ = self.alert_tx.try_send(AlertEvent::System(Box::new(alert)));
+        }
+    }
+
     fn process_dns_event(&self, header: DnsEvent, payload: &[u8]) {
         let is_tcp = ebpf_common::event::is_tcp(header.flags);
         let direction = if header.direction == ebpf_common::dns::DNS_DIRECTION_RESPONSE {
@@ -1525,8 +1605,10 @@ impl EventDispatcher {
             "DNS event received"
         );
 
-        // Only process responses (which contain resolved IPs)
+        // A query is only of interest to the observers; everything below
+        // reads the answers of a response.
         if header.direction != ebpf_common::dns::DNS_DIRECTION_RESPONSE {
+            self.notify_dns_query_observers(&header, payload);
             return;
         }
 
@@ -2618,6 +2700,141 @@ mod tests {
         });
 
         assert_eq!(observer.seen.lock().unwrap()[0].3, Some(4_242));
+    }
+
+    /// Raises one alert on every query naming `tunnel.example`, and keeps the
+    /// process id each query was lent.
+    #[derive(Default)]
+    struct TunnelSpotter {
+        seen: Mutex<Vec<(String, Option<u32>, u8)>>,
+    }
+
+    impl ports::secondary::dns_query_observer_port::DnsQueryObserver for TunnelSpotter {
+        fn observe(
+            &self,
+            query: &ports::secondary::dns_query_observer_port::DnsQuery<'_>,
+        ) -> Option<domain::alert::entity::Alert> {
+            self.seen.lock().unwrap().push((
+                query.domain.to_string(),
+                query.workload.map(|w| w.pid),
+                query.ip_protocol,
+            ));
+            query.domain.ends_with("tunnel.example").then(|| {
+                domain::alert::entity::Alert::from_ai_security(
+                    "dns",
+                    "dns-tunnelling",
+                    domain::common::entity::Severity::High,
+                    DomainMode::Alert,
+                    [0; 4],
+                    [0; 4],
+                    0,
+                    0,
+                    0,
+                    false,
+                    "tunnelling",
+                    query.timestamp_ns,
+                    &domain::alert::mitre::MitreContext::Dns(
+                        domain::alert::mitre::DnsMitreReason::BlocklistOrEncrypted,
+                    ),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            })
+        }
+    }
+
+    /// A DNS query for `name`, type A, as the wire carries it.
+    fn dns_query_payload(name: &str) -> Vec<u8> {
+        let mut payload = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        for label in name.split('.') {
+            payload.push(u8::try_from(label.len()).unwrap());
+            payload.extend_from_slice(label.as_bytes());
+        }
+        payload.extend_from_slice(&[0, 0, 1, 0, 1]);
+        payload
+    }
+
+    fn dns_query_event(direction: u8) -> DnsEvent {
+        DnsEvent {
+            timestamp_ns: 1,
+            src_addr: [0xC0A8_0001, 0, 0, 0],
+            dst_addr: [0x0808_0808, 0, 0, 0],
+            dns_payload_len: 0,
+            dns_payload_offset: DnsEvent::HEADER_SIZE,
+            direction,
+            flags: 0,
+            vlan_id: 0,
+            src_port: 40_000,
+            dst_port: 53,
+            _padding: [0; 4],
+            cgroup_id: 0,
+        }
+    }
+
+    fn dns_query_dispatcher(
+        alert_tx: mpsc::Sender<AlertEvent>,
+        observer: &Arc<TunnelSpotter>,
+    ) -> EventDispatcher {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let workloads = crate::workload_resolver::WorkloadResolver::new()
+            .with_sockets(Box::new(OwnedBy(4_242)));
+        make_dispatcher(ids, metrics, alert_tx)
+            .with_workload_resolver(workloads)
+            .with_dns_query_observer(Arc::clone(observer) as _)
+    }
+
+    #[tokio::test]
+    async fn a_dns_query_observer_alert_carries_the_flow_and_the_sending_workload() {
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let observer = Arc::new(TunnelSpotter::default());
+        let dispatcher = dns_query_dispatcher(alert_tx, &observer);
+
+        dispatcher.dispatch_agent_event(AgentEvent::Dns {
+            header: dns_query_event(ebpf_common::dns::DNS_DIRECTION_QUERY),
+            payload: dns_query_payload("agvsbg8.tunnel.example"),
+        });
+
+        assert_eq!(
+            observer.seen.lock().unwrap().as_slice(),
+            &[("agvsbg8.tunnel.example".to_string(), Some(4_242), 17)]
+        );
+        let Ok(AlertEvent::System(alert)) = alert_rx.try_recv() else {
+            panic!("expected one alert on the system path");
+        };
+        assert_eq!(alert.rule_id.0, "dns-tunnelling");
+        assert_eq!(alert.src_addr, [0xC0A8_0001, 0, 0, 0]);
+        assert_eq!(alert.dst_addr, [0x0808_0808, 0, 0, 0]);
+        assert_eq!(
+            (alert.src_port, alert.dst_port, alert.protocol),
+            (40_000, 53, 17)
+        );
+        assert_eq!(
+            alert.matched_domain.as_deref(),
+            Some("agvsbg8.tunnel.example")
+        );
+        assert_eq!(alert.workload.as_ref().map(|w| w.pid), Some(4_242));
+    }
+
+    #[tokio::test]
+    async fn a_dns_query_observer_raises_nothing_it_did_not_find_and_never_sees_a_response() {
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let observer = Arc::new(TunnelSpotter::default());
+        let dispatcher = dns_query_dispatcher(alert_tx, &observer);
+
+        dispatcher.dispatch_agent_event(AgentEvent::Dns {
+            header: dns_query_event(ebpf_common::dns::DNS_DIRECTION_QUERY),
+            payload: dns_query_payload("www.example.com"),
+        });
+        dispatcher.dispatch_agent_event(AgentEvent::Dns {
+            header: dns_query_event(ebpf_common::dns::DNS_DIRECTION_RESPONSE),
+            payload: dns_query_payload("agvsbg8.tunnel.example"),
+        });
+
+        assert_eq!(observer.seen.lock().unwrap().len(), 1);
+        assert!(alert_rx.try_recv().is_err());
     }
 
     fn l7_event_to(dst_port: u16) -> PacketEvent {

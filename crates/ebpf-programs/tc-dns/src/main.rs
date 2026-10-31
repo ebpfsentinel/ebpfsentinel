@@ -154,6 +154,7 @@ fn process_dns_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
         ctx,
         &src_addr,
         &dst_addr,
+        [src_port, dst_port],
         flags | tcp_flag,
         vlan_id,
         direction,
@@ -208,6 +209,7 @@ fn process_dns_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
         ctx,
         &src_addr,
         &dst_addr,
+        [src_port, dst_port],
         flags | tcp_flag,
         vlan_id,
         direction,
@@ -238,6 +240,7 @@ fn dns_ringbuf_has_backpressure() -> bool {
 struct DnsHeaderFields {
     src_addr: [u32; 4],
     dst_addr: [u32; 4],
+    ports: [u16; 2],
     payload_len: u16,
     direction: u8,
     flags: u8,
@@ -266,6 +269,7 @@ fn emit_dns_event(
     ctx: &TcContext,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
+    ports: [u16; 2],
     flags: u8,
     vlan_id: u16,
     direction: u8,
@@ -295,6 +299,7 @@ fn emit_dns_event(
     let fields = DnsHeaderFields {
         src_addr: *src_addr,
         dst_addr: *dst_addr,
+        ports,
         payload_len: payload_len as u16,
         direction,
         flags,
@@ -336,7 +341,9 @@ unsafe fn write_dns_header(ptr: *mut DnsEvent, f: &DnsHeaderFields) {
         (*ptr).direction = f.direction;
         (*ptr).flags = f.flags;
         (*ptr).vlan_id = f.vlan_id;
-        (*ptr)._padding = [0; 8];
+        (*ptr).src_port = f.ports[0];
+        (*ptr).dst_port = f.ports[1];
+        (*ptr)._padding = [0; 4];
         // Valid on egress queries where the current task owns the skb; 0 on
         // ingress softirq (DNS responses).
         (*ptr).cgroup_id = bpf_get_current_cgroup_id();
