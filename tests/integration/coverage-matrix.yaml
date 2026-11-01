@@ -133,6 +133,9 @@ suite_profiles:
   # 78 runs a copied binary from /tmp, promotes a rule by rewriting the
   # configuration and restarting the agent, and waits for the kill: nightly.
   "78": nightly
+  # 79 makes the host busy beside the agent and waits two passes of each
+  # hidden sweep at their shortest interval, about three minutes: nightly.
+  "79": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -604,11 +607,11 @@ coverage:
 
   - kind: cli_subcommand
     feature: ebpf
-    suites: ["16", "60", "62", "77"]
+    suites: ["16", "60", "62", "77", "79"]
     topology: 2vm
     kernel_min: "6.12"
     profile: pr
-    notes: "Program load status through /api/v1/ebpf/status; the per-container uprobe inventory in 60; the kernel floor refusal and the kernel-features verdicts in 77"
+    notes: "Program load status through /api/v1/ebpf/status; the per-container uprobe inventory in 60; the kernel floor refusal and the kernel-features verdicts in 77; the hidden port and hidden process sweeps in 79"
 
   - kind: cli_subcommand
     feature: geoip
@@ -770,6 +773,14 @@ coverage:
     kernel_min: "6.12"
     profile: pr
     notes: "DNS intel; DoH/DoT detection via ClientHello SNI + dst_port 853 in 45; AAAA query parser-readiness asserted in 55"
+
+  - kind: domain_module
+    feature: hidden
+    suites: ["79"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "Hidden ports and hidden processes on a busy host: listeners in two network namespaces, SO_REUSEPORT, TIME_WAIT, a many-threaded process and process churn, and neither sweep reports anything twice in a row; the process sweep stays inside its time and CPU budget. The positive case is unit-tested at the port boundary, since a real one needs a rootkit"
 
   - kind: domain_module
     feature: hostrule
