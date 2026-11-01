@@ -13,8 +13,13 @@
 //! second reading before it is reported.
 
 pub mod port;
+pub mod process;
 
 pub use port::{
     HIDDEN_PORT_COMPONENT, HIDDEN_PORT_RULE_ID, HiddenPort, ListedPort, Listing, NamespacePorts,
     PortFamily, PortProbe, PortReading, PortSweep, PortSweepCounts, Transport, sweep_ports,
+};
+pub use process::{
+    HIDDEN_PROCESS_COMPONENT, HIDDEN_PROCESS_RULE_ID, HiddenProcess, PidObservation,
+    ProcessReading, ProcessSweep, ProcessSweepCounts, sweep_processes,
 };

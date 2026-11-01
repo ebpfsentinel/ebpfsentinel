@@ -30,8 +30,8 @@ use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame,
 // build request values without taking a direct dependency on the protocol crate.
 pub use ebpfsentinel_warden_proto::{
     BindProbe, ConntrackTuple, DlpTarget, ExecutableIdentity, FimEvent, FimFacts, FimFile,
-    FimFileType, FimMark, FimReading, FimXattr, HeldBpfObjects, ListedPort, NamespacePortReading,
-    NetworkProgram, PacketSocket, RouteSpec, TaskIdentity,
+    FimFileType, FimMark, FimReading, FimXattr, HeldBpfObjects, HiddenProcessReading, ListedPort,
+    NamespacePortReading, NetworkProgram, PacketSocket, PidObservation, RouteSpec, TaskIdentity,
 };
 
 /// How long one warden call may take before the client gives up on it.
@@ -83,6 +83,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::FimRead { .. } => "FimRead",
         Command::FimFacts { .. } => "FimFacts",
         Command::HiddenPorts { .. } => "HiddenPorts",
+        Command::HiddenProcesses { .. } => "HiddenProcesses",
     }
 }
 
@@ -264,6 +265,15 @@ impl WardenClient {
         })? {
             Response::HiddenPorts { namespaces } => Ok(namespaces),
             other => Err(unexpected("HiddenPorts", &other)),
+        }
+    }
+
+    /// List `/proc` and signal the pid space at about `rate` pids a second,
+    /// twice over for what answered and was not listed.
+    pub fn hidden_processes(&mut self, rate: u32) -> io::Result<HiddenProcessReading> {
+        match self.call(&Command::HiddenProcesses { rate })? {
+            Response::HiddenProcesses { reading } => Ok(reading),
+            other => Err(unexpected("HiddenProcesses", &other)),
         }
     }
 
@@ -598,6 +608,12 @@ impl ReconnectingClient {
     /// bounced.
     pub fn hidden_ports(&mut self, ports: &[u16]) -> io::Result<Vec<NamespacePortReading>> {
         self.with_retry(|c| c.hidden_ports(ports))
+    }
+
+    /// Sweep for hidden processes through the warden, reconnecting if it
+    /// bounced.
+    pub fn hidden_processes(&mut self, rate: u32) -> io::Result<HiddenProcessReading> {
+        self.with_retry(|c| c.hidden_processes(rate))
     }
 
     /// Name the warden's thread group through the connection, reconnecting

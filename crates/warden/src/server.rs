@@ -23,8 +23,8 @@ use crate::fim_watch::FimWatch;
 use crate::host_ops::HostOps;
 use crate::pcap_slots::{PcapSlot, PcapSlots};
 use crate::{
-    bpf_inventory, cgroup_ops, delegate_over_fd, dlp_scan, exe_read, hidden_ports, net_ops,
-    netns_tcx_ops, packet_sockets, recv_fd, send_msg_fds, uprobe_ops,
+    bpf_inventory, cgroup_ops, delegate_over_fd, dlp_scan, exe_read, hidden_ports,
+    hidden_processes, net_ops, netns_tcx_ops, packet_sockets, recv_fd, send_msg_fds, uprobe_ops,
 };
 
 /// How long a connection may hold a thread without saying `Hello`.
@@ -658,6 +658,9 @@ fn dispatch(cmd: &Command, host: &dyn HostOps, proc_root: &Path) -> Response {
         },
         Command::HiddenPorts { ports } => Response::HiddenPorts {
             namespaces: hidden_ports::scan(proc_root, ports),
+        },
+        Command::HiddenProcesses { rate } => Response::HiddenProcesses {
+            reading: hidden_processes::scan(proc_root, *rate),
         },
         Command::NetworkPrograms => match bpf_inventory::scan(proc_root) {
             Ok(programs) => Response::NetworkPrograms { programs },

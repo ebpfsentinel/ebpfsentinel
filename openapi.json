@@ -3065,6 +3065,55 @@
         ]
       }
     },
+    "/api/v1/ebpf/hidden-processes": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "`GET /api/v1/ebpf/hidden-processes` - pids that answer a signal and that\n`/proc` does not list.",
+        "operationId": "get_hidden_processes",
+        "responses": {
+          "200": {
+            "description": "The last comparison of the listing of /proc with a signal sweep, with what explained each unlisted pid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HiddenProcessesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/ebpf/kernel-features": {
       "get": {
         "tags": [
@@ -12951,6 +13000,150 @@
             "items": {
               "$ref": "#/components/schemas/UnreachableNamespaceBody"
             }
+          }
+        }
+      },
+      "HiddenProcessBody": {
+        "type": "object",
+        "description": "One process that answers a signal and that `/proc` does not list.",
+        "required": [
+          "pid"
+        ],
+        "properties": {
+          "comm": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The command name, where its `/proc` entry could be read."
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "HiddenProcessCountsBody": {
+        "type": "object",
+        "description": "How the last sweep reached its result.",
+        "required": [
+          "pid_space",
+          "probed",
+          "listed",
+          "answered_unlisted",
+          "explained_by_thread",
+          "explained_by_exit",
+          "unconfirmed",
+          "reused",
+          "hidden"
+        ],
+        "properties": {
+          "answered_unlisted": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Pids that answered and were not listed as a thread group.",
+            "minimum": 0
+          },
+          "explained_by_exit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Thread groups on their way out.",
+            "minimum": 0
+          },
+          "explained_by_thread": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Of those, threads of a listed group.",
+            "minimum": 0
+          },
+          "hidden": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Processes reported hidden.",
+            "minimum": 0
+          },
+          "listed": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Thread groups the first listing of `/proc` held.",
+            "minimum": 0
+          },
+          "pid_space": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The pid space swept, `pid_max`.",
+            "minimum": 0
+          },
+          "probed": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Pids signalled.",
+            "minimum": 0
+          },
+          "reused": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Pids that changed hands between the two observations.",
+            "minimum": 0
+          },
+          "unconfirmed": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Pids gone by the second signal, or listed by the second listing.",
+            "minimum": 0
+          }
+        }
+      },
+      "HiddenProcessesResponse": {
+        "type": "object",
+        "description": "The last comparison of the listing of `/proc` with a signal sweep.",
+        "required": [
+          "reading",
+          "pids_per_second",
+          "scanned_at_ns",
+          "counts",
+          "hidden"
+        ],
+        "properties": {
+          "counts": {
+            "$ref": "#/components/schemas/HiddenProcessCountsBody"
+          },
+          "hidden": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HiddenProcessBody"
+            }
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last sweep failed or was not taken. The result is then the\nsweep before."
+          },
+          "pids_per_second": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The pace asked for, in pids a second.",
+            "minimum": 0
+          },
+          "reading": {
+            "type": "boolean",
+            "description": "Whether the sweep runs."
+          },
+          "scanned_at_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the last sweep was made, in nanoseconds since the epoch, `0`\nbefore the first.",
+            "minimum": 0
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the readings come from: `warden` or `local`. Absent when the\nsweep is off."
           }
         }
       },

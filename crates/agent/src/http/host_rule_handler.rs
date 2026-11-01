@@ -86,16 +86,52 @@ pub async fn get_host_intents(State(state): State<Arc<AppState>>) -> Json<HostIn
 /// what is reading rather than from the kernel version.
 async fn host_sources(state: &AppState) -> HostSources {
     let programs = state.ebpf_program_status.read().await;
-    reported_sources(
-        &programs,
-        state.network_programs.load().is_some(),
-        state.raw_sockets.load().is_some(),
-        state.hidden_ports.load().is_some(),
-    )
+    let running = [
+        (
+            Source::NetworkProgramInventory,
+            state.network_programs.load().is_some(),
+        ),
+        (
+            Source::RawSocketInventory,
+            state.raw_sockets.load().is_some(),
+        ),
+        (Source::HiddenPortScan, state.hidden_ports.load().is_some()),
+        (
+            Source::HiddenProcessScan,
+            state.hidden_processes.load().is_some(),
+        ),
+    ];
+    let running: Vec<Source> = running
+        .into_iter()
+        .filter_map(|(source, on)| on.then_some(source))
+        .collect();
+    reported_sources(&programs, &running)
 }
 
+/// The sources an agent task reads rather than an attached program, and
+/// what is said of each when that task is not running.
+const TASK_SOURCES: [(Source, &str); 4] = [
+    (
+        Source::NetworkProgramInventory,
+        "the network program inventory is not reading",
+    ),
+    (
+        Source::RawSocketInventory,
+        "the packet socket inventory is not reading",
+    ),
+    (
+        Source::HiddenPortScan,
+        "the hidden port sweep is not running",
+    ),
+    (
+        Source::HiddenProcessScan,
+        "the hidden process sweep is not running",
+    ),
+];
+
 /// What this host reports about each source, given which datapath programs
-/// loaded and whether the two inventories are reading.
+/// loaded and which of the agent's own readings, the inventories and the
+/// hidden sweeps, are running.
 ///
 /// The process tracing and socket attribution halves are read from what
 /// their attachers published, so a binary that builds its own datapath
@@ -103,9 +139,7 @@ async fn host_sources(state: &AppState) -> HostSources {
 #[must_use]
 pub fn reported_sources<S: std::hash::BuildHasher>(
     programs: &std::collections::HashMap<String, bool, S>,
-    network_inventory: bool,
-    raw_socket_inventory: bool,
-    hidden_port_sweep: bool,
+    running: &[Source],
 ) -> HostSources {
     let kernel = adapters::ebpf::kernel_probe::probe()
         .ok()
@@ -130,41 +164,20 @@ pub fn reported_sources<S: std::hash::BuildHasher>(
     host = program(host, Source::DnsCapture, programs, "tc-dns");
     host = program(host, Source::TlsCapture, programs, "tc-ids");
 
-    host = if network_inventory {
-        host.present(Source::NetworkProgramInventory)
-    } else {
-        host.absent(
-            Source::NetworkProgramInventory,
-            "the network program inventory is not reading",
-        )
-    };
-    host = if raw_socket_inventory {
-        host.present(Source::RawSocketInventory)
-    } else {
-        host.absent(
-            Source::RawSocketInventory,
-            "the packet socket inventory is not reading",
-        )
-    };
+    for (source, reason) in TASK_SOURCES {
+        host = if running.contains(&source) {
+            host.present(source)
+        } else {
+            host.absent(source, reason)
+        };
+    }
 
     host = match adapters::warden::file_watch::status() {
         None => host.present(Source::FileWatch),
         Some(reason) => host.absent(Source::FileWatch, reason),
     };
 
-    host = if hidden_port_sweep {
-        host.present(Source::HiddenPortScan)
-    } else {
-        host.absent(
-            Source::HiddenPortScan,
-            "the hidden port sweep is not running",
-        )
-    };
-
-    for source in [Source::HiddenProcessScan, Source::PackageInventory] {
-        host = host.absent(source, NOT_IN_THIS_BUILD);
-    }
-    host
+    host.absent(Source::PackageInventory, NOT_IN_THIS_BUILD)
 }
 
 fn attach(

@@ -8,6 +8,10 @@ const MAX_INTERVAL_SECS: u64 = 86_400;
 /// The well-known ports, probed unless turned off.
 const WELL_KNOWN: std::ops::RangeInclusive<u16> = 1..=1024;
 const MAX_EXTRA_PORTS: usize = 4_096;
+const DEFAULT_PROCESS_INTERVAL_SECS: u64 = 900;
+const DEFAULT_PIDS_PER_SECOND: u32 = 100_000;
+/// The pace bounds the warden itself clamps to.
+const PIDS_PER_SECOND: std::ops::RangeInclusive<u32> = 10_000..=10_000_000;
 
 /// Comparisons of two readings of the same kernel state, where an entry the
 /// kernel holds and its own listing leaves out is reported.
@@ -16,6 +20,33 @@ const MAX_EXTRA_PORTS: usize = 4_096;
 pub struct HiddenChecksConfig {
     /// Sockets the listings omit while the port refuses a bind.
     pub ports: HiddenPortsConfig,
+    /// Pids that answer a signal while `/proc` does not list them.
+    pub processes: HiddenProcessesConfig,
+}
+
+/// The hidden process sweep.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct HiddenProcessesConfig {
+    /// Whether the sweep runs at all.
+    pub enabled: bool,
+
+    /// How often the pid space is swept, in seconds.
+    pub interval_secs: u64,
+
+    /// How many pids are signalled a second, so the sweep is never itself
+    /// a load: at the default a full 22-bit pid space takes 42 seconds.
+    pub pids_per_second: u32,
+}
+
+impl Default for HiddenProcessesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_secs: DEFAULT_PROCESS_INTERVAL_SECS,
+            pids_per_second: DEFAULT_PIDS_PER_SECOND,
+        }
+    }
 }
 
 /// The hidden port sweep.
@@ -70,8 +101,8 @@ impl HiddenChecksConfig {
     /// # Errors
     ///
     /// Returns [`ConfigError::Validation`] when the interval is out of range,
-    /// a port is zero, too many extra ports are listed, or the sweep is on
-    /// with no port to probe.
+    /// a port is zero, too many extra ports are listed, the port sweep is on
+    /// with no port to probe, or the process sweep's pace is out of range.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let ports = &self.ports;
         if !(MIN_INTERVAL_SECS..=MAX_INTERVAL_SECS).contains(&ports.interval_secs) {
@@ -100,6 +131,25 @@ impl HiddenChecksConfig {
                 message: "the sweep is on with no port to probe: keep well_known or list \
                           extra_ports"
                     .to_string(),
+            });
+        }
+        let processes = &self.processes;
+        if !(MIN_INTERVAL_SECS..=MAX_INTERVAL_SECS).contains(&processes.interval_secs) {
+            return Err(ConfigError::Validation {
+                field: "hidden_checks.processes.interval_secs".to_string(),
+                message: format!(
+                    "must be between {MIN_INTERVAL_SECS} and {MAX_INTERVAL_SECS} seconds"
+                ),
+            });
+        }
+        if !PIDS_PER_SECOND.contains(&processes.pids_per_second) {
+            return Err(ConfigError::Validation {
+                field: "hidden_checks.processes.pids_per_second".to_string(),
+                message: format!(
+                    "must be between {} and {}",
+                    PIDS_PER_SECOND.start(),
+                    PIDS_PER_SECOND.end()
+                ),
             });
         }
         Ok(())
@@ -155,7 +205,40 @@ mod tests {
             },
         ];
         for ports in bad {
-            assert!(HiddenChecksConfig { ports }.validate().is_err());
+            let config = HiddenChecksConfig {
+                ports,
+                ..HiddenChecksConfig::default()
+            };
+            assert!(config.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn the_process_sweep_is_on_every_quarter_hour_at_a_bounded_pace() {
+        let config = HiddenChecksConfig::default();
+        assert!(config.processes.enabled);
+        assert_eq!(config.processes.interval_secs, 900);
+        assert_eq!(config.processes.pids_per_second, 100_000);
+        let bad = [
+            HiddenProcessesConfig {
+                interval_secs: 30,
+                ..HiddenProcessesConfig::default()
+            },
+            HiddenProcessesConfig {
+                pids_per_second: 9_999,
+                ..HiddenProcessesConfig::default()
+            },
+            HiddenProcessesConfig {
+                pids_per_second: 10_000_001,
+                ..HiddenProcessesConfig::default()
+            },
+        ];
+        for processes in bad {
+            let config = HiddenChecksConfig {
+                processes,
+                ..HiddenChecksConfig::default()
+            };
+            assert!(config.validate().is_err());
         }
     }
 

@@ -2157,6 +2157,41 @@ pub struct HiddenPortsResponse {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct HiddenProcessEntry {
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comm: Option<String>,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+pub struct HiddenProcessCounts {
+    pub pid_space: u32,
+    pub probed: u32,
+    pub listed: u32,
+    pub answered_unlisted: u32,
+    pub explained_by_thread: u32,
+    pub explained_by_exit: u32,
+    pub unconfirmed: u32,
+    pub reused: u32,
+    pub hidden: u32,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct HiddenProcessesResponse {
+    pub reading: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub pids_per_second: u32,
+    pub scanned_at_ns: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub counts: HiddenProcessCounts,
+    #[serde(default)]
+    pub hidden: Vec<HiddenProcessEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct IntentFieldEntry {
     pub name: String,
     #[serde(rename = "type")]
@@ -4339,6 +4374,15 @@ impl ApiClient {
     pub async fn hidden_ports(&self) -> anyhow::Result<HiddenPortsResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/ebpf/hidden-ports")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn hidden_processes(&self) -> anyhow::Result<HiddenProcessesResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ebpf/hidden-processes")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

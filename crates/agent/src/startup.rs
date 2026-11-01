@@ -4580,6 +4580,36 @@ pub async fn run(
         }
     }
 
+    // Pids that answer a null signal and that /proc does not list, swept
+    // from the host's pid namespace through the warden when there is one.
+    if config.hidden_checks.processes.enabled {
+        let reader = Arc::new(
+            adapters::warden::hidden_processes::WardenHiddenProcessReader::new(
+                ebpfsentinel_warden::hidden_processes::scan,
+                coverage_proc.clone(),
+            ),
+        );
+        let sweep = Arc::new(
+            application::hidden_process_service::HiddenProcessWatcher::new(
+                reader,
+                config.hidden_checks.processes.pids_per_second,
+                alert_tx.clone(),
+            ),
+        );
+        app_state.install_hidden_processes(Arc::clone(&sweep));
+        let interval = Duration::from_secs(config.hidden_checks.processes.interval_secs);
+        let sweep_cancel = cancel_token.clone();
+        info!(
+            interval_secs = config.hidden_checks.processes.interval_secs,
+            pids_per_second = sweep.rate(),
+            source = sweep.source(),
+            "hidden process sweep running"
+        );
+        tokio::spawn(async move {
+            sweep.run(interval, sweep_cancel).await;
+        });
+    }
+
     // Who else reads the node's traffic: the packet sockets open on it, read
     // through the warden when there is one and from the host's /proc
     // otherwise.

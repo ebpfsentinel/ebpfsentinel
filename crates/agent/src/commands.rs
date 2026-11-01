@@ -4896,6 +4896,59 @@ pub async fn cmd_ebpf_hidden_ports(client: &ApiClient, output: OutputFormat) -> 
     Ok(())
 }
 
+/// Print the last comparison of the listing of `/proc` with a signal sweep:
+/// what explained each pid that answered and was not listed, and the
+/// processes nothing explained.
+pub async fn cmd_ebpf_hidden_processes(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.hidden_processes().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    if !resp.reading {
+        println!("The hidden process sweep is turned off on this node.");
+        return Ok(());
+    }
+    if resp.scanned_at_ns == 0 {
+        println!("The first sweep has not finished yet.");
+        return Ok(());
+    }
+    if let Some(error) = &resp.last_error {
+        println!("Last sweep failed, the result below is the previous one: {error}");
+    }
+    let c = &resp.counts;
+    println!(
+        "{} pid(s) signalled of {} at {} a second, {} thread group(s) listed, read through {}.",
+        c.probed,
+        c.pid_space,
+        resp.pids_per_second,
+        c.listed,
+        resp.source.as_deref().unwrap_or("-")
+    );
+    println!(
+        "{} pid(s) answered and were not listed: {} thread(s) of a listed group, {} exiting, \
+         {} not confirmed by the second reading, {} reused, {} hidden.",
+        c.answered_unlisted,
+        c.explained_by_thread,
+        c.explained_by_exit,
+        c.unconfirmed,
+        c.reused,
+        c.hidden
+    );
+    if resp.hidden.is_empty() {
+        println!("No hidden process.");
+        return Ok(());
+    }
+    let mut table = Table::new(&[("PID", Align::Right), ("COMMAND", Align::Left)]);
+    for process in &resp.hidden {
+        table.row(cells![process.pid, process.comm.as_deref().unwrap_or("-")]);
+    }
+    table.print();
+    Ok(())
+}
+
 /// Print the eBPF programs on the network path that the agent did not load,
 /// where they run and who holds them.
 pub async fn cmd_ebpf_foreign_programs(client: &ApiClient, output: OutputFormat) -> Result<()> {

@@ -81,6 +81,7 @@ pub mod firewall_service_impl;
 pub mod flow_export_service;
 pub mod guest_inventory_service;
 pub mod hidden_port_service;
+pub mod hidden_process_service;
 pub mod host_rule_service;
 pub mod ids_service_impl;
 pub mod ids_workload_scope_service;

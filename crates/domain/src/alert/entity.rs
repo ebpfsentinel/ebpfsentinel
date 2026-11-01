@@ -12,6 +12,7 @@ use crate::file_watch::watched::{FILE_INTEGRITY_COMPONENT, WatchedPathChange};
 use crate::firewall::exec_network::{EXEC_NETWORK_EXECUTABLE_SOURCE, ExecNetworkRecord};
 use crate::firewall::workload::{DestinationAddr, WORKLOAD_FIREWALL_COMPONENT, WorkloadDenial};
 use crate::hidden::port::{HIDDEN_PORT_COMPONENT, HiddenPort, PortFamily, Transport};
+use crate::hidden::process::{HIDDEN_PROCESS_COMPONENT, HiddenProcess};
 use crate::hostrule::event::IntentEvent;
 use crate::hostrule::rule::{HOST_RULE_COMPONENT, HostRule};
 use crate::ids::entity::IdsAlert;
@@ -1156,6 +1157,67 @@ impl Alert {
             mitigation_status: None,
             total_packets: None,
             mitre_attack: Some(HiddenPort::mitre()),
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
+            executable_path: None,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
+            workload: None,
+        }
+    }
+
+    /// Create an alert for a process that answers a signal and that
+    /// `/proc` does not list. The pid is the process's own; no address and
+    /// no port apply.
+    #[must_use]
+    pub fn from_hidden_process(process: &HiddenProcess, at_ns: u64) -> Self {
+        let rule_id = HiddenProcess::rule_id();
+        Self {
+            id: Self::generate_id(at_ns, &rule_id),
+            timestamp_ns: at_ns,
+            component: HIDDEN_PROCESS_COMPONENT.to_string(),
+            severity: Severity::High,
+            rule_id,
+            action: DomainMode::Alert,
+            src_addr: [0; 4],
+            dst_addr: [0; 4],
+            src_port: 0,
+            dst_port: 0,
+            protocol: 0,
+            is_ipv6: false,
+            message: process.message(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: Some(process.pid),
+            tgid: Some(process.pid),
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: Some(HiddenProcess::mitre()),
             ja4_fingerprint: None,
             ml_anomaly_score: None,
             ml_top_feature: None,

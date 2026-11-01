@@ -83,7 +83,7 @@ pub use flow_export::{
     OtlpFlowSinkConfig, SyslogSinkConfig,
 };
 pub use geoip::{GeoIpConfig, GeoIpSource};
-pub use hidden_checks::{HiddenChecksConfig, HiddenPortsConfig};
+pub use hidden_checks::{HiddenChecksConfig, HiddenPortsConfig, HiddenProcessesConfig};
 pub use host_rules::{HostRulesConfig, MAX_HOST_RULES};
 pub use ids::{IdsConfig, IdsRuleConfig, SamplingConfig, ThresholdRuleConfig};
 pub use ips::{IpsConfig, IpsRuleConfig};

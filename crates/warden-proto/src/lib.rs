@@ -320,6 +320,42 @@ pub struct BindProbe {
     pub port: u16,
 }
 
+/// What `/proc/<pid>` said about a pid that answered a signal and was not
+/// listed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PidObservation {
+    pub pid: u32,
+    /// The thread group, from `status`.
+    pub tgid: Option<u32>,
+    /// The start time in clock ticks since boot, from `stat`.
+    pub start_time: Option<u64>,
+    /// The one-letter state, from `stat`.
+    pub state: Option<char>,
+    /// The command name, from `stat`.
+    pub comm: Option<String>,
+}
+
+/// The two readings of the hidden process check.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HiddenProcessReading {
+    /// Why the sweep was not taken; everything else is then empty.
+    pub error: Option<String>,
+    /// `pid_max`, the size of the pid space swept.
+    pub pid_space: u32,
+    /// Pids signalled.
+    pub probed: u32,
+    /// Thread groups the first listing held.
+    pub listed: u32,
+    /// Pids that answered and a listed group's `task` directory held.
+    pub threads: u32,
+    /// Pids that answered and were listed nowhere, as first observed.
+    pub first: Vec<PidObservation>,
+    /// Of those, the pids the second listing held.
+    pub relisted: Vec<u32>,
+    /// Of those, the pids that answered the second signal, observed again.
+    pub second: Vec<PidObservation>,
+}
+
 /// What the hidden port probe read inside one network namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespacePortReading {
@@ -541,6 +577,14 @@ pub enum Command {
         /// The ports to probe, at most 65535 of them.
         ports: Vec<u16>,
     },
+    /// List `/proc`, then `kill(pid, 0)` every pid up to `pid_max` at about
+    /// `rate` pids a second, which delivers nothing; observe the pids that
+    /// answered and were not listed, list again and signal them again.
+    /// Answered by [`Response::HiddenProcesses`].
+    HiddenProcesses {
+        /// The pace, in pids per second, clamped by the warden.
+        rate: u32,
+    },
 }
 
 /// A thread group as one pid namespace numbers it.
@@ -674,6 +718,8 @@ pub enum Response {
         /// One entry per network namespace found.
         namespaces: Vec<NamespacePortReading>,
     },
+    /// The two readings, answering [`Command::HiddenProcesses`].
+    HiddenProcesses { reading: HiddenProcessReading },
 }
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
@@ -707,9 +753,9 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BindProbe, Command, ConntrackTuple, DlpTarget, ExecutableIdentity, ListedPort,
-        MAX_FRAME_LEN, NamespacePortReading, NetworkProgram, PacketSocket, Response, RouteSpec,
-        TaskIdentity, read_frame, write_frame,
+        BindProbe, Command, ConntrackTuple, DlpTarget, ExecutableIdentity, HiddenProcessReading,
+        ListedPort, MAX_FRAME_LEN, NamespacePortReading, NetworkProgram, PacketSocket,
+        PidObservation, Response, RouteSpec, TaskIdentity, read_frame, write_frame,
     };
     use std::io::Cursor;
 
@@ -777,6 +823,7 @@ mod tests {
             Command::HiddenPorts {
                 ports: vec![22, 31_337],
             },
+            Command::HiddenProcesses { rate: 1_000_000 },
         ]
     }
 
@@ -865,41 +912,70 @@ mod tests {
 
     /// The answers of the two hidden checks.
     fn hidden_responses() -> Vec<Response> {
-        vec![Response::HiddenPorts {
-            namespaces: vec![
-                NamespacePortReading {
-                    netns: 4_026_531_840,
-                    host_netns: true,
+        vec![
+            Response::HiddenPorts {
+                namespaces: vec![
+                    NamespacePortReading {
+                        netns: 4_026_531_840,
+                        host_netns: true,
+                        error: None,
+                        first_listing: vec![ListedPort {
+                            udp: false,
+                            port: 22,
+                            state: 10,
+                            sock_diag: true,
+                        }],
+                        second_listing: Vec::new(),
+                        probed: 4096,
+                        unprobed: 2,
+                        refused_first: vec![BindProbe {
+                            udp: false,
+                            ipv6: true,
+                            port: 22,
+                        }],
+                        refused_second: Vec::new(),
+                    },
+                    NamespacePortReading {
+                        netns: 4_026_532_999,
+                        host_netns: false,
+                        error: Some("setns: operation not permitted".into()),
+                        first_listing: Vec::new(),
+                        second_listing: Vec::new(),
+                        probed: 0,
+                        unprobed: 0,
+                        refused_first: Vec::new(),
+                        refused_second: Vec::new(),
+                    },
+                ],
+            },
+            Response::HiddenProcesses {
+                reading: HiddenProcessReading {
                     error: None,
-                    first_listing: vec![ListedPort {
-                        udp: false,
-                        port: 22,
-                        state: 10,
-                        sock_diag: true,
+                    pid_space: 4_194_304,
+                    probed: 4_194_303,
+                    listed: 412,
+                    threads: 1_870,
+                    first: vec![PidObservation {
+                        pid: 31_337,
+                        tgid: Some(31_337),
+                        start_time: Some(8_812),
+                        state: Some('S'),
+                        comm: Some("kworker/u:9".into()),
                     }],
-                    second_listing: Vec::new(),
-                    probed: 4096,
-                    unprobed: 2,
-                    refused_first: vec![BindProbe {
-                        udp: false,
-                        ipv6: true,
-                        port: 22,
+                    relisted: Vec::new(),
+                    second: vec![PidObservation {
+                        pid: 31_337,
+                        ..PidObservation::default()
                     }],
-                    refused_second: Vec::new(),
                 },
-                NamespacePortReading {
-                    netns: 4_026_532_999,
-                    host_netns: false,
-                    error: Some("setns: operation not permitted".into()),
-                    first_listing: Vec::new(),
-                    second_listing: Vec::new(),
-                    probed: 0,
-                    unprobed: 0,
-                    refused_first: Vec::new(),
-                    refused_second: Vec::new(),
+            },
+            Response::HiddenProcesses {
+                reading: HiddenProcessReading {
+                    error: Some("/proc lists another pid namespace".into()),
+                    ..HiddenProcessReading::default()
                 },
-            ],
-        }]
+            },
+        ]
     }
 
     #[test]
