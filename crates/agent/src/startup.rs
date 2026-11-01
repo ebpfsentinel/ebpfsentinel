@@ -4151,6 +4151,9 @@ pub async fn run(
                 workloads: workloads.clone(),
                 metrics: Arc::clone(&metrics),
                 ebpf_loaded: Arc::clone(&ebpf_loaded),
+                remote_identities: Arc::new(
+                    application::remote_identity_store::RemoteIdentityStore::new(),
+                ),
             }),
             ebpf_dir.clone(),
         );

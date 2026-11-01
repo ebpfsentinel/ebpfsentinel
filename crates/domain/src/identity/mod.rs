@@ -23,6 +23,8 @@
 //! Addresses nobody off the node can reach are not published: loopback,
 //! link-local, multicast and the unspecified address.
 
+pub mod remote;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::IpAddr;
 

@@ -107,6 +107,7 @@ pub mod qos_service_impl;
 pub mod quarantine_service;
 pub mod ratelimit_service_impl;
 pub mod raw_socket_service;
+pub mod remote_identity_store;
 pub mod reputation_enforcement;
 pub mod routing_service_impl;
 pub mod schedule_service_impl;

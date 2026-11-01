@@ -94,6 +94,9 @@ pub struct ServiceHandles {
     /// the kernel tables, and emptied again when that generation goes, so a
     /// holder never answers from a map the kernel has freed.
     pub workloads: application::workload_resolver::WorkloadResolver,
+    /// The addresses of the other nodes, as the console last handed them.
+    /// Empty on a node no console has reached, which names no peer.
+    pub remote_identities: Arc<application::remote_identity_store::RemoteIdentityStore>,
 
     // ── Infrastructure ───────────────────────────────────────────
     pub metrics: Arc<AgentMetrics>,
@@ -768,6 +771,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         workloads: application::workload_resolver::WorkloadResolver::new(),
         metrics,
         ebpf_loaded,
+        remote_identities: Arc::new(application::remote_identity_store::RemoteIdentityStore::new()),
     })
 }
 

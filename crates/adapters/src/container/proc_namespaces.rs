@@ -133,10 +133,7 @@ fe80000000000000a8c1abfffe2b3c4d 02 40 20 80     eth0
     #[test]
     fn local_ipv4_addresses_are_the_host_routes_of_the_trie() {
         let found: Vec<Ipv4Addr> = local_ipv4(FIB_TRIE).into_iter().collect();
-        assert_eq!(
-            found,
-            [Ipv4Addr::new(10, 244, 0, 7), Ipv4Addr::LOCALHOST]
-        );
+        assert_eq!(found, [Ipv4Addr::new(10, 244, 0, 7), Ipv4Addr::LOCALHOST]);
     }
 
     #[test]
