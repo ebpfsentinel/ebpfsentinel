@@ -65,6 +65,33 @@ const VMLINUX_BTF_PATH: &str = "/sys/kernel/btf/vmlinux";
 /// Directory holding per-module split BTF blobs.
 const MODULE_BTF_DIR: &str = "/sys/kernel/btf";
 
+/// The kfuncs the programs call that a kernel module registers rather than
+/// vmlinux, with the module that registers each.
+///
+/// A stock cloud image loads none of these modules until something asks for
+/// them, and a kfunc whose module is absent from `/sys/kernel/btf` resolves
+/// nowhere. Knowing the owner is what lets the loader refuse with the module's
+/// name instead of the kernel's "not found in vmlinux or any loaded module".
+pub const MODULE_KFUNCS: [(&str, &str); 8] = [
+    ("bpf_xdp_ct_lookup", "nf_conntrack"),
+    ("bpf_skb_ct_lookup", "nf_conntrack"),
+    ("bpf_ct_release", "nf_conntrack"),
+    ("bpf_ct_change_timeout", "nf_conntrack"),
+    ("bpf_skb_get_fou_encap", "fou"),
+    ("bpf_skb_set_fou_encap", "fou"),
+    ("bpf_skb_get_xfrm_info", "xfrm_interface"),
+    ("bpf_skb_set_xfrm_info", "xfrm_interface"),
+];
+
+/// The module registering `kfunc`, when it is one of [`MODULE_KFUNCS`].
+#[must_use]
+pub fn owning_module(kfunc: &str) -> Option<&'static str> {
+    MODULE_KFUNCS
+        .iter()
+        .find(|(name, _)| *name == kfunc)
+        .map(|(_, module)| *module)
+}
+
 /// Module-name → BTF-object fd, supplied by a privileged helper.
 ///
 /// Opening a module's BTF object fd needs `CAP_SYS_ADMIN`
@@ -941,6 +968,16 @@ fn raw_fd_u32(fd: &OwnedFd) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_module_kfunc_has_one_owner_and_none_is_a_vmlinux_name() {
+        let mut seen = std::collections::HashSet::new();
+        for (kfunc, module) in MODULE_KFUNCS {
+            assert!(seen.insert(kfunc), "{kfunc} listed twice");
+            assert_eq!(owning_module(kfunc), Some(module));
+        }
+        assert_eq!(owning_module("bpf_dynptr_from_skb"), None);
+    }
 
     #[test]
     fn kind_extra_sizes_match_btf_layout() {

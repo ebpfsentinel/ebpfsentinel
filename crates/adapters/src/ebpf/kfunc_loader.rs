@@ -176,6 +176,25 @@ pub enum KfuncLoaderError {
     #[error("kfunc resolve: {0}")]
     Resolve(#[from] KfuncError),
 
+    #[error(
+        "{programs} call{s} {kfuncs}, registered by kernel module{ms} {names}, which {verb} \
+         not loaded on this host (absent from /sys/kernel/btf): load {it} with `modprobe {args}` \
+         or list {it} in /etc/modules-load.d, then restart the agent",
+        programs = callers(programs),
+        s = if programs.len() == 1 { "s" } else { "" },
+        kfuncs = quoted_list(kfuncs),
+        ms = if modules.len() == 1 { "" } else { "s" },
+        names = quoted_list(modules),
+        verb = if modules.len() == 1 { "is" } else { "are" },
+        it = if modules.len() == 1 { "it" } else { "them" },
+        args = modules.join(" "),
+    )]
+    ModuleNotLoaded {
+        modules: Vec<String>,
+        programs: Vec<String>,
+        kfuncs: Vec<String>,
+    },
+
     #[error("map `{0}` referenced by program but not hosted by aya")]
     MapNotHosted(String),
 
@@ -287,6 +306,114 @@ pub fn find_kfunc_sites(elf: &[u8]) -> Result<Vec<KfuncSite>, KfuncLoaderError> 
         }
     }
     Ok(sites)
+}
+
+/// `a`, `a` and `b`, or `a`, `b` and `c`, each in backticks.
+fn quoted_list(items: &[String]) -> String {
+    let quoted: Vec<String> = items.iter().map(|i| format!("`{i}`")).collect();
+    match quoted.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// The programs a refusal names, or the object's when no symbol says which.
+fn callers(programs: &[String]) -> String {
+    if programs.is_empty() {
+        "programs in this object".to_string()
+    } else {
+        quoted_list(programs)
+    }
+}
+
+/// Every function symbol of the object, by the section it lives in: the
+/// program names a refusal can quote for a call site.
+fn programs_by_section(elf: &[u8]) -> Result<HashMap<usize, Vec<String>>, KfuncLoaderError> {
+    let file = object::File::parse(elf).map_err(|e| KfuncLoaderError::ParseElf(e.to_string()))?;
+    let mut out: HashMap<usize, Vec<String>> = HashMap::new();
+    for sym in file.symbols() {
+        if sym.kind() != object::SymbolKind::Text || !sym.is_global() {
+            continue;
+        }
+        let (Some(section), Ok(name)) = (sym.section_index(), sym.name()) else {
+            continue;
+        };
+        // Shared subprograms live in `.text` and are no program of their own.
+        if file
+            .section_by_index(section)
+            .is_ok_and(|s| s.name() == Ok(".text"))
+        {
+            continue;
+        }
+        if !name.is_empty() {
+            out.entry(section.0).or_default().push(name.to_owned());
+        }
+    }
+    Ok(out)
+}
+
+/// The refusal naming every module whose kfuncs this object calls and the
+/// resolver cannot find, with those kfuncs and the programs calling them, or
+/// `None` when every module kfunc resolves.
+///
+/// Asked before any program is loaded, so a host missing a module learns which
+/// one and for which program rather than reading a kernel error that names
+/// neither, and learns every missing module at once rather than one restart
+/// at a time. A call made from a shared subprogram is attributed to every
+/// program of the object, since any of them may reach it.
+fn missing_module(
+    sites: &[KfuncSite],
+    resolves: &dyn Fn(&str) -> bool,
+    programs: &HashMap<usize, Vec<String>>,
+) -> Option<KfuncLoaderError> {
+    let mut every_program: Vec<&String> = programs.values().flatten().collect();
+    every_program.sort();
+    every_program.dedup();
+    let mut modules: Vec<String> = Vec::new();
+    let mut kfuncs: Vec<String> = Vec::new();
+    let mut callers: Vec<String> = Vec::new();
+    for site in sites {
+        let Some(module) = super::kfunc::owning_module(&site.name) else {
+            continue;
+        };
+        if resolves(&site.name) {
+            continue;
+        }
+        push_unique(&mut modules, module);
+        push_unique(&mut kfuncs, &site.name);
+        let calling: Vec<&String> = match programs.get(&site.section_index) {
+            Some(names) => names.iter().collect(),
+            None => every_program.clone(),
+        };
+        for program in calling {
+            push_unique(&mut callers, program);
+        }
+    }
+    if modules.is_empty() {
+        return None;
+    }
+    Some(KfuncLoaderError::ModuleNotLoaded {
+        modules,
+        programs: callers,
+        kfuncs,
+    })
+}
+
+/// Refuse the object before anything loads when a module it needs is absent.
+fn refuse_missing_modules(
+    elf: &[u8],
+    sites: &[KfuncSite],
+    resolver: &KfuncResolver,
+) -> Result<(), KfuncLoaderError> {
+    let programs = programs_by_section(elf)?;
+    missing_module(sites, &|name| resolver.resolve(name).is_ok(), &programs).map_or(Ok(()), Err)
+}
+
+fn push_unique(list: &mut Vec<String>, item: &str) {
+    if !list.iter().any(|i| i == item) {
+        list.push(item.to_owned());
+    }
 }
 
 /// Distinct kfunc names the object calls, in first-seen order. Every one of
@@ -449,7 +576,9 @@ pub fn load_kfunc_programs<S: BuildHasher>(
     dev_bound_ifindex: Option<u32>,
     optional: &[&str],
 ) -> Result<LoadedPrograms, KfuncLoaderError> {
-    let names = unique_names(&find_kfunc_sites(elf)?);
+    let sites = find_kfunc_sites(elf)?;
+    refuse_missing_modules(elf, &sites, resolver)?;
+    let names = unique_names(&sites);
 
     let mut obj = Object::parse(elf).map_err(|e| KfuncLoaderError::ParseObject(e.to_string()))?;
     // Every BTF feature is answered as supported: the kernel floor carries all
@@ -1866,6 +1995,98 @@ pub fn load_object_token(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_missing_module_is_named_with_its_kfuncs_and_the_programs_calling_them() {
+        let site = |section_index, name: &str| super::KfuncSite {
+            section_index,
+            offset: 0,
+            name: name.to_string(),
+        };
+        let sites = vec![
+            site(3, "bpf_dynptr_from_skb"),
+            site(3, "bpf_skb_ct_lookup"),
+            site(3, "bpf_ct_release"),
+            site(5, "bpf_skb_ct_lookup"),
+            site(7, "bpf_skb_set_fou_encap"),
+        ];
+        let programs = std::collections::HashMap::from([
+            (3, vec!["tc_conntrack".to_string()]),
+            (5, vec!["tc_conntrack_egress".to_string()]),
+            (7, vec!["tc_nat_egress".to_string()]),
+        ]);
+        let refusal = super::missing_module(&sites, &|n| n == "bpf_dynptr_from_skb", &programs)
+            .expect("a refusal");
+        let text = refusal.to_string();
+        assert!(
+            matches!(&refusal, super::KfuncLoaderError::ModuleNotLoaded { modules, .. }
+                if modules == &["nf_conntrack", "fou"]),
+            "{text}"
+        );
+        assert_eq!(
+            text,
+            "`tc_conntrack`, `tc_conntrack_egress` and `tc_nat_egress` call \
+             `bpf_skb_ct_lookup`, `bpf_ct_release` and `bpf_skb_set_fou_encap`, registered by \
+             kernel modules `nf_conntrack` and `fou`, which are not loaded on this host (absent \
+             from /sys/kernel/btf): load them with `modprobe nf_conntrack fou` or list them in \
+             /etc/modules-load.d, then restart the agent"
+        );
+    }
+
+    #[test]
+    fn a_call_from_a_shared_subprogram_names_every_program_and_one_module_reads_singular() {
+        let sites = vec![super::KfuncSite {
+            section_index: 2,
+            offset: 0,
+            name: "bpf_skb_get_xfrm_info".to_string(),
+        }];
+        let programs = std::collections::HashMap::from([
+            (4, vec!["tc_nat_ingress".to_string()]),
+            (6, vec!["tc_nat_ingress_v6".to_string()]),
+        ]);
+        let text = super::missing_module(&sites, &|_| false, &programs)
+            .expect("refusal")
+            .to_string();
+        assert!(
+            text.starts_with(
+                "`tc_nat_ingress` and `tc_nat_ingress_v6` call `bpf_skb_get_xfrm_info`, \
+                 registered by kernel module `xfrm_interface`, which is not loaded"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("load it with `modprobe xfrm_interface`"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_module_that_resolves_or_a_vmlinux_kfunc_is_no_refusal() {
+        let sites = vec![
+            super::KfuncSite {
+                section_index: 1,
+                offset: 0,
+                name: "bpf_skb_ct_lookup".to_string(),
+            },
+            super::KfuncSite {
+                section_index: 1,
+                offset: 8,
+                name: "bpf_dynptr_from_skb".to_string(),
+            },
+        ];
+        let none = std::collections::HashMap::new();
+        assert!(super::missing_module(&sites, &|_| true, &none).is_none());
+        assert!(
+            super::missing_module(&sites[1..], &|_| false, &none).is_none(),
+            "an unresolved vmlinux kfunc keeps the resolver's own error"
+        );
+        let unnamed = super::missing_module(&sites[..1], &|_| false, &none).expect("refusal");
+        assert!(
+            unnamed
+                .to_string()
+                .starts_with("programs in this object call ")
+        );
+    }
+
     use super::*;
 
     #[test]
