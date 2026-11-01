@@ -21,6 +21,8 @@
 #     count the expected writer's writes as expected.
 #   * With the agent stopped, the same run writes every file: the refusal
 #     fails open.
+#   * Killed with SIGKILL while a writer is working, the agent leaves the
+#     node writable at once: no open hangs and nothing more is refused.
 #
 # Needs the BPF LSM active at boot (`bpf` in /sys/kernel/security/lsm).
 
@@ -116,6 +118,25 @@ except OSError as e:
 PY
 }
 
+# _kill_agent_while_writing <dir> - SIGKILL the agent's whole group while a
+# second writer is creating files under <dir>, and wait for it to be gone.
+# Prints the background writer's exit status: 124 means an open hung.
+_kill_agent_while_writing() {
+    local dir="$1" pid bg n=0
+    mkdir -p "${dir}"
+    timeout 15 bash -c 'for n in $(seq 0 199); do echo x >"$1/bg${n}.txt" 2>/dev/null; sleep 0.01; done; exit 0' _ "${dir}" &
+    bg=$!
+    sleep 0.3
+    pid="$(cat "${AGENT_PID_FILE}")"
+    kill -KILL -- "-${pid}" 2>/dev/null || kill -KILL "${pid}"
+    while kill -0 "${pid}" 2>/dev/null && [ "${n}" -lt 50 ]; do
+        sleep 0.1
+        n=$((n + 1))
+    done
+    wait "${bg}"
+    echo "$?"
+}
+
 # ── Tests ───────────────────────────────────────────────────────────
 
 @test "a writer past the threshold is refused at the tenth write-open and nine files carry a byte" {
@@ -202,5 +223,30 @@ PY
     [ "$(grep -cx ok <<<"${output}")" -eq "${ATTEMPTS}" ]
     [ "$(tail -n 1 <<<"${output}")" = "truncate ok" ]
     run tee "${DATA_DIR}/held.conf" <<<"after"
+    [ "$status" -eq 0 ]
+}
+
+@test "killed with SIGKILL mid-enforcement, the agent leaves the node writable at once" {
+    start_ebpf_agent "${PREPARED_CONFIG}"
+    wait_for_ebpf_loaded 30
+    _wait_enforcing
+    # In force: the same run is refused before the kill.
+    local before="${DATA_DIR}/watched/run/before"
+    mkdir -p "${before}"
+    run _write "${before}" "${ATTEMPTS}"
+    grep -qx EACCES <<<"${output}"
+    run tee "${DATA_DIR}/held.conf" <<<"refused"
+    [ "$status" -ne 0 ]
+
+    run _kill_agent_while_writing "${DATA_DIR}/watched/run/during"
+    [ "$(tail -n 1 <<<"${output}")" = "0" ]
+    ! kill -0 "$(cat "${AGENT_PID_FILE}")" 2>/dev/null
+
+    local after="${DATA_DIR}/watched/run/after"
+    mkdir -p "${after}"
+    run timeout 10 bash -c "$(declare -f _write); _write '${after}' ${ATTEMPTS}"
+    [ "$status" -eq 0 ]
+    [ "$(grep -cx ok <<<"${output}")" -eq "${ATTEMPTS}" ]
+    run timeout 5 tee "${DATA_DIR}/held.conf" <<<"after the kill"
     [ "$status" -eq 0 ]
 }
