@@ -17,12 +17,18 @@ use std::time::Duration;
 use domain::audit::entity::{AuditAction, AuditEntry};
 use domain::common::error::DomainError;
 use domain::response::signal::{ProcessKillOutcome, ProcessSignalGuard, ProtectedReason};
-use ebpf_common::signal::{SIGNAL_OUTCOME_PROTECTED, SIGNAL_OUTCOME_SENT};
+use ebpf_common::signal::{SIGNAL_OUTCOME_PROTECTED, SIGNAL_OUTCOME_SENT, SignalEvent};
+use futures_util::StreamExt;
 use ports::secondary::audit_store::AuditStore;
 use ports::secondary::process_executable_port::ProcessExecutableReader;
 use ports::secondary::process_signal_map_port::ProcessSignalMapPort;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
+
+/// How many members of one run are signalled at once: enough that a run
+/// forking a worker per directory is stopped together, bounded so one verdict
+/// never holds every map lock waiting at the same instant.
+const RUN_CONCURRENT_KILLS: usize = 64;
 
 /// How long a target stays armed, and how often the ring is read while it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +58,15 @@ pub struct ProcessSignalService {
     audit: Option<Arc<dyn AuditStore>>,
     guard: ProcessSignalGuard,
     settings: ProcessSignalSettings,
+    /// Records drained for a target another call is waiting on. The ring
+    /// is shared, so whichever call drains it keeps what belongs to the
+    /// others here rather than throwing it away.
+    pending: Mutex<Vec<SignalEvent>>,
 }
+
+/// Records held for other calls at most; the oldest go first, being for
+/// targets whose wait has long closed.
+const PENDING_EVENTS_MAX: usize = 1024;
 
 impl ProcessSignalService {
     /// Build the service and publish the kernel's protected set.
@@ -80,6 +94,7 @@ impl ProcessSignalService {
             audit,
             guard,
             settings,
+            pending: Mutex::new(Vec::new()),
         })
     }
 
@@ -87,6 +102,34 @@ impl ProcessSignalService {
     #[must_use]
     pub fn settings(&self) -> ProcessSignalSettings {
         self.settings
+    }
+
+    /// Stop every thread group of `members` at once, on behalf of `rule_id`,
+    /// and answer for each in the order given.
+    ///
+    /// The kills run concurrently rather than one after the other, so a run
+    /// whose members fork while the first of them dies is not given the time
+    /// each wait would cost. A member whose maps refused is reported as a
+    /// survivor that was never signalled, because that is what it is.
+    pub async fn kill_run(&self, members: Vec<u32>, rule_id: &str) -> Vec<ProcessKillOutcome> {
+        let signal = self.settings.signal;
+        let kills = members.into_iter().map(|pid| async move {
+            match self.kill(pid, rule_id).await {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    warn!(pid, rule_id, error = %e, "member of the run not signalled");
+                    ProcessKillOutcome::Survived {
+                        tgid: pid,
+                        signal,
+                        signal_sent: false,
+                    }
+                }
+            }
+        });
+        futures_util::stream::iter(kills)
+            .buffered(RUN_CONCURRENT_KILLS)
+            .collect()
+            .await
     }
 
     /// Stop the thread group `tgid`, on behalf of `rule_id`.
@@ -137,13 +180,8 @@ impl ProcessSignalService {
         let mut signalled = false;
         while tokio::time::Instant::now() < deadline {
             tokio::time::sleep(self.settings.poll_interval).await;
-            let events = self.maps.lock().await.drain_events()?;
+            let events = self.events_for(tgid).await?;
             for event in events {
-                if event.tgid != tgid {
-                    // Another decision's record. The ring is shared and the
-                    // service may be arming more than one target at a time.
-                    continue;
-                }
                 match event.outcome {
                     SIGNAL_OUTCOME_SENT => signalled = true,
                     SIGNAL_OUTCOME_PROTECTED => {
@@ -169,6 +207,18 @@ impl ProcessSignalService {
             signal,
             signal_sent: signalled,
         })
+    }
+
+    /// Drain the ring and hand back the records for `tgid`, keeping the
+    /// others for the calls waiting on them: the service may be arming more
+    /// than one target at a time.
+    async fn events_for(&self, tgid: u32) -> Result<Vec<SignalEvent>, DomainError> {
+        let mut pending = self.pending.lock().await;
+        pending.extend(self.maps.lock().await.drain_events()?);
+        let mine: Vec<SignalEvent> = pending.extract_if(.., |e| e.tgid == tgid).collect();
+        let excess = pending.len().saturating_sub(PENDING_EVENTS_MAX);
+        pending.drain(..excess);
+        Ok(mine)
     }
 
     /// Write the audit record. A store that refuses is logged and not fatal:

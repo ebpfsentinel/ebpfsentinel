@@ -1,0 +1,15 @@
+{
+  "suite": "tests/perf/08-mass-encryption-kill-latency.bats",
+  "documents": 2000,
+  "directories": 20,
+  "runs": 5,
+  "single_latency_ms": [102, 105, 101, 103, 101],
+  "single_files_counted": [65, 46, 87, 34, 46],
+  "single_files_lost": [183, 128, 249, 146, 168],
+  "single_status": ["stopped", "stopped", "stopped", "stopped", "stopped"],
+  "forked_latency_ms": [0, 1, 0, 109, 103],
+  "forked_files_counted": [175, 119, 143, 21, 67],
+  "forked_files_lost": [2000, 2000, 2000, 1711, 1851],
+  "forked_status": ["not_stopped", "not_stopped", "not_stopped", "partially_stopped", "partially_stopped"],
+  "kernel": "7.0.0-42-generic"
+}

@@ -101,7 +101,12 @@ impl AlertRouter {
         )
     }
 
-    /// Compute a dedup key by hashing (`rule_id`, `src_ip()`, `dst_ip()`, `dst_port`, protocol).
+    /// Compute a dedup key by hashing (`rule_id`, `src_ip()`, `dst_ip()`,
+    /// `dst_port`, protocol, the process named and the mitigation outcome).
+    /// An alert raised on a host carries no address, so without the process
+    /// two verdicts on two different programs would be one, and without the
+    /// outcome the report of what was done about a verdict would be taken
+    /// for the verdict again.
     fn dedup_key(alert: &Alert) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         alert.rule_id.0.hash(&mut hasher);
@@ -109,6 +114,8 @@ impl AlertRouter {
         alert.dst_ip().hash(&mut hasher);
         alert.dst_port.hash(&mut hasher);
         alert.protocol.hash(&mut hasher);
+        alert.workload.as_ref().map(|w| w.pid).hash(&mut hasher);
+        alert.mitigation_status.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -260,6 +267,24 @@ mod tests {
 
         let second = router.process_alert(&alert);
         assert!(second.routes().is_empty(), "duplicate should be suppressed");
+    }
+
+    #[test]
+    fn host_alerts_on_two_processes_or_two_outcomes_are_not_duplicates() {
+        use crate::workload::entity::{Workload, WorkloadSource};
+        let routes = vec![make_route("all", Severity::Low)];
+        let mut router = make_router(routes);
+        let mut first = make_alert("mass-encryption", Severity::Critical);
+        first.workload = Workload::new(100, WorkloadSource::Process);
+        let mut other = first.clone();
+        other.workload = Workload::new(200, WorkloadSource::Process);
+        let mut stopped = first.clone();
+        stopped.mitigation_status = Some("stopped".into());
+
+        assert_eq!(router.process_alert(&first).routes().len(), 1);
+        assert_eq!(router.process_alert(&other).routes().len(), 1);
+        assert_eq!(router.process_alert(&stopped).routes().len(), 1);
+        assert!(router.process_alert(&first).routes().is_empty());
     }
 
     #[test]

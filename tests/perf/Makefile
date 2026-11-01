@@ -40,6 +40,10 @@ feature-overhead-extended: ## Isolated scrub/DNS/QoS/conntrack overhead (perf/05
 nat-dlp: ## NAT translation + DLP uprobe overhead (perf/06)
 	sudo $(BATS) --timing $(PERF_DIR)/06-ebpf-feature-overhead-nat-dlp.bats
 
+.PHONY: kill-latency
+kill-latency: ## Mass encryption verdict to run stopped (perf/08)
+	sudo $(BATS) --timing $(PERF_DIR)/08-mass-encryption-kill-latency.bats
+
 .PHONY: suite
 suite: ## Run a single suite: make suite SUITE=02-ebpf-feature-overhead
 	sudo $(BATS) --timing $(PERF_DIR)/$(SUITE).bats

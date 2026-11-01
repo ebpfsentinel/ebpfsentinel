@@ -1609,28 +1609,7 @@ pub async fn start_host_observation(
 
     let tracing = start_process_tracing(config, services, process_tx, &cancel);
 
-    let mut table = application::process_table_service::ProcessTableService::new(
-        config.process_table.capacity,
-        config.process_table.capture_command_line,
-    )
-    .with_executables(Arc::new(adapters::container::ProcExecutableResolver::new(
-        &proc_root,
-    )))
-    .with_details(Arc::new(adapters::container::ProcDetailsResolver::new(
-        &proc_root,
-    )))
-    .with_ids_workload_scope(Arc::clone(&services.ids_workload_scope));
-    if let Some(resolver) = startup::container_resolver(config, &proc_root) {
-        table = table.with_containers(resolver);
-    }
-    for enricher in build_workload_enrichers(config).await {
-        table = table.with_metadata_enricher(enricher);
-    }
-    if let Some(ref scope) = services.dlp_scope_svc
-        && scope.needs_executables()
-    {
-        table = table.with_dlp_scope(Arc::clone(scope));
-    }
+    let mut table = process_table(config, services, &proc_root).await;
     let alerts_for_ransom = alerts.clone();
     let host_rules = Arc::new(
         application::host_rule_service::HostRuleService::new(host_rules_set, alerts).with_facts(
@@ -1665,6 +1644,14 @@ pub async fn start_host_observation(
         workload.watch_processes(&processes);
     }
     services.workloads.install_processes(Arc::clone(&processes));
+    if let Some(ref ransom) = ransom {
+        startup::install_mass_encryption_stop(
+            config,
+            ransom,
+            services.process_signal_svc.as_ref(),
+            &processes,
+        );
+    }
     // The calls into the crypto libraries are read against the same table,
     // so they are counted only where mass encryption is.
     let crypto = ransom.as_ref().and_then(|ransom| {
@@ -1693,6 +1680,38 @@ pub async fn start_host_observation(
         _tracing: tracing,
         _crypto: crypto,
     }))
+}
+
+/// The process table, resolving what each entry runs, where it runs and
+/// which scopes read it, before any detection is attached to it.
+async fn process_table(
+    config: &AgentConfig,
+    services: &ServiceHandles,
+    proc_root: &std::path::Path,
+) -> application::process_table_service::ProcessTableService {
+    let mut table = application::process_table_service::ProcessTableService::new(
+        config.process_table.capacity,
+        config.process_table.capture_command_line,
+    )
+    .with_executables(Arc::new(adapters::container::ProcExecutableResolver::new(
+        proc_root,
+    )))
+    .with_details(Arc::new(adapters::container::ProcDetailsResolver::new(
+        proc_root,
+    )))
+    .with_ids_workload_scope(Arc::clone(&services.ids_workload_scope));
+    if let Some(resolver) = startup::container_resolver(config, proc_root) {
+        table = table.with_containers(resolver);
+    }
+    for enricher in build_workload_enrichers(config).await {
+        table = table.with_metadata_enricher(enricher);
+    }
+    if let Some(ref scope) = services.dlp_scope_svc
+        && scope.needs_executables()
+    {
+        table = table.with_dlp_scope(Arc::clone(scope));
+    }
+    table
 }
 
 /// A workload firewall loaded for a binary that does not run the agent's own

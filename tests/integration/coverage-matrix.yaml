@@ -142,6 +142,9 @@ suite_profiles:
   # 81 writes a few thousand files through real tools and restarts the
   # agent once to promote the verdict: root on a throwaway host, so nightly.
   "81": nightly
+  # 82 encrypts a tree under a promoted verdict and is killed by the stop:
+  # root on a throwaway host, so nightly.
+  "82": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -150,6 +153,7 @@ suite_profiles:
   "perf/05": nightly
   "perf/06": nightly
   "perf/07": nightly
+  "perf/08": nightly
   # The performance suites (perf/01-06) live in tests/perf/, run via `make test-perf`.
 
 coverage:
@@ -706,6 +710,14 @@ coverage:
     kernel_min: "6.12"
     profile: nightly
     notes: "The mass encryption verdict through /api/v1/host-rules/mass-encryption and host-rules mass-encryption: evaluated in shadow by default, an archive extraction, rsync, cp, gzip over logs and a git checkout over a few hundred documents reach no verdict, a program rewriting and renaming the same documents is counted under its workload with no alert, and the verdict promoted to enforce raises the alert"
+
+  - kind: cli_subcommand
+    feature: mass-encryption-stop
+    suites: ["82", "perf/08"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "The mass encryption stop: with the verdict in enforce and the stop armed, one process encrypting a tree is killed in the middle of it with a second alert counting the files written before it stopped, and a run forking one worker per directory is stopped whole, the parent and every worker still alive at the verdict; the time from the verdict to the last member gone, and the files written meanwhile, measured in perf/08"
 
   - kind: cli_subcommand
     feature: surface

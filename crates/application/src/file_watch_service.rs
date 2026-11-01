@@ -45,6 +45,8 @@ use domain::file_watch::{
     watched_path_change,
 };
 use domain::hostrule::{Intent, SettledChange, file_events};
+use domain::process::engine::Lineage;
+use domain::process::entity::ProcessEntry;
 use domain::ransom::{canary_exempt, written_now};
 use ports::secondary::file_watch_port::{FileBaselineStore, FileWatchSource, ProcessRootReader};
 use ports::secondary::metrics_port::MetricsPort;
@@ -103,6 +105,11 @@ struct Pending {
     kinds: BTreeSet<FileChangeKind>,
     dev: Option<u64>,
     ino: Option<u64>,
+    /// The last writer as the process table named it when the change
+    /// arrived, with its ancestry. Read then rather than when the path is
+    /// read back, because a worker that writes its share and exits is gone
+    /// from the table by the time the batch settles.
+    writer: Option<(Lineage, ProcessEntry)>,
     /// The host path a rename reported with both names moved the entry from.
     renamed_from: Option<String>,
     /// The path is the old end of a rename reported with both names.
@@ -878,6 +885,19 @@ impl FileWatcher {
         }
     }
 
+    /// The process `pid` and its ancestry, where a reader of the writer is
+    /// wired and the table holds it.
+    fn writer_of(&self, pid: u32) -> Option<(Lineage, ProcessEntry)> {
+        let feed = self.feed.as_ref()?;
+        let wanted =
+            feed.ransom.is_some() || FILE_INTENTS.iter().any(|intent| feed.rules.wants(*intent));
+        if !wanted {
+            return None;
+        }
+        let table = feed.processes.as_ref()?;
+        table.get(pid).map(|entry| (table.lineage(pid), entry))
+    }
+
     /// Queue the path each change names, to be read again.
     fn queue(&mut self, batch: &FileChangeBatch) {
         let mut lost = false;
@@ -885,6 +905,7 @@ impl FileWatcher {
             let Some(path) = change_path(change) else {
                 continue;
             };
+            let writer = self.writer_of(change.pid);
             let full = self.pending.len() >= FILE_FACTS_PENDING_MAX;
             let pending = match self.pending.entry(path) {
                 Entry::Occupied(slot) => slot.into_mut(),
@@ -894,6 +915,9 @@ impl FileWatcher {
                     continue;
                 }
             };
+            if writer.is_some() || pending.pid != change.pid {
+                pending.writer = writer;
+            }
             pending.pid = change.pid;
             pending.kinds.extend(change.kinds.iter().copied());
             pending.dev = change.dev.or(pending.dev);
@@ -1089,10 +1113,14 @@ impl FileWatcher {
             return;
         }
         let rules = Arc::clone(&feed.rules);
-        let writer = feed.processes.as_ref().and_then(|table| {
-            table
-                .get(pending.pid)
-                .map(|entry| (table.lineage(pending.pid), entry))
+        // The writer as it was when the change arrived, and the table only
+        // where that was not read.
+        let writer = pending.writer.clone().or_else(|| {
+            feed.processes.as_ref().and_then(|table| {
+                table
+                    .get(pending.pid)
+                    .map(|entry| (table.lineage(pending.pid), entry))
+            })
         });
         let at_ns = now_ns();
         if let (Some(ransom), Some((lineage, entry))) = (feed.ransom.as_ref(), writer.as_ref()) {
@@ -2329,6 +2357,49 @@ mod tests {
         let ancestry = workload.ancestry.as_ref().unwrap();
         assert_eq!(ancestry.ancestors[0].pid, 10);
         assert_eq!(ancestry.ancestors[0].name, "sshd");
+    }
+
+    #[tokio::test]
+    async fn a_writer_that_exits_before_the_path_is_read_back_is_still_named() {
+        let (rules, mut rx) = rules(&[(
+            "keys",
+            r#""file.appears":{"path":"/root/.ssh/authorized_keys"}"#,
+        )]);
+        let processes = table().await;
+        let mut w = fed(rules, Arc::clone(&processes), Arc::new(Memory::default()));
+        let (directory, name) = KEYS.rsplit_once('/').unwrap();
+        let mut written = change(vec![FileChangeKind::Created, FileChangeKind::Written]);
+        written.pid = 42;
+        written.directory = Some(directory.into());
+        written.name = name.into();
+        w.queue(&FileChangeBatch {
+            changes: vec![written],
+            overflowed: false,
+            opened: Vec::new(),
+        });
+        let mut exit = lifecycle(42, Some(10), "sh");
+        exit.kind = domain::process::entity::ProcessEventKind::Exit;
+        processes.apply(exit).await;
+        assert!(processes.get(42).is_none());
+        w.source = Box::new(Scripted {
+            opens: Vec::new(),
+            reads: Vec::new(),
+            facts: vec![
+                Ok(vec![fact(KEYS, FileReading::Present(file('a', 0o600)))]),
+                Ok(vec![fact(
+                    "/var/lib/c/3/fs/root/.ssh/authorized_keys",
+                    FileReading::Gone,
+                )]),
+            ],
+            cancel: CancellationToken::new(),
+            opened: Arc::new(AtomicU64::new(0)),
+        });
+        w.settle().unwrap();
+        let raised = alerts(&mut rx);
+        assert_eq!(raised.len(), 1);
+        let workload = raised[0].workload.as_ref().unwrap();
+        assert_eq!(workload.pid, 42);
+        assert_eq!(workload.ancestry.as_ref().unwrap().ancestors[0].pid, 10);
     }
 
     #[tokio::test]

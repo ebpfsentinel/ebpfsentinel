@@ -21,6 +21,7 @@ pub mod rename;
 pub mod replace;
 pub mod shadow;
 pub mod signal;
+pub mod stop;
 pub mod thresholds;
 
 pub use actor::{Actor, actor_of};
@@ -55,6 +56,9 @@ pub use replace::{
 };
 pub use shadow::{RANSOM_SHADOW_RECENT_MAX, RansomShadow, ShadowVerdict};
 pub use signal::{RansomSignal, SignalKind, Tier, UnavailableSignal, unavailable};
+pub use stop::{
+    FilesWritten, RANSOM_FILES_COUNTED_MAX, RANSOM_STOP_SETTLE_MS, RansomStop, run_members,
+};
 pub use thresholds::{
     BASELINE_CEILING_FACTOR, BASELINE_FLOOR_DIVISOR, BASELINED, bounded_threshold,
     shipped_threshold, threshold_band,

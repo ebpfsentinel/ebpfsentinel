@@ -9,6 +9,24 @@ Nothing in this directory is a target. A guest with four vCPUs is not a
 production node, and the suite says so in its own output: the bounds it
 asserts are what the lane can hold, not what the product promises.
 
+## `2026-11-01-mass-encryption-kill-latency.json`
+
+`08-mass-encryption-kill-latency.bats` on the local lane: a tree of 2,000 small
+documents in twenty directories encrypted at full speed, five runs by a single
+process and five by one forking a worker per directory, with
+`mass_encryption.stop` on. `latency_ms` is what the stop alert reports from the
+verdict to the last process of the run gone, `files_counted` is the count the
+alert carries and `files_lost` is the number of documents renamed to the
+encrypted extension on disk once the run is over.
+
+**What to quote.** A single encryptor is stopped every time, about a tenth of a
+second after the verdict, having lost 128 to 249 of the 2,000 documents. Twenty
+workers writing in parallel finished the whole tree before the verdict in three
+runs of five, which the alert reports as `not_stopped` with nothing left to
+kill, and most of it in the other two. The count in the alert is a floor, a
+third to a half of the files lost, because the watch reads changed paths back
+in batches and the alert is written when the verdict is reached.
+
 ## `2026-10-30-l7-port-promise.json`
 
 The check comparing a connection's protocol with its port, timed by criterion

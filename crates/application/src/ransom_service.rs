@@ -7,7 +7,8 @@
 //! the engine, the host's own account of which sources it reads, and the
 //! alert channel.
 
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
+use std::time::{Duration, Instant};
 
 use domain::alert::entity::Alert;
 use domain::file_watch::entity::FileChangeKind;
@@ -16,18 +17,21 @@ use domain::hostrule::HostSources;
 use domain::process::engine::Lineage;
 use domain::process::entity::ProcessEntry;
 use domain::ransom::{
-    Actor, CryptoRates, DistinctPaths, MassRenames, RansomEngine, RansomNotes, RansomShadow,
-    RansomSignal, RansomVerdict, Replacements, ShadowVerdict, SignalKind, UnavailableSignal,
-    actor_of, backup_destroyed, backup_destroyed_signal, backup_program, bounded_threshold,
-    canary_touched, entropy_rose, header_mismatch, initiator, original_of, renamed_over,
-    renamed_to_new_extension, unavailable,
+    Actor, CryptoRates, DistinctPaths, FilesWritten, MASS_ENCRYPTION_RULE_ID, MassRenames,
+    RansomEngine, RansomNotes, RansomShadow, RansomSignal, RansomStop, RansomVerdict, Replacements,
+    ShadowVerdict, SignalKind, UnavailableSignal, actor_of, backup_destroyed,
+    backup_destroyed_signal, backup_program, bounded_threshold, canary_touched, entropy_rose,
+    header_mismatch, initiator, original_of, renamed_over, renamed_to_new_extension, run_members,
+    unavailable,
 };
 use domain::workload::entity::{Workload, WorkloadSource};
 use ports::secondary::ransom_baseline_port::RansomBaselinePort;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::alert_event::AlertEvent;
+use crate::process_signal_service::ProcessSignalService;
+use crate::process_table_service::ProcessTableService;
 use crate::workload_policy_service::workload_of;
 
 /// Why the encryption calls are not read before anything said otherwise.
@@ -80,6 +84,17 @@ pub struct FileRewrite<'a> {
     pub written_now: bool,
 }
 
+/// What stops a run once its verdict is in force: the signal service, the
+/// table the run's members are read from, and how long the watch is given
+/// to read back what the run wrote before the count is taken. The table is
+/// held weakly because it holds this service.
+#[derive(Clone)]
+struct Stopper {
+    signals: Arc<ProcessSignalService>,
+    processes: Weak<ProcessTableService>,
+    settle: Duration,
+}
+
 /// One change as every counter records it.
 struct Held<'a> {
     actor: &'a Actor,
@@ -104,6 +119,8 @@ pub struct RansomService {
     mode: RuleMode,
     shadow: Mutex<RansomShadow>,
     baseline: RwLock<Option<Arc<dyn RansomBaselinePort>>>,
+    stopper: RwLock<Option<Stopper>>,
+    written: Arc<Mutex<FilesWritten>>,
     sources: HostSourcesReader,
     alerts: mpsc::Sender<AlertEvent>,
 }
@@ -126,6 +143,8 @@ impl RansomService {
             mode: RuleMode::Shadow,
             shadow: Mutex::new(RansomShadow::default()),
             baseline: RwLock::new(None),
+            stopper: RwLock::new(None),
+            written: Arc::new(Mutex::new(FilesWritten::default())),
             sources,
             alerts,
         }
@@ -284,6 +303,12 @@ impl RansomService {
             return;
         }
         let actor = actor_of(writer, lineage);
+        self.written
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            // A document written then renamed is one file lost, so the new
+            // name is counted under the one it had.
+            .record(actor.key, change.renamed_from.unwrap_or(change.path), at_ns);
         let held = Held {
             actor: &actor,
             writer,
@@ -308,7 +333,15 @@ impl RansomService {
         if entropy_rose(change.entropy_before, change.entropy_now) {
             self.count(&self.entropy_rises, &held);
         }
-        if header_mismatch(change.path, change.head) {
+        // A document renamed to a name the table does not judge is still held
+        // to the name it had: encrypting `report.pdf` and leaving it as
+        // `report.pdf.locked` is the commonest shape of a run, and a name
+        // chosen by the run is no reason to stop reading what it wrote.
+        let mismatch = header_mismatch(change.path, change.head)
+            || change
+                .renamed_from
+                .is_some_and(|from| header_mismatch(from, change.head));
+        if mismatch {
             self.count(&self.header_mismatches, &held);
         }
         if let Some(from) = change.renamed_from {
@@ -428,6 +461,80 @@ impl RansomService {
         }
     }
 
+    /// Stop every run a verdict in force names: the actor and everything it
+    /// started, read from `processes` before the first signal, each killed
+    /// through `signals`. Once the last member answered and `settle` has
+    /// passed, an alert says how many files the run wrote before it died.
+    pub fn install_stop(
+        &self,
+        signals: Arc<ProcessSignalService>,
+        processes: &Arc<ProcessTableService>,
+        settle: Duration,
+    ) {
+        *self.stopper.write().unwrap_or_else(PoisonError::into_inner) = Some(Stopper {
+            signals,
+            processes: Arc::downgrade(processes),
+            settle,
+        });
+    }
+
+    /// Kill the run `verdict` names, then raise what that cost beside
+    /// `alert`. Nothing happens where no stop is installed.
+    fn stop(&self, verdict: &RansomVerdict, alert: &Alert) {
+        let Some(stopper) = self
+            .stopper
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            warn!(
+                actor = verdict.actor.pid,
+                "mass encryption run not stopped: no runtime to signal from"
+            );
+            return;
+        };
+        let started = Instant::now();
+        let actor = verdict.actor.key;
+        let members = stopper.processes.upgrade().map_or_else(
+            || vec![actor.pid],
+            |table| run_members(&table.list(), actor),
+        );
+        let written = Arc::clone(&self.written);
+        let alerts = self.alerts.clone();
+        let alert = alert.clone();
+        runtime.spawn(async move {
+            let outcomes = stopper
+                .signals
+                .kill_run(members, MASS_ENCRYPTION_RULE_ID)
+                .await;
+            let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            tokio::time::sleep(stopper.settle).await;
+            let files_written = written
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .count(actor);
+            let stop = RansomStop {
+                outcomes,
+                files_written,
+                latency_ms,
+            };
+            info!(actor = actor.pid, stop = %stop.describe(), "mass encryption run stopped");
+            let sent = alerts.try_send(AlertEvent::ProcessDetection {
+                alert: Box::new(Alert::from_ransom_stop(&alert, &stop)),
+                kill_process: false,
+            });
+            if sent.is_err() {
+                warn!(
+                    actor = actor.pid,
+                    "mass encryption stop dropped: the alert channel is full or closed"
+                );
+            }
+        });
+    }
+
     /// Read the counts a baseline may move against what `baseline` learned
     /// for each executable from here on. What it answers is held inside the
     /// band the content fixes, and the decisive signals never ask it.
@@ -501,6 +608,7 @@ impl RansomService {
             return;
         }
         let alert = Alert::from_ransom_verdict(verdict, workload, at_ns);
+        self.stop(verdict, &alert);
         let sent = self.alerts.try_send(AlertEvent::ProcessDetection {
             alert: Box::new(alert),
             kill_process: false,
@@ -543,7 +651,7 @@ fn actor_workload(
 mod tests {
     use super::*;
     use domain::hostrule::Source;
-    use domain::process::entity::ProcessIdentity;
+    use domain::process::entity::{ProcessEventKind, ProcessIdentity, ProcessLifecycleEvent};
     use domain::ransom::{
         RANSOM_CRYPTO_CALLS, RANSOM_DISTINCT_REWRITES, RANSOM_ENTROPY_RISES,
         RANSOM_HEADER_MISMATCHES, RANSOM_MASS_RENAMES, RANSOM_NOTE_DIRECTORIES,
@@ -833,6 +941,160 @@ mod tests {
         assert!(!alert.message.contains("entropy_rise (not read"));
     }
 
+    /// Signal maps where every armed target is reached at once.
+    #[derive(Default)]
+    struct ReachedMaps {
+        armed: Vec<u32>,
+        events: Vec<ebpf_common::signal::SignalEvent>,
+    }
+
+    impl ports::secondary::process_signal_map_port::ProcessSignalMapPort for ReachedMaps {
+        fn set_protected(
+            &mut self,
+            _tgids: &[u32],
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+        fn arm(
+            &mut self,
+            tgid: u32,
+            _signal: u32,
+            _window_ns: u64,
+        ) -> Result<(), domain::common::error::DomainError> {
+            self.armed.push(tgid);
+            self.events.push(ebpf_common::signal::SignalEvent {
+                tgid,
+                outcome: ebpf_common::signal::SIGNAL_OUTCOME_SENT,
+                ..Default::default()
+            });
+            Ok(())
+        }
+        fn disarm(&mut self, _tgid: u32) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+        fn drain_events(
+            &mut self,
+        ) -> Result<Vec<ebpf_common::signal::SignalEvent>, domain::common::error::DomainError>
+        {
+            Ok(std::mem::take(&mut self.events))
+        }
+    }
+
+    /// Every process runs until it has been looked at once, the look the
+    /// guard takes before arming, and is gone after.
+    #[derive(Default)]
+    struct GoneOnceSignalled(Mutex<std::collections::HashSet<u32>>);
+
+    impl ports::secondary::process_executable_port::ProcessExecutableReader for GoneOnceSignalled {
+        fn read_executable(&self, pid: u32) -> Option<domain::dlp::entity::DlpExecutable> {
+            let first = self
+                .0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(pid);
+            first.then(|| domain::dlp::entity::DlpExecutable {
+                path: "/tmp/enc".to_string(),
+                dev: 0,
+                inode: 0,
+                source: domain::dlp::entity::DlpIdentitySource::ProcessAtAlertTime,
+            })
+        }
+    }
+
+    fn started(pid: u32, parent: Option<u32>) -> ProcessLifecycleEvent {
+        ProcessLifecycleEvent {
+            kind: ProcessEventKind::Exec,
+            pid,
+            tgid: pid,
+            uid: 0,
+            gid: 0,
+            cgroup_id: 1,
+            comm: "enc".to_string(),
+            at_ns: u64::from(pid),
+            start_ns: Some(u64::from(pid)),
+            parent_pid: parent,
+            parent_start_ns: parent.map(u64::from),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_verdict_in_force_kills_the_whole_run_and_says_how_many_files_it_cost() {
+        let (service, mut rx) = service();
+        let table = Arc::new(ProcessTableService::new(64, false));
+        // The actor, a worker it forked, the worker's own worker, and a
+        // process that is no part of the run.
+        table.apply(started(100, None)).await;
+        table.apply(started(101, Some(100))).await;
+        table.apply(started(102, Some(101))).await;
+        table.apply(started(200, None)).await;
+        let maps = Arc::new(tokio::sync::Mutex::new(ReachedMaps::default()));
+        let signals = Arc::new(
+            ProcessSignalService::new(
+                maps.clone(),
+                Arc::new(GoneOnceSignalled::default()),
+                None,
+                domain::response::signal::ProcessSignalGuard::new(4242, &[], &[]),
+                crate::process_signal_service::ProcessSignalSettings {
+                    signal: 9,
+                    window: Duration::from_millis(200),
+                    poll_interval: Duration::from_millis(2),
+                },
+            )
+            .await
+            .expect("the fake maps take the protected set"),
+        );
+        service.install_stop(signals, &table, Duration::from_millis(5));
+
+        let run = running(100, "/tmp/enc", 7);
+        let lineage = Lineage {
+            ancestors: Vec::new(),
+            truncated: false,
+            incomplete: false,
+        };
+        for n in 0..RANSOM_HEADER_MISMATCHES {
+            service.record_file_change(
+                &run,
+                &lineage,
+                [FileChangeKind::Written],
+                FileRewrite {
+                    path: &format!("/srv/report{n}.docx"),
+                    entropy_before: None,
+                    entropy_now: None,
+                    head: Some([0x9A, 0x13, 0x7F, 0x02]),
+                    renamed_from: None,
+                    size_before: None,
+                    size_now: None,
+                    written_now: false,
+                },
+                2,
+            );
+        }
+        let Some(AlertEvent::ProcessDetection { alert: verdict, .. }) = rx.recv().await else {
+            panic!("no verdict raised");
+        };
+        assert!(verdict.mitigation_status.is_none());
+        let stopped = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the stop is reported");
+        let Some(AlertEvent::ProcessDetection {
+            alert,
+            kill_process,
+        }) = stopped
+        else {
+            panic!("the stop is a process detection");
+        };
+        assert!(!kill_process, "the stop has already been taken");
+        assert_eq!(alert.mitigation_status.as_deref(), Some("stopped"));
+        assert_ne!(alert.id, verdict.id);
+        assert!(alert.message.starts_with(&format!(
+            "{RANSOM_HEADER_MISMATCHES} files written before the run was stopped; 3 of 3 processes of the run gone"
+        )));
+        assert!(alert.message.contains("header_mismatch (pid 100)"));
+        let mut armed = maps.lock().await.armed.clone();
+        armed.sort_unstable();
+        assert_eq!(armed, vec![100, 101, 102], "the run and nothing else");
+    }
+
     #[test]
     fn documents_left_unlike_their_names_are_decisive_on_their_own() {
         let (service, mut rx) = service();
@@ -885,6 +1147,91 @@ mod tests {
         };
         assert!(alert.message.contains("header_mismatch (pid 100)"));
         assert!(alert.message.contains("do not match their extension"));
+    }
+
+    #[test]
+    fn documents_renamed_away_from_their_names_are_still_held_to_them() {
+        let (service, mut rx) = service();
+        let run = running(100, "/tmp/enc", 7);
+        let lineage = Lineage {
+            ancestors: Vec::new(),
+            truncated: false,
+            incomplete: false,
+        };
+        let rename = |n: usize, head: [u8; 4], at: u64| {
+            let from = format!("/srv/report{n}.pdf");
+            service.record_file_change(
+                &run,
+                &lineage,
+                [FileChangeKind::MovedIn],
+                FileRewrite {
+                    path: &format!("{from}.lockd"),
+                    entropy_before: None,
+                    entropy_now: None,
+                    head: Some(head),
+                    renamed_from: Some(&from),
+                    size_before: None,
+                    size_now: None,
+                    written_now: false,
+                },
+                at,
+            );
+        };
+        // A document kept as it was under a new name raises nothing.
+        for n in 0..RANSOM_HEADER_MISMATCHES {
+            rename(n, *b"%PDF", 1);
+        }
+        assert!(rx.try_recv().is_err());
+        for n in RANSOM_HEADER_MISMATCHES..RANSOM_HEADER_MISMATCHES * 2 {
+            rename(n, [0x9A, 0x13, 0x7F, 0x02], 2);
+        }
+        let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() else {
+            panic!("no verdict raised");
+        };
+        assert!(alert.message.contains("header_mismatch (pid 100)"));
+    }
+
+    #[test]
+    fn a_document_written_then_renamed_is_one_file_written() {
+        let (service, _rx) = service();
+        let run = running(100, "/tmp/enc", 7);
+        let lineage = Lineage {
+            ancestors: Vec::new(),
+            truncated: false,
+            incomplete: false,
+        };
+        let change = |kind: FileChangeKind, path: &str, renamed_from: Option<&str>| {
+            service.record_file_change(
+                &run,
+                &lineage,
+                [kind],
+                FileRewrite {
+                    path,
+                    entropy_before: None,
+                    entropy_now: None,
+                    head: None,
+                    renamed_from,
+                    size_before: None,
+                    size_now: None,
+                    written_now: true,
+                },
+                1,
+            );
+        };
+        change(FileChangeKind::Written, "/srv/a.pdf", None);
+        change(
+            FileChangeKind::MovedIn,
+            "/srv/a.pdf.lockd",
+            Some("/srv/a.pdf"),
+        );
+        change(FileChangeKind::Written, "/srv/b.pdf", None);
+        let actor = actor_of(&run, &lineage).key;
+        let counted = service
+            .written
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .count(actor);
+        assert_eq!(counted, 2);
     }
 
     #[test]

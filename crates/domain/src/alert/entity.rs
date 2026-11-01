@@ -21,8 +21,11 @@ use crate::network_program::change::{NETWORK_PATH_COMPONENT, PathChange};
 use crate::process::detection::{
     PROCESS_DETECTION_COMPONENT, ProcessDetection, ProcessDetectionKind,
 };
-use crate::ransom::{MASS_ENCRYPTION_COMPONENT, MASS_ENCRYPTION_RULE_ID, RansomVerdict};
+use crate::ransom::{
+    MASS_ENCRYPTION_COMPONENT, MASS_ENCRYPTION_RULE_ID, RansomStop, RansomVerdict,
+};
 use crate::raw_socket::entity::{FilterState, RAW_SOCKET_COMPONENT, RawSocket};
+use crate::response::signal::ProcessKillOutcome;
 use crate::tcp_health::reset_scan::{ResetScan, TCP_HEALTH_COMPONENT};
 use crate::threatintel::entity::ThreatIntelAlert;
 use crate::workload::entity::Workload;
@@ -142,7 +145,8 @@ pub struct Alert {
     /// What was done about the alert's source. `DDoS`: detecting, active,
     /// mitigated, expired. An application attack blocked by an extension:
     /// blocked, `already_blocked`, `allow_listed`, `ceiling_reached`,
-    /// `no_source` or failed.
+    /// `no_source` or failed. A stopped mass encryption run: stopped,
+    /// `partially_stopped` or `not_stopped`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mitigation_status: Option<String>,
     /// `DDoS`: total packets in attack.
@@ -1382,6 +1386,27 @@ impl Alert {
             }
             alert.workload = Some(w);
         }
+        alert
+    }
+
+    /// The alert a stopped mass encryption run raises after its verdict:
+    /// what stopping it cost first, then the verdict it answers. Its
+    /// mitigation reads `stopped` only when every process of the run is gone.
+    #[must_use]
+    pub fn from_ransom_stop(verdict: &Self, stop: &RansomStop) -> Self {
+        let mut alert = verdict.clone();
+        alert.id = Self::generate_id(verdict.timestamp_ns, &verdict.rule_id);
+        alert.message = format!("{}; {}", stop.describe(), verdict.message);
+        alert.mitigation_status = Some(
+            if stop.all_stopped() {
+                "stopped"
+            } else if stop.outcomes.iter().any(ProcessKillOutcome::is_killed) {
+                "partially_stopped"
+            } else {
+                "not_stopped"
+            }
+            .to_string(),
+        );
         alert
     }
 

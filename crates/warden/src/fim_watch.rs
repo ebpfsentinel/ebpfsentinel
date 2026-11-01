@@ -487,7 +487,11 @@ impl FimWatch {
             }
             Err(e) => return Err(mark_refusal(&e)),
         };
-        let mount = open_path(path, libc::O_PATH).map_err(|e| mark_refusal(&e))?;
+        // Opened for reading rather than as a bare path: the descriptor is
+        // the mount every handle on this filesystem is opened against, and
+        // `open_by_handle_at` refuses an `O_PATH` one with EBADF.
+        let mount =
+            open_path(path, libc::O_RDONLY | libc::O_NONBLOCK).map_err(|e| mark_refusal(&e))?;
         let fsid = fsid_of(mount.as_raw_fd()).map_err(|e| e.to_string())?;
         self.mounts.entry(fsid).or_insert(mount);
         Ok(renames)

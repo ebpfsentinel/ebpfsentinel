@@ -612,6 +612,24 @@ impl AgentConfig {
                     .to_string(),
             });
         }
+        let ransom = &self.file_watch.mass_encryption;
+        if ransom.stop {
+            let refusal = if ransom.mode != domain::firewall::entity::RuleMode::Enforce {
+                Some("a run is stopped only on a verdict in force, and mode is not enforce")
+            } else if !self.response.kill_process.enabled {
+                Some("stopping a run kills its processes, and response.kill_process is not enabled")
+            } else if !self.process_table.enabled {
+                Some("the run is read from the process table, and process_table.enabled is false")
+            } else {
+                None
+            };
+            if let Some(message) = refusal {
+                return Err(ConfigError::Validation {
+                    field: "file_watch.mass_encryption.stop".to_string(),
+                    message: message.to_string(),
+                });
+            }
+        }
         if !self.process_table.enabled && self.host_rules.any() {
             return Err(ConfigError::Validation {
                 field: "host_rules.rules".to_string(),
@@ -5975,6 +5993,30 @@ ids:
             err.contains("process_table.detections.kill_process"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn a_mass_encryption_run_is_stopped_only_in_force_with_process_kill_and_the_table() {
+        let document = |mode: &str, kill: bool, table: bool| {
+            format!(
+                "agent:\n  interfaces: [eth0]\nresponse:\n  kill_process:\n    enabled: {kill}\n\
+                 process_table:\n  enabled: {table}\n\
+                 file_watch:\n  enabled: true\n  filesystems: [/srv]\n  mass_encryption:\n    mode: {mode}\n    stop: true\n"
+            )
+        };
+        assert!(AgentConfig::from_yaml(&document("enforce", true, true)).is_ok());
+        for (doc, needle) in [
+            (document("shadow", true, true), "mode is not enforce"),
+            (document("enforce", false, true), "response.kill_process"),
+            (document("enforce", true, false), "process_table.enabled"),
+        ] {
+            let err = AgentConfig::from_yaml(&doc).unwrap_err().to_string();
+            assert!(
+                err.contains("file_watch.mass_encryption.stop"),
+                "unexpected error: {err}"
+            );
+            assert!(err.contains(needle), "unexpected error: {err}");
+        }
     }
 
     #[test]

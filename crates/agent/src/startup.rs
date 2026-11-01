@@ -4441,6 +4441,9 @@ pub async fn run(
             app_state.install_ransom_service(Arc::clone(ransom));
         }
         let svc = Arc::new(svc);
+        if let Some(ref ransom) = ransom_for_files {
+            install_mass_encryption_stop(&config, ransom, process_signal_svc.as_ref(), &svc);
+        }
         // The calls into the crypto libraries are read against the same
         // table, so they are counted only where mass encryption is.
         if ebpf_capable && let Some(ref ransom) = ransom_for_files {
@@ -7476,6 +7479,34 @@ pub fn mass_encryption_service(
             .with_command_lines(config.process_table.capture_command_line)
             .with_mode(config.file_watch.mass_encryption.mode),
     )
+}
+
+/// Stop each run a mass encryption verdict in force names, where the
+/// configuration asks for it. The signal service exists only where its
+/// program loaded, so a stop asked for on a host that could not load it is
+/// said once here rather than discovered at the first verdict.
+pub fn install_mass_encryption_stop(
+    config: &AgentConfig,
+    ransom: &application::ransom_service::RansomService,
+    signals: Option<&Arc<application::process_signal_service::ProcessSignalService>>,
+    processes: &Arc<application::process_table_service::ProcessTableService>,
+) {
+    if !config.file_watch.mass_encryption.stop {
+        return;
+    }
+    let Some(signals) = signals else {
+        warn!(
+            "file_watch.mass_encryption.stop is set and no run will be stopped: \
+             the process signal program is not loaded"
+        );
+        return;
+    };
+    ransom.install_stop(
+        Arc::clone(signals),
+        processes,
+        std::time::Duration::from_millis(domain::ransom::RANSOM_STOP_SETTLE_MS),
+    );
+    info!("mass encryption runs are stopped on a verdict in force");
 }
 
 /// Count the calls into the system crypto libraries and hand each process's

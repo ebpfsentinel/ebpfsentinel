@@ -32,6 +32,8 @@ fixtures live here; there is no separate Vagrant box.
 | `04-pktgen-high-pps` | ≥ 1 Mpps XDP-drop CPU savings + SYN-cookie path | 2VM (pktgen) |
 | `05-ebpf-feature-overhead-extended` | isolated per-feature throughput overhead: scrub, DNS, QoS, conntrack | 2VM |
 | `06-ebpf-feature-overhead-nat-dlp` | NAT translation overhead (SNAT egress / DNAT ingress / both) + DLP uprobe SSL-inspection cost | local + 2VM |
+| `07-attribution-overhead` | cost of naming the workload behind a flow, per connect() and per execve() | local |
+| `08-mass-encryption-kill-latency` | time from a mass encryption verdict to the last process of the run gone, alone and forking a worker per directory | local |
 
 Remaining per-feature datapath suites - **L4 LB** (forwarded, 3VM) and **L7**
 (HTTP via `run_http_bench`) - are planned alongside these; they need the 3VM

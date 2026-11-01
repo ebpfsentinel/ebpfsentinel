@@ -68,12 +68,19 @@ pub struct MassEncryptionConfig {
     /// last ones without raising anything, so the thresholds can be watched
     /// against this host's own work first; `enforce` raises an alert.
     pub mode: RuleMode,
+
+    /// Whether a verdict in force also kills the run: the actor and every
+    /// process it started, then a second alert saying how many files it
+    /// wrote before it died. Off by default, needs `enforce` and
+    /// `response.kill_process.enabled`.
+    pub stop: bool,
 }
 
 impl Default for MassEncryptionConfig {
     fn default() -> Self {
         Self {
             mode: RuleMode::Shadow,
+            stop: false,
         }
     }
 }
