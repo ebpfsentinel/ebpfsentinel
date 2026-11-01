@@ -14,7 +14,7 @@ const MAX_DEPTH: usize = 16;
 /// mount and matching directory inode numbers. On cgroup v2 the id
 /// returned by `bpf_get_current_cgroup_id` is the cgroup directory's
 /// kernfs id, which equals its `st_ino` on the kernels this agent targets
-/// (>= 6.9). Resolution is only hit on a resolver cache miss, so the walk
+/// (>= 6.12). Resolution is only hit on a resolver cache miss, so the walk
 /// cost is amortised across the lifetime of each container.
 pub struct CgroupfsResolver {
     root: PathBuf,

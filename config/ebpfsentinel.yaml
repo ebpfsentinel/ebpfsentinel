@@ -66,7 +66,7 @@ agent:
   grpc_port: 50051
   metrics_port: 9090
 
-  # BPF token delegation (kernel 6.9+ REQUIRED). eBPF is loaded
+  # BPF token delegation (tokens need 6.9, the agent's floor is 6.12). eBPF is loaded
   # exclusively through a BPF token - the agent never loads programs with
   # CAP_BPF. BPF tokens are a user-namespace feature, so the agent self-unshares
   # a user namespace and has the `warden` broker delegate a bpffs there, then

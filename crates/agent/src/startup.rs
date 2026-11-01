@@ -1938,7 +1938,7 @@ pub async fn run(
 
     // ── 10. Load eBPF programs ─────────────────────────────────────
     //
-    // Kernel version is MANDATORY: 6.9+ is required unconditionally.
+    // Kernel version is MANDATORY: 6.12+ is required unconditionally.
     // No "API-only" fallback when the kernel is too old - every eBPF
     // program depends on kfuncs introduced in 6.4 → 6.9 and the
     // verifier rejects them at load time on older kernels. The
@@ -5673,9 +5673,9 @@ fn is_safe_probe_target(target: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
 }
 
-/// Verify the kernel version is **>= 6.9**.
+/// Verify the kernel version is **>= 6.12**.
 ///
-/// The 6.9 floor is mandatory - there is **no graceful fallback on
+/// The 6.12 floor is mandatory - there is **no graceful fallback on
 /// older kernels**. The agent relies on the following kernel features
 /// across every eBPF program:
 ///
@@ -5691,8 +5691,10 @@ fn is_safe_probe_target(target: &str) -> bool {
 /// A kernel that fails this check **cannot** run the agent in a
 /// degraded mode - the eBPF verifier rejects every program at load
 /// time because the kfuncs are not present in `vmlinux` BTF. The
-/// correct response is to upgrade the kernel. `BPF_TOKEN_CREATE` -
-/// the agent's only eBPF loading path - also requires 6.9+.
+/// correct response is to upgrade the kernel, and the refusal names how
+/// for the distribution the release string belongs to. `BPF_TOKEN_CREATE` -
+/// the agent's only eBPF loading path - needs 6.9, and the floor is the
+/// 6.12 long-term kernel the distributions converged on.
 fn check_kernel_version() -> anyhow::Result<()> {
     check_kernel_version_from(std::path::Path::new("/proc/sys/kernel/osrelease"))
 }
@@ -5707,11 +5709,9 @@ fn check_kernel_version_from(path: &std::path::Path) -> anyhow::Result<()> {
     probe_kernel_features_from(path, std::path::Path::new("/sys/kernel/btf/vmlinux")).map_err(
         |e| {
             anyhow::anyhow!(
-                "kernel is below the mandatory minimum {MIN_KERNEL_MAJOR}.{MIN_KERNEL_MINOR} \
-                 ({e}) - eBPFsentinel refuses to start. Required features: BPF token \
-                 delegation, cgroup1 kfunc, XDP metadata kfuncs, netfilter conntrack kfuncs, \
-                 dynptr helpers. No fallback path exists - upgrade the host kernel to 6.9+ \
-                 and restart the agent."
+                "eBPFsentinel refuses to start: {e} The agent needs Linux \
+                 {MIN_KERNEL_MAJOR}.{MIN_KERNEL_MINOR} or later and has no degraded mode below \
+                 it; restart it once the host runs the new kernel."
             )
         },
     )?;
@@ -5752,16 +5752,16 @@ mod kernel_version_tests {
     }
 
     #[test]
-    fn accepts_kernel_6_9_exact() {
+    fn accepts_kernel_6_12_exact() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = write_osrelease(&tmp, "6.9.0-060900-generic\n");
+        let p = write_osrelease(&tmp, "6.12.0-061200-generic\n");
         assert!(check_kernel_version_from(&p).is_ok());
     }
 
     #[test]
-    fn accepts_kernel_6_10() {
+    fn accepts_kernel_6_17() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = write_osrelease(&tmp, "6.10.4-generic\n");
+        let p = write_osrelease(&tmp, "6.17.0-5-generic\n");
         assert!(check_kernel_version_from(&p).is_ok());
     }
 
@@ -5773,13 +5773,21 @@ mod kernel_version_tests {
     }
 
     #[test]
-    fn rejects_kernel_6_8() {
+    fn rejects_kernel_6_11_naming_running_required_and_the_way_up() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = write_osrelease(&tmp, "6.8.0-ubuntu-24.04\n");
+        let p = write_osrelease(&tmp, "6.11.0-29-generic\n");
         let err = check_kernel_version_from(&p).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("below the mandatory minimum 6.9"));
-        assert!(msg.contains("No fallback path exists"));
+        assert!(msg.contains("kernel 6.11 is below the required minimum 6.12"));
+        assert!(msg.contains("linux-generic-hwe-24.04"));
+        assert!(msg.contains("no degraded mode"));
+    }
+
+    #[test]
+    fn rejects_kernel_6_9() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_osrelease(&tmp, "6.9.0-060900-generic\n");
+        assert!(check_kernel_version_from(&p).is_err());
     }
 
     #[test]

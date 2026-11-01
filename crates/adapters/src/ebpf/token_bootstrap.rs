@@ -68,7 +68,8 @@ pub enum BootstrapError {
 
     #[error(
         "kernel {major}.{minor} lacks BPF_TOKEN_CREATE - eBPFsentinel loads eBPF \
-         only through a BPF token (kernel 6.9+ required). Upgrade the host kernel."
+         only through a BPF token, which needs 6.9, and the agent's floor is 6.12. \
+         Upgrade the host kernel."
     )]
     KernelTooOld { major: u32, minor: u32 },
 
@@ -89,7 +90,7 @@ pub enum BootstrapError {
 ///
 /// # Errors
 /// Returns [`BootstrapError::KernelProbe`] when the kernel cannot be
-/// probed, [`BootstrapError::KernelTooOld`] when it is below 6.9, and
+/// probed, [`BootstrapError::KernelTooOld`] when it is below 6.12, and
 /// [`BootstrapError::TokenCreate`] when `BPF_TOKEN_CREATE` fails (most
 /// commonly because the delegated bpffs has not been mounted).
 pub fn bootstrap(policy: &BpfTokenPolicy) -> Result<BpfLoadingHandle, BootstrapError> {

@@ -7,7 +7,7 @@ pub const ACTION_REJECT: u8 = 3;
 
 /// Maximum number of firewall rules per address family (V4 / V6).
 ///
-/// Requires kernel 6.9+ (project minimum) - uses the `bpf_loop` helper so the
+/// Uses the `bpf_loop` helper, present on every kernel the agent supports, so the
 /// XDP firewall can iterate over this many rules without hitting verifier
 /// complexity limits.
 pub const MAX_FIREWALL_RULES: u32 = 4096;
