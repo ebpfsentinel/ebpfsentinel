@@ -7,8 +7,10 @@
 
 pub mod baseline;
 pub mod entity;
+pub mod own;
 pub mod rooted;
 
 pub use baseline::{FileBaseline, FileDrift, FileFacts, FileReading, FileType, XattrDigest};
 pub use entity::{FileChange, FileChangeBatch, FileChangeKind, WatchedFilesystem};
+pub use own::{AGENT_FILES_COMPONENT, OwnFileChange, OwnFileRole, OwnFiles, own_file_change};
 pub use rooted::{RootMount, RootedPath, root_mount, rooted};

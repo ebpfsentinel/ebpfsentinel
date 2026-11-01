@@ -356,7 +356,10 @@ mod tests {
 
     #[test]
     fn an_unknown_field_is_refused_with_the_fields_that_exist() {
-        let message = Intent::FileChanges.field("dst_port").unwrap_err().to_string();
+        let message = Intent::FileChanges
+            .field("dst_port")
+            .unwrap_err()
+            .to_string();
         assert!(
             message.contains("`file.changes` has no field `dst_port`"),
             "{message}"

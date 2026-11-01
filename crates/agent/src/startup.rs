@@ -4656,6 +4656,17 @@ pub async fn run(
                 );
                 // The rules live with the process table: with the table off
                 // there is no writer to name and no rule set to feed.
+                // The agent's own files are watched whatever the
+                // configuration names, and a change another process makes
+                // to one is an alert.
+                let own = agent_files(config_path, &ebpf_dir, &baseline_path);
+                info!(files = own.len(), "the agent's own files are watched");
+                watcher = watcher.with_own_files(application::file_watch_service::OwnFileGuard {
+                    files: own,
+                    own_pid: std::process::id(),
+                    alerts: alert_tx.clone(),
+                    workloads: workloads.clone(),
+                });
                 if let Some(ref rules) = host_rules_for_files {
                     watcher = watcher.with_rules(application::file_watch_service::FileRuleFeed {
                         rules: Arc::clone(rules),
@@ -5872,6 +5883,81 @@ mod kernel_version_tests {
         assert!(!is_safe_interface_name("eth0; rm -rf /"));
         assert!(!is_safe_interface_name("eth 0"));
     }
+
+    #[test]
+    fn the_agents_files_are_named_by_absolute_path() {
+        use domain::file_watch::OwnFileRole;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let objects = root.join("objects");
+        std::fs::create_dir(&objects).unwrap();
+        std::fs::write(objects.join("tc-ids"), b"o").unwrap();
+        std::fs::create_dir(objects.join("nested")).unwrap();
+        std::fs::write(root.join("agent.yaml"), b"c").unwrap();
+        std::fs::write(root.join("file_baselines.redb"), b"s").unwrap();
+        let files = agent_files(
+            &root.join("objects/../agent.yaml").to_string_lossy(),
+            &objects.to_string_lossy(),
+            &root.join("file_baselines.redb"),
+        );
+        let at = |p: &str| root.join(p).to_string_lossy().into_owned();
+        assert_eq!(
+            files.role(&at("agent.yaml")),
+            Some(OwnFileRole::Configuration)
+        );
+        assert_eq!(
+            files.role(&at("objects/tc-ids")),
+            Some(OwnFileRole::Program)
+        );
+        assert_eq!(files.role(&at("objects/nested")), None);
+        assert_eq!(
+            files.role(&at("file_baselines.redb")),
+            Some(OwnFileRole::BaselineStore)
+        );
+        assert!(
+            files
+                .paths()
+                .any(|p| files.role(p) == Some(OwnFileRole::Binary))
+        );
+        assert_eq!(files.len(), 4);
+    }
+}
+
+/// The agent's own files, each by its absolute path: the executable, the
+/// configuration, every eBPF object in `ebpf_dir` and the baseline store. A
+/// path that cannot be resolved is left out rather than watched under a
+/// name no change will ever carry.
+fn agent_files(
+    config_path: &str,
+    ebpf_dir: &str,
+    baseline_path: &Path,
+) -> domain::file_watch::OwnFiles {
+    use domain::file_watch::OwnFileRole;
+    let absolute = |path: &Path| {
+        std::fs::canonicalize(path)
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+    };
+    let mut files = domain::file_watch::OwnFiles::new();
+    if let Some(exe) = std::env::current_exe().ok().as_deref().and_then(absolute) {
+        files.add(exe, OwnFileRole::Binary);
+    }
+    if let Some(config) = absolute(Path::new(config_path)) {
+        files.add(config, OwnFileRole::Configuration);
+    }
+    if let Ok(entries) = std::fs::read_dir(ebpf_dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_file())
+                && let Some(object) = absolute(&entry.path())
+            {
+                files.add(object, OwnFileRole::Program);
+            }
+        }
+    }
+    if let Some(store) = absolute(baseline_path) {
+        files.add(store, OwnFileRole::BaselineStore);
+    }
+    files
 }
 
 /// Resolve the directory containing compiled eBPF program binaries.

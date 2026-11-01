@@ -16,24 +16,36 @@
 //! Each settled change is named the way its writer sees it, read from the
 //! writer's own root mount, and handed to the host rules with the writer
 //! and its ancestry as the process table holds them.
+//!
+//! The agent's own files are watched whatever the configuration names: the
+//! filesystem holding each is opened, each is read and kept as soon as the
+//! watch is, past the cap on baselines, and a difference another process
+//! leaves on one is an alert rather than a log line. A difference found
+//! when the watch is opened again, after a gap nothing was read in, is one
+//! too; the first opening only learns, since an upgrade replaces the binary
+//! and the objects while the agent is stopped.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
+use domain::alert::entity::Alert;
 use domain::file_watch::{
-    FileBaseline, FileChangeBatch, FileChangeKind, FileDrift, FileFacts, FileReading, RootMount,
-    RootedPath, WatchedFilesystem, rooted,
+    FileBaseline, FileChangeBatch, FileChangeKind, FileDrift, FileFacts, FileReading, OwnFiles,
+    RootMount, RootedPath, WatchedFilesystem, own_file_change, rooted,
 };
 use domain::hostrule::{Intent, SettledChange, file_events};
 use ports::secondary::file_watch_port::{FileBaselineStore, FileWatchSource, ProcessRootReader};
 use ports::secondary::metrics_port::MetricsPort;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::alert_event::AlertEvent;
 use crate::host_rule_service::HostRuleService;
 use crate::process_table_service::ProcessTableService;
+use crate::workload_resolver::WorkloadResolver;
 
 /// How long one reading waits for a first change. Short enough that a
 /// cancelled agent stops within it.
@@ -89,6 +101,17 @@ pub struct FileRuleFeed {
     pub roots: Option<Arc<dyn ProcessRootReader>>,
 }
 
+/// The agent's own files, and where a change another process makes to one
+/// goes.
+pub struct OwnFileGuard {
+    pub files: OwnFiles,
+    /// The agent's pid as the watch reports writers: its own writes are not
+    /// an alert.
+    pub own_pid: u32,
+    pub alerts: mpsc::Sender<AlertEvent>,
+    pub workloads: WorkloadResolver,
+}
+
 /// Opens the watch on the configured filesystems, reads it until cancelled,
 /// and compares every changed path with its baseline.
 pub struct FileWatcher {
@@ -102,6 +125,12 @@ pub struct FileWatcher {
     kept: u64,
     reopen_delay: Duration,
     feed: Option<FileRuleFeed>,
+    own: Option<OwnFileGuard>,
+    /// How many of `paths` the configuration named; the rest hold the
+    /// agent's own files.
+    configured: usize,
+    /// Whether the agent's files were read once already.
+    primed: bool,
 }
 
 impl FileWatcher {
@@ -115,6 +144,7 @@ impl FileWatcher {
     ) -> Self {
         Self {
             source,
+            configured: paths.len(),
             paths,
             metrics,
             baselines,
@@ -123,7 +153,22 @@ impl FileWatcher {
             kept: 0,
             reopen_delay: FILE_WATCH_REOPEN_DELAY,
             feed: None,
+            own: None,
+            primed: false,
         }
+    }
+
+    /// Watch the agent's own files as well, alerting on a change another
+    /// process makes to one.
+    #[must_use]
+    pub fn with_own_files(mut self, guard: OwnFileGuard) -> Self {
+        for dir in guard.files.directories() {
+            if !self.paths.contains(&dir) {
+                self.paths.push(dir);
+            }
+        }
+        self.own = Some(guard);
+        self
     }
 
     /// Hand every settled change to the host rules, named the way its writer
@@ -151,8 +196,9 @@ impl FileWatcher {
                 return false;
             }
         };
-        let watched = marks.iter().filter(|m| m.is_watched()).count();
-        let refused = marks.len() - watched;
+        let named = &marks[..self.configured.min(marks.len())];
+        let watched = named.iter().filter(|m| m.is_watched()).count();
+        let refused = named.len() - watched;
         self.metrics
             .set_file_watch_filesystems(watched as u64, refused as u64);
         // A reopen that changes nothing is not news: the outcome of every
@@ -169,8 +215,115 @@ impl FileWatcher {
                 }
             }
         }
+        let any = marks.iter().any(WatchedFilesystem::is_watched);
         *last = Some(marks);
-        watched > 0
+        any
+    }
+
+    /// Read the agent's own files and keep each, past the cap. The first
+    /// time only learns; a later opening follows a gap in which nothing was
+    /// read, so what differs then is reported.
+    fn prime_own(&mut self) {
+        let Some(guard) = self.own.as_ref() else {
+            return;
+        };
+        let paths: Vec<String> = guard.files.paths().map(ToOwned::to_owned).collect();
+        let mut facts = Vec::with_capacity(paths.len());
+        let mut asked = paths.as_slice();
+        while !asked.is_empty() {
+            match self.source.facts(asked, self.policy.max_hash_bytes) {
+                Ok(read) if !read.is_empty() => {
+                    asked = &asked[read.len().min(asked.len())..];
+                    facts.extend(read);
+                }
+                Ok(_) => break,
+                Err(e) => {
+                    warn!(error = %e, "the agent's own files could not be read");
+                    return;
+                }
+            }
+        }
+        let first = !self.primed;
+        self.primed = true;
+        let unseen = BTreeSet::new();
+        for fact in facts {
+            let kept = match self.baselines.get(&fact.path) {
+                Ok(kept) => kept,
+                Err(e) => {
+                    warn!(path = %fact.path, error = %e, "file baseline could not be read");
+                    continue;
+                }
+            };
+            if let Some(old) = &kept {
+                let drift = old.drift(&fact.reading);
+                if first {
+                    if !drift.is_empty() {
+                        let what: Vec<&str> = drift.iter().map(|d| d.as_str()).collect();
+                        info!(path = %fact.path, drift = ?what, "the agent's file differs from when it last ran");
+                    }
+                } else {
+                    self.guard(&fact.path, &unseen, &drift, 0);
+                }
+            }
+            self.keep_own(&fact, kept.is_some());
+        }
+        self.metrics.set_file_baselines(self.kept);
+    }
+
+    /// Keep or forget the baseline of one of the agent's files.
+    fn keep_own(&mut self, fact: &FileFacts, had: bool) {
+        let path = fact.path.as_str();
+        match &fact.reading {
+            FileReading::Present(now) => match self.baselines.put(path, now) {
+                Ok(()) if !had => self.kept += 1,
+                Ok(()) => {}
+                Err(e) => warn!(path, error = %e, "file baseline could not be kept"),
+            },
+            FileReading::Gone if had => match self.baselines.remove(path) {
+                Ok(true) => self.kept = self.kept.saturating_sub(1),
+                Ok(false) => {}
+                Err(e) => warn!(path, error = %e, "file baseline could not be forgotten"),
+            },
+            FileReading::Gone | FileReading::Unreadable(_) => {}
+        }
+    }
+
+    /// Alert on a difference `writer` left on one of the agent's files.
+    fn guard(
+        &self,
+        path: &str,
+        kinds: &BTreeSet<FileChangeKind>,
+        drift: &[FileDrift],
+        writer: u32,
+    ) {
+        let Some(guard) = self.own.as_ref() else {
+            return;
+        };
+        let Some(role) = guard.files.role(path) else {
+            return;
+        };
+        let Some(change) = own_file_change(path, role, kinds, drift, writer, guard.own_pid) else {
+            return;
+        };
+        warn!(
+            path,
+            writer,
+            role = role.describe(),
+            "another process changed one of the agent's files"
+        );
+        let workload = (writer != 0)
+            .then(|| guard.workloads.by_pid(writer))
+            .flatten();
+        let alert = Alert::from_own_file_change(&change, workload, now_ns());
+        if let Err(e) = guard.alerts.try_send(AlertEvent::System(Box::new(alert))) {
+            warn!(path, error = %e, "alert on one of the agent's files could not be queued");
+        }
+    }
+
+    fn is_own(&self, path: &str) -> bool {
+        self.own
+            .as_ref()
+            .is_some_and(|guard| guard.files.role(path).is_some())
     }
 
     /// Count one reading's changes into the metrics.
@@ -293,10 +446,13 @@ impl FileWatcher {
             }
         };
         self.feed(fact, pending, rooted, kept.as_ref());
+        if let Some(old) = &kept {
+            self.guard(path, &pending.kinds, &old.drift(&fact.reading), pid);
+        }
         let inside = rooted.path.as_deref().unwrap_or(path);
         match (&fact.reading, kept) {
             (FileReading::Present(new), None) => {
-                if self.kept >= self.policy.max_files {
+                if self.kept >= self.policy.max_files && !self.is_own(path) {
                     debug!(path, "file baseline store is full, path not kept");
                     self.metrics.record_file_baseline_refused();
                     return;
@@ -460,6 +616,7 @@ impl FileWatcher {
                     }
                     continue;
                 }
+                self.prime_own();
             }
             // Paths still waiting to be read are not waited on.
             let wait = if self.pending.is_empty() {
@@ -817,6 +974,137 @@ mod tests {
             path: path.into(),
             reading,
         }
+    }
+
+    fn guard(own_pid: u32) -> (OwnFileGuard, mpsc::Receiver<AlertEvent>) {
+        let (alerts, rx) = mpsc::channel(8);
+        let mut files = OwnFiles::new();
+        files.add("/etc/hosts", domain::file_watch::OwnFileRole::Configuration);
+        (
+            OwnFileGuard {
+                files,
+                own_pid,
+                alerts,
+                workloads: WorkloadResolver::new(),
+            },
+            rx,
+        )
+    }
+
+    fn own_alerts(rx: &mut mpsc::Receiver<AlertEvent>) -> Vec<Alert> {
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                AlertEvent::System(alert) => out.push(*alert),
+                _ => panic!("an agent file alert travels as a system alert"),
+            }
+        }
+        out
+    }
+
+    fn own_run(own_pid: u32) -> Vec<Alert> {
+        let cancel = CancellationToken::new();
+        let source = Scripted {
+            opens: vec![Ok(vec![watched("/")])],
+            reads: vec![Ok(written())],
+            facts: vec![
+                Ok(vec![fact(
+                    "/etc/hosts",
+                    FileReading::Present(file('a', 0o644)),
+                )]),
+                Ok(vec![fact(
+                    "/etc/hosts",
+                    FileReading::Present(file('b', 0o644)),
+                )]),
+            ],
+            cancel: cancel.clone(),
+            opened: Arc::new(AtomicU64::new(0)),
+        };
+        let (guard, mut rx) = guard(own_pid);
+        watcher(source, Arc::new(Counted::default()))
+            .with_own_files(guard)
+            .run_blocking(&cancel);
+        own_alerts(&mut rx)
+    }
+
+    #[test]
+    fn another_process_changing_an_agent_file_is_an_alert() {
+        let alerts = own_run(99);
+        assert_eq!(alerts.len(), 1);
+        let alert = &alerts[0];
+        assert_eq!(alert.component, "agent_files");
+        assert_eq!(alert.rule_id.0, "agent-configuration-changed");
+        assert_eq!(alert.tgid, Some(7));
+        assert!(
+            alert
+                .message
+                .contains("/etc/hosts was changed by process 7: content"),
+            "{}",
+            alert.message
+        );
+    }
+
+    #[test]
+    fn the_agent_changing_its_own_file_is_not() {
+        assert!(own_run(7).is_empty());
+    }
+
+    #[test]
+    fn the_first_opening_learns_and_a_later_one_reports_the_gap() {
+        let cancel = CancellationToken::new();
+        let store = Arc::new(Memory::default());
+        store.map().insert("/etc/hosts".into(), file('a', 0o644));
+        let source = Scripted {
+            opens: vec![Ok(vec![watched("/")]), Ok(vec![watched("/")])],
+            reads: vec![
+                Err(DomainError::EngineError("no file watch is open".into())),
+                Ok(FileChangeBatch::default()),
+            ],
+            facts: vec![
+                Ok(vec![fact(
+                    "/etc/hosts",
+                    FileReading::Present(file('b', 0o644)),
+                )]),
+                Ok(vec![fact(
+                    "/etc/hosts",
+                    FileReading::Present(file('c', 0o600)),
+                )]),
+            ],
+            cancel: cancel.clone(),
+            opened: Arc::new(AtomicU64::new(0)),
+        };
+        let (guard, mut rx) = guard(99);
+        // No room for baselines: the agent's own files are kept anyway.
+        watcher_with(source, Arc::new(Counted::default()), Arc::clone(&store), 0)
+            .with_own_files(guard)
+            .run_blocking(&cancel);
+        let alerts = own_alerts(&mut rx);
+        assert_eq!(alerts.len(), 1, "the upgrade-time difference only learns");
+        assert_eq!(alerts[0].tgid, None);
+        assert!(
+            alerts[0]
+                .message
+                .contains("changed by a process the agent cannot name: content, mode"),
+            "{}",
+            alerts[0].message
+        );
+        assert_eq!(store.map().get("/etc/hosts"), Some(&file('c', 0o600)));
+    }
+
+    #[test]
+    fn the_filesystem_of_every_agent_file_is_opened() {
+        let cancel = CancellationToken::new();
+        let source = Scripted {
+            opens: Vec::new(),
+            reads: Vec::new(),
+            facts: Vec::new(),
+            cancel,
+            opened: Arc::new(AtomicU64::new(0)),
+        };
+        let (guard, _rx) = guard(1);
+        let w = watcher(source, Arc::new(Counted::default())).with_own_files(guard);
+        assert_eq!(w.paths, vec!["/", "/var/lib/containerd", "/etc"]);
+        assert_eq!(w.configured, 2);
     }
 
     fn written() -> FileChangeBatch {
