@@ -19,16 +19,18 @@ pub mod apk;
 pub mod dpkg;
 pub mod entity;
 pub mod error;
+pub mod gobuild;
 pub mod rpm;
 pub mod sqlite;
 
 pub use apk::parse_apk_installed;
 pub use dpkg::{DpkgEntry, parse_dpkg_list, parse_dpkg_status};
 pub use entity::{
-    DatabaseOutcome, DatabaseReading, InventorySweep, Package, PackageManager, PackageState,
-    RootInventory, RootScope,
+    DatabaseOutcome, DatabaseReading, GoExecutableReading, GoOutcome, InventorySweep, Package,
+    PackageManager, PackageState, RootInventory, RootScope,
 };
 pub use error::InventoryError;
+pub use gobuild::{GoBuildInfo, GoModule, GoReplacement, parse_go_buildinfo};
 pub use rpm::{parse_rpm_header, read_rpm_sqlite};
 
 /// Where the dpkg status file sits in a root.
@@ -72,6 +74,30 @@ fn reading(
                 reason: err.to_string(),
             },
         },
+    }
+}
+
+/// One running Go executable: the section's bytes parsed, or the reason
+/// they were not handed over.
+#[must_use]
+pub fn go_reading(
+    scope: RootScope,
+    path: String,
+    pids: Vec<u32>,
+    section: Result<&[u8], String>,
+) -> GoExecutableReading {
+    let outcome = match section.map(parse_go_buildinfo) {
+        Ok(Ok(build)) => GoOutcome::Read { build },
+        Ok(Err(err)) => GoOutcome::Unreadable {
+            reason: err.to_string(),
+        },
+        Err(reason) => GoOutcome::Unreadable { reason },
+    };
+    GoExecutableReading {
+        scope,
+        path,
+        pids,
+        outcome,
     }
 }
 

@@ -4620,6 +4620,7 @@ pub async fn run(
             adapters::warden::package_inventory::WardenPackageReader::new(
                 ebpfsentinel_warden::rooted_read::file_roots,
                 ebpfsentinel_warden::rooted_read::read_rooted_file,
+                ebpfsentinel_warden::go_executables::scan,
                 coverage_proc.clone(),
             ),
         );

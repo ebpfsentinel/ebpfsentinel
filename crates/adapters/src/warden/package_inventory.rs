@@ -5,6 +5,10 @@
 //! `(dev, ino, size, mtime)` before it is read, and one whose stamp has not
 //! moved since the last sweep is not read again, so a quiet node costs a
 //! handful of `stat` calls a root.
+//!
+//! The same sweep asks for the build information of every running Go
+//! executable, since a static Go program carries its own module list and no
+//! package database names it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,10 +17,10 @@ use std::sync::Mutex;
 use domain::common::error::DomainError;
 use domain::inventory::{
     DatabaseReading, InventorySweep, PackageManager, RootInventory, apk_reading, dpkg_reading,
-    rpm_sqlite_reading, scope_of, unreadable,
+    go_reading, rpm_sqlite_reading, scope_of, unreadable,
 };
 use ebpfsentinel_warden_client::{
-    FileRoot, ROOTED_CHUNK_MAX, ReconnectingClient, RootedFile, RootedRead,
+    FileRoot, GoExecutableScan, ROOTED_CHUNK_MAX, ReconnectingClient, RootedFile, RootedRead,
 };
 use ports::secondary::package_inventory_port::PackageInventoryReader;
 
@@ -32,6 +36,8 @@ pub const MAX_DATABASE_BYTES: u64 = 256 * 1024 * 1024;
 pub type LocalRoots = fn(&Path) -> Vec<FileRoot>;
 /// The in-process read of a piece of a database inside a root.
 pub type LocalRead = fn(&Path, u32, &RootedFile, u64, u32) -> RootedRead;
+/// The in-process scan of running Go executables, given the procfs to read.
+pub type LocalGo = fn(&Path) -> GoExecutableScan;
 
 enum Source {
     /// A rootless agent cannot follow another process's root, so the warden
@@ -41,6 +47,7 @@ enum Source {
     Local {
         roots: LocalRoots,
         read: LocalRead,
+        go: LocalGo,
         proc_root: PathBuf,
     },
 }
@@ -72,9 +79,14 @@ pub struct WardenPackageReader {
 }
 
 impl WardenPackageReader {
-    /// The warden when the environment names one, else `roots` and `read`
-    /// over `proc_root`.
-    pub fn new(roots: LocalRoots, read: LocalRead, proc_root: impl Into<PathBuf>) -> Self {
+    /// The warden when the environment names one, else `roots`, `read` and
+    /// `go` over `proc_root`.
+    pub fn new(
+        roots: LocalRoots,
+        read: LocalRead,
+        go: LocalGo,
+        proc_root: impl Into<PathBuf>,
+    ) -> Self {
         let warden = std::env::var_os(WARDEN_SOCK_ENV)
             .map(PathBuf::from)
             .filter(|p| !p.as_os_str().is_empty());
@@ -83,6 +95,7 @@ impl WardenPackageReader {
             None => Source::Local {
                 roots,
                 read,
+                go,
                 proc_root: proc_root.into(),
             },
         };
@@ -104,6 +117,21 @@ impl WardenPackageReader {
             Source::Local {
                 roots, proc_root, ..
             } => Ok(roots(proc_root)),
+        }
+    }
+
+    fn go_executables(&self) -> Result<GoExecutableScan, DomainError> {
+        match &self.source {
+            Source::Warden(client) => client
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .go_executables()
+                .map_err(|e| {
+                    DomainError::EngineError(format!(
+                        "warden could not read the running executables: {e}"
+                    ))
+                }),
+            Source::Local { go, proc_root, .. } => Ok(go(proc_root)),
         }
     }
 
@@ -359,9 +387,30 @@ impl PackageInventoryReader for WardenPackageReader {
             .cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = fresh;
+        let scan = self.go_executables()?;
+        let go_executables = scan
+            .executables
+            .into_iter()
+            .map(|exe| {
+                let pid = exe.pids.first().copied().unwrap_or(0);
+                let section = match (&exe.buildinfo, exe.error) {
+                    (Some(bytes), _) => Ok(bytes.as_slice()),
+                    (None, reason) => Err(reason.unwrap_or_else(|| "not handed over".into())),
+                };
+                go_reading(
+                    scope_of(exe.host, &exe.cgroup, pid),
+                    exe.path,
+                    exe.pids,
+                    section,
+                )
+            })
+            .collect();
         Ok(InventorySweep {
             roots: out,
             roots_not_read,
+            go_executables,
+            executables_examined: scan.examined,
+            go_executables_not_read: scan.not_read,
         })
     }
 
@@ -443,11 +492,45 @@ mod tests {
         }
     }
 
+    fn go(_: &Path) -> GoExecutableScan {
+        let fixtures = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../domain/tests/fixtures/inventory/go/goimports.buildinfo"
+        );
+        GoExecutableScan {
+            examined: 3,
+            executables: vec![
+                ebpfsentinel_warden_client::GoExecutable {
+                    dev: 9,
+                    ino: 70,
+                    path: "/usr/bin/goimports".into(),
+                    pids: vec![41, 44],
+                    host: false,
+                    cgroup: format!("0::/system.slice/docker-{}.scope\n", "ab".repeat(32)),
+                    buildinfo: std::fs::read(fixtures).ok(),
+                    error: None,
+                },
+                ebpfsentinel_warden_client::GoExecutable {
+                    dev: 1,
+                    ino: 71,
+                    path: "/usr/local/bin/huge".into(),
+                    pids: vec![7],
+                    host: true,
+                    cgroup: "0::/init.scope\n".into(),
+                    buildinfo: None,
+                    error: Some("past the size read".into()),
+                },
+            ],
+            not_read: 1,
+        }
+    }
+
     fn reader() -> WardenPackageReader {
         WardenPackageReader {
             source: Source::Local {
                 roots,
                 read,
+                go,
                 proc_root: PathBuf::from("/proc"),
             },
             cache: Mutex::new(HashMap::new()),
@@ -483,6 +566,35 @@ mod tests {
         assert_eq!(
             container.packages().next().map(|p| p.name.as_str()),
             Some("musl")
+        );
+    }
+
+    #[test]
+    fn a_running_go_executable_states_its_modules_and_a_refusal_its_reason() {
+        let Ok(sweep) = reader().read() else {
+            panic!("the sweep was taken");
+        };
+        assert_eq!(sweep.executables_examined, 3);
+        assert_eq!(sweep.go_executables_not_read, 1);
+        let [goimports, huge] = sweep.go_executables.as_slice() else {
+            panic!("two Go executables");
+        };
+        assert!(matches!(
+            goimports.scope,
+            domain::inventory::RootScope::Container { .. }
+        ));
+        assert_eq!(goimports.pids, [41, 44]);
+        let domain::inventory::GoOutcome::Read { build } = &goimports.outcome else {
+            panic!("read");
+        };
+        assert_eq!(build.go_version, "go1.26.4");
+        assert_eq!(build.modules().count(), 4);
+        assert_eq!(huge.scope, domain::inventory::RootScope::Host);
+        assert_eq!(
+            huge.outcome,
+            domain::inventory::GoOutcome::Unreadable {
+                reason: "past the size read".into()
+            }
         );
     }
 

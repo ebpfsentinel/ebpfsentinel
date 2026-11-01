@@ -23,7 +23,7 @@ use crate::fim_watch::FimWatch;
 use crate::host_ops::HostOps;
 use crate::pcap_slots::{PcapSlot, PcapSlots};
 use crate::{
-    bpf_inventory, cgroup_ops, delegate_over_fd, dlp_scan, exe_read, hidden_ports,
+    bpf_inventory, cgroup_ops, delegate_over_fd, dlp_scan, exe_read, go_executables, hidden_ports,
     hidden_processes, net_ops, netns_tcx_ops, packet_sockets, recv_fd, rooted_read, send_msg_fds,
     uprobe_ops,
 };
@@ -673,6 +673,9 @@ fn dispatch(cmd: &Command, host: &dyn HostOps, proc_root: &Path) -> Response {
             len,
         } => Response::RootedRead {
             read: rooted_read::read_rooted_file(proc_root, *pid, file, *offset, *len),
+        },
+        Command::GoExecutables => Response::GoExecutables {
+            scan: go_executables::scan(proc_root),
         },
         Command::NetworkPrograms => match bpf_inventory::scan(proc_root) {
             Ok(programs) => Response::NetworkPrograms { programs },

@@ -8160,7 +8160,7 @@
         "operationId": "get_packages",
         "responses": {
           "200": {
-            "description": "The packages the dpkg, rpm and Alpine databases list in every root, with the reason a database could not be read",
+            "description": "The packages the dpkg, rpm and Alpine databases list in every root, and the modules every running Go executable states, with the reason a database or an executable could not be read",
             "content": {
               "application/json": {
                 "schema": {
@@ -12702,6 +12702,104 @@
           }
         }
       },
+      "GoExecutableBody": {
+        "type": "object",
+        "description": "One running Go executable and the modules it states.",
+        "required": [
+          "kind",
+          "path",
+          "pids",
+          "modules"
+        ],
+        "properties": {
+          "container_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "go_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The toolchain it was built with."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The root of the lowest process running it: `host`, `container` or\n`other`."
+          },
+          "main_package": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The import path of its main package."
+          },
+          "modules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GoModuleBody"
+            },
+            "description": "The main module first, then every dependency."
+          },
+          "path": {
+            "type": "string",
+            "description": "Its path inside that root."
+          },
+          "pids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Processes running it, lowest first, at most sixteen."
+          },
+          "runtime": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unreadable": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why its build information could not be read. Its modules are then\nempty."
+          }
+        }
+      },
+      "GoModuleBody": {
+        "type": "object",
+        "description": "One module a Go executable was linked from.",
+        "required": [
+          "path",
+          "version",
+          "main"
+        ],
+        "properties": {
+          "main": {
+            "type": "boolean",
+            "description": "Whether it is the module the main package belongs to."
+          },
+          "path": {
+            "type": "string"
+          },
+          "replaced_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What a `replace` directive put in its place, `path version`."
+          },
+          "version": {
+            "type": "string",
+            "description": "`(devel)` for a module built from a working tree."
+          }
+        }
+      },
       "GuestEntry": {
         "type": "object",
         "description": "One guest device on this host.",
@@ -15752,9 +15850,31 @@
           "reading",
           "scanned_at_ns",
           "roots_not_read",
-          "roots"
+          "roots",
+          "executables_examined",
+          "go_executables_not_read",
+          "go_executables"
         ],
         "properties": {
+          "executables_examined": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Distinct running executables opened to look for Go build\ninformation, Go or not.",
+            "minimum": 0
+          },
+          "go_executables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GoExecutableBody"
+            },
+            "description": "Every running Go executable, once per file."
+          },
+          "go_executables_not_read": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Go executables found past what one sweep carries.",
+            "minimum": 0
+          },
           "last_error": {
             "type": [
               "string",

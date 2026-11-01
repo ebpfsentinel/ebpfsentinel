@@ -177,6 +177,27 @@ _root_of() {
     }
 }
 
+@test "a running Go program states the modules it was built from" {
+    local body pid exe entry
+    pid="$(pgrep -xo containerd || pgrep -xo dockerd || true)"
+    [ -n "$pid" ] || soft_skip "no containerd or dockerd runs on this host"
+    exe="$(readlink "/proc/${pid}/exe")"
+    body="$(_wait_read 60)"
+    [ "$(echo "$body" | jq '.executables_examined')" -gt 1 ]
+    entry="$(echo "$body" | jq -c --arg exe "$exe" --argjson pid "$pid" \
+        '[.go_executables[] | select(.path == $exe and (.pids | index($pid)))][0]')"
+    [ "$entry" != "null" ] || {
+        echo "${exe} (pid ${pid}) not listed: $(echo "$body" | jq -c '[.go_executables[].path]')" >&2
+        return 1
+    }
+    [ "$(echo "$entry" | jq -r '.kind')" = "host" ]
+    echo "$entry" | jq -e '.go_version | startswith("go1.")'
+    echo "$entry" | jq -e '[.modules[] | select(.path | startswith("github.com/"))] | length > 0'
+    # bash is no Go program, and running is what it takes to be listed.
+    [ "$(echo "$body" | jq --arg bash "$(readlink -f "$(command -v bash)")" \
+        '[.go_executables[] | select(.path == $bash)] | length')" -eq 0 ]
+}
+
 @test "no field names a vulnerability, a severity or a score" {
     local body
     body="$(_wait_read 60)"
@@ -192,4 +213,9 @@ _root_of() {
     echo "$out" | grep -qE ' +apk +musl +1\.2\.5-r10 '
     out="$("$AGENT_BIN" surface --host "$AGENT_HOST" --port "$AGENT_HTTP_PORT" packages --output json)"
     [ "$(echo "$out" | jq '.roots | length')" -eq "$(echo "$body" | jq '.roots | length')" ]
+    if [ "$(echo "$body" | jq '[.go_executables[].modules[]] | length')" -gt 0 ]; then
+        out="$("$AGENT_BIN" surface --host "$AGENT_HOST" --port "$AGENT_HTTP_PORT" packages 2>&1)"
+        echo "$out" | grep -qE 'running executable\(s\) examined'
+        echo "$out" | grep -qE '^host +/[^ ]+ +go1\.[0-9]+'
+    fi
 }

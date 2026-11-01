@@ -126,7 +126,7 @@ mod tests {
                 databases: Vec::new(),
                 error: None,
             }],
-            roots_not_read: 0,
+            ..InventorySweep::default()
         }
     }
 

@@ -30,9 +30,10 @@ use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame,
 // build request values without taking a direct dependency on the protocol crate.
 pub use ebpfsentinel_warden_proto::{
     BindProbe, ConntrackTuple, DlpTarget, ExecutableIdentity, FileRoot, FimEvent, FimFacts,
-    FimFile, FimFileType, FimMark, FimReading, FimXattr, HeldBpfObjects, HiddenProcessReading,
-    ListedPort, NamespacePortReading, NetworkProgram, PacketSocket, PidObservation,
-    ROOTED_CHUNK_MAX, RootedFile, RootedRead, RouteSpec, TaskIdentity,
+    FimFile, FimFileType, FimMark, FimReading, FimXattr, GoExecutable, GoExecutableScan,
+    HeldBpfObjects, HiddenProcessReading, ListedPort, NamespacePortReading, NetworkProgram,
+    PacketSocket, PidObservation, ROOTED_CHUNK_MAX, RootedFile, RootedRead, RouteSpec,
+    TaskIdentity,
 };
 
 /// How long one warden call may take before the client gives up on it.
@@ -87,6 +88,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::HiddenProcesses { .. } => "HiddenProcesses",
         Command::FileRoots => "FileRoots",
         Command::ReadRootedFile { .. } => "ReadRootedFile",
+        Command::GoExecutables => "GoExecutables",
     }
 }
 
@@ -304,6 +306,15 @@ impl WardenClient {
         })? {
             Response::RootedRead { read } => Ok(read),
             other => Err(unexpected("ReadRootedFile", &other)),
+        }
+    }
+
+    /// Hand back the build information section of every running Go
+    /// executable.
+    pub fn go_executables(&mut self) -> io::Result<GoExecutableScan> {
+        match self.call(&Command::GoExecutables)? {
+            Response::GoExecutables { scan } => Ok(scan),
+            other => Err(unexpected("GoExecutables", &other)),
         }
     }
 
@@ -627,6 +638,13 @@ impl ReconnectingClient {
         len: u32,
     ) -> io::Result<RootedRead> {
         self.with_retry(|c| c.read_rooted_file(pid, file.clone(), offset, len))
+    }
+
+    /// Read the build information of every running Go executable through
+    /// the warden, reconnecting if it bounced. A read, so replaying it is
+    /// harmless.
+    pub fn go_executables(&mut self) -> io::Result<GoExecutableScan> {
+        self.with_retry(WardenClient::go_executables)
     }
 
     /// Read one TCX hook's program ids in run order, reconnecting if the

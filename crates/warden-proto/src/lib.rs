@@ -490,6 +490,49 @@ pub struct FileRoot {
     pub cgroup: String,
 }
 
+/// The most bytes of one `.go.buildinfo` section handed back.
+pub const GO_BUILDINFO_MAX: usize = 1024 * 1024;
+
+/// The most section bytes one [`Response::GoExecutables`] carries in all,
+/// well inside a frame.
+pub const GO_SCAN_BYTES_MAX: usize = 12 * 1024 * 1024;
+
+/// The most pids named per executable.
+pub const GO_PIDS_MAX: usize = 16;
+
+/// One running executable carrying a Go build information section.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoExecutable {
+    /// `st_dev` and `st_ino` of the executable, the identity it is
+    /// deduplicated by.
+    pub dev: u64,
+    pub ino: u64,
+    /// What `/proc/<pid>/exe` names, inside the root of the process.
+    pub path: String,
+    /// The pids running it, lowest first, at most [`GO_PIDS_MAX`].
+    pub pids: Vec<u32>,
+    /// Whether the lowest of them runs in pid 1's root.
+    pub host: bool,
+    /// `/proc/<pid>/cgroup` of the lowest, for the agent to name the
+    /// container by.
+    pub cgroup: String,
+    /// The section's bytes, at most [`GO_BUILDINFO_MAX`]; `None` when it
+    /// could not be read, with `error` saying why.
+    pub buildinfo: Option<Vec<u8>>,
+    pub error: Option<String>,
+}
+
+/// Every running Go executable found in one pass over `/proc`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoExecutableScan {
+    /// Distinct executables opened, Go or not.
+    pub examined: u32,
+    /// Those carrying a `.go.buildinfo` section.
+    pub executables: Vec<GoExecutable>,
+    /// Go executables found past [`GO_SCAN_BYTES_MAX`], left out.
+    pub not_read: u32,
+}
+
 /// A request from the agent to the warden. Every variant is one kernel operation
 /// the rootless agent cannot perform itself; the warden validates each against an
 /// allowlist before acting, so a compromised agent cannot turn the warden into an
@@ -710,6 +753,11 @@ pub enum Command {
         /// Capped by [`ROOTED_CHUNK_MAX`].
         len: u32,
     },
+    /// Open the executable of every process once per distinct inode and
+    /// hand back the `.go.buildinfo` section of those that carry one,
+    /// answered by [`Response::GoExecutables`]. Read-only: an executable's
+    /// ELF headers and one section, nothing from any process's memory.
+    GoExecutables,
 }
 
 /// A thread group as one pid namespace numbers it.
@@ -849,6 +897,8 @@ pub enum Response {
     FileRoots { roots: Vec<FileRoot> },
     /// What was read, answering [`Command::ReadRootedFile`].
     RootedRead { read: RootedRead },
+    /// The Go executables found, answering [`Command::GoExecutables`].
+    GoExecutables { scan: GoExecutableScan },
 }
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
@@ -882,10 +932,10 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BindProbe, Command, ConntrackTuple, DlpTarget, ExecutableIdentity, FileRoot,
-        HiddenProcessReading, ListedPort, MAX_FRAME_LEN, NamespacePortReading, NetworkProgram,
-        PacketSocket, PidObservation, ROOTED_CHUNK_MAX, Response, RootedFile, RootedRead,
-        RouteSpec, TaskIdentity, read_frame, valid_dpkg_list_name, write_frame,
+        BindProbe, Command, ConntrackTuple, DlpTarget, ExecutableIdentity, FileRoot, GoExecutable,
+        GoExecutableScan, HiddenProcessReading, ListedPort, MAX_FRAME_LEN, NamespacePortReading,
+        NetworkProgram, PacketSocket, PidObservation, ROOTED_CHUNK_MAX, Response, RootedFile,
+        RootedRead, RouteSpec, TaskIdentity, read_frame, valid_dpkg_list_name, write_frame,
     };
     use std::io::Cursor;
 
@@ -963,6 +1013,7 @@ mod tests {
                 offset: 0,
                 len: ROOTED_CHUNK_MAX,
             },
+            Command::GoExecutables,
         ]
     }
 
@@ -1046,6 +1097,7 @@ mod tests {
         ]
         .into_iter()
         .chain(hidden_responses())
+        .chain(inventory_responses())
         .collect()
     }
 
@@ -1114,6 +1166,12 @@ mod tests {
                     ..HiddenProcessReading::default()
                 },
             },
+        ]
+    }
+
+    /// The answers of the inventory reads.
+    fn inventory_responses() -> Vec<Response> {
+        vec![
             Response::FileRoots {
                 roots: vec![FileRoot {
                     pid: 1,
@@ -1140,6 +1198,22 @@ mod tests {
             },
             Response::RootedRead {
                 read: RootedRead::Absent,
+            },
+            Response::GoExecutables {
+                scan: GoExecutableScan {
+                    examined: 40,
+                    executables: vec![GoExecutable {
+                        dev: 48,
+                        ino: 917_963,
+                        path: "/usr/local/bin/coredns".into(),
+                        pids: vec![812, 815],
+                        host: false,
+                        cgroup: "0::/kubepods.slice\n".into(),
+                        buildinfo: Some(b"\xff Go buildinf:".to_vec()),
+                        error: None,
+                    }],
+                    not_read: 0,
+                },
             },
         ]
     }

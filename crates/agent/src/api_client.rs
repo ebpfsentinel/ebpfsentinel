@@ -2238,6 +2238,42 @@ pub struct PackagesResponse {
     pub roots_not_read: u32,
     #[serde(default)]
     pub roots: Vec<PackageRootEntry>,
+    #[serde(default)]
+    pub executables_examined: u32,
+    #[serde(default)]
+    pub go_executables_not_read: u32,
+    #[serde(default)]
+    pub go_executables: Vec<GoExecutableEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct GoModuleEntry {
+    pub path: String,
+    pub version: String,
+    #[serde(default)]
+    pub main: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_by: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct GoExecutableEntry {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    pub path: String,
+    #[serde(default)]
+    pub pids: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreadable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub go_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_package: Option<String>,
+    #[serde(default)]
+    pub modules: Vec<GoModuleEntry>,
 }
 
 #[derive(Deserialize, Serialize)]

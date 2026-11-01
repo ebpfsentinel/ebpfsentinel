@@ -4951,11 +4951,75 @@ pub async fn cmd_ebpf_hidden_processes(client: &ApiClient, output: OutputFormat)
 
 /// The short name of a root: the host, a container by the first twelve
 /// characters of its id, or the pid whose root no runtime names.
-fn root_label(root: &crate::api_client::PackageRootEntry) -> String {
-    match (root.kind.as_str(), root.container_id.as_deref()) {
+fn root_label(kind: &str, container_id: Option<&str>, pid: u32) -> String {
+    match (kind, container_id) {
         ("host", _) => "host".to_string(),
         ("container", Some(id)) => id.chars().take(12).collect(),
-        _ => format!("pid {}", root.pid),
+        _ => format!("pid {pid}"),
+    }
+}
+
+/// Say how many running executables were examined and which Go ones could
+/// not be read.
+fn print_go_notes(resp: &crate::api_client::PackagesResponse) {
+    println!(
+        "{} running executable(s) examined, {} carry Go build information.",
+        resp.executables_examined,
+        resp.go_executables.len()
+    );
+    if resp.go_executables_not_read > 0 {
+        println!(
+            "{} more Go executable(s) were not read.",
+            resp.go_executables_not_read
+        );
+    }
+    for exe in &resp.go_executables {
+        if let Some(reason) = &exe.unreadable {
+            println!(
+                "{}: {} not read: {reason}",
+                root_label(
+                    &exe.kind,
+                    exe.container_id.as_deref(),
+                    exe.pids.first().copied().unwrap_or(0)
+                ),
+                exe.path
+            );
+        }
+    }
+}
+
+/// Print one row per module of every running Go executable.
+fn print_go_modules(resp: &crate::api_client::PackagesResponse) {
+    let mut modules = Table::new(&[
+        ("ROOT", Align::Left),
+        ("EXECUTABLE", Align::Left),
+        ("GO", Align::Left),
+        ("MODULE", Align::Left),
+        ("VERSION", Align::Left),
+        ("REPLACED BY", Align::Left),
+    ]);
+    let mut module_rows = 0usize;
+    for exe in &resp.go_executables {
+        let label = root_label(
+            &exe.kind,
+            exe.container_id.as_deref(),
+            exe.pids.first().copied().unwrap_or(0),
+        );
+        for m in &exe.modules {
+            module_rows += 1;
+            modules.row(cells![
+                label,
+                exe.path,
+                exe.go_version.as_deref().unwrap_or("-"),
+                m.path,
+                m.version,
+                m.replaced_by.as_deref().unwrap_or("-")
+            ]);
+        }
+    }
+    if module_rows > 0 {
+        println!();
+        modules.print();
     }
 }
 
@@ -4988,8 +5052,9 @@ pub async fn cmd_surface_packages(client: &ApiClient, output: OutputFormat) -> R
     if resp.roots_not_read > 0 {
         println!("{} more root(s) were not read.", resp.roots_not_read);
     }
+    print_go_notes(&resp);
     for root in &resp.roots {
-        let label = root_label(root);
+        let label = root_label(&root.kind, root.container_id.as_deref(), root.pid);
         if let Some(error) = &root.error {
             println!("{label}: could not be read: {error}");
         }
@@ -5013,7 +5078,7 @@ pub async fn cmd_surface_packages(client: &ApiClient, output: OutputFormat) -> R
     ]);
     let mut rows = 0usize;
     for root in &resp.roots {
-        let label = root_label(root);
+        let label = root_label(&root.kind, root.container_id.as_deref(), root.pid);
         for db in &root.databases {
             for p in &db.packages {
                 rows += 1;
@@ -5031,9 +5096,10 @@ pub async fn cmd_surface_packages(client: &ApiClient, output: OutputFormat) -> R
     }
     if rows == 0 {
         println!("No package database was found in any root.");
-        return Ok(());
+    } else {
+        table.print();
     }
-    table.print();
+    print_go_modules(&resp);
     Ok(())
 }
 

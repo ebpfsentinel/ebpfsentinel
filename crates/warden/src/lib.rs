@@ -48,6 +48,7 @@ pub mod dlp_scan;
 pub mod exe_read;
 pub mod file_facts;
 pub mod fim_watch;
+pub mod go_executables;
 pub mod hidden_ports;
 pub mod hidden_processes;
 pub mod host_ops;

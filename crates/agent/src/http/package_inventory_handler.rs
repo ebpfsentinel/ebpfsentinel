@@ -3,7 +3,8 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State;
 use domain::inventory::{
-    DatabaseOutcome, DatabaseReading, Package, PackageState, RootInventory, RootScope,
+    DatabaseOutcome, DatabaseReading, GoExecutableReading, GoModule, GoOutcome, Package,
+    PackageState, RootInventory, RootScope,
 };
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -62,6 +63,47 @@ pub struct PackageRootBody {
     pub databases: Vec<PackageDatabaseBody>,
 }
 
+/// One module a Go executable was linked from.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GoModuleBody {
+    pub path: String,
+    /// `(devel)` for a module built from a working tree.
+    pub version: String,
+    /// Whether it is the module the main package belongs to.
+    pub main: bool,
+    /// What a `replace` directive put in its place, `path version`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaced_by: Option<String>,
+}
+
+/// One running Go executable and the modules it states.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GoExecutableBody {
+    /// The root of the lowest process running it: `host`, `container` or
+    /// `other`.
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    /// Its path inside that root.
+    pub path: String,
+    /// Processes running it, lowest first, at most sixteen.
+    pub pids: Vec<u32>,
+    /// Why its build information could not be read. Its modules are then
+    /// empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreadable: Option<String>,
+    /// The toolchain it was built with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub go_version: Option<String>,
+    /// The import path of its main package.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub main_package: Option<String>,
+    /// The main module first, then every dependency.
+    pub modules: Vec<GoModuleBody>,
+}
+
 /// What the package managers say is installed, root by root.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PackagesResponse {
@@ -80,6 +122,13 @@ pub struct PackagesResponse {
     /// Roots found beyond the number one sweep reads.
     pub roots_not_read: u32,
     pub roots: Vec<PackageRootBody>,
+    /// Distinct running executables opened to look for Go build
+    /// information, Go or not.
+    pub executables_examined: u32,
+    /// Go executables found past what one sweep carries.
+    pub go_executables_not_read: u32,
+    /// Every running Go executable, once per file.
+    pub go_executables: Vec<GoExecutableBody>,
 }
 
 fn package(p: &Package) -> PackageBody {
@@ -107,8 +156,9 @@ fn database(db: &DatabaseReading) -> PackageDatabaseBody {
     }
 }
 
-fn root(r: &RootInventory) -> PackageRootBody {
-    let (kind, container_id, runtime) = match &r.scope {
+/// A root's kind, container id and runtime.
+fn scope(scope: &RootScope) -> (&'static str, Option<String>, Option<String>) {
+    match scope {
         RootScope::Host => ("host", None, None),
         RootScope::Container {
             container_id,
@@ -119,7 +169,52 @@ fn root(r: &RootInventory) -> PackageRootBody {
             Some(runtime.to_string()),
         ),
         RootScope::Other => ("other", None, None),
+    }
+}
+
+fn module(m: &GoModule, main: bool) -> GoModuleBody {
+    GoModuleBody {
+        path: m.path.clone(),
+        version: m.version.clone(),
+        main,
+        replaced_by: m
+            .replaced_by
+            .as_ref()
+            .map(|r| format!("{} {}", r.path, r.version)),
+    }
+}
+
+fn go_executable(e: &GoExecutableReading) -> GoExecutableBody {
+    let (kind, container_id, runtime) = scope(&e.scope);
+    let mut body = GoExecutableBody {
+        kind,
+        container_id,
+        runtime,
+        path: e.path.clone(),
+        pids: e.pids.clone(),
+        unreadable: None,
+        go_version: None,
+        main_package: None,
+        modules: Vec::new(),
     };
+    match &e.outcome {
+        GoOutcome::Read { build } => {
+            body.go_version = Some(build.go_version.clone());
+            body.main_package.clone_from(&build.main_package);
+            body.modules = build
+                .main_module
+                .iter()
+                .map(|m| module(m, true))
+                .chain(build.dependencies.iter().map(|m| module(m, false)))
+                .collect();
+        }
+        GoOutcome::Unreadable { reason } => body.unreadable = Some(reason.clone()),
+    }
+    body
+}
+
+fn root(r: &RootInventory) -> PackageRootBody {
+    let (kind, container_id, runtime) = scope(&r.scope);
     PackageRootBody {
         kind,
         container_id,
@@ -135,7 +230,7 @@ fn root(r: &RootInventory) -> PackageRootBody {
 #[utoipa::path(
     get, path = "/api/v1/surface/packages",
     tag = "Operations",
-    responses((status = 200, description = "The packages the dpkg, rpm and Alpine databases list in every root, with the reason a database could not be read", body = PackagesResponse),
+    responses((status = 200, description = "The packages the dpkg, rpm and Alpine databases list in every root, and the modules every running Go executable states, with the reason a database or an executable could not be read", body = PackagesResponse),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -153,6 +248,9 @@ pub async fn get_packages(State(state): State<Arc<AppState>>) -> Json<PackagesRe
             last_error: None,
             roots_not_read: 0,
             roots: Vec::new(),
+            executables_examined: 0,
+            go_executables_not_read: 0,
+            go_executables: Vec::new(),
         });
     };
     let report = service.report();
@@ -163,6 +261,14 @@ pub async fn get_packages(State(state): State<Arc<AppState>>) -> Json<PackagesRe
         last_error: report.error.clone(),
         roots_not_read: report.sweep.roots_not_read,
         roots: report.sweep.roots.iter().map(root).collect(),
+        executables_examined: report.sweep.executables_examined,
+        go_executables_not_read: report.sweep.go_executables_not_read,
+        go_executables: report
+            .sweep
+            .go_executables
+            .iter()
+            .map(go_executable)
+            .collect(),
     })
 }
 
@@ -220,6 +326,32 @@ mod tests {
         );
     }
 
+    fn go_sample() -> GoExecutableReading {
+        domain::inventory::go_reading(
+            RootScope::Other,
+            "/usr/bin/app".into(),
+            vec![7],
+            Ok(&std::fs::read(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../domain/tests/fixtures/inventory/go/replaced.buildinfo"
+            ))
+            .unwrap_or_default()),
+        )
+    }
+
+    #[test]
+    fn a_go_executable_lists_its_main_module_first_and_names_a_replacement() {
+        let b = go_executable(&go_sample());
+        assert_eq!(b.kind, "other");
+        assert_eq!(b.go_version.as_deref(), Some("go1.27.1"));
+        assert_eq!(b.main_package.as_deref(), Some("example.com/app"));
+        assert_eq!(b.modules.len(), 2);
+        assert!(b.modules[0].main);
+        assert_eq!(b.modules[1].path, "example.com/lib");
+        assert_eq!(b.modules[1].replaced_by.as_deref(), Some("../lib (devel)"));
+        assert!(b.unreadable.is_none());
+    }
+
     #[test]
     fn no_field_names_a_vulnerability_a_severity_or_a_score() {
         let json = serde_json::to_string(&PackagesResponse {
@@ -229,6 +361,9 @@ mod tests {
             last_error: None,
             roots_not_read: 0,
             roots: vec![root(&sample())],
+            executables_examined: 1,
+            go_executables_not_read: 0,
+            go_executables: vec![go_executable(&go_sample())],
         })
         .unwrap_or_default()
         .to_lowercase();

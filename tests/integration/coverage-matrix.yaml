@@ -694,7 +694,7 @@ coverage:
     topology: none
     kernel_min: "6.12"
     profile: nightly
-    notes: "What is installed, root by root, through /api/v1/surface/packages: the CLI's table and JSON agree with the route"
+    notes: "What is installed, root by root, through /api/v1/surface/packages, and the modules a running Go program (containerd or dockerd) states from its own build information: the CLI's tables and JSON agree with the route"
 
   - kind: cli_subcommand
     feature: processes

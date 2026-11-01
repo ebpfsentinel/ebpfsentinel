@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::container::entity::ContainerRuntime;
 
+use super::gobuild::GoBuildInfo;
+
 /// The package manager whose database a package was read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -114,6 +116,32 @@ impl RootInventory {
     }
 }
 
+/// What reading one Go executable's build information gave.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "lowercase")]
+pub enum GoOutcome {
+    Read {
+        build: GoBuildInfo,
+    },
+    /// It carries the section and the section could not be read, and why.
+    Unreadable {
+        reason: String,
+    },
+}
+
+/// One running Go executable and the modules it was linked from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoExecutableReading {
+    /// The root of the lowest process running it.
+    pub scope: RootScope,
+    /// Its path inside that root.
+    pub path: String,
+    /// Processes running it, lowest first, at most sixteen.
+    pub pids: Vec<u32>,
+    #[serde(flatten)]
+    pub outcome: GoOutcome,
+}
+
 /// Every root read in one sweep.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InventorySweep {
@@ -121,4 +149,11 @@ pub struct InventorySweep {
     pub roots: Vec<RootInventory>,
     /// Roots found beyond the number one sweep reads, left for none.
     pub roots_not_read: u32,
+    /// Every running executable carrying Go build information, once per
+    /// file however many processes run it.
+    pub go_executables: Vec<GoExecutableReading>,
+    /// Distinct running executables opened to look for it, Go or not.
+    pub executables_examined: u32,
+    /// Go executables found past what one sweep carries, left for none.
+    pub go_executables_not_read: u32,
 }

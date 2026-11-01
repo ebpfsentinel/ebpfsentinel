@@ -398,6 +398,8 @@ use super::zone_handler;
         package_inventory_handler::PackageRootBody,
         package_inventory_handler::PackageDatabaseBody,
         package_inventory_handler::PackageBody,
+        package_inventory_handler::GoExecutableBody,
+        package_inventory_handler::GoModuleBody,
         hidden_port_handler::UnreachableNamespaceBody,
         host_rule_handler::HostIntentsResponse,
         host_rule_handler::HostRulesResponse,
