@@ -190,6 +190,7 @@ fn to_baseline(file: FimFile) -> FileBaseline {
         sha256: file.sha256.map(|d| hex(&d)),
         hash_unread: file.hash_unread,
         entropy_millibits: file.entropy_millibits,
+        head: file.head,
         xattrs: file
             .xattrs
             .into_iter()
@@ -322,6 +323,7 @@ mod tests {
                         sha256: Some([0xab; 32]),
                         hash_unread: None,
                         entropy_millibits: None,
+                        head: None,
                         xattrs: vec![FimXattr {
                             name: "security.ima".into(),
                             sha256: [0x01; 32],

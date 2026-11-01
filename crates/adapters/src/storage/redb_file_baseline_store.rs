@@ -184,6 +184,7 @@ mod tests {
             sha256: None,
             hash_unread: Some("permission denied".into()),
             entropy_millibits: None,
+            head: None,
             xattrs: Vec::new(),
             xattrs_unread: None,
         }

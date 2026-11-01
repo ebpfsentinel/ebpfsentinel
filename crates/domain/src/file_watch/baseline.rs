@@ -50,6 +50,11 @@ pub struct FileBaseline {
     /// content was not read, and in a baseline kept before it was measured.
     #[serde(default)]
     pub entropy_millibits: Option<u16>,
+    /// The first four bytes of a regular file's content as this reading
+    /// found them, to set against what its extension names. Carried with the
+    /// reading and never stored.
+    #[serde(skip)]
+    pub head: Option<[u8; 4]>,
     /// Extended attributes, sorted by name.
     pub xattrs: Vec<XattrDigest>,
     /// Why the extended attributes could not be listed.
@@ -182,6 +187,7 @@ mod tests {
             sha256: Some("a".repeat(64)),
             hash_unread: None,
             entropy_millibits: None,
+            head: None,
             xattrs: vec![XattrDigest {
                 name: "security.selinux".into(),
                 sha256: "b".repeat(64),

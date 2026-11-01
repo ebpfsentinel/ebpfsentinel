@@ -261,6 +261,7 @@ mod tests {
             sha256: Some("a".repeat(64)),
             hash_unread: None,
             entropy_millibits: None,
+            head: None,
             xattrs: vec![XattrDigest {
                 name: "security.selinux".into(),
                 sha256: "b".repeat(64),

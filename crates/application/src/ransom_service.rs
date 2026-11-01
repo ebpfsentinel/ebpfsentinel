@@ -15,8 +15,8 @@ use domain::hostrule::HostSources;
 use domain::process::engine::Lineage;
 use domain::process::entity::ProcessEntry;
 use domain::ransom::{
-    DistinctPaths, RansomEngine, RansomSignal, RansomVerdict, SignalKind, actor_of, entropy_rose,
-    unavailable,
+    Actor, DistinctPaths, RansomEngine, RansomSignal, RansomVerdict, SignalKind, actor_of,
+    entropy_rose, header_mismatch, unavailable,
 };
 use domain::workload::entity::{Workload, WorkloadSource};
 use tokio::sync::mpsc;
@@ -30,7 +30,11 @@ pub type HostSourcesReader = Arc<dyn Fn() -> HostSources + Send + Sync>;
 /// The signals this agent produces today. A signal missing here is named in
 /// every verdict as not read, so a verdict never reads as the whole engine
 /// when part of it is absent.
-const READ: &[SignalKind] = &[SignalKind::DistinctRewrites, SignalKind::EntropyRise];
+const READ: &[SignalKind] = &[
+    SignalKind::DistinctRewrites,
+    SignalKind::EntropyRise,
+    SignalKind::HeaderMismatch,
+];
 
 /// Whether a settled change rewrote the file's content or put a file in its
 /// place, which is what an encryption run does to every file it touches.
@@ -43,19 +47,30 @@ fn rewrites(kinds: impl IntoIterator<Item = FileChangeKind>) -> bool {
     })
 }
 
-/// One settled change to a file: its path, and its sampled entropy before
-/// and after where both readings measured one.
+/// One settled change to a file: its path, its sampled entropy before and
+/// after where both readings measured one, and its first four bytes now.
 #[derive(Debug, Clone, Copy)]
 pub struct FileRewrite<'a> {
     pub path: &'a str,
     pub entropy_before: Option<u16>,
     pub entropy_now: Option<u16>,
+    pub head: Option<[u8; 4]>,
+}
+
+/// One change as every counter records it.
+struct Held<'a> {
+    actor: &'a Actor,
+    writer: &'a ProcessEntry,
+    lineage: &'a Lineage,
+    path: &'a str,
+    at_ns: u64,
 }
 
 pub struct RansomService {
     engine: Mutex<RansomEngine>,
     rewrites: Mutex<DistinctPaths>,
     entropy_rises: Mutex<DistinctPaths>,
+    header_mismatches: Mutex<DistinctPaths>,
     sources: HostSourcesReader,
     alerts: mpsc::Sender<AlertEvent>,
 }
@@ -67,6 +82,7 @@ impl RansomService {
             engine: Mutex::new(RansomEngine::default()),
             rewrites: Mutex::new(DistinctPaths::rewrites()),
             entropy_rises: Mutex::new(DistinctPaths::entropy_rises()),
+            header_mismatches: Mutex::new(DistinctPaths::header_mismatches()),
             sources,
             alerts,
         }
@@ -86,24 +102,31 @@ impl RansomService {
             return;
         }
         let actor = actor_of(writer, lineage);
-        let rewritten = self
-            .rewrites
+        let held = Held {
+            actor: &actor,
+            writer,
+            lineage,
+            path: change.path,
+            at_ns,
+        };
+        self.count(&self.rewrites, &held);
+        if entropy_rose(change.entropy_before, change.entropy_now) {
+            self.count(&self.entropy_rises, &held);
+        }
+        if header_mismatch(change.path, change.head) {
+            self.count(&self.header_mismatches, &held);
+        }
+    }
+
+    /// Count the path toward its actor on one counter, and observe the
+    /// signal that counter raises.
+    fn count(&self, counter: &Mutex<DistinctPaths>, held: &Held<'_>) {
+        let raised = counter
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .record(&actor, writer.pid, change.path, at_ns);
-        if let Some(signal) = rewritten {
-            self.observe(signal, writer, lineage);
-        }
-        if !entropy_rose(change.entropy_before, change.entropy_now) {
-            return;
-        }
-        let rose = self
-            .entropy_rises
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .record(&actor, writer.pid, change.path, at_ns);
-        if let Some(signal) = rose {
-            self.observe(signal, writer, lineage);
+            .record(held.actor, held.writer.pid, held.path, held.at_ns);
+        if let Some(signal) = raised {
+            self.observe(signal, held.writer, held.lineage);
         }
     }
 
@@ -167,7 +190,9 @@ mod tests {
     use super::*;
     use domain::hostrule::Source;
     use domain::process::entity::ProcessIdentity;
-    use domain::ransom::{RANSOM_DISTINCT_REWRITES, RANSOM_ENTROPY_RISES};
+    use domain::ransom::{
+        RANSOM_DISTINCT_REWRITES, RANSOM_ENTROPY_RISES, RANSOM_HEADER_MISMATCHES,
+    };
 
     fn running(pid: u32, path: &str, inode: u64) -> ProcessEntry {
         let mut entry = ProcessEntry::new(pid, "p", u64::from(pid));
@@ -208,6 +233,7 @@ mod tests {
                     path: &format!("/srv/{n}"),
                     entropy_before: None,
                     entropy_now: None,
+                    head: None,
                 },
                 1,
             );
@@ -246,6 +272,7 @@ mod tests {
                     path: &format!("/srv/{n}"),
                     entropy_before: Some(4_200),
                     entropy_now: Some(7_995),
+                    head: None,
                 },
                 2,
             );
@@ -257,6 +284,52 @@ mod tests {
         assert!(alert.message.contains("near-random content"));
         assert!(alert.message.contains("entropy_rise (pid 100)"));
         assert!(!alert.message.contains("entropy_rise (not read"));
+    }
+
+    #[test]
+    fn documents_left_unlike_their_names_are_decisive_on_their_own() {
+        let (service, mut rx) = service();
+        let run = running(100, "/tmp/enc", 7);
+        let lineage = Lineage {
+            ancestors: Vec::new(),
+            truncated: false,
+            incomplete: false,
+        };
+        // Files still what they say they are raise nothing.
+        for n in 0..RANSOM_HEADER_MISMATCHES {
+            service.record_file_change(
+                &run,
+                &lineage,
+                [FileChangeKind::Written],
+                FileRewrite {
+                    path: &format!("/srv/ok{n}.pdf"),
+                    entropy_before: None,
+                    entropy_now: None,
+                    head: Some(*b"%PDF"),
+                },
+                1,
+            );
+        }
+        assert!(rx.try_recv().is_err());
+        for n in 0..RANSOM_HEADER_MISMATCHES {
+            service.record_file_change(
+                &run,
+                &lineage,
+                [FileChangeKind::Written],
+                FileRewrite {
+                    path: &format!("/srv/report{n}.docx"),
+                    entropy_before: None,
+                    entropy_now: None,
+                    head: Some([0x9A, 0x13, 0x7F, 0x02]),
+                },
+                2,
+            );
+        }
+        let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() else {
+            panic!("no verdict raised");
+        };
+        assert!(alert.message.contains("header_mismatch (pid 100)"));
+        assert!(alert.message.contains("do not match their extension"));
     }
 
     #[test]

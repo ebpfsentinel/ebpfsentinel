@@ -276,6 +276,9 @@ pub struct FimFile {
     /// file's content, in thousandths of a bit per byte, read from the bytes
     /// the hash reads. Absent where the content was not read or is empty.
     pub entropy_millibits: Option<u16>,
+    /// The first four bytes of a regular file's content, read with the hash.
+    /// Absent where the content was not read or is shorter than four bytes.
+    pub head: Option<[u8; 4]>,
     /// Extended attributes, sorted by name.
     pub xattrs: Vec<FimXattr>,
     /// Why the extended attributes were not read.

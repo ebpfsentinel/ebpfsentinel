@@ -24,6 +24,11 @@ pub const RANSOM_DISTINCT_REWRITES: usize = 100;
 /// window before the signal is raised.
 pub const RANSOM_ENTROPY_RISES: usize = 20;
 
+/// How many files one actor leaves with leading bytes that no longer match
+/// their extension in a window before the signal is raised. Decisive on its
+/// own, so it waits for more than a stray mislabelled file or two.
+pub const RANSOM_HEADER_MISMATCHES: usize = 10;
+
 #[derive(Debug)]
 struct Run {
     opened_ns: u64,
@@ -56,6 +61,9 @@ fn evidence(kind: SignalKind, threshold: usize, seconds: u64, path: &str) -> Str
         SignalKind::EntropyRise => format!(
             "{threshold} files rewritten from ordinary to near-random content in {seconds} s, the last {path}"
         ),
+        SignalKind::HeaderMismatch => format!(
+            "{threshold} files left with leading bytes that do not match their extension in {seconds} s, the last {path}"
+        ),
         _ => format!("{threshold} distinct files rewritten in {seconds} s, the last {path}"),
     }
 }
@@ -79,6 +87,17 @@ impl DistinctPaths {
             SignalKind::EntropyRise,
             RANSOM_WINDOW_NS,
             RANSOM_ENTROPY_RISES,
+            RANSOM_ACTORS_MAX,
+        )
+    }
+
+    /// Files whose leading bytes no longer match what their extension names.
+    #[must_use]
+    pub fn header_mismatches() -> Self {
+        Self::new(
+            SignalKind::HeaderMismatch,
+            RANSOM_WINDOW_NS,
+            RANSOM_HEADER_MISMATCHES,
             RANSOM_ACTORS_MAX,
         )
     }

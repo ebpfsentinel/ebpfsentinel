@@ -147,6 +147,7 @@ fn read_one(
                             *spent = spent.saturating_add(hashed.read);
                             file.sha256 = Some(hashed.digest);
                             file.entropy_millibits = hashed.entropy_millibits;
+                            file.head = hashed.head;
                         }
                         Err(e) => file.hash_unread = Some(e),
                     }
@@ -183,6 +184,7 @@ fn file_from_stat(st: &libc::stat) -> FimFile {
         sha256: None,
         hash_unread: None,
         entropy_millibits: None,
+        head: None,
         xattrs: Vec::new(),
         xattrs_unread: None,
     }
@@ -193,12 +195,14 @@ struct Hashed {
     digest: [u8; 32],
     read: u64,
     entropy_millibits: Option<u16>,
+    head: Option<[u8; 4]>,
 }
 
 /// Byte counts over the first [`FIM_ENTROPY_SAMPLE`] bytes read.
 struct Sample {
     counts: [u32; 256],
     taken: usize,
+    head: [u8; 4],
 }
 
 impl Sample {
@@ -206,16 +210,28 @@ impl Sample {
         Self {
             counts: [0; 256],
             taken: 0,
+            head: [0; 4],
         }
     }
 
     fn take(&mut self, bytes: &[u8]) {
         let room = FIM_ENTROPY_SAMPLE.saturating_sub(self.taken);
         let bytes = &bytes[..bytes.len().min(room)];
+        for (at, &b) in bytes.iter().enumerate() {
+            let Some(slot) = self.head.get_mut(self.taken + at) else {
+                break;
+            };
+            *slot = b;
+        }
         for &b in bytes {
             self.counts[usize::from(b)] = self.counts[usize::from(b)].saturating_add(1);
         }
         self.taken += bytes.len();
+    }
+
+    /// The first four bytes, once that many were read.
+    fn head(&self) -> Option<[u8; 4]> {
+        (self.taken >= self.head.len()).then_some(self.head)
     }
 
     /// Shannon entropy of the sample, in thousandths of a bit per byte;
@@ -265,6 +281,7 @@ fn hash(mut file: File, limit: u64) -> Result<Hashed, String> {
         digest: hasher.finalize().into(),
         read,
         entropy_millibits: sample.millibits(),
+        head: sample.head(),
     })
 }
 
@@ -437,6 +454,13 @@ mod tests {
         let empty = dir.path().join("empty");
         std::fs::write(&empty, b"").unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(present(one(&empty, 1024)).entropy_millibits, None);
+        // The head is the first four bytes, across reads, and absent when the
+        // file is shorter.
+        assert_eq!(file.head, Some(*b"aaaa"));
+        assert_eq!(present(one(&full, 1 << 20)).head, Some([0, 1, 2, 3]));
+        let short = dir.path().join("short");
+        std::fs::write(&short, b"PK").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(present(one(&short, 1024)).head, None);
     }
 
     #[test]

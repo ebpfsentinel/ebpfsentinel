@@ -158,6 +158,7 @@ mod tests {
             sha256: Some(sha.to_string().repeat(64)),
             hash_unread: None,
             entropy_millibits: None,
+            head: None,
             xattrs: Vec::new(),
             xattrs_unread: None,
         }

@@ -11,6 +11,7 @@
 pub mod actor;
 pub mod engine;
 pub mod entropy;
+pub mod header;
 pub mod paths;
 pub mod signal;
 
@@ -20,5 +21,8 @@ pub use engine::{
     RANSOM_WINDOW_NS, RansomEngine, RansomVerdict, corroborate,
 };
 pub use entropy::{ENTROPY_HIGH_MILLIBITS, ENTROPY_LOW_MILLIBITS, entropy_rose};
-pub use paths::{DistinctPaths, RANSOM_DISTINCT_REWRITES, RANSOM_ENTROPY_RISES};
+pub use header::{HEADER_BYTES, expected_headers, header_mismatch};
+pub use paths::{
+    DistinctPaths, RANSOM_DISTINCT_REWRITES, RANSOM_ENTROPY_RISES, RANSOM_HEADER_MISMATCHES,
+};
 pub use signal::{RansomSignal, SignalKind, Tier, UnavailableSignal, unavailable};

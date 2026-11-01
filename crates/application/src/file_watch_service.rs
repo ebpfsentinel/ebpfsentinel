@@ -877,9 +877,9 @@ impl FileWatcher {
         });
         let at_ns = now_ns();
         if let (Some(ransom), Some((lineage, entry))) = (feed.ransom.as_ref(), writer.as_ref()) {
-            let entropy_now = match &fact.reading {
-                FileReading::Present(now) => now.entropy_millibits,
-                FileReading::Gone | FileReading::Unreadable(_) => None,
+            let (entropy_now, head) = match &fact.reading {
+                FileReading::Present(now) => (now.entropy_millibits, now.head),
+                FileReading::Gone | FileReading::Unreadable(_) => (None, None),
             };
             ransom.record_file_change(
                 entry,
@@ -889,6 +889,7 @@ impl FileWatcher {
                     path: &fact.path,
                     entropy_before: before.and_then(|b| b.entropy_millibits),
                     entropy_now,
+                    head,
                 },
                 at_ns,
             );
@@ -1340,6 +1341,7 @@ mod tests {
             sha256: Some(sha.to_string().repeat(64)),
             hash_unread: None,
             entropy_millibits: None,
+            head: None,
             xattrs: Vec::new(),
             xattrs_unread: None,
         }
