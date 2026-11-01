@@ -27,6 +27,7 @@ pub mod ipset_map_manager;
 pub mod kernel_probe;
 pub mod kfunc;
 pub mod kfunc_attach;
+pub mod kfunc_feature_probe;
 pub mod kfunc_loader;
 pub mod l7_ports_manager;
 pub mod lb_map_manager;

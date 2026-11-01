@@ -25,6 +25,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use super::kfunc_feature_probe::insn;
 use super::lsm_probe::{self, BpfLsmStatus, VMLINUX_BTF_PATH};
 
 /// The kfuncs this probe answers for, in the order they are reported.
@@ -39,7 +40,7 @@ pub const FILE_KFUNCS: [&str; 4] = [
 /// list of LSM hooks a sleepable program may attach to, which is not every
 /// hook: a non-sleepable one would refuse the load for a reason unrelated to
 /// the question asked.
-const SLEEPABLE_PROBE_HOOK: &str = "bpf_lsm_bprm_committed_creds";
+pub(crate) const SLEEPABLE_PROBE_HOOK: &str = "bpf_lsm_bprm_committed_creds";
 
 /// Whether a sleepable LSM program loads on this host.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,11 +187,15 @@ pub fn run() -> FileKfuncStatus {
     let funcs = std::fs::read(VMLINUX_BTF_PATH)
         .map_err(|e| format!("{VMLINUX_BTF_PATH}: {e}"))
         .and_then(|data| super::kfunc::vmlinux_func_ids(data).map_err(|e| e.to_string()));
-    evaluate(
-        &funcs,
-        lsm_probe::status(),
-        &mut super::kfunc_loader::load_sleepable_lsm_stub,
-    )
+    evaluate(&funcs, lsm_probe::status(), &mut |hook| {
+        super::kfunc_loader::load_probe_program(&super::kfunc_loader::ProbeProgram {
+            prog_type: super::kfunc_loader::PROBE_PROG_TYPE_LSM,
+            expected_attach_type: super::kfunc_loader::PROBE_LSM_MAC,
+            prog_flags: super::kfunc_loader::PROBE_F_SLEEPABLE,
+            attach_btf_id: hook,
+            insns: vec![insn::mov_imm(0, 0), insn::exit()],
+        })
+    })
 }
 
 static CACHE: OnceLock<FileKfuncStatus> = OnceLock::new();

@@ -1150,33 +1150,49 @@ fn issue_prog_load(
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
 
-/// Load the smallest sleepable LSM program there is, `r0 = 0; exit`, against
-/// the hook function whose vmlinux BTF id is `attach_btf_id`, and close it.
+/// A program a probe loads to ask the verifier one question, then closes.
+pub(crate) struct ProbeProgram {
+    pub prog_type: u32,
+    pub expected_attach_type: u32,
+    pub prog_flags: u32,
+    /// The vmlinux function an LSM program attaches to, zero otherwise.
+    pub attach_btf_id: u32,
+    /// Raw instructions in the little-endian layout the bpfel target and
+    /// every host this agent runs on share.
+    pub insns: Vec<u64>,
+}
+
+/// `BPF_PROG_TYPE_LSM`, for the probes that build their own programs.
+pub(crate) const PROBE_PROG_TYPE_LSM: u32 = BPF_PROG_TYPE_LSM;
+/// `BPF_PROG_TYPE_KPROBE`, for the probes that build their own programs.
+pub(crate) const PROBE_PROG_TYPE_KPROBE: u32 = BPF_PROG_TYPE_KPROBE;
+/// `BPF_LSM_MAC`, for the probes that build their own programs.
+pub(crate) const PROBE_LSM_MAC: u32 = BPF_LSM_MAC;
+/// `BPF_TRACE_KPROBE_SESSION`: one program run on a function's entry and on
+/// its return, whose session kfuncs the verifier offers to it alone.
+pub(crate) const PROBE_TRACE_KPROBE_SESSION: u32 = bpf_attach_type::BPF_TRACE_KPROBE_SESSION as u32;
+/// `BPF_F_SLEEPABLE`, for the probes that build their own programs.
+pub(crate) const PROBE_F_SLEEPABLE: u32 = BPF_F_SLEEPABLE;
+
+/// Load a probe program and close it at once.
 ///
-/// This is the question the file kfuncs depend on: they are callable only from
-/// a sleepable LSM program, so a kernel that carries them and refuses this
-/// load offers them to nobody. The load goes through the process-wide token
-/// when one is set, exactly as the agent's own LSM objects do. Returns the
-/// errno and the verifier's log on refusal.
-pub(crate) fn load_sleepable_lsm_stub(attach_btf_id: u32) -> Result<(), (i32, String)> {
-    // `mov64 r0, 0` then `exit`, in the little-endian layout the bpfel target
-    // and every host this agent runs on share: the opcode is the first byte.
-    let insns: [u64; 2] = [
-        u64::from_le_bytes([0xb7, 0, 0, 0, 0, 0, 0, 0]),
-        u64::from_le_bytes([0x95, 0, 0, 0, 0, 0, 0, 0]),
-    ];
+/// The load goes through the process-wide token when one is set, exactly as
+/// the agent's own objects do, so a probe is refused only where they would
+/// be. Every kfunc a probe calls is a vmlinux one, so no `fd_array` is
+/// passed. Returns the errno and the verifier's log on refusal.
+pub(crate) fn load_probe_program(probe: &ProbeProgram) -> Result<(), (i32, String)> {
     let license = b"GPL\0";
     let mut attr = ProgLoadAttr {
-        prog_type: BPF_PROG_TYPE_LSM,
-        insn_cnt: 2,
-        insns: insns.as_ptr() as u64,
+        prog_type: probe.prog_type,
+        insn_cnt: u32::try_from(probe.insns.len()).unwrap_or(u32::MAX),
+        insns: probe.insns.as_ptr() as u64,
         license: license.as_ptr() as u64,
-        prog_flags: BPF_F_SLEEPABLE,
-        expected_attach_type: BPF_LSM_MAC,
-        attach_btf_id,
+        prog_flags: probe.prog_flags,
+        expected_attach_type: probe.expected_attach_type,
+        attach_btf_id: probe.attach_btf_id,
         ..Default::default()
     };
-    let name = b"sleepable_probe";
+    let name = b"kernel_probe";
     attr.prog_name[..name.len()].copy_from_slice(name);
     if let Some(token) = global_token_fd() {
         attr.prog_flags |= super::bpf_token::BPF_F_TOKEN_FD;

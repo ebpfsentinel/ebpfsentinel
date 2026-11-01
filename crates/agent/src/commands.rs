@@ -4981,6 +4981,37 @@ fn print_lsm_blocks(resp: &crate::api_client::KernelFeaturesResponse) {
         Some(report) => print_file_kfuncs(report),
         None => println!("\nFile kfuncs\n  Not reported by this agent."),
     }
+    match &resp.kfunc_features {
+        Some(report) => print_kfunc_features(report),
+        None => println!("\nKernel facts not yet used\n  Not reported by this agent."),
+    }
+}
+
+/// Print each kernel fact no shipped program uses yet: whether this host
+/// offers it, how that was established, and what it would be used for.
+fn print_kfunc_features(report: &crate::api_client::KfuncFeaturesReport) {
+    println!("\nKernel facts not yet used");
+    if !report.probed {
+        println!("  Not probed: startup has not run the probe.");
+        return;
+    }
+    for feature in &report.features {
+        let state = match (feature.usable, feature.load_tested) {
+            (Some(true), _) => "confirmed by a load",
+            (Some(false), _) => "not available",
+            (None, false) if feature.kfuncs.iter().all(|k| k.declared == Some(true)) => {
+                "declared, not confirmed"
+            }
+            (None, _) => "not probed",
+        };
+        println!("  {:<24} {state}", feature.name);
+        println!("    For: {}", feature.consumer);
+        if feature.usable != Some(true)
+            && let Some(reason) = &feature.reason
+        {
+            println!("    {reason}");
+        }
+    }
 }
 
 /// Print whether the file kfuncs are usable, one line per kfunc, with the

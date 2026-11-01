@@ -2245,6 +2245,41 @@ pub struct KernelFeaturesResponse {
     /// Absent from an agent that predates the file kfunc probe.
     #[serde(default)]
     pub file_kfuncs: Option<FileKfuncReport>,
+    /// Absent from an agent that predates the kfunc feature probe.
+    #[serde(default)]
+    pub kfunc_features: Option<KfuncFeaturesReport>,
+}
+
+/// The kernel facts a future program would rest on, as the node answered.
+#[derive(Deserialize, Serialize)]
+pub struct KfuncFeaturesReport {
+    pub probed: bool,
+    #[serde(default)]
+    pub features: Vec<KfuncFeatureEntry>,
+}
+
+/// One kernel fact on the node.
+#[derive(Deserialize, Serialize)]
+pub struct KfuncFeatureEntry {
+    pub name: String,
+    #[serde(default)]
+    pub consumer: String,
+    #[serde(default)]
+    pub kfuncs: Vec<DeclaredKfuncEntry>,
+    #[serde(default)]
+    pub load_tested: bool,
+    #[serde(default)]
+    pub usable: Option<bool>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// One kfunc and whether the node's kernel declares it.
+#[derive(Deserialize, Serialize)]
+pub struct DeclaredKfuncEntry {
+    pub name: String,
+    #[serde(default)]
+    pub declared: Option<bool>,
 }
 
 /// Whether the file kfuncs are usable on the node, and which condition failed.

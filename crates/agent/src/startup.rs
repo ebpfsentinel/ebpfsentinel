@@ -2034,6 +2034,15 @@ pub async fn run(
         of = file_kfuncs.kfuncs.len(),
         "file kfunc probe"
     );
+    let kfunc_features = adapters::ebpf::kfunc_feature_probe::init_cached();
+    info!(
+        confirmed = kfunc_features
+            .iter()
+            .filter(|f| f.usable == Some(true))
+            .count(),
+        of = kfunc_features.len(),
+        "kfunc feature probe"
+    );
 
     // In BPF-token mode the agent cannot open a kernel module's BTF object fd
     // itself (BTF_GET_FD_BY_ID needs CAP_SYS_ADMIN, which the token does not

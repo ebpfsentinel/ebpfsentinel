@@ -167,6 +167,73 @@ pub struct KernelFeaturesResponse {
     /// kernel's BTF, and usable only where a sleepable LSM program loads and
     /// the BPF LSM is active, so the report says which of the three failed.
     pub file_kfuncs: FileKfuncReport,
+    /// Kernel facts no shipped program uses yet, each with what it would be
+    /// used for, so the day one is wired this host's answer is already here.
+    pub kfunc_features: KfuncFeaturesReport,
+}
+
+/// What this host answered about the kfuncs a future program would rest on.
+#[derive(Serialize, ToSchema)]
+pub struct KfuncFeaturesReport {
+    /// False until startup has run the probe; `features` is then empty.
+    pub probed: bool,
+    pub features: Vec<KfuncFeatureEntry>,
+}
+
+/// One kernel fact, the kfuncs it rests on and what it would be used for.
+#[derive(Serialize, ToSchema)]
+pub struct KfuncFeatureEntry {
+    pub name: String,
+    /// What the agent would use it for.
+    pub consumer: String,
+    pub kfuncs: Vec<DeclaredKfuncEntry>,
+    /// Whether a program was loaded to confirm it, or the BTF alone was read.
+    pub load_tested: bool,
+    /// True when a load confirmed it, false when the kernel lacks or refused
+    /// it, absent when nothing could confirm it either way.
+    pub usable: Option<bool>,
+    /// Why it is not confirmed, in one sentence.
+    pub reason: Option<String>,
+}
+
+/// One kfunc and whether the kernel declares it.
+#[derive(Serialize, ToSchema)]
+pub struct DeclaredKfuncEntry {
+    pub name: String,
+    /// Absent when the kernel's BTF could not be read.
+    pub declared: Option<bool>,
+}
+
+impl From<Option<&[adapters::ebpf::kfunc_feature_probe::KfuncFeature]>> for KfuncFeaturesReport {
+    fn from(features: Option<&[adapters::ebpf::kfunc_feature_probe::KfuncFeature]>) -> Self {
+        let Some(features) = features else {
+            return Self {
+                probed: false,
+                features: Vec::new(),
+            };
+        };
+        Self {
+            probed: true,
+            features: features
+                .iter()
+                .map(|f| KfuncFeatureEntry {
+                    name: f.name.to_string(),
+                    consumer: f.consumer.to_string(),
+                    kfuncs: f
+                        .kfuncs
+                        .iter()
+                        .map(|k| DeclaredKfuncEntry {
+                            name: k.name.to_string(),
+                            declared: k.declared,
+                        })
+                        .collect(),
+                    load_tested: f.load_tested,
+                    usable: f.usable,
+                    reason: f.reason.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// What this host answered about the file kfuncs.
@@ -682,6 +749,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
         NetworkExecutablesReport::from(adapters::ebpf::exec_network::status());
     let self_protection = SelfProtectionReport::from(adapters::ebpf::bpf_guard::status());
     let file_kfuncs = FileKfuncReport::from(adapters::ebpf::file_kfunc_probe::cached());
+    let kfunc_features = KfuncFeaturesReport::from(adapters::ebpf::kfunc_feature_probe::cached());
 
     let Some(report) = report else {
         return KernelFeaturesResponse {
@@ -700,6 +768,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
             network_executables,
             self_protection,
             file_kfuncs,
+            kfunc_features,
         };
     };
 
@@ -748,6 +817,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
         network_executables,
         self_protection,
         file_kfuncs,
+        kfunc_features,
     }
 }
 
@@ -1171,6 +1241,50 @@ mod tests {
             json["kfuncs"][1]["reason"],
             "this kernel does not declare it"
         );
+    }
+
+    #[test]
+    fn kfunc_features_before_startup_probed_claim_nothing() {
+        let report = KfuncFeaturesReport::from(None);
+        assert!(!report.probed);
+        assert!(report.features.is_empty());
+    }
+
+    #[test]
+    fn kfunc_features_keep_the_difference_between_refused_and_unconfirmed() {
+        use adapters::ebpf::kfunc_feature_probe::{DeclaredKfunc, KfuncFeature};
+        let features = vec![
+            KfuncFeature {
+                name: "kprobe_session",
+                consumer: "one program on entry and return",
+                kfuncs: vec![DeclaredKfunc {
+                    name: "bpf_session_cookie",
+                    declared: Some(true),
+                }],
+                load_tested: true,
+                usable: Some(true),
+                reason: None,
+            },
+            KfuncFeature {
+                name: "tcp_reqsk_assign",
+                consumer: "a SYN cookie as a request socket",
+                kfuncs: vec![DeclaredKfunc {
+                    name: "bpf_sk_assign_tcp_reqsk",
+                    declared: Some(true),
+                }],
+                load_tested: false,
+                usable: None,
+                reason: Some("declared, not confirmed".to_string()),
+            },
+        ];
+        let report = KfuncFeaturesReport::from(Some(features.as_slice()));
+        let json = serde_json::to_value(&report).expect("serialise");
+        assert_eq!(json["probed"], true);
+        assert_eq!(json["features"][0]["usable"], true);
+        assert_eq!(json["features"][0]["kfuncs"][0]["declared"], true);
+        assert_eq!(json["features"][1]["load_tested"], false);
+        assert!(json["features"][1]["usable"].is_null());
+        assert_eq!(json["features"][1]["reason"], "declared, not confirmed");
     }
 
     #[test]

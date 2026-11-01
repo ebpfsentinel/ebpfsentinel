@@ -11207,6 +11207,25 @@
           }
         }
       },
+      "DeclaredKfuncEntry": {
+        "type": "object",
+        "description": "One kfunc and whether the kernel declares it.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "declared": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Absent when the kernel's BTF could not be read."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "DlpPatternResponse": {
         "type": "object",
         "required": [
@@ -12905,7 +12924,8 @@
           "bpf_lsm",
           "network_executables",
           "self_protection",
-          "file_kfuncs"
+          "file_kfuncs",
+          "kfunc_features"
         ],
         "properties": {
           "attribution": {
@@ -12925,6 +12945,10 @@
             "items": {
               "$ref": "#/components/schemas/HelperSupportEntry"
             }
+          },
+          "kfunc_features": {
+            "$ref": "#/components/schemas/KfuncFeaturesReport",
+            "description": "Kernel facts no shipped program uses yet, each with what it would be\nused for, so the day one is wired this host's answer is already here."
           },
           "load_mode": {
             "type": "string",
@@ -12974,6 +12998,69 @@
           "workload_firewall": {
             "$ref": "#/components/schemas/WorkloadFirewallReport",
             "description": "Whether the hooks deciding a workload rule are on this host's cgroup.\nRead the same way as the two blocks above, and asked more often than\neither: a rule naming a binary is the one kind of rule whose absence\nnothing on the wire makes visible."
+          }
+        }
+      },
+      "KfuncFeatureEntry": {
+        "type": "object",
+        "description": "One kernel fact, the kfuncs it rests on and what it would be used for.",
+        "required": [
+          "name",
+          "consumer",
+          "kfuncs",
+          "load_tested"
+        ],
+        "properties": {
+          "consumer": {
+            "type": "string",
+            "description": "What the agent would use it for."
+          },
+          "kfuncs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeclaredKfuncEntry"
+            }
+          },
+          "load_tested": {
+            "type": "boolean",
+            "description": "Whether a program was loaded to confirm it, or the BTF alone was read."
+          },
+          "name": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it is not confirmed, in one sentence."
+          },
+          "usable": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "True when a load confirmed it, false when the kernel lacks or refused\nit, absent when nothing could confirm it either way."
+          }
+        }
+      },
+      "KfuncFeaturesReport": {
+        "type": "object",
+        "description": "What this host answered about the kfuncs a future program would rest on.",
+        "required": [
+          "probed",
+          "features"
+        ],
+        "properties": {
+          "features": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/KfuncFeatureEntry"
+            }
+          },
+          "probed": {
+            "type": "boolean",
+            "description": "False until startup has run the probe; `features` is then empty."
           }
         }
       },
