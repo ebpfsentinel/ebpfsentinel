@@ -57,6 +57,46 @@ enum Source {
 
 const NO_LOCAL_WATCH: &str = "no file watch is open: no filesystem could be marked";
 
+/// Why no file is watched before the watch was ever opened.
+const NEVER_OPENED: &str = "the file watch is not enabled";
+
+static STATUS: std::sync::OnceLock<std::sync::Mutex<Option<String>>> = std::sync::OnceLock::new();
+
+fn status_cell() -> &'static std::sync::Mutex<Option<String>> {
+    STATUS.get_or_init(|| std::sync::Mutex::new(Some(NEVER_OPENED.to_owned())))
+}
+
+fn publish(reason: Option<String>) {
+    *status_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = reason;
+}
+
+/// Why no filesystem is watched right now, `None` while at least one is.
+/// Published by every opening of the watch, so a watch the warden lost
+/// reads as lost until it is opened again.
+#[must_use]
+pub fn status() -> Option<String> {
+    status_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Why an opening left nothing watched, `None` when it watches something.
+fn unwatched(opened: &Result<Vec<WatchedFilesystem>, DomainError>) -> Option<String> {
+    match opened {
+        Err(e) => Some(e.to_string()),
+        Ok(marks) if marks.iter().any(WatchedFilesystem::is_watched) => None,
+        Ok(marks) => Some(
+            marks
+                .iter()
+                .find_map(|m| m.error.clone())
+                .unwrap_or_else(|| "no filesystem is configured to be watched".to_owned()),
+        ),
+    }
+}
+
 /// The file watch, through the warden when `EBPFSENTINEL_WARDEN_SOCK` is set
 /// and in-process otherwise.
 pub struct FileWatch {
@@ -187,7 +227,7 @@ fn to_marks(marks: Vec<FimMark>) -> Vec<WatchedFilesystem> {
 
 impl FileWatchSource for FileWatch {
     fn open(&mut self, paths: &[String]) -> Result<Vec<WatchedFilesystem>, DomainError> {
-        match &mut self.source {
+        let opened = match &mut self.source {
             Source::Warden(client) => client.fim_open(paths).map(to_marks).map_err(|e| {
                 DomainError::EngineError(format!("warden could not open the file watch: {e}"))
             }),
@@ -196,7 +236,9 @@ impl FileWatchSource for FileWatch {
                 *watch = opened;
                 Ok(to_marks(marks))
             }
-        }
+        };
+        publish(unwatched(&opened));
+        opened
     }
 
     fn read(&mut self, max_wait: Duration) -> Result<FileChangeBatch, DomainError> {
@@ -310,6 +352,27 @@ mod tests {
             })
             .collect();
         (None, marks)
+    }
+
+    #[test]
+    fn an_opening_says_why_nothing_is_watched() {
+        let mark = |error: Option<&str>| WatchedFilesystem {
+            path: "/".into(),
+            error: error.map(Into::into),
+        };
+        assert_eq!(
+            unwatched(&Ok(vec![mark(Some("refused")), mark(None)])),
+            None
+        );
+        assert_eq!(
+            unwatched(&Ok(vec![mark(Some("refused"))])).as_deref(),
+            Some("refused")
+        );
+        assert!(unwatched(&Ok(Vec::new())).is_some());
+        assert!(
+            unwatched(&Err(DomainError::EngineError("warden unreachable".into())))
+                .is_some_and(|r| r.contains("warden unreachable"))
+        );
     }
 
     #[test]

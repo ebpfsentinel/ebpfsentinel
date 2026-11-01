@@ -19,6 +19,7 @@ pub mod error;
 pub mod event;
 pub mod exception;
 pub mod field;
+pub mod file_event;
 pub mod intent;
 pub mod limits;
 pub mod rule;
@@ -34,6 +35,7 @@ pub use error::HostRuleError;
 pub use event::IntentEvent;
 pub use exception::{HOST_RULE_EXCEPTIONS_MAX, HostRuleException};
 pub use field::{FieldSpec, FieldType, FieldValue, RESERVED_KEYS};
+pub use file_event::{SettledChange, file_events};
 pub use intent::{Intent, IntentFamily};
 pub use limits::{HOST_RULE_LIMITS, HostRuleLimit};
 pub use rule::{

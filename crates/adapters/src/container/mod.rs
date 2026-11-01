@@ -18,6 +18,7 @@ pub mod proc_executable;
 pub mod proc_facts;
 pub mod proc_namespaces;
 pub mod proc_resolver;
+pub mod proc_root;
 
 pub use cgroupfs_resolver::{CgroupfsResolver, root_cgroup_id, self_cgroup_id};
 pub use cri_client::{
@@ -55,3 +56,4 @@ pub use proc_details::ProcDetailsResolver;
 pub use proc_executable::ProcExecutableResolver;
 pub use proc_facts::ProcFactsReader;
 pub use proc_resolver::ProcContainerResolver;
+pub use proc_root::ProcRootReader;

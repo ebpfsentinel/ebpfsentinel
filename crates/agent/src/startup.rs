@@ -4353,10 +4353,14 @@ pub async fn run(
     // is includes the container it runs in, and the resolver and enrichers
     // that answer that have only just been decided. The events the reader
     // produced in between waited in the channel.
-    // Kept for the learning collector, which names a pid the same way.
+    // Kept for the learning collector and the file watch, which name a pid
+    // the same way, and the host rules for the file watch, which feeds them
+    // the file intentions.
     let mut process_table_for_learning: Option<
         Arc<application::process_table_service::ProcessTableService>,
     > = None;
+    let mut host_rules_for_files: Option<Arc<application::host_rule_service::HostRuleService>> =
+        None;
     if config.process_table.enabled {
         let mut svc = application::process_table_service::ProcessTableService::new(
             config.process_table.capacity,
@@ -4422,6 +4426,7 @@ pub async fn run(
             );
             svc = svc.with_host_rules(Arc::clone(&host_rules));
         }
+        host_rules_for_files = Some(Arc::clone(&host_rules));
         app_state.install_host_rule_service(host_rules);
         let svc = Arc::new(svc);
         // And the other way for a reload: a new policy renumbers the bits,
@@ -4639,7 +4644,7 @@ pub async fn run(
         ) {
             Ok(store) => {
                 let source = adapters::warden::file_watch::FileWatch::new(open_local_file_watch);
-                let watcher = application::file_watch_service::FileWatcher::new(
+                let mut watcher = application::file_watch_service::FileWatcher::new(
                     Box::new(source),
                     config.file_watch.filesystems.clone(),
                     Arc::clone(&metrics) as Arc<dyn MetricsPort>,
@@ -4649,6 +4654,17 @@ pub async fn run(
                         max_files: config.file_watch.max_baselines,
                     },
                 );
+                // The rules live with the process table: with the table off
+                // there is no writer to name and no rule set to feed.
+                if let Some(ref rules) = host_rules_for_files {
+                    watcher = watcher.with_rules(application::file_watch_service::FileRuleFeed {
+                        rules: Arc::clone(rules),
+                        processes: process_table_for_learning.clone(),
+                        roots: Some(Arc::new(adapters::container::ProcRootReader::new(
+                            &coverage_proc,
+                        ))),
+                    });
+                }
                 info!(
                     source = watcher.source(),
                     filesystems = config.file_watch.filesystems.len(),

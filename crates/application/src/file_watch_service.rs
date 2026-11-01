@@ -12,19 +12,28 @@
 //! raises nothing; every later one is compared with it and kept in its
 //! place. A path that disappears is forgotten, so a log rotated away and its
 //! successor moved in read as one disappearance and one first sight.
+//!
+//! Each settled change is named the way its writer sees it, read from the
+//! writer's own root mount, and handed to the host rules with the writer
+//! and its ancestry as the process table holds them.
 
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
 use domain::file_watch::{
-    FileChangeBatch, FileChangeKind, FileDrift, FileFacts, FileReading, WatchedFilesystem,
+    FileBaseline, FileChangeBatch, FileChangeKind, FileDrift, FileFacts, FileReading, RootMount,
+    RootedPath, WatchedFilesystem, rooted,
 };
-use ports::secondary::file_watch_port::{FileBaselineStore, FileWatchSource};
+use domain::hostrule::{Intent, SettledChange, file_events};
+use ports::secondary::file_watch_port::{FileBaselineStore, FileWatchSource, ProcessRootReader};
 use ports::secondary::metrics_port::MetricsPort;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
+use crate::host_rule_service::HostRuleService;
+use crate::process_table_service::ProcessTableService;
 
 /// How long one reading waits for a first change. Short enough that a
 /// cancelled agent stops within it.
@@ -52,6 +61,34 @@ pub struct BaselinePolicy {
     pub max_files: u64,
 }
 
+/// The file intentions, any of which a rule may name.
+const FILE_INTENTS: [Intent; 5] = [
+    Intent::FileChanges,
+    Intent::FileAppears,
+    Intent::FileDisappears,
+    Intent::FilePermissionsChange,
+    Intent::FileIntegrityBreaks,
+];
+
+/// A changed path waiting to be read again.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Pending {
+    /// The last writer seen.
+    pid: u32,
+    /// Every kind of change seen since the path was last read.
+    kinds: BTreeSet<FileChangeKind>,
+    dev: Option<u64>,
+    ino: Option<u64>,
+}
+
+/// Where settled changes go beyond the baseline: the host rules, the
+/// process table naming each writer, and the reader of each writer's root.
+pub struct FileRuleFeed {
+    pub rules: Arc<HostRuleService>,
+    pub processes: Option<Arc<ProcessTableService>>,
+    pub roots: Option<Arc<dyn ProcessRootReader>>,
+}
+
 /// Opens the watch on the configured filesystems, reads it until cancelled,
 /// and compares every changed path with its baseline.
 pub struct FileWatcher {
@@ -61,9 +98,10 @@ pub struct FileWatcher {
     baselines: Arc<dyn FileBaselineStore>,
     policy: BaselinePolicy,
     /// Changed paths not read yet, each with the last writer seen.
-    pending: BTreeMap<String, u32>,
+    pending: BTreeMap<String, Pending>,
     kept: u64,
     reopen_delay: Duration,
+    feed: Option<FileRuleFeed>,
 }
 
 impl FileWatcher {
@@ -84,7 +122,16 @@ impl FileWatcher {
             pending: BTreeMap::new(),
             kept: 0,
             reopen_delay: FILE_WATCH_REOPEN_DELAY,
+            feed: None,
         }
+    }
+
+    /// Hand every settled change to the host rules, named the way its writer
+    /// sees it and carrying the writer and its ancestry.
+    #[must_use]
+    pub fn with_rules(mut self, feed: FileRuleFeed) -> Self {
+        self.feed = Some(feed);
+        self
     }
 
     /// Where the watch lives: `warden` or `local`.
@@ -166,15 +213,18 @@ impl FileWatcher {
                 format!("{directory}/{}", change.name)
             };
             let full = self.pending.len() >= FILE_FACTS_PENDING_MAX;
-            match self.pending.entry(path) {
-                Entry::Occupied(mut writer) => {
-                    writer.insert(change.pid);
+            let pending = match self.pending.entry(path) {
+                Entry::Occupied(slot) => slot.into_mut(),
+                Entry::Vacant(slot) if !full => slot.insert(Pending::default()),
+                Entry::Vacant(_) => {
+                    lost = true;
+                    continue;
                 }
-                Entry::Vacant(slot) if !full => {
-                    slot.insert(change.pid);
-                }
-                Entry::Vacant(_) => lost = true,
-            }
+            };
+            pending.pid = change.pid;
+            pending.kinds.extend(change.kinds.iter().copied());
+            pending.dev = change.dev.or(pending.dev);
+            pending.ino = change.ino.or(pending.ino);
         }
         if lost {
             warn!(
@@ -205,16 +255,36 @@ impl FileWatcher {
         if facts.is_empty() {
             return Err("the reader answered none of the paths".into());
         }
+        let mut roots = HashMap::new();
         for fact in facts {
-            let pid = self.pending.remove(&fact.path).unwrap_or(0);
-            self.compare(&fact, pid);
+            let pending = self.pending.remove(&fact.path).unwrap_or_default();
+            let rooted = self.rooted(&fact.path, pending.pid, &mut roots);
+            self.compare(&fact, &pending, &rooted);
         }
         self.metrics.set_file_baselines(self.kept);
         Ok(())
     }
 
-    fn compare(&mut self, fact: &FileFacts, pid: u32) {
+    /// `path` as the writer `pid` sees it, its root read once per batch.
+    fn rooted(
+        &self,
+        path: &str,
+        pid: u32,
+        roots: &mut HashMap<u32, Option<RootMount>>,
+    ) -> RootedPath {
+        let Some(reader) = self.feed.as_ref().and_then(|feed| feed.roots.as_ref()) else {
+            return RootedPath::default();
+        };
+        roots
+            .entry(pid)
+            .or_insert_with(|| reader.root_mount(pid))
+            .as_ref()
+            .map_or_else(RootedPath::default, |root| rooted(path, root))
+    }
+
+    fn compare(&mut self, fact: &FileFacts, pending: &Pending, rooted: &RootedPath) {
         let path = fact.path.as_str();
+        let pid = pending.pid;
         let kept = match self.baselines.get(path) {
             Ok(kept) => kept,
             Err(e) => {
@@ -222,6 +292,8 @@ impl FileWatcher {
                 return;
             }
         };
+        self.feed(fact, pending, rooted, kept.as_ref());
+        let inside = rooted.path.as_deref().unwrap_or(path);
         match (&fact.reading, kept) {
             (FileReading::Present(new), None) => {
                 if self.kept >= self.policy.max_files {
@@ -235,13 +307,13 @@ impl FileWatcher {
                 }
             }
             (FileReading::Present(new), Some(old)) => {
-                self.report(path, pid, &old.drift(&fact.reading), &fact.reading);
+                self.report(path, inside, pid, &old.drift(&fact.reading), &fact.reading);
                 if let Err(e) = self.baselines.put(path, new) {
                     warn!(path, error = %e, "file baseline could not be kept");
                 }
             }
             (FileReading::Gone, Some(old)) => {
-                self.report(path, pid, &old.drift(&fact.reading), &fact.reading);
+                self.report(path, inside, pid, &old.drift(&fact.reading), &fact.reading);
                 match self.baselines.remove(path) {
                     Ok(true) => self.kept = self.kept.saturating_sub(1),
                     Ok(false) => {}
@@ -252,7 +324,7 @@ impl FileWatcher {
             // last thing known about it, and the next readable reading is
             // compared against it.
             (FileReading::Unreadable(_), Some(old)) => {
-                self.report(path, pid, &old.drift(&fact.reading), &fact.reading);
+                self.report(path, inside, pid, &old.drift(&fact.reading), &fact.reading);
             }
             (FileReading::Unreadable(reason), None) => {
                 debug!(path, reason = %reason, "changed path could not be read");
@@ -261,18 +333,96 @@ impl FileWatcher {
         }
     }
 
-    fn report(&self, path: &str, pid: u32, drift: &[FileDrift], reading: &FileReading) {
+    fn report(
+        &self,
+        path: &str,
+        inside: &str,
+        pid: u32,
+        drift: &[FileDrift],
+        reading: &FileReading,
+    ) {
         if drift.is_empty() {
             return;
         }
         let what: Vec<&str> = drift.iter().map(|d| d.as_str()).collect();
+        let exe = self
+            .feed
+            .as_ref()
+            .and_then(|feed| feed.processes.as_ref())
+            .and_then(|table| table.get(pid))
+            .and_then(|entry| entry.identity.path().map(ToOwned::to_owned));
+        let exe = exe.as_deref().unwrap_or("-");
         if let FileReading::Unreadable(reason) = reading {
-            warn!(path, pid, drift = ?what, reason = %reason, "file differs from its baseline");
+            warn!(path, rooted = inside, pid, exe, drift = ?what, reason = %reason, "file differs from its baseline");
         } else {
-            warn!(path, pid, drift = ?what, "file differs from its baseline");
+            warn!(path, rooted = inside, pid, exe, drift = ?what, "file differs from its baseline");
         }
         for d in drift {
             self.metrics.record_file_drifts(d.as_str(), 1);
+        }
+    }
+
+    /// Hand the intentions `fact` raises to the host rules, with the writer
+    /// and its ancestry, where a rule names any file intention.
+    fn feed(
+        &mut self,
+        fact: &FileFacts,
+        pending: &Pending,
+        rooted: &RootedPath,
+        before: Option<&FileBaseline>,
+    ) {
+        let Some(feed) = self.feed.as_ref() else {
+            return;
+        };
+        if !FILE_INTENTS.iter().any(|intent| feed.rules.wants(*intent)) {
+            return;
+        }
+        let rules = Arc::clone(&feed.rules);
+        let writer = feed.processes.as_ref().and_then(|table| {
+            table
+                .get(pending.pid)
+                .map(|entry| (table.lineage(pending.pid), entry))
+        });
+        let arrived = pending.kinds.contains(&FileChangeKind::Created)
+            || pending.kinds.contains(&FileChangeKind::MovedIn);
+        let in_image = before.is_none()
+            && arrived
+            && matches!(fact.reading, FileReading::Present(_))
+            && self.in_image(&rooted.layers);
+        let events = file_events(&SettledChange {
+            kinds: &pending.kinds,
+            host_path: &fact.path,
+            rooted,
+            before,
+            reading: &fact.reading,
+            in_image,
+            dev: pending.dev,
+            ino: pending.ino,
+        });
+        let at_ns = now_ns();
+        for event in events {
+            rules.record_file(
+                event,
+                writer.as_ref().map(|(lineage, entry)| (entry, lineage)),
+                at_ns,
+            );
+        }
+    }
+
+    /// Whether any of `layers` holds a file: a name the container creates
+    /// that its image already carried was copied up, not made.
+    fn in_image(&mut self, layers: &[String]) -> bool {
+        if layers.is_empty() {
+            return false;
+        }
+        match self.source.facts(layers, 0) {
+            Ok(facts) => facts
+                .iter()
+                .any(|fact| matches!(fact.reading, FileReading::Present(_))),
+            Err(e) => {
+                debug!(error = %e, "image layers could not be read");
+                false
+            }
         }
     }
 
@@ -338,6 +488,13 @@ impl FileWatcher {
     }
 }
 
+/// Wall clock nanoseconds, the time a settled change is dated with.
+fn now_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -351,6 +508,11 @@ mod tests {
         FirewallMetrics, IpsMetrics, LbMetrics, PacketMetrics, RoutingMetrics, SystemMetrics,
         ThreatIntelMetrics, ZoneMetrics,
     };
+
+    use domain::process::entity::ProcessLifecycleEvent;
+    use tokio::sync::mpsc;
+
+    use crate::alert_event::AlertEvent;
 
     use super::*;
 
@@ -820,8 +982,196 @@ mod tests {
         let pending: Vec<_> = w
             .pending
             .iter()
-            .map(|(p, pid)| (p.as_str(), *pid))
+            .map(|(p, pending)| (p.as_str(), pending.pid))
             .collect();
         assert_eq!(pending, vec![("/etc", 7), ("/etc/hosts", 8), ("/hosts", 7)]);
+    }
+
+    /// A writer whose root is the overlay of one container.
+    struct Overlay;
+    impl ProcessRootReader for Overlay {
+        fn root_mount(&self, pid: u32) -> Option<RootMount> {
+            (pid == 42).then(|| RootMount {
+                fstype: "overlay".into(),
+                upper: Some("/var/lib/c/9/fs".into()),
+                lowers: vec!["/var/lib/c/3/fs".into()],
+            })
+        }
+    }
+
+    fn lifecycle(pid: u32, parent: Option<u32>, comm: &str) -> ProcessLifecycleEvent {
+        ProcessLifecycleEvent {
+            kind: domain::process::entity::ProcessEventKind::Exec,
+            pid,
+            tgid: pid,
+            uid: 0,
+            gid: 0,
+            cgroup_id: 9,
+            comm: comm.into(),
+            at_ns: u64::from(pid),
+            start_ns: None,
+            parent_pid: parent,
+            parent_start_ns: None,
+        }
+    }
+
+    /// A table holding `sshd` (pid 10) and the shell it started (pid 42).
+    async fn table() -> Arc<ProcessTableService> {
+        let table = Arc::new(ProcessTableService::new(16, false));
+        table.apply(lifecycle(10, None, "sshd")).await;
+        table.apply(lifecycle(42, Some(10), "sh")).await;
+        table
+    }
+
+    /// One rule in force per `(id, when)`.
+    fn rules(whens: &[(&str, &str)]) -> (Arc<HostRuleService>, mpsc::Receiver<AlertEvent>) {
+        let specs: Vec<domain::hostrule::HostRuleSpec> = whens
+            .iter()
+            .map(|(id, when)| {
+                serde_json::from_str(&format!(
+                    r#"{{"id":"{id}","mode":"enforce","when":{{{when}}}}}"#
+                ))
+                .unwrap()
+            })
+            .collect();
+        let (tx, rx) = mpsc::channel(8);
+        let set = domain::hostrule::HostRuleSet::compile(specs).unwrap();
+        (Arc::new(HostRuleService::new(set, tx)), rx)
+    }
+
+    fn alerts(rx: &mut mpsc::Receiver<AlertEvent>) -> Vec<domain::alert::entity::Alert> {
+        let mut out = Vec::new();
+        while let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() {
+            out.push(*alert);
+        }
+        out
+    }
+
+    /// One settled change of `host` by pid 42, the reader answering each
+    /// question from `answers` in turn.
+    fn settle_one(
+        w: &mut FileWatcher,
+        host: &str,
+        kinds: Vec<FileChangeKind>,
+        answers: Vec<Vec<FileFacts>>,
+    ) {
+        let (directory, name) = host.rsplit_once('/').unwrap();
+        let mut change = change(kinds);
+        change.pid = 42;
+        change.directory = Some(directory.into());
+        change.name = name.into();
+        w.queue(&FileChangeBatch {
+            changes: vec![change],
+            overflowed: false,
+        });
+        let source = Scripted {
+            opens: Vec::new(),
+            reads: Vec::new(),
+            facts: answers.into_iter().map(Ok).collect(),
+            cancel: CancellationToken::new(),
+            opened: Arc::new(AtomicU64::new(0)),
+        };
+        w.source = Box::new(source);
+        w.settle().unwrap();
+    }
+
+    fn fed(
+        rules: Arc<HostRuleService>,
+        processes: Arc<ProcessTableService>,
+        store: Arc<Memory>,
+    ) -> FileWatcher {
+        watcher_with(
+            Scripted {
+                opens: Vec::new(),
+                reads: Vec::new(),
+                facts: Vec::new(),
+                cancel: CancellationToken::new(),
+                opened: Arc::new(AtomicU64::new(0)),
+            },
+            Arc::new(Counted::default()),
+            store,
+            10,
+        )
+        .with_rules(FileRuleFeed {
+            rules,
+            processes: Some(processes),
+            roots: Some(Arc::new(Overlay)),
+        })
+    }
+
+    const KEYS: &str = "/var/lib/c/9/fs/root/.ssh/authorized_keys";
+
+    #[tokio::test]
+    async fn a_new_file_in_a_container_names_its_writer_and_ancestry() {
+        let (rules, mut rx) = rules(&[(
+            "keys",
+            r#""file.appears":{"path":"/root/.ssh/authorized_keys"}"#,
+        )]);
+        let mut w = fed(rules, table().await, Arc::new(Memory::default()));
+        settle_one(
+            &mut w,
+            KEYS,
+            vec![FileChangeKind::Created, FileChangeKind::Written],
+            vec![
+                vec![fact(KEYS, FileReading::Present(file('a', 0o600)))],
+                vec![fact(
+                    "/var/lib/c/3/fs/root/.ssh/authorized_keys",
+                    FileReading::Gone,
+                )],
+            ],
+        );
+        let raised = alerts(&mut rx);
+        assert_eq!(raised.len(), 1);
+        let workload = raised[0].workload.as_ref().unwrap();
+        assert_eq!(workload.pid, 42);
+        let ancestry = workload.ancestry.as_ref().unwrap();
+        assert_eq!(ancestry.ancestors[0].pid, 10);
+        assert_eq!(ancestry.ancestors[0].name, "sshd");
+    }
+
+    #[tokio::test]
+    async fn a_move_over_a_known_file_is_a_change_and_not_a_disappearance() {
+        let (rules, mut rx) = rules(&[
+            (
+                "changed",
+                r#""file.changes":{"path":"/root/.ssh/authorized_keys"}"#,
+            ),
+            (
+                "gone",
+                r#""file.disappears":{"path":"/root/.ssh/authorized_keys"}"#,
+            ),
+        ]);
+        let store = Arc::new(Memory::default());
+        store.map().insert(KEYS.into(), file('a', 0o600));
+        let mut w = fed(rules, table().await, store);
+        settle_one(
+            &mut w,
+            KEYS,
+            vec![FileChangeKind::MovedIn],
+            vec![vec![fact(KEYS, FileReading::Present(file('b', 0o600)))]],
+        );
+        let raised = alerts(&mut rx);
+        assert_eq!(raised.len(), 1, "{raised:?}");
+        assert_eq!(raised[0].rule_id.0, "changed");
+    }
+
+    #[tokio::test]
+    async fn a_first_write_to_a_file_of_the_image_is_a_change() {
+        let (rules, mut rx) = rules(&[("passwd", r#""file.changes":{"path":"/etc/passwd"}"#)]);
+        let mut w = fed(rules, table().await, Arc::new(Memory::default()));
+        let host = "/var/lib/c/9/fs/etc/passwd";
+        settle_one(
+            &mut w,
+            host,
+            vec![FileChangeKind::Created, FileChangeKind::Written],
+            vec![
+                vec![fact(host, FileReading::Present(file('a', 0o644)))],
+                vec![fact(
+                    "/var/lib/c/3/fs/etc/passwd",
+                    FileReading::Present(file('b', 0o644)),
+                )],
+            ],
+        );
+        assert_eq!(alerts(&mut rx).len(), 1, "copied up from the image");
     }
 }

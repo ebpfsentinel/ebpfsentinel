@@ -231,16 +231,30 @@ pub(super) const PROCESS_SENDS_TLS: &[FieldSpec] = &[
     FieldSpec::new("ja4", Ty::Text, "JA4 fingerprint of the client hello"),
 ];
 
-pub(super) const FILE_CHANGES: &[FieldSpec] = &[FILE_PATH, EXTENSION, EXE, UID];
+const HOST_PATH: FieldSpec = FieldSpec::new(
+    "host_path",
+    Ty::Path,
+    "path of the file on the host, which differs from `path` inside a container",
+);
+const DEVICE: FieldSpec = FieldSpec::new("device", Ty::Integer, "device holding the file");
+const INODE: FieldSpec = FieldSpec::new("inode", Ty::Integer, "inode of the file on its device");
 
-pub(super) const FILE_APPEARS: &[FieldSpec] = &[FILE_PATH, EXTENSION, EXE, UID];
+pub(super) const FILE_CHANGES: &[FieldSpec] =
+    &[FILE_PATH, EXTENSION, EXE, UID, HOST_PATH, DEVICE, INODE];
 
-pub(super) const FILE_DISAPPEARS: &[FieldSpec] = &[FILE_PATH, EXTENSION, EXE, UID];
+pub(super) const FILE_APPEARS: &[FieldSpec] =
+    &[FILE_PATH, EXTENSION, EXE, UID, HOST_PATH, DEVICE, INODE];
+
+pub(super) const FILE_DISAPPEARS: &[FieldSpec] =
+    &[FILE_PATH, EXTENSION, EXE, UID, HOST_PATH, DEVICE, INODE];
 
 pub(super) const FILE_PERMISSIONS_CHANGE: &[FieldSpec] = &[
     FILE_PATH,
     EXE,
     UID,
+    HOST_PATH,
+    DEVICE,
+    INODE,
     FieldSpec::new("mode", Ty::Integer, "permission bits after the change"),
     FieldSpec::new(
         "previous_mode",
@@ -256,6 +270,11 @@ pub(super) const FILE_PERMISSIONS_CHANGE: &[FieldSpec] = &[
 
 pub(super) const FILE_INTEGRITY_BREAKS: &[FieldSpec] = &[
     FILE_PATH,
+    EXE,
+    UID,
+    HOST_PATH,
+    DEVICE,
+    INODE,
     FieldSpec::new("expected_hash", Ty::Hash, "digest the baseline recorded"),
     FieldSpec::new("actual_hash", Ty::Hash, "digest read now"),
 ];

@@ -9,6 +9,12 @@
 //! process and its ancestry, and a rule asking for it stops the process
 //! through the same kill the process detections use.
 //!
+//! The file watch hands its settled changes here the same way: the file
+//! intentions arrive carrying the path as the writer sees it, and the writer
+//! and its ancestry as the process table holds them. A change whose writer
+//! the table no longer holds is evaluated without one, so a rule on the
+//! writer's fields does not match it and no process is stopped for it.
+//!
 //! A rule in shadow, the default, does neither: what it would have done is
 //! counted per workload in a reading, and putting it in force is decided on
 //! that reading.
@@ -37,10 +43,18 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::alert_event::AlertEvent;
-use crate::workload_policy_service::workload_of;
+use crate::workload_policy_service::{ResolvedWorkload, workload_of};
 
 /// The intentions a source in this build delivers to host rules.
-pub const FED_INTENTS: &[Intent] = &[Intent::ProcessStarts, Intent::ProcessEnds];
+pub const FED_INTENTS: &[Intent] = &[
+    Intent::ProcessStarts,
+    Intent::ProcessEnds,
+    Intent::FileChanges,
+    Intent::FileAppears,
+    Intent::FileDisappears,
+    Intent::FilePermissionsChange,
+    Intent::FileIntegrityBreaks,
+];
 
 /// Why an intention outside [`FED_INTENTS`] is not applicable.
 #[must_use]
@@ -221,7 +235,7 @@ impl HostRuleService {
             return;
         }
         let event = self.starts_event(entry, lineage.ancestors.first());
-        self.evaluate(&event, entry, lineage, at_ns);
+        self.evaluate(&event, Some((entry, lineage)), at_ns);
     }
 
     /// An exit the process table has purged, with the entry it held.
@@ -230,7 +244,26 @@ impl HostRuleService {
             return;
         }
         let event = with_process(IntentEvent::new(Intent::ProcessEnds), entry);
-        self.evaluate(&event, entry, lineage, at_ns);
+        self.evaluate(&event, Some((entry, lineage)), at_ns);
+    }
+
+    /// A change to a watched file, with the process that made it and its
+    /// ancestry where the process table knows it. The event carries the
+    /// file's own fields; the writer's executable and user are added here.
+    pub fn record_file(
+        &self,
+        event: IntentEvent,
+        writer: Option<(&ProcessEntry, &Lineage)>,
+        at_ns: u64,
+    ) {
+        if !self.rules.load().names(event.intent()) {
+            return;
+        }
+        let event = match writer {
+            Some((entry, _)) => with_process(event, entry),
+            None => event,
+        };
+        self.evaluate(&event, writer, at_ns);
     }
 
     fn starts_event(&self, entry: &ProcessEntry, parent: Option<&ProcessEntry>) -> IntentEvent {
@@ -259,12 +292,24 @@ impl HostRuleService {
         event
     }
 
-    fn evaluate(&self, event: &IntentEvent, entry: &ProcessEntry, lineage: &Lineage, at_ns: u64) {
-        let resolved = workload_of(entry).with_ancestry(lineage);
+    fn evaluate(
+        &self,
+        event: &IntentEvent,
+        process: Option<(&ProcessEntry, &Lineage)>,
+        at_ns: u64,
+    ) {
+        // A change whose writer the table never heard of, or has forgotten,
+        // is still evaluated: on the file's own fields, with no workload for
+        // a selector to match and nobody to stop.
+        let resolved = process.map_or_else(ResolvedWorkload::default, |(entry, lineage)| {
+            workload_of(entry).with_ancestry(lineage)
+        });
         let facts = resolved.facts();
-        let ancestors: Vec<ProcessKey> = lineage.ancestors.iter().map(ProcessEntry::key).collect();
+        let ancestors: Vec<ProcessKey> = process.map_or_else(Vec::new, |(_, lineage)| {
+            lineage.ancestors.iter().map(ProcessEntry::key).collect()
+        });
         let subject = Subject {
-            process: Some(entry.key()),
+            process: process.map(|(entry, _)| entry.key()),
             ancestors: &ancestors,
         };
         // A waiting step is written in one insert, and a count's window
@@ -304,18 +349,20 @@ impl HostRuleService {
                     Some(RuleMode::Enforce) => {}
                 }
             }
-            let workload = Workload::new(entry.pid, WorkloadSource::Process)
-                .map(|w| w.with_process(entry).with_lineage(lineage));
+            let workload = process.and_then(|(entry, lineage)| {
+                Workload::new(entry.pid, WorkloadSource::Process)
+                    .map(|w| w.with_process(entry).with_lineage(lineage))
+            });
             let alert = Alert::from_host_rule(rule, event, workload, at_ns);
             let sent = self.alerts.try_send(AlertEvent::ProcessDetection {
                 alert: Box::new(alert),
-                kill_process: rule.kills(),
+                kill_process: rule.kills() && process.is_some(),
             });
             if sent.is_err() {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
                 warn!(
                     rule = rule.id(),
-                    pid = entry.pid,
+                    pid = process.map_or(0, |(entry, _)| entry.pid),
                     "host rule matched and the alert queue is full: the alert is lost"
                 );
             }

@@ -145,8 +145,12 @@ pub fn reported_sources<S: std::hash::BuildHasher>(
         )
     };
 
+    host = match adapters::warden::file_watch::status() {
+        None => host.present(Source::FileWatch),
+        Some(reason) => host.absent(Source::FileWatch, reason),
+    };
+
     for source in [
-        Source::FileWatch,
         Source::HiddenProcessScan,
         Source::HiddenPortScan,
         Source::PackageInventory,
@@ -492,7 +496,7 @@ mod tests {
     fn the_sources_present_decide_what_is_served() {
         let host = HostSources::new(Some((6, 12)))
             .present(Source::ProcessTracing)
-            .absent(Source::FileWatch, NOT_IN_THIS_BUILD);
+            .absent(Source::FileWatch, "the file watch is not enabled");
         let body = intents_body(&host);
         let starts = body
             .intents
@@ -509,9 +513,25 @@ mod tests {
         assert_eq!(changes.state, "not_applicable");
         assert_eq!(
             changes.reason.as_deref(),
-            Some("file_watch: no source for it is part of this build")
+            Some("file_watch: the file watch is not enabled")
         );
         assert_eq!(body.applicable, 2);
+
+        let watched = HostSources::new(Some((6, 12)))
+            .present(Source::ProcessTracing)
+            .present(Source::FileWatch);
+        let body = intents_body(&watched);
+        for name in [
+            "file.changes",
+            "file.appears",
+            "file.disappears",
+            "file.permissions_change",
+            "file.integrity_breaks",
+        ] {
+            let intent = body.intents.iter().find(|i| i.name == name).unwrap();
+            assert_eq!(intent.state, "applicable", "{name}: {:?}", intent.reason);
+        }
+        assert_eq!(body.applicable, 7);
     }
 
     #[test]

@@ -77,3 +77,11 @@ pub trait FileBaselineStore: Send + Sync {
     /// The store could not be read.
     fn count(&self) -> Result<u64, DomainError>;
 }
+
+/// Reads where a process's root lives, so a path the watch reports on the
+/// backing filesystem can be named the way that process sees it.
+pub trait ProcessRootReader: Send + Sync {
+    /// The root mount of `pid`, `None` when the process is gone or its
+    /// mount table cannot be read.
+    fn root_mount(&self, pid: u32) -> Option<domain::file_watch::RootMount>;
+}
