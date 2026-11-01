@@ -12825,6 +12825,31 @@
           }
         }
       },
+      "HostRuleExceptionBody": {
+        "type": "object",
+        "description": "A workload some host rules leave alone.",
+        "required": [
+          "id",
+          "rules",
+          "workload"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The rules it silences; empty for every rule."
+          },
+          "workload": {
+            "type": "object",
+            "description": "The workload it names, written as a rule's `workload`."
+          }
+        }
+      },
       "HostRulesResponse": {
         "type": "object",
         "description": "Every loaded host rule, and what they have matched since the start.",
@@ -12836,6 +12861,8 @@
           "pending_refused",
           "counting",
           "counting_refused",
+          "exempted",
+          "exceptions",
           "rules"
         ],
         "properties": {
@@ -12854,6 +12881,19 @@
             "type": "integer",
             "format": "int64",
             "description": "Of the matches of rules in force, alerts lost to a full alert queue.",
+            "minimum": 0
+          },
+          "exceptions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HostRuleExceptionBody"
+            },
+            "description": "The exceptions in force."
+          },
+          "exempted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Matches an exception left alone: no alert and no shadow reading.",
             "minimum": 0
           },
           "matched": {

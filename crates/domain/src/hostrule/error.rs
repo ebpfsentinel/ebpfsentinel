@@ -47,6 +47,10 @@ pub enum HostRuleError {
     #[error("host rule `{id}`: {reason}")]
     Rule { id: String, reason: String },
 
+    /// An exception that does not load, and why.
+    #[error("host rule exception `{id}`: {reason}")]
+    Exception { id: String, reason: String },
+
     /// Two host rules carry one identifier.
     #[error("host rule `{id}` is defined twice; an identifier names one rule")]
     DuplicateRule { id: String },

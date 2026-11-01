@@ -331,7 +331,22 @@ pub struct HostRulesResponse {
     /// Events not counted because the groups or the events held were at
     /// their bound.
     pub counting_refused: u64,
+    /// Matches an exception left alone: no alert and no shadow reading.
+    pub exempted: u64,
+    /// The exceptions in force.
+    pub exceptions: Vec<HostRuleExceptionBody>,
     pub rules: Vec<HostRuleBody>,
+}
+
+/// A workload some host rules leave alone.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HostRuleExceptionBody {
+    pub id: String,
+    /// The rules it silences; empty for every rule.
+    pub rules: Vec<String>,
+    /// The workload it names, written as a rule's `workload`.
+    #[schema(value_type = Object)]
+    pub workload: serde_json::Value,
 }
 
 /// `GET /api/v1/host-rules` - the loaded host rules and whether this host
@@ -366,6 +381,8 @@ pub fn rules_body(service: Option<&HostRuleService>, host: &HostSources) -> Host
             pending_refused: 0,
             counting: 0,
             counting_refused: 0,
+            exempted: 0,
+            exceptions: Vec::new(),
             rules: Vec::new(),
         };
     };
@@ -379,6 +396,17 @@ pub fn rules_body(service: Option<&HostRuleService>, host: &HostSources) -> Host
         pending_refused: memory.pending_refused,
         counting: memory.counting,
         counting_refused: memory.counting_refused,
+        exempted: service.exempted(),
+        exceptions: service
+            .exceptions()
+            .iter()
+            .map(|exception| HostRuleExceptionBody {
+                id: exception.id().to_string(),
+                rules: exception.rules().to_vec(),
+                workload: serde_json::to_value(exception.selector())
+                    .unwrap_or(serde_json::Value::Null),
+            })
+            .collect(),
         rules: service
             .rules()
             .rules()

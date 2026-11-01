@@ -17,6 +17,7 @@ pub mod binding;
 pub mod count;
 pub mod error;
 pub mod event;
+pub mod exception;
 pub mod field;
 pub mod intent;
 pub mod limits;
@@ -31,13 +32,14 @@ pub use count::{
 };
 pub use error::HostRuleError;
 pub use event::IntentEvent;
+pub use exception::{HOST_RULE_EXCEPTIONS_MAX, HostRuleException};
 pub use field::{FieldSpec, FieldType, FieldValue, RESERVED_KEYS};
 pub use intent::{Intent, IntentFamily};
 pub use limits::{HOST_RULE_LIMITS, HostRuleLimit};
 pub use rule::{
-    Condition, FollowedBy, Glob, HOST_RULE_COMPONENT, HOST_RULE_REGEX_DFA_LIMIT,
-    HOST_RULE_REGEX_SIZE_LIMIT, HOST_RULE_WINDOW_MAX_NS, HostRule, HostRuleAction, HostRuleSet,
-    HostRuleSpec, IntentBlock, Matcher, Pattern, RawValue, Test,
+    Condition, FollowedBy, Glob, HOST_RULE_COMPONENT, HOST_RULE_ID_MAX_LEN, HOST_RULE_LIST_MAX,
+    HOST_RULE_REGEX_DFA_LIMIT, HOST_RULE_REGEX_SIZE_LIMIT, HOST_RULE_WINDOW_MAX_NS, HostRule,
+    HostRuleAction, HostRuleSet, HostRuleSpec, IntentBlock, Matcher, Pattern, RawValue, Test,
 };
 pub use sequence::{HOST_RULE_PENDING_MAX, HostRuleState, PendingSequences, Subject};
 pub use shadow::{

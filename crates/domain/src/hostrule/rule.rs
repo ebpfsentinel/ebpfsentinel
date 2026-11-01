@@ -630,7 +630,7 @@ impl HostRuleSet {
     }
 }
 
-fn check_id(id: &str) -> Result<(), String> {
+pub(crate) fn check_id(id: &str) -> Result<(), String> {
     if id.is_empty() || id.len() > HOST_RULE_ID_MAX_LEN {
         return Err(format!(
             "the id must be 1 to {HOST_RULE_ID_MAX_LEN} characters"

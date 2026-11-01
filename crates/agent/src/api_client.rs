@@ -2126,7 +2126,18 @@ pub struct HostRulesResponse {
     pub pending_refused: u64,
     pub counting: usize,
     pub counting_refused: u64,
+    #[serde(default)]
+    pub exempted: u64,
+    #[serde(default)]
+    pub exceptions: Vec<HostRuleExceptionEntry>,
     pub rules: Vec<HostRuleEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct HostRuleExceptionEntry {
+    pub id: String,
+    pub rules: Vec<String>,
+    pub workload: serde_json::Value,
 }
 
 #[derive(Deserialize, Serialize)]

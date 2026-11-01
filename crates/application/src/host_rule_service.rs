@@ -26,8 +26,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use domain::firewall::entity::RuleMode;
 use domain::hostrule::{
-    FieldValue, HostRuleSet, HostRuleState, HostShadowBook, HostShadowReading, Intent, IntentEvent,
-    PromotionRefused, Subject,
+    FieldValue, HostRuleException, HostRuleSet, HostRuleState, HostShadowBook, HostShadowReading,
+    Intent, IntentEvent, PromotionRefused, Subject,
 };
 use domain::process::engine::Lineage;
 use domain::process::entity::{ProcessEntry, ProcessKey};
@@ -69,8 +69,10 @@ pub struct HostRuleService {
     facts: Option<Arc<dyn ProcessFactsReader>>,
     state: Mutex<HostRuleState>,
     shadow: Mutex<HostShadowBook>,
+    exceptions: ArcSwap<Vec<HostRuleException>>,
     matched: AtomicU64,
     dropped: AtomicU64,
+    exempted: AtomicU64,
 }
 
 impl HostRuleService {
@@ -82,8 +84,10 @@ impl HostRuleService {
             alerts,
             facts: None,
             state: Mutex::new(HostRuleState::default()),
+            exceptions: ArcSwap::from_pointee(Vec::new()),
             matched: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            exempted: AtomicU64::new(0),
         }
     }
 
@@ -114,6 +118,25 @@ impl HostRuleService {
         let mut book = self.book();
         *book = book.renewed(&previous, &next, now_ns());
         *state = HostRuleState::default();
+    }
+
+    /// Leave the workloads `exceptions` select alone from now on, in place
+    /// of the exceptions held. The rules and their readings are untouched:
+    /// an exception decides what a match does, not what matches.
+    pub fn set_exceptions(&self, exceptions: Vec<HostRuleException>) {
+        self.exceptions.store(Arc::new(exceptions));
+    }
+
+    /// The exceptions in force.
+    #[must_use]
+    pub fn exceptions(&self) -> Arc<Vec<HostRuleException>> {
+        self.exceptions.load_full()
+    }
+
+    /// How many matches an exception left alone.
+    #[must_use]
+    pub fn exempted(&self) -> u64 {
+        self.exempted.load(Ordering::Relaxed)
     }
 
     /// How many events matched a rule, and how many of those alerts were
@@ -256,8 +279,16 @@ impl HostRuleService {
         let rules = self.rules.load_full();
         let fired = rules.evaluate(&mut state, event, Some(&facts), &subject, at_ns);
         drop(state);
+        let exceptions = self.exceptions.load();
         for rule in fired {
             self.matched.fetch_add(1, Ordering::Relaxed);
+            if exceptions
+                .iter()
+                .any(|exception| exception.silences(rule.id(), &facts))
+            {
+                self.exempted.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
             let hit = facts.container_id.or(facts.cgroup).or(facts.unit);
             {
                 // A set replaced since this one was evaluated may no longer
@@ -415,6 +446,35 @@ mod tests {
         service.record_exec(&entry(7, "/bin/sh", 0), &Lineage::default(), 4);
         assert!(rx.try_recv().is_err(), "a rule taken away does nothing");
         assert_eq!(service.mode("quiet"), None);
+    }
+
+    #[test]
+    fn an_exception_leaves_its_workload_without_alert_or_reading() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let service = HostRuleService::new(
+            rules(
+                r#"[{"id":"loud","mode":"enforce","when":{"process.starts":{"exe":"/bin/sh"}}},
+                    {"id":"quiet","mode":"shadow","when":{"process.starts":{"exe":"/bin/sh"}}}]"#,
+            ),
+            tx,
+        );
+        let make = Lineage {
+            ancestors: Vec::new(),
+            ..Lineage::default()
+        };
+        let selector = serde_json::from_str(r#"{"exe":"/bin/sh"}"#).unwrap();
+        service.set_exceptions(vec![
+            HostRuleException::new("shells", Vec::new(), selector).unwrap(),
+        ]);
+        service.record_exec(&entry(8, "/bin/sh", 0), &make, 1);
+        assert!(rx.try_recv().is_err(), "an exempted match sends nothing");
+        assert_eq!(service.reading("quiet").unwrap().events, 0);
+        assert_eq!(service.exempted(), 2);
+
+        service.set_exceptions(Vec::new());
+        service.record_exec(&entry(9, "/bin/sh", 0), &make, 2);
+        assert_eq!(take(&mut rx).len(), 1);
+        assert_eq!(service.reading("quiet").unwrap().events, 1);
     }
 
     fn entry(pid: u32, exe: &str, uid: u32) -> ProcessEntry {

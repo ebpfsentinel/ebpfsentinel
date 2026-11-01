@@ -6402,6 +6402,20 @@ pub async fn cmd_host_rules_list(client: &ApiClient, output: OutputFormat) -> Re
             resp.counting, resp.counting_refused
         );
     }
+    for exception in &resp.exceptions {
+        let rules = if exception.rules.is_empty() {
+            "every rule".to_string()
+        } else {
+            exception.rules.join(", ")
+        };
+        println!(
+            "Exception {}: {rules} leave {} alone.",
+            exception.id, exception.workload
+        );
+    }
+    if resp.exempted > 0 {
+        println!("{} matches left alone by an exception.", resp.exempted);
+    }
     for rule in &resp.rules {
         if let Some(shadow) = rule.shadow.as_ref().filter(|s| s.events > 0) {
             let hits: Vec<String> = shadow
