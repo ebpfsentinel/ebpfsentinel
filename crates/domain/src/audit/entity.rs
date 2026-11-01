@@ -95,6 +95,13 @@ pub enum AuditAction {
     WorkloadQuarantineRefused,
     /// A workload's quarantine was lifted, by an operator or by its expiry.
     WorkloadReleased,
+    /// A bounded investigation of one workload started, under the name of
+    /// the person who started it.
+    InvestigationStarted,
+    /// An investigation was stopped before its time by an operator.
+    InvestigationStopped,
+    /// An investigation reached the end of its time and stopped by itself.
+    InvestigationExpired,
 }
 
 impl AuditAction {
@@ -116,6 +123,9 @@ impl AuditAction {
             Self::WorkloadQuarantined => "workload_quarantined",
             Self::WorkloadQuarantineRefused => "workload_quarantine_refused",
             Self::WorkloadReleased => "workload_released",
+            Self::InvestigationStarted => "investigation_started",
+            Self::InvestigationStopped => "investigation_stopped",
+            Self::InvestigationExpired => "investigation_expired",
         }
     }
 }
@@ -351,6 +361,21 @@ mod tests {
         assert_eq!(AuditAction::Drop.as_str(), "drop");
         assert_eq!(AuditAction::Alert.as_str(), "alert");
         assert_eq!(AuditAction::RateExceeded.as_str(), "rate_exceeded");
+    }
+
+    #[test]
+    fn investigation_actions_serialize_as_they_display() {
+        for (action, name) in [
+            (AuditAction::InvestigationStarted, "investigation_started"),
+            (AuditAction::InvestigationStopped, "investigation_stopped"),
+            (AuditAction::InvestigationExpired, "investigation_expired"),
+        ] {
+            assert_eq!(action.as_str(), name);
+            assert_eq!(
+                serde_json::to_string(&action).unwrap(),
+                format!("\"{name}\"")
+            );
+        }
     }
 
     #[test]
