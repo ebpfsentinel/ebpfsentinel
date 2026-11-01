@@ -630,6 +630,52 @@ pub struct WorkloadResponse {
     pub unit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ancestry: Option<WorkloadAncestryResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<PeerWorkloadResponse>,
+}
+
+/// The other end of a flow, named from the list of remote identities.
+#[derive(Deserialize, Serialize)]
+pub struct PeerWorkloadResponse {
+    pub address: String,
+    /// `remote_list`: a corroboration, never a kernel reading.
+    pub source: String,
+    pub node: String,
+    pub kind: String,
+    pub list_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest: Option<String>,
+}
+
+impl PeerWorkloadResponse {
+    /// The peer on one line, saying where the name came from.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let what = match (
+            self.pod.as_deref(),
+            self.container.as_deref(),
+            self.guest.as_deref(),
+        ) {
+            (Some(pod), _, _) => match self.namespace.as_deref() {
+                Some(ns) => format!("pod {ns}/{pod}"),
+                None => format!("pod {pod}"),
+            },
+            (None, Some(container), _) => format!("container {container}"),
+            (None, None, Some(guest)) => format!("guest {guest}"),
+            (None, None, None) => self.kind.clone(),
+        };
+        format!("{what} on {} [{}]", self.node, self.source)
+    }
 }
 
 /// One process above the one behind a flow.
@@ -704,6 +750,9 @@ impl WorkloadResponse {
             let _ = write!(out, " in container {container}");
         }
         let _ = write!(out, " [{}]", self.source);
+        if let Some(peer) = self.peer.as_ref() {
+            let _ = write!(out, " -> {}", peer.summary());
+        }
         out
     }
 }
@@ -4690,6 +4739,31 @@ mod tests {
             assignee: None,
             notes: Vec::new(),
         }
+    }
+
+    /// A peer named from the list says so on the one-line view, so a reader
+    /// never takes it for something this node read.
+    #[test]
+    fn a_peer_on_the_listing_says_where_its_name_came_from() {
+        let block: super::WorkloadResponse = serde_json::from_value(serde_json::json!({
+            "pid": 4242,
+            "source": "socket",
+            "exe": "/usr/bin/curl",
+            "peer": {
+                "address": "10.1.2.3",
+                "source": "remote_list",
+                "node": "node-b",
+                "kind": "pod",
+                "list_version": "v7",
+                "pod": "db-0",
+                "namespace": "shop"
+            }
+        }))
+        .expect("the block parses");
+        assert_eq!(
+            block.summary(),
+            "/usr/bin/curl (4242) [socket] -> pod shop/db-0 on node-b [remote_list]"
+        );
     }
 
     /// The one-line listing names the binary, and says when the destination

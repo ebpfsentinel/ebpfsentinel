@@ -10,7 +10,7 @@
 //! no block at all, so the key is missing from the document instead of
 //! holding a pid of zero.
 
-use domain::workload::entity::{Workload, WorkloadAncestry};
+use domain::workload::entity::{PeerWorkload, Workload, WorkloadAncestry};
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -57,6 +57,56 @@ pub struct WorkloadResponse {
     /// The processes above this one, where the process table holds any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ancestry: Option<WorkloadAncestryResponse>,
+    /// The workload at the other end of the flow, where its address is on
+    /// another node of the fleet. Named from the list the console hands this
+    /// node, never read off the wire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer: Option<PeerWorkloadResponse>,
+}
+
+/// The other end of a flow, as the node holding its address published it.
+#[derive(Serialize, ToSchema)]
+pub struct PeerWorkloadResponse {
+    /// The remote address the name belongs to.
+    pub address: String,
+    /// Always `remote_list`: a corroboration from the list of remote
+    /// identities, never a kernel reading. A list older than a pod's move
+    /// names the pod that left.
+    pub source: String,
+    /// The node holding the address, as the console knows it.
+    pub node: String,
+    /// What sits behind the address: `host`, `container`, `pod` or `guest`.
+    pub kind: String,
+    /// The version of the list the name was read from.
+    pub list_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pod: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guest: Option<String>,
+}
+
+fn peer_response(peer: PeerWorkload) -> PeerWorkloadResponse {
+    PeerWorkloadResponse {
+        address: peer.address.to_string(),
+        source: peer.source.as_str().to_string(),
+        node: peer.node,
+        kind: peer.kind.as_str().to_string(),
+        list_version: peer.list_version,
+        container: peer.container,
+        image: peer.image,
+        pod: peer.pod,
+        namespace: peer.namespace,
+        service_account: peer.service_account,
+        guest: peer.guest,
+    }
 }
 
 /// One process above the one behind a flow.
@@ -125,6 +175,7 @@ pub fn workload_response(workload: Option<Workload>) -> Option<WorkloadResponse>
         service_account: w.service_account,
         unit: w.unit,
         ancestry: w.ancestry.map(ancestry_response),
+        peer: w.peer.map(peer_response),
     })
 }
 
@@ -133,6 +184,35 @@ mod tests {
     use domain::workload::entity::WorkloadSource;
 
     use super::*;
+
+    #[test]
+    fn the_peer_half_says_it_came_from_the_list() {
+        use domain::identity::IdentityKind;
+        use domain::workload::entity::PeerSource;
+
+        let mut w = Workload::new(4242, WorkloadSource::Socket).expect("a pid builds a block");
+        w.peer = Some(PeerWorkload {
+            address: "10.1.2.3".parse().expect("an address"),
+            source: PeerSource::RemoteList,
+            node: "node-b".to_string(),
+            kind: IdentityKind::Pod,
+            list_version: "v7".to_string(),
+            container: None,
+            image: None,
+            pod: Some("db-0".to_string()),
+            namespace: Some("shop".to_string()),
+            service_account: None,
+            guest: None,
+        });
+        let json = serde_json::to_value(workload_response(Some(w)).expect("a block"))
+            .expect("the block serialises");
+        assert_eq!(json["source"], "socket");
+        assert_eq!(json["peer"]["source"], "remote_list");
+        assert_eq!(json["peer"]["node"], "node-b");
+        assert_eq!(json["peer"]["kind"], "pod");
+        assert_eq!(json["peer"]["address"], "10.1.2.3");
+        assert!(json["peer"].get("image").is_none());
+    }
 
     #[test]
     fn an_unresolved_flow_carries_no_block() {

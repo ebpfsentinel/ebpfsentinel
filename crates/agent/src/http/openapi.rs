@@ -316,6 +316,7 @@ use super::zone_handler;
         workload_dto::WorkloadResponse,
         workload_dto::WorkloadAncestryResponse,
         workload_dto::WorkloadAncestorResponse,
+        workload_dto::PeerWorkloadResponse,
         alert_handler::FalsePositiveResponse,
         alert_handler::AlertNoteResponse,
         alert_handler::TriageRequest,

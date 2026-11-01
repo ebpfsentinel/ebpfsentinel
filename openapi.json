@@ -15179,6 +15179,75 @@
           }
         }
       },
+      "PeerWorkloadResponse": {
+        "type": "object",
+        "description": "The other end of a flow, as the node holding its address published it.",
+        "required": [
+          "address",
+          "source",
+          "node",
+          "kind",
+          "list_version"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The remote address the name belongs to."
+          },
+          "container": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "guest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "description": "What sits behind the address: `host`, `container`, `pod` or `guest`."
+          },
+          "list_version": {
+            "type": "string",
+            "description": "The version of the list the name was read from."
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node": {
+            "type": "string",
+            "description": "The node holding the address, as the console knows it."
+          },
+          "pod": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "service_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "description": "Always `remote_list`: a corroboration from the list of remote\nidentities, never a kernel reading. A list older than a pod's move\nnames the pod that left."
+          }
+        }
+      },
       "PodCoverageEntry": {
         "type": "object",
         "required": [
@@ -18654,6 +18723,17 @@
               "null"
             ],
             "description": "Namespace, on a Kubernetes node."
+          },
+          "peer": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PeerWorkloadResponse",
+                "description": "The workload at the other end of the flow, where its address is on\nanother node of the fleet. Named from the list the console hands this\nnode, never read off the wire."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "pid": {
             "type": "integer",

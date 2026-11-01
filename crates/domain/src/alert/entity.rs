@@ -1678,6 +1678,7 @@ mod tests {
         // refuses one anyway: a surface showing "pid 0" is the one failure
         // this whole field exists to prevent.
         let zeroed = Some(crate::workload::entity::Workload {
+            peer: None,
             pid: 0,
             source: crate::workload::entity::WorkloadSource::Socket,
             exe: None,

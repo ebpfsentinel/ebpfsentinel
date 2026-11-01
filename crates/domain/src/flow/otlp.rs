@@ -173,6 +173,11 @@ fn push_workload(attributes: &mut Vec<(&'static str, String)>, workload: &Worklo
             attributes.push((WORKLOAD_ANCESTRY_INCOMPLETE, "true".to_string()));
         }
     }
+    if let Some(peer) = workload.peer.as_ref() {
+        for (key, _, value) in peer.fields() {
+            push_text(attributes, key, value.as_deref());
+        }
+    }
 }
 
 /// Write a text attribute, skipping both absence and the empty string: a
@@ -211,6 +216,7 @@ mod tests {
 
     fn workload() -> Workload {
         Workload {
+            peer: None,
             pid: 4_242,
             source: WorkloadSource::Socket,
             exe: Some("/usr/bin/curl".to_string()),
@@ -266,6 +272,29 @@ mod tests {
         assert_eq!(value(&attributes, FLOW_DURATION_MS), Some("12500"));
         assert_eq!(value(&attributes, FLOW_END_REASON), Some("idle_timeout"));
         assert_eq!(value(&attributes, FLOW_END_REASON_CODE), Some("1"));
+    }
+
+    #[test]
+    fn the_peer_half_says_where_it_came_from() {
+        let mut w = workload();
+        w.peer = Some(crate::workload::entity::sample_peer());
+        let full = FlowRecord {
+            workload: Some(w),
+            ..record()
+        };
+        let attributes = attributes(&full);
+        let value = |key: &str| {
+            attributes
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(
+            value("ebpfsentinel.workload.peer.source"),
+            Some("remote_list")
+        );
+        assert_eq!(value("ebpfsentinel.workload.peer.namespace"), Some("shop"));
+        assert_eq!(value("ebpfsentinel.workload.peer.guest"), None);
     }
 
     #[test]

@@ -95,6 +95,19 @@ fn workload_block(alert: &Alert) -> Option<proto::Workload> {
             .unwrap_or_default(),
         ancestry_truncated: ancestry.is_some_and(|a| a.truncated),
         ancestry_incomplete: ancestry.is_some_and(|a| a.incomplete),
+        peer: w.peer.as_ref().map(|p| proto::PeerWorkload {
+            address: p.address.to_string(),
+            source: p.source.as_str().to_string(),
+            node: p.node.clone(),
+            kind: p.kind.as_str().to_string(),
+            list_version: p.list_version.clone(),
+            container: p.container.clone().unwrap_or_default(),
+            image: p.image.clone().unwrap_or_default(),
+            pod: p.pod.clone().unwrap_or_default(),
+            namespace: p.namespace.clone().unwrap_or_default(),
+            service_account: p.service_account.clone().unwrap_or_default(),
+            guest: p.guest.clone().unwrap_or_default(),
+        }),
     })
 }
 
@@ -366,6 +379,40 @@ mod tests {
         assert_eq!(block.namespace, "");
         assert_eq!(block.cgroup, 0);
         assert!(block.ancestors.is_empty());
+        assert!(block.peer.is_none());
+    }
+
+    #[test]
+    fn the_peer_half_rides_the_stream_marked_as_relayed() {
+        use domain::identity::IdentityKind;
+        use domain::workload::entity::{PeerSource, PeerWorkload, Workload, WorkloadSource};
+
+        let mut alert = make_alert("ids", Severity::High, "ids-001");
+        let mut workload = Workload::new(4242, WorkloadSource::Socket).expect("a pid builds one");
+        workload.peer = Some(PeerWorkload {
+            address: "10.1.2.3".parse().expect("an address"),
+            source: PeerSource::RemoteList,
+            node: "node-b".to_string(),
+            kind: IdentityKind::Pod,
+            list_version: "v7".to_string(),
+            container: None,
+            image: None,
+            pod: Some("db-0".to_string()),
+            namespace: Some("shop".to_string()),
+            service_account: None,
+            guest: None,
+        });
+        alert.workload = Some(workload);
+
+        let peer = alert_to_event(&alert)
+            .workload
+            .and_then(|w| w.peer)
+            .expect("the peer travels");
+        assert_eq!(peer.source, "remote_list");
+        assert_eq!(peer.node, "node-b");
+        assert_eq!(peer.address, "10.1.2.3");
+        assert_eq!(peer.pod, "db-0");
+        assert_eq!(peer.image, "");
     }
 
     #[test]

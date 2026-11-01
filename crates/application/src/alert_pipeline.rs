@@ -306,8 +306,9 @@ impl AlertPipeline {
         // A DLP alert already names its own thread: the uprobe fired in the
         // process doing the writing, which is a reading rather than a match.
         if let Some(pid) = alert.tgid.or(alert.pid)
-            && let Some(workload) = self.workloads.by_pid(pid)
+            && let Some(mut workload) = self.workloads.by_pid(pid)
         {
+            workload.peer = alert_flow(alert).and_then(|flow| self.workloads.peer_of(&flow));
             alert.workload = Some(workload);
             return;
         }

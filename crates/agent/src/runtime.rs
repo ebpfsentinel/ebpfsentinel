@@ -741,6 +741,8 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         (None, None)
     };
 
+    let remote_identities =
+        Arc::new(application::remote_identity_store::RemoteIdentityStore::new());
     Ok(ServiceHandles {
         firewall_svc,
         ids_svc,
@@ -768,10 +770,14 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         // capability exists only where the object was loaded and attached.
         process_signal_svc: None,
         quarantine_svc: None,
-        workloads: application::workload_resolver::WorkloadResolver::new(),
+        workloads: {
+            let workloads = application::workload_resolver::WorkloadResolver::new();
+            workloads.install_remote(Arc::clone(&remote_identities));
+            workloads
+        },
         metrics,
         ebpf_loaded,
-        remote_identities: Arc::new(application::remote_identity_store::RemoteIdentityStore::new()),
+        remote_identities,
     })
 }
 

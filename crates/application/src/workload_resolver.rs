@@ -16,10 +16,11 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use domain::exposure::entity::{AcceptedConnections, BoundSocket};
-use domain::workload::entity::{Workload, WorkloadSource};
+use domain::workload::entity::{PeerWorkload, Workload, WorkloadSource};
 use ports::secondary::socket_identity_port::{FlowEndpoints, SocketIdentityReader, SocketOwner};
 
 use crate::process_table_service::ProcessTableService;
+use crate::remote_identity_store::RemoteIdentityStore;
 
 /// Resolves the workload behind a socket, a flow or a pid.
 ///
@@ -43,6 +44,9 @@ pub struct WorkloadResolver {
     /// the table is built once the container resolver and the enrichers have
     /// been decided, which is well after the hooks attach.
     processes: Arc<ArcSwapOption<ProcessTableService>>,
+    /// The list naming the other nodes' addresses, which is what fills the
+    /// peer half of a block. Absent on a node no console feeds.
+    remote: Arc<ArcSwapOption<RemoteIdentityStore>>,
 }
 
 impl WorkloadResolver {
@@ -83,6 +87,31 @@ impl WorkloadResolver {
         self.processes.store(Some(processes));
     }
 
+    /// Name the other end of a flow from the list of remote identities.
+    pub fn install_remote(&self, remote: Arc<RemoteIdentityStore>) {
+        self.remote.store(Some(remote));
+    }
+
+    /// The workload another node published for either end of `flow`.
+    ///
+    /// Both ends are tried because a caller reading conntrack does not know
+    /// which side is this node's, and this node's own addresses are never in
+    /// the list it is handed, so at most one end answers in practice.
+    #[must_use]
+    pub fn peer_of(&self, flow: &FlowEndpoints) -> Option<PeerWorkload> {
+        let remote = self.remote.load();
+        let held = remote.as_ref()?.current()?;
+        [flow.remote_addr, flow.local_addr]
+            .into_iter()
+            .find_map(|address| held.get(address))
+            .map(|entry| PeerWorkload::from_entry(entry, held.version()))
+    }
+
+    fn with_peer(&self, mut workload: Workload, flow: &FlowEndpoints) -> Workload {
+        workload.peer = self.peer_of(flow);
+        workload
+    }
+
     /// Whether anything here can answer at all.
     ///
     /// A resolver with neither half is not an error: it is what an agent on a
@@ -104,7 +133,7 @@ impl WorkloadResolver {
     #[must_use]
     pub fn by_flow(&self, flow: &FlowEndpoints) -> Option<Workload> {
         let owner = self.sockets.load().as_ref()?.by_flow(flow)?;
-        Some(self.enrich(owner))
+        Some(self.with_peer(self.enrich(owner), flow))
     }
 
     /// The workload that opened a connection from the local end stated.
@@ -116,7 +145,7 @@ impl WorkloadResolver {
     #[must_use]
     pub fn by_originated_flow(&self, flow: &FlowEndpoints) -> Option<Workload> {
         let owner = self.sockets.load().as_ref()?.by_originated_flow(flow)?;
-        Some(self.enrich(owner))
+        Some(self.with_peer(self.enrich(owner), flow))
     }
 
     /// The workload behind a pid the caller already knows, which is how a DLP
@@ -235,6 +264,7 @@ impl WorkloadResolver {
 /// option, so this builds the one thing that is always true of the record.
 fn unreachable_owner(owner: SocketOwner) -> Workload {
     Workload {
+        peer: None,
         pid: owner.pid,
         source: owner.source,
         exe: None,
@@ -302,6 +332,81 @@ mod tests {
             ))
             .await;
         Arc::new(service)
+    }
+
+    fn remote_list(address: IpAddr) -> Arc<RemoteIdentityStore> {
+        use domain::identity::remote::{RemoteEntry, RemoteSnapshot};
+        use domain::identity::{AddressIdentity, IdentityKind};
+        let store = RemoteIdentityStore::new();
+        store
+            .replace(RemoteSnapshot {
+                version: "v7".to_string(),
+                entries: vec![RemoteEntry {
+                    node: "node-b".to_string(),
+                    identity: AddressIdentity {
+                        address,
+                        kind: IdentityKind::Pod,
+                        container: Some("db".to_string()),
+                        image: None,
+                        pod: Some("db-0".to_string()),
+                        namespace: Some("shop".to_string()),
+                        service_account: Some("db".to_string()),
+                        guest: None,
+                        pod_labels: std::collections::BTreeMap::from([(
+                            "app".to_string(),
+                            "db".to_string(),
+                        )]),
+                        namespace_labels: std::collections::BTreeMap::new(),
+                        services: Vec::new(),
+                    },
+                }],
+                conflicts: 0,
+            })
+            .expect("a valid list");
+        Arc::new(store)
+    }
+
+    #[test]
+    fn the_other_end_is_named_from_the_list_and_says_so() {
+        let resolver = WorkloadResolver::new().with_sockets(Box::new(FixedSocket(Some(owner()))));
+        resolver.install_remote(remote_list(flow().remote_addr));
+
+        let peer = resolver
+            .by_flow(&flow())
+            .and_then(|w| w.peer)
+            .expect("the remote end is in the list");
+        assert_eq!(peer.source.as_str(), "remote_list");
+        assert_eq!(peer.node, "node-b");
+        assert_eq!(peer.pod.as_deref(), Some("db-0"));
+        assert_eq!(peer.list_version, "v7");
+        assert_eq!(peer.address, flow().remote_addr);
+
+        let originated = resolver.by_originated_flow(&flow()).expect("a block");
+        assert!(originated.peer.is_some());
+    }
+
+    #[test]
+    fn an_end_the_list_does_not_hold_names_no_peer() {
+        let resolver = WorkloadResolver::new().with_sockets(Box::new(FixedSocket(Some(owner()))));
+        assert!(resolver.by_flow(&flow()).expect("a block").peer.is_none());
+
+        resolver.install_remote(remote_list(IpAddr::V4(Ipv4Addr::new(10, 9, 9, 9))));
+        let workload = resolver.by_flow(&flow()).expect("a block");
+        assert!(workload.peer.is_none());
+        let json = serde_json::to_string(&workload).expect("serialises");
+        assert!(!json.contains("peer"), "absence is absence: {json}");
+    }
+
+    #[test]
+    fn a_reversed_conntrack_row_still_finds_the_remote_end() {
+        let resolver = WorkloadResolver::new();
+        resolver.install_remote(remote_list(flow().remote_addr));
+        let reversed = FlowEndpoints {
+            local_addr: flow().remote_addr,
+            remote_addr: flow().local_addr,
+            ..flow()
+        };
+        assert!(resolver.peer_of(&reversed).is_some());
     }
 
     #[test]

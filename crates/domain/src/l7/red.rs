@@ -579,6 +579,7 @@ mod tests {
 
     fn workload() -> Workload {
         Workload {
+            peer: None,
             pid: 42,
             source: WorkloadSource::Flow,
             exe: Some("/usr/sbin/nginx".into()),

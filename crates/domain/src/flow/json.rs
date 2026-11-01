@@ -117,6 +117,11 @@ fn write_workload(out: &mut String, workload: &Workload) {
             flag(out, otlp::WORKLOAD_ANCESTRY_INCOMPLETE);
         }
     }
+    if let Some(peer) = workload.peer.as_ref() {
+        for (key, _, value) in peer.fields() {
+            optional_text(out, key, value.as_deref());
+        }
+    }
 }
 
 /// The transport word the conventions define, or nothing for a protocol they
@@ -271,6 +276,7 @@ mod tests {
     fn a_resolved_workload_writes_its_block() {
         let record = FlowRecord {
             workload: Some(Workload {
+                peer: None,
                 pid: 4_242,
                 source: WorkloadSource::Socket,
                 exe: Some("/usr/bin/curl".to_string()),
@@ -341,6 +347,26 @@ mod tests {
     fn the_same_record_renders_the_same_line_twice() {
         let record = transited();
         assert_eq!(line(&record, 1), line(&record, 1));
+    }
+
+    #[test]
+    fn the_peer_half_is_written_after_the_word_saying_it_was_relayed() {
+        let mut w = Workload::new(4_242, WorkloadSource::Socket).expect("a pid builds a block");
+        w.peer = Some(crate::workload::entity::sample_peer());
+        let record = FlowRecord {
+            workload: Some(w),
+            ..transited()
+        };
+        let rendered = line(&record, 1);
+        let value = parse(&rendered);
+        assert_eq!(value["ebpfsentinel.workload.peer.source"], "remote_list");
+        assert_eq!(value["ebpfsentinel.workload.peer.node"], "node-b");
+        assert_eq!(value["ebpfsentinel.workload.peer.pod"], "db-0");
+        assert_eq!(value["ebpfsentinel.workload.peer.address"], "10.1.2.3");
+        assert!(value.get("ebpfsentinel.workload.peer.image").is_none());
+        let source = rendered.find("peer.source").expect("the source is written");
+        let pod = rendered.find("peer.pod").expect("the pod is written");
+        assert!(source < pod, "{rendered}");
     }
 
     #[test]

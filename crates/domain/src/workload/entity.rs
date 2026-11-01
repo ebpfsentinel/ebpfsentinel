@@ -15,7 +15,11 @@
 
 use serde::{Deserialize, Serialize};
 
+use std::net::IpAddr;
+
 use crate::container::entity::{ContainerContext, ContainerInfo, ContainerMetadata};
+use crate::identity::IdentityKind;
+use crate::identity::remote::RemoteEntry;
 use crate::process::engine::Lineage;
 use crate::process::entity::ProcessEntry;
 
@@ -213,6 +217,160 @@ pub struct Workload {
     /// The processes above this one, where the process table holds any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ancestry: Option<WorkloadAncestry>,
+    /// The workload at the other end of the flow, where its address is on
+    /// another node of the fleet. Read from the list the console hands this
+    /// node rather than from the kernel, and marked so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<PeerWorkload>,
+}
+
+/// Where the other end of a flow was named.
+///
+/// One way today, and stated on every block anyway: everything else in a
+/// workload block is this node's own reading, and the peer half is what
+/// another node said about an address, relayed by the console. A reader
+/// weighing an alert is owed that difference in the document itself rather
+/// than in the documentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerSource {
+    /// The address was in the list of remote identities this node holds.
+    /// A corroboration: the node holding the address published it, nothing
+    /// on the wire carried it, and a list older than a pod's move names the
+    /// pod that left.
+    RemoteList,
+}
+
+impl PeerSource {
+    /// The word an API response, an alert and a SIEM document use.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RemoteList => "remote_list",
+        }
+    }
+}
+
+/// The workload behind the remote address of a flow, as another node
+/// published it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerWorkload {
+    /// The remote address the name belongs to.
+    pub address: IpAddr,
+    /// How the name was reached. Never a kernel reading.
+    pub source: PeerSource,
+    /// The node holding the address, as the console knows it.
+    pub node: String,
+    /// What sits behind the address.
+    pub kind: IdentityKind,
+    /// The version of the list the name was read from.
+    pub list_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest: Option<String>,
+}
+
+/// One field of the peer half on a flat export: the dotted name the OTLP and
+/// JSON lines exports use, the camel-case name the SIEM line uses, and the
+/// value where there is one.
+pub type PeerField = (&'static str, &'static str, Option<String>);
+
+impl PeerWorkload {
+    /// The peer half flattened for an export that has no nesting. The source
+    /// comes first so a reader meets the word saying the name was relayed
+    /// before the name itself.
+    #[must_use]
+    pub fn fields(&self) -> [PeerField; 11] {
+        [
+            (
+                "ebpfsentinel.workload.peer.source",
+                "workloadPeerSource",
+                Some(self.source.as_str().to_string()),
+            ),
+            (
+                "ebpfsentinel.workload.peer.address",
+                "workloadPeerAddress",
+                Some(self.address.to_string()),
+            ),
+            (
+                "ebpfsentinel.workload.peer.node",
+                "workloadPeerNode",
+                Some(self.node.clone()),
+            ),
+            (
+                "ebpfsentinel.workload.peer.kind",
+                "workloadPeerKind",
+                Some(self.kind.as_str().to_string()),
+            ),
+            (
+                "ebpfsentinel.workload.peer.list_version",
+                "workloadPeerListVersion",
+                Some(self.list_version.clone()),
+            ),
+            (
+                "ebpfsentinel.workload.peer.container",
+                "workloadPeerContainer",
+                self.container.clone(),
+            ),
+            (
+                "ebpfsentinel.workload.peer.image",
+                "workloadPeerImage",
+                self.image.clone(),
+            ),
+            (
+                "ebpfsentinel.workload.peer.pod",
+                "workloadPeerPod",
+                self.pod.clone(),
+            ),
+            (
+                "ebpfsentinel.workload.peer.namespace",
+                "workloadPeerNamespace",
+                self.namespace.clone(),
+            ),
+            (
+                "ebpfsentinel.workload.peer.service_account",
+                "workloadPeerServiceAccount",
+                self.service_account.clone(),
+            ),
+            (
+                "ebpfsentinel.workload.peer.guest",
+                "workloadPeerGuest",
+                self.guest.clone(),
+            ),
+        ]
+    }
+
+    /// The peer half for one entry of the list carrying `version`.
+    ///
+    /// Labels are left behind on purpose: a block riding every alert and
+    /// every flow names the workload, and the label sets stay on the list
+    /// where a rule reads them.
+    #[must_use]
+    pub fn from_entry(entry: &RemoteEntry, version: &str) -> Self {
+        let identity = &entry.identity;
+        Self {
+            address: identity.address,
+            source: PeerSource::RemoteList,
+            node: entry.node.clone(),
+            kind: identity.kind,
+            list_version: version.to_string(),
+            container: identity.container.clone(),
+            image: identity.image.clone(),
+            pod: identity.pod.clone(),
+            namespace: identity.namespace.clone(),
+            service_account: identity.service_account.clone(),
+            guest: identity.guest.clone(),
+        }
+    }
 }
 
 impl Workload {
@@ -240,6 +398,7 @@ impl Workload {
             service_account: None,
             unit: None,
             ancestry: None,
+            peer: None,
         })
     }
 
@@ -325,6 +484,24 @@ impl Workload {
             }
             _ => {}
         }
+    }
+}
+
+/// A pod on another node, named by a list, for the format tests.
+#[cfg(test)]
+pub(crate) fn sample_peer() -> PeerWorkload {
+    PeerWorkload {
+        address: IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 2, 3)),
+        source: PeerSource::RemoteList,
+        node: "node-b".to_string(),
+        kind: IdentityKind::Pod,
+        list_version: "v7".to_string(),
+        container: None,
+        image: None,
+        pod: Some("db-0".to_string()),
+        namespace: Some("shop".to_string()),
+        service_account: None,
+        guest: None,
     }
 }
 
@@ -427,6 +604,7 @@ mod tests {
         // guarantees that a block assembled field by field, by a future
         // caller or by a deserialiser, cannot publish a process of zero.
         let forged = Some(Workload {
+            peer: None,
             pid: 0,
             source: WorkloadSource::Flow,
             exe: Some("/usr/bin/curl".to_string()),

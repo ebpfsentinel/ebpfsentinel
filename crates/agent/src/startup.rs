@@ -2131,6 +2131,9 @@ pub async fn run(
     // it from the moment it loads.
     let remote_identities =
         Arc::new(application::remote_identity_store::RemoteIdentityStore::new());
+    // The same list names the other end of a flow on every block the
+    // resolver builds.
+    workloads.install_remote(Arc::clone(&remote_identities));
     // The tracepoint links live here until the manager takes them over.
     let mut process_attacher: Option<adapters::ebpf::ProcessTracingAttacher> = None;
     // The signal link and the service that arms through it. The attacher is

@@ -170,6 +170,11 @@ fn push_workload(fields: &mut Vec<(&'static str, String)>, workload: &Workload) 
             fields.push((KEY_ANCESTRY_INCOMPLETE, "true".to_string()));
         }
     }
+    if let Some(peer) = workload.peer.as_ref() {
+        for (_, key, value) in peer.fields() {
+            push_text(fields, key, value.as_deref());
+        }
+    }
 }
 
 /// The executable's own name, which is what CEF's `sproc` holds while the
@@ -365,6 +370,7 @@ mod tests {
     fn resolved() -> FlowRecord {
         FlowRecord {
             workload: Some(Workload {
+                peer: None,
                 pid: 4_242,
                 source: WorkloadSource::Socket,
                 exe: Some("/usr/bin/curl".to_string()),
@@ -474,6 +480,32 @@ mod tests {
                 "podNamespace",
                 "serviceAccount",
                 "systemdUnit",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_peer_half_rides_on_its_own_keys() {
+        let mut record = resolved();
+        if let Some(workload) = record.workload.as_mut() {
+            workload.peer = Some(crate::workload::entity::sample_peer());
+        }
+        let fields = fields(&record);
+        let keys: Vec<&str> = fields
+            .iter()
+            .map(|(key, _)| *key)
+            .filter(|key| key.starts_with("workloadPeer"))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "workloadPeerSource",
+                "workloadPeerAddress",
+                "workloadPeerNode",
+                "workloadPeerKind",
+                "workloadPeerListVersion",
+                "workloadPeerPod",
+                "workloadPeerNamespace",
             ]
         );
     }
