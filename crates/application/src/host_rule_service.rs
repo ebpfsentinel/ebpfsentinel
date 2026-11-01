@@ -58,6 +58,7 @@ pub const FED_INTENTS: &[Intent] = &[
     Intent::FileChanges,
     Intent::FileAppears,
     Intent::FileDisappears,
+    Intent::FileRenames,
     Intent::FilePermissionsChange,
     Intent::FileIntegrityBreaks,
     Intent::PortHidden,

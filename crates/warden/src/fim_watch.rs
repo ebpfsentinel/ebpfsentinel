@@ -39,18 +39,24 @@ pub const FAN_CREATE: u64 = 0x0000_0100;
 pub const FAN_DELETE: u64 = 0x0000_0200;
 /// The kernel's queue overflowed and events were dropped.
 pub const FAN_Q_OVERFLOW: u64 = 0x0000_4000;
+/// An entry was renamed, reported once with both names.
+pub const FAN_RENAME: u64 = 0x1000_0000;
 /// The entry is a directory.
 pub const FAN_ONDIR: u64 = 0x4000_0000;
 
 /// What the group asks for. `FAN_CLOSE_WRITE` rather than `FAN_MODIFY`: one
 /// event per write session instead of one per `write(2)`, which is what keeps
-/// a log being appended to from drowning every other change.
+/// a log being appended to from drowning every other change. `FAN_RENAME`
+/// rides beside the two halves of a move, since it is the one event naming
+/// both ends; a filesystem refusing it is marked without it, and its renames
+/// read as a disappearance plus an appearance.
 pub const FIM_MASK: u64 = FAN_ATTRIB
     | FAN_CLOSE_WRITE
     | FAN_MOVED_FROM
     | FAN_MOVED_TO
     | FAN_CREATE
     | FAN_DELETE
+    | FAN_RENAME
     | FAN_ONDIR;
 
 /// The longest a read waits for a first event. Below the client's own call
@@ -83,6 +89,8 @@ const METADATA_VERSION: u8 = 3;
 const INFO_HEADER_LEN: usize = 4;
 const INFO_TYPE_DFID_NAME: u8 = 2;
 const INFO_TYPE_DFID: u8 = 3;
+const INFO_TYPE_OLD_DFID_NAME: u8 = 10;
+const INFO_TYPE_NEW_DFID_NAME: u8 = 12;
 pub(crate) const FSID_LEN: usize = 8;
 const HANDLE_HEADER_LEN: usize = 8;
 
@@ -102,6 +110,9 @@ pub struct RawEvent {
     pub handle: Vec<u8>,
     /// The entry inside the directory, empty when the record named none.
     pub name: String,
+    /// For a rename, the directory and name the entry left, the event itself
+    /// naming where it arrived.
+    pub from: Option<Box<RawEvent>>,
 }
 
 /// What [`parse_events`] found in one buffer.
@@ -169,6 +180,7 @@ fn parse_one(event: &[u8], meta_len: usize, parsed: &mut Parsed) {
     }
     let pid = u32::try_from(pid).unwrap_or(0);
     let mut info = meta_len;
+    let (mut old, mut new) = (None, None);
     while let (Some(info_type), Some(info_len)) =
         (event.get(info).copied(), u16_at(event, info + 2))
     {
@@ -179,13 +191,26 @@ fn parse_one(event: &[u8], meta_len: usize, parsed: &mut Parsed) {
         if info_len < INFO_HEADER_LEN {
             return;
         }
-        if matches!(info_type, INFO_TYPE_DFID_NAME | INFO_TYPE_DFID)
-            && let Some(raw) = parse_fid_record(record, mask, pid, info_type == INFO_TYPE_DFID_NAME)
-        {
-            parsed.events.push(raw);
-            return;
+        match info_type {
+            INFO_TYPE_DFID_NAME | INFO_TYPE_DFID if mask & FAN_RENAME == 0 => {
+                if let Some(raw) =
+                    parse_fid_record(record, mask, pid, info_type == INFO_TYPE_DFID_NAME)
+                {
+                    parsed.events.push(raw);
+                    return;
+                }
+            }
+            INFO_TYPE_OLD_DFID_NAME => old = parse_fid_record(record, mask, pid, true),
+            INFO_TYPE_NEW_DFID_NAME => new = parse_fid_record(record, mask, pid, true),
+            _ => {}
         }
         info += info_len;
+    }
+    // A rename is kept where it names its new end; the old end alone says
+    // nothing the separate `FAN_MOVED_FROM` does not.
+    if let Some(mut raw) = new {
+        raw.from = old.map(Box::new);
+        parsed.events.push(raw);
     }
 }
 
@@ -213,6 +238,7 @@ fn parse_fid_record(record: &[u8], mask: u64, pid: u32, named: bool) -> Option<R
         handle_type,
         handle,
         name,
+        from: None,
     })
 }
 
@@ -293,6 +319,7 @@ impl FimWatch {
                 .map(|path| FimMark {
                     path: path.clone(),
                     error: error.clone(),
+                    renames: false,
                 })
                 .collect();
             return (None, marks);
@@ -321,6 +348,7 @@ impl FimWatch {
                 .map(|path| FimMark {
                     path: path.clone(),
                     error: Some(reason.clone()),
+                    renames: false,
                 })
                 .collect();
             return (None, marks);
@@ -335,36 +363,62 @@ impl FimWatch {
         };
         let marks: Vec<FimMark> = paths
             .iter()
-            .map(|path| FimMark {
-                path: path.clone(),
-                error: watch.mark(Path::new(path)).err(),
+            .map(|path| match watch.mark(Path::new(path)) {
+                Ok(renames) => FimMark {
+                    path: path.clone(),
+                    error: None,
+                    renames,
+                },
+                Err(error) => FimMark {
+                    path: path.clone(),
+                    error: Some(error),
+                    renames: false,
+                },
             })
             .collect();
         let watch = (!watch.mounts.is_empty()).then_some(watch);
         (watch, marks)
     }
 
-    fn mark(&mut self, path: &Path) -> Result<(), String> {
+    /// Mark the filesystem holding `path`, answering whether its renames are
+    /// reported with both names.
+    fn mark(&mut self, path: &Path) -> Result<bool, String> {
         let c = CString::new(path.as_os_str().as_bytes())
             .map_err(|_| "the path holds a NUL byte".to_owned())?;
-        // SAFETY: the group is open and `c` is a NUL-terminated path that
+        let renames = match self.mark_with(&c, FIM_MASK) {
+            Ok(()) => true,
+            // A kernel without `FAN_RENAME` refuses the whole mask as invalid,
+            // and the rest of it is still worth having.
+            Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {
+                self.mark_with(&c, FIM_MASK & !FAN_RENAME)
+                    .map_err(|e| mark_refusal(&e))?;
+                false
+            }
+            Err(e) => return Err(mark_refusal(&e)),
+        };
+        let mount = open_path(path, libc::O_PATH).map_err(|e| mark_refusal(&e))?;
+        let fsid = fsid_of(mount.as_raw_fd()).map_err(|e| e.to_string())?;
+        self.mounts.entry(fsid).or_insert(mount);
+        Ok(renames)
+    }
+
+    fn mark_with(&self, path: &CString, mask: u64) -> io::Result<()> {
+        // SAFETY: the group is open and `path` is a NUL-terminated path that
         // outlives the call.
         let rc = unsafe {
             libc::fanotify_mark(
                 self.group.as_raw_fd(),
                 FAN_MARK_ADD | FAN_MARK_FILESYSTEM,
-                FIM_MASK,
+                mask,
                 libc::AT_FDCWD,
-                c.as_ptr(),
+                path.as_ptr(),
             )
         };
-        if rc != 0 {
-            return Err(mark_refusal(&io::Error::last_os_error()));
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
         }
-        let mount = open_path(path, libc::O_PATH).map_err(|e| mark_refusal(&e))?;
-        let fsid = fsid_of(mount.as_raw_fd()).map_err(|e| e.to_string())?;
-        self.mounts.entry(fsid).or_insert(mount);
-        Ok(())
     }
 
     /// Whether the filesystem `fsid` names is one this watch marked.
@@ -429,8 +483,14 @@ impl FimWatch {
 
     fn resolve(&mut self, raw: &RawEvent) -> FimEvent {
         let directory = self.directory(raw);
+        let renamed_from = raw.from.as_deref().and_then(|old| {
+            self.directory(old)
+                .ok()
+                .map(|dir| dir.join(&old.name).to_string_lossy().into_owned())
+        });
         // A directory moved or deleted renames everything cached beneath it.
-        if raw.mask & FAN_ONDIR != 0 && raw.mask & (FAN_MOVED_FROM | FAN_MOVED_TO | FAN_DELETE) != 0
+        if raw.mask & FAN_ONDIR != 0
+            && raw.mask & (FAN_MOVED_FROM | FAN_MOVED_TO | FAN_DELETE | FAN_RENAME) != 0
         {
             self.dirs.clear();
         }
@@ -451,6 +511,7 @@ impl FimWatch {
             dev,
             ino,
             unresolved,
+            renamed_from,
         }
     }
 
@@ -531,7 +592,7 @@ mod tests {
         body.extend_from_slice(&u32::try_from(handle.len()).expect("small").to_ne_bytes());
         body.extend_from_slice(&handle_type.to_ne_bytes());
         body.extend_from_slice(handle);
-        if info_type == INFO_TYPE_DFID_NAME {
+        if info_type != INFO_TYPE_DFID {
             body.extend_from_slice(name.as_bytes());
             body.push(0);
         }
@@ -584,7 +645,39 @@ mod tests {
                 handle_type: 1,
                 handle: vec![9; 8],
                 name: "passwd".to_owned(),
+                from: None,
             }]
+        );
+    }
+
+    #[test]
+    fn a_rename_carries_the_name_it_left_and_the_name_it_took() {
+        let old = record(INFO_TYPE_OLD_DFID_NAME, [0; 8], 1, &[1; 8], "report.docx");
+        let new = record(
+            INFO_TYPE_NEW_DFID_NAME,
+            [0; 8],
+            1,
+            &[2; 8],
+            "report.docx.locked",
+        );
+        let mut info = old;
+        info.extend(new);
+        let buf = event(METADATA_VERSION, FAN_RENAME, 77, &info);
+        let parsed = parse_events(&buf);
+        assert_eq!(parsed.events.len(), 1);
+        let raw = &parsed.events[0];
+        assert_eq!(raw.name, "report.docx.locked");
+        assert_eq!(raw.handle, vec![2; 8]);
+        let from = raw.from.as_deref().expect("the old end");
+        assert_eq!(from.name, "report.docx");
+        assert_eq!(from.handle, vec![1; 8]);
+        // A rename naming only where it left is the separate move-out's to
+        // report, and is not kept.
+        let only_old = record(INFO_TYPE_OLD_DFID_NAME, [0; 8], 1, &[1; 8], "a");
+        assert!(
+            parse_events(&event(METADATA_VERSION, FAN_RENAME, 1, &only_old))
+                .events
+                .is_empty()
         );
     }
 

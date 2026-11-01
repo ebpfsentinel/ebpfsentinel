@@ -248,6 +248,26 @@ pub(super) const FILE_APPEARS: &[FieldSpec] =
 pub(super) const FILE_DISAPPEARS: &[FieldSpec] =
     &[FILE_PATH, EXTENSION, EXE, UID, HOST_PATH, DEVICE, INODE];
 
+pub(super) const FILE_RENAMES: &[FieldSpec] = &[
+    FILE_PATH,
+    EXTENSION,
+    EXE,
+    UID,
+    HOST_PATH,
+    DEVICE,
+    INODE,
+    FieldSpec::new(
+        "previous_path",
+        Ty::Path,
+        "path the file had before the rename, as `path` names it",
+    ),
+    FieldSpec::new(
+        "previous_extension",
+        Ty::Text,
+        "extension of the name before the rename, without the dot, case kept",
+    ),
+];
+
 pub(super) const FILE_PERMISSIONS_CHANGE: &[FieldSpec] = &[
     FILE_PATH,
     EXE,

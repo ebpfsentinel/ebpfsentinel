@@ -15,8 +15,8 @@ use domain::hostrule::HostSources;
 use domain::process::engine::Lineage;
 use domain::process::entity::ProcessEntry;
 use domain::ransom::{
-    Actor, DistinctPaths, RansomEngine, RansomSignal, RansomVerdict, SignalKind, actor_of,
-    entropy_rose, header_mismatch, unavailable,
+    Actor, DistinctPaths, MassRenames, RansomEngine, RansomSignal, RansomVerdict, SignalKind,
+    actor_of, entropy_rose, header_mismatch, unavailable,
 };
 use domain::workload::entity::{Workload, WorkloadSource};
 use tokio::sync::mpsc;
@@ -34,6 +34,7 @@ const READ: &[SignalKind] = &[
     SignalKind::DistinctRewrites,
     SignalKind::EntropyRise,
     SignalKind::HeaderMismatch,
+    SignalKind::MassRename,
 ];
 
 /// Whether a settled change rewrote the file's content or put a file in its
@@ -55,6 +56,8 @@ pub struct FileRewrite<'a> {
     pub entropy_before: Option<u16>,
     pub entropy_now: Option<u16>,
     pub head: Option<[u8; 4]>,
+    /// The path the file was renamed from, when the kernel named both.
+    pub renamed_from: Option<&'a str>,
 }
 
 /// One change as every counter records it.
@@ -71,6 +74,7 @@ pub struct RansomService {
     rewrites: Mutex<DistinctPaths>,
     entropy_rises: Mutex<DistinctPaths>,
     header_mismatches: Mutex<DistinctPaths>,
+    renames: Mutex<MassRenames>,
     sources: HostSourcesReader,
     alerts: mpsc::Sender<AlertEvent>,
 }
@@ -83,6 +87,7 @@ impl RansomService {
             rewrites: Mutex::new(DistinctPaths::rewrites()),
             entropy_rises: Mutex::new(DistinctPaths::entropy_rises()),
             header_mismatches: Mutex::new(DistinctPaths::header_mismatches()),
+            renames: Mutex::new(MassRenames::default()),
             sources,
             alerts,
         }
@@ -115,6 +120,16 @@ impl RansomService {
         }
         if header_mismatch(change.path, change.head) {
             self.count(&self.header_mismatches, &held);
+        }
+        if let Some(from) = change.renamed_from {
+            let raised = self
+                .renames
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .record(&actor, writer.pid, from, change.path, at_ns);
+            if let Some(signal) = raised {
+                self.observe(signal, writer, lineage);
+            }
         }
     }
 
@@ -234,6 +249,7 @@ mod tests {
                     entropy_before: None,
                     entropy_now: None,
                     head: None,
+                    renamed_from: None,
                 },
                 1,
             );
@@ -273,6 +289,7 @@ mod tests {
                     entropy_before: Some(4_200),
                     entropy_now: Some(7_995),
                     head: None,
+                    renamed_from: None,
                 },
                 2,
             );
@@ -306,6 +323,7 @@ mod tests {
                     entropy_before: None,
                     entropy_now: None,
                     head: Some(*b"%PDF"),
+                    renamed_from: None,
                 },
                 1,
             );
@@ -321,6 +339,7 @@ mod tests {
                     entropy_before: None,
                     entropy_now: None,
                     head: Some([0x9A, 0x13, 0x7F, 0x02]),
+                    renamed_from: None,
                 },
                 2,
             );
@@ -330,6 +349,46 @@ mod tests {
         };
         assert!(alert.message.contains("header_mismatch (pid 100)"));
         assert!(alert.message.contains("do not match their extension"));
+    }
+
+    #[test]
+    fn files_renamed_to_one_new_extension_are_strong_and_corroborate() {
+        let (service, mut rx) = service();
+        let run = running(100, "/tmp/enc", 7);
+        let lineage = Lineage {
+            ancestors: Vec::new(),
+            truncated: false,
+            incomplete: false,
+        };
+        let rename = |n: usize, at_ns: u64| {
+            let from = format!("/srv/q{n}.xlsx");
+            service.record_file_change(
+                &run,
+                &lineage,
+                [FileChangeKind::MovedIn],
+                FileRewrite {
+                    path: &format!("/srv/q{n}.xlsx.locked"),
+                    entropy_before: (n < RANSOM_ENTROPY_RISES).then_some(4_000),
+                    entropy_now: (n < RANSOM_ENTROPY_RISES).then_some(7_950),
+                    head: None,
+                    renamed_from: Some(&from),
+                },
+                at_ns,
+            );
+        };
+        // A rise, then the renames: a strong and a supporting signal are not
+        // yet a verdict.
+        for n in 0..RANSOM_DISTINCT_REWRITES - 1 {
+            rename(n, 1);
+        }
+        assert!(rx.try_recv().is_err());
+        // The distinct rewrites are the second supporting signal.
+        rename(RANSOM_DISTINCT_REWRITES, 2);
+        let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() else {
+            panic!("no verdict raised");
+        };
+        assert!(alert.message.contains("mass_rename (pid 100)"));
+        assert!(alert.message.contains("renamed to .locked"));
     }
 
     #[test]

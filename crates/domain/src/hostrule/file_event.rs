@@ -5,7 +5,8 @@
 //! there, by `mv` or by an overlay copying a file of the image up into the
 //! container, is a change to that file rather than a new one, and a name
 //! moved away or deleted is a disappearance only where something was known
-//! to be there.
+//! to be there. A rename the kernel reported with both names is one event
+//! carrying both, and the name it left raises nothing of its own.
 
 use std::collections::BTreeSet;
 
@@ -33,6 +34,10 @@ pub struct SettledChange<'a> {
     /// Device and inode the change named, for a path no longer readable.
     pub dev: Option<u64>,
     pub ino: Option<u64>,
+    /// The host path the entry was renamed from, when the kernel named it.
+    pub renamed_from: Option<&'a str>,
+    /// The path is the old end of a rename reported with both names.
+    pub renamed_away: bool,
 }
 
 /// The intentions `change` raises, each carrying the file's fields. The
@@ -47,7 +52,12 @@ pub fn file_events(change: &SettledChange<'_>) -> Vec<IntentEvent> {
     match change.reading {
         FileReading::Present(now) => {
             let existed = change.before.is_some() || change.in_image;
-            if arrived && !existed {
+            if change.renamed_from.is_some() {
+                events.push(Intent::FileRenames);
+                if change.kinds.contains(&FileChangeKind::Written) {
+                    events.push(Intent::FileChanges);
+                }
+            } else if arrived && !existed {
                 events.push(Intent::FileAppears);
             } else if arrived || change.kinds.contains(&FileChangeKind::Written) {
                 events.push(Intent::FileChanges);
@@ -81,7 +91,9 @@ pub fn file_events(change: &SettledChange<'_>) -> Vec<IntentEvent> {
             }
             out
         }
-        FileReading::Gone if change.before.is_some() || (left && !arrived) => {
+        FileReading::Gone
+            if !change.renamed_away && (change.before.is_some() || (left && !arrived)) =>
+        {
             vec![file_fields(Intent::FileDisappears, change, change.before)]
         }
         FileReading::Gone | FileReading::Unreadable(_) => Vec::new(),
@@ -119,7 +131,40 @@ fn file_fields(
     if let Some(ino) = ino.and_then(|i| i64::try_from(i).ok()) {
         event = put(event, "inode", FieldValue::Integer(ino));
     }
+    if intent == Intent::FileRenames
+        && let Some(from) = change.renamed_from
+    {
+        let previous = previous_path(change, from);
+        if let Some(extension) = extension(previous) {
+            event = put(
+                event,
+                "previous_extension",
+                FieldValue::Text(extension.to_owned()),
+            );
+        }
+        event = put(
+            event,
+            "previous_path",
+            FieldValue::Text(previous.to_owned()),
+        );
+    }
     event
+}
+
+/// The old name as the writer saw it: the host prefix the new name loses
+/// inside the writer's root is taken off the old one too, since a rename
+/// never crosses a filesystem.
+fn previous_path<'a>(change: &SettledChange<'_>, from: &'a str) -> &'a str {
+    let Some(inside) = change.rooted.path.as_deref() else {
+        return from;
+    };
+    change
+        .host_path
+        .strip_suffix(inside)
+        .filter(|prefix| !prefix.is_empty())
+        .and_then(|prefix| from.strip_prefix(prefix))
+        .filter(|rest| rest.starts_with('/'))
+        .unwrap_or(from)
 }
 
 /// The extension of the last component, without the dot: none for a name
@@ -188,6 +233,8 @@ mod tests {
             in_image,
             dev: Some(7),
             ino: Some(8),
+            renamed_from: None,
+            renamed_away: false,
         })
     }
 
@@ -326,9 +373,72 @@ mod tests {
             in_image: false,
             dev: None,
             ino: None,
+            renamed_from: None,
+            renamed_away: false,
         });
         assert_eq!(text(&out[0], "path").as_deref(), Some("/data/report.CSV"));
         assert_eq!(text(&out[0], "extension").as_deref(), Some("CSV"));
+    }
+
+    #[test]
+    fn a_rename_reported_with_both_names_is_one_event_carrying_both() {
+        let arrived = kinds(&[FileChangeKind::MovedIn]);
+        let rooted = RootedPath {
+            path: Some("/srv/q3.locked".into()),
+            layers: Vec::new(),
+        };
+        let now = FileReading::Present(file('a', 0o644, 0));
+        let out = file_events(&SettledChange {
+            kinds: &arrived,
+            host_path: "/var/lib/c/9/fs/srv/q3.locked",
+            rooted: &rooted,
+            before: None,
+            reading: &now,
+            in_image: false,
+            dev: None,
+            ino: None,
+            renamed_from: Some("/var/lib/c/9/fs/srv/q3.xlsx"),
+            renamed_away: false,
+        });
+        assert_eq!(intents(&out), vec![Intent::FileRenames]);
+        assert_eq!(text(&out[0], "path").as_deref(), Some("/srv/q3.locked"));
+        assert_eq!(text(&out[0], "extension").as_deref(), Some("locked"));
+        assert_eq!(
+            text(&out[0], "previous_path").as_deref(),
+            Some("/srv/q3.xlsx")
+        );
+        assert_eq!(text(&out[0], "previous_extension").as_deref(), Some("xlsx"));
+        // The name it left is gone, and says nothing the rename did not.
+        let left = kinds(&[FileChangeKind::MovedOut]);
+        let before = file('a', 0o644, 0);
+        let out = file_events(&SettledChange {
+            kinds: &left,
+            host_path: "/var/lib/c/9/fs/srv/q3.xlsx",
+            rooted: &RootedPath::default(),
+            before: Some(&before),
+            reading: &FileReading::Gone,
+            in_image: false,
+            dev: None,
+            ino: None,
+            renamed_from: None,
+            renamed_away: true,
+        });
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn without_the_rename_event_a_move_is_a_disappearance_and_an_appearance() {
+        let now = FileReading::Present(file('a', 0o644, 0));
+        let out = events(&[FileChangeKind::MovedIn], None, &now, false);
+        assert_eq!(intents(&out), vec![Intent::FileAppears]);
+        let before = file('a', 0o644, 0);
+        let out = events(
+            &[FileChangeKind::MovedOut],
+            Some(&before),
+            &FileReading::Gone,
+            false,
+        );
+        assert_eq!(intents(&out), vec![Intent::FileDisappears]);
     }
 
     #[test]

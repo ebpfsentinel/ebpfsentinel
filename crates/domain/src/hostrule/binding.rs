@@ -92,107 +92,82 @@ const PROCESS: &[Source] = &[Source::ProcessTracing];
 const SOCKET: &[Source] = &[Source::SocketAttribution];
 const FILE: &[Source] = &[Source::FileWatch];
 
+/// A binding with no fallback, the shape of every intention but one.
+const fn served(sources: &'static [Source], hook: &'static str, min_kernel: (u32, u32)) -> Binding {
+    Binding {
+        sources,
+        hook,
+        min_kernel,
+        fallback: None,
+    }
+}
+
 impl Intent {
     /// The binding that serves this intention.
     #[must_use]
     pub fn binding(self) -> Binding {
         match self {
-            Self::ProcessStarts => Binding {
-                sources: PROCESS,
-                hook: "raw tracepoint sched_process_exec",
-                min_kernel: (4, 17),
-                fallback: None,
-            },
-            Self::ProcessEnds => Binding {
-                sources: PROCESS,
-                hook: "raw tracepoint sched_process_exit",
-                min_kernel: (4, 17),
-                fallback: None,
-            },
-            Self::ProcessConnects => Binding {
-                sources: SOCKET,
-                hook: "cgroup connect4 and connect6",
-                min_kernel: (4, 17),
-                fallback: None,
-            },
-            Self::ProcessListens => Binding {
-                sources: SOCKET,
-                hook: "cgroup post_bind4 and post_bind6",
-                min_kernel: (4, 17),
-                fallback: None,
-            },
-            Self::ProcessResolves => Binding {
-                sources: &[Source::DnsCapture, Source::SocketAttribution],
-                hook: "traffic-control DNS capture joined to the socket's task",
-                min_kernel: (4, 17),
-                fallback: None,
-            },
-            Self::ProcessSendsTls => Binding {
-                sources: &[Source::TlsCapture, Source::SocketAttribution],
-                hook: "traffic-control client hello capture joined to the socket's task",
-                min_kernel: (4, 17),
-                fallback: None,
-            },
-            Self::FileChanges => Binding {
+            Self::ProcessStarts => served(PROCESS, "raw tracepoint sched_process_exec", (4, 17)),
+            Self::ProcessEnds => served(PROCESS, "raw tracepoint sched_process_exit", (4, 17)),
+            Self::ProcessConnects => served(SOCKET, "cgroup connect4 and connect6", (4, 17)),
+            Self::ProcessListens => served(SOCKET, "cgroup post_bind4 and post_bind6", (4, 17)),
+            Self::ProcessResolves => served(
+                &[Source::DnsCapture, Source::SocketAttribution],
+                "traffic-control DNS capture joined to the socket's task",
+                (4, 17),
+            ),
+            Self::ProcessSendsTls => served(
+                &[Source::TlsCapture, Source::SocketAttribution],
+                "traffic-control client hello capture joined to the socket's task",
+                (4, 17),
+            ),
+            Self::FileChanges => served(FILE, "fanotify FAN_MODIFY on the watched mounts", (5, 1)),
+            Self::FileAppears => served(FILE, "fanotify FAN_CREATE on the watched mounts", (5, 1)),
+            Self::FileDisappears => {
+                served(FILE, "fanotify FAN_DELETE on the watched mounts", (5, 1))
+            }
+            Self::FileRenames => Binding {
                 sources: FILE,
-                hook: "fanotify FAN_MODIFY on the watched mounts",
-                min_kernel: (5, 1),
-                fallback: None,
+                hook: "fanotify FAN_RENAME on the watched mounts, both names in one event",
+                min_kernel: (5, 17),
+                fallback: Some(
+                    "file.disappears at the old name and file.appears at the new one, on a \
+                     filesystem whose mark refused FAN_RENAME",
+                ),
             },
-            Self::FileAppears => Binding {
-                sources: FILE,
-                hook: "fanotify FAN_CREATE on the watched mounts",
-                min_kernel: (5, 1),
-                fallback: None,
-            },
-            Self::FileDisappears => Binding {
-                sources: FILE,
-                hook: "fanotify FAN_DELETE on the watched mounts",
-                min_kernel: (5, 1),
-                fallback: None,
-            },
-            Self::FilePermissionsChange => Binding {
-                sources: FILE,
-                hook: "fanotify FAN_ATTRIB on the watched mounts",
-                min_kernel: (5, 1),
-                fallback: None,
-            },
-            Self::FileIntegrityBreaks => Binding {
-                sources: FILE,
-                hook: "baseline digest compared on fanotify FAN_CLOSE_WRITE",
-                min_kernel: (5, 1),
-                fallback: None,
-            },
-            Self::PortHidden => Binding {
-                sources: &[Source::HiddenPortScan],
-                hook: "bind probe compared with the socket listings of every network namespace",
-                min_kernel: (5, 9),
-                fallback: None,
-            },
-            Self::ProcessHidden => Binding {
-                sources: &[Source::HiddenProcessScan],
-                hook: "null signal across the pid space compared with the listing of /proc",
-                min_kernel: (5, 8),
-                fallback: None,
-            },
-            Self::BpfForeignProgram => Binding {
-                sources: &[Source::NetworkProgramInventory],
-                hook: "BPF program and link enumeration of the network path",
-                min_kernel: (5, 8),
-                fallback: None,
-            },
-            Self::PacketSocketAppears => Binding {
-                sources: &[Source::RawSocketInventory],
-                hook: "sock_diag packet socket inventory",
-                min_kernel: (4, 2),
-                fallback: None,
-            },
-            Self::PackageVulnerableReachable => Binding {
-                sources: &[Source::PackageInventory],
-                hook: "package database read joined to the listening sockets",
-                min_kernel: (4, 17),
-                fallback: None,
-            },
+            Self::FilePermissionsChange => {
+                served(FILE, "fanotify FAN_ATTRIB on the watched mounts", (5, 1))
+            }
+            Self::FileIntegrityBreaks => served(
+                FILE,
+                "baseline digest compared on fanotify FAN_CLOSE_WRITE",
+                (5, 1),
+            ),
+            Self::PortHidden => served(
+                &[Source::HiddenPortScan],
+                "bind probe compared with the socket listings of every network namespace",
+                (5, 9),
+            ),
+            Self::ProcessHidden => served(
+                &[Source::HiddenProcessScan],
+                "null signal across the pid space compared with the listing of /proc",
+                (5, 8),
+            ),
+            Self::BpfForeignProgram => served(
+                &[Source::NetworkProgramInventory],
+                "BPF program and link enumeration of the network path",
+                (5, 8),
+            ),
+            Self::PacketSocketAppears => served(
+                &[Source::RawSocketInventory],
+                "sock_diag packet socket inventory",
+                (4, 2),
+            ),
+            Self::PackageVulnerableReachable => served(
+                &[Source::PackageInventory],
+                "package database read joined to the listening sockets",
+                (4, 17),
+            ),
         }
     }
 }

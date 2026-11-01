@@ -188,6 +188,10 @@ pub struct FimMark {
     pub path: String,
     /// Why the filesystem holding it is not watched, `None` when it is.
     pub error: Option<String>,
+    /// Its renames are reported once with both names; `false` where the
+    /// kernel refused that event, and a rename there reads as a disappearance
+    /// plus an appearance.
+    pub renames: bool,
 }
 
 /// One change on a watched filesystem, its file handle already resolved.
@@ -214,6 +218,9 @@ pub struct FimEvent {
     pub ino: Option<u64>,
     /// Why the directory could not be named, when it could not.
     pub unresolved: Option<String>,
+    /// For a rename, the full path the entry left, when its directory could
+    /// be named.
+    pub renamed_from: Option<String>,
 }
 
 /// What [`Command::FimFacts`] is refused with on a connection whose watch does

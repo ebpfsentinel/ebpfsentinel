@@ -545,13 +545,14 @@ mod tests {
             "file.changes",
             "file.appears",
             "file.disappears",
+            "file.renames",
             "file.permissions_change",
             "file.integrity_breaks",
         ] {
             let intent = body.intents.iter().find(|i| i.name == name).unwrap();
             assert_eq!(intent.state, "applicable", "{name}: {:?}", intent.reason);
         }
-        assert_eq!(body.applicable, 7);
+        assert_eq!(body.applicable, 8);
     }
 
     #[test]

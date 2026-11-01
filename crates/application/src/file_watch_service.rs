@@ -83,10 +83,11 @@ pub struct BaselinePolicy {
 }
 
 /// The file intentions, any of which a rule may name.
-const FILE_INTENTS: [Intent; 5] = [
+const FILE_INTENTS: [Intent; 6] = [
     Intent::FileChanges,
     Intent::FileAppears,
     Intent::FileDisappears,
+    Intent::FileRenames,
     Intent::FilePermissionsChange,
     Intent::FileIntegrityBreaks,
 ];
@@ -100,6 +101,10 @@ struct Pending {
     kinds: BTreeSet<FileChangeKind>,
     dev: Option<u64>,
     ino: Option<u64>,
+    /// The host path a rename reported with both names moved the entry from.
+    renamed_from: Option<String>,
+    /// The path is the old end of a rename reported with both names.
+    renamed_away: bool,
 }
 
 /// Where settled changes go beyond the baseline: the host rules, the
@@ -399,8 +404,16 @@ impl FileWatcher {
         if last.as_ref() != Some(&marks) {
             for mark in &marks {
                 match &mark.error {
-                    None => {
+                    None if mark.renames => {
                         info!(path = %mark.path, "file watch covers the filesystem holding this path");
+                    }
+                    None => {
+                        warn!(
+                            path = %mark.path,
+                            "file watch covers the filesystem holding this path, but its kernel \
+                             reports no rename with both names: a rename there reads as a \
+                             disappearance plus an appearance"
+                        );
                     }
                     Some(reason) => {
                         warn!(path = %mark.path, reason = %reason, "file watch does not cover this path");
@@ -696,6 +709,23 @@ impl FileWatcher {
             pending.kinds.extend(change.kinds.iter().copied());
             pending.dev = change.dev.or(pending.dev);
             pending.ino = change.ino.or(pending.ino);
+            if let Some(from) = &change.renamed_from {
+                pending.renamed_from = Some(from.clone());
+                // The old name's own move-out may come before or after, and
+                // either way the rename is what reports it.
+                let full = self.pending.len() >= FILE_FACTS_PENDING_MAX;
+                match self.pending.entry(from.clone()) {
+                    Entry::Occupied(slot) => slot.into_mut().renamed_away = true,
+                    Entry::Vacant(slot) if !full => {
+                        slot.insert(Pending {
+                            pid: change.pid,
+                            renamed_away: true,
+                            ..Pending::default()
+                        });
+                    }
+                    Entry::Vacant(_) => lost = true,
+                }
+            }
         }
         if lost {
             warn!(
@@ -890,6 +920,7 @@ impl FileWatcher {
                     entropy_before: before.and_then(|b| b.entropy_millibits),
                     entropy_now,
                     head,
+                    renamed_from: pending.renamed_from.as_deref(),
                 },
                 at_ns,
             );
@@ -912,6 +943,8 @@ impl FileWatcher {
             in_image,
             dev: pending.dev,
             ino: pending.ino,
+            renamed_from: pending.renamed_from.as_deref(),
+            renamed_away: pending.renamed_away,
         });
         for event in events {
             rules.record_file(
@@ -1201,6 +1234,7 @@ mod tests {
         WatchedFilesystem {
             path: path.into(),
             error: None,
+            renames: true,
         }
     }
 
@@ -1208,6 +1242,7 @@ mod tests {
         WatchedFilesystem {
             path: path.into(),
             error: Some("this filesystem cannot report file handles".into()),
+            renames: false,
         }
     }
 
@@ -1221,6 +1256,7 @@ mod tests {
             dev: Some(1),
             ino: Some(2),
             unresolved: None,
+            renamed_from: None,
         }
     }
 
@@ -2023,6 +2059,49 @@ mod tests {
         let raised = alerts(&mut rx);
         assert_eq!(raised.len(), 1, "{raised:?}");
         assert_eq!(raised[0].rule_id.0, "changed");
+    }
+
+    #[tokio::test]
+    async fn a_rename_with_both_names_is_one_rename_and_no_disappearance() {
+        let (rules, mut rx) = rules(&[
+            (
+                "renamed",
+                r#""file.renames":{"path":"/srv/q3.xlsx.locked","previous_path":"/srv/q3.xlsx"}"#,
+            ),
+            ("gone", r#""file.disappears":{"path":"/srv/q3.xlsx"}"#),
+        ]);
+        let old = "/var/lib/c/9/fs/srv/q3.xlsx";
+        let new = "/var/lib/c/9/fs/srv/q3.xlsx.locked";
+        let store = Arc::new(Memory::default());
+        store.map().insert(old.into(), file('a', 0o600));
+        let mut w = fed(rules, table().await, store);
+        let mut arrived = change(vec![FileChangeKind::MovedIn]);
+        arrived.pid = 42;
+        arrived.directory = Some("/var/lib/c/9/fs/srv".into());
+        arrived.name = "q3.xlsx.locked".into();
+        arrived.renamed_from = Some(old.into());
+        let mut left = change(vec![FileChangeKind::MovedOut]);
+        left.pid = 42;
+        left.directory = Some("/var/lib/c/9/fs/srv".into());
+        left.name = "q3.xlsx".into();
+        w.queue(&FileChangeBatch {
+            changes: vec![arrived, left],
+            overflowed: false,
+        });
+        w.source = Box::new(Scripted {
+            opens: Vec::new(),
+            reads: Vec::new(),
+            facts: vec![Ok(vec![
+                fact(new, FileReading::Present(file('a', 0o600))),
+                fact(old, FileReading::Gone),
+            ])],
+            cancel: CancellationToken::new(),
+            opened: Arc::new(AtomicU64::new(0)),
+        });
+        w.settle().unwrap();
+        let raised = alerts(&mut rx);
+        assert_eq!(raised.len(), 1, "{raised:?}");
+        assert_eq!(raised[0].rule_id.0, "renamed");
     }
 
     #[tokio::test]

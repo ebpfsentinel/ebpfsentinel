@@ -63,6 +63,8 @@ pub struct FileChange {
     pub ino: Option<u64>,
     /// Why the directory could not be named, when it could not.
     pub unresolved: Option<String>,
+    /// For a rename reported with both names, the full path the entry left.
+    pub renamed_from: Option<String>,
 }
 
 /// What one reading handed over.
@@ -81,6 +83,9 @@ pub struct WatchedFilesystem {
     pub path: String,
     /// Why the filesystem holding it is not watched, `None` when it is.
     pub error: Option<String>,
+    /// Its renames are reported once with both names; where they are not, a
+    /// rename reads as a disappearance plus an appearance.
+    pub renames: bool,
 }
 
 impl WatchedFilesystem {
@@ -108,11 +113,13 @@ mod tests {
         let refused = WatchedFilesystem {
             path: "/".into(),
             error: Some("no such path".into()),
+            renames: false,
         };
         assert!(!refused.is_watched());
         let watched = WatchedFilesystem {
             path: "/".into(),
             error: None,
+            renames: true,
         };
         assert!(watched.is_watched());
     }

@@ -29,6 +29,7 @@ const FAN_MOVED_FROM: u64 = 0x0000_0040;
 const FAN_MOVED_TO: u64 = 0x0000_0080;
 const FAN_CREATE: u64 = 0x0000_0100;
 const FAN_DELETE: u64 = 0x0000_0200;
+const FAN_RENAME: u64 = 0x1000_0000;
 const FAN_ONDIR: u64 = 0x4000_0000;
 
 /// An open in-process watch, run by the same code the warden runs.
@@ -129,7 +130,8 @@ pub fn kinds_of(mask: u64) -> Vec<FileChangeKind> {
                 FileChangeKind::Written => FAN_CLOSE_WRITE,
                 FileChangeKind::AttributesChanged => FAN_ATTRIB,
                 FileChangeKind::MovedOut => FAN_MOVED_FROM,
-                FileChangeKind::MovedIn => FAN_MOVED_TO,
+                // A rename names the entry where it arrived.
+                FileChangeKind::MovedIn => FAN_MOVED_TO | FAN_RENAME,
                 FileChangeKind::Deleted => FAN_DELETE,
             };
             mask & bit != 0
@@ -151,6 +153,7 @@ fn to_change(event: FimEvent) -> Option<FileChange> {
         dev: event.dev,
         ino: event.ino,
         unresolved: event.unresolved,
+        renamed_from: event.renamed_from,
     })
 }
 
@@ -223,6 +226,7 @@ fn to_marks(marks: Vec<FimMark>) -> Vec<WatchedFilesystem> {
         .map(|m| WatchedFilesystem {
             path: m.path,
             error: m.error,
+            renames: m.renames,
         })
         .collect()
 }
@@ -295,6 +299,7 @@ mod tests {
             dev: Some(2049),
             ino: Some(131_074),
             unresolved: None,
+            renamed_from: None,
         }
     }
 
@@ -342,6 +347,7 @@ mod tests {
             .map(|p| FimMark {
                 path: p.clone(),
                 error: None,
+                renames: true,
             })
             .collect();
         (Some(read), marks)
@@ -353,6 +359,7 @@ mod tests {
             .map(|p| FimMark {
                 path: p.clone(),
                 error: Some("no such path".into()),
+                renames: false,
             })
             .collect();
         (None, marks)
@@ -363,6 +370,7 @@ mod tests {
         let mark = |error: Option<&str>| WatchedFilesystem {
             path: "/".into(),
             error: error.map(Into::into),
+            renames: error.is_none(),
         };
         assert_eq!(
             unwatched(&Ok(vec![mark(Some("refused")), mark(None)])),
@@ -390,6 +398,7 @@ mod tests {
             ]
         );
         assert!(kinds_of(FAN_ONDIR).is_empty());
+        assert_eq!(kinds_of(FAN_RENAME), vec![FileChangeKind::MovedIn]);
     }
 
     #[test]

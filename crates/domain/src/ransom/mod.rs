@@ -13,6 +13,7 @@ pub mod engine;
 pub mod entropy;
 pub mod header;
 pub mod paths;
+pub mod rename;
 pub mod signal;
 
 pub use actor::{Actor, actor_of};
@@ -24,5 +25,8 @@ pub use entropy::{ENTROPY_HIGH_MILLIBITS, ENTROPY_LOW_MILLIBITS, entropy_rose};
 pub use header::{HEADER_BYTES, expected_headers, header_mismatch};
 pub use paths::{
     DistinctPaths, RANSOM_DISTINCT_REWRITES, RANSOM_ENTROPY_RISES, RANSOM_HEADER_MISMATCHES,
+};
+pub use rename::{
+    MassRenames, RANSOM_MASS_RENAMES, RANSOM_RENAME_EXTENSIONS_MAX, renamed_to_new_extension,
 };
 pub use signal::{RansomSignal, SignalKind, Tier, UnavailableSignal, unavailable};

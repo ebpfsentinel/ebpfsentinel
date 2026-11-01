@@ -41,6 +41,9 @@ pub enum Intent {
     /// A file was removed.
     #[serde(rename = "file.disappears")]
     FileDisappears,
+    /// A file was renamed, both names known.
+    #[serde(rename = "file.renames")]
+    FileRenames,
     /// A file's mode or owner changed.
     #[serde(rename = "file.permissions_change")]
     FilePermissionsChange,
@@ -94,7 +97,7 @@ impl IntentFamily {
 
 impl Intent {
     /// Every intention, in catalogue order.
-    pub const ALL: [Intent; 16] = [
+    pub const ALL: [Intent; 17] = [
         Self::ProcessStarts,
         Self::ProcessEnds,
         Self::ProcessConnects,
@@ -104,6 +107,7 @@ impl Intent {
         Self::FileChanges,
         Self::FileAppears,
         Self::FileDisappears,
+        Self::FileRenames,
         Self::FilePermissionsChange,
         Self::FileIntegrityBreaks,
         Self::PortHidden,
@@ -126,6 +130,7 @@ impl Intent {
             Self::FileChanges => "file.changes",
             Self::FileAppears => "file.appears",
             Self::FileDisappears => "file.disappears",
+            Self::FileRenames => "file.renames",
             Self::FilePermissionsChange => "file.permissions_change",
             Self::FileIntegrityBreaks => "file.integrity_breaks",
             Self::PortHidden => "port.hidden",
@@ -165,6 +170,7 @@ impl Intent {
             Self::FileChanges
             | Self::FileAppears
             | Self::FileDisappears
+            | Self::FileRenames
             | Self::FilePermissionsChange
             | Self::FileIntegrityBreaks => IntentFamily::File,
             Self::PortHidden
@@ -193,6 +199,7 @@ impl Intent {
             Self::FileChanges => field::FILE_CHANGES,
             Self::FileAppears => field::FILE_APPEARS,
             Self::FileDisappears => field::FILE_DISAPPEARS,
+            Self::FileRenames => field::FILE_RENAMES,
             Self::FilePermissionsChange => field::FILE_PERMISSIONS_CHANGE,
             Self::FileIntegrityBreaks => field::FILE_INTEGRITY_BREAKS,
             Self::PortHidden => field::PORT_HIDDEN,
