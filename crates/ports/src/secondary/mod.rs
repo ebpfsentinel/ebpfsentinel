@@ -60,6 +60,7 @@ pub mod socket_identity_port;
 pub mod tcp_health_port;
 pub mod telemetry_port;
 pub mod threatintel_map_port;
+pub mod tls_plaintext_observer_port;
 pub mod vip_announcer_port;
 pub mod workload_policy_map_port;
 pub mod zone_map_port;

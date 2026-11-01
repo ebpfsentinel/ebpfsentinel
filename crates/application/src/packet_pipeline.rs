@@ -113,6 +113,15 @@ pub struct EventDispatcher {
     l7_observers: Vec<Arc<dyn ports::secondary::l7_observer_port::L7Observer>>,
     /// Extensions handed every DNS query with the workload that sent it.
     dns_query_observers: Vec<Arc<dyn ports::secondary::dns_query_observer_port::DnsQueryObserver>>,
+    /// Extensions handed every TLS plaintext buffer the library probes read.
+    tls_plaintext_observers:
+        Vec<Arc<dyn ports::secondary::tls_plaintext_observer_port::TlsPlaintextObserver>>,
+}
+
+/// What one DLP event's process resolves to, read once per event.
+struct DlpEventContext {
+    container: Option<domain::container::entity::ContainerInfo>,
+    executable: Option<domain::dlp::entity::DlpExecutable>,
 }
 
 impl EventDispatcher {
@@ -170,6 +179,7 @@ impl EventDispatcher {
             workloads: crate::workload_resolver::WorkloadResolver::new(),
             l7_observers: Vec::new(),
             dns_query_observers: Vec::new(),
+            tls_plaintext_observers: Vec::new(),
             metrics,
         }
     }
@@ -244,6 +254,23 @@ impl EventDispatcher {
     ) -> Self {
         tracing::info!(observer = observer.name(), "DNS query observer registered");
         self.dns_query_observers.push(observer);
+        self
+    }
+
+    /// Hand every TLS plaintext buffer the library probes capture to
+    /// `observer`, in both directions, whether or not DLP itself is scanning.
+    /// An alert the observer returns is completed with the flow, the process,
+    /// the executable and the container, and raised like any other.
+    #[must_use]
+    pub fn with_tls_plaintext_observer(
+        mut self,
+        observer: Arc<dyn ports::secondary::tls_plaintext_observer_port::TlsPlaintextObserver>,
+    ) -> Self {
+        tracing::info!(
+            observer = observer.name(),
+            "TLS plaintext observer registered"
+        );
+        self.tls_plaintext_observers.push(observer);
         self
     }
 
@@ -1743,41 +1770,120 @@ impl EventDispatcher {
             "DLP event received"
         );
 
+        let actual_len = (event.data_len as usize).min(ebpf_common::dlp::DLP_MAX_EXCERPT);
+        let data = &event.data_excerpt[..actual_len];
+        // Resolved once per event and only when something will read them:
+        // the pid is the same for every alert raised on one buffer, and the
+        // process may exit between two of them.
+        let mut context: Option<DlpEventContext> = None;
+
         if let Some(ref dlp_svc) = self.dlp_service {
             let svc = dlp_svc.load();
-            if !svc.enabled() {
-                return;
-            }
+            if svc.enabled() {
+                let matches = svc.scan_data(data);
+                if !matches.is_empty() {
+                    tracing::info!(
+                        pid = event.pid,
+                        match_count = matches.len(),
+                        direction,
+                        "DLP patterns matched in SSL traffic"
+                    );
+                    self.metrics.record_packet("dlp", "alert");
 
-            let actual_len = (event.data_len as usize).min(ebpf_common::dlp::DLP_MAX_EXCERPT);
-            let matches = svc.scan_data(&event.data_excerpt[..actual_len]);
-            if !matches.is_empty() {
-                tracing::info!(
-                    pid = event.pid,
-                    match_count = matches.len(),
-                    direction,
-                    "DLP patterns matched in SSL traffic"
-                );
-                self.metrics.record_packet("dlp", "alert");
-
-                let container_info = self.resolve_container_dlp(event.pid, event.cgroup_id);
-                // One read per event rather than one per match: the pid is
-                // the same for every pattern that fired on the same buffer,
-                // and the process may exit under us between two of them.
-                let executable = self
-                    .executable_reader
-                    .as_ref()
-                    .and_then(|reader| reader.read_executable(event.pid));
-                let patterns = svc.list_patterns();
-                for m in &matches {
-                    if let Some(pattern) = patterns.get(m.pattern_index) {
-                        let mut dlp_alert = DlpAlert::from_event(event, pattern);
-                        dlp_alert.container.clone_from(&container_info);
-                        dlp_alert.executable.clone_from(&executable);
-                        if self.alert_tx.try_send(AlertEvent::Dlp(dlp_alert)).is_err() {
-                            self.metrics.record_event_dropped("alert_channel_full");
+                    let ctx = context.get_or_insert_with(|| self.dlp_event_context(event));
+                    let patterns = svc.list_patterns();
+                    for m in &matches {
+                        if let Some(pattern) = patterns.get(m.pattern_index) {
+                            let mut dlp_alert = DlpAlert::from_event(event, pattern);
+                            dlp_alert.container.clone_from(&ctx.container);
+                            dlp_alert.executable.clone_from(&ctx.executable);
+                            if self.alert_tx.try_send(AlertEvent::Dlp(dlp_alert)).is_err() {
+                                self.metrics.record_event_dropped("alert_channel_full");
+                            }
                         }
                     }
+                }
+            }
+        }
+
+        if !self.tls_plaintext_observers.is_empty() {
+            let ctx = context.get_or_insert_with(|| self.dlp_event_context(event));
+            self.notify_tls_plaintext_observers(event, data, ctx);
+        }
+    }
+
+    fn dlp_event_context(&self, event: &DlpEvent) -> DlpEventContext {
+        DlpEventContext {
+            container: self.resolve_container_dlp(event.pid, event.cgroup_id),
+            executable: self
+                .executable_reader
+                .as_ref()
+                .and_then(|reader| reader.read_executable(event.pid)),
+        }
+    }
+
+    fn notify_tls_plaintext_observers(&self, event: &DlpEvent, data: &[u8], ctx: &DlpEventContext) {
+        use ports::secondary::tls_plaintext_observer_port::{PlaintextDirection, TlsPlaintext};
+
+        let direction = if event.direction == ebpf_common::dlp::DLP_DIRECTION_READ {
+            PlaintextDirection::Read
+        } else {
+            PlaintextDirection::Write
+        };
+        let flow = domain::dlp::entity::DlpFlow::from_socket(&event.flow);
+        let plaintext = TlsPlaintext {
+            timestamp_ns: event.timestamp_ns,
+            pid: event.pid,
+            tgid: event.tgid,
+            cgroup_id: event.cgroup_id,
+            direction,
+            data,
+            flow: flow.as_ref(),
+            exe: ctx.executable.as_ref().map(|e| e.path.as_str()),
+            container: ctx.container.as_ref(),
+        };
+        for observer in &self.tls_plaintext_observers {
+            for mut alert in observer.observe(&plaintext) {
+                if let Some(ref flow) = flow {
+                    // The side that sent the bytes is the alert's source: the
+                    // peer for a buffer the process read, the local end for
+                    // one it wrote.
+                    let (src, dst, src_port, dst_port) = match direction {
+                        PlaintextDirection::Read => {
+                            (flow.dst_addr, flow.src_addr, flow.dst_port, flow.src_port)
+                        }
+                        PlaintextDirection::Write => {
+                            (flow.src_addr, flow.dst_addr, flow.src_port, flow.dst_port)
+                        }
+                    };
+                    alert.src_addr = src;
+                    alert.dst_addr = dst;
+                    alert.src_port = src_port;
+                    alert.dst_port = dst_port;
+                    alert.protocol = flow.protocol;
+                    alert.is_ipv6 = flow.is_ipv6;
+                    alert.flow_source = Some(flow.source.as_str().to_string());
+                }
+                alert.pid = Some(event.pid);
+                alert.tgid = Some(event.tgid);
+                alert.direction = Some(event.direction);
+                if alert.container.is_none() {
+                    alert.container.clone_from(&ctx.container);
+                }
+                if alert.executable_path.is_none()
+                    && let Some(ref exe) = ctx.executable
+                {
+                    alert.executable_path = Some(exe.path.clone());
+                    alert.executable_dev = Some(exe.dev);
+                    alert.executable_inode = Some(exe.inode);
+                    alert.executable_source = Some(exe.source.as_str().to_string());
+                }
+                if self
+                    .alert_tx
+                    .try_send(AlertEvent::System(Box::new(alert)))
+                    .is_err()
+                {
+                    self.metrics.record_event_dropped("alert_channel_full");
                 }
             }
         }
@@ -3714,6 +3820,133 @@ mod tests {
             })
             .unwrap();
         Arc::new(ArcSwap::from_pointee(DlpAppService::new(engine, metrics)))
+    }
+
+    /// Raises one alert on every buffer carrying `attack`, and keeps the
+    /// direction and length of each buffer it was lent.
+    #[derive(Default)]
+    struct PlaintextSpotter {
+        seen: Mutex<Vec<(&'static str, usize, Option<String>)>>,
+    }
+
+    impl ports::secondary::tls_plaintext_observer_port::TlsPlaintextObserver for PlaintextSpotter {
+        fn observe(
+            &self,
+            plaintext: &ports::secondary::tls_plaintext_observer_port::TlsPlaintext<'_>,
+        ) -> Vec<domain::alert::entity::Alert> {
+            self.seen.lock().unwrap().push((
+                plaintext.direction.as_str(),
+                plaintext.data.len(),
+                plaintext.exe.map(str::to_string),
+            ));
+            if !plaintext.data.windows(6).any(|w| w == b"attack") {
+                return Vec::new();
+            }
+            vec![domain::alert::entity::Alert::from_ai_security(
+                "l7-inspect",
+                "l7-sqli",
+                Severity::High,
+                DomainMode::Alert,
+                [0; 4],
+                [0; 4],
+                0,
+                0,
+                0,
+                false,
+                "attack",
+                plaintext.timestamp_ns,
+                &domain::alert::mitre::MitreContext::Dns(
+                    domain::alert::mitre::DnsMitreReason::BlocklistOrEncrypted,
+                ),
+                None,
+                None,
+                None,
+                None,
+            )]
+        }
+    }
+
+    fn inbound_plaintext(data: &[u8]) -> DlpEvent {
+        let mut event = make_dlp_event_with_data(data);
+        event.direction = ebpf_common::dlp::DLP_DIRECTION_READ;
+        event.flow = ebpf_common::dlp::DlpSocket {
+            src_addr: [0x0a00_0001, 0, 0, 0],
+            dst_addr: [0xc633_6407, 0, 0, 0],
+            src_port: 443,
+            dst_port: 51_000,
+            family: ebpf_common::dlp::DLP_FLOW_FAMILY_IPV4,
+            protocol: 6,
+            source: ebpf_common::dlp::DLP_FLOW_SOURCE_KERNEL_SOCKET,
+            _pad: 0,
+        };
+        event
+    }
+
+    #[tokio::test]
+    async fn a_tls_plaintext_observer_sees_every_buffer_without_dlp_scanning() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let observer = Arc::new(PlaintextSpotter::default());
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_tls_plaintext_observer(Arc::clone(&observer) as _);
+
+        dispatcher.dispatch_agent_event(AgentEvent::Dlp(Box::new(make_dlp_event_with_data(
+            b"GET / HTTP/1.1",
+        ))));
+        dispatcher.dispatch_agent_event(AgentEvent::Dlp(Box::new(inbound_plaintext(
+            b"GET /?q=1 HTTP/1.1",
+        ))));
+
+        let seen = observer.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].0, "write");
+        assert_eq!(seen[0].1, 14);
+        assert_eq!(seen[1].0, "read");
+        assert!(
+            alert_rx.try_recv().is_err(),
+            "nothing matched, nothing raised"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_alert_on_a_buffer_read_names_the_peer_as_its_source() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let observer = Arc::new(PlaintextSpotter::default());
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_executable_reader(Arc::new(FixedExecutable(Some(
+                domain::dlp::entity::DlpExecutable {
+                    path: "/usr/sbin/nginx".to_string(),
+                    dev: 3,
+                    inode: 42,
+                    source: domain::dlp::entity::DlpIdentitySource::ProcessAtAlertTime,
+                },
+            ))))
+            .with_tls_plaintext_observer(Arc::clone(&observer) as _);
+
+        dispatcher.dispatch_agent_event(AgentEvent::Dlp(Box::new(inbound_plaintext(
+            b"POST /login attack",
+        ))));
+
+        assert_eq!(
+            observer.seen.lock().unwrap()[0].2.as_deref(),
+            Some("/usr/sbin/nginx")
+        );
+        let AlertEvent::System(alert) = alert_rx.try_recv().unwrap() else {
+            panic!("expected AlertEvent::System");
+        };
+        assert_eq!(alert.src_addr, [0xc633_6407, 0, 0, 0]);
+        assert_eq!(alert.src_port, 51_000);
+        assert_eq!(alert.dst_addr, [0x0a00_0001, 0, 0, 0]);
+        assert_eq!(alert.dst_port, 443);
+        assert_eq!(alert.protocol, 6);
+        assert!(!alert.is_ipv6);
+        assert_eq!(alert.pid, Some(1000));
+        assert_eq!(alert.direction, Some(ebpf_common::dlp::DLP_DIRECTION_READ));
+        assert_eq!(alert.executable_path.as_deref(), Some("/usr/sbin/nginx"));
+        assert_eq!(alert.flow_source.as_deref(), Some("kernel_socket"));
     }
 
     #[tokio::test]
