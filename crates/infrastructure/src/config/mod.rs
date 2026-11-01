@@ -75,7 +75,7 @@ pub use dns::{
     DnsBlocklistFeedConfig, DnsBlocklistSectionConfig, DnsCacheConfig, DnsConfig,
     ReputationSectionConfig,
 };
-pub use file_watch::{FileWatchConfig, MAX_FILE_WATCH_FILESYSTEMS};
+pub use file_watch::{FileWatchConfig, MAX_FILE_WATCH_FILESYSTEMS, WriteRefusalConfig};
 pub use firewall::{
     DefaultPolicy, FirewallConfig, FirewallRuleConfig, PortRangeConfig, ScopeConfig, ScopeMap,
 };

@@ -5473,6 +5473,10 @@ fn print_lsm_blocks(resp: &crate::api_client::KernelFeaturesResponse) {
         Some(report) => print_network_executables(report),
         None => println!("\nNetwork executables\n  Not reported by this agent."),
     }
+    match &resp.write_refusal {
+        Some(report) => print_write_refusal(report),
+        None => println!("\nWrite refusal\n  Not reported by this agent."),
+    }
     match &resp.self_protection {
         Some(report) => print_self_protection(report),
         None => println!("\nSelf-protection\n  Not reported by this agent."),
@@ -5572,6 +5576,24 @@ fn print_network_executables(report: &crate::api_client::NetworkExecutablesRepor
         };
         println!("  Mode:       {mode}");
         println!("  Listed:     {} executables", report.executables);
+    }
+    if let Some(reason) = &report.reason {
+        println!("  Reason:     {reason}");
+    }
+}
+
+/// Print whether the kernel refuses a write-open past a count.
+fn print_write_refusal(report: &crate::api_client::WriteRefusalReport) {
+    println!("\nWrite refusal");
+    println!("  Attached:   {}", yes_no(report.attached));
+    if report.attached {
+        let mode = if report.enforcing {
+            "enforce"
+        } else {
+            "shadow"
+        };
+        println!("  Mode:       {mode}");
+        println!("  Watched:    {} directories", report.directories);
     }
     if let Some(reason) = &report.reason {
         println!("  Reason:     {reason}");

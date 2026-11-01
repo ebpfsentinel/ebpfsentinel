@@ -145,6 +145,9 @@ suite_profiles:
   # 82 encrypts a tree under a promoted verdict and is killed by the stop:
   # root on a throwaway host, so nightly.
   "82": nightly
+  # 83 needs the BPF LSM active at boot, which no lane's kernel command line
+  # sets yet; where it is not, it skips: nightly, so it runs the day one does.
+  "83": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -333,6 +336,14 @@ coverage:
     kernel_min: "6.12"
     profile: manual
     notes: "No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks. Needs the BPF LSM active at boot (lsm=bpf), which no lane's kernel command line sets yet"
+
+  - kind: ebpf_program
+    feature: lsm-write-refusal
+    suites: ["83"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "A writer's write-opens and truncations under a watched directory refused past a count inside a window, and nothing refused once the agent is gone. Needs the BPF LSM active at boot (lsm=bpf); the suite skips where it is not"
 
   - kind: ebpf_program
     feature: tracepoint-drop-reason

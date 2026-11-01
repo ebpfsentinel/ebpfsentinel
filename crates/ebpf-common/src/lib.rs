@@ -34,4 +34,5 @@ pub mod trace;
 pub mod vip;
 pub mod vlan;
 pub mod workload_policy;
+pub mod write_refusal;
 pub mod zone;

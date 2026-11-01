@@ -8,8 +8,9 @@
 use domain::file_watch::{DECLARED_ORIGIN, WATCHED_PATHS_MAX, WatchedPaths, check_watched_path};
 use domain::firewall::entity::RuleMode;
 use domain::ransom::{
-    CANARIES_MAX, CANARY_DIRECTORIES, CANARY_EXEMPT, CANARY_NAMES, canary_name_refusal,
-    canary_paths,
+    CANARIES_MAX, CANARY_DIRECTORIES, CANARY_EXEMPT, CANARY_NAMES, CountBy,
+    WRITE_REFUSAL_THRESHOLD, WRITE_REFUSAL_WINDOW_SECS, canary_name_refusal, canary_paths,
+    validate_write_refusal,
 };
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +59,74 @@ pub struct FileWatchConfig {
 
     /// What a mass encryption verdict does once it is reached.
     pub mass_encryption: MassEncryptionConfig,
+
+    /// Write-opens refused in the kernel past a count, under the directories
+    /// named. Independent of `enabled`: it needs the BPF LSM, not the watch.
+    pub write_refusal: WriteRefusalConfig,
+}
+
+/// The kernel refusing a write-open past a count.
+///
+/// Needs the BPF LSM active at boot (`lsm=bpf`); without it the agent says
+/// so and refuses nothing. It fails open: an agent that stops refuses
+/// nothing, and the files written before the threshold are lost in every
+/// case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct WriteRefusalConfig {
+    /// Whether the program is loaded. Off by default.
+    pub enabled: bool,
+
+    /// `shadow`, the default, counts what would have been refused and
+    /// reports it; `enforce` refuses.
+    pub mode: RuleMode,
+
+    /// The directories watched, each absolute and everything beneath it.
+    pub paths: Vec<String>,
+
+    /// The write-open by one writer inside the window that is refused
+    /// first; every one after it in the window is refused too.
+    pub threshold: u32,
+
+    /// The window the count runs over, in seconds.
+    pub window_secs: u64,
+
+    /// `process` counts each thread group alone; `cgroup` counts a
+    /// container or a unit as one writer, forks included.
+    pub count_by: CountBy,
+}
+
+impl Default for WriteRefusalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: RuleMode::Shadow,
+            paths: Vec::new(),
+            threshold: WRITE_REFUSAL_THRESHOLD,
+            window_secs: WRITE_REFUSAL_WINDOW_SECS,
+            count_by: CountBy::Process,
+        }
+    }
+}
+
+impl WriteRefusalConfig {
+    /// Checks the block when it is turned on.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] naming the first entry or number
+    /// that cannot be applied.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        validate_write_refusal(&self.paths, self.threshold, self.window_secs).map_err(|e| {
+            ConfigError::Validation {
+                field: "file_watch.write_refusal".to_string(),
+                message: e.to_string(),
+            }
+        })
+    }
 }
 
 /// The composed mass encryption verdict.
@@ -174,6 +243,7 @@ impl Default for FileWatchConfig {
             paths: Vec::new(),
             canaries: CanaryConfig::default(),
             mass_encryption: MassEncryptionConfig::default(),
+            write_refusal: WriteRefusalConfig::default(),
         }
     }
 }
@@ -228,7 +298,8 @@ impl FileWatchConfig {
         for path in &self.paths {
             check_watched_path(path).map_err(invalid_path)?;
         }
-        self.canaries.validate()
+        self.canaries.validate()?;
+        self.write_refusal.validate()
     }
 
     /// The declared paths, each watched through the configuration.
@@ -255,7 +326,32 @@ mod tests {
         assert!(!config.enabled);
         assert_eq!(config.filesystems, vec!["/".to_owned()]);
         assert_eq!(config.mass_encryption.mode, RuleMode::Shadow);
+        assert!(!config.write_refusal.enabled);
+        assert_eq!(config.write_refusal.mode, RuleMode::Shadow);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn a_write_refusal_turned_on_names_its_directories_or_fails_at_boot() {
+        let mut config = FileWatchConfig::default();
+        config.write_refusal.enabled = true;
+        let err = config.validate().expect_err("no directory");
+        assert!(
+            err.to_string().contains("file_watch.write_refusal"),
+            "{err}"
+        );
+        config.write_refusal.paths = vec!["/srv/data".into()];
+        assert!(config.validate().is_ok());
+        config.write_refusal.paths = vec!["/".into()];
+        assert!(config.validate().is_err());
+        let parsed: FileWatchConfig = serde_norway::from_str(
+            "write_refusal:\n  enabled: true\n  mode: enforce\n  paths: [/srv]\n  threshold: 5\n  window_secs: 10\n  count_by: cgroup\n",
+        )
+        .expect("parses");
+        assert_eq!(parsed.write_refusal.mode, RuleMode::Enforce);
+        assert_eq!(parsed.write_refusal.count_by, CountBy::Cgroup);
+        assert_eq!(parsed.write_refusal.threshold, 5);
+        assert!(parsed.validate().is_ok());
     }
 
     #[test]

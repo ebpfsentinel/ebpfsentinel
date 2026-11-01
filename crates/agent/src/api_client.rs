@@ -2704,6 +2704,9 @@ pub struct KernelFeaturesResponse {
     /// Absent from an agent that predates the list.
     #[serde(default)]
     pub network_executables: Option<NetworkExecutablesReport>,
+    /// Absent from an agent that predates the write refusal.
+    #[serde(default)]
+    pub write_refusal: Option<WriteRefusalReport>,
     /// Absent from an agent that predates the guard.
     #[serde(default)]
     pub self_protection: Option<SelfProtectionReport>,
@@ -2782,6 +2785,18 @@ pub struct SelfProtectionReport {
     pub links: usize,
     #[serde(default)]
     pub tasks: usize,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// What became of the write refusal on the node.
+#[derive(Deserialize, Serialize)]
+pub struct WriteRefusalReport {
+    pub attached: bool,
+    #[serde(default)]
+    pub enforcing: bool,
+    #[serde(default)]
+    pub directories: usize,
     #[serde(default)]
     pub reason: Option<String>,
 }

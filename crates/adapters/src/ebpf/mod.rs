@@ -75,6 +75,7 @@ pub mod workload_dns_reader;
 pub mod workload_event_reader;
 pub mod workload_firewall_attach;
 pub mod workload_policy_map_manager;
+pub mod write_refusal;
 pub mod zone_map_manager;
 
 pub use attach_inspect::{

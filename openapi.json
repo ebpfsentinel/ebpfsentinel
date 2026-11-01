@@ -14141,6 +14141,7 @@
           "quarantine",
           "bpf_lsm",
           "network_executables",
+          "write_refusal",
           "self_protection",
           "file_kfuncs",
           "kfunc_features"
@@ -14216,6 +14217,10 @@
           "workload_firewall": {
             "$ref": "#/components/schemas/WorkloadFirewallReport",
             "description": "Whether the hooks deciding a workload rule are on this host's cgroup.\nRead the same way as the two blocks above, and asked more often than\neither: a rule naming a binary is the one kind of rule whose absence\nnothing on the wire makes visible."
+          },
+          "write_refusal": {
+            "$ref": "#/components/schemas/WriteRefusalReport",
+            "description": "Whether the kernel refuses a write-open past a count under the\nwatched directories, and whether it refuses or only counts. Reported\nwhether or not it is configured, with the reason it is not in force."
           }
         }
       },
@@ -20361,6 +20366,37 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "WriteRefusalReport": {
+        "type": "object",
+        "description": "What became of the write refusal on this host.",
+        "required": [
+          "attached",
+          "enforcing",
+          "directories"
+        ],
+        "properties": {
+          "attached": {
+            "type": "boolean",
+            "description": "Both hooks are attached and deciding."
+          },
+          "directories": {
+            "type": "integer",
+            "description": "How many watched directories the kernel holds.",
+            "minimum": 0
+          },
+          "enforcing": {
+            "type": "boolean",
+            "description": "A writer past the threshold is refused rather than counted."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the refusal is not in force, in one sentence."
           }
         }
       },

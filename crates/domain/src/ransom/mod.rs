@@ -17,6 +17,7 @@ pub mod entropy;
 pub mod header;
 pub mod note;
 pub mod paths;
+pub mod refusal;
 pub mod rename;
 pub mod replace;
 pub mod shadow;
@@ -46,6 +47,11 @@ pub use note::{
 pub use paths::{
     DistinctPaths, RANSOM_DISTINCT_REWRITES, RANSOM_ENTROPY_RISES, RANSOM_HEADER_MISMATCHES,
     learned_evidence,
+};
+pub use refusal::{
+    CountBy, MAX_WRITE_REFUSAL_DIRECTORIES, MAX_WRITE_REFUSAL_WINDOW_SECS, WRITE_REFUSAL_RULE_ID,
+    WRITE_REFUSAL_THRESHOLD, WRITE_REFUSAL_WINDOW_SECS, WRITE_REFUSAL_WRITERS, WriteRefusalError,
+    WriteRefusalHook, WriteRefusalRecord, validate_write_refusal,
 };
 pub use rename::{
     MassRenames, RANSOM_MASS_RENAMES, RANSOM_RENAME_EXTENSIONS_MAX, renamed_to_new_extension,

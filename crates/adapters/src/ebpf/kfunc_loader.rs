@@ -2369,6 +2369,21 @@ mod tests {
     }
 
     #[test]
+    fn the_built_write_refusal_object_names_both_its_hooks() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/bpfel-unknown-none/release/lsm-write-refusal"
+        );
+        // The object exists only once the eBPF programs were built.
+        let Ok(elf) = std::fs::read(path) else {
+            return;
+        };
+        let mut hooks: Vec<String> = lsm_hooks(&elf).expect("parse").into_values().collect();
+        hooks.sort();
+        assert_eq!(hooks, vec!["file_open", "path_truncate"]);
+    }
+
+    #[test]
     fn the_built_guard_object_names_the_bpf_hooks() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),

@@ -158,6 +158,10 @@ pub struct KernelFeaturesResponse {
     /// whether it refuses or only reports. Reported whether or not the list is
     /// configured, with the reason it is not in force.
     pub network_executables: NetworkExecutablesReport,
+    /// Whether the kernel refuses a write-open past a count under the
+    /// watched directories, and whether it refuses or only counts. Reported
+    /// whether or not it is configured, with the reason it is not in force.
+    pub write_refusal: WriteRefusalReport,
     /// Whether the kernel refuses every other task a writable descriptor to
     /// the agent's maps and a descriptor to its links. A node without the
     /// BPF LSM says it is unprotected and why, rather than saying nothing.
@@ -344,6 +348,30 @@ impl From<adapters::ebpf::exec_network::ExecNetworkStatus> for NetworkExecutable
             attached: status.attached,
             enforcing: status.enforcing,
             executables: status.executables,
+            reason: status.reason,
+        }
+    }
+}
+
+/// What became of the write refusal on this host.
+#[derive(Serialize, ToSchema)]
+pub struct WriteRefusalReport {
+    /// Both hooks are attached and deciding.
+    pub attached: bool,
+    /// A writer past the threshold is refused rather than counted.
+    pub enforcing: bool,
+    /// How many watched directories the kernel holds.
+    pub directories: usize,
+    /// Why the refusal is not in force, in one sentence.
+    pub reason: Option<String>,
+}
+
+impl From<adapters::ebpf::write_refusal::WriteRefusalStatus> for WriteRefusalReport {
+    fn from(status: adapters::ebpf::write_refusal::WriteRefusalStatus) -> Self {
+        Self {
+            attached: status.attached,
+            enforcing: status.enforcing,
+            directories: status.directories,
             reason: status.reason,
         }
     }
@@ -747,6 +775,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
     let bpf_lsm = BpfLsmReport::from(adapters::ebpf::lsm_probe::status());
     let network_executables =
         NetworkExecutablesReport::from(adapters::ebpf::exec_network::status());
+    let write_refusal = WriteRefusalReport::from(adapters::ebpf::write_refusal::status());
     let self_protection = SelfProtectionReport::from(adapters::ebpf::bpf_guard::status());
     let file_kfuncs = FileKfuncReport::from(adapters::ebpf::file_kfunc_probe::cached());
     let kfunc_features = KfuncFeaturesReport::from(adapters::ebpf::kfunc_feature_probe::cached());
@@ -766,6 +795,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
             quarantine,
             bpf_lsm,
             network_executables,
+            write_refusal,
             self_protection,
             file_kfuncs,
             kfunc_features,
@@ -815,6 +845,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
         quarantine,
         bpf_lsm,
         network_executables,
+        write_refusal,
         self_protection,
         file_kfuncs,
         kfunc_features,
@@ -1157,6 +1188,16 @@ mod tests {
         assert_eq!(resp.network_executables.attached, held.attached);
         assert_eq!(resp.network_executables.enforcing, held.enforcing);
         assert_eq!(resp.network_executables.reason, held.reason);
+    }
+
+    #[test]
+    fn kernel_features_reports_the_write_refusal_even_unprobed() {
+        let resp = kernel_features_body(None);
+        let held = adapters::ebpf::write_refusal::status();
+        assert_eq!(resp.write_refusal.attached, held.attached);
+        assert_eq!(resp.write_refusal.enforcing, held.enforcing);
+        assert_eq!(resp.write_refusal.directories, held.directories);
+        assert_eq!(resp.write_refusal.reason, held.reason);
     }
 
     #[test]

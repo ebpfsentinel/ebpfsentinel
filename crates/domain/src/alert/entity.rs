@@ -23,6 +23,7 @@ use crate::process::detection::{
 };
 use crate::ransom::{
     MASS_ENCRYPTION_COMPONENT, MASS_ENCRYPTION_RULE_ID, RansomStop, RansomVerdict,
+    WriteRefusalRecord,
 };
 use crate::raw_socket::entity::{FilterState, RAW_SOCKET_COMPONENT, RawSocket};
 use crate::response::signal::ProcessKillOutcome;
@@ -1389,6 +1390,72 @@ impl Alert {
         alert
     }
 
+    /// Create an alert for a writer the kernel refused, or would have
+    /// refused in shadow, under the watched directories. The file is named
+    /// by the inode the kernel decided on; the workload is the pipeline's
+    /// business, off the thread group.
+    #[must_use]
+    pub fn from_write_refusal(record: &WriteRefusalRecord) -> Self {
+        let rule_id = WriteRefusalRecord::rule();
+        Self {
+            id: Self::generate_id(record.at_ns, &rule_id),
+            timestamp_ns: record.at_ns,
+            component: MASS_ENCRYPTION_COMPONENT.to_string(),
+            severity: Severity::High,
+            rule_id,
+            action: if record.refused {
+                DomainMode::Block
+            } else {
+                DomainMode::Alert
+            },
+            src_addr: [0; 4],
+            dst_addr: [0; 4],
+            src_port: 0,
+            dst_port: 0,
+            protocol: 0,
+            is_ipv6: false,
+            message: record.message(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: Some(record.tgid),
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: record.refused.then(|| "refused".to_string()),
+            total_packets: None,
+            mitre_attack: None,
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
+            executable_path: None,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
+            workload: None,
+        }
+    }
+
     /// The alert a stopped mass encryption run raises after its verdict:
     /// what stopping it cost first, then the verdict it answers. Its
     /// mitigation reads `stopped` only when every process of the run is gone.
@@ -2361,6 +2428,32 @@ mod operational_tests {
         assert_eq!(alert.severity, Severity::Critical);
         assert_eq!(alert.message, "all 2 WAN gateway(s) down: gw0, gw1");
         assert_eq!(alert.timestamp_ns, 7);
+    }
+
+    #[test]
+    fn a_write_refusal_blocks_under_the_mass_encryption_component() {
+        use crate::ransom::{WRITE_REFUSAL_RULE_ID, WriteRefusalHook, WriteRefusalRecord};
+        let mut record = WriteRefusalRecord {
+            at_ns: 10,
+            tgid: 31,
+            cgroup_id: 4,
+            file: (2049, 8),
+            name: "a.docx".into(),
+            directory: Some("/srv".into()),
+            count: 100,
+            hook: WriteRefusalHook::Open,
+            refused: true,
+        };
+        let alert = Alert::from_write_refusal(&record);
+        assert_eq!(alert.component, MASS_ENCRYPTION_COMPONENT);
+        assert_eq!(alert.rule_id.0, WRITE_REFUSAL_RULE_ID);
+        assert_eq!(alert.action, DomainMode::Block);
+        assert_eq!(alert.tgid, Some(31));
+        assert_eq!(alert.mitigation_status.as_deref(), Some("refused"));
+        record.refused = false;
+        let shadow = Alert::from_write_refusal(&record);
+        assert_eq!(shadow.action, DomainMode::Alert);
+        assert!(shadow.mitigation_status.is_none());
     }
 
     #[test]

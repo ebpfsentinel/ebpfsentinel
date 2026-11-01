@@ -255,6 +255,21 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (4, "unreadable"),
             (5, "event_lost"),
         ],
+        // Every write-open and truncation not by the agent, then those under
+        // a watched directory. `refused` and `would_refuse` are past the
+        // threshold, in enforce and in shadow; `unresolved` is a call whose
+        // path could not be walked or ran deeper than the walk goes, let
+        // through; `table_full` a new writer the counter map had no room
+        // for, let through; `event_lost` a record the ring had no room for.
+        "WRITE_REFUSAL_METRICS" => &[
+            (0, "checked"),
+            (1, "watched"),
+            (2, "refused"),
+            (3, "would_refuse"),
+            (4, "unresolved"),
+            (5, "table_full"),
+            (6, "event_lost"),
+        ],
         // Every descriptor asked for on one of the agent's own maps or
         // links that the guard decided, then the refusals: a writable map
         // descriptor, or a link descriptor, asked for by another task.
@@ -666,6 +681,10 @@ mod tests {
         (
             "EXEC_NET_METRICS",
             ebpf_common::exec_network::EXEC_NET_METRIC_COUNT,
+        ),
+        (
+            "WRITE_REFUSAL_METRICS",
+            ebpf_common::write_refusal::WRITE_REFUSAL_METRIC_COUNT,
         ),
         (
             "BPF_GUARD_METRICS",

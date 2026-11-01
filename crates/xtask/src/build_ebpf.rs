@@ -31,6 +31,7 @@ pub(crate) const EBPF_PROGRAMS: &[&str] = &[
     "tracepoint-tcp-health",
     "lsm-exec-network",
     "lsm-bpf-guard",
+    "lsm-write-refusal",
 ];
 
 // Kernel kfuncs called by the eBPF programs. These resolve to undefined
