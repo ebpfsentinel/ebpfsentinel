@@ -7725,18 +7725,68 @@ struct WriteRefusalWiring<'a> {
 
 /// Start the write refusal when the configuration turns it on, and say why
 /// when it cannot be.
-///
-/// Unlike the network executables list, a refusal that cannot be put in force
-/// does not stop the agent even in `enforce`: the detection beside it still
-/// reaches its verdict and stops the process, so the node keeps a defence,
-/// one that loses more files. The reason is published where the operator
-/// reads the kernel's capabilities.
 fn wire_write_refusal(
     w: &mut WriteRefusalWiring<'_>,
 ) -> Option<adapters::ebpf::write_refusal::WriteRefusalAttacher> {
+    let handle = start_write_refusal_run(&WriteRefusalStart {
+        ebpf_dir: w.ebpf_dir,
+        config: w.config,
+        metrics: w.metrics,
+        alert_tx: w.alert_tx,
+        cancel: w.cancel,
+    })?;
+    let WriteRefusalHandle {
+        loader,
+        metrics_reader,
+        attacher,
+        set: _,
+    } = handle;
+    if let Some(rdr) = metrics_reader {
+        w.metrics_readers.push(rdr);
+    }
+    w.ebpf_state.add_loader(loader);
+    Some(attacher)
+}
+
+/// What starting the write refusal needs.
+pub struct WriteRefusalStart<'a> {
+    /// Where the eBPF objects are read from.
+    pub ebpf_dir: &'a str,
+    /// The `file_watch.write_refusal` block.
+    pub config: &'a infrastructure::config::WriteRefusalConfig,
+    /// Where the program's status is recorded.
+    pub metrics: &'a Arc<AgentMetrics>,
+    /// Where a writer reported by the kernel becomes an alert.
+    pub alert_tx: &'a mpsc::Sender<application::alert_event::AlertEvent>,
+    /// Ends the readers and the refresh.
+    pub cancel: &'a CancellationToken,
+}
+
+/// A running write refusal. The refusal lasts as long as `attacher` and
+/// `loader` are held: dropping them detaches both hooks, which is how it
+/// fails open.
+pub struct WriteRefusalHandle {
+    /// The loaded object.
+    pub loader: EbpfLoader,
+    /// The program's counters, for whoever polls them.
+    pub metrics_reader: Option<MetricsReader>,
+    /// The two LSM links.
+    pub attacher: adapters::ebpf::write_refusal::WriteRefusalAttacher,
+    /// The watched paths and expected writers, which the caller may replace;
+    /// the kernel follows them at the next refresh.
+    pub set: Arc<std::sync::RwLock<adapters::ebpf::write_refusal::WriteRefusalSet>>,
+}
+
+/// Start the write refusal the configuration asks for: load it, write the
+/// watched paths of both regimes and the expected writers, attach, and keep
+/// the set and the counters current.
+///
+/// `None` when it is turned off or cannot be put in force here, with the
+/// reason published for the kernel-features endpoint.
+pub fn start_write_refusal_run(start: &WriteRefusalStart<'_>) -> Option<WriteRefusalHandle> {
     use adapters::ebpf::write_refusal as wr;
-    if !w.config.enabled {
-        w.metrics.clear_ebpf_program_status("lsm_write_refusal");
+    if !start.config.enabled {
+        start.metrics.clear_ebpf_program_status("lsm_write_refusal");
         wr::publish_status(wr::WriteRefusalStatus {
             reason: Some("the write refusal is turned off in the configuration".to_string()),
             ..wr::WriteRefusalStatus::default()
@@ -7744,15 +7794,21 @@ fn wire_write_refusal(
         return None;
     }
     let policy = wr::WriteRefusalPolicy {
-        enforce: w.config.mode == domain::firewall::entity::RuleMode::Enforce,
-        threshold: w.config.threshold,
-        window_ns: w.config.window_secs.saturating_mul(1_000_000_000),
-        count_by: w.config.count_by,
+        enforce: start.config.mode == domain::firewall::entity::RuleMode::Enforce,
+        threshold: start.config.threshold,
+        window_ns: start.config.window_secs.saturating_mul(1_000_000_000),
+        count_by: start.config.count_by,
     };
-    let started = match start_write_refusal(w.ebpf_dir, &w.config.paths, &policy) {
+    let set = wr::WriteRefusalSet {
+        data: start.config.paths.clone(),
+        system: start.config.system_paths.clone(),
+        writers: start.config.system_writers.clone(),
+    };
+    let started = match start_write_refusal(start.ebpf_dir, &set, &policy) {
         Ok(started) => started,
         Err(reason) => {
-            w.metrics
+            start
+                .metrics
                 .set_ebpf_program_status("lsm_write_refusal", false);
             warn!(
                 "write refusal unavailable, the detection still stops a run but the kernel refuses no write: {reason}"
@@ -7771,22 +7827,21 @@ fn wire_write_refusal(
         attacher,
         reader,
     } = started;
-    if let Some(rdr) = metrics_rdr {
-        w.metrics_readers.push(rdr);
-    }
-    w.metrics.set_ebpf_program_status("lsm_write_refusal", true);
+    start
+        .metrics
+        .set_ebpf_program_status("lsm_write_refusal", true);
 
     let (record_tx, mut record_rx) =
         mpsc::channel::<domain::ransom::WriteRefusalRecord>(WORKLOAD_DENIAL_CHANNEL_CAPACITY);
     let rb_obs = RingBufObserver::new(
         wr::WRITE_REFUSAL_OBJECT,
-        Arc::clone(w.metrics) as Arc<dyn MetricsPort>,
+        Arc::clone(start.metrics) as Arc<dyn MetricsPort>,
     );
-    let reader_cancel = w.cancel.clone();
+    let reader_cancel = start.cancel.clone();
     tokio::spawn(async move {
         reader.run(record_tx, reader_cancel, rb_obs).await;
     });
-    let alert_tx = w.alert_tx.clone();
+    let alert_tx = start.alert_tx.clone();
     tokio::spawn(async move {
         while let Some(record) = record_rx.recv().await {
             // Named by the pipeline off the thread group: the hook carries
@@ -7803,27 +7858,34 @@ fn wire_write_refusal(
             }
         }
     });
+    let shared = Arc::new(std::sync::RwLock::new(set.clone()));
     tokio::spawn(refresh_write_refusal(
         maps,
-        w.config.paths.clone(),
+        Arc::clone(&shared),
         policy.enforce,
-        w.cancel.clone(),
+        start.cancel.clone(),
     ));
-    w.ebpf_state.add_loader(loader);
     if policy.enforce {
         warn!(
-            directories = w.config.paths.len(),
+            data_paths = set.data.len(),
+            system_paths = set.system.len(),
             threshold = policy.threshold,
-            "write refusal enforce: a writer past the threshold is refused its next write-open under the watched directories"
+            "write refusal enforce: a writer past the threshold under a data path, or an unexpected writer under a system path, is refused its next write-open"
         );
     } else {
         info!(
-            directories = w.config.paths.len(),
+            data_paths = set.data.len(),
+            system_paths = set.system.len(),
             threshold = policy.threshold,
-            "write refusal shadow: a writer past the threshold is reported, not refused"
+            "write refusal shadow: what would be refused is reported, not refused"
         );
     }
-    Some(attacher)
+    Some(WriteRefusalHandle {
+        loader,
+        metrics_reader: metrics_rdr,
+        attacher,
+        set: shared,
+    })
 }
 
 /// What a started write refusal hands back to start-up.
@@ -7835,15 +7897,15 @@ pub struct WriteRefusalStarted {
     reader: adapters::ebpf::write_refusal::WriteRefusalEventReader,
 }
 
-/// Load the write refusal object, write the watched set and the slot, then
-/// attach both hooks.
+/// Load the write refusal object, write the watched set, the expected
+/// writers and the slot, then attach both hooks.
 ///
 /// # Errors
 ///
 /// Returns why the refusal cannot be put in force here, in one sentence.
 pub fn start_write_refusal(
     ebpf_dir: &str,
-    paths: &[String],
+    set: &adapters::ebpf::write_refusal::WriteRefusalSet,
     policy: &adapters::ebpf::write_refusal::WriteRefusalPolicy,
 ) -> Result<WriteRefusalStarted, String> {
     use adapters::ebpf::write_refusal as wr;
@@ -7868,20 +7930,16 @@ pub fn start_write_refusal(
     let mut maps = wr::WriteRefusalMaps::new(loader.ebpf_mut()).map_err(|e| e.to_string())?;
     let reader = wr::WriteRefusalEventReader::new(loader.ebpf_mut(), maps.watched())
         .map_err(|e| e.to_string())?;
-    let (keys, missing) = wr::directory_keys(paths);
+    let missing = maps.apply(set).map_err(|e| e.to_string())?;
     for entry in &missing {
-        warn!("write refusal: {entry}, left out of the watched set until it exists");
+        warn!("write refusal: {entry}, left out until it exists");
     }
-    maps.replace(&keys).map_err(|e| e.to_string())?;
     maps.arm(offsets, policy).map_err(|e| e.to_string())?;
     let mut attacher = wr::WriteRefusalAttacher::new();
     attacher.attach(&loader)?;
-    wr::publish_status(wr::WriteRefusalStatus {
-        attached: attacher.attached(),
-        enforcing: policy.enforce,
-        directories: maps.held(),
-        reason: None,
-    });
+    let mut status = maps.status(policy.enforce);
+    status.attached = attacher.attached();
+    wr::publish_status(status);
     Ok(WriteRefusalStarted {
         loader,
         metrics_rdr,
@@ -7891,15 +7949,16 @@ pub fn start_write_refusal(
     })
 }
 
-/// How often the watched directories are stat-ed again and the counts of
-/// writers whose window has passed are removed.
+/// How often the watched paths and the expected writers are stat-ed again
+/// and the counts of writers whose window has passed are removed.
 const WRITE_REFUSAL_REFRESH: Duration = Duration::from_secs(30);
 
-/// Keep the kernel's watched set on the directories the paths name now, and
-/// the counter map on the writers of the current window.
+/// Keep the kernel's watched set on the paths the shared set names now, the
+/// expected writers on the files they are now, and the counter map on the
+/// writers of the current window.
 async fn refresh_write_refusal(
     mut maps: adapters::ebpf::write_refusal::WriteRefusalMaps,
-    paths: Vec<String>,
+    set: Arc<std::sync::RwLock<adapters::ebpf::write_refusal::WriteRefusalSet>>,
     enforce: bool,
     cancel: CancellationToken,
 ) {
@@ -7915,20 +7974,22 @@ async fn refresh_write_refusal(
                 if removed > 0 {
                     debug!(removed, "write refusal: expired writer counts removed");
                 }
-                let (keys, missing) = wr::directory_keys(&paths);
-                for entry in &missing {
-                    debug!("write refusal: {entry}");
+                let current = set
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                match maps.apply(&current) {
+                    Ok(missing) => {
+                        for entry in &missing {
+                            debug!("write refusal: {entry}");
+                        }
+                    }
+                    Err(e) => {
+                        warn!("write refusal refresh failed, the previous set stays: {e}");
+                        continue;
+                    }
                 }
-                if let Err(e) = maps.replace(&keys) {
-                    warn!("write refusal refresh failed, the previous set stays: {e}");
-                    continue;
-                }
-                wr::publish_status(wr::WriteRefusalStatus {
-                    attached: true,
-                    enforcing: enforce,
-                    directories: maps.held(),
-                    reason: None,
-                });
+                wr::publish_status(maps.status(enforce));
             }
         }
     }

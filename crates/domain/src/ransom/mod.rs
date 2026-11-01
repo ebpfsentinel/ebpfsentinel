@@ -49,9 +49,10 @@ pub use paths::{
     learned_evidence,
 };
 pub use refusal::{
-    CountBy, MAX_WRITE_REFUSAL_DIRECTORIES, MAX_WRITE_REFUSAL_WINDOW_SECS, WRITE_REFUSAL_RULE_ID,
-    WRITE_REFUSAL_THRESHOLD, WRITE_REFUSAL_WINDOW_SECS, WRITE_REFUSAL_WRITERS, WriteRefusalError,
-    WriteRefusalHook, WriteRefusalRecord, validate_write_refusal,
+    CountBy, MAX_WRITE_REFUSAL_DIRECTORIES, MAX_WRITE_REFUSAL_EXPECTED_WRITERS,
+    MAX_WRITE_REFUSAL_WINDOW_SECS, WRITE_REFUSAL_RULE_ID, WRITE_REFUSAL_THRESHOLD,
+    WRITE_REFUSAL_WINDOW_SECS, WRITE_REFUSAL_WRITERS, WriteRefusalError, WriteRefusalHook,
+    WriteRefusalRecord, WriteRefusalRegime, WriteRefusalSetRef, validate_write_refusal,
 };
 pub use rename::{
     MassRenames, RANSOM_MASS_RENAMES, RANSOM_RENAME_EXTENSIONS_MAX, renamed_to_new_extension,

@@ -9,8 +9,8 @@ use domain::file_watch::{DECLARED_ORIGIN, WATCHED_PATHS_MAX, WatchedPaths, check
 use domain::firewall::entity::RuleMode;
 use domain::ransom::{
     CANARIES_MAX, CANARY_DIRECTORIES, CANARY_EXEMPT, CANARY_NAMES, CountBy,
-    WRITE_REFUSAL_THRESHOLD, WRITE_REFUSAL_WINDOW_SECS, canary_name_refusal, canary_paths,
-    validate_write_refusal,
+    WRITE_REFUSAL_THRESHOLD, WRITE_REFUSAL_WINDOW_SECS, WriteRefusalSetRef, canary_name_refusal,
+    canary_paths, validate_write_refusal,
 };
 use serde::{Deserialize, Serialize};
 
@@ -81,11 +81,22 @@ pub struct WriteRefusalConfig {
     /// reports it; `enforce` refuses.
     pub mode: RuleMode,
 
-    /// The directories watched, each absolute and everything beneath it.
+    /// The data paths watched, each absolute and everything beneath it,
+    /// refused at the threshold: mass writes there are legitimate.
     pub paths: Vec<String>,
 
+    /// The system paths watched, each absolute and everything beneath it,
+    /// refused at the first write by an executable not in
+    /// `system_writers`: a write there is anomalous once.
+    pub system_paths: Vec<String>,
+
+    /// The executables expected to write under the system paths, each an
+    /// absolute path: the package manager, the estate's configuration tool.
+    pub system_writers: Vec<String>,
+
     /// The write-open by one writer inside the window that is refused
-    /// first; every one after it in the window is refused too.
+    /// first under a data path; every one after it in the window is refused
+    /// too.
     pub threshold: u32,
 
     /// The window the count runs over, in seconds.
@@ -102,6 +113,8 @@ impl Default for WriteRefusalConfig {
             enabled: false,
             mode: RuleMode::Shadow,
             paths: Vec::new(),
+            system_paths: Vec::new(),
+            system_writers: Vec::new(),
             threshold: WRITE_REFUSAL_THRESHOLD,
             window_secs: WRITE_REFUSAL_WINDOW_SECS,
             count_by: CountBy::Process,
@@ -120,12 +133,22 @@ impl WriteRefusalConfig {
         if !self.enabled {
             return Ok(());
         }
-        validate_write_refusal(&self.paths, self.threshold, self.window_secs).map_err(|e| {
+        validate_write_refusal(self.set(), self.threshold, self.window_secs).map_err(|e| {
             ConfigError::Validation {
                 field: "file_watch.write_refusal".to_string(),
                 message: e.to_string(),
             }
         })
+    }
+
+    /// The watched paths of both regimes and the expected writers.
+    #[must_use]
+    pub fn set(&self) -> WriteRefusalSetRef<'_> {
+        WriteRefusalSetRef {
+            data: &self.paths,
+            system: &self.system_paths,
+            writers: &self.system_writers,
+        }
     }
 }
 
@@ -352,6 +375,23 @@ mod tests {
         assert_eq!(parsed.write_refusal.count_by, CountBy::Cgroup);
         assert_eq!(parsed.write_refusal.threshold, 5);
         assert!(parsed.validate().is_ok());
+    }
+
+    #[test]
+    fn a_write_refusal_may_watch_system_paths_alone_with_their_expected_writers() {
+        let parsed: FileWatchConfig = serde_norway::from_str(
+            "write_refusal:\n  enabled: true\n  system_paths: [/etc, /usr/bin]\n  system_writers: [/usr/bin/dpkg]\n",
+        )
+        .expect("parses");
+        assert!(parsed.validate().is_ok());
+        assert_eq!(parsed.write_refusal.set().system.len(), 2);
+        let mut overlap = parsed.clone();
+        overlap.write_refusal.paths = vec!["/etc/".into()];
+        assert!(overlap.validate().is_err());
+        let mut relative = parsed;
+        relative.write_refusal.system_writers = vec!["dpkg".into()];
+        let err = relative.validate().expect_err("relative writer");
+        assert!(err.to_string().contains("expected writer"), "{err}");
     }
 
     #[test]

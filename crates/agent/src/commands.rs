@@ -5593,7 +5593,11 @@ fn print_write_refusal(report: &crate::api_client::WriteRefusalReport) {
             "shadow"
         };
         println!("  Mode:       {mode}");
-        println!("  Watched:    {} directories", report.directories);
+        println!(
+            "  Watched:    {} paths, {} of them system paths",
+            report.directories, report.system_paths
+        );
+        println!("  Expected:   {} writers", report.expected_writers);
     }
     if let Some(reason) = &report.reason {
         println!("  Reason:     {reason}");

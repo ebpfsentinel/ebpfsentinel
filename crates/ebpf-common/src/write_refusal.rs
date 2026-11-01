@@ -3,7 +3,10 @@
 //! The program decides a write-open, or a truncation by path, under a watched
 //! directory: it counts it against the writer, the thread group or the
 //! cgroup as configured, inside a window, and the open that reaches the
-//! threshold is refused. What is shared here is the layout both sides read
+//! threshold is refused. A watched path is in one of two regimes: a data
+//! path is refused at the threshold, a system path at the first write by an
+//! executable not on the expected list, because a write there is anomalous
+//! once. What is shared here is the layout both sides read
 //! and [`write_refusal_step`], the decision itself, which the program calls
 //! and the tests exercise without a kernel.
 
@@ -19,6 +22,18 @@ pub const WRITE_REFUSAL_BY_PROCESS: u32 = 0;
 /// workers a run forks share the count of the process that forked them.
 pub const WRITE_REFUSAL_BY_CGROUP: u32 = 1;
 
+/// Value of a watched path in `WRITE_REFUSAL_DIRS`: a data path, refused at
+/// the threshold.
+pub const WRITE_REFUSAL_REGIME_DATA: u8 = 0;
+/// Value of a watched path in `WRITE_REFUSAL_DIRS`: a system path, refused at
+/// the first write by an executable not on the expected list.
+pub const WRITE_REFUSAL_REGIME_SYSTEM: u8 = 1;
+/// How many executables the expected writers of the system paths hold.
+pub const WRITE_REFUSAL_MAX_EXPECTED_WRITERS: u32 = 256;
+/// Bit set on a writer's counter key for the system regime, so a process
+/// counted against a data path and refused on a system path keeps two
+/// counts that never meet. Neither a thread group nor a cgroup id reaches it.
+pub const WRITE_REFUSAL_SYSTEM_KEY_BIT: u64 = 1 << 63;
 /// Index of the single slot in `WRITE_REFUSAL_CONFIG`.
 pub const WRITE_REFUSAL_CONFIG_SLOT: u32 = 0;
 
@@ -73,8 +88,11 @@ pub const WRITE_REFUSAL_METRIC_TABLE_FULL: u32 = 5;
 /// Metric index: records the ring buffer had no room for. The decision is
 /// taken whatever happens to the record.
 pub const WRITE_REFUSAL_METRIC_EVENT_LOST: u32 = 6;
+/// Metric index: writes on a system path by an expected executable, or by
+/// the kernel itself, let through.
+pub const WRITE_REFUSAL_METRIC_EXPECTED: u32 = 7;
 /// How many counters the metrics array holds.
-pub const WRITE_REFUSAL_METRIC_COUNT: u32 = 7;
+pub const WRITE_REFUSAL_METRIC_COUNT: u32 = 8;
 
 /// One watched directory, as the kernel names it. `dev` is the kernel's own
 /// encoding, see [`crate::exec_network::kernel_dev`].
@@ -136,6 +154,13 @@ pub struct WriteRefusalConfig {
     pub inode_sb: u32,
     /// `super_block.s_dev`
     pub sb_dev: u32,
+    /// `task_struct.mm`
+    pub task_mm: u32,
+    /// `mm_struct.exe_file`
+    pub mm_exe_file: u32,
+    /// `file.f_inode`
+    pub file_inode: u32,
+    pub _pad: u32,
     /// Non-zero once the slot is complete.
     pub valid: u32,
 }
@@ -165,7 +190,9 @@ pub struct WriteRefusalEvent {
     pub hook: u8,
     /// Non-zero when the kernel refused the write rather than counted it.
     pub refused: u8,
-    pub _pad: [u8; 6],
+    /// `WRITE_REFUSAL_REGIME_*` of the watched path.
+    pub regime: u8,
+    pub _pad: [u8; 5],
     /// The file's own name, NUL-terminated or cut.
     pub name: [u8; WRITE_REFUSAL_NAME_BYTES],
 }
@@ -183,7 +210,8 @@ impl Default for WriteRefusalEvent {
             count: 0,
             hook: 0,
             refused: 0,
-            _pad: [0; 6],
+            regime: 0,
+            _pad: [0; 5],
             name: [0; WRITE_REFUSAL_NAME_BYTES],
         }
     }
@@ -236,6 +264,27 @@ pub const fn write_refusal_step(
         },
         over,
         report,
+    }
+}
+
+/// The threshold a write under a path of `regime` is held to: the
+/// configured one for a data path, one for a system path.
+#[must_use]
+pub const fn write_refusal_threshold(regime: u8, data_threshold: u32) -> u32 {
+    if regime == WRITE_REFUSAL_REGIME_SYSTEM {
+        1
+    } else {
+        data_threshold
+    }
+}
+
+/// The counter key of `writer` under a path of `regime`.
+#[must_use]
+pub const fn write_refusal_count_key(writer: u64, regime: u8) -> u64 {
+    if regime == WRITE_REFUSAL_REGIME_SYSTEM {
+        writer | WRITE_REFUSAL_SYSTEM_KEY_BIT
+    } else {
+        writer
     }
 }
 
@@ -334,12 +383,43 @@ mod tests {
     fn the_layouts_carry_no_implicit_padding() {
         assert_eq!(mem::size_of::<WriteRefusalDir>(), 16);
         assert_eq!(mem::size_of::<WriteRefusalCount>(), 16);
-        assert_eq!(mem::size_of::<WriteRefusalConfig>(), 64);
-        assert_eq!(mem::offset_of!(WriteRefusalConfig, valid), 60);
+        assert_eq!(mem::size_of::<WriteRefusalConfig>(), 80);
+        assert_eq!(mem::offset_of!(WriteRefusalConfig, valid), 76);
         assert_eq!(mem::size_of::<WriteRefusalEvent>(), 104);
         assert_eq!(mem::offset_of!(WriteRefusalEvent, tgid), 32);
         assert_eq!(mem::offset_of!(WriteRefusalEvent, hook), 48);
         assert_eq!(mem::offset_of!(WriteRefusalEvent, name), 56);
+    }
+
+    #[test]
+    fn a_system_path_is_held_to_one_and_a_data_path_to_its_threshold() {
+        assert_eq!(write_refusal_threshold(WRITE_REFUSAL_REGIME_SYSTEM, 100), 1);
+        assert_eq!(write_refusal_threshold(WRITE_REFUSAL_REGIME_DATA, 100), 100);
+        let first = write_refusal_step(
+            None,
+            1,
+            SECOND,
+            write_refusal_threshold(WRITE_REFUSAL_REGIME_SYSTEM, 100),
+        );
+        assert!(first.over && first.report);
+        let first = write_refusal_step(
+            None,
+            1,
+            SECOND,
+            write_refusal_threshold(WRITE_REFUSAL_REGIME_DATA, 100),
+        );
+        assert!(!first.over);
+    }
+
+    #[test]
+    fn the_two_regimes_never_share_a_count() {
+        for writer in [0_u64, 4242, u64::from(u32::MAX), (1 << 62) + 7] {
+            let data = write_refusal_count_key(writer, WRITE_REFUSAL_REGIME_DATA);
+            let system = write_refusal_count_key(writer, WRITE_REFUSAL_REGIME_SYSTEM);
+            assert_eq!(data, writer);
+            assert_ne!(data, system);
+            assert_eq!(system & !WRITE_REFUSAL_SYSTEM_KEY_BIT, writer);
+        }
     }
 
     #[test]

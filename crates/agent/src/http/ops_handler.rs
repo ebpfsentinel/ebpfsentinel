@@ -159,7 +159,8 @@ pub struct KernelFeaturesResponse {
     /// configured, with the reason it is not in force.
     pub network_executables: NetworkExecutablesReport,
     /// Whether the kernel refuses a write-open past a count under the
-    /// watched directories, and whether it refuses or only counts. Reported
+    /// watched data paths, or the first by an unexpected executable under
+    /// the system paths, and whether it refuses or only counts. Reported
     /// whether or not it is configured, with the reason it is not in force.
     pub write_refusal: WriteRefusalReport,
     /// Whether the kernel refuses every other task a writable descriptor to
@@ -360,8 +361,13 @@ pub struct WriteRefusalReport {
     pub attached: bool,
     /// A writer past the threshold is refused rather than counted.
     pub enforcing: bool,
-    /// How many watched directories the kernel holds.
+    /// How many watched paths the kernel holds, both regimes.
     pub directories: usize,
+    /// How many of them are system paths, refused at the first write by an
+    /// executable not expected there.
+    pub system_paths: usize,
+    /// How many expected writers of the system paths the kernel holds.
+    pub expected_writers: usize,
     /// Why the refusal is not in force, in one sentence.
     pub reason: Option<String>,
 }
@@ -372,6 +378,8 @@ impl From<adapters::ebpf::write_refusal::WriteRefusalStatus> for WriteRefusalRep
             attached: status.attached,
             enforcing: status.enforcing,
             directories: status.directories,
+            system_paths: status.system,
+            expected_writers: status.writers,
             reason: status.reason,
         }
     }
@@ -1197,6 +1205,8 @@ mod tests {
         assert_eq!(resp.write_refusal.attached, held.attached);
         assert_eq!(resp.write_refusal.enforcing, held.enforcing);
         assert_eq!(resp.write_refusal.directories, held.directories);
+        assert_eq!(resp.write_refusal.system_paths, held.system);
+        assert_eq!(resp.write_refusal.expected_writers, held.writers);
         assert_eq!(resp.write_refusal.reason, held.reason);
     }
 

@@ -2798,6 +2798,10 @@ pub struct WriteRefusalReport {
     #[serde(default)]
     pub directories: usize,
     #[serde(default)]
+    pub system_paths: usize,
+    #[serde(default)]
+    pub expected_writers: usize,
+    #[serde(default)]
     pub reason: Option<String>,
 }
 

@@ -260,7 +260,9 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
         // threshold, in enforce and in shadow; `unresolved` is a call whose
         // path could not be walked or ran deeper than the walk goes, let
         // through; `table_full` a new writer the counter map had no room
-        // for, let through; `event_lost` a record the ring had no room for.
+        // for, let through; `event_lost` a record the ring had no room for;
+        // `expected` a write under a system path by an executable expected
+        // there, or by the kernel itself, let through.
         "WRITE_REFUSAL_METRICS" => &[
             (0, "checked"),
             (1, "watched"),
@@ -269,6 +271,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (4, "unresolved"),
             (5, "table_full"),
             (6, "event_lost"),
+            (7, "expected"),
         ],
         // Every descriptor asked for on one of the agent's own maps or
         // links that the guard decided, then the refusals: a writable map

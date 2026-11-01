@@ -3,7 +3,7 @@
 
 use aya_ebpf::{
     btf_maps::{Array, HashMap, PerCpuArray, RingBuf},
-    helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_boot_ns},
+    helpers::{bpf_get_current_pid_tgid, bpf_get_current_task, bpf_ktime_get_boot_ns},
     macros::{btf_map, lsm},
     programs::LsmContext,
 };
@@ -12,13 +12,15 @@ use aya_ebpf_bindings::helpers::{
 };
 use ebpf_common::write_refusal::{
     WRITE_REFUSAL_BY_CGROUP, WRITE_REFUSAL_CONFIG_SLOT, WRITE_REFUSAL_EVENTS_RINGBUF_BYTES,
-    WRITE_REFUSAL_FMODE_WRITE, WRITE_REFUSAL_HOOK_OPEN, WRITE_REFUSAL_HOOK_TRUNCATE,
+    WRITE_REFUSAL_FMODE_WRITE, WRITE_REFUSAL_HOOK_OPEN, WRITE_REFUSAL_MAX_EXPECTED_WRITERS,
+    WRITE_REFUSAL_METRIC_EXPECTED, WRITE_REFUSAL_REGIME_SYSTEM, WRITE_REFUSAL_HOOK_TRUNCATE,
     WRITE_REFUSAL_MAX_DEPTH, WRITE_REFUSAL_MAX_DIRECTORIES, WRITE_REFUSAL_MAX_WRITERS,
     WRITE_REFUSAL_METRIC_CHECKED, WRITE_REFUSAL_METRIC_COUNT, WRITE_REFUSAL_METRIC_EVENT_LOST,
     WRITE_REFUSAL_METRIC_REFUSED, WRITE_REFUSAL_METRIC_TABLE_FULL, WRITE_REFUSAL_METRIC_UNRESOLVED,
     WRITE_REFUSAL_METRIC_WATCHED, WRITE_REFUSAL_METRIC_WOULD_REFUSE, WRITE_REFUSAL_MODE_ENFORCE,
     WRITE_REFUSAL_NAME_BYTES, WRITE_REFUSAL_REFUSAL, WriteRefusalConfig, WriteRefusalCount,
-    WriteRefusalDir, WriteRefusalEvent, write_refusal_step,
+    WriteRefusalDir, WriteRefusalEvent, write_refusal_count_key, write_refusal_step,
+    write_refusal_threshold,
 };
 use ebpf_helpers::increment_metric;
 
@@ -27,13 +29,23 @@ use ebpf_helpers::increment_metric;
 #[btf_map]
 static WRITE_REFUSAL_CONFIG: Array<WriteRefusalConfig, 1> = Array::new();
 
-/// The watched directories. The value is unread: a key being present is the
-/// whole statement.
+/// The watched directories, each with its regime: a data path counted to the
+/// threshold, a system path refused at the first unexpected write.
 #[btf_map]
 static WRITE_REFUSAL_DIRS: HashMap<
     WriteRefusalDir,
     u8,
     { WRITE_REFUSAL_MAX_DIRECTORIES as usize },
+> = HashMap::new();
+
+/// The executables expected to write under a system path, by the device and
+/// inode of their file: a package manager, the configuration tool of the
+/// estate. Their writes there are let through and counted as expected.
+#[btf_map]
+static WRITE_REFUSAL_WRITERS: HashMap<
+    WriteRefusalDir,
+    u8,
+    { WRITE_REFUSAL_MAX_EXPECTED_WRITERS as usize },
 > = HashMap::new();
 
 /// Each writer's count inside its window, keyed by thread group or by cgroup
@@ -55,7 +67,7 @@ static WRITE_REFUSAL_EVENTS: RingBuf<
 > = RingBuf::new();
 
 /// Per-CPU counters. Index: 0=checked, 1=watched, 2=refused,
-/// 3=would_refuse, 4=unresolved, 5=table_full, 6=event_lost.
+/// 3=would_refuse, 4=unresolved, 5=table_full, 6=event_lost, 7=expected.
 #[btf_map]
 static WRITE_REFUSAL_METRICS: PerCpuArray<u64, { WRITE_REFUSAL_METRIC_COUNT as usize }> =
     PerCpuArray::new();
@@ -124,8 +136,14 @@ fn decide(config: &WriteRefusalConfig, path: *const u8, hook: u8) -> i32 {
         increment_metric!(WRITE_REFUSAL_METRICS, WRITE_REFUSAL_METRIC_UNRESOLVED);
         return 0;
     };
-    let dir = match watched_root(config, dentry) {
-        Walk::Watched(dir) => dir,
+    // A watched file is its own entry: `/etc/passwd` is named, not `/etc`.
+    let own = unsafe { WRITE_REFUSAL_DIRS.get(&file) }.map(|regime| *regime);
+    let walk = match own {
+        Some(regime) => Walk::Watched(file, regime),
+        None => watched_root(config, dentry),
+    };
+    let (dir, regime) = match walk {
+        Walk::Watched(dir, regime) => (dir, regime),
         Walk::Outside => return 0,
         Walk::Unresolved => {
             increment_metric!(WRITE_REFUSAL_METRICS, WRITE_REFUSAL_METRIC_UNRESOLVED);
@@ -133,6 +151,24 @@ fn decide(config: &WriteRefusalConfig, path: *const u8, hook: u8) -> i32 {
         }
     };
     increment_metric!(WRITE_REFUSAL_METRICS, WRITE_REFUSAL_METRIC_WATCHED);
+    if regime == WRITE_REFUSAL_REGIME_SYSTEM {
+        match current_executable(config) {
+            Executable::Kernel => {
+                increment_metric!(WRITE_REFUSAL_METRICS, WRITE_REFUSAL_METRIC_EXPECTED);
+                return 0;
+            }
+            Executable::File(exe) => {
+                if unsafe { WRITE_REFUSAL_WRITERS.get(&exe) }.is_some() {
+                    increment_metric!(WRITE_REFUSAL_METRICS, WRITE_REFUSAL_METRIC_EXPECTED);
+                    return 0;
+                }
+            }
+            Executable::Unresolved => {
+                increment_metric!(WRITE_REFUSAL_METRICS, WRITE_REFUSAL_METRIC_UNRESOLVED);
+                return 0;
+            }
+        }
+    }
 
     let cgroup_id = unsafe { bpf_get_current_cgroup_id() };
     let writer = if config.count_by == WRITE_REFUSAL_BY_CGROUP {
@@ -141,9 +177,11 @@ fn decide(config: &WriteRefusalConfig, path: *const u8, hook: u8) -> i32 {
         u64::from(tgid)
     };
     let now_ns = unsafe { bpf_ktime_get_boot_ns() };
-    let previous = unsafe { WRITE_REFUSAL_COUNTS.get(&writer) }.copied();
-    let step = write_refusal_step(previous, now_ns, config.window_ns, config.threshold);
-    if WRITE_REFUSAL_COUNTS.insert(&writer, &step.next, 0).is_err() {
+    let key = write_refusal_count_key(writer, regime);
+    let previous = unsafe { WRITE_REFUSAL_COUNTS.get(&key) }.copied();
+    let threshold = write_refusal_threshold(regime, config.threshold);
+    let step = write_refusal_step(previous, now_ns, config.window_ns, threshold);
+    if WRITE_REFUSAL_COUNTS.insert(&key, &step.next, 0).is_err() {
         increment_metric!(WRITE_REFUSAL_METRICS, WRITE_REFUSAL_METRIC_TABLE_FULL);
         return 0;
     }
@@ -168,6 +206,7 @@ fn decide(config: &WriteRefusalConfig, path: *const u8, hook: u8) -> i32 {
             now_ns,
             count: step.next.count,
             hook,
+            regime,
             refused: enforce,
         });
     }
@@ -176,8 +215,8 @@ fn decide(config: &WriteRefusalConfig, path: *const u8, hook: u8) -> i32 {
 
 /// Where the walk up from a written file ended.
 enum Walk {
-    /// Under this watched directory.
-    Watched(WriteRefusalDir),
+    /// Under this watched directory, in this regime.
+    Watched(WriteRefusalDir, u8),
     /// At the root of its filesystem without meeting one.
     Outside,
     /// A step could not be read, or the chain ran deeper than the walk goes.
@@ -199,8 +238,8 @@ fn watched_root(config: &WriteRefusalConfig, dentry: *const u8) -> Walk {
         let Some(key) = inode_key(config, current) else {
             return Walk::Unresolved;
         };
-        if unsafe { WRITE_REFUSAL_DIRS.get(&key) }.is_some() {
-            return Walk::Watched(key);
+        if let Some(regime) = unsafe { WRITE_REFUSAL_DIRS.get(&key) } {
+            return Walk::Watched(key, *regime);
         }
         let Some(parent) = read_ptr(current, config.dentry_parent) else {
             return Walk::Unresolved;
@@ -209,6 +248,45 @@ fn watched_root(config: &WriteRefusalConfig, dentry: *const u8) -> Walk {
         current = parent;
     }
     Walk::Unresolved
+}
+
+/// What the writing task runs.
+enum Executable {
+    /// A kernel thread: no memory map, no file, and a write the kernel makes
+    /// on its own behalf.
+    Kernel,
+    /// The device and inode of the executable's file.
+    File(WriteRefusalDir),
+    /// A step could not be read.
+    Unresolved,
+}
+
+/// The executable of the current task, read through `task->mm->exe_file`.
+#[inline(always)]
+fn current_executable(config: &WriteRefusalConfig) -> Executable {
+    let task = unsafe { bpf_get_current_task() } as *const u8;
+    let Some(mm) = read_value::<u64>(task, config.task_mm) else {
+        return Executable::Unresolved;
+    };
+    if mm == 0 {
+        return Executable::Kernel;
+    }
+    let Some(exe) = read_ptr(mm as *const u8, config.mm_exe_file) else {
+        return Executable::Unresolved;
+    };
+    let Some(inode) = read_ptr(exe, config.file_inode) else {
+        return Executable::Unresolved;
+    };
+    let Some(sb) = read_ptr(inode, config.inode_sb) else {
+        return Executable::Unresolved;
+    };
+    let (Some(ino), Some(dev)) = (
+        read_value::<u64>(inode, config.inode_ino),
+        read_value::<u32>(sb, config.sb_dev),
+    ) else {
+        return Executable::Unresolved;
+    };
+    Executable::File(WriteRefusalDir { ino, dev, _pad: 0 })
 }
 
 /// The inode and device a dentry names, `None` for a negative dentry or a
@@ -256,6 +334,7 @@ struct Report<'a> {
     now_ns: u64,
     count: u32,
     hook: u8,
+    regime: u8,
     refused: bool,
 }
 
@@ -278,7 +357,8 @@ fn report(r: &Report<'_>) {
         count: r.count,
         hook: r.hook,
         refused: u8::from(r.refused),
-        _pad: [0; 6],
+        regime: r.regime,
+        _pad: [0; 5],
         name: [0; WRITE_REFUSAL_NAME_BYTES],
     };
     if let Some(name) = read_ptr(r.dentry, r.config.dentry_name) {

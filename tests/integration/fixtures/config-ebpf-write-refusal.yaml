@@ -4,6 +4,11 @@
 # A threshold of ten inside a minute, counted per process, in force: the
 # tenth write-open a process makes under the watched directory is refused,
 # and every one after it until the minute ends.
+#
+# Beside it, a system directory and a system file, held to one write: the
+# first write-open there by any executable but the one expected writer is
+# refused. The expected writer is a copy of a binary the suite places before
+# the agent starts, so the original binary stays unexpected.
 
 agent:
   interfaces:
@@ -27,6 +32,11 @@ file_watch:
     mode: enforce
     paths:
       - __DATA_DIR__/watched
+    system_paths:
+      - __DATA_DIR__/system
+      - __DATA_DIR__/held.conf
+    system_writers:
+      - __DATA_DIR__/bin/expected-writer
     threshold: 10
     window_secs: 60
     count_by: process

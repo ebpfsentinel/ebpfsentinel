@@ -6,7 +6,7 @@ use std::os::unix::fs::MetadataExt;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 
 use aya::maps::{Array, HashMap as AyaHashMap, MapData, RingBuf};
-use domain::ransom::{CountBy, WriteRefusalHook, WriteRefusalRecord};
+use domain::ransom::{CountBy, WriteRefusalHook, WriteRefusalRecord, WriteRefusalRegime};
 use ebpf_common::exec_network::kernel_dev;
 use ebpf_common::write_refusal::{
     WRITE_REFUSAL_BY_CGROUP, WRITE_REFUSAL_BY_PROCESS, WRITE_REFUSAL_CONFIG_SLOT,
@@ -42,8 +42,12 @@ pub struct WriteRefusalStatus {
     /// The kernel refuses the write past the threshold rather than counting
     /// it.
     pub enforcing: bool,
-    /// How many watched directories the kernel holds.
+    /// How many watched paths the kernel holds, both regimes.
     pub directories: usize,
+    /// How many of them are system paths.
+    pub system: usize,
+    /// How many expected writers of the system paths the kernel holds.
+    pub writers: usize,
     /// Why the refusal is not in force, in one sentence. `None` when it is.
     pub reason: Option<String>,
 }
@@ -95,6 +99,9 @@ pub fn resolve_offsets() -> Result<WriteRefusalConfig, String> {
     let qstr = members("qstr", &["name"])?;
     let inode = members("inode", &["i_ino", "i_sb"])?;
     let sb = members("super_block", &["s_dev"])?;
+    let task = members("task_struct", &["mm"])?;
+    let mm = members("mm_struct", &["exe_file"])?;
+    let exe = members("file", &["f_inode"])?;
     Ok(WriteRefusalConfig {
         file_mode: file[0],
         file_path: file[1],
@@ -105,21 +112,39 @@ pub fn resolve_offsets() -> Result<WriteRefusalConfig, String> {
         inode_ino: inode[0],
         inode_sb: inode[1],
         sb_dev: sb[0],
+        task_mm: task[0],
+        mm_exe_file: mm[0],
+        file_inode: exe[0],
         ..WriteRefusalConfig::default()
     })
 }
 
-/// The key the kernel compares for the directory at `path`, following
-/// symlinks.
+/// The key the kernel compares for the watched path at `path`, a directory
+/// and everything beneath it or a single file, following symlinks.
+///
+/// # Errors
+///
+/// Returns the I/O error of the `stat`, or one saying the path is neither a
+/// directory nor a regular file.
+pub fn path_key(path: &str) -> std::io::Result<WriteRefusalDir> {
+    let meta = std::fs::metadata(path)?;
+    if !meta.is_dir() && !meta.is_file() {
+        return Err(std::io::Error::other("neither a directory nor a file"));
+    }
+    Ok(key_from_stat(meta.dev(), meta.ino()))
+}
+
+/// The key the kernel compares for the executable at `path`, following
+/// symlinks, so `/usr/bin/python3` names the interpreter it points at.
 ///
 /// # Errors
 ///
 /// Returns the I/O error of the `stat`, or one saying the path is not a
-/// directory.
-pub fn directory_key(path: &str) -> std::io::Result<WriteRefusalDir> {
+/// regular file.
+pub fn executable_key(path: &str) -> std::io::Result<WriteRefusalDir> {
     let meta = std::fs::metadata(path)?;
-    if !meta.is_dir() {
-        return Err(std::io::Error::other("not a directory"));
+    if !meta.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
     }
     Ok(key_from_stat(meta.dev(), meta.ino()))
 }
@@ -140,28 +165,84 @@ pub fn stat_dev(kernel: u32) -> u64 {
     libc::makedev(kernel >> 20, kernel & 0x000f_ffff)
 }
 
-/// The watched directories by key, each with the path it was configured as.
-pub type WatchedDirectories = HashMap<WriteRefusalDir, String>;
+/// A watched path as configured, with its regime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchedPath {
+    /// The path as configured.
+    pub path: String,
+    /// How it is refused.
+    pub regime: WriteRefusalRegime,
+}
 
-/// The keys for `paths`.
-///
-/// A path that does not resolve is left out and named in the second half of
-/// the answer rather than failing the set: a list shared across a fleet names
-/// directories one node does not carry, and the set is read again on a timer
-/// so the day one is created it is picked up.
-#[must_use]
-pub fn directory_keys(paths: &[String]) -> (WatchedDirectories, Vec<String>) {
-    let mut keys = HashMap::with_capacity(paths.len());
-    let mut missing = Vec::new();
-    for path in paths {
-        match directory_key(path) {
-            Ok(key) => {
-                keys.insert(key, path.clone());
+/// The watched paths by key.
+pub type WatchedDirectories = HashMap<WriteRefusalDir, WatchedPath>;
+
+/// The expected writers by key, each with the path it was configured as.
+pub type ExpectedWriters = HashMap<WriteRefusalDir, String>;
+
+/// The watched paths of both regimes and the executables expected to write
+/// the system ones, as the configuration and any content composed them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WriteRefusalSet {
+    /// Refused at the threshold.
+    pub data: Vec<String>,
+    /// Refused at the first unexpected write.
+    pub system: Vec<String>,
+    /// Executables whose writes under a system path are expected.
+    pub writers: Vec<String>,
+}
+
+impl WriteRefusalSet {
+    /// The keys of the watched paths.
+    ///
+    /// A path that does not resolve is left out and named in the second
+    /// half of the answer rather than failing the set: a list shared across
+    /// a fleet names paths one node does not carry, and the set is read
+    /// again on a timer so the day one is created it is picked up. A key
+    /// named in both regimes is a system path: the stricter regime wins.
+    #[must_use]
+    pub fn watched_keys(&self) -> (WatchedDirectories, Vec<String>) {
+        let mut keys = HashMap::with_capacity(self.data.len() + self.system.len());
+        let mut missing = Vec::new();
+        let regimes = [
+            (WriteRefusalRegime::Data, &self.data),
+            (WriteRefusalRegime::System, &self.system),
+        ];
+        for (regime, paths) in regimes {
+            for path in paths {
+                match path_key(path) {
+                    Ok(key) => {
+                        keys.insert(
+                            key,
+                            WatchedPath {
+                                path: path.clone(),
+                                regime,
+                            },
+                        );
+                    }
+                    Err(e) => missing.push(format!("{path}: {e}")),
+                }
             }
-            Err(e) => missing.push(format!("{path}: {e}")),
         }
+        (keys, missing)
     }
-    (keys, missing)
+
+    /// The keys of the expected writers, read again on the same timer: an
+    /// upgrade replaces the executable's file, and with it the inode.
+    #[must_use]
+    pub fn writer_keys(&self) -> (ExpectedWriters, Vec<String>) {
+        let mut keys = HashMap::with_capacity(self.writers.len());
+        let mut missing = Vec::new();
+        for path in &self.writers {
+            match executable_key(path) {
+                Ok(key) => {
+                    keys.insert(key, path.clone());
+                }
+                Err(e) => missing.push(format!("expected writer {path}: {e}")),
+            }
+        }
+        (keys, missing)
+    }
 }
 
 /// What the program decides with, beside the offsets.
@@ -204,13 +285,15 @@ impl WriteRefusalPolicy {
 pub struct WriteRefusalMaps {
     config: Array<MapData, WriteRefusalConfig>,
     dirs: AyaHashMap<MapData, WriteRefusalDir, u8>,
+    writers: AyaHashMap<MapData, WriteRefusalDir, u8>,
+    held_writers: ExpectedWriters,
     counts: AyaHashMap<MapData, u64, WriteRefusalCount>,
     held: Arc<RwLock<WatchedDirectories>>,
     window_ns: u64,
 }
 
 impl WriteRefusalMaps {
-    /// Take the three maps out of a loaded refusal object.
+    /// Take the four maps out of a loaded refusal object.
     ///
     /// # Errors
     ///
@@ -222,10 +305,13 @@ impl WriteRefusalMaps {
         };
         let config = Array::try_from(take("WRITE_REFUSAL_CONFIG")?)?;
         let dirs = AyaHashMap::try_from(take("WRITE_REFUSAL_DIRS")?)?;
+        let writers = AyaHashMap::try_from(take("WRITE_REFUSAL_WRITERS")?)?;
         let counts = AyaHashMap::try_from(take("WRITE_REFUSAL_COUNTS")?)?;
         Ok(Self {
             config,
             dirs,
+            writers,
+            held_writers: HashMap::new(),
             counts,
             held: Arc::new(RwLock::new(HashMap::new())),
             window_ns: 0,
@@ -239,16 +325,20 @@ impl WriteRefusalMaps {
         Arc::clone(&self.held)
     }
 
-    /// Make the kernel's watched set exactly `keys`, new keys first.
+    /// Make the kernel's watched set exactly `keys`, new keys and changed
+    /// regimes first.
     ///
     /// # Errors
     ///
     /// Returns the first write the kernel refused.
     pub fn replace(&mut self, keys: &WatchedDirectories) -> Result<(), anyhow::Error> {
         let mut held = self.held.write().unwrap_or_else(PoisonError::into_inner);
-        for key in keys.keys().filter(|k| !held.contains_key(k)) {
+        for (key, watched) in keys {
+            if held.get(key).map(|h| h.regime) == Some(watched.regime) {
+                continue;
+            }
             self.dirs
-                .insert(key, &1, 0)
+                .insert(key, &watched.regime.kernel(), 0)
                 .map_err(|e| anyhow::anyhow!("WRITE_REFUSAL_DIRS write failed: {e}"))?;
         }
         for key in held.keys().filter(|k| !keys.contains_key(k)) {
@@ -260,13 +350,58 @@ impl WriteRefusalMaps {
         Ok(())
     }
 
-    /// How many directories the kernel holds.
+    /// Make the kernel's expected writers exactly `keys`, new keys first.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first write the kernel refused.
+    pub fn replace_writers(&mut self, keys: &ExpectedWriters) -> Result<(), anyhow::Error> {
+        for key in keys.keys().filter(|k| !self.held_writers.contains_key(k)) {
+            self.writers
+                .insert(key, &1, 0)
+                .map_err(|e| anyhow::anyhow!("WRITE_REFUSAL_WRITERS write failed: {e}"))?;
+        }
+        for key in self.held_writers.keys().filter(|k| !keys.contains_key(k)) {
+            if let Err(e) = self.writers.remove(key) {
+                debug!("WRITE_REFUSAL_WRITERS entry already gone: {e}");
+            }
+        }
+        self.held_writers.clone_from(keys);
+        Ok(())
+    }
+
+    /// Write the watched paths and the expected writers `set` names now,
+    /// returning what did not resolve, each in one phrase.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first write the kernel refused.
+    pub fn apply(&mut self, set: &WriteRefusalSet) -> Result<Vec<String>, anyhow::Error> {
+        let (keys, mut missing) = set.watched_keys();
+        let (writers, missing_writers) = set.writer_keys();
+        missing.extend(missing_writers);
+        // Writers first: a system path is never live before the executables
+        // expected to write it are.
+        self.replace_writers(&writers)?;
+        self.replace(&keys)?;
+        Ok(missing)
+    }
+
+    /// The status the held set gives, for a refusal attached and deciding.
     #[must_use]
-    pub fn held(&self) -> usize {
-        self.held
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len()
+    pub fn status(&self, enforcing: bool) -> WriteRefusalStatus {
+        let held = self.held.read().unwrap_or_else(PoisonError::into_inner);
+        WriteRefusalStatus {
+            attached: true,
+            enforcing,
+            directories: held.len(),
+            system: held
+                .values()
+                .filter(|w| w.regime == WriteRefusalRegime::System)
+                .count(),
+            writers: self.held_writers.len(),
+            reason: None,
+        }
     }
 
     /// Write the complete slot, which is what turns the hooks on.
@@ -437,7 +572,7 @@ fn drain(
                 dev: raw.dir_dev,
                 _pad: 0,
             })
-            .cloned()
+            .map(|w| w.path.clone())
         };
         let Some(record) = parse(&raw, directory) else {
             observer.dropped("unknown_kind");
@@ -456,6 +591,7 @@ fn drain(
 #[must_use]
 fn parse(raw: &WriteRefusalEvent, directory: Option<String>) -> Option<WriteRefusalRecord> {
     let hook = WriteRefusalHook::from_kernel(raw.hook)?;
+    let regime = WriteRefusalRegime::from_kernel(raw.regime)?;
     let len = raw
         .name
         .iter()
@@ -470,6 +606,7 @@ fn parse(raw: &WriteRefusalEvent, directory: Option<String>) -> Option<WriteRefu
         directory,
         count: raw.count,
         hook,
+        regime,
         refused: raw.refused != 0,
     })
 }
@@ -477,7 +614,9 @@ fn parse(raw: &WriteRefusalEvent, directory: Option<String>) -> Option<WriteRefu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ebpf_common::write_refusal::{WRITE_REFUSAL_HOOK_TRUNCATE, WRITE_REFUSAL_NAME_BYTES};
+    use ebpf_common::write_refusal::{
+        WRITE_REFUSAL_HOOK_TRUNCATE, WRITE_REFUSAL_NAME_BYTES, WRITE_REFUSAL_REGIME_SYSTEM,
+    };
 
     #[test]
     fn the_stat_device_is_written_in_the_kernel_encoding_and_read_back() {
@@ -508,6 +647,13 @@ mod tests {
         assert_eq!(record.directory.as_deref(), Some("/srv"));
         assert_eq!(record.hook, WriteRefusalHook::Truncate);
         assert!(record.refused);
+        assert_eq!(record.regime, WriteRefusalRegime::Data);
+        raw.regime = WRITE_REFUSAL_REGIME_SYSTEM;
+        let system = parse(&raw, None).expect("a known regime parses");
+        assert_eq!(system.regime, WriteRefusalRegime::System);
+        raw.regime = 7;
+        assert!(parse(&raw, None).is_none());
+        raw.regime = 0;
         raw.name = [b'a'; WRITE_REFUSAL_NAME_BYTES];
         let cut = parse(&raw, None).expect("parses");
         assert_eq!(cut.name.len(), WRITE_REFUSAL_NAME_BYTES);
@@ -516,20 +662,48 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_resolves_and_a_file_or_missing_path_is_named() {
+    fn each_regime_resolves_its_paths_and_a_missing_one_is_named() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let file = dir.path().join("f");
-        std::fs::write(&file, b"x").expect("write");
-        let paths = vec![
-            dir.path().to_str().expect("utf8").to_string(),
-            file.to_str().expect("utf8").to_string(),
-            "/nonexistent/dir".to_string(),
-        ];
-        let (keys, missing) = directory_keys(&paths);
+        let data = dir.path().join("data");
+        let etc = dir.path().join("etc");
+        std::fs::create_dir(&data).expect("mkdir");
+        std::fs::create_dir(&etc).expect("mkdir");
+        let passwd = etc.join("passwd");
+        std::fs::write(&passwd, b"x").expect("write");
+        let s = |p: &std::path::Path| p.to_str().expect("utf8").to_string();
+        let set = WriteRefusalSet {
+            data: vec![s(&data), "/nonexistent/dir".to_string()],
+            system: vec![s(&etc), s(&passwd)],
+            writers: vec![s(&passwd), s(&etc)],
+        };
+        let (keys, missing) = set.watched_keys();
+        assert_eq!(keys.len(), 3);
+        assert_eq!(missing.len(), 1);
+        let regime_of =
+            |p: &std::path::Path| keys.get(&path_key(&s(p)).expect("stat")).map(|w| w.regime);
+        assert_eq!(regime_of(&data), Some(WriteRefusalRegime::Data));
+        assert_eq!(regime_of(&etc), Some(WriteRefusalRegime::System));
+        assert_eq!(regime_of(&passwd), Some(WriteRefusalRegime::System));
+        let (writers, missing) = set.writer_keys();
+        assert_eq!(writers.len(), 1);
+        assert!(missing[0].contains("not a regular file"), "{missing:?}");
+    }
+
+    #[test]
+    fn a_path_named_in_both_regimes_is_a_system_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_str().expect("utf8").to_string();
+        let set = WriteRefusalSet {
+            data: vec![path.clone()],
+            system: vec![path],
+            writers: Vec::new(),
+        };
+        let (keys, _) = set.watched_keys();
         assert_eq!(keys.len(), 1);
-        assert_eq!(keys.values().next(), Some(&paths[0]));
-        assert_eq!(missing.len(), 2);
-        assert!(missing[0].contains("not a directory"), "{missing:?}");
+        assert_eq!(
+            keys.values().next().map(|w| w.regime),
+            Some(WriteRefusalRegime::System)
+        );
     }
 
     #[test]
@@ -566,6 +740,8 @@ mod tests {
         match resolve_offsets() {
             Ok(offsets) => {
                 assert_eq!(offsets.valid, 0);
+                assert_ne!(offsets.task_mm, 0);
+                assert_ne!(offsets.file_inode, 0);
                 assert_ne!(offsets.dentry_parent, offsets.dentry_inode);
                 assert_ne!(offsets.inode_sb, offsets.inode_ino);
                 assert!(offsets.dentry_name > 0);

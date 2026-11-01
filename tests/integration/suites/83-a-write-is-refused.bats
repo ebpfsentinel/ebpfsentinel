@@ -14,6 +14,11 @@
 #   * Writes outside the watched directory are never counted.
 #   * One alert names the writer and the directory, and the counters say
 #     what was refused.
+#   * Under a system directory, and on a system file, the first write-open
+#     by an executable that is not expected there is refused, while the
+#     expected writer writes, and a file beside the held one is not held.
+#   * The refusal under a system path names it as one, and the counters
+#     count the expected writer's writes as expected.
 #   * With the agent stopped, the same run writes every file: the refusal
 #     fails open.
 #
@@ -44,7 +49,11 @@ setup_file() {
     fi
 
     export DATA_DIR="/var/tmp/ebpfsentinel-test-data-write-refusal-$$"
-    mkdir -p "${DATA_DIR}/watched" "${DATA_DIR}/outside"
+    mkdir -p "${DATA_DIR}/watched" "${DATA_DIR}/outside" "${DATA_DIR}/system" "${DATA_DIR}/bin"
+    # The expected writer is a copy, so it is a file of its own and the
+    # original stays an executable nobody expects.
+    install -m 0755 "$(command -v tee)" "${DATA_DIR}/bin/expected-writer"
+    echo original >"${DATA_DIR}/held.conf"
 
     stop_ebpf_agent 2>/dev/null || true
     destroy_test_netns 2>/dev/null || true
@@ -77,7 +86,9 @@ _wait_enforcing() {
         body="$(api_get /api/v1/ebpf/kernel-features 2>/dev/null)" || body=""
         [ "$(jq -r '.write_refusal.attached' <<<"${body}" 2>/dev/null)" = "true" ] &&
             [ "$(jq -r '.write_refusal.enforcing' <<<"${body}" 2>/dev/null)" = "true" ] &&
-            [ "$(jq -r '.write_refusal.directories' <<<"${body}" 2>/dev/null)" = "1" ] && return 0
+            [ "$(jq -r '.write_refusal.directories' <<<"${body}" 2>/dev/null)" = "3" ] &&
+            [ "$(jq -r '.write_refusal.system_paths' <<<"${body}" 2>/dev/null)" = "2" ] &&
+            [ "$(jq -r '.write_refusal.expected_writers' <<<"${body}" 2>/dev/null)" = "1" ] && return 0
         sleep 0.5
         attempt=$((attempt + 1))
     done
@@ -153,6 +164,36 @@ PY
     [ "${refused%.*}" -ge $((ATTEMPTS - THRESHOLD + 1)) ]
 }
 
+@test "under a system path the first write by an unexpected executable is refused" {
+    run _write "${DATA_DIR}/system" 3
+    [ "$(head -n 1 <<<"${output}")" = "EACCES" ]
+    [ "$(grep -cx ok <<<"${output}")" -eq 0 ]
+    run tee "${DATA_DIR}/held.conf" <<<"tampered"
+    [ "$status" -ne 0 ]
+    [ "$(cat "${DATA_DIR}/held.conf")" = "original" ]
+}
+
+@test "the expected writer writes under a system path, and a file beside the held one is free" {
+    run "${DATA_DIR}/bin/expected-writer" "${DATA_DIR}/system/unit.conf" <<<"expected"
+    [ "$status" -eq 0 ]
+    [ "$(cat "${DATA_DIR}/system/unit.conf")" = "expected" ]
+    run "${DATA_DIR}/bin/expected-writer" "${DATA_DIR}/held.conf" <<<"updated"
+    [ "$status" -eq 0 ]
+    [ "$(cat "${DATA_DIR}/held.conf")" = "updated" ]
+    run tee "${DATA_DIR}/beside.conf" <<<"free"
+    [ "$status" -eq 0 ]
+}
+
+@test "a refusal under a system path says so, and the expected writes are counted" {
+    local alert
+    alert="$(wait_for_alert "[.[] | select(.rule_id == \"write-refusal\" and (.message | contains(\"under the system path\")))] | first" 30 1)"
+    [ -n "${alert}" ]
+    jq -e '.message | contains("is not one expected to write there")' <<<"${alert}"
+    local expected
+    expected="$(wait_for_metric ebpfsentinel_packets_total 1 30 '{interface="WRITE_REFUSAL_METRICS",action="expected"}')"
+    [ "${expected%.*}" -ge 2 ]
+}
+
 @test "with the agent stopped the same run writes every file: the refusal fails open" {
     stop_ebpf_agent
     local dir="${DATA_DIR}/watched/after"
@@ -160,4 +201,6 @@ PY
     run _write "${dir}" "${ATTEMPTS}"
     [ "$(grep -cx ok <<<"${output}")" -eq "${ATTEMPTS}" ]
     [ "$(tail -n 1 <<<"${output}")" = "truncate ok" ]
+    run tee "${DATA_DIR}/held.conf" <<<"after"
+    [ "$status" -eq 0 ]
 }

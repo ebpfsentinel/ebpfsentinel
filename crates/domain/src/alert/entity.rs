@@ -2432,7 +2432,9 @@ mod operational_tests {
 
     #[test]
     fn a_write_refusal_blocks_under_the_mass_encryption_component() {
-        use crate::ransom::{WRITE_REFUSAL_RULE_ID, WriteRefusalHook, WriteRefusalRecord};
+        use crate::ransom::{
+            WRITE_REFUSAL_RULE_ID, WriteRefusalHook, WriteRefusalRecord, WriteRefusalRegime,
+        };
         let mut record = WriteRefusalRecord {
             at_ns: 10,
             tgid: 31,
@@ -2442,6 +2444,7 @@ mod operational_tests {
             directory: Some("/srv".into()),
             count: 100,
             hook: WriteRefusalHook::Open,
+            regime: WriteRefusalRegime::Data,
             refused: true,
         };
         let alert = Alert::from_write_refusal(&record);
