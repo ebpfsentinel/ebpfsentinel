@@ -123,6 +123,14 @@ rules:
     #[test]
     fn an_unknown_key_beside_the_rules_is_refused() {
         assert!(parse("rules: []\nenabled: true\n").is_err());
-        assert!(parse("rules:\n  - id: x\n    when: {}\n    match: 'a && b'\n").is_err());
+    }
+
+    #[test]
+    fn an_expression_beside_the_rule_is_refused_naming_the_limit() {
+        let config =
+            parse("rules:\n  - id: x\n    when:\n      process.starts: {}\n    match: 'a && b'\n")
+                .unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("there is no expression language"), "{err}");
     }
 }

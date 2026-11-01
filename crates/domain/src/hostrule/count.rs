@@ -98,11 +98,7 @@ pub(super) fn compile_count(intent: Intent, raw: &RawValue) -> Result<Count, Str
     }
     let min = compile_min(map)?;
     let Some(within) = map.get("within") else {
-        return Err(
-            "`count` needs `within`, the window its events must fall in, such as `within: 60s`: \
-             a counter with no window is a gauge and never fires on what is happening now"
-                .to_string(),
-        );
+        return Err(super::limits::COUNT_IS_BOUNDED.refusal());
     };
     let (within_ns, within) = parse_window(within, "and every event counted is held for it")?;
     let per = match map.get("per") {
@@ -565,7 +561,7 @@ mod tests {
             ))
         };
         for (count, expected) in [
-            (r#"{"min":5}"#, "needs `within`"),
+            (r#"{"min":5}"#, "a count has a window"),
             (r#"{"within":"10s"}"#, "needs `min`"),
             (r#"{"min":1,"within":"10s"}"#, "the event itself"),
             (r#"{"min":5000,"within":"10s"}"#, "outside 2 to 1024"),

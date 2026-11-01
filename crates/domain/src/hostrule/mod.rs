@@ -19,6 +19,7 @@ pub mod error;
 pub mod event;
 pub mod field;
 pub mod intent;
+pub mod limits;
 pub mod rule;
 pub mod sequence;
 pub mod shadow;
@@ -32,6 +33,7 @@ pub use error::HostRuleError;
 pub use event::IntentEvent;
 pub use field::{FieldSpec, FieldType, FieldValue, RESERVED_KEYS};
 pub use intent::{Intent, IntentFamily};
+pub use limits::{HOST_RULE_LIMITS, HostRuleLimit};
 pub use rule::{
     Condition, FollowedBy, Glob, HOST_RULE_COMPONENT, HOST_RULE_REGEX_DFA_LIMIT,
     HOST_RULE_REGEX_SIZE_LIMIT, HOST_RULE_WINDOW_MAX_NS, HostRule, HostRuleAction, HostRuleSet,

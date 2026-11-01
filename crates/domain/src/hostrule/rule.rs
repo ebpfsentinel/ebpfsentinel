@@ -35,6 +35,7 @@ use super::error::HostRuleError;
 use super::event::IntentEvent;
 use super::field::{FieldSpec, FieldType, FieldValue, RESERVED_KEYS};
 use super::intent::Intent;
+use super::limits;
 
 /// Component every host rule alert carries.
 pub const HOST_RULE_COMPONENT: &str = "host_rule";
@@ -137,8 +138,11 @@ fn default_then() -> Vec<HostRuleAction> {
 }
 
 /// A host rule as it is written in the configuration.
+//
+// Unknown keys are collected rather than refused by the deserialiser, so that a
+// key reaching for a limit of the syntax, such as `not_followed_by`, is refused
+// with the limit it hit and what to write instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct HostRuleSpec {
     /// Identifier, unique among the rules, carried by every alert.
     pub id: String,
@@ -152,12 +156,13 @@ pub struct HostRuleSpec {
     /// rules use, beside the intention rather than inside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload: Option<WorkloadSelector>,
-    /// The intention and its matchers.
-    pub when: BTreeMap<String, RawValue>,
+    /// The intention and its matchers: a map, refused at compile when it is
+    /// anything else.
+    pub when: RawValue,
     /// A second step, the window it must arrive in as `within`, and nothing
     /// else: about the process `when` matched, or one started below it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub followed_by: Option<BTreeMap<String, RawValue>>,
+    pub followed_by: Option<RawValue>,
     /// What to do when it matches.
     #[serde(default = "default_then")]
     pub then: Vec<HostRuleAction>,
@@ -165,6 +170,21 @@ pub struct HostRuleSpec {
     /// none of it; `enforce` does it.
     #[serde(default = "default_mode")]
     pub mode: RuleMode,
+    /// Every other key written, each refused at compile.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unknown: BTreeMap<String, RawValue>,
+}
+
+/// The refusal for a key a host rule does not take.
+fn unknown_key(key: &str) -> String {
+    match key {
+        "not_followed_by" | "unless_followed_by" => limits::NO_ABSENCE.refusal(),
+        "condition" | "match" | "expression" | "filter" => limits::NO_EXPRESSION.refusal(),
+        _ => format!(
+            "`{key}` is not a key of a host rule, whose keys are `id`, `description`, \
+             `severity`, `workload`, `when`, `followed_by`, `then` and `mode`"
+        ),
+    }
 }
 
 fn default_mode() -> RuleMode {
@@ -403,6 +423,9 @@ impl HostRule {
             reason,
         };
         check_id(&spec.id).map_err(refuse)?;
+        if let Some(key) = spec.unknown.keys().next() {
+            return Err(refuse(unknown_key(key)));
+        }
         let severity = parse_severity(&spec.severity).ok_or_else(|| {
             refuse(format!(
                 "severity `{}` is not one of low, medium, high or critical",
@@ -425,7 +448,7 @@ impl HostRule {
         let followed_by = spec
             .followed_by
             .as_ref()
-            .map(|map| compile_followed_by(map, &when))
+            .map(|raw| compile_followed_by(raw, &when))
             .transpose()
             .map_err(refuse)?;
         let acted_on = followed_by.as_ref().map_or(&when, |f| &f.then);
@@ -667,24 +690,40 @@ fn names_a_process(intent: Intent) -> bool {
     intent.field("exe").is_ok() || intent == Intent::ProcessHidden
 }
 
-fn compile_when(when: &BTreeMap<String, RawValue>) -> Result<Condition, String> {
-    compile_condition(when, "`when`")
+fn compile_when(when: &RawValue) -> Result<Condition, String> {
+    compile_condition(as_condition_map(when, "`when`")?, "`when`")
+}
+
+/// The map `when` or `followed_by` must be; text is an expression, which
+/// the syntax does not have.
+fn as_condition_map<'a>(
+    raw: &'a RawValue,
+    place: &str,
+) -> Result<&'a BTreeMap<String, RawValue>, String> {
+    match raw {
+        RawValue::Map(map) => Ok(map),
+        RawValue::Text(_) => Err(limits::NO_EXPRESSION.refusal()),
+        other => Err(format!(
+            "{place} is a map of an intent and its matchers, and {} was given",
+            other.kind()
+        )),
+    }
 }
 
 /// The longest window a sequence may wait: every first step is held for
 /// that long, so the window is a memory bound as much as a semantic one.
 pub const HOST_RULE_WINDOW_MAX_NS: u64 = 3_600 * 1_000_000_000;
 
-fn compile_followed_by(
-    map: &BTreeMap<String, RawValue>,
-    when: &Condition,
-) -> Result<FollowedBy, String> {
+fn compile_followed_by(raw: &RawValue, when: &Condition) -> Result<FollowedBy, String> {
+    let map = as_condition_map(raw, "`followed_by`")?;
     if map.contains_key("followed_by") {
-        return Err(
-            "a sequence is two steps and `followed_by` does not nest: what came before the \
-             first step is in the ancestry the alert carries, and a third step is a second rule"
-                .to_string(),
-        );
+        return Err(limits::TWO_STEPS.refusal());
+    }
+    if let Some(key) = map
+        .keys()
+        .find(|k| matches!(k.as_str(), "not_followed_by" | "unless_followed_by"))
+    {
+        return Err(unknown_key(key));
     }
     if map.contains_key("workload") {
         return Err(
@@ -834,7 +873,8 @@ fn compile_alternative(
              never hold at once: use `any_of` to match either"
         ));
     }
-    let intent = Intent::parse(name).map_err(|e| e.to_string())?;
+    let intent =
+        Intent::parse(name).map_err(|e| format!("{e}; {}", limits::SHIPPED_INTENTS.refusal()))?;
     let RawValue::Map(matchers) = block else {
         return Err(format!(
             "`{intent}` takes a map of matchers, such as `exe: /usr/bin/curl`, and {} was given",
@@ -856,11 +896,7 @@ fn compile_alternative(
 /// The refusal for a reserved key written where an intent was expected.
 fn misplaced_at_when(key: &str) -> Option<String> {
     match key {
-        ANY_OF => Some(
-            "`any_of` does not nest: list every alternative in the one `any_of` at the top of \
-             `when`"
-                .to_string(),
-        ),
+        ANY_OF => Some(limits::ANY_OF_DEPTH_ONE.refusal()),
         "workload" => Some("`workload` sits beside `when`, at the top of the rule".to_string()),
         "count" => Some("`count` is a key of an intent block, never of `when`".to_string()),
         "followed_by" => Some(
@@ -879,10 +915,7 @@ fn misplaced_at_when(key: &str) -> Option<String> {
 /// The refusal for a reserved key written inside an intent block.
 fn misplaced_in_block(intent: Intent, key: &str) -> Option<String> {
     match key {
-        ANY_OF => Some(format!(
-            "`any_of` sits at the top of `when`, never inside `{intent}`: list the alternatives \
-             there, each an intent with its matchers"
-        )),
+        ANY_OF => Some(limits::ANY_OF_DEPTH_ONE.refusal()),
         "workload" => Some(format!(
             "`workload` sits beside `when`, at the top of the rule, never inside `{intent}`"
         )),
@@ -901,6 +934,9 @@ fn split_key(intent: Intent, key: &str) -> Result<(&'static FieldSpec, Option<Op
     if let Ok(spec) = intent.field(key) {
         return Ok((spec, None));
     }
+    if key.ends_with("_gt_field") || key.ends_with("_lt_field") {
+        return Err(limits::FIELDS_COMPARE_FOR_EQUALITY.refusal());
+    }
     for (suffix, op) in SUFFIXES {
         if let Some(base) = key.strip_suffix(suffix) {
             if RESERVED_KEYS.contains(&base) {
@@ -914,8 +950,8 @@ fn split_key(intent: Intent, key: &str) -> Result<(&'static FieldSpec, Option<Op
         }
     }
     Err(format!(
-        "{}; a matcher is a field, optionally followed by `_in`, `_not_in`, `_matches`, `_gt`, \
-         `_lt`, `_eq_field` or `_ne_field`",
+        "{}; a matcher is a field, optionally followed by `_in`, `_not_in`, `_matches`, \
+         `_regex`, `_gt`, `_lt`, `_eq_field` or `_ne_field`",
         intent
             .field(key)
             .map_err(|e| e.to_string())
@@ -1305,7 +1341,7 @@ mod tests {
         );
         assert!(
             refused(r#"{"id":"r","when":{"process.starts":{"any_of":[]}}}"#)
-                .contains("never inside")
+                .contains("`any_of` does not nest")
         );
     }
 
@@ -1431,10 +1467,8 @@ mod tests {
             .is_err()
         );
         assert!(
-            serde_json::from_str::<HostRuleSpec>(
-                r#"{"id":"r","when":{"process.starts":{}},"expression":"a && b"}"#
-            )
-            .is_err()
+            refused(r#"{"id":"r","when":{"process.starts":{}},"expression":"a && b"}"#)
+                .contains("there is no expression language")
         );
         let kill = compile(
             r#"{"id":"r","severity":"critical","then":["alert","kill_process"],
@@ -1546,7 +1580,7 @@ mod tests {
             (r#"{"within":"30s"}"#, "names no intent"),
             (
                 r#"{"within":"30s","process.starts":{},"followed_by":{}}"#,
-                "does not nest",
+                "a sequence is two steps",
             ),
             (
                 r#"{"within":"30s","process.starts":{},"workload":{}}"#,
@@ -1686,6 +1720,7 @@ mod tests {
                 }
                 let mut when = BTreeMap::new();
                 when.insert(intent.as_str().to_string(), RawValue::Map(block));
+                let when = RawValue::Map(when);
                 let rule = HostRuleSpec {
                     id: "p".to_string(),
                     description: None,
@@ -1695,6 +1730,7 @@ mod tests {
                     followed_by: None,
                     then: vec![HostRuleAction::Alert],
                     mode: RuleMode::Enforce,
+                    unknown: BTreeMap::new(),
                 };
                 if let Ok(rule) = HostRule::compile(rule) {
                     let _ = rule.matches(&event, None);
