@@ -6030,6 +6030,17 @@ pub fn start_file_watch(start: FileWatchStart<'_>) -> Option<FileWatchHandle> {
     let watched = config.file_watch.watched_paths();
     info!(paths = watched.len(), "watched paths declared");
     let set = Arc::new(WatchedPathSet::new(watched));
+    // Every change by a named writer is counted toward a mass encryption
+    // verdict, so it lives where the writer is named: with the process table.
+    let ransom = start.host_rules.as_ref().map(|_| {
+        let sources: application::ransom_service::HostSourcesReader = Arc::new(|| {
+            crate::http::host_rule_handler::reported_sources(&std::collections::HashMap::new(), &[])
+        });
+        Arc::new(application::ransom_service::RansomService::new(
+            start.alerts.clone(),
+            sources,
+        ))
+    });
     watcher = watcher.with_watched_paths(WatchedPathGuard {
         set: Arc::clone(&set),
         own_pid: std::process::id(),
@@ -6044,6 +6055,7 @@ pub fn start_file_watch(start: FileWatchStart<'_>) -> Option<FileWatchHandle> {
             roots: Some(Arc::new(adapters::container::ProcRootReader::new(
                 &proc_root,
             ))),
+            ransom,
         });
     }
     info!(

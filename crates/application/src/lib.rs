@@ -108,6 +108,7 @@ pub mod process_table_service;
 pub mod qos_cgroup_shaping_service;
 pub mod qos_service_impl;
 pub mod quarantine_service;
+pub mod ransom_service;
 pub mod ratelimit_service_impl;
 pub mod raw_socket_service;
 pub mod remote_identity_store;

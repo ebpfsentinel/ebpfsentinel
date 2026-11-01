@@ -34,6 +34,7 @@ pub mod netpol;
 pub mod network_program;
 pub mod process;
 pub mod qos;
+pub mod ransom;
 pub mod ratelimit;
 pub mod raw_socket;
 pub mod response;

@@ -21,6 +21,7 @@ use crate::network_program::change::{NETWORK_PATH_COMPONENT, PathChange};
 use crate::process::detection::{
     PROCESS_DETECTION_COMPONENT, ProcessDetection, ProcessDetectionKind,
 };
+use crate::ransom::{MASS_ENCRYPTION_COMPONENT, MASS_ENCRYPTION_RULE_ID, RansomVerdict};
 use crate::raw_socket::entity::{FilterState, RAW_SOCKET_COMPONENT, RawSocket};
 use crate::tcp_health::reset_scan::{ResetScan, TCP_HEALTH_COMPONENT};
 use crate::threatintel::entity::ThreatIntelAlert;
@@ -1311,6 +1312,79 @@ impl Alert {
         }
     }
 
+    /// Create an alert for a mass encryption verdict. The message names the
+    /// actor, the rule that reached the verdict, every signal with its
+    /// evidence and what this host could not read; `workload` is the actor.
+    #[must_use]
+    pub fn from_ransom_verdict(
+        verdict: &RansomVerdict,
+        workload: Option<Workload>,
+        at_ns: u64,
+    ) -> Self {
+        let rule_id = RuleId(MASS_ENCRYPTION_RULE_ID.to_string());
+        let mut alert = Self {
+            id: Self::generate_id(at_ns, &rule_id),
+            timestamp_ns: at_ns,
+            component: MASS_ENCRYPTION_COMPONENT.to_string(),
+            severity: Severity::Critical,
+            rule_id,
+            action: DomainMode::Alert,
+            src_addr: [0; 4],
+            dst_addr: [0; 4],
+            src_port: 0,
+            dst_port: 0,
+            protocol: 0,
+            is_ipv6: false,
+            message: verdict.describe(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: Some(verdict.actor.pid),
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: None,
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
+            executable_path: verdict.actor.exe.clone(),
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
+            workload: None,
+        };
+        if let Some(w) = workload {
+            alert.tgid = Some(w.pid);
+            if w.exe.is_some() {
+                alert.executable_path.clone_from(&w.exe);
+            }
+            alert.workload = Some(w);
+        }
+        alert
+    }
+
     /// Create an alert for a reset rate above its line. The source of the
     /// probes is the alert's source and the host that answered them its
     /// destination; `workload` is the local socket that was refused, where
@@ -2335,5 +2409,62 @@ mod host_rule_tests {
 
         let bare = Alert::from_host_rule(&rule, &event, None, 7);
         assert!(bare.tgid.is_none() && bare.workload.is_none());
+    }
+}
+
+#[cfg(test)]
+mod ransom_tests {
+    use super::*;
+    use crate::process::entity::ProcessKey;
+    use crate::ransom::{Actor, Corroboration, RansomSignal, SignalKind, UnavailableSignal};
+    use crate::workload::entity::WorkloadSource;
+
+    #[test]
+    fn a_mass_encryption_alert_is_critical_and_names_its_signals_and_gaps() {
+        let actor = Actor {
+            key: ProcessKey {
+                pid: 40,
+                start_ns: 1,
+            },
+            pid: 40,
+            exe: Some("/tmp/enc".to_string()),
+        };
+        let verdict = RansomVerdict {
+            actor: actor.clone(),
+            at_ns: 9,
+            corroboration: Corroboration::Decisive,
+            signals: vec![RansomSignal {
+                kind: SignalKind::CanaryTouched,
+                actor,
+                pid: 41,
+                at_ns: 9,
+                evidence: "opened /srv/.canary".to_string(),
+            }],
+            unavailable: vec![UnavailableSignal {
+                kind: SignalKind::CryptoRate,
+                reason: "not read by this agent".to_string(),
+            }],
+        };
+        let alert = Alert::from_ransom_verdict(&verdict, None, 9);
+        assert_eq!(alert.component, MASS_ENCRYPTION_COMPONENT);
+        assert_eq!(alert.rule_id.0, MASS_ENCRYPTION_RULE_ID);
+        assert_eq!(alert.severity, Severity::Critical);
+        assert_eq!(alert.tgid, Some(40));
+        assert_eq!(alert.executable_path.as_deref(), Some("/tmp/enc"));
+        assert!(
+            alert
+                .message
+                .contains("canary_touched (pid 41): opened /srv/.canary")
+        );
+        assert!(
+            alert
+                .message
+                .contains("crypto_rate (not read by this agent)")
+        );
+
+        let workload = Workload::new(40, WorkloadSource::Process).unwrap();
+        let alert = Alert::from_ransom_verdict(&verdict, Some(workload), 9);
+        assert_eq!(alert.workload.as_ref().map(|w| w.pid), Some(40));
+        assert_eq!(alert.executable_path.as_deref(), Some("/tmp/enc"));
     }
 }

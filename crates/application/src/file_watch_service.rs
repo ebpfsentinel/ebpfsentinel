@@ -53,6 +53,7 @@ use tracing::{debug, info, warn};
 use crate::alert_event::AlertEvent;
 use crate::host_rule_service::HostRuleService;
 use crate::process_table_service::ProcessTableService;
+use crate::ransom_service::RansomService;
 use crate::workload_resolver::WorkloadResolver;
 
 /// How long one reading waits for a first change. Short enough that a
@@ -107,6 +108,9 @@ pub struct FileRuleFeed {
     pub rules: Arc<HostRuleService>,
     pub processes: Option<Arc<ProcessTableService>>,
     pub roots: Option<Arc<dyn ProcessRootReader>>,
+    /// Where every change by a named writer is counted toward a mass
+    /// encryption verdict, whatever the rules ask for.
+    pub ransom: Option<Arc<RansomService>>,
 }
 
 /// The agent's own files, and where a change another process makes to one
@@ -861,7 +865,8 @@ impl FileWatcher {
         let Some(feed) = self.feed.as_ref() else {
             return;
         };
-        if !FILE_INTENTS.iter().any(|intent| feed.rules.wants(*intent)) {
+        let wanted = FILE_INTENTS.iter().any(|intent| feed.rules.wants(*intent));
+        if !wanted && feed.ransom.is_none() {
             return;
         }
         let rules = Arc::clone(&feed.rules);
@@ -870,6 +875,19 @@ impl FileWatcher {
                 .get(pending.pid)
                 .map(|entry| (table.lineage(pending.pid), entry))
         });
+        let at_ns = now_ns();
+        if let (Some(ransom), Some((lineage, entry))) = (feed.ransom.as_ref(), writer.as_ref()) {
+            ransom.record_file_change(
+                entry,
+                lineage,
+                pending.kinds.iter().copied(),
+                &fact.path,
+                at_ns,
+            );
+        }
+        if !wanted {
+            return;
+        }
         let arrived = pending.kinds.contains(&FileChangeKind::Created)
             || pending.kinds.contains(&FileChangeKind::MovedIn);
         let in_image = before.is_none()
@@ -886,7 +904,6 @@ impl FileWatcher {
             dev: pending.dev,
             ino: pending.ino,
         });
-        let at_ns = now_ns();
         for event in events {
             rules.record_file(
                 event,
@@ -1937,6 +1954,7 @@ mod tests {
             rules,
             processes: Some(processes),
             roots: Some(Arc::new(Overlay)),
+            ransom: None,
         })
     }
 
