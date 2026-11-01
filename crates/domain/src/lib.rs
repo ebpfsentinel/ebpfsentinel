@@ -17,6 +17,7 @@ pub mod exposure;
 pub mod firewall;
 pub mod flow;
 pub mod guest;
+pub mod hostrule;
 pub mod ids;
 pub mod ips;
 pub mod l2;
