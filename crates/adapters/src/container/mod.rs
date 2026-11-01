@@ -35,6 +35,9 @@ pub use k8s_enricher::{
     pod_info_from, resolve_node_name, spawn_namespace_watcher, spawn_pod_watcher, strip_cri_prefix,
     try_build_client,
 };
+/// The API server client the cluster watchers read through.
+#[cfg(feature = "kubernetes")]
+pub use kube::Client as KubeClient;
 pub use lxc_enricher::{
     DEFAULT_INCUS_SOCKET as LXC_DEFAULT_INCUS_SOCKET,
     DEFAULT_PROXMOX_DIR as LXC_DEFAULT_PROXMOX_DIR, LxcEnricher,

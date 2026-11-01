@@ -81,7 +81,7 @@ A snapshot of the capabilities below - see the [Features guide](https://github.c
 
 ```mermaid
 flowchart TB
-    subgraph kernel["Linux Kernel (25 eBPF programs)"]
+    subgraph kernel["Linux Kernel (26 eBPF programs)"]
         direction TB
         subgraph xdp["XDP - first hook on the receive path"]
             fw["xdp-firewall\n(stateful L3/L4)"]
@@ -113,6 +113,7 @@ flowchart TB
             lsm["lsm-exec-network\n(listed executables only)"]
             guard["lsm-bpf-guard\n(the agent's maps and links are its own)"]
             redir["cgroup-connect-redirect\n(selected workloads to the TLS proxy)"]
+            cip["cgroup-clusterip\n(opted-in workloads' cluster addresses at connect)"]
         end
     end
 

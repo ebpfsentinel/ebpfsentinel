@@ -429,6 +429,24 @@ pub struct ServiceView {
     pub cluster_ips: Vec<IpAddr>,
     pub ports: Vec<ServicePort>,
     pub backends: Vec<ServiceBackend>,
+    /// How the Service asks its connections to be routed.
+    pub routing: ServiceRouting,
+}
+
+/// The parts of a Service's spec that decide which backend a connection
+/// reaches, which nothing but a load balancer reads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServiceRouting {
+    /// `ClientIP` session affinity and its timeout in seconds, `None` for
+    /// none.
+    pub affinity_secs: Option<u32>,
+    /// `internalTrafficPolicy: Local`: only the backends on the client's own
+    /// node may answer.
+    pub node_local: bool,
+    /// A topology preference, `trafficDistribution` or the
+    /// `service.kubernetes.io/topology-mode` annotation: backends are
+    /// preferred by zone.
+    pub topology: bool,
 }
 
 /// Everything the compile reads.

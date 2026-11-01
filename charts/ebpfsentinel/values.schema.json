@@ -195,6 +195,23 @@
               "properties": {
                 "mode": { "type": "string", "enum": ["off", "observe", "enforce"] }
               }
+            },
+            "clusterIp": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "workloads": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "pods": { "$ref": "#/$defs/labelSelector" },
+                      "namespaces": { "$ref": "#/$defs/labelSelector" }
+                    }
+                  }
+                }
+              }
             }
           }
         }
@@ -224,6 +241,26 @@
     "configOverride": { "type": "string" }
   },
   "$defs": {
+    "labelSelector": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "matchLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+        "matchExpressions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "operator"],
+            "properties": {
+              "key": { "type": "string" },
+              "operator": { "type": "string", "enum": ["In", "NotIn", "Exists", "DoesNotExist"] },
+              "values": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      }
+    },
     "domainToggle": {
       "type": "object",
       "properties": {

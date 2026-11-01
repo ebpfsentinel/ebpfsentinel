@@ -14,7 +14,7 @@ use super::compile::{CompiledPolicy, NodeContext, compile};
 use super::entity::{
     ClusterView, Direction, IpBlock, LabelRequirement, LabelSelector, NamedPort, NamespaceView,
     NetPrefix, NetworkPolicy, Peer, PodView, PolicyPort, PolicyRule, PortRef, Protocol,
-    SelectorOperator, ServiceBackend, ServicePort, ServiceView,
+    SelectorOperator, ServiceBackend, ServicePort, ServiceRouting, ServiceView,
 };
 use ebpf_common::netpol::NETPOL_MAX_RANGES;
 
@@ -788,6 +788,7 @@ fn service(backends: &[&str]) -> ServiceView {
                 }],
             })
             .collect(),
+        routing: ServiceRouting::default(),
     }
 }
 

@@ -5,6 +5,7 @@ pub mod alias;
 pub mod audit;
 pub mod auth;
 pub mod capture;
+pub mod clusterip;
 pub mod common;
 pub mod conntrack;
 pub mod container;

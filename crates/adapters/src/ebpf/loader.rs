@@ -103,6 +103,19 @@ impl EbpfLoader {
         Ok(Self::from_token_object(loaded))
     }
 
+    /// Load an eBPF object whose maps are its own: none is pinned on bpffs
+    /// and none is shared with another object, so closing the loader leaves
+    /// nothing of it in the kernel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the object does not parse, a map cannot be
+    /// created or a program is refused.
+    pub fn load_unpinned(program_bytes: &[u8]) -> Result<Self, anyhow::Error> {
+        let loaded = kfunc_loader::load_object_token_unpinned(program_bytes, &[])?;
+        Ok(Self::from_token_object(loaded))
+    }
+
     /// Load an eBPF program with map pinning enabled.
     ///
     /// Maps with matching names across programs will be shared via the

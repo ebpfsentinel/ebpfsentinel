@@ -266,6 +266,17 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (3, "published"),
             (4, "publish_failed"),
         ],
+        // Connections of the opted-in workloads to a cluster address the
+        // table holds: sent to a backend, left to kube-proxy because no
+        // backend could be read or no reverse record written, sent to the
+        // backend a session affinity remembered, and the peer address or
+        // datagram source rewritten back to the cluster address.
+        "CLUSTERIP_METRICS" => &[
+            (0, "translated"),
+            (1, "left_to_kube_proxy"),
+            (2, "affinity_hit"),
+            (3, "reversed"),
+        ],
         "SIGNAL_METRICS" => &[
             (0, "sent"),
             (1, "protected"),
@@ -669,6 +680,10 @@ mod tests {
             ebpf_common::quarantine::QUARANTINE_METRIC_COUNT,
         ),
         ("NETPOL_METRICS", ebpf_common::netpol::NETPOL_METRIC_COUNT),
+        (
+            "CLUSTERIP_METRICS",
+            ebpf_common::clusterip::CLUSTERIP_METRIC_COUNT,
+        ),
     ];
 
     #[test]

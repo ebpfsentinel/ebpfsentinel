@@ -22,7 +22,7 @@ pub use compile::{
 pub use entity::{
     ClusterView, Direction, IpBlock, LabelRequirement, LabelSelector, NamedPort, NamespaceView,
     NetPrefix, NetworkPolicy, Peer, PodView, PolicyPort, PolicyRule, PortRef, Protocol,
-    SelectorOperator, ServiceBackend, ServicePort, ServiceView,
+    SelectorOperator, ServiceBackend, ServicePort, ServiceRouting, ServiceView,
 };
 pub use replay::{
     Delivery, ObservedFlow, RefusedFlow, ReplayReport, WorkloadReplay, overlay, replay,

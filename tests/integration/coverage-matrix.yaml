@@ -298,6 +298,14 @@ coverage:
     notes: "Steers the TCP connections of selected cgroups to a local listener at connect4/connect6. No suite yet: nothing asserts a steered connection lands on the listener"
 
   - kind: ebpf_program
+    feature: cgroup-clusterip
+    suites: ["TBD"]
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "Resolves the Service cluster addresses of opted-in pods at connect4/connect6 and answers with the cluster address at getpeername and recvmsg. Asserted beside Cilium and Calico in the operator's coexistence lane, which needs a cluster no lane here provisions"
+
+  - kind: ebpf_program
     feature: lsm-exec-network
     suites: ["TBD"]
     topology: none

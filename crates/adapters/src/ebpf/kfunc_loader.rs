@@ -1822,19 +1822,22 @@ fn is_shareable_map(map_type: u32) -> bool {
 /// the dedup window look broken - and let a `uprobe-dlp` record land in a
 /// packet-event reader. A private ring per object is also what the aya path
 /// produces, since none of these maps ask for pinning in their definition.
+///
+/// With no `pin_path` nothing is pinned and nothing is reused: every map is
+/// the object's own and goes when its last fd closes.
 fn create_object_maps(
     elf: &[u8],
-    pin_path: &str,
+    pin_path: Option<&str>,
     btf_fd: Option<RawFd>,
 ) -> Result<HashMap<String, (OwnedFd, u32)>, KfuncLoaderError> {
     let obj = Object::parse(elf).map_err(|e| KfuncLoaderError::ParseObject(e.to_string()))?;
     let mut out = HashMap::new();
     for (name, def) in &obj.maps {
         let map_type = def.map_type();
-        if !is_shareable_map(map_type) {
+        let Some(pin_path) = pin_path.filter(|_| is_shareable_map(map_type)) else {
             out.insert(name.clone(), (raw_map_create(name, def, btf_fd)?, map_type));
             continue;
-        }
+        };
         // The kernel truncates map names to 15 bytes; pin under the full ELF
         // name so distinct maps never collide on the pinned path.
         let pin = format!("{}/{}", pin_path.trim_end_matches('/'), name);
@@ -1937,7 +1940,25 @@ pub fn load_object_token(
         path: pin_path.to_owned(),
         errno: e.raw_os_error().unwrap_or(0),
     })?;
+    load_object_token_maps(elf, Some(pin_path), dev_bound_ifindex, optional)
+}
 
+/// Like [`load_object_token`], but no map is pinned and none is reused: the
+/// object shares nothing with any other, and once the agent closes its fds
+/// no map of it is left in the kernel or on bpffs.
+pub fn load_object_token_unpinned(
+    elf: &[u8],
+    optional: &[&str],
+) -> Result<TokenLoadedObject, KfuncLoaderError> {
+    load_object_token_maps(elf, None, None, optional)
+}
+
+fn load_object_token_maps(
+    elf: &[u8],
+    pin_path: Option<&str>,
+    dev_bound_ifindex: Option<u32>,
+    optional: &[&str],
+) -> Result<TokenLoadedObject, KfuncLoaderError> {
     // Pre-patch every kfunc call to a sentinel (no-op when the object has no
     // kfuncs) so `relocate_calls` does not mistake a kfunc call for a BPF-to-BPF
     // call to an unknown function. `load_kfunc_programs` restores the real

@@ -3,6 +3,7 @@
 
 pub mod attribution;
 pub mod bpf_guard;
+pub mod clusterip;
 pub mod config_flags;
 pub mod conntrack;
 pub mod ddos;

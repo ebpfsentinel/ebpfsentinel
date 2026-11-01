@@ -21,7 +21,7 @@ use domain::common::error::DomainError;
 use domain::netpol::{
     ClusterView, Direction, IpBlock, LabelRequirement, LabelSelector, NamedPort, NamespaceView,
     NetPrefix, NetworkPolicy, Peer, PodView, PolicyPort, PolicyRule, PortRef, Protocol,
-    SelectorOperator, ServiceBackend, ServicePort, ServiceView,
+    SelectorOperator, ServiceBackend, ServicePort, ServiceRouting, ServiceView,
 };
 use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::{Namespace, Pod, Service};
@@ -52,6 +52,7 @@ const NAMESPACE_NAME_LABEL: &str = "kubernetes.io/metadata.name";
 struct ServiceSpec {
     cluster_ips: Vec<IpAddr>,
     ports: Vec<ServicePort>,
+    routing: ServiceRouting,
 }
 
 /// One endpoint slice's contribution to its Service.
@@ -126,6 +127,7 @@ impl NetpolClusterCache {
                         .get(&(namespace.as_str(), name.as_str()))
                         .cloned()
                         .unwrap_or_default(),
+                    routing: spec.routing,
                 })
                 .collect(),
         }
@@ -543,8 +545,44 @@ fn service_from(service: &Service) -> Option<(String, String, ServiceSpec)> {
     Some((
         service.metadata.namespace.clone()?,
         service.metadata.name.clone()?,
-        ServiceSpec { cluster_ips, ports },
+        ServiceSpec {
+            cluster_ips,
+            ports,
+            routing: routing_from(service, spec),
+        },
     ))
+}
+
+/// The annotation older clusters spell a topology preference with.
+const TOPOLOGY_MODE_ANNOTATION: &str = "service.kubernetes.io/topology-mode";
+
+/// The `ClientIP` affinity timeout the API applies when none is written.
+const DEFAULT_AFFINITY_SECS: u32 = 10_800;
+
+fn routing_from(
+    service: &Service,
+    spec: &k8s_openapi::api::core::v1::ServiceSpec,
+) -> ServiceRouting {
+    let affinity_secs = (spec.session_affinity.as_deref() == Some("ClientIP")).then(|| {
+        spec.session_affinity_config
+            .as_ref()
+            .and_then(|config| config.client_ip.as_ref())
+            .and_then(|client_ip| client_ip.timeout_seconds)
+            .and_then(|secs| u32::try_from(secs).ok())
+            .filter(|secs| *secs > 0)
+            .unwrap_or(DEFAULT_AFFINITY_SECS)
+    });
+    let annotated = service
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(TOPOLOGY_MODE_ANNOTATION))
+        .is_some_and(|mode| !mode.is_empty() && !mode.eq_ignore_ascii_case("disabled"));
+    ServiceRouting {
+        affinity_secs,
+        node_local: spec.internal_traffic_policy.as_deref() == Some("Local"),
+        topology: spec.traffic_distribution.is_some() || annotated,
+    }
 }
 
 fn slice_from(slice: &EndpointSlice) -> Option<SliceSpec> {

@@ -2121,6 +2121,9 @@ pub async fn run(
     > = None;
     let mut netpol_replay: Option<Arc<application::netpol_replay_service::NetpolReplayService>> =
         None;
+    // The cluster address hooks' links, held for the life of the agent: the
+    // hooks go with them, and every connection back to kube-proxy.
+    let mut cluster_ip_attacher: Option<adapters::ebpf::clusterip::ClusterIpAttacher> = None;
     let mut workload_policy_service: Option<
         Arc<application::workload_policy_service::WorkloadPolicyService>,
     > = None;
@@ -3225,6 +3228,37 @@ pub async fn run(
             }
         }
 
+        // 10f-quater. Cluster addresses resolved at connect() for the
+        // workloads the configuration names, and for no other.
+        if config.container.kubernetes.cluster_ip.enabled {
+            let cancel = readers.child_token();
+            match start_cluster_ip(&ebpf_dir, &config, &mut metrics_readers, cancel.clone()).await {
+                Ok((loader, attacher)) => {
+                    cluster_ip_attacher = Some(attacher);
+                    managed.push(("cgroup_clusterip", loader, cancel));
+                    metrics.set_ebpf_program_status("cgroup_clusterip", true);
+                }
+                Err(e) => {
+                    metrics.set_ebpf_program_status("cgroup_clusterip", false);
+                    if adapters::ebpf::clusterip::status().reason.is_none() {
+                        adapters::ebpf::clusterip::publish_status(
+                            adapters::ebpf::clusterip::ClusterIpStatus {
+                                cgroup: config.attribution.cgroup_root.clone(),
+                                reason: Some(e.to_string()),
+                                ..adapters::ebpf::clusterip::ClusterIpStatus::default()
+                            },
+                        );
+                    }
+                    warn!("cluster addresses stay with kube-proxy for every workload: {e}");
+                }
+            }
+        } else {
+            metrics.clear_ebpf_program_status("cgroup_clusterip");
+            adapters::ebpf::clusterip::publish_status(
+                adapters::ebpf::clusterip::ClusterIpStatus::default(),
+            );
+        }
+
         // 10f-ter. Process tracing (exec and exit tracepoints)
         process_tracing_ok = if config.process_table.enabled {
             match try_load_process_tracing(&ebpf_dir, &config) {
@@ -3873,6 +3907,10 @@ pub async fn run(
             "cgroup-workload-firewall".to_string(),
             adapters::ebpf::workload_firewall_attach::status().attached,
         );
+        status.insert(
+            "cgroup-clusterip".to_string(),
+            adapters::ebpf::clusterip::status().attached,
+        );
     }
 
     // ── Anonymous usage telemetry ───────────────────────────────
@@ -4151,6 +4189,8 @@ pub async fn run(
         // The workload firewall's links travel the same way, so they outlive
         // start-up and a reload that unloads the object takes them with it.
         mgr.workload_firewall = workload_firewall_attacher;
+        // The cluster address hooks' links, for the same reason.
+        mgr.cluster_ip = cluster_ip_attacher;
         // A reload that loads the hooks again hands the new tables to the
         // same resolver, and one that unloads them takes the old tables away
         // from every reader in the same instant.
@@ -6874,9 +6914,8 @@ async fn start_network_policy(
         metrics_readers.push(rdr);
     }
 
-    let cache = Arc::new(adapters::container::NetpolClusterCache::default());
+    let cache = shared_cluster_cache(&client);
     let changes = cache.subscribe();
-    let _watchers = adapters::container::spawn_netpol_watchers(&client, &cache);
     let replay = Arc::new(
         application::netpol_replay_service::NetpolReplayService::new(
             Arc::clone(&cache) as Arc<dyn ports::secondary::netpol_map_port::ClusterViewPort>,
@@ -6893,6 +6932,98 @@ async fn start_network_policy(
     );
     tokio::spawn(service.run(changes, cancel));
     Ok(Some(replay))
+}
+
+/// The one cache of the cluster's policies, namespaces, pods, services and
+/// endpoints, read by network policy and by cluster address resolution
+/// alike, so turning both on watches the API server once.
+#[cfg(feature = "kubernetes")]
+fn shared_cluster_cache(
+    client: &adapters::container::KubeClient,
+) -> Arc<adapters::container::NetpolClusterCache> {
+    static CACHE: std::sync::OnceLock<Arc<adapters::container::NetpolClusterCache>> =
+        std::sync::OnceLock::new();
+    Arc::clone(CACHE.get_or_init(|| {
+        let cache = Arc::new(adapters::container::NetpolClusterCache::default());
+        // The watchers run for the life of the agent; their handles are
+        // not needed to keep them running.
+        drop(adapters::container::spawn_netpol_watchers(client, &cache));
+        cache
+    }))
+}
+
+/// Load the cluster address object with maps of its own, attach its hooks
+/// to the cgroup root, and start keeping its tables equal to the cluster.
+///
+/// # Errors
+///
+/// Returns an error when the agent is not in a cluster, no client can be
+/// built, the object cannot be loaded or a hook is refused. Nothing is then
+/// attached, and every connection keeps going through kube-proxy.
+#[cfg(feature = "kubernetes")]
+async fn start_cluster_ip(
+    ebpf_dir: &str,
+    config: &AgentConfig,
+    metrics_readers: &mut Vec<MetricsReader>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<(EbpfLoader, adapters::ebpf::clusterip::ClusterIpAttacher)> {
+    use adapters::ebpf::clusterip::{ClusterIpAttacher, ClusterIpMaps};
+
+    if !adapters::container::is_running_in_kubernetes() {
+        anyhow::bail!("the agent is not running in a Kubernetes cluster");
+    }
+    let Some(client) = adapters::container::try_build_client().await else {
+        anyhow::bail!("no Kubernetes client could be built");
+    };
+    let program_bytes = read_ebpf_program(ebpf_dir, "cgroup-clusterip")?;
+    let mut loader = EbpfLoader::load_unpinned(&program_bytes)?;
+    let maps = ClusterIpMaps::new(loader.ebpf_mut())?;
+    let metrics = MetricsReader::new(loader.ebpf_mut(), "CLUSTERIP_METRICS").ok();
+
+    let cache = shared_cluster_cache(&client);
+    let changes = cache.subscribe();
+    let mut service = application::clusterip_service::ClusterIpService::new(
+        cache,
+        Arc::new(adapters::container::PodCgroupScanner::new(
+            config.attribution.cgroup_root.clone(),
+        )),
+        Box::new(maps),
+        config.container.kubernetes.cluster_ip.workloads.clone(),
+    );
+    // The tables are filled before any hook attaches, so the first
+    // connection a hook sees is already decided against the cluster.
+    if let Err(e) = service.sync_once() {
+        warn!("cluster address table not filled before the attach: {e}");
+    }
+
+    let mut attacher = ClusterIpAttacher::new();
+    if let Some(sock) = warden_sock_from_env() {
+        attacher = attacher.with_warden_socket(sock);
+    }
+    let status = attacher.attach_all(&loader, &config.attribution.cgroup_root);
+    if !status.attached {
+        anyhow::bail!(
+            "{}",
+            status
+                .reason
+                .unwrap_or_else(|| "the kernel refused the attach".to_string())
+        );
+    }
+    if let Some(rdr) = metrics {
+        metrics_readers.push(rdr);
+    }
+    tokio::spawn(service.run(changes, cancel));
+    Ok((loader, attacher))
+}
+
+#[cfg(not(feature = "kubernetes"))]
+async fn start_cluster_ip(
+    _ebpf_dir: &str,
+    _config: &AgentConfig,
+    _metrics_readers: &mut Vec<MetricsReader>,
+    _cancel: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<(EbpfLoader, adapters::ebpf::clusterip::ClusterIpAttacher)> {
+    anyhow::bail!("this agent was built without Kubernetes support")
 }
 
 #[cfg(not(feature = "kubernetes"))]

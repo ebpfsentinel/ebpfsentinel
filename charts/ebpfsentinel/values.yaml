@@ -373,6 +373,16 @@ container:
       # widens the ClusterRole to list and watch networkpolicies, services and
       # endpointslices across the cluster.
       mode: "off"
+    clusterIp:
+      # -- Resolve Service cluster addresses to a ready backend at connect()
+      # for the pods `workloads` names; every other pod keeps kube-proxy, which
+      # stays installed. Needs `enabled` and at least one workload, and widens
+      # the ClusterRole to list and watch services and endpointslices.
+      enabled: false
+      # -- Pods resolved by the agent, each entry a `pods` and/or `namespaces`
+      # label selector (`matchLabels`, `matchExpressions`); a pod is taken when
+      # it matches any entry.
+      workloads: []
 
 # -- Pod disruption budget (protects against voluntary evictions)
 podDisruptionBudget:

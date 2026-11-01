@@ -301,6 +301,76 @@ pub struct KubernetesEnricherConfig {
     /// this node's pods by the cgroup hooks.
     #[serde(default)]
     pub network_policy: NetworkPolicyConfig,
+
+    /// Cluster addresses resolved at `connect()` for the workloads named
+    /// here, and for no other: every other connection keeps going through
+    /// kube-proxy.
+    #[serde(default)]
+    pub cluster_ip: ClusterIpConfig,
+}
+
+/// Which workloads have their Service cluster addresses resolved on the node
+/// rather than by kube-proxy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterIpConfig {
+    /// Off unless set. Turning it off detaches every hook, and every
+    /// connection goes through kube-proxy again.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// The pods opted in, as a list of pod and namespace selectors: a pod
+    /// matching any entry is resolved here.
+    #[serde(default)]
+    pub workloads: Vec<domain::clusterip::WorkloadSelector>,
+}
+
+impl ClusterIpConfig {
+    fn validate(&self, kubernetes_enabled: bool) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if !kubernetes_enabled {
+            return Err(ConfigError::Validation {
+                field: "container.kubernetes.cluster_ip.enabled".to_string(),
+                message: "services and their endpoints are read from the cluster, so \
+                          container.kubernetes.enabled must be true"
+                    .to_string(),
+            });
+        }
+        if self.workloads.is_empty() {
+            return Err(ConfigError::Validation {
+                field: "container.kubernetes.cluster_ip.workloads".to_string(),
+                message: "name at least one workload: resolution applies to the pods a \
+                          selector names and to no other"
+                    .to_string(),
+            });
+        }
+        for (idx, workload) in self.workloads.iter().enumerate() {
+            let field = format!("container.kubernetes.cluster_ip.workloads[{idx}]");
+            if workload.pods.is_none() && workload.namespaces.is_none() {
+                return Err(ConfigError::Validation {
+                    field,
+                    message: "set pods, namespaces or both".to_string(),
+                });
+            }
+            for (name, selector) in [
+                ("pods", &workload.pods),
+                ("namespaces", &workload.namespaces),
+            ] {
+                if let Some(Err(message)) = selector
+                    .as_ref()
+                    .map(domain::netpol::LabelSelector::validate)
+                {
+                    return Err(ConfigError::Validation {
+                        field: format!("{field}.{name}"),
+                        message,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// What the agent does with the cluster's `NetworkPolicy` objects.
@@ -443,6 +513,9 @@ impl ContainerConfig {
                         .to_string(),
             });
         }
+        self.kubernetes
+            .cluster_ip
+            .validate(self.kubernetes.enabled)?;
         Ok(())
     }
 }
@@ -581,6 +654,34 @@ mod tests {
         assert!(cfg.validate().is_err());
         cfg.kubernetes.enabled = true;
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn cluster_ip_needs_kubernetes_and_a_workload_naming_something() {
+        let mut cfg = ContainerConfig::default();
+        assert!(!cfg.kubernetes.cluster_ip.enabled);
+        cfg.kubernetes.cluster_ip = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "workloads": [{ "pods": { "match_labels": { "app": "web" } } }],
+        }))
+        .unwrap();
+        assert!(cfg.validate().is_err());
+        cfg.kubernetes.enabled = true;
+        assert!(cfg.validate().is_ok());
+        cfg.kubernetes.cluster_ip.workloads[0].pods = None;
+        assert!(cfg.validate().is_err());
+        cfg.kubernetes.cluster_ip.workloads.clear();
+        assert!(cfg.validate().is_err());
+        cfg.kubernetes.cluster_ip.workloads = serde_json::from_value(serde_json::json!([
+            { "namespaces": { "match_expressions": [{ "key": "team", "operator": "In" }] } }
+        ]))
+        .unwrap();
+        assert!(cfg.validate().is_err());
+        assert!(
+            serde_json::from_value::<ClusterIpConfig>(serde_json::json!({ "enable": true }))
+                .is_err()
+        );
     }
 
     #[test]

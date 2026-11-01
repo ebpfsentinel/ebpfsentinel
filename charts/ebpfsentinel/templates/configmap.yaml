@@ -98,6 +98,25 @@ data:
         {{- end }}
         network_policy:
           mode: {{ .Values.container.kubernetes.networkPolicy.mode | quote }}
+        {{- with .Values.container.kubernetes.clusterIp }}
+        {{- $workloads := list }}
+        {{- range $workload := .workloads }}
+        {{- $entry := dict }}
+        {{- range $side := list "pods" "namespaces" }}
+        {{- $selector := index $workload $side }}
+        {{- if $selector }}
+        {{- $out := dict }}
+        {{- with $selector.matchLabels }}{{ $_ := set $out "match_labels" . }}{{ end }}
+        {{- with $selector.matchExpressions }}{{ $_ := set $out "match_expressions" . }}{{ end }}
+        {{- $_ := set $entry $side $out }}
+        {{- end }}
+        {{- end }}
+        {{- $workloads = append $workloads $entry }}
+        {{- end }}
+        cluster_ip:
+          enabled: {{ .enabled }}
+          workloads: {{ toJson $workloads }}
+        {{- end }}
     {{- end }}
     {{- with .Values.auto_response }}
     auto_response:

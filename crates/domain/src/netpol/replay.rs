@@ -280,7 +280,7 @@ mod tests {
     use super::*;
     use crate::netpol::entity::{
         LabelSelector, Peer, PolicyPort, PolicyRule, PortRef, Protocol, ServiceBackend,
-        ServicePort, ServiceView,
+        ServicePort, ServiceRouting, ServiceView,
     };
 
     const NODE: &str = "192.168.1.10";
@@ -451,6 +451,7 @@ mod tests {
                 ip: ip("10.244.1.3"),
                 ports: Vec::new(),
             }],
+            routing: ServiceRouting::default(),
         });
         let flow = ObservedFlow {
             delivered: Some(Delivery {

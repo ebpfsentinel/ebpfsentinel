@@ -23,6 +23,7 @@ pub(crate) const EBPF_PROGRAMS: &[&str] = &[
     "cgroup-attribution",
     "cgroup-workload-firewall",
     "cgroup-connect-redirect",
+    "cgroup-clusterip",
     "tracepoint-process",
     "tracepoint-signal",
     "tracepoint-drop-reason",

@@ -19,13 +19,18 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["list", "watch"]
-  {{- if ne .Values.container.kubernetes.networkPolicy.mode "off" }}
+  {{- $netpol := ne .Values.container.kubernetes.networkPolicy.mode "off" }}
+  {{- if $netpol }}
   # NetworkPolicy is compiled on the agent: a policy names its peers by pod
   # and namespace labels anywhere in the cluster, and a Service address is
   # opened only when every backend behind it is allowed.
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["list", "watch"]
+  {{- end }}
+  {{- if or $netpol .Values.container.kubernetes.clusterIp.enabled }}
+  # Services and their endpoint slices, read for a NetworkPolicy's Service
+  # addresses and for the backends a cluster address resolves to.
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["list", "watch"]

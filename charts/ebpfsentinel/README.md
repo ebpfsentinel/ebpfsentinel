@@ -247,7 +247,9 @@ helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --versi
 | commonLabels | object | `{}` | Labels added to all resources |
 | configOverride | string | `""` | Override the entire config.yaml content. When set, all agent.* and domain toggles above are ignored. |
 | conntrack.enabled | bool | `false` | Enable connection tracking |
-| container | object | `{"kubernetes":{"enabled":false,"labelFilter":[],"networkPolicy":{"mode":"off"}}}` | Container awareness |
+| container | object | `{"kubernetes":{"clusterIp":{"enabled":false,"workloads":[]},"enabled":false,"labelFilter":[],"networkPolicy":{"mode":"off"}}}` | Container awareness |
+| container.kubernetes.clusterIp.enabled | bool | `false` | Resolve Service cluster addresses to a ready backend at connect() for the pods `workloads` names; every other pod keeps kube-proxy, which stays installed. Needs `enabled` and at least one workload, and widens the ClusterRole to list and watch services and endpointslices. |
+| container.kubernetes.clusterIp.workloads | list | `[]` | Pods resolved by the agent, each entry a `pods` and/or `namespaces` label selector (`matchLabels`, `matchExpressions`); a pod is taken when it matches any entry. |
 | container.kubernetes.enabled | bool | `false` | Enable the Kubernetes pod metadata enricher: alerts carry the pod name, namespace and labels of the container that produced them. Turning it on creates a ClusterRole with get/list/watch on `pods` and list/watch on `namespaces`, binds it to the ServiceAccount and mounts the ServiceAccount token into the pod, which is otherwise left unmounted. |
 | container.kubernetes.labelFilter | list | `[]` | Optional label selector (`key=value` pairs) narrowing the pod watcher |
 | container.kubernetes.networkPolicy.mode | string | `"off"` | Kubernetes NetworkPolicy on this node's pods: `off`, `observe` (refusals counted and let through) or `enforce`. Needs `enabled`, and widens the ClusterRole to list and watch networkpolicies, services and endpointslices across the cluster. |

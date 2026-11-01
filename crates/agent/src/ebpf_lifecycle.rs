@@ -89,6 +89,10 @@ pub struct EbpfProgramManager {
     /// Dropping it detaches them, which is how a reload turns the process
     /// table's source off.
     pub process_tracing: Option<adapters::ebpf::ProcessTracingAttacher>,
+    /// The links of the cluster address hooks, where they attached. Held
+    /// for the agent's life; dropping it sends every connection back to
+    /// kube-proxy.
+    pub cluster_ip: Option<adapters::ebpf::clusterip::ClusterIpAttacher>,
     /// Where a process event goes. The table drains this channel for the
     /// life of the agent, so a reload that loads the tracepoints again only
     /// has to hand the new reader a clone of this sender.
@@ -136,6 +140,7 @@ impl EbpfProgramManager {
             ipset_wired: false,
             attribution: None,
             workload_firewall: None,
+            cluster_ip: None,
             workloads: application::workload_resolver::WorkloadResolver::new(),
             process_tracing: None,
             process_events: None,
