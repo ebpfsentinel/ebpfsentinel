@@ -155,13 +155,13 @@ pub fn attribution_sendmsg6(ctx: SockAddrContext) -> i32 {
 /// the only moment its opener is still on the stack.
 #[cgroup_sock(post_bind4)]
 pub fn attribution_post_bind4(ctx: SockContext) -> i32 {
-    record_sock(&ctx)
+    record_sock(&ctx, ATTRIBUTION_FAMILY_IPV4)
 }
 
 /// The same for IPv6.
 #[cgroup_sock(post_bind6)]
 pub fn attribution_post_bind6(ctx: SockContext) -> i32 {
-    record_sock(&ctx)
+    record_sock(&ctx, ATTRIBUTION_FAMILY_IPV6)
 }
 
 /// A socket being closed: it holds no address any more, so it leaves the
@@ -395,9 +395,12 @@ fn record_sock_addr(ctx: &SockAddrContext, hook: u8, metric: u32) -> i32 {
 }
 
 /// Record the calling task against the socket's cookie, from a `bpf_sock`
-/// context.
+/// context. `hook_family` is the family the hook is attached for, a constant
+/// at each call site: the verifier refuses `src_ip4` to a post-bind6 program
+/// and `src_ip6` to a post-bind4 one whether or not the branch reading it can
+/// run, so each program must carry the read of its own family only.
 #[inline(always)]
-fn record_sock(ctx: &SockContext) -> i32 {
+fn record_sock(ctx: &SockContext, hook_family: u8) -> i32 {
     let cookie = unsafe { generated::bpf_get_socket_cookie(ctx.sock.cast()) };
     let family = unsafe { (*ctx.sock).family };
     let protocol = unsafe { (*ctx.sock).protocol };
@@ -410,7 +413,9 @@ fn record_sock(ctx: &SockContext) -> i32 {
     ) else {
         return ALLOW;
     };
-    record_listener(ctx, cookie, identity);
+    if identity.family == hook_family {
+        record_listener(ctx, cookie, identity, hook_family);
+    }
     ALLOW
 }
 
@@ -418,16 +423,16 @@ fn record_sock(ctx: &SockContext) -> i32 {
 /// took them. `src_port` is handed over in host order and the addresses in
 /// network order, converted here into the encoding of the flow key.
 #[inline(always)]
-fn record_listener(ctx: &SockContext, cookie: u64, identity: SocketIdentity) {
+fn record_listener(ctx: &SockContext, cookie: u64, identity: SocketIdentity, hook_family: u8) {
     let mut listener = ListeningSocket {
         identity,
         port: unsafe { (*ctx.sock).src_port } as u16,
         state: LISTENER_STATE_BOUND,
         ..ListeningSocket::default()
     };
-    if identity.family == ATTRIBUTION_FAMILY_IPV4 {
+    if hook_family == ATTRIBUTION_FAMILY_IPV4 {
         listener.local_addr[0] = u32::from_be(unsafe { (*ctx.sock).src_ip4 });
-    } else if identity.family == ATTRIBUTION_FAMILY_IPV6 {
+    } else if hook_family == ATTRIBUTION_FAMILY_IPV6 {
         let words = unsafe { (*ctx.sock).src_ip6 };
         let mut word = 0usize;
         while word < 4 {

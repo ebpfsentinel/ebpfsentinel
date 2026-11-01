@@ -141,6 +141,7 @@ use super::routing_handler::{
 };
 use super::service_graph_handler::service_graph;
 use super::state::AppState;
+use super::surface_handler::get_listening;
 use super::threatintel_handler::{
     list_feeds, list_iocs, list_url_iocs, refresh_feeds, threatintel_status,
 };
@@ -324,6 +325,7 @@ pub fn build_router(
             .route("/api/v1/ebpf/hidden-processes", get(get_hidden_processes))
             .route("/api/v1/surface/packages", get(get_packages))
             .route("/api/v1/surface/loaded", get(get_loaded))
+            .route("/api/v1/surface/listening", get(get_listening))
             .route("/api/v1/host-rules", get(get_host_rules))
             .route("/api/v1/host-rules/intents", get(get_host_intents))
             .route("/api/v1/exposure/listeners", get(get_listeners))

@@ -727,6 +727,7 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
             match args.command {
                 SurfaceCommand::Packages => commands::cmd_surface_packages(&client, output).await,
                 SurfaceCommand::Loaded => commands::cmd_surface_loaded(&client, output).await,
+                SurfaceCommand::Listening => commands::cmd_surface_listening(&client, output).await,
             }
         }
 

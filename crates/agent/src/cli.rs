@@ -1182,6 +1182,9 @@ pub enum SurfaceCommand {
     /// List every file live processes have mapped executable, the
     /// processes mapping it and the package owning it
     Loaded,
+    /// List every listener with the packages its process maps, whether it
+    /// took traffic and who the policy lets reach it
+    Listening,
 }
 
 // ── Host rules ──────────────────────────────────────────────────────────
@@ -2780,6 +2783,18 @@ mod tests {
             cli.command,
             Some(Command::Surface(DomainArgs {
                 command: SurfaceCommand::Packages,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_surface_listening() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "surface", "listening"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Surface(DomainArgs {
+                command: SurfaceCommand::Listening,
                 ..
             }))
         ));

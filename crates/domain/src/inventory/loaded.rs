@@ -73,6 +73,25 @@ pub struct LoadedObjects {
     pub objects: Vec<LoadedObject>,
     /// Objects past [`LOADED_OBJECTS_MAX`], left out.
     pub not_listed: u32,
+    /// Every process read, by pid, with the index in `objects` of each file
+    /// it maps, so a process names what it maps however many others map the
+    /// same file.
+    #[serde(default)]
+    pub by_pid: Vec<(u32, Vec<u32>)>,
+}
+
+impl LoadedObjects {
+    /// What `pid` maps, `None` when its mappings were not read.
+    #[must_use]
+    pub fn of_pid(&self, pid: u32) -> Option<impl Iterator<Item = &LoadedObject>> {
+        let at = self.by_pid.binary_search_by_key(&pid, |(p, _)| *p).ok()?;
+        Some(
+            self.by_pid[at]
+                .1
+                .iter()
+                .filter_map(|&i| self.objects.get(i as usize)),
+        )
+    }
 }
 
 /// The path a package database and `/proc/<pid>/maps` agree on: on a merged
@@ -110,6 +129,8 @@ struct Group {
     object: Arc<MappedObject>,
     pids: Vec<u32>,
     processes: u32,
+    /// Every process mapping it, past the [`LOADED_PIDS_MAX`] named.
+    all: Vec<u32>,
 }
 
 /// Join what `processes` map to the packages of `roots`.
@@ -126,6 +147,7 @@ pub fn loaded_objects(roots: &[RootInventory], processes: &[ProcessObjects]) -> 
                     object: Arc::clone(object),
                     pids: Vec::new(),
                     processes: 0,
+                    all: Vec::new(),
                 });
             // One process can map one file under two names; it counts once.
             if group.pids.last() == Some(&process.pid) {
@@ -134,6 +156,7 @@ pub fn loaded_objects(roots: &[RootInventory], processes: &[ProcessObjects]) -> 
             if group.pids.len() < LOADED_PIDS_MAX {
                 group.pids.push(process.pid);
             }
+            group.all.push(process.pid);
             group.processes = group.processes.saturating_add(1);
         }
     }
@@ -143,7 +166,7 @@ pub fn loaded_objects(roots: &[RootInventory], processes: &[ProcessObjects]) -> 
         .map(|(i, r)| (r.pid, (i, r)))
         .collect();
     let mut indexes: HashMap<u32, HashMap<String, PackageRef>> = HashMap::new();
-    let mut rows: Vec<(usize, LoadedObject)> = groups
+    let mut rows: Vec<(usize, LoadedObject, Vec<u32>)> = groups
         .into_iter()
         .map(|((root_pid, _, _), group)| {
             let root = root_pid.and_then(|pid| by_pid.get(&pid).copied());
@@ -166,16 +189,30 @@ pub fn loaded_objects(roots: &[RootInventory], processes: &[ProcessObjects]) -> 
                     pids: group.pids,
                     processes: group.processes,
                 },
+                group.all,
             )
         })
         .collect();
-    rows.sort_by(|(a, x), (b, y)| a.cmp(b).then_with(|| x.path.cmp(&y.path)));
+    rows.sort_by(|(a, x, _), (b, y, _)| a.cmp(b).then_with(|| x.path.cmp(&y.path)));
     let not_listed =
         u32::try_from(rows.len().saturating_sub(LOADED_OBJECTS_MAX)).unwrap_or(u32::MAX);
     rows.truncate(LOADED_OBJECTS_MAX);
+    let mut by_pid: HashMap<u32, Vec<u32>> =
+        processes.iter().map(|p| (p.pid, Vec::new())).collect();
+    let mut objects = Vec::with_capacity(rows.len());
+    for (index, (_, object, all)) in rows.into_iter().enumerate() {
+        let index = u32::try_from(index).unwrap_or(u32::MAX);
+        for pid in all {
+            by_pid.entry(pid).or_default().push(index);
+        }
+        objects.push(object);
+    }
+    let mut by_pid: Vec<(u32, Vec<u32>)> = by_pid.into_iter().collect();
+    by_pid.sort_unstable_by_key(|(pid, _)| *pid);
     LoadedObjects {
-        objects: rows.into_iter().map(|(_, o)| o).collect(),
+        objects,
         not_listed,
+        by_pid,
     }
 }
 
@@ -249,6 +286,31 @@ mod tests {
             Some("libssl3t64")
         );
         assert_eq!(o.scope, Some(RootScope::Host));
+        let of_20: Vec<_> = loaded
+            .of_pid(20)
+            .unwrap()
+            .map(|o| o.path.as_str())
+            .collect();
+        assert_eq!(of_20, ["/usr/lib/x86_64-linux-gnu/libssl.so.3"]);
+        assert!(loaded.of_pid(40).is_none());
+    }
+
+    #[test]
+    fn a_process_past_the_named_pids_still_names_what_it_maps() {
+        let lib = object(16, "/usr/lib/libshared.so", false);
+        let many: Vec<ProcessObjects> = (1..=40).map(|pid| process(pid, &[&lib])).collect();
+        let loaded = loaded_objects(&[host(Vec::new())], &many);
+        assert_eq!(loaded.objects[0].pids.len(), LOADED_PIDS_MAX);
+        assert_eq!(loaded.objects[0].processes, 40);
+        assert_eq!(loaded.of_pid(40).unwrap().count(), 1);
+        // A process mapping nothing was read, and maps nothing.
+        let quiet = ProcessObjects {
+            pid: 99,
+            root_pid: Some(1),
+            objects: Vec::new(),
+        };
+        let loaded = loaded_objects(&[host(Vec::new())], &[quiet]);
+        assert_eq!(loaded.of_pid(99).unwrap().count(), 0);
     }
 
     #[test]

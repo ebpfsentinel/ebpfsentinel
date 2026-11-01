@@ -20,6 +20,7 @@ pub mod dpkg;
 pub mod entity;
 pub mod error;
 pub mod gobuild;
+pub mod listening;
 pub mod loaded;
 pub mod rpm;
 pub mod sqlite;
@@ -32,6 +33,7 @@ pub use entity::{
 };
 pub use error::InventoryError;
 pub use gobuild::{GoBuildInfo, GoModule, GoReplacement, parse_go_buildinfo};
+pub use listening::{Behind, Origin, behind};
 pub use loaded::{
     LOADED_OBJECTS_MAX, LOADED_PIDS_MAX, LoadedObject, LoadedObjects, MappedObject, PackageRef,
     ProcessObjects, loaded_objects,

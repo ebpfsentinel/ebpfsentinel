@@ -2292,6 +2292,43 @@ pub struct LoadedObjectEntry {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct ListeningResponse {
+    pub listeners_read: bool,
+    pub inventory_read: bool,
+    #[serde(default)]
+    pub scanned_at_ns: u64,
+    #[serde(default)]
+    pub listeners: Vec<ListeningEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ListeningEntry {
+    pub address: String,
+    pub port: u16,
+    pub protocol: String,
+    pub scope: String,
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod: Option<String>,
+    pub class: String,
+    pub origin: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_from: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<u64>,
+    #[serde(default)]
+    pub mapped_read: bool,
+    #[serde(default)]
+    pub packages: Vec<OwnerEntry>,
+    #[serde(default)]
+    pub unowned: Vec<String>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct GoModuleEntry {
     pub path: String,
     pub version: String,
@@ -4531,6 +4568,15 @@ impl ApiClient {
     pub async fn surface_loaded(&self) -> anyhow::Result<LoadedResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/surface/loaded")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn surface_listening(&self) -> anyhow::Result<ListeningResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/surface/listening")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

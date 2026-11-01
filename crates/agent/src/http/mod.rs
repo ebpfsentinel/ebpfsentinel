@@ -46,6 +46,7 @@ pub mod routing_handler;
 pub mod server;
 pub mod service_graph_handler;
 pub mod state;
+pub mod surface_handler;
 pub mod threatintel_handler;
 pub mod tls;
 pub mod tls_handler;

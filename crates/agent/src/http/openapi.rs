@@ -46,6 +46,7 @@ use super::raw_socket_handler;
 use super::response_handler;
 use super::routing_handler;
 use super::service_graph_handler;
+use super::surface_handler;
 use super::threatintel_handler;
 use super::tls_handler;
 use super::trace_handler;
@@ -148,6 +149,7 @@ use super::zone_handler;
         hidden_process_handler::get_hidden_processes,
         package_inventory_handler::get_packages,
         package_inventory_handler::get_loaded,
+        surface_handler::get_listening,
         host_rule_handler::get_host_intents,
         host_rule_handler::get_host_rules,
         exposure_handler::get_listeners,
@@ -404,6 +406,8 @@ use super::zone_handler;
         package_inventory_handler::LoadedResponse,
         package_inventory_handler::LoadedObjectBody,
         package_inventory_handler::OwnerBody,
+        surface_handler::ListeningResponse,
+        surface_handler::ListeningBody,
         hidden_port_handler::UnreachableNamespaceBody,
         host_rule_handler::HostIntentsResponse,
         host_rule_handler::HostRulesResponse,

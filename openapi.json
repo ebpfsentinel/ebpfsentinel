@@ -8151,6 +8151,54 @@
         ]
       }
     },
+    "/api/v1/surface/listening": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "operationId": "get_listening",
+        "responses": {
+          "200": {
+            "description": "Every listener on the node with the packages its process maps, whether it took traffic and who the policy lets reach it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListeningResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/surface/loaded": {
       "get": {
         "tags": [
@@ -15066,6 +15114,139 @@
           "reading": {
             "type": "boolean",
             "description": "Whether the socket hooks are attached. When they are not, the node's\nlisteners are unknown rather than absent."
+          }
+        }
+      },
+      "ListeningBody": {
+        "type": "object",
+        "description": "One listener and the packages behind it.",
+        "required": [
+          "address",
+          "port",
+          "protocol",
+          "scope",
+          "pid",
+          "class",
+          "origin",
+          "mapped_read",
+          "packages",
+          "unowned"
+        ],
+        "properties": {
+          "accepted": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "TCP connections accepted on it since the hooks attached; absent for\nUDP.",
+            "minimum": 0
+          },
+          "address": {
+            "type": "string"
+          },
+          "allowed_from": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The sources let through, when only some are."
+          },
+          "class": {
+            "type": "string",
+            "description": "`exposed_used`, `exposed_unused`, `exposed_unmeasured`,\n`closed_by_policy` or `loopback_only`, as on the listeners route."
+          },
+          "container": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "executable": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mapped_read": {
+            "type": "boolean",
+            "description": "Whether the files its process maps were read. When not, the two\nlists below are unknown rather than empty."
+          },
+          "origin": {
+            "type": "string",
+            "description": "Who the policy lets reach it: `anywhere`, `private_only` when every\nsource let through lies in a private or link-local range,\n`blocked` or `loopback`."
+          },
+          "packages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OwnerBody"
+            },
+            "description": "The packages owning a file its process maps, each once."
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The process that bound it.",
+            "minimum": 0
+          },
+          "pod": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The pod holding it, as `namespace/name`."
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "protocol": {
+            "type": "string",
+            "description": "`tcp` or `udp`."
+          },
+          "scope": {
+            "type": "string",
+            "description": "`all_addresses`, `address` or `loopback`."
+          },
+          "unowned": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Files its process maps that no package in its root owns."
+          }
+        }
+      },
+      "ListeningResponse": {
+        "type": "object",
+        "description": "Every listener with the packages its process maps.",
+        "required": [
+          "listeners_read",
+          "inventory_read",
+          "scanned_at_ns",
+          "listeners"
+        ],
+        "properties": {
+          "inventory_read": {
+            "type": "boolean",
+            "description": "Whether the package inventory is read."
+          },
+          "listeners": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ListeningBody"
+            }
+          },
+          "listeners_read": {
+            "type": "boolean",
+            "description": "Whether the socket hooks are attached."
+          },
+          "scanned_at_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the mapped files were last read, nanoseconds since the epoch,\n`0` before the first.",
+            "minimum": 0
           }
         }
       },

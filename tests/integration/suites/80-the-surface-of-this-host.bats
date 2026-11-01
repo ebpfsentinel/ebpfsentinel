@@ -20,6 +20,10 @@
 #     and the package owning its C library, and leaves once it is stopped.
 #   * What a chrooted process maps is attributed to its own root.
 #   * The CLI prints the mapped files the route answers.
+#   * A server started during the suite is listed among the listeners with
+#     the packages its process maps, the connection it took and who the
+#     policy lets reach it, and leaves once it is stopped.
+#   * The CLI prints the listeners the route answers.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
@@ -131,6 +135,30 @@ _wait_loaded() {
     done
     echo "${body:-}" | jq -c '{processes_listed, processes_reread, processes_not_read,
         objects: (.objects | length)}' >&2
+    return 1
+}
+
+# _listening - the listeners with their packages, empty when the route did
+# not answer.
+_listening() {
+    curl -sf --max-time "${HTTP_TIMEOUT}" "${BASE_URL}/api/v1/surface/listening" || true
+}
+
+# _wait_listening <timeout_s> [jq args...] <jq filter> - polls until the
+# listeners satisfy the filter, and prints them.
+_wait_listening() {
+    local timeout="$1" body i
+    shift
+    for ((i = 0; i < timeout; i++)); do
+        body="$(_listening)"
+        if echo "${body:-{\}}" | jq -e "$@" >/dev/null 2>&1; then
+            echo "$body"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "${body:-}" | jq -c '{listeners_read, inventory_read,
+        listeners: [.listeners[]? | {port, pid, mapped_read}]}' >&2
     return 1
 }
 
@@ -301,6 +329,59 @@ _root_of() {
     echo "$out" | grep -qE '^host +/[^ ]*libc\.so\.6 +libc6 '
     out="$("$AGENT_BIN" surface --host "$AGENT_HOST" --port "$AGENT_HTTP_PORT" loaded --output json)"
     echo "$out" | jq -e '.objects | length > 0'
+    [ "$(echo "$out" | jq '[paths | map(strings) | .[]
+        | select(test("cve|severity|score|vulnerab|cvss|risk"; "i"))] | length')" -eq 0 ]
+}
+
+@test "a server started now is listed with the packages behind it, and leaves when stopped" {
+    local port=18480 pid body row i
+    python3 -m http.server --bind 0.0.0.0 "$port" >/dev/null 2>&1 &
+    pid=$!
+    echo "$pid" >> "${ROOTS_PIDS_FILE}"
+    # The first request that answers is the connection it takes.
+    for ((i = 0; i < 20; i++)); do
+        curl -sf --max-time 2 "http://127.0.0.1:${port}/" >/dev/null && break
+        sleep 0.5
+    done
+    body="$(_wait_listening 150 --argjson pid "$pid" --argjson port "$port" \
+        '.listeners | any(.port == $port and .pid == $pid and .mapped_read
+            and (.accepted // 0) > 0)')" || {
+        kill "$pid" 2>/dev/null || true
+        echo "port ${port} (pid ${pid}) never listed with its packages" >&2
+        return 1
+    }
+    row="$(echo "$body" | jq -c --argjson port "$port" '[.listeners[] | select(.port == $port)][0]')"
+    [ "$(echo "$row" | jq -r '.protocol + " " + .scope')" = "tcp all_addresses" ]
+    # The firewall only alerts and lets everything through.
+    [ "$(echo "$row" | jq -r '.origin')" = "anywhere" ]
+    [ "$(echo "$row" | jq -r '.class')" = "exposed_used" ]
+    echo "$row" | jq -e --arg v "$(dpkg-query -W -f='${Version}' libc6)" \
+        '.packages | any(.manager == "dpkg" and .name == "libc6" and .version == $v)'
+    # The interpreter itself is installed by a python3 package.
+    echo "$row" | jq -e '.packages | any(.name | startswith("libpython3") or startswith("python3"))'
+    kill "$pid"
+    wait "$pid" 2>/dev/null || true
+    _wait_listening 60 --argjson port "$port" '.listeners | all(.port != $port)' >/dev/null
+}
+
+@test "the CLI prints the listeners the route answers" {
+    local port=18481 pid out
+    # The agent's own port was bound before its hooks attached, so it is not
+    # listed: a server started now is.
+    python3 -m http.server --bind 0.0.0.0 "$port" >/dev/null 2>&1 &
+    pid=$!
+    echo "$pid" >> "${ROOTS_PIDS_FILE}"
+    _wait_listening 150 --argjson port "$port" \
+        '.listeners | any(.port == $port and .mapped_read)' >/dev/null || {
+        kill "$pid" 2>/dev/null || true
+        return 1
+    }
+    out="$("$AGENT_BIN" surface --host "$AGENT_HOST" --port "$AGENT_HTTP_PORT" listening 2>&1)"
+    echo "$out" | grep -qE "^0\\.0\\.0\\.0 +${port} +tcp +${pid} +anywhere +exposed_unused +0 +.*libc6 "
+    out="$("$AGENT_BIN" surface --host "$AGENT_HOST" --port "$AGENT_HTTP_PORT" listening --output json)"
+    kill "$pid"
+    wait "$pid" 2>/dev/null || true
+    echo "$out" | jq -e '.listeners_read and .inventory_read'
     [ "$(echo "$out" | jq '[paths | map(strings) | .[]
         | select(test("cve|severity|score|vulnerab|cvss|risk"; "i"))] | length')" -eq 0 ]
 }

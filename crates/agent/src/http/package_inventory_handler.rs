@@ -4,7 +4,7 @@ use axum::Json;
 use axum::extract::State;
 use domain::inventory::{
     DatabaseOutcome, DatabaseReading, GoExecutableReading, GoModule, GoOutcome, LoadedObject,
-    Package, PackageState, RootInventory, RootScope,
+    Package, PackageRef, PackageState, RootInventory, RootScope,
 };
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -236,6 +236,16 @@ fn scope(scope: &RootScope) -> (&'static str, Option<String>, Option<String>) {
     }
 }
 
+/// A package named as owning a file.
+#[must_use]
+pub fn owner_body(p: &PackageRef) -> OwnerBody {
+    OwnerBody {
+        manager: p.manager.as_str(),
+        name: p.name.clone(),
+        version: p.version.clone(),
+    }
+}
+
 fn loaded(o: &LoadedObject) -> LoadedObjectBody {
     let (kind, container_id, runtime) = o.scope.as_ref().map_or(("unread", None, None), scope);
     LoadedObjectBody {
@@ -245,11 +255,7 @@ fn loaded(o: &LoadedObject) -> LoadedObjectBody {
         root_pid: o.root_pid,
         path: o.path.clone(),
         deleted: o.deleted,
-        owner: o.owner.as_ref().map(|p| OwnerBody {
-            manager: p.manager.as_str(),
-            name: p.name.clone(),
-            version: p.version.clone(),
-        }),
+        owner: o.owner.as_ref().map(owner_body),
         pids: o.pids.clone(),
         processes: o.processes,
     }

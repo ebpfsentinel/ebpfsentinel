@@ -5103,6 +5103,71 @@ pub async fn cmd_surface_packages(client: &ApiClient, output: OutputFormat) -> R
     Ok(())
 }
 
+/// Print every listener with the packages its process maps.
+pub async fn cmd_surface_listening(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.surface_listening().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    if !resp.listeners_read {
+        println!("The socket hooks are not attached: the node's listeners are unknown.");
+        return Ok(());
+    }
+    if !resp.inventory_read {
+        println!("The package inventory is turned off: no listener names its packages.");
+    } else if resp.scanned_at_ns == 0 {
+        println!("The first reading of mapped files has not finished yet.");
+    }
+    let mut table = Table::new(&[
+        ("ADDRESS", Align::Left),
+        ("PORT", Align::Right),
+        ("PROTO", Align::Left),
+        ("PID", Align::Right),
+        ("ORIGIN", Align::Left),
+        ("CLASS", Align::Left),
+        ("ACCEPTED", Align::Right),
+        ("PACKAGES", Align::Left),
+    ]);
+    for l in &resp.listeners {
+        let packages = if l.mapped_read {
+            let mut names: Vec<String> = l
+                .packages
+                .iter()
+                .map(|p| format!("{} {}", p.name, p.version))
+                .collect();
+            if !l.unowned.is_empty() {
+                names.push(format!("{} unowned file(s)", l.unowned.len()));
+            }
+            if names.is_empty() {
+                "-".to_string()
+            } else {
+                names.join(", ")
+            }
+        } else {
+            "not read".to_string()
+        };
+        table.row(cells![
+            l.address,
+            l.port,
+            l.protocol,
+            l.pid,
+            l.origin,
+            l.class,
+            l.accepted.map_or("-".to_string(), |n| n.to_string()),
+            packages
+        ]);
+    }
+    if resp.listeners.is_empty() {
+        println!("Nothing listens on this node.");
+    } else {
+        table.print();
+    }
+    Ok(())
+}
+
 /// Print every file live processes have mapped executable, the processes
 /// mapping it and the package owning it in their root.
 pub async fn cmd_surface_loaded(client: &ApiClient, output: OutputFormat) -> Result<()> {
