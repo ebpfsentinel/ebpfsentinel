@@ -33,7 +33,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use ebpf_common::workload_policy::{
-    WORKLOAD_HOOK_BIND, WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_SENDMSG, WORKLOAD_POLICY_MAX_RULES,
+    WORKLOAD_HOOK_BIND, WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_INGRESS, WORKLOAD_HOOK_SENDMSG,
+    WORKLOAD_POLICY_MAX_RULES,
 };
 
 use crate::common::entity::{Protocol, RuleId};
@@ -43,6 +44,7 @@ use crate::netpol::LabelSelector;
 use super::entity::{FirewallAction, FirewallRule, IpNetwork, PortRange};
 use super::error::FirewallError;
 use super::fqdn::{FqdnPattern, WorkloadDnsSettings};
+use super::workload_peer::PeerSelector;
 
 /// Longest value one matcher may carry.
 ///
@@ -604,6 +606,10 @@ pub struct WorkloadMatch {
     /// each opens for that workload alone; see [`super::fqdn`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fqdn: Vec<FqdnPattern>,
+    /// The destination named as a workload on another node, in place of an
+    /// address; see [`super::workload_peer`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<PeerSelector>,
 }
 
 impl WorkloadMatch {
@@ -614,6 +620,7 @@ impl WorkloadMatch {
             selector,
             mode: WorkloadMode::Observe,
             fqdn: Vec::new(),
+            peer: None,
         }
     }
 
@@ -624,6 +631,7 @@ impl WorkloadMatch {
             selector,
             mode: WorkloadMode::Enforce,
             fqdn: Vec::new(),
+            peer: None,
         }
     }
 }
@@ -721,6 +729,9 @@ pub struct WorkloadRule {
     /// Destinations named by DNS name, empty for a rule naming an address.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dst_fqdn: Vec<FqdnPattern>,
+    /// The destination named as a workload on another node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_peer: Option<PeerSelector>,
     /// Whether the rule is in force.
     pub enabled: bool,
 }
@@ -732,10 +743,12 @@ impl WorkloadRule {
     /// "this workload, anywhere" half of the contract. A rule naming its
     /// destinations by DNS name admits nothing here: which address a name
     /// stands for is known only to the kernel map the answers filled, per
-    /// workload, and a guess from userspace would be a second opinion.
+    /// workload, and a guess from userspace would be a second opinion. A rule
+    /// naming a remote workload admits nothing here either, for the same
+    /// reason: the list of remote identities is read in the kernel.
     #[must_use]
     pub fn admits_destination(&self, destination: &WorkloadDestination) -> bool {
-        if !self.dst_fqdn.is_empty() {
+        if !self.dst_fqdn.is_empty() || self.dst_peer.is_some() {
             return false;
         }
         if self.protocol != Protocol::Any && self.protocol != destination.protocol {
@@ -775,6 +788,11 @@ impl WorkloadRule {
         }
         match self.dst_ip {
             Some(network) => parts.push(format!("to {}", describe_network(&network))),
+            None if self.dst_peer.is_some() => {
+                if let Some(peer) = self.dst_peer.as_ref() {
+                    parts.push(format!("to {}", peer.describe()));
+                }
+            }
             None if !self.dst_fqdn.is_empty() => parts.push(format!(
                 "to {}",
                 self.dst_fqdn
@@ -833,6 +851,10 @@ pub enum WorkloadHook {
     Sendmsg,
     /// `bind()`, where the address is the local one the workload is taking.
     Bind,
+    /// A connection arriving at the workload from a workload on another
+    /// node, decided on its opening segment. The address is the peer's and
+    /// the port is the workload's own.
+    Ingress,
 }
 
 impl WorkloadHook {
@@ -843,6 +865,7 @@ impl WorkloadHook {
             Self::Connect => "connect",
             Self::Sendmsg => "sendmsg",
             Self::Bind => "bind",
+            Self::Ingress => "ingress",
         }
     }
 
@@ -853,6 +876,7 @@ impl WorkloadHook {
             Self::Connect => "connecting to",
             Self::Sendmsg => "sending to",
             Self::Bind => "binding to",
+            Self::Ingress => "accepting a connection from",
         }
     }
 
@@ -864,6 +888,7 @@ impl WorkloadHook {
             WORKLOAD_HOOK_CONNECT => Some(Self::Connect),
             WORKLOAD_HOOK_SENDMSG => Some(Self::Sendmsg),
             WORKLOAD_HOOK_BIND => Some(Self::Bind),
+            WORKLOAD_HOOK_INGRESS => Some(Self::Ingress),
             _ => None,
         }
     }
@@ -1001,6 +1026,11 @@ pub struct WorkloadReach {
     /// What this rule has refused since the policy was published, from the
     /// kernel's own counter.
     pub denials: u64,
+    /// For a rule naming a workload on another node, which ends decide it.
+    pub peer_ends: Option<super::workload_peer::PeerEnds>,
+    /// Why the node a connection arrives at cannot decide it, for a rule
+    /// decided where the connection leaves alone.
+    pub peer_reason: Option<String>,
 }
 
 /// An IPv6 address as the eight groups it is written in.
@@ -1056,6 +1086,7 @@ impl WorkloadPolicy {
                 dst_ip: rule.dst_ip,
                 dst_port: rule.dst_port,
                 dst_fqdn: workload.fqdn.clone(),
+                dst_peer: workload.peer.clone(),
                 enabled: rule.enabled,
             });
         }
@@ -1842,6 +1873,53 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_workload_is_the_only_destination_of_its_rule() {
+        let peer = crate::firewall::workload_peer::PeerSelector {
+            service_account: Some("db".to_string()),
+            ..Default::default()
+        };
+        let mut named = rule("to-db", 10, FirewallAction::Allow);
+        named.protocol = Protocol::Tcp;
+        if let Some(workload) = named.workload.as_mut() {
+            workload.peer = Some(peer);
+        }
+        assert!(named.validate_workload().is_ok());
+
+        let mut both = named.clone();
+        both.dst_ip = Some(network([10, 0, 0, 0], 8));
+        assert!(matches!(
+            both.validate_workload(),
+            Err(FirewallError::WorkloadMatcherUnsupported {
+                matcher: "peer",
+                ..
+            })
+        ));
+
+        let mut icmp = named.clone();
+        icmp.protocol = Protocol::Icmp;
+        assert!(icmp.validate_workload().is_err());
+
+        let mut empty = named;
+        if let Some(workload) = empty.workload.as_mut() {
+            workload.peer = Some(crate::firewall::workload_peer::PeerSelector::default());
+        }
+        assert!(empty.validate_workload().is_err());
+
+        let policy = WorkloadPolicy::from_rules(&[{
+            let mut r = rule("copied", 10, FirewallAction::Allow);
+            if let Some(workload) = r.workload.as_mut() {
+                workload.peer = Some(crate::firewall::workload_peer::PeerSelector {
+                    guest: Some("vm1".to_string()),
+                    ..Default::default()
+                });
+            }
+            r
+        }])
+        .expect("a valid policy");
+        assert!(policy.rules()[0].dst_peer.is_some());
+    }
+
+    #[test]
     fn the_same_matchers_are_fine_on_a_rule_naming_no_workload() {
         let mut address_only = rule("address-only", 10, FirewallAction::Reject);
         address_only.workload = None;
@@ -2019,6 +2097,10 @@ mod tests {
         assert_eq!(
             WorkloadHook::from_kernel(WORKLOAD_HOOK_BIND),
             Some(WorkloadHook::Bind)
+        );
+        assert_eq!(
+            WorkloadHook::from_kernel(WORKLOAD_HOOK_INGRESS),
+            Some(WorkloadHook::Ingress)
         );
         assert_eq!(WorkloadHook::from_kernel(9), None);
         assert_eq!(WorkloadHook::Bind.as_str(), "bind");

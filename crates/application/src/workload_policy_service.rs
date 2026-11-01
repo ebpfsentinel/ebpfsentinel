@@ -31,6 +31,7 @@
 //! a cgroup id and nothing else.
 
 use std::collections::{BTreeMap, HashMap};
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use domain::common::entity::RuleId;
@@ -43,8 +44,10 @@ use domain::firewall::fqdn::{
 };
 use domain::firewall::workload::{
     WorkloadDenial, WorkloadDenialRecord, WorkloadFacts, WorkloadPolicy, WorkloadReach,
-    cgroup_path_of, unit_of,
+    WorkloadRule, cgroup_path_of, unit_of,
 };
+use domain::firewall::workload_peer::{PeerEnds, PeerRuleEnds, source_matches_remote};
+use domain::identity::remote::RemoteIdentities;
 use domain::process::engine::Lineage;
 use domain::process::entity::{ProcessEntry, ProcessIdentity};
 use ebpf_common::workload_policy::WORKLOAD_POLICY_MAX_RULES;
@@ -248,6 +251,87 @@ fn compose(
         .map_err(|e| DomainError::InvalidRule(e.to_string()))
 }
 
+/// Where the rules naming a remote workload stand on this node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerStatus {
+    /// Every enabled rule naming a remote workload, with the ends that
+    /// decide it.
+    pub rules: Vec<PeerRuleEnds>,
+    /// The version of the list of remote identities the tables were last
+    /// written from, absent before the first one arrived.
+    pub list_version: Option<String>,
+    /// Remote addresses a rule names as its destination.
+    pub destinations: usize,
+    /// Remote addresses the destination end decides a connection from.
+    pub sources: usize,
+    /// Addresses a full table refused, which stay unnamed.
+    pub refused: usize,
+}
+
+/// What the last write of the remote tables was made from.
+#[derive(Debug, Default)]
+struct PeerState {
+    /// The list version and the policy generation written, or nothing when
+    /// the next sync has to write whatever it is handed.
+    synced: Option<(String, u64)>,
+    generation: u64,
+    destinations: usize,
+    sources: usize,
+    refused: usize,
+}
+
+/// Per remote address, the slots whose remote workload the list names there,
+/// and the slots decided at the destination whose source half the workload
+/// there satisfies. Addresses no slot names are left out.
+type PeerTables = (Vec<(IpAddr, u64)>, Vec<(IpAddr, u64)>);
+
+/// The enabled rule in kernel slot `slot`.
+fn slot_rule(policy: &WorkloadPolicy, slot: usize) -> Option<&WorkloadRule> {
+    u16::try_from(slot)
+        .ok()
+        .and_then(|slot| policy.rule_in_slot(slot))
+}
+
+fn peer_tables(policy: &WorkloadPolicy, list: Option<&RemoteIdentities>) -> PeerTables {
+    let Some(list) = list else {
+        return (Vec::new(), Vec::new());
+    };
+    let ends = policy.peer_ends();
+    if ends.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let named: Vec<_> = ends
+        .iter()
+        .filter_map(|ends| {
+            let rule = slot_rule(policy, ends.slot)?;
+            Some((ends, rule, rule.dst_peer.as_ref()?))
+        })
+        .collect();
+    let mut destinations = Vec::new();
+    let mut sources = Vec::new();
+    for entry in list.entries() {
+        let identity = &entry.identity;
+        let mut to = 0u64;
+        let mut from = 0u64;
+        for (ends, rule, peer) in &named {
+            let bit = 1u64 << (ends.slot & 63);
+            if peer.matches_remote(identity) {
+                to |= bit;
+            }
+            if ends.ends == PeerEnds::Both && source_matches_remote(&rule.selector, identity) {
+                from |= bit;
+            }
+        }
+        if to != 0 {
+            destinations.push((identity.address, to));
+        }
+        if from != 0 {
+            sources.push((identity.address, from));
+        }
+    }
+    (destinations, sources)
+}
+
 /// Keeps the kernel's view of which workload is which.
 pub struct WorkloadPolicyService {
     /// The policy in force: the configured rules and every container's
@@ -266,6 +350,8 @@ pub struct WorkloadPolicyService {
     /// grant, so a reload and an answer never interleave.
     fqdn: Mutex<FqdnState>,
     cgroups: Option<Arc<dyn CgroupReader>>,
+    /// The remote tables, as last written.
+    peers: Mutex<PeerState>,
     /// Weak because the table holds this service: the table is what learns
     /// of an exec, and this is what a new policy has to be replayed over.
     /// An `Arc` both ways would be a cycle neither end ever drops.
@@ -291,6 +377,7 @@ impl WorkloadPolicyService {
             cgroup_masks: Mutex::new(HashMap::new()),
             fqdn: Mutex::new(fqdn),
             cgroups: None,
+            peers: Mutex::new(PeerState::default()),
             processes: OnceLock::new(),
         }
     }
@@ -405,6 +492,19 @@ impl WorkloadPolicyService {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        {
+            // The publish emptied the remote tables, whose masks are slots:
+            // the next sync writes them again whatever list it is handed.
+            let mut peers = self
+                .peers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            peers.synced = None;
+            peers.generation += 1;
+            peers.destinations = 0;
+            peers.sources = 0;
+            peers.refused = 0;
+        }
         let rules = policy.rules().len();
         *self
             .policy
@@ -531,6 +631,11 @@ impl WorkloadPolicyService {
         if let Err(err) = maps.set_task_selectors(entry.pid, masks.task) {
             warn!(pid = entry.pid, error = %err, "a task's workload selectors were not written");
         }
+        if entry.cgroup_id != 0
+            && let Err(err) = maps.set_peer_targets(entry.cgroup_id, self.peer_targets(&resolved))
+        {
+            warn!(pid = entry.pid, error = %err, "a cgroup's remote workload rules were not written");
+        }
         if let ProcessIdentity::Path { path, dev, inode } = &entry.identity
             && let Err(err) = maps.note_lineage_executable(path, *dev, *inode)
         {
@@ -548,6 +653,102 @@ impl WorkloadPolicyService {
                 task = masks.task,
                 "a task was named by the workload policy"
             );
+        }
+    }
+
+    /// The slots decided at the destination whose remote workload is this
+    /// one, as a mask.
+    fn peer_targets(&self, resolved: &ResolvedWorkload) -> u64 {
+        let policy = self
+            .policy
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let facts = resolved.facts();
+        let mut mask = 0u64;
+        for ends in policy.peer_ends() {
+            if ends.ends != PeerEnds::Both {
+                continue;
+            }
+            if let Some(peer) = slot_rule(&policy, ends.slot).and_then(|r| r.dst_peer.as_ref())
+                && peer.matches_local(&facts)
+            {
+                mask |= 1u64 << (ends.slot & 63);
+            }
+        }
+        mask
+    }
+
+    /// Write the remote tables from `list`, the list of remote identities
+    /// the console last handed this node.
+    ///
+    /// Nothing is written when neither the list nor the policy changed since
+    /// the last write. With no list, every remote table is emptied: a rule
+    /// naming a remote workload then applies to no address, which is what an
+    /// unnamed address means.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the map port refuses other than a full table.
+    pub fn sync_peers(&self, list: Option<&RemoteIdentities>) -> Result<(), DomainError> {
+        let Some(maps) = &self.maps else {
+            return Ok(());
+        };
+        let version = list.map_or_else(String::new, |list| list.version().to_string());
+        let mut peers = self
+            .peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let wanted = (version, peers.generation);
+        if peers.synced.as_ref() == Some(&wanted) {
+            return Ok(());
+        }
+        let (destinations, sources) = {
+            let policy = self
+                .policy
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            peer_tables(&policy, list)
+        };
+        let refused = maps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace_peer_addresses(&destinations, &sources)?;
+        peers.destinations = destinations.len();
+        peers.sources = sources.len();
+        peers.refused = refused;
+        info!(
+            list = %wanted.0,
+            destinations = destinations.len(),
+            sources = sources.len(),
+            refused,
+            "remote workload tables written"
+        );
+        peers.synced = Some(wanted);
+        Ok(())
+    }
+
+    /// Where the rules naming a remote workload stand.
+    #[must_use]
+    pub fn peer_status(&self) -> PeerStatus {
+        let rules = self
+            .policy
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .peer_ends();
+        let peers = self
+            .peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        PeerStatus {
+            rules,
+            list_version: peers
+                .synced
+                .as_ref()
+                .map(|(version, _)| version.clone())
+                .filter(|version| !version.is_empty()),
+            destinations: peers.destinations,
+            sources: peers.sources,
+            refused: peers.refused,
         }
     }
 
@@ -634,17 +835,27 @@ impl WorkloadPolicyService {
             .policy
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut peers: HashMap<usize, PeerRuleEnds> = policy
+            .peer_ends()
+            .into_iter()
+            .map(|ends| (ends.slot, ends))
+            .collect();
         Ok(policy
             .in_slot_order()
             .enumerate()
             .filter(|(_, rule)| facts.is_none_or(|facts| rule.selector.matches(facts)))
-            .map(|(slot, rule)| WorkloadReach {
-                rule: rule.id.clone(),
-                allows: !rule.refuses(),
-                mode: rule.mode,
-                selector: rule.selector.describe(),
-                destination: rule.describe_destination(),
-                denials: counts.get(slot).copied().unwrap_or(0),
+            .map(|(slot, rule)| {
+                let peer = peers.remove(&slot);
+                WorkloadReach {
+                    rule: rule.id.clone(),
+                    allows: !rule.refuses(),
+                    mode: rule.mode,
+                    selector: rule.selector.describe(),
+                    destination: rule.describe_destination(),
+                    denials: counts.get(slot).copied().unwrap_or(0),
+                    peer_ends: peer.as_ref().map(|peer| peer.ends),
+                    peer_reason: peer.and_then(|peer| peer.reason),
+                }
             })
             .collect())
     }
@@ -968,6 +1179,9 @@ mod tests {
         DestinationAddr, KubernetesMatchers, LineageMatchers, WorkloadDestination, WorkloadHook,
         WorkloadMode, WorkloadRule, WorkloadSelector,
     };
+    use domain::firewall::workload_peer::PeerSelector;
+    use domain::identity::remote::{RemoteEntry, RemoteSnapshot};
+    use domain::identity::{AddressIdentity, IdentityKind};
     use domain::netpol::LabelSelector;
 
     use super::*;
@@ -980,6 +1194,10 @@ mod tests {
         denials: Vec<u64>,
         grants: HashMap<FqdnGrantKey, u64>,
         executables: Vec<(String, u64, u64)>,
+        peer_destinations: HashMap<IpAddr, u64>,
+        peer_sources: HashMap<IpAddr, u64>,
+        peer_targets: HashMap<u64, u64>,
+        peer_writes: usize,
     }
 
     #[derive(Clone, Default)]
@@ -996,6 +1214,9 @@ mod tests {
             held.cgroups.clear();
             held.tasks.clear();
             held.grants.clear();
+            held.peer_destinations.clear();
+            held.peer_sources.clear();
+            held.peer_targets.clear();
             Ok(())
         }
 
@@ -1031,6 +1252,28 @@ mod tests {
             Ok(())
         }
 
+        fn replace_peer_addresses(
+            &mut self,
+            destinations: &[(IpAddr, u64)],
+            sources: &[(IpAddr, u64)],
+        ) -> Result<usize, DomainError> {
+            let mut held = self.0.lock().unwrap();
+            held.peer_destinations = destinations.iter().copied().collect();
+            held.peer_sources = sources.iter().copied().collect();
+            held.peer_writes += 1;
+            Ok(0)
+        }
+
+        fn set_peer_targets(&mut self, cgroup_id: u64, mask: u64) -> Result<(), DomainError> {
+            let mut held = self.0.lock().unwrap();
+            if mask == 0 {
+                held.peer_targets.remove(&cgroup_id);
+            } else {
+                held.peer_targets.insert(cgroup_id, mask);
+            }
+            Ok(())
+        }
+
         fn note_lineage_executable(
             &mut self,
             path: &str,
@@ -1056,6 +1299,7 @@ mod tests {
 
     fn rule(id: &str, selector: WorkloadSelector) -> WorkloadRule {
         WorkloadRule {
+            dst_peer: None,
             id: RuleId(id.to_string()),
             priority: 10,
             action: FirewallAction::Deny,
@@ -1417,6 +1661,147 @@ mod tests {
         // A host process is in no pod, so neither rule names it.
         service.record_exec(&entry(42, "/app/api"));
         assert_eq!(maps.0.lock().unwrap().cgroups.get(&4242), Some(&0));
+    }
+
+    fn labels(app: &str) -> LabelSelector {
+        serde_json::from_str(&format!(r#"{{"match_labels":{{"app":"{app}"}}}}"#)).unwrap()
+    }
+
+    fn peer_rule(id: &str, from: &str, to: &str) -> WorkloadRule {
+        let selector = WorkloadSelector::with_kubernetes(
+            None,
+            None,
+            None,
+            None,
+            KubernetesMatchers {
+                pods: Some(labels(from)),
+                ..KubernetesMatchers::default()
+            },
+        )
+        .expect("valid");
+        WorkloadRule {
+            action: FirewallAction::Allow,
+            protocol: Protocol::Tcp,
+            dst_peer: Some(PeerSelector {
+                pods: Some(labels(to)),
+                ..PeerSelector::default()
+            }),
+            ..rule(id, selector)
+        }
+    }
+
+    fn remote_pod(address: &str, app: &str) -> RemoteEntry {
+        RemoteEntry {
+            node: "node-2".to_string(),
+            identity: AddressIdentity {
+                address: address.parse().unwrap(),
+                kind: IdentityKind::Pod,
+                container: Some(app.to_string()),
+                image: None,
+                pod: Some(format!("{app}-0")),
+                namespace: Some("payments".to_string()),
+                service_account: None,
+                guest: None,
+                pod_labels: [("app".to_string(), app.to_string())].into(),
+                namespace_labels: BTreeMap::new(),
+                services: Vec::new(),
+            },
+        }
+    }
+
+    fn remote_list(version: &str) -> RemoteIdentities {
+        RemoteIdentities::accept(
+            RemoteSnapshot {
+                version: version.to_string(),
+                entries: vec![remote_pod("10.1.0.5", "db"), remote_pod("10.1.0.6", "api")],
+                conflicts: 0,
+            },
+            1,
+        )
+        .expect("a valid list")
+    }
+
+    #[test]
+    fn the_remote_tables_carry_the_slots_each_address_satisfies() {
+        let maps = SharedMaps::default();
+        let service = service(
+            vec![
+                peer_rule("api-to-db", "api", "db"),
+                peer_rule("db-to-api", "db", "api"),
+            ],
+            maps.clone(),
+        );
+        let db: IpAddr = "10.1.0.5".parse().unwrap();
+        let api: IpAddr = "10.1.0.6".parse().unwrap();
+
+        service.sync_peers(Some(&remote_list("v1"))).unwrap();
+        {
+            let held = maps.0.lock().unwrap();
+            assert_eq!(held.peer_destinations.get(&db), Some(&0b01));
+            assert_eq!(held.peer_destinations.get(&api), Some(&0b10));
+            assert_eq!(held.peer_sources.get(&api), Some(&0b01));
+            assert_eq!(held.peer_sources.get(&db), Some(&0b10));
+            assert_eq!(held.peer_writes, 1);
+        }
+
+        // The same list under the same policy writes nothing.
+        service.sync_peers(Some(&remote_list("v1"))).unwrap();
+        assert_eq!(maps.0.lock().unwrap().peer_writes, 1);
+
+        // A local pod labelled api is the target of the rule reaching api.
+        service.record_exec(&pod_entry(41, Vec::new()));
+        assert_eq!(maps.0.lock().unwrap().peer_targets.get(&4242), Some(&0b10));
+
+        let status = service.peer_status();
+        assert_eq!(status.rules.len(), 2);
+        assert!(status.rules.iter().all(|r| r.ends == PeerEnds::Both));
+        assert_eq!(status.list_version.as_deref(), Some("v1"));
+        assert_eq!((status.destinations, status.sources), (2, 2));
+
+        // A reload empties the tables, and the next sync writes them again.
+        service
+            .apply(WorkloadPolicy::new(vec![peer_rule("api-to-db", "api", "db")]).unwrap())
+            .unwrap();
+        assert_eq!(service.peer_status().list_version, None);
+        service.sync_peers(Some(&remote_list("v1"))).unwrap();
+        let held = maps.0.lock().unwrap();
+        assert_eq!(held.peer_writes, 2);
+        assert_eq!(held.peer_destinations.get(&db), Some(&0b01));
+        assert_eq!(held.peer_destinations.get(&api), None);
+    }
+
+    #[test]
+    fn no_list_empties_the_remote_tables() {
+        let maps = SharedMaps::default();
+        let service = service(vec![peer_rule("api-to-db", "api", "db")], maps.clone());
+        service.sync_peers(Some(&remote_list("v1"))).unwrap();
+        service.sync_peers(None).unwrap();
+        let held = maps.0.lock().unwrap();
+        assert!(held.peer_destinations.is_empty());
+        assert!(held.peer_sources.is_empty());
+        assert_eq!(held.peer_writes, 2);
+    }
+
+    #[test]
+    fn a_source_named_by_executable_is_left_to_the_source_node() {
+        let maps = SharedMaps::default();
+        let mut by_exe = exe_rule("curl-to-db", "/usr/bin/curl");
+        by_exe.action = FirewallAction::Allow;
+        by_exe.protocol = Protocol::Tcp;
+        by_exe.dst_peer = Some(PeerSelector {
+            pods: Some(labels("db")),
+            ..PeerSelector::default()
+        });
+        let service = service(vec![by_exe], maps.clone());
+        service.sync_peers(Some(&remote_list("v1"))).unwrap();
+        let held = maps.0.lock().unwrap();
+        // The source still looks the destination up, the destination reads
+        // nothing it could not decide.
+        assert_eq!(held.peer_destinations.len(), 1);
+        assert!(held.peer_sources.is_empty());
+        drop(held);
+        let status = service.peer_status();
+        assert_eq!(status.rules[0].ends, PeerEnds::Source);
     }
 
     #[test]

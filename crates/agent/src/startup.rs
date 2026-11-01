@@ -63,8 +63,7 @@ use infrastructure::config::AgentConfig;
 use infrastructure::constants::{
     ALERT_CHANNEL_CAPACITY, CAPTURE_STOP_TIMEOUT, CGROUP_SHAPING_READ_INTERVAL,
     CONTAINER_LABEL_CHANNEL_CAPACITY, EVENT_CHANNEL_CAPACITY, GRACEFUL_SHUTDOWN_TIMEOUT,
-    WORKLOAD_DENIAL_CHANNEL_CAPACITY, WORKLOAD_DENIAL_READ_INTERVAL, WORKLOAD_DNS_CHANNEL_CAPACITY,
-    WORKLOAD_FQDN_SWEEP_INTERVAL,
+    WORKLOAD_DENIAL_CHANNEL_CAPACITY,
 };
 use infrastructure::logging::init_logging;
 use infrastructure::retry::RetryConfig;
@@ -2127,6 +2126,11 @@ pub async fn run(
     let mut workload_policy_service: Option<
         Arc<application::workload_policy_service::WorkloadPolicyService>,
     > = None;
+    // The addresses of the other nodes, as a console hands them. Made here
+    // rather than with the other handles because the workload firewall reads
+    // it from the moment it loads.
+    let remote_identities =
+        Arc::new(application::remote_identity_store::RemoteIdentityStore::new());
     // The tracepoint links live here until the manager takes them over.
     let mut process_attacher: Option<adapters::ebpf::ProcessTracingAttacher> = None;
     // The signal link and the service that arms through it. The attacher is
@@ -2889,142 +2893,15 @@ pub async fn run(
                     // so no task is resolved against an empty rule array.
                     service.apply(workload_policy.clone())?;
 
-                    // Every refusal becomes an alert naming the rule that
-                    // refused it. The record carries a slot rather than a
-                    // rule identifier, because the kernel walks an array,
-                    // so the policy in force is what turns one into the
-                    // other and a record that crossed a reload is dropped
-                    // rather than named after whoever inherited its slot.
-                    let (denial_tx, mut denial_rx) =
-                        mpsc::channel::<domain::firewall::workload::WorkloadDenialRecord>(
-                            WORKLOAD_DENIAL_CHANNEL_CAPACITY,
-                        );
-                    let rb_obs = RingBufObserver::new(
-                        adapters::ebpf::workload_event_reader::RINGBUF_SOURCE,
-                        Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+                    crate::runtime::spawn_workload_firewall_tasks(
+                        &service,
+                        &mut loader,
+                        reader,
+                        &metrics,
+                        alert_tx.clone(),
+                        &remote_identities,
+                        &workload_cancel,
                     );
-                    let reader_cancel = workload_cancel.clone();
-                    tokio::spawn(async move {
-                        reader.run(denial_tx, reader_cancel, rb_obs).await;
-                    });
-                    let naming = Arc::clone(&service);
-                    let denial_alert_tx = alert_tx.clone();
-                    tokio::spawn(async move {
-                        while let Some(record) = denial_rx.recv().await {
-                            let Some(denial) = naming.name_denial(record) else {
-                                continue;
-                            };
-                            // The task is named by the pipeline, off the
-                            // thread group the hook reported: a socket hook
-                            // has no flow to look the workload up by.
-                            let alert =
-                                domain::alert::entity::Alert::from_workload_denial(&denial, None);
-                            if denial_alert_tx
-                                .send(application::alert_event::AlertEvent::WorkloadDenial(
-                                    Box::new(alert),
-                                ))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    });
-
-                    // The answers named workloads are given, read so the
-                    // addresses a rule names by DNS name open for the pod
-                    // that asked. Without the reader those rules stay
-                    // closed, which is the side a failure belongs on.
-                    match adapters::ebpf::WorkloadDnsReader::new(loader.ebpf_mut()) {
-                        Ok(dns_reader) => {
-                            let (dns_tx, mut dns_rx) =
-                                mpsc::channel::<domain::firewall::fqdn::DnsCapture>(
-                                    WORKLOAD_DNS_CHANNEL_CAPACITY,
-                                );
-                            let dns_obs = RingBufObserver::new(
-                                adapters::ebpf::workload_dns_reader::RINGBUF_SOURCE,
-                                Arc::clone(&metrics) as Arc<dyn MetricsPort>,
-                            );
-                            let dns_cancel = workload_cancel.clone();
-                            tokio::spawn(async move {
-                                dns_reader.run(dns_tx, dns_cancel, dns_obs).await;
-                            });
-                            let learning = Arc::clone(&service);
-                            tokio::spawn(async move {
-                                while let Some(capture) = dns_rx.recv().await {
-                                    learning.observe_dns(&capture);
-                                }
-                            });
-                            let sweeping = Arc::clone(&service);
-                            let fqdn_cancel = workload_cancel.clone();
-                            tokio::spawn(async move {
-                                let mut ticker =
-                                    tokio::time::interval(WORKLOAD_FQDN_SWEEP_INTERVAL);
-                                loop {
-                                    tokio::select! {
-                                        () = fqdn_cancel.cancelled() => break,
-                                        _ = ticker.tick() => {}
-                                    }
-                                    sweeping.sweep_fqdn(
-                                        adapters::ebpf::ringbuf_observer::boottime_now_ns(),
-                                    );
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            warn!(
-                                "workload DNS answers unreadable, rules naming a destination by name stay closed: {e}"
-                            );
-                        }
-                    }
-
-                    // The per-rule counters are the kernel's own and are
-                    // read rather than counted off the records, because the
-                    // ring can drop one under load and a security count
-                    // that quietly loses a refusal is worse than none. What
-                    // goes to Prometheus is the difference between two
-                    // readings, and a rule whose count went backwards was
-                    // republished rather than refused a negative number of
-                    // times.
-                    let counting = Arc::clone(&service);
-                    let counter_metrics = Arc::clone(&metrics) as Arc<dyn MetricsPort>;
-                    let counter_cancel = workload_cancel.clone();
-                    tokio::spawn(async move {
-                        use std::collections::HashMap;
-
-                        let mut seen: HashMap<String, u64> = HashMap::new();
-                        let mut ticker = tokio::time::interval(WORKLOAD_DENIAL_READ_INTERVAL);
-                        loop {
-                            tokio::select! {
-                                () = counter_cancel.cancelled() => break,
-                                _ = ticker.tick() => {}
-                            }
-                            let counts = match counting.denials_by_rule() {
-                                Ok(counts) => counts,
-                                Err(e) => {
-                                    warn!("workload denial counters unreadable: {e}");
-                                    continue;
-                                }
-                            };
-                            let enforcing = counting.policy();
-                            for (rule, total) in counts {
-                                let previous = seen.get(&rule.0).copied().unwrap_or(0);
-                                let delta = total.saturating_sub(previous);
-                                seen.insert(rule.0.clone(), total);
-                                if delta == 0 {
-                                    continue;
-                                }
-                                let enforced = enforcing
-                                    .rules()
-                                    .iter()
-                                    .find(|candidate| candidate.id == rule)
-                                    .is_some_and(
-                                        domain::firewall::workload::WorkloadRule::enforces,
-                                    );
-                                counter_metrics.record_workload_denials(&rule.0, enforced, delta);
-                            }
-                        }
-                    });
 
                     // The quarantine's own two maps, taken from the same
                     // object. Turned off, they are left in it: an unused map
@@ -4151,9 +4028,7 @@ pub async fn run(
                 workloads: workloads.clone(),
                 metrics: Arc::clone(&metrics),
                 ebpf_loaded: Arc::clone(&ebpf_loaded),
-                remote_identities: Arc::new(
-                    application::remote_identity_store::RemoteIdentityStore::new(),
-                ),
+                remote_identities: Arc::clone(&remote_identities),
             }),
             ebpf_dir.clone(),
         );
@@ -5459,7 +5334,7 @@ pub async fn run(
             crate::ebpf_metrics::run_kernel_metrics_loop(
                 shared_readers,
                 kr_metrics,
-                Duration::from_secs(10),
+                infrastructure::constants::KERNEL_METRICS_INTERVAL,
                 kr_cancel,
             )
             .await;

@@ -12,6 +12,7 @@ use domain::firewall::fqdn::{DEFAULT_GRACE_SECS, FqdnPattern, WorkloadDnsSetting
 use domain::firewall::workload::{
     KubernetesMatchers, LineageMatchers, WorkloadMatch, WorkloadMode, WorkloadSelector,
 };
+use domain::firewall::workload_peer::PeerSelector;
 use domain::netpol::LabelSelector;
 use serde::{Deserialize, Serialize};
 
@@ -614,6 +615,13 @@ pub struct WorkloadMatchConfig {
     /// answers this workload is given by `firewall.workload_dns.resolvers`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fqdn: Vec<String>,
+
+    /// The destination named by the workload on another node rather than by
+    /// address: `kind`, `container`, `pods`, `namespaces`,
+    /// `service_account` or `guest`, read against the list of remote
+    /// identities the console hands this node. In place of `dst_ip`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<PeerSelector>,
 }
 
 fn default_workload_mode() -> String {
@@ -664,7 +672,15 @@ impl WorkloadMatchConfig {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        if let Some(peer) = &self.peer {
+            peer.validate().map_err(|e| ConfigError::Validation {
+                field: format!("{prefix}.workload.peer"),
+                message: e.to_string(),
+            })?;
+        }
+
         Ok(WorkloadMatch {
+            peer: self.peer.clone(),
             selector,
             mode,
             fqdn,
@@ -1186,6 +1202,72 @@ workload:
             "service_account=api pods={app=api,tier in (front,edge)} \
              namespaces={kubernetes.io/metadata.name=payments}"
         );
+    }
+
+    #[test]
+    fn a_rule_may_name_a_workload_on_another_node() {
+        let rule = workload_rule(
+            r"
+id: fw-api-to-db
+priority: 10
+action: allow
+protocol: tcp
+dst_port: 5432
+workload:
+  pods:
+    match_labels:
+      app: api
+  peer:
+    kind: pod
+    pods:
+      match_labels:
+        app: db
+",
+        );
+
+        rule.validate(0).expect("a valid rule");
+        let domain_rule = rule.to_domain_rule(&HashMap::new()).expect("a domain rule");
+        let peer = domain_rule
+            .workload
+            .expect("the workload half")
+            .peer
+            .expect("the remote workload");
+        assert_eq!(peer.kind, Some(domain::identity::IdentityKind::Pod));
+        assert!(peer.pods.is_some());
+    }
+
+    #[test]
+    fn a_remote_workload_naming_nothing_names_the_line() {
+        let rule = workload_rule(
+            r"
+id: fw-empty-peer
+priority: 10
+action: deny
+workload:
+  exe: /usr/bin/curl
+  peer: {}
+",
+        );
+        let err = rule
+            .to_domain_rule(&HashMap::new())
+            .expect_err("an empty remote selector is refused");
+        assert!(err.to_string().contains("workload.peer"), "{err}");
+    }
+
+    #[test]
+    fn a_misspelled_remote_matcher_is_refused() {
+        let parsed: Result<FirewallRuleConfig, _> = serde_norway::from_str(
+            r"
+id: fw-typo
+priority: 10
+action: deny
+workload:
+  exe: /usr/bin/curl
+  peer:
+    pod: {}
+",
+        );
+        assert!(parsed.is_err());
     }
 
     #[test]

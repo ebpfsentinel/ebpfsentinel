@@ -1574,6 +1574,7 @@ pub async fn start_host_observation(
     config: &AgentConfig,
     services: &ServiceHandles,
     alerts: mpsc::Sender<application::alert_event::AlertEvent>,
+    workload: Option<&Arc<application::workload_policy_service::WorkloadPolicyService>>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<Option<HostObservation>> {
     if !config.process_table.enabled {
@@ -1631,7 +1632,17 @@ pub async fn start_host_observation(
         "host rules loaded"
     );
     table = table.with_host_rules(Arc::clone(&host_rules));
+    // The table is where an exec is learned of, so it is where the kernel's
+    // idea of which workload a task is gets written.
+    if let Some(workload) = workload {
+        table = table.with_workload_policy(Arc::clone(workload));
+    }
     let processes = Arc::new(table);
+    // A new policy renumbers the bits, so it is replayed over the tasks
+    // already running rather than waiting for each of them to exec again.
+    if let Some(workload) = workload {
+        workload.watch_processes(&processes);
+    }
     services.workloads.install_processes(Arc::clone(&processes));
     let writer = Arc::clone(&processes);
     tokio::spawn(async move {
@@ -1647,6 +1658,307 @@ pub async fn start_host_observation(
         host_rules,
         _tracing: tracing,
     }))
+}
+
+/// A workload firewall loaded for a binary that does not run the agent's own
+/// start-up path. The hooks stay attached while this lives.
+pub struct WorkloadFirewall {
+    /// The policy in force, what it refused and the remote tables.
+    pub service: Arc<application::workload_policy_service::WorkloadPolicyService>,
+    _loader: EbpfLoader,
+    _attacher: adapters::ebpf::workload_firewall_attach::WorkloadFirewallAttacher,
+}
+
+/// Load the workload firewall off the configuration's workload rules, for a
+/// binary that does not run the agent's own start-up path.
+///
+/// `None` when the configuration carries no workload rule, or when the
+/// kernel refused the hooks under a policy that only observes: the reason is
+/// published where the status route reads it either way. The rules' DNS
+/// answers, refusals and counters are read until `cancel`, and the remote
+/// tables follow `services.remote_identities`.
+///
+/// # Errors
+///
+/// Returns an error when the rules do not convert, when the policy cannot be
+/// written to the kernel's tables, and when the hooks did not attach under a
+/// policy that refuses: an agent reporting healthy while a rule in the file
+/// enforces nothing is the outcome worth refusing to start over.
+pub fn start_workload_firewall(
+    config: &AgentConfig,
+    services: &ServiceHandles,
+    alerts: mpsc::Sender<application::alert_event::AlertEvent>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> anyhow::Result<Option<WorkloadFirewall>> {
+    let policy = domain::firewall::workload::WorkloadPolicy::from_rules(&config.firewall_rules()?)?
+        .with_dns(config.workload_dns()?)?;
+    if policy.is_empty() {
+        services
+            .metrics
+            .clear_ebpf_program_status("cgroup_workload_firewall");
+        adapters::ebpf::workload_firewall_attach::publish_status(
+            adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus::default(),
+        );
+        return Ok(None);
+    }
+    let ebpf_dir = startup::resolve_ebpf_program_dir(config);
+    let reason = match startup::try_load_cgroup_workload_firewall(&ebpf_dir, config) {
+        Ok((mut loader, metrics_rdr, manager, reader, attacher, status)) if status.attached => {
+            let proc_root = startup::resolver_proc_path(
+                &config.container.resolver.proc_path,
+                &startup::host_proc_root(),
+            );
+            let service = Arc::new(
+                application::workload_policy_service::WorkloadPolicyService::new(policy.clone())
+                    .with_maps(Box::new(manager))
+                    .with_cgroups(Arc::new(adapters::container::ProcContainerResolver::new(
+                        &proc_root,
+                    ))),
+            );
+            // The rules go in before the table starts naming tasks, so no
+            // task is resolved against an empty rule array.
+            service.apply(policy.clone())?;
+            spawn_workload_firewall_tasks(
+                &service,
+                &mut loader,
+                reader,
+                &services.metrics,
+                alerts,
+                &services.remote_identities,
+                cancel,
+            );
+            // The program's own counters, polled the way every other
+            // program's are: a per-CPU array wakes nobody.
+            if let Some(rdr) = metrics_rdr {
+                let readers = Arc::new(RwLock::new(vec![rdr]));
+                let port = Arc::clone(&services.metrics) as Arc<dyn MetricsPort>;
+                let metrics_cancel = cancel.clone();
+                tokio::spawn(async move {
+                    crate::ebpf_metrics::run_kernel_metrics_loop(
+                        readers,
+                        port,
+                        infrastructure::constants::KERNEL_METRICS_INTERVAL,
+                        metrics_cancel,
+                    )
+                    .await;
+                });
+            }
+            services
+                .metrics
+                .set_ebpf_program_status("cgroup_workload_firewall", true);
+            info!(
+                rules = policy.rules().len(),
+                enforcing = policy.enforces(),
+                "eBPF cgroup-workload-firewall active"
+            );
+            return Ok(Some(WorkloadFirewall {
+                service,
+                _loader: loader,
+                _attacher: attacher,
+            }));
+        }
+        Ok((_, _, _, _, _, status)) => status
+            .reason
+            .unwrap_or_else(|| "the kernel refused the attach".to_string()),
+        Err(e) => e.to_string(),
+    };
+    services
+        .metrics
+        .set_ebpf_program_status("cgroup_workload_firewall", false);
+    adapters::ebpf::workload_firewall_attach::publish_status(
+        adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus {
+            attached: false,
+            cgroup: config.attribution.cgroup_root.clone(),
+            hooks: Vec::new(),
+            reason: Some(reason.clone()),
+            brokered: false,
+        },
+    );
+    if policy.enforces() {
+        return Err(anyhow::anyhow!(
+            adapters::ebpf::workload_firewall_attach::enforcement_unavailable(&reason)
+        ));
+    }
+    warn!("workload firewall not loaded, the rules that observe observe nothing: {reason}");
+    Ok(None)
+}
+
+/// Read the answers named workloads are given, so the addresses a rule names
+/// by DNS name open for the pod that asked, and sweep the ones whose time ran
+/// out. Without the reader those rules stay closed, which is the side a
+/// failure belongs on.
+fn spawn_workload_dns_tasks(
+    service: &Arc<application::workload_policy_service::WorkloadPolicyService>,
+    loader: &mut EbpfLoader,
+    metrics: &Arc<AgentMetrics>,
+    cancel: &tokio_util::sync::CancellationToken,
+) {
+    match adapters::ebpf::WorkloadDnsReader::new(loader.ebpf_mut()) {
+        Ok(dns_reader) => {
+            let (dns_tx, mut dns_rx) = mpsc::channel::<domain::firewall::fqdn::DnsCapture>(
+                infrastructure::constants::WORKLOAD_DNS_CHANNEL_CAPACITY,
+            );
+            let dns_obs = RingBufObserver::new(
+                adapters::ebpf::workload_dns_reader::RINGBUF_SOURCE,
+                Arc::clone(metrics) as Arc<dyn MetricsPort>,
+            );
+            let dns_cancel = cancel.clone();
+            tokio::spawn(async move {
+                dns_reader.run(dns_tx, dns_cancel, dns_obs).await;
+            });
+            let learning = Arc::clone(service);
+            tokio::spawn(async move {
+                while let Some(capture) = dns_rx.recv().await {
+                    learning.observe_dns(&capture);
+                }
+            });
+            let sweeping = Arc::clone(service);
+            let fqdn_cancel = cancel.clone();
+            tokio::spawn(async move {
+                let mut ticker =
+                    tokio::time::interval(infrastructure::constants::WORKLOAD_FQDN_SWEEP_INTERVAL);
+                loop {
+                    tokio::select! {
+                        () = fqdn_cancel.cancelled() => break,
+                        _ = ticker.tick() => {}
+                    }
+                    sweeping.sweep_fqdn(adapters::ebpf::ringbuf_observer::boottime_now_ns());
+                }
+            });
+        }
+        Err(e) => {
+            warn!(
+                "workload DNS answers unreadable, rules naming a destination by name stay closed: {e}"
+            );
+        }
+    }
+}
+
+/// Run what a loaded workload firewall needs beside its hooks: the alerts
+/// its refusals raise, the DNS answers its rules on names learn from, the
+/// per-rule counters, and the remote tables kept in step with the list of
+/// remote identities.
+///
+/// Every task ends with `cancel`.
+pub fn spawn_workload_firewall_tasks(
+    service: &Arc<application::workload_policy_service::WorkloadPolicyService>,
+    loader: &mut EbpfLoader,
+    reader: adapters::ebpf::WorkloadEventReader,
+    metrics: &Arc<AgentMetrics>,
+    alerts: mpsc::Sender<application::alert_event::AlertEvent>,
+    remote_identities: &Arc<application::remote_identity_store::RemoteIdentityStore>,
+    cancel: &tokio_util::sync::CancellationToken,
+) {
+    // Every refusal becomes an alert naming the rule that
+    // refused it. The record carries a slot rather than a
+    // rule identifier, because the kernel walks an array,
+    // so the policy in force is what turns one into the
+    // other and a record that crossed a reload is dropped
+    // rather than named after whoever inherited its slot.
+    let (denial_tx, mut denial_rx) =
+        mpsc::channel::<domain::firewall::workload::WorkloadDenialRecord>(
+            infrastructure::constants::WORKLOAD_DENIAL_CHANNEL_CAPACITY,
+        );
+    let rb_obs = RingBufObserver::new(
+        adapters::ebpf::workload_event_reader::RINGBUF_SOURCE,
+        Arc::clone(metrics) as Arc<dyn MetricsPort>,
+    );
+    let reader_cancel = cancel.clone();
+    tokio::spawn(async move {
+        reader.run(denial_tx, reader_cancel, rb_obs).await;
+    });
+    let naming = Arc::clone(service);
+    let denial_alert_tx = alerts;
+    tokio::spawn(async move {
+        while let Some(record) = denial_rx.recv().await {
+            let Some(denial) = naming.name_denial(record) else {
+                continue;
+            };
+            // The task is named by the pipeline, off the
+            // thread group the hook reported: a socket hook
+            // has no flow to look the workload up by.
+            let alert = domain::alert::entity::Alert::from_workload_denial(&denial, None);
+            if denial_alert_tx
+                .send(application::alert_event::AlertEvent::WorkloadDenial(
+                    Box::new(alert),
+                ))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    spawn_workload_dns_tasks(service, loader, metrics, cancel);
+
+    // The per-rule counters are the kernel's own and are
+    // read rather than counted off the records, because the
+    // ring can drop one under load and a security count
+    // that quietly loses a refusal is worse than none. What
+    // goes to Prometheus is the difference between two
+    // readings, and a rule whose count went backwards was
+    // republished rather than refused a negative number of
+    // times.
+    let counting = Arc::clone(service);
+    let counter_metrics = Arc::clone(metrics) as Arc<dyn MetricsPort>;
+    let counter_cancel = cancel.clone();
+    tokio::spawn(async move {
+        use std::collections::HashMap;
+
+        let mut seen: HashMap<String, u64> = HashMap::new();
+        let mut ticker =
+            tokio::time::interval(infrastructure::constants::WORKLOAD_DENIAL_READ_INTERVAL);
+        loop {
+            tokio::select! {
+                () = counter_cancel.cancelled() => break,
+                _ = ticker.tick() => {}
+            }
+            let counts = match counting.denials_by_rule() {
+                Ok(counts) => counts,
+                Err(e) => {
+                    warn!("workload denial counters unreadable: {e}");
+                    continue;
+                }
+            };
+            let enforcing = counting.policy();
+            for (rule, total) in counts {
+                let previous = seen.get(&rule.0).copied().unwrap_or(0);
+                let delta = total.saturating_sub(previous);
+                seen.insert(rule.0.clone(), total);
+                if delta == 0 {
+                    continue;
+                }
+                let enforced = enforcing
+                    .rules()
+                    .iter()
+                    .find(|candidate| candidate.id == rule)
+                    .is_some_and(domain::firewall::workload::WorkloadRule::enforces);
+                counter_metrics.record_workload_denials(&rule.0, enforced, delta);
+            }
+        }
+    });
+
+    // A rule naming a workload on another node reaches it through the list
+    // a console hands this one. The tables are written again whenever the
+    // list or the policy moves, and emptied when no list is held, which
+    // leaves such a rule matching no address rather than a stale one.
+    let syncing = Arc::clone(service);
+    let remote = Arc::clone(remote_identities);
+    let peer_cancel = cancel.clone();
+    tokio::spawn(async move {
+        let mut ticker =
+            tokio::time::interval(infrastructure::constants::WORKLOAD_PEER_SYNC_INTERVAL);
+        loop {
+            tokio::select! {
+                () = peer_cancel.cancelled() => break,
+                _ = ticker.tick() => {}
+            }
+            if let Err(e) = syncing.sync_peers(remote.current().as_deref()) {
+                warn!("remote workload tables not written: {e}");
+            }
+        }
+    });
 }
 
 /// Load and attach the process tracepoints, feeding `process_tx` until

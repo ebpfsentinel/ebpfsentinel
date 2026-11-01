@@ -12,6 +12,7 @@ use ebpf_common::firewall::{
 
 use super::error::FirewallError;
 use super::workload::WorkloadMatch;
+use super::workload_peer::PeerSelector;
 
 // ── Actions ─────────────────────────────────────────────────────────
 
@@ -811,7 +812,38 @@ impl FirewallRule {
         if !workload.fqdn.is_empty() {
             self.validate_workload_fqdn(workload)?;
         }
+        if let Some(peer) = workload.peer.as_ref() {
+            self.validate_workload_peer(workload, peer)?;
+        }
 
+        Ok(())
+    }
+
+    /// A destination named by remote workload: alone, and over a socket
+    /// that reaches one.
+    fn validate_workload_peer(
+        &self,
+        workload: &WorkloadMatch,
+        peer: &PeerSelector,
+    ) -> Result<(), FirewallError> {
+        peer.validate()?;
+        if self.dst_ip.is_some() || self.dst_alias.is_some() || !workload.fqdn.is_empty() {
+            return Err(FirewallError::WorkloadMatcherUnsupported {
+                matcher: "peer",
+                reason: "a rule names its destination by address, by name or by remote \
+                         workload, one of the three; write one rule per form",
+            });
+        }
+        if self.protocol != Protocol::Any
+            && self.protocol != Protocol::Tcp
+            && self.protocol != Protocol::Udp
+        {
+            return Err(FirewallError::WorkloadMatcherUnsupported {
+                matcher: "peer",
+                reason: "a remote workload is reached over a stream or a datagram socket, \
+                         so the protocol is tcp, udp or any",
+            });
+        }
         Ok(())
     }
 

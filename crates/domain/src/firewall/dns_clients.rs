@@ -212,6 +212,7 @@ impl DnsClients {
             group_mask: 0,
             tenant_id: 0,
             workload: Some(WorkloadMatch {
+                peer: None,
                 selector,
                 mode: self.mode,
                 fqdn: Vec::new(),

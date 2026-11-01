@@ -60,6 +60,17 @@ pub const CONTAINER_LABEL_CHANNEL_CAPACITY: usize = 256;
 /// one second keeps the listed state no staler than the grace is long.
 pub const WORKLOAD_FQDN_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How often the eBPF programs' per-CPU counters are read and exported.
+pub const KERNEL_METRICS_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How often the remote workload tables are compared with the list of remote
+/// identities a console last handed this node.
+///
+/// Nothing is written when neither the list nor the policy moved, so the
+/// tick costs a comparison of two strings, and five seconds is short beside
+/// the time a console takes to notice a pod has moved.
+pub const WORKLOAD_PEER_SYNC_INTERVAL: Duration = Duration::from_secs(5);
+
 /// How long the stop sequence waits for running packet captures to close their
 /// files after being asked to stop.
 ///

@@ -128,6 +128,7 @@ pub async fn cmd_firewall_workload(client: &ApiClient, output: OutputFormat) -> 
         ]);
     }
     table.print();
+    print_source_only(&listing.rules);
 
     if !listing.enforcing {
         println!("\nNo rule in force refuses: every one of them only counts.");
@@ -391,6 +392,7 @@ pub async fn cmd_firewall_reach(
         ]);
     }
     table.print();
+    print_source_only(&reach.rules);
 
     println!(
         "\n{} rule(s) name this workload, in the order the kernel walks them. The first one \
@@ -6482,6 +6484,22 @@ pub async fn cmd_host_rules_intents(client: &ApiClient, output: OutputFormat) ->
         }
     }
     Ok(())
+}
+
+/// Say which rules naming a workload on another node are decided where the
+/// connection leaves and nowhere else, with the reason, under the table.
+fn print_source_only(rules: &[crate::api_client::WorkloadReachEntry]) {
+    for rule in rules {
+        if rule.decided_at.as_deref() == Some("source") {
+            println!(
+                "\nRule {} is decided only on the node a connection leaves: {}.",
+                rule.rule,
+                rule.source_only_reason
+                    .as_deref()
+                    .unwrap_or("the node it arrives at cannot read it")
+            );
+        }
+    }
 }
 
 #[cfg(test)]

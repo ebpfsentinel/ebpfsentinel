@@ -662,6 +662,7 @@ mod tests {
         .unwrap();
         WorkloadPolicyService::new(
             WorkloadPolicy::new(vec![WorkloadRule {
+                dst_peer: None,
                 id: RuleId("api".to_string()),
                 priority: 10,
                 action: FirewallAction::Deny,
@@ -842,6 +843,22 @@ mod tests {
             _path: &str,
             _dev: u64,
             _inode: u64,
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+
+        fn replace_peer_addresses(
+            &mut self,
+            _destinations: &[(std::net::IpAddr, u64)],
+            _sources: &[(std::net::IpAddr, u64)],
+        ) -> Result<usize, domain::common::error::DomainError> {
+            Ok(0)
+        }
+
+        fn set_peer_targets(
+            &mut self,
+            _cgroup_id: u64,
+            _mask: u64,
         ) -> Result<(), domain::common::error::DomainError> {
             Ok(())
         }
@@ -1173,6 +1190,7 @@ mod tests {
 
         let masks = TaskMasks::default();
         let policy = WorkloadPolicy::new(vec![WorkloadRule {
+            dst_peer: None,
             id: RuleId("one".to_string()),
             priority: 10,
             action: FirewallAction::Deny,
@@ -1208,6 +1226,7 @@ mod tests {
 
         fn policy(exe: &str) -> WorkloadPolicy {
             WorkloadPolicy::new(vec![WorkloadRule {
+                dst_peer: None,
                 id: RuleId("one".to_string()),
                 priority: 10,
                 action: FirewallAction::Deny,

@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use domain::common::error::DomainError;
 use domain::firewall::fqdn::FqdnGrantKey;
 use domain::firewall::workload::WorkloadPolicy;
@@ -23,7 +25,34 @@ pub trait WorkloadPolicyMapPort: Send + Sync {
     /// the slot of the rule that named it and the slots are numbered afresh,
     /// and the capture of DNS packets is turned on exactly when an enabled
     /// rule names a destination by DNS name.
+    ///
+    /// The tables naming remote workloads by address are emptied with it,
+    /// for the same reason: their masks are slots.
     fn publish_policy(&mut self, policy: &WorkloadPolicy) -> Result<(), DomainError>;
+
+    /// Replace both address tables of the rules naming a remote workload.
+    ///
+    /// `destinations` holds, per remote address, the slots whose remote
+    /// workload the list names there; `sources`, the slots decided at the
+    /// destination whose source half the workload there satisfies. Each is
+    /// written whole: an address not in the new table is removed, so a
+    /// workload that moved off an address stops being named at it.
+    ///
+    /// # Errors
+    ///
+    /// Whatever writing a map refused other than a full table. The number
+    /// returned is how many entries a full table refused: those addresses
+    /// stay unnamed, so a rule naming the workload behind them does not
+    /// apply to them.
+    fn replace_peer_addresses(
+        &mut self,
+        destinations: &[(IpAddr, u64)],
+        sources: &[(IpAddr, u64)],
+    ) -> Result<usize, DomainError>;
+
+    /// Record which slots decided at the destination name the workload in
+    /// this cgroup as their remote workload. Zero removes the entry.
+    fn set_peer_targets(&mut self, cgroup_id: u64, mask: u64) -> Result<(), DomainError>;
 
     /// Record which selectors a cgroup satisfies, by bit.
     ///

@@ -367,6 +367,7 @@ fn build_rules(
     let mut push = |kind: &str, index: usize, action, destination: Option<&LabelDestination>| {
         let priority = LABEL_PRIORITY_BASE.saturating_add(u32::try_from(rules.len()).unwrap_or(0));
         rules.push(WorkloadRule {
+            dst_peer: None,
             id: RuleId(format!("label-{short}-{kind}-{index}")),
             priority,
             action,

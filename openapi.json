@@ -18510,6 +18510,13 @@
             "type": "boolean",
             "description": "Whether the rule lets the destination through."
           },
+          "decided_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For a rule naming a workload on another node: `both` when the node\na connection arrives at decides it too, `source` when only the node\nit leaves can."
+          },
           "denials": {
             "type": "integer",
             "format": "int64",
@@ -18530,6 +18537,13 @@
           "selector": {
             "type": "string",
             "description": "The selector written out, as the rule names the workload."
+          },
+          "source_only_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the node a connection arrives at cannot decide it."
           }
         }
       },

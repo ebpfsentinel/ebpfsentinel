@@ -136,6 +136,11 @@ impl RemoteIdentities {
     pub fn get(&self, address: IpAddr) -> Option<&RemoteEntry> {
         self.entries.get(&address)
     }
+
+    /// Every address the list carries, in no particular order.
+    pub fn entries(&self) -> impl Iterator<Item = &RemoteEntry> {
+        self.entries.values()
+    }
 }
 
 #[cfg(test)]

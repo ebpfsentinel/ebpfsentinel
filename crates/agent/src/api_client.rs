@@ -147,6 +147,10 @@ pub struct WorkloadReachEntry {
     pub selector: String,
     pub destination: String,
     pub denials: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_only_reason: Option<String>,
 }
 
 /// What the workload policy lets a workload reach.

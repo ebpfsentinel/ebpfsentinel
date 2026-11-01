@@ -137,6 +137,10 @@ pub const WORKLOAD_HOOK_CONNECT: u8 = 0;
 pub const WORKLOAD_HOOK_SENDMSG: u8 = 1;
 /// `hook` on a denial record: the workload was taking a local address.
 pub const WORKLOAD_HOOK_BIND: u8 = 2;
+/// `hook` on a denial record: a peer was opening a connection to the
+/// workload, refused where it arrived. `dst_addr` is then the peer's address
+/// and `dst_port` the workload's own port, and there is no calling task.
+pub const WORKLOAD_HOOK_INGRESS: u8 = 3;
 
 /// Size of `WORKLOAD_EVENTS`, the ring buffer denial records travel in.
 ///
@@ -180,6 +184,23 @@ pub const WORKLOAD_DNS_RESPONSE: u8 = 1;
 /// `fqdn` on a rule: the destination is the set of addresses learned for
 /// this rule from DNS, per cgroup, rather than `dst_addr`.
 pub const WORKLOAD_RULE_FQDN: u8 = 1;
+
+/// `fqdn` on a rule: the destination is a workload on another node, named by
+/// the identity the console handed this node, so the address is matched in
+/// `WORKLOAD_PEER_DESTINATIONS` rather than against `dst_addr`.
+pub const WORKLOAD_RULE_PEER: u8 = 2;
+
+/// Capacity of `WORKLOAD_PEER_DESTINATIONS` and `WORKLOAD_PEER_SOURCES`, one
+/// entry per peer address a rule names.
+///
+/// The size of the whole list a node can hold, so a list the node took never
+/// needs more room than this; an address that finds the map full is left
+/// unnamed and counted, and a rule naming it then matches nothing there.
+pub const WORKLOAD_PEER_MAX_ADDRS: u32 = 65_536;
+
+/// Capacity of `WORKLOAD_PEER_TARGETS`, the cgroups of this node a peer rule
+/// names as the workload being reached.
+pub const WORKLOAD_PEER_MAX_TARGETS: u32 = WORKLOAD_POLICY_MAX_CGROUPS;
 
 /// How many generations the hook walks up from the calling task looking for
 /// a parent or an ancestor a rule names.
@@ -377,6 +398,24 @@ pub struct WorkloadFqdnKey {
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for WorkloadFqdnKey {}
 
+/// Key of the peer maps: one address of another node.
+///
+/// The value is a mask of rule slots, bit `n` for slot `n`, so one lookup
+/// answers every rule at once and a rule needs no entry of its own per
+/// address.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WorkloadPeerKey {
+    /// The address, host-order words, IPv4 in word zero.
+    pub addr: [u32; 4],
+    /// `WORKLOAD_FAMILY_IPV4` or `WORKLOAD_FAMILY_IPV6`.
+    pub family: u8,
+    pub _pad: [u8; 3],
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for WorkloadPeerKey {}
+
 /// One DNS packet of a named workload, as the capture hands it up.
 ///
 /// Queries travel as well as answers because an answer is only believed when
@@ -473,6 +512,15 @@ mod tests {
     }
 
     #[test]
+    fn the_peer_key_is_the_size_both_sides_compiled_against() {
+        assert_eq!(mem::size_of::<WorkloadPeerKey>(), 20);
+        assert_eq!(mem::align_of::<WorkloadPeerKey>(), 4);
+    }
+
+    // Every rule slot has a bit in a remote workload mask.
+    const _: () = assert!(WORKLOAD_POLICY_MAX_RULES <= 64);
+
+    #[test]
     fn a_full_policy_fits_the_lineage_table_with_room_for_upgrades() {
         assert!(WORKLOAD_LINEAGE_MAX_EXECUTABLES as usize >= 2 * WORKLOAD_POLICY_MAX_SELECTORS);
     }
@@ -495,6 +543,7 @@ mod tests {
             WORKLOAD_HOOK_CONNECT,
             WORKLOAD_HOOK_SENDMSG,
             WORKLOAD_HOOK_BIND,
+            WORKLOAD_HOOK_INGRESS,
         ];
         for (position, hook) in hooks.iter().enumerate() {
             assert_eq!(usize::from(*hook), position);

@@ -41,8 +41,8 @@ use ebpf_common::exec_network::ExecNetKey;
 use ebpf_common::workload_policy::{
     WORKLOAD_ACTION_ALLOW, WORKLOAD_ACTION_DENY, WORKLOAD_FAMILY_ANY, WORKLOAD_FAMILY_IPV4,
     WORKLOAD_FAMILY_IPV6, WORKLOAD_MODE_ENFORCE, WORKLOAD_MODE_OBSERVE, WORKLOAD_POLICY_MAX_RULES,
-    WORKLOAD_RULE_FQDN, WorkloadExeKey, WorkloadFqdnKey, WorkloadLineageBits,
-    WorkloadLineageConfig, WorkloadRuleEntry,
+    WORKLOAD_RULE_FQDN, WORKLOAD_RULE_PEER, WorkloadExeKey, WorkloadFqdnKey, WorkloadLineageBits,
+    WorkloadLineageConfig, WorkloadPeerKey, WorkloadRuleEntry,
 };
 use ports::secondary::workload_policy_map_port::WorkloadPolicyMapPort;
 use tracing::{info, warn};
@@ -60,6 +60,9 @@ pub struct WorkloadPolicyMapManager {
     capture: Array<MapData, u32>,
     lineage_exes: AyaHashMap<MapData, WorkloadExeKey, WorkloadLineageBits>,
     lineage_config: Array<MapData, WorkloadLineageConfig>,
+    peer_destinations: AyaHashMap<MapData, WorkloadPeerKey, u64>,
+    peer_sources: AyaHashMap<MapData, WorkloadPeerKey, u64>,
+    peer_targets: AyaHashMap<MapData, u64, u64>,
     /// The offsets the walk reads, or why the running kernel's BTF did not
     /// give them.
     offsets: Result<WorkloadLineageConfig, String>,
@@ -179,6 +182,18 @@ impl WorkloadPolicyMapManager {
             ebpf.take_map("WORKLOAD_LINEAGE_CONFIG")
                 .ok_or_else(|| anyhow::anyhow!("map 'WORKLOAD_LINEAGE_CONFIG' not found"))?,
         )?;
+        let peer_destinations = AyaHashMap::try_from(
+            ebpf.take_map("WORKLOAD_PEER_DESTINATIONS")
+                .ok_or_else(|| anyhow::anyhow!("map 'WORKLOAD_PEER_DESTINATIONS' not found"))?,
+        )?;
+        let peer_sources = AyaHashMap::try_from(
+            ebpf.take_map("WORKLOAD_PEER_SOURCES")
+                .ok_or_else(|| anyhow::anyhow!("map 'WORKLOAD_PEER_SOURCES' not found"))?,
+        )?;
+        let peer_targets = AyaHashMap::try_from(
+            ebpf.take_map("WORKLOAD_PEER_TARGETS")
+                .ok_or_else(|| anyhow::anyhow!("map 'WORKLOAD_PEER_TARGETS' not found"))?,
+        )?;
         info!("workload policy tables acquired");
         Ok(Self {
             rules,
@@ -189,6 +204,9 @@ impl WorkloadPolicyMapManager {
             capture,
             lineage_exes,
             lineage_config,
+            peer_destinations,
+            peer_sources,
+            peer_targets,
             offsets: lineage_offsets(),
             lineage_paths: BTreeMap::new(),
         })
@@ -321,6 +339,10 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
         for key in Self::keys(&self.fqdn) {
             let _ = self.fqdn.remove(&key);
         }
+        self.replace_peer_addresses(&[], &[])?;
+        for key in Self::keys(&self.peer_targets) {
+            let _ = self.peer_targets.remove(&key);
+        }
         self.capture
             .set(0, &u32::from(policy.names_destinations()), 0)
             .map_err(|e| {
@@ -384,6 +406,68 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
         Ok(())
     }
 
+    fn replace_peer_addresses(
+        &mut self,
+        destinations: &[(IpAddr, u64)],
+        sources: &[(IpAddr, u64)],
+    ) -> Result<usize, DomainError> {
+        let mut refused = 0;
+        for (map, wanted, name) in [
+            (
+                &mut self.peer_destinations,
+                destinations,
+                "WORKLOAD_PEER_DESTINATIONS",
+            ),
+            (&mut self.peer_sources, sources, "WORKLOAD_PEER_SOURCES"),
+        ] {
+            let keep: BTreeMap<_, _> = wanted
+                .iter()
+                .filter(|(_, mask)| *mask != 0)
+                .map(|(addr, mask)| (host_words(*addr), (peer_key(*addr), *mask)))
+                .collect();
+            for key in map.keys().filter_map(Result::ok).collect::<Vec<_>>() {
+                if !keep.contains_key(&(key.addr, key.family)) {
+                    let _ = map.remove(&key);
+                }
+            }
+            for (key, mask) in keep.values() {
+                if map.get(key, 0).ok() == Some(*mask) {
+                    continue;
+                }
+                match map.insert(key, mask, 0) {
+                    Ok(()) => {}
+                    Err(aya::maps::MapError::SyscallError(ref e))
+                        if e.io_error.raw_os_error() == Some(libc::E2BIG) =>
+                    {
+                        refused += 1;
+                    }
+                    Err(e) => {
+                        return Err(DomainError::EngineError(format!(
+                            "{name} insert failed: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+        if refused > 0 {
+            warn!(
+                refused,
+                "remote workload tables full, addresses left unnamed"
+            );
+        }
+        Ok(refused)
+    }
+
+    fn set_peer_targets(&mut self, cgroup_id: u64, mask: u64) -> Result<(), DomainError> {
+        if mask == 0 {
+            let _ = self.peer_targets.remove(&cgroup_id);
+            return Ok(());
+        }
+        self.peer_targets.insert(&cgroup_id, &mask, 0).map_err(|e| {
+            DomainError::EngineError(format!("WORKLOAD_PEER_TARGETS insert failed: {e}"))
+        })
+    }
+
     fn grant_fqdn(&mut self, key: &FqdnGrantKey, expires_ns: u64) -> Result<(), DomainError> {
         self.fqdn
             .insert(&fqdn_key(key), &expires_ns, 0)
@@ -428,7 +512,30 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
 /// dual-stack socket connecting to an IPv4 peer presents it in that form.
 #[must_use]
 pub fn fqdn_key(key: &FqdnGrantKey) -> WorkloadFqdnKey {
-    let (addr, family) = match key.addr {
+    let (addr, family) = host_words(key.addr);
+    WorkloadFqdnKey {
+        cgroup_id: key.cgroup_id,
+        addr,
+        family,
+        slot: u8::try_from(key.slot).unwrap_or(u8::MAX),
+        _pad: [0; 6],
+    }
+}
+
+/// A remote address in the shape the hooks look it up by: the same words
+/// and family a grant carries.
+#[must_use]
+pub fn peer_key(addr: IpAddr) -> WorkloadPeerKey {
+    let (addr, family) = host_words(addr);
+    WorkloadPeerKey {
+        addr,
+        family,
+        _pad: [0; 3],
+    }
+}
+
+fn host_words(addr: IpAddr) -> ([u32; 4], u8) {
+    match addr {
         IpAddr::V4(v4) => ([u32::from(v4), 0, 0, 0], WORKLOAD_FAMILY_IPV4),
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
             Some(v4) => ([u32::from(v4), 0, 0, 0], WORKLOAD_FAMILY_IPV4),
@@ -437,13 +544,6 @@ pub fn fqdn_key(key: &FqdnGrantKey) -> WorkloadFqdnKey {
                 WORKLOAD_FAMILY_IPV6,
             ),
         },
-    };
-    WorkloadFqdnKey {
-        cgroup_id: key.cgroup_id,
-        addr,
-        family,
-        slot: u8::try_from(key.slot).unwrap_or(u8::MAX),
-        _pad: [0; 6],
     }
 }
 
@@ -488,7 +588,9 @@ pub fn entry_for(rule: &WorkloadRule, bit: usize) -> WorkloadRuleEntry {
             WORKLOAD_MODE_OBSERVE
         },
         enabled: 1,
-        fqdn: if rule.dst_fqdn.is_empty() {
+        fqdn: if rule.dst_peer.is_some() {
+            WORKLOAD_RULE_PEER
+        } else if rule.dst_fqdn.is_empty() {
             0
         } else {
             WORKLOAD_RULE_FQDN
@@ -506,6 +608,7 @@ mod tests {
 
     fn rule(action: FirewallAction, mode: WorkloadMode) -> WorkloadRule {
         WorkloadRule {
+            dst_peer: None,
             id: RuleId("one".to_string()),
             priority: 10,
             action,
@@ -708,5 +811,33 @@ mod tests {
         });
         assert_eq!(v6.addr, [0x2001_0db8, 0, 0, 1]);
         assert_eq!(v6.family, WORKLOAD_FAMILY_IPV6);
+    }
+
+    #[test]
+    fn a_remote_address_is_keyed_the_way_the_ingress_hook_reads_the_packet() {
+        use std::net::Ipv4Addr;
+        let v4 = peer_key(IpAddr::V4(Ipv4Addr::new(10, 1, 0, 5)));
+        assert_eq!(v4.addr, [0x0a01_0005, 0, 0, 0]);
+        assert_eq!(v4.family, WORKLOAD_FAMILY_IPV4);
+        assert_eq!(
+            peer_key(IpAddr::V6(Ipv4Addr::new(10, 1, 0, 5).to_ipv6_mapped())),
+            v4
+        );
+        let v6 = peer_key("2001:db8::5".parse().expect("an address"));
+        assert_eq!(v6.addr, [0x2001_0db8, 0, 0, 5]);
+        assert_eq!(v6.family, WORKLOAD_FAMILY_IPV6);
+    }
+
+    #[test]
+    fn a_rule_naming_a_remote_workload_goes_out_with_the_peer_flag() {
+        let mut named = rule(FirewallAction::Allow, WorkloadMode::Enforce);
+        named.dst_ip = None;
+        named.dst_peer = Some(domain::firewall::workload_peer::PeerSelector {
+            service_account: Some("db".to_string()),
+            ..Default::default()
+        });
+        let entry = entry_for(&named, 0);
+        assert_eq!(entry.fqdn, WORKLOAD_RULE_PEER);
+        assert_eq!(entry.family, WORKLOAD_FAMILY_ANY);
     }
 }

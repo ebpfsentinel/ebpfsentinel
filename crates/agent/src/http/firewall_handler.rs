@@ -692,6 +692,14 @@ pub struct WorkloadReachEntry {
     /// How many socket operations this rule has refused since it was
     /// published, counted by the kernel.
     pub denials: u64,
+    /// For a rule naming a workload on another node: `both` when the node
+    /// a connection arrives at decides it too, `source` when only the node
+    /// it leaves can.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<String>,
+    /// Why the node a connection arrives at cannot decide it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_only_reason: Option<String>,
 }
 
 /// The answer to "what may this workload reach".
@@ -1087,6 +1095,8 @@ fn entry_of(reach: domain::firewall::workload::WorkloadReach) -> WorkloadReachEn
         selector: reach.selector,
         destination: reach.destination,
         denials: reach.denials,
+        decided_at: reach.peer_ends.map(|ends| ends.as_str().to_string()),
+        source_only_reason: reach.peer_reason,
     }
 }
 
@@ -1588,6 +1598,7 @@ mod tests {
         };
         let mut rule = req.into_domain_rule().unwrap();
         rule.workload = Some(WorkloadMatch {
+            peer: None,
             selector: domain::firewall::workload::WorkloadSelector {
                 container: Some("storefront".to_string()),
                 ..Default::default()

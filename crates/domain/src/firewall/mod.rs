@@ -7,3 +7,4 @@ pub mod exec_network;
 pub mod fqdn;
 pub mod shadow;
 pub mod workload;
+pub mod workload_peer;

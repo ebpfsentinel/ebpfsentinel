@@ -85,14 +85,16 @@ use ebpf_common::workload_policy::{
     WORKLOAD_ACTION_DENY, WORKLOAD_DNS_MAX_PAYLOAD, WORKLOAD_DNS_QUERY, WORKLOAD_DNS_RESPONSE,
     WORKLOAD_DNS_RINGBUF_BYTES, WORKLOAD_EVENTS_RINGBUF_BYTES, WORKLOAD_FAMILY_ANY,
     WORKLOAD_FAMILY_IPV4, WORKLOAD_FAMILY_IPV6, WORKLOAD_FQDN_MAX_ALLOWED, WORKLOAD_HOOK_BIND,
-    WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_SENDMSG, WORKLOAD_LINEAGE_MAX_DEPTH,
+    WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_INGRESS, WORKLOAD_HOOK_SENDMSG, WORKLOAD_LINEAGE_MAX_DEPTH,
     WORKLOAD_LINEAGE_MAX_EXECUTABLES, WORKLOAD_METRIC_ALLOWED, WORKLOAD_METRIC_BIND,
     WORKLOAD_METRIC_CONNECT, WORKLOAD_METRIC_COUNT, WORKLOAD_METRIC_DNS_LOST,
     WORKLOAD_METRIC_EVENT_LOST, WORKLOAD_METRIC_LINEAGE_TRUNCATED, WORKLOAD_METRIC_NO_RULE, WORKLOAD_METRIC_REFUSED,
     WORKLOAD_METRIC_SENDMSG, WORKLOAD_METRIC_UNRESOLVED, WORKLOAD_METRIC_WOULD_REFUSE,
-    WORKLOAD_MODE_ENFORCE, WORKLOAD_POLICY_MAX_CGROUPS, WORKLOAD_POLICY_MAX_RULES,
-    WORKLOAD_POLICY_MAX_TASKS, WORKLOAD_PROTOCOL_ANY, WorkloadDenialEvent, WorkloadDnsEvent,
-    WorkloadExeKey, WorkloadFqdnKey, WorkloadLineageBits, WorkloadLineageConfig, WorkloadRuleEntry,
+    WORKLOAD_MODE_ENFORCE, WORKLOAD_PEER_MAX_ADDRS, WORKLOAD_PEER_MAX_TARGETS,
+    WORKLOAD_POLICY_MAX_CGROUPS, WORKLOAD_POLICY_MAX_RULES,
+    WORKLOAD_POLICY_MAX_TASKS, WORKLOAD_PROTOCOL_ANY, WORKLOAD_RULE_FQDN, WORKLOAD_RULE_PEER,
+    WorkloadDenialEvent, WorkloadDnsEvent,
+    WorkloadExeKey, WorkloadFqdnKey, WorkloadPeerKey, WorkloadLineageBits, WorkloadLineageConfig, WorkloadRuleEntry,
 };
 use ebpf_helpers::{increment_metric, opaque_usize};
 
@@ -246,6 +248,30 @@ static NETPOL_CGROUPS: HashMap<u64, NetpolCgroup, { NETPOL_MAX_CGROUPS as usize 
 static NETPOL_REPLIES: LruHashMap<NetpolReplyKey, u64, { NETPOL_MAX_REPLIES as usize }> =
     LruHashMap::new();
 
+/// Remote address -> the slots whose remote workload the list names at it.
+///
+/// Read at connect and sendmsg, where the address is the destination. An
+/// address the list does not carry is in no rule, so a rule naming a remote
+/// workload never applies to it.
+#[btf_map]
+static WORKLOAD_PEER_DESTINATIONS: HashMap<
+    WorkloadPeerKey,
+    u64,
+    { WORKLOAD_PEER_MAX_ADDRS as usize },
+> = HashMap::new();
+
+/// Remote address -> the slots decided at the destination whose source half
+/// the workload the list names at it satisfies.
+#[btf_map]
+static WORKLOAD_PEER_SOURCES: HashMap<WorkloadPeerKey, u64, { WORKLOAD_PEER_MAX_ADDRS as usize }> =
+    HashMap::new();
+
+/// Local cgroup -> the slots decided at the destination whose remote workload
+/// is the one in that cgroup.
+#[btf_map]
+static WORKLOAD_PEER_TARGETS: HashMap<u64, u64, { WORKLOAD_PEER_MAX_TARGETS as usize }> =
+    HashMap::new();
+
 /// What the policy did, per CPU.
 #[btf_map]
 static NETPOL_METRICS: PerCpuArray<u64, { NETPOL_METRIC_COUNT as usize }> = PerCpuArray::new();
@@ -338,7 +364,11 @@ pub fn workload_skb_egress(ctx: SkBuffContext) -> i32 {
 #[cgroup_skb(ingress)]
 pub fn workload_skb_ingress(ctx: SkBuffContext) -> i32 {
     capture(&ctx, WORKLOAD_DNS_RESPONSE);
-    admit(&ctx)
+    let verdict = admit(&ctx);
+    if verdict == SKB_DROP {
+        return verdict;
+    }
+    peer_ingress(&ctx)
 }
 
 // ── DNS capture ─────────────────────────────────────────────────────
@@ -604,7 +634,11 @@ fn decide<const V6: bool>(ctx: &SockAddrContext, hook: u8) -> i32 {
             }
         );
         increment_metric!(WORKLOAD_RULE_DENIALS, index as u32);
-        report(index, &addr, family, port, protocol, hook, enforced);
+        let task = Task {
+            tgid: (bpf_get_current_pid_tgid() >> 32) as u32,
+            uid: bpf_get_current_uid_gid() as u32,
+        };
+        report(index, &operation, enforced, &task);
         if enforced {
             return REFUSE;
         }
@@ -629,33 +663,33 @@ fn hook_metric(hook: u8) -> u32 {
 /// The slot is what travels rather than the rule's name: a hook has no string
 /// to send and userspace published the slots in the order it holds the rules,
 /// so the translation is exact and costs the kernel nothing.
-fn report(
-    index: usize,
-    addr: &[u32; 4],
-    family: u8,
-    port: u16,
-    protocol: u8,
-    hook: u8,
-    enforced: bool,
-) {
+fn report(index: usize, op: &Operation<'_>, enforced: bool, task: &Task) {
     let Some(mut entry) = WORKLOAD_EVENTS.reserve(0) else {
         increment_metric!(WORKLOAD_METRICS, WORKLOAD_METRIC_EVENT_LOST);
         return;
     };
     entry.write(WorkloadDenialEvent {
         at_ns: unsafe { bpf_ktime_get_boot_ns() },
-        cgroup_id: unsafe { bpf_get_current_cgroup_id() },
-        dst_addr: *addr,
-        tgid: (bpf_get_current_pid_tgid() >> 32) as u32,
-        uid: bpf_get_current_uid_gid() as u32,
-        dst_port: port,
+        cgroup_id: op.cgroup,
+        dst_addr: *op.addr,
+        tgid: task.tgid,
+        uid: task.uid,
+        dst_port: op.port,
         rule: index as u16,
-        family,
-        protocol,
-        hook,
+        family: op.family,
+        protocol: op.protocol,
+        hook: op.hook,
         enforced: u8::from(enforced),
     });
     entry.submit(0);
+}
+
+/// The task a refusal is about. At the socket hooks it is the calling task;
+/// on a packet arriving there is no calling task, only the cgroup of the
+/// socket it is for, and both fields stay zero.
+struct Task {
+    tgid: u32,
+    uid: u32,
 }
 
 /// Every selector the calling task satisfies, from both halves of the lookup.
@@ -835,10 +869,33 @@ fn applies(rule: &WorkloadRuleEntry, slot: usize, mask: u64, op: &Operation<'_>)
     {
         return false;
     }
-    if rule.fqdn != 0 {
+    if rule.fqdn == WORKLOAD_RULE_FQDN {
         return learned(slot, op);
     }
+    if rule.fqdn == WORKLOAD_RULE_PEER {
+        return remote(slot, op);
+    }
     inside(&rule.dst_addr, rule.prefix_len, op.addr)
+}
+
+/// Whether the list of remote identities names, at this address, the remote
+/// workload this rule is about.
+///
+/// A remote workload is somewhere a workload goes, never somewhere it binds,
+/// so the rule does not apply at the bind hook.
+fn remote(slot: usize, op: &Operation<'_>) -> bool {
+    if op.hook == WORKLOAD_HOOK_BIND {
+        return false;
+    }
+    let key = WorkloadPeerKey {
+        addr: *op.addr,
+        family: op.family,
+        _pad: [0; 3],
+    };
+    let Some(mask) = (unsafe { WORKLOAD_PEER_DESTINATIONS.get(&key) }).copied() else {
+        return false;
+    };
+    mask & (1u64 << (slot & 63)) != 0
 }
 
 /// Whether this cgroup was answered this address for this rule, and the
@@ -1133,6 +1190,114 @@ fn admit(ctx: &SkBuffContext) -> i32 {
     }
     increment_metric!(NETPOL_METRICS, NETPOL_METRIC_INGRESS_WOULD_REFUSE);
     SKB_PASS
+}
+
+/// The destination's half of the rules naming a remote workload: a
+/// connection opening at a local workload, from an address the list names.
+///
+/// Only the opening segment of a TCP connection is decided. A datagram opens
+/// nothing the destination could keep a decision for, and every later segment
+/// belongs to a connection that was already let in. The slots offered here
+/// are the ones userspace computed as decidable at this end, so walking them
+/// in order gives the same first match the source would have found.
+fn peer_ingress(ctx: &SkBuffContext) -> i32 {
+    let cgroup = unsafe { bpf_skb_cgroup_id(ctx.skb.skb) };
+    let Some(targets) = (unsafe { WORKLOAD_PEER_TARGETS.get(&cgroup) }).copied() else {
+        return SKB_PASS;
+    };
+    let Some(packet) = packet(ctx) else {
+        return SKB_PASS;
+    };
+    if packet.protocol != IPPROTO_TCP {
+        return SKB_PASS;
+    }
+    let Ok(flags) = ctx.load::<u8>(packet.l4 + 13) else {
+        return SKB_PASS;
+    };
+    if flags & TCP_SYN == 0 || flags & TCP_ACK != 0 {
+        return SKB_PASS;
+    }
+    let Ok(dport) = ctx.load::<u16>(packet.l4 + 2) else {
+        return SKB_PASS;
+    };
+    let local_port = u16::from_be(dport);
+    let (addr, family) = peer_words(&packet);
+    let key = WorkloadPeerKey {
+        addr,
+        family,
+        _pad: [0; 3],
+    };
+    let Some(sources) = (unsafe { WORKLOAD_PEER_SOURCES.get(&key) }).copied() else {
+        return SKB_PASS;
+    };
+    let candidates = sources & targets;
+    if candidates == 0 {
+        return SKB_PASS;
+    }
+
+    for index in 0..WORKLOAD_POLICY_MAX_RULES {
+        let Some(rule) = WORKLOAD_RULES.get(index as u32) else {
+            break;
+        };
+        if rule.enabled == 0 {
+            break;
+        }
+        if candidates & (1u64 << (index & 63)) == 0 {
+            continue;
+        }
+        if rule.protocol != WORKLOAD_PROTOCOL_ANY && rule.protocol != IPPROTO_TCP {
+            continue;
+        }
+        if (rule.port_start != 0 || rule.port_end != 0)
+            && (local_port < rule.port_start || local_port > rule.port_end)
+        {
+            continue;
+        }
+        if rule.action != WORKLOAD_ACTION_DENY {
+            increment_metric!(WORKLOAD_METRICS, WORKLOAD_METRIC_ALLOWED);
+            return SKB_PASS;
+        }
+        let enforced = rule.mode == WORKLOAD_MODE_ENFORCE;
+        increment_metric!(
+            WORKLOAD_METRICS,
+            if enforced {
+                WORKLOAD_METRIC_REFUSED
+            } else {
+                WORKLOAD_METRIC_WOULD_REFUSE
+            }
+        );
+        increment_metric!(WORKLOAD_RULE_DENIALS, index as u32);
+        let operation = Operation {
+            addr: &addr,
+            family,
+            port: local_port,
+            protocol: IPPROTO_TCP,
+            hook: WORKLOAD_HOOK_INGRESS,
+            cgroup,
+        };
+        report(index, &operation, enforced, &Task { tgid: 0, uid: 0 });
+        if enforced {
+            return SKB_DROP;
+        }
+        return SKB_PASS;
+    }
+    SKB_PASS
+}
+
+/// A packet's source address in the form the socket hooks key on: host-order
+/// words, an IPv4 address in the first word, and an IPv4-mapped IPv6 address
+/// folded to IPv4.
+fn peer_words(packet: &Packet) -> ([u32; 4], u8) {
+    let b = &packet.src;
+    let word = |i: usize| u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+    if !packet.v6 {
+        return ([word(0), 0, 0, 0], WORKLOAD_FAMILY_IPV4);
+    }
+    let words = [word(0), word(4), word(8), word(12)];
+    if words[0] == 0 && words[1] == 0 && words[2] == 0x0000_ffff {
+        return ([words[3], 0, 0, 0], WORKLOAD_FAMILY_IPV4);
+    }
+    (words, WORKLOAD_FAMILY_IPV6)
 }
 
 #[cfg(not(test))]
