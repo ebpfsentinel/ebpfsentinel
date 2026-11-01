@@ -12,6 +12,7 @@ pub mod actor;
 pub mod engine;
 pub mod entropy;
 pub mod header;
+pub mod note;
 pub mod paths;
 pub mod rename;
 pub mod replace;
@@ -24,6 +25,9 @@ pub use engine::{
 };
 pub use entropy::{ENTROPY_HIGH_MILLIBITS, ENTROPY_LOW_MILLIBITS, entropy_rose};
 pub use header::{HEADER_BYTES, expected_headers, header_mismatch};
+pub use note::{
+    RANSOM_NOTE_DIRECTORIES, RANSOM_NOTE_NAMES_MAX, RansomNotes, SCATTERED_NAMES, scattered,
+};
 pub use paths::{
     DistinctPaths, RANSOM_DISTINCT_REWRITES, RANSOM_ENTROPY_RISES, RANSOM_HEADER_MISMATCHES,
 };

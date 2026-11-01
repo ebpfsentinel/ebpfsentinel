@@ -15,8 +15,9 @@ use domain::hostrule::HostSources;
 use domain::process::engine::Lineage;
 use domain::process::entity::ProcessEntry;
 use domain::ransom::{
-    Actor, DistinctPaths, MassRenames, RansomEngine, RansomSignal, RansomVerdict, Replacements,
-    SignalKind, actor_of, entropy_rose, header_mismatch, original_of, renamed_over, unavailable,
+    Actor, DistinctPaths, MassRenames, RansomEngine, RansomNotes, RansomSignal, RansomVerdict,
+    Replacements, SignalKind, actor_of, entropy_rose, header_mismatch, original_of, renamed_over,
+    unavailable,
 };
 use domain::workload::entity::{Workload, WorkloadSource};
 use tokio::sync::mpsc;
@@ -36,6 +37,7 @@ const READ: &[SignalKind] = &[
     SignalKind::HeaderMismatch,
     SignalKind::MassRename,
     SignalKind::ReplaceSequence,
+    SignalKind::RansomNote,
 ];
 
 /// Whether a settled change rewrote the file's content or put a file in its
@@ -82,6 +84,7 @@ pub struct RansomService {
     entropy_rises: Mutex<DistinctPaths>,
     header_mismatches: Mutex<DistinctPaths>,
     renames: Mutex<MassRenames>,
+    notes: Mutex<RansomNotes>,
     replaced: Mutex<DistinctPaths>,
     replacements: Mutex<Replacements>,
     sources: HostSourcesReader,
@@ -97,6 +100,7 @@ impl RansomService {
             entropy_rises: Mutex::new(DistinctPaths::entropy_rises()),
             header_mismatches: Mutex::new(DistinctPaths::header_mismatches()),
             renames: Mutex::new(MassRenames::default()),
+            notes: Mutex::new(RansomNotes::default()),
             replaced: Mutex::new(DistinctPaths::replacements()),
             replacements: Mutex::new(Replacements::default()),
             sources,
@@ -153,6 +157,16 @@ impl RansomService {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .record(&actor, writer.pid, from, change.path, at_ns);
+            if let Some(signal) = raised {
+                self.observe(signal, writer, lineage);
+            }
+        }
+        if kinds.contains(&FileChangeKind::Created) {
+            let raised = self
+                .notes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .record(&actor, writer.pid, change.path, at_ns);
             if let Some(signal) = raised {
                 self.observe(signal, writer, lineage);
             }
@@ -295,7 +309,7 @@ mod tests {
     use domain::process::entity::ProcessIdentity;
     use domain::ransom::{
         RANSOM_DISTINCT_REWRITES, RANSOM_ENTROPY_RISES, RANSOM_HEADER_MISMATCHES,
-        RANSOM_REPLACEMENTS,
+        RANSOM_MASS_RENAMES, RANSOM_NOTE_DIRECTORIES, RANSOM_REPLACEMENTS,
     };
 
     fn running(pid: u32, path: &str, inode: u64) -> ProcessEntry {
@@ -625,6 +639,67 @@ mod tests {
             "{}",
             alert.message
         );
+    }
+
+    #[test]
+    fn one_new_name_in_many_directories_is_strong_and_corroborates_with_renames() {
+        let (service, mut rx) = service();
+        let run = running(100, "/tmp/enc", 7);
+        let lineage = Lineage {
+            ancestors: Vec::new(),
+            truncated: false,
+            incomplete: false,
+        };
+        let change = |kinds: &[FileChangeKind], path: &str, from: Option<&str>| {
+            service.record_file_change(
+                &run,
+                &lineage,
+                kinds.iter().copied(),
+                FileRewrite {
+                    path,
+                    entropy_before: None,
+                    entropy_now: None,
+                    head: None,
+                    renamed_from: from,
+                    size_before: None,
+                    size_now: Some(900),
+                    written_now: true,
+                },
+                1,
+            );
+        };
+        // A build scattering one of its own names raises nothing, and the
+        // note in every directory is one strong signal, not yet a verdict.
+        for n in 0..RANSOM_NOTE_DIRECTORIES {
+            change(
+                &[FileChangeKind::Created],
+                &format!("/srv/d{n}/__init__.py"),
+                None,
+            );
+            change(
+                &[FileChangeKind::Created],
+                &format!("/srv/d{n}/README_RESTORE.txt"),
+                None,
+            );
+        }
+        assert!(rx.try_recv().is_err());
+        for n in 0..RANSOM_MASS_RENAMES {
+            let from = format!("/srv/d0/f{n}.pdf");
+            change(
+                &[FileChangeKind::MovedIn],
+                &format!("{from}.locked"),
+                Some(&from),
+            );
+        }
+        let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() else {
+            panic!("no verdict raised");
+        };
+        assert!(
+            alert.message.contains("ransom_note (pid 100)"),
+            "{}",
+            alert.message
+        );
+        assert!(alert.message.contains("README_RESTORE.txt written into"));
     }
 
     #[test]
