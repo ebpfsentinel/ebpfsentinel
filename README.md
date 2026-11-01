@@ -369,7 +369,7 @@ The changelog is kept with the releases rather than here, so the whole product's
 ## Compatibility
 
 - **OS:** Linux only (kernel 6.12+ with BTF)
-- **Distros:** Debian 13+, Ubuntu 24.04.3+ with the HWE kernel (6.14), RHEL / Rocky 10+, Fedora 41+, Alpine 3.21+, Arch, NixOS with `linuxPackages_latest`, Talos 1.9+. Not Debian 12 (6.1), Ubuntu 22.04 (HWE stops at 6.8), Ubuntu 24.04 on its GA kernel (6.8) or the 24.04.2 HWE kernel (6.11), RHEL 9 (5.14) or Alpine 3.20 (6.6) without a newer kernel
+- **Distros:** Debian 13+, Debian 12 with the bookworm-backports kernel (6.12), Ubuntu 26.04 (7.0), Ubuntu 24.04 with the HWE kernel (7.0 since 24.04.5), RHEL / Rocky 10+, Fedora 41+, Alpine 3.21+, Arch, NixOS 25.05+, Talos 1.9+, and AKS on its Ubuntu 26.04 node image. Not Debian 12 on its stock kernel (6.1), Ubuntu 22.04 (HWE stops at 6.8), Ubuntu 24.04 on its GA kernel (6.8), RHEL 9 (5.14) or Alpine 3.20 (6.6) without a newer kernel
 - **Arch:** x86_64 and aarch64, the userspace tests run on both in CI
 - **Runtime:** Docker, Podman, Kubernetes (DaemonSet), Nomad
 

@@ -91,9 +91,10 @@ pub enum KernelProbeError {
 pub fn upgrade_path(release: &str) -> &'static str {
     let r = release.to_ascii_lowercase();
     if r.contains("azure") || r.contains(".azl") || r.contains(".cm2") {
-        "This is an Azure kernel: no current AKS node image carries 6.12, and a standard node \
-         pool cannot change its kernel, so the agent is not supported on AKS until its node \
-         images reach 6.12. On a self-managed Azure VM, install a 6.12 or later kernel."
+        "This is an Azure kernel: an AKS node pool changes its kernel only with its node image, \
+         so move it to Ubuntu 26.04, which carries 7.0; the Azure Linux 3.0 and Ubuntu 22.04 node \
+         images are below 6.12. On a self-managed Ubuntu 24.04 VM, `linux-azure` tracks 7.0 \
+         (`apt install linux-azure`); elsewhere install a 6.12 or later kernel."
     } else if r.contains("amzn2023") || r.contains("amzn2") {
         "On Amazon Linux 2023 install the 6.12 kernel stream (`dnf install kernel6.12`) and \
          reboot; on EKS use the AL2023 node image for Kubernetes 1.33 or later, or a custom AMI \
@@ -118,8 +119,8 @@ pub fn upgrade_path(release: &str) -> &'static str {
         || r.contains("-lowlatency")
     {
         "On Ubuntu 24.04 install the hardware enablement kernel \
-         (`apt install linux-generic-hwe-24.04`) and reboot; Ubuntu 22.04 and earlier have no \
-         6.12 kernel, so upgrade the release."
+         (`apt install linux-generic-hwe-24.04`, 7.0 today) and reboot; Ubuntu 22.04 and \
+         earlier have no 6.12 kernel, so upgrade the release to 24.04 or 26.04."
     } else if r.contains("-default") {
         "SLES 16 and openSUSE Leap 16 ship 6.12; upgrade the host to one of them."
     } else if r.ends_with('+') && !r.contains('-') {
@@ -314,7 +315,7 @@ mod tests {
     fn every_family_has_its_own_upgrade_path() {
         let cases = [
             ("6.8.0-1041-azure", "AKS"),
-            ("6.6.64.2-9.azl3", "AKS"),
+            ("6.6.64.2-9.azl3", "Ubuntu 26.04"),
             ("6.1.102-111.182.amzn2023.x86_64", "kernel6.12"),
             (
                 "5.10.225-213.878.amzn2.x86_64",
