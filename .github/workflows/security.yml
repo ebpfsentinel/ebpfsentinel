@@ -132,6 +132,10 @@ jobs:
         run: |
           mkdir -p fuzz/corpus/fuzz_suricata
           cargo +nightly fuzz run fuzz_suricata fuzz/corpus/fuzz_suricata fuzz/seeds/fuzz_suricata -- -max_len=4096 -max_total_time=30
+      - name: Fuzz host rule deserialiser
+        run: |
+          mkdir -p fuzz/corpus/fuzz_host_rule
+          cargo +nightly fuzz run fuzz_host_rule fuzz/corpus/fuzz_host_rule fuzz/seeds/fuzz_host_rule -- -max_len=4096 -max_total_time=30
 
   # ── SBOM generation ──────────────────────────────────────────────
   sbom:

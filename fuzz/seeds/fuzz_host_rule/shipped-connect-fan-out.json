@@ -1,0 +1,1 @@
+[{"id": "shipped-connect-fan-out", "description": "one process connecting to many distinct addresses in seconds, the shape of a scan", "severity": "high", "when": {"process.connects": {"count": {"min": 100, "within": "10s", "per": "process", "distinct": "remote_address"}}}}]

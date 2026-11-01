@@ -1,0 +1,1 @@
+[{"id": "shipped-shell-from-web-server", "description": "a shell started by a web server or an application runtime", "severity": "high", "when": {"process.starts": {"exe_matches": ["*/sh", "*/bash", "*/dash", "*/zsh", "*/ksh", "*/ash"], "parent_exe_matches": ["*/nginx", "*/apache2", "*/httpd", "*/php-fpm*", "*/lighttpd", "*/caddy", "*/java", "*/node", "*/tomcat*"]}}}]

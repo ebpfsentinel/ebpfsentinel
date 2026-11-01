@@ -1,0 +1,1 @@
+[{"id": "shipped-dns-tunnel-shape", "description": "one process asking for many distinct TXT names in a minute", "severity": "high", "when": {"process.resolves": {"query_type": "TXT", "count": {"min": 50, "within": "1m", "per": "process", "distinct": "domain"}}}}]

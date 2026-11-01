@@ -1,0 +1,1 @@
+[{"id": "shipped-fileless-exec", "description": "a program started from an executable with no file on disk", "severity": "critical", "when": {"process.starts": {"exe_on_disk": false}}}]

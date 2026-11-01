@@ -1,0 +1,1 @@
+[{"id": "shipped-web-server-child-connects-out", "description": "a program started by a web server that connects out on its own", "severity": "high", "when": {"process.starts": {"parent_exe_matches": ["*/nginx", "*/apache2", "*/httpd", "*/php-fpm*", "*/lighttpd", "*/caddy"]}}, "followed_by": {"within": "1m", "process.connects": {}}}]

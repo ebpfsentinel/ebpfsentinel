@@ -1,0 +1,1 @@
+[{"id": "shipped-exec-from-temporary-directory", "description": "a program started from a world-writable temporary directory", "severity": "high", "when": {"process.starts": {"exe_matches": ["/tmp/*", "/var/tmp/*", "/dev/shm/*", "/run/user/*/*"]}}}]

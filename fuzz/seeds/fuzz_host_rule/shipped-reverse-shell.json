@@ -1,0 +1,1 @@
+[{"id": "shipped-reverse-shell", "description": "a shell that opens a connection within seconds of starting", "severity": "critical", "when": {"process.starts": {"exe_matches": ["*/sh", "*/bash", "*/dash", "*/zsh", "*/ksh", "*/ash", "*/busybox"]}}, "followed_by": {"within": "10s", "process.connects": {}}}]

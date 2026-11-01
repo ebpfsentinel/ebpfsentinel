@@ -148,3 +148,8 @@ doc = false
 name = "fuzz_suricata"
 path = "fuzz_targets/fuzz_suricata.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_host_rule"
+path = "fuzz_targets/fuzz_host_rule.rs"
+doc = false

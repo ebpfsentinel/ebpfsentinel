@@ -130,6 +130,9 @@ suite_profiles:
   # 77 shows the agent a release below its floor through a private mount
   # namespace and unloads nf_conntrack: root on a throwaway host, so nightly.
   "77": nightly
+  # 78 runs a copied binary from /tmp, promotes a rule by rewriting the
+  # configuration and restarting the agent, and waits for the kill: nightly.
+  "78": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -664,6 +667,14 @@ coverage:
     notes: "NetworkPolicy compiled for the pods of one node. No suite yet: the kubernetes lane does not apply a policy and read the compiled rules back"
 
   - kind: cli_subcommand
+    feature: hostrules
+    suites: ["78"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "Host rules through /api/v1/host-rules and /api/v1/host-rules/intents: a written rule loads in shadow beside the shipped ones, its shadow count rises per workload with no alert, promotion to enforce kills the process and alerts, and an intention the host does not feed carries the same reason everywhere it is named"
+
+  - kind: cli_subcommand
     feature: processes
     suites: ["TBD"]
     topology: none
@@ -751,6 +762,14 @@ coverage:
     kernel_min: "6.12"
     profile: pr
     notes: "DNS intel; DoH/DoT detection via ClientHello SNI + dst_port 853 in 45; AAAA query parser-readiness asserted in 55"
+
+  - kind: domain_module
+    feature: hostrule
+    suites: ["78"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "Intent catalogue, typed matchers, shadow book and promotion, decided on process start and exit fed by tracepoint-process; the rule and event grammar is also fuzzed by fuzz_host_rule"
 
   - kind: domain_module
     feature: firewall

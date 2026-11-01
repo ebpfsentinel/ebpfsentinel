@@ -1,0 +1,74 @@
+# config-ebpf-host-rules.yaml - host rules from shadow to enforce.
+#
+# The shipped rules load beside one written rule naming a copy of `bash`
+# the suite places under the data directory, which sits in /tmp, so a start
+# of it is also what the shipped rule on temporary directories looks for.
+# The written rule starts in shadow; the suite promotes it by rewriting
+# `mode: shadow` to `mode: enforce` and restarting, which is how an
+# operator does it.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  allow_plaintext_api: true
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+host_rules:
+  shipped: true
+  rules:
+    - id: hr-loop
+      description: the suite's copy of bash, started from the data directory
+      severity: high
+      when:
+        process.starts:
+          exe: [__DATA_DIR__/hr-loop]
+      then: [alert, kill_process]
+      mode: shadow
+
+# A rule that stops a process is refused at load unless the signal program
+# is armed, so the promoted rule has something to act through.
+response:
+  kill_process:
+    enabled: true
+
+# The firewall passes everything; it is loaded because it is what the
+# agent reports as its datapath being up.
+firewall:
+  enabled: true
+  mode: alert
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
+
+# The suites drive the datapath, not the control plane's identity: the
+# agent answers unauthenticated plaintext here, which the two opt-outs
+# above are what make legal on a non-loopback bind.
+auth:
+  enabled: false

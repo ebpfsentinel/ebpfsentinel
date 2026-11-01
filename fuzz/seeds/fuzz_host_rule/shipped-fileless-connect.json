@@ -1,0 +1,1 @@
+[{"id": "shipped-fileless-connect", "description": "a connection opened by a program whose executable has no file on disk", "severity": "critical", "when": {"process.connects": {"exe_on_disk": false}}}]
