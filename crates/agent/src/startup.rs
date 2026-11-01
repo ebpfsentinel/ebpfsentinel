@@ -4447,6 +4447,25 @@ pub async fn run(
         }
         app_state.install_host_rule_service(host_rules);
         let svc = Arc::new(svc);
+        // The calls into the crypto libraries are read against the same
+        // table, so they are counted only where mass encryption is.
+        if ebpf_capable && let Some(ref ransom) = ransom_for_files {
+            let loader = start_crypto_calls(
+                &ebpf_dir,
+                &host_proc_root(),
+                &metrics,
+                Arc::clone(ransom),
+                Arc::clone(&svc),
+                cancel_token.clone(),
+            );
+            ebpf_program_status
+                .write()
+                .await
+                .insert("uprobe-crypto".to_string(), loader.is_some());
+            if let Some(loader) = loader {
+                ebpf_state.add_loader(loader);
+            }
+        }
         // And the other way for a reload: a new policy renumbers the bits,
         // so it is replayed over the tasks already running rather than
         // waiting for each of them to exec again.
@@ -7413,6 +7432,109 @@ pub fn start_tcp_health(
         }
     });
     Some((service, loader))
+}
+
+/// Load the crypto call counter and probe the crypto libraries this host
+/// maps.
+///
+/// # Errors
+///
+/// Returns why the counter cannot run on this host.
+pub fn try_load_crypto_calls(
+    ebpf_dir: &str,
+    proc_root: &std::path::Path,
+) -> anyhow::Result<(
+    EbpfLoader,
+    adapters::ebpf::crypto_attach::CryptoCallCounter,
+    adapters::ebpf::crypto_attach::CryptoAttacher,
+)> {
+    let program_bytes = read_ebpf_program(ebpf_dir, "uprobe-crypto")?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    let counter = adapters::ebpf::crypto_attach::CryptoCallCounter::new(loader.ebpf_mut())?;
+    let mut attacher = adapters::ebpf::crypto_attach::CryptoAttacher::new(proc_root, &loader)?;
+    if let Some(sock) = warden_sock_from_env() {
+        attacher = attacher.with_warden_socket(&sock);
+    }
+    Ok((loader, counter, attacher))
+}
+
+/// How often the calls are read and handed to the mass encryption engine.
+const CRYPTO_CALLS_POLL: Duration = Duration::from_secs(1);
+
+/// How often the libraries running processes map are looked for again, so a
+/// container started after the agent is counted too.
+const CRYPTO_LIBRARIES_RESCAN: Duration = Duration::from_secs(30);
+
+/// Count the calls into the system crypto libraries and hand each process's
+/// share to the mass encryption engine, which reads it beside the files the
+/// same actor rewrites. Why it does not run is told to the engine, which
+/// names it in every verdict. The loader handed back holds the program.
+pub fn start_crypto_calls(
+    ebpf_dir: &str,
+    proc_root: &std::path::Path,
+    metrics: &Arc<AgentMetrics>,
+    ransom: Arc<application::ransom_service::RansomService>,
+    processes: Arc<application::process_table_service::ProcessTableService>,
+    cancel: CancellationToken,
+) -> Option<EbpfLoader> {
+    let refused = |reason: String| {
+        warn!("encryption calls not counted: {reason}");
+        metrics.set_ebpf_program_status("uprobe_crypto", false);
+        adapters::ebpf::crypto_attach::publish_status(
+            adapters::ebpf::crypto_attach::CryptoStatus {
+                attached: false,
+                libraries: 0,
+                reason: Some(reason.clone()),
+            },
+        );
+        ransom.set_crypto_calls(Some(reason));
+    };
+    let (loader, mut counter, mut attacher) = match try_load_crypto_calls(ebpf_dir, proc_root) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            refused(e.to_string());
+            return None;
+        }
+    };
+    attacher.reconcile();
+    if attacher.libraries() == 0 {
+        refused(
+            adapters::ebpf::crypto_attach::status()
+                .reason
+                .unwrap_or_else(|| "no crypto library is probed".to_string()),
+        );
+        return None;
+    }
+    metrics.set_ebpf_program_status("uprobe_crypto", true);
+    ransom.set_crypto_calls(None);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(CRYPTO_CALLS_POLL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut rescan = tokio::time::interval(CRYPTO_LIBRARIES_RESCAN);
+        rescan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => break,
+                _ = rescan.tick() => {
+                    attacher.reconcile();
+                }
+                _ = tick.tick() => {
+                    let at_ns = adapters::ebpf::ringbuf_observer::boottime_now_ns();
+                    for (tgid, calls) in counter.deltas() {
+                        // A caller the table never saw exec cannot be named,
+                        // and an unnamed actor cannot be raised against.
+                        let Some(caller) = processes.get(tgid) else {
+                            continue;
+                        };
+                        let lineage = processes.lineage(tgid);
+                        ransom.record_crypto_calls(&caller, &lineage, calls, at_ns);
+                    }
+                }
+            }
+        }
+    });
+    Some(loader)
 }
 
 /// What a started network executables list hands back to start-up.

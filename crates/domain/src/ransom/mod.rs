@@ -11,6 +11,7 @@
 pub mod actor;
 pub mod backup;
 pub mod canary;
+pub mod crypto;
 pub mod engine;
 pub mod entropy;
 pub mod header;
@@ -29,6 +30,7 @@ pub use canary::{
     CANARIES_MAX, CANARY_DIRECTORIES, CANARY_EXEMPT, CANARY_NAMES, canary_exempt,
     canary_name_refusal, canary_paths, canary_touched,
 };
+pub use crypto::{CryptoRates, RANSOM_CRYPTO_CALLS, RANSOM_CRYPTO_FILES};
 pub use engine::{
     Corroboration, MASS_ENCRYPTION_COMPONENT, MASS_ENCRYPTION_RULE_ID, RANSOM_ACTORS_MAX,
     RANSOM_WINDOW_NS, RansomEngine, RansomVerdict, corroborate,

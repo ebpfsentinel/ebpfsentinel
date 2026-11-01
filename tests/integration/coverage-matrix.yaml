@@ -344,6 +344,14 @@ coverage:
     notes: "Retransmissions, resets and connections opened, failed and closed, counted per pair of ends at the TCP stack's own tracepoints; 71 provokes resets to a closed port and full connections, and reads both ends back"
 
   - kind: ebpf_program
+    feature: uprobe-crypto
+    suites: ["TBD"]
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "Calls into the encryption entry point of libcrypto, libgcrypt and libsodium, counted per process for the mass encryption engine. No suite yet: nothing runs a program that encrypts files through the library and reads the signal back"
+
+  - kind: ebpf_program
     feature: tracepoint-process
     suites: ["67", "70", "perf/07"]
     topology: none

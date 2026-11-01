@@ -20,6 +20,7 @@ pub(crate) const EBPF_PROGRAMS: &[&str] = &[
     "tc-qos",
     "tc-scrub",
     "uprobe-dlp",
+    "uprobe-crypto",
     "cgroup-attribution",
     "cgroup-workload-firewall",
     "cgroup-connect-redirect",

@@ -356,17 +356,17 @@ pub struct ReconcileOutcome {
     pub skipped: bool,
 }
 
-/// One file-backed SSL library mapping found in a `/proc/<pid>/maps`.
+/// One file-backed library mapping found in a `/proc/<pid>/maps`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SslMapping {
+pub(super) struct LibraryMapping {
     /// Absolute path as seen inside the mapping process's mount namespace, with
     /// the kernel's `(deleted)` marker stripped off.
-    path: String,
+    pub(super) path: String,
     /// Name of this mapping's `/proc/<pid>/map_files` entry.
-    map_file: String,
+    pub(super) map_file: String,
     /// The backing file was unlinked after the process mapped it, so `path` no
     /// longer names this inode - and may since name a different one.
-    deleted: bool,
+    pub(super) deleted: bool,
 }
 
 /// Split a maps line into its five fixed columns and the pathname remainder.
@@ -402,11 +402,17 @@ fn map_files_name(range: &str) -> Option<String> {
 }
 
 /// Extract the distinct SSL library mappings from the contents of a
-/// `/proc/<pid>/maps` file, one entry per (path, deleted) pair - a process that
-/// maps both a replaced library and its replacement holds two live inodes and
-/// both are probe targets.
-fn ssl_mappings_in_maps(maps: &str) -> Vec<SslMapping> {
-    let mut out: BTreeMap<(String, bool), SslMapping> = BTreeMap::new();
+/// `/proc/<pid>/maps` file.
+fn ssl_mappings_in_maps(maps: &str) -> Vec<LibraryMapping> {
+    library_mappings_in_maps(maps, SSL_LIB_MARKERS)
+}
+
+/// Extract the distinct mappings of the libraries whose file name starts with
+/// one of `markers` from the contents of a `/proc/<pid>/maps` file, one entry
+/// per (path, deleted) pair - a process that maps both a replaced library and
+/// its replacement holds two live inodes and both are probe targets.
+pub(super) fn library_mappings_in_maps(maps: &str, markers: &[&str]) -> Vec<LibraryMapping> {
+    let mut out: BTreeMap<(String, bool), LibraryMapping> = BTreeMap::new();
     for line in maps.lines() {
         // maps line: "addr perms offset dev inode pathname".
         let Some(([range, _perms, _offset, _dev, inode], rest)) = split_maps_line(line) else {
@@ -425,7 +431,7 @@ fn ssl_mappings_in_maps(maps: &str) -> Vec<SslMapping> {
             continue;
         }
         let base = path.rsplit('/').next().unwrap_or(path);
-        if !SSL_LIB_MARKERS.iter().any(|m| base.starts_with(m)) {
+        if !markers.iter().any(|m| base.starts_with(m)) {
             continue;
         }
         let Some(map_file) = map_files_name(range) else {
@@ -434,7 +440,7 @@ fn ssl_mappings_in_maps(maps: &str) -> Vec<SslMapping> {
         // A library occupies several consecutive mappings (text, rodata, data);
         // they all name one inode, so the first one carries the whole library.
         out.entry((path.to_owned(), deleted))
-            .or_insert_with(|| SslMapping {
+            .or_insert_with(|| LibraryMapping {
                 path: path.to_owned(),
                 map_file,
                 deleted,
@@ -718,17 +724,12 @@ impl DlpUprobeAttacher {
         )
     }
 
-    fn resolve_mapping(&self, pid: u32, m: &SslMapping) -> Option<(PathBuf, std::fs::Metadata)> {
-        let pid_dir = self.proc_root.join(pid.to_string());
-        if !m.deleted {
-            let by_name = pid_dir.join("root").join(m.path.trim_start_matches('/'));
-            if let Ok(meta) = std::fs::metadata(&by_name) {
-                return Some((by_name, meta));
-            }
-        }
-        let by_map_file = pid_dir.join("map_files").join(&m.map_file);
-        let meta = std::fs::metadata(&by_map_file).ok()?;
-        Some((by_map_file, meta))
+    fn resolve_mapping(
+        &self,
+        pid: u32,
+        m: &LibraryMapping,
+    ) -> Option<(PathBuf, std::fs::Metadata)> {
+        resolve_mapping_in(&self.proc_root, pid, m)
     }
 
     /// One lifecycle pass: attach the DLP uprobe set to SSL libraries newly
@@ -1256,6 +1257,27 @@ impl DlpUprobeAttacher {
             }
         }
     }
+}
+
+/// Resolve one library mapping of `pid`, as listed under `proc_root`, to a
+/// path that can be opened and the metadata of the file behind it: by name
+/// through the process's own root, then through `map_files` when the name is
+/// gone or names something else.
+pub(super) fn resolve_mapping_in(
+    proc_root: &std::path::Path,
+    pid: u32,
+    m: &LibraryMapping,
+) -> Option<(PathBuf, std::fs::Metadata)> {
+    let pid_dir = proc_root.join(pid.to_string());
+    if !m.deleted {
+        let by_name = pid_dir.join("root").join(m.path.trim_start_matches('/'));
+        if let Ok(meta) = std::fs::metadata(&by_name) {
+            return Some((by_name, meta));
+        }
+    }
+    let by_map_file = pid_dir.join("map_files").join(&m.map_file);
+    let meta = std::fs::metadata(&by_map_file).ok()?;
+    Some((by_map_file, meta))
 }
 
 impl Drop for DlpUprobeAttacher {

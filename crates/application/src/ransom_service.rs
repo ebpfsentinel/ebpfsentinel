@@ -15,8 +15,8 @@ use domain::hostrule::HostSources;
 use domain::process::engine::Lineage;
 use domain::process::entity::ProcessEntry;
 use domain::ransom::{
-    Actor, DistinctPaths, MassRenames, RansomEngine, RansomNotes, RansomSignal, RansomVerdict,
-    Replacements, SignalKind, UnavailableSignal, actor_of, backup_destroyed,
+    Actor, CryptoRates, DistinctPaths, MassRenames, RansomEngine, RansomNotes, RansomSignal,
+    RansomVerdict, Replacements, SignalKind, UnavailableSignal, actor_of, backup_destroyed,
     backup_destroyed_signal, canary_touched, entropy_rose, header_mismatch, initiator, original_of,
     renamed_over, unavailable,
 };
@@ -25,6 +25,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::alert_event::AlertEvent;
+
+/// Why the encryption calls are not read before anything said otherwise.
+const CRYPTO_NOT_LOADED: &str = "the crypto library probes are not loaded";
 
 /// What this host reports reading, asked when a verdict is reached.
 pub type HostSourcesReader = Arc<dyn Fn() -> HostSources + Send + Sync>;
@@ -35,6 +38,7 @@ pub type HostSourcesReader = Arc<dyn Fn() -> HostSources + Send + Sync>;
 const READ: &[SignalKind] = &[
     SignalKind::BackupDestroyed,
     SignalKind::CanaryTouched,
+    SignalKind::CryptoRate,
     SignalKind::DistinctRewrites,
     SignalKind::EntropyRise,
     SignalKind::HeaderMismatch,
@@ -90,6 +94,8 @@ pub struct RansomService {
     notes: Mutex<RansomNotes>,
     replaced: Mutex<DistinctPaths>,
     replacements: Mutex<Replacements>,
+    crypto: Mutex<CryptoRates>,
+    crypto_unread: Mutex<Option<String>>,
     command_lines: bool,
     sources: HostSourcesReader,
     alerts: mpsc::Sender<AlertEvent>,
@@ -107,6 +113,8 @@ impl RansomService {
             notes: Mutex::new(RansomNotes::default()),
             replaced: Mutex::new(DistinctPaths::replacements()),
             replacements: Mutex::new(Replacements::default()),
+            crypto: Mutex::new(CryptoRates::default()),
+            crypto_unread: Mutex::new(Some(CRYPTO_NOT_LOADED.to_string())),
             command_lines: false,
             sources,
             alerts,
@@ -153,9 +161,56 @@ impl RansomService {
             .hold_prior(signal);
     }
 
-    /// What this host cannot read, the command lines among it.
+    /// Whether the calls into the system crypto libraries are counted on
+    /// this host: `None` once the probes hold, otherwise why not, which every
+    /// verdict then names beside the signal.
+    pub fn set_crypto_calls(&self, unread: Option<String>) {
+        *self
+            .crypto_unread
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = unread;
+    }
+
+    /// `calls` new calls into a system encryption entry point by `caller`
+    /// since the last reading. The signal is raised once those calls keep
+    /// pace with the files the same actor rewrites.
+    pub fn record_crypto_calls(
+        &self,
+        caller: &ProcessEntry,
+        lineage: &Lineage,
+        calls: u64,
+        at_ns: u64,
+    ) {
+        if calls == 0 {
+            return;
+        }
+        let actor = actor_of(caller, lineage);
+        let raised = self
+            .crypto
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .called(&actor, caller.pid, calls, at_ns);
+        if let Some(signal) = raised {
+            self.observe(signal, caller, lineage);
+        }
+    }
+
+    /// What this host cannot read, the command lines and the encryption
+    /// calls among it.
     fn unavailable(&self) -> Vec<UnavailableSignal> {
         let mut missing = unavailable(&(self.sources)(), READ);
+        if let Some(reason) = self
+            .crypto_unread
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        {
+            missing.retain(|u| u.kind != SignalKind::CryptoRate);
+            missing.push(UnavailableSignal {
+                kind: SignalKind::CryptoRate,
+                reason,
+            });
+        }
         if !self.command_lines {
             missing.retain(|u| u.kind != SignalKind::BackupDestroyed);
             missing.push(UnavailableSignal {
@@ -203,6 +258,14 @@ impl RansomService {
             at_ns,
         };
         self.count(&self.rewrites, &held);
+        let raised = self
+            .crypto
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .wrote(&actor, writer.pid, at_ns);
+        if let Some(signal) = raised {
+            self.observe(signal, writer, lineage);
+        }
         if entropy_rose(change.entropy_before, change.entropy_now) {
             self.count(&self.entropy_rises, &held);
         }
@@ -385,8 +448,9 @@ mod tests {
     use domain::hostrule::Source;
     use domain::process::entity::ProcessIdentity;
     use domain::ransom::{
-        RANSOM_DISTINCT_REWRITES, RANSOM_ENTROPY_RISES, RANSOM_HEADER_MISMATCHES,
-        RANSOM_MASS_RENAMES, RANSOM_NOTE_DIRECTORIES, RANSOM_REPLACEMENTS,
+        RANSOM_CRYPTO_CALLS, RANSOM_DISTINCT_REWRITES, RANSOM_ENTROPY_RISES,
+        RANSOM_HEADER_MISMATCHES, RANSOM_MASS_RENAMES, RANSOM_NOTE_DIRECTORIES,
+        RANSOM_REPLACEMENTS,
     };
 
     fn running(pid: u32, path: &str, inode: u64) -> ProcessEntry {
@@ -491,6 +555,61 @@ mod tests {
                 .iter()
                 .all(|u| u.kind != SignalKind::BackupDestroyed)
         );
+    }
+
+    #[test]
+    fn encryption_calls_keeping_pace_with_the_files_written_are_one_strong_signal() {
+        let (service, mut rx) = service();
+        // Unread until the probes hold, and named so.
+        let unread: Vec<_> = service
+            .unavailable()
+            .into_iter()
+            .filter(|u| u.kind == SignalKind::CryptoRate)
+            .collect();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].reason, CRYPTO_NOT_LOADED);
+        service.set_crypto_calls(None);
+        assert!(
+            service
+                .unavailable()
+                .iter()
+                .all(|u| u.kind != SignalKind::CryptoRate)
+        );
+
+        let run = running(70, "/tmp/enc", 9);
+        let lineage = Lineage::default();
+        // Seen calling first, so the files after it count toward the rate.
+        service.record_crypto_calls(&run, &lineage, 1, 900);
+        // One note in every directory walked: one strong signal, and as
+        // many files rewritten beside the calls.
+        for n in 0..RANSOM_NOTE_DIRECTORIES {
+            service.record_file_change(
+                &run,
+                &lineage,
+                [FileChangeKind::Created],
+                FileRewrite {
+                    path: &format!("/srv/d{n}/README_RESTORE.txt"),
+                    entropy_before: None,
+                    entropy_now: None,
+                    head: None,
+                    renamed_from: None,
+                    size_before: None,
+                    size_now: Some(10),
+                    written_now: true,
+                },
+                1_000 + n as u64,
+            );
+        }
+        assert!(rx.try_recv().is_err());
+        // The calls catch up with the files: the second strong signal.
+        service.record_crypto_calls(&run, &lineage, RANSOM_CRYPTO_CALLS, 5_000);
+        let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() else {
+            panic!("a verdict on two strong signals");
+        };
+        assert!(alert.message.contains("crypto_rate"));
+        assert!(alert.message.contains("encryption calls beside"));
+        // No call at all is no reading.
+        service.record_crypto_calls(&run, &lineage, 0, 6_000);
     }
 
     #[test]
@@ -922,7 +1041,7 @@ mod tests {
         assert!(
             alert
                 .message
-                .contains("crypto_rate (not read by this agent)")
+                .contains("crypto_rate (the crypto library probes are not loaded)")
         );
         assert!(!alert.message.contains("distinct_rewrites ("));
         assert!(!alert.message.contains("canary_touched ("));

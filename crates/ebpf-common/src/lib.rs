@@ -6,6 +6,7 @@ pub mod bpf_guard;
 pub mod clusterip;
 pub mod config_flags;
 pub mod conntrack;
+pub mod crypto;
 pub mod ddos;
 pub mod dlp;
 pub mod dns;
