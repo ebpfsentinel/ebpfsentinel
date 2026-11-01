@@ -256,7 +256,7 @@ fn spawn_pod_tc_attacher(
 /// `/proc`; set `EBPFSENTINEL_HOST_PROC` (e.g. `/host/proc`) when the host proc is
 /// bind-mounted into the agent container so it can resolve neighbouring
 /// containers' SSL libraries. A set-but-empty value is treated as unset.
-fn host_proc_root() -> std::path::PathBuf {
+pub(crate) fn host_proc_root() -> std::path::PathBuf {
     std::env::var_os("EBPFSENTINEL_HOST_PROC")
         .map(std::path::PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
@@ -271,12 +271,44 @@ fn host_proc_root() -> std::path::PathBuf {
 /// node's processes without the config file having to repeat the mount point -
 /// which is what lets the same file serve a host and a container, and what lets
 /// a pod drop the host pid namespace without losing container attribution.
-fn resolver_proc_path(configured: &str, host_proc: &std::path::Path) -> std::path::PathBuf {
+pub(crate) fn resolver_proc_path(
+    configured: &str,
+    host_proc: &std::path::Path,
+) -> std::path::PathBuf {
     if configured == "/proc" {
         host_proc.to_path_buf()
     } else {
         std::path::PathBuf::from(configured)
     }
+}
+
+/// The engine naming the container a cgroup belongs to, `None` when the
+/// configuration turns it off.
+pub(crate) fn container_resolver(
+    config: &AgentConfig,
+    proc_root: &std::path::Path,
+) -> Option<Arc<domain::container::engine::ContainerResolverEngine>> {
+    if !config.container.resolver.enabled {
+        info!("Container resolver disabled via config");
+        return None;
+    }
+    let proc_resolver = Arc::new(adapters::container::ProcContainerResolver::new(proc_root))
+        as Arc<dyn domain::container::engine::CgroupReader>;
+    let id_resolver = Arc::new(adapters::container::CgroupfsResolver::new(
+        &config.container.resolver.cgroup_root,
+    )) as Arc<dyn domain::container::engine::CgroupIdResolver>;
+    let engine = domain::container::engine::ContainerResolverEngine::new(
+        proc_resolver,
+        config.container.resolver.cache_size,
+    )
+    .with_id_resolver(id_resolver);
+    info!(
+        cache_size = config.container.resolver.cache_size,
+        proc_path = %proc_root.display(),
+        cgroup_root = %config.container.resolver.cgroup_root,
+        "Container resolver initialized"
+    );
+    Some(Arc::new(engine))
 }
 
 /// The service that compiles IDS rules scoped to workloads into the
@@ -4206,30 +4238,7 @@ pub async fn run(
     );
 
     // ── 10d. Build container resolver ───────────────────────────────
-    let container_resolver = if config.container.resolver.enabled {
-        let resolver_proc = coverage_proc.clone();
-        let proc_resolver = Arc::new(adapters::container::ProcContainerResolver::new(
-            &resolver_proc,
-        )) as Arc<dyn domain::container::engine::CgroupReader>;
-        let id_resolver = Arc::new(adapters::container::CgroupfsResolver::new(
-            &config.container.resolver.cgroup_root,
-        )) as Arc<dyn domain::container::engine::CgroupIdResolver>;
-        let engine = domain::container::engine::ContainerResolverEngine::new(
-            proc_resolver,
-            config.container.resolver.cache_size,
-        )
-        .with_id_resolver(id_resolver);
-        info!(
-            cache_size = config.container.resolver.cache_size,
-            proc_path = %resolver_proc.display(),
-            cgroup_root = %config.container.resolver.cgroup_root,
-            "Container resolver initialized"
-        );
-        Some(Arc::new(engine))
-    } else {
-        info!("Container resolver disabled via config");
-        None
-    };
+    let container_resolver = container_resolver(&config, &coverage_proc);
 
     // ── 10e. Build Docker metadata enricher (optional) ──────────────
     let mut docker_state = EnricherState::OffByConfiguration;

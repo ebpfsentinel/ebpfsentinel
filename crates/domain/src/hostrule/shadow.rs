@@ -17,6 +17,38 @@ use crate::firewall::entity::RuleMode;
 /// counted without a name.
 pub const HOST_RULE_SHADOW_WORKLOADS_MAX: usize = 32;
 
+/// How far apart two starts may be and still name one reading.
+///
+/// A browser reads the figure as a double, which holds a nanosecond count of
+/// today to within a few hundred nanoseconds, so an exact comparison would
+/// refuse every promotion made from a console. The readings start once per
+/// rule set, which no two loads share within a microsecond.
+pub const HOST_RULE_SAME_READING_NS: u64 = 1_000;
+
+/// Why a rule was not put in force.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromotionRefused {
+    /// No rule carries the identifier.
+    Unknown,
+    /// The rule already acts.
+    AlreadyInForce,
+    /// The readings started at another time than the one the caller weighed.
+    StaleReading { since_ns: u64 },
+}
+
+impl std::fmt::Display for PromotionRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown => f.write_str("no host rule carries this identifier"),
+            Self::AlreadyInForce => f.write_str("the rule is already in force"),
+            Self::StaleReading { since_ns } => write!(
+                f,
+                "the readings started afresh at {since_ns} since that reading; read them again"
+            ),
+        }
+    }
+}
+
 /// Events a shadow rule matched about one workload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkloadHits {
@@ -101,6 +133,31 @@ impl HostShadowBook {
         self.readings.get(id).and_then(Option::as_ref)
     }
 
+    /// Put `id` in force, on the reading that started at `seen_since_ns`.
+    ///
+    /// Returns the reading as it stood when the rule stopped counting, which
+    /// is the one the decision is recorded against.
+    ///
+    /// # Errors
+    ///
+    /// [`PromotionRefused`] for an unknown rule, a rule already in force, or
+    /// readings that started at another time than `seen_since_ns`.
+    pub fn promote(
+        &mut self,
+        id: &str,
+        seen_since_ns: u64,
+    ) -> Result<HostShadowReading, PromotionRefused> {
+        let since_ns = self.since_ns;
+        let slot = self.readings.get_mut(id).ok_or(PromotionRefused::Unknown)?;
+        if slot.is_none() {
+            return Err(PromotionRefused::AlreadyInForce);
+        }
+        if since_ns.abs_diff(seen_since_ns) >= HOST_RULE_SAME_READING_NS {
+            return Err(PromotionRefused::StaleReading { since_ns });
+        }
+        slot.take().ok_or(PromotionRefused::AlreadyInForce)
+    }
+
     /// Count an event `id` would have acted on, when it is in shadow.
     /// `false` for a rule in force, which acts.
     pub fn record(&mut self, id: &str, workload: Option<&str>) -> bool {
@@ -179,5 +236,33 @@ mod tests {
             "a named workload keeps counting"
         );
         assert_eq!(reading.events, HOST_RULE_SHADOW_WORKLOADS_MAX as u64 + 6);
+    }
+
+    #[test]
+    fn a_promotion_names_the_reading_and_the_rule_then_acts() {
+        let mut book = HostShadowBook::new(&rules(TWO), 1_000_000);
+        book.record("quiet", Some("web"));
+        assert_eq!(
+            book.promote("quiet", 5_000),
+            Err(PromotionRefused::StaleReading {
+                since_ns: 1_000_000
+            })
+        );
+        assert_eq!(
+            book.promote("nope", 1_000_000),
+            Err(PromotionRefused::Unknown)
+        );
+        assert_eq!(
+            book.promote("loud", 1_000_000),
+            Err(PromotionRefused::AlreadyInForce)
+        );
+        let reading = book.promote("quiet", 1_000_400).unwrap();
+        assert_eq!(reading.events, 1);
+        assert_eq!(book.mode("quiet"), Some(RuleMode::Enforce));
+        assert!(!book.record("quiet", Some("web")), "a promoted rule acts");
+        assert_eq!(
+            book.promote("quiet", 1_000_000),
+            Err(PromotionRefused::AlreadyInForce)
+        );
     }
 }

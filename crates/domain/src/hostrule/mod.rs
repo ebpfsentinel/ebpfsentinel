@@ -40,4 +40,7 @@ pub use rule::{
     HostRuleSpec, IntentBlock, Matcher, Pattern, RawValue, Test,
 };
 pub use sequence::{HOST_RULE_PENDING_MAX, HostRuleState, PendingSequences, Subject};
-pub use shadow::{HOST_RULE_SHADOW_WORKLOADS_MAX, HostShadowBook, HostShadowReading, WorkloadHits};
+pub use shadow::{
+    HOST_RULE_SAME_READING_NS, HOST_RULE_SHADOW_WORKLOADS_MAX, HostShadowBook, HostShadowReading,
+    PromotionRefused, WorkloadHits,
+};

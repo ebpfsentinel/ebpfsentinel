@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use domain::firewall::entity::RuleMode;
 use domain::hostrule::{
     FieldValue, HostRuleSet, HostRuleState, HostShadowBook, HostShadowReading, Intent, IntentEvent,
-    Subject,
+    PromotionRefused, Subject,
 };
 use domain::process::engine::Lineage;
 use domain::process::entity::{ProcessEntry, ProcessKey};
@@ -134,6 +134,27 @@ impl HostRuleService {
     #[must_use]
     pub fn shadow_since_ns(&self) -> u64 {
         self.book().since_ns()
+    }
+
+    /// Put `id` in force on the reading that started at `seen_since_ns`.
+    ///
+    /// Returns when the readings started and the reading the rule stopped
+    /// counting on. The flip and the reading are taken under one lock, so no
+    /// event lands between what is recorded and what is decided.
+    ///
+    /// # Errors
+    ///
+    /// [`PromotionRefused`] for an unknown rule, one already in force, or a
+    /// reading that started at another time.
+    pub fn promote(
+        &self,
+        id: &str,
+        seen_since_ns: u64,
+    ) -> Result<(u64, HostShadowReading), PromotionRefused> {
+        let mut book = self.book();
+        let since_ns = book.since_ns();
+        book.promote(id, seen_since_ns)
+            .map(|reading| (since_ns, reading))
     }
 
     /// What `id` would have done since the readings started, `None` for a
@@ -312,6 +333,29 @@ mod tests {
         assert_eq!(reading.events, 2);
         assert_eq!(reading.workloads[0].workload.as_deref(), Some("web"));
         assert_eq!(reading.workloads[1].workload, None);
+    }
+
+    #[test]
+    fn a_promoted_rule_raises_what_it_used_to_count() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let service = HostRuleService::new(
+            rules(
+                r#"[{"id":"quiet","mode":"shadow","when":{"process.starts":{"exe":"/bin/sh"}}}]"#,
+            ),
+            tx,
+        );
+        service.record_exec(&entry(4, "/bin/sh", 0), &Lineage::default(), 1);
+        assert!(rx.try_recv().is_err());
+        let since = service.shadow_since_ns();
+        assert_eq!(
+            service.promote("quiet", since + 5_000),
+            Err(PromotionRefused::StaleReading { since_ns: since })
+        );
+        let (at, reading) = service.promote("quiet", since).unwrap();
+        assert_eq!((at, reading.events), (since, 1));
+        assert_eq!(service.mode("quiet"), Some(RuleMode::Enforce));
+        service.record_exec(&entry(5, "/bin/sh", 0), &Lineage::default(), 2);
+        assert!(rx.try_recv().is_ok(), "a rule in force raises");
     }
 
     fn entry(pid: u32, exe: &str, uid: u32) -> ProcessEntry {

@@ -85,6 +85,26 @@ pub async fn get_host_intents(State(state): State<Arc<AppState>>) -> Json<HostIn
 /// What this host reported about each source, read from what attached and
 /// what is reading rather than from the kernel version.
 async fn host_sources(state: &AppState) -> HostSources {
+    let programs = state.ebpf_program_status.read().await;
+    reported_sources(
+        &programs,
+        state.network_programs.load().is_some(),
+        state.raw_sockets.load().is_some(),
+    )
+}
+
+/// What this host reports about each source, given which datapath programs
+/// loaded and whether the two inventories are reading.
+///
+/// The process tracing and socket attribution halves are read from what
+/// their attachers published, so a binary that builds its own datapath
+/// answers the same way the agent does.
+#[must_use]
+pub fn reported_sources<S: std::hash::BuildHasher>(
+    programs: &std::collections::HashMap<String, bool, S>,
+    network_inventory: bool,
+    raw_socket_inventory: bool,
+) -> HostSources {
     let kernel = adapters::ebpf::kernel_probe::probe()
         .ok()
         .map(|k| (k.major, k.minor));
@@ -105,13 +125,10 @@ async fn host_sources(state: &AppState) -> HostSources {
         attribution.reason,
     );
 
-    {
-        let programs = state.ebpf_program_status.read().await;
-        host = program(host, Source::DnsCapture, &programs, "tc-dns");
-        host = program(host, Source::TlsCapture, &programs, "tc-ids");
-    }
+    host = program(host, Source::DnsCapture, programs, "tc-dns");
+    host = program(host, Source::TlsCapture, programs, "tc-ids");
 
-    host = if state.network_programs.load().is_some() {
+    host = if network_inventory {
         host.present(Source::NetworkProgramInventory)
     } else {
         host.absent(
@@ -119,7 +136,7 @@ async fn host_sources(state: &AppState) -> HostSources {
             "the network program inventory is not reading",
         )
     };
-    host = if state.raw_sockets.load().is_some() {
+    host = if raw_socket_inventory {
         host.present(Source::RawSocketInventory)
     } else {
         host.absent(
@@ -155,10 +172,10 @@ fn attach(
     }
 }
 
-fn program(
+fn program<S: std::hash::BuildHasher>(
     host: HostSources,
     source: Source,
-    programs: &std::collections::HashMap<String, bool>,
+    programs: &std::collections::HashMap<String, bool, S>,
     name: &str,
 ) -> HostSources {
     match programs.get(name) {
@@ -182,7 +199,9 @@ fn served(intent: Intent, host: &HostSources) -> Result<(), String> {
     }
 }
 
-fn intents_body(host: &HostSources) -> HostIntentsResponse {
+/// Every intention a rule may name, against what `host` reports.
+#[must_use]
+pub fn intents_body(host: &HostSources) -> HostIntentsResponse {
     let intents: Vec<IntentBody> = Intent::ALL
         .into_iter()
         .map(|intent| {
@@ -335,7 +354,9 @@ pub async fn get_host_rules(State(state): State<Arc<AppState>>) -> Json<HostRule
     Json(rules_body(service.as_deref(), &host))
 }
 
-fn rules_body(service: Option<&HostRuleService>, host: &HostSources) -> HostRulesResponse {
+/// Every rule, its mode and its reading, against what `host` reports.
+#[must_use]
+pub fn rules_body(service: Option<&HostRuleService>, host: &HostSources) -> HostRulesResponse {
     let Some(service) = service else {
         return HostRulesResponse {
             matched: 0,

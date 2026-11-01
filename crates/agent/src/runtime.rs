@@ -201,16 +201,26 @@ pub fn build_dlp_scope_service(
 /// container and pod where the node can say.
 ///
 /// For a binary that does not run the agent's own start-up path, which builds
-/// the same enrichers inline beside the rest of the container tracking. Docker
-/// is read when its socket is there, Kubernetes when the agent runs in a
-/// cluster and was built with it; without either, a selector naming a pod or a
-/// container matches nothing, which is said once here.
+/// the same enrichers inline beside the rest of the container tracking.
 pub async fn build_workload_source(
     config: &AgentConfig,
 ) -> adapters::container::CgroupWorkloadScanner {
-    let mut scanner =
-        adapters::container::CgroupWorkloadScanner::new(&config.container.resolver.cgroup_root);
-    let mut named = false;
+    build_workload_enrichers(config).await.into_iter().fold(
+        adapters::container::CgroupWorkloadScanner::new(&config.container.resolver.cgroup_root),
+        adapters::container::CgroupWorkloadScanner::with_enricher,
+    )
+}
+
+/// What names a container and a pod on this node.
+///
+/// Docker is read when its socket is there, Kubernetes when the agent runs in
+/// a cluster and was built with it; without any, a selector naming a pod or a
+/// container matches nothing, which is said once here.
+pub async fn build_workload_enrichers(
+    config: &AgentConfig,
+) -> Vec<Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>> {
+    let mut enrichers: Vec<Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>> =
+        Vec::new();
 
     let docker = &config.container.docker;
     if docker.enabled && Path::new(&docker.socket).exists() {
@@ -224,20 +234,17 @@ pub async fn build_workload_source(
             Arc::clone(&cache),
             None,
         );
-        scanner = scanner.with_enricher(Arc::new(adapters::container::DockerEnricher::new(
+        enrichers.push(Arc::new(adapters::container::DockerEnricher::new(
             client, cache,
         )));
-        named = true;
     }
 
     if let (_, Some(podman)) = build_podman_enricher(config) {
-        scanner = scanner.with_enricher(podman);
-        named = true;
+        enrichers.push(podman);
     }
 
     if let (_, Some(lxc)) = build_lxc_enricher(config) {
-        scanner = scanner.with_enricher(lxc);
-        named = true;
+        enrichers.push(lxc);
     }
 
     #[cfg(feature = "kubernetes")]
@@ -265,17 +272,16 @@ pub async fn build_workload_source(
             cache,
             metrics,
         );
-        scanner = scanner.with_enricher(Arc::new(enricher));
-        named = true;
+        enrichers.push(Arc::new(enricher));
     }
 
-    if !named {
+    if enrichers.is_empty() {
         warn!(
             "no container runtime or cluster answers on this node, so a workload selector \
              naming a pod or a container matches nothing; cgroups and units still resolve"
         );
     }
-    scanner
+    enrichers
 }
 
 /// The Podman enricher, and what it means for the node.
@@ -1501,4 +1507,164 @@ pub fn detach_ebpf(state: EbpfState) {
     // continuing to publish them would report TLS inspection that is not running.
     adapters::ebpf::clear_uprobe_inventory();
     info!(program_count = count, "eBPF programs detached");
+}
+
+// ── Host observation ────────────────────────────────────────────
+
+/// The process table and the host rules evaluated on what it learns, kept
+/// running for as long as this value is held.
+///
+/// Built apart from [`load_ebpf_programs`] because a host's processes are
+/// observed on every node whatever its datapath role: a standby still runs
+/// processes, and a rule watching them must not wait for a promotion.
+pub struct HostObservation {
+    /// The table every exec and exit lands in.
+    pub processes: Arc<application::process_table_service::ProcessTableService>,
+    /// The rules evaluated on it, with their shadow readings.
+    pub host_rules: Arc<application::host_rule_service::HostRuleService>,
+    // The tracepoints stay attached while these live.
+    _tracing: Option<(EbpfLoader, adapters::ebpf::ProcessTracingAttacher)>,
+}
+
+/// Start the process table and the host rules, for a binary that does not
+/// run the agent's own start-up path.
+///
+/// `None` when the configuration turns the process table off. A kernel that
+/// refuses the tracepoints still gets the table and the rules, which then
+/// learn nothing, and the reason is published where the host rule routes
+/// read it, so every rule reports why it cannot match rather than sitting
+/// silent. Matches go to `alerts`; the tasks end with `cancel`.
+///
+/// # Errors
+///
+/// Returns an error when the host rules do not compile, which validating the
+/// configuration refuses first.
+pub async fn start_host_observation(
+    config: &AgentConfig,
+    services: &ServiceHandles,
+    alerts: mpsc::Sender<application::alert_event::AlertEvent>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<Option<HostObservation>> {
+    if !config.process_table.enabled {
+        adapters::ebpf::process_attach::publish_status(adapters::ebpf::ProcessTracingStatus {
+            attached: false,
+            tracepoints: Vec::new(),
+            reason: Some("the process table is turned off in the configuration".to_string()),
+            command_line: false,
+            lineage: false,
+            lineage_reason: None,
+        });
+        return Ok(None);
+    }
+    let host_rules_set = config.host_rules.compile()?;
+    let proc_root = startup::resolver_proc_path(
+        &config.container.resolver.proc_path,
+        &startup::host_proc_root(),
+    );
+    let (process_tx, process_rx) =
+        mpsc::channel::<domain::process::entity::ProcessLifecycleEvent>(4096);
+
+    let tracing = start_process_tracing(config, services, process_tx, &cancel);
+
+    let mut table = application::process_table_service::ProcessTableService::new(
+        config.process_table.capacity,
+        config.process_table.capture_command_line,
+    )
+    .with_executables(Arc::new(adapters::container::ProcExecutableResolver::new(
+        &proc_root,
+    )))
+    .with_details(Arc::new(adapters::container::ProcDetailsResolver::new(
+        &proc_root,
+    )))
+    .with_ids_workload_scope(Arc::clone(&services.ids_workload_scope));
+    if let Some(resolver) = startup::container_resolver(config, &proc_root) {
+        table = table.with_containers(resolver);
+    }
+    for enricher in build_workload_enrichers(config).await {
+        table = table.with_metadata_enricher(enricher);
+    }
+    if let Some(ref scope) = services.dlp_scope_svc
+        && scope.needs_executables()
+    {
+        table = table.with_dlp_scope(Arc::clone(scope));
+    }
+    let host_rules = Arc::new(
+        application::host_rule_service::HostRuleService::new(host_rules_set, alerts).with_facts(
+            Arc::new(adapters::container::ProcFactsReader::new(&proc_root)),
+        ),
+    );
+    if !host_rules.rules().is_empty() {
+        info!(
+            rules = host_rules.rules().rules().len(),
+            "host rules loaded"
+        );
+        table = table.with_host_rules(Arc::clone(&host_rules));
+    }
+    let processes = Arc::new(table);
+    services.workloads.install_processes(Arc::clone(&processes));
+    let writer = Arc::clone(&processes);
+    tokio::spawn(async move {
+        writer.run(process_rx, cancel).await;
+    });
+    info!(
+        capacity = config.process_table.capacity,
+        command_line = config.process_table.capture_command_line,
+        "process table running"
+    );
+    Ok(Some(HostObservation {
+        processes,
+        host_rules,
+        _tracing: tracing,
+    }))
+}
+
+/// Load and attach the process tracepoints, feeding `process_tx` until
+/// `cancel`. `None` when the kernel refused them, with the reason published.
+fn start_process_tracing(
+    config: &AgentConfig,
+    services: &ServiceHandles,
+    process_tx: mpsc::Sender<domain::process::entity::ProcessLifecycleEvent>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Option<(EbpfLoader, adapters::ebpf::ProcessTracingAttacher)> {
+    let ebpf_dir = startup::resolve_ebpf_program_dir(config);
+    match startup::try_load_process_tracing(&ebpf_dir, config) {
+        // The program's own counters are left unread: this binary polls the
+        // datapath's readers, and the exec rate is not one of its figures.
+        Ok((loader, _metrics, reader, attacher, status)) if status.attached => {
+            let observer = RingBufObserver::new(
+                "tracepoint-process",
+                Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
+            );
+            let reader_cancel = cancel.clone();
+            tokio::spawn(async move {
+                reader.run(process_tx, reader_cancel, observer).await;
+            });
+            services
+                .metrics
+                .set_ebpf_program_status("tracepoint_process", true);
+            info!("eBPF process tracing active");
+            Some((loader, attacher))
+        }
+        Ok(_) => {
+            services
+                .metrics
+                .set_ebpf_program_status("tracepoint_process", false);
+            None
+        }
+        Err(e) => {
+            warn!("process tracing load failed (degraded mode): {e}");
+            adapters::ebpf::process_attach::publish_status(adapters::ebpf::ProcessTracingStatus {
+                attached: false,
+                tracepoints: Vec::new(),
+                reason: Some(e.to_string()),
+                command_line: config.process_table.capture_command_line,
+                lineage: false,
+                lineage_reason: None,
+            });
+            services
+                .metrics
+                .set_ebpf_program_status("tracepoint_process", false);
+            None
+        }
+    }
 }
