@@ -66,6 +66,13 @@ pub struct FileChangeLabels {
     pub kind: String,
 }
 
+/// Labels for the file drift counter: `what` is one of the differences a
+/// baseline comparison names.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct FileDriftLabels {
+    pub what: String,
+}
+
 /// Labels for the workload link hot-plug: `kind` is the link kind the
 /// watcher classified (`veth`, `netkit`, `macvlan`, `ipvlan`,
 /// `bridge-member`).
@@ -455,6 +462,9 @@ pub struct AgentMetrics {
     pub file_change_overflows_total: Counter,
     pub file_watch_filesystems: Gauge,
     pub file_watch_filesystems_refused: Gauge,
+    pub file_drifts_total: Family<FileDriftLabels, Counter>,
+    pub file_baselines: Gauge,
+    pub file_baselines_refused_total: Counter,
     pub dns_cache_entries: Gauge,
     pub dns_cache_hits_total: Counter,
     pub dns_cache_evictions_total: Counter,
@@ -939,6 +949,27 @@ impl AgentMetrics {
             file_watch_filesystems_refused.clone(),
         );
 
+        let file_drifts_total = Family::<FileDriftLabels, Counter>::default();
+        registry.register(
+            "file_drifts",
+            "Differences found between a file's baseline and a new reading of it, by what differed",
+            file_drifts_total.clone(),
+        );
+
+        let file_baselines = Gauge::default();
+        registry.register(
+            "file_baselines",
+            "File baselines kept",
+            file_baselines.clone(),
+        );
+
+        let file_baselines_refused_total = Counter::default();
+        registry.register(
+            "file_baselines_refused",
+            "Paths that got no baseline because the store was full",
+            file_baselines_refused_total.clone(),
+        );
+
         let dns_cache_entries = Gauge::default();
         registry.register(
             "dns_cache_entries",
@@ -1396,6 +1427,9 @@ impl AgentMetrics {
             file_change_overflows_total,
             file_watch_filesystems,
             file_watch_filesystems_refused,
+            file_drifts_total,
+            file_baselines,
+            file_baselines_refused_total,
             dns_cache_entries,
             dns_cache_hits_total,
             dns_cache_evictions_total,
@@ -2062,6 +2096,23 @@ impl SystemMetrics for AgentMetrics {
             .set(watched.try_into().unwrap_or(i64::MAX));
         self.file_watch_filesystems_refused
             .set(refused.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn record_file_drifts(&self, what: &str, count: u64) {
+        self.file_drifts_total
+            .get_or_create(&FileDriftLabels {
+                what: what.to_string(),
+            })
+            .inc_by(count);
+    }
+
+    fn set_file_baselines(&self, count: u64) {
+        self.file_baselines
+            .set(count.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn record_file_baseline_refused(&self) {
+        self.file_baselines_refused_total.inc();
     }
 }
 
@@ -2912,8 +2963,11 @@ mod tests {
         ("encrypted_dns_detections", "counter"),
         ("events_dropped", "counter"),
         ("false_positives", "counter"),
+        ("file_baselines", "gauge"),
+        ("file_baselines_refused", "counter"),
         ("file_change_overflows", "counter"),
         ("file_changes", "counter"),
+        ("file_drifts", "counter"),
         ("file_watch_filesystems", "gauge"),
         ("file_watch_filesystems_refused", "gauge"),
         ("fingerprints_seen", "counter"),
@@ -3287,6 +3341,7 @@ mod tests {
         );
         m.record_l7_port_promise(443, "mismatch");
         m.record_file_changes("written", 1);
+        m.record_file_drifts("content", 1);
         m.dlp_scan_duration_seconds.observe(0.000_01);
         m.link_attach_gap_seconds
             .get_or_create(&LinkKindLabels {

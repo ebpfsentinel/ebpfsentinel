@@ -216,6 +216,84 @@ pub struct FimEvent {
     pub unresolved: Option<String>,
 }
 
+/// What [`Command::FimFacts`] is refused with on a connection whose watch does
+/// not cover the path's filesystem.
+pub const FIM_NOT_WATCHED: &str = "the path is not on a watched filesystem";
+
+/// The kind of entry a path names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FimFileType {
+    /// A regular file, hashed when not larger than asked.
+    Regular,
+    /// A directory.
+    Directory,
+    /// A symbolic link, read and never followed.
+    Symlink,
+    /// A device, a socket or a pipe: never opened.
+    Other,
+}
+
+/// One extended attribute: its name and the digest of its value. The value
+/// itself never leaves the warden.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FimXattr {
+    /// The attribute's name, `security.selinux` and the like.
+    pub name: String,
+    /// SHA-256 of the value.
+    pub sha256: [u8; 32],
+}
+
+/// What a path named when the warden read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FimFile {
+    /// The kind of entry.
+    pub file_type: FimFileType,
+    /// Size in bytes.
+    pub size: u64,
+    /// Modification time, nanoseconds since the epoch.
+    pub mtime_ns: i64,
+    /// Permission, set-id and sticky bits, without the type.
+    pub mode: u32,
+    /// Owner.
+    pub uid: u32,
+    /// Group.
+    pub gid: u32,
+    /// Device.
+    pub dev: u64,
+    /// Inode.
+    pub ino: u64,
+    /// Where a symbolic link points.
+    pub link_target: Option<String>,
+    /// SHA-256 of a regular file's content.
+    pub sha256: Option<[u8; 32]>,
+    /// Why a regular file carries no hash.
+    pub hash_unread: Option<String>,
+    /// Extended attributes, sorted by name.
+    pub xattrs: Vec<FimXattr>,
+    /// Why the extended attributes were not read.
+    pub xattrs_unread: Option<String>,
+}
+
+/// What reading one path found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FimReading {
+    /// The entry, read.
+    Present(FimFile),
+    /// Nothing is at the path.
+    Gone,
+    /// The path could not be read, for this reason.
+    Unreadable(String),
+}
+
+/// One path and what reading it found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FimFacts {
+    /// The path as asked for.
+    pub path: String,
+    /// What was found there.
+    pub reading: FimReading,
+}
+
 /// A request from the agent to the warden. Every variant is one kernel operation
 /// the rootless agent cannot perform itself; the warden validates each against an
 /// allowlist before acting, so a compromised agent cannot turn the warden into an
@@ -394,6 +472,16 @@ pub enum Command {
         /// How long to wait when nothing is queued, capped by the warden.
         max_wait_ms: u32,
     },
+    /// Read what each path names, its content hashed when it is a regular
+    /// file no larger than `max_hash_bytes`, answered by
+    /// [`Response::FimFactsRead`]. Only a path on a filesystem this
+    /// connection's watch covers is read; another is answered as unreadable.
+    FimFacts {
+        /// Absolute paths, as the warden's mount namespace reaches them.
+        paths: Vec<String>,
+        /// A regular file larger than this is not hashed.
+        max_hash_bytes: u64,
+    },
 }
 
 /// A thread group as one pid namespace numbers it.
@@ -514,6 +602,13 @@ pub enum Response {
         events: Vec<FimEvent>,
         /// The kernel's queue overflowed and changes were lost before these.
         overflowed: bool,
+    },
+    /// What the paths of a [`Command::FimFacts`] name, in the order asked.
+    /// Fewer entries than paths means the warden's reading budget ran out
+    /// and the rest are to be asked for again.
+    FimFactsRead {
+        /// One entry per path read.
+        facts: Vec<FimFacts>,
     },
 }
 

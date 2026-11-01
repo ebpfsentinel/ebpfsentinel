@@ -4718,20 +4718,42 @@ pub async fn run(
 
     // Changes to whole filesystems and the process behind each, watched by
     // the warden when there is one and in-process otherwise.
+    // A watch whose baselines cannot be kept would compare nothing, so it
+    // is not opened.
     if config.file_watch.enabled {
-        let source = adapters::warden::file_watch::FileWatch::new(open_local_file_watch);
-        let watcher = application::file_watch_service::FileWatcher::new(
-            Box::new(source),
-            config.file_watch.filesystems.clone(),
-            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
-        );
-        info!(
-            source = watcher.source(),
-            filesystems = config.file_watch.filesystems.len(),
-            "file watch running"
-        );
-        let watch_cancel = cancel_token.clone();
-        tokio::task::spawn_blocking(move || watcher.run_blocking(&watch_cancel));
+        let baseline_path = storage_path.with_file_name("file_baselines.redb");
+        match adapters::storage::redb_file_baseline_store::RedbFileBaselineStore::open(
+            &baseline_path,
+        ) {
+            Ok(store) => {
+                let source = adapters::warden::file_watch::FileWatch::new(open_local_file_watch);
+                let watcher = application::file_watch_service::FileWatcher::new(
+                    Box::new(source),
+                    config.file_watch.filesystems.clone(),
+                    Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+                    Arc::new(store),
+                    application::file_watch_service::BaselinePolicy {
+                        max_hash_bytes: config.file_watch.max_hash_bytes,
+                        max_files: config.file_watch.max_baselines,
+                    },
+                );
+                info!(
+                    source = watcher.source(),
+                    filesystems = config.file_watch.filesystems.len(),
+                    baselines = %baseline_path.display(),
+                    "file watch running"
+                );
+                let watch_cancel = cancel_token.clone();
+                tokio::task::spawn_blocking(move || watcher.run_blocking(&watch_cancel));
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    path = %baseline_path.display(),
+                    "file baseline store unavailable, file watch not opened"
+                );
+            }
+        }
     }
 
     // ── 11. Spawn event dispatcher (replaces flat event consumer) ───
@@ -8216,16 +8238,38 @@ mod tests {
 /// stops the agent: a container told to use a resolver that is not there
 /// resolves nothing at all.
 /// The in-process file watch, for an agent holding the privilege itself.
+/// The in-process file watch, run by the warden's own code.
+struct LocalFileWatch(ebpfsentinel_warden::fim_watch::FimWatch);
+
+impl adapters::warden::file_watch::LocalWatch for LocalFileWatch {
+    fn read(
+        &mut self,
+        max_wait: Duration,
+    ) -> Result<(Vec<adapters::warden::file_watch::FimEvent>, bool), String> {
+        self.0.read(max_wait)
+    }
+
+    fn facts(
+        &self,
+        paths: &[String],
+        max_hash_bytes: u64,
+    ) -> Vec<adapters::warden::file_watch::FimFacts> {
+        ebpfsentinel_warden::file_facts::read_facts(paths, max_hash_bytes, &|fsid| {
+            self.0.covers(fsid)
+        })
+    }
+}
+
 fn open_local_file_watch(
     paths: &[String],
 ) -> (
-    Option<adapters::warden::file_watch::LocalRead>,
+    Option<Box<dyn adapters::warden::file_watch::LocalWatch>>,
     Vec<adapters::warden::file_watch::FimMark>,
 ) {
     let (watch, marks) = ebpfsentinel_warden::fim_watch::FimWatch::open(paths);
-    let read = watch
-        .map(|mut w| Box::new(move |wait| w.read(wait)) as adapters::warden::file_watch::LocalRead);
-    (read, marks)
+    let watch = watch
+        .map(|w| Box::new(LocalFileWatch(w)) as Box<dyn adapters::warden::file_watch::LocalWatch>);
+    (watch, marks)
 }
 
 async fn spawn_dns_allowlist_resolver(

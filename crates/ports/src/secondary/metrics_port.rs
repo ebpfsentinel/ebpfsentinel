@@ -390,6 +390,17 @@ pub trait SystemMetrics: Send + Sync {
     /// Set how many filesystems the file watch covers and how many it was
     /// refused, published each time the watch is opened.
     fn set_file_watch_filesystems(&self, _watched: u64, _refused: u64) {}
+
+    /// Count `count` differences found between a file's baseline and a new
+    /// reading of it, by what differed: `content`, `mode`, `owner` and the
+    /// rest of the drift names.
+    fn record_file_drifts(&self, _what: &str, _count: u64) {}
+
+    /// Set how many file baselines are kept.
+    fn set_file_baselines(&self, _count: u64) {}
+
+    /// Count one path that got no baseline because the store was full.
+    fn record_file_baseline_refused(&self) {}
 }
 
 // ── Configuration metrics ──────────────────────────────────────────

@@ -29,8 +29,9 @@ use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame,
 // Re-exported under their real names so callers of the typed control methods can
 // build request values without taking a direct dependency on the protocol crate.
 pub use ebpfsentinel_warden_proto::{
-    ConntrackTuple, DlpTarget, ExecutableIdentity, FimEvent, FimMark, HeldBpfObjects,
-    NetworkProgram, PacketSocket, RouteSpec, TaskIdentity,
+    ConntrackTuple, DlpTarget, ExecutableIdentity, FimEvent, FimFacts, FimFile, FimFileType,
+    FimMark, FimReading, FimXattr, HeldBpfObjects, NetworkProgram, PacketSocket, RouteSpec,
+    TaskIdentity,
 };
 
 /// How long one warden call may take before the client gives up on it.
@@ -80,6 +81,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::Identity => "Identity",
         Command::FimOpen { .. } => "FimOpen",
         Command::FimRead { .. } => "FimRead",
+        Command::FimFacts { .. } => "FimFacts",
     }
 }
 
@@ -275,6 +277,22 @@ impl WardenClient {
         match self.call(&Command::FimRead { max_wait_ms })? {
             Response::FimEvents { events, overflowed } => Ok((events, overflowed)),
             other => Err(unexpected("FimRead", &other)),
+        }
+    }
+
+    /// Read what each path names on a watched filesystem; fewer answers than
+    /// paths means the rest are to be asked for again.
+    pub fn fim_facts(
+        &mut self,
+        paths: Vec<String>,
+        max_hash_bytes: u64,
+    ) -> io::Result<Vec<FimFacts>> {
+        match self.call(&Command::FimFacts {
+            paths,
+            max_hash_bytes,
+        })? {
+            Response::FimFactsRead { facts } => Ok(facts),
+            other => Err(unexpected("FimFacts", &other)),
         }
     }
 
@@ -593,6 +611,15 @@ impl ReconnectingClient {
     /// again.
     pub fn fim_read(&mut self, max_wait_ms: u32) -> io::Result<(Vec<FimEvent>, bool)> {
         self.with_retry(|c| c.fim_read(max_wait_ms))
+    }
+
+    /// Read what each path names on a watched filesystem.
+    pub fn fim_facts(
+        &mut self,
+        paths: &[String],
+        max_hash_bytes: u64,
+    ) -> io::Result<Vec<FimFacts>> {
+        self.with_retry(|c| c.fim_facts(paths.to_vec(), max_hash_bytes))
     }
 
     /// Tear down a single conntrack flow.

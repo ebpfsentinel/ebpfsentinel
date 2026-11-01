@@ -5,6 +5,8 @@
 //! made it. This module holds that report in the product's words; it decides
 //! nothing about whether a change matters.
 
+pub mod baseline;
 pub mod entity;
 
+pub use baseline::{FileBaseline, FileDrift, FileFacts, FileReading, FileType, XattrDigest};
 pub use entity::{FileChange, FileChangeBatch, FileChangeKind, WatchedFilesystem};

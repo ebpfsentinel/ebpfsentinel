@@ -5,13 +5,23 @@
 //! the watch with it, so a failed reading is answered by opening the watch
 //! again rather than by giving up. A filesystem that cannot be watched is
 //! reported once, with its reason, and costs the agent nothing else.
+//!
+//! Every path a change names is read again once the change is seen: its
+//! kind, mode, owner, size and time, the digest of its content and of each
+//! extended attribute. The first reading is kept as the path's baseline and
+//! raises nothing; every later one is compared with it and kept in its
+//! place. A path that disappears is forgotten, so a log rotated away and its
+//! successor moved in read as one disappearance and one first sight.
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::sync::Arc;
 use std::time::Duration;
 
-use domain::file_watch::{FileChangeBatch, FileChangeKind, WatchedFilesystem};
-use ports::secondary::file_watch_port::FileWatchSource;
+use domain::file_watch::{
+    FileChangeBatch, FileChangeKind, FileDrift, FileFacts, FileReading, WatchedFilesystem,
+};
+use ports::secondary::file_watch_port::{FileBaselineStore, FileWatchSource};
 use ports::secondary::metrics_port::MetricsPort;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -24,12 +34,35 @@ pub const FILE_WATCH_READ_WAIT: Duration = Duration::from_secs(1);
 /// watch could not be opened or could no longer be read.
 pub const FILE_WATCH_REOPEN_DELAY: Duration = Duration::from_secs(30);
 
-/// Opens the watch on the configured filesystems and reads it until
-/// cancelled.
+/// Paths asked for in one reading of facts; the reader may answer fewer.
+pub const FILE_FACTS_BATCH: usize = 256;
+
+/// Changed paths waiting to be read. A burst beyond this is counted as lost,
+/// the same way a full kernel queue is.
+pub const FILE_FACTS_PENDING_MAX: usize = 65_536;
+
+/// What baselines cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BaselinePolicy {
+    /// A regular file larger than this is not hashed: its size and time are
+    /// compared instead, and the baseline says why it carries no hash.
+    pub max_hash_bytes: u64,
+    /// Baselines kept at most. A path first seen once the store holds this
+    /// many gets none, and is counted.
+    pub max_files: u64,
+}
+
+/// Opens the watch on the configured filesystems, reads it until cancelled,
+/// and compares every changed path with its baseline.
 pub struct FileWatcher {
     source: Box<dyn FileWatchSource>,
     paths: Vec<String>,
     metrics: Arc<dyn MetricsPort>,
+    baselines: Arc<dyn FileBaselineStore>,
+    policy: BaselinePolicy,
+    /// Changed paths not read yet, each with the last writer seen.
+    pending: BTreeMap<String, u32>,
+    kept: u64,
     reopen_delay: Duration,
 }
 
@@ -39,11 +72,17 @@ impl FileWatcher {
         source: Box<dyn FileWatchSource>,
         paths: Vec<String>,
         metrics: Arc<dyn MetricsPort>,
+        baselines: Arc<dyn FileBaselineStore>,
+        policy: BaselinePolicy,
     ) -> Self {
         Self {
             source,
             paths,
             metrics,
+            baselines,
+            policy,
+            pending: BTreeMap::new(),
+            kept: 0,
             reopen_delay: FILE_WATCH_REOPEN_DELAY,
         }
     }
@@ -112,6 +151,131 @@ impl FileWatcher {
         }
     }
 
+    /// Queue the path each change names, to be read again.
+    fn queue(&mut self, batch: &FileChangeBatch) {
+        let mut lost = false;
+        for change in &batch.changes {
+            let Some(directory) = change.directory.as_deref() else {
+                continue;
+            };
+            let path = if change.name.is_empty() {
+                directory.to_owned()
+            } else if directory.ends_with('/') {
+                format!("{directory}{}", change.name)
+            } else {
+                format!("{directory}/{}", change.name)
+            };
+            let full = self.pending.len() >= FILE_FACTS_PENDING_MAX;
+            match self.pending.entry(path) {
+                Entry::Occupied(mut writer) => {
+                    writer.insert(change.pid);
+                }
+                Entry::Vacant(slot) if !full => {
+                    slot.insert(change.pid);
+                }
+                Entry::Vacant(_) => lost = true,
+            }
+        }
+        if lost {
+            warn!(
+                pending = FILE_FACTS_PENDING_MAX,
+                "changed paths were lost: too many are waiting to be read"
+            );
+            self.metrics.record_file_change_overflow();
+        }
+    }
+
+    /// Read one batch of the pending paths and compare each with its
+    /// baseline.
+    ///
+    /// # Errors
+    ///
+    /// The reader could not be asked; the paths stay pending.
+    fn settle(&mut self) -> Result<(), String> {
+        let asked: Vec<String> = self
+            .pending
+            .keys()
+            .take(FILE_FACTS_BATCH)
+            .cloned()
+            .collect();
+        let facts = self
+            .source
+            .facts(&asked, self.policy.max_hash_bytes)
+            .map_err(|e| e.to_string())?;
+        if facts.is_empty() {
+            return Err("the reader answered none of the paths".into());
+        }
+        for fact in facts {
+            let pid = self.pending.remove(&fact.path).unwrap_or(0);
+            self.compare(&fact, pid);
+        }
+        self.metrics.set_file_baselines(self.kept);
+        Ok(())
+    }
+
+    fn compare(&mut self, fact: &FileFacts, pid: u32) {
+        let path = fact.path.as_str();
+        let kept = match self.baselines.get(path) {
+            Ok(kept) => kept,
+            Err(e) => {
+                warn!(path, error = %e, "file baseline could not be read");
+                return;
+            }
+        };
+        match (&fact.reading, kept) {
+            (FileReading::Present(new), None) => {
+                if self.kept >= self.policy.max_files {
+                    debug!(path, "file baseline store is full, path not kept");
+                    self.metrics.record_file_baseline_refused();
+                    return;
+                }
+                match self.baselines.put(path, new) {
+                    Ok(()) => self.kept += 1,
+                    Err(e) => warn!(path, error = %e, "file baseline could not be kept"),
+                }
+            }
+            (FileReading::Present(new), Some(old)) => {
+                self.report(path, pid, &old.drift(&fact.reading), &fact.reading);
+                if let Err(e) = self.baselines.put(path, new) {
+                    warn!(path, error = %e, "file baseline could not be kept");
+                }
+            }
+            (FileReading::Gone, Some(old)) => {
+                self.report(path, pid, &old.drift(&fact.reading), &fact.reading);
+                match self.baselines.remove(path) {
+                    Ok(true) => self.kept = self.kept.saturating_sub(1),
+                    Ok(false) => {}
+                    Err(e) => warn!(path, error = %e, "file baseline could not be forgotten"),
+                }
+            }
+            // The baseline is kept: what the path named before is still the
+            // last thing known about it, and the next readable reading is
+            // compared against it.
+            (FileReading::Unreadable(_), Some(old)) => {
+                self.report(path, pid, &old.drift(&fact.reading), &fact.reading);
+            }
+            (FileReading::Unreadable(reason), None) => {
+                debug!(path, reason = %reason, "changed path could not be read");
+            }
+            (FileReading::Gone, None) => {}
+        }
+    }
+
+    fn report(&self, path: &str, pid: u32, drift: &[FileDrift], reading: &FileReading) {
+        if drift.is_empty() {
+            return;
+        }
+        let what: Vec<&str> = drift.iter().map(|d| d.as_str()).collect();
+        if let FileReading::Unreadable(reason) = reading {
+            warn!(path, pid, drift = ?what, reason = %reason, "file differs from its baseline");
+        } else {
+            warn!(path, pid, drift = ?what, "file differs from its baseline");
+        }
+        for d in drift {
+            self.metrics.record_file_drifts(d.as_str(), 1);
+        }
+    }
+
     /// Wait `delay` in steps no longer than a reading, and say whether the
     /// watcher was cancelled meanwhile.
     fn pause(delay: Duration, cancel: &CancellationToken) -> bool {
@@ -130,6 +294,11 @@ impl FileWatcher {
     /// Open and read until `cancel` fires. Blocking: run it on a thread of
     /// its own.
     pub fn run_blocking(mut self, cancel: &CancellationToken) {
+        self.kept = self.baselines.count().unwrap_or_else(|e| {
+            warn!(error = %e, "file baselines could not be counted");
+            0
+        });
+        self.metrics.set_file_baselines(self.kept);
         let mut last = None;
         let mut open = false;
         while !cancel.is_cancelled() {
@@ -142,12 +311,28 @@ impl FileWatcher {
                     continue;
                 }
             }
-            match self.source.read(FILE_WATCH_READ_WAIT) {
-                Ok(batch) => self.record(&batch),
+            // Paths still waiting to be read are not waited on.
+            let wait = if self.pending.is_empty() {
+                FILE_WATCH_READ_WAIT
+            } else {
+                Duration::ZERO
+            };
+            match self.source.read(wait) {
+                Ok(batch) => {
+                    self.record(&batch);
+                    self.queue(&batch);
+                }
                 Err(e) => {
                     debug!(error = %e, "file watch reading failed, opening it again");
                     open = false;
+                    continue;
                 }
+            }
+            if !self.pending.is_empty()
+                && let Err(e) = self.settle()
+            {
+                debug!(error = %e, "changed paths could not be read, opening the watch again");
+                open = false;
             }
         }
     }
@@ -159,7 +344,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use domain::common::error::DomainError;
-    use domain::file_watch::FileChange;
+    use domain::file_watch::{FileBaseline, FileChange, FileType};
     use ports::secondary::metrics_port::{
         AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, CtMetrics,
         DdosMetrics, DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics,
@@ -174,6 +359,9 @@ mod tests {
         changes: Mutex<BTreeMap<String, u64>>,
         overflows: AtomicU64,
         filesystems: Mutex<Vec<(u64, u64)>>,
+        drifts: Mutex<BTreeMap<String, u64>>,
+        baselines: AtomicU64,
+        refused: AtomicU64,
     }
 
     impl PacketMetrics for Counted {}
@@ -213,12 +401,64 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push((watched, refused));
         }
+        fn record_file_drifts(&self, what: &str, count: u64) {
+            *self
+                .drifts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(what.to_owned())
+                .or_default() += count;
+        }
+        fn set_file_baselines(&self, count: u64) {
+            self.baselines.store(count, Ordering::Relaxed);
+        }
+        fn record_file_baseline_refused(&self) {
+            self.refused.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl Counted {
+        fn drifts(&self) -> BTreeMap<String, u64> {
+            self.drifts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[derive(Default)]
+    struct Memory(Mutex<BTreeMap<String, FileBaseline>>);
+
+    impl Memory {
+        fn map(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, FileBaseline>> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+    }
+
+    impl FileBaselineStore for Memory {
+        fn get(&self, path: &str) -> Result<Option<FileBaseline>, DomainError> {
+            Ok(self.map().get(path).cloned())
+        }
+        fn put(&self, path: &str, baseline: &FileBaseline) -> Result<(), DomainError> {
+            self.map().insert(path.to_owned(), baseline.clone());
+            Ok(())
+        }
+        fn remove(&self, path: &str) -> Result<bool, DomainError> {
+            Ok(self.map().remove(path).is_some())
+        }
+        fn count(&self) -> Result<u64, DomainError> {
+            Ok(self.map().len() as u64)
+        }
     }
 
     /// Answers each call from a script, then cancels the watcher.
     struct Scripted {
         opens: Vec<Result<Vec<WatchedFilesystem>, DomainError>>,
         reads: Vec<Result<FileChangeBatch, DomainError>>,
+        /// What each path reads as, one answer used per question.
+        facts: Vec<Result<Vec<FileFacts>, DomainError>>,
         cancel: CancellationToken,
         opened: Arc<AtomicU64>,
     }
@@ -239,6 +479,22 @@ mod tests {
                 return Ok(FileChangeBatch::default());
             }
             self.reads.remove(0)
+        }
+
+        fn facts(
+            &mut self,
+            paths: &[String],
+            _max_hash_bytes: u64,
+        ) -> Result<Vec<FileFacts>, DomainError> {
+            if self.facts.is_empty() {
+                return Err(DomainError::EngineError("no facts scripted".into()));
+            }
+            let answer = self.facts.remove(0)?;
+            assert!(
+                answer.iter().all(|f| paths.contains(&f.path)),
+                "answered {answer:?} for {paths:?}"
+            );
+            Ok(answer)
         }
 
         fn source(&self) -> &'static str {
@@ -274,10 +530,24 @@ mod tests {
     }
 
     fn watcher(source: Scripted, metrics: Arc<Counted>) -> FileWatcher {
+        watcher_with(source, metrics, Arc::new(Memory::default()), 10)
+    }
+
+    fn watcher_with(
+        source: Scripted,
+        metrics: Arc<Counted>,
+        store: Arc<Memory>,
+        max_files: u64,
+    ) -> FileWatcher {
         let mut w = FileWatcher::new(
             Box::new(source),
             vec!["/".into(), "/var/lib/containerd".into()],
             metrics,
+            store,
+            BaselinePolicy {
+                max_hash_bytes: 1024,
+                max_files,
+            },
         );
         w.reopen_delay = Duration::ZERO;
         w
@@ -296,6 +566,7 @@ mod tests {
                 ],
                 overflowed: true,
             })],
+            facts: vec![Ok(Vec::new())],
             cancel: cancel.clone(),
             opened: Arc::new(AtomicU64::new(0)),
         };
@@ -326,6 +597,7 @@ mod tests {
                 Err(DomainError::EngineError("no file watch is open".into())),
                 Ok(FileChangeBatch::default()),
             ],
+            facts: Vec::new(),
             cancel: cancel.clone(),
             opened: Arc::clone(&opened),
         };
@@ -344,6 +616,7 @@ mod tests {
             ],
             // A read would cancel early and leave `opened` at one.
             reads: vec![Err(DomainError::EngineError("must not be read".into()))],
+            facts: Vec::new(),
             cancel: cancel.clone(),
             opened: Arc::clone(&opened),
         };
@@ -357,5 +630,198 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_empty()
         );
+    }
+
+    fn file(sha: char, mode: u32) -> FileBaseline {
+        FileBaseline {
+            file_type: FileType::Regular,
+            size: 4,
+            mtime_ns: 9,
+            mode,
+            uid: 0,
+            gid: 0,
+            dev: 1,
+            ino: 2,
+            link_target: None,
+            sha256: Some(sha.to_string().repeat(64)),
+            hash_unread: None,
+            xattrs: Vec::new(),
+            xattrs_unread: None,
+        }
+    }
+
+    fn fact(path: &str, reading: FileReading) -> FileFacts {
+        FileFacts {
+            path: path.into(),
+            reading,
+        }
+    }
+
+    fn written() -> FileChangeBatch {
+        FileChangeBatch {
+            changes: vec![change(vec![FileChangeKind::Written])],
+            overflowed: false,
+        }
+    }
+
+    fn run(facts: Vec<Vec<FileFacts>>, reads: usize, store: Arc<Memory>, max: u64) -> Arc<Counted> {
+        let facts = facts.into_iter().map(Ok).collect();
+        let cancel = CancellationToken::new();
+        let metrics = Arc::new(Counted::default());
+        let source = Scripted {
+            opens: vec![Ok(vec![watched("/")])],
+            reads: (0..reads).map(|_| Ok(written())).collect(),
+            facts,
+            cancel: cancel.clone(),
+            opened: Arc::new(AtomicU64::new(0)),
+        };
+        watcher_with(source, Arc::clone(&metrics), store, max).run_blocking(&cancel);
+        metrics
+    }
+
+    #[test]
+    fn a_first_sight_is_kept_and_raises_nothing() {
+        let store = Arc::new(Memory::default());
+        let metrics = run(
+            vec![vec![fact(
+                "/etc/hosts",
+                FileReading::Present(file('a', 0o644)),
+            )]],
+            1,
+            Arc::clone(&store),
+            10,
+        );
+        assert!(metrics.drifts().is_empty());
+        assert_eq!(store.map().get("/etc/hosts"), Some(&file('a', 0o644)));
+        assert_eq!(metrics.baselines.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_later_reading_is_compared_and_replaces_the_baseline() {
+        let store = Arc::new(Memory::default());
+        let metrics = run(
+            vec![
+                vec![fact("/etc/hosts", FileReading::Present(file('a', 0o644)))],
+                vec![fact("/etc/hosts", FileReading::Present(file('b', 0o666)))],
+            ],
+            2,
+            Arc::clone(&store),
+            10,
+        );
+        let drifts = metrics.drifts();
+        assert_eq!(drifts.get("content"), Some(&1));
+        assert_eq!(drifts.get("mode"), Some(&1));
+        assert_eq!(store.map().get("/etc/hosts"), Some(&file('b', 0o666)));
+    }
+
+    #[test]
+    fn a_path_that_disappears_is_reported_and_forgotten() {
+        let store = Arc::new(Memory::default());
+        store.map().insert("/etc/hosts".into(), file('a', 0o644));
+        let metrics = run(
+            vec![vec![fact("/etc/hosts", FileReading::Gone)]],
+            1,
+            Arc::clone(&store),
+            10,
+        );
+        assert_eq!(metrics.drifts().get("disappeared"), Some(&1));
+        assert!(store.map().is_empty());
+        assert_eq!(metrics.baselines.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn an_unreadable_path_keeps_its_baseline() {
+        let store = Arc::new(Memory::default());
+        store.map().insert("/etc/hosts".into(), file('a', 0o644));
+        let metrics = run(
+            vec![vec![fact(
+                "/etc/hosts",
+                FileReading::Unreadable("permission denied".into()),
+            )]],
+            1,
+            Arc::clone(&store),
+            10,
+        );
+        assert_eq!(metrics.drifts().get("unreadable"), Some(&1));
+        assert_eq!(store.map().get("/etc/hosts"), Some(&file('a', 0o644)));
+    }
+
+    #[test]
+    fn a_full_store_refuses_a_new_path_and_counts_it() {
+        let store = Arc::new(Memory::default());
+        store.map().insert("/etc/passwd".into(), file('a', 0o644));
+        let metrics = run(
+            vec![vec![fact(
+                "/etc/hosts",
+                FileReading::Present(file('a', 0o644)),
+            )]],
+            1,
+            Arc::clone(&store),
+            1,
+        );
+        assert_eq!(metrics.refused.load(Ordering::Relaxed), 1);
+        assert!(!store.map().contains_key("/etc/hosts"));
+    }
+
+    #[test]
+    fn paths_the_reader_could_not_answer_are_asked_again_after_a_reopen() {
+        let store = Arc::new(Memory::default());
+        let cancel = CancellationToken::new();
+        let opened = Arc::new(AtomicU64::new(0));
+        let source = Scripted {
+            opens: vec![Ok(vec![watched("/")]), Ok(vec![watched("/")])],
+            reads: vec![Ok(written()), Ok(FileChangeBatch::default())],
+            facts: vec![
+                Err(DomainError::EngineError("no file watch is open".into())),
+                Ok(vec![fact(
+                    "/etc/hosts",
+                    FileReading::Present(file('a', 0o644)),
+                )]),
+            ],
+            cancel: cancel.clone(),
+            opened: Arc::clone(&opened),
+        };
+        watcher_with(source, Arc::new(Counted::default()), Arc::clone(&store), 10)
+            .run_blocking(&cancel);
+        assert_eq!(opened.load(Ordering::Relaxed), 2);
+        assert!(store.map().contains_key("/etc/hosts"));
+    }
+
+    #[test]
+    fn a_change_names_its_directory_and_entry_once() {
+        let mut w = watcher(
+            Scripted {
+                opens: Vec::new(),
+                reads: Vec::new(),
+                facts: Vec::new(),
+                cancel: CancellationToken::new(),
+                opened: Arc::new(AtomicU64::new(0)),
+            },
+            Arc::new(Counted::default()),
+        );
+        let mut root = change(vec![FileChangeKind::Created]);
+        root.directory = Some("/".into());
+        let mut dir_itself = change(vec![FileChangeKind::AttributesChanged]);
+        dir_itself.name = String::new();
+        let mut unnamed = change(vec![FileChangeKind::Written]);
+        unnamed.directory = None;
+        let mut later = change(vec![FileChangeKind::Written]);
+        later.pid = 8;
+        w.queue(&FileChangeBatch {
+            changes: vec![
+                change(vec![FileChangeKind::Written]),
+                root,
+                dir_itself,
+                unnamed,
+                later,
+            ],
+            overflowed: false,
+        });
+        let pending: Vec<_> = w
+            .pending
+            .iter()
+            .map(|(p, pid)| (p.as_str(), *pid))
+            .collect();
+        assert_eq!(pending, vec![("/etc", 7), ("/etc/hosts", 8), ("/hosts", 7)]);
     }
 }

@@ -406,6 +406,22 @@ fn handle_conn_with_timeouts(
                 };
                 write_frame(&mut writer, &resp).is_ok()
             }
+            Command::FimFacts {
+                paths,
+                max_hash_bytes,
+            } => {
+                let resp = match fim.as_ref() {
+                    Some(watch) => Response::FimFactsRead {
+                        facts: crate::file_facts::read_facts(paths, *max_hash_bytes, &|fsid| {
+                            watch.covers(fsid)
+                        }),
+                    },
+                    None => Response::Error {
+                        message: FIM_NO_WATCH.into(),
+                    },
+                };
+                write_frame(&mut writer, &resp).is_ok()
+            }
             // `AttachUprobe` answers out-of-band: it first receives the agent's
             // program fd over `SCM_RIGHTS`, creates the link, then replies
             // `FdReady` + the link fd (or a typed `Error`).

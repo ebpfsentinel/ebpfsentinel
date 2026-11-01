@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 libc = { workspace = true }
 object = { workspace = true }
+sha2 = { workspace = true }
 ebpfsentinel-warden-proto = { workspace = true }
 
 [dev-dependencies]

@@ -10,9 +10,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use domain::common::error::DomainError;
-use domain::file_watch::{FileChange, FileChangeBatch, FileChangeKind, WatchedFilesystem};
+use domain::file_watch::{
+    FileBaseline, FileChange, FileChangeBatch, FileChangeKind, FileFacts, FileReading, FileType,
+    WatchedFilesystem, XattrDigest,
+};
 use ebpfsentinel_warden_client::ReconnectingClient;
-pub use ebpfsentinel_warden_client::{FimEvent, FimMark};
+pub use ebpfsentinel_warden_client::{
+    FimEvent, FimFacts, FimFile, FimFileType, FimMark, FimReading, FimXattr,
+};
 use ports::secondary::file_watch_port::FileWatchSource;
 
 /// Set to the warden's control socket when the agent runs rootless.
@@ -26,20 +31,31 @@ const FAN_CREATE: u64 = 0x0000_0100;
 const FAN_DELETE: u64 = 0x0000_0200;
 const FAN_ONDIR: u64 = 0x4000_0000;
 
-/// An open in-process watch: reads what it queued, waiting at most the
-/// duration given.
-pub type LocalRead = Box<dyn FnMut(Duration) -> Result<(Vec<FimEvent>, bool), String> + Send>;
+/// An open in-process watch, run by the same code the warden runs.
+pub trait LocalWatch: Send {
+    /// What the watch queued, waiting at most `max_wait` for a first change.
+    ///
+    /// # Errors
+    ///
+    /// The watch could not be read.
+    fn read(&mut self, max_wait: Duration) -> Result<(Vec<FimEvent>, bool), String>;
+
+    /// What each path on a watched filesystem names.
+    fn facts(&self, paths: &[String], max_hash_bytes: u64) -> Vec<FimFacts>;
+}
 
 /// Opens an in-process watch on the filesystems holding the paths given.
-pub type LocalOpen = fn(&[String]) -> (Option<LocalRead>, Vec<FimMark>);
+pub type LocalOpen = fn(&[String]) -> (Option<Box<dyn LocalWatch>>, Vec<FimMark>);
 
 enum Source {
     Warden(Box<ReconnectingClient>),
     Local {
         open: LocalOpen,
-        watch: Option<LocalRead>,
+        watch: Option<Box<dyn LocalWatch>>,
     },
 }
+
+const NO_LOCAL_WATCH: &str = "no file watch is open: no filesystem could be marked";
 
 /// The file watch, through the warden when `EBPFSENTINEL_WARDEN_SOCK` is set
 /// and in-process otherwise.
@@ -105,6 +121,60 @@ fn to_batch(events: Vec<FimEvent>, overflowed: bool) -> FileChangeBatch {
     }
 }
 
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
+}
+
+fn to_baseline(file: FimFile) -> FileBaseline {
+    FileBaseline {
+        file_type: match file.file_type {
+            FimFileType::Regular => FileType::Regular,
+            FimFileType::Directory => FileType::Directory,
+            FimFileType::Symlink => FileType::Symlink,
+            FimFileType::Other => FileType::Other,
+        },
+        size: file.size,
+        mtime_ns: file.mtime_ns,
+        mode: file.mode,
+        uid: file.uid,
+        gid: file.gid,
+        dev: file.dev,
+        ino: file.ino,
+        link_target: file.link_target,
+        sha256: file.sha256.map(|d| hex(&d)),
+        hash_unread: file.hash_unread,
+        xattrs: file
+            .xattrs
+            .into_iter()
+            .map(|x| XattrDigest {
+                name: x.name,
+                sha256: hex(&x.sha256),
+            })
+            .collect(),
+        xattrs_unread: file.xattrs_unread,
+    }
+}
+
+fn to_facts(facts: Vec<FimFacts>) -> Vec<FileFacts> {
+    facts
+        .into_iter()
+        .map(|f| FileFacts {
+            path: f.path,
+            reading: match f.reading {
+                FimReading::Present(file) => FileReading::Present(to_baseline(file)),
+                FimReading::Gone => FileReading::Gone,
+                FimReading::Unreadable(reason) => FileReading::Unreadable(reason),
+            },
+        })
+        .collect()
+}
+
 fn to_marks(marks: Vec<FimMark>) -> Vec<WatchedFilesystem> {
     marks
         .into_iter()
@@ -136,15 +206,28 @@ impl FileWatchSource for FileWatch {
                 DomainError::EngineError(format!("warden could not read the file watch: {e}"))
             })?,
             Source::Local { watch, .. } => match watch {
-                Some(read) => read(max_wait).map_err(DomainError::EngineError)?,
-                None => {
-                    return Err(DomainError::EngineError(
-                        "no file watch is open: no filesystem could be marked".into(),
-                    ));
-                }
+                Some(watch) => watch.read(max_wait).map_err(DomainError::EngineError)?,
+                None => return Err(DomainError::EngineError(NO_LOCAL_WATCH.into())),
             },
         };
         Ok(to_batch(events, overflowed))
+    }
+
+    fn facts(
+        &mut self,
+        paths: &[String],
+        max_hash_bytes: u64,
+    ) -> Result<Vec<FileFacts>, DomainError> {
+        let facts = match &mut self.source {
+            Source::Warden(client) => client.fim_facts(paths, max_hash_bytes).map_err(|e| {
+                DomainError::EngineError(format!("warden could not read the files: {e}"))
+            })?,
+            Source::Local { watch, .. } => match watch {
+                Some(watch) => watch.facts(paths, max_hash_bytes),
+                None => return Err(DomainError::EngineError(NO_LOCAL_WATCH.into())),
+            },
+        };
+        Ok(to_facts(facts))
     }
 
     fn source(&self) -> &'static str {
@@ -171,8 +254,43 @@ mod tests {
         }
     }
 
-    fn opens_one(paths: &[String]) -> (Option<LocalRead>, Vec<FimMark>) {
-        let read: LocalRead = Box::new(|_| Ok((vec![event(FAN_CREATE | FAN_CLOSE_WRITE)], true)));
+    struct OneEvent;
+
+    impl LocalWatch for OneEvent {
+        fn read(&mut self, _: Duration) -> Result<(Vec<FimEvent>, bool), String> {
+            Ok((vec![event(FAN_CREATE | FAN_CLOSE_WRITE)], true))
+        }
+
+        fn facts(&self, paths: &[String], _: u64) -> Vec<FimFacts> {
+            paths
+                .iter()
+                .map(|p| FimFacts {
+                    path: p.clone(),
+                    reading: FimReading::Present(FimFile {
+                        file_type: FimFileType::Regular,
+                        size: 2,
+                        mtime_ns: 5,
+                        mode: 0o600,
+                        uid: 1,
+                        gid: 2,
+                        dev: 3,
+                        ino: 4,
+                        link_target: None,
+                        sha256: Some([0xab; 32]),
+                        hash_unread: None,
+                        xattrs: vec![FimXattr {
+                            name: "security.ima".into(),
+                            sha256: [0x01; 32],
+                        }],
+                        xattrs_unread: None,
+                    }),
+                })
+                .collect()
+        }
+    }
+
+    fn opens_one(paths: &[String]) -> (Option<Box<dyn LocalWatch>>, Vec<FimMark>) {
+        let read: Box<dyn LocalWatch> = Box::new(OneEvent);
         let marks = paths
             .iter()
             .map(|p| FimMark {
@@ -183,7 +301,7 @@ mod tests {
         (Some(read), marks)
     }
 
-    fn opens_none(paths: &[String]) -> (Option<LocalRead>, Vec<FimMark>) {
+    fn opens_none(paths: &[String]) -> (Option<Box<dyn LocalWatch>>, Vec<FimMark>) {
         let marks = paths
             .iter()
             .map(|p| FimMark {
@@ -233,6 +351,26 @@ mod tests {
     }
 
     #[test]
+    fn local_facts_carry_digests_as_hex() {
+        let mut watch = FileWatch {
+            source: Source::Local {
+                open: opens_one,
+                watch: None,
+            },
+        };
+        assert!(watch.facts(&["/etc/hosts".into()], 1).is_err());
+        let _ = watch.open(&["/".into()]);
+        let facts = watch.facts(&["/etc/hosts".into()], 1).unwrap_or_default();
+        let FileReading::Present(file) = &facts[0].reading else {
+            panic!("expected an entry");
+        };
+        assert_eq!(facts[0].path, "/etc/hosts");
+        assert_eq!(file.sha256.as_deref(), Some("ab".repeat(32).as_str()));
+        assert_eq!(file.xattrs[0].sha256, "01".repeat(32));
+        assert_eq!((file.mode, file.uid, file.gid), (0o600, 1, 2));
+    }
+
+    #[test]
     fn a_local_watch_that_marked_nothing_says_why_and_reads_nothing() {
         let mut watch = FileWatch {
             source: Source::Local {
@@ -256,6 +394,7 @@ mod tests {
         assert_eq!(watch.source(), "warden");
         assert!(watch.open(&["/".into()]).is_err());
         assert!(watch.read(Duration::ZERO).is_err());
+        assert!(watch.facts(&["/etc/hosts".into()], 1).is_err());
     }
 
     #[test]

@@ -83,7 +83,7 @@ const METADATA_VERSION: u8 = 3;
 const INFO_HEADER_LEN: usize = 4;
 const INFO_TYPE_DFID_NAME: u8 = 2;
 const INFO_TYPE_DFID: u8 = 3;
-const FSID_LEN: usize = 8;
+pub(crate) const FSID_LEN: usize = 8;
 const HANDLE_HEADER_LEN: usize = 8;
 
 /// One event as the kernel queued it, its directory still a handle.
@@ -238,7 +238,7 @@ fn mark_refusal(err: &io::Error) -> String {
 
 /// The filesystem identifier of the filesystem holding `fd`, in the bytes the
 /// kernel puts in an event.
-fn fsid_of(fd: RawFd) -> io::Result<[u8; FSID_LEN]> {
+pub(crate) fn fsid_of(fd: RawFd) -> io::Result<[u8; FSID_LEN]> {
     let mut st = std::mem::MaybeUninit::<libc::statfs>::zeroed();
     // SAFETY: `fd` is an open descriptor owned by the caller and `st` points to
     // a `statfs` the call fills in.
@@ -254,7 +254,7 @@ fn fsid_of(fd: RawFd) -> io::Result<[u8; FSID_LEN]> {
     Ok(unsafe { std::mem::transmute::<libc::fsid_t, [u8; FSID_LEN]>(st.f_fsid) })
 }
 
-fn open_path(path: &Path, flags: libc::c_int) -> io::Result<OwnedFd> {
+pub(crate) fn open_path(path: &Path, flags: libc::c_int) -> io::Result<OwnedFd> {
     let c = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
     // SAFETY: `c` is a NUL-terminated path that outlives the call.
@@ -365,6 +365,12 @@ impl FimWatch {
         let fsid = fsid_of(mount.as_raw_fd()).map_err(|e| e.to_string())?;
         self.mounts.entry(fsid).or_insert(mount);
         Ok(())
+    }
+
+    /// Whether the filesystem `fsid` names is one this watch marked.
+    #[must_use]
+    pub fn covers(&self, fsid: [u8; FSID_LEN]) -> bool {
+        self.mounts.contains_key(&fsid)
     }
 
     /// Hand over what the group queued, waiting at most `max_wait` (capped by
