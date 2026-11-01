@@ -41,6 +41,7 @@ pub mod lpm_coordinator_port;
 pub mod metadata_enricher_port;
 pub mod metrics_port;
 pub mod mitigation_store;
+pub mod namespace_address_port;
 pub mod nat_map_port;
 pub mod netpol_map_port;
 pub mod network_program_port;

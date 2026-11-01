@@ -157,6 +157,15 @@ impl WorkloadResolver {
             .map(|workload| workload.with_cgroup(cgroup_id))
     }
 
+    /// Every process the table holds, or `None` when no process table is
+    /// installed: a node that does not observe its processes does not know
+    /// its workloads, which is not the same as having none.
+    #[must_use]
+    pub fn processes(&self) -> Option<Vec<domain::process::entity::ProcessEntry>> {
+        let processes = self.processes.load();
+        Some(processes.as_ref()?.list())
+    }
+
     /// The connections this node accepted per local address and port, or
     /// `None` when no socket table is installed.
     #[must_use]

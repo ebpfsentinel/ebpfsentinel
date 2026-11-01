@@ -197,6 +197,33 @@ pub fn build_dlp_scope_service(
     Ok(Some(Arc::new(service)))
 }
 
+/// This node's addresses and who holds each, read through the procfs the
+/// container resolver walks and the workloads the process table knows.
+///
+/// The run's epoch is the moment it was built: a reader holding versions of
+/// an earlier run of the agent is handed the whole list rather than a delta
+/// computed against a journal it never saw.
+#[must_use]
+pub fn build_address_identities(
+    config: &AgentConfig,
+    services: &ServiceHandles,
+) -> application::address_identity_service::AddressIdentityService {
+    let proc_root = startup::resolver_proc_path(
+        &config.container.resolver.proc_path,
+        &startup::host_proc_root(),
+    );
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(1, |since| {
+            u64::try_from(since.as_nanos()).unwrap_or(u64::MAX)
+        });
+    application::address_identity_service::AddressIdentityService::new(
+        services.workloads.clone(),
+        Arc::new(adapters::container::proc_namespaces::ProcNamespaceAddresses::new(proc_root)),
+        epoch,
+    )
+}
+
 /// The workload source a selector is resolved against, naming each cgroup's
 /// container and pod where the node can say.
 ///

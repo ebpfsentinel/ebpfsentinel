@@ -1,7 +1,10 @@
 use std::net::IpAddr;
 
 /// The transport a bound socket carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum ListenerProtocol {
     Tcp,
     Udp,

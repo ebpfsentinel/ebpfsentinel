@@ -52,6 +52,7 @@ pub fn convert_to_lpm_entries(
     (v4, v6)
 }
 
+pub mod address_identity_service;
 pub mod alert_enrichment;
 pub mod alert_event;
 pub mod alert_pipeline;

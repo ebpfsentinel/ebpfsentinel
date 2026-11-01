@@ -16,6 +16,7 @@ pub mod podman_enricher;
 pub mod proc_details;
 pub mod proc_executable;
 pub mod proc_facts;
+pub mod proc_namespaces;
 pub mod proc_resolver;
 
 pub use cgroupfs_resolver::{CgroupfsResolver, root_cgroup_id, self_cgroup_id};
