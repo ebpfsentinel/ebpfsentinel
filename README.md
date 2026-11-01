@@ -52,6 +52,7 @@ A snapshot of the capabilities below - see the [Features guide](https://github.c
 | **Process Table** | Every fork, exec and exit, with the container and the chain of ancestors, so a pid becomes a name |
 | **Process Detections** | Reverse shells, binaries with no file on disk, and a server's unexpected descendant, read off the process tree where it holds a connection |
 | **File Watch** | Every change on whole filesystems with the process that made it, baselines of content, mode, owner and extended attributes, alerts on watched paths and on the agent's own files. Detection only: nothing is blocked |
+| **Mass Encryption** | One run encrypting many files, recognised by signals that agree, and with the stop on the whole run killed, workers included, its files counted in the alert. Detected and stopped, not prevented and not undone: the files written before the verdict are lost and nothing is rolled back |
 | **Network Inventory** | Packet sockets and their filters, listening sockets and who bound them, foreign eBPF programs on the network path, each new one an alert; ports a bind finds held and no listing shows, processes a signal reaches and `/proc` does not list |
 | **Installed Packages** | What the dpkg, rpm and Alpine databases say is installed, in the host's root and every container's, read without running a package manager. A list, not a vulnerability verdict |
 | **Self-Protection** | No other process detaches the agent's links or writes its maps. Needs the BPF LSM active at boot, like the executables list |
@@ -410,7 +411,7 @@ The **enterprise edition** layers on capabilities for fleets and regulated envir
 | Content channel | Signed content delivered without a redeploy: IDS rules, DLP patterns, JA4 fingerprints, AI providers, ML models, TLS offsets, host rule profiles and file watch profiles per distribution |
 | Operations | HA clustering, multi-cluster federation, fleet management, air-gap mode, bare-metal LoadBalancer addresses over ARP or BGP |
 | Multi-tenancy & access | Multi-tenancy (isolation + quotas), advanced RBAC, advanced analytics & reports |
-| Integration & response | SIEM integration (10 connectors), automated response orchestration (SOAR) |
+| Integration & response | SIEM integration (10 connectors), automated response orchestration (SOAR), a mass encryption run stopped across the fleet and its counting thresholds learned per host |
 | Compliance | Compliance reports (PCI-DSS 4, HIPAA, GDPR, SOC 2, NIS2, DORA, SecNumCloud, HDS) |
 | Licensing & integrity | Ed25519 + ML-DSA-65 dual-signed keys, machine fingerprint binding, air-gap activation, SHA-256 + Ed25519 binary self-verification at startup |
 | Kubernetes operator | CRD-driven deployment & lifecycle management for the agent fleet |
