@@ -24,6 +24,7 @@ pub mod listening;
 pub mod loaded;
 pub mod rpm;
 pub mod sqlite;
+pub mod surface;
 
 pub use apk::parse_apk_installed;
 pub use dpkg::{DpkgEntry, parse_dpkg_list, parse_dpkg_status};
@@ -39,6 +40,7 @@ pub use loaded::{
     ProcessObjects, loaded_objects,
 };
 pub use rpm::{parse_rpm_header, read_rpm_sqlite};
+pub use surface::{MappedCounts, mapped_counts};
 
 /// Where the dpkg status file sits in a root.
 pub const DPKG_STATUS_PATH: &str = "/var/lib/dpkg/status";

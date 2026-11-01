@@ -8151,6 +8151,54 @@
         ]
       }
     },
+    "/api/v1/surface": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "operationId": "get_surface",
+        "responses": {
+          "200": {
+            "description": "This host's own surface: what is installed, what runs and maps it, what listens, what is reachable and what the policy already blocks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/surface/listening": {
       "get": {
         "tags": [
@@ -13769,6 +13817,42 @@
           }
         }
       },
+      "InstalledBody": {
+        "type": "object",
+        "description": "What the package databases list.",
+        "required": [
+          "roots",
+          "roots_not_read",
+          "packages",
+          "go_programs"
+        ],
+        "properties": {
+          "go_programs": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Running Go programs, whose modules no database lists.",
+            "minimum": 0
+          },
+          "packages": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Packages the databases list, every root together.",
+            "minimum": 0
+          },
+          "roots": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Roots whose databases were read.",
+            "minimum": 0
+          },
+          "roots_not_read": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Roots that could not be read.",
+            "minimum": 0
+          }
+        }
+      },
       "IntentBody": {
         "type": "object",
         "description": "One intention and whether this host serves it.",
@@ -15246,6 +15330,69 @@
             "type": "integer",
             "format": "int64",
             "description": "When the mapped files were last read, nanoseconds since the epoch,\n`0` before the first.",
+            "minimum": 0
+          }
+        }
+      },
+      "ListensBody": {
+        "type": "object",
+        "description": "What listens, and who the policy lets reach it.",
+        "required": [
+          "sockets",
+          "took_traffic",
+          "took_no_traffic",
+          "unmeasured",
+          "anywhere",
+          "private_only",
+          "blocked",
+          "loopback"
+        ],
+        "properties": {
+          "anywhere": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Listeners some source outside the private ranges may reach.",
+            "minimum": 0
+          },
+          "blocked": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Listeners the policy drops every packet for.",
+            "minimum": 0
+          },
+          "loopback": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Listeners bound on the loopback.",
+            "minimum": 0
+          },
+          "private_only": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Listeners only private, carrier-grade or link-local sources may reach.",
+            "minimum": 0
+          },
+          "sockets": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "took_no_traffic": {
+            "type": "integer",
+            "format": "int32",
+            "description": "TCP listeners that accepted none.",
+            "minimum": 0
+          },
+          "took_traffic": {
+            "type": "integer",
+            "format": "int32",
+            "description": "TCP listeners that accepted a connection since the hooks attached.",
+            "minimum": 0
+          },
+          "unmeasured": {
+            "type": "integer",
+            "format": "int32",
+            "description": "UDP listeners, whose use is not counted.",
             "minimum": 0
           }
         }
@@ -18301,6 +18448,70 @@
           }
         }
       },
+      "RunsBody": {
+        "type": "object",
+        "description": "What the live processes map.",
+        "required": [
+          "processes",
+          "processes_not_read",
+          "files_mapped",
+          "files_not_listed",
+          "files_unowned",
+          "files_deleted",
+          "packages_mapped",
+          "packages_not_mapped"
+        ],
+        "properties": {
+          "files_deleted": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Files mapped that were unlinked since.",
+            "minimum": 0
+          },
+          "files_mapped": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Distinct files mapped executable, once per root.",
+            "minimum": 0
+          },
+          "files_not_listed": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Files beyond the limit one reading lists.",
+            "minimum": 0
+          },
+          "files_unowned": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Files mapped that no database in their root lists.",
+            "minimum": 0
+          },
+          "packages_mapped": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Installed packages owning a file a live process maps.",
+            "minimum": 0
+          },
+          "packages_not_mapped": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Installed packages no live process maps a file of.",
+            "minimum": 0
+          },
+          "processes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Processes the reading listed.",
+            "minimum": 0
+          },
+          "processes_not_read": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Processes whose mappings could not be read.",
+            "minimum": 0
+          }
+        }
+      },
       "RuntimeWriteDto": {
         "type": "object",
         "description": "One policy write accepted outside the document.",
@@ -18767,6 +18978,59 @@
           "scope": {
             "$ref": "#/components/schemas/ScopeBody",
             "description": "What to watch. Omitted means the whole node."
+          }
+        }
+      },
+      "SurfaceResponse": {
+        "type": "object",
+        "description": "This host's own surface.",
+        "required": [
+          "inventory_read",
+          "listeners_read",
+          "scanned_at_ns",
+          "installed",
+          "runs",
+          "listens",
+          "reachable",
+          "blocked"
+        ],
+        "properties": {
+          "blocked": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ListeningBody"
+            },
+            "description": "Every listener the policy already closes."
+          },
+          "installed": {
+            "$ref": "#/components/schemas/InstalledBody"
+          },
+          "inventory_read": {
+            "type": "boolean",
+            "description": "Whether the package inventory is read."
+          },
+          "listeners_read": {
+            "type": "boolean",
+            "description": "Whether the socket hooks are attached."
+          },
+          "listens": {
+            "$ref": "#/components/schemas/ListensBody"
+          },
+          "reachable": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ListeningBody"
+            },
+            "description": "Every listener something off the node may reach, with the packages\nbehind it."
+          },
+          "runs": {
+            "$ref": "#/components/schemas/RunsBody"
+          },
+          "scanned_at_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the inventory was last read, nanoseconds since the epoch, `0`\nbefore the first.",
+            "minimum": 0
           }
         }
       },

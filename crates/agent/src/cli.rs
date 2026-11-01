@@ -279,8 +279,9 @@ pub enum Command {
     /// What this node exposes: listening sockets and who bound them
     Exposure(DomainArgs<ExposureCommand>),
 
-    /// What is installed on this node, in its own root and every container's
-    Surface(DomainArgs<SurfaceCommand>),
+    /// This node's own surface: what is installed, what runs, what listens,
+    /// what is reachable and what the policy blocks; a subcommand for detail
+    Surface(SurfaceArgs),
 
     /// Host rules: the intentions a rule may name and which this host serves
     HostRules(DomainArgs<HostRulesCommand>),
@@ -296,6 +297,17 @@ pub enum Command {
 
     /// External alias lists: status and content
     Aliases(DomainArgs<AliasesCommand>),
+}
+
+/// The surface: a summary with no subcommand, the detail of one part with
+/// one.
+#[derive(Args, Debug)]
+pub struct SurfaceArgs {
+    #[command(flatten)]
+    pub conn: ConnectionArgs,
+
+    #[command(subcommand)]
+    pub command: Option<SurfaceCommand>,
 }
 
 /// Generic domain args: connection + subcommand.
@@ -2781,10 +2793,19 @@ mod tests {
         let cli = Cli::try_parse_from(["ebpfsentinel-agent", "surface", "packages"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Surface(DomainArgs {
-                command: SurfaceCommand::Packages,
+            Some(Command::Surface(SurfaceArgs {
+                command: Some(SurfaceCommand::Packages),
                 ..
             }))
+        ));
+    }
+
+    #[test]
+    fn cli_surface_alone_is_the_summary() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "surface"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Surface(SurfaceArgs { command: None, .. }))
         ));
     }
 
@@ -2793,8 +2814,8 @@ mod tests {
         let cli = Cli::try_parse_from(["ebpfsentinel-agent", "surface", "listening"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Surface(DomainArgs {
-                command: SurfaceCommand::Listening,
+            Some(Command::Surface(SurfaceArgs {
+                command: Some(SurfaceCommand::Listening),
                 ..
             }))
         ));
@@ -2805,8 +2826,8 @@ mod tests {
         let cli = Cli::try_parse_from(["ebpfsentinel-agent", "surface", "loaded"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Surface(DomainArgs {
-                command: SurfaceCommand::Loaded,
+            Some(Command::Surface(SurfaceArgs {
+                command: Some(SurfaceCommand::Loaded),
                 ..
             }))
         ));

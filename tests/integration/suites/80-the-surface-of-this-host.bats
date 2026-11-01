@@ -24,6 +24,9 @@
 #     the packages its process maps, the connection it took and who the
 #     policy lets reach it, and leaves once it is stopped.
 #   * The CLI prints the listeners the route answers.
+#   * The surface sums agree with themselves: every installed package is
+#     mapped or not, every listener has one origin, and a server reachable
+#     from anywhere is listed with its packages, in the route and the CLI.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
@@ -384,4 +387,40 @@ _root_of() {
     echo "$out" | jq -e '.listeners_read and .inventory_read'
     [ "$(echo "$out" | jq '[paths | map(strings) | .[]
         | select(test("cve|severity|score|vulnerab|cvss|risk"; "i"))] | length')" -eq 0 ]
+}
+
+@test "the surface sums what is installed, mapped, listening and reachable" {
+    local port=18482 pid body out
+    python3 -m http.server --bind 0.0.0.0 "$port" >/dev/null 2>&1 &
+    pid=$!
+    echo "$pid" >> "${ROOTS_PIDS_FILE}"
+    _wait_listening 150 --argjson port "$port" \
+        '.listeners | any(.port == $port and .mapped_read)' >/dev/null || {
+        kill "$pid" 2>/dev/null || true
+        return 1
+    }
+    body="$(curl -sf --max-time "${HTTP_TIMEOUT}" "${BASE_URL}/api/v1/surface")"
+    # The command reads the same route while the server still listens, so
+    # the reachable table it prints is not empty.
+    out="$("$AGENT_BIN" surface --host "$AGENT_HOST" --port "$AGENT_HTTP_PORT" 2>&1)"
+    kill "$pid"
+    wait "$pid" 2>/dev/null || true
+    echo "$body" | jq -e '.inventory_read and .listeners_read and .scanned_at_ns > 0'
+    # Every installed package is either mapped by a live process or not.
+    echo "$body" | jq -e '.installed.packages > 0
+        and .runs.packages_mapped > 0
+        and .runs.packages_mapped + .runs.packages_not_mapped == .installed.packages'
+    echo "$body" | jq -e '.listens | .sockets == .anywhere + .private_only + .blocked + .loopback
+        and .sockets == .took_traffic + .took_no_traffic + .unmeasured'
+    echo "$body" | jq -e '(.reachable | length) == .listens.anywhere + .listens.private_only
+        and (.blocked | length) == .listens.blocked'
+    echo "$body" | jq -e --argjson port "$port" \
+        '.reachable | any(.port == $port and (.packages | any(.name == "libc6")))'
+    [ "$(echo "$body" | jq '[paths | map(strings) | .[]
+        | select(test("cve|severity|score|vulnerab|cvss|risk"; "i"))] | length')" -eq 0 ]
+
+    echo "$out" | grep -qE "^Installed: [0-9]+ package\\(s\\) in [0-9]+ root\\(s\\)"
+    echo "$out" | grep -qE "^Runs: +[0-9]+ process\\(es\\) map [0-9]+ file\\(s\\)"
+    echo "$out" | grep -qE "^Reach: +[0-9]+ from anywhere"
+    echo "$out" | grep -q "^Reachable:"
 }

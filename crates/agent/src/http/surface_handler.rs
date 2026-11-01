@@ -4,7 +4,7 @@ use application::exposure_service::Listener;
 use application::package_inventory_service::PackageInventoryReport;
 use axum::Json;
 use axum::extract::State;
-use domain::inventory::{Origin, behind};
+use domain::inventory::{Origin, behind, mapped_counts};
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -137,6 +137,177 @@ fn listening(listener: &Listener, report: Option<&PackageInventoryReport>) -> Li
     }
 }
 
+/// What the package databases list.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct InstalledBody {
+    /// Roots whose databases were read.
+    pub roots: u32,
+    /// Roots that could not be read.
+    pub roots_not_read: u32,
+    /// Packages the databases list, every root together.
+    pub packages: u32,
+    /// Running Go programs, whose modules no database lists.
+    pub go_programs: u32,
+}
+
+/// What the live processes map.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RunsBody {
+    /// Processes the reading listed.
+    pub processes: u32,
+    /// Processes whose mappings could not be read.
+    pub processes_not_read: u32,
+    /// Distinct files mapped executable, once per root.
+    pub files_mapped: u32,
+    /// Files beyond the limit one reading lists.
+    pub files_not_listed: u32,
+    /// Files mapped that no database in their root lists.
+    pub files_unowned: u32,
+    /// Files mapped that were unlinked since.
+    pub files_deleted: u32,
+    /// Installed packages owning a file a live process maps.
+    pub packages_mapped: u32,
+    /// Installed packages no live process maps a file of.
+    pub packages_not_mapped: u32,
+}
+
+/// What listens, and who the policy lets reach it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ListensBody {
+    pub sockets: u32,
+    /// TCP listeners that accepted a connection since the hooks attached.
+    pub took_traffic: u32,
+    /// TCP listeners that accepted none.
+    pub took_no_traffic: u32,
+    /// UDP listeners, whose use is not counted.
+    pub unmeasured: u32,
+    /// Listeners some source outside the private ranges may reach.
+    pub anywhere: u32,
+    /// Listeners only private, carrier-grade or link-local sources may reach.
+    pub private_only: u32,
+    /// Listeners the policy drops every packet for.
+    pub blocked: u32,
+    /// Listeners bound on the loopback.
+    pub loopback: u32,
+}
+
+/// This host's own surface.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SurfaceResponse {
+    /// Whether the package inventory is read.
+    pub inventory_read: bool,
+    /// Whether the socket hooks are attached.
+    pub listeners_read: bool,
+    /// When the inventory was last read, nanoseconds since the epoch, `0`
+    /// before the first.
+    pub scanned_at_ns: u64,
+    pub installed: InstalledBody,
+    pub runs: RunsBody,
+    pub listens: ListensBody,
+    /// Every listener something off the node may reach, with the packages
+    /// behind it.
+    pub reachable: Vec<ListeningBody>,
+    /// Every listener the policy already closes.
+    pub blocked: Vec<ListeningBody>,
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/surface",
+    tag = "Operations",
+    responses((status = 200, description = "This host's own surface: what is installed, what runs and maps it, what listens, what is reachable and what the policy already blocks", body = SurfaceResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn get_surface(State(state): State<Arc<AppState>>) -> Json<SurfaceResponse> {
+    let listeners = match state.exposure.load_full() {
+        Some(service) => {
+            let posture = state.firewall_service.read().await.posture();
+            service.listeners(&posture)
+        }
+        None => None,
+    };
+    let report = state.package_inventory.load_full().map(|s| s.report());
+    Json(surface_response(listeners, report.as_deref()))
+}
+
+/// The surface from a reading of the listeners and of the inventory, each
+/// `None` when it is not read.
+#[must_use]
+pub fn surface_response(
+    listeners: Option<Vec<Listener>>,
+    report: Option<&PackageInventoryReport>,
+) -> SurfaceResponse {
+    let listening = listening_response(listeners, report);
+    let sweep = report.map(|r| &r.sweep);
+    let counts = sweep.map(mapped_counts).unwrap_or_default();
+    let mut listens = ListensBody {
+        sockets: count(listening.listeners.len()),
+        took_traffic: 0,
+        took_no_traffic: 0,
+        unmeasured: 0,
+        anywhere: 0,
+        private_only: 0,
+        blocked: 0,
+        loopback: 0,
+    };
+    let (mut reachable, mut blocked) = (Vec::new(), Vec::new());
+    for l in listening.listeners {
+        match l.accepted {
+            Some(0) => listens.took_no_traffic += 1,
+            Some(_) => listens.took_traffic += 1,
+            None => listens.unmeasured += 1,
+        }
+        match l.origin {
+            "anywhere" => {
+                listens.anywhere += 1;
+                reachable.push(l);
+            }
+            "private_only" => {
+                listens.private_only += 1;
+                reachable.push(l);
+            }
+            "blocked" => {
+                listens.blocked += 1;
+                blocked.push(l);
+            }
+            _ => listens.loopback += 1,
+        }
+    }
+    SurfaceResponse {
+        inventory_read: listening.inventory_read,
+        listeners_read: listening.listeners_read,
+        scanned_at_ns: listening.scanned_at_ns,
+        installed: InstalledBody {
+            roots: counts.roots,
+            roots_not_read: sweep.map_or(0, |s| s.roots_not_read),
+            packages: counts.packages_installed,
+            go_programs: sweep.map_or(0, |s| count(s.go_executables.len())),
+        },
+        runs: RunsBody {
+            processes: sweep.map_or(0, |s| s.processes_listed),
+            processes_not_read: sweep.map_or(0, |s| s.processes_not_read),
+            files_mapped: counts.files_mapped,
+            files_not_listed: sweep.map_or(0, |s| s.loaded.not_listed),
+            files_unowned: counts.files_unowned,
+            files_deleted: counts.files_deleted,
+            packages_mapped: counts.packages_mapped,
+            packages_not_mapped: counts.packages_not_mapped(),
+        },
+        listens,
+        reachable,
+        blocked,
+    }
+}
+
+fn count(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,9 +419,46 @@ mod tests {
     }
 
     #[test]
+    fn the_surface_counts_what_is_installed_mapped_listening_and_blocked() {
+        let report = report();
+        let mut closed = listener(90, 22, &[], 0);
+        closed.reach.open = false;
+        closed.class = ExposureClass::of(ListenerScope::AllAddresses, false, Some(0));
+        let mut dns = listener(91, 53, &[], 0);
+        dns.protocol = ListenerProtocol::Udp;
+        dns.accepted = None;
+        let surface = surface_response(
+            Some(vec![listener(80, 443, &[], 12), closed, dns]),
+            Some(&report),
+        );
+        assert_eq!(surface.installed.roots, 1);
+        assert_eq!(surface.installed.packages, 1);
+        assert_eq!(surface.runs.files_mapped, 2);
+        assert_eq!(surface.runs.files_unowned, 1);
+        assert_eq!(surface.runs.packages_mapped, 1);
+        assert_eq!(surface.runs.packages_not_mapped, 0);
+        assert_eq!(surface.listens.sockets, 3);
+        assert_eq!(surface.listens.took_traffic, 1);
+        assert_eq!(surface.listens.took_no_traffic, 1);
+        assert_eq!(surface.listens.unmeasured, 1);
+        assert_eq!(surface.listens.anywhere, 2);
+        assert_eq!(surface.listens.blocked, 1);
+        assert_eq!(surface.reachable.len(), 2);
+        assert_eq!(surface.reachable[0].packages[0].name, "nginx-core");
+        assert_eq!(surface.blocked[0].port, 22);
+        let json = serde_json::to_string(&surface).unwrap().to_lowercase();
+        for word in ["cve", "severity", "score", "vulnerab", "cvss", "risk"] {
+            assert!(!json.contains(word), "{word}");
+        }
+    }
+
+    #[test]
     fn nothing_read_says_so_on_both_halves() {
         let json = serde_json::to_value(listening_response(None, None)).unwrap();
         assert_eq!(json["listeners_read"], false);
+        let surface = surface_response(None, None);
+        assert!(!surface.inventory_read && !surface.listeners_read);
+        assert_eq!(surface.installed.packages, 0);
         assert_eq!(json["inventory_read"], false);
         let json = serde_json::to_value(listening_response(
             Some(vec![listener(80, 443, &[], 1)]),

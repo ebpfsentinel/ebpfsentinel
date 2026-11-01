@@ -2292,6 +2292,59 @@ pub struct LoadedObjectEntry {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct SurfaceInstalled {
+    pub roots: u32,
+    #[serde(default)]
+    pub roots_not_read: u32,
+    pub packages: u32,
+    #[serde(default)]
+    pub go_programs: u32,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct SurfaceRuns {
+    pub processes: u32,
+    #[serde(default)]
+    pub processes_not_read: u32,
+    pub files_mapped: u32,
+    #[serde(default)]
+    pub files_not_listed: u32,
+    #[serde(default)]
+    pub files_unowned: u32,
+    #[serde(default)]
+    pub files_deleted: u32,
+    pub packages_mapped: u32,
+    pub packages_not_mapped: u32,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct SurfaceListens {
+    pub sockets: u32,
+    pub took_traffic: u32,
+    pub took_no_traffic: u32,
+    pub unmeasured: u32,
+    pub anywhere: u32,
+    pub private_only: u32,
+    pub blocked: u32,
+    pub loopback: u32,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct SurfaceResponse {
+    pub inventory_read: bool,
+    pub listeners_read: bool,
+    #[serde(default)]
+    pub scanned_at_ns: u64,
+    pub installed: SurfaceInstalled,
+    pub runs: SurfaceRuns,
+    pub listens: SurfaceListens,
+    #[serde(default)]
+    pub reachable: Vec<ListeningEntry>,
+    #[serde(default)]
+    pub blocked: Vec<ListeningEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct ListeningResponse {
     pub listeners_read: bool,
     pub inventory_read: bool,
@@ -4568,6 +4621,15 @@ impl ApiClient {
     pub async fn surface_loaded(&self) -> anyhow::Result<LoadedResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/surface/loaded")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn surface(&self) -> anyhow::Result<SurfaceResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/surface")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

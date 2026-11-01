@@ -725,9 +725,14 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
         Some(Command::Surface(args)) => {
             let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
             match args.command {
-                SurfaceCommand::Packages => commands::cmd_surface_packages(&client, output).await,
-                SurfaceCommand::Loaded => commands::cmd_surface_loaded(&client, output).await,
-                SurfaceCommand::Listening => commands::cmd_surface_listening(&client, output).await,
+                None => commands::cmd_surface(&client, output).await,
+                Some(SurfaceCommand::Packages) => {
+                    commands::cmd_surface_packages(&client, output).await
+                }
+                Some(SurfaceCommand::Loaded) => commands::cmd_surface_loaded(&client, output).await,
+                Some(SurfaceCommand::Listening) => {
+                    commands::cmd_surface_listening(&client, output).await
+                }
             }
         }
 

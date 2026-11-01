@@ -5103,6 +5103,97 @@ pub async fn cmd_surface_packages(client: &ApiClient, output: OutputFormat) -> R
     Ok(())
 }
 
+/// Print this host's own surface: what is installed, what runs and maps
+/// it, what listens, what is reachable and what the policy blocks.
+pub async fn cmd_surface(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.surface().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    if resp.inventory_read && resp.scanned_at_ns > 0 {
+        let i = &resp.installed;
+        let r = &resp.runs;
+        println!(
+            "Installed: {} package(s) in {} root(s), {} root(s) not read, {} running Go program(s).",
+            i.packages, i.roots, i.roots_not_read, i.go_programs
+        );
+        println!(
+            "Runs:      {} process(es) map {} file(s); {} package(s) mapped, {} never mapped; \
+             {} file(s) no package owns, {} deleted since mapped.",
+            r.processes,
+            r.files_mapped,
+            r.packages_mapped,
+            r.packages_not_mapped,
+            r.files_unowned,
+            r.files_deleted
+        );
+        if r.processes_not_read > 0 || r.files_not_listed > 0 {
+            println!(
+                "           {} process(es) not read, {} file(s) beyond the limit.",
+                r.processes_not_read, r.files_not_listed
+            );
+        }
+    } else if resp.inventory_read {
+        println!("Installed: the first reading has not finished yet.");
+    } else {
+        println!("Installed: the package inventory is turned off on this node.");
+    }
+    if !resp.listeners_read {
+        println!("Listens:   the socket hooks are not attached, the node's listeners are unknown.");
+        return Ok(());
+    }
+    let l = &resp.listens;
+    println!(
+        "Listens:   {} socket(s); {} took traffic, {} took none, {} UDP not measured.",
+        l.sockets, l.took_traffic, l.took_no_traffic, l.unmeasured
+    );
+    println!(
+        "Reach:     {} from anywhere, {} from private ranges only, {} blocked by policy, {} loopback only.",
+        l.anywhere, l.private_only, l.blocked, l.loopback
+    );
+    for (title, rows) in [
+        ("Reachable", &resp.reachable),
+        ("Blocked by policy", &resp.blocked),
+    ] {
+        if rows.is_empty() {
+            continue;
+        }
+        println!();
+        println!("{title}:");
+        let mut table = Table::new(&[
+            ("ADDRESS", Align::Left),
+            ("PORT", Align::Right),
+            ("PROTO", Align::Left),
+            ("PID", Align::Right),
+            ("EXECUTABLE", Align::Left),
+            ("ORIGIN", Align::Left),
+            ("ACCEPTED", Align::Right),
+            ("PACKAGES", Align::Right),
+        ]);
+        for row in rows {
+            table.row(cells![
+                row.address,
+                row.port,
+                row.protocol,
+                row.pid,
+                row.executable.as_deref().unwrap_or("-"),
+                row.origin,
+                row.accepted.map_or("-".to_string(), |n| n.to_string()),
+                if row.mapped_read {
+                    row.packages.len().to_string()
+                } else {
+                    "not read".to_string()
+                }
+            ]);
+        }
+        table.print();
+    }
+    Ok(())
+}
+
 /// Print every listener with the packages its process maps.
 pub async fn cmd_surface_listening(client: &ApiClient, output: OutputFormat) -> Result<()> {
     let resp = client.surface_listening().await?;
