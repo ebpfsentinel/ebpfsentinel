@@ -478,6 +478,18 @@ impl RansomService {
         });
     }
 
+    /// Whether a verdict in force stops the run it names, which is a stop
+    /// installed and verdicts taken in `Enforce`.
+    #[must_use]
+    pub fn stops(&self) -> bool {
+        self.mode == RuleMode::Enforce
+            && self
+                .stopper
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_some()
+    }
+
     /// Kill the run `verdict` names, then raise what that cost beside
     /// `alert`. Nothing happens where no stop is installed.
     fn stop(&self, verdict: &RansomVerdict, alert: &Alert) {
@@ -1043,7 +1055,12 @@ mod tests {
             .await
             .expect("the fake maps take the protected set"),
         );
+        assert!(!service.stops(), "no stop is installed yet");
         service.install_stop(signals, &table, Duration::from_millis(5));
+        assert!(
+            service.stops(),
+            "a verdict in force with a stop installed stops"
+        );
 
         let run = running(100, "/tmp/enc", 7);
         let lineage = Lineage {
