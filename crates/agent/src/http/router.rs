@@ -86,8 +86,8 @@ use super::drop_reason_handler::get_drop_reasons;
 use super::exposure_handler::get_listeners;
 use super::fingerprint_handler::{fingerprint_summary, ja4s_summary};
 use super::firewall_handler::{
-    create_rule, delete_rule, list_rules, list_workload_rules, workload_fqdn, workload_labels,
-    workload_reach,
+    create_rule, delete_rule, list_rules, list_workload_rules, shadow_report, workload_fqdn,
+    workload_labels, workload_reach,
 };
 use super::flow_handler::flow_export_status;
 use super::geoip_handler::{geoip_lookup, geoip_status};
@@ -272,6 +272,7 @@ pub fn build_router(
             .route("/api/v1/firewall/l7-rules", get(list_l7_rules))
             .route("/api/v1/firewall/workload/reach", get(workload_reach))
             .route("/api/v1/firewall/workload/rules", get(list_workload_rules))
+            .route("/api/v1/firewall/shadow", get(shadow_report))
             .route("/api/v1/firewall/workload/fqdn", get(workload_fqdn))
             .route("/api/v1/firewall/workload/labels", get(workload_labels))
             .route("/api/v1/learning/sessions", get(list_learning))

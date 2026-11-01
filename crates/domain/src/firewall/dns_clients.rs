@@ -173,6 +173,7 @@ impl DnsClients {
         selector: WorkloadSelector,
     ) -> FirewallRule {
         FirewallRule {
+            mode: crate::firewall::entity::RuleMode::Enforce,
             id: RuleId(id),
             priority,
             action,

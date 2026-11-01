@@ -4,7 +4,9 @@ use std::collections::HashMap;
 
 use domain::common::entity::RuleId;
 use domain::firewall::dns_clients::{DEFAULT_DNS_CLIENTS_PRIORITY, DnsClients};
-use domain::firewall::entity::{FirewallAction, FirewallRule, PortRange, Scope as DomainScope};
+use domain::firewall::entity::{
+    FirewallAction, FirewallRule, PortRange, RuleMode, Scope as DomainScope,
+};
 use domain::firewall::exec_network::NetworkExecutables;
 use domain::firewall::fqdn::{DEFAULT_GRACE_SECS, FqdnPattern, WorkloadDnsSettings};
 use domain::firewall::workload::{
@@ -536,6 +538,11 @@ pub struct FirewallRuleConfig {
     /// Which workload this rule is about, when it is about one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload: Option<WorkloadMatchConfig>,
+
+    /// `enforce` (the default) decides traffic; `shadow` decides nothing and
+    /// counts what the rule would have allowed or denied.
+    #[serde(default, skip_serializing_if = "RuleMode::is_enforce")]
+    pub mode: RuleMode,
 }
 
 // ── Workload match config ──────────────────────────────────────────
@@ -874,6 +881,7 @@ impl FirewallRuleConfig {
             })?;
 
         let rule = FirewallRule {
+            mode: self.mode,
             id: RuleId(self.id.clone()),
             enabled: self.enabled,
             priority: self.priority,
@@ -919,6 +927,7 @@ impl FirewallRuleConfig {
         };
 
         rule.validate_workload()
+            .and_then(|()| rule.validate_shadow())
             .map_err(|e| ConfigError::Validation {
                 field: format!("firewall.rules[{}]", self.id),
                 message: e.to_string(),
@@ -1085,6 +1094,39 @@ protocol: tcp
         .unwrap();
 
         assert_eq!(rule.to_domain_rule(&HashMap::new()).unwrap().tenant_id, 0);
+    }
+
+    #[test]
+    fn a_rule_in_shadow_mode_reaches_the_domain_in_that_mode() {
+        let rule: FirewallRuleConfig = serde_norway::from_str(
+            r"
+id: fw-watched
+priority: 10
+action: deny
+protocol: tcp
+mode: shadow
+",
+        )
+        .unwrap();
+        let domain_rule = rule.to_domain_rule(&HashMap::new()).unwrap();
+        assert_eq!(domain_rule.mode, RuleMode::Shadow);
+    }
+
+    #[test]
+    fn a_shadow_rule_marking_dscp_is_refused_when_read() {
+        let rule: FirewallRuleConfig = serde_norway::from_str(
+            r"
+id: fw-watched
+priority: 10
+action: allow
+protocol: tcp
+mode: shadow
+dscp_mark: 10
+",
+        )
+        .unwrap();
+        let err = rule.to_domain_rule(&HashMap::new()).unwrap_err();
+        assert!(err.to_string().contains("dscp_mark"), "{err}");
     }
 
     // ── Workload matchers ─────────────────────────────────────────

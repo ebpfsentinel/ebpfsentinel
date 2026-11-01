@@ -3743,6 +3743,65 @@
         ]
       }
     },
+    "/api/v1/firewall/shadow": {
+      "get": {
+        "tags": [
+          "Firewall"
+        ],
+        "summary": "`GET /api/v1/firewall/shadow` - what each shadow rule would have done.",
+        "operationId": "shadow_report",
+        "responses": {
+          "200": {
+            "description": "Shadow rules and what each would have done",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShadowReportResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The kernel counters could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/firewall/workload/fqdn": {
       "get": {
         "tags": [
@@ -10899,6 +10958,13 @@
           "id": {
             "type": "string"
           },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`enforce` (the default) decides traffic; `shadow` decides nothing and\ncounts what the rule would have done."
+          },
           "priority": {
             "type": "integer",
             "format": "int32",
@@ -16160,6 +16226,7 @@
         "required": [
           "id",
           "enabled",
+          "mode",
           "priority",
           "action",
           "protocol",
@@ -16270,6 +16337,10 @@
             ],
             "format": "int32",
             "minimum": 0
+          },
+          "mode": {
+            "type": "string",
+            "description": "`enforce` decides traffic; `shadow` only counts what it would do."
           },
           "negate_dst": {
             "type": "boolean"
@@ -16664,6 +16735,152 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "ShadowFlowResponse": {
+        "type": "object",
+        "description": "One flow a shadow rule would have decided otherwise, or the same way.",
+        "required": [
+          "src_ip",
+          "dst_ip",
+          "src_port",
+          "dst_port",
+          "protocol",
+          "live_verdict",
+          "packets",
+          "first_seen_ns",
+          "last_seen_ns"
+        ],
+        "properties": {
+          "dst_ip": {
+            "type": "string"
+          },
+          "dst_port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "first_seen_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "First packet seen, nanoseconds since the Unix epoch.",
+            "minimum": 0
+          },
+          "last_seen_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last packet seen, nanoseconds since the Unix epoch.",
+            "minimum": 0
+          },
+          "live_verdict": {
+            "type": "string",
+            "description": "`allow` or `deny`: what the rules in force did to the flow."
+          },
+          "packets": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Packets of this flow the rule matched while it was sampled.",
+            "minimum": 0
+          },
+          "protocol": {
+            "type": "integer",
+            "format": "int32",
+            "description": "IP protocol number.",
+            "minimum": 0
+          },
+          "src_ip": {
+            "type": "string"
+          },
+          "src_port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "ShadowReportResponse": {
+        "type": "object",
+        "description": "What every shadow rule would have done.",
+        "required": [
+          "counting_since_ns",
+          "rules"
+        ],
+        "properties": {
+          "counting_since_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the counters were last reset, nanoseconds since the Unix epoch:\nevery change to the set of shadow rules starts them again. Zero when\nno shadow rule was ever loaded.",
+            "minimum": 0
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ShadowRuleResponse"
+            }
+          }
+        }
+      },
+      "ShadowRuleResponse": {
+        "type": "object",
+        "description": "What one shadow rule would have done since counting started.",
+        "required": [
+          "rule_id",
+          "action",
+          "would",
+          "installed",
+          "packets",
+          "flows",
+          "changed_packets",
+          "changed_flows",
+          "sample"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "The rule's own action."
+          },
+          "changed_flows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Flows the rules in force decided otherwise than this rule would.",
+            "minimum": 0
+          },
+          "changed_packets": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Packets the rules in force decided otherwise than this rule would.",
+            "minimum": 0
+          },
+          "flows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct flows the rule matched. A floor: a flow forgotten by the\nbounded flow table is counted again when it returns.",
+            "minimum": 0
+          },
+          "installed": {
+            "type": "boolean",
+            "description": "Whether the rule is in the kernel. A rule past the per-family limit,\ndisabled or outside its schedule counts nothing."
+          },
+          "packets": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Packets the rule matched.",
+            "minimum": 0
+          },
+          "rule_id": {
+            "type": "string"
+          },
+          "sample": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ShadowFlowResponse"
+            },
+            "description": "Most recent flows matched, newest first."
+          },
+          "would": {
+            "type": "string",
+            "description": "`allow` or `deny`: what the action amounts to on the wire."
           }
         }
       },

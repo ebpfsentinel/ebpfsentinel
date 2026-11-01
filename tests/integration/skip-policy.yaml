@@ -87,6 +87,7 @@ env:
   - "suite 73 makes its guest devices beside the agent (local lane only)"
   - "suite 74 makes its guest devices beside the agent (local lane only)"
   - "suite 75 runs its guests beside the agent (local lane only)"
+  - "suite 76 sends its traffic from the local namespace (local lane only)"
   - "libvirt and QEMU not installed (run the libvirt provisioner)"
   - "libvirtd not reachable on qemu:///system"
   - "suite 39 requires EBPF_2VM_MODE=true (attacker VM driving real slow flood)"

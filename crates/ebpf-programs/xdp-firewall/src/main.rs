@@ -5,7 +5,7 @@
 use aya_ebpf::{
     bindings::xdp_action,
     btf_maps::{
-        Array, HashMap, PerCpuArray, ProgramArray, RingBuf,
+        Array, HashMap, LruHashMap, PerCpuArray, ProgramArray, RingBuf,
         lpm_trie::{Key, LpmTrie},
     },
     cty::c_void,
@@ -34,7 +34,9 @@ use ebpf_common::{
         MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT, MATCH_SRC_SET, MATCH2_DSCP, MATCH2_DST_MAC,
         MATCH2_ICMP_CODE, MATCH2_ICMP_TYPE, MATCH2_NEGATE_DST, MATCH2_NEGATE_SRC, MATCH2_SRC_MAC,
         MATCH2_TCP_FLAGS, MAX_FIREWALL_RULES, MAX_FW_HASH_5TUPLE, MAX_FW_HASH_PORT,
-        MAX_IPSET_ENTRIES_V4, MAX_LPM_RULES, PacketCtx, VLAN_ANY,
+        MAX_IPSET_ENTRIES_V4, MAX_LPM_RULES, MAX_SHADOW_FLOWS, MAX_SHADOW_RULES, MAX_SHADOW_SAMPLE,
+        PacketCtx, SHADOW_FAMILY_V4, SHADOW_FAMILY_V6, SHADOW_STAT_SLOTS, SHADOW_VERDICT_ALLOW,
+        SHADOW_VERDICT_DENY, ShadowFlowKey, ShadowMeta, ShadowRuleStats, ShadowSample, VLAN_ANY,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
     zone::{
@@ -211,6 +213,38 @@ static CT_STATE_SCRATCH: PerCpuArray<u32, 1> = PerCpuArray::new();
 // zero-filled copy - otherwise reject reads protocol/offsets as 0 and forges
 // a malformed ICMP from offset 0 for every packet.
 static PKT_CTX: PerCpuArray<PacketCtx, 1> = PerCpuArray::new();
+
+/// IPv4 shadow rules: read after the verdict, never part of it.
+#[btf_map]
+static FW_SHADOW_RULES: Array<FirewallRuleEntry, { MAX_SHADOW_RULES as usize }> = Array::new();
+
+/// IPv6 shadow rules.
+#[btf_map]
+static FW_SHADOW_RULES_V6: Array<FirewallRuleEntryV6, { MAX_SHADOW_RULES as usize }> = Array::new();
+
+/// Number of shadow rules per family (`SHADOW_FAMILY_V4`, `SHADOW_FAMILY_V6`).
+#[btf_map]
+static FW_SHADOW_COUNT: Array<u32, 2> = Array::new();
+
+/// Per shadow rule, what it matched and how often it disagreed with the
+/// verdict. Slot `i` is v4 rule `i`, slot `MAX_SHADOW_RULES + i` v6 rule `i`.
+#[btf_map]
+static FW_SHADOW_STATS: PerCpuArray<ShadowRuleStats, { SHADOW_STAT_SLOTS as usize }> =
+    PerCpuArray::new();
+
+/// Flows each shadow rule has seen, so a flow is counted once.
+#[btf_map]
+static FW_SHADOW_FLOWS: LruHashMap<ShadowFlowKey, u8, { MAX_SHADOW_FLOWS as usize }> =
+    LruHashMap::new();
+
+/// The bounded sample of flows a shadow rule would have decided otherwise.
+#[btf_map]
+static FW_SHADOW_SAMPLE: LruHashMap<ShadowFlowKey, ShadowSample, { MAX_SHADOW_SAMPLE as usize }> =
+    LruHashMap::new();
+
+/// What the packet path leaves for the shadow scan at the entry point.
+#[btf_map]
+static SHADOW_META: PerCpuArray<ShadowMeta, 1> = PerCpuArray::new();
 
 /// Kernel->userspace event ring buffer, 1 MiB: about 7,500 packet events
 /// before backpressure refuses new ones (sizing in `ebpf_helpers::ringbuf`).
@@ -690,6 +724,9 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
             }
         }
     };
+    // The verdict is taken; a shadow rule can now be read against it and
+    // cannot change it.
+    let action = settle_shadow(action);
     // Tail calls must happen in the XDP entry point (not subprogs) to
     // satisfy kernel 6.17+ verifier: "tail_call is only allowed in
     // functions that return 'int'".
@@ -1167,6 +1204,13 @@ fn process_firewall_v4(
         CT_STATE_UNKNOWN
     };
 
+    arm_shadow(
+        ctx_raw,
+        SHADOW_FAMILY_V4,
+        ct_state,
+        pack_shadow_l4(tcp_flags, icmp_type, icmp_code, dscp),
+    );
+
     // Phase 1: LPM Trie lookup - O(log n) for CIDR-only rules.
     // Keys use network byte order for correct prefix matching.
     if !feature_empty(gates, FW_EMPTY_LPM_V4) {
@@ -1357,6 +1401,343 @@ fn process_firewall_v4(
 
     // No rule matched - apply default policy
     apply_default_policy(ctx, ctx_raw)
+}
+
+// ── Shadow rules ────────────────────────────────────────────────────
+
+/// Pack the four one-byte L4 facts the shadow scan reads, so arming stays
+/// within the five argument registers.
+#[inline(always)]
+fn pack_shadow_l4(tcp_flags: u8, icmp_type: u8, icmp_code: u8, dscp: u8) -> u32 {
+    u32::from(tcp_flags)
+        | (u32::from(icmp_type) << 8)
+        | (u32::from(icmp_code) << 16)
+        | (u32::from(dscp) << 24)
+}
+
+/// Leave what the shadow scan needs beside `PacketCtx`, when this family has
+/// a shadow rule. Nothing here is read by the verdict.
+///
+/// A trace is never armed: a synthetic packet must not count as traffic a
+/// rule would have changed.
+#[inline(never)]
+fn arm_shadow(ctx_raw: *mut core::ffi::c_void, family: u32, ct_state: u8, l4: u32) {
+    let count = match FW_SHADOW_COUNT.get(family) {
+        Some(&c) => c,
+        None => 0,
+    };
+    if count == 0 || traced(ctx_raw) {
+        return;
+    }
+    let Some(meta) = SHADOW_META.get_ptr_mut(0) else {
+        return;
+    };
+    let Some(pkt) = PKT_CTX.get(0) else {
+        return;
+    };
+    let ctx_owned = XdpContext::new(ctx_raw.cast());
+    let ctx = &ctx_owned;
+    let Ok(ethhdr) = (unsafe { ptr_at::<EthHdr>(ctx, 0) }) else {
+        return;
+    };
+    let gates = empty_features();
+    let ifindex = ctx.ingress_ifindex() as u32;
+    let tenant_id = if family == SHADOW_FAMILY_V4 {
+        unsafe { resolve_tenant_id(ifindex, pkt.vlan_id, pkt.src_addr[0], gates) }
+    } else {
+        unsafe { resolve_tenant_id_v6(ifindex, pkt.vlan_id, &pkt.src_addr, gates) }
+    };
+    unsafe {
+        let p = ethhdr as *const u8;
+        copy_mac_asm!((*meta).dst_mac.as_mut_ptr(), p);
+        copy_mac_asm!((*meta).src_mac.as_mut_ptr(), p.add(6));
+        (*meta).ct_state = ct_state;
+        (*meta).tcp_flags = (l4 & 0xFF) as u8;
+        (*meta).icmp_type = ((l4 >> 8) & 0xFF) as u8;
+        (*meta).icmp_code = ((l4 >> 16) & 0xFF) as u8;
+        (*meta).dscp = (l4 >> 24) as u8;
+        (*meta).iface_groups = get_iface_groups(ctx, gates);
+        (*meta).tenant_id = tenant_id;
+        (*meta).armed = 1;
+    }
+}
+
+/// Context passed through `bpf_loop` to the shadow callbacks.
+#[repr(C)]
+struct ShadowScanCtx {
+    count: u32,
+    src_addr: [u32; 4],
+    dst_addr: [u32; 4],
+    src_port: u16,
+    dst_port: u16,
+    protocol: u8,
+    live_verdict: u8,
+    vlan_id: u16,
+    ct_state: u8,
+    tcp_flags: u8,
+    icmp_type: u8,
+    icmp_code: u8,
+    dscp: u8,
+    src_mac: [u8; 6],
+    dst_mac: [u8; 6],
+    iface_groups: u32,
+    tenant_id: u32,
+    now_ns: u64,
+    /// Bit `i` set: rule `i` of the family matched the packet.
+    matched: u64,
+    /// Bit `i` set: rule `i` would have dropped or rejected it.
+    would_deny: u64,
+    /// First counter slot of the family.
+    slot_base: u32,
+}
+
+/// Read every shadow rule of the packet's family against the verdict already
+/// taken. Only a pass and a drop or reject are verdicts a rule could have
+/// contradicted; the ARP hand-off is neither.
+///
+/// Returns the verdict unchanged. It is read back from `SHADOW_META` rather
+/// than kept in a register, so no path into this function is told apart by
+/// the verdict it carries and the scan is verified once.
+#[inline(never)]
+fn settle_shadow(action: u32) -> u32 {
+    let Some(meta) = SHADOW_META.get_ptr_mut(0) else {
+        return action;
+    };
+    unsafe { core::ptr::write_volatile(&raw mut (*meta).verdict, action) };
+    read_shadow(meta);
+    unsafe { core::ptr::read_volatile(&raw const (*meta).verdict) }
+}
+
+#[inline(always)]
+fn read_shadow(meta: *mut ShadowMeta) {
+    if unsafe { (*meta).armed } == 0 {
+        return;
+    }
+    unsafe { (*meta).armed = 0 };
+    let action = unsafe { core::ptr::read_volatile(&raw const (*meta).verdict) };
+    let live_verdict = if action == xdp_action::XDP_PASS {
+        SHADOW_VERDICT_ALLOW
+    } else if action == xdp_action::XDP_DROP || action == XDP_ACTION_REJECT {
+        SHADOW_VERDICT_DENY
+    } else {
+        return;
+    };
+    let Some(pkt) = PKT_CTX.get(0) else {
+        return;
+    };
+    let v6 = (pkt.flags & FLAG_IPV6) != 0;
+    let family = if v6 {
+        SHADOW_FAMILY_V6
+    } else {
+        SHADOW_FAMILY_V4
+    };
+    let count = match FW_SHADOW_COUNT.get(family) {
+        Some(&c) => c,
+        None => 0,
+    };
+    if count == 0 {
+        return;
+    }
+    let mut scan = unsafe {
+        ShadowScanCtx {
+            count,
+            src_addr: pkt.src_addr,
+            dst_addr: pkt.dst_addr,
+            src_port: pkt.src_port,
+            dst_port: pkt.dst_port,
+            protocol: pkt.protocol,
+            live_verdict,
+            vlan_id: pkt.vlan_id,
+            ct_state: (*meta).ct_state,
+            tcp_flags: (*meta).tcp_flags,
+            icmp_type: (*meta).icmp_type,
+            icmp_code: (*meta).icmp_code,
+            dscp: (*meta).dscp,
+            src_mac: (*meta).src_mac,
+            dst_mac: (*meta).dst_mac,
+            iface_groups: (*meta).iface_groups,
+            tenant_id: (*meta).tenant_id,
+            now_ns: bpf_ktime_get_boot_ns(),
+            matched: 0,
+            would_deny: 0,
+            slot_base: if v6 { MAX_SHADOW_RULES } else { 0 },
+        }
+    };
+    let callback = if v6 {
+        scan_shadow_v6 as *mut c_void
+    } else {
+        scan_shadow_v4 as *mut c_void
+    };
+    // Matching and counting are two passes: in one callback the verifier
+    // would walk every counting branch once per matching path.
+    let scan_ptr = &mut scan as *mut ShadowScanCtx as *mut c_void;
+    unsafe {
+        bpf_loop(MAX_SHADOW_RULES, callback, scan_ptr, 0);
+    }
+    if scan.matched == 0 {
+        return;
+    }
+    unsafe {
+        bpf_loop(
+            MAX_SHADOW_RULES,
+            count_shadow_slot as *mut c_void,
+            scan_ptr,
+            0,
+        );
+    }
+}
+
+/// Mark rule `index` of the family as matched, and whether it would deny.
+#[inline(always)]
+fn mark_shadow(lctx: &mut ShadowScanCtx, index: u32, rule_action: u8) {
+    let bit = 1u64 << (index & 63);
+    lctx.matched |= bit;
+    if rule_action != ACTION_PASS && rule_action != ACTION_LOG {
+        lctx.would_deny |= bit;
+    }
+}
+
+/// Callback for `bpf_loop`: count the packet against rule `index` when the
+/// matching pass marked it.
+unsafe extern "C" fn count_shadow_slot(index: u32, ctx: *mut c_void) -> i64 {
+    unsafe {
+        let lctx = &*(ctx as *const ShadowScanCtx);
+        if index >= lctx.count || index >= MAX_SHADOW_RULES {
+            return 1;
+        }
+        let bit = 1u64 << (index & 63);
+        if lctx.matched & bit == 0 {
+            return 0;
+        }
+        let would = if lctx.would_deny & bit == 0 {
+            SHADOW_VERDICT_ALLOW
+        } else {
+            SHADOW_VERDICT_DENY
+        };
+        count_shadow(lctx, lctx.slot_base + index, would);
+        0
+    }
+}
+
+/// Callback for `bpf_loop`: read one IPv4 shadow rule. Every rule is read,
+/// not only the first that matches, since each is counted on its own.
+unsafe extern "C" fn scan_shadow_v4(index: u32, ctx: *mut c_void) -> i64 {
+    unsafe {
+        let lctx = &mut *(ctx as *mut ShadowScanCtx);
+        if index >= lctx.count {
+            return 1;
+        }
+        if let Some(rule) = FW_SHADOW_RULES.get(index) {
+            if !group_matches(rule.group_mask, lctx.iface_groups) {
+                return 0;
+            }
+            if rule.tenant_id != 0 && rule.tenant_id != lctx.tenant_id {
+                return 0;
+            }
+            if match_rule_v4(
+                rule,
+                lctx.src_addr[0],
+                lctx.dst_addr[0],
+                lctx.src_port,
+                lctx.dst_port,
+                lctx.protocol,
+                lctx.vlan_id,
+                lctx.ct_state,
+                lctx.tcp_flags,
+                lctx.icmp_type,
+                lctx.icmp_code,
+                lctx.dscp,
+                &lctx.src_mac,
+                &lctx.dst_mac,
+            ) {
+                mark_shadow(lctx, index, rule.action);
+            }
+        }
+        0
+    }
+}
+
+/// Callback for `bpf_loop`: read one IPv6 shadow rule.
+unsafe extern "C" fn scan_shadow_v6(index: u32, ctx: *mut c_void) -> i64 {
+    unsafe {
+        let lctx = &mut *(ctx as *mut ShadowScanCtx);
+        if index >= lctx.count {
+            return 1;
+        }
+        if let Some(rule) = FW_SHADOW_RULES_V6.get(index) {
+            if !group_matches(rule.group_mask, lctx.iface_groups) {
+                return 0;
+            }
+            if rule.tenant_id != 0 && rule.tenant_id != lctx.tenant_id {
+                return 0;
+            }
+            if match_rule_v6(
+                rule,
+                &lctx.src_addr,
+                &lctx.dst_addr,
+                lctx.src_port,
+                lctx.dst_port,
+                lctx.protocol,
+                lctx.vlan_id,
+                lctx.ct_state,
+                lctx.tcp_flags,
+                lctx.icmp_type,
+                lctx.icmp_code,
+                lctx.dscp,
+                &lctx.src_mac,
+                &lctx.dst_mac,
+            ) {
+                mark_shadow(lctx, index, rule.action);
+            }
+        }
+        0
+    }
+}
+
+/// Count one matched packet against a shadow rule's slot: the packet, its flow
+/// on first sight, and, when the rule would have decided otherwise, the flow
+/// in the sample.
+#[inline(always)]
+fn count_shadow(lctx: &ShadowScanCtx, slot: u32, would: u8) {
+    let changed = would != lctx.live_verdict;
+    let Some(stats) = FW_SHADOW_STATS.get_ptr_mut(slot) else {
+        return;
+    };
+    let key = ShadowFlowKey {
+        slot: slot as u16,
+        protocol: lctx.protocol,
+        _pad: 0,
+        src_port: lctx.src_port,
+        dst_port: lctx.dst_port,
+        src_addr: lctx.src_addr,
+        dst_addr: lctx.dst_addr,
+    };
+    unsafe {
+        (*stats).packets += 1;
+        if FW_SHADOW_FLOWS.get_ptr(&key).is_none() && FW_SHADOW_FLOWS.insert(&key, &1u8, 0).is_ok()
+        {
+            (*stats).flows += 1;
+        }
+        if !changed {
+            return;
+        }
+        (*stats).changed_packets += 1;
+        if let Some(sample) = FW_SHADOW_SAMPLE.get_ptr_mut(&key) {
+            (*sample).last_seen_ns = lctx.now_ns;
+            (*sample).packets += 1;
+            return;
+        }
+        let sample = ShadowSample {
+            first_seen_ns: lctx.now_ns,
+            last_seen_ns: lctx.now_ns,
+            packets: 1,
+            live_verdict: lctx.live_verdict,
+            _pad: [0; 7],
+        };
+        if FW_SHADOW_SAMPLE.insert(&key, &sample, 0).is_ok() {
+            (*stats).changed_flows += 1;
+        }
+    }
 }
 
 /// Check if an IPv4 rule matches the packet fields.
@@ -1923,6 +2304,13 @@ fn process_firewall_v6(
     } else {
         CT_STATE_UNKNOWN
     };
+
+    arm_shadow(
+        ctx_raw,
+        SHADOW_FAMILY_V6,
+        ct_state,
+        pack_shadow_l4(tcp_flags, icmp_type, icmp_code, dscp),
+    );
 
     let gates = empty_features();
 

@@ -5,4 +5,5 @@ pub mod entity;
 pub mod error;
 pub mod exec_network;
 pub mod fqdn;
+pub mod shadow;
 pub mod workload;

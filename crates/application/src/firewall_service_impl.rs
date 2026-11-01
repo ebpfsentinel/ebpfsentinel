@@ -6,17 +6,23 @@ use domain::common::entity::Protocol;
 use domain::common::entity::{DomainMode, RuleId};
 use domain::common::error::DomainError;
 use domain::firewall::engine::FirewallEngine;
-use domain::firewall::entity::{FirewallAction, FirewallRule, PortRange, Scope};
+use domain::firewall::entity::{FirewallAction, FirewallRule, PortRange, RuleMode, Scope};
 use domain::firewall::error::FirewallError;
+use domain::firewall::shadow::{
+    ShadowCounters, ShadowFlow, ShadowReading, ShadowReport, ShadowVerdict,
+};
 
 use domain::firewall::entity::IpNetwork;
-use ebpf_common::firewall::{DEFAULT_POLICY_DROP, DEFAULT_POLICY_PASS};
+use ebpf_common::firewall::{
+    DEFAULT_POLICY_DROP, DEFAULT_POLICY_PASS, FirewallRuleEntry, FirewallRuleEntryV6,
+    MAX_SHADOW_RULES, SHADOW_VERDICT_ALLOW, ShadowFlowKey, ShadowRuleStats,
+};
 use ebpf_common::interface_group::group_matches;
 
 use crate::firewall_aliases::AliasBindings;
 use domain::trace::FirewallTraceIndex;
 use ports::secondary::conntrack_kill_port::ConnTrackKillPort;
-use ports::secondary::ebpf_map_port::FirewallArrayMapPort;
+use ports::secondary::ebpf_map_port::{FirewallArrayMapPort, ShadowCounts};
 use ports::secondary::metrics_port::MetricsPort;
 
 /// The rule identifiers the deny-all posture installs.
@@ -133,6 +139,168 @@ impl InterfaceScopeBits {
     }
 }
 
+/// One entry the kernel holds for a rule.
+enum KernelEntry {
+    V4(FirewallRuleEntry),
+    V6(FirewallRuleEntryV6),
+}
+
+/// Entries bound for one set of arrays, with the rule behind each.
+#[derive(Default)]
+struct KernelRules {
+    v4: Vec<FirewallRuleEntry>,
+    v6: Vec<FirewallRuleEntryV6>,
+    v4_ids: Vec<RuleId>,
+    v6_ids: Vec<RuleId>,
+}
+
+impl KernelRules {
+    fn push(&mut self, id: &RuleId, entry: &KernelEntry) {
+        match *entry {
+            KernelEntry::V4(entry) => {
+                self.v4.push(entry);
+                self.v4_ids.push(id.clone());
+            }
+            KernelEntry::V6(entry) => {
+                self.v6.push(entry);
+                self.v6_ids.push(id.clone());
+            }
+        }
+    }
+
+    /// Add a shadow rule's entries if they all fit, so a rule is either read
+    /// whole or not at all: half of an alias counted would be a reading of a
+    /// rule nobody wrote. Returns whether it was added.
+    fn push_bounded(&mut self, rule: &FirewallRule, entries: &[KernelEntry]) -> bool {
+        let limit = MAX_SHADOW_RULES as usize;
+        let v6 = entries
+            .iter()
+            .filter(|e| matches!(e, KernelEntry::V6(_)))
+            .count();
+        let v4 = entries.len() - v6;
+        if self.v4.len() + v4 > limit || self.v6.len() + v6 > limit {
+            tracing::warn!(
+                component = "firewall",
+                rule = %rule.id.0,
+                "shadow rule not installed: the datapath holds {limit} shadow entries per address family"
+            );
+            return false;
+        }
+        for entry in entries {
+            self.push(&rule.id, entry);
+        }
+        true
+    }
+}
+
+/// Which rule each shadow slot holds, and every shadow rule in priority order.
+#[derive(Debug, Default)]
+struct ShadowIndex {
+    counting_since_ns: u64,
+    slots_v4: Vec<RuleId>,
+    slots_v6: Vec<RuleId>,
+    /// Every enabled shadow rule, whether the kernel holds it or not.
+    rules: Vec<(RuleId, FirewallAction, bool)>,
+}
+
+impl ShadowIndex {
+    /// The rule behind a counter slot, v4 slots first.
+    fn rule_at(&self, slot: u32) -> Option<&RuleId> {
+        let slot = slot as usize;
+        let v4 = MAX_SHADOW_RULES as usize;
+        if slot < v4 {
+            self.slots_v4.get(slot)
+        } else {
+            self.slots_v6.get(slot - v4)
+        }
+    }
+
+    fn report(&self, counts: &ShadowCounts) -> ShadowReport {
+        let mut counters: HashMap<&RuleId, ShadowCounters> = HashMap::new();
+        let slots = self
+            .slots_v4
+            .iter()
+            .zip(&counts.v4)
+            .chain(self.slots_v6.iter().zip(&counts.v6));
+        for (id, stats) in slots {
+            counters.entry(id).or_default().add(&counters_of(stats));
+        }
+        let mut samples: HashMap<&RuleId, Vec<ShadowFlow>> = HashMap::new();
+        for (key, flow) in &counts.sample {
+            if let Some(id) = self.rule_at(u32::from(key.slot)) {
+                samples.entry(id).or_default().push(ShadowFlow {
+                    src_ip: flow_addr(key, true),
+                    dst_ip: flow_addr(key, false),
+                    src_port: key.src_port,
+                    dst_port: key.dst_port,
+                    protocol: key.protocol,
+                    verdict: if flow.live_verdict == SHADOW_VERDICT_ALLOW {
+                        ShadowVerdict::Allow
+                    } else {
+                        ShadowVerdict::Deny
+                    },
+                    packets: flow.packets,
+                    first_seen_ns: flow.first_seen_ns,
+                    last_seen_ns: flow.last_seen_ns,
+                });
+            }
+        }
+        let rules = self
+            .rules
+            .iter()
+            .map(|(id, action, installed)| {
+                let mut sample = samples.remove(id).unwrap_or_default();
+                sample.sort_by_key(|s| std::cmp::Reverse(s.last_seen_ns));
+                ShadowReading {
+                    rule_id: id.clone(),
+                    action: *action,
+                    would: ShadowVerdict::of(*action),
+                    installed: *installed,
+                    counters: counters.get(id).copied().unwrap_or_default(),
+                    sample,
+                }
+            })
+            .collect();
+        ShadowReport {
+            counting_since_ns: self.counting_since_ns,
+            rules,
+        }
+    }
+}
+
+fn counters_of(stats: &ShadowRuleStats) -> ShadowCounters {
+    ShadowCounters {
+        packets: stats.packets,
+        flows: stats.flows,
+        changed_packets: stats.changed_packets,
+        changed_flows: stats.changed_flows,
+    }
+}
+
+/// One end of a sampled flow. The slot says the family: the v6 slots follow
+/// the v4 ones.
+fn flow_addr(key: &ShadowFlowKey, src: bool) -> IpAddr {
+    let words = if src { key.src_addr } else { key.dst_addr };
+    if u32::from(key.slot) < MAX_SHADOW_RULES {
+        IpAddr::V4(std::net::Ipv4Addr::from(words[0]))
+    } else {
+        let mut bytes = [0u8; 16];
+        let (chunks, _) = bytes.as_chunks_mut::<4>();
+        for (chunk, word) in chunks.iter_mut().zip(words) {
+            *chunk = word.to_be_bytes();
+        }
+        IpAddr::V6(std::net::Ipv6Addr::from(bytes))
+    }
+}
+
+fn now_epoch_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
+}
+
 /// Application-level firewall service.
 ///
 /// Orchestrates the domain engine, optional eBPF map sync, and metrics updates.
@@ -162,6 +330,8 @@ pub struct FirewallAppService {
     /// Which rule each kernel slot and fast-path key holds, as of the last
     /// sync, so a trace names the rule behind what the datapath reports.
     trace_index: FirewallTraceIndex,
+    /// Which rule each shadow slot holds, as of the last sync.
+    shadow: ShadowIndex,
 }
 
 impl FirewallAppService {
@@ -183,6 +353,7 @@ impl FirewallAppService {
             default_policy: DEFAULT_POLICY_PASS,
             deny_all: None,
             trace_index: FirewallTraceIndex::default(),
+            shadow: ShadowIndex::default(),
         }
     }
 
@@ -255,6 +426,7 @@ impl FirewallAppService {
     pub fn clear_map_port(&mut self) {
         self.map_port = None;
         self.trace_index = FirewallTraceIndex::default();
+        self.shadow = ShadowIndex::default();
     }
 
     /// Set the kernel-conntrack kill port.
@@ -679,6 +851,7 @@ impl FirewallAppService {
     ) -> FirewallRule {
         let port = |p: u16| PortRange { start: p, end: p };
         FirewallRule {
+            mode: RuleMode::Enforce,
             id: RuleId(id),
             enabled: true,
             priority: 0,
@@ -738,6 +911,7 @@ impl FirewallAppService {
         ]
         .into_iter()
         .map(|(id, dst_ip)| FirewallRule {
+            mode: RuleMode::Enforce,
             id: RuleId(id.to_string()),
             enabled: true,
             priority: 1,
@@ -828,6 +1002,7 @@ impl FirewallAppService {
                     None => format!("anti-lockout-{port}"),
                 };
                 let v4 = FirewallRule {
+                    mode: RuleMode::Enforce,
                     id: RuleId(id_suffix),
                     enabled: true,
                     priority: 0,
@@ -880,109 +1055,130 @@ impl FirewallAppService {
         rules
     }
 
+    /// Project one rule onto what the kernel holds: the alert-mode override,
+    /// the interface scope as a group mask, and alias references resolved
+    /// into set ids or literal criteria. `None` when the kernel cannot hold
+    /// the rule at all.
+    fn kernel_entries(&self, rule: &FirewallRule) -> Option<Vec<KernelEntry>> {
+        // In alert mode: override deny/reject -> log (observe without
+        // blocking). A shadow rule blocks nothing in any mode, and keeping its
+        // action is what lets it say what it would have done.
+        let mut effective_rule = if self.mode == DomainMode::Alert
+            && rule.mode == RuleMode::Enforce
+            && (rule.action == FirewallAction::Deny || rule.action == FirewallAction::Reject)
+        {
+            let mut alert_rule = rule.clone();
+            alert_rule.action = FirewallAction::Log;
+            alert_rule
+        } else {
+            rule.clone()
+        };
+
+        // The kernel narrows by group bit, never by interface name.
+        match self.interface_scope.kernel_scope(&effective_rule) {
+            KernelScope::Mask(mask) => effective_rule.group_mask = mask,
+            KernelScope::Never => {
+                tracing::debug!(
+                    component = "firewall",
+                    rule = %effective_rule.id.0,
+                    "rule not installed: its interface groups exclude the interface it is scoped to"
+                );
+                return None;
+            }
+            // An anti-lockout rule keeps the node reachable, so one that
+            // cannot be narrowed is installed wider rather than dropped.
+            KernelScope::Unplaceable if effective_rule.system => {
+                tracing::warn!(
+                    component = "firewall",
+                    rule = %effective_rule.id.0,
+                    "system rule scoped to an interface with no group bit, installed on every interface"
+                );
+            }
+            KernelScope::Unplaceable => {
+                tracing::warn!(
+                    component = "firewall",
+                    rule = %effective_rule.id.0,
+                    "rule not installed: its interface has no group bit, so the kernel cannot narrow it"
+                );
+                return None;
+            }
+        }
+
+        // Alias references name something the kernel cannot look up, so
+        // they are resolved into set ids or literal criteria here.
+        let kernel_rules =
+            match crate::firewall_aliases::expand_for_kernel(&effective_rule, &self.alias_bindings)
+            {
+                Ok(kernel_rules) => kernel_rules,
+                Err(reason) => {
+                    tracing::warn!(
+                        component = "firewall",
+                        rule = %effective_rule.id.0,
+                        "rule not installed: {reason}"
+                    );
+                    return None;
+                }
+            };
+        Some(
+            kernel_rules
+                .into_iter()
+                .map(|kernel_rule| {
+                    if kernel_rule.rule.is_v6() {
+                        KernelEntry::V6(kernel_rule.rule.to_ebpf_entry_v6())
+                    } else {
+                        KernelEntry::V4(kernel_rule.rule.to_ebpf_entry_with_sets(
+                            kernel_rule.src_set_id,
+                            kernel_rule.dst_set_id,
+                        ))
+                    }
+                })
+                .collect(),
+        )
+    }
+
     /// Full-reload sync: partition rules into V4/V6, apply mode overrides,
     /// and bulk-load into eBPF array maps.
     ///
     /// In `Alert` mode, deny actions are overridden to log (observation only).
+    /// A disabled rule is left out, which is what a schedule switching a rule
+    /// off relies on. Rules in shadow mode go to arrays of their own that no
+    /// verdict reads.
     fn sync_ebpf_maps(&mut self) {
-        let Some(ref mut map) = self.map_port else {
+        if self.map_port.is_none() {
             return;
-        };
+        }
 
-        let rules = self.engine.rules();
-        let alias_bindings = &self.alias_bindings;
-
-        // Partition into V4 and V6, applying alert-mode override
-        let mut v4_entries = Vec::new();
-        let mut v6_entries = Vec::new();
-        let mut v4_ids = Vec::new();
-        let mut v6_ids = Vec::new();
-
-        for rule in rules {
+        let mut enforce = KernelRules::default();
+        let mut shadow = KernelRules::default();
+        let mut shadow_rules = Vec::new();
+        for rule in self.engine.rules() {
             // A workload rule is decided in the socket hooks. The packet path
             // cannot tell which task a frame belongs to, so installing it
             // there would apply it to every task on the node.
-            if rule.workload.is_some() {
+            if !rule.enabled || rule.workload.is_some() {
                 continue;
             }
-            // In alert mode: override deny/reject -> log (observe without blocking)
-            let mut effective_rule = if self.mode == DomainMode::Alert
-                && (rule.action == FirewallAction::Deny || rule.action == FirewallAction::Reject)
-            {
-                let mut alert_rule = rule.clone();
-                alert_rule.action = FirewallAction::Log;
-                alert_rule
-            } else {
-                rule.clone()
-            };
-
-            // The kernel narrows by group bit, never by interface name.
-            match self.interface_scope.kernel_scope(&effective_rule) {
-                KernelScope::Mask(mask) => effective_rule.group_mask = mask,
-                KernelScope::Never => {
-                    tracing::debug!(
-                        component = "firewall",
-                        rule = %effective_rule.id.0,
-                        "rule not installed: its interface groups exclude the interface it is scoped to"
-                    );
-                    continue;
-                }
-                // An anti-lockout rule keeps the node reachable, so one that
-                // cannot be narrowed is installed wider rather than dropped.
-                KernelScope::Unplaceable if effective_rule.system => {
-                    tracing::warn!(
-                        component = "firewall",
-                        rule = %effective_rule.id.0,
-                        "system rule scoped to an interface with no group bit, installed on every interface"
-                    );
-                }
-                KernelScope::Unplaceable => {
-                    tracing::warn!(
-                        component = "firewall",
-                        rule = %effective_rule.id.0,
-                        "rule not installed: its interface has no group bit, so the kernel cannot narrow it"
-                    );
-                    continue;
-                }
-            }
-
-            // Alias references name something the kernel cannot look up, so
-            // they are resolved into set ids or literal criteria here.
-            let kernel_rules =
-                match crate::firewall_aliases::expand_for_kernel(&effective_rule, alias_bindings) {
-                    Ok(kernel_rules) => kernel_rules,
-                    Err(reason) => {
-                        tracing::warn!(
-                            component = "firewall",
-                            rule = %effective_rule.id.0,
-                            "rule not installed: {reason}"
-                        );
-                        continue;
-                    }
-                };
-
-            for kernel_rule in kernel_rules {
-                if kernel_rule.rule.is_v6() {
-                    v6_entries.push(kernel_rule.rule.to_ebpf_entry_v6());
-                    v6_ids.push(effective_rule.id.clone());
-                } else {
-                    v4_ids.push(effective_rule.id.clone());
-                    v4_entries.push(
-                        kernel_rule.rule.to_ebpf_entry_with_sets(
-                            kernel_rule.src_set_id,
-                            kernel_rule.dst_set_id,
-                        ),
-                    );
+            let entries = self.kernel_entries(rule);
+            if rule.mode == RuleMode::Shadow {
+                let installed = entries.is_some_and(|entries| shadow.push_bounded(rule, &entries));
+                shadow_rules.push((rule.id.clone(), rule.action, installed));
+            } else if let Some(entries) = entries {
+                for entry in &entries {
+                    enforce.push(&rule.id, entry);
                 }
             }
         }
 
+        let Some(ref mut map) = self.map_port else {
+            return;
+        };
         let mut index = FirewallTraceIndex::default();
 
         // Bulk-load V4
-        match map.load_v4_rules(&v4_entries) {
+        match map.load_v4_rules(&enforce.v4) {
             Ok(placements) => {
-                for ((id, entry), placement) in v4_ids.into_iter().zip(&v4_entries).zip(placements)
+                for ((id, entry), placement) in
+                    enforce.v4_ids.into_iter().zip(&enforce.v4).zip(placements)
                 {
                     index.record_v4(id, entry, placement);
                 }
@@ -991,15 +1187,50 @@ impl FirewallAppService {
         }
 
         // Bulk-load V6
-        match map.load_v6_rules(&v6_entries) {
+        match map.load_v6_rules(&enforce.v6) {
             Ok(placements) => {
-                for (id, placement) in v6_ids.into_iter().zip(placements) {
+                for (id, placement) in enforce.v6_ids.into_iter().zip(placements) {
                     index.record_v6(id, placement);
                 }
             }
             Err(e) => tracing::warn!("failed to load V6 rules into eBPF map: {e}"),
         }
         self.trace_index = index;
+
+        match map.load_shadow_rules(&shadow.v4, &shadow.v6) {
+            Ok(changed) => {
+                if changed {
+                    self.shadow.counting_since_ns = now_epoch_ns();
+                }
+                self.shadow.slots_v4 = shadow.v4_ids;
+                self.shadow.slots_v6 = shadow.v6_ids;
+                self.shadow.rules = shadow_rules;
+            }
+            Err(e) => {
+                tracing::warn!("failed to load shadow rules into eBPF map: {e}");
+                self.shadow = ShadowIndex {
+                    rules: shadow_rules
+                        .into_iter()
+                        .map(|(id, action, _)| (id, action, false))
+                        .collect(),
+                    ..ShadowIndex::default()
+                };
+            }
+        }
+    }
+
+    /// What every rule in shadow mode has counted since the set of shadow
+    /// rules last changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the kernel maps cannot be read.
+    pub fn shadow_report(&self) -> Result<ShadowReport, DomainError> {
+        let counts = match self.map_port.as_ref() {
+            Some(map) if !self.shadow.rules.is_empty() => map.read_shadow()?,
+            _ => ShadowCounts::default(),
+        };
+        Ok(self.shadow.report(&counts))
     }
 
     fn update_metrics(&self) {
@@ -1018,6 +1249,7 @@ mod tests {
 
     fn make_rule(id: &str, priority: u32) -> FirewallRule {
         FirewallRule {
+            mode: RuleMode::Enforce,
             id: RuleId(id.to_string()),
             priority,
             action: FirewallAction::Deny,
@@ -1061,6 +1293,9 @@ mod tests {
         v4: Arc<std::sync::Mutex<Vec<ebpf_common::firewall::FirewallRuleEntry>>>,
         v6: Arc<std::sync::Mutex<Vec<ebpf_common::firewall::FirewallRuleEntryV6>>>,
         policy: Arc<std::sync::Mutex<Option<u8>>>,
+        shadow_v4: Arc<std::sync::Mutex<Vec<ebpf_common::firewall::FirewallRuleEntry>>>,
+        shadow_v6: Arc<std::sync::Mutex<Vec<ebpf_common::firewall::FirewallRuleEntryV6>>>,
+        shadow_counts: Arc<std::sync::Mutex<ShadowCounts>>,
     }
 
     impl FirewallArrayMapPort for RecordingMap {
@@ -1092,6 +1327,164 @@ mod tests {
         fn rule_count(&self) -> Result<usize, DomainError> {
             Ok(self.v4.lock().unwrap().len() + self.v6.lock().unwrap().len())
         }
+
+        fn load_shadow_rules(
+            &mut self,
+            v4: &[ebpf_common::firewall::FirewallRuleEntry],
+            v6: &[ebpf_common::firewall::FirewallRuleEntryV6],
+        ) -> Result<bool, DomainError> {
+            let mut held_v4 = self.shadow_v4.lock().unwrap();
+            let mut held_v6 = self.shadow_v6.lock().unwrap();
+            if held_v4.as_slice() == v4 && held_v6.as_slice() == v6 {
+                return Ok(false);
+            }
+            *held_v4 = v4.to_vec();
+            *held_v6 = v6.to_vec();
+            Ok(true)
+        }
+
+        fn read_shadow(&self) -> Result<ShadowCounts, DomainError> {
+            Ok(self.shadow_counts.lock().unwrap().clone())
+        }
+    }
+
+    fn shadow(id: &str, priority: u32, action: FirewallAction) -> FirewallRule {
+        let mut rule = make_rule(id, priority);
+        rule.action = action;
+        rule.mode = RuleMode::Shadow;
+        rule
+    }
+
+    #[test]
+    fn a_shadow_rule_goes_to_its_own_arrays_and_never_to_the_verdict() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(map.clone()));
+        svc.add_rule(make_rule("live", 10)).unwrap();
+        svc.add_rule(shadow("watched", 5, FirewallAction::Deny))
+            .unwrap();
+
+        assert_eq!(map.v4.lock().unwrap().len(), 1);
+        assert_eq!(map.shadow_v4.lock().unwrap().len(), 1);
+        assert_eq!(
+            map.shadow_v4.lock().unwrap()[0].action,
+            ebpf_common::firewall::ACTION_DROP
+        );
+    }
+
+    #[test]
+    fn a_shadow_deny_keeps_its_action_in_alert_mode() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_mode(DomainMode::Alert);
+        svc.set_map_port(Box::new(map.clone()));
+        svc.add_rule(shadow("watched", 5, FirewallAction::Deny))
+            .unwrap();
+        assert_eq!(
+            map.shadow_v4.lock().unwrap()[0].action,
+            ebpf_common::firewall::ACTION_DROP
+        );
+    }
+
+    #[test]
+    fn a_disabled_rule_reaches_no_array() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(map.clone()));
+        let mut off = make_rule("off", 10);
+        off.enabled = false;
+        let mut shadow_off = shadow("shadow-off", 11, FirewallAction::Deny);
+        shadow_off.enabled = false;
+        svc.add_rule(off).unwrap();
+        svc.add_rule(shadow_off).unwrap();
+        assert_eq!(
+            map.v4.lock().unwrap().len() + map.shadow_v4.lock().unwrap().len(),
+            0
+        );
+        assert!(svc.shadow_report().unwrap().rules.is_empty());
+    }
+
+    #[test]
+    fn the_reading_names_the_rule_behind_each_slot_and_each_sampled_flow() {
+        use ebpf_common::firewall::{ShadowFlowKey, ShadowRuleStats, ShadowSample};
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(map.clone()));
+        svc.add_rule(shadow("block-a", 5, FirewallAction::Deny))
+            .unwrap();
+        let mut v6 = shadow("block-b", 6, FirewallAction::Allow);
+        v6.src_ip = Some(IpNetwork::V6 {
+            addr: [0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]
+                .map(u16::to_be_bytes)
+                .concat()
+                .try_into()
+                .unwrap(),
+            prefix_len: 128,
+        });
+        svc.add_rule(v6).unwrap();
+        let since = svc.shadow_report().unwrap().counting_since_ns;
+        assert!(since > 0);
+
+        let stats = ShadowRuleStats {
+            packets: 9,
+            flows: 2,
+            changed_packets: 4,
+            changed_flows: 1,
+        };
+        let key = ShadowFlowKey {
+            slot: u16::try_from(MAX_SHADOW_RULES).unwrap(),
+            protocol: 6,
+            _pad: 0,
+            src_port: 40000,
+            dst_port: 443,
+            src_addr: [0x2001_0db8, 0, 0, 1],
+            dst_addr: [0x2001_0db8, 0, 0, 2],
+        };
+        let flow = ShadowSample {
+            first_seen_ns: 1,
+            last_seen_ns: 2,
+            packets: 4,
+            live_verdict: ebpf_common::firewall::SHADOW_VERDICT_DENY,
+            _pad: [0; 7],
+        };
+        *map.shadow_counts.lock().unwrap() = ShadowCounts {
+            v4: vec![ShadowRuleStats::default()],
+            v6: vec![stats],
+            sample: vec![(key, flow)],
+        };
+
+        let report = svc.shadow_report().unwrap();
+        let ids: Vec<&str> = report.rules.iter().map(|r| r.rule_id.0.as_str()).collect();
+        assert_eq!(ids, ["block-a", "block-b"]);
+        let b = &report.rules[1];
+        assert_eq!(b.would, ShadowVerdict::Allow);
+        assert_eq!(b.counters.changed_packets, 4);
+        assert_eq!(b.sample.len(), 1);
+        assert_eq!(b.sample[0].src_ip, "2001:db8::1".parse::<IpAddr>().unwrap());
+        assert_eq!(b.sample[0].verdict, ShadowVerdict::Deny);
+        assert!(report.rules[0].sample.is_empty());
+
+        // Reloading the same shadow rules keeps what they counted.
+        svc.add_rule(make_rule("live", 20)).unwrap();
+        assert_eq!(svc.shadow_report().unwrap().counting_since_ns, since);
+    }
+
+    #[test]
+    fn a_shadow_rule_past_the_datapath_capacity_is_reported_as_not_installed() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(map.clone()));
+        let rules: Vec<FirewallRule> = (0..=MAX_SHADOW_RULES)
+            .map(|i| shadow(&format!("s{i}"), 10 + i, FirewallAction::Deny))
+            .collect();
+        svc.reload_rules(rules).unwrap();
+        let report = svc.shadow_report().unwrap();
+        assert_eq!(
+            map.shadow_v4.lock().unwrap().len(),
+            MAX_SHADOW_RULES as usize
+        );
+        assert!(!report.rules.last().unwrap().installed);
+        assert!(report.rules[0].installed);
     }
 
     fn make_service() -> FirewallAppService {

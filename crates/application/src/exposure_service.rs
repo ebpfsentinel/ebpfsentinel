@@ -324,6 +324,7 @@ mod tests {
         use domain::common::entity::{Protocol, RuleId};
         use domain::firewall::entity::{FirewallAction, FirewallRule, Scope};
         FirewallRule {
+            mode: domain::firewall::entity::RuleMode::Enforce,
             id: RuleId("sample".to_string()),
             priority: 1,
             action: FirewallAction::Deny,

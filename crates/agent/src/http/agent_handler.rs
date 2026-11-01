@@ -336,6 +336,7 @@ mod tests {
         let mut engine = FirewallEngine::new();
         engine
             .add_rule(FirewallRule {
+                mode: domain::firewall::entity::RuleMode::Enforce,
                 id: RuleId("fw-001".to_string()),
                 priority: 10,
                 action: FirewallAction::Deny,

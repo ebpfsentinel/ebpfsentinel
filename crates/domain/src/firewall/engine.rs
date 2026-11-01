@@ -1,7 +1,7 @@
 use crate::common::entity::RuleId;
 use crate::common::error::DomainError;
 
-use super::entity::{FirewallAction, FirewallRule, PacketInfo, Scope};
+use super::entity::{FirewallAction, FirewallRule, PacketInfo, RuleMode, Scope};
 use super::error::FirewallError;
 
 /// In-memory firewall rule engine.
@@ -20,11 +20,11 @@ impl FirewallEngine {
 
     /// Evaluate a packet against all loaded rules.
     /// Returns the action of the first matching enabled rule (lowest priority number wins).
-    /// Returns `None` if no rule matches.
+    /// Returns `None` if no rule matches. A rule in shadow mode takes no part.
     pub fn evaluate(&self, packet: &PacketInfo) -> Option<FirewallAction> {
         self.rules
             .iter()
-            .filter(|r| r.enabled)
+            .filter(|r| r.enabled && r.mode == RuleMode::Enforce)
             .filter(|r| Self::matches_scope(r, packet))
             .find(|r| Self::matches_packet(r, packet))
             .map(|r| r.action)
@@ -189,6 +189,7 @@ mod tests {
 
     fn make_rule(id: &str, priority: u32, action: FirewallAction) -> FirewallRule {
         FirewallRule {
+            mode: RuleMode::Enforce,
             id: RuleId(id.to_string()),
             priority,
             action,
@@ -239,6 +240,19 @@ mod tests {
     }
 
     // ── Engine lifecycle tests ─────────────────────────────────────
+
+    #[test]
+    fn a_shadow_rule_takes_no_part_in_the_verdict() {
+        let mut engine = FirewallEngine::new();
+        let mut watched = make_rule("watched", 1, FirewallAction::Deny);
+        watched.mode = super::RuleMode::Shadow;
+        engine.add_rule(watched).unwrap();
+        assert_eq!(engine.evaluate(&make_packet()), None);
+        engine
+            .add_rule(make_rule("live", 2, FirewallAction::Allow))
+            .unwrap();
+        assert_eq!(engine.evaluate(&make_packet()), Some(FirewallAction::Allow));
+    }
 
     #[test]
     fn new_engine_is_empty() {

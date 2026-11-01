@@ -461,10 +461,119 @@ pub const FW_EMPTY_THREAT_IOCS_V6: u32 = 1 << 15;
 /// interface-group read and the tenant resolution behind it.
 pub const FW_EMPTY_QOS_CLASSIFIERS: u32 = 1 << 16;
 
+// ── Shadow rules ───────────────────────────────────────────────────
+
+// A shadow rule is read by the datapath after the verdict is taken and never
+// changes it. It sits in arrays of its own, so no live scan ever walks one,
+// and what it would have done is counted per rule against what the packet
+// actually got.
+
+/// Shadow rules per address family.
+pub const MAX_SHADOW_RULES: u32 = 64;
+/// Counter slots: the v4 shadow rules first, the v6 ones after them.
+pub const SHADOW_STAT_SLOTS: u32 = MAX_SHADOW_RULES * 2;
+/// Flows remembered so a flow is counted once rather than once per packet.
+/// Least recently used, so a flow evicted and seen again counts twice: the
+/// flow figure is a floor on a busy node, never an overcount of distinct
+/// traffic in a quiet one.
+pub const MAX_SHADOW_FLOWS: u32 = 16_384;
+/// Flows kept as the sample of what a shadow rule would have changed.
+pub const MAX_SHADOW_SAMPLE: u32 = 256;
+/// Index of the v4 count in `FW_SHADOW_COUNT`.
+pub const SHADOW_FAMILY_V4: u32 = 0;
+/// Index of the v6 count in `FW_SHADOW_COUNT`.
+pub const SHADOW_FAMILY_V6: u32 = 1;
+/// The packet passed, or a shadow rule would have let it pass.
+pub const SHADOW_VERDICT_ALLOW: u8 = 0;
+/// The packet was dropped or rejected, or a shadow rule would have done so.
+pub const SHADOW_VERDICT_DENY: u8 = 1;
+
+/// What one shadow rule matched, summed per CPU.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ShadowRuleStats {
+    /// Packets the rule matched.
+    pub packets: u64,
+    /// Flows the rule matched, counted on first sight.
+    pub flows: u64,
+    /// Matched packets whose live verdict differs from the rule's.
+    pub changed_packets: u64,
+    /// Flows entered into the sample, which holds changed flows only.
+    pub changed_flows: u64,
+}
+
+/// What the shadow scan needs that `PacketCtx` does not carry, written by the
+/// packet path for the entry point to read once the verdict is known.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ShadowMeta {
+    /// Non-zero while the packet in hand still has to be settled.
+    pub armed: u8,
+    pub ct_state: u8,
+    pub tcp_flags: u8,
+    pub icmp_type: u8,
+    pub icmp_code: u8,
+    pub dscp: u8,
+    pub src_mac: [u8; 6],
+    pub dst_mac: [u8; 6],
+    pub _pad: [u8; 2],
+    pub iface_groups: u32,
+    pub tenant_id: u32,
+    /// The verdict in hand while the shadow rules are read. It travels
+    /// through here rather than in a register so the verifier reads the
+    /// shadow scan once, not once per verdict the packet path can reach.
+    pub verdict: u32,
+}
+
+/// One flow as one shadow rule saw it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ShadowFlowKey {
+    /// Counter slot of the rule (`MAX_SHADOW_RULES` and up for v6).
+    pub slot: u16,
+    pub protocol: u8,
+    pub _pad: u8,
+    pub src_port: u16,
+    pub dst_port: u16,
+    /// Host-order words; only the first is used for v4.
+    pub src_addr: [u32; 4],
+    pub dst_addr: [u32; 4],
+}
+
+/// A flow the shadow rule would have decided otherwise.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ShadowSample {
+    /// Boot-clock nanoseconds of the first packet sampled.
+    pub first_seen_ns: u64,
+    /// Boot-clock nanoseconds of the latest one.
+    pub last_seen_ns: u64,
+    /// Packets of the flow seen since it entered the sample.
+    pub packets: u64,
+    /// What the packet actually got (`SHADOW_VERDICT_*`).
+    pub live_verdict: u8,
+    pub _pad: [u8; 7],
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for ShadowRuleStats {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for ShadowFlowKey {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for ShadowSample {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::mem;
+
+    #[test]
+    fn shadow_types_keep_their_kernel_sizes() {
+        assert_eq!(mem::size_of::<ShadowRuleStats>(), 32);
+        assert_eq!(mem::size_of::<ShadowMeta>(), 32);
+        assert_eq!(mem::size_of::<ShadowFlowKey>(), 40);
+        assert_eq!(mem::size_of::<ShadowSample>(), 32);
+    }
 
     // ── FirewallRuleEntry (V4) ──────────────────────────────────────
 

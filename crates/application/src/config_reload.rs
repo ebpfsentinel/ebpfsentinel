@@ -1246,6 +1246,7 @@ mod tests {
 
     fn make_fw_rule(id: &str, priority: u32) -> FirewallRule {
         FirewallRule {
+            mode: domain::firewall::entity::RuleMode::Enforce,
             id: RuleId(id.to_string()),
             priority,
             action: FirewallAction::Deny,

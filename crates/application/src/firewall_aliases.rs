@@ -395,6 +395,7 @@ mod tests {
 
     fn rule() -> FirewallRule {
         FirewallRule {
+            mode: domain::firewall::entity::RuleMode::Enforce,
             id: RuleId("r1".to_string()),
             priority: 100,
             action: FirewallAction::Deny,

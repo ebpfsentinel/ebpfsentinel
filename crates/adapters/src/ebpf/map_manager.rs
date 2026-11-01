@@ -1,14 +1,15 @@
 use crate::ebpf::feature_gates::{self, Feature};
 use crate::ebpf::map_store::MapStore;
-use aya::maps::{Array, HashMap, MapData};
+use aya::maps::{Array, HashMap, MapData, PerCpuArray, PerCpuValues};
 use domain::common::error::DomainError;
 use domain::trace::RulePlacement;
 use ebpf_common::firewall::{
     ACTION_PASS, DSCP_MARK_NONE, FirewallRuleEntry, FirewallRuleEntryV6, FwHashKey5Tuple,
     FwHashKeyPort, FwHashValue, MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT, MATCH_PROTO,
-    MATCH_SRC_IP, MATCH_SRC_PORT, MAX_FIREWALL_RULES, VLAN_ANY,
+    MATCH_SRC_IP, MATCH_SRC_PORT, MAX_FIREWALL_RULES, MAX_SHADOW_RULES, SHADOW_FAMILY_V4,
+    SHADOW_FAMILY_V6, ShadowFlowKey, ShadowRuleStats, ShadowSample, VLAN_ANY,
 };
-use ports::secondary::ebpf_map_port::FirewallArrayMapPort;
+use ports::secondary::ebpf_map_port::{FirewallArrayMapPort, ShadowCounts};
 use tracing::info;
 
 /// Manages the array-based eBPF firewall maps.
@@ -47,6 +48,144 @@ pub struct FirewallMapManager {
     /// Whether the default policy needs the ESTABLISHED/RELATED bypass, which
     /// is exactly the case where it is not `pass`.
     policy_needs_ct: bool,
+    /// The maps of the rules read after the verdict. Absent on an object built
+    /// before them, in which case loading a shadow rule is refused.
+    shadow: Option<ShadowMaps>,
+}
+
+/// The maps behind the shadow rules, taken together or not at all.
+struct ShadowMaps {
+    rules_v4: Array<MapData, FirewallRuleEntry>,
+    rules_v6: Array<MapData, FirewallRuleEntryV6>,
+    count: Array<MapData, u32>,
+    stats: PerCpuArray<MapData, ShadowRuleStats>,
+    flows: HashMap<MapData, ShadowFlowKey, u8>,
+    sample: HashMap<MapData, ShadowFlowKey, ShadowSample>,
+    /// What was last loaded, so an identical load keeps its counters.
+    loaded_v4: Vec<FirewallRuleEntry>,
+    loaded_v6: Vec<FirewallRuleEntryV6>,
+    /// Whether a loaded shadow rule reads conntrack state. Starts asserted,
+    /// like every other half of the gate.
+    needs_ct: bool,
+}
+
+impl ShadowMaps {
+    fn take(ebpf: &mut dyn MapStore) -> Option<Self> {
+        let rules_v4 = Array::try_from(ebpf.take_map("FW_SHADOW_RULES")?).ok()?;
+        let rules_v6 = Array::try_from(ebpf.take_map("FW_SHADOW_RULES_V6")?).ok()?;
+        let count = Array::try_from(ebpf.take_map("FW_SHADOW_COUNT")?).ok()?;
+        let stats = PerCpuArray::try_from(ebpf.take_map("FW_SHADOW_STATS")?).ok()?;
+        let flows = HashMap::try_from(ebpf.take_map("FW_SHADOW_FLOWS")?).ok()?;
+        let sample = HashMap::try_from(ebpf.take_map("FW_SHADOW_SAMPLE")?).ok()?;
+        Some(Self {
+            rules_v4,
+            rules_v6,
+            count,
+            stats,
+            flows,
+            sample,
+            loaded_v4: Vec::new(),
+            loaded_v6: Vec::new(),
+            needs_ct: true,
+        })
+    }
+
+    /// Replace the shadow rules: hide both families, write the entries, start
+    /// every counter and the sample afresh, then publish the counts.
+    #[allow(clippy::cast_possible_truncation)] // both ≤ MAX_SHADOW_RULES (64)
+    fn load(
+        &mut self,
+        v4: &[FirewallRuleEntry],
+        v6: &[FirewallRuleEntryV6],
+    ) -> Result<(), DomainError> {
+        let err = |what: &str, e: aya::maps::MapError| {
+            DomainError::EngineError(format!("shadow rules: {what} failed: {e}"))
+        };
+        self.count
+            .set(SHADOW_FAMILY_V4, &0, 0)
+            .map_err(|e| err("hiding v4", e))?;
+        self.count
+            .set(SHADOW_FAMILY_V6, &0, 0)
+            .map_err(|e| err("hiding v6", e))?;
+        for (i, entry) in v4.iter().enumerate() {
+            self.rules_v4
+                .set(i as u32, entry, 0)
+                .map_err(|e| err("writing a v4 rule", e))?;
+        }
+        for (i, entry) in v6.iter().enumerate() {
+            self.rules_v6
+                .set(i as u32, entry, 0)
+                .map_err(|e| err("writing a v6 rule", e))?;
+        }
+        let cpus = aya::util::nr_cpus()
+            .map_err(|(_, e)| DomainError::EngineError(format!("shadow rules: CPU count: {e}")))
+            .and_then(|n| {
+                usize::try_from(n.get())
+                    .map_err(|e| DomainError::EngineError(format!("shadow rules: CPU count: {e}")))
+            })?;
+        for slot in 0..MAX_SHADOW_RULES * 2 {
+            let zero = PerCpuValues::try_from(vec![ShadowRuleStats::default(); cpus])
+                .map_err(|e| err("zeroing counters", e.into()))?;
+            self.stats
+                .set(slot, zero, 0)
+                .map_err(|e| err("zeroing counters", e))?;
+        }
+        let flows: Vec<ShadowFlowKey> = self.flows.keys().filter_map(Result::ok).collect();
+        for key in &flows {
+            let _ = self.flows.remove(key);
+        }
+        let sampled: Vec<ShadowFlowKey> = self.sample.keys().filter_map(Result::ok).collect();
+        for key in &sampled {
+            let _ = self.sample.remove(key);
+        }
+        self.count
+            .set(SHADOW_FAMILY_V4, &(v4.len() as u32), 0)
+            .map_err(|e| err("publishing the v4 count", e))?;
+        self.count
+            .set(SHADOW_FAMILY_V6, &(v6.len() as u32), 0)
+            .map_err(|e| err("publishing the v6 count", e))?;
+        self.loaded_v4 = v4.to_vec();
+        self.loaded_v6 = v6.to_vec();
+        Ok(())
+    }
+
+    #[allow(clippy::cast_possible_truncation)] // slots < 2 * MAX_SHADOW_RULES
+    fn read(&self) -> Result<ShadowCounts, DomainError> {
+        let slot = |index: u32| -> Result<ShadowRuleStats, DomainError> {
+            let values = self
+                .stats
+                .get(&index, 0)
+                .map_err(|e| DomainError::EngineError(format!("shadow counters not read: {e}")))?;
+            Ok(values
+                .iter()
+                .fold(ShadowRuleStats::default(), |mut sum, cpu| {
+                    sum.packets += cpu.packets;
+                    sum.flows += cpu.flows;
+                    sum.changed_packets += cpu.changed_packets;
+                    sum.changed_flows += cpu.changed_flows;
+                    sum
+                }))
+        };
+        let v4 = (0..self.loaded_v4.len() as u32)
+            .map(slot)
+            .collect::<Result<Vec<_>, _>>()?;
+        let v6 = (0..self.loaded_v6.len() as u32)
+            .map(|i| slot(MAX_SHADOW_RULES + i))
+            .collect::<Result<Vec<_>, _>>()?;
+        let sample = self
+            .sample
+            .iter()
+            .filter_map(Result::ok)
+            .map(|(key, mut flow)| {
+                flow.first_seen_ns =
+                    super::ringbuf_observer::boottime_to_epoch_ns(flow.first_seen_ns);
+                flow.last_seen_ns =
+                    super::ringbuf_observer::boottime_to_epoch_ns(flow.last_seen_ns);
+                (key, flow)
+            })
+            .collect();
+        Ok(ShadowCounts { v4, v6, sample })
+    }
 }
 
 impl FirewallMapManager {
@@ -87,6 +226,7 @@ impl FirewallMapManager {
         let ct_gate = ebpf
             .take_map("FW_CT_GATE")
             .and_then(|m| Array::try_from(m).ok());
+        let shadow = ShadowMaps::take(ebpf);
 
         // The datapath's empty-feature mask. This manager adopts it because it
         // is the one that owns the firewall's own configuration maps; the
@@ -128,6 +268,7 @@ impl FirewallMapManager {
             v4_needs_ct: true,
             v6_needs_ct: true,
             policy_needs_ct: true,
+            shadow,
         })
     }
 }
@@ -159,7 +300,10 @@ impl FirewallMapManager {
     /// previous value, which is why the gate defaults open: the worst outcome
     /// of a stale gate is a probe nobody needed.
     fn sync_ct_gate(&mut self) {
-        let open = self.v4_needs_ct || self.v6_needs_ct || self.policy_needs_ct;
+        let open = self.v4_needs_ct
+            || self.v6_needs_ct
+            || self.policy_needs_ct
+            || self.shadow.as_ref().is_some_and(|s| s.needs_ct);
         if let Some(ref mut map) = self.ct_gate {
             if let Err(e) = map.set(0, &u8::from(open), 0) {
                 info!(error = %e, "conntrack gate not written, datapath keeps probing");
@@ -389,6 +533,49 @@ impl FirewallArrayMapPort for FirewallMapManager {
 
     fn rule_count(&self) -> Result<usize, DomainError> {
         Ok(self.cached_v4_count + self.cached_v6_count)
+    }
+
+    fn load_shadow_rules(
+        &mut self,
+        v4: &[FirewallRuleEntry],
+        v6: &[FirewallRuleEntryV6],
+    ) -> Result<bool, DomainError> {
+        let limit = MAX_SHADOW_RULES as usize;
+        if v4.len() > limit || v6.len() > limit {
+            return Err(DomainError::InvalidRule(format!(
+                "too many shadow rules: {} IPv4 and {} IPv6, the datapath holds {limit} of each",
+                v4.len(),
+                v6.len()
+            )));
+        }
+        let Some(shadow) = self.shadow.as_mut() else {
+            if v4.is_empty() && v6.is_empty() {
+                return Ok(false);
+            }
+            return Err(DomainError::EngineError(
+                "shadow rules: the loaded firewall program carries no shadow maps".to_string(),
+            ));
+        };
+        if shadow.loaded_v4 == v4 && shadow.loaded_v6 == v6 {
+            return Ok(false);
+        }
+        shadow.load(v4, v6)?;
+        shadow.needs_ct = v4
+            .iter()
+            .any(|r| rule_reads_ct(r.match_flags, r.max_states))
+            || v6
+                .iter()
+                .any(|r| rule_reads_ct(r.match_flags, r.max_states));
+        self.sync_ct_gate();
+        info!(v4 = v4.len(), v6 = v6.len(), "firewall shadow rules loaded");
+        Ok(true)
+    }
+
+    fn read_shadow(&self) -> Result<ShadowCounts, DomainError> {
+        match self.shadow.as_ref() {
+            Some(shadow) => shadow.read(),
+            None => Ok(ShadowCounts::default()),
+        }
     }
 }
 

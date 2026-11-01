@@ -440,6 +440,8 @@ pub enum FirewallCommand {
     },
     /// List the workload rules in force and what each has refused
     Workload,
+    /// List what each shadow rule would have allowed or denied
+    Shadow,
     /// List what the rules naming destinations by name have resolved
     Fqdn,
     /// List the containers whose labels carry policy, and any label refused

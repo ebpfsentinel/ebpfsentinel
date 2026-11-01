@@ -93,6 +93,49 @@ pub struct RuleResponse {
     /// configuration file used. Empty is a floating rule.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interfaces: Vec<String>,
+    /// `enforce` or `shadow`. An older agent sends none, and every rule it
+    /// has enforces.
+    #[serde(default = "enforce_mode")]
+    pub mode: String,
+}
+
+fn enforce_mode() -> String {
+    "enforce".to_string()
+}
+
+/// What every shadow rule would have done.
+#[derive(Deserialize, Serialize)]
+pub struct ShadowReportResponse {
+    pub counting_since_ns: u64,
+    pub rules: Vec<ShadowRuleEntry>,
+}
+
+/// One shadow rule and what it would have done.
+#[derive(Deserialize, Serialize)]
+pub struct ShadowRuleEntry {
+    pub rule_id: String,
+    pub action: String,
+    pub would: String,
+    pub installed: bool,
+    pub packets: u64,
+    pub flows: u64,
+    pub changed_packets: u64,
+    pub changed_flows: u64,
+    pub sample: Vec<ShadowFlowEntry>,
+}
+
+/// One flow a shadow rule matched.
+#[derive(Deserialize, Serialize)]
+pub struct ShadowFlowEntry {
+    pub src_ip: String,
+    pub dst_ip: String,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub protocol: u8,
+    pub live_verdict: String,
+    pub packets: u64,
+    pub first_seen_ns: u64,
+    pub last_seen_ns: u64,
 }
 
 /// One rule naming a workload, as the reach route answers it.
@@ -2665,6 +2708,16 @@ impl ApiClient {
     pub async fn workload_rules(&self) -> anyhow::Result<WorkloadRulesResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/firewall/workload/rules")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    /// What each shadow rule would have done since counting started.
+    pub async fn firewall_shadow(&self) -> anyhow::Result<ShadowReportResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/firewall/shadow")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

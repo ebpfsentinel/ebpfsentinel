@@ -20,6 +20,7 @@ use ports::test_utils::NoopMetrics;
 
 fn make_rule(id: usize, priority: u32, action: FirewallAction) -> FirewallRule {
     FirewallRule {
+        mode: domain::firewall::entity::RuleMode::Enforce,
         id: RuleId(format!("fw-{id:05}")),
         priority,
         action,

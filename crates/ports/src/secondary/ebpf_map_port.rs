@@ -1,6 +1,20 @@
 use domain::common::error::DomainError;
 use domain::trace::RulePlacement;
-use ebpf_common::firewall::{FirewallRuleEntry, FirewallRuleEntryV6};
+use ebpf_common::firewall::{
+    FirewallRuleEntry, FirewallRuleEntryV6, ShadowFlowKey, ShadowRuleStats, ShadowSample,
+};
+
+/// What the datapath counted for the shadow rules, as read from the kernel.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShadowCounts {
+    /// Per IPv4 shadow slot, summed across CPUs, in load order.
+    pub v4: Vec<ShadowRuleStats>,
+    /// Per IPv6 shadow slot, summed across CPUs, in load order.
+    pub v6: Vec<ShadowRuleStats>,
+    /// The sampled flows, each keyed by the slot of the rule that saw it.
+    /// Stamps are already converted to nanoseconds since the Unix epoch.
+    pub sample: Vec<(ShadowFlowKey, ShadowSample)>,
+}
 
 /// Secondary port for array-based eBPF firewall map operations.
 ///
@@ -34,6 +48,21 @@ pub trait FirewallArrayMapPort: Send + Sync {
 
     /// Return the total number of rules currently loaded (V4 + V6).
     fn rule_count(&self) -> Result<usize, DomainError>;
+
+    /// Load the rules the datapath reads after its verdict and never acts on.
+    ///
+    /// Loading the same entries again changes nothing and keeps what they
+    /// have counted, so a reload that leaves the shadow rules alone does not
+    /// reset them. Any other load starts every counter and the sample afresh,
+    /// since a slot then names another rule. Returns whether anything changed.
+    fn load_shadow_rules(
+        &mut self,
+        v4: &[FirewallRuleEntry],
+        v6: &[FirewallRuleEntryV6],
+    ) -> Result<bool, DomainError>;
+
+    /// Read what the shadow rules have counted since they were loaded.
+    fn read_shadow(&self) -> Result<ShadowCounts, DomainError>;
 }
 
 #[cfg(test)]

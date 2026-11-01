@@ -80,6 +80,13 @@ pub enum FirewallError {
 
     #[error("invalid dns_clients: {reason}")]
     InvalidDnsClients { reason: String },
+
+    /// A field that acts on traffic was written on a rule in shadow mode.
+    #[error("{matcher} has no meaning on a rule in shadow mode: {reason}")]
+    ShadowMatcherUnsupported {
+        matcher: &'static str,
+        reason: &'static str,
+    },
 }
 
 impl From<FirewallError> for DomainError {

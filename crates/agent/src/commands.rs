@@ -69,6 +69,7 @@ pub async fn cmd_firewall_list(client: &ApiClient, output: OutputFormat) -> Resu
         ("DST PORT", Align::Right),
         ("SCOPE", Align::Left),
         ("INTERFACES", Align::Left),
+        ("MODE", Align::Left),
         ("ENABLED", Align::Left),
     ]);
 
@@ -84,6 +85,7 @@ pub async fn cmd_firewall_list(client: &ApiClient, output: OutputFormat) -> Resu
             rule.dst_port.as_deref().unwrap_or("-"),
             rule.scope,
             interface_scope(&rule.interfaces),
+            rule.mode,
             yes_no(rule.enabled)
         ]);
     }
@@ -130,6 +132,63 @@ pub async fn cmd_firewall_workload(client: &ApiClient, output: OutputFormat) -> 
     if !listing.enforcing {
         println!("\nNo rule in force refuses: every one of them only counts.");
     }
+    Ok(())
+}
+
+/// `firewall shadow` - what each shadow rule would have done.
+pub async fn cmd_firewall_shadow(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let report = client.firewall_shadow().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    if report.rules.is_empty() {
+        println!("No rule is in shadow mode.");
+        return Ok(());
+    }
+
+    let mut table = Table::new(&[
+        ("RULE", Align::Left),
+        ("WOULD", Align::Left),
+        ("INSTALLED", Align::Left),
+        ("PACKETS", Align::Right),
+        ("FLOWS", Align::Right),
+        ("CHANGED PKTS", Align::Right),
+        ("CHANGED FLOWS", Align::Right),
+    ]);
+    for rule in &report.rules {
+        table.row(cells![
+            rule.rule_id,
+            rule.would,
+            yes_no(rule.installed),
+            rule.packets,
+            rule.flows,
+            rule.changed_packets,
+            rule.changed_flows
+        ]);
+    }
+    table.print();
+
+    for rule in report.rules.iter().filter(|r| !r.sample.is_empty()) {
+        println!("\n{} - most recent flows:", rule.rule_id);
+        for flow in &rule.sample {
+            println!(
+                "  {}:{} -> {}:{} proto {} live {} ({} packets)",
+                flow.src_ip,
+                flow.src_port,
+                flow.dst_ip,
+                flow.dst_port,
+                flow.protocol,
+                flow.live_verdict,
+                flow.packets
+            );
+        }
+    }
+    println!(
+        "\nCounters restart whenever the set of shadow rules changes. Flow counts are a floor."
+    );
     Ok(())
 }
 

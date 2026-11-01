@@ -242,6 +242,7 @@ mod tests {
 
     fn prod_rule(dst: Option<IpNetwork>, namespace: &str) -> FirewallRule {
         FirewallRule {
+            mode: domain::firewall::entity::RuleMode::Enforce,
             id: domain::common::entity::RuleId("r".to_string()),
             priority: 10,
             action: domain::firewall::entity::FirewallAction::Deny,

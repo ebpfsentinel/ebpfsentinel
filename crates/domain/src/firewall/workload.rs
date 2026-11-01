@@ -1351,6 +1351,7 @@ mod tests {
 
     fn rule(id: &str, priority: u32, action: FirewallAction) -> FirewallRule {
         FirewallRule {
+            mode: crate::firewall::entity::RuleMode::Enforce,
             id: RuleId(id.to_string()),
             priority,
             action,

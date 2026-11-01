@@ -78,6 +78,7 @@ use super::zone_handler;
         firewall_handler::delete_rule,
         firewall_handler::workload_reach,
         firewall_handler::list_workload_rules,
+        firewall_handler::shadow_report,
         firewall_handler::workload_fqdn,
         firewall_handler::workload_labels,
         // L7
@@ -251,6 +252,9 @@ use super::zone_handler;
         firewall_handler::WorkloadReachEntry,
         firewall_handler::WorkloadReachResponse,
         firewall_handler::WorkloadRulesResponse,
+        firewall_handler::ShadowReportResponse,
+        firewall_handler::ShadowRuleResponse,
+        firewall_handler::ShadowFlowResponse,
         firewall_handler::WorkloadFqdnResponse,
         firewall_handler::FqdnRuleEntry,
         firewall_handler::FqdnPatternEntry,

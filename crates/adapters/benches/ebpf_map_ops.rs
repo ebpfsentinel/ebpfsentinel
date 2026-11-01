@@ -39,6 +39,7 @@ fn make_firewall_rule(i: usize) -> FirewallRule {
     let octet = (i % 256) as u8;
     let subnet = ((i / 256) % 256) as u8;
     FirewallRule {
+        mode: domain::firewall::entity::RuleMode::Enforce,
         id: RuleId(format!("bench-fw-{i}")),
         priority: (i as u32 % 1000) + 1,
         action: match i % 3 {

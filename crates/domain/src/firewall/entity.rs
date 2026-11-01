@@ -506,6 +506,41 @@ pub struct FirewallRule {
     /// workload anywhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload: Option<WorkloadMatch>,
+    /// Whether the rule decides traffic or only counts what it would decide.
+    #[serde(default, skip_serializing_if = "RuleMode::is_enforce")]
+    pub mode: RuleMode,
+}
+
+/// Whether a rule takes part in the verdict.
+///
+/// A shadow rule is read after the verdict is taken and never changes it: it
+/// counts the packets and flows it would have allowed or denied, and keeps a
+/// bounded sample of the flows it would have decided otherwise, so a rule can
+/// be watched against real traffic before it is trusted with any.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleMode {
+    /// The rule decides the packets it matches.
+    #[default]
+    Enforce,
+    /// The rule decides nothing and counts what it would have decided.
+    Shadow,
+}
+
+impl RuleMode {
+    /// `true` for the default mode, which is left out of serialized rules.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub fn is_enforce(&self) -> bool {
+        *self == Self::Enforce
+    }
+
+    /// The name the configuration and the API use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enforce => "enforce",
+            Self::Shadow => "shadow",
+        }
+    }
 }
 
 /// Connection state names for stateful rule matching.
@@ -617,8 +652,55 @@ impl FirewallRule {
         }
 
         self.validate_workload()?;
+        self.validate_shadow()?;
 
         Ok(())
+    }
+
+    /// A shadow rule may carry only what can be read after the verdict
+    /// without acting on the packet.
+    ///
+    /// A workload rule is decided at the socket hooks, where no packet verdict
+    /// exists to be read against; a DSCP mark and a state ceiling both act on
+    /// the traffic; and a system rule exists to protect access, which a rule
+    /// that decides nothing cannot do.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FirewallError::ShadowMatcherUnsupported`] naming the field.
+    pub fn validate_shadow(&self) -> Result<(), FirewallError> {
+        if self.mode != RuleMode::Shadow {
+            return Ok(());
+        }
+        let refused: [(&'static str, bool, &'static str); 4] = [
+            (
+                "workload",
+                self.workload.is_some(),
+                "a workload rule is decided at the socket hooks, where there is no packet \
+                 verdict to read it against",
+            ),
+            (
+                "dscp_mark",
+                self.dscp_mark.is_some(),
+                "a mark rewrites the packet, and a shadow rule acts on nothing",
+            ),
+            (
+                "max_states",
+                self.max_states.is_some(),
+                "a state ceiling refuses connections, and a shadow rule refuses nothing",
+            ),
+            (
+                "system",
+                self.system,
+                "a system rule protects access, which a rule that decides nothing cannot do",
+            ),
+        ];
+        match refused.into_iter().find(|(_, set, _)| *set) {
+            Some((matcher, _, reason)) => {
+                Err(FirewallError::ShadowMatcherUnsupported { matcher, reason })
+            }
+            None => Ok(()),
+        }
     }
 
     /// Check the workload half of the rule, and that nothing the socket hooks
@@ -1390,8 +1472,39 @@ mod tests {
 
     // ── FirewallRule validation tests ──────────────────────────────
 
+    #[test]
+    fn a_shadow_rule_refuses_what_acts_on_traffic() {
+        let mut rule = make_rule("watched", 10);
+        rule.mode = RuleMode::Shadow;
+        assert!(rule.validate().is_ok());
+        rule.dscp_mark = Some(10);
+        assert!(matches!(
+            rule.validate(),
+            Err(FirewallError::ShadowMatcherUnsupported {
+                matcher: "dscp_mark",
+                ..
+            })
+        ));
+        rule.dscp_mark = None;
+        rule.max_states = Some(5);
+        assert!(rule.validate().is_err());
+    }
+
+    #[test]
+    fn the_mode_is_written_only_when_it_is_shadow() {
+        let mut rule = make_rule("watched", 10);
+        let json = serde_json::to_value(&rule).unwrap();
+        assert!(json.get("mode").is_none());
+        rule.mode = RuleMode::Shadow;
+        let json = serde_json::to_value(&rule).unwrap();
+        assert_eq!(json["mode"], "shadow");
+        let back: FirewallRule = serde_json::from_value(json).unwrap();
+        assert_eq!(back.mode, RuleMode::Shadow);
+    }
+
     fn make_rule(id: &str, priority: u32) -> FirewallRule {
         FirewallRule {
+            mode: RuleMode::Enforce,
             id: RuleId(id.to_string()),
             priority,
             action: FirewallAction::Deny,

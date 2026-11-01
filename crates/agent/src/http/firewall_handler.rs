@@ -9,7 +9,10 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use domain::auth::entity::JwtClaims;
 use domain::common::entity::{Protocol, RuleId};
-use domain::firewall::entity::{FirewallAction, FirewallRule, IpCidr, IpNetwork, PortRange, Scope};
+use domain::firewall::entity::{
+    FirewallAction, FirewallRule, IpCidr, IpNetwork, PortRange, RuleMode, Scope,
+};
+use domain::firewall::shadow::{ShadowFlow, ShadowReading, ShadowReport};
 use domain::firewall::workload::{WorkloadMatch, WorkloadMode};
 use infrastructure::config::{group_mask_words, parse_cidr};
 use serde::{Deserialize, Serialize};
@@ -65,6 +68,10 @@ pub struct CreateRuleRequest {
     /// Optional destination MAC filter (L2), colon-separated.
     #[serde(default)]
     pub dst_mac: Option<String>,
+    /// `enforce` (the default) decides traffic; `shadow` decides nothing and
+    /// counts what the rule would have done.
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -72,6 +79,8 @@ pub struct CreateRuleRequest {
 pub struct RuleResponse {
     pub id: String,
     pub enabled: bool,
+    /// `enforce` decides traffic; `shadow` only counts what it would do.
+    pub mode: &'static str,
     pub priority: u32,
     pub action: String,
     pub protocol: String,
@@ -184,6 +193,17 @@ fn is_false(v: &bool) -> bool {
 
 // ── Conversion helpers ──────────────────────────────────────────────
 
+fn parse_mode(s: Option<&str>) -> Result<RuleMode, ApiError> {
+    match s.map(str::to_lowercase).as_deref() {
+        None | Some("enforce") => Ok(RuleMode::Enforce),
+        Some("shadow") => Ok(RuleMode::Shadow),
+        Some(other) => Err(ApiError::BadRequest {
+            code: "VALIDATION_ERROR",
+            message: format!("invalid mode '{other}': expected enforce|shadow"),
+        }),
+    }
+}
+
 fn parse_action(s: &str) -> Result<FirewallAction, ApiError> {
     match s.to_lowercase().as_str() {
         "allow" | "pass" => Ok(FirewallAction::Allow),
@@ -234,6 +254,7 @@ impl CreateRuleRequest {
 
         let action = parse_action(&self.action)?;
         let protocol = parse_protocol(&self.protocol)?;
+        let mode = parse_mode(self.mode.as_deref())?;
 
         let src_ip = self
             .src_ip
@@ -279,6 +300,7 @@ impl CreateRuleRequest {
             })?;
 
         Ok(FirewallRule {
+            mode,
             id: RuleId(self.id),
             priority: self.priority,
             action,
@@ -432,6 +454,7 @@ impl From<&FirewallRule> for RuleResponse {
         Self {
             id: rule.id.0.clone(),
             enabled: rule.enabled,
+            mode: rule.mode.as_str(),
             priority: rule.priority,
             action: format_action(rule.action).to_string(),
             protocol: format_protocol(rule.protocol).to_string(),
@@ -696,6 +719,140 @@ pub struct WorkloadRulesResponse {
     pub enforcing: bool,
     /// Every rule in force, in the order the kernel walks them.
     pub rules: Vec<WorkloadReachEntry>,
+}
+
+/// One flow a shadow rule would have decided otherwise, or the same way.
+#[derive(Serialize, ToSchema)]
+pub struct ShadowFlowResponse {
+    pub src_ip: String,
+    pub dst_ip: String,
+    pub src_port: u16,
+    pub dst_port: u16,
+    /// IP protocol number.
+    pub protocol: u8,
+    /// `allow` or `deny`: what the rules in force did to the flow.
+    pub live_verdict: &'static str,
+    /// Packets of this flow the rule matched while it was sampled.
+    pub packets: u64,
+    /// First packet seen, nanoseconds since the Unix epoch.
+    pub first_seen_ns: u64,
+    /// Last packet seen, nanoseconds since the Unix epoch.
+    pub last_seen_ns: u64,
+}
+
+impl From<&ShadowFlow> for ShadowFlowResponse {
+    fn from(flow: &ShadowFlow) -> Self {
+        Self {
+            src_ip: flow.src_ip.to_string(),
+            dst_ip: flow.dst_ip.to_string(),
+            src_port: flow.src_port,
+            dst_port: flow.dst_port,
+            protocol: flow.protocol,
+            live_verdict: verdict_str(flow.verdict),
+            packets: flow.packets,
+            first_seen_ns: flow.first_seen_ns,
+            last_seen_ns: flow.last_seen_ns,
+        }
+    }
+}
+
+/// What one shadow rule would have done since counting started.
+#[derive(Serialize, ToSchema)]
+pub struct ShadowRuleResponse {
+    pub rule_id: String,
+    /// The rule's own action.
+    pub action: &'static str,
+    /// `allow` or `deny`: what the action amounts to on the wire.
+    pub would: &'static str,
+    /// Whether the rule is in the kernel. A rule past the per-family limit,
+    /// disabled or outside its schedule counts nothing.
+    pub installed: bool,
+    /// Packets the rule matched.
+    pub packets: u64,
+    /// Distinct flows the rule matched. A floor: a flow forgotten by the
+    /// bounded flow table is counted again when it returns.
+    pub flows: u64,
+    /// Packets the rules in force decided otherwise than this rule would.
+    pub changed_packets: u64,
+    /// Flows the rules in force decided otherwise than this rule would.
+    pub changed_flows: u64,
+    /// Most recent flows matched, newest first.
+    pub sample: Vec<ShadowFlowResponse>,
+}
+
+impl From<&ShadowReading> for ShadowRuleResponse {
+    fn from(reading: &ShadowReading) -> Self {
+        Self {
+            rule_id: reading.rule_id.0.clone(),
+            action: format_action(reading.action),
+            would: verdict_str(reading.would),
+            installed: reading.installed,
+            packets: reading.counters.packets,
+            flows: reading.counters.flows,
+            changed_packets: reading.counters.changed_packets,
+            changed_flows: reading.counters.changed_flows,
+            sample: reading
+                .sample
+                .iter()
+                .map(ShadowFlowResponse::from)
+                .collect(),
+        }
+    }
+}
+
+/// What every shadow rule would have done.
+#[derive(Serialize, ToSchema)]
+pub struct ShadowReportResponse {
+    /// When the counters were last reset, nanoseconds since the Unix epoch:
+    /// every change to the set of shadow rules starts them again. Zero when
+    /// no shadow rule was ever loaded.
+    pub counting_since_ns: u64,
+    pub rules: Vec<ShadowRuleResponse>,
+}
+
+impl From<&ShadowReport> for ShadowReportResponse {
+    fn from(report: &ShadowReport) -> Self {
+        Self {
+            counting_since_ns: report.counting_since_ns,
+            rules: report.rules.iter().map(ShadowRuleResponse::from).collect(),
+        }
+    }
+}
+
+fn verdict_str(verdict: domain::firewall::shadow::ShadowVerdict) -> &'static str {
+    match verdict {
+        domain::firewall::shadow::ShadowVerdict::Allow => "allow",
+        domain::firewall::shadow::ShadowVerdict::Deny => "deny",
+    }
+}
+
+/// `GET /api/v1/firewall/shadow` - what each shadow rule would have done.
+#[utoipa::path(
+    get, path = "/api/v1/firewall/shadow",
+    tag = "Firewall",
+    responses(
+        (status = 200, description = "Shadow rules and what each would have done", body = ShadowReportResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 500, description = "The kernel counters could not be read", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn shadow_report(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ShadowReportResponse>, ApiError> {
+    let report = state
+        .firewall_service
+        .read()
+        .await
+        .shadow_report()
+        .map_err(|e| ApiError::Internal {
+            message: format!("the shadow counters could not be read: {e}"),
+        })?;
+    Ok(Json(ShadowReportResponse::from(&report)))
 }
 
 /// `GET /api/v1/firewall/workload/rules` - the workload rules in force and
@@ -1196,6 +1353,7 @@ mod tests {
             vlan_id: None,
             src_mac: None,
             dst_mac: None,
+            mode: None,
         };
         let rule = req.into_domain_rule().unwrap();
         assert_eq!(rule.id.0, "fw-001");
@@ -1222,6 +1380,7 @@ mod tests {
             vlan_id: None,
             src_mac: Some("aa:bb:cc:dd:ee:ff".to_string()),
             dst_mac: None,
+            mode: None,
         };
         let rule = req.into_domain_rule().unwrap();
         assert_eq!(
@@ -1247,8 +1406,73 @@ mod tests {
             vlan_id: None,
             src_mac: Some("not-a-mac".to_string()),
             dst_mac: None,
+            mode: None,
         };
         assert!(req.into_domain_rule().is_err());
+    }
+
+    fn shadow_request(mode: &str) -> CreateRuleRequest {
+        CreateRuleRequest {
+            id: "fw-watch".to_string(),
+            priority: 10,
+            action: "deny".to_string(),
+            protocol: "tcp".to_string(),
+            src_ip: None,
+            dst_ip: None,
+            src_port: None,
+            dst_port: Some(22),
+            scope: "global".to_string(),
+            enabled: true,
+            vlan_id: None,
+            src_mac: None,
+            dst_mac: None,
+            mode: Some(mode.to_string()),
+        }
+    }
+
+    #[test]
+    fn a_rule_created_in_shadow_mode_reads_back_in_that_mode() {
+        let rule = shadow_request("shadow").into_domain_rule().unwrap();
+        assert_eq!(rule.mode, RuleMode::Shadow);
+        assert_eq!(RuleResponse::from(&rule).mode, "shadow");
+        assert!(shadow_request("audit").into_domain_rule().is_err());
+    }
+
+    #[test]
+    fn the_shadow_report_names_both_verdicts_in_words() {
+        let report = ShadowReport {
+            counting_since_ns: 7,
+            rules: vec![ShadowReading {
+                rule_id: RuleId("fw-watch".to_string()),
+                action: FirewallAction::Reject,
+                would: domain::firewall::shadow::ShadowVerdict::Deny,
+                installed: true,
+                counters: domain::firewall::shadow::ShadowCounters {
+                    packets: 4,
+                    flows: 2,
+                    changed_packets: 3,
+                    changed_flows: 1,
+                },
+                sample: vec![ShadowFlow {
+                    src_ip: "10.0.0.1".parse().unwrap(),
+                    dst_ip: "10.0.0.2".parse().unwrap(),
+                    src_port: 40000,
+                    dst_port: 22,
+                    protocol: 6,
+                    verdict: domain::firewall::shadow::ShadowVerdict::Allow,
+                    packets: 3,
+                    first_seen_ns: 1,
+                    last_seen_ns: 2,
+                }],
+            }],
+        };
+        let body = serde_json::to_value(ShadowReportResponse::from(&report)).unwrap();
+        assert_eq!(body["counting_since_ns"], 7);
+        assert_eq!(body["rules"][0]["action"], "reject");
+        assert_eq!(body["rules"][0]["would"], "deny");
+        assert_eq!(body["rules"][0]["changed_packets"], 3);
+        assert_eq!(body["rules"][0]["sample"][0]["live_verdict"], "allow");
+        assert_eq!(body["rules"][0]["sample"][0]["dst_ip"], "10.0.0.2");
     }
 
     #[test]
@@ -1267,6 +1491,7 @@ mod tests {
             vlan_id: None,
             src_mac: None,
             dst_mac: None,
+            mode: None,
         };
         assert!(req.into_domain_rule().is_err());
     }
@@ -1287,6 +1512,7 @@ mod tests {
             vlan_id: None,
             src_mac: None,
             dst_mac: None,
+            mode: None,
         };
         assert!(req.into_domain_rule().is_err());
     }
@@ -1294,6 +1520,7 @@ mod tests {
     #[test]
     fn rule_response_from_domain() {
         let rule = FirewallRule {
+            mode: RuleMode::Enforce,
             id: RuleId("fw-001".to_string()),
             priority: 100,
             action: FirewallAction::Deny,
@@ -1357,6 +1584,7 @@ mod tests {
             vlan_id: None,
             src_mac: None,
             dst_mac: None,
+            mode: None,
         };
         let mut rule = req.into_domain_rule().unwrap();
         rule.workload = Some(WorkloadMatch {
@@ -1393,6 +1621,7 @@ mod tests {
             vlan_id: None,
             src_mac: None,
             dst_mac: None,
+            mode: None,
         };
         let rule = req.into_domain_rule().unwrap();
         let mut resp = RuleResponse::from(&rule);
