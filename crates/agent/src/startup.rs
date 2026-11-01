@@ -5894,16 +5894,25 @@ pub struct FileWatchStart<'a> {
     pub cancel: CancellationToken,
 }
 
-/// Start the file watch the configuration asks for, and hand back the
-/// watched paths it follows, which the caller may replace while it runs.
+/// What a running file watch hands back to whoever started it.
+pub struct FileWatchHandle {
+    /// The watched paths it follows, which the caller may replace.
+    pub watched: Arc<application::file_watch_service::WatchedPathSet>,
+    /// The baselines it keeps, readable while it runs.
+    pub baselines: Arc<dyn ports::secondary::file_watch_port::FileBaselineStore>,
+    /// The fleet's expected state, empty until the caller puts one in force.
+    pub expected: Arc<application::file_watch_service::ExpectedBaselineSet>,
+}
+
+/// Start the file watch the configuration asks for, and hand back what the
+/// caller may read or replace while it runs.
 ///
 /// `None` when the watch is off, and when its baselines cannot be kept: a
 /// watch that compares nothing is not opened.
-pub fn start_file_watch(
-    start: FileWatchStart<'_>,
-) -> Option<Arc<application::file_watch_service::WatchedPathSet>> {
+pub fn start_file_watch(start: FileWatchStart<'_>) -> Option<FileWatchHandle> {
     use application::file_watch_service::{
-        BaselinePolicy, FileRuleFeed, FileWatcher, OwnFileGuard, WatchedPathGuard, WatchedPathSet,
+        BaselinePolicy, ExpectedBaselineSet, FileRuleFeed, FileWatcher, OwnFileGuard,
+        WatchedPathGuard, WatchedPathSet,
     };
     let config = start.config;
     if !config.file_watch.enabled {
@@ -5923,17 +5932,20 @@ pub fn start_file_watch(
             return None;
         }
     };
+    let store: Arc<dyn ports::secondary::file_watch_port::FileBaselineStore> = Arc::new(store);
+    let expected = Arc::new(ExpectedBaselineSet::new());
     let source = adapters::warden::file_watch::FileWatch::new(open_local_file_watch);
     let mut watcher = FileWatcher::new(
         Box::new(source),
         config.file_watch.filesystems.clone(),
         start.metrics,
-        Arc::new(store),
+        Arc::clone(&store),
         BaselinePolicy {
             max_hash_bytes: config.file_watch.max_hash_bytes,
             max_files: config.file_watch.max_baselines,
         },
-    );
+    )
+    .with_expected(Arc::clone(&expected));
     // The agent's own files are watched whatever the configuration names,
     // and a change another process makes to one is an alert.
     let ebpf_dir = resolve_ebpf_program_dir(config);
@@ -5972,7 +5984,11 @@ pub fn start_file_watch(
     );
     let cancel = start.cancel;
     tokio::task::spawn_blocking(move || watcher.run_blocking(&cancel));
-    Some(set)
+    Some(FileWatchHandle {
+        watched: set,
+        baselines: store,
+        expected,
+    })
 }
 
 /// The agent's own files, each by its absolute path: the executable, the

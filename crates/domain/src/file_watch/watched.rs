@@ -171,6 +171,9 @@ pub struct WatchedPathChange {
     pub drift: Vec<FileDrift>,
     /// The path arrived while the watch was open and had no baseline.
     pub appeared: bool,
+    /// The difference is from the fleet's expected state rather than from
+    /// what this node read before.
+    pub expected: bool,
     /// The writer, `0` when the kernel could not name it in the agent's
     /// view.
     pub writer: u32,
@@ -183,6 +186,8 @@ impl WatchedPathChange {
         RuleId(
             if self.appeared {
                 "watched-path-appeared"
+            } else if self.expected {
+                "watched-path-unexpected"
             } else {
                 "watched-path-changed"
             }
@@ -205,6 +210,13 @@ impl WatchedPathChange {
         };
         if self.appeared {
             format!("{} appeared {under}, put there by {by}", self.path)
+        } else if self.expected {
+            let what: Vec<&str> = self.drift.iter().map(|d| d.as_str()).collect();
+            format!(
+                "{} {under} differs from the fleet's expected state: {}",
+                self.path,
+                what.join(", ")
+            )
         } else {
             let what: Vec<&str> = self.drift.iter().map(|d| d.as_str()).collect();
             format!(
@@ -233,8 +245,11 @@ pub struct SettledPath<'a> {
     pub path: &'a str,
     /// Every kind of change seen since the path was last read.
     pub kinds: &'a BTreeSet<FileChangeKind>,
-    /// Whether the path was known before this reading.
+    /// Whether the path was known before this reading, from this node's
+    /// own baseline or from the fleet's expected state.
     pub had_baseline: bool,
+    /// Whether `drift` is measured against the fleet's expected state.
+    pub expected: bool,
     /// What differs from the baseline.
     pub drift: &'a [FileDrift],
     /// Whether the path exists now.
@@ -271,6 +286,7 @@ pub fn watched_path_change(
         origin: origin.to_owned(),
         drift: settled.drift.to_vec(),
         appeared,
+        expected: settled.expected && !appeared,
         writer,
     })
 }
@@ -302,6 +318,7 @@ mod tests {
             path,
             kinds,
             had_baseline,
+            expected: false,
             drift,
             present,
             writer,
@@ -416,5 +433,34 @@ mod tests {
         // Arrived and already gone again: nothing is left to report on.
         let created = kinds(&[FileChangeKind::Created]);
         assert!(judge(&set, "/etc/ssh/tmp", &created, (false, false), &[], (9, 1)).is_none());
+    }
+
+    #[test]
+    fn a_first_reading_unlike_the_fleet_is_its_own_rule() {
+        let created = kinds(&[FileChangeKind::Created]);
+        let drift = [FileDrift::Content, FileDrift::Mode];
+        let settled = SettledPath {
+            path: "/etc/ssh/sshd_config",
+            kinds: &created,
+            had_baseline: true,
+            expected: true,
+            drift: &drift,
+            present: true,
+            writer: 0,
+        };
+        let change = watched_path_change(&watched(), &settled, 77).unwrap();
+        assert!(change.expected);
+        assert!(!change.appeared);
+        assert_eq!(change.rule_id().0, "watched-path-unexpected");
+        assert_eq!(
+            change.message(),
+            "/etc/ssh/sshd_config under /etc/ssh, watched through configuration differs from \
+             the fleet's expected state: content, mode"
+        );
+        let same = SettledPath {
+            drift: &[],
+            ..settled
+        };
+        assert!(watched_path_change(&watched(), &same, 77).is_none());
     }
 }

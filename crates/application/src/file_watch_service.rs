@@ -39,9 +39,9 @@ use std::time::Duration;
 
 use domain::alert::entity::Alert;
 use domain::file_watch::{
-    FileBaseline, FileChangeBatch, FileChangeKind, FileDrift, FileFacts, FileReading, OwnFiles,
-    RootMount, RootedPath, SettledPath, WatchedFilesystem, WatchedPaths, own_file_change, rooted,
-    watched_path_change,
+    ExpectedBaseline, ExpectedBaselines, FileBaseline, FileChangeBatch, FileChangeKind, FileDrift,
+    FileFacts, FileFingerprint, FileReading, OwnFiles, RootMount, RootedPath, SettledPath,
+    WatchedFilesystem, WatchedPaths, own_file_change, rooted, watched_path_change,
 };
 use domain::hostrule::{Intent, SettledChange, file_events};
 use ports::secondary::file_watch_port::{FileBaselineStore, FileWatchSource, ProcessRootReader};
@@ -157,6 +157,95 @@ impl WatchedPathSet {
     }
 }
 
+/// The state a fleet expects of its watched files, swapped whole while the
+/// watch runs.
+///
+/// A path this node has no baseline of yet is compared against it instead
+/// of learned, so a node joining an estate is held to what its peers carry
+/// rather than to whatever its disk held when the agent first started.
+#[derive(Debug, Default)]
+pub struct ExpectedBaselineSet {
+    inner: RwLock<Arc<ExpectedBaselines>>,
+}
+
+impl ExpectedBaselineSet {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Put `expected` in force, and say whether that changed anything.
+    pub fn replace(&self, expected: ExpectedBaselines) -> bool {
+        // One assignment: a poisoned lock still holds a whole set.
+        let mut held = self.inner.write().unwrap_or_else(PoisonError::into_inner);
+        if **held == expected {
+            return false;
+        }
+        *held = Arc::new(expected);
+        true
+    }
+
+    /// The set in force.
+    #[must_use]
+    pub fn current(&self) -> Arc<ExpectedBaselines> {
+        Arc::clone(&self.inner.read().unwrap_or_else(PoisonError::into_inner))
+    }
+}
+
+/// Most baselines one node lists for its fleet to compare.
+pub const LISTED_BASELINES_MAX: usize = 10_000;
+
+/// The fingerprints this node keeps for every watched path and what lies
+/// beneath it, in path order, at most `limit`, and whether more were left
+/// out. This is the shape a fleet's expected state is written in, so what
+/// one node lists can be handed back to every other.
+///
+/// # Errors
+///
+/// The store could not be read.
+pub fn listed_baselines(
+    store: &dyn FileBaselineStore,
+    watched: &WatchedPaths,
+    limit: usize,
+) -> Result<(Vec<ExpectedBaseline>, bool), String> {
+    let mut listed = Vec::new();
+    let mut truncated = false;
+    let mut seen = BTreeSet::new();
+    for path in watched.paths() {
+        let room = limit.saturating_sub(listed.len());
+        // One more than the room says whether anything was left out.
+        let found = store
+            .under(path, room.saturating_add(1))
+            .map_err(|e| e.to_string())?;
+        for (key, baseline) in found {
+            if listed.len() >= limit {
+                truncated = true;
+                break;
+            }
+            // A watched file beneath a watched directory is listed once.
+            if seen.insert(key.clone()) {
+                listed.push(ExpectedBaseline {
+                    path: key,
+                    fingerprint: FileFingerprint::of(&baseline),
+                });
+            }
+        }
+    }
+    listed.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok((listed, truncated))
+}
+
+/// What a difference on a watched path is measured against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Basis {
+    /// Nothing: the path is seen for the first time.
+    Unknown,
+    /// This node's own baseline.
+    Kept,
+    /// The fleet's expected state.
+    Expected,
+}
+
 /// The watched paths, and where a difference under one goes.
 pub struct WatchedPathGuard {
     pub set: Arc<WatchedPathSet>,
@@ -192,6 +281,8 @@ pub struct FileWatcher {
     /// Watched paths read once already: a later reading reports what
     /// differs, the first only learns.
     learned: BTreeSet<String>,
+    /// The fleet's expected state, compared on a path's first sight.
+    expected: Option<Arc<ExpectedBaselineSet>>,
 }
 
 impl FileWatcher {
@@ -219,7 +310,23 @@ impl FileWatcher {
             watched: None,
             watching: (0, Arc::new(WatchedPaths::new())),
             learned: BTreeSet::new(),
+            expected: None,
         }
+    }
+
+    /// Compare a watched path seen for the first time against the fleet's
+    /// expected state rather than learning it.
+    #[must_use]
+    pub fn with_expected(mut self, expected: Arc<ExpectedBaselineSet>) -> Self {
+        self.expected = Some(expected);
+        self
+    }
+
+    /// The fingerprint the fleet expects at `path`.
+    fn expected_at(&self, path: &str) -> Option<FileFingerprint> {
+        self.expected
+            .as_ref()
+            .and_then(|set| set.current().get(path).cloned())
     }
 
     /// Alert on a difference under a watched path, and follow the set as it
@@ -352,11 +459,23 @@ impl FileWatcher {
             return;
         }
         let watching = Arc::clone(&self.watching.1);
-        let paths: Vec<String> = watching
+        let mut paths: Vec<String> = watching
             .paths()
             .filter(|path| !self.is_own(path))
             .map(ToOwned::to_owned)
             .collect();
+        // What the fleet expects beneath a watched path is read too, so a
+        // file nobody touches on this node is still held to its peers.
+        if let Some(expected) = self.expected.as_ref().map(|set| set.current()) {
+            for path in expected.paths() {
+                if watching.covering(path).is_some()
+                    && !self.is_own(path)
+                    && !paths.iter().any(|p| p == path)
+                {
+                    paths.push(path.to_owned());
+                }
+            }
+        }
         let facts = match self.read_all(&paths) {
             Ok(facts) => facts,
             Err(e) => {
@@ -377,7 +496,17 @@ impl FileWatcher {
                 && self.learned.contains(&fact.path)
             {
                 let drift = old.drift(&fact.reading);
-                self.watch(&fact.path, &unseen, true, &drift, &fact.reading, 0);
+                self.watch(&fact.path, &unseen, Basis::Kept, &drift, &fact.reading, 0);
+            } else if let Some(expected) = self.expected_at(&fact.path) {
+                let drift = expected.drift(&fact.reading);
+                self.watch(
+                    &fact.path,
+                    &unseen,
+                    Basis::Expected,
+                    &drift,
+                    &fact.reading,
+                    0,
+                );
             }
             self.keep_listed(&fact, kept.is_some());
             self.learned.insert(fact.path);
@@ -407,7 +536,7 @@ impl FileWatcher {
         &self,
         path: &str,
         kinds: &BTreeSet<FileChangeKind>,
-        had_baseline: bool,
+        basis: Basis,
         drift: &[FileDrift],
         reading: &FileReading,
         writer: u32,
@@ -418,7 +547,8 @@ impl FileWatcher {
         let settled = SettledPath {
             path,
             kinds,
-            had_baseline,
+            had_baseline: basis != Basis::Unknown,
+            expected: basis == Basis::Expected,
             drift,
             present: matches!(reading, FileReading::Present(_)),
             writer,
@@ -638,14 +768,14 @@ impl FileWatcher {
             self.guard(path, &pending.kinds, &drift, pid);
         }
         if !self.is_own(path) {
-            self.watch(
-                path,
-                &pending.kinds,
-                kept.is_some(),
-                &drift,
-                &fact.reading,
-                pid,
-            );
+            // A path this node never kept is held to the fleet's expected
+            // state where there is one, and learned where there is none.
+            let (basis, drift) = match (&kept, self.expected_at(path)) {
+                (Some(_), _) => (Basis::Kept, drift),
+                (None, Some(expected)) => (Basis::Expected, expected.drift(&fact.reading)),
+                (None, None) => (Basis::Unknown, Vec::new()),
+            };
+            self.watch(path, &pending.kinds, basis, &drift, &fact.reading, pid);
         }
         let inside = rooted.path.as_deref().unwrap_or(path);
         match (&fact.reading, kept) {
@@ -975,6 +1105,20 @@ mod tests {
         }
         fn count(&self) -> Result<u64, DomainError> {
             Ok(self.map().len() as u64)
+        }
+        fn under(
+            &self,
+            path: &str,
+            limit: usize,
+        ) -> Result<Vec<(String, FileBaseline)>, DomainError> {
+            let beneath = format!("{path}/");
+            Ok(self
+                .map()
+                .iter()
+                .filter(|(key, _)| *key == path || key.starts_with(&beneath))
+                .take(limit)
+                .map(|(key, b)| (key.clone(), b.clone()))
+                .collect())
         }
     }
 
@@ -1430,6 +1574,90 @@ mod tests {
         assert_eq!(w.watching.1.directories(), vec!["/srv/app".to_owned()]);
         assert!(w.is_watched("/srv/app/config.toml"));
         assert!(!w.is_watched("/etc/hosts"));
+    }
+
+    fn expected(entries: &[(&str, FileBaseline)]) -> Arc<ExpectedBaselineSet> {
+        let set = Arc::new(ExpectedBaselineSet::new());
+        let held = ExpectedBaselines::from_entries(
+            entries
+                .iter()
+                .map(|(path, baseline)| ExpectedBaseline {
+                    path: (*path).to_owned(),
+                    fingerprint: FileFingerprint::of(baseline),
+                })
+                .collect(),
+        )
+        .unwrap();
+        assert!(set.replace(held.clone()));
+        assert!(!set.replace(held));
+        set
+    }
+
+    fn expected_run(on_disk: FileBaseline, fleet: FileBaseline, then: FileBaseline) -> Vec<Alert> {
+        let cancel = CancellationToken::new();
+        let source = Scripted {
+            opens: vec![Ok(vec![watched("/")])],
+            reads: vec![Ok(written())],
+            facts: vec![
+                Ok(vec![fact("/etc", FileReading::Present(file('d', 0o755)))]),
+                Ok(vec![fact("/etc/hosts", FileReading::Present(on_disk))]),
+                Ok(vec![fact("/etc/hosts", FileReading::Present(then))]),
+            ],
+            cancel: cancel.clone(),
+            opened: Arc::new(AtomicU64::new(0)),
+        };
+        let (guard, mut rx) = watched_guard(watched_set("/etc"));
+        watcher(source, Arc::new(Counted::default()))
+            .with_watched_paths(guard)
+            .with_expected(expected(&[("/etc/hosts", fleet)]))
+            .run_blocking(&cancel);
+        own_alerts(&mut rx)
+    }
+
+    #[test]
+    fn a_first_sight_unlike_the_fleet_is_an_alert_rather_than_learned() {
+        // The file is read when the watch opens because the fleet names it,
+        // although nothing touches it and only its directory is watched.
+        let alerts = expected_run(file('b', 0o600), file('a', 0o644), file('b', 0o600));
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].rule_id.0, "watched-path-unexpected");
+        assert_eq!(
+            alerts[0].message,
+            "/etc/hosts under /etc, watched through configuration differs from the fleet's \
+             expected state: content, mode"
+        );
+        assert_eq!(alerts[0].tgid, None);
+    }
+
+    #[test]
+    fn a_first_sight_like_the_fleet_is_kept_and_later_compared_with_itself() {
+        let alerts = expected_run(file('a', 0o644), file('a', 0o644), file('c', 0o644));
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].rule_id.0, "watched-path-changed");
+    }
+
+    #[test]
+    fn a_node_lists_what_it_keeps_beneath_its_watched_paths_once_and_bounded() {
+        let store = Memory::default();
+        for path in ["/etc/ssh", "/etc/ssh/sshd_config", "/etc/sshd", "/var/x"] {
+            store.put(path, &file('a', 0o644)).unwrap();
+        }
+        let mut watched = WatchedPaths::new();
+        watched.add("/etc/ssh", "debian").unwrap();
+        watched.add("/etc/ssh/sshd_config", "rhel").unwrap();
+        let (listed, truncated) = listed_baselines(&store, &watched, 10).unwrap();
+        let paths: Vec<&str> = listed.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["/etc/ssh", "/etc/ssh/sshd_config"]);
+        assert!(!truncated);
+        assert_eq!(
+            listed[1].fingerprint,
+            FileFingerprint::of(&file('a', 0o644))
+        );
+        let (one, truncated) = listed_baselines(&store, &watched, 1).unwrap();
+        assert_eq!(one.len(), 1);
+        assert!(truncated);
+        // What one node lists is what every other is handed back.
+        assert!(ExpectedBaselines::from_entries(listed).is_ok());
     }
 
     fn written() -> FileChangeBatch {

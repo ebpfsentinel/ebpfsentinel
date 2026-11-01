@@ -7,12 +7,17 @@
 
 pub mod baseline;
 pub mod entity;
+pub mod expected;
 pub mod own;
 pub mod rooted;
 pub mod watched;
 
 pub use baseline::{FileBaseline, FileDrift, FileFacts, FileReading, FileType, XattrDigest};
 pub use entity::{FileChange, FileChangeBatch, FileChangeKind, WatchedFilesystem};
+pub use expected::{
+    EXPECTED_BASELINES_MAX, ExpectedBaseline, ExpectedBaselines, ExpectedBaselinesDocument,
+    FileFingerprint,
+};
 pub use own::{AGENT_FILES_COMPONENT, OwnFileChange, OwnFileRole, OwnFiles, own_file_change};
 pub use rooted::{RootMount, RootedPath, root_mount, rooted};
 pub use watched::{

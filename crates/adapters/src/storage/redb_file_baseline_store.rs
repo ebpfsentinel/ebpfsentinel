@@ -123,6 +123,45 @@ impl FileBaselineStore for RedbFileBaselineStore {
             .map_err(|e| storage_error("table open", &e))?;
         table.len().map_err(|e| storage_error("count", &e))
     }
+
+    fn under(&self, path: &str, limit: usize) -> Result<Vec<(String, FileBaseline)>, DomainError> {
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| storage_error("read transaction", &e))?;
+        let table = txn
+            .open_table(BASELINES_TABLE)
+            .map_err(|e| storage_error("table open", &e))?;
+        let mut found = Vec::new();
+        let decode = |key: &str, value: &[u8]| match serde_json::from_slice::<FileBaseline>(value) {
+            Ok(baseline) => Some((key.to_owned(), baseline)),
+            Err(e) => {
+                tracing::warn!(path = key, error = %e, "unreadable file baseline skipped");
+                None
+            }
+        };
+        if limit == 0 {
+            return Ok(found);
+        }
+        if let Some(value) = table.get(path).map_err(|e| storage_error("read", &e))? {
+            found.extend(decode(path, value.value()));
+        }
+        // Every key beneath `path` sorts between `path/` and `path0`, `0`
+        // being the character after `/`; a sibling such as `path-old` sorts
+        // before both and is never read.
+        let (from, to) = (format!("{path}/"), format!("{path}0"));
+        let range = table
+            .range::<&str>(from.as_str()..to.as_str())
+            .map_err(|e| storage_error("range", &e))?;
+        for entry in range {
+            if found.len() >= limit {
+                break;
+            }
+            let (key, value) = entry.map_err(|e| storage_error("read", &e))?;
+            found.extend(decode(key.value(), value.value()));
+        }
+        Ok(found)
+    }
 }
 
 #[cfg(test)]
@@ -172,5 +211,48 @@ mod tests {
         assert_eq!(store.remove("/etc/hosts").ok(), Some(true));
         assert_eq!(store.remove("/etc/hosts").ok(), Some(false));
         assert_eq!(store.count().ok(), Some(1));
+    }
+
+    #[test]
+    fn a_path_and_what_lies_beneath_it_are_listed_and_a_sibling_is_not() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let store = RedbFileBaselineStore::open(&dir.path().join("b.redb"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        for (i, path) in [
+            "/etc/ssh",
+            "/etc/ssh-old/x",
+            "/etc/ssh/sshd_config",
+            "/etc/ssh/sshd_config.d/a.conf",
+            "/etc/sshd",
+            "/etc/shadow",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert!(store.put(path, &baseline(i as u64)).is_ok());
+        }
+        let names = |limit| {
+            store
+                .under("/etc/ssh", limit)
+                .unwrap_or_else(|e| panic!("{e}"))
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(10),
+            vec![
+                "/etc/ssh",
+                "/etc/ssh/sshd_config",
+                "/etc/ssh/sshd_config.d/a.conf"
+            ]
+        );
+        assert_eq!(names(2).len(), 2);
+        assert!(names(0).is_empty());
+        let file = store
+            .under("/etc/shadow", 10)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(file.len(), 1);
+        assert_eq!(file[0].1, baseline(5));
     }
 }

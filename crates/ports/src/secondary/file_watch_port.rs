@@ -76,6 +76,14 @@ pub trait FileBaselineStore: Send + Sync {
     ///
     /// The store could not be read.
     fn count(&self) -> Result<u64, DomainError>;
+
+    /// The baselines kept for `path` and everything beneath it, in path
+    /// order, at most `limit` of them.
+    ///
+    /// # Errors
+    ///
+    /// The store could not be read.
+    fn under(&self, path: &str, limit: usize) -> Result<Vec<(String, FileBaseline)>, DomainError>;
 }
 
 /// Reads where a process's root lives, so a path the watch reports on the
