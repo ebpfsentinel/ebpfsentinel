@@ -1150,6 +1150,44 @@ fn issue_prog_load(
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
 
+/// Load the smallest sleepable LSM program there is, `r0 = 0; exit`, against
+/// the hook function whose vmlinux BTF id is `attach_btf_id`, and close it.
+///
+/// This is the question the file kfuncs depend on: they are callable only from
+/// a sleepable LSM program, so a kernel that carries them and refuses this
+/// load offers them to nobody. The load goes through the process-wide token
+/// when one is set, exactly as the agent's own LSM objects do. Returns the
+/// errno and the verifier's log on refusal.
+pub(crate) fn load_sleepable_lsm_stub(attach_btf_id: u32) -> Result<(), (i32, String)> {
+    // `mov64 r0, 0` then `exit`, in the little-endian layout the bpfel target
+    // and every host this agent runs on share: the opcode is the first byte.
+    let insns: [u64; 2] = [
+        u64::from_le_bytes([0xb7, 0, 0, 0, 0, 0, 0, 0]),
+        u64::from_le_bytes([0x95, 0, 0, 0, 0, 0, 0, 0]),
+    ];
+    let license = b"GPL\0";
+    let mut attr = ProgLoadAttr {
+        prog_type: BPF_PROG_TYPE_LSM,
+        insn_cnt: 2,
+        insns: insns.as_ptr() as u64,
+        license: license.as_ptr() as u64,
+        prog_flags: BPF_F_SLEEPABLE,
+        expected_attach_type: BPF_LSM_MAC,
+        attach_btf_id,
+        ..Default::default()
+    };
+    let name = b"sleepable_probe";
+    attr.prog_name[..name.len()].copy_from_slice(name);
+    if let Some(token) = global_token_fd() {
+        attr.prog_flags |= super::bpf_token::BPF_F_TOKEN_FD;
+        attr.prog_token_fd = token;
+    }
+    let mut log = vec![0u8; 64 << 10];
+    issue_prog_load(&mut attr, 1, &mut log)
+        .map(drop)
+        .map_err(|(errno, raw)| (errno, raw.chars().filter(|&c| c != '\0').collect()))
+}
+
 /// SAFETY wrapper: invoke `bpf(cmd, attr, size)`.
 unsafe fn bpf(cmd: u32, attr: *mut core::ffi::c_void, size: usize) -> i64 {
     // SAFETY: caller passes a valid attr region of `size` bytes matching the

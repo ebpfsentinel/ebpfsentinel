@@ -2242,6 +2242,34 @@ pub struct KernelFeaturesResponse {
     /// Absent from an agent that predates the guard.
     #[serde(default)]
     pub self_protection: Option<SelfProtectionReport>,
+    /// Absent from an agent that predates the file kfunc probe.
+    #[serde(default)]
+    pub file_kfuncs: Option<FileKfuncReport>,
+}
+
+/// Whether the file kfuncs are usable on the node, and which condition failed.
+#[derive(Deserialize, Serialize)]
+pub struct FileKfuncReport {
+    pub probed: bool,
+    #[serde(default)]
+    pub sleepable_lsm: Option<bool>,
+    #[serde(default)]
+    pub sleepable_reason: Option<String>,
+    #[serde(default)]
+    pub kfuncs: Vec<FileKfuncEntry>,
+    #[serde(default)]
+    pub remedy: Option<String>,
+}
+
+/// One file kfunc on the node.
+#[derive(Deserialize, Serialize)]
+pub struct FileKfuncEntry {
+    pub name: String,
+    #[serde(default)]
+    pub declared: Option<bool>,
+    pub usable: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// Whether the agent's own maps and links are guarded on the node.

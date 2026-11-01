@@ -738,6 +738,15 @@ fn btf_get_fd_by_id(id: u32) -> Result<OwnedFd, KfuncError> {
 
 // ── public resolver ─────────────────────────────────────────────────────
 
+/// Every `FUNC` the vmlinux BTF blob in `data` declares, by name.
+///
+/// The probes that ask whether a kfunc exists read this rather than building a
+/// whole [`KfuncResolver`], which also walks every module's split BTF and asks
+/// for the module object ids.
+pub(crate) fn vmlinux_func_ids(data: Vec<u8>) -> Result<HashMap<String, u32>, KfuncError> {
+    BtfBlob::parse_base(data)?.func_ids(None)
+}
+
 /// Resolves kfunc names to kernel BTF ids and owns the module BTF fds the
 /// program loader needs for its `fd_array`.
 pub struct KfuncResolver {

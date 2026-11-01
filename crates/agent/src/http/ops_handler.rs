@@ -162,6 +162,67 @@ pub struct KernelFeaturesResponse {
     /// the agent's maps and a descriptor to its links. A node without the
     /// BPF LSM says it is unprotected and why, rather than saying nothing.
     pub self_protection: SelfProtectionReport,
+    /// Whether the kfuncs that read a task's executable and a file's path
+    /// and attributes are usable here. Each is declared or not by the
+    /// kernel's BTF, and usable only where a sleepable LSM program loads and
+    /// the BPF LSM is active, so the report says which of the three failed.
+    pub file_kfuncs: FileKfuncReport,
+}
+
+/// What this host answered about the file kfuncs.
+#[derive(Serialize, ToSchema)]
+pub struct FileKfuncReport {
+    /// False until startup has run the probe; every other field is then empty.
+    pub probed: bool,
+    /// Whether a sleepable LSM program loads. Absent when the probe could not
+    /// run, which proves nothing either way.
+    pub sleepable_lsm: Option<bool>,
+    /// Why it does not load, or why nothing was measured.
+    pub sleepable_reason: Option<String>,
+    pub kfuncs: Vec<FileKfuncEntry>,
+    /// The one change on this host that would make them usable, when there is one.
+    pub remedy: Option<String>,
+}
+
+/// One file kfunc on this host.
+#[derive(Serialize, ToSchema)]
+pub struct FileKfuncEntry {
+    pub name: String,
+    /// Whether the kernel's BTF declares it. Absent when the BTF could not be read.
+    pub declared: Option<bool>,
+    pub usable: bool,
+    /// The first condition that failed, when it is not usable.
+    pub reason: Option<String>,
+}
+
+impl From<Option<&adapters::ebpf::file_kfunc_probe::FileKfuncStatus>> for FileKfuncReport {
+    fn from(status: Option<&adapters::ebpf::file_kfunc_probe::FileKfuncStatus>) -> Self {
+        let Some(status) = status else {
+            return Self {
+                probed: false,
+                sleepable_lsm: None,
+                sleepable_reason: Some("startup has not run the file kfunc probe".to_string()),
+                kfuncs: Vec::new(),
+                remedy: None,
+            };
+        };
+        Self {
+            probed: true,
+            sleepable_lsm: status.sleepable.loads,
+            sleepable_reason: status.sleepable.reason.clone(),
+            kfuncs: status
+                .kfuncs
+                .iter()
+                .map(|k| FileKfuncEntry {
+                    name: k.name.to_string(),
+                    declared: k.declared,
+                    usable: k.usable,
+                    reason: k.reason.clone(),
+                })
+                .collect(),
+            remedy: status.remedy.clone(),
+        }
+    }
 }
 
 /// Whether the agent's own maps and links are guarded on this host.
@@ -620,6 +681,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
     let network_executables =
         NetworkExecutablesReport::from(adapters::ebpf::exec_network::status());
     let self_protection = SelfProtectionReport::from(adapters::ebpf::bpf_guard::status());
+    let file_kfuncs = FileKfuncReport::from(adapters::ebpf::file_kfunc_probe::cached());
 
     let Some(report) = report else {
         return KernelFeaturesResponse {
@@ -637,6 +699,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
             bpf_lsm,
             network_executables,
             self_protection,
+            file_kfuncs,
         };
     };
 
@@ -684,6 +747,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
         bpf_lsm,
         network_executables,
         self_protection,
+        file_kfuncs,
     }
 }
 
@@ -1055,6 +1119,58 @@ mod tests {
         assert_eq!(resp.bpf_lsm.modules, host.modules);
         assert_eq!(resp.bpf_lsm.remedy, host.remedy);
         assert_eq!(resp.bpf_lsm.active, resp.bpf_lsm.remedy.is_none());
+    }
+
+    #[test]
+    fn file_kfuncs_before_startup_probed_say_so_and_claim_nothing() {
+        // The endpoint never runs the load itself: before startup has asked,
+        // the block is empty and says why, rather than reading as absent.
+        let report = FileKfuncReport::from(None);
+        assert!(!report.probed);
+        assert_eq!(report.sleepable_lsm, None);
+        assert!(report.kfuncs.is_empty());
+        assert!(
+            report
+                .sleepable_reason
+                .as_deref()
+                .is_some_and(|r| r.contains("has not run"))
+        );
+    }
+
+    #[test]
+    fn file_kfuncs_carry_each_kfunc_and_the_condition_that_failed() {
+        use adapters::ebpf::file_kfunc_probe::{FileKfunc, FileKfuncStatus, SleepableStatus};
+        let status = FileKfuncStatus {
+            sleepable: SleepableStatus {
+                loads: Some(true),
+                reason: None,
+            },
+            kfuncs: vec![
+                FileKfunc {
+                    name: "bpf_path_d_path",
+                    declared: Some(true),
+                    usable: true,
+                    reason: None,
+                },
+                FileKfunc {
+                    name: "bpf_get_dentry_xattr",
+                    declared: Some(false),
+                    usable: false,
+                    reason: Some("this kernel does not declare it".to_string()),
+                },
+            ],
+            remedy: Some("run a kernel that declares every file kfunc".to_string()),
+        };
+        let report = FileKfuncReport::from(Some(&status));
+        let json = serde_json::to_value(&report).expect("serialise");
+        assert_eq!(json["probed"], true);
+        assert_eq!(json["sleepable_lsm"], true);
+        assert_eq!(json["kfuncs"][0]["usable"], true);
+        assert_eq!(json["kfuncs"][1]["declared"], false);
+        assert_eq!(
+            json["kfuncs"][1]["reason"],
+            "this kernel does not declare it"
+        );
     }
 
     #[test]

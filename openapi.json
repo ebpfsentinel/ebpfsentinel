@@ -12002,6 +12002,77 @@
           }
         }
       },
+      "FileKfuncEntry": {
+        "type": "object",
+        "description": "One file kfunc on this host.",
+        "required": [
+          "name",
+          "usable"
+        ],
+        "properties": {
+          "declared": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the kernel's BTF declares it. Absent when the BTF could not be read."
+          },
+          "name": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The first condition that failed, when it is not usable."
+          },
+          "usable": {
+            "type": "boolean"
+          }
+        }
+      },
+      "FileKfuncReport": {
+        "type": "object",
+        "description": "What this host answered about the file kfuncs.",
+        "required": [
+          "probed",
+          "kfuncs"
+        ],
+        "properties": {
+          "kfuncs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FileKfuncEntry"
+            }
+          },
+          "probed": {
+            "type": "boolean",
+            "description": "False until startup has run the probe; every other field is then empty."
+          },
+          "remedy": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The one change on this host that would make them usable, when there is one."
+          },
+          "sleepable_lsm": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether a sleepable LSM program loads. Absent when the probe could not\nrun, which proves nothing either way."
+          },
+          "sleepable_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it does not load, or why nothing was measured."
+          }
+        }
+      },
       "FingerprintSummaryResponse": {
         "type": "object",
         "description": "Response for `GET /api/v1/fingerprints/summary`.",
@@ -12833,7 +12904,8 @@
           "quarantine",
           "bpf_lsm",
           "network_executables",
-          "self_protection"
+          "self_protection",
+          "file_kfuncs"
         ],
         "properties": {
           "attribution": {
@@ -12843,6 +12915,10 @@
           "bpf_lsm": {
             "$ref": "#/components/schemas/BpfLsmReport",
             "description": "Whether an LSM program can attach on this host. Read from the host\nrather than from any attach, because it is asked before anything that\nneeds it is configured, and the kernel version does not answer it."
+          },
+          "file_kfuncs": {
+            "$ref": "#/components/schemas/FileKfuncReport",
+            "description": "Whether the kfuncs that read a task's executable and a file's path\nand attributes are usable here. Each is declared or not by the\nkernel's BTF, and usable only where a sleepable LSM program loads and\nthe BPF LSM is active, so the report says which of the three failed."
           },
           "helpers": {
             "type": "array",

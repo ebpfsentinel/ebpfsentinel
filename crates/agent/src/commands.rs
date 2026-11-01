@@ -4977,6 +4977,42 @@ fn print_lsm_blocks(resp: &crate::api_client::KernelFeaturesResponse) {
         Some(report) => print_self_protection(report),
         None => println!("\nSelf-protection\n  Not reported by this agent."),
     }
+    match &resp.file_kfuncs {
+        Some(report) => print_file_kfuncs(report),
+        None => println!("\nFile kfuncs\n  Not reported by this agent."),
+    }
+}
+
+/// Print whether the file kfuncs are usable, one line per kfunc, with the
+/// condition that failed where one did.
+fn print_file_kfuncs(report: &crate::api_client::FileKfuncReport) {
+    println!("\nFile kfuncs");
+    let sleepable = match report.sleepable_lsm {
+        Some(loads) => yes_no(loads),
+        None => "not probed",
+    };
+    println!("  Sleepable LSM: {sleepable}");
+    if let Some(reason) = &report.sleepable_reason {
+        println!("  Reason:        {reason}");
+    }
+    for kfunc in &report.kfuncs {
+        let state = match (kfunc.usable, kfunc.declared) {
+            (true, _) => "usable",
+            (false, Some(true)) => "declared, not usable",
+            (false, Some(false)) => "not declared",
+            (false, None) => "unknown",
+        };
+        println!("  {:<24} {state}", kfunc.name);
+        if !kfunc.usable
+            && let Some(reason) = &kfunc.reason
+            && report.sleepable_reason.as_deref() != Some(reason.as_str())
+        {
+            println!("    {reason}");
+        }
+    }
+    if let Some(remedy) = &report.remedy {
+        println!("  Remedy:        {remedy}");
+    }
 }
 
 /// Print whether other tasks are refused the agent's maps and links.

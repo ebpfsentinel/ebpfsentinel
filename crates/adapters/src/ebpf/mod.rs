@@ -17,6 +17,7 @@ pub mod ebpf_map_write_adapter;
 pub mod event_reader;
 pub mod exec_network;
 pub mod feature_gates;
+pub mod file_kfunc_probe;
 pub mod geoip_lpm_manager;
 pub mod helper_probe;
 pub mod ids_map_manager;
