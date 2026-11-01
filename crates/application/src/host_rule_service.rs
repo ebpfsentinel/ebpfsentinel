@@ -19,6 +19,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use arc_swap::ArcSwap;
+
 use domain::alert::entity::Alert;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -62,7 +64,7 @@ pub struct HostRuleMemory {
 
 /// The host rules and where their alerts go.
 pub struct HostRuleService {
-    rules: HostRuleSet,
+    rules: ArcSwap<HostRuleSet>,
     alerts: mpsc::Sender<AlertEvent>,
     facts: Option<Arc<dyn ProcessFactsReader>>,
     state: Mutex<HostRuleState>,
@@ -74,12 +76,9 @@ pub struct HostRuleService {
 impl HostRuleService {
     #[must_use]
     pub fn new(rules: HostRuleSet, alerts: mpsc::Sender<AlertEvent>) -> Self {
-        let since_ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
         Self {
-            shadow: Mutex::new(HostShadowBook::new(&rules, since_ns)),
-            rules,
+            shadow: Mutex::new(HostShadowBook::new(&rules, now_ns())),
+            rules: ArcSwap::from_pointee(rules),
             alerts,
             facts: None,
             state: Mutex::new(HostRuleState::default()),
@@ -98,8 +97,23 @@ impl HostRuleService {
 
     /// The loaded rules.
     #[must_use]
-    pub fn rules(&self) -> &HostRuleSet {
-        &self.rules
+    pub fn rules(&self) -> Arc<HostRuleSet> {
+        self.rules.load_full()
+    }
+
+    /// Evaluate `rules` from now on, in place of the ones loaded.
+    ///
+    /// The readings start again, because a reading of the old set says
+    /// nothing of the new one, and a rule promoted here stays in force only
+    /// where the new set carries it written exactly as it was. What the old
+    /// rules were waiting for or counting is dropped with them.
+    pub fn replace(&self, rules: HostRuleSet) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let previous = self.rules.swap(Arc::new(rules));
+        let next = self.rules.load();
+        let mut book = self.book();
+        *book = book.renewed(&previous, &next, now_ns());
+        *state = HostRuleState::default();
     }
 
     /// How many events matched a rule, and how many of those alerts were
@@ -174,13 +188,13 @@ impl HostRuleService {
     /// walk for an event nobody asks about.
     #[must_use]
     pub fn wants(&self, intent: Intent) -> bool {
-        self.rules.names(intent)
+        self.rules.load().names(intent)
     }
 
     /// An exec the process table has recorded, with its ancestry, the
     /// parent first, as the table holds it.
     pub fn record_exec(&self, entry: &ProcessEntry, lineage: &Lineage, at_ns: u64) {
-        if !self.rules.names(Intent::ProcessStarts) {
+        if !self.rules.load().names(Intent::ProcessStarts) {
             return;
         }
         let event = self.starts_event(entry, lineage.ancestors.first());
@@ -189,7 +203,7 @@ impl HostRuleService {
 
     /// An exit the process table has purged, with the entry it held.
     pub fn record_exit(&self, entry: &ProcessEntry, lineage: &Lineage, at_ns: u64) {
-        if !self.rules.names(Intent::ProcessEnds) {
+        if !self.rules.load().names(Intent::ProcessEnds) {
             return;
         }
         let event = with_process(IntentEvent::new(Intent::ProcessEnds), entry);
@@ -201,7 +215,10 @@ impl HostRuleService {
         if let Some(line) = &entry.command_line {
             event = set(event, "command_line", FieldValue::Text(line.clone()));
         }
-        if self.rules.reads(Intent::ProcessStarts, "exe_on_disk")
+        if self
+            .rules
+            .load()
+            .reads(Intent::ProcessStarts, "exe_on_disk")
             && let Some(facts) = self.facts.as_ref().and_then(|r| r.read_facts(entry.pid))
         {
             event = set(event, "exe_on_disk", FieldValue::Boolean(!facts.fileless));
@@ -232,16 +249,29 @@ impl HostRuleService {
         // one event being recorded, which only moves when a bound is hit:
         // nothing a panic elsewhere could leave is worth refusing to
         // evaluate the next event for.
-        let fired = {
-            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            self.rules
-                .evaluate(&mut state, event, Some(&facts), &subject, at_ns)
-        };
+        // The rules are read under the state's lock, which a replacement
+        // also takes, so the state an evaluation writes is always the one
+        // of the set it evaluated.
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let rules = self.rules.load_full();
+        let fired = rules.evaluate(&mut state, event, Some(&facts), &subject, at_ns);
+        drop(state);
         for rule in fired {
             self.matched.fetch_add(1, Ordering::Relaxed);
             let hit = facts.container_id.or(facts.cgroup).or(facts.unit);
-            if self.book().record(rule.id(), hit) {
-                continue;
+            {
+                // A set replaced since this one was evaluated may no longer
+                // carry the rule: it then does nothing rather than act in a
+                // mode nobody chose for it.
+                let mut book = self.book();
+                match book.mode(rule.id()) {
+                    None => continue,
+                    Some(RuleMode::Shadow) => {
+                        book.record(rule.id(), hit);
+                        continue;
+                    }
+                    Some(RuleMode::Enforce) => {}
+                }
             }
             let workload = Workload::new(entry.pid, WorkloadSource::Process)
                 .map(|w| w.with_process(entry).with_lineage(lineage));
@@ -260,6 +290,13 @@ impl HostRuleService {
             }
         }
     }
+}
+
+/// Wall clock nanoseconds, where the readings are dated from.
+fn now_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
 /// The fields every process intention takes from the entry.
@@ -356,6 +393,28 @@ mod tests {
         assert_eq!(service.mode("quiet"), Some(RuleMode::Enforce));
         service.record_exec(&entry(5, "/bin/sh", 0), &Lineage::default(), 2);
         assert!(rx.try_recv().is_ok(), "a rule in force raises");
+    }
+
+    #[test]
+    fn a_replaced_set_is_evaluated_and_keeps_a_promotion_of_an_unchanged_rule() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let quiet = r#"{"id":"quiet","mode":"shadow","when":{"process.starts":{"exe":"/bin/sh"}}}"#;
+        let service = HostRuleService::new(rules(&format!("[{quiet}]")), tx);
+        let since = service.shadow_since_ns();
+        service.promote("quiet", since).unwrap();
+        service.replace(rules(&format!(
+            r#"[{quiet},{{"id":"curl","mode":"shadow","when":{{"process.starts":{{"exe":"/usr/bin/curl"}}}}}}]"#
+        )));
+        assert_eq!(service.rules().rules().len(), 2);
+        assert_eq!(service.mode("quiet"), Some(RuleMode::Enforce));
+        assert_eq!(service.mode("curl"), Some(RuleMode::Shadow));
+        service.record_exec(&entry(6, "/usr/bin/curl", 0), &Lineage::default(), 3);
+        assert!(rx.try_recv().is_err(), "a new rule starts in shadow");
+        assert_eq!(service.reading("curl").unwrap().events, 1);
+        service.replace(rules("[]"));
+        service.record_exec(&entry(7, "/bin/sh", 0), &Lineage::default(), 4);
+        assert!(rx.try_recv().is_err(), "a rule taken away does nothing");
+        assert_eq!(service.mode("quiet"), None);
     }
 
     fn entry(pid: u32, exe: &str, uid: u32) -> ProcessEntry {

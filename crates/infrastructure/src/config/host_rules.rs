@@ -58,12 +58,24 @@ impl HostRulesConfig {
     /// Returns [`ConfigError::Validation`] naming the first rule that does
     /// not load and why, or an identifier used twice.
     pub fn compile(&self) -> Result<HostRuleSet, ConfigError> {
+        self.compile_with(Vec::new())
+    }
+
+    /// The rules, compiled with `delivered` beside them: rules that did not
+    /// come from this file, under the same bound and the same rule that no
+    /// two share an identifier.
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::compile`] refuses, counting `delivered` in.
+    pub fn compile_with(&self, delivered: Vec<HostRuleSpec>) -> Result<HostRuleSet, ConfigError> {
         let mut rules = if self.shipped {
             shipped_rules()?
         } else {
             Vec::new()
         };
         rules.extend(self.rules.iter().cloned());
+        rules.extend(delivered);
         if rules.len() > MAX_HOST_RULES {
             return Err(ConfigError::Validation {
                 field: "host_rules.rules".to_string(),
@@ -258,6 +270,30 @@ rules:
         )
         .unwrap();
         assert!(clash.validate().is_err());
+    }
+
+    #[test]
+    fn delivered_rules_count_against_the_bound_and_may_not_take_a_written_name() {
+        let config = parse("rules:\n  - id: mine\n    when:\n      process.starts: {}\n").unwrap();
+        let delivered = |id: &str| {
+            serde_norway::from_str::<HostRuleSpec>(&format!(
+                "id: {id}\nwhen:\n  process.starts: {{}}\n"
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            config
+                .compile_with(vec![delivered("theirs")])
+                .unwrap()
+                .rules()
+                .len(),
+            2
+        );
+        assert!(config.compile_with(vec![delivered("mine")]).is_err());
+        let many = (0..MAX_HOST_RULES)
+            .map(|n| delivered(&format!("r{n}")))
+            .collect();
+        assert!(config.compile_with(many).is_err());
     }
 
     #[test]

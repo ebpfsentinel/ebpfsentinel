@@ -1593,13 +1593,13 @@ pub async fn start_host_observation(
             Arc::new(adapters::container::ProcFactsReader::new(&proc_root)),
         ),
     );
-    if !host_rules.rules().is_empty() {
-        info!(
-            rules = host_rules.rules().rules().len(),
-            "host rules loaded"
-        );
-        table = table.with_host_rules(Arc::clone(&host_rules));
-    }
+    // Attached even with no rule: a binary running this path may hand the
+    // service a set later, and an empty one costs a lookup per event.
+    info!(
+        rules = host_rules.rules().rules().len(),
+        "host rules loaded"
+    );
+    table = table.with_host_rules(Arc::clone(&host_rules));
     let processes = Arc::new(table);
     services.workloads.install_processes(Arc::clone(&processes));
     let writer = Arc::clone(&processes);

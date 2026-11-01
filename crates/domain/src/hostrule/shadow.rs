@@ -112,6 +112,30 @@ impl HostShadowBook {
         Self { since_ns, readings }
     }
 
+    /// The book for `next`, which replaces `previous`, the readings starting
+    /// again at `since_ns`.
+    ///
+    /// A rule promoted here stays in force when `next` carries it written
+    /// exactly as it was; a rule that changed starts in the mode it is written
+    /// with, because a promotion was decided on a reading of the rule as it
+    /// stood. Every reading restarts: one taken of the old set says nothing of
+    /// what the new one would have done.
+    #[must_use]
+    pub fn renewed(&self, previous: &HostRuleSet, next: &HostRuleSet, since_ns: u64) -> Self {
+        let mut book = Self::new(next, since_ns);
+        for rule in next.rules() {
+            let promoted_here = self.mode(rule.id()) == Some(RuleMode::Enforce)
+                && previous
+                    .rules()
+                    .iter()
+                    .any(|old| old.id() == rule.id() && old.spec == rule.spec);
+            if promoted_here && let Some(slot) = book.readings.get_mut(rule.id()) {
+                *slot = None;
+            }
+        }
+        book
+    }
+
     /// When the readings started.
     #[must_use]
     pub fn since_ns(&self) -> u64 {
@@ -185,6 +209,35 @@ mod tests {
         {"id":"quiet","when":{"process.starts":{"exe":"/bin/sh"}}},
         {"id":"loud","mode":"enforce","when":{"process.starts":{"exe":"/bin/sh"}}}
     ]"#;
+
+    #[test]
+    fn a_promotion_survives_a_new_set_only_for_the_rule_as_it_was_written() {
+        let before = rules(
+            r#"[
+            {"id":"kept","when":{"process.starts":{"exe":"/bin/sh"}}},
+            {"id":"changed","when":{"process.starts":{"exe":"/bin/sh"}}},
+            {"id":"untouched","when":{"process.starts":{"exe":"/bin/sh"}}}
+        ]"#,
+        );
+        let mut book = HostShadowBook::new(&before, 5);
+        book.record("untouched", None);
+        book.promote("kept", 5).unwrap();
+        book.promote("changed", 5).unwrap();
+        let after = rules(
+            r#"[
+            {"id":"kept","when":{"process.starts":{"exe":"/bin/sh"}}},
+            {"id":"changed","when":{"process.starts":{"exe":"/bin/bash"}}},
+            {"id":"untouched","when":{"process.starts":{"exe":"/bin/sh"}}},
+            {"id":"new","when":{"process.starts":{"exe":"/bin/sh"}}}
+        ]"#,
+        );
+        let renewed = book.renewed(&before, &after, 9);
+        assert_eq!(renewed.since_ns(), 9);
+        assert_eq!(renewed.mode("kept"), Some(RuleMode::Enforce));
+        assert_eq!(renewed.mode("changed"), Some(RuleMode::Shadow));
+        assert_eq!(renewed.mode("new"), Some(RuleMode::Shadow));
+        assert_eq!(renewed.reading("untouched").unwrap().events, 0);
+    }
 
     #[test]
     fn a_rule_is_in_shadow_unless_it_says_otherwise() {
