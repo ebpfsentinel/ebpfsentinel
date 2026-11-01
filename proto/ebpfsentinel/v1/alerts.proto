@@ -173,7 +173,7 @@ message WorkloadAncestor {
 // block. The Kubernetes fields are populated only when a k8s enricher
 // attached pod metadata.
 message ContainerIdentity {
-  // Detected runtime (docker, containerd, crio, podman, unknown).
+  // Detected runtime (docker, containerd, crio, podman, lxc, unknown).
   string runtime = 1;
   // Container ID.
   string id = 2;
