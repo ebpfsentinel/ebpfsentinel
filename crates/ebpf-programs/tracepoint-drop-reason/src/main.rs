@@ -15,14 +15,15 @@
 #![no_main]
 
 use aya_ebpf::{
-    btf_maps::{Array, PerCpuArray, PerCpuHashMap},
+    btf_maps::{Array, HashMap, PerCpuArray, PerCpuHashMap},
     helpers::bpf_probe_read_kernel,
     macros::{btf_map, raw_tracepoint},
     programs::RawTracePointContext,
 };
 use ebpf_common::drop_reason::{
-    DROP_METRIC_COUNT, DROP_METRIC_COUNTED, DROP_METRIC_KEYS_FULL, DROP_METRIC_UNCONFIGURED,
-    DROP_IFNAME_LEN, DROP_REASON_MAX_KEYS, DropReasonConfig, DropReasonKey, counted_reason,
+    DROP_IFNAME_LEN, DROP_METRIC_COUNT, DROP_METRIC_COUNTED, DROP_METRIC_KEYS_FULL,
+    DROP_METRIC_UNCONFIGURED, DROP_REASON_MAX_KEYS, DROP_WATCH_MAX, DROP_WORKLOAD_MAX_KEYS,
+    DropReasonConfig, DropReasonKey, DropWorkloadKey, counted_reason,
 };
 use ebpf_helpers::increment_metric;
 
@@ -42,6 +43,22 @@ static DROP_CONFIG: Array<DropReasonConfig, 1> = Array::new();
 /// backwards, which a reader takes for a restart. A full map is counted.
 #[btf_map]
 static DROP_COUNTS: PerCpuHashMap<DropReasonKey, u64, { DROP_REASON_MAX_KEYS as usize }> =
+    PerCpuHashMap::new();
+
+/// How many workloads are watched. Read first, so a node investigating
+/// nothing pays one array read per drop and no socket walk.
+#[btf_map]
+static DROP_WATCHING: Array<u32, 1> = Array::new();
+
+/// The cgroups being watched, written by userspace for an investigation's
+/// lifetime and removed at its end.
+#[btf_map]
+static DROP_WATCHED: HashMap<u64, u8, { DROP_WATCH_MAX as usize }> = HashMap::new();
+
+/// Drops per watched workload and reason. Userspace removes a workload's
+/// rows when it stops watching it, so the next investigation starts at zero.
+#[btf_map]
+static DROP_WORKLOADS: PerCpuHashMap<DropWorkloadKey, u64, { DROP_WORKLOAD_MAX_KEYS as usize }> =
     PerCpuHashMap::new();
 
 /// Per-CPU counters. Index: 0=counted, 1=keys_full, 2=unconfigured.
@@ -64,7 +81,12 @@ pub fn drop_reason_kfree_skb(ctx: RawTracePointContext) -> i32 {
     if reason < config.first_drop {
         return 0;
     }
-    let key = key_of(counted_reason(reason), ctx.arg::<u64>(0), &config);
+    let reason = counted_reason(reason);
+    let skb = ctx.arg::<u64>(0);
+    if DROP_WATCHING.get(0).is_some_and(|n| *n != 0) {
+        count_workload(reason, skb, ctx.arg::<u64>(3), &config);
+    }
+    let key = key_of(reason, skb, &config);
     if let Some(count) = DROP_COUNTS.get_ptr_mut(&key) {
         // Per-CPU value: no other CPU writes this slot.
         unsafe { *count += 1 };
@@ -84,6 +106,64 @@ pub fn drop_reason_kfree_skb(ctx: RawTracePointContext) -> i32 {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+/// `TCP_TIME_WAIT` and `TCP_NEW_SYN_RECV`: sockets that carry only a
+/// `sock_common`, so nothing past it may be read as a full socket.
+const TCP_TIME_WAIT: u8 = 6;
+const TCP_NEW_SYN_RECV: u8 = 12;
+
+/// Count a drop under its workload when the socket behind it sits in a
+/// watched cgroup: the socket the receive path found, else the sender's.
+#[inline(always)]
+fn count_workload(reason: u32, skb: u64, rx_sk: u64, config: &DropReasonConfig) {
+    let sk = if rx_sk != 0 {
+        rx_sk
+    } else if skb != 0 {
+        read_u64(skb + u64::from(config.skb_sk))
+    } else {
+        0
+    };
+    if sk == 0 {
+        return;
+    }
+    let state_at = (sk + u64::from(config.sk_state)) as *const u8;
+    match unsafe { bpf_probe_read_kernel(state_at) } {
+        Ok(TCP_TIME_WAIT | TCP_NEW_SYN_RECV) | Err(_) => return,
+        Ok(_) => {}
+    }
+    let data = sk + u64::from(config.sk_cgrp_data);
+    let cgroup = read_u64(data + u64::from(config.cgrp_data_cgroup));
+    if cgroup == 0 {
+        return;
+    }
+    let kn = read_u64(cgroup + u64::from(config.cgroup_kn));
+    if kn == 0 {
+        return;
+    }
+    let id = read_u64(kn + u64::from(config.kn_id));
+    if id == 0 || unsafe { DROP_WATCHED.get(&id) }.is_none() {
+        return;
+    }
+    let key = DropWorkloadKey {
+        cgroup: id,
+        reason,
+        _pad: 0,
+    };
+    if let Some(count) = DROP_WORKLOADS.get_ptr_mut(&key) {
+        unsafe { *count += 1 };
+    } else if DROP_WORKLOADS.insert(&key, &1, BPF_NOEXIST).is_err() {
+        match DROP_WORKLOADS.get_ptr_mut(&key) {
+            Some(count) => unsafe { *count += 1 },
+            None => increment_metric!(DROP_METRICS, DROP_METRIC_KEYS_FULL),
+        }
+    }
+}
+
+/// A kernel pointer-sized read, 0 when it faults.
+#[inline(always)]
+fn read_u64(at: u64) -> u64 {
+    unsafe { bpf_probe_read_kernel(at as *const u64) }.unwrap_or(0)
+}
 
 /// The pair a dropped packet is counted under: its device's index and name
 /// when it still has a device, the index it arrived on otherwise, and 0 when

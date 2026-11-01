@@ -359,6 +359,20 @@ impl TcpEdgeDeltas {
             uncounted: added_uncounted,
         }
     }
+
+    /// What every edge of the workload under `cgroup` has counted so far, as
+    /// of the last reading.
+    #[must_use]
+    pub fn totals_of(&self, cgroup: u64) -> Vec<RawTcpEdge> {
+        self.last
+            .iter()
+            .filter(|(id, _)| id.cgroup == cgroup)
+            .map(|(id, counts)| RawTcpEdge {
+                id: *id,
+                counts: *counts,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -377,6 +391,41 @@ mod tests {
             },
             counts,
         }
+    }
+
+    #[test]
+    fn the_totals_of_a_workload_are_its_edges_as_last_read() {
+        let mut deltas = TcpEdgeDeltas::default();
+        let mut other = edge(80, TcpCounts::default());
+        other.id.cgroup = 9;
+        deltas.advance(
+            &[
+                edge(
+                    443,
+                    TcpCounts {
+                        retransmits: 4,
+                        ..TcpCounts::default()
+                    },
+                ),
+                other,
+            ],
+            0,
+        );
+        deltas.advance(
+            &[edge(
+                443,
+                TcpCounts {
+                    retransmits: 6,
+                    ..TcpCounts::default()
+                },
+            )],
+            0,
+        );
+        let totals = deltas.totals_of(7);
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].counts.retransmits, 6);
+        assert_eq!(deltas.totals_of(9).len(), 1);
+        assert!(deltas.totals_of(1).is_empty());
     }
 
     #[test]

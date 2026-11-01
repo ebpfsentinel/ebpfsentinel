@@ -17,6 +17,13 @@
 //! offsets of `sk_buff.dev`, `sk_buff.skb_iif` and `net_device.ifindex` come
 //! from the running kernel's BTF, and a program handed no configuration
 //! counts nothing rather than reading at a guessed offset.
+//!
+//! While somebody investigates one workload's drops, its cgroup is written
+//! into a watch set and each drop whose socket sits in a watched cgroup is
+//! also counted under that cgroup and its reason. The socket is the one the
+//! receive path had found, or else the one the packet was sent from; a packet
+//! dropped before any socket was looked up belongs to no workload. With the
+//! watch set empty, a drop costs one extra array read.
 
 /// The high half of a drop reason names a subsystem with reasons of its own
 /// (`SKB_DROP_REASON_SUBSYS_MASK`). Those are counted under the subsystem
@@ -31,6 +38,14 @@ pub const DROP_REASON_SUBSYS_MASK: u32 = 0xffff_0000;
 /// every reason on thirty interfaces. A pair that finds the map full is
 /// counted in `DROP_METRIC_KEYS_FULL`, never folded into another one.
 pub const DROP_REASON_MAX_KEYS: u32 = 4_096;
+
+/// How many workloads can be watched at once. A workload is watched only
+/// while somebody investigates its drops, and a node runs a handful of
+/// investigations at a time.
+pub const DROP_WATCH_MAX: u32 = 64;
+
+/// How many distinct workload and reason pairs are counted while watched.
+pub const DROP_WORKLOAD_MAX_KEYS: u32 = 4_096;
 
 /// Metric index: drops counted under their reason and interface.
 pub const DROP_METRIC_COUNTED: u32 = 0;
@@ -61,6 +76,16 @@ pub struct DropReasonKey {
     pub name: [u8; DROP_IFNAME_LEN],
 }
 
+/// One workload counter's identity: the cgroup v2 id of the socket the
+/// packet belonged to, and the reason the kernel gave.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct DropWorkloadKey {
+    pub cgroup: u64,
+    pub reason: u32,
+    pub _pad: u32,
+}
+
 /// What the program needs from the running kernel before it counts.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -76,6 +101,19 @@ pub struct DropReasonConfig {
     pub dev_ifindex: u32,
     /// Byte offset of `net_device.name`.
     pub dev_name: u32,
+    /// Byte offset of `sk_buff.sk`.
+    pub skb_sk: u32,
+    /// Byte offset of the state byte of a socket: `sock.__sk_common` plus
+    /// `sock_common.skc_state`.
+    pub sk_state: u32,
+    /// Byte offset of `sock.sk_cgrp_data`.
+    pub sk_cgrp_data: u32,
+    /// Byte offset of `sock_cgroup_data.cgroup`.
+    pub cgrp_data_cgroup: u32,
+    /// Byte offset of `cgroup.kn`.
+    pub cgroup_kn: u32,
+    /// Byte offset of `kernfs_node.id`.
+    pub kn_id: u32,
 }
 
 #[cfg(feature = "userspace")]
@@ -83,6 +121,9 @@ unsafe impl aya::Pod for DropReasonKey {}
 
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for DropReasonConfig {}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for DropWorkloadKey {}
 
 /// The pair a drop is counted under: a subsystem reason keeps only its
 /// subsystem, and a core reason is kept whole.
@@ -103,7 +144,8 @@ mod tests {
     #[test]
     fn the_key_and_the_configuration_carry_no_implicit_padding() {
         assert_eq!(mem::size_of::<DropReasonKey>(), 24);
-        assert_eq!(mem::size_of::<DropReasonConfig>(), 20);
+        assert_eq!(mem::size_of::<DropReasonConfig>(), 44);
+        assert_eq!(mem::size_of::<DropWorkloadKey>(), 16);
     }
 
     #[test]

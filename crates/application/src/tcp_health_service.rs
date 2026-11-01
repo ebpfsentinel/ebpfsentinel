@@ -160,6 +160,17 @@ impl TcpHealthService {
             .read(now_ns, minutes)
     }
 
+    /// What each edge of the workload under `cgroup` has counted since the
+    /// agent first read it, as of the last poll.
+    #[must_use]
+    pub fn edges_of(&self, cgroup: u64) -> Vec<RawTcpEdge> {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .deltas
+            .totals_of(cgroup)
+    }
+
     /// Read the counter once and publish what moved, as of `now_ns`.
     pub fn poll(&self, now_ns: u64) {
         let (edges, uncounted) = match self.source.read() {
@@ -395,6 +406,26 @@ mod tests {
         assert_eq!(edges[0].2, "client");
         assert_eq!(edges[0].3.opened, 2);
         assert_eq!(*recorder.uncounted.lock().unwrap(), 3);
+    }
+
+    #[test]
+    fn a_workload_reads_its_own_edges_as_last_polled() {
+        let retransmits = TcpCounts {
+            retransmits: 5,
+            ..TcpCounts::default()
+        };
+        let mut mine = edge(1, 2, 443, EdgeRole::Client, retransmits);
+        mine.id.cgroup = 42;
+        let (service, _) = service(vec![(
+            vec![mine, edge(1, 3, 80, EdgeRole::Client, retransmits)],
+            0,
+        )]);
+        assert!(service.edges_of(42).is_empty());
+        service.poll(0);
+        let edges = service.edges_of(42);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].counts.retransmits, 5);
+        assert_eq!(edges[0].id.port, 443);
     }
 
     #[test]

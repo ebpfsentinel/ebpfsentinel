@@ -7,16 +7,21 @@
 //! and which value of `enum skb_drop_reason` is the first one that means a
 //! drop. The reason names come from the same enumeration, so a kernel that
 //! adds a reason is counted under that reason's own name.
+//!
+//! The same object also counts the drops of the workloads somebody is
+//! watching, under each one's cgroup, which takes where a socket keeps its
+//! state and its cgroup and where the cgroup keeps its id.
 
 use std::collections::HashMap;
 use std::os::fd::{OwnedFd, RawFd};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use aya::maps::{Array, MapData, PerCpuArray, PerCpuHashMap, PerCpuValues};
+use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, PerCpuHashMap, PerCpuValues};
 use domain::common::error::DomainError;
 use domain::drops::RawDrop;
 use ebpf_common::drop_reason::{
-    DROP_METRIC_KEYS_FULL, DROP_METRIC_UNCONFIGURED, DropReasonConfig, DropReasonKey,
+    DROP_METRIC_KEYS_FULL, DROP_METRIC_UNCONFIGURED, DROP_WATCH_MAX, DropReasonConfig,
+    DropReasonKey, DropWorkloadKey,
 };
 use ports::secondary::drop_counter_port::DropCounterPort;
 use tracing::{info, warn};
@@ -148,16 +153,17 @@ pub fn resolve_from_btf() -> Result<(DropReasonConfig, ReasonNames), String> {
     let subsystems = vmlinux_enum_members(SUBSYS_ENUM).unwrap_or_default();
     let names = ReasonNames::from_members(&drops, &subsystems)
         .ok_or_else(|| format!("`enum {DROP_ENUM}` has no `{FIRST_DROP}`"))?;
-    let skb = vmlinux_struct_member_offsets("sk_buff", &["dev", "skb_iif"])
+    let skb = vmlinux_struct_member_offsets("sk_buff", &["dev", "skb_iif", "sk"])
         .map_err(|e| format!("`struct sk_buff` could not be read: {e}"))?;
     let dev = vmlinux_struct_member_offsets("net_device", &["ifindex", "name"])
         .map_err(|e| format!("`struct net_device` could not be read: {e}"))?;
-    let (Some(skb_dev), Some(skb_iif)) = (skb[0], skb[1]) else {
-        return Err("`struct sk_buff` has no `dev` or no `skb_iif`".to_owned());
+    let (Some(skb_dev), Some(skb_iif), Some(skb_sk)) = (skb[0], skb[1], skb[2]) else {
+        return Err("`struct sk_buff` has no `dev`, no `skb_iif` or no `sk`".to_owned());
     };
     let (Some(dev_ifindex), Some(dev_name)) = (dev[0], dev[1]) else {
         return Err("`struct net_device` has no `ifindex` or no `name`".to_owned());
     };
+    let socket = socket_layout()?;
     Ok((
         DropReasonConfig {
             first_drop: names.first_drop,
@@ -165,15 +171,46 @@ pub fn resolve_from_btf() -> Result<(DropReasonConfig, ReasonNames), String> {
             skb_iif,
             dev_ifindex,
             dev_name,
+            skb_sk,
+            sk_state: socket[0],
+            sk_cgrp_data: socket[1],
+            cgrp_data_cgroup: socket[2],
+            cgroup_kn: socket[3],
+            kn_id: socket[4],
         },
         names,
     ))
 }
 
-/// The three maps of the drop reason object.
+/// Where a socket keeps its state and its cgroup, and where the cgroup keeps
+/// its id: `[sk_state, sk_cgrp_data, cgrp_data_cgroup, cgroup_kn, kn_id]`.
+fn socket_layout() -> Result<[u32; 5], String> {
+    let one = |name: &str, members: &[&str]| -> Result<Vec<u32>, String> {
+        let found = vmlinux_struct_member_offsets(name, members)
+            .map_err(|e| format!("`struct {name}` could not be read: {e}"))?;
+        members
+            .iter()
+            .zip(found)
+            .map(|(member, offset)| {
+                offset.ok_or_else(|| format!("`struct {name}` has no `{member}`"))
+            })
+            .collect()
+    };
+    let sock = one("sock", &["__sk_common", "sk_cgrp_data"])?;
+    let common = one("sock_common", &["skc_state"])?;
+    let data = one("sock_cgroup_data", &["cgroup"])?;
+    let cgroup = one("cgroup", &["kn"])?;
+    let kn = one("kernfs_node", &["id"])?;
+    Ok([sock[0] + common[0], sock[1], data[0], cgroup[0], kn[0]])
+}
+
+/// The maps of the drop reason object.
 pub struct DropReasonCounter {
     counts: PerCpuHashMap<MapData, DropReasonKey, u64>,
     metrics: PerCpuArray<MapData, u64>,
+    watching: Array<MapData, u32>,
+    watched: AyaHashMap<MapData, u64, u8>,
+    workloads: PerCpuHashMap<MapData, DropWorkloadKey, u64>,
     names: ReasonNames,
 }
 
@@ -203,11 +240,107 @@ impl DropReasonCounter {
             ebpf.take_map("DROP_METRICS")
                 .ok_or_else(|| anyhow::anyhow!("map 'DROP_METRICS' not found"))?,
         )?;
+        let watching = Array::try_from(
+            ebpf.take_map("DROP_WATCHING")
+                .ok_or_else(|| anyhow::anyhow!("map 'DROP_WATCHING' not found"))?,
+        )?;
+        let watched = AyaHashMap::try_from(
+            ebpf.take_map("DROP_WATCHED")
+                .ok_or_else(|| anyhow::anyhow!("map 'DROP_WATCHED' not found"))?,
+        )?;
+        let workloads = PerCpuHashMap::try_from(
+            ebpf.take_map("DROP_WORKLOADS")
+                .ok_or_else(|| anyhow::anyhow!("map 'DROP_WORKLOADS' not found"))?,
+        )?;
         Ok(Self {
             counts,
             metrics,
+            watching,
+            watched,
+            workloads,
             names,
         })
+    }
+
+    /// Start counting the drops of the workload under `cgroup`, from zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the kernel refused the write, or that the watch set is
+    /// full.
+    pub fn watch(&mut self, cgroup: u64) -> Result<(), DomainError> {
+        self.forget(cgroup)?;
+        let watched = self.watched_count();
+        if self.watched.get(&cgroup, 0).is_err() && watched >= DROP_WATCH_MAX {
+            return Err(DomainError::EngineError(format!(
+                "{DROP_WATCH_MAX} workloads are already watched"
+            )));
+        }
+        self.watched
+            .insert(&cgroup, &1, 0)
+            .map_err(|e| DomainError::EngineError(format!("DROP_WATCHED write failed: {e}")))?;
+        self.publish_watching()
+    }
+
+    /// Stop counting the drops of the workload under `cgroup` and remove
+    /// what was counted for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the kernel refused the write.
+    pub fn unwatch(&mut self, cgroup: u64) -> Result<(), DomainError> {
+        // Absent already is the state asked for.
+        let _ = self.watched.remove(&cgroup);
+        self.publish_watching()?;
+        self.forget(cgroup)
+    }
+
+    /// How many workloads are watched.
+    #[must_use]
+    pub fn watched_count(&self) -> u32 {
+        u32::try_from(self.watched.keys().flatten().count()).unwrap_or(u32::MAX)
+    }
+
+    /// The drops counted for the workload under `cgroup` since it was
+    /// watched, per reason name, largest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the map could not be read.
+    pub fn read_workload(&self, cgroup: u64) -> Result<Vec<(String, u64)>, DomainError> {
+        let mut rows: Vec<(String, u64)> = Vec::new();
+        for entry in &self.workloads {
+            let (key, values) = entry.map_err(|e| {
+                DomainError::EngineError(format!("DROP_WORKLOADS read failed: {e}"))
+            })?;
+            if key.cgroup == cgroup {
+                rows.push((self.names.name(key.reason), values.iter().sum()));
+            }
+        }
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(rows)
+    }
+
+    fn publish_watching(&mut self) -> Result<(), DomainError> {
+        let count = self.watched_count();
+        self.watching
+            .set(0, &count, 0)
+            .map_err(|e| DomainError::EngineError(format!("DROP_WATCHING write failed: {e}")))
+    }
+
+    fn forget(&mut self, cgroup: u64) -> Result<(), DomainError> {
+        let stale: Vec<DropWorkloadKey> = self
+            .workloads
+            .keys()
+            .filter_map(Result::ok)
+            .filter(|key| key.cgroup == cgroup)
+            .collect();
+        for key in stale {
+            self.workloads.remove(&key).map_err(|e| {
+                DomainError::EngineError(format!("DROP_WORKLOADS delete failed: {e}"))
+            })?;
+        }
+        Ok(())
     }
 
     fn metric(&self, slot: u32) -> u64 {
@@ -284,6 +417,17 @@ impl DropReasonAttacher {
         status
     }
 
+    /// Attach for a caller that owns the link's lifetime itself, such as an
+    /// investigation, without reporting it as the node's drop counter.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the kernel refused the attach.
+    pub fn attach_scoped(&mut self, loader: &EbpfLoader) -> Result<(), String> {
+        self.link = Some(Self::attach_one(loader)?);
+        Ok(())
+    }
+
     fn attach_one(loader: &EbpfLoader) -> Result<OwnedFd, String> {
         let prog_fd: RawFd = loader.program_fd(DROP_REASON_PROGRAM).ok_or_else(|| {
             format!("program `{DROP_REASON_PROGRAM}` is not in the loaded object")
@@ -343,6 +487,23 @@ mod tests {
         name[..4].copy_from_slice(b"eth0");
         assert_eq!(key_name(&name), "eth0");
         assert_eq!(key_name(&[0_u8; 16]), "");
+    }
+
+    #[test]
+    fn the_socket_walk_resolves_on_the_running_kernel() {
+        // Every host this agent supports publishes its BTF; a build machine
+        // without it has no kernel layout to check against.
+        if !std::path::Path::new("/sys/kernel/btf/vmlinux").exists() {
+            return;
+        }
+        let [state, cgrp_data, cgroup, kn, id] =
+            socket_layout().expect("sock, cgroup and kernfs_node carry the walked members");
+        // None of these members opens its struct.
+        assert!(state > 0 && cgrp_data > 0 && kn > 0);
+        // The id sits past the kernfs node's counters, and the cgroup
+        // pointer may lead its own struct.
+        assert!(id > 0);
+        assert!(cgroup < 64);
     }
 
     #[test]
