@@ -4310,6 +4310,55 @@
         ]
       }
     },
+    "/api/v1/host-rules/intents": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "`GET /api/v1/host-rules/intents` - what a host rule can name, and\nwhich of it this host serves.",
+        "operationId": "get_host_intents",
+        "responses": {
+          "200": {
+            "description": "Every intention a host rule may name, its fields, the hook serving it and whether this host serves it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostIntentsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/ids/rules": {
       "get": {
         "tags": [
@@ -12635,6 +12684,34 @@
           }
         }
       },
+      "HostIntentsResponse": {
+        "type": "object",
+        "description": "Every intention a host rule may name, resolved against this host.",
+        "required": [
+          "applicable",
+          "intents"
+        ],
+        "properties": {
+          "applicable": {
+            "type": "integer",
+            "description": "How many of the intentions this host serves.",
+            "minimum": 0
+          },
+          "intents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IntentBody"
+            }
+          },
+          "kernel": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The running kernel as `major.minor`, absent when it could not be read."
+          }
+        }
+      },
       "IdsRuleResponse": {
         "type": "object",
         "required": [
@@ -12766,6 +12843,91 @@
           "rule_count": {
             "type": "integer",
             "minimum": 0
+          }
+        }
+      },
+      "IntentBody": {
+        "type": "object",
+        "description": "One intention and whether this host serves it.",
+        "required": [
+          "name",
+          "family",
+          "hook",
+          "sources",
+          "min_kernel",
+          "state",
+          "fields"
+        ],
+        "properties": {
+          "fallback": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What serves it, less well, when the hook is absent."
+          },
+          "family": {
+            "type": "string",
+            "description": "`process`, `file`, `posture` or `surface`."
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IntentFieldBody"
+            }
+          },
+          "hook": {
+            "type": "string",
+            "description": "The kernel mechanism serving it, in one line."
+          },
+          "min_kernel": {
+            "type": "string",
+            "description": "Oldest kernel the hook exists on, as `major.minor`."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name a rule writes, such as `process.connects`."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why this host cannot serve it, one sentence per missing source."
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The sources it needs, every one of them."
+          },
+          "state": {
+            "type": "string",
+            "description": "`applicable` or `not_applicable`."
+          }
+        }
+      },
+      "IntentFieldBody": {
+        "type": "object",
+        "description": "One field an intention carries.",
+        "required": [
+          "name",
+          "type",
+          "doc"
+        ],
+        "properties": {
+          "doc": {
+            "type": "string",
+            "description": "What it holds."
+          },
+          "name": {
+            "type": "string",
+            "description": "The key a rule writes."
+          },
+          "type": {
+            "type": "string",
+            "description": "Its type: `text`, `path`, `integer`, `port`, `address`, `boolean`\nor `hash`."
           }
         }
       },

@@ -279,6 +279,9 @@ pub enum Command {
     /// What this node exposes: listening sockets and who bound them
     Exposure(DomainArgs<ExposureCommand>),
 
+    /// Host rules: the intentions a rule may name and which this host serves
+    HostRules(DomainArgs<HostRulesCommand>),
+
     /// Running configuration: show and reload
     Config(DomainArgs<ConfigCommand>),
 
@@ -1162,6 +1165,15 @@ pub enum ExposureCommand {
     /// List the sockets the node accepts traffic on and the workload that
     /// bound each
     Listeners,
+}
+
+// ── Host rules ──────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+pub enum HostRulesCommand {
+    /// List every intention a host rule may name, its fields, the hook
+    /// serving it and whether this host serves it
+    Intents,
 }
 
 // ── Aliases ─────────────────────────────────────────────────────────────
@@ -2736,6 +2748,18 @@ mod tests {
             cli.command,
             Some(Command::Exposure(DomainArgs {
                 command: ExposureCommand::Listeners,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_host_rules_intents() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "host-rules", "intents"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::HostRules(DomainArgs {
+                command: HostRulesCommand::Intents,
                 ..
             }))
         ));

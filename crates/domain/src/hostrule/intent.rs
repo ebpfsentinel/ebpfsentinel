@@ -79,6 +79,19 @@ pub enum IntentFamily {
     Surface,
 }
 
+impl IntentFamily {
+    /// The name the family is reported under.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Process => "process",
+            Self::File => "file",
+            Self::Posture => "posture",
+            Self::Surface => "surface",
+        }
+    }
+}
+
 impl Intent {
     /// Every intention, in catalogue order.
     pub const ALL: [Intent; 16] = [

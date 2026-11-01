@@ -2058,6 +2058,37 @@ pub struct RawSocketsResponse {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct IntentFieldEntry {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+    pub doc: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct IntentEntry {
+    pub name: String,
+    pub family: String,
+    pub hook: String,
+    pub sources: Vec<String>,
+    pub min_kernel: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub fields: Vec<IntentFieldEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct HostIntentsResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel: Option<String>,
+    pub applicable: usize,
+    pub intents: Vec<IntentEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct ListenerEntry {
     pub address: String,
     pub port: u16,
@@ -4113,6 +4144,15 @@ impl ApiClient {
     pub async fn exposure_listeners(&self) -> anyhow::Result<ListenersResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/exposure/listeners")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn host_intents(&self) -> anyhow::Result<HostIntentsResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/host-rules/intents")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

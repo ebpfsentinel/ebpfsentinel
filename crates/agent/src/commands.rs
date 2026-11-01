@@ -6346,6 +6346,47 @@ fn print_learning_session(session: &LearningSessionResponse, output: OutputForma
     Ok(())
 }
 
+pub async fn cmd_host_rules_intents(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.host_intents().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    let mut table = Table::new(&[
+        ("INTENT", Align::Left),
+        ("STATE", Align::Left),
+        ("HOOK", Align::Left),
+        ("FIELDS", Align::Left),
+    ]);
+    for intent in &resp.intents {
+        let fields: Vec<&str> = intent.fields.iter().map(|f| f.name.as_str()).collect();
+        table.row(cells![
+            intent.name,
+            intent.state.replace('_', " "),
+            intent.hook,
+            fields.join(", "),
+        ]);
+    }
+    table.print();
+    println!(
+        "{} of {} intentions served on this host{}.",
+        resp.applicable,
+        resp.intents.len(),
+        resp.kernel
+            .as_deref()
+            .map(|k| format!(", kernel {k}"))
+            .unwrap_or_default()
+    );
+    for intent in resp.intents.iter().filter(|i| i.reason.is_some()) {
+        if let Some(reason) = &intent.reason {
+            println!("  {}: {reason}", intent.name);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

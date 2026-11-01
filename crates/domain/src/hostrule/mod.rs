@@ -13,11 +13,13 @@
 //! configuration key, which is what keeps the surface something one
 //! maintainer can hold.
 
+pub mod binding;
 pub mod error;
 pub mod event;
 pub mod field;
 pub mod intent;
 
+pub use binding::{Applicability, Binding, HostSources, Source, resolve};
 pub use error::HostRuleError;
 pub use event::IntentEvent;
 pub use field::{FieldSpec, FieldType, FieldValue, RESERVED_KEYS};

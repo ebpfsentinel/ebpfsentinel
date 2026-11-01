@@ -43,6 +43,20 @@ impl FieldType {
         }
     }
 
+    /// The type's own name, as an API reports it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Path => "path",
+            Self::Integer => "integer",
+            Self::Port => "port",
+            Self::Address => "address",
+            Self::Boolean => "boolean",
+            Self::Hash => "hash",
+        }
+    }
+
     /// Whether the type orders, so that "greater than" means something.
     #[must_use]
     pub fn is_numeric(self) -> bool {

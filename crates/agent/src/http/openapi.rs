@@ -24,6 +24,7 @@ use super::flow_handler;
 use super::geoip_handler;
 use super::guest_handler;
 use super::health_handler;
+use super::host_rule_handler;
 use super::ids_handler;
 use super::ips_handler;
 use super::l7_handler;
@@ -140,6 +141,7 @@ use super::zone_handler;
         ops_handler::get_uprobes,
         drop_reason_handler::get_drop_reasons,
         raw_socket_handler::get_raw_sockets,
+        host_rule_handler::get_host_intents,
         exposure_handler::get_listeners,
         network_program_handler::get_foreign_programs,
         // DNS
@@ -378,6 +380,9 @@ use super::zone_handler;
         drop_reason_handler::DropReasonsResponse,
         drop_reason_handler::DropReasonBody,
         raw_socket_handler::RawSocketsResponse,
+        host_rule_handler::HostIntentsResponse,
+        host_rule_handler::IntentBody,
+        host_rule_handler::IntentFieldBody,
         exposure_handler::ListenersResponse,
         exposure_handler::ListenerBody,
         raw_socket_handler::RawSocketBody,

@@ -13,9 +13,9 @@ use cli::{
     AlertsCommand, AliasesCommand, AuditCommand, BlacklistAction, CaptureCommand, Command,
     ConfigCommand, DdosCommand, DlpCommand, DnsCommand, DomainsCommand, EbpfCommand,
     ExposureCommand, FeedsAction, FingerprintsCommand, FirewallCommand, FlowsAction, GeoipCommand,
-    IdsCommand, IpsCommand, L7Command, LbCommand, LearningCommand, MitreCommand, NatCommand,
-    NetpolCommand, NptV6Command, ProcessesCommand, QosCommand, RatelimitCommand, ResponsesCommand,
-    RoutingCommand, ThreatintelCommand, TlsCommand, ZonesCommand,
+    HostRulesCommand, IdsCommand, IpsCommand, L7Command, LbCommand, LearningCommand, MitreCommand,
+    NatCommand, NetpolCommand, NptV6Command, ProcessesCommand, QosCommand, RatelimitCommand,
+    ResponsesCommand, RoutingCommand, ThreatintelCommand, TlsCommand, ZonesCommand,
 };
 
 fn main() -> Result<()> {
@@ -714,6 +714,15 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
             match args.command {
                 ExposureCommand::Listeners => {
                     commands::cmd_exposure_listeners(&client, output).await
+                }
+            }
+        }
+
+        Some(Command::HostRules(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                HostRulesCommand::Intents => {
+                    commands::cmd_host_rules_intents(&client, output).await
                 }
             }
         }
