@@ -42,6 +42,14 @@ pub enum HostRuleError {
         field: &'static str,
         value: i64,
     },
+
+    /// A host rule that does not load, and why.
+    #[error("host rule `{id}`: {reason}")]
+    Rule { id: String, reason: String },
+
+    /// Two host rules carry one identifier.
+    #[error("host rule `{id}` is defined twice; an identifier names one rule")]
+    DuplicateRule { id: String },
 }
 
 impl From<HostRuleError> for DomainError {

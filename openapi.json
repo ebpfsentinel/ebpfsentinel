@@ -4310,6 +4310,55 @@
         ]
       }
     },
+    "/api/v1/host-rules": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "`GET /api/v1/host-rules` - the loaded host rules and whether this host\ncan match each of them.",
+        "operationId": "get_host_rules",
+        "responses": {
+          "200": {
+            "description": "Every loaded host rule, the intentions it names and whether this host serves each, with the match counters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostRulesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/host-rules/intents": {
       "get": {
         "tags": [
@@ -12712,6 +12761,83 @@
           }
         }
       },
+      "HostRuleBody": {
+        "type": "object",
+        "description": "One loaded host rule.",
+        "required": [
+          "id",
+          "severity",
+          "then",
+          "state",
+          "intents",
+          "spec"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "intents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RuleIntentBody"
+            }
+          },
+          "severity": {
+            "type": "string",
+            "description": "`low`, `medium`, `high` or `critical`."
+          },
+          "spec": {
+            "type": "object",
+            "description": "The rule as it was written, `workload` and `when` included."
+          },
+          "state": {
+            "type": "string",
+            "description": "`applicable` when every intention it names is served here,\n`partially_applicable` when some are, `not_applicable` when none is."
+          },
+          "then": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`alert`, and `kill_process` where the rule stops the process."
+          }
+        }
+      },
+      "HostRulesResponse": {
+        "type": "object",
+        "description": "Every loaded host rule, and what they have matched since the start.",
+        "required": [
+          "matched",
+          "dropped",
+          "rules"
+        ],
+        "properties": {
+          "dropped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, alerts lost to a full alert queue.",
+            "minimum": 0
+          },
+          "matched": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Events that matched a rule.",
+            "minimum": 0
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HostRuleBody"
+            }
+          }
+        }
+      },
       "IdsRuleResponse": {
         "type": "object",
         "required": [
@@ -16543,6 +16669,29 @@
           },
           "rule_id": {
             "type": "string"
+          }
+        }
+      },
+      "RuleIntentBody": {
+        "type": "object",
+        "description": "One intention a rule names, and whether this host serves it.",
+        "required": [
+          "name",
+          "state"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "description": "`applicable` or `not_applicable`."
           }
         }
       },

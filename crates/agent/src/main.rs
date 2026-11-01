@@ -721,6 +721,7 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
         Some(Command::HostRules(args)) => {
             let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
             match args.command {
+                HostRulesCommand::List => commands::cmd_host_rules_list(&client, output).await,
                 HostRulesCommand::Intents => {
                     commands::cmd_host_rules_intents(&client, output).await
                 }

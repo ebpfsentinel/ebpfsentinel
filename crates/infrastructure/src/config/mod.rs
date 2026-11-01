@@ -20,6 +20,7 @@ mod dns;
 mod firewall;
 mod flow_export;
 mod geoip;
+mod host_rules;
 mod ids;
 mod ips;
 mod kernel_drops;
@@ -79,6 +80,7 @@ pub use flow_export::{
     OtlpFlowSinkConfig, SyslogSinkConfig,
 };
 pub use geoip::{GeoIpConfig, GeoIpSource};
+pub use host_rules::{HostRulesConfig, MAX_HOST_RULES};
 pub use ids::{IdsConfig, IdsRuleConfig, SamplingConfig, ThresholdRuleConfig};
 pub use ips::{IpsConfig, IpsRuleConfig};
 pub use kernel_drops::KernelDropsConfig;
@@ -296,6 +298,11 @@ pub struct AgentConfig {
     /// is attached to them. On by default.
     #[serde(default)]
     pub network_inventory: NetworkInventoryConfig,
+
+    /// Host rules: an intention named in the product's words, a map of
+    /// matchers on its fields and what to do. None until one is written.
+    #[serde(default)]
+    pub host_rules: HostRulesConfig,
 
     /// Enterprise configuration block. The OSS agent never reads this - the
     /// enterprise edition parses it with its own loader. It is declared here
@@ -563,6 +570,7 @@ impl AgentConfig {
         self.kernel_drops.validate()?;
         self.tcp_health.validate()?;
         self.network_inventory.validate()?;
+        self.host_rules.validate()?;
 
         // Validate container resolver config
         self.container.validate()?;
@@ -578,6 +586,29 @@ impl AgentConfig {
                 message: "the detections ask for a process to be stopped and \
                           response.kill_process is not enabled"
                     .to_string(),
+            });
+        }
+        if !self.process_table.enabled && !self.host_rules.rules.is_empty() {
+            return Err(ConfigError::Validation {
+                field: "host_rules.rules".to_string(),
+                message: "host rules are evaluated on the process table's events, and \
+                          process_table.enabled is false"
+                    .to_string(),
+            });
+        }
+        if !self.response.kill_process.enabled
+            && let Some(rule) = self.host_rules.rules.iter().find(|r| {
+                r.then
+                    .contains(&domain::hostrule::HostRuleAction::KillProcess)
+            })
+        {
+            return Err(ConfigError::Validation {
+                field: "host_rules.rules".to_string(),
+                message: format!(
+                    "host rule `{}` asks for a process to be stopped and \
+                     response.kill_process is not enabled",
+                    rule.id
+                ),
             });
         }
         self.learning.validate()?;
@@ -5919,6 +5950,42 @@ ids:
         assert!(
             err.contains("process_table.detections.kill_process"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_host_rule_stops_a_process_only_where_process_kill_is_enabled() {
+        let document = |enabled: bool| {
+            format!(
+                "agent:\n  interfaces: [eth0]\nresponse:\n  kill_process:\n    enabled: {enabled}\n\
+                 host_rules:\n  rules:\n    - id: tmp-exec\n      then: [alert, kill_process]\n\
+                 \x20     when:\n        process.starts:\n          exe_matches: '/tmp/*'\n"
+            )
+        };
+        assert!(AgentConfig::from_yaml(&document(true)).is_ok());
+        let err = AgentConfig::from_yaml(&document(false))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("host rule `tmp-exec`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn host_rules_need_the_process_table() {
+        let document = "agent:\n  interfaces: [eth0]\nprocess_table:\n  enabled: false\n\
+                        host_rules:\n  rules:\n    - id: any-start\n      when:\n        process.starts: {}\n";
+        let err = AgentConfig::from_yaml(document).unwrap_err().to_string();
+        assert!(
+            err.contains("process_table.enabled"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            AgentConfig::from_yaml(
+                "agent:\n  interfaces: [eth0]\nprocess_table:\n  enabled: false\n"
+            )
+            .is_ok()
         );
     }
 

@@ -6346,6 +6346,52 @@ fn print_learning_session(session: &LearningSessionResponse, output: OutputForma
     Ok(())
 }
 
+pub async fn cmd_host_rules_list(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.host_rules().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    if resp.rules.is_empty() {
+        println!("No host rule is loaded.");
+        return Ok(());
+    }
+    let mut table = Table::new(&[
+        ("RULE", Align::Left),
+        ("SEVERITY", Align::Left),
+        ("STATE", Align::Left),
+        ("THEN", Align::Left),
+        ("INTENTS", Align::Left),
+    ]);
+    for rule in &resp.rules {
+        let intents: Vec<&str> = rule.intents.iter().map(|i| i.name.as_str()).collect();
+        table.row(cells![
+            rule.id,
+            rule.severity,
+            rule.state.replace('_', " "),
+            rule.then.join(", "),
+            intents.join(", "),
+        ]);
+    }
+    table.print();
+    println!(
+        "{} rules, {} events matched, {} alerts lost to a full queue.",
+        resp.rules.len(),
+        resp.matched,
+        resp.dropped
+    );
+    for rule in &resp.rules {
+        for intent in &rule.intents {
+            if let Some(reason) = &intent.reason {
+                println!("  {} / {}: {reason}", rule.id, intent.name);
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn cmd_host_rules_intents(client: &ApiClient, output: OutputFormat) -> Result<()> {
     let resp = client.host_intents().await?;
 

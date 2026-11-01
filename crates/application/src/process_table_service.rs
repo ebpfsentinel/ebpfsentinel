@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::dlp_scope_service::DlpScopeService;
+use crate::host_rule_service::HostRuleService;
 use crate::ids_workload_scope_service::IdsWorkloadScopeService;
 use crate::qos_cgroup_shaping_service::QosCgroupShapingService;
 use crate::workload_policy_service::WorkloadPolicyService;
@@ -52,6 +53,7 @@ pub struct ProcessTableService {
     dlp_scope: Option<Arc<DlpScopeService>>,
     ids_scope: Option<Arc<IdsWorkloadScopeService>>,
     shaping: Option<Arc<QosCgroupShapingService>>,
+    host_rules: Option<Arc<HostRuleService>>,
     metadata_changes: Option<watch::Receiver<u64>>,
     capture_command_line: bool,
 }
@@ -75,6 +77,7 @@ impl ProcessTableService {
             dlp_scope: None,
             ids_scope: None,
             shaping: None,
+            host_rules: None,
             metadata_changes: None,
             capture_command_line,
         }
@@ -147,6 +150,16 @@ impl ProcessTableService {
     #[must_use]
     pub fn with_cgroup_shaping(mut self, service: Arc<QosCgroupShapingService>) -> Self {
         self.shaping = Some(service);
+        self
+    }
+
+    /// Evaluate `service`'s host rules against every exec and exit, after
+    /// the table has recorded the one and before it forgets the other, so
+    /// each event carries the binary, the user and the ancestry the table
+    /// already resolved.
+    #[must_use]
+    pub fn with_host_rules(mut self, service: Arc<HostRuleService>) -> Self {
+        self.host_rules = Some(service);
         self
     }
 
@@ -268,6 +281,11 @@ impl ProcessTableService {
 
         self.notify_exec(&entry);
 
+        let rules = self
+            .host_rules
+            .as_ref()
+            .filter(|r| r.wants(domain::hostrule::Intent::ProcessStarts))
+            .map(|r| (Arc::clone(r), entry.clone()));
         let replaced = self
             .table
             .write()
@@ -278,6 +296,9 @@ impl ProcessTableService {
             replaced = replaced.is_some(),
             "process table recorded an exec"
         );
+        if let Some((rules, entry)) = rules {
+            rules.record_exec(&entry, &self.lineage(pid), event.at_ns);
+        }
     }
 
     /// A new process running its parent's image. The entry is the parent's,
@@ -347,6 +368,20 @@ impl ProcessTableService {
 
     fn record_exit(&self, event: &ProcessLifecycleEvent) {
         let pid = event.tgid;
+        // Read before the purge: the entry is what the rule is about, and
+        // its ancestry is walked from the live pid.
+        let ending = self
+            .host_rules
+            .as_ref()
+            .filter(|r| r.wants(domain::hostrule::Intent::ProcessEnds))
+            .and_then(|r| {
+                let table = self
+                    .table
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let entry = table.get(pid)?.clone();
+                Some((Arc::clone(r), entry, table.lineage(pid)))
+            });
         let outcome = self
             .table
             .write()
@@ -375,6 +410,9 @@ impl ProcessTableService {
         }
         if let Some(shaping) = &self.shaping {
             shaping.record_exit(pid);
+        }
+        if let Some((rules, entry, lineage)) = ending {
+            rules.record_exit(&entry, &lineage, event.at_ns);
         }
     }
 
@@ -1007,6 +1045,61 @@ mod tests {
         assert_eq!(lineage.ancestors[0].pid, 10);
         assert!(lineage.ancestors[0].exited_at_ns.is_some());
         assert!(!lineage.incomplete);
+    }
+
+    fn host_rules(
+        json: &str,
+    ) -> (
+        Arc<HostRuleService>,
+        mpsc::Receiver<crate::alert_event::AlertEvent>,
+    ) {
+        let specs: Vec<domain::hostrule::HostRuleSpec> = serde_json::from_str(json).unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        let rules = domain::hostrule::HostRuleSet::compile(specs).unwrap();
+        (Arc::new(HostRuleService::new(rules, tx)), rx)
+    }
+
+    fn rule_ids(rx: &mut mpsc::Receiver<crate::alert_event::AlertEvent>) -> Vec<String> {
+        let mut ids = Vec::new();
+        while let Ok(crate::alert_event::AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv()
+        {
+            ids.push(alert.rule_id.0);
+        }
+        ids
+    }
+
+    #[tokio::test]
+    async fn an_exec_and_an_exit_reach_the_host_rules_with_the_parent_and_the_entry() {
+        let (rules, mut rx) = host_rules(
+            r#"[{"id":"curl-under-1","when":{"process.starts":{"exe":"/usr/bin/curl","parent_uid":1000}}},
+                {"id":"curl-ended","when":{"process.ends":{"exe":"/usr/bin/curl"}}}]"#,
+        );
+        let service = ProcessTableService::new(16, false)
+            .with_executables(Arc::new(FixedExecutable))
+            .with_host_rules(rules);
+        service.apply(lineage(exec(10, 1), 1, (0, 0))).await;
+        // The first exec has no parent in the table, so no parent_uid.
+        assert!(rule_ids(&mut rx).is_empty());
+        service.apply(lineage(exec(11, 2), 2, (10, 1))).await;
+        assert_eq!(rule_ids(&mut rx), vec!["curl-under-1"]);
+        let mut gone = exit(11);
+        gone.start_ns = Some(2);
+        service.apply(gone).await;
+        assert_eq!(rule_ids(&mut rx), vec!["curl-ended"]);
+        // A late exit for a pid the table no longer holds reaches no rule.
+        service.apply(exit(11)).await;
+        assert!(rule_ids(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_late_exit_for_a_reused_pid_reaches_no_host_rule() {
+        let (rules, mut rx) = host_rules(r#"[{"id":"any-end","when":{"process.ends":{}}}]"#);
+        let service = ProcessTableService::new(16, false).with_host_rules(rules);
+        service.apply(lineage(exec(42, 1), 50, (1, 0))).await;
+        let mut late = exit(42);
+        late.start_ns = Some(20);
+        service.apply(late).await;
+        assert!(rule_ids(&mut rx).is_empty());
     }
 
     #[tokio::test]

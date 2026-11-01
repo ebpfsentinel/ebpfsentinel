@@ -2081,6 +2081,33 @@ pub struct IntentEntry {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct RuleIntentEntry {
+    pub name: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct HostRuleEntry {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub severity: String,
+    pub then: Vec<String>,
+    pub state: String,
+    pub intents: Vec<RuleIntentEntry>,
+    pub spec: serde_json::Value,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct HostRulesResponse {
+    pub matched: u64,
+    pub dropped: u64,
+    pub rules: Vec<HostRuleEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct HostIntentsResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel: Option<String>,
@@ -4144,6 +4171,15 @@ impl ApiClient {
     pub async fn exposure_listeners(&self) -> anyhow::Result<ListenersResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/exposure/listeners")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn host_rules(&self) -> anyhow::Result<HostRulesResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/host-rules")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

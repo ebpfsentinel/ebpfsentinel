@@ -1171,6 +1171,9 @@ pub enum ExposureCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum HostRulesCommand {
+    /// List the loaded host rules, whether this host can match each and
+    /// how many events matched
+    List,
     /// List every intention a host rule may name, its fields, the hook
     /// serving it and whether this host serves it
     Intents,
@@ -2748,6 +2751,18 @@ mod tests {
             cli.command,
             Some(Command::Exposure(DomainArgs {
                 command: ExposureCommand::Listeners,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_host_rules_list() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "host-rules", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::HostRules(DomainArgs {
+                command: HostRulesCommand::List,
                 ..
             }))
         ));

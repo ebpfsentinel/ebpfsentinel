@@ -152,6 +152,9 @@ pub struct AppState {
     /// resolver and the enrichers have been built, like the coverage above:
     /// a table answering before that would name no container.
     pub process_table_service: ArcSwapOption<ProcessTableService>,
+    /// The host rules and their counters, installed with the process table
+    /// whose events they are evaluated on; empty where the table is off.
+    pub host_rule_service: ArcSwapOption<application::host_rule_service::HostRuleService>,
     /// Which workloads the DLP probes are reading, when the configuration
     /// scopes DLP at all. Filled after the eBPF load, because the maps it
     /// reports on are installed there; empty on a node reading every task.
@@ -236,6 +239,7 @@ impl AppState {
             ddos_service: None,
             dlp_service: None,
             process_table_service: ArcSwapOption::empty(),
+            host_rule_service: ArcSwapOption::empty(),
             dlp_scope_service: ArcSwapOption::empty(),
             workload_policy_service: ArcSwapOption::empty(),
             netpol_replay: ArcSwapOption::empty(),
@@ -425,6 +429,14 @@ impl AppState {
     /// process with.
     pub fn install_process_table_service(&self, svc: Arc<ProcessTableService>) {
         self.process_table_service.store(Some(svc));
+    }
+
+    /// Hand the host rules over, once the process table feeds them.
+    pub fn install_host_rule_service(
+        &self,
+        svc: Arc<application::host_rule_service::HostRuleService>,
+    ) {
+        self.host_rule_service.store(Some(svc));
     }
 
     /// Hand the DLP scope resolver over, once its maps are installed.

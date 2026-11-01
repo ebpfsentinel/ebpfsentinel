@@ -4482,6 +4482,26 @@ pub async fn run(
         {
             svc = svc.with_dlp_scope(Arc::clone(scope));
         }
+        // Host rules are evaluated on what the table learns, so they hang
+        // off it. The set was compiled once when the file was validated;
+        // compiling it again here cannot fail on the same input.
+        let host_rules = Arc::new(
+            application::host_rule_service::HostRuleService::new(
+                config.host_rules.compile()?,
+                alert_tx.clone(),
+            )
+            .with_facts(Arc::new(adapters::container::ProcFactsReader::new(
+                &coverage_proc,
+            ))),
+        );
+        if !host_rules.rules().is_empty() {
+            tracing::info!(
+                rules = host_rules.rules().rules().len(),
+                "host rules loaded"
+            );
+            svc = svc.with_host_rules(Arc::clone(&host_rules));
+        }
+        app_state.install_host_rule_service(host_rules);
         let svc = Arc::new(svc);
         // And the other way for a reload: a new policy renumbers the bits,
         // so it is replayed over the tasks already running rather than

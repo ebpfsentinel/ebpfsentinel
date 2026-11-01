@@ -142,6 +142,7 @@ use super::zone_handler;
         drop_reason_handler::get_drop_reasons,
         raw_socket_handler::get_raw_sockets,
         host_rule_handler::get_host_intents,
+        host_rule_handler::get_host_rules,
         exposure_handler::get_listeners,
         network_program_handler::get_foreign_programs,
         // DNS
@@ -381,6 +382,9 @@ use super::zone_handler;
         drop_reason_handler::DropReasonBody,
         raw_socket_handler::RawSocketsResponse,
         host_rule_handler::HostIntentsResponse,
+        host_rule_handler::HostRulesResponse,
+        host_rule_handler::HostRuleBody,
+        host_rule_handler::RuleIntentBody,
         host_rule_handler::IntentBody,
         host_rule_handler::IntentFieldBody,
         exposure_handler::ListenersResponse,
