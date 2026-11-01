@@ -1675,6 +1675,47 @@ pub struct WorkloadFirewall {
     _attacher: adapters::ebpf::workload_firewall_attach::WorkloadFirewallAttacher,
 }
 
+/// Read what the package managers say is installed, in the host's root and
+/// in every container's, through the warden when there is one, on the
+/// configured interval until `cancel`. `None` when the reading is turned
+/// off in the configuration.
+#[must_use]
+pub fn start_package_inventory(
+    config: &AgentConfig,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Option<Arc<application::package_inventory_service::PackageInventoryService>> {
+    if !config.package_inventory.enabled {
+        return None;
+    }
+    let proc_root = startup::resolver_proc_path(
+        &config.container.resolver.proc_path,
+        &startup::host_proc_root(),
+    );
+    let reader = Arc::new(
+        adapters::warden::package_inventory::WardenPackageReader::new(
+            ebpfsentinel_warden::rooted_read::file_roots,
+            ebpfsentinel_warden::rooted_read::read_rooted_file,
+            ebpfsentinel_warden::go_executables::scan,
+            ebpfsentinel_warden::process_maps::scan,
+            proc_root,
+        ),
+    );
+    let inventory =
+        Arc::new(application::package_inventory_service::PackageInventoryService::new(reader));
+    let interval = std::time::Duration::from_secs(config.package_inventory.interval_secs);
+    info!(
+        interval_secs = config.package_inventory.interval_secs,
+        source = inventory.source(),
+        "package inventory reading"
+    );
+    let running = Arc::clone(&inventory);
+    let cancel = cancel.clone();
+    tokio::spawn(async move {
+        running.run(interval, cancel).await;
+    });
+    Some(inventory)
+}
+
 /// Load the workload firewall off the configuration's workload rules, for a
 /// binary that does not run the agent's own start-up path.
 ///
