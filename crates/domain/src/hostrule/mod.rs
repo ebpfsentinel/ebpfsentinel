@@ -21,6 +21,7 @@ pub mod field;
 pub mod intent;
 pub mod rule;
 pub mod sequence;
+pub mod shadow;
 
 pub use binding::{Applicability, Binding, HostSources, Source, resolve};
 pub use count::{
@@ -37,3 +38,4 @@ pub use rule::{
     HostRuleSpec, IntentBlock, Matcher, Pattern, RawValue, Test,
 };
 pub use sequence::{HOST_RULE_PENDING_MAX, HostRuleState, PendingSequences, Subject};
+pub use shadow::{HOST_RULE_SHADOW_WORKLOADS_MAX, HostShadowBook, HostShadowReading, WorkloadHits};

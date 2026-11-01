@@ -2097,12 +2097,30 @@ pub struct HostRuleEntry {
     pub then: Vec<String>,
     pub state: String,
     pub intents: Vec<RuleIntentEntry>,
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<HostShadowEntry>,
     pub spec: serde_json::Value,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct HostShadowWorkloadEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<String>,
+    pub events: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct HostShadowEntry {
+    pub events: u64,
+    pub workloads: Vec<HostShadowWorkloadEntry>,
+    pub unsampled: u64,
 }
 
 #[derive(Deserialize, Serialize)]
 pub struct HostRulesResponse {
     pub matched: u64,
+    pub shadow_since_ns: u64,
     pub dropped: u64,
     pub pending: usize,
     pub pending_refused: u64,

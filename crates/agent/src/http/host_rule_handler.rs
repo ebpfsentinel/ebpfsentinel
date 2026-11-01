@@ -3,7 +3,9 @@ use std::sync::Arc;
 use application::host_rule_service::{FED_INTENTS, HostRuleService, not_fed_reason};
 use axum::Json;
 use axum::extract::State;
-use domain::hostrule::{Applicability, HostRule, HostSources, Intent, Source, resolve};
+use domain::hostrule::{
+    Applicability, HostRule, HostShadowReading, HostSources, Intent, Source, resolve,
+};
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -227,6 +229,44 @@ pub struct RuleIntentBody {
     pub reason: Option<String>,
 }
 
+/// Events a shadow rule would have acted on about one workload.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HostShadowWorkloadBody {
+    /// The container, else the cgroup, else the systemd unit; absent for a
+    /// process in none of them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload: Option<String>,
+    pub events: u64,
+}
+
+/// What a rule in shadow would have done since the reading started.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HostShadowBody {
+    /// Events on which it would have acted.
+    pub events: u64,
+    /// Those events by workload, the first ones seen, bounded.
+    pub workloads: Vec<HostShadowWorkloadBody>,
+    /// Events about a workload that came after the sample was full.
+    pub unsampled: u64,
+}
+
+impl From<HostShadowReading> for HostShadowBody {
+    fn from(reading: HostShadowReading) -> Self {
+        Self {
+            events: reading.events,
+            workloads: reading
+                .workloads
+                .into_iter()
+                .map(|hits| HostShadowWorkloadBody {
+                    workload: hits.workload,
+                    events: hits.events,
+                })
+                .collect(),
+            unsampled: reading.unsampled,
+        }
+    }
+}
+
 /// One loaded host rule.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct HostRuleBody {
@@ -241,6 +281,12 @@ pub struct HostRuleBody {
     /// `partially_applicable` when some are, `not_applicable` when none is.
     pub state: &'static str,
     pub intents: Vec<RuleIntentBody>,
+    /// `shadow`, counting what it would have done and doing none of it, or
+    /// `enforce`, acting on what it matches.
+    pub mode: &'static str,
+    /// What it would have done, for a rule in shadow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<HostShadowBody>,
     /// The rule as it was written, `workload` and `when` included.
     #[schema(value_type = Object)]
     pub spec: serde_json::Value,
@@ -249,9 +295,12 @@ pub struct HostRuleBody {
 /// Every loaded host rule, and what they have matched since the start.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct HostRulesResponse {
-    /// Events that matched a rule.
+    /// Events that matched a rule, in force or in shadow.
     pub matched: u64,
-    /// Of those, alerts lost to a full alert queue.
+    /// When the shadow readings started, nanoseconds since the epoch: the
+    /// agent's start.
+    pub shadow_since_ns: u64,
+    /// Of the matches of rules in force, alerts lost to a full alert queue.
     pub dropped: u64,
     /// First steps of sequences waiting for their second now.
     pub pending: usize,
@@ -290,6 +339,7 @@ fn rules_body(service: Option<&HostRuleService>, host: &HostSources) -> HostRule
     let Some(service) = service else {
         return HostRulesResponse {
             matched: 0,
+            shadow_since_ns: 0,
             dropped: 0,
             pending: 0,
             pending_refused: 0,
@@ -302,6 +352,7 @@ fn rules_body(service: Option<&HostRuleService>, host: &HostSources) -> HostRule
     let memory = service.memory();
     HostRulesResponse {
         matched,
+        shadow_since_ns: service.shadow_since_ns(),
         dropped,
         pending: memory.pending,
         pending_refused: memory.pending_refused,
@@ -311,12 +362,12 @@ fn rules_body(service: Option<&HostRuleService>, host: &HostSources) -> HostRule
             .rules()
             .rules()
             .iter()
-            .map(|rule| rule_body(rule, host))
+            .map(|rule| rule_body(rule, service, host))
             .collect(),
     }
 }
 
-fn rule_body(rule: &HostRule, host: &HostSources) -> HostRuleBody {
+fn rule_body(rule: &HostRule, service: &HostRuleService, host: &HostSources) -> HostRuleBody {
     let intents: Vec<RuleIntentBody> = rule
         .intents()
         .into_iter()
@@ -348,6 +399,8 @@ fn rule_body(rule: &HostRule, host: &HostSources) -> HostRuleBody {
         then: rule.spec.then.iter().map(|a| a.as_str()).collect(),
         state,
         intents,
+        mode: service.mode(rule.id()).unwrap_or(rule.spec.mode).as_str(),
+        shadow: service.reading(rule.id()).map(HostShadowBody::from),
         spec: serde_json::to_value(&rule.spec).unwrap_or(serde_json::Value::Null),
     }
 }
@@ -458,6 +511,21 @@ mod tests {
         assert_eq!((body.matched, body.dropped), (0, 0));
         assert_eq!((body.pending, body.pending_refused), (0, 0));
         assert_eq!((body.counting, body.counting_refused), (0, 0));
+        assert_eq!(
+            body.rules[0].mode, "shadow",
+            "a rule is in shadow unless it says otherwise"
+        );
+        assert_eq!(body.rules[0].shadow.as_ref().map(|s| s.events), Some(0));
+        assert_eq!(body.shadow_since_ns, service.shadow_since_ns());
+    }
+
+    #[test]
+    fn a_rule_written_in_force_carries_no_reading() {
+        let service = service(r#"[{"id":"loud","mode":"enforce","when":{"process.starts":{}}}]"#);
+        let host = HostSources::new(Some((6, 12))).present(Source::ProcessTracing);
+        let body = rules_body(Some(&service), &host);
+        assert_eq!(body.rules[0].mode, "enforce");
+        assert!(body.rules[0].shadow.is_none());
     }
 
     #[test]

@@ -1053,7 +1053,10 @@ mod tests {
         Arc<HostRuleService>,
         mpsc::Receiver<crate::alert_event::AlertEvent>,
     ) {
-        let specs: Vec<domain::hostrule::HostRuleSpec> = serde_json::from_str(json).unwrap();
+        let mut specs: Vec<domain::hostrule::HostRuleSpec> = serde_json::from_str(json).unwrap();
+        for spec in &mut specs {
+            spec.mode = domain::firewall::entity::RuleMode::Enforce;
+        }
         let (tx, rx) = mpsc::channel(8);
         let rules = domain::hostrule::HostRuleSet::compile(specs).unwrap();
         (Arc::new(HostRuleService::new(rules, tx)), rx)

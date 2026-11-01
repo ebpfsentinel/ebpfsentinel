@@ -9,6 +9,10 @@
 //! process and its ancestry, and a rule asking for it stops the process
 //! through the same kill the process detections use.
 //!
+//! A rule in shadow, the default, does neither: what it would have done is
+//! counted per workload in a reading, and putting it in force is decided on
+//! that reading.
+//!
 //! Only the intentions in [`FED_INTENTS`] reach this service in this build.
 //! A rule naming another one loads, and the API says it is not applicable
 //! here rather than letting it sit silent.
@@ -18,7 +22,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use domain::alert::entity::Alert;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use domain::hostrule::{FieldValue, HostRuleSet, HostRuleState, Intent, IntentEvent, Subject};
+use domain::firewall::entity::RuleMode;
+use domain::hostrule::{
+    FieldValue, HostRuleSet, HostRuleState, HostShadowBook, HostShadowReading, Intent, IntentEvent,
+    Subject,
+};
 use domain::process::engine::Lineage;
 use domain::process::entity::{ProcessEntry, ProcessKey};
 use domain::workload::entity::{Workload, WorkloadSource};
@@ -58,6 +66,7 @@ pub struct HostRuleService {
     alerts: mpsc::Sender<AlertEvent>,
     facts: Option<Arc<dyn ProcessFactsReader>>,
     state: Mutex<HostRuleState>,
+    shadow: Mutex<HostShadowBook>,
     matched: AtomicU64,
     dropped: AtomicU64,
 }
@@ -65,7 +74,11 @@ pub struct HostRuleService {
 impl HostRuleService {
     #[must_use]
     pub fn new(rules: HostRuleSet, alerts: mpsc::Sender<AlertEvent>) -> Self {
+        let since_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
         Self {
+            shadow: Mutex::new(HostShadowBook::new(&rules, since_ns)),
             rules,
             alerts,
             facts: None,
@@ -109,6 +122,31 @@ impl HostRuleService {
             counting: state.counts.len(),
             counting_refused: state.counts.refused(),
         }
+    }
+
+    /// The mode `id` is in now, `None` for no such rule.
+    #[must_use]
+    pub fn mode(&self, id: &str) -> Option<RuleMode> {
+        self.book().mode(id)
+    }
+
+    /// When the shadow readings started, wall clock nanoseconds.
+    #[must_use]
+    pub fn shadow_since_ns(&self) -> u64 {
+        self.book().since_ns()
+    }
+
+    /// What `id` would have done since the readings started, `None` for a
+    /// rule in force.
+    #[must_use]
+    pub fn reading(&self, id: &str) -> Option<HostShadowReading> {
+        self.book().reading(id).cloned()
+    }
+
+    // The book is a mode per rule and a few counters, each written in one
+    // statement: a panic elsewhere leaves nothing half done in it.
+    fn book(&self) -> std::sync::MutexGuard<'_, HostShadowBook> {
+        self.shadow.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Whether any rule names `intent`, so the table can skip the lineage
@@ -180,6 +218,10 @@ impl HostRuleService {
         };
         for rule in fired {
             self.matched.fetch_add(1, Ordering::Relaxed);
+            let hit = facts.container_id.or(facts.cgroup).or(facts.unit);
+            if self.book().record(rule.id(), hit) {
+                continue;
+            }
             let workload = Workload::new(entry.pid, WorkloadSource::Process)
                 .map(|w| w.with_process(entry).with_lineage(lineage));
             let alert = Alert::from_host_rule(rule, event, workload, at_ns);
@@ -223,15 +265,53 @@ fn set(event: IntentEvent, name: &str, value: FieldValue) -> IntentEvent {
 
 #[cfg(test)]
 mod tests {
+    use domain::container::entity::{ContainerContext, ContainerInfo, ContainerRuntime};
     use domain::hostrule::HostRuleSpec;
     use domain::process::detection::ProcessFacts;
     use domain::process::entity::ProcessIdentity;
 
     use super::*;
 
+    /// The rules in `json`, in force unless one names its mode.
     fn rules(json: &str) -> HostRuleSet {
-        let specs: Vec<HostRuleSpec> = serde_json::from_str(json).unwrap();
+        let mut raw: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        for rule in &mut raw {
+            if let Some(map) = rule.as_object_mut() {
+                map.entry("mode").or_insert_with(|| "enforce".into());
+            }
+        }
+        let specs: Vec<HostRuleSpec> = serde_json::from_value(raw.into()).unwrap();
         HostRuleSet::compile(specs).unwrap()
+    }
+
+    #[test]
+    fn a_shadow_rule_counts_by_workload_and_raises_nothing() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let service = HostRuleService::new(
+            rules(
+                r#"[{"id":"quiet","mode":"shadow","then":["alert","kill_process"],
+                     "when":{"process.starts":{"exe":"/bin/sh"}}}]"#,
+            ),
+            tx,
+        );
+        let mut shell = entry(4, "/bin/sh", 0);
+        shell.container = Some(ContainerContext::new(ContainerInfo::Container {
+            container_id: "web".to_string(),
+            runtime: ContainerRuntime::Containerd,
+            cgroup_path: "/kubepods/web".to_string(),
+            pid: 4,
+        }));
+        service.record_exec(&shell, &Lineage::default(), 1);
+        service.record_exec(&entry(5, "/bin/sh", 0), &Lineage::default(), 2);
+        assert!(
+            rx.try_recv().is_err(),
+            "a shadow rule raises nothing and stops nothing"
+        );
+        assert_eq!(service.mode("quiet"), Some(RuleMode::Shadow));
+        let reading = service.reading("quiet").unwrap();
+        assert_eq!(reading.events, 2);
+        assert_eq!(reading.workloads[0].workload.as_deref(), Some("web"));
+        assert_eq!(reading.workloads[1].workload, None);
     }
 
     fn entry(pid: u32, exe: &str, uid: u32) -> ProcessEntry {

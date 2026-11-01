@@ -6362,15 +6362,23 @@ pub async fn cmd_host_rules_list(client: &ApiClient, output: OutputFormat) -> Re
         ("RULE", Align::Left),
         ("SEVERITY", Align::Left),
         ("STATE", Align::Left),
+        ("MODE", Align::Left),
+        ("WOULD HAVE", Align::Right),
         ("THEN", Align::Left),
         ("INTENTS", Align::Left),
     ]);
     for rule in &resp.rules {
         let intents: Vec<&str> = rule.intents.iter().map(|i| i.name.as_str()).collect();
+        let would_have = rule
+            .shadow
+            .as_ref()
+            .map_or_else(|| "-".to_string(), |s| s.events.to_string());
         table.row(cells![
             rule.id,
             rule.severity,
             rule.state.replace('_', " "),
+            rule.mode,
+            would_have,
             rule.then.join(", "),
             intents.join(", "),
         ]);
@@ -6395,6 +6403,23 @@ pub async fn cmd_host_rules_list(client: &ApiClient, output: OutputFormat) -> Re
         );
     }
     for rule in &resp.rules {
+        if let Some(shadow) = rule.shadow.as_ref().filter(|s| s.events > 0) {
+            let hits: Vec<String> = shadow
+                .workloads
+                .iter()
+                .map(|w| format!("{} {}", w.workload.as_deref().unwrap_or("host"), w.events))
+                .collect();
+            println!(
+                "  {} would have acted on: {}{}",
+                rule.id,
+                hits.join(", "),
+                if shadow.unsampled > 0 {
+                    format!(", {} more unnamed", shadow.unsampled)
+                } else {
+                    String::new()
+                }
+            );
+        }
         for intent in &rule.intents {
             if let Some(reason) = &intent.reason {
                 println!("  {} / {}: {reason}", rule.id, intent.name);

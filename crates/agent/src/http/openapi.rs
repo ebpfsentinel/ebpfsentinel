@@ -384,6 +384,8 @@ use super::zone_handler;
         host_rule_handler::HostIntentsResponse,
         host_rule_handler::HostRulesResponse,
         host_rule_handler::HostRuleBody,
+        host_rule_handler::HostShadowBody,
+        host_rule_handler::HostShadowWorkloadBody,
         host_rule_handler::RuleIntentBody,
         host_rule_handler::IntentBody,
         host_rule_handler::IntentFieldBody,

@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::alert::filter::parse_severity;
 use crate::common::entity::Severity;
+use crate::firewall::entity::RuleMode;
 use crate::firewall::workload::{WorkloadFacts, WorkloadSelector};
 
 use super::count::{Count, CountPer, compile_count};
@@ -160,6 +161,14 @@ pub struct HostRuleSpec {
     /// What to do when it matches.
     #[serde(default = "default_then")]
     pub then: Vec<HostRuleAction>,
+    /// `shadow`, the default, counts what the rule would have done and does
+    /// none of it; `enforce` does it.
+    #[serde(default = "default_mode")]
+    pub mode: RuleMode,
+}
+
+fn default_mode() -> RuleMode {
+    RuleMode::Shadow
 }
 
 /// A shell-style pattern: `*` is any run of characters, `?` is one.
@@ -1685,6 +1694,7 @@ mod tests {
                     when,
                     followed_by: None,
                     then: vec![HostRuleAction::Alert],
+                    mode: RuleMode::Enforce,
                 };
                 if let Ok(rule) = HostRule::compile(rule) {
                     let _ = rule.matches(&event, None);

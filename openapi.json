@@ -12770,6 +12770,7 @@
           "then",
           "state",
           "intents",
+          "mode",
           "spec"
         ],
         "properties": {
@@ -12788,9 +12789,24 @@
               "$ref": "#/components/schemas/RuleIntentBody"
             }
           },
+          "mode": {
+            "type": "string",
+            "description": "`shadow`, counting what it would have done and doing none of it, or\n`enforce`, acting on what it matches."
+          },
           "severity": {
             "type": "string",
             "description": "`low`, `medium`, `high` or `critical`."
+          },
+          "shadow": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/HostShadowBody",
+                "description": "What it would have done, for a rule in shadow."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "spec": {
             "type": "object",
@@ -12814,6 +12830,7 @@
         "description": "Every loaded host rule, and what they have matched since the start.",
         "required": [
           "matched",
+          "shadow_since_ns",
           "dropped",
           "pending",
           "pending_refused",
@@ -12836,13 +12853,13 @@
           "dropped": {
             "type": "integer",
             "format": "int64",
-            "description": "Of those, alerts lost to a full alert queue.",
+            "description": "Of the matches of rules in force, alerts lost to a full alert queue.",
             "minimum": 0
           },
           "matched": {
             "type": "integer",
             "format": "int64",
-            "description": "Events that matched a rule.",
+            "description": "Events that matched a rule, in force or in shadow.",
             "minimum": 0
           },
           "pending": {
@@ -12861,6 +12878,63 @@
             "items": {
               "$ref": "#/components/schemas/HostRuleBody"
             }
+          },
+          "shadow_since_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the shadow readings started, nanoseconds since the epoch: the\nagent's start.",
+            "minimum": 0
+          }
+        }
+      },
+      "HostShadowBody": {
+        "type": "object",
+        "description": "What a rule in shadow would have done since the reading started.",
+        "required": [
+          "events",
+          "workloads",
+          "unsampled"
+        ],
+        "properties": {
+          "events": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Events on which it would have acted.",
+            "minimum": 0
+          },
+          "unsampled": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Events about a workload that came after the sample was full.",
+            "minimum": 0
+          },
+          "workloads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HostShadowWorkloadBody"
+            },
+            "description": "Those events by workload, the first ones seen, bounded."
+          }
+        }
+      },
+      "HostShadowWorkloadBody": {
+        "type": "object",
+        "description": "Events a shadow rule would have acted on about one workload.",
+        "required": [
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "workload": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The container, else the cgroup, else the systemd unit; absent for a\nprocess in none of them."
           }
         }
       },
