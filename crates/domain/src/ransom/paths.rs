@@ -14,6 +14,7 @@ use crate::process::entity::ProcessKey;
 
 use super::actor::Actor;
 use super::engine::{RANSOM_ACTORS_MAX, RANSOM_WINDOW_NS};
+use super::replace::RANSOM_REPLACEMENTS;
 use super::signal::{RansomSignal, SignalKind};
 
 /// How many distinct files one actor rewrites in a window before the signal
@@ -64,6 +65,9 @@ fn evidence(kind: SignalKind, threshold: usize, seconds: u64, path: &str) -> Str
         SignalKind::HeaderMismatch => format!(
             "{threshold} files left with leading bytes that do not match their extension in {seconds} s, the last {path}"
         ),
+        SignalKind::ReplaceSequence => format!(
+            "{threshold} files replaced by a file of their size written fresh beside them in {seconds} s, the last {path}"
+        ),
         _ => format!("{threshold} distinct files rewritten in {seconds} s, the last {path}"),
     }
 }
@@ -98,6 +102,17 @@ impl DistinctPaths {
             SignalKind::HeaderMismatch,
             RANSOM_WINDOW_NS,
             RANSOM_HEADER_MISMATCHES,
+            RANSOM_ACTORS_MAX,
+        )
+    }
+
+    /// Files replaced by one of their size written fresh beside them.
+    #[must_use]
+    pub fn replacements() -> Self {
+        Self::new(
+            SignalKind::ReplaceSequence,
+            RANSOM_WINDOW_NS,
+            RANSOM_REPLACEMENTS,
             RANSOM_ACTORS_MAX,
         )
     }

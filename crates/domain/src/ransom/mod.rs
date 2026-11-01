@@ -14,6 +14,7 @@ pub mod entropy;
 pub mod header;
 pub mod paths;
 pub mod rename;
+pub mod replace;
 pub mod signal;
 
 pub use actor::{Actor, actor_of};
@@ -28,5 +29,9 @@ pub use paths::{
 };
 pub use rename::{
     MassRenames, RANSOM_MASS_RENAMES, RANSOM_RENAME_EXTENSIONS_MAX, renamed_to_new_extension,
+};
+pub use replace::{
+    RANSOM_REPLACEMENTS, REPLACEMENT_FRESH_NS, REPLACEMENT_HALVES_MAX, REPLACEMENT_OVERHEAD_BYTES,
+    Replacements, original_of, renamed_over, replaces, written_now,
 };
 pub use signal::{RansomSignal, SignalKind, Tier, UnavailableSignal, unavailable};

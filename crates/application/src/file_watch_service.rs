@@ -44,6 +44,7 @@ use domain::file_watch::{
     WatchedFilesystem, WatchedPaths, own_file_change, rooted, watched_path_change,
 };
 use domain::hostrule::{Intent, SettledChange, file_events};
+use domain::ransom::written_now;
 use ports::secondary::file_watch_port::{FileBaselineStore, FileWatchSource, ProcessRootReader};
 use ports::secondary::metrics_port::MetricsPort;
 use tokio::sync::mpsc;
@@ -907,9 +908,9 @@ impl FileWatcher {
         });
         let at_ns = now_ns();
         if let (Some(ransom), Some((lineage, entry))) = (feed.ransom.as_ref(), writer.as_ref()) {
-            let (entropy_now, head) = match &fact.reading {
-                FileReading::Present(now) => (now.entropy_millibits, now.head),
-                FileReading::Gone | FileReading::Unreadable(_) => (None, None),
+            let now = match &fact.reading {
+                FileReading::Present(now) => Some(now),
+                FileReading::Gone | FileReading::Unreadable(_) => None,
             };
             ransom.record_file_change(
                 entry,
@@ -918,9 +919,12 @@ impl FileWatcher {
                 FileRewrite {
                     path: &fact.path,
                     entropy_before: before.and_then(|b| b.entropy_millibits),
-                    entropy_now,
-                    head,
+                    entropy_now: now.and_then(|n| n.entropy_millibits),
+                    head: now.and_then(|n| n.head),
                     renamed_from: pending.renamed_from.as_deref(),
+                    size_before: before.map(|b| b.size),
+                    size_now: now.map(|n| n.size),
+                    written_now: now.is_some_and(|n| written_now(n.mtime_ns, at_ns)),
                 },
                 at_ns,
             );

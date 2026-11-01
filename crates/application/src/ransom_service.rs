@@ -15,8 +15,8 @@ use domain::hostrule::HostSources;
 use domain::process::engine::Lineage;
 use domain::process::entity::ProcessEntry;
 use domain::ransom::{
-    Actor, DistinctPaths, MassRenames, RansomEngine, RansomSignal, RansomVerdict, SignalKind,
-    actor_of, entropy_rose, header_mismatch, unavailable,
+    Actor, DistinctPaths, MassRenames, RansomEngine, RansomSignal, RansomVerdict, Replacements,
+    SignalKind, actor_of, entropy_rose, header_mismatch, original_of, renamed_over, unavailable,
 };
 use domain::workload::entity::{Workload, WorkloadSource};
 use tokio::sync::mpsc;
@@ -35,6 +35,7 @@ const READ: &[SignalKind] = &[
     SignalKind::EntropyRise,
     SignalKind::HeaderMismatch,
     SignalKind::MassRename,
+    SignalKind::ReplaceSequence,
 ];
 
 /// Whether a settled change rewrote the file's content or put a file in its
@@ -58,6 +59,12 @@ pub struct FileRewrite<'a> {
     pub head: Option<[u8; 4]>,
     /// The path the file was renamed from, when the kernel named both.
     pub renamed_from: Option<&'a str>,
+    /// The size the path held before the change, when it was known.
+    pub size_before: Option<u64>,
+    /// The size it holds now, absent when it is gone or unreadable.
+    pub size_now: Option<u64>,
+    /// Its modification time is now rather than a time carried from a source.
+    pub written_now: bool,
 }
 
 /// One change as every counter records it.
@@ -75,6 +82,8 @@ pub struct RansomService {
     entropy_rises: Mutex<DistinctPaths>,
     header_mismatches: Mutex<DistinctPaths>,
     renames: Mutex<MassRenames>,
+    replaced: Mutex<DistinctPaths>,
+    replacements: Mutex<Replacements>,
     sources: HostSourcesReader,
     alerts: mpsc::Sender<AlertEvent>,
 }
@@ -88,13 +97,15 @@ impl RansomService {
             entropy_rises: Mutex::new(DistinctPaths::entropy_rises()),
             header_mismatches: Mutex::new(DistinctPaths::header_mismatches()),
             renames: Mutex::new(MassRenames::default()),
+            replaced: Mutex::new(DistinctPaths::replacements()),
+            replacements: Mutex::new(Replacements::default()),
             sources,
             alerts,
         }
     }
 
     /// A settled change by `writer`, as the file watcher reports it.
-    /// Changes that rewrite nothing are not counted.
+    /// Changes that neither rewrite nor delete anything are not counted.
     pub fn record_file_change(
         &self,
         writer: &ProcessEntry,
@@ -103,7 +114,22 @@ impl RansomService {
         change: FileRewrite<'_>,
         at_ns: u64,
     ) {
-        if !rewrites(kinds) {
+        let kinds: Vec<FileChangeKind> = kinds.into_iter().collect();
+        if kinds.contains(&FileChangeKind::Deleted)
+            && change.size_now.is_none()
+            && let Some(size) = change.size_before
+        {
+            let actor = actor_of(writer, lineage);
+            let completed = self
+                .replacements
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .deleted(&actor, change.path, size, at_ns);
+            if completed {
+                self.count_replacement(&actor, writer, lineage, change.path, at_ns);
+            }
+        }
+        if !rewrites(kinds.iter().copied()) {
             return;
         }
         let actor = actor_of(writer, lineage);
@@ -131,6 +157,68 @@ impl RansomService {
                 self.observe(signal, writer, lineage);
             }
         }
+        self.record_replacement(&actor, writer, lineage, &kinds, change, at_ns);
+    }
+
+    /// The half of a replacement a rewrite may be: a file renamed over a
+    /// known one of its size, or a new file written beside its original.
+    /// Either way the replacement must have been written now.
+    fn record_replacement(
+        &self,
+        actor: &Actor,
+        writer: &ProcessEntry,
+        lineage: &Lineage,
+        kinds: &[FileChangeKind],
+        change: FileRewrite<'_>,
+        at_ns: u64,
+    ) {
+        let Some(size) = change.size_now.filter(|_| change.written_now) else {
+            return;
+        };
+        match change.renamed_from {
+            Some(from) => {
+                if change
+                    .size_before
+                    .is_some_and(|before| renamed_over(from, change.path, before, size))
+                {
+                    self.count_replacement(actor, writer, lineage, change.path, at_ns);
+                }
+            }
+            None if kinds.contains(&FileChangeKind::Created) => {
+                let Some(original) = original_of(change.path) else {
+                    return;
+                };
+                let completed = self
+                    .replacements
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .written(actor, original, size, at_ns);
+                if completed {
+                    self.count_replacement(actor, writer, lineage, original, at_ns);
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn count_replacement(
+        &self,
+        actor: &Actor,
+        writer: &ProcessEntry,
+        lineage: &Lineage,
+        original: &str,
+        at_ns: u64,
+    ) {
+        self.count(
+            &self.replaced,
+            &Held {
+                actor,
+                writer,
+                lineage,
+                path: original,
+                at_ns,
+            },
+        );
     }
 
     /// Count the path toward its actor on one counter, and observe the
@@ -207,6 +295,7 @@ mod tests {
     use domain::process::entity::ProcessIdentity;
     use domain::ransom::{
         RANSOM_DISTINCT_REWRITES, RANSOM_ENTROPY_RISES, RANSOM_HEADER_MISMATCHES,
+        RANSOM_REPLACEMENTS,
     };
 
     fn running(pid: u32, path: &str, inode: u64) -> ProcessEntry {
@@ -250,6 +339,9 @@ mod tests {
                     entropy_now: None,
                     head: None,
                     renamed_from: None,
+                    size_before: None,
+                    size_now: None,
+                    written_now: false,
                 },
                 1,
             );
@@ -290,6 +382,9 @@ mod tests {
                     entropy_now: Some(7_995),
                     head: None,
                     renamed_from: None,
+                    size_before: None,
+                    size_now: None,
+                    written_now: false,
                 },
                 2,
             );
@@ -324,6 +419,9 @@ mod tests {
                     entropy_now: None,
                     head: Some(*b"%PDF"),
                     renamed_from: None,
+                    size_before: None,
+                    size_now: None,
+                    written_now: false,
                 },
                 1,
             );
@@ -340,6 +438,9 @@ mod tests {
                     entropy_now: None,
                     head: Some([0x9A, 0x13, 0x7F, 0x02]),
                     renamed_from: None,
+                    size_before: None,
+                    size_now: None,
+                    written_now: false,
                 },
                 2,
             );
@@ -372,6 +473,9 @@ mod tests {
                     entropy_now: (n < RANSOM_ENTROPY_RISES).then_some(7_950),
                     head: None,
                     renamed_from: Some(&from),
+                    size_before: None,
+                    size_now: None,
+                    written_now: false,
                 },
                 at_ns,
             );
@@ -389,6 +493,138 @@ mod tests {
         };
         assert!(alert.message.contains("mass_rename (pid 100)"));
         assert!(alert.message.contains("renamed to .locked"));
+    }
+
+    #[test]
+    fn originals_replaced_by_a_file_of_their_size_written_beside_them_are_strong() {
+        let (service, mut rx) = service();
+        let run = running(100, "/tmp/enc", 7);
+        let lineage = Lineage {
+            ancestors: Vec::new(),
+            truncated: false,
+            incomplete: false,
+        };
+        let write = |n: usize, written_now: bool| {
+            service.record_file_change(
+                &run,
+                &lineage,
+                [FileChangeKind::Created, FileChangeKind::Written],
+                FileRewrite {
+                    path: &format!("/srv/r{n}.docx.locked"),
+                    entropy_before: None,
+                    entropy_now: None,
+                    head: None,
+                    renamed_from: None,
+                    size_before: None,
+                    size_now: Some(4_096 + 512),
+                    written_now,
+                },
+                1,
+            );
+        };
+        let delete = |n: usize| {
+            service.record_file_change(
+                &run,
+                &lineage,
+                [FileChangeKind::Deleted],
+                FileRewrite {
+                    path: &format!("/srv/r{n}.docx"),
+                    entropy_before: None,
+                    entropy_now: None,
+                    head: None,
+                    renamed_from: None,
+                    size_before: Some(4_096),
+                    size_now: None,
+                    written_now: false,
+                },
+                2,
+            );
+        };
+        // Copies carrying their source's time replace nothing.
+        for n in 0..RANSOM_REPLACEMENTS {
+            write(n, false);
+            delete(n);
+        }
+        // The rest of the run: enough distinct rewrites to support a verdict.
+        for n in RANSOM_REPLACEMENTS..RANSOM_DISTINCT_REWRITES + RANSOM_REPLACEMENTS {
+            write(n, true);
+        }
+        assert!(rx.try_recv().is_err());
+        // Two supporting signals are needed beside one strong one; this run
+        // has one, so its replacements alone are not a verdict.
+        for n in RANSOM_REPLACEMENTS..RANSOM_REPLACEMENTS * 2 {
+            delete(n);
+        }
+        assert!(rx.try_recv().is_err());
+        // Renamed over the original, the same shape is counted too, and once
+        // the entropy also rose the verdict is reached.
+        for n in 0..RANSOM_ENTROPY_RISES {
+            service.record_file_change(
+                &run,
+                &lineage,
+                [FileChangeKind::Written],
+                FileRewrite {
+                    path: &format!("/srv/e{n}.txt"),
+                    entropy_before: Some(4_000),
+                    entropy_now: Some(7_950),
+                    head: None,
+                    renamed_from: None,
+                    size_before: None,
+                    size_now: None,
+                    written_now: false,
+                },
+                3,
+            );
+        }
+        let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() else {
+            panic!("no verdict raised");
+        };
+        assert!(
+            alert.message.contains("replace_sequence (pid 100)"),
+            "{}",
+            alert.message
+        );
+        assert!(alert.message.contains("written fresh beside them"));
+    }
+
+    #[test]
+    fn a_rename_over_a_known_file_of_its_size_is_a_replacement() {
+        let (service, mut rx) = service();
+        let run = running(100, "/tmp/enc", 7);
+        let lineage = Lineage {
+            ancestors: Vec::new(),
+            truncated: false,
+            incomplete: false,
+        };
+        // Each file renamed over by a hidden temporary of its size plus a
+        // header: distinct rewrites, entropy rises on some, and replacements.
+        for n in 0..RANSOM_DISTINCT_REWRITES {
+            let rose = n < RANSOM_ENTROPY_RISES;
+            service.record_file_change(
+                &run,
+                &lineage,
+                [FileChangeKind::MovedIn],
+                FileRewrite {
+                    path: &format!("/srv/r{n}.pdf"),
+                    entropy_before: rose.then_some(4_000),
+                    entropy_now: rose.then_some(7_950),
+                    head: None,
+                    renamed_from: Some(&format!("/srv/.r{n}.tmp")),
+                    size_before: Some(10_000),
+                    size_now: Some(10_016),
+                    written_now: true,
+                },
+                1,
+            );
+        }
+        let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() else {
+            panic!("no verdict raised");
+        };
+        assert!(
+            alert.message.contains("replace_sequence (pid 100)"),
+            "{}",
+            alert.message
+        );
     }
 
     #[test]
