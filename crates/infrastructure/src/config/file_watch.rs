@@ -5,6 +5,7 @@
 //! container's writes are seen on the filesystem beneath it, where its upper
 //! directory lives.
 
+use domain::file_watch::{DECLARED_ORIGIN, WATCHED_PATHS_MAX, WatchedPaths, check_watched_path};
 use serde::{Deserialize, Serialize};
 
 use super::ConfigError;
@@ -40,6 +41,11 @@ pub struct FileWatchConfig {
     /// Baselines kept at most. A path first seen once the store holds this
     /// many gets none, and is counted.
     pub max_baselines: u64,
+
+    /// Paths watched for any difference, each a file or a directory and
+    /// everything beneath it: a change under one is an alert, whichever
+    /// process made it.
+    pub paths: Vec<String>,
 }
 
 impl Default for FileWatchConfig {
@@ -49,6 +55,7 @@ impl Default for FileWatchConfig {
             filesystems: vec!["/".to_owned()],
             max_hash_bytes: DEFAULT_MAX_HASH_BYTES,
             max_baselines: DEFAULT_MAX_BASELINES,
+            paths: Vec::new(),
         }
     }
 }
@@ -61,7 +68,8 @@ impl FileWatchConfig {
     /// Returns [`ConfigError::Validation`] when the watch is on and names no
     /// filesystem, more than [`MAX_FILE_WATCH_FILESYSTEMS`], or a path that
     /// is not absolute, a hash size above [`MAX_HASH_BYTES_CEILING`], or no
-    /// room for a single baseline.
+    /// room for a single baseline, and when a watched path is not one the
+    /// watch can name or there are more than [`WATCHED_PATHS_MAX`].
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.max_hash_bytes > MAX_HASH_BYTES_CEILING {
             return Err(ConfigError::Validation {
@@ -92,7 +100,30 @@ impl FileWatchConfig {
         if let Some(path) = self.filesystems.iter().find(|p| !p.starts_with('/')) {
             return Err(invalid(format!("{path:?} is not an absolute path")));
         }
+        let invalid_path = |message: String| ConfigError::Validation {
+            field: "file_watch.paths".to_string(),
+            message,
+        };
+        if self.paths.len() > WATCHED_PATHS_MAX {
+            return Err(invalid_path(format!("at most {WATCHED_PATHS_MAX} paths")));
+        }
+        for path in &self.paths {
+            check_watched_path(path).map_err(invalid_path)?;
+        }
         Ok(())
+    }
+
+    /// The declared paths, each watched through the configuration.
+    #[must_use]
+    pub fn watched_paths(&self) -> WatchedPaths {
+        let mut watched = WatchedPaths::new();
+        for path in &self.paths {
+            // Validation refused every path `add` would, so nothing is lost.
+            if watched.add(path, DECLARED_ORIGIN).is_err() {
+                break;
+            }
+        }
+        watched
     }
 }
 
@@ -137,6 +168,38 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_path_is_watched_through_the_configuration() {
+        let config = FileWatchConfig {
+            enabled: true,
+            paths: vec!["/etc/ssh".into(), "/etc/ssh".into(), "/etc/shadow".into()],
+            ..FileWatchConfig::default()
+        };
+        assert!(config.validate().is_ok());
+        let watched = config.watched_paths();
+        assert_eq!(watched.len(), 2);
+        assert_eq!(
+            watched.covering("/etc/ssh/sshd_config"),
+            Some(("/etc/ssh", DECLARED_ORIGIN))
+        );
+    }
+
+    #[test]
+    fn a_path_the_watch_cannot_name_is_refused() {
+        for path in ["etc/ssh", "/", "/etc/../root", "/etc/ssh/"] {
+            let config = FileWatchConfig {
+                paths: vec![path.into()],
+                ..FileWatchConfig::default()
+            };
+            assert!(config.validate().is_err(), "{path}");
+        }
+        let many = FileWatchConfig {
+            paths: (0..=WATCHED_PATHS_MAX).map(|i| format!("/p{i}")).collect(),
+            ..FileWatchConfig::default()
+        };
+        assert!(many.validate().is_err());
+    }
+
+    #[test]
     fn hashing_past_the_ceiling_or_keeping_nothing_is_refused() {
         let big = FileWatchConfig {
             max_hash_bytes: MAX_HASH_BYTES_CEILING + 1,
@@ -157,7 +220,7 @@ mod tests {
     #[test]
     fn an_unknown_key_is_refused() {
         let parsed: Result<FileWatchConfig, _> =
-            serde_norway::from_str("enabled: true\npaths: [/]\n");
+            serde_norway::from_str("enabled: true\nmounts: [/]\n");
         assert!(parsed.is_err());
     }
 }

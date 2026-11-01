@@ -8,6 +8,7 @@ use crate::ddos::entity::DdosAttack;
 use crate::dlp::entity::DlpAlert;
 use crate::dns::entity::{DnsAlert, DnsAlertReason};
 use crate::file_watch::own::{AGENT_FILES_COMPONENT, OwnFileChange};
+use crate::file_watch::watched::{FILE_INTEGRITY_COMPONENT, WatchedPathChange};
 use crate::firewall::exec_network::{EXEC_NETWORK_EXECUTABLE_SOURCE, ExecNetworkRecord};
 use crate::firewall::workload::{DestinationAddr, WORKLOAD_FIREWALL_COMPONENT, WorkloadDenial};
 use crate::hostrule::event::IntentEvent;
@@ -1371,6 +1372,74 @@ impl Alert {
             mitigation_status: None,
             total_packets: None,
             mitre_attack: Some(OwnFileChange::mitre()),
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
+            executable_path,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
+            workload,
+        }
+    }
+
+    /// The alert for a difference under a watched path: the writer, its
+    /// executable and its workload where they resolve.
+    #[must_use]
+    pub fn from_watched_path_change(
+        change: &WatchedPathChange,
+        workload: Option<Workload>,
+        at_ns: u64,
+    ) -> Self {
+        let rule_id = change.rule_id();
+        let (tgid, executable_path) = match &workload {
+            Some(w) => (Some(w.pid), w.exe.clone()),
+            None => ((change.writer != 0).then_some(change.writer), None),
+        };
+        Self {
+            id: Self::generate_id(at_ns, &rule_id),
+            timestamp_ns: at_ns,
+            component: FILE_INTEGRITY_COMPONENT.to_string(),
+            severity: Severity::Medium,
+            rule_id,
+            action: DomainMode::Alert,
+            src_addr: [0; 4],
+            dst_addr: [0; 4],
+            src_port: 0,
+            dst_port: 0,
+            protocol: 0,
+            is_ipv6: false,
+            message: change.message(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: Some(WatchedPathChange::mitre()),
             ja4_fingerprint: None,
             ml_anomaly_score: None,
             ml_top_feature: None,

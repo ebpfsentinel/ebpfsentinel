@@ -4637,63 +4637,16 @@ pub async fn run(
     // the warden when there is one and in-process otherwise.
     // A watch whose baselines cannot be kept would compare nothing, so it
     // is not opened.
-    if config.file_watch.enabled {
-        let baseline_path = storage_path.with_file_name("file_baselines.redb");
-        match adapters::storage::redb_file_baseline_store::RedbFileBaselineStore::open(
-            &baseline_path,
-        ) {
-            Ok(store) => {
-                let source = adapters::warden::file_watch::FileWatch::new(open_local_file_watch);
-                let mut watcher = application::file_watch_service::FileWatcher::new(
-                    Box::new(source),
-                    config.file_watch.filesystems.clone(),
-                    Arc::clone(&metrics) as Arc<dyn MetricsPort>,
-                    Arc::new(store),
-                    application::file_watch_service::BaselinePolicy {
-                        max_hash_bytes: config.file_watch.max_hash_bytes,
-                        max_files: config.file_watch.max_baselines,
-                    },
-                );
-                // The rules live with the process table: with the table off
-                // there is no writer to name and no rule set to feed.
-                // The agent's own files are watched whatever the
-                // configuration names, and a change another process makes
-                // to one is an alert.
-                let own = agent_files(config_path, &ebpf_dir, &baseline_path);
-                info!(files = own.len(), "the agent's own files are watched");
-                watcher = watcher.with_own_files(application::file_watch_service::OwnFileGuard {
-                    files: own,
-                    own_pid: std::process::id(),
-                    alerts: alert_tx.clone(),
-                    workloads: workloads.clone(),
-                });
-                if let Some(ref rules) = host_rules_for_files {
-                    watcher = watcher.with_rules(application::file_watch_service::FileRuleFeed {
-                        rules: Arc::clone(rules),
-                        processes: process_table_for_learning.clone(),
-                        roots: Some(Arc::new(adapters::container::ProcRootReader::new(
-                            &coverage_proc,
-                        ))),
-                    });
-                }
-                info!(
-                    source = watcher.source(),
-                    filesystems = config.file_watch.filesystems.len(),
-                    baselines = %baseline_path.display(),
-                    "file watch running"
-                );
-                let watch_cancel = cancel_token.clone();
-                tokio::task::spawn_blocking(move || watcher.run_blocking(&watch_cancel));
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    path = %baseline_path.display(),
-                    "file baseline store unavailable, file watch not opened"
-                );
-            }
-        }
-    }
+    start_file_watch(FileWatchStart {
+        config: &config,
+        config_path,
+        metrics: Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+        alerts: alert_tx.clone(),
+        workloads: workloads.clone(),
+        host_rules: host_rules_for_files.clone(),
+        processes: process_table_for_learning.clone(),
+        cancel: cancel_token.clone(),
+    });
 
     // ── 11. Spawn event dispatcher (replaces flat event consumer) ───
     let dispatcher = EventDispatcher::new(
@@ -5921,6 +5874,105 @@ mod kernel_version_tests {
         );
         assert_eq!(files.len(), 4);
     }
+}
+
+/// What the file watch starts with, for the agent and for a binary that does
+/// not run the agent's own start-up path.
+pub struct FileWatchStart<'a> {
+    pub config: &'a AgentConfig,
+    /// The configuration file the agent was started with, watched as one of
+    /// its own files.
+    pub config_path: &'a str,
+    pub metrics: Arc<dyn MetricsPort>,
+    pub alerts: tokio::sync::mpsc::Sender<application::alert_event::AlertEvent>,
+    pub workloads: application::workload_resolver::WorkloadResolver,
+    /// The host rules a file change feeds, with the process table naming
+    /// the writer. Both live with the process table, so with the table off
+    /// there is no rule set to feed.
+    pub host_rules: Option<Arc<application::host_rule_service::HostRuleService>>,
+    pub processes: Option<Arc<application::process_table_service::ProcessTableService>>,
+    pub cancel: CancellationToken,
+}
+
+/// Start the file watch the configuration asks for, and hand back the
+/// watched paths it follows, which the caller may replace while it runs.
+///
+/// `None` when the watch is off, and when its baselines cannot be kept: a
+/// watch that compares nothing is not opened.
+pub fn start_file_watch(
+    start: FileWatchStart<'_>,
+) -> Option<Arc<application::file_watch_service::WatchedPathSet>> {
+    use application::file_watch_service::{
+        BaselinePolicy, FileRuleFeed, FileWatcher, OwnFileGuard, WatchedPathGuard, WatchedPathSet,
+    };
+    let config = start.config;
+    if !config.file_watch.enabled {
+        return None;
+    }
+    let baseline_path = Path::new(&config.audit.storage_path).with_file_name("file_baselines.redb");
+    let store = match adapters::storage::redb_file_baseline_store::RedbFileBaselineStore::open(
+        &baseline_path,
+    ) {
+        Ok(store) => store,
+        Err(e) => {
+            warn!(
+                error = %e,
+                path = %baseline_path.display(),
+                "file baseline store unavailable, file watch not opened"
+            );
+            return None;
+        }
+    };
+    let source = adapters::warden::file_watch::FileWatch::new(open_local_file_watch);
+    let mut watcher = FileWatcher::new(
+        Box::new(source),
+        config.file_watch.filesystems.clone(),
+        start.metrics,
+        Arc::new(store),
+        BaselinePolicy {
+            max_hash_bytes: config.file_watch.max_hash_bytes,
+            max_files: config.file_watch.max_baselines,
+        },
+    );
+    // The agent's own files are watched whatever the configuration names,
+    // and a change another process makes to one is an alert.
+    let ebpf_dir = resolve_ebpf_program_dir(config);
+    let own = agent_files(start.config_path, &ebpf_dir, &baseline_path);
+    info!(files = own.len(), "the agent's own files are watched");
+    watcher = watcher.with_own_files(OwnFileGuard {
+        files: own,
+        own_pid: std::process::id(),
+        alerts: start.alerts.clone(),
+        workloads: start.workloads.clone(),
+    });
+    let watched = config.file_watch.watched_paths();
+    info!(paths = watched.len(), "watched paths declared");
+    let set = Arc::new(WatchedPathSet::new(watched));
+    watcher = watcher.with_watched_paths(WatchedPathGuard {
+        set: Arc::clone(&set),
+        own_pid: std::process::id(),
+        alerts: start.alerts,
+        workloads: start.workloads,
+    });
+    if let Some(rules) = start.host_rules {
+        let proc_root = resolver_proc_path(&config.container.resolver.proc_path, &host_proc_root());
+        watcher = watcher.with_rules(FileRuleFeed {
+            rules,
+            processes: start.processes,
+            roots: Some(Arc::new(adapters::container::ProcRootReader::new(
+                &proc_root,
+            ))),
+        });
+    }
+    info!(
+        source = watcher.source(),
+        filesystems = config.file_watch.filesystems.len(),
+        baselines = %baseline_path.display(),
+        "file watch running"
+    );
+    let cancel = start.cancel;
+    tokio::task::spawn_blocking(move || watcher.run_blocking(&cancel));
+    Some(set)
 }
 
 /// The agent's own files, each by its absolute path: the executable, the

@@ -24,16 +24,24 @@
 //! when the watch is opened again, after a gap nothing was read in, is one
 //! too; the first opening only learns, since an upgrade replaces the binary
 //! and the objects while the agent is stopped.
+//!
+//! The watched paths, declared in the configuration or named by a profile,
+//! decide what a difference elsewhere amounts to: one under a watched path is
+//! an alert, and so is a file arriving under a watched directory. A watched
+//! path is read as soon as the watch opens, past the cap, so its first change
+//! is compared rather than learned. The set can be swapped whole while the
+//! watch runs; the watch is opened again on the filesystems the new set needs.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
 use domain::alert::entity::Alert;
 use domain::file_watch::{
     FileBaseline, FileChangeBatch, FileChangeKind, FileDrift, FileFacts, FileReading, OwnFiles,
-    RootMount, RootedPath, WatchedFilesystem, own_file_change, rooted,
+    RootMount, RootedPath, SettledPath, WatchedFilesystem, WatchedPaths, own_file_change, rooted,
+    watched_path_change,
 };
 use domain::hostrule::{Intent, SettledChange, file_events};
 use ports::secondary::file_watch_port::{FileBaselineStore, FileWatchSource, ProcessRootReader};
@@ -112,6 +120,53 @@ pub struct OwnFileGuard {
     pub workloads: WorkloadResolver,
 }
 
+/// The watched paths, swapped whole while the watch runs.
+///
+/// Each replacement that changes the set moves its generation, which is how
+/// the watcher learns to open the watch again on what the new set needs.
+#[derive(Debug, Default)]
+pub struct WatchedPathSet {
+    inner: RwLock<(u64, Arc<WatchedPaths>)>,
+}
+
+impl WatchedPathSet {
+    #[must_use]
+    pub fn new(paths: WatchedPaths) -> Self {
+        Self {
+            inner: RwLock::new((0, Arc::new(paths))),
+        }
+    }
+
+    /// Put `paths` in force, and say whether that changed anything.
+    pub fn replace(&self, paths: WatchedPaths) -> bool {
+        // A replacement is one assignment, so a poisoned lock still holds a
+        // whole set.
+        let mut held = self.inner.write().unwrap_or_else(PoisonError::into_inner);
+        if *held.1 == paths {
+            return false;
+        }
+        *held = (held.0 + 1, Arc::new(paths));
+        true
+    }
+
+    /// The set in force and its generation.
+    #[must_use]
+    pub fn current(&self) -> (u64, Arc<WatchedPaths>) {
+        let held = self.inner.read().unwrap_or_else(PoisonError::into_inner);
+        (held.0, Arc::clone(&held.1))
+    }
+}
+
+/// The watched paths, and where a difference under one goes.
+pub struct WatchedPathGuard {
+    pub set: Arc<WatchedPathSet>,
+    /// The agent's pid as the watch reports writers: its own writes are not
+    /// an alert.
+    pub own_pid: u32,
+    pub alerts: mpsc::Sender<AlertEvent>,
+    pub workloads: WorkloadResolver,
+}
+
 /// Opens the watch on the configured filesystems, reads it until cancelled,
 /// and compares every changed path with its baseline.
 pub struct FileWatcher {
@@ -131,6 +186,12 @@ pub struct FileWatcher {
     configured: usize,
     /// Whether the agent's files were read once already.
     primed: bool,
+    watched: Option<WatchedPathGuard>,
+    /// The watched set the watch was last opened for, and its generation.
+    watching: (u64, Arc<WatchedPaths>),
+    /// Watched paths read once already: a later reading reports what
+    /// differs, the first only learns.
+    learned: BTreeSet<String>,
 }
 
 impl FileWatcher {
@@ -155,7 +216,19 @@ impl FileWatcher {
             feed: None,
             own: None,
             primed: false,
+            watched: None,
+            watching: (0, Arc::new(WatchedPaths::new())),
+            learned: BTreeSet::new(),
         }
+    }
+
+    /// Alert on a difference under a watched path, and follow the set as it
+    /// is replaced.
+    #[must_use]
+    pub fn with_watched_paths(mut self, guard: WatchedPathGuard) -> Self {
+        self.watching = guard.set.current();
+        self.watched = Some(guard);
+        self
     }
 
     /// Watch the agent's own files as well, alerting on a change another
@@ -188,7 +261,16 @@ impl FileWatcher {
     /// Open the watch, publish what it covers, and say whether anything is
     /// watched.
     fn open(&mut self, last: &mut Option<Vec<WatchedFilesystem>>) -> bool {
-        let marks = match self.source.open(&self.paths) {
+        if let Some(guard) = self.watched.as_ref() {
+            self.watching = guard.set.current();
+        }
+        let mut paths = self.paths.clone();
+        for dir in self.watching.1.directories() {
+            if !paths.contains(&dir) {
+                paths.push(dir);
+            }
+        }
+        let marks = match self.source.open(&paths) {
             Ok(marks) => marks,
             Err(e) => {
                 warn!(source = self.source.source(), error = %e, "file watch could not be opened");
@@ -228,21 +310,13 @@ impl FileWatcher {
             return;
         };
         let paths: Vec<String> = guard.files.paths().map(ToOwned::to_owned).collect();
-        let mut facts = Vec::with_capacity(paths.len());
-        let mut asked = paths.as_slice();
-        while !asked.is_empty() {
-            match self.source.facts(asked, self.policy.max_hash_bytes) {
-                Ok(read) if !read.is_empty() => {
-                    asked = &asked[read.len().min(asked.len())..];
-                    facts.extend(read);
-                }
-                Ok(_) => break,
-                Err(e) => {
-                    warn!(error = %e, "the agent's own files could not be read");
-                    return;
-                }
+        let facts = match self.read_all(&paths) {
+            Ok(facts) => facts,
+            Err(e) => {
+                warn!(error = %e, "the agent's own files could not be read");
+                return;
             }
-        }
+        };
         let first = !self.primed;
         self.primed = true;
         let unseen = BTreeSet::new();
@@ -265,13 +339,118 @@ impl FileWatcher {
                     self.guard(&fact.path, &unseen, &drift, 0);
                 }
             }
-            self.keep_own(&fact, kept.is_some());
+            self.keep_listed(&fact, kept.is_some());
         }
         self.metrics.set_file_baselines(self.kept);
     }
 
-    /// Keep or forget the baseline of one of the agent's files.
-    fn keep_own(&mut self, fact: &FileFacts, had: bool) {
+    /// Read every watched path and keep each, past the cap. A path read for
+    /// the first time only learns; one read before follows a gap in which
+    /// nothing was read, so what differs then is reported.
+    fn prime_watched(&mut self) {
+        if self.watched.is_none() {
+            return;
+        }
+        let watching = Arc::clone(&self.watching.1);
+        let paths: Vec<String> = watching
+            .paths()
+            .filter(|path| !self.is_own(path))
+            .map(ToOwned::to_owned)
+            .collect();
+        let facts = match self.read_all(&paths) {
+            Ok(facts) => facts,
+            Err(e) => {
+                warn!(error = %e, "the watched paths could not be read");
+                return;
+            }
+        };
+        let unseen = BTreeSet::new();
+        for fact in facts {
+            let kept = match self.baselines.get(&fact.path) {
+                Ok(kept) => kept,
+                Err(e) => {
+                    warn!(path = %fact.path, error = %e, "file baseline could not be read");
+                    continue;
+                }
+            };
+            if let Some(old) = &kept
+                && self.learned.contains(&fact.path)
+            {
+                let drift = old.drift(&fact.reading);
+                self.watch(&fact.path, &unseen, true, &drift, &fact.reading, 0);
+            }
+            self.keep_listed(&fact, kept.is_some());
+            self.learned.insert(fact.path);
+        }
+        self.metrics.set_file_baselines(self.kept);
+    }
+
+    /// Read what each of `paths` names, however many readings that takes.
+    fn read_all(&mut self, paths: &[String]) -> Result<Vec<FileFacts>, String> {
+        let mut facts = Vec::with_capacity(paths.len());
+        let mut asked = paths;
+        while !asked.is_empty() {
+            match self.source.facts(asked, self.policy.max_hash_bytes) {
+                Ok(read) if !read.is_empty() => {
+                    asked = &asked[read.len().min(asked.len())..];
+                    facts.extend(read);
+                }
+                Ok(_) => break,
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Ok(facts)
+    }
+
+    /// Alert on a difference `writer` left under a watched path.
+    fn watch(
+        &self,
+        path: &str,
+        kinds: &BTreeSet<FileChangeKind>,
+        had_baseline: bool,
+        drift: &[FileDrift],
+        reading: &FileReading,
+        writer: u32,
+    ) {
+        let Some(guard) = self.watched.as_ref() else {
+            return;
+        };
+        let settled = SettledPath {
+            path,
+            kinds,
+            had_baseline,
+            drift,
+            present: matches!(reading, FileReading::Present(_)),
+            writer,
+        };
+        let Some(change) = watched_path_change(&self.watching.1, &settled, guard.own_pid) else {
+            return;
+        };
+        warn!(
+            path,
+            writer,
+            watched = %change.watched,
+            origin = %change.origin,
+            "a watched path changed"
+        );
+        let workload = (writer != 0)
+            .then(|| guard.workloads.by_pid(writer))
+            .flatten();
+        let alert = Alert::from_watched_path_change(&change, workload, now_ns());
+        if let Err(e) = guard.alerts.try_send(AlertEvent::System(Box::new(alert))) {
+            warn!(path, error = %e, "alert on a watched path could not be queued");
+        }
+    }
+
+    /// Whether the watched set moved since the watch was opened.
+    fn watched_moved(&self) -> bool {
+        self.watched
+            .as_ref()
+            .is_some_and(|guard| guard.set.current().0 != self.watching.0)
+    }
+
+    /// Keep or forget the baseline of a path kept past the cap.
+    fn keep_listed(&mut self, fact: &FileFacts, had: bool) {
         let path = fact.path.as_str();
         match &fact.reading {
             FileReading::Present(now) => match self.baselines.put(path, now) {
@@ -324,6 +503,11 @@ impl FileWatcher {
         self.own
             .as_ref()
             .is_some_and(|guard| guard.files.role(path).is_some())
+    }
+
+    /// Whether `path` is itself a watched path, kept past the cap.
+    fn is_watched(&self, path: &str) -> bool {
+        self.watched.is_some() && self.watching.1.names(path)
     }
 
     /// Count one reading's changes into the metrics.
@@ -446,13 +630,30 @@ impl FileWatcher {
             }
         };
         self.feed(fact, pending, rooted, kept.as_ref());
-        if let Some(old) = &kept {
-            self.guard(path, &pending.kinds, &old.drift(&fact.reading), pid);
+        let drift = kept
+            .as_ref()
+            .map(|old| old.drift(&fact.reading))
+            .unwrap_or_default();
+        if kept.is_some() {
+            self.guard(path, &pending.kinds, &drift, pid);
+        }
+        if !self.is_own(path) {
+            self.watch(
+                path,
+                &pending.kinds,
+                kept.is_some(),
+                &drift,
+                &fact.reading,
+                pid,
+            );
         }
         let inside = rooted.path.as_deref().unwrap_or(path);
         match (&fact.reading, kept) {
             (FileReading::Present(new), None) => {
-                if self.kept >= self.policy.max_files && !self.is_own(path) {
+                if self.kept >= self.policy.max_files
+                    && !self.is_own(path)
+                    && !self.is_watched(path)
+                {
                     debug!(path, "file baseline store is full, path not kept");
                     self.metrics.record_file_baseline_refused();
                     return;
@@ -617,6 +818,11 @@ impl FileWatcher {
                     continue;
                 }
                 self.prime_own();
+                self.prime_watched();
+            } else if self.watched_moved() {
+                info!("the watched paths changed, opening the watch again");
+                open = false;
+                continue;
             }
             // Paths still waiting to be read are not waited on.
             let wait = if self.pending.is_empty() {
@@ -1105,6 +1311,125 @@ mod tests {
         let w = watcher(source, Arc::new(Counted::default())).with_own_files(guard);
         assert_eq!(w.paths, vec!["/", "/var/lib/containerd", "/etc"]);
         assert_eq!(w.configured, 2);
+    }
+
+    fn watched_set(path: &str) -> Arc<WatchedPathSet> {
+        let mut paths = WatchedPaths::new();
+        paths
+            .add(path, domain::file_watch::DECLARED_ORIGIN)
+            .unwrap();
+        Arc::new(WatchedPathSet::new(paths))
+    }
+
+    fn watched_guard(set: Arc<WatchedPathSet>) -> (WatchedPathGuard, mpsc::Receiver<AlertEvent>) {
+        let (alerts, rx) = mpsc::channel(8);
+        (
+            WatchedPathGuard {
+                set,
+                own_pid: 99,
+                alerts,
+                workloads: WorkloadResolver::new(),
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn a_difference_under_a_watched_path_is_an_alert_and_its_first_change_is_compared() {
+        let cancel = CancellationToken::new();
+        let store = Arc::new(Memory::default());
+        let source = Scripted {
+            opens: vec![Ok(vec![watched("/")])],
+            reads: vec![Ok(written())],
+            facts: vec![
+                Ok(vec![fact(
+                    "/etc/hosts",
+                    FileReading::Present(file('a', 0o644)),
+                )]),
+                Ok(vec![fact(
+                    "/etc/hosts",
+                    FileReading::Present(file('b', 0o644)),
+                )]),
+            ],
+            cancel: cancel.clone(),
+            opened: Arc::new(AtomicU64::new(0)),
+        };
+        let (guard, mut rx) = watched_guard(watched_set("/etc/hosts"));
+        // No room for baselines: a watched path is kept anyway, so the
+        // write after the opening is compared rather than learned.
+        watcher_with(source, Arc::new(Counted::default()), Arc::clone(&store), 0)
+            .with_watched_paths(guard)
+            .run_blocking(&cancel);
+        let alerts = own_alerts(&mut rx);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].component, "file_integrity");
+        assert_eq!(alerts[0].rule_id.0, "watched-path-changed");
+        assert_eq!(alerts[0].tgid, Some(7));
+        assert_eq!(
+            alerts[0].message,
+            "/etc/hosts watched through configuration was changed by process 7: content"
+        );
+        assert_eq!(store.map().get("/etc/hosts"), Some(&file('b', 0o644)));
+    }
+
+    #[test]
+    fn a_file_arriving_under_a_watched_directory_is_an_alert() {
+        let cancel = CancellationToken::new();
+        let source = Scripted {
+            opens: vec![Ok(vec![watched("/")])],
+            reads: vec![Ok(FileChangeBatch {
+                changes: vec![change(vec![
+                    FileChangeKind::Created,
+                    FileChangeKind::Written,
+                ])],
+                overflowed: false,
+            })],
+            facts: vec![
+                Ok(vec![fact("/etc", FileReading::Present(file('d', 0o755)))]),
+                Ok(vec![fact(
+                    "/etc/hosts",
+                    FileReading::Present(file('a', 0o644)),
+                )]),
+            ],
+            cancel: cancel.clone(),
+            opened: Arc::new(AtomicU64::new(0)),
+        };
+        let (guard, mut rx) = watched_guard(watched_set("/etc"));
+        watcher(source, Arc::new(Counted::default()))
+            .with_watched_paths(guard)
+            .run_blocking(&cancel);
+        let alerts = own_alerts(&mut rx);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].rule_id.0, "watched-path-appeared");
+        assert_eq!(
+            alerts[0].message,
+            "/etc/hosts appeared under /etc, watched through configuration, put there by process 7"
+        );
+    }
+
+    #[test]
+    fn a_replaced_set_is_followed_on_the_filesystems_it_needs() {
+        let set = watched_set("/etc/hosts");
+        assert!(!set.replace(set.current().1.as_ref().clone()));
+        let source = Scripted {
+            opens: vec![Ok(vec![watched("/")])],
+            reads: Vec::new(),
+            facts: Vec::new(),
+            cancel: CancellationToken::new(),
+            opened: Arc::new(AtomicU64::new(0)),
+        };
+        let (guard, _rx) = watched_guard(Arc::clone(&set));
+        let mut w = watcher(source, Arc::new(Counted::default())).with_watched_paths(guard);
+        assert!(!w.watched_moved());
+        let mut next = WatchedPaths::new();
+        next.add("/srv/app/config.toml", "web").unwrap();
+        assert!(set.replace(next));
+        assert!(w.watched_moved());
+        assert!(w.open(&mut None));
+        assert!(!w.watched_moved());
+        assert_eq!(w.watching.1.directories(), vec!["/srv/app".to_owned()]);
+        assert!(w.is_watched("/srv/app/config.toml"));
+        assert!(!w.is_watched("/etc/hosts"));
     }
 
     fn written() -> FileChangeBatch {

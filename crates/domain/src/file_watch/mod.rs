@@ -9,8 +9,13 @@ pub mod baseline;
 pub mod entity;
 pub mod own;
 pub mod rooted;
+pub mod watched;
 
 pub use baseline::{FileBaseline, FileDrift, FileFacts, FileReading, FileType, XattrDigest};
 pub use entity::{FileChange, FileChangeBatch, FileChangeKind, WatchedFilesystem};
 pub use own::{AGENT_FILES_COMPONENT, OwnFileChange, OwnFileRole, OwnFiles, own_file_change};
 pub use rooted::{RootMount, RootedPath, root_mount, rooted};
+pub use watched::{
+    DECLARED_ORIGIN, FILE_INTEGRITY_COMPONENT, SettledPath, WATCHED_PATHS_MAX, WatchedPathChange,
+    WatchedPaths, check_watched_path, watched_path_change,
+};
