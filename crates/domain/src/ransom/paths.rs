@@ -20,6 +20,10 @@ use super::signal::{RansomSignal, SignalKind};
 /// is raised.
 pub const RANSOM_DISTINCT_REWRITES: usize = 100;
 
+/// How many files one actor rewrites from ordinary to near-random content in a
+/// window before the signal is raised.
+pub const RANSOM_ENTROPY_RISES: usize = 20;
+
 #[derive(Debug)]
 struct Run {
     opened_ns: u64,
@@ -28,25 +32,16 @@ struct Run {
     raised: bool,
 }
 
-/// Distinct rewritten paths per actor, in windows that open at the first
-/// change and close `window_ns` later. Each actor holds at most `threshold`
-/// path hashes, and at most `max_actors` actors are held.
+/// Distinct paths per actor that showed one signal's fact, in windows that
+/// open at the first such path and close `window_ns` later. Each actor holds
+/// at most `threshold` path hashes, and at most `max_actors` actors are held.
 #[derive(Debug)]
-pub struct DistinctRewrites {
+pub struct DistinctPaths {
+    kind: SignalKind,
     window_ns: u64,
     threshold: usize,
     max_actors: usize,
     runs: HashMap<ProcessKey, Run>,
-}
-
-impl Default for DistinctRewrites {
-    fn default() -> Self {
-        Self::new(
-            RANSOM_WINDOW_NS,
-            RANSOM_DISTINCT_REWRITES,
-            RANSOM_ACTORS_MAX,
-        )
-    }
 }
 
 fn hash(path: &str) -> u64 {
@@ -55,10 +50,43 @@ fn hash(path: &str) -> u64 {
     hasher.finish()
 }
 
-impl DistinctRewrites {
+/// What `threshold` paths of `kind` in `seconds` say, the last one named.
+fn evidence(kind: SignalKind, threshold: usize, seconds: u64, path: &str) -> String {
+    match kind {
+        SignalKind::EntropyRise => format!(
+            "{threshold} files rewritten from ordinary to near-random content in {seconds} s, the last {path}"
+        ),
+        _ => format!("{threshold} distinct files rewritten in {seconds} s, the last {path}"),
+    }
+}
+
+impl DistinctPaths {
+    /// Distinct files rewritten, counted on every rewrite.
     #[must_use]
-    pub fn new(window_ns: u64, threshold: usize, max_actors: usize) -> Self {
+    pub fn rewrites() -> Self {
+        Self::new(
+            SignalKind::DistinctRewrites,
+            RANSOM_WINDOW_NS,
+            RANSOM_DISTINCT_REWRITES,
+            RANSOM_ACTORS_MAX,
+        )
+    }
+
+    /// Files whose sampled entropy rose from ordinary to near-random.
+    #[must_use]
+    pub fn entropy_rises() -> Self {
+        Self::new(
+            SignalKind::EntropyRise,
+            RANSOM_WINDOW_NS,
+            RANSOM_ENTROPY_RISES,
+            RANSOM_ACTORS_MAX,
+        )
+    }
+
+    #[must_use]
+    pub fn new(kind: SignalKind, window_ns: u64, threshold: usize, max_actors: usize) -> Self {
         Self {
+            kind,
             window_ns,
             threshold: threshold.max(1),
             max_actors: max_actors.max(1),
@@ -108,14 +136,11 @@ impl DistinctRewrites {
         let seconds = at_ns.saturating_sub(run.opened_ns) / 1_000_000_000;
         run.paths.clear();
         Some(RansomSignal {
-            kind: SignalKind::DistinctRewrites,
+            kind: self.kind,
             actor: actor.clone(),
             pid,
             at_ns,
-            evidence: format!(
-                "{} distinct files rewritten in {seconds} s, the last {path}",
-                self.threshold
-            ),
+            evidence: evidence(self.kind, self.threshold, seconds, path),
         })
     }
 
@@ -156,7 +181,7 @@ mod tests {
 
     #[test]
     fn the_threshold_of_distinct_paths_raises_the_signal_once() {
-        let mut rewrites = DistinctRewrites::new(RANSOM_WINDOW_NS, 3, 8);
+        let mut rewrites = DistinctPaths::new(SignalKind::DistinctRewrites, RANSOM_WINDOW_NS, 3, 8);
         let a = actor(10);
         assert!(rewrites.record(&a, 11, "/d/a", S).is_none());
         assert!(rewrites.record(&a, 12, "/d/a", 2 * S).is_none());
@@ -173,7 +198,7 @@ mod tests {
 
     #[test]
     fn a_new_window_counts_from_zero() {
-        let mut rewrites = DistinctRewrites::new(RANSOM_WINDOW_NS, 2, 8);
+        let mut rewrites = DistinctPaths::new(SignalKind::DistinctRewrites, RANSOM_WINDOW_NS, 2, 8);
         let a = actor(10);
         rewrites.record(&a, 10, "/a", 0);
         assert!(rewrites.record(&a, 10, "/b", 61 * S).is_none());
@@ -182,12 +207,30 @@ mod tests {
 
     #[test]
     fn two_actors_count_apart_and_the_bound_holds() {
-        let mut rewrites = DistinctRewrites::new(RANSOM_WINDOW_NS, 2, 2);
+        let mut rewrites = DistinctPaths::new(SignalKind::DistinctRewrites, RANSOM_WINDOW_NS, 2, 2);
         rewrites.record(&actor(1), 1, "/a", S);
         assert!(rewrites.record(&actor(2), 2, "/b", 2 * S).is_none());
         rewrites.record(&actor(3), 3, "/c", 3 * S);
         assert_eq!(rewrites.actors(), 2);
         // Actor 1 was let go, so its next path is its first again.
         assert!(rewrites.record(&actor(1), 1, "/d", 4 * S).is_none());
+    }
+
+    #[test]
+    fn each_counter_raises_its_own_signal() {
+        let mut rises = DistinctPaths::new(SignalKind::EntropyRise, RANSOM_WINDOW_NS, 2, 8);
+        let a = actor(10);
+        rises.record(&a, 10, "/a", 0);
+        let signal = rises.record(&a, 10, "/b", 2 * S).unwrap();
+        assert_eq!(signal.kind, SignalKind::EntropyRise);
+        assert_eq!(
+            signal.evidence,
+            "2 files rewritten from ordinary to near-random content in 2 s, the last /b"
+        );
+        assert_eq!(DistinctPaths::rewrites().kind, SignalKind::DistinctRewrites);
+        assert_eq!(
+            DistinctPaths::entropy_rises().threshold,
+            RANSOM_ENTROPY_RISES
+        );
     }
 }

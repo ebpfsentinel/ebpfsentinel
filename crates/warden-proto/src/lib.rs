@@ -243,6 +243,10 @@ pub struct FimXattr {
     pub sha256: [u8; 32],
 }
 
+/// How many leading bytes of a regular file the entropy is sampled over: the
+/// first block the hash reads, or the whole file when it is shorter.
+pub const FIM_ENTROPY_SAMPLE: usize = 64 * 1024;
+
 /// What a path named when the warden read it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FimFile {
@@ -268,6 +272,10 @@ pub struct FimFile {
     pub sha256: Option<[u8; 32]>,
     /// Why a regular file carries no hash.
     pub hash_unread: Option<String>,
+    /// Shannon entropy of the first [`FIM_ENTROPY_SAMPLE`] bytes of a regular
+    /// file's content, in thousandths of a bit per byte, read from the bytes
+    /// the hash reads. Absent where the content was not read or is empty.
+    pub entropy_millibits: Option<u16>,
     /// Extended attributes, sorted by name.
     pub xattrs: Vec<FimXattr>,
     /// Why the extended attributes were not read.

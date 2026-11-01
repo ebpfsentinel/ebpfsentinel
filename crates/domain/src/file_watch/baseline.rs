@@ -45,6 +45,11 @@ pub struct FileBaseline {
     pub sha256: Option<String>,
     /// Why a regular file has no hash: too large to hash, or unreadable.
     pub hash_unread: Option<String>,
+    /// Shannon entropy of the first 64 KiB of a regular file's content, in
+    /// thousandths of a bit per byte, read with the hash. Absent where the
+    /// content was not read, and in a baseline kept before it was measured.
+    #[serde(default)]
+    pub entropy_millibits: Option<u16>,
     /// Extended attributes, sorted by name.
     pub xattrs: Vec<XattrDigest>,
     /// Why the extended attributes could not be listed.
@@ -176,6 +181,7 @@ mod tests {
             link_target: None,
             sha256: Some("a".repeat(64)),
             hash_unread: None,
+            entropy_millibits: None,
             xattrs: vec![XattrDigest {
                 name: "security.selinux".into(),
                 sha256: "b".repeat(64),

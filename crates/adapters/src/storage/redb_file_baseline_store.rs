@@ -183,6 +183,7 @@ mod tests {
             link_target: None,
             sha256: None,
             hash_unread: Some("permission denied".into()),
+            entropy_millibits: None,
             xattrs: Vec::new(),
             xattrs_unread: None,
         }

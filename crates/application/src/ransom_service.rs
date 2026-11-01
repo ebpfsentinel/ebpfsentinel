@@ -15,7 +15,8 @@ use domain::hostrule::HostSources;
 use domain::process::engine::Lineage;
 use domain::process::entity::ProcessEntry;
 use domain::ransom::{
-    DistinctRewrites, RansomEngine, RansomSignal, RansomVerdict, SignalKind, actor_of, unavailable,
+    DistinctPaths, RansomEngine, RansomSignal, RansomVerdict, SignalKind, actor_of, entropy_rose,
+    unavailable,
 };
 use domain::workload::entity::{Workload, WorkloadSource};
 use tokio::sync::mpsc;
@@ -29,7 +30,7 @@ pub type HostSourcesReader = Arc<dyn Fn() -> HostSources + Send + Sync>;
 /// The signals this agent produces today. A signal missing here is named in
 /// every verdict as not read, so a verdict never reads as the whole engine
 /// when part of it is absent.
-const READ: &[SignalKind] = &[SignalKind::DistinctRewrites];
+const READ: &[SignalKind] = &[SignalKind::DistinctRewrites, SignalKind::EntropyRise];
 
 /// Whether a settled change rewrote the file's content or put a file in its
 /// place, which is what an encryption run does to every file it touches.
@@ -42,9 +43,19 @@ fn rewrites(kinds: impl IntoIterator<Item = FileChangeKind>) -> bool {
     })
 }
 
+/// One settled change to a file: its path, and its sampled entropy before
+/// and after where both readings measured one.
+#[derive(Debug, Clone, Copy)]
+pub struct FileRewrite<'a> {
+    pub path: &'a str,
+    pub entropy_before: Option<u16>,
+    pub entropy_now: Option<u16>,
+}
+
 pub struct RansomService {
     engine: Mutex<RansomEngine>,
-    rewrites: Mutex<DistinctRewrites>,
+    rewrites: Mutex<DistinctPaths>,
+    entropy_rises: Mutex<DistinctPaths>,
     sources: HostSourcesReader,
     alerts: mpsc::Sender<AlertEvent>,
 }
@@ -54,32 +65,44 @@ impl RansomService {
     pub fn new(alerts: mpsc::Sender<AlertEvent>, sources: HostSourcesReader) -> Self {
         Self {
             engine: Mutex::new(RansomEngine::default()),
-            rewrites: Mutex::new(DistinctRewrites::default()),
+            rewrites: Mutex::new(DistinctPaths::rewrites()),
+            entropy_rises: Mutex::new(DistinctPaths::entropy_rises()),
             sources,
             alerts,
         }
     }
 
-    /// A settled change to `path` by `writer`, as the file watcher reports
-    /// it. Changes that rewrite nothing are not counted.
+    /// A settled change by `writer`, as the file watcher reports it.
+    /// Changes that rewrite nothing are not counted.
     pub fn record_file_change(
         &self,
         writer: &ProcessEntry,
         lineage: &Lineage,
         kinds: impl IntoIterator<Item = FileChangeKind>,
-        path: &str,
+        change: FileRewrite<'_>,
         at_ns: u64,
     ) {
         if !rewrites(kinds) {
             return;
         }
         let actor = actor_of(writer, lineage);
-        let signal = self
+        let rewritten = self
             .rewrites
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .record(&actor, writer.pid, path, at_ns);
-        if let Some(signal) = signal {
+            .record(&actor, writer.pid, change.path, at_ns);
+        if let Some(signal) = rewritten {
+            self.observe(signal, writer, lineage);
+        }
+        if !entropy_rose(change.entropy_before, change.entropy_now) {
+            return;
+        }
+        let rose = self
+            .entropy_rises
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .record(&actor, writer.pid, change.path, at_ns);
+        if let Some(signal) = rose {
             self.observe(signal, writer, lineage);
         }
     }
@@ -144,7 +167,7 @@ mod tests {
     use super::*;
     use domain::hostrule::Source;
     use domain::process::entity::ProcessIdentity;
-    use domain::ransom::RANSOM_DISTINCT_REWRITES;
+    use domain::ransom::{RANSOM_DISTINCT_REWRITES, RANSOM_ENTROPY_RISES};
 
     fn running(pid: u32, path: &str, inode: u64) -> ProcessEntry {
         let mut entry = ProcessEntry::new(pid, "p", u64::from(pid));
@@ -181,11 +204,59 @@ mod tests {
                 &run,
                 &lineage,
                 [FileChangeKind::Written],
-                &format!("/srv/{n}"),
+                FileRewrite {
+                    path: &format!("/srv/{n}"),
+                    entropy_before: None,
+                    entropy_now: None,
+                },
                 1,
             );
         }
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn rewrites_that_turn_content_random_corroborate_with_two_supporting_signals_and_a_strong_one()
+    {
+        let (service, mut rx) = service();
+        let run = running(100, "/tmp/enc", 7);
+        let lineage = Lineage {
+            ancestors: Vec::new(),
+            truncated: false,
+            incomplete: false,
+        };
+        let actor = actor_of(&run, &lineage);
+        let held = service.engine.lock().unwrap().observe(
+            RansomSignal {
+                kind: SignalKind::MassRename,
+                actor,
+                pid: 100,
+                at_ns: 1,
+                evidence: "renamed".to_string(),
+            },
+            Vec::new,
+        );
+        assert!(held.is_none());
+        for n in 0..RANSOM_DISTINCT_REWRITES.max(RANSOM_ENTROPY_RISES) {
+            service.record_file_change(
+                &run,
+                &lineage,
+                [FileChangeKind::Written],
+                FileRewrite {
+                    path: &format!("/srv/{n}"),
+                    entropy_before: Some(4_200),
+                    entropy_now: Some(7_995),
+                },
+                2,
+            );
+        }
+        let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() else {
+            panic!("no verdict raised");
+        };
+        assert!(alert.message.contains("entropy_rise"));
+        assert!(alert.message.contains("near-random content"));
+        assert!(alert.message.contains("entropy_rise (pid 100)"));
+        assert!(!alert.message.contains("entropy_rise (not read"));
     }
 
     #[test]

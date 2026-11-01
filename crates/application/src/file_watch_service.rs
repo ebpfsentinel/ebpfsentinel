@@ -53,7 +53,7 @@ use tracing::{debug, info, warn};
 use crate::alert_event::AlertEvent;
 use crate::host_rule_service::HostRuleService;
 use crate::process_table_service::ProcessTableService;
-use crate::ransom_service::RansomService;
+use crate::ransom_service::{FileRewrite, RansomService};
 use crate::workload_resolver::WorkloadResolver;
 
 /// How long one reading waits for a first change. Short enough that a
@@ -877,11 +877,19 @@ impl FileWatcher {
         });
         let at_ns = now_ns();
         if let (Some(ransom), Some((lineage, entry))) = (feed.ransom.as_ref(), writer.as_ref()) {
+            let entropy_now = match &fact.reading {
+                FileReading::Present(now) => now.entropy_millibits,
+                FileReading::Gone | FileReading::Unreadable(_) => None,
+            };
             ransom.record_file_change(
                 entry,
                 lineage,
                 pending.kinds.iter().copied(),
-                &fact.path,
+                FileRewrite {
+                    path: &fact.path,
+                    entropy_before: before.and_then(|b| b.entropy_millibits),
+                    entropy_now,
+                },
                 at_ns,
             );
         }
@@ -1331,6 +1339,7 @@ mod tests {
             link_target: None,
             sha256: Some(sha.to_string().repeat(64)),
             hash_unread: None,
+            entropy_millibits: None,
             xattrs: Vec::new(),
             xattrs_unread: None,
         }

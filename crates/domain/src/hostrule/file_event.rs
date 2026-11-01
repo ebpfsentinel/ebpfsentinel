@@ -157,6 +157,7 @@ mod tests {
             link_target: None,
             sha256: Some(sha.to_string().repeat(64)),
             hash_unread: None,
+            entropy_millibits: None,
             xattrs: Vec::new(),
             xattrs_unread: None,
         }

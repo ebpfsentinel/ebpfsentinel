@@ -10,7 +10,8 @@
 
 pub mod actor;
 pub mod engine;
-pub mod rewrites;
+pub mod entropy;
+pub mod paths;
 pub mod signal;
 
 pub use actor::{Actor, actor_of};
@@ -18,5 +19,6 @@ pub use engine::{
     Corroboration, MASS_ENCRYPTION_COMPONENT, MASS_ENCRYPTION_RULE_ID, RANSOM_ACTORS_MAX,
     RANSOM_WINDOW_NS, RansomEngine, RansomVerdict, corroborate,
 };
-pub use rewrites::{DistinctRewrites, RANSOM_DISTINCT_REWRITES};
+pub use entropy::{ENTROPY_HIGH_MILLIBITS, ENTROPY_LOW_MILLIBITS, entropy_rose};
+pub use paths::{DistinctPaths, RANSOM_DISTINCT_REWRITES, RANSOM_ENTROPY_RISES};
 pub use signal::{RansomSignal, SignalKind, Tier, UnavailableSignal, unavailable};

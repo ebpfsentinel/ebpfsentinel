@@ -15,7 +15,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use ebpfsentinel_warden_proto::{
-    FIM_NOT_WATCHED, FimFacts, FimFile, FimFileType, FimReading, FimXattr,
+    FIM_ENTROPY_SAMPLE, FIM_NOT_WATCHED, FimFacts, FimFile, FimFileType, FimReading, FimXattr,
 };
 use sha2::{Digest, Sha256};
 
@@ -143,9 +143,10 @@ fn read_one(
                     file.hash_unread = Some(format!("larger than {max_hash_bytes} bytes"));
                 } else {
                     match hash(File::from(fd), max_hash_bytes) {
-                        Ok((digest, read)) => {
-                            *spent = spent.saturating_add(read);
-                            file.sha256 = Some(digest);
+                        Ok(hashed) => {
+                            *spent = spent.saturating_add(hashed.read);
+                            file.sha256 = Some(hashed.digest);
+                            file.entropy_millibits = hashed.entropy_millibits;
                         }
                         Err(e) => file.hash_unread = Some(e),
                     }
@@ -181,15 +182,69 @@ fn file_from_stat(st: &libc::stat) -> FimFile {
         link_target: None,
         sha256: None,
         hash_unread: None,
+        entropy_millibits: None,
         xattrs: Vec::new(),
         xattrs_unread: None,
     }
 }
 
+/// What hashing a file read from it.
+struct Hashed {
+    digest: [u8; 32],
+    read: u64,
+    entropy_millibits: Option<u16>,
+}
+
+/// Byte counts over the first [`FIM_ENTROPY_SAMPLE`] bytes read.
+struct Sample {
+    counts: [u32; 256],
+    taken: usize,
+}
+
+impl Sample {
+    fn new() -> Self {
+        Self {
+            counts: [0; 256],
+            taken: 0,
+        }
+    }
+
+    fn take(&mut self, bytes: &[u8]) {
+        let room = FIM_ENTROPY_SAMPLE.saturating_sub(self.taken);
+        let bytes = &bytes[..bytes.len().min(room)];
+        for &b in bytes {
+            self.counts[usize::from(b)] = self.counts[usize::from(b)].saturating_add(1);
+        }
+        self.taken += bytes.len();
+    }
+
+    /// Shannon entropy of the sample, in thousandths of a bit per byte;
+    /// nothing for an empty sample.
+    fn millibits(&self) -> Option<u16> {
+        let total = u32::try_from(self.taken).ok().filter(|t| *t > 0)?;
+        let total = f64::from(total);
+        let bits: f64 = self
+            .counts
+            .iter()
+            .filter(|c| **c > 0)
+            .map(|c| {
+                let p = f64::from(*c) / total;
+                -p * p.log2()
+            })
+            .sum();
+        // Between 0 and 8 bits, so the rounded thousandths fit; the clamp
+        // only absorbs floating-point noise.
+        let millibits = (bits * 1000.0).round().clamp(0.0, 8000.0) as i32;
+        u16::try_from(millibits).ok()
+    }
+}
+
 /// Hash at most `limit` bytes: a file grown past the limit since it was
-/// stat'ed is reported as such rather than hashed in part.
-fn hash(mut file: File, limit: u64) -> Result<([u8; 32], u64), String> {
+/// stat'ed is reported as such rather than hashed in part. The entropy is
+/// sampled from the same bytes as they pass.
+fn hash(mut file: File, limit: u64) -> Result<Hashed, String> {
     let mut hasher = Sha256::new();
+    let mut sample = Sample::new();
     let mut buf = vec![0_u8; HASH_CHUNK];
     let mut read = 0_u64;
     loop {
@@ -204,8 +259,13 @@ fn hash(mut file: File, limit: u64) -> Result<([u8; 32], u64), String> {
             return Err(format!("grew larger than {limit} bytes while read"));
         }
         hasher.update(&buf[..n]);
+        sample.take(&buf[..n]);
     }
-    Ok((hasher.finalize().into(), read))
+    Ok(Hashed {
+        digest: hasher.finalize().into(),
+        read,
+        entropy_millibits: sample.millibits(),
+    })
 }
 
 fn fstatat(dir: RawFd, name: &CStr) -> io::Result<libc::stat> {
@@ -353,6 +413,30 @@ mod tests {
         );
         // SAFETY: getuid cannot fail.
         assert_eq!(file.uid, unsafe { libc::getuid() });
+    }
+
+    #[test]
+    fn the_entropy_is_sampled_from_the_bytes_the_hash_reads() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let flat = dir.path().join("flat");
+        std::fs::write(&flat, vec![b'a'; 4096]).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(present(one(&flat, 1 << 20)).entropy_millibits, Some(0));
+        // Every byte value equally often: eight bits per byte.
+        let even: Vec<u8> = (0..=255_u8).cycle().take(8192).collect();
+        let full = dir.path().join("full");
+        std::fs::write(&full, &even).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(present(one(&full, 1 << 20)).entropy_millibits, Some(8000));
+        // Past the sample, the bytes are hashed and not counted.
+        let mut tail = vec![b'a'; FIM_ENTROPY_SAMPLE];
+        tail.extend_from_slice(&even);
+        let late = dir.path().join("late");
+        std::fs::write(&late, &tail).unwrap_or_else(|e| panic!("{e}"));
+        let file = present(one(&late, 1 << 20));
+        assert_eq!(file.entropy_millibits, Some(0));
+        assert_eq!(file.sha256, Some(Sha256::digest(&tail).into()));
+        let empty = dir.path().join("empty");
+        std::fs::write(&empty, b"").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(present(one(&empty, 1024)).entropy_millibits, None);
     }
 
     #[test]
