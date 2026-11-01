@@ -21,11 +21,15 @@ A snapshot of the capabilities below - see the [Features guide](https://github.c
 
 | Feature | Summary |
 |---------|---------|
-| **DDoS Mitigation** | XDP-speed SYN cookies + flood detection, drops attacks before the TCP stack |
-| **Stateful Firewall** | L3/L4 filtering with conntrack, GeoIP, zones, VLAN/QinQ, IPv4/IPv6 |
+| **DDoS Mitigation** | XDP-speed SYN cookies + SYN/ICMP/UDP flood detection, drops attacks before the TCP stack |
+| **Stateful Firewall** | L3/L4 filtering with conntrack, GeoIP, zones, scheduling, shadow rules, VLAN/QinQ, IPv4/IPv6 |
+| **Workload Firewall** | Rules naming an executable, a systemd unit, a cgroup or a container, decided at `connect()`, `sendmsg()` and `bind()`, with destinations by name or by remote workload |
+| **Executables Allowed on the Network** | Only listed executables open internet sockets, decided in the kernel from the calling task. Needs the BPF LSM active at boot (`lsm=` including `bpf`), which not every distribution or host provider sets: `/api/v1/ebpf/kernel-features` answers for your own host |
+| **Kubernetes NetworkPolicy** | Enforces `NetworkPolicy` objects where the CNI leaves them unenforced (Flannel, kubenet) |
+| **Cluster IP at connect()** | An opted-in pod's connection to a Service address sent straight to a ready backend, without kube-proxy's NAT |
 | **L7 Filtering** | Protocol-aware rules for HTTP, TLS/SNI, gRPC, SMTP, FTP, SMB |
-| **L4 Load Balancer** | TCP/UDP/TLS passthrough with four balancing algorithms |
-| **Traffic Shaping (QoS)** | Bandwidth limits, fair queuing, EDT pacing, FQ-CoDel AQM |
+| **L4 Load Balancer** | TCP/UDP/TLS passthrough with five algorithms: round-robin, weighted, ip-hash, least-conn, maglev |
+| **Traffic Shaping (QoS)** | Bandwidth limits, ECN marking, EDT pacing, delay/loss emulation, per-cgroup egress ceilings |
 | **Rate Limiting** | Four algorithms with kernel-side per-country tiers |
 | **NAT** | SNAT, DNAT, masquerade, port forwarding, 1:1, NPTv6, hairpin |
 | **Connection Tracking** | Kernel-side TCP/UDP/ICMP state machine with timeout policies |
@@ -34,7 +38,6 @@ A snapshot of the capabilities below - see the [Features guide](https://github.c
 | **Zone Segmentation** | Network zones (DMZ/LAN/WAN) with inter-zone isolation |
 | **Interface Groups** | Named NIC groups for multi-NIC rule scoping |
 | **IP/Port Aliases** | Reusable named objects across firewall, IPS, and DDoS rules |
-| **VLAN / QinQ** | 802.1Q and 802.1ad double-tagging across engines |
 | **IPv6 Dual-Stack** | Full V4/V6 parity, NDP-aware, NPTv6 |
 
 ### Threat Detection & Response
@@ -42,18 +45,31 @@ A snapshot of the capabilities below - see the [Features guide](https://github.c
 | Feature | Summary |
 |---------|---------|
 | **IDS / IPS** | Kernel-side pattern matching with automatic blocking |
-| **Threat Intelligence** | Any OSINT feed (CSV, JSON, STIX 2.1) with real-time IOC matching |
-| **DLP** | TLS inspection for PCI, PII, and credential patterns via uprobe |
-| **DNS Security** | Passive capture, blocklists, behavioral reputation scoring |
+| **Threat Intelligence** | Any OSINT feed (CSV, JSON, STIX 2.1) with real-time IOC matching on addresses, domains and URLs |
+| **DLP** | TLS plaintext inspection for PCI, PII, and credential patterns via uprobe |
+| **DNS Security** | Passive capture, blocklists, behavioral reputation scoring, DoH/DoT detection |
+| **Host Rules** | Rules written as intentions (`process.connects`, `file.changes`, `bpf.foreign_program`), each served by whichever hook the host's kernel offers, in shadow before they alert |
+| **Process Table** | Every fork, exec and exit, with the container and the chain of ancestors, so a pid becomes a name |
+| **Process Detections** | Reverse shells, binaries with no file on disk, and a server's unexpected descendant, read off the process tree where it holds a connection |
+| **File Watch** | Every change on whole filesystems with the process that made it, baselines of content, mode, owner and extended attributes, alerts on watched paths and on the agent's own files. Detection only: nothing is blocked |
+| **Network Inventory** | Packet sockets and their filters, listening sockets and who bound them, foreign eBPF programs on the network path, each new one an alert |
+| **Self-Protection** | No other process detaches the agent's links or writes its maps. Needs the BPF LSM active at boot, like the executables list |
+| **Learning Mode** | A declared window of what each workload dialled, rendered back as workload firewall rules in observe mode |
 | **MITRE ATT&CK Mapping** | Every alert tagged with tactic + technique ID |
 | **JA4+ Fingerprinting** | TLS client fingerprinting for C2 and malware detection |
+| **Network Cryptography** | Which flows negotiate a post-quantum hybrid, a classical curve or less than TLS 1.2, read off the handshakes without decrypting |
 | **GeoIP Enforcement** | MaxMind country resolution shared across all engines |
-| **Automated Response** | Condition-based policies (block IP, webhook, escalation) |
+| **Automated Response** | Time-bounded block and throttle, manual or on severity-based policies, expiring on their own |
 
 ### Operations
 
 | Feature | Summary |
 |---------|---------|
+| **Container Awareness** | Every event named with its container and pod: Docker, Podman, containerd, CRI-O, LXC, Kubernetes |
+| **Packet Trace** | One crafted packet run through the loaded programs, each saying what it decided and which rule decided it |
+| **Kernel Drop Reasons** | Every packet the kernel drops, counted by its reason and interface |
+| **TCP Health Per Edge** | Retransmissions, resets and failed connections counted per pair of services |
+| **Flow Export** | Connection table as IPFIX, OTLP logs, syslog, CEF or JSON lines |
 | **Hot Reload** | Update rules and toggle eBPF programs without restart |
 | **REST API** | OpenAPI 3.0 with Swagger UI, all domains covered |
 | **gRPC Streaming** | Real-time alert subscriptions with severity/component filters |
@@ -61,10 +77,10 @@ A snapshot of the capabilities below - see the [Features guide](https://github.c
 | **OTLP Export** | Alerts as OpenTelemetry Logs (gRPC or HTTP) |
 | **Alert Pipeline** | Routing to email, webhook, log, OTLP with dedup + throttling |
 | **Audit Trail** | Rule change history with before/after diff and actor tracking |
-| **Packet Capture** | Ring-buffer capture with BPF filters for forensics |
-| **CLI** | 18+ subcommands with `--output table\|json` and `--token` auth |
+| **Packet Capture** | libpcap capture with BPF filters, manual or triggered by an alert |
+| **CLI** | Forty-three subcommands with `--output table\|json` and `--token` auth, every API route reachable |
 | **Authentication** | JWT, OIDC, and API keys with role-based access |
-| **TLS 1.3** | rustls + aws_lc_rs, post-quantum ready (X25519MLKEM768) |
+| **TLS 1.3** | rustls + aws_lc_rs, post-quantum hybrid key exchange (X25519MLKEM768) |
 
 ## Architecture
 
@@ -384,10 +400,12 @@ The **enterprise edition** layers on capabilities for fleets and regulated envir
 
 | Area | Enterprise adds |
 | ---- | --------------- |
-| Detection | ML anomaly detection (Z-score, EWMA, CUSUM, ONNX, heavy-hitter CMS, DGA/tunneling, C2 beaconing, TLS clustering), AI/LLM security, TLS intelligence, network forensics |
-| L7 deep inspection | Extended protocol parsers (MQTT, AMQP, NATS, Cassandra), content inspection (SQLi/XSS/injection signatures), per-protocol policies (Redis/Mongo/Kafka/SQL/LDAP/SSH), alert enrichment (OWASP/MITRE/PCI), extended TLS-library hooking |
+| Detection | ML anomaly detection (Z-score, EWMA, CUSUM, ONNX with a delivered base model, heavy-hitter CMS, DGA/tunneling, C2 beaconing, TLS clustering), AI/LLM security, TLS intelligence, Sigma rules compiled into the agent's own rules, threat intelligence platforms (TAXII 2.1, MISP) |
+| Investigation | Cases with an owner, a timeline and an evidence pack, network forensics with workload investigations, threat hunting over the fleet's history |
+| L7 deep inspection | Extended protocol parsers (MQTT, AMQP, NATS, Cassandra), application attack detection (SQLi/XSS/injection signatures), per-protocol policies (Redis/Mongo/Kafka/SQL/LDAP/SSH), alert enrichment (OWASP/MITRE/PCI), extended TLS-library hooking (Go, static OpenSSL/BoringSSL, kTLS, GnuTLS, wolfSSL, mbedTLS, s2n-tls) |
 | Data protection | Advanced DLP (Vectorscan engine, custom patterns, block mode) |
-| Operations | HA clustering, multi-cluster federation, fleet management, air-gap mode |
+| Content channel | Signed content delivered without a redeploy: IDS rules, DLP patterns, JA4 fingerprints, AI providers, ML models, TLS offsets, host rule profiles and file watch profiles per distribution |
+| Operations | HA clustering, multi-cluster federation, fleet management, air-gap mode, bare-metal LoadBalancer addresses over ARP or BGP |
 | Multi-tenancy & access | Multi-tenancy (isolation + quotas), advanced RBAC, advanced analytics & reports |
 | Integration & response | SIEM integration (10 connectors), automated response orchestration (SOAR) |
 | Compliance | Compliance reports (PCI-DSS 4, HIPAA, GDPR, SOC 2, NIS2, DORA, SecNumCloud, HDS) |
