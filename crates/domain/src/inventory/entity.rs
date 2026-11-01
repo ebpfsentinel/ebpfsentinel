@@ -156,4 +156,15 @@ pub struct InventorySweep {
     pub executables_examined: u32,
     /// Go executables found past what one sweep carries, left for none.
     pub go_executables_not_read: u32,
+    /// Every file mapped executable by a live process, with the package
+    /// owning it in that process's root.
+    pub loaded: super::loaded::LoadedObjects,
+    /// Live processes listed.
+    pub processes_listed: u32,
+    /// Of those, the ones whose mappings were read this sweep, because they
+    /// started, mapped something or unmapped something since the last one.
+    pub processes_reread: u32,
+    /// Live processes whose mappings are not in `loaded`: unreadable, or
+    /// past what one sweep reads.
+    pub processes_not_read: u32,
 }

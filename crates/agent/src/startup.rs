@@ -4621,6 +4621,7 @@ pub async fn run(
                 ebpfsentinel_warden::rooted_read::file_roots,
                 ebpfsentinel_warden::rooted_read::read_rooted_file,
                 ebpfsentinel_warden::go_executables::scan,
+                ebpfsentinel_warden::process_maps::scan,
                 coverage_proc.clone(),
             ),
         );

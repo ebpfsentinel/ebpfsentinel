@@ -533,6 +533,76 @@ pub struct GoExecutableScan {
     pub not_read: u32,
 }
 
+/// The most processes one [`Response::ProcessMappings`] lists.
+pub const MAPPED_PIDS_MAX: usize = 65_536;
+
+/// The most bytes of one process's `/proc/<pid>/maps` read.
+pub const MAPS_BYTES_MAX: usize = 4 * 1024 * 1024;
+
+/// The most distinct executable files one process is listed as mapping.
+pub const MAPPED_FILES_PER_PID_MAX: usize = 4096;
+
+/// The most path bytes one [`Response::ProcessMappings`] carries in its
+/// file table, well inside a frame; changed processes past it are left for
+/// the next call.
+pub const MAPPINGS_BYTES_MAX: usize = 8 * 1024 * 1024;
+
+/// What tells one process apart from the one before it under the same pid,
+/// and its mappings from the ones it had: a process whose stamp has not moved
+/// is not read again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProcessStamp {
+    pub pid: u32,
+    /// `starttime` of `/proc/<pid>/stat`, in clock ticks since boot.
+    pub start_time: u64,
+    /// `vsize` of `/proc/<pid>/stat`, which moves when a mapping is added
+    /// or removed.
+    pub vsize: u64,
+}
+
+/// One file mapped executable by at least one process.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MappedFile {
+    /// The device and inode `/proc/<pid>/maps` names.
+    pub dev: u64,
+    pub ino: u64,
+    /// The path as the process sees it, inside its own root.
+    pub path: String,
+    /// The file was unlinked after it was mapped.
+    pub deleted: bool,
+}
+
+/// The executable mappings of one process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessMappings {
+    pub stamp: ProcessStamp,
+    /// `st_dev` and `st_ino` of `/proc/<pid>/root`, the root it runs in.
+    pub root_dev: u64,
+    pub root_ino: u64,
+    /// Indices into [`MappingScan::files`].
+    pub files: Vec<u32>,
+    /// Its maps were longer than [`MAPS_BYTES_MAX`] or it mapped more than
+    /// [`MAPPED_FILES_PER_PID_MAX`] files, and the rest is left out.
+    pub truncated: bool,
+    /// Why it could not be read; its files are then empty.
+    pub error: Option<String>,
+}
+
+/// One pass over the processes, reading only the ones whose stamp moved.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MappingScan {
+    /// Every process listed, with its stamp, at most [`MAPPED_PIDS_MAX`].
+    pub processes: Vec<ProcessStamp>,
+    /// Processes past [`MAPPED_PIDS_MAX`], not listed.
+    pub not_listed: u32,
+    /// The processes read in this call: those the caller did not know.
+    pub read: Vec<ProcessMappings>,
+    /// The files [`ProcessMappings::files`] point into.
+    pub files: Vec<MappedFile>,
+    /// Processes to read that [`MAPPINGS_BYTES_MAX`] left for another call.
+    pub pending: u32,
+}
+
 /// A request from the agent to the warden. Every variant is one kernel operation
 /// the rootless agent cannot perform itself; the warden validates each against an
 /// allowlist before acting, so a compromised agent cannot turn the warden into an
@@ -758,6 +828,12 @@ pub enum Command {
     /// answered by [`Response::GoExecutables`]. Read-only: an executable's
     /// ELF headers and one section, nothing from any process's memory.
     GoExecutables,
+    /// List every process with its stamp and read the executable mappings
+    /// of those whose stamp is not in `known`, answered by
+    /// [`Response::ProcessMappings`]. Read-only: `/proc/<pid>/stat`,
+    /// `/proc/<pid>/maps` and the root's identity, nothing from any
+    /// process's memory.
+    ProcessMappings { known: Vec<ProcessStamp> },
 }
 
 /// A thread group as one pid namespace numbers it.
@@ -899,6 +975,9 @@ pub enum Response {
     RootedRead { read: RootedRead },
     /// The Go executables found, answering [`Command::GoExecutables`].
     GoExecutables { scan: GoExecutableScan },
+    /// The processes and the mappings read, answering
+    /// [`Command::ProcessMappings`].
+    ProcessMappings { scan: MappingScan },
 }
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
@@ -933,9 +1012,10 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
 mod tests {
     use super::{
         BindProbe, Command, ConntrackTuple, DlpTarget, ExecutableIdentity, FileRoot, GoExecutable,
-        GoExecutableScan, HiddenProcessReading, ListedPort, MAX_FRAME_LEN, NamespacePortReading,
-        NetworkProgram, PacketSocket, PidObservation, ROOTED_CHUNK_MAX, Response, RootedFile,
-        RootedRead, RouteSpec, TaskIdentity, read_frame, valid_dpkg_list_name, write_frame,
+        GoExecutableScan, HiddenProcessReading, ListedPort, MAX_FRAME_LEN, MappedFile, MappingScan,
+        NamespacePortReading, NetworkProgram, PacketSocket, PidObservation, ProcessMappings,
+        ProcessStamp, ROOTED_CHUNK_MAX, Response, RootedFile, RootedRead, RouteSpec, TaskIdentity,
+        read_frame, valid_dpkg_list_name, write_frame,
     };
     use std::io::Cursor;
 
@@ -1014,6 +1094,13 @@ mod tests {
                 len: ROOTED_CHUNK_MAX,
             },
             Command::GoExecutables,
+            Command::ProcessMappings {
+                known: vec![ProcessStamp {
+                    pid: 1,
+                    start_time: 2,
+                    vsize: 170_000_000,
+                }],
+            },
         ]
     }
 
@@ -1213,6 +1300,35 @@ mod tests {
                         error: None,
                     }],
                     not_read: 0,
+                },
+            },
+            Response::ProcessMappings {
+                scan: MappingScan {
+                    processes: vec![ProcessStamp {
+                        pid: 812,
+                        start_time: 4_410,
+                        vsize: 1_250_000_000,
+                    }],
+                    not_listed: 0,
+                    read: vec![ProcessMappings {
+                        stamp: ProcessStamp {
+                            pid: 812,
+                            start_time: 4_410,
+                            vsize: 1_250_000_000,
+                        },
+                        root_dev: 48,
+                        root_ino: 2,
+                        files: vec![0],
+                        truncated: false,
+                        error: None,
+                    }],
+                    files: vec![MappedFile {
+                        dev: 64_769,
+                        ino: 917_970,
+                        path: "/usr/lib/x86_64-linux-gnu/libssl.so.3".into(),
+                        deleted: true,
+                    }],
+                    pending: 0,
                 },
             },
         ]

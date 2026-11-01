@@ -2247,6 +2247,51 @@ pub struct PackagesResponse {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct LoadedResponse {
+    pub reading: bool,
+    pub scanned_at_ns: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub processes_listed: u32,
+    #[serde(default)]
+    pub processes_reread: u32,
+    #[serde(default)]
+    pub processes_not_read: u32,
+    #[serde(default)]
+    pub objects_not_listed: u32,
+    #[serde(default)]
+    pub objects: Vec<LoadedObjectEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct OwnerEntry {
+    pub manager: String,
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct LoadedObjectEntry {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_pid: Option<u32>,
+    pub path: String,
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<OwnerEntry>,
+    #[serde(default)]
+    pub pids: Vec<u32>,
+    #[serde(default)]
+    pub processes: u32,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct GoModuleEntry {
     pub path: String,
     pub version: String,
@@ -4477,6 +4522,15 @@ impl ApiClient {
     pub async fn surface_packages(&self) -> anyhow::Result<PackagesResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/surface/packages")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn surface_loaded(&self) -> anyhow::Result<LoadedResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/surface/loaded")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

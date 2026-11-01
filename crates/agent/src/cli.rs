@@ -1179,6 +1179,9 @@ pub enum SurfaceCommand {
     /// List what the dpkg, rpm and Alpine databases say is installed, root
     /// by root
     Packages,
+    /// List every file live processes have mapped executable, the
+    /// processes mapping it and the package owning it
+    Loaded,
 }
 
 // ── Host rules ──────────────────────────────────────────────────────────
@@ -2777,6 +2780,18 @@ mod tests {
             cli.command,
             Some(Command::Surface(DomainArgs {
                 command: SurfaceCommand::Packages,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_surface_loaded() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "surface", "loaded"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Surface(DomainArgs {
+                command: SurfaceCommand::Loaded,
                 ..
             }))
         ));

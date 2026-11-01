@@ -8,19 +8,24 @@
 //!
 //! The same sweep asks for the build information of every running Go
 //! executable, since a static Go program carries its own module list and no
-//! package database names it.
+//! package database names it, and for the files every live process maps
+//! executable. Those are read again only for a process that started, mapped
+//! or unmapped something since the last sweep, and are joined to the
+//! package owning each in the process's own root.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use domain::common::error::DomainError;
 use domain::inventory::{
-    DatabaseReading, InventorySweep, PackageManager, RootInventory, apk_reading, dpkg_reading,
-    go_reading, rpm_sqlite_reading, scope_of, unreadable,
+    DatabaseReading, InventorySweep, MappedObject, PackageManager, ProcessObjects, RootInventory,
+    apk_reading, dpkg_reading, go_reading, loaded_objects, rpm_sqlite_reading, scope_of,
+    unreadable,
 };
 use ebpfsentinel_warden_client::{
-    FileRoot, GoExecutableScan, ROOTED_CHUNK_MAX, ReconnectingClient, RootedFile, RootedRead,
+    FileRoot, GoExecutableScan, MappingScan, ProcessStamp, ROOTED_CHUNK_MAX, ReconnectingClient,
+    RootedFile, RootedRead,
 };
 use ports::secondary::package_inventory_port::PackageInventoryReader;
 
@@ -38,6 +43,13 @@ pub type LocalRoots = fn(&Path) -> Vec<FileRoot>;
 pub type LocalRead = fn(&Path, u32, &RootedFile, u64, u32) -> RootedRead;
 /// The in-process scan of running Go executables, given the procfs to read.
 pub type LocalGo = fn(&Path) -> GoExecutableScan;
+/// The in-process walk of what every process maps, given the procfs to read
+/// and the processes already held.
+pub type LocalMappings = fn(&Path, &[ProcessStamp]) -> MappingScan;
+
+/// The most mapping walks one sweep asks for; each reads up to the warden's
+/// byte budget, and what is left waits for the next sweep.
+pub const MAPPING_CALLS_MAX: usize = 8;
 
 enum Source {
     /// A rootless agent cannot follow another process's root, so the warden
@@ -48,8 +60,26 @@ enum Source {
         roots: LocalRoots,
         read: LocalRead,
         go: LocalGo,
+        mappings: LocalMappings,
         proc_root: PathBuf,
     },
+}
+
+/// What one process was last seen mapping.
+struct Mapped {
+    stamp: ProcessStamp,
+    root: (u64, u64),
+    objects: Vec<Arc<MappedObject>>,
+    /// Its mappings could not be read; it is not read again until its
+    /// stamp moves.
+    unreadable: bool,
+}
+
+/// The live processes after one sweep's walks.
+struct Walk {
+    listed: u32,
+    reread: u32,
+    not_read: u32,
 }
 
 /// What identifies one reading of one database in one root.
@@ -76,15 +106,17 @@ enum Whole {
 pub struct WardenPackageReader {
     source: Source,
     cache: Mutex<HashMap<Stamp, DatabaseReading>>,
+    mapped: Mutex<HashMap<u32, Mapped>>,
 }
 
 impl WardenPackageReader {
-    /// The warden when the environment names one, else `roots`, `read` and
-    /// `go` over `proc_root`.
+    /// The warden when the environment names one, else `roots`, `read`,
+    /// `go` and `mappings` over `proc_root`.
     pub fn new(
         roots: LocalRoots,
         read: LocalRead,
         go: LocalGo,
+        mappings: LocalMappings,
         proc_root: impl Into<PathBuf>,
     ) -> Self {
         let warden = std::env::var_os(WARDEN_SOCK_ENV)
@@ -96,12 +128,118 @@ impl WardenPackageReader {
                 roots,
                 read,
                 go,
+                mappings,
                 proc_root: proc_root.into(),
             },
         };
         Self {
             source,
             cache: Mutex::new(HashMap::new()),
+            mapped: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn mapping_scan(&self, known: &[ProcessStamp]) -> Result<MappingScan, DomainError> {
+        match &self.source {
+            Source::Warden(client) => client
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .process_mappings(known)
+                .map_err(|e| {
+                    DomainError::EngineError(format!(
+                        "warden could not read what the processes map: {e}"
+                    ))
+                }),
+            Source::Local {
+                mappings,
+                proc_root,
+                ..
+            } => Ok(mappings(proc_root, known)),
+        }
+    }
+
+    /// Bring what every live process maps up to date, reading only the
+    /// processes whose stamp moved.
+    fn walk(&self) -> Result<(Walk, Vec<ProcessObjects>), DomainError> {
+        let mut mapped = self
+            .mapped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut reread = 0u32;
+        let mut last = MappingScan::default();
+        for _ in 0..MAPPING_CALLS_MAX {
+            let known: Vec<ProcessStamp> = mapped.values().map(|m| m.stamp).collect();
+            last = self.mapping_scan(&known)?;
+            let files: Vec<Arc<MappedObject>> = last
+                .files
+                .iter()
+                .map(|f| {
+                    Arc::new(MappedObject {
+                        dev: f.dev,
+                        ino: f.ino,
+                        path: f.path.clone(),
+                        deleted: f.deleted,
+                    })
+                })
+                .collect();
+            for process in &last.read {
+                reread = reread.saturating_add(1);
+                mapped.insert(
+                    process.stamp.pid,
+                    Mapped {
+                        stamp: process.stamp,
+                        root: (process.root_dev, process.root_ino),
+                        objects: process
+                            .files
+                            .iter()
+                            .filter_map(|&i| files.get(i as usize).cloned())
+                            .collect(),
+                        unreadable: process.error.is_some(),
+                    },
+                );
+            }
+            if last.pending == 0 {
+                break;
+            }
+        }
+        // A process gone, or a pid now held by another process, leaves.
+        let live: HashMap<u32, ProcessStamp> = last.processes.iter().map(|s| (s.pid, *s)).collect();
+        mapped.retain(|pid, m| live.get(pid) == Some(&m.stamp));
+        let current = mapped.values().filter(|m| !m.unreadable).count();
+        let listed = u32::try_from(last.processes.len()).unwrap_or(u32::MAX);
+        let not_read = last
+            .not_listed
+            .saturating_add(listed.saturating_sub(u32::try_from(current).unwrap_or(u32::MAX)));
+        let walk = Walk {
+            listed,
+            reread,
+            not_read,
+        };
+        let processes = mapped
+            .values()
+            .filter(|m| !m.unreadable)
+            .map(|m| ProcessObjects {
+                pid: m.stamp.pid,
+                root_pid: None,
+                objects: m.objects.clone(),
+            })
+            .collect();
+        Ok((walk, processes))
+    }
+
+    /// The root each process runs in, named by the pid the roots were
+    /// listed under.
+    fn with_roots(&self, processes: &mut [ProcessObjects], roots: &[FileRoot]) {
+        let by_identity: HashMap<(u64, u64), u32> =
+            roots.iter().map(|r| ((r.dev, r.ino), r.pid)).collect();
+        let mapped = self
+            .mapped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for process in processes {
+            process.root_pid = mapped
+                .get(&process.pid)
+                .and_then(|m| by_identity.get(&m.root).copied());
         }
     }
 
@@ -387,6 +525,9 @@ impl PackageInventoryReader for WardenPackageReader {
             .cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = fresh;
+        let (walk, mut processes) = self.walk()?;
+        self.with_roots(&mut processes, &roots);
+        let loaded = loaded_objects(&out, &processes);
         let scan = self.go_executables()?;
         let go_executables = scan
             .executables
@@ -411,6 +552,10 @@ impl PackageInventoryReader for WardenPackageReader {
             go_executables,
             executables_examined: scan.examined,
             go_executables_not_read: scan.not_read,
+            loaded,
+            processes_listed: walk.listed,
+            processes_reread: walk.reread,
+            processes_not_read: walk.not_read,
         })
     }
 
@@ -525,16 +670,128 @@ mod tests {
         }
     }
 
+    /// One fake process: its stamp, its root's device and inode, and the
+    /// paths it maps.
+    type FakeProcess = (ProcessStamp, (u64, u64), Vec<&'static str>);
+
+    thread_local! {
+        /// The processes the fake procfs holds, and the stamps each walk
+        /// was handed.
+        static PROCESSES: std::cell::RefCell<Vec<FakeProcess>> =
+            std::cell::RefCell::new(vec![
+                (stamp(100, 1), (1, 2), vec!["/lib/libc.so.6", "/usr/sbin/sshd"]),
+                (stamp(101, 1), (1, 2), vec!["/usr/lib/libc.so.6"]),
+                (stamp(400, 1), (9, 2), vec!["/lib/ld-musl-x86_64.so.1"]),
+            ]);
+        static WALKED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn stamp(pid: u32, vsize: u64) -> ProcessStamp {
+        ProcessStamp {
+            pid,
+            start_time: 10,
+            vsize,
+        }
+    }
+
+    /// One process read per walk, so a sweep takes several.
+    fn mappings(_: &Path, known: &[ProcessStamp]) -> MappingScan {
+        let mut scan = MappingScan::default();
+        PROCESSES.with_borrow(|all| {
+            for (stamp, root, paths) in all {
+                scan.processes.push(*stamp);
+                if known.contains(stamp) {
+                    continue;
+                }
+                if !scan.read.is_empty() {
+                    scan.pending += 1;
+                    continue;
+                }
+                WALKED.with(|w| w.set(w.get() + 1));
+                let mut files = Vec::new();
+                for path in paths {
+                    files.push(u32::try_from(scan.files.len()).unwrap_or(0));
+                    scan.files.push(ebpfsentinel_warden_client::MappedFile {
+                        dev: root.0,
+                        ino: if path.contains("libc") { 5 } else { 6 },
+                        path: (*path).to_string(),
+                        deleted: false,
+                    });
+                }
+                scan.read.push(ebpfsentinel_warden_client::ProcessMappings {
+                    stamp: *stamp,
+                    root_dev: root.0,
+                    root_ino: root.1,
+                    files,
+                    truncated: false,
+                    error: None,
+                });
+            }
+        });
+        scan
+    }
+
     fn reader() -> WardenPackageReader {
         WardenPackageReader {
             source: Source::Local {
                 roots,
                 read,
                 go,
+                mappings,
                 proc_root: PathBuf::from("/proc"),
             },
             cache: Mutex::new(HashMap::new()),
+            mapped: Mutex::new(HashMap::new()),
         }
+    }
+
+    #[test]
+    fn what_live_processes_map_is_named_with_its_package_and_read_once() {
+        let reader = reader();
+        let Ok(first) = reader.read() else {
+            panic!("the sweep was taken");
+        };
+        assert_eq!(WALKED.with(Cell::get), 3);
+        assert_eq!(
+            (
+                first.processes_listed,
+                first.processes_reread,
+                first.processes_not_read
+            ),
+            (3, 3, 0)
+        );
+        let libc = first
+            .loaded
+            .objects
+            .iter()
+            .find(|o| o.path.ends_with("libc.so.6"))
+            .unwrap_or_else(|| panic!("libc listed"));
+        assert_eq!(libc.pids, [100, 101]);
+        assert_eq!(libc.owner.as_ref().map(|p| p.name.as_str()), Some("libc6"));
+        let musl = first
+            .loaded
+            .objects
+            .iter()
+            .find(|o| o.path.contains("musl"))
+            .unwrap_or_else(|| panic!("musl listed"));
+        assert_eq!(musl.root_pid, Some(40));
+        let Ok(second) = reader.read() else {
+            panic!("the sweep was taken");
+        };
+        assert_eq!(WALKED.with(Cell::get), 3);
+        assert_eq!(second.processes_reread, 0);
+        assert_eq!(second.loaded, first.loaded);
+        // A process that exits leaves; one that maps something is read again.
+        PROCESSES.with_borrow_mut(|all| {
+            all.remove(2);
+            all[1].0.vsize = 2;
+        });
+        let Ok(third) = reader.read() else {
+            panic!("the sweep was taken");
+        };
+        assert_eq!(WALKED.with(Cell::get), 4);
+        assert_eq!((third.processes_listed, third.processes_reread), (2, 1));
+        assert!(third.loaded.objects.iter().all(|o| o.root_pid == Some(1)));
     }
 
     #[test]
@@ -606,7 +863,10 @@ mod tests {
         let between = reads();
         let second = reader.read().ok();
         let after = reads();
-        assert_eq!(first, second);
+        assert_eq!(
+            first.as_ref().map(|s| &s.roots),
+            second.as_ref().map(|s| &s.roots)
+        );
         // The second sweep only stats: one call per database found, where
         // the first read every three-byte piece of every one of them.
         assert!(
@@ -622,6 +882,7 @@ mod tests {
                 "/nonexistent/warden.sock",
             ))),
             cache: Mutex::new(HashMap::new()),
+            mapped: Mutex::new(HashMap::new()),
         };
         assert_eq!(reader.source(), "warden");
         assert!(reader.read().is_err());

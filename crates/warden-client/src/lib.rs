@@ -31,9 +31,9 @@ use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame,
 pub use ebpfsentinel_warden_proto::{
     BindProbe, ConntrackTuple, DlpTarget, ExecutableIdentity, FileRoot, FimEvent, FimFacts,
     FimFile, FimFileType, FimMark, FimReading, FimXattr, GoExecutable, GoExecutableScan,
-    HeldBpfObjects, HiddenProcessReading, ListedPort, NamespacePortReading, NetworkProgram,
-    PacketSocket, PidObservation, ROOTED_CHUNK_MAX, RootedFile, RootedRead, RouteSpec,
-    TaskIdentity,
+    HeldBpfObjects, HiddenProcessReading, ListedPort, MappedFile, MappingScan,
+    NamespacePortReading, NetworkProgram, PacketSocket, PidObservation, ProcessMappings,
+    ProcessStamp, ROOTED_CHUNK_MAX, RootedFile, RootedRead, RouteSpec, TaskIdentity,
 };
 
 /// How long one warden call may take before the client gives up on it.
@@ -89,6 +89,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::FileRoots => "FileRoots",
         Command::ReadRootedFile { .. } => "ReadRootedFile",
         Command::GoExecutables => "GoExecutables",
+        Command::ProcessMappings { .. } => "ProcessMappings",
     }
 }
 
@@ -315,6 +316,17 @@ impl WardenClient {
         match self.call(&Command::GoExecutables)? {
             Response::GoExecutables { scan } => Ok(scan),
             other => Err(unexpected("GoExecutables", &other)),
+        }
+    }
+
+    /// List every process and read the executable mappings of those whose
+    /// stamp is not in `known`.
+    pub fn process_mappings(&mut self, known: &[ProcessStamp]) -> io::Result<MappingScan> {
+        match self.call(&Command::ProcessMappings {
+            known: known.to_vec(),
+        })? {
+            Response::ProcessMappings { scan } => Ok(scan),
+            other => Err(unexpected("ProcessMappings", &other)),
         }
     }
 
@@ -645,6 +657,13 @@ impl ReconnectingClient {
     /// harmless.
     pub fn go_executables(&mut self) -> io::Result<GoExecutableScan> {
         self.with_retry(WardenClient::go_executables)
+    }
+
+    /// List every process and read the mappings of those not in `known`,
+    /// reconnecting if the warden bounced. A read, so replaying it is
+    /// harmless.
+    pub fn process_mappings(&mut self, known: &[ProcessStamp]) -> io::Result<MappingScan> {
+        self.with_retry(|c| c.process_mappings(known))
     }
 
     /// Read one TCX hook's program ids in run order, reconnecting if the

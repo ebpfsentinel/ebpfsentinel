@@ -694,7 +694,7 @@ coverage:
     topology: none
     kernel_min: "6.12"
     profile: nightly
-    notes: "What is installed, root by root, through /api/v1/surface/packages, and the modules a running Go program (containerd or dockerd) states from its own build information: the CLI's tables and JSON agree with the route"
+    notes: "What is installed, root by root, through /api/v1/surface/packages, and the modules a running Go program (containerd or dockerd) states from its own build information, and every file live processes map executable through /api/v1/surface/loaded, joined to the package owning it in that process's root (a program started in the suite appears with its libc owned by libc6 and leaves when stopped, a chrooted process is attributed to its own root): the CLI's tables and JSON agree with both routes"
 
   - kind: cli_subcommand
     feature: processes

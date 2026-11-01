@@ -16,6 +16,10 @@
 #   * A link climbing out of a root does not reach the host's files.
 #   * No field of the answer names a vulnerability, a severity or a score.
 #   * The CLI prints the same packages the route answers.
+#   * A program started during the suite is listed with the files it maps
+#     and the package owning its C library, and leaves once it is stopped.
+#   * What a chrooted process maps is attributed to its own root.
+#   * The CLI prints the mapped files the route answers.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
@@ -105,6 +109,29 @@ APK
 # _packages - the inventory, empty when the route did not answer.
 _packages() {
     curl -sf --max-time "${HTTP_TIMEOUT}" "${BASE_URL}/api/v1/surface/packages" || true
+}
+
+# _loaded - the mapped files, empty when the route did not answer.
+_loaded() {
+    curl -sf --max-time "${HTTP_TIMEOUT}" "${BASE_URL}/api/v1/surface/loaded" || true
+}
+
+# _wait_loaded <timeout_s> [jq args...] <jq filter> - polls until the mapped
+# files satisfy the filter, and prints them.
+_wait_loaded() {
+    local timeout="$1" body i
+    shift
+    for ((i = 0; i < timeout; i++)); do
+        body="$(_loaded)"
+        if echo "${body:-{\}}" | jq -e "$@" >/dev/null 2>&1; then
+            echo "$body"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "${body:-}" | jq -c '{processes_listed, processes_reread, processes_not_read,
+        objects: (.objects | length)}' >&2
+    return 1
 }
 
 # _wait_read <timeout_s> - polls until a reading finished, and prints it.
@@ -218,4 +245,62 @@ _root_of() {
         echo "$out" | grep -qE 'running executable\(s\) examined'
         echo "$out" | grep -qE '^host +/[^ ]+ +go1\.[0-9]+'
     fi
+}
+
+@test "a program started now is listed with what it maps, and leaves when stopped" {
+    local svc pid body libc
+    svc="${DATA_DIR}/surface-service"
+    cp "$(readlink -f "$(command -v sleep)")" "$svc"
+    "$svc" 3600 &
+    pid=$!
+    echo "$pid" >> "${ROOTS_PIDS_FILE}"
+    body="$(_wait_loaded 150 --argjson pid "$pid" --arg svc "$svc" \
+        '.objects | any(.path == $svc and (.pids | index($pid)))')" || {
+        kill "$pid" 2>/dev/null || true
+        echo "${svc} (pid ${pid}) never listed" >&2
+        return 1
+    }
+    [ "$(echo "$body" | jq -r --arg svc "$svc" '.objects[] | select(.path == $svc) | .kind')" = "host" ]
+    # Nothing installed it, so no package owns it.
+    [ "$(echo "$body" | jq -r --arg svc "$svc" '.objects[] | select(.path == $svc) | .owner')" = "null" ]
+    # Every process on the host maps the C library, so the new one is
+    # counted there rather than among the sixteen pids named.
+    libc="$(echo "$body" | jq -c \
+        '[.objects[] | select(.kind == "host" and (.path | test("/libc\\.so\\.6$")))][0]')"
+    [ "$libc" != "null" ]
+    [ "$(echo "$libc" | jq -r '.owner.manager + " " + .owner.name')" = "dpkg libc6" ]
+    [ "$(echo "$libc" | jq -r '.owner.version')" = "$(dpkg-query -W -f='${Version}' libc6)" ]
+    [ "$(echo "$libc" | jq '.processes')" -gt 1 ]
+    kill "$pid"
+    wait "$pid" 2>/dev/null || true
+    _wait_loaded 150 --arg svc "$svc" '.objects | all(.path != $svc)' >/dev/null
+}
+
+@test "what a chrooted process maps is attributed to its own root" {
+    local pid body entry
+    pid="$(sed -n 1p "${ROOTS_PIDS_FILE}")"
+    body="$(_wait_loaded 150 --argjson pid "$pid" \
+        '.objects | any((.pids | index($pid)) and .root_pid == $pid)')" || {
+        echo "nothing mapped by pid ${pid} is under its own root" >&2
+        return 1
+    }
+    entry="$(echo "$body" | jq -c --argjson pid "$pid" \
+        '[.objects[] | select((.pids | index($pid)) and (.path | test("python")))][0]')"
+    [ "$entry" != "null" ]
+    [ "$(echo "$entry" | jq -r '.kind')" = "other" ]
+    [ "$(echo "$entry" | jq -r '.root_pid')" = "$pid" ]
+    # The Alpine database of that root owns no python, whatever the host's says.
+    [ "$(echo "$entry" | jq -r '.owner')" = "null" ]
+}
+
+@test "the CLI prints the mapped files the route answers" {
+    local body out
+    body="$(_wait_loaded 150 '.objects | length > 0')"
+    out="$("$AGENT_BIN" surface --host "$AGENT_HOST" --port "$AGENT_HTTP_PORT" loaded 2>&1)"
+    echo "$out" | grep -qE 'process\(es\) listed'
+    echo "$out" | grep -qE '^host +/[^ ]*libc\.so\.6 +libc6 '
+    out="$("$AGENT_BIN" surface --host "$AGENT_HOST" --port "$AGENT_HTTP_PORT" loaded --output json)"
+    echo "$out" | jq -e '.objects | length > 0'
+    [ "$(echo "$out" | jq '[paths | map(strings) | .[]
+        | select(test("cve|severity|score|vulnerab|cvss|risk"; "i"))] | length')" -eq 0 ]
 }

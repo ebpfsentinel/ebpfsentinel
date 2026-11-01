@@ -3,8 +3,8 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State;
 use domain::inventory::{
-    DatabaseOutcome, DatabaseReading, GoExecutableReading, GoModule, GoOutcome, Package,
-    PackageState, RootInventory, RootScope,
+    DatabaseOutcome, DatabaseReading, GoExecutableReading, GoModule, GoOutcome, LoadedObject,
+    Package, PackageState, RootInventory, RootScope,
 };
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -131,6 +131,70 @@ pub struct PackagesResponse {
     pub go_executables: Vec<GoExecutableBody>,
 }
 
+/// The package a database says owns a mapped file.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OwnerBody {
+    /// `dpkg`, `rpm` or `apk`.
+    pub manager: &'static str,
+    pub name: String,
+    pub version: String,
+}
+
+/// One file mapped executable by live processes, once per file and root.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LoadedObjectBody {
+    /// The root it is mapped in: `host`, `container`, `other`, or `unread`
+    /// for a root past what one sweep reads.
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    /// The process naming that root, as in the package inventory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_pid: Option<u32>,
+    /// Its path inside that root.
+    pub path: String,
+    /// Unlinked since it was mapped: an upgrade replaced it on disk and the
+    /// processes below still run the old file.
+    pub deleted: bool,
+    /// The package owning the path in that root. Absent when no database
+    /// read there lists it. For a deleted file it is the package owning
+    /// the path now, which may be a later version than the one mapped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<OwnerBody>,
+    /// Processes mapping it, lowest first, at most sixteen.
+    pub pids: Vec<u32>,
+    /// How many processes map it in all.
+    pub processes: u32,
+}
+
+/// What live processes have mapped executable, and the package owning
+/// each file.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LoadedResponse {
+    /// Whether the inventory is read.
+    pub reading: bool,
+    /// When the last sweep was made, in nanoseconds since the epoch, `0`
+    /// before the first.
+    pub scanned_at_ns: u64,
+    /// Why the last sweep failed. The result is then the sweep before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// Live processes listed in the last sweep.
+    pub processes_listed: u32,
+    /// Of those, the ones read again because they started, mapped or
+    /// unmapped something since the sweep before.
+    pub processes_reread: u32,
+    /// Live processes whose mappings are not below: unreadable, or past
+    /// what one sweep reads.
+    pub processes_not_read: u32,
+    /// Files past the number one sweep lists.
+    pub objects_not_listed: u32,
+    /// Root first, then by path.
+    pub objects: Vec<LoadedObjectBody>,
+}
+
 fn package(p: &Package) -> PackageBody {
     PackageBody {
         name: p.name.clone(),
@@ -169,6 +233,25 @@ fn scope(scope: &RootScope) -> (&'static str, Option<String>, Option<String>) {
             Some(runtime.to_string()),
         ),
         RootScope::Other => ("other", None, None),
+    }
+}
+
+fn loaded(o: &LoadedObject) -> LoadedObjectBody {
+    let (kind, container_id, runtime) = o.scope.as_ref().map_or(("unread", None, None), scope);
+    LoadedObjectBody {
+        kind,
+        container_id,
+        runtime,
+        root_pid: o.root_pid,
+        path: o.path.clone(),
+        deleted: o.deleted,
+        owner: o.owner.as_ref().map(|p| OwnerBody {
+            manager: p.manager.as_str(),
+            name: p.name.clone(),
+            version: p.version.clone(),
+        }),
+        pids: o.pids.clone(),
+        processes: o.processes,
     }
 }
 
@@ -272,6 +355,45 @@ pub async fn get_packages(State(state): State<Arc<AppState>>) -> Json<PackagesRe
     })
 }
 
+#[utoipa::path(
+    get, path = "/api/v1/surface/loaded",
+    tag = "Operations",
+    responses((status = 200, description = "Every file live processes have mapped executable, once per file and root, with the processes mapping it and the package owning it in that root", body = LoadedResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn get_loaded(State(state): State<Arc<AppState>>) -> Json<LoadedResponse> {
+    let Some(service) = state.package_inventory.load_full() else {
+        return Json(LoadedResponse {
+            reading: false,
+            scanned_at_ns: 0,
+            last_error: None,
+            processes_listed: 0,
+            processes_reread: 0,
+            processes_not_read: 0,
+            objects_not_listed: 0,
+            objects: Vec::new(),
+        });
+    };
+    let report = service.report();
+    let sweep = &report.sweep;
+    Json(LoadedResponse {
+        reading: true,
+        scanned_at_ns: report.scanned_at_ns,
+        last_error: report.error.clone(),
+        processes_listed: sweep.processes_listed,
+        processes_reread: sweep.processes_reread,
+        processes_not_read: sweep.processes_not_read,
+        objects_not_listed: sweep.loaded.not_listed,
+        objects: sweep.loaded.objects.iter().map(loaded).collect(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,5 +492,34 @@ mod tests {
         for word in ["cve", "severity", "score", "vulnerab", "cvss", "risk"] {
             assert!(!json.contains(&format!("\"{word}")), "{word}");
         }
+    }
+
+    #[test]
+    fn a_mapped_file_names_its_owner_and_an_unread_root_says_so() {
+        let owned = LoadedObject {
+            scope: Some(RootScope::Host),
+            root_pid: Some(1),
+            path: "/usr/lib/libz.so.1".into(),
+            deleted: true,
+            owner: Some(domain::inventory::PackageRef {
+                manager: PackageManager::Dpkg,
+                name: "zlib1g".into(),
+                version: "1:1.3".into(),
+            }),
+            pids: vec![7, 9],
+            processes: 2,
+        };
+        let b = loaded(&owned);
+        assert_eq!((b.kind, b.root_pid, b.deleted), ("host", Some(1), true));
+        assert_eq!(b.owner.as_ref().map(|o| o.manager), Some("dpkg"));
+        let unread = loaded(&LoadedObject {
+            scope: None,
+            root_pid: None,
+            owner: None,
+            ..owned
+        });
+        assert_eq!(unread.kind, "unread");
+        let json = serde_json::to_value(&unread).unwrap_or_default();
+        assert!(json.get("owner").is_none() && json.get("root_pid").is_none());
     }
 }

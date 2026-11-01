@@ -5103,6 +5103,73 @@ pub async fn cmd_surface_packages(client: &ApiClient, output: OutputFormat) -> R
     Ok(())
 }
 
+/// Print every file live processes have mapped executable, the processes
+/// mapping it and the package owning it in their root.
+pub async fn cmd_surface_loaded(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.surface_loaded().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    if !resp.reading {
+        println!("The package inventory is turned off on this node.");
+        return Ok(());
+    }
+    if resp.scanned_at_ns == 0 {
+        println!("The first reading has not finished yet.");
+        return Ok(());
+    }
+    if let Some(error) = &resp.last_error {
+        println!("Last reading failed, the result below is the previous one: {error}");
+    }
+    println!(
+        "{} process(es) listed, {} read again since the last sweep, {} not read.",
+        resp.processes_listed, resp.processes_reread, resp.processes_not_read
+    );
+    if resp.objects_not_listed > 0 {
+        println!(
+            "{} more mapped file(s) were not listed.",
+            resp.objects_not_listed
+        );
+    }
+    let mut table = Table::new(&[
+        ("ROOT", Align::Left),
+        ("FILE", Align::Left),
+        ("PACKAGE", Align::Left),
+        ("VERSION", Align::Left),
+        ("PROCESSES", Align::Right),
+        ("PIDS", Align::Left),
+    ]);
+    for o in &resp.objects {
+        let label = match o.root_pid {
+            Some(pid) => root_label(&o.kind, o.container_id.as_deref(), pid),
+            None => "unread".to_string(),
+        };
+        let file = if o.deleted {
+            format!("{} (deleted)", o.path)
+        } else {
+            o.path.clone()
+        };
+        let pids: Vec<String> = o.pids.iter().map(ToString::to_string).collect();
+        table.row(cells![
+            label,
+            file,
+            o.owner.as_ref().map_or("-", |p| p.name.as_str()),
+            o.owner.as_ref().map_or("-", |p| p.version.as_str()),
+            o.processes,
+            pids.join(",")
+        ]);
+    }
+    if resp.objects.is_empty() {
+        println!("No mapped file was read.");
+    } else {
+        table.print();
+    }
+    Ok(())
+}
+
 /// Print the eBPF programs on the network path that the agent did not load,
 /// where they run and who holds them.
 pub async fn cmd_ebpf_foreign_programs(client: &ApiClient, output: OutputFormat) -> Result<()> {

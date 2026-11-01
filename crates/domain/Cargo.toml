@@ -92,3 +92,7 @@ harness = false
 [[bench]]
 name = "host_rule_matcher"
 harness = false
+
+[[bench]]
+name = "loaded_objects"
+harness = false

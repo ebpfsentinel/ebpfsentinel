@@ -56,6 +56,7 @@ pub mod net_ops;
 pub mod netns_tcx_ops;
 pub mod packet_sockets;
 pub mod pcap_slots;
+pub mod process_maps;
 pub mod rooted_read;
 pub mod server;
 pub mod tcx_ops;

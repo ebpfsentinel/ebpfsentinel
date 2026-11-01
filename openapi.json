@@ -8151,6 +8151,54 @@
         ]
       }
     },
+    "/api/v1/surface/loaded": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "operationId": "get_loaded",
+        "responses": {
+          "200": {
+            "description": "Every file live processes have mapped executable, once per file and root, with the processes mapping it and the package owning it in that root",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoadedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/surface/packages": {
       "get": {
         "tags": [
@@ -15021,6 +15069,141 @@
           }
         }
       },
+      "LoadedObjectBody": {
+        "type": "object",
+        "description": "One file mapped executable by live processes, once per file and root.",
+        "required": [
+          "kind",
+          "path",
+          "deleted",
+          "pids",
+          "processes"
+        ],
+        "properties": {
+          "container_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deleted": {
+            "type": "boolean",
+            "description": "Unlinked since it was mapped: an upgrade replaced it on disk and the\nprocesses below still run the old file."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The root it is mapped in: `host`, `container`, `other`, or `unread`\nfor a root past what one sweep reads."
+          },
+          "owner": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OwnerBody",
+                "description": "The package owning the path in that root. Absent when no database\nread there lists it. For a deleted file it is the package owning\nthe path now, which may be a later version than the one mapped."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "path": {
+            "type": "string",
+            "description": "Its path inside that root."
+          },
+          "pids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Processes mapping it, lowest first, at most sixteen."
+          },
+          "processes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many processes map it in all.",
+            "minimum": 0
+          },
+          "root_pid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The process naming that root, as in the package inventory.",
+            "minimum": 0
+          },
+          "runtime": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "LoadedResponse": {
+        "type": "object",
+        "description": "What live processes have mapped executable, and the package owning\neach file.",
+        "required": [
+          "reading",
+          "scanned_at_ns",
+          "processes_listed",
+          "processes_reread",
+          "processes_not_read",
+          "objects_not_listed",
+          "objects"
+        ],
+        "properties": {
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last sweep failed. The result is then the sweep before."
+          },
+          "objects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LoadedObjectBody"
+            },
+            "description": "Root first, then by path."
+          },
+          "objects_not_listed": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Files past the number one sweep lists.",
+            "minimum": 0
+          },
+          "processes_listed": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Live processes listed in the last sweep.",
+            "minimum": 0
+          },
+          "processes_not_read": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Live processes whose mappings are not below: unreadable, or past\nwhat one sweep reads.",
+            "minimum": 0
+          },
+          "processes_reread": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Of those, the ones read again because they started, mapped or\nunmapped something since the sweep before.",
+            "minimum": 0
+          },
+          "reading": {
+            "type": "boolean",
+            "description": "Whether the inventory is read."
+          },
+          "scanned_at_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the last sweep was made, in nanoseconds since the epoch, `0`\nbefore the first.",
+            "minimum": 0
+          }
+        }
+      },
       "MissingHelperEntry": {
         "type": "object",
         "description": "A helper an object needs that this kernel does not offer for its type.",
@@ -15725,6 +15908,27 @@
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          }
+        }
+      },
+      "OwnerBody": {
+        "type": "object",
+        "description": "The package a database says owns a mapped file.",
+        "required": [
+          "manager",
+          "name",
+          "version"
+        ],
+        "properties": {
+          "manager": {
+            "type": "string",
+            "description": "`dpkg`, `rpm` or `apk`."
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
           }
         }
       },
