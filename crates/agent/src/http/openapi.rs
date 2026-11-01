@@ -24,6 +24,7 @@ use super::flow_handler;
 use super::geoip_handler;
 use super::guest_handler;
 use super::health_handler;
+use super::hidden_port_handler;
 use super::host_rule_handler;
 use super::ids_handler;
 use super::ips_handler;
@@ -141,6 +142,7 @@ use super::zone_handler;
         ops_handler::get_uprobes,
         drop_reason_handler::get_drop_reasons,
         raw_socket_handler::get_raw_sockets,
+        hidden_port_handler::get_hidden_ports,
         host_rule_handler::get_host_intents,
         host_rule_handler::get_host_rules,
         exposure_handler::get_listeners,
@@ -382,6 +384,10 @@ use super::zone_handler;
         drop_reason_handler::DropReasonsResponse,
         drop_reason_handler::DropReasonBody,
         raw_socket_handler::RawSocketsResponse,
+        hidden_port_handler::HiddenPortsResponse,
+        hidden_port_handler::HiddenPortBody,
+        hidden_port_handler::HiddenPortCountsBody,
+        hidden_port_handler::UnreachableNamespaceBody,
         host_rule_handler::HostIntentsResponse,
         host_rule_handler::HostRulesResponse,
         host_rule_handler::HostRuleBody,

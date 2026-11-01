@@ -1108,6 +1108,8 @@ pub enum EbpfCommand {
     Drops,
     /// List the packet sockets open on this node, their holder and filter
     RawSockets,
+    /// Compare the socket listings with a bind probe: ports held and listed nowhere
+    HiddenPorts,
     /// List the eBPF programs on the network path that the agent did not load
     ForeignPrograms,
 }
@@ -2775,6 +2777,18 @@ mod tests {
             cli.command,
             Some(Command::HostRules(DomainArgs {
                 command: HostRulesCommand::Intents,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_ebpf_hidden_ports() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "ebpf", "hidden-ports"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Ebpf(DomainArgs {
+                command: EbpfCommand::HiddenPorts,
                 ..
             }))
         ));

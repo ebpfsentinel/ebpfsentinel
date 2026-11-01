@@ -294,6 +294,55 @@ pub struct FimFacts {
     pub reading: FimReading,
 }
 
+/// One socket a listing showed inside a namespace, reduced to what explains a
+/// refused bind. Duplicates are folded, so an estate of connections on one
+/// port is one entry per state rather than one per connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ListedPort {
+    /// `true` for UDP, `false` for TCP.
+    pub udp: bool,
+    /// The local port, in host order.
+    pub port: u16,
+    /// The kernel's state number for the socket.
+    pub state: u8,
+    /// `true` when `sock_diag` listed it, `false` for `/proc/net`.
+    pub sock_diag: bool,
+}
+
+/// One bind the hidden port probe made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BindProbe {
+    /// `true` for UDP, `false` for TCP.
+    pub udp: bool,
+    /// `true` for the IPv6 wildcard, `false` for the IPv4 one.
+    pub ipv6: bool,
+    /// The port, in host order.
+    pub port: u16,
+}
+
+/// What the hidden port probe read inside one network namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespacePortReading {
+    /// The namespace's inode.
+    pub netns: u64,
+    /// Whether it is the host's.
+    pub host_netns: bool,
+    /// Why the namespace could not be entered; everything else is then empty.
+    pub error: Option<String>,
+    /// Both listings, taken before the first probe.
+    pub first_listing: Vec<ListedPort>,
+    /// Both listings, taken again before the second probe.
+    pub second_listing: Vec<ListedPort>,
+    /// Binds the first pass attempted.
+    pub probed: u32,
+    /// Binds refused for another reason than the port being in use.
+    pub unprobed: u32,
+    /// Binds the first pass saw refused as in use.
+    pub refused_first: Vec<BindProbe>,
+    /// The first pass's refusals refused again by the second.
+    pub refused_second: Vec<BindProbe>,
+}
+
 /// A request from the agent to the warden. Every variant is one kernel operation
 /// the rootless agent cannot perform itself; the warden validates each against an
 /// allowlist before acting, so a compromised agent cannot turn the warden into an
@@ -482,6 +531,16 @@ pub enum Command {
         /// A regular file larger than this is not hashed.
         max_hash_bytes: u64,
     },
+    /// In every network namespace `/proc` shows, read the TCP and UDP
+    /// listings from `/proc/net` and `sock_diag`, then bind each of `ports`
+    /// on both wildcards and both transports with no reuse option and
+    /// release it at once; take the listings again and probe the refused
+    /// ports a second time. Answered by [`Response::HiddenPorts`]. The bind
+    /// is the only thing done in a namespace and nothing is left open.
+    HiddenPorts {
+        /// The ports to probe, at most 65535 of them.
+        ports: Vec<u16>,
+    },
 }
 
 /// A thread group as one pid namespace numbers it.
@@ -610,6 +669,11 @@ pub enum Response {
         /// One entry per path read.
         facts: Vec<FimFacts>,
     },
+    /// What each namespace answered, answering [`Command::HiddenPorts`].
+    HiddenPorts {
+        /// One entry per network namespace found.
+        namespaces: Vec<NamespacePortReading>,
+    },
 }
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
@@ -643,8 +707,9 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, ConntrackTuple, DlpTarget, ExecutableIdentity, MAX_FRAME_LEN, NetworkProgram,
-        PacketSocket, Response, RouteSpec, TaskIdentity, read_frame, write_frame,
+        BindProbe, Command, ConntrackTuple, DlpTarget, ExecutableIdentity, ListedPort,
+        MAX_FRAME_LEN, NamespacePortReading, NetworkProgram, PacketSocket, Response, RouteSpec,
+        TaskIdentity, read_frame, write_frame,
     };
     use std::io::Cursor;
 
@@ -709,11 +774,14 @@ mod tests {
             Command::PacketSockets,
             Command::NetworkPrograms,
             Command::Identity,
+            Command::HiddenPorts {
+                ports: vec![22, 31_337],
+            },
         ]
     }
 
     fn all_responses() -> Vec<Response> {
-        vec![
+        [
             Response::HelloOk { version: 1 },
             Response::Delegated {
                 btf_names: vec!["nf_conntrack".into(), "fou".into()],
@@ -790,6 +858,48 @@ mod tests {
                 },
             },
         ]
+        .into_iter()
+        .chain(hidden_responses())
+        .collect()
+    }
+
+    /// The answers of the two hidden checks.
+    fn hidden_responses() -> Vec<Response> {
+        vec![Response::HiddenPorts {
+            namespaces: vec![
+                NamespacePortReading {
+                    netns: 4_026_531_840,
+                    host_netns: true,
+                    error: None,
+                    first_listing: vec![ListedPort {
+                        udp: false,
+                        port: 22,
+                        state: 10,
+                        sock_diag: true,
+                    }],
+                    second_listing: Vec::new(),
+                    probed: 4096,
+                    unprobed: 2,
+                    refused_first: vec![BindProbe {
+                        udp: false,
+                        ipv6: true,
+                        port: 22,
+                    }],
+                    refused_second: Vec::new(),
+                },
+                NamespacePortReading {
+                    netns: 4_026_532_999,
+                    host_netns: false,
+                    error: Some("setns: operation not permitted".into()),
+                    first_listing: Vec::new(),
+                    second_listing: Vec::new(),
+                    probed: 0,
+                    unprobed: 0,
+                    refused_first: Vec::new(),
+                    refused_second: Vec::new(),
+                },
+            ],
+        }]
     }
 
     #[test]

@@ -93,6 +93,7 @@ use super::flow_handler::flow_export_status;
 use super::geoip_handler::{geoip_lookup, geoip_status};
 use super::guest_handler::get_guests;
 use super::health_handler::{healthz, readyz};
+use super::hidden_port_handler::get_hidden_ports;
 use super::host_rule_handler::{get_host_intents, get_host_rules};
 use super::ids_handler::{ids_status, list_ids_rules, suricata_report};
 use super::ips_handler::{
@@ -317,6 +318,7 @@ pub fn build_router(
             .route("/api/v1/ebpf/uprobes", get(get_uprobes))
             .route("/api/v1/ebpf/drop-reasons", get(get_drop_reasons))
             .route("/api/v1/ebpf/raw-sockets", get(get_raw_sockets))
+            .route("/api/v1/ebpf/hidden-ports", get(get_hidden_ports))
             .route("/api/v1/host-rules", get(get_host_rules))
             .route("/api/v1/host-rules/intents", get(get_host_intents))
             .route("/api/v1/exposure/listeners", get(get_listeners))

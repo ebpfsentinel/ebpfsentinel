@@ -48,6 +48,7 @@ pub mod dlp_scan;
 pub mod exe_read;
 pub mod file_facts;
 pub mod fim_watch;
+pub mod hidden_ports;
 pub mod host_ops;
 pub mod net_ops;
 pub mod netns_tcx_ops;

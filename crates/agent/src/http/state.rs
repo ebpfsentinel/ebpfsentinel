@@ -199,6 +199,8 @@ pub struct AppState {
     pub exposure: ArcSwapOption<application::exposure_service::ExposureService>,
     /// The inventory of the node's packet sockets, once it reads.
     pub raw_sockets: ArcSwapOption<application::raw_socket_service::RawSocketWatcher>,
+    /// The hidden port sweep, once it runs.
+    pub hidden_ports: ArcSwapOption<application::hidden_port_service::HiddenPortWatcher>,
     /// The inventory of the other eBPF programs on the network path, once
     /// it reads.
     pub network_programs:
@@ -254,6 +256,7 @@ impl AppState {
             tcp_health: ArcSwapOption::empty(),
             exposure: ArcSwapOption::empty(),
             raw_sockets: ArcSwapOption::empty(),
+            hidden_ports: ArcSwapOption::empty(),
             network_programs: ArcSwapOption::empty(),
             nat_service: None,
             alias_service: None,
@@ -521,6 +524,14 @@ impl AppState {
         watcher: Arc<application::raw_socket_service::RawSocketWatcher>,
     ) {
         self.raw_sockets.store(Some(watcher));
+    }
+
+    /// Hand the hidden port sweep over once it runs.
+    pub fn install_hidden_ports(
+        &self,
+        watcher: Arc<application::hidden_port_service::HiddenPortWatcher>,
+    ) {
+        self.hidden_ports.store(Some(watcher));
     }
 
     /// Hand the network program inventory over once it reads.

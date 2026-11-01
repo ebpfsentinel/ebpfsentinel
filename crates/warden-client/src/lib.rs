@@ -29,9 +29,9 @@ use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame,
 // Re-exported under their real names so callers of the typed control methods can
 // build request values without taking a direct dependency on the protocol crate.
 pub use ebpfsentinel_warden_proto::{
-    ConntrackTuple, DlpTarget, ExecutableIdentity, FimEvent, FimFacts, FimFile, FimFileType,
-    FimMark, FimReading, FimXattr, HeldBpfObjects, NetworkProgram, PacketSocket, RouteSpec,
-    TaskIdentity,
+    BindProbe, ConntrackTuple, DlpTarget, ExecutableIdentity, FimEvent, FimFacts, FimFile,
+    FimFileType, FimMark, FimReading, FimXattr, HeldBpfObjects, ListedPort, NamespacePortReading,
+    NetworkProgram, PacketSocket, RouteSpec, TaskIdentity,
 };
 
 /// How long one warden call may take before the client gives up on it.
@@ -82,6 +82,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::FimOpen { .. } => "FimOpen",
         Command::FimRead { .. } => "FimRead",
         Command::FimFacts { .. } => "FimFacts",
+        Command::HiddenPorts { .. } => "HiddenPorts",
     }
 }
 
@@ -252,6 +253,17 @@ impl WardenClient {
         match self.call(&Command::NetworkPrograms)? {
             Response::NetworkPrograms { programs } => Ok(programs),
             other => Err(unexpected("NetworkPrograms", &other)),
+        }
+    }
+
+    /// Read every network namespace's listings and probe `ports` against
+    /// them, twice over.
+    pub fn hidden_ports(&mut self, ports: &[u16]) -> io::Result<Vec<NamespacePortReading>> {
+        match self.call(&Command::HiddenPorts {
+            ports: ports.to_vec(),
+        })? {
+            Response::HiddenPorts { namespaces } => Ok(namespaces),
+            other => Err(unexpected("HiddenPorts", &other)),
         }
     }
 
@@ -580,6 +592,12 @@ impl ReconnectingClient {
     /// reconnecting if it bounced.
     pub fn network_programs(&mut self) -> io::Result<Vec<NetworkProgram>> {
         self.with_retry(WardenClient::network_programs)
+    }
+
+    /// Probe for hidden ports through the warden, reconnecting if it
+    /// bounced.
+    pub fn hidden_ports(&mut self, ports: &[u16]) -> io::Result<Vec<NamespacePortReading>> {
+        self.with_retry(|c| c.hidden_ports(ports))
     }
 
     /// Name the warden's thread group through the connection, reconnecting

@@ -19,6 +19,7 @@ pub mod file_watch;
 pub mod firewall;
 pub mod flow;
 pub mod guest;
+pub mod hidden;
 pub mod hostrule;
 pub mod identity;
 pub mod ids;

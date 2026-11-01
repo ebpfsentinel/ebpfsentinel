@@ -4828,6 +4828,74 @@ pub async fn cmd_ebpf_raw_sockets(client: &ApiClient, output: OutputFormat) -> R
     Ok(())
 }
 
+/// Print the last comparison of the socket listings with a bind probe: what
+/// explained each refused bind, and the ports nothing explained.
+pub async fn cmd_ebpf_hidden_ports(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.hidden_ports().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    if !resp.reading {
+        println!("The hidden port sweep is turned off on this node.");
+        return Ok(());
+    }
+    if resp.scanned_at_ns == 0 {
+        println!("The first sweep has not finished yet.");
+        return Ok(());
+    }
+    if let Some(error) = &resp.last_error {
+        println!("Last sweep failed, the result below is the previous one: {error}");
+    }
+    let c = &resp.counts;
+    println!(
+        "{} port(s) probed in {} namespace(s), read through {}.",
+        resp.probed_ports,
+        c.namespaces,
+        resp.source.as_deref().unwrap_or("-")
+    );
+    println!(
+        "{} bind(s) refused: {} by a listener, {} by TIME_WAIT, {} by another socket, \
+         {} not confirmed by the second reading, {} hidden. {} bind(s) could not be tried.",
+        c.refused,
+        c.explained_by_listener,
+        c.explained_by_time_wait,
+        c.explained_by_other_socket,
+        c.unconfirmed,
+        c.hidden,
+        c.unprobed
+    );
+    for ns in &resp.unreachable {
+        println!("Namespace {} not swept: {}", ns.netns, ns.reason);
+    }
+    if resp.hidden.is_empty() {
+        println!("No hidden port.");
+        return Ok(());
+    }
+    let mut table = Table::new(&[
+        ("NETNS", Align::Left),
+        ("TRANSPORT", Align::Left),
+        ("ADDRESS", Align::Left),
+        ("PORT", Align::Right),
+    ]);
+    for port in &resp.hidden {
+        table.row(cells![
+            if port.host_netns {
+                "host".to_string()
+            } else {
+                port.netns.to_string()
+            },
+            port.transport,
+            port.address,
+            port.port
+        ]);
+    }
+    table.print();
+    Ok(())
+}
+
 /// Print the eBPF programs on the network path that the agent did not load,
 /// where they run and who holds them.
 pub async fn cmd_ebpf_foreign_programs(client: &ApiClient, output: OutputFormat) -> Result<()> {

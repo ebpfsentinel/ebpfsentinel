@@ -3016,6 +3016,55 @@
         ]
       }
     },
+    "/api/v1/ebpf/hidden-ports": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "`GET /api/v1/ebpf/hidden-ports` - ports that refuse a bind and appear in\nno socket listing.",
+        "operationId": "get_hidden_ports",
+        "responses": {
+          "200": {
+            "description": "The last comparison of the socket listings with a bind probe, with what explained each refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HiddenPortsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/ebpf/kernel-features": {
       "get": {
         "tags": [
@@ -12733,6 +12782,178 @@
           }
         }
       },
+      "HiddenPortBody": {
+        "type": "object",
+        "description": "One port the kernel holds and no listing shows.",
+        "required": [
+          "netns",
+          "host_netns",
+          "transport",
+          "address",
+          "port"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The wildcard the refused bind was made on: `0.0.0.0` or `::`."
+          },
+          "host_netns": {
+            "type": "boolean",
+            "description": "Whether that namespace is the host's."
+          },
+          "netns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The network namespace, as an inode number.",
+            "minimum": 0
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "transport": {
+            "type": "string",
+            "description": "`tcp` or `udp`."
+          }
+        }
+      },
+      "HiddenPortCountsBody": {
+        "type": "object",
+        "description": "How the last sweep reached its result.",
+        "required": [
+          "namespaces",
+          "unreachable_namespaces",
+          "probed",
+          "unprobed",
+          "refused",
+          "explained_by_listener",
+          "explained_by_time_wait",
+          "explained_by_other_socket",
+          "unconfirmed",
+          "hidden"
+        ],
+        "properties": {
+          "explained_by_listener": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Refusals a listed listener explains, every member of a\n`SO_REUSEPORT` group included.",
+            "minimum": 0
+          },
+          "explained_by_other_socket": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Refusals only another bound socket explains, such as an outgoing\nconnection.",
+            "minimum": 0
+          },
+          "explained_by_time_wait": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Refusals only a TCP socket in `TIME_WAIT` explains.",
+            "minimum": 0
+          },
+          "hidden": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Ports reported hidden.",
+            "minimum": 0
+          },
+          "namespaces": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Network namespaces found.",
+            "minimum": 0
+          },
+          "probed": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Binds attempted in the first pass.",
+            "minimum": 0
+          },
+          "refused": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Binds refused because the port is in use.",
+            "minimum": 0
+          },
+          "unconfirmed": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Refusals the second reading did not confirm: a socket that came or\nwent between the two.",
+            "minimum": 0
+          },
+          "unprobed": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Binds refused for another reason than the port being in use, so the\nport was not asked.",
+            "minimum": 0
+          },
+          "unreachable_namespaces": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Namespaces that could not be entered.",
+            "minimum": 0
+          }
+        }
+      },
+      "HiddenPortsResponse": {
+        "type": "object",
+        "description": "The last comparison of the socket listings with a bind probe.",
+        "required": [
+          "reading",
+          "probed_ports",
+          "scanned_at_ns",
+          "counts",
+          "hidden",
+          "unreachable"
+        ],
+        "properties": {
+          "counts": {
+            "$ref": "#/components/schemas/HiddenPortCountsBody"
+          },
+          "hidden": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HiddenPortBody"
+            }
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last sweep failed. The result is then the sweep before."
+          },
+          "probed_ports": {
+            "type": "integer",
+            "description": "How many ports each namespace is probed on.",
+            "minimum": 0
+          },
+          "reading": {
+            "type": "boolean",
+            "description": "Whether the sweep runs."
+          },
+          "scanned_at_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the last sweep was made, in nanoseconds since the epoch, `0`\nbefore the first.",
+            "minimum": 0
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the readings come from: `warden` or `local`. Absent when the\nsweep is off."
+          },
+          "unreachable": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UnreachableNamespaceBody"
+            }
+          }
+        }
+      },
       "HostIntentsResponse": {
         "type": "object",
         "description": "Every intention a host rule may name, resolved against this host.",
@@ -18311,6 +18532,24 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "UnreachableNamespaceBody": {
+        "type": "object",
+        "description": "A namespace that could not be entered, so nothing in it was asked.",
+        "required": [
+          "netns",
+          "reason"
+        ],
+        "properties": {
+          "netns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "reason": {
+            "type": "string"
           }
         }
       },

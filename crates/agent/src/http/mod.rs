@@ -19,6 +19,7 @@ pub mod flow_handler;
 pub mod geoip_handler;
 pub mod guest_handler;
 pub mod health_handler;
+pub mod hidden_port_handler;
 pub mod host_rule_handler;
 pub mod ids_handler;
 pub mod ips_handler;

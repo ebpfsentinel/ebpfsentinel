@@ -4605,6 +4605,32 @@ pub async fn run(
             watcher.run(interval, inventory_cancel).await;
         });
 
+        // Ports a bind finds held and no socket listing shows, in every
+        // namespace, read through the warden like the packet sockets.
+        if config.hidden_checks.ports.enabled {
+            let reader = Arc::new(adapters::warden::hidden_ports::WardenHiddenPortReader::new(
+                ebpfsentinel_warden::hidden_ports::scan,
+                coverage_proc.clone(),
+            ));
+            let sweep = Arc::new(application::hidden_port_service::HiddenPortWatcher::new(
+                reader,
+                config.hidden_checks.ports.probed_ports(),
+                alert_tx.clone(),
+            ));
+            app_state.install_hidden_ports(Arc::clone(&sweep));
+            let interval = Duration::from_secs(config.hidden_checks.ports.interval_secs);
+            let sweep_cancel = cancel_token.clone();
+            info!(
+                interval_secs = config.hidden_checks.ports.interval_secs,
+                probed_ports = sweep.probed_ports(),
+                source = sweep.source(),
+                "hidden port sweep running"
+            );
+            tokio::spawn(async move {
+                sweep.run(interval, sweep_cancel).await;
+            });
+        }
+
         // The other eBPF programs on the network path, read the same way
         // and on the same interval; a change bearing on the agent's own
         // programs is an alert.

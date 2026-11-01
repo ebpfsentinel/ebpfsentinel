@@ -6,6 +6,7 @@
 pub mod arp;
 pub mod attribution;
 pub mod file_watch;
+pub mod hidden_ports;
 pub mod network_programs;
 pub mod packet_sockets;
 pub mod pcap;

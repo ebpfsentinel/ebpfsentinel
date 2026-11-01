@@ -678,6 +678,7 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
                 EbpfCommand::Uprobes => commands::cmd_ebpf_uprobes(&client, output).await,
                 EbpfCommand::Drops => commands::cmd_ebpf_drops(&client, output).await,
                 EbpfCommand::RawSockets => commands::cmd_ebpf_raw_sockets(&client, output).await,
+                EbpfCommand::HiddenPorts => commands::cmd_ebpf_hidden_ports(&client, output).await,
                 EbpfCommand::ForeignPrograms => {
                     commands::cmd_ebpf_foreign_programs(&client, output).await
                 }

@@ -2111,6 +2111,52 @@ pub struct RawSocketsResponse {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct HiddenPortEntry {
+    pub netns: u64,
+    pub host_netns: bool,
+    pub transport: String,
+    pub address: String,
+    pub port: u16,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct UnreachableNamespaceEntry {
+    pub netns: u64,
+    pub reason: String,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+pub struct HiddenPortCounts {
+    pub namespaces: u32,
+    pub unreachable_namespaces: u32,
+    pub probed: u32,
+    pub unprobed: u32,
+    pub refused: u32,
+    pub explained_by_listener: u32,
+    pub explained_by_time_wait: u32,
+    pub explained_by_other_socket: u32,
+    pub unconfirmed: u32,
+    pub hidden: u32,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct HiddenPortsResponse {
+    pub reading: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub probed_ports: usize,
+    pub scanned_at_ns: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub counts: HiddenPortCounts,
+    #[serde(default)]
+    pub hidden: Vec<HiddenPortEntry>,
+    #[serde(default)]
+    pub unreachable: Vec<UnreachableNamespaceEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct IntentFieldEntry {
     pub name: String,
     #[serde(rename = "type")]
@@ -4284,6 +4330,15 @@ impl ApiClient {
     pub async fn raw_sockets(&self) -> anyhow::Result<RawSocketsResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/ebpf/raw-sockets")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn hidden_ports(&self) -> anyhow::Result<HiddenPortsResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/ebpf/hidden-ports")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

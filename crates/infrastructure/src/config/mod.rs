@@ -21,6 +21,7 @@ mod file_watch;
 mod firewall;
 mod flow_export;
 mod geoip;
+mod hidden_checks;
 mod host_rules;
 mod ids;
 mod ips;
@@ -82,6 +83,7 @@ pub use flow_export::{
     OtlpFlowSinkConfig, SyslogSinkConfig,
 };
 pub use geoip::{GeoIpConfig, GeoIpSource};
+pub use hidden_checks::{HiddenChecksConfig, HiddenPortsConfig};
 pub use host_rules::{HostRulesConfig, MAX_HOST_RULES};
 pub use ids::{IdsConfig, IdsRuleConfig, SamplingConfig, ThresholdRuleConfig};
 pub use ips::{IpsConfig, IpsRuleConfig};
@@ -305,6 +307,11 @@ pub struct AgentConfig {
     /// is attached to them. On by default.
     #[serde(default)]
     pub network_inventory: NetworkInventoryConfig,
+
+    /// Kernel state its own listings leave out: a port that refuses a bind
+    /// and appears in no socket listing. On by default.
+    #[serde(default)]
+    pub hidden_checks: HiddenChecksConfig,
 
     /// Host rules: an intention named in the product's words, a map of
     /// matchers on its fields and what to do. None until one is written.
@@ -578,6 +585,7 @@ impl AgentConfig {
         self.file_watch.validate()?;
         self.tcp_health.validate()?;
         self.network_inventory.validate()?;
+        self.hidden_checks.validate()?;
         self.host_rules.validate()?;
 
         // Validate container resolver config

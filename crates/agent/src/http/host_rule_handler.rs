@@ -90,6 +90,7 @@ async fn host_sources(state: &AppState) -> HostSources {
         &programs,
         state.network_programs.load().is_some(),
         state.raw_sockets.load().is_some(),
+        state.hidden_ports.load().is_some(),
     )
 }
 
@@ -104,6 +105,7 @@ pub fn reported_sources<S: std::hash::BuildHasher>(
     programs: &std::collections::HashMap<String, bool, S>,
     network_inventory: bool,
     raw_socket_inventory: bool,
+    hidden_port_sweep: bool,
 ) -> HostSources {
     let kernel = adapters::ebpf::kernel_probe::probe()
         .ok()
@@ -150,11 +152,16 @@ pub fn reported_sources<S: std::hash::BuildHasher>(
         Some(reason) => host.absent(Source::FileWatch, reason),
     };
 
-    for source in [
-        Source::HiddenProcessScan,
-        Source::HiddenPortScan,
-        Source::PackageInventory,
-    ] {
+    host = if hidden_port_sweep {
+        host.present(Source::HiddenPortScan)
+    } else {
+        host.absent(
+            Source::HiddenPortScan,
+            "the hidden port sweep is not running",
+        )
+    };
+
+    for source in [Source::HiddenProcessScan, Source::PackageInventory] {
         host = host.absent(source, NOT_IN_THIS_BUILD);
     }
     host

@@ -98,13 +98,13 @@ pub fn bracketed(target: &str, kind: &str) -> Option<u64> {
 }
 
 /// The inode of the namespace behind a `ns/net` link.
-fn netns_of(link: &Path) -> Option<u64> {
+pub(crate) fn netns_of(link: &Path) -> Option<u64> {
     let target = std::fs::read_link(link).ok()?;
     bracketed(&target.to_string_lossy(), "net")
 }
 
 /// The processes under `proc_root`, as their pid and network namespace.
-fn processes(proc_root: &Path) -> Vec<(u32, u64)> {
+pub(crate) fn processes(proc_root: &Path) -> Vec<(u32, u64)> {
     let Ok(entries) = std::fs::read_dir(proc_root) else {
         return Vec::new();
     };
