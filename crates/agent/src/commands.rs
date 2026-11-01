@@ -5593,6 +5593,12 @@ fn print_write_refusal(report: &crate::api_client::WriteRefusalReport) {
             "shadow"
         };
         println!("  Mode:       {mode}");
+        if let Some(route) = &report.route {
+            println!("  Route:      {route}");
+        }
+        if report.marks > 0 {
+            println!("  Marks:      {} inodes", report.marks);
+        }
         println!(
             "  Watched:    {} paths, {} of them system paths",
             report.directories, report.system_paths

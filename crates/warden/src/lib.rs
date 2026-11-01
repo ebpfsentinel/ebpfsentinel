@@ -62,6 +62,7 @@ pub mod server;
 pub mod tcx_ops;
 pub mod uprobe_ops;
 pub mod userns_bootstrap;
+pub mod write_refusal;
 
 // `bpf(2)` command numbers (uapi/linux/bpf.h `enum bpf_cmd`).
 const BPF_OBJ_GET_INFO_BY_FD: libc::c_int = 15;

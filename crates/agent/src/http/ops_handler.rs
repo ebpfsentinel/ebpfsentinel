@@ -368,6 +368,11 @@ pub struct WriteRefusalReport {
     pub system_paths: usize,
     /// How many expected writers of the system paths the kernel holds.
     pub expected_writers: usize,
+    /// Which mechanism refuses: `bpf_lsm`, or `fanotify` where the BPF LSM
+    /// is not active. Absent while nothing does.
+    pub route: Option<String>,
+    /// How many inode marks the fanotify route holds; zero on the BPF LSM.
+    pub marks: usize,
     /// Why the refusal is not in force, in one sentence.
     pub reason: Option<String>,
 }
@@ -380,6 +385,8 @@ impl From<adapters::ebpf::write_refusal::WriteRefusalStatus> for WriteRefusalRep
             directories: status.directories,
             system_paths: status.system,
             expected_writers: status.writers,
+            route: status.route.map(|r| r.as_str().to_string()),
+            marks: status.marks,
             reason: status.reason,
         }
     }

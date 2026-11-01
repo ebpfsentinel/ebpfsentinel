@@ -2802,6 +2802,10 @@ pub struct WriteRefusalReport {
     #[serde(default)]
     pub expected_writers: usize,
     #[serde(default)]
+    pub route: Option<String>,
+    #[serde(default)]
+    pub marks: usize,
+    #[serde(default)]
     pub reason: Option<String>,
 }
 

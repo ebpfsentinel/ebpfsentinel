@@ -32,8 +32,9 @@ pub use ebpfsentinel_warden_proto::{
     BindProbe, ConntrackTuple, DlpTarget, ExecutableIdentity, FileRoot, FimCanary, FimEvent,
     FimFacts, FimFile, FimFileType, FimMark, FimReading, FimXattr, GoExecutable, GoExecutableScan,
     HeldBpfObjects, HiddenProcessReading, ListedPort, MappedFile, MappingScan,
-    NamespacePortReading, NetworkProgram, PacketSocket, PidObservation, ProcessMappings,
-    ProcessStamp, ROOTED_CHUNK_MAX, RootedFile, RootedRead, RouteSpec, TaskIdentity,
+    NamespacePortReading, NetworkProgram, OPENER_READINGS_MAX, OpenIntent, OpenerReading,
+    PacketSocket, PidObservation, ProcessMappings, ProcessStamp, ROOTED_CHUNK_MAX, RootedFile,
+    RootedRead, RouteSpec, TaskIdentity,
 };
 
 /// How long one warden call may take before the client gives up on it.
@@ -91,6 +92,8 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::ReadRootedFile { .. } => "ReadRootedFile",
         Command::GoExecutables => "GoExecutables",
         Command::ProcessMappings { .. } => "ProcessMappings",
+        Command::WriteRefusalGroup => "WriteRefusalGroup",
+        Command::OpenerReadings { .. } => "OpenerReadings",
     }
 }
 
@@ -331,6 +334,17 @@ impl WardenClient {
         }
     }
 
+    /// Read what each thread blocked on a permission event says about its
+    /// open, one reading per thread in the order asked.
+    pub fn opener_readings(&mut self, tids: &[u32]) -> io::Result<Vec<OpenerReading>> {
+        match self.call(&Command::OpenerReadings {
+            tids: tids.to_vec(),
+        })? {
+            Response::OpenerReadings { readings } => Ok(readings),
+            other => Err(unexpected("OpenerReadings", &other)),
+        }
+    }
+
     /// Name the warden's own thread group and pid namespace.
     pub fn identity(&mut self) -> io::Result<TaskIdentity> {
         match self.call(&Command::Identity)? {
@@ -446,6 +460,25 @@ impl WardenClient {
                 self.classify("PcapOpen", "waiting for the capture socket from", result)
             }
             other => Err(unexpected("PcapOpen", &other)),
+        }
+    }
+
+    /// Ask the warden to open a fanotify permission group and receive its
+    /// descriptor over `SCM_RIGHTS`. The warden keeps no copy, so the group
+    /// lives exactly as long as the agent holds it.
+    #[cfg(feature = "fd-pass")]
+    pub fn write_refusal_group(&mut self) -> io::Result<std::os::fd::OwnedFd> {
+        self.send(&Command::WriteRefusalGroup)?;
+        match self.recv("WriteRefusalGroup")? {
+            Response::FdReady => {
+                let result = fd_pass::recv_one_fd(&self.stream);
+                self.classify(
+                    "WriteRefusalGroup",
+                    "waiting for the fanotify group from",
+                    result,
+                )
+            }
+            other => Err(unexpected("WriteRefusalGroup", &other)),
         }
     }
 
@@ -679,6 +712,12 @@ impl ReconnectingClient {
     /// warden bounced. A read, so replaying it is harmless.
     pub fn tcx_chain(&mut self, iface: &str, egress: bool) -> io::Result<Vec<u32>> {
         self.with_retry(|c| c.tcx_chain(iface, egress))
+    }
+
+    /// Read the threads blocked on permission events through the warden,
+    /// reconnecting if it bounced. A read, so replaying it is harmless.
+    pub fn opener_readings(&mut self, tids: &[u32]) -> io::Result<Vec<OpenerReading>> {
+        self.with_retry(|c| c.opener_readings(tids))
     }
 
     /// Name one process's executable through the warden, reconnecting if it

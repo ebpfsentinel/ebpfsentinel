@@ -2146,8 +2146,7 @@ pub async fn run(
     // on would be a reload able to cut the node off.
     let mut exec_network_attacher: Option<adapters::ebpf::exec_network::ExecNetworkAttacher> = None;
     let mut bpf_guard_attacher: Option<adapters::ebpf::bpf_guard::BpfGuardAttacher> = None;
-    let mut write_refusal_attacher: Option<adapters::ebpf::write_refusal::WriteRefusalAttacher> =
-        None;
+    let mut write_refusal_running: Option<WriteRefusalRunning> = None;
     let mut process_signal_svc: Option<
         Arc<application::process_signal_service::ProcessSignalService>,
     > = None;
@@ -3470,13 +3469,12 @@ pub async fn run(
 
         // 10f-septies. Write-opens refused past a count under the watched
         // directories
-        write_refusal_attacher = wire_write_refusal(&mut WriteRefusalWiring {
+        write_refusal_running = wire_write_refusal(&mut WriteRefusalWiring {
             ebpf_dir: &ebpf_dir,
             config: &config.file_watch.write_refusal,
             metrics: &metrics,
             alert_tx: &alert_tx,
             metrics_readers: &mut metrics_readers,
-            ebpf_state: &mut ebpf_state,
             cancel: &workload_cancel,
         });
 
@@ -5653,11 +5651,12 @@ pub async fn run(
         // signalled, whatever is still in the map on the way out.
         attacher.detach();
     }
-    // Dropping the two LSM links lets every call through again before the
+    // Dropping the two LSM links, and closing the write refusal's fanotify
+    // group where that is the route, lets every call through again before the
     // rest of the datapath goes, so an agent on its way out never leaves an
     // enforcing list behind with nobody to rewrite it.
     drop(exec_network_attacher.take());
-    drop(write_refusal_attacher.take());
+    drop(write_refusal_running.take());
     ebpf_manager.lock().await.detach_all().await;
     drop(ebpf_state); // Drop startup loaders (detaches legacy programs)
     // The guard goes last: until here every descriptor to the agent's
@@ -7719,15 +7718,12 @@ struct WriteRefusalWiring<'a> {
     metrics: &'a Arc<AgentMetrics>,
     alert_tx: &'a mpsc::Sender<application::alert_event::AlertEvent>,
     metrics_readers: &'a mut Vec<MetricsReader>,
-    ebpf_state: &'a mut EbpfState,
     cancel: &'a CancellationToken,
 }
 
 /// Start the write refusal when the configuration turns it on, and say why
 /// when it cannot be.
-fn wire_write_refusal(
-    w: &mut WriteRefusalWiring<'_>,
-) -> Option<adapters::ebpf::write_refusal::WriteRefusalAttacher> {
+fn wire_write_refusal(w: &mut WriteRefusalWiring<'_>) -> Option<WriteRefusalRunning> {
     let handle = start_write_refusal_run(&WriteRefusalStart {
         ebpf_dir: w.ebpf_dir,
         config: w.config,
@@ -7736,16 +7732,13 @@ fn wire_write_refusal(
         cancel: w.cancel,
     })?;
     let WriteRefusalHandle {
-        loader,
-        metrics_reader,
-        attacher,
+        mut running,
         set: _,
     } = handle;
-    if let Some(rdr) = metrics_reader {
+    if let Some(rdr) = running.take_metrics_reader() {
         w.metrics_readers.push(rdr);
     }
-    w.ebpf_state.add_loader(loader);
-    Some(attacher)
+    Some(running)
 }
 
 /// What starting the write refusal needs.
@@ -7762,29 +7755,51 @@ pub struct WriteRefusalStart<'a> {
     pub cancel: &'a CancellationToken,
 }
 
-/// A running write refusal. The refusal lasts as long as `attacher` and
-/// `loader` are held: dropping them detaches both hooks, which is how it
-/// fails open.
+/// What holds a write refusal in force. Dropping it ends the refusal and
+/// lets every write through, which is how it fails open.
+pub enum WriteRefusalRunning {
+    /// The BPF LSM route.
+    Kernel {
+        /// The two LSM links, declared first so they go before the object.
+        attacher: adapters::ebpf::write_refusal::WriteRefusalAttacher,
+        /// The loaded object.
+        loader: Box<EbpfLoader>,
+        /// The program's counters, for whoever polls them.
+        metrics_reader: Option<MetricsReader>,
+    },
+    /// The fanotify route: a permission group on a bounded set of inodes,
+    /// closed when this is dropped.
+    Fanotify(adapters::write_refusal_fanotify::FanotifyRefusal),
+}
+
+impl WriteRefusalRunning {
+    /// The program's counters, once, on the route that has a program.
+    pub fn take_metrics_reader(&mut self) -> Option<MetricsReader> {
+        match self {
+            Self::Kernel { metrics_reader, .. } => metrics_reader.take(),
+            Self::Fanotify(_) => None,
+        }
+    }
+}
+
+/// A running write refusal.
 pub struct WriteRefusalHandle {
-    /// The loaded object.
-    pub loader: EbpfLoader,
-    /// The program's counters, for whoever polls them.
-    pub metrics_reader: Option<MetricsReader>,
-    /// The two LSM links.
-    pub attacher: adapters::ebpf::write_refusal::WriteRefusalAttacher,
+    /// What holds it in force.
+    pub running: WriteRefusalRunning,
     /// The watched paths and expected writers, which the caller may replace;
-    /// the kernel follows them at the next refresh.
+    /// the refusal follows them at the next refresh.
     pub set: Arc<std::sync::RwLock<adapters::ebpf::write_refusal::WriteRefusalSet>>,
 }
 
-/// Start the write refusal the configuration asks for: load it, write the
-/// watched paths of both regimes and the expected writers, attach, and keep
-/// the set and the counters current.
+/// Start the write refusal the configuration asks for, on the route it
+/// names: the BPF LSM, the fanotify fallback, or the first where the second
+/// stands in for a kernel without the first.
 ///
 /// `None` when it is turned off or cannot be put in force here, with the
 /// reason published for the kernel-features endpoint.
 pub fn start_write_refusal_run(start: &WriteRefusalStart<'_>) -> Option<WriteRefusalHandle> {
     use adapters::ebpf::write_refusal as wr;
+    use domain::ransom::WriteRefusalRoute;
     if !start.config.enabled {
         start.metrics.clear_ebpf_program_status("lsm_write_refusal");
         wr::publish_status(wr::WriteRefusalStatus {
@@ -7804,12 +7819,18 @@ pub fn start_write_refusal_run(start: &WriteRefusalStart<'_>) -> Option<WriteRef
         system: start.config.system_paths.clone(),
         writers: start.config.system_writers.clone(),
     };
-    let started = match start_write_refusal(start.ebpf_dir, &set, &policy) {
-        Ok(started) => started,
-        Err(reason) => {
-            start
-                .metrics
-                .set_ebpf_program_status("lsm_write_refusal", false);
+    let kernel = match start.config.route {
+        WriteRefusalRoute::Fanotify => None,
+        WriteRefusalRoute::Auto | WriteRefusalRoute::BpfLsm => {
+            Some(start_write_refusal(start.ebpf_dir, &set, &policy))
+        }
+    };
+    start
+        .metrics
+        .set_ebpf_program_status("lsm_write_refusal", matches!(kernel, Some(Ok(_))));
+    match kernel {
+        Some(Ok(started)) => Some(run_kernel_write_refusal(start, started, set, &policy)),
+        Some(Err(reason)) if start.config.route == WriteRefusalRoute::BpfLsm => {
             warn!(
                 "write refusal unavailable, the detection still stops a run but the kernel refuses no write: {reason}"
             );
@@ -7817,35 +7838,28 @@ pub fn start_write_refusal_run(start: &WriteRefusalStart<'_>) -> Option<WriteRef
                 reason: Some(reason),
                 ..wr::WriteRefusalStatus::default()
             });
-            return None;
+            None
         }
-    };
-    let WriteRefusalStarted {
-        loader,
-        metrics_rdr,
-        maps,
-        attacher,
-        reader,
-    } = started;
-    start
-        .metrics
-        .set_ebpf_program_status("lsm_write_refusal", true);
+        Some(Err(reason)) => {
+            info!(
+                "write refusal: the BPF LSM route is unavailable, trying the fanotify fallback: {reason}"
+            );
+            run_fanotify_write_refusal(start, set, &policy, Some(reason))
+        }
+        None => run_fanotify_write_refusal(start, set, &policy, None),
+    }
+}
 
-    let (record_tx, mut record_rx) =
-        mpsc::channel::<domain::ransom::WriteRefusalRecord>(WORKLOAD_DENIAL_CHANNEL_CAPACITY);
-    let rb_obs = RingBufObserver::new(
-        wr::WRITE_REFUSAL_OBJECT,
-        Arc::clone(start.metrics) as Arc<dyn MetricsPort>,
-    );
-    let reader_cancel = start.cancel.clone();
-    tokio::spawn(async move {
-        reader.run(record_tx, reader_cancel, rb_obs).await;
-    });
+/// Turn the records of either route into alerts.
+fn forward_write_refusal_records(
+    start: &WriteRefusalStart<'_>,
+    mut record_rx: mpsc::Receiver<domain::ransom::WriteRefusalRecord>,
+) {
     let alert_tx = start.alert_tx.clone();
     tokio::spawn(async move {
         while let Some(record) = record_rx.recv().await {
-            // Named by the pipeline off the thread group: the hook carries
-            // the file, not the workload.
+            // Named by the pipeline off the thread group: the decision
+            // carries the file, not the workload.
             let alert = domain::alert::entity::Alert::from_write_refusal(&record);
             if alert_tx
                 .send(application::alert_event::AlertEvent::WorkloadDenial(
@@ -7858,15 +7872,17 @@ pub fn start_write_refusal_run(start: &WriteRefusalStart<'_>) -> Option<WriteRef
             }
         }
     });
-    let shared = Arc::new(std::sync::RwLock::new(set.clone()));
-    tokio::spawn(refresh_write_refusal(
-        maps,
-        Arc::clone(&shared),
-        policy.enforce,
-        start.cancel.clone(),
-    ));
+}
+
+/// Say what the refusal now does, once, at start.
+fn log_write_refusal_started(
+    set: &adapters::ebpf::write_refusal::WriteRefusalSet,
+    policy: &adapters::ebpf::write_refusal::WriteRefusalPolicy,
+    route: &str,
+) {
     if policy.enforce {
         warn!(
+            route,
             data_paths = set.data.len(),
             system_paths = set.system.len(),
             threshold = policy.threshold,
@@ -7874,16 +7890,127 @@ pub fn start_write_refusal_run(start: &WriteRefusalStart<'_>) -> Option<WriteRef
         );
     } else {
         info!(
+            route,
             data_paths = set.data.len(),
             system_paths = set.system.len(),
             threshold = policy.threshold,
             "write refusal shadow: what would be refused is reported, not refused"
         );
     }
-    Some(WriteRefusalHandle {
+}
+
+/// Keep a loaded and attached BPF LSM refusal: its reader, its alerts and
+/// its refresh.
+fn run_kernel_write_refusal(
+    start: &WriteRefusalStart<'_>,
+    started: WriteRefusalStarted,
+    set: adapters::ebpf::write_refusal::WriteRefusalSet,
+    policy: &adapters::ebpf::write_refusal::WriteRefusalPolicy,
+) -> WriteRefusalHandle {
+    use adapters::ebpf::write_refusal as wr;
+    let WriteRefusalStarted {
         loader,
-        metrics_reader: metrics_rdr,
+        metrics_rdr,
+        maps,
         attacher,
+        reader,
+    } = started;
+    let (record_tx, record_rx) =
+        mpsc::channel::<domain::ransom::WriteRefusalRecord>(WORKLOAD_DENIAL_CHANNEL_CAPACITY);
+    let rb_obs = RingBufObserver::new(
+        wr::WRITE_REFUSAL_OBJECT,
+        Arc::clone(start.metrics) as Arc<dyn MetricsPort>,
+    );
+    let reader_cancel = start.cancel.clone();
+    tokio::spawn(async move {
+        reader.run(record_tx, reader_cancel, rb_obs).await;
+    });
+    forward_write_refusal_records(start, record_rx);
+    log_write_refusal_started(&set, policy, "bpf_lsm");
+    let shared = Arc::new(std::sync::RwLock::new(set));
+    tokio::spawn(refresh_write_refusal(
+        maps,
+        Arc::clone(&shared),
+        policy.enforce,
+        start.cancel.clone(),
+    ));
+    WriteRefusalHandle {
+        running: WriteRefusalRunning::Kernel {
+            attacher,
+            loader: Box::new(loader),
+            metrics_reader: metrics_rdr,
+        },
+        set: shared,
+    }
+}
+
+/// The openers read in-process, from this host's procfs, when the agent
+/// holds the privilege itself.
+fn read_local_openers(tids: &[u32]) -> Vec<adapters::write_refusal_fanotify::OpenerReading> {
+    ebpfsentinel_warden::write_refusal::read_openers(std::path::Path::new("/proc"), tids)
+}
+
+/// Start the fanotify fallback, `kernel` being why the BPF LSM route did
+/// not, when it was tried.
+fn run_fanotify_write_refusal(
+    start: &WriteRefusalStart<'_>,
+    set: adapters::ebpf::write_refusal::WriteRefusalSet,
+    policy: &adapters::ebpf::write_refusal::WriteRefusalPolicy,
+    kernel: Option<String>,
+) -> Option<WriteRefusalHandle> {
+    use adapters::ebpf::write_refusal as wr;
+    use adapters::write_refusal_fanotify as fan;
+    let (record_tx, record_rx) =
+        mpsc::channel::<domain::ransom::WriteRefusalRecord>(WORKLOAD_DENIAL_CHANNEL_CAPACITY);
+    let mut placed = None;
+    let started = fan::FallbackPlan::walk(&set, fan::mark_bound()).and_then(|plan| {
+        for entry in &plan.missing {
+            warn!("write refusal: {entry}, left out until it exists");
+        }
+        placed = Some(plan.clone());
+        fan::FanotifyRefusal::start(
+            plan,
+            policy,
+            fan::FallbackSinks {
+                metrics: Arc::clone(start.metrics) as Arc<dyn MetricsPort>,
+                records: record_tx,
+            },
+            fan::LocalRefusal {
+                group: ebpfsentinel_warden::write_refusal::permission_group,
+                read: read_local_openers,
+            },
+        )
+    });
+    let refusal = match started {
+        Ok(refusal) => refusal,
+        Err(fallback) => {
+            let reason = match kernel {
+                Some(kernel) => {
+                    format!("{kernel}; the fanotify fallback cannot run either: {fallback}")
+                }
+                None => fallback,
+            };
+            warn!(
+                "write refusal unavailable, the detection still stops a run but no write is refused: {reason}"
+            );
+            wr::publish_status(wr::WriteRefusalStatus {
+                reason: Some(reason),
+                ..wr::WriteRefusalStatus::default()
+            });
+            return None;
+        }
+    };
+    forward_write_refusal_records(start, record_rx);
+    log_write_refusal_started(&set, policy, "fanotify");
+    let shared = Arc::new(std::sync::RwLock::new(set));
+    tokio::spawn(refresh_fanotify_write_refusal(
+        refusal.plans(),
+        placed,
+        Arc::clone(&shared),
+        start.cancel.clone(),
+    ));
+    Some(WriteRefusalHandle {
+        running: WriteRefusalRunning::Fanotify(refusal),
         set: shared,
     })
 }
@@ -7990,6 +8117,55 @@ async fn refresh_write_refusal(
                     }
                 }
                 wr::publish_status(maps.status(enforce));
+            }
+        }
+    }
+}
+
+/// Walk the shared set again at every refresh and hand the fanotify
+/// handler the marks it needs now, only when they moved: replacing them
+/// flushes the group, and an unchanged set is not worth that instant.
+async fn refresh_fanotify_write_refusal(
+    plans: std::sync::mpsc::Sender<adapters::write_refusal_fanotify::FallbackPlan>,
+    mut held: Option<adapters::write_refusal_fanotify::FallbackPlan>,
+    set: Arc<std::sync::RwLock<adapters::ebpf::write_refusal::WriteRefusalSet>>,
+    cancel: CancellationToken,
+) {
+    use adapters::write_refusal_fanotify as fan;
+    let mut tick = tokio::time::interval(WRITE_REFUSAL_REFRESH);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await;
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            _ = tick.tick() => {
+                let current = set
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                let walked = tokio::task::spawn_blocking(move || {
+                    fan::FallbackPlan::walk(&current, fan::mark_bound())
+                })
+                .await;
+                let plan = match walked {
+                    Ok(Ok(plan)) => plan,
+                    Ok(Err(e)) => {
+                        warn!("write refusal refresh failed, the previous marks stay: {e}");
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("write refusal refresh did not complete: {e}");
+                        continue;
+                    }
+                };
+                if held.as_ref() == Some(&plan) {
+                    continue;
+                }
+                if plans.send(plan.clone()).is_err() {
+                    warn!("write refusal: the fanotify handler is gone, the refresh stops");
+                    break;
+                }
+                held = Some(plan);
             }
         }
     }

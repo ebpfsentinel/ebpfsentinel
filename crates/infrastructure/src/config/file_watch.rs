@@ -9,8 +9,8 @@ use domain::file_watch::{DECLARED_ORIGIN, WATCHED_PATHS_MAX, WatchedPaths, check
 use domain::firewall::entity::RuleMode;
 use domain::ransom::{
     CANARIES_MAX, CANARY_DIRECTORIES, CANARY_EXEMPT, CANARY_NAMES, CountBy,
-    WRITE_REFUSAL_THRESHOLD, WRITE_REFUSAL_WINDOW_SECS, WriteRefusalSetRef, canary_name_refusal,
-    canary_paths, validate_write_refusal,
+    WRITE_REFUSAL_THRESHOLD, WRITE_REFUSAL_WINDOW_SECS, WriteRefusalRoute, WriteRefusalSetRef,
+    canary_name_refusal, canary_paths, validate_write_refusal,
 };
 use serde::{Deserialize, Serialize};
 
@@ -105,6 +105,12 @@ pub struct WriteRefusalConfig {
     /// `process` counts each thread group alone; `cgroup` counts a
     /// container or a unit as one writer, forks included.
     pub count_by: CountBy,
+
+    /// `auto`, the default, refuses through the BPF LSM where it is active
+    /// and through a fanotify permission group on the watched paths
+    /// everywhere else; `bpf_lsm` refuses through the LSM or not at all;
+    /// `fanotify` takes the fallback even where the LSM is active.
+    pub route: WriteRefusalRoute,
 }
 
 impl Default for WriteRefusalConfig {
@@ -118,6 +124,7 @@ impl Default for WriteRefusalConfig {
             threshold: WRITE_REFUSAL_THRESHOLD,
             window_secs: WRITE_REFUSAL_WINDOW_SECS,
             count_by: CountBy::Process,
+            route: WriteRefusalRoute::Auto,
         }
     }
 }

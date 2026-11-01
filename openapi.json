@@ -20377,7 +20377,8 @@
           "enforcing",
           "directories",
           "system_paths",
-          "expected_writers"
+          "expected_writers",
+          "marks"
         ],
         "properties": {
           "attached": {
@@ -20398,12 +20399,24 @@
             "description": "How many expected writers of the system paths the kernel holds.",
             "minimum": 0
           },
+          "marks": {
+            "type": "integer",
+            "description": "How many inode marks the fanotify route holds; zero on the BPF LSM.",
+            "minimum": 0
+          },
           "reason": {
             "type": [
               "string",
               "null"
             ],
             "description": "Why the refusal is not in force, in one sentence."
+          },
+          "route": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which mechanism refuses: `bpf_lsm`, or `fanotify` where the BPF LSM\nis not active. Absent while nothing does."
           },
           "system_paths": {
             "type": "integer",

@@ -90,6 +90,150 @@ impl WriteRefusalRegime {
     }
 }
 
+/// How many inode marks the fanotify fallback places at most. Every marked
+/// file and directory costs a round trip to the agent on each open, so the
+/// set is bounded here and counted against the kernel's own per-user ceiling
+/// before the first mark is placed.
+pub const WRITE_REFUSAL_FALLBACK_MARKS: usize = 4_096;
+
+/// How long the fallback may take to answer the opens it read at once, in
+/// milliseconds. Past it the rest are allowed without a decision: an agent
+/// late to answer is an agent holding every opener on the watched paths,
+/// and an outage is worse than a write let through.
+pub const WRITE_REFUSAL_REPLY_BUDGET_MS: u64 = 20;
+
+/// Which mechanism refuses.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteRefusalRoute {
+    /// The BPF LSM where the kernel offers it, the fanotify fallback
+    /// everywhere else.
+    #[default]
+    Auto,
+    /// The BPF LSM program, and nothing where it cannot load.
+    BpfLsm,
+    /// The fanotify permission group, even where the BPF LSM is active.
+    Fanotify,
+}
+
+impl WriteRefusalRoute {
+    /// The name the configuration and the API use.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::BpfLsm => "bpf_lsm",
+            Self::Fanotify => "fanotify",
+        }
+    }
+}
+
+/// What the count of one writer says about its write-open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteCount {
+    /// Below the threshold: the open goes through.
+    Under(u32),
+    /// At or past the threshold; `first` is true for the one open per
+    /// writer and window that is reported.
+    Reached {
+        /// The count, this open included.
+        count: u32,
+        /// The first open of the window to reach the threshold.
+        first: bool,
+    },
+    /// Every slot holds a writer of the current window: a newcomer is let
+    /// through and counted as such, the way the kernel's full map does.
+    TableFull,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WindowCount {
+    start_ns: u64,
+    count: u32,
+    reported: bool,
+}
+
+/// The write-opens of each writer inside its window, for the route that
+/// counts in userspace. The same arithmetic the kernel program runs: a
+/// window starts at a writer's first write-open, the open reaching the
+/// threshold is the first refused, and every one after it in the window is
+/// refused too.
+#[derive(Debug, Clone)]
+pub struct WriteOpenCounter {
+    threshold: u32,
+    window_ns: u64,
+    capacity: usize,
+    counts: std::collections::HashMap<u64, WindowCount>,
+}
+
+impl WriteOpenCounter {
+    /// A counter refusing at `threshold` over `window_ns`, holding at most
+    /// `capacity` writers.
+    #[must_use]
+    pub fn new(threshold: u32, window_ns: u64, capacity: usize) -> Self {
+        Self {
+            threshold: threshold.max(1),
+            window_ns,
+            capacity,
+            counts: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Count one write-open by `writer` at `now_ns`.
+    pub fn count(&mut self, writer: u64, now_ns: u64) -> WriteCount {
+        let full = self.counts.len() >= self.capacity;
+        let entry = match self.counts.get_mut(&writer) {
+            Some(held) => held,
+            None if full => return WriteCount::TableFull,
+            None => self.counts.entry(writer).or_insert(WindowCount {
+                start_ns: now_ns,
+                count: 0,
+                reported: false,
+            }),
+        };
+        if now_ns.saturating_sub(entry.start_ns) >= self.window_ns {
+            *entry = WindowCount {
+                start_ns: now_ns,
+                count: 0,
+                reported: false,
+            };
+        }
+        entry.count = entry.count.saturating_add(1);
+        if entry.count < self.threshold {
+            return WriteCount::Under(entry.count);
+        }
+        let first = !entry.reported;
+        entry.reported = true;
+        WriteCount::Reached {
+            count: entry.count,
+            first,
+        }
+    }
+
+    /// Drop the writers whose window has passed; how many were dropped.
+    pub fn sweep(&mut self, now_ns: u64) -> usize {
+        let before = self.counts.len();
+        let window = self.window_ns;
+        self.counts
+            .retain(|_, held| now_ns.saturating_sub(held.start_ns) < window);
+        before - self.counts.len()
+    }
+
+    /// How many writers are counted now.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.counts.len()
+    }
+
+    /// Whether no writer is counted.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.counts.is_empty()
+    }
+}
+
 /// What a writer is counted as.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -315,6 +459,46 @@ mod tests {
             system: &[],
             writers: &[],
         }
+    }
+
+    #[test]
+    fn the_counter_refuses_at_the_threshold_reports_once_and_starts_again_with_the_window() {
+        let mut counter = WriteOpenCounter::new(3, 1_000, 8);
+        assert_eq!(counter.count(7, 0), WriteCount::Under(1));
+        assert_eq!(counter.count(7, 10), WriteCount::Under(2));
+        assert_eq!(
+            counter.count(7, 20),
+            WriteCount::Reached {
+                count: 3,
+                first: true
+            }
+        );
+        assert_eq!(
+            counter.count(7, 30),
+            WriteCount::Reached {
+                count: 4,
+                first: false
+            }
+        );
+        assert_eq!(counter.count(8, 30), WriteCount::Under(1));
+        assert_eq!(counter.count(7, 1_000), WriteCount::Under(1));
+        assert_eq!(counter.sweep(1_100), 1);
+        assert_eq!(counter.len(), 1);
+    }
+
+    #[test]
+    fn a_full_counter_lets_a_newcomer_through_and_keeps_counting_the_writers_it_holds() {
+        let mut counter = WriteOpenCounter::new(2, 1_000, 1);
+        assert_eq!(counter.count(1, 0), WriteCount::Under(1));
+        assert_eq!(counter.count(2, 0), WriteCount::TableFull);
+        assert_eq!(
+            counter.count(1, 1),
+            WriteCount::Reached {
+                count: 2,
+                first: true
+            }
+        );
+        assert!(!counter.is_empty());
     }
 
     #[test]

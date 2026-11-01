@@ -6,7 +6,9 @@ use std::os::unix::fs::MetadataExt;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 
 use aya::maps::{Array, HashMap as AyaHashMap, MapData, RingBuf};
-use domain::ransom::{CountBy, WriteRefusalHook, WriteRefusalRecord, WriteRefusalRegime};
+use domain::ransom::{
+    CountBy, WriteRefusalHook, WriteRefusalRecord, WriteRefusalRegime, WriteRefusalRoute,
+};
 use ebpf_common::exec_network::kernel_dev;
 use ebpf_common::write_refusal::{
     WRITE_REFUSAL_BY_CGROUP, WRITE_REFUSAL_BY_PROCESS, WRITE_REFUSAL_CONFIG_SLOT,
@@ -48,6 +50,11 @@ pub struct WriteRefusalStatus {
     pub system: usize,
     /// How many expected writers of the system paths the kernel holds.
     pub writers: usize,
+    /// Which mechanism refuses, `None` while nothing does.
+    pub route: Option<WriteRefusalRoute>,
+    /// How many inode marks the fanotify fallback holds; zero on the BPF
+    /// LSM route, which places none.
+    pub marks: usize,
     /// Why the refusal is not in force, in one sentence. `None` when it is.
     pub reason: Option<String>,
 }
@@ -400,6 +407,8 @@ impl WriteRefusalMaps {
                 .filter(|w| w.regime == WriteRefusalRegime::System)
                 .count(),
             writers: self.held_writers.len(),
+            route: Some(WriteRefusalRoute::BpfLsm),
+            marks: 0,
             reason: None,
         }
     }

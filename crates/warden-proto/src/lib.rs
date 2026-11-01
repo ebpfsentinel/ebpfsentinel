@@ -872,6 +872,59 @@ pub enum Command {
     /// `/proc/<pid>/maps` and the root's identity, nothing from any
     /// process's memory.
     ProcessMappings { known: Vec<ProcessStamp> },
+    /// Open a fanotify permission group for the write refusal and hand its
+    /// descriptor over in an `SCM_RIGHTS` cmsg after [`Response::FdReady`].
+    /// A permission class needs `CAP_SYS_ADMIN` in the initial user
+    /// namespace, which the rootless agent does not hold. The warden keeps no
+    /// copy: the agent's descriptor is the group's only one, so the agent's
+    /// death or its stop closes the group and the kernel allows every open
+    /// still waiting.
+    WriteRefusalGroup,
+    /// Read what each thread blocked on a permission event says about its
+    /// open, answered by [`Response::OpenerReadings`] in the order asked.
+    /// Reading another process's pending system call is a ptrace access
+    /// check the rootless agent fails. Read-only: `/proc` and the cgroup tree.
+    OpenerReadings {
+        /// The threads, as the agent's pid namespace numbers them.
+        tids: Vec<u32>,
+    },
+}
+
+/// The most threads one [`Command::OpenerReadings`] reads.
+pub const OPENER_READINGS_MAX: usize = 1_024;
+
+/// What an opener's pending system call says about its open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OpenIntent {
+    /// A write access mode, a truncation or a `creat`.
+    Write,
+    /// A read-only open.
+    Read,
+    /// The call could not be read or is not an open.
+    Unknown,
+}
+
+/// What the warden read about one thread blocked on a permission event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenerReading {
+    /// What the pending open asks for.
+    pub intent: OpenIntent,
+    /// The thread's group, `0` when the thread is gone.
+    pub tgid: u32,
+    /// The inode of its cgroup directory, `0` when unread.
+    pub cgroup_id: u64,
+    /// The device and inode of its executable, when readable.
+    pub exe: Option<(u64, u64)>,
+}
+
+impl OpenerReading {
+    /// A thread that could not be read at all.
+    pub const GONE: Self = Self {
+        intent: OpenIntent::Unknown,
+        tgid: 0,
+        cgroup_id: 0,
+        exe: None,
+    };
 }
 
 /// A thread group as one pid namespace numbers it.
@@ -1022,6 +1075,8 @@ pub enum Response {
     /// The processes and the mappings read, answering
     /// [`Command::ProcessMappings`].
     ProcessMappings { scan: MappingScan },
+    /// One reading per thread asked, answering [`Command::OpenerReadings`].
+    OpenerReadings { readings: Vec<OpenerReading> },
 }
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
@@ -1057,9 +1112,9 @@ mod tests {
     use super::{
         BindProbe, Command, ConntrackTuple, DlpTarget, ExecutableIdentity, FileRoot, GoExecutable,
         GoExecutableScan, HiddenProcessReading, ListedPort, MAX_FRAME_LEN, MappedFile, MappingScan,
-        NamespacePortReading, NetworkProgram, PacketSocket, PidObservation, ProcessMappings,
-        ProcessStamp, ROOTED_CHUNK_MAX, Response, RootedFile, RootedRead, RouteSpec, TaskIdentity,
-        read_frame, valid_dpkg_list_name, write_frame,
+        NamespacePortReading, NetworkProgram, OpenIntent, OpenerReading, PacketSocket,
+        PidObservation, ProcessMappings, ProcessStamp, ROOTED_CHUNK_MAX, Response, RootedFile,
+        RootedRead, RouteSpec, TaskIdentity, read_frame, valid_dpkg_list_name, write_frame,
     };
     use std::io::Cursor;
 
@@ -1144,6 +1199,10 @@ mod tests {
                     start_time: 2,
                     vsize: 170_000_000,
                 }],
+            },
+            Command::WriteRefusalGroup,
+            Command::OpenerReadings {
+                tids: vec![4242, 4243],
             },
         ]
     }
@@ -1374,6 +1433,17 @@ mod tests {
                     }],
                     pending: 0,
                 },
+            },
+            Response::OpenerReadings {
+                readings: vec![
+                    OpenerReading {
+                        intent: OpenIntent::Write,
+                        tgid: 812,
+                        cgroup_id: 4_410,
+                        exe: Some((64_769, 917_970)),
+                    },
+                    OpenerReading::GONE,
+                ],
             },
         ]
     }

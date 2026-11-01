@@ -22,6 +22,7 @@ use ebpfsentinel_warden_proto::{
 use crate::fim_watch::FimWatch;
 use crate::host_ops::HostOps;
 use crate::pcap_slots::{PcapSlot, PcapSlots};
+use crate::write_refusal;
 use crate::{
     bpf_inventory, cgroup_ops, delegate_over_fd, dlp_scan, exe_read, go_executables, hidden_ports,
     hidden_processes, net_ops, netns_tcx_ops, packet_sockets, process_maps, recv_fd, rooted_read,
@@ -380,6 +381,19 @@ fn handle_conn_with_timeouts(
                 }
             }
             Command::Delegate => serve_delegate(&mut writer, btf, pcap.fds()),
+            Command::WriteRefusalGroup => match write_refusal::permission_group() {
+                Ok(group) => {
+                    eprintln!("[warden] write refusal group handed over");
+                    // The warden's copy closes here, once sent: the agent's
+                    // is the group's only descriptor, so its stop or its
+                    // death allows every open still waiting.
+                    serve_passed_fd(&mut writer, Ok(group.as_raw_fd()))
+                }
+                Err(message) => {
+                    eprintln!("[warden] write refusal group refused: {message}");
+                    serve_passed_fd(&mut writer, Err(message))
+                }
+            },
             Command::FimOpen { paths } => {
                 let (watch, marks) = FimWatch::open(paths);
                 for mark in &marks {
@@ -694,6 +708,9 @@ fn dispatch(cmd: &Command, host: &dyn HostOps, proc_root: &Path) -> Response {
         },
         Command::GoExecutables => Response::GoExecutables {
             scan: go_executables::scan(proc_root),
+        },
+        Command::OpenerReadings { tids } => Response::OpenerReadings {
+            readings: write_refusal::read_openers(proc_root, tids),
         },
         Command::ProcessMappings { known } => Response::ProcessMappings {
             scan: process_maps::scan(proc_root, known),
