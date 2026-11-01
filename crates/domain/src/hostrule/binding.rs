@@ -165,13 +165,13 @@ impl Intent {
             },
             Self::PortHidden => Binding {
                 sources: &[Source::HiddenPortScan],
-                hook: "kernel socket iterator compared with /proc/net",
+                hook: "bind probe compared with the socket listings of every network namespace",
                 min_kernel: (5, 9),
                 fallback: None,
             },
             Self::ProcessHidden => Binding {
                 sources: &[Source::HiddenProcessScan],
-                hook: "kernel task iterator compared with /proc",
+                hook: "null signal across the pid space compared with the listing of /proc",
                 min_kernel: (5, 8),
                 fallback: None,
             },

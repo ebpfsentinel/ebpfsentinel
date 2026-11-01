@@ -15,6 +15,12 @@
 //! the table no longer holds is evaluated without one, so a rule on the
 //! writer's fields does not match it and no process is stopped for it.
 //!
+//! The hidden port and hidden process sweeps hand each finding here once,
+//! the sweep it first appeared in, with no process: a port or a pid the
+//! listings omit has no entry in the process table to describe it, so a
+//! rule on `port.hidden` or `process.hidden` matches on the finding's own
+//! fields and its reading counts it against the host.
+//!
 //! A rule in shadow, the default, does neither: what it would have done is
 //! counted per workload in a reading, and putting it in force is decided on
 //! that reading.
@@ -54,6 +60,8 @@ pub const FED_INTENTS: &[Intent] = &[
     Intent::FileDisappears,
     Intent::FilePermissionsChange,
     Intent::FileIntegrityBreaks,
+    Intent::PortHidden,
+    Intent::ProcessHidden,
 ];
 
 /// Why an intention outside [`FED_INTENTS`] is not applicable.
@@ -266,6 +274,15 @@ impl HostRuleService {
         self.evaluate(&event, writer, at_ns);
     }
 
+    /// A posture finding of one of the hidden sweeps, which no process
+    /// describes: evaluated on its own fields alone.
+    pub fn record_posture(&self, event: &IntentEvent, at_ns: u64) {
+        if !self.rules.load().names(event.intent()) {
+            return;
+        }
+        self.evaluate(event, None, at_ns);
+    }
+
     fn starts_event(&self, entry: &ProcessEntry, parent: Option<&ProcessEntry>) -> IntentEvent {
         let mut event = with_process(IntentEvent::new(Intent::ProcessStarts), entry);
         if let Some(line) = &entry.command_line {
@@ -418,6 +435,43 @@ mod tests {
         }
         let specs: Vec<HostRuleSpec> = serde_json::from_value(raw.into()).unwrap();
         HostRuleSet::compile(specs).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_posture_finding_alerts_without_a_process_and_counts_in_shadow() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let service = HostRuleService::new(
+            rules(
+                r#"[{"id":"loud","when":{"process.hidden":{"comm":"kworkerd"}}},
+                    {"id":"quiet","mode":"shadow","when":{"port.hidden":{"local_port":31337}}}]"#,
+            ),
+            tx,
+        );
+        let process = IntentEvent::new(Intent::ProcessHidden)
+            .with("pid", FieldValue::Integer(4242))
+            .unwrap()
+            .with("comm", FieldValue::Text("kworkerd".to_string()))
+            .unwrap();
+        service.record_posture(&process, 1);
+        let Some(AlertEvent::ProcessDetection {
+            alert,
+            kill_process,
+        }) = rx.recv().await
+        else {
+            panic!("the rule in force alerts");
+        };
+        assert_eq!(alert.rule_id.0, "loud");
+        assert!(!kill_process, "no process to stop");
+
+        let port = IntentEvent::new(Intent::PortHidden)
+            .with("local_port", FieldValue::Integer(31337))
+            .unwrap()
+            .with("protocol", FieldValue::Text("tcp".to_string()))
+            .unwrap();
+        service.record_posture(&port, 2);
+        assert!(rx.try_recv().is_err(), "a rule in shadow raises nothing");
+        assert_eq!(service.counts().0, 2, "both matched");
+        assert_eq!(service.reading("quiet").map(|r| r.events), Some(1));
     }
 
     #[test]
@@ -632,7 +686,12 @@ mod tests {
     #[test]
     fn every_fed_intent_carries_the_fields_built_here() {
         for intent in FED_INTENTS {
-            for name in ["exe", "uid"] {
+            let built: &[&str] = match intent {
+                Intent::PortHidden => &["local_address", "local_port", "protocol"],
+                Intent::ProcessHidden => &["pid", "comm"],
+                _ => &["exe", "uid"],
+            };
+            for name in built {
                 assert!(intent.field(name).is_ok(), "{intent} lost `{name}`");
             }
         }

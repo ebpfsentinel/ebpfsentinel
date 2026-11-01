@@ -1,16 +1,19 @@
 use std::collections::BTreeSet;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use domain::alert::entity::Alert;
-use domain::hidden::{PortFamily, PortSweep, Transport, sweep_ports};
+use domain::hidden::{HiddenPort, PortFamily, PortSweep, Transport, sweep_ports};
+use domain::hostrule::{FieldValue, HostRuleError, Intent, IntentEvent};
 use ports::secondary::hidden_port_port::HiddenPortReader;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::alert_event::AlertEvent;
+use crate::host_rule_service::HostRuleService;
 use crate::learning_service::now_ns;
 
 /// The sweep as of the last reading.
@@ -26,12 +29,29 @@ pub struct HiddenPortReport {
 /// What identifies one hidden port across sweeps.
 type HiddenKey = (u64, Transport, PortFamily, u16);
 
+/// The `port.hidden` event of one finding: the wildcard address the probe
+/// was refused on, the port and the transport.
+fn port_event(hidden: &HiddenPort) -> Result<IntentEvent, HostRuleError> {
+    let address = match hidden.family {
+        PortFamily::V4 => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        PortFamily::V6 => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    };
+    IntentEvent::new(Intent::PortHidden)
+        .with("local_address", FieldValue::Address(address))?
+        .with("local_port", FieldValue::Integer(i64::from(hidden.port)))?
+        .with(
+            "protocol",
+            FieldValue::Text(hidden.transport.as_str().to_string()),
+        )
+}
+
 /// Compares the kernel's socket listings with a bind probe on an interval.
 pub struct HiddenPortWatcher {
     reader: Arc<dyn HiddenPortReader>,
     ports: Arc<[u16]>,
     alerts: mpsc::Sender<AlertEvent>,
     report: ArcSwap<HiddenPortReport>,
+    host_rules: Option<Arc<HostRuleService>>,
 }
 
 impl HiddenPortWatcher {
@@ -46,7 +66,15 @@ impl HiddenPortWatcher {
             ports: ports.into(),
             alerts,
             report: ArcSwap::from_pointee(HiddenPortReport::default()),
+            host_rules: None,
         }
+    }
+
+    /// Hand each new finding to the host rules as well, as `port.hidden`.
+    #[must_use]
+    pub fn with_host_rules(mut self, host_rules: Arc<HostRuleService>) -> Self {
+        self.host_rules = Some(host_rules);
+        self
     }
 
     /// The sweep as of the last reading.
@@ -98,10 +126,21 @@ impl HiddenPortWatcher {
             .iter()
             .map(|h| (h.netns, h.transport, h.family, h.port))
             .collect();
-        let events: Vec<AlertEvent> = sweep
+        let fresh: Vec<&HiddenPort> = sweep
             .hidden
             .iter()
             .filter(|h| !before.contains(&(h.netns, h.transport, h.family, h.port)))
+            .collect();
+        if let Some(rules) = &self.host_rules {
+            for hidden in &fresh {
+                match port_event(hidden) {
+                    Ok(event) => rules.record_posture(&event, now),
+                    Err(err) => warn!(error = %err, "hidden port not handed to the host rules"),
+                }
+            }
+        }
+        let events: Vec<AlertEvent> = fresh
+            .into_iter()
             .map(|h| AlertEvent::System(Box::new(Alert::from_hidden_port(h, now))))
             .collect();
         self.report.store(Arc::new(HiddenPortReport {

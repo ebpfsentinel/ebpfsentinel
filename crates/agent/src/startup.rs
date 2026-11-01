@@ -4589,13 +4589,16 @@ pub async fn run(
                 coverage_proc.clone(),
             ),
         );
-        let sweep = Arc::new(
-            application::hidden_process_service::HiddenProcessWatcher::new(
-                reader,
-                config.hidden_checks.processes.pids_per_second,
-                alert_tx.clone(),
-            ),
+        let sweep = application::hidden_process_service::HiddenProcessWatcher::new(
+            reader,
+            config.hidden_checks.processes.pids_per_second,
+            alert_tx.clone(),
         );
+        let sweep = match &host_rules_for_files {
+            Some(rules) => sweep.with_host_rules(Arc::clone(rules)),
+            None => sweep,
+        };
+        let sweep = Arc::new(sweep);
         app_state.install_hidden_processes(Arc::clone(&sweep));
         let interval = Duration::from_secs(config.hidden_checks.processes.interval_secs);
         let sweep_cancel = cancel_token.clone();
@@ -4642,11 +4645,16 @@ pub async fn run(
                 ebpfsentinel_warden::hidden_ports::scan,
                 coverage_proc.clone(),
             ));
-            let sweep = Arc::new(application::hidden_port_service::HiddenPortWatcher::new(
+            let sweep = application::hidden_port_service::HiddenPortWatcher::new(
                 reader,
                 config.hidden_checks.ports.probed_ports(),
                 alert_tx.clone(),
-            ));
+            );
+            let sweep = match &host_rules_for_files {
+                Some(rules) => sweep.with_host_rules(Arc::clone(rules)),
+                None => sweep,
+            };
+            let sweep = Arc::new(sweep);
             app_state.install_hidden_ports(Arc::clone(&sweep));
             let interval = Duration::from_secs(config.hidden_checks.ports.interval_secs);
             let sweep_cancel = cancel_token.clone();

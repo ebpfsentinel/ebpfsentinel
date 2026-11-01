@@ -4,13 +4,15 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use domain::alert::entity::Alert;
-use domain::hidden::{ProcessSweep, sweep_processes};
+use domain::hidden::{HiddenProcess, ProcessSweep, sweep_processes};
+use domain::hostrule::{FieldValue, HostRuleError, Intent, IntentEvent};
 use ports::secondary::hidden_process_port::HiddenProcessReader;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::alert_event::AlertEvent;
+use crate::host_rule_service::HostRuleService;
 use crate::learning_service::now_ns;
 
 /// The sweep as of the last reading.
@@ -23,6 +25,17 @@ pub struct HiddenProcessReport {
     pub error: Option<String>,
 }
 
+/// The `process.hidden` event of one finding: its pid and, where it could be
+/// read, its command name.
+fn process_event(hidden: &HiddenProcess) -> Result<IntentEvent, HostRuleError> {
+    let event = IntentEvent::new(Intent::ProcessHidden)
+        .with("pid", FieldValue::Integer(i64::from(hidden.pid)))?;
+    match &hidden.comm {
+        Some(comm) => event.with("comm", FieldValue::Text(comm.clone())),
+        None => Ok(event),
+    }
+}
+
 /// Compares the listing of `/proc` with a null signal across the pid space
 /// on an interval.
 pub struct HiddenProcessWatcher {
@@ -30,6 +43,7 @@ pub struct HiddenProcessWatcher {
     rate: u32,
     alerts: mpsc::Sender<AlertEvent>,
     report: ArcSwap<HiddenProcessReport>,
+    host_rules: Option<Arc<HostRuleService>>,
 }
 
 impl HiddenProcessWatcher {
@@ -44,7 +58,15 @@ impl HiddenProcessWatcher {
             rate,
             alerts,
             report: ArcSwap::from_pointee(HiddenProcessReport::default()),
+            host_rules: None,
         }
+    }
+
+    /// Hand each new finding to the host rules as well, as `process.hidden`.
+    #[must_use]
+    pub fn with_host_rules(mut self, host_rules: Arc<HostRuleService>) -> Self {
+        self.host_rules = Some(host_rules);
+        self
     }
 
     /// The sweep as of the last reading.
@@ -91,10 +113,21 @@ impl HiddenProcessWatcher {
         let sweep = sweep_processes(&reading);
         let previous = self.report.load_full();
         let before: BTreeSet<u32> = previous.sweep.hidden.iter().map(|h| h.pid).collect();
-        let events: Vec<AlertEvent> = sweep
+        let fresh: Vec<&HiddenProcess> = sweep
             .hidden
             .iter()
             .filter(|h| !before.contains(&h.pid))
+            .collect();
+        if let Some(rules) = &self.host_rules {
+            for hidden in &fresh {
+                match process_event(hidden) {
+                    Ok(event) => rules.record_posture(&event, now),
+                    Err(err) => warn!(error = %err, "hidden process not handed to the host rules"),
+                }
+            }
+        }
+        let events: Vec<AlertEvent> = fresh
+            .into_iter()
             .map(|h| AlertEvent::System(Box::new(Alert::from_hidden_process(h, now))))
             .collect();
         self.report.store(Arc::new(HiddenProcessReport {
@@ -209,6 +242,37 @@ mod tests {
             "hidden again after a clean sweep"
         );
         assert_eq!(watcher.rate(), 100_000);
+    }
+
+    #[tokio::test]
+    async fn a_new_hidden_process_is_handed_to_the_host_rules_once() {
+        let (tx, _rx) = mpsc::channel(16);
+        let specs: Vec<domain::hostrule::HostRuleSpec> = serde_json::from_str(
+            r#"[{"id":"shadowed","mode":"shadow","when":{"process.hidden":{"comm":"implant"}}}]"#,
+        )
+        .unwrap();
+        let rules = Arc::new(HostRuleService::new(
+            domain::hostrule::HostRuleSet::compile(specs).unwrap(),
+            tx,
+        ));
+        let (alerts, mut rx) = mpsc::channel(16);
+        let reader = Arc::new(Scripted {
+            readings: Mutex::new(vec![Ok(concealing(4242)), Ok(concealing(4242))]),
+        });
+        let watcher = Arc::new(
+            HiddenProcessWatcher::new(reader, 100_000, alerts).with_host_rules(Arc::clone(&rules)),
+        );
+        assert_eq!(watcher.sample().await, 1);
+        assert_eq!(watcher.sample().await, 0);
+        assert!(
+            rx.recv().await.is_some(),
+            "the sweep's own alert still goes"
+        );
+        assert_eq!(
+            rules.reading("shadowed").map(|r| r.events),
+            Some(1),
+            "counted the sweep it first appeared in, not every sweep after"
+        );
     }
 
     #[tokio::test]
