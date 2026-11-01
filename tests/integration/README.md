@@ -64,7 +64,7 @@ make test
 # Run a single suite
 make test-suite SUITE=01-agent-lifecycle
 
-# Run eBPF scenario tests (requires root + kernel >= 6.9)
+# Run eBPF scenario tests (requires root + kernel >= 6.12)
 make test-ebpf-scenarios
 
 # Quick performance test
@@ -87,7 +87,7 @@ Run without root. Require the agent binary built (`cargo build --release`).
 | **03-rest-api-firewall** |     8 | Firewall rule CRUD via REST: create, read, update, delete, priority ordering, bulk operations                                                                                    |
 | **04-rest-api-domains**  |    23 | Domain-specific REST APIs: IPS blacklist, rate limit config, threat intel feeds, alerting routes, L7 inspection, DNS cache/blocklist, domain reputation |
 | **05-grpc-streaming**    |     4 | gRPC health check, server reflection, event streaming subscription                                                                                                               |
-| **06-ebpf-programs**     |     3 | eBPF program loading and attachment to a veth interface (requires kernel >= 6.9)                                                                                                |
+| **06-ebpf-programs**     |     3 | eBPF program loading and attachment to a veth interface (requires kernel >= 6.12)                                                                                                |
 | **07-authentication**    |    11 | JWT RS256 validation, OIDC JWKS endpoint, API key auth, role-based access control (admin/operator/viewer), token expiry, composite auth                                          |
 | **08-tls**               |     5 | HTTPS termination on port 8443, gRPC over TLS, self-signed certificate validation, mTLS                                                                                         |
 | **09-docker**            |    11 | Docker image build, compose deployment, healthz, baseline/Docker TCP throughput, ICMP latency, RSS/CPU overhead, API latency under load, memory stability, clean shutdown         |
@@ -97,7 +97,7 @@ Run without root. Require the agent binary built (`cargo build --release`).
 
 ### eBPF Scenario Tests (suites 11-14, 18-24)
 
-Require **root** and **kernel >= 6.9**. Use isolated network namespaces with veth pairs (10.200.0.0/24) to test real eBPF packet processing. In 2-VM mode, root is not required locally.
+Require **root** and **kernel >= 6.12**. Use isolated network namespaces with veth pairs (10.200.0.0/24) to test real eBPF packet processing. In 2-VM mode, root is not required locally.
 
 | Suite                              | Tests | What it covers                                                                                                                                    |
 | ---------------------------------- | ----: | ------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -115,7 +115,7 @@ Require **root** and **kernel >= 6.9**. Use isolated network namespaces with vet
 
 ### End-to-End & Advanced Tests (suites 24-28)
 
-Require **root** and **kernel >= 6.9** (or 2-VM mode).
+Require **root** and **kernel >= 6.12** (or 2-VM mode).
 
 | Suite                          | Tests | What it covers                                                                                                |
 | ------------------------------ | ----: | ------------------------------------------------------------------------------------------------------------- |
@@ -126,7 +126,7 @@ Require **root** and **kernel >= 6.9** (or 2-VM mode).
 
 ### Performance & Benchmark Suites (suites 15, 29-30)
 
-Require **root** and **kernel >= 6.9** (or 2-VM mode). Measure agent overhead using iperf3, hping3, and `/proc` sampling.
+Require **root** and **kernel >= 6.12** (or 2-VM mode). Measure agent overhead using iperf3, hping3, and `/proc` sampling.
 
 | Suite                          | Tests | What it covers                                                                                                   |
 | ------------------------------ | ----: | ---------------------------------------------------------------------------------------------------------------- |
@@ -195,108 +195,108 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `cgroup-workload-firewall` | 67, 70 | 2vm | 6.12 | nightly | Workload rules decided at connect/sendmsg/bind; suite 70 refuses a connect by the executable of the direct parent and of any ancestor, read from the live chain of parents |
 | `lsm-exec-network` | TBD | none | 6.12 | manual | Only the executables in the set reach the network, at socket_create and socket_connect. Needs the BPF LSM active at boot (lsm=bpf), which no lane's kernel command line sets yet |
 | `lsm-bpf-guard` | TBD | none | 6.12 | manual | No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks. Needs the BPF LSM active at boot (lsm=bpf), which no lane's kernel command line sets yet |
-| `tc-conntrack` | 18, 24, 47, 67 | 3vm | 6.9 | pr | Connection tracking; kernel-CT kill via kill_flow_via_xdp_ct/skb_ct asserted in 47 |
-| `tc-dns` | 19, 45, 67 | 3vm | 6.9 | pr | Passive DNS capture; DoH/DoT detection via ClientHello SNI + dst_port 853 asserted in 45 |
-| `tc-ids` | 12, 25, perf/04, 39, 66, 67 | 2vm | 6.9 | pr | Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in perf/04; slow-attack signatures in 39; what the agent decided to drop against what the kernel confirmed it tore down in 66, driven from both sides of the tc hook so the confirmation is not read as a copy of the drop count |
-| `tc-nat-egress` | 21, 50, perf/06, 67 | 2vm | 6.9 | pr | SNAT (TC egress); NPTv6 (RFC 6296) checksum-neutral prefix swap config + CLI/REST surface asserted in 50 (wire-level swap gated on IPv6 routability); SNAT/masquerade datapath throughput overhead measured in perf/06 |
-| `tc-nat-ingress` | 21, 50, perf/06, 67 | 2vm | 6.9 | pr | DNAT (TC ingress); NPTv6 reverse-prefix translation surface asserted via REST + CLI in 50; DNAT datapath throughput overhead measured in perf/06 |
-| `tc-qos` | 28, 67 | 2vm | 6.9 | pr | Traffic shaping (TC egress) |
-| `tc-scrub` | 23, 40, 46, 67 | 3vm | 6.9 | pr | Packet normalization; spoofed-source amplification drop in 40; byte-level pcap assertions (TTL floor, MSS clamp, DF clear, IP-ID rand) in 46 |
-| `tc-threatintel` | 17, 33, 67 | 2vm | 6.9 | pr | OSINT feed IOC matching (TC) |
+| `tc-conntrack` | 18, 24, 47, 67 | 3vm | 6.12 | pr | Connection tracking; kernel-CT kill via kill_flow_via_xdp_ct/skb_ct asserted in 47 |
+| `tc-dns` | 19, 45, 67 | 3vm | 6.12 | pr | Passive DNS capture; DoH/DoT detection via ClientHello SNI + dst_port 853 asserted in 45 |
+| `tc-ids` | 12, 25, perf/04, 39, 66, 67, 77 | 2vm | 6.12 | pr | Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in perf/04; slow-attack signatures in 39; what the agent decided to drop against what the kernel confirmed it tore down in 66, driven from both sides of the tc hook so the confirmation is not read as a copy of the drop count; refused by name with fou unloaded in 77 |
+| `tc-nat-egress` | 21, 50, perf/06, 67 | 2vm | 6.12 | pr | SNAT (TC egress); NPTv6 (RFC 6296) checksum-neutral prefix swap config + CLI/REST surface asserted in 50 (wire-level swap gated on IPv6 routability); SNAT/masquerade datapath throughput overhead measured in perf/06 |
+| `tc-nat-ingress` | 21, 50, perf/06, 67 | 2vm | 6.12 | pr | DNAT (TC ingress); NPTv6 reverse-prefix translation surface asserted via REST + CLI in 50; DNAT datapath throughput overhead measured in perf/06 |
+| `tc-qos` | 28, 67 | 2vm | 6.12 | pr | Traffic shaping (TC egress) |
+| `tc-scrub` | 23, 40, 46, 67 | 3vm | 6.12 | pr | Packet normalization; spoofed-source amplification drop in 40; byte-level pcap assertions (TTL floor, MSS clamp, DF clear, IP-ID rand) in 46 |
+| `tc-threatintel` | 17, 33, 67 | 2vm | 6.12 | pr | OSINT feed IOC matching (TC) |
 | `tracepoint-drop-reason` | TBD | none | 6.12 | manual | Counts the packets the kernel frees undelivered, under the skb_drop_reason it gives. No suite yet: nothing provokes a drop of a known reason and reads the counter back |
 | `tracepoint-tcp-health` | 71 | none | 6.12 | nightly | Retransmissions, resets and connections opened, failed and closed, counted per pair of ends at the TCP stack's own tracepoints; 71 provokes resets to a closed port and full connections, and reads both ends back |
 | `tracepoint-process` | 67, 70, perf/07 | none | 6.12 | pr | Exec, fork and exit feeding the process table; 67 reads a program that execed after the hooks attached, 70 decides workload rules on the chain of parents it records, exec() cost measured in perf/07 |
 | `tracepoint-signal` | TBD | none | 6.12 | manual | Signals the task behind a flow from inside that task, for the process response. No suite yet: nothing asserts a named process is stopped |
-| `uprobe-dlp` | 27, 60, 62, perf/06, 67 | 2vm | 6.9 | pr | SSL/TLS DLP via uprobes; per-container uprobe attach across cgroups in suite 60; TLS-MITM inspection is enterprise-only; uprobe SSL-inspection goodput cost (loopback libssl) measured in perf/06 |
-| `xdp-firewall` | 11, 24, 26, perf/04, 40, 67, 69 | 2vm | 6.9 | pr | L3/L4 stateful firewall (XDP); XDP-drop CPU savings measured in perf/04; amplification ports denied in 40; a port Docker publishes refused before its DNAT in 69 |
-| `xdp-firewall-reject` | 42 | 2vm | 6.9 | nightly | TCP RST / ICMP forging tail-call; perf/04 wire-validates checksums + src/dst swap + whitelist bypass |
-| `xdp-loadbalancer` | 20, 44, 67 | 2vm | 6.9 | pr | L4 LB + Maglev; suite 44 (3-VM) covers L2 DSR end-to-end and Maglev disruption bound |
-| `xdp-pass` | 42, 46 | 2vm | 6.9 | nightly | Test-only XDP_PASS stub attached to the netns side of the veth pair by lib/ebpf_helpers.bash (create_test_netns) so XDP_TX reflections from xdp-firewall-reject reach the namespace; a physical NIC needs no such helper |
-| `xdp-ratelimit` | 14, 15, perf/04, 67 | 2vm | 6.9 | pr | Token bucket + sliding window + leaky bucket; SYN cookie at >1 Mpps in perf/04 |
-| `xdp-ratelimit-syncookie` | 43 | 2vm | 6.9 | nightly | SYN cookie forging tail-call; suite 43 asserts TcpExtSyncookiesSent + agent metric grow, legit ncat completes, spoofed flood leaves TcpExtSyncookiesRecv flat |
-| `xdp-vip-announcer` | 37, 44, 67 | 2vm | 6.9 | nightly | L2 VIP announcer / ARP responder; suite 44 (3-VM) drives the responder + gratuitous-ARP + is_self_announced predicate from a real client |
+| `uprobe-dlp` | 27, 60, 62, perf/06, 67 | 2vm | 6.12 | pr | SSL/TLS DLP via uprobes; per-container uprobe attach across cgroups in suite 60; TLS-MITM inspection is enterprise-only; uprobe SSL-inspection goodput cost (loopback libssl) measured in perf/06 |
+| `xdp-firewall` | 11, 24, 26, perf/04, 40, 67, 69 | 2vm | 6.12 | pr | L3/L4 stateful firewall (XDP); XDP-drop CPU savings measured in perf/04; amplification ports denied in 40; a port Docker publishes refused before its DNAT in 69 |
+| `xdp-firewall-reject` | 42 | 2vm | 6.12 | nightly | TCP RST / ICMP forging tail-call; perf/04 wire-validates checksums + src/dst swap + whitelist bypass |
+| `xdp-loadbalancer` | 20, 44, 67 | 2vm | 6.12 | pr | L4 LB + Maglev; suite 44 (3-VM) covers L2 DSR end-to-end and Maglev disruption bound |
+| `xdp-pass` | 42, 46 | 2vm | 6.12 | nightly | Test-only XDP_PASS stub attached to the netns side of the veth pair by lib/ebpf_helpers.bash (create_test_netns) so XDP_TX reflections from xdp-firewall-reject reach the namespace; a physical NIC needs no such helper |
+| `xdp-ratelimit` | 14, 15, perf/04, 67 | 2vm | 6.12 | pr | Token bucket + sliding window + leaky bucket; SYN cookie at >1 Mpps in perf/04 |
+| `xdp-ratelimit-syncookie` | 43 | 2vm | 6.12 | nightly | SYN cookie forging tail-call; suite 43 asserts TcpExtSyncookiesSent + agent metric grow, legit ncat completes, spoofed flood leaves TcpExtSyncookiesRecv flat |
+| `xdp-vip-announcer` | 37, 44, 67 | 2vm | 6.12 | nightly | L2 VIP announcer / ARP responder; suite 44 (3-VM) drives the responder + gratuitous-ARP + is_self_announced predicate from a real client |
 
 #### CLI subcommands (40)
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
-| `alerts` | 04, 25, 34 | 2vm | 6.9 | pr | Alert list + e2e + SSE stream |
-| `aliases` | 16 | 2vm | 6.9 | pr | Alias status and resolved content read back through /api/v1/aliases in 16, including an alias that does not exist |
+| `alerts` | 04, 25, 34 | 2vm | 6.12 | pr | Alert list + e2e + SSE stream |
+| `aliases` | 16 | 2vm | 6.12 | pr | Alias status and resolved content read back through /api/v1/aliases in 16, including an alias that does not exist |
 | `audit` | 04 | none | n/a | pr | Audit log + rule history |
-| `capture` | 49 | 2vm | 6.9 | nightly | Manual packet capture (start/list/stop) with tcpdump-parseable pcap export asserted in 49 |
-| `config` | 16, 17, 23, 25, 35, 52 | 2vm | 6.9 | pr | Effective configuration and reload through /api/v1/config; reload asserted under sustained load in 52 and against the operator-managed flag in 35 |
-| `conntrack` | 18, 16 | 2vm | 6.9 | pr | Connection tracking inspection + flush |
-| `ddos` | 15, 22, 38, 39, 40 | 2vm | 6.9 | pr | DDoS protection + scrub; MHDDoS flood matrix in 38; slow-attack T1499.002 in 39; amplification T1498.002 in 40 |
-| `dlp` | 16, 27 | 2vm | 6.9 | pr | DLP status and pattern list; the uprobe datapath behind them is asserted in 27 |
-| `dns` | 04, 19 | 2vm | 6.9 | pr | DNS cache, stats, blocklist |
+| `capture` | 49 | 2vm | 6.12 | nightly | Manual packet capture (start/list/stop) with tcpdump-parseable pcap export asserted in 49 |
+| `config` | 16, 17, 23, 25, 35, 52 | 2vm | 6.12 | pr | Effective configuration and reload through /api/v1/config; reload asserted under sustained load in 52 and against the operator-managed flag in 35 |
+| `conntrack` | 18, 16 | 2vm | 6.12 | pr | Connection tracking inspection + flush |
+| `ddos` | 15, 22, 38, 39, 40 | 2vm | 6.12 | pr | DDoS protection + scrub; MHDDoS flood matrix in 38; slow-attack T1499.002 in 39; amplification T1498.002 in 40 |
+| `dlp` | 16, 27 | 2vm | 6.12 | pr | DLP status and pattern list; the uprobe datapath behind them is asserted in 27 |
+| `dns` | 04, 19 | 2vm | 6.12 | pr | DNS cache, stats, blocklist |
 | `domains` | 04 | none | n/a | pr | Domain reputation + blocklist |
-| `ebpf` | 16, 60, 62 | 2vm | 6.9 | pr | Program load status through /api/v1/ebpf/status; the per-container uprobe inventory in 60 |
-| `fingerprints` | 29, 41 | 2vm | 6.9 | nightly | JA4+ cache + client-diversity (curl/openssl/python/go/MHDDoS) on suite 41 |
-| `firewall` | 03, 11, 26, 40 | 2vm | 6.9 | pr | L3/L4 rule CRUD + eBPF scenarios; amplification UDP-port denies in 40 |
-| `flows` | 04, 18 | 2vm | 6.9 | pr | Aggregated connection map |
-| `geoip` | 30 | 2vm | 6.9 | pr | GeoIP status and address lookup against the fixture database in 30 |
+| `ebpf` | 16, 60, 62, 77 | 2vm | 6.12 | pr | Program load status through /api/v1/ebpf/status; the per-container uprobe inventory in 60; the kernel floor refusal and the kernel-features verdicts in 77 |
+| `fingerprints` | 29, 41 | 2vm | 6.12 | nightly | JA4+ cache + client-diversity (curl/openssl/python/go/MHDDoS) on suite 41 |
+| `firewall` | 03, 11, 26, 40 | 2vm | 6.12 | pr | L3/L4 rule CRUD + eBPF scenarios; amplification UDP-port denies in 40 |
+| `flows` | 04, 18 | 2vm | 6.12 | pr | Aggregated connection map |
+| `geoip` | 30 | 2vm | 6.12 | pr | GeoIP status and address lookup against the fixture database in 30 |
 | `health` | 02 | none | n/a | pr | /healthz + /readyz |
 | `identity` | 35 | none | n/a | pr | Operator-managed flag, hostname, version |
-| `ids` | 12, 16, 33, 55, 59 | 2vm | 6.9 | pr | IDS status and rule list; the rules are asserted over IPv6 in 55 and under a real SSH brute force in 59 |
+| `ids` | 12, 16, 33, 55, 59 | 2vm | 6.12 | pr | IDS status and rule list; the rules are asserted over IPv6 in 55 and under a real SSH brute force in 59 |
 | `investigate` | 04 | none | n/a | pr | IP correlation across alerts/CT/DNS/blacklist |
-| `ips` | 13, 16, 38, 39 | 2vm | 6.9 | pr | Intrusion prevention + auto-blacklist; MHDDoS flood matrix in 38; slowhttptest in 39 |
-| `l7` | 16, 29, 38, 39 | 2vm | 6.9 | pr | L7 firewall rules (HTTP/SMTP/FTP/SMB inspection); MHDDoS flood matrix in 38; slow-request timeout in 39 |
-| `lb` | 16, 20, 37 | 2vm | 6.9 | pr | Load balancer services + VIPs |
+| `ips` | 13, 16, 38, 39 | 2vm | 6.12 | pr | Intrusion prevention + auto-blacklist; MHDDoS flood matrix in 38; slowhttptest in 39 |
+| `l7` | 16, 29, 38, 39 | 2vm | 6.12 | pr | L7 firewall rules (HTTP/SMTP/FTP/SMB inspection); MHDDoS flood matrix in 38; slow-request timeout in 39 |
+| `lb` | 16, 20, 37 | 2vm | 6.12 | pr | Load balancer services + VIPs |
 | `learning` | TBD | none | 6.12 | manual | Learning window start, status and result. No suite drives the CLI or the window it opens |
 | `metrics` | 02 | none | n/a | pr | Prometheus metrics |
-| `mitre` | 16, 51 | 2vm | 6.9 | nightly | MITRE coverage matrix; suite 16 asserts GET /api/v1/mitre/coverage (technique/tactic consistency), suite 51 enforces that every alert-producing suite carries a MITRE assertion |
-| `nat` | 16, 21, 50 | 2vm | 6.9 | pr | NAT + NPTv6; NPTv6 prefix translation covered by suite 50 |
+| `mitre` | 16, 51 | 2vm | 6.12 | nightly | MITRE coverage matrix; suite 16 asserts GET /api/v1/mitre/coverage (technique/tactic consistency), suite 51 enforces that every alert-producing suite carries a MITRE assertion |
+| `nat` | 16, 21, 50 | 2vm | 6.12 | pr | NAT + NPTv6; NPTv6 prefix translation covered by suite 50 |
 | `netpol` | TBD | k8s | 6.12 | manual | NetworkPolicy compiled for the pods of one node. No suite yet: the kubernetes lane does not apply a policy and read the compiled rules back |
 | `processes` | TBD | none | 6.12 | manual | What a pid is, from its exec to its exit. The REST route it reads is asserted in 67; the CLI itself is not driven by any suite |
-| `qos` | 16, 28 | 2vm | 6.9 | pr | QoS / traffic shaping |
-| `ratelimit` | 04, 14, 16, 38 | 2vm | 6.9 | pr | Rate limit policies; MHDDoS flood matrix in 38 |
-| `responses` | 48 | 2vm | 6.9 | nightly | Manual time-bounded response actions (create/list/revoke + TTL auto-expire) asserted via REST + CLI parity in 48 |
-| `routing` | 16, 32, 53 | 2vm | 6.9 | pr | Gateway and route list through /api/v1/routing; failover ordering in 53 |
+| `qos` | 16, 28 | 2vm | 6.12 | pr | QoS / traffic shaping |
+| `ratelimit` | 04, 14, 16, 38 | 2vm | 6.12 | pr | Rate limit policies; MHDDoS flood matrix in 38 |
+| `responses` | 48 | 2vm | 6.12 | nightly | Manual time-bounded response actions (create/list/revoke + TTL auto-expire) asserted via REST + CLI parity in 48 |
+| `routing` | 16, 32, 53 | 2vm | 6.12 | pr | Gateway and route list through /api/v1/routing; failover ordering in 53 |
 | `score` | 04 | none | n/a | pr | 0-10 network risk score |
 | `status` | 01, 02 | none | n/a | pr | Runtime status query |
-| `threatintel` | 16, 17, 33 | 2vm | 6.9 | pr | OSINT feed CRUD + IOC matching + STIX feed |
+| `threatintel` | 16, 17, 33 | 2vm | 6.12 | pr | OSINT feed CRUD + IOC matching + STIX feed |
 | `tls` | 58 | none | n/a | nightly | TLS status through /api/v1/tls/status, read while the PQ-hybrid handshake sweep runs in 58 |
 | `top` | 04 | none | n/a | pr | Top talkers by traffic volume |
 | `version` | 01 | none | n/a | pr | Version + build info |
 | `watch` | 34 | none | n/a | pr | SSE alerts stream (tail -f) |
-| `zones` | 31 | 2vm | 6.9 | pr | Zone, policy and status reads through /api/v1/zones in 31 |
+| `zones` | 31 | 2vm | 6.12 | pr | Zone, policy and status reads through /api/v1/zones in 31 |
 
 #### Domain modules (31)
 
 | Feature | Suites | Topology | Kernel | Profile | Notes |
 |---|---|---|---|---|---|
-| `alert` | 04, 25, 34, 61 | 2vm | 6.9 | pr | Alert pipeline + routing; outbound delivery asserted in 61 across all three senders - webhook (POST + JSON body identity + route headers + 5xx retry + SSRF refusal of a loopback target), email (SMTP envelope + body) and OTLP (export on /v1/logs with the alert attributes) |
+| `alert` | 04, 25, 34, 61 | 2vm | 6.12 | pr | Alert pipeline + routing; outbound delivery asserted in 61 across all three senders - webhook (POST + JSON body identity + route headers + 5xx retry + SSRF refusal of a loopback target), email (SMTP envelope + body) and OTLP (export on /v1/logs with the alert attributes) |
 | `alias` | 16 | none | n/a | pr | AliasSet (CIDR aliases); suite 16 covers alias_count plus PUT /api/v1/aliases/{id}/content on an External alias (accept) and on ip_set / unknown / invalid-CIDR inputs (reject) |
 | `audit` | 04 | none | n/a | pr | Audit trail + rule history |
 | `auth` | 07, 36 | none | n/a | pr | JWT/OIDC/JWKS/API-key + RBAC |
-| `capture` | 49, 62 | 2vm | 6.9 | nightly | Pcap export lifecycle (Running → Completed) + on-disk pcap validity asserted in 49; broker-provided AF_PACKET sockets (PcapOpen fd hand-off) asserted in 62 |
-| `conntrack` | 16, 18, 24, 47, 62, 66 | 3vm | 6.9 | pr | Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; what the kernel confirmed it tore down against what the agent decided, on both sides of the tc hook order, in 66; GET /api/v1/conntrack/events SSE stream asserted in 16 (skipped when /proc/net/nf_conntrack is absent); brokered teardown from the user-namespace agent asserted in 62 |
-| `container` | 54 | 2vm | 6.9 | nightly | cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 54; AlertResponse container fields and k8s pod enrichment tracked as deferred ACs in the suite header. Per-tenant cgroup filtering is enterprise-only and is tested in the enterprise repo |
+| `capture` | 49, 62 | 2vm | 6.12 | nightly | Pcap export lifecycle (Running → Completed) + on-disk pcap validity asserted in 49; broker-provided AF_PACKET sockets (PcapOpen fd hand-off) asserted in 62 |
+| `conntrack` | 16, 18, 24, 47, 62, 66 | 3vm | 6.12 | pr | Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; what the kernel confirmed it tore down against what the agent decided, on both sides of the tc hook order, in 66; GET /api/v1/conntrack/events SSE stream asserted in 16 (skipped when /proc/net/nf_conntrack is absent); brokered teardown from the user-namespace agent asserted in 62 |
+| `container` | 54 | 2vm | 6.12 | nightly | cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 54; AlertResponse container fields and k8s pod enrichment tracked as deferred ACs in the suite header. Per-tenant cgroup filtering is enterprise-only and is tested in the enterprise repo |
 | `coverage` | TBD | k8s | 6.12 | manual | What the node agent sees of each pod and why it misses what it misses. No suite reads the per-pod coverage report |
-| `ddos` | 15, 22, 38, 39, 40 | 2vm | 6.9 | pr | DDoS detection + policy; MHDDoS flood matrix in 38; service-exhaustion in 39; amplification in 40 |
-| `dlp` | 16, 27, 60, 62, perf/06 | 2vm | 6.9 | pr | Data loss prevention; suite 27 covers pattern match + uprobe attach, suite 60 the per-container attach path, suite 62 the brokered DlpScan + AttachUprobe half. TLS-MITM proxy is enterprise-only; wire-level malicious-MITM + decrypted-payload assertions remain 3-VM deferrals (need mitmproxy + injected-CA topology). uprobe SSL-inspection goodput cost benched in perf/06 |
-| `dns` | 04, 19, 45, 55 | 3vm | 6.9 | pr | DNS intel; DoH/DoT detection via ClientHello SNI + dst_port 853 in 45; AAAA query parser-readiness asserted in 55 |
+| `ddos` | 15, 22, 38, 39, 40 | 2vm | 6.12 | pr | DDoS detection + policy; MHDDoS flood matrix in 38; service-exhaustion in 39; amplification in 40 |
+| `dlp` | 16, 27, 60, 62, perf/06 | 2vm | 6.12 | pr | Data loss prevention; suite 27 covers pattern match + uprobe attach, suite 60 the per-container attach path, suite 62 the brokered DlpScan + AttachUprobe half. TLS-MITM proxy is enterprise-only; wire-level malicious-MITM + decrypted-payload assertions remain 3-VM deferrals (need mitmproxy + injected-CA topology). uprobe SSL-inspection goodput cost benched in perf/06 |
+| `dns` | 04, 19, 45, 55 | 3vm | 6.12 | pr | DNS intel; DoH/DoT detection via ClientHello SNI + dst_port 853 in 45; AAAA query parser-readiness asserted in 55 |
 | `drops` | TBD | none | 6.12 | manual | Kernel drop reasons as readable counts, fed by tracepoint-drop-reason. Untested for the same reason as that program |
-| `firewall` | 03, 11, 24, 26, 40, 47, 55 | 3vm | 6.9 | pr | Stateful L3/L4 firewall; amplification UDP-port denies in 40; mid-flow block + CT-kill in 47; IPv6 CIDR rule round-trip + v4↔v6 co-existence asserted in 55 |
+| `firewall` | 03, 11, 24, 26, 40, 47, 55 | 3vm | 6.12 | pr | Stateful L3/L4 firewall; amplification UDP-port denies in 40; mid-flow block + CT-kill in 47; IPv6 CIDR rule round-trip + v4↔v6 co-existence asserted in 55 |
 | `flow` | TBD | none | 6.12 | manual | Flow records and their IPFIX, OTLP, JSON and SIEM encodings. No suite exports a flow and decodes it at a collector; 61 asserts the alert sinks, not the flow export |
-| `ids` | 12, 25, 38, 39, 55, 59, 66 | 2vm | 6.9 | pr | Intrusion detection engine; the block branch's two counters - the attempt and the kernel's own confirmation of the conntrack tear-down - asserted against each other in 66; behavioural signatures stressed in 38; slow-attack signatures in 39; IPv6-scoped signature surface asserted in 55 (wire-level v6 IDS alert via tc-ids deferred - needs dual-stack 2-VM topology); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 59 (real hydra/ncrack credential bursts deferred - same dataplane contract is driven by the SYN-burst path) |
-| `ips` | 13, 16, 38, 39, 55, 59, perf/03 | 2vm | 6.9 | pr | Auto-blacklist + whitelist; MHDDoS flood matrix in 38; slowhttptest in 39; IPv6 blacklist-write surface asserted in 55; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 59; in-kernel blacklist-injection control-plane latency (100/1K) benched in perf/03 |
-| `l2` | 37, 44, 62 | 2vm | 6.9 | nightly | L2 binding + self-whitelist; DSR end-to-end covered by suite 44; gratuitous ARP brokered through the warden (ArpAnnounce) asserted in 62 |
-| `l7` | 16, 29, 38, 39, 56 | 2vm | 6.9 | pr | HTTP/TLS/SNI/gRPC/SMTP/FTP/SMB; slow-request timeout in 39; SMTP/FTP/SMB matcher round-trip + parser robustness (truncated TCP, invalid-protocol POST rejection) asserted in 56. Wire-level swaks/lftp/smbclient per-command behaviour deferred (needs extra deps on test VMs; covered by domain l7::engine unit tests) |
+| `ids` | 12, 25, 38, 39, 55, 59, 66 | 2vm | 6.12 | pr | Intrusion detection engine; the block branch's two counters - the attempt and the kernel's own confirmation of the conntrack tear-down - asserted against each other in 66; behavioural signatures stressed in 38; slow-attack signatures in 39; IPv6-scoped signature surface asserted in 55 (wire-level v6 IDS alert via tc-ids deferred - needs dual-stack 2-VM topology); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 59 (real hydra/ncrack credential bursts deferred - same dataplane contract is driven by the SYN-burst path) |
+| `ips` | 13, 16, 38, 39, 55, 59, perf/03 | 2vm | 6.12 | pr | Auto-blacklist + whitelist; MHDDoS flood matrix in 38; slowhttptest in 39; IPv6 blacklist-write surface asserted in 55; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 59; in-kernel blacklist-injection control-plane latency (100/1K) benched in perf/03 |
+| `l2` | 37, 44, 62 | 2vm | 6.12 | nightly | L2 binding + self-whitelist; DSR end-to-end covered by suite 44; gratuitous ARP brokered through the warden (ArpAnnounce) asserted in 62 |
+| `l7` | 16, 29, 38, 39, 56 | 2vm | 6.12 | pr | HTTP/TLS/SNI/gRPC/SMTP/FTP/SMB; slow-request timeout in 39; SMTP/FTP/SMB matcher round-trip + parser robustness (truncated TCP, invalid-protocol POST rejection) asserted in 56. Wire-level swaks/lftp/smbclient per-command behaviour deferred (needs extra deps on test VMs; covered by domain l7::engine unit tests) |
 | `learning` | TBD | none | 6.12 | manual | Watching a node for a window and holding what it reached. No suite opens a window |
-| `loadbalancer` | 16, 20, 37, 44 | 2vm | 6.9 | pr | Maglev + DSR; 3-VM end-to-end coverage via suite 44 |
-| `nat` | 16, 21, 50, perf/03, perf/06 | 2vm | 6.9 | pr | SNAT/DNAT/NPTv6; NPTv6 rule CRUD + tc-nat-egress config surface asserted in 50; NPTv6 control-plane add latency in perf/03; SNAT/DNAT datapath throughput overhead in perf/06 |
+| `loadbalancer` | 16, 20, 37, 44 | 2vm | 6.12 | pr | Maglev + DSR; 3-VM end-to-end coverage via suite 44 |
+| `nat` | 16, 21, 50, perf/03, perf/06 | 2vm | 6.12 | pr | SNAT/DNAT/NPTv6; NPTv6 rule CRUD + tc-nat-egress config surface asserted in 50; NPTv6 control-plane add latency in perf/03; SNAT/DNAT datapath throughput overhead in perf/06 |
 | `netpol` | TBD | k8s | 6.12 | manual | Kubernetes NetworkPolicy compiled for the pods of one node. No suite applies a policy |
 | `process` | 67, 70 | none | 6.12 | nightly | The process table: a pid from exec to exit with its chain of ancestors; read through REST in 67, the chain decides workload rules in 70 |
-| `qos` | 16, 28 | 2vm | 6.9 | pr | Traffic shaping policies |
-| `ratelimit` | 04, 14, 38 | 2vm | 6.9 | pr | Token bucket + variants; exhaustion under flood in 38 |
-| `response` | 48 | 2vm | 6.9 | nightly | In-memory ResponseEngine create/list/revoke + TTL auto-expire asserted in 48; auto_response → IpsService → firewall-map mirroring exercised separately by the auto-response pipeline (not in 48) |
-| `routing` | 32, 53 | 2vm | 6.9 | nightly | Multi-WAN routing; failover ordering + REST + metrics surface asserted in 53 (priority-ordered list, gateways_total gauge, failovers_total counter, SIGHUP-driven priority swap). Active health probe loop + WAN_ALL_DOWN alert + real link-down egress reroute tracked as deferred ACs in the suite header |
+| `qos` | 16, 28 | 2vm | 6.12 | pr | Traffic shaping policies |
+| `ratelimit` | 04, 14, 38 | 2vm | 6.12 | pr | Token bucket + variants; exhaustion under flood in 38 |
+| `response` | 48 | 2vm | 6.12 | nightly | In-memory ResponseEngine create/list/revoke + TTL auto-expire asserted in 48; auto_response → IpsService → firewall-map mirroring exercised separately by the auto-response pipeline (not in 48) |
+| `routing` | 32, 53 | 2vm | 6.12 | nightly | Multi-WAN routing; failover ordering + REST + metrics surface asserted in 53 (priority-ordered list, gateways_total gauge, failovers_total counter, SIGHUP-driven priority swap). Active health probe loop + WAN_ALL_DOWN alert + real link-down egress reroute tracked as deferred ACs in the suite header |
 | `tcp_health` | 71 | none | 6.12 | nightly | TCP health per edge as named counters, fed by tracepoint-tcp-health; 71 reads the no_listener resets and both ends of a connection |
 | `telemetry` | TBD | none | n/a | manual | Anonymous heartbeat of version and eBPF load state. No suite exercises it: the destination is a build-time constant that no test build carries, so a community or CI binary has nowhere to send one and there is nothing to receive it |
-| `threatintel` | 16, 17, 33 | 2vm | 6.9 | pr | OSINT feeds + IOC + STIX |
+| `threatintel` | 16, 17, 33 | 2vm | 6.12 | pr | OSINT feeds + IOC + STIX |
 | `workload` | 67, 70 | none | 6.12 | nightly | The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry |
-| `zone` | 31 | 2vm | 6.9 | pr | Zone-based policy |
+| `zone` | 31 | 2vm | 6.12 | pr | Zone-based policy |
 
 <!-- coverage:end -->
 
@@ -616,9 +616,9 @@ make vagrant-destroy       # Delete VM
 | `test-vm`                 | Run all suites in Vagrant VM | Vagrant              |
 | `test-suite SUITE=<name>` | Run a single suite           | agent binary         |
 | `test-k8s`                | Kubernetes suite only        | Minikube             |
-| `test-ebpf-scenarios`     | Suites 11-14, 18-24          | root, kernel >= 6.9 |
-| `test-performance`        | Suite 15                     | root, kernel >= 6.9 |
-| `test-ebpf-all`           | Suites 11-15                 | root, kernel >= 6.9 |
+| `test-ebpf-scenarios`     | Suites 11-14, 18-24          | root, kernel >= 6.12 |
+| `test-performance`        | Suite 15                     | root, kernel >= 6.12 |
+| `test-ebpf-all`           | Suites 11-15                 | root, kernel >= 6.12 |
 | `test-ebpf-vm`            | eBPF suites in Vagrant VM    | Vagrant              |
 
 ### 2-VM Topology

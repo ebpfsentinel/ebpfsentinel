@@ -17,7 +17,7 @@
 #      userspace drained and then threw away? Those are two different
 #      failures and they are now two different counters.
 #
-# Requires: root, kernel >= 6.9, ncat.
+# Requires: root, kernel >= 6.12, ncat.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
@@ -28,7 +28,7 @@ HEARTBEAT_SECS=10
 
 setup_file() {
     require_root
-    require_kernel 6 9
+    require_kernel 6 12
     require_tool ncat
 
     export PROJECT_ROOT

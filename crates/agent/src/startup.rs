@@ -1946,7 +1946,7 @@ pub async fn run(
     // agent as a pure HTTP frontend on a 6.8 host gives operators a
     // false sense of coverage, so we refuse to boot.
     //
-    // eBPF is loaded EXCLUSIVELY through a BPF token (kernel 6.9+). The
+    // eBPF is loaded EXCLUSIVELY through a BPF token. The
     // agent never loads programs with CAP_BPF / CAP_NET_ADMIN: the
     // self-bootstrap has had the warden delegate a bpffs and mounted it
     // before this runtime started, and the agent - which may run fully

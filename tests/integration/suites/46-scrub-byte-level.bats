@@ -19,7 +19,7 @@
 # feature story and explicitly skipped here so the suite remains
 # honest about coverage.
 #
-# Requires: 3-VM mode, kernel >= 6.9, scapy on attacker
+# Requires: 3-VM mode, kernel >= 6.12, scapy on attacker
 # (/opt/scapy-venv), tcpdump on the bats runner, libpcap on backend.
 
 load '../lib/helpers'
@@ -28,7 +28,7 @@ load '../lib/scrub_helpers'
 
 setup_file() {
     skip_if_not_3vm
-    require_kernel 6 9
+    require_kernel 6 12
 
     export PROJECT_ROOT
     PROJECT_ROOT="$(find_project_root)"

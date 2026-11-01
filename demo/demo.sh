@@ -44,8 +44,8 @@ preflight() {
   major="${release%%.*}"
   minor="${release#*.}"
   minor="${minor%%.*}"
-  if [ "$major" -lt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -lt 9 ]; }; then
-    fail "kernel ${release}: the agent loads eBPF through a BPF token, which needs 6.9 or later."
+  if [ "$major" -lt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -lt 12 ]; }; then
+    fail "kernel ${release}: the agent needs 6.12 or later."
   fi
   [ -r /sys/kernel/btf/vmlinux ] || fail "this kernel exposes no BTF at /sys/kernel/btf/vmlinux."
 

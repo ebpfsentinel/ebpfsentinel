@@ -27,8 +27,8 @@ BPF_TOKEN_WARDEN_SOCK="${BPF_TOKEN_WARDEN_SOCK:-/tmp/ebpfsentinel-warden-$$.sock
 # require_bpf_token_env - skip unless this host can exercise token delegation.
 require_bpf_token_env() {
     require_root
-    # BPF token delegation (BPF_TOKEN_CREATE + delegated bpffs) is kernel 6.9+.
-    require_kernel 6 9
+    # BPF token delegation (BPF_TOKEN_CREATE + delegated bpffs) is kernel 6.12+.
+    require_kernel 6 12
 }
 
 # bpf_token_build_launcher - resolve (or build) the shipped `warden` broker binary

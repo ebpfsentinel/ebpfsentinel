@@ -8,7 +8,7 @@
 # namespace, creates a BPF token, and loads/attaches the full program set through
 # it. Driving the real warden + agent means CI validates the binaries we ship.
 #
-# Requires: root, kernel >= 6.9, local eBPF build, the warden binary (prebuilt
+# Requires: root, kernel >= 6.12, local eBPF build, the warden binary (prebuilt
 # next to the agent or built on demand). VM-only (Vagrant agent).
 
 load '../lib/helpers'

@@ -5,7 +5,7 @@
 # Topology: 2vm. Profile: nightly. Requires:
 #   - Attacker VM with slowhttptest installed
 #   - Agent VM reachable via 2VM SSH helpers
-#   - Kernel >= 6.9
+#   - Kernel >= 6.12
 #
 # Three offensive variants (Slowloris, RUDY, Slowread) and one
 # false-positive guard (legitimate slow client within timeout). Each
@@ -32,7 +32,7 @@ fi
 
 setup_file() {
     require_root
-    require_kernel 6 9
+    require_kernel 6 12
     require_tool jq
     require_tool bc
     require_tool curl

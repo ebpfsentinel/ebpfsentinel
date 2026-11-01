@@ -7,7 +7,7 @@
 # Topology: 2vm. Profile: nightly. Requires:
 #   - Attacker VM with tcpdump, tshark, ncat, scapy
 #   - Agent VM reachable via 2VM SSH helpers
-#   - Kernel >= 6.9
+#   - Kernel >= 6.12
 #
 # Asserts (per AC):
 #   1. TCP connect to a `reject` port yields ECONNREFUSED, captured RST
@@ -28,7 +28,7 @@ WHITELIST_PROBE_SRC="${WHITELIST_PROBE_SRC:-10.200.0.50}"
 
 setup_file() {
     require_root
-    require_kernel 6 9
+    require_kernel 6 12
     require_tool jq
     require_tool bc
 

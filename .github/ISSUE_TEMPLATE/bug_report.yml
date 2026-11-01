@@ -32,7 +32,7 @@ body:
     id: kernel
     attributes:
       label: Kernel and distribution
-      description: Output of `uname -r` and the distribution name. The agent needs 6.9 or later with BTF.
+      description: Output of `uname -r` and the distribution name. The agent needs 6.12 or later with BTF.
     validations:
       required: true
   - type: dropdown

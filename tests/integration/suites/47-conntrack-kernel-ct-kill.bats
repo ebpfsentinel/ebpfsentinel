@@ -15,7 +15,7 @@
 #   3. follow-up packets on the same 4-tuple no longer carry CT info
 #      (no new ESTABLISHED entry materializes immediately)
 #
-# Requires: 3-VM mode, kernel >= 6.9, conntrack-tools on the agent,
+# Requires: 3-VM mode, kernel >= 6.12, conntrack-tools on the agent,
 # iperf3 on attacker + backend.
 
 load '../lib/helpers'
@@ -24,7 +24,7 @@ load '../lib/ct_helpers'
 
 setup_file() {
     skip_if_not_3vm
-    require_kernel 6 9
+    require_kernel 6 12
 
     export PROJECT_ROOT
     PROJECT_ROOT="$(find_project_root)"

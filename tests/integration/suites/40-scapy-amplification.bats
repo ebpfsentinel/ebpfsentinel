@@ -5,7 +5,7 @@
 # Topology: 2vm. Profile: nightly. Requires:
 #   - Attacker VM with python3 + scapy
 #   - Agent VM reachable via 2VM SSH helpers
-#   - Kernel >= 6.9
+#   - Kernel >= 6.12
 #
 # Each vector test floods the agent (victim side) with the reflected
 # response leg of an amplification attack: UDP datagrams sourced *from*
@@ -24,7 +24,7 @@ load '../lib/amp_helpers'
 
 setup_file() {
     require_root
-    require_kernel 6 9
+    require_kernel 6 12
     require_tool jq
     require_tool bc
 

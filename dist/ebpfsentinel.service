@@ -20,7 +20,7 @@ StartLimitIntervalSec=300
 [Service]
 Type=simple
 
-# eBPF is loaded EXCLUSIVELY through a BPF token (kernel 6.9+), a user-namespace
+# eBPF is loaded EXCLUSIVELY through a BPF token, a user-namespace
 # feature. The agent self-unshares a user namespace, has the warden delegate a
 # bpffs over the socket, and loads its own eBPF through the token - holding NO
 # capabilities over the host (no CAP_BPF). It runs as root only so it can map

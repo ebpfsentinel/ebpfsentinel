@@ -33,7 +33,7 @@
 # targets; the SMTP and OTLP senders have no such guard, so their sinks bind
 # loopback.
 #
-# Requires: root, kernel >= 6.9, python3, ncat, jq.
+# Requires: root, kernel >= 6.12, python3, ncat, jq.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
@@ -129,7 +129,7 @@ _wait_for_delivery() {
 
 setup_file() {
     require_root
-    require_kernel 6 9
+    require_kernel 6 12
     require_tool python3
     require_tool ncat
     require_tool jq

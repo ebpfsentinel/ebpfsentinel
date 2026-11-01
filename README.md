@@ -203,7 +203,7 @@ Details, host requirements and the lab's own addresses are in
 
 ### Install for real
 
-**Requirements:** Linux kernel 6.9+ on x86_64 or aarch64, with BTF (`CONFIG_DEBUG_INFO_BTF=y`). The 6.9 floor unlocks **BPF token delegation** - the agent loads its eBPF programs with zero `CAP_BPF` / `CAP_NET_ADMIN` (rootless).
+**Requirements:** Linux kernel 6.12+ on x86_64 or aarch64, with BTF (`CONFIG_DEBUG_INFO_BTF=y`). The floor is the kernel the managed node images (GKE COS, EKS AL2023, Ubuntu HWE) converge on; **BPF token delegation**, which arrived in 6.9, is what lets the agent load its eBPF programs with zero `CAP_BPF` / `CAP_NET_ADMIN` (rootless).
 
 ### Install (package)
 
@@ -303,7 +303,7 @@ The systemd install (`dist/install.sh`) wires this as two units - `ebpfsentinel-
 
 ### Docker (rootless)
 
-The agent loads eBPF **exclusively** through a BPF token (kernel 6.9+) - never `CAP_BPF`, never `--privileged`. The deployment is two containers: the privileged `warden` broker and the rootless `agent`, sharing a control socket. `docker compose up` wires both:
+The agent loads eBPF **exclusively** through a BPF token - never `CAP_BPF`, never `--privileged`. The deployment is two containers: the privileged `warden` broker and the rootless `agent`, sharing a control socket. `docker compose up` wires both:
 
 ```bash
 # The agent runs as uid 65534 and rejects a world-readable config; make it
@@ -368,8 +368,8 @@ The changelog is kept with the releases rather than here, so the whole product's
 
 ## Compatibility
 
-- **OS:** Linux only (kernel 6.9+ with BTF)
-- **Distros:** Debian 13+, Ubuntu 24.04.2+ with the HWE kernel, RHEL / Rocky 10+, Fedora 41+, Alpine 3.21+, Arch, NixOS with `linuxPackages_latest`, Talos 1.9+. Not Debian 12 (6.1), Ubuntu 22.04 (HWE stops at 6.8), Ubuntu 24.04 on its GA kernel (6.8), RHEL 9 (5.14) or Alpine 3.20 (6.6) without a newer kernel
+- **OS:** Linux only (kernel 6.12+ with BTF)
+- **Distros:** Debian 13+, Ubuntu 24.04.3+ with the HWE kernel (6.14), RHEL / Rocky 10+, Fedora 41+, Alpine 3.21+, Arch, NixOS with `linuxPackages_latest`, Talos 1.9+. Not Debian 12 (6.1), Ubuntu 22.04 (HWE stops at 6.8), Ubuntu 24.04 on its GA kernel (6.8) or the 24.04.2 HWE kernel (6.11), RHEL 9 (5.14) or Alpine 3.20 (6.6) without a newer kernel
 - **Arch:** x86_64 and aarch64, the userspace tests run on both in CI
 - **Runtime:** Docker, Podman, Kubernetes (DaemonSet), Nomad
 

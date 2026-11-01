@@ -1,6 +1,6 @@
 //! High-level BPF token bootstrap.
 //!
-//! eBPF is loaded **exclusively** through a kernel 6.9+ BPF token
+//! eBPF is loaded **exclusively** through a BPF token
 //! (`BPF_TOKEN_CREATE`) created against a delegated bpffs mount. There
 //! is no capability-based loading path: the agent never loads eBPF with
 //! `CAP_BPF` / `CAP_NET_ADMIN` / `CAP_SYS_ADMIN`. Before the runtime

@@ -15,7 +15,7 @@
 #   * the agent does NOT alert on its own ARP announcements
 #     (is_self_announced predicate - ARP-guard foundation)
 #
-# Requires: 3-VM mode (EBPF_3VM_MODE=true), root on each VM, kernel >= 6.9
+# Requires: 3-VM mode (EBPF_3VM_MODE=true), root on each VM, kernel >= 6.12
 # on the agent, bpftool + tcpdump on agent + backend, python3 + scapy
 # available locally (attacker VM).
 
@@ -31,7 +31,7 @@ LB_RING_SIZE="${LB_MAGLEV_RING_SIZE:-65537}"
 
 setup_file() {
     skip_if_not_3vm
-    require_kernel 6 9
+    require_kernel 6 12
     require_tool curl
     require_tool python3
 

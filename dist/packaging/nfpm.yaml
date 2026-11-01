@@ -23,7 +23,7 @@ description: |
   One Rust agent carrying firewall, IDS/IPS, DDoS mitigation, DLP, threat
   intelligence, NAT and QoS as eBPF programs on one kernel pipeline, beside a
   small privileged broker that holds the operations the kernel will not
-  delegate. Needs Linux 6.9 or newer with BTF.
+  delegate. Needs Linux 6.12 or newer with BTF.
 vendor: eBPFsentinel
 homepage: https://github.com/ebpfsentinel/ebpfsentinel
 license: AGPL-3.0-only

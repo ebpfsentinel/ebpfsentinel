@@ -9,7 +9,7 @@
 # Method mirrors perf/02: baseline (no agent) → enable one feature → iperf3 TCP
 # → overhead = (1 - bps/baseline) × 100, asserted under a (VM-relaxed) threshold.
 #
-# Requires: root, kernel >= 6.9, bpftool, iperf3, jq. Nightly tier.
+# Requires: root, kernel >= 6.12, bpftool, iperf3, jq. Nightly tier.
 # Outputs JSON to /tmp/ebpfsentinel-feature-overhead-extended.json
 
 # perf suites live in tests/perf/ but reuse the shared integration lib; fixtures are local.

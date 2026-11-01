@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 25-alert-end-to-end.bats - Alert lifecycle end-to-end tests
-# Requires: root, kernel >= 6.9, bpftool, ncat, jq
+# Requires: root, kernel >= 6.12, bpftool, ncat, jq
 #
 # Tests the full alert lifecycle:
 #   1. Trigger an IDS alert via TCP traffic to port 4444

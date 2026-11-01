@@ -31,7 +31,7 @@
 # tracks gateway health and selection without programming kernel routes), so
 # there is nothing to drive end-to-end.
 #
-# Requires: root, kernel >= 6.9, local eBPF build + warden binary, python3,
+# Requires: root, kernel >= 6.12, local eBPF build + warden binary, python3,
 # setpriv, ncat, jq. VM-only (Vagrant agent).
 
 load '../lib/helpers'
@@ -82,7 +82,7 @@ _probe_as() {
 
 setup_file() {
     require_root
-    require_kernel 6 9
+    require_kernel 6 12
     require_tool python3
     require_tool setpriv
     require_tool ncat

@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 32-ebpf-routing-scenarios.bats - Dynamic routing eBPF scenario tests
-# Requires: root, kernel >= 6.9, bpftool
+# Requires: root, kernel >= 6.12, bpftool
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

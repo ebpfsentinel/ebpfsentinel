@@ -14,7 +14,7 @@
 #   * plain UDP/53 traffic does NOT raise a DoH/DoT alert (false-
 #     positive guard for the encrypted-DNS detector)
 #
-# Requires: 3-VM mode, kernel >= 6.9, openssl on attacker, nginx :443
+# Requires: 3-VM mode, kernel >= 6.12, openssl on attacker, nginx :443
 # and openssl s_server :853 on backend (dot-backend.service shipped by
 # the backend provisioner).
 
@@ -24,7 +24,7 @@ load '../lib/dns_encrypted_helpers'
 
 setup_file() {
     skip_if_not_3vm
-    require_kernel 6 9
+    require_kernel 6 12
     require_tool curl
 
     export PROJECT_ROOT

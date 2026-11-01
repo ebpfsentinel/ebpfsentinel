@@ -1350,7 +1350,7 @@ unsafe fn bpf(cmd: u32, attr: *mut core::ffi::c_void, size: usize) -> i64 {
 
 // ── Full token-mode object loader ───────────────────────────────────────
 //
-// When the agent holds a BPF token (kernel 6.9+, no CAP_BPF), aya cannot load
+// When the agent holds a BPF token (no CAP_BPF), aya cannot load
 // anything - every map_create / btf_load / prog_load needs the token fd in its
 // attr, which stock aya does not pass. This loader does the whole object via
 // raw syscalls (token-authorized), reusing `load_kfunc_programs` for the BTF

@@ -23,7 +23,7 @@
 #     the warden over the shared socket.
 #
 # Prerequisites:
-#   - Linux kernel 6.9+ with BTF support
+#   - Linux kernel 6.12+ with BTF support
 #   - Docker with host networking support
 #   - Unprivileged user namespaces enabled on the host (the agent unshares one).
 #   - On Ubuntu 24.04+ (and other kernels that set

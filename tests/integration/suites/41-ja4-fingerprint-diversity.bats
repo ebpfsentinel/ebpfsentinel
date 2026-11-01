@@ -6,7 +6,7 @@
 #   - Attacker VM with curl, openssl, python3 (urllib3 / aiohttp), go
 #    ; MHDDoS optional
 #   - Agent VM reachable via 2VM SSH helpers
-#   - Kernel >= 6.9
+#   - Kernel >= 6.12
 #
 # What's asserted:
 #   1. The agent's JA4 cache count grows monotonically across distinct
@@ -30,7 +30,7 @@ LEGIT_SNI="legit-ja4.test"
 
 setup_file() {
     require_root
-    require_kernel 6 9
+    require_kernel 6 12
     require_tool jq
     require_tool curl
     require_tool openssl

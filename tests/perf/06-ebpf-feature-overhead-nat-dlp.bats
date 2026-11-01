@@ -17,7 +17,7 @@
 # Method (NAT) mirrors perf/05: baseline (no agent) → enable one variant → iperf3
 # TCP → overhead = (1 - bps/baseline) × 100, asserted under a (VM-relaxed) bound.
 #
-# Requires: root, kernel >= 6.9, bpftool, iperf3, jq; openssl for the DLP test.
+# Requires: root, kernel >= 6.12, bpftool, iperf3, jq; openssl for the DLP test.
 # Nightly tier. Outputs JSON to /tmp/ebpfsentinel-feature-overhead-nat-dlp.json
 
 # perf suites live in tests/perf/ but reuse the shared integration lib; fixtures are local.

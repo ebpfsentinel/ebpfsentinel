@@ -5,15 +5,15 @@
 # install and 2 for an upgrade. Nothing below depends on which, because the
 # kernel floor is the same question in both cases.
 #
-# The agent loads eBPF exclusively through a BPF token, which is a kernel 6.9
-# feature, and it needs BTF to relocate against the running kernel. A package
+# The agent refuses any kernel below 6.12, loads eBPF exclusively through a BPF
+# token, and needs BTF to relocate against the running kernel. A package
 # that installs on a host where the agent cannot start leaves an operator with
 # a failed unit and no explanation, so the refusal happens here, where the
 # package manager reports it and rolls back.
 set -eu
 
 KERNEL_FLOOR_MAJOR=6
-KERNEL_FLOOR_MINOR=9
+KERNEL_FLOOR_MINOR=12
 
 release="$(uname -r)"
 major="$(echo "$release" | cut -d. -f1)"

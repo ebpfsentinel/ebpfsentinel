@@ -25,14 +25,14 @@
 # direction proves the counter moves, the other proves it is not simply a
 # copy of the drop count.
 #
-# Requires: root, kernel >= 6.9, ncat.
+# Requires: root, kernel >= 6.12, ncat.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
 
 setup_file() {
     require_root
-    require_kernel 6 9
+    require_kernel 6 12
     require_tool ncat
 
     export PROJECT_ROOT

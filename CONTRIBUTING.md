@@ -4,7 +4,7 @@
 
 | Requirement | Version | Purpose |
 |-------------|---------|---------|
-| Linux kernel | 6.9+ with BTF | eBPF program loading (BPF token delegation, cgroup1 kfunc, XDP metadata kfuncs) |
+| Linux kernel | 6.12+ with BTF | eBPF program loading (BPF token delegation, cgroup1 kfunc, XDP metadata kfuncs) |
 | Rust stable | 1.99+ | Userspace crates |
 | Rust nightly | the date in `crates/ebpf-programs/rust-toolchain.toml` | eBPF kernel programs (`bpfel-unknown-none`) |
 | `bpftool` | any | eBPF program inspection |

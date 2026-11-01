@@ -9,7 +9,7 @@
 # Topology: 2vm. Profile: nightly. Requires:
 #   - Attacker VM with hping3, scapy, nstat, ncat
 #   - Agent VM reachable via 2VM SSH helpers
-#   - Kernel >= 6.9 (bpf_tcp_raw_check_syncookie)
+#   - Kernel >= 6.12 (bpf_tcp_raw_check_syncookie)
 #
 # Asserts (per AC):
 #   1. Under flood, agent generates SYN cookies - both
@@ -29,7 +29,7 @@ SPOOF_COUNT="${SPOOF_COUNT:-500}"
 
 setup_file() {
     require_root
-    require_kernel 6 9
+    require_kernel 6 12
     require_tool jq
     require_tool bc
 

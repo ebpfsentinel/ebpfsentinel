@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 65-conntrack-source-guard.bats - Per-source connection guard scenarios
-# Requires: root, kernel >= 6.9, bpftool, ncat
+# Requires: root, kernel >= 6.12, bpftool, ncat
 #
 # The guard lives in xdp-firewall and is driven entirely by the conntrack
 # section: max_src_conn_rate over conn_rate_window_secs, with a source that

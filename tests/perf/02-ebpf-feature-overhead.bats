@@ -3,7 +3,7 @@
 # Measures TCP throughput with incremental feature enablement to isolate
 # the cost of each eBPF subsystem.
 #
-# Requires: root, kernel >= 6.9, bpftool, iperf3
+# Requires: root, kernel >= 6.12, bpftool, iperf3
 # Outputs JSON report to /tmp/ebpfsentinel-feature-overhead-latest.json
 
 # perf suites live in tests/perf/ but reuse the shared integration lib; fixtures are local.

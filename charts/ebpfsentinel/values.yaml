@@ -139,7 +139,7 @@ daemonset:
   # -- Pod priority class name
   priorityClassName: ""
   # -- BPF token delegation. eBPF is loaded EXCLUSIVELY through a BPF token
-  # (kernel 6.9+), a user-namespace feature. The pod runs the warden broker as a
+  # (kernel 6.12+), a user-namespace feature. The pod runs the warden broker as a
   # native sidecar; the agent self-unshares a user namespace, has the warden
   # delegate a bpffs at `bpffsPath`, and loads its own eBPF through the token -
   # holding no host capabilities. There is no capability-based loading path.

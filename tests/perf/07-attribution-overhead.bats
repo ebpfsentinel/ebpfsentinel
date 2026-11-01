@@ -26,7 +26,7 @@
 # taskset and four vCPUs allow it, which takes the scheduler's migrations out
 # of the same figure.
 #
-# Requires: root, kernel >= 6.9, a C compiler, python3, jq, bc.
+# Requires: root, kernel >= 6.12, a C compiler, python3, jq, bc.
 # Nightly tier. Outputs JSON to /tmp/ebpfsentinel-attribution-overhead.json
 
 FIXTURE_DIR="${BATS_TEST_DIRNAME}/fixtures"
@@ -53,7 +53,7 @@ setup_file() {
         env_skip "attribution overhead is timed on the agent host itself (local lane only)"
     fi
     require_root
-    require_kernel 6 9
+    require_kernel 6 12
     require_tool cc
     require_tool python3
     require_tool jq

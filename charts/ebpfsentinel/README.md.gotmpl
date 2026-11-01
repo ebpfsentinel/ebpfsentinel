@@ -52,7 +52,7 @@ See [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/m
 | unprivileged user namespaces enabled on the node | `BPF_TOKEN_CREATE` is `EOPNOTSUPP` outside a user namespace |
 | `/sys/fs/bpf` mount | BPF filesystem for map pinning + delegated token bpffs |
 | `/sys/kernel/debug` mount | eBPF tracing (debugfs) |
-| Kernel 6.9+ with BTF | Agent minimum: BPF token delegation, ARENA maps, kfuncs; CO-RE requires BTF |
+| Kernel 6.12+ with BTF | Agent minimum: BPF token delegation, ARENA maps, kfuncs; CO-RE requires BTF |
 
 ### Feature Limitations in Kubernetes
 

@@ -50,7 +50,7 @@ rewrite table does not carry.
 
 ## What the maintainer scripts do
 
-- `preinst` refuses the install on a kernel below 6.9 or without BTF. The
+- `preinst` refuses the install on a kernel below 6.12 or without BTF. The
   agent cannot load its eBPF on either, and a package that installs anyway
   leaves a failed unit and no explanation.
 - `postinst` creates the state directories through tmpfiles, reloads systemd,

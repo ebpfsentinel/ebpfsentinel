@@ -22,14 +22,14 @@
 # from the object without hand-parsing relocations. So the gate is a real
 # kernel being asked, with the config that asks for all of it.
 #
-# Requires: root, kernel >= 6.9.
+# Requires: root, kernel >= 6.12.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
 
 setup_file() {
     require_root
-    require_kernel 6 9
+    require_kernel 6 12
 
     export PROJECT_ROOT
     PROJECT_ROOT="$(find_project_root)"

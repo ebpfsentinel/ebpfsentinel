@@ -187,11 +187,11 @@ LIMITS
     # ----------------------------------------------------------
     # Provisioner: kernel-hwe
     #
-    # The agent enforces a hard minimum kernel of 6.9 (BPF token
-    # delegation, BPF_MAP_TYPE_ARENA, kfuncs, dynptr) with no fallback.
+    # The agent enforces a hard minimum kernel of 6.12 with no fallback,
+    # the kernel the managed node images converge on.
     # The bento/ubuntu-24.04 box ships 6.8, so without this the agent
     # refuses to start and every eBPF suite's setup_file fails. Install
-    # the HWE kernel (>= 6.9) and reboot into it. The Ubuntu HWE kernel
+    # the HWE kernel (>= 6.12) and reboot into it. The Ubuntu HWE kernel
     # ships vboxsf/vboxguest in-tree, so the synced folder still mounts
     # after the reboot without rebuilding the ISO guest additions.
     #
@@ -212,13 +212,13 @@ LIMITS
       apt-get install -y --no-install-recommends linux-tools-generic-hwe-24.04
 
       running="$(uname -r | sed 's/-generic//')"
-      if dpkg --compare-versions "$running" ge 6.9; then
-        echo "kernel $running already >= 6.9, nothing to do"
+      if dpkg --compare-versions "$running" ge 6.12; then
+        echo "kernel $running already >= 6.12, nothing to do"
         exit 0
       fi
 
       apt-get install -y --no-install-recommends linux-generic-hwe-24.04
-      echo "HWE kernel + tools installed; rebooting into >= 6.9"
+      echo "HWE kernel + tools installed; rebooting into >= 6.12"
     SHELL
 
     # ----------------------------------------------------------
@@ -285,7 +285,7 @@ NETPLAN
 
       cat > /etc/sysctl.d/99-ebpfsentinel-userns.conf <<SYSCTL
 # Allow warden-token to create an unprivileged user namespace
-# (required for BPF token delegation, kernel 6.9+).
+# (required for BPF token delegation).
 kernel.apparmor_restrict_unprivileged_userns=0
 # Older fallback knob (no-op where the AppArmor gate is the one in effect).
 kernel.unprivileged_userns_clone=1
@@ -680,7 +680,7 @@ UNIT
     # agent hard-refuses to start below 6.9. The bento/ubuntu-24.04 box
     # ships 6.8, so without this the kernel-gated suites all skip and the
     # PQ-handshake suite's setup_file fails. Mirror the agent VM: install
-    # the HWE kernel (>= 6.9) and reboot into it.
+    # the HWE kernel (>= 6.12) and reboot into it.
     # ----------------------------------------------------------
     attacker.vm.provision "shell", name: "kernel-hwe", reboot: true, inline: <<-SHELL
       set -euxo pipefail
@@ -690,13 +690,13 @@ UNIT
       apt-get install -y --no-install-recommends linux-tools-generic-hwe-24.04
 
       running="$(uname -r | sed 's/-generic//')"
-      if dpkg --compare-versions "$running" ge 6.9; then
-        echo "kernel $running already >= 6.9, nothing to do"
+      if dpkg --compare-versions "$running" ge 6.12; then
+        echo "kernel $running already >= 6.12, nothing to do"
         exit 0
       fi
 
       apt-get install -y --no-install-recommends linux-generic-hwe-24.04
-      echo "HWE kernel + tools installed; rebooting into >= 6.9"
+      echo "HWE kernel + tools installed; rebooting into >= 6.12"
     SHELL
 
     # ----------------------------------------------------------

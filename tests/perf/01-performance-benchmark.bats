@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # 01-performance-benchmark.bats - Performance benchmarks (throughput + resource usage)
-# Requires: root, kernel >= 6.9, bpftool, iperf3
+# Requires: root, kernel >= 6.12, bpftool, iperf3
 #
 # Each throughput point is sampled IPERF_SAMPLES times and reduced to a median;
 # the spread of the no-agent samples becomes the run's noise floor, and the
