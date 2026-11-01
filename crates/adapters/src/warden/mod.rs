@@ -9,6 +9,7 @@ pub mod file_watch;
 pub mod hidden_ports;
 pub mod hidden_processes;
 pub mod network_programs;
+pub mod package_inventory;
 pub mod packet_sockets;
 pub mod pcap;
 pub mod pod_tc;

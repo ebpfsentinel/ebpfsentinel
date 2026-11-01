@@ -32,6 +32,7 @@ mod loadbalancer;
 mod management;
 mod nat;
 mod network_inventory;
+mod package_inventory;
 mod process_table;
 mod profile;
 pub mod provenance;
@@ -96,6 +97,7 @@ pub use loadbalancer::{
 pub use management::ManagementConfig;
 pub use nat::{HairpinNatConfig, NatConfig, NatRuleConfig, NptV6RuleConfig};
 pub use network_inventory::NetworkInventoryConfig;
+pub use package_inventory::PackageInventoryConfig;
 pub use process_table::{ProcessDetectionConfig, ProcessTableConfig};
 pub use profile::{AgentProfile, POD_REFUSED_SECTIONS, PodSelectorConfig};
 pub use qos::{
@@ -312,6 +314,11 @@ pub struct AgentConfig {
     /// and appears in no socket listing. On by default.
     #[serde(default)]
     pub hidden_checks: HiddenChecksConfig,
+
+    /// What the package managers say is installed, in the host's root and
+    /// every container's. On by default.
+    #[serde(default)]
+    pub package_inventory: PackageInventoryConfig,
 
     /// Host rules: an intention named in the product's words, a map of
     /// matchers on its fields and what to do. None until one is written.
@@ -586,6 +593,7 @@ impl AgentConfig {
         self.tcp_health.validate()?;
         self.network_inventory.validate()?;
         self.hidden_checks.validate()?;
+        self.package_inventory.validate()?;
         self.host_rules.validate()?;
 
         // Validate container resolver config

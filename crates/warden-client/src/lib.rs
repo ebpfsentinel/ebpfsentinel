@@ -29,9 +29,10 @@ use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame,
 // Re-exported under their real names so callers of the typed control methods can
 // build request values without taking a direct dependency on the protocol crate.
 pub use ebpfsentinel_warden_proto::{
-    BindProbe, ConntrackTuple, DlpTarget, ExecutableIdentity, FimEvent, FimFacts, FimFile,
-    FimFileType, FimMark, FimReading, FimXattr, HeldBpfObjects, HiddenProcessReading, ListedPort,
-    NamespacePortReading, NetworkProgram, PacketSocket, PidObservation, RouteSpec, TaskIdentity,
+    BindProbe, ConntrackTuple, DlpTarget, ExecutableIdentity, FileRoot, FimEvent, FimFacts,
+    FimFile, FimFileType, FimMark, FimReading, FimXattr, HeldBpfObjects, HiddenProcessReading,
+    ListedPort, NamespacePortReading, NetworkProgram, PacketSocket, PidObservation,
+    ROOTED_CHUNK_MAX, RootedFile, RootedRead, RouteSpec, TaskIdentity,
 };
 
 /// How long one warden call may take before the client gives up on it.
@@ -84,6 +85,8 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::FimFacts { .. } => "FimFacts",
         Command::HiddenPorts { .. } => "HiddenPorts",
         Command::HiddenProcesses { .. } => "HiddenProcesses",
+        Command::FileRoots => "FileRoots",
+        Command::ReadRootedFile { .. } => "ReadRootedFile",
     }
 }
 
@@ -274,6 +277,33 @@ impl WardenClient {
         match self.call(&Command::HiddenProcesses { rate })? {
             Response::HiddenProcesses { reading } => Ok(reading),
             other => Err(unexpected("HiddenProcesses", &other)),
+        }
+    }
+
+    /// List the distinct filesystem roots processes run in.
+    pub fn file_roots(&mut self) -> io::Result<Vec<FileRoot>> {
+        match self.call(&Command::FileRoots)? {
+            Response::FileRoots { roots } => Ok(roots),
+            other => Err(unexpected("FileRoots", &other)),
+        }
+    }
+
+    /// Read a piece of `file` inside the root of `pid`.
+    pub fn read_rooted_file(
+        &mut self,
+        pid: u32,
+        file: RootedFile,
+        offset: u64,
+        len: u32,
+    ) -> io::Result<RootedRead> {
+        match self.call(&Command::ReadRootedFile {
+            pid,
+            file,
+            offset,
+            len,
+        })? {
+            Response::RootedRead { read } => Ok(read),
+            other => Err(unexpected("ReadRootedFile", &other)),
         }
     }
 
@@ -578,6 +608,25 @@ impl ReconnectingClient {
     /// Read the kernel conntrack table.
     pub fn conntrack_dump(&mut self) -> io::Result<Vec<u8>> {
         self.with_retry(WardenClient::conntrack_dump)
+    }
+
+    /// List the distinct filesystem roots through the warden, reconnecting
+    /// if it bounced. A read, so replaying it is harmless.
+    pub fn file_roots(&mut self) -> io::Result<Vec<FileRoot>> {
+        self.with_retry(WardenClient::file_roots)
+    }
+
+    /// Read a piece of a package database inside the root of `pid` through
+    /// the warden, reconnecting if it bounced. A read, so replaying it is
+    /// harmless.
+    pub fn read_rooted_file(
+        &mut self,
+        pid: u32,
+        file: &RootedFile,
+        offset: u64,
+        len: u32,
+    ) -> io::Result<RootedRead> {
+        self.with_retry(|c| c.read_rooted_file(pid, file.clone(), offset, len))
     }
 
     /// Read one TCX hook's program ids in run order, reconnecting if the

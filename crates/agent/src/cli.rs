@@ -279,6 +279,9 @@ pub enum Command {
     /// What this node exposes: listening sockets and who bound them
     Exposure(DomainArgs<ExposureCommand>),
 
+    /// What is installed on this node, in its own root and every container's
+    Surface(DomainArgs<SurfaceCommand>),
+
     /// Host rules: the intentions a rule may name and which this host serves
     HostRules(DomainArgs<HostRulesCommand>),
 
@@ -1169,6 +1172,13 @@ pub enum ExposureCommand {
     /// List the sockets the node accepts traffic on and the workload that
     /// bound each
     Listeners,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SurfaceCommand {
+    /// List what the dpkg, rpm and Alpine databases say is installed, root
+    /// by root
+    Packages,
 }
 
 // ── Host rules ──────────────────────────────────────────────────────────
@@ -2755,6 +2765,18 @@ mod tests {
             cli.command,
             Some(Command::Exposure(DomainArgs {
                 command: ExposureCommand::Listeners,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_surface_packages() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "surface", "packages"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Surface(DomainArgs {
+                command: SurfaceCommand::Packages,
                 ..
             }))
         ));

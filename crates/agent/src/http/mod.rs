@@ -35,6 +35,7 @@ pub mod netpol_handler;
 pub mod network_program_handler;
 pub mod openapi;
 pub mod ops_handler;
+pub mod package_inventory_handler;
 pub mod process_handler;
 pub mod qos_handler;
 pub mod ratelimit_handler;

@@ -8151,6 +8151,55 @@
         ]
       }
     },
+    "/api/v1/surface/packages": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "`GET /api/v1/surface/packages` - what the package managers say is\ninstalled, in the host's root and every container's.",
+        "operationId": "get_packages",
+        "responses": {
+          "200": {
+            "description": "The packages the dpkg, rpm and Alpine databases list in every root, with the reason a database could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackagesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/threatintel/feeds": {
       "get": {
         "tags": [
@@ -15578,6 +15627,169 @@
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          }
+        }
+      },
+      "PackageBody": {
+        "type": "object",
+        "description": "One package a database says is installed.",
+        "required": [
+          "name",
+          "version",
+          "state"
+        ],
+        "properties": {
+          "arch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "files": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "How many files the database says it owns. Absent when no file list\ncould be read for it.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "description": "`installed`, or `partial` for a package dpkg has not finished\ninstalling or configuring."
+          },
+          "version": {
+            "type": "string",
+            "description": "As the database writes it, epoch included where there is one."
+          }
+        }
+      },
+      "PackageDatabaseBody": {
+        "type": "object",
+        "description": "One package database found in a root.",
+        "required": [
+          "manager",
+          "path",
+          "packages"
+        ],
+        "properties": {
+          "manager": {
+            "type": "string",
+            "description": "`dpkg`, `rpm` or `apk`."
+          },
+          "packages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PackageBody"
+            }
+          },
+          "path": {
+            "type": "string",
+            "description": "Where it was found, inside the root."
+          },
+          "unreadable": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it could not be read. Its packages are then empty, which says\nnothing about what is installed."
+          }
+        }
+      },
+      "PackageRootBody": {
+        "type": "object",
+        "description": "The package databases of one filesystem root.",
+        "required": [
+          "kind",
+          "pid",
+          "databases"
+        ],
+        "properties": {
+          "container_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "databases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PackageDatabaseBody"
+            },
+            "description": "One entry per database found; none means no database this reader\nknows of is there."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the root could not be read at all."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`host`, `container`, or `other` for a root no container runtime\nnames."
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The process whose root was read.",
+            "minimum": 0
+          },
+          "runtime": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PackagesResponse": {
+        "type": "object",
+        "description": "What the package managers say is installed, root by root.",
+        "required": [
+          "reading",
+          "scanned_at_ns",
+          "roots_not_read",
+          "roots"
+        ],
+        "properties": {
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last sweep failed. The result is then the sweep before."
+          },
+          "reading": {
+            "type": "boolean",
+            "description": "Whether the databases are read."
+          },
+          "roots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PackageRootBody"
+            }
+          },
+          "roots_not_read": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Roots found beyond the number one sweep reads.",
+            "minimum": 0
+          },
+          "scanned_at_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the last sweep was made, in nanoseconds since the epoch, `0`\nbefore the first.",
+            "minimum": 0
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the readings come from: `warden` or `local`. Absent when the\ninventory is off."
           }
         }
       },

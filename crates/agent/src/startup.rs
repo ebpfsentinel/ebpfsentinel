@@ -4613,6 +4613,31 @@ pub async fn run(
         });
     }
 
+    // What the package managers say is installed, in the host's root and in
+    // every container's, read through the warden when there is one.
+    if config.package_inventory.enabled {
+        let reader = Arc::new(
+            adapters::warden::package_inventory::WardenPackageReader::new(
+                ebpfsentinel_warden::rooted_read::file_roots,
+                ebpfsentinel_warden::rooted_read::read_rooted_file,
+                coverage_proc.clone(),
+            ),
+        );
+        let inventory =
+            Arc::new(application::package_inventory_service::PackageInventoryService::new(reader));
+        app_state.install_package_inventory(Arc::clone(&inventory));
+        let interval = Duration::from_secs(config.package_inventory.interval_secs);
+        let inventory_cancel = cancel_token.clone();
+        info!(
+            interval_secs = config.package_inventory.interval_secs,
+            source = inventory.source(),
+            "package inventory reading"
+        );
+        tokio::spawn(async move {
+            inventory.run(interval, inventory_cancel).await;
+        });
+    }
+
     // Who else reads the node's traffic: the packet sockets open on it, read
     // through the warden when there is one and from the host's /proc
     // otherwise.

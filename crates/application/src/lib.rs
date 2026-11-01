@@ -99,6 +99,7 @@ pub mod nat_service_impl;
 pub mod netpol_replay_service;
 pub mod netpol_service;
 pub mod network_program_service;
+pub mod package_inventory_service;
 pub mod packet_pipeline;
 pub mod pod_coverage_service;
 pub mod process_detection_service;

@@ -23,6 +23,7 @@ pub mod hidden;
 pub mod hostrule;
 pub mod identity;
 pub mod ids;
+pub mod inventory;
 pub mod ips;
 pub mod l2;
 pub mod l7;

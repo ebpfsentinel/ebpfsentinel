@@ -203,6 +203,9 @@ pub struct AppState {
     pub hidden_ports: ArcSwapOption<application::hidden_port_service::HiddenPortWatcher>,
     /// The hidden process sweep, once it runs.
     pub hidden_processes: ArcSwapOption<application::hidden_process_service::HiddenProcessWatcher>,
+    /// The package inventory, once it reads.
+    pub package_inventory:
+        ArcSwapOption<application::package_inventory_service::PackageInventoryService>,
     /// The inventory of the other eBPF programs on the network path, once
     /// it reads.
     pub network_programs:
@@ -260,6 +263,7 @@ impl AppState {
             raw_sockets: ArcSwapOption::empty(),
             hidden_ports: ArcSwapOption::empty(),
             hidden_processes: ArcSwapOption::empty(),
+            package_inventory: ArcSwapOption::empty(),
             network_programs: ArcSwapOption::empty(),
             nat_service: None,
             alias_service: None,
@@ -543,6 +547,14 @@ impl AppState {
         watcher: Arc<application::hidden_process_service::HiddenProcessWatcher>,
     ) {
         self.hidden_processes.store(Some(watcher));
+    }
+
+    /// Hand the package inventory over once it reads.
+    pub fn install_package_inventory(
+        &self,
+        service: Arc<application::package_inventory_service::PackageInventoryService>,
+    ) {
+        self.package_inventory.store(Some(service));
     }
 
     /// Hand the network program inventory over once it reads.

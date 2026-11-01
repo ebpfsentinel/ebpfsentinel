@@ -38,6 +38,7 @@ use super::nat_handler;
 use super::netpol_handler;
 use super::network_program_handler;
 use super::ops_handler;
+use super::package_inventory_handler;
 use super::process_handler;
 use super::qos_handler;
 use super::ratelimit_handler;
@@ -145,6 +146,7 @@ use super::zone_handler;
         raw_socket_handler::get_raw_sockets,
         hidden_port_handler::get_hidden_ports,
         hidden_process_handler::get_hidden_processes,
+        package_inventory_handler::get_packages,
         host_rule_handler::get_host_intents,
         host_rule_handler::get_host_rules,
         exposure_handler::get_listeners,
@@ -392,6 +394,10 @@ use super::zone_handler;
         hidden_process_handler::HiddenProcessesResponse,
         hidden_process_handler::HiddenProcessBody,
         hidden_process_handler::HiddenProcessCountsBody,
+        package_inventory_handler::PackagesResponse,
+        package_inventory_handler::PackageRootBody,
+        package_inventory_handler::PackageDatabaseBody,
+        package_inventory_handler::PackageBody,
         hidden_port_handler::UnreachableNamespaceBody,
         host_rule_handler::HostIntentsResponse,
         host_rule_handler::HostRulesResponse,

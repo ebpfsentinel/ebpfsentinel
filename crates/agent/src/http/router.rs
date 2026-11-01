@@ -122,6 +122,7 @@ use super::openapi::ApiDoc;
 use super::ops_handler::{
     get_config, get_ebpf_status, get_kernel_features, get_uprobes, reload_config,
 };
+use super::package_inventory_handler::get_packages;
 use super::process_handler::{get_process, list_processes};
 use super::qos_handler::{
     create_qos_classifier, create_qos_pipe, create_qos_queue, delete_qos_classifier,
@@ -321,6 +322,7 @@ pub fn build_router(
             .route("/api/v1/ebpf/raw-sockets", get(get_raw_sockets))
             .route("/api/v1/ebpf/hidden-ports", get(get_hidden_ports))
             .route("/api/v1/ebpf/hidden-processes", get(get_hidden_processes))
+            .route("/api/v1/surface/packages", get(get_packages))
             .route("/api/v1/host-rules", get(get_host_rules))
             .route("/api/v1/host-rules/intents", get(get_host_intents))
             .route("/api/v1/exposure/listeners", get(get_listeners))

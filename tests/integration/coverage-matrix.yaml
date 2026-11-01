@@ -136,6 +136,9 @@ suite_profiles:
   # 79 makes the host busy beside the agent and waits two passes of each
   # hidden sweep at their shortest interval, about three minutes: nightly.
   "79": nightly
+  # 80 builds two chroots beside the agent and waits one inventory reading:
+  # root on a throwaway host, so nightly.
+  "80": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -686,6 +689,14 @@ coverage:
     notes: "Host rules through /api/v1/host-rules and /api/v1/host-rules/intents: a written rule loads in shadow beside the shipped ones, its shadow count rises per workload with no alert, promotion to enforce kills the process and alerts, and an intention the host does not feed carries the same reason everywhere it is named"
 
   - kind: cli_subcommand
+    feature: surface
+    suites: ["80"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "What is installed, root by root, through /api/v1/surface/packages: the CLI's table and JSON agree with the route"
+
+  - kind: cli_subcommand
     feature: processes
     suites: ["TBD"]
     topology: none
@@ -781,6 +792,14 @@ coverage:
     kernel_min: "6.12"
     profile: nightly
     notes: "Hidden ports and hidden processes on a busy host: listeners in two network namespaces, SO_REUSEPORT, TIME_WAIT, a many-threaded process and process churn, and neither sweep reports anything twice in a row; the process sweep stays inside its time and CPU budget. The positive case is unit-tested at the port boundary, since a real one needs a rootkit"
+
+  - kind: domain_module
+    feature: inventory
+    suites: ["80"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "The host's dpkg database agrees with dpkg-query, a chroot's Alpine database is read under kind other, and a link climbing out of a root finds nothing. rpm's sqlite reader and every parser are unit-tested against databases taken from real images"
 
   - kind: domain_module
     feature: hostrule

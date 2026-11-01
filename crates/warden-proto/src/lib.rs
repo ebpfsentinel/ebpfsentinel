@@ -379,6 +379,117 @@ pub struct NamespacePortReading {
     pub refused_second: Vec<BindProbe>,
 }
 
+/// The longest piece of a file one [`Command::ReadRootedFile`] hands back,
+/// well inside a frame.
+pub const ROOTED_CHUNK_MAX: u32 = 8 * 1024 * 1024;
+
+/// The longest dpkg list name the warden opens.
+const DPKG_LIST_NAME_MAX: usize = 128;
+
+/// A package database file, named by what it is rather than by a path, so
+/// the warden opens only the files on this list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RootedFile {
+    /// `var/lib/dpkg/status`.
+    DpkgStatus,
+    /// `var/lib/dpkg/info/<name>.list`, the files one package owns.
+    DpkgList {
+        /// The package name, with `:arch` for a `Multi-Arch: same` package.
+        name: String,
+    },
+    /// The rpm database in its SQLite form.
+    RpmSqlite,
+    /// The rpm database in its Berkeley DB form.
+    RpmBerkeley,
+    /// The rpm database in its ndb form.
+    RpmNdb,
+    /// The Alpine installed database.
+    ApkInstalled,
+}
+
+impl RootedFile {
+    /// The paths, relative to the root, this file is looked for at, in
+    /// order; `None` for a dpkg list whose name is not a package name.
+    #[must_use]
+    pub fn candidates(&self) -> Option<Vec<String>> {
+        let fixed: &[&str] = match self {
+            Self::DpkgStatus => &["var/lib/dpkg/status"],
+            Self::DpkgList { name } => {
+                return valid_dpkg_list_name(name)
+                    .then(|| vec![format!("var/lib/dpkg/info/{name}.list")]);
+            }
+            Self::RpmSqlite => &[
+                "usr/lib/sysimage/rpm/rpmdb.sqlite",
+                "var/lib/rpm/rpmdb.sqlite",
+            ],
+            Self::RpmBerkeley => &["usr/lib/sysimage/rpm/Packages", "var/lib/rpm/Packages"],
+            Self::RpmNdb => &[
+                "usr/lib/sysimage/rpm/Packages.db",
+                "var/lib/rpm/Packages.db",
+            ],
+            Self::ApkInstalled => &["lib/apk/db/installed", "usr/lib/apk/db/installed"],
+        };
+        Some(fixed.iter().map(|p| (*p).to_string()).collect())
+    }
+}
+
+/// Whether `name` is a dpkg package name, optionally with `:arch`: lower
+/// case letters, digits and `+.-`, starting with a letter or a digit, so it
+/// can name nothing but a file in the info directory.
+#[must_use]
+pub fn valid_dpkg_list_name(name: &str) -> bool {
+    let (package, arch) = match name.split_once(':') {
+        Some((p, a)) => (p, Some(a)),
+        None => (name, None),
+    };
+    let lead = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
+    name.len() <= DPKG_LIST_NAME_MAX
+        && package.starts_with(lead)
+        && package
+            .chars()
+            .all(|c| lead(c) || matches!(c, '+' | '.' | '-'))
+        && arch.is_none_or(|a| !a.is_empty() && a.chars().all(|c| lead(c) || c == '-'))
+}
+
+/// What reading a [`RootedFile`] gave.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RootedRead {
+    /// None of its candidate paths exists in that root.
+    Absent,
+    /// It exists, or the root does, and could not be read, and why.
+    Unreadable { reason: String },
+    /// A piece of it.
+    Chunk {
+        /// The candidate path it was found at, relative to the root.
+        path: String,
+        /// `st_dev` and `st_ino` of the file, so pieces of one reading can
+        /// be told from pieces of a file replaced in between.
+        dev: u64,
+        ino: u64,
+        /// The whole file's size.
+        size: u64,
+        /// Its modification time, in nanoseconds since the epoch, so a
+        /// reader can tell an unchanged file without reading it again.
+        mtime_ns: i64,
+        /// The bytes from the offset asked for.
+        data: Vec<u8>,
+    },
+}
+
+/// One filesystem root processes run in, named by its lowest pid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRoot {
+    /// The lowest pid whose root this is.
+    pub pid: u32,
+    /// `st_dev` and `st_ino` of the root directory.
+    pub dev: u64,
+    pub ino: u64,
+    /// Whether it is the root of pid 1.
+    pub host: bool,
+    /// `/proc/<pid>/cgroup`, for the agent to name the container by.
+    pub cgroup: String,
+}
+
 /// A request from the agent to the warden. Every variant is one kernel operation
 /// the rootless agent cannot perform itself; the warden validates each against an
 /// allowlist before acting, so a compromised agent cannot turn the warden into an
@@ -585,6 +696,20 @@ pub enum Command {
         /// The pace, in pids per second, clamped by the warden.
         rate: u32,
     },
+    /// List the distinct filesystem roots processes run in, one entry per
+    /// root, answered by [`Response::FileRoots`]. Read-only.
+    FileRoots,
+    /// Read up to `len` bytes from `offset` of `file` inside the root of
+    /// `pid`, answered by [`Response::RootedRead`]. The path is resolved
+    /// inside that root, so a link cannot lead out of it, and only a regular
+    /// file is read. Read-only.
+    ReadRootedFile {
+        pid: u32,
+        file: RootedFile,
+        offset: u64,
+        /// Capped by [`ROOTED_CHUNK_MAX`].
+        len: u32,
+    },
 }
 
 /// A thread group as one pid namespace numbers it.
@@ -720,6 +845,10 @@ pub enum Response {
     },
     /// The two readings, answering [`Command::HiddenProcesses`].
     HiddenProcesses { reading: HiddenProcessReading },
+    /// The roots found, answering [`Command::FileRoots`].
+    FileRoots { roots: Vec<FileRoot> },
+    /// What was read, answering [`Command::ReadRootedFile`].
+    RootedRead { read: RootedRead },
 }
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
@@ -753,9 +882,10 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BindProbe, Command, ConntrackTuple, DlpTarget, ExecutableIdentity, HiddenProcessReading,
-        ListedPort, MAX_FRAME_LEN, NamespacePortReading, NetworkProgram, PacketSocket,
-        PidObservation, Response, RouteSpec, TaskIdentity, read_frame, write_frame,
+        BindProbe, Command, ConntrackTuple, DlpTarget, ExecutableIdentity, FileRoot,
+        HiddenProcessReading, ListedPort, MAX_FRAME_LEN, NamespacePortReading, NetworkProgram,
+        PacketSocket, PidObservation, ROOTED_CHUNK_MAX, Response, RootedFile, RootedRead,
+        RouteSpec, TaskIdentity, read_frame, valid_dpkg_list_name, write_frame,
     };
     use std::io::Cursor;
 
@@ -824,6 +954,15 @@ mod tests {
                 ports: vec![22, 31_337],
             },
             Command::HiddenProcesses { rate: 1_000_000 },
+            Command::FileRoots,
+            Command::ReadRootedFile {
+                pid: 4242,
+                file: RootedFile::DpkgList {
+                    name: "libc6:amd64".into(),
+                },
+                offset: 0,
+                len: ROOTED_CHUNK_MAX,
+            },
         ]
     }
 
@@ -975,6 +1114,33 @@ mod tests {
                     ..HiddenProcessReading::default()
                 },
             },
+            Response::FileRoots {
+                roots: vec![FileRoot {
+                    pid: 1,
+                    dev: 2049,
+                    ino: 2,
+                    host: true,
+                    cgroup: "0::/init.scope\n".into(),
+                }],
+            },
+            Response::RootedRead {
+                read: RootedRead::Chunk {
+                    path: "var/lib/dpkg/status".into(),
+                    dev: 48,
+                    ino: 917_962,
+                    size: 70_000,
+                    mtime_ns: 1_793_000_000_000_000_000,
+                    data: b"Package: libc6\n".to_vec(),
+                },
+            },
+            Response::RootedRead {
+                read: RootedRead::Unreadable {
+                    reason: "not a regular file".into(),
+                },
+            },
+            Response::RootedRead {
+                read: RootedRead::Absent,
+            },
         ]
     }
 
@@ -983,6 +1149,33 @@ mod tests {
         let me = TaskIdentity::of_self().expect("procfs is mounted");
         assert_eq!(me.tgid, std::process::id());
         assert_ne!(me.pid_ns_ino, 0);
+    }
+
+    #[test]
+    fn a_dpkg_list_name_names_nothing_but_a_list() {
+        for good in ["libc6", "libc6:amd64", "g++-14", "libstdc++6:i386", "0ad"] {
+            assert!(valid_dpkg_list_name(good), "{good}");
+        }
+        for bad in [
+            "",
+            "../shadow",
+            "a/b",
+            "Libc",
+            ".hidden",
+            "a:",
+            "a:b/c",
+            "a b",
+            "-x",
+        ] {
+            assert!(!valid_dpkg_list_name(bad), "{bad}");
+            assert!(
+                RootedFile::DpkgList { name: bad.into() }
+                    .candidates()
+                    .is_none(),
+                "{bad}"
+            );
+        }
+        assert!(!valid_dpkg_list_name(&"a".repeat(129)));
     }
 
     #[test]

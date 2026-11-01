@@ -2192,6 +2192,55 @@ pub struct HiddenProcessesResponse {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct PackageEntry {
+    pub name: String,
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<usize>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct PackageDatabaseEntry {
+    pub manager: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreadable: Option<String>,
+    #[serde(default)]
+    pub packages: Vec<PackageEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct PackageRootEntry {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub databases: Vec<PackageDatabaseEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct PackagesResponse {
+    pub reading: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub scanned_at_ns: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub roots_not_read: u32,
+    #[serde(default)]
+    pub roots: Vec<PackageRootEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct IntentFieldEntry {
     pub name: String,
     #[serde(rename = "type")]
@@ -4383,6 +4432,15 @@ impl ApiClient {
     pub async fn hidden_processes(&self) -> anyhow::Result<HiddenProcessesResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/ebpf/hidden-processes")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn surface_packages(&self) -> anyhow::Result<PackagesResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/surface/packages")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

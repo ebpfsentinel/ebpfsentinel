@@ -15,7 +15,7 @@ use cli::{
     ExposureCommand, FeedsAction, FingerprintsCommand, FirewallCommand, FlowsAction, GeoipCommand,
     HostRulesCommand, IdsCommand, IpsCommand, L7Command, LbCommand, LearningCommand, MitreCommand,
     NatCommand, NetpolCommand, NptV6Command, ProcessesCommand, QosCommand, RatelimitCommand,
-    ResponsesCommand, RoutingCommand, ThreatintelCommand, TlsCommand, ZonesCommand,
+    ResponsesCommand, RoutingCommand, SurfaceCommand, ThreatintelCommand, TlsCommand, ZonesCommand,
 };
 
 fn main() -> Result<()> {
@@ -719,6 +719,13 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
                 ExposureCommand::Listeners => {
                     commands::cmd_exposure_listeners(&client, output).await
                 }
+            }
+        }
+
+        Some(Command::Surface(args)) => {
+            let client = ApiClient::new(&args.conn.host, args.conn.port, cli.token);
+            match args.command {
+                SurfaceCommand::Packages => commands::cmd_surface_packages(&client, output).await,
             }
         }
 

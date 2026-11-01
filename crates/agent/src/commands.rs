@@ -4949,6 +4949,94 @@ pub async fn cmd_ebpf_hidden_processes(client: &ApiClient, output: OutputFormat)
     Ok(())
 }
 
+/// The short name of a root: the host, a container by the first twelve
+/// characters of its id, or the pid whose root no runtime names.
+fn root_label(root: &crate::api_client::PackageRootEntry) -> String {
+    match (root.kind.as_str(), root.container_id.as_deref()) {
+        ("host", _) => "host".to_string(),
+        ("container", Some(id)) => id.chars().take(12).collect(),
+        _ => format!("pid {}", root.pid),
+    }
+}
+
+/// Print what the package databases say is installed, root by root, and
+/// each database that could not be read with the reason.
+pub async fn cmd_surface_packages(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.surface_packages().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    if !resp.reading {
+        println!("The package inventory is turned off on this node.");
+        return Ok(());
+    }
+    if resp.scanned_at_ns == 0 {
+        println!("The first reading has not finished yet.");
+        return Ok(());
+    }
+    if let Some(error) = &resp.last_error {
+        println!("Last reading failed, the result below is the previous one: {error}");
+    }
+    println!(
+        "{} root(s) read through {}.",
+        resp.roots.len(),
+        resp.source.as_deref().unwrap_or("-")
+    );
+    if resp.roots_not_read > 0 {
+        println!("{} more root(s) were not read.", resp.roots_not_read);
+    }
+    for root in &resp.roots {
+        let label = root_label(root);
+        if let Some(error) = &root.error {
+            println!("{label}: could not be read: {error}");
+        }
+        for db in &root.databases {
+            if let Some(reason) = &db.unreadable {
+                println!(
+                    "{label}: {} database {} not read: {reason}",
+                    db.manager, db.path
+                );
+            }
+        }
+    }
+    let mut table = Table::new(&[
+        ("ROOT", Align::Left),
+        ("MANAGER", Align::Left),
+        ("PACKAGE", Align::Left),
+        ("VERSION", Align::Left),
+        ("ARCH", Align::Left),
+        ("STATE", Align::Left),
+        ("FILES", Align::Right),
+    ]);
+    let mut rows = 0usize;
+    for root in &resp.roots {
+        let label = root_label(root);
+        for db in &root.databases {
+            for p in &db.packages {
+                rows += 1;
+                table.row(cells![
+                    label,
+                    db.manager,
+                    p.name,
+                    p.version,
+                    p.arch.as_deref().unwrap_or("-"),
+                    p.state,
+                    p.files.map_or_else(|| "-".to_string(), |n| n.to_string())
+                ]);
+            }
+        }
+    }
+    if rows == 0 {
+        println!("No package database was found in any root.");
+        return Ok(());
+    }
+    table.print();
+    Ok(())
+}
+
 /// Print the eBPF programs on the network path that the agent did not load,
 /// where they run and who holds them.
 pub async fn cmd_ebpf_foreign_programs(client: &ApiClient, output: OutputFormat) -> Result<()> {
