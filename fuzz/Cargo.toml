@@ -153,3 +153,13 @@ doc = false
 name = "fuzz_host_rule"
 path = "fuzz_targets/fuzz_host_rule.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_dpkg_status"
+path = "fuzz_targets/fuzz_dpkg_status.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_rpm_database"
+path = "fuzz_targets/fuzz_rpm_database.rs"
+doc = false

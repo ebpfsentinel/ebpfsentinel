@@ -125,6 +125,7 @@ fuzz_target!(|data: &[u8]| {
             group_mask: 0,
             tenant_id,
             workload: None,
+            mode: Default::default(),
         };
         rules.push(rule);
     }

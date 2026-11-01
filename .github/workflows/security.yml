@@ -136,6 +136,14 @@ jobs:
         run: |
           mkdir -p fuzz/corpus/fuzz_host_rule
           cargo +nightly fuzz run fuzz_host_rule fuzz/corpus/fuzz_host_rule fuzz/seeds/fuzz_host_rule -- -max_len=4096 -max_total_time=30
+      - name: Fuzz dpkg and Alpine database readers
+        run: |
+          mkdir -p fuzz/corpus/fuzz_dpkg_status
+          cargo +nightly fuzz run fuzz_dpkg_status fuzz/corpus/fuzz_dpkg_status fuzz/seeds/fuzz_dpkg_status -- -max_len=65536 -max_total_time=30
+      - name: Fuzz rpm database reader
+        run: |
+          mkdir -p fuzz/corpus/fuzz_rpm_database
+          cargo +nightly fuzz run fuzz_rpm_database fuzz/corpus/fuzz_rpm_database fuzz/seeds/fuzz_rpm_database -- -max_len=262144 -max_total_time=30
 
   # ── SBOM generation ──────────────────────────────────────────────
   sbom:
