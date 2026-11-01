@@ -3240,16 +3240,7 @@ pub async fn run(
                 }
                 Err(e) => {
                     metrics.set_ebpf_program_status("cgroup_clusterip", false);
-                    if adapters::ebpf::clusterip::status().reason.is_none() {
-                        adapters::ebpf::clusterip::publish_status(
-                            adapters::ebpf::clusterip::ClusterIpStatus {
-                                cgroup: config.attribution.cgroup_root.clone(),
-                                reason: Some(e.to_string()),
-                                ..adapters::ebpf::clusterip::ClusterIpStatus::default()
-                            },
-                        );
-                    }
-                    warn!("cluster addresses stay with kube-proxy for every workload: {e}");
+                    publish_cluster_ip_refusal(&config, &e);
                 }
             }
         } else {
@@ -6952,6 +6943,19 @@ fn shared_cluster_cache(
     }))
 }
 
+/// Publish why the cluster address hooks are not attached, unless the attach
+/// itself already said so, and warn that every workload stays on kube-proxy.
+pub(crate) fn publish_cluster_ip_refusal(config: &AgentConfig, error: &anyhow::Error) {
+    if adapters::ebpf::clusterip::status().reason.is_none() {
+        adapters::ebpf::clusterip::publish_status(adapters::ebpf::clusterip::ClusterIpStatus {
+            cgroup: config.attribution.cgroup_root.clone(),
+            reason: Some(error.to_string()),
+            ..adapters::ebpf::clusterip::ClusterIpStatus::default()
+        });
+    }
+    warn!("cluster addresses stay with kube-proxy for every workload: {error}");
+}
+
 /// Load the cluster address object with maps of its own, attach its hooks
 /// to the cgroup root, and start keeping its tables equal to the cluster.
 ///
@@ -6961,7 +6965,7 @@ fn shared_cluster_cache(
 /// built, the object cannot be loaded or a hook is refused. Nothing is then
 /// attached, and every connection keeps going through kube-proxy.
 #[cfg(feature = "kubernetes")]
-async fn start_cluster_ip(
+pub(crate) async fn start_cluster_ip(
     ebpf_dir: &str,
     config: &AgentConfig,
     metrics_readers: &mut Vec<MetricsReader>,
@@ -7017,7 +7021,7 @@ async fn start_cluster_ip(
 }
 
 #[cfg(not(feature = "kubernetes"))]
-async fn start_cluster_ip(
+pub(crate) async fn start_cluster_ip(
     _ebpf_dir: &str,
     _config: &AgentConfig,
     _metrics_readers: &mut Vec<MetricsReader>,

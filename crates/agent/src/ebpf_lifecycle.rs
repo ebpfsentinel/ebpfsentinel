@@ -314,6 +314,7 @@ impl EbpfProgramManager {
             "uprobe_dlp" => self.enable_uprobe_dlp(config).await,
             "cgroup_attribution" => self.enable_cgroup_attribution(config).await,
             "tracepoint_process" => self.enable_process_tracing(config).await,
+            "cgroup_clusterip" => self.enable_cgroup_clusterip(config).await,
             _ => {
                 warn!(
                     program = name,
@@ -374,6 +375,16 @@ impl EbpfProgramManager {
                 // The table keeps whatever it already knows and stops learning,
                 // which is why the published status says the source is off.
                 if let Some(mut attacher) = self.process_tracing.take() {
+                    attacher.detach_all();
+                }
+            }
+            "cgroup_clusterip" => {
+                // The links are held outside the handle too. Closing them
+                // first is what returns every selected workload to
+                // kube-proxy; the loader dropped below then takes the
+                // unpinned tables with it, and the cancel above has already
+                // stopped the task that kept them equal to the cluster.
+                if let Some(mut attacher) = self.cluster_ip.take() {
                     attacher.detach_all();
                 }
             }
@@ -755,6 +766,36 @@ impl EbpfProgramManager {
         );
 
         info!("cgroup-attribution enabled via hot-reload");
+        Ok(())
+    }
+
+    async fn enable_cgroup_clusterip(&mut self, config: &AgentConfig) -> anyhow::Result<()> {
+        let cancel = CancellationToken::new();
+        let mut readers = Vec::new();
+        match startup::start_cluster_ip(&self.ebpf_dir, config, &mut readers, cancel.clone()).await
+        {
+            Ok((loader, attacher)) => {
+                self.cluster_ip = Some(attacher);
+                self.metrics_readers.write().await.extend(readers);
+                self.set_status("cgroup_clusterip", true).await;
+                self.programs.insert(
+                    "cgroup_clusterip".to_string(),
+                    ProgramHandle {
+                        name: "cgroup_clusterip".to_string(),
+                        loader,
+                        reader_cancel: cancel,
+                        reader_handles: Vec::new(),
+                    },
+                );
+                info!("cgroup-clusterip enabled via hot-reload");
+            }
+            Err(e) => {
+                // Nothing was attached, so every workload is still on
+                // kube-proxy; the published status carries the reason.
+                self.set_status("cgroup_clusterip", false).await;
+                startup::publish_cluster_ip_refusal(config, &e);
+            }
+        }
         Ok(())
     }
 
@@ -1377,6 +1418,10 @@ pub fn program_config_map(config: &AgentConfig) -> Vec<(&'static str, bool)> {
         ("uprobe_dlp", config.dlp.enabled),
         ("cgroup_attribution", config.attribution.enabled),
         ("tracepoint_process", config.process_table.enabled),
+        (
+            "cgroup_clusterip",
+            config.container.kubernetes.cluster_ip.enabled,
+        ),
     ]
 }
 
@@ -1422,6 +1467,7 @@ fn metrics_maps(program: &str) -> &'static [&'static str] {
         "uprobe_dlp" => &["DLP_METRICS"],
         "cgroup_attribution" => &["ATTRIBUTION_METRICS"],
         "tracepoint_process" => &["PROCESS_METRICS"],
+        "cgroup_clusterip" => &["CLUSTERIP_METRICS"],
         _ => &[],
     }
 }
@@ -1500,5 +1546,31 @@ mod tests {
     fn an_empty_side_only_loads_or_only_unloads() {
         assert_eq!(plan_xdp(&[RL], &[]), (vec![], vec![RL]));
         assert_eq!(plan_xdp(&[], &[FW, RL]), (vec![FW, RL], vec![]));
+    }
+
+    fn wanted(yaml: &str, program: &str) -> bool {
+        let config = infrastructure::config::AgentConfig::from_yaml(yaml).unwrap();
+        super::program_config_map(&config)
+            .into_iter()
+            .find(|(name, _)| *name == program)
+            .map(|(_, enabled)| enabled)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_reload_follows_the_cluster_address_switch_both_ways() {
+        let on = "agent:\n  interfaces: [eth0]\ncontainer:\n  kubernetes:\n    enabled: true\n    cluster_ip:\n      enabled: true\n      workloads:\n        - pods:\n            match_labels: {app: checkout}\n";
+        let off = "agent:\n  interfaces: [eth0]\ncontainer:\n  kubernetes:\n    enabled: true\n    cluster_ip:\n      enabled: false\n";
+        assert!(wanted(on, "cgroup_clusterip"));
+        assert!(!wanted(off, "cgroup_clusterip"));
+        assert!(!wanted("agent:\n  interfaces: [eth0]", "cgroup_clusterip"));
+    }
+
+    #[test]
+    fn an_unloaded_cluster_address_object_stops_being_counted() {
+        assert_eq!(
+            super::metrics_maps("cgroup_clusterip"),
+            ["CLUSTERIP_METRICS"]
+        );
     }
 }

@@ -187,6 +187,19 @@ impl ClusterIpAttacher {
         }
     }
 
+    /// Close every link, which takes every hook off the cgroup and returns
+    /// every selected workload to kube-proxy, and publish that resolution is
+    /// off. The links are this attacher's alone, so nothing stays attached.
+    pub fn detach_all(&mut self) {
+        let detached = self.links.len();
+        self.links.clear();
+        publish_status(ClusterIpStatus::default());
+        info!(
+            hooks = detached,
+            "cluster ip resolution detached, every workload is back on kube-proxy"
+        );
+    }
+
     /// How many hooks this attacher currently holds a link for.
     #[must_use]
     pub fn attached(&self) -> usize {
@@ -460,6 +473,23 @@ fn words(ip: IpAddr) -> ([u32; 4], u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detaching_publishes_that_resolution_is_off() {
+        publish_status(ClusterIpStatus {
+            attached: true,
+            cgroup: "/sys/fs/cgroup".into(),
+            hooks: vec!["connect4".into()],
+            reason: None,
+            brokered: false,
+        });
+        let mut attacher = ClusterIpAttacher::new();
+        attacher.detach_all();
+        assert_eq!(attacher.attached(), 0);
+        let now = status();
+        assert!(!now.attached);
+        assert!(now.hooks.is_empty());
+    }
 
     #[test]
     fn every_reverse_hook_attaches_before_the_first_translation() {
