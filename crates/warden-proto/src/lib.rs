@@ -177,6 +177,45 @@ pub struct RouteSpec {
     pub table: u32,
 }
 
+/// What the warden answers a [`Command::FimRead`] on a connection that opened
+/// no watch, which is what a reconnect leaves the agent with.
+pub const FIM_NO_WATCH: &str = "no file watch is open on this connection";
+
+/// A filesystem the warden was asked to watch, and whether the mark took.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FimMark {
+    /// The path the agent named, in the warden's mount namespace.
+    pub path: String,
+    /// Why the filesystem holding it is not watched, `None` when it is.
+    pub error: Option<String>,
+}
+
+/// One change on a watched filesystem, its file handle already resolved.
+///
+/// The kernel reports the directory as a file handle, which only a holder of
+/// `CAP_DAC_READ_SEARCH` can open, so the warden opens it and the agent is
+/// handed a path and never a handle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FimEvent {
+    /// The fanotify event bits, `FAN_CREATE`, `FAN_CLOSE_WRITE` and the rest.
+    pub mask: u64,
+    /// The writing thread group as the warden's pid namespace numbers it, `0`
+    /// when the kernel could not name it there.
+    pub pid: u32,
+    /// The directory the change happened in, as the warden's mount namespace
+    /// reaches it. On an overlay this is the upper directory on the backing
+    /// filesystem, not the path the writer saw.
+    pub directory: Option<String>,
+    /// The entry inside that directory.
+    pub name: String,
+    /// Device of the entry, when it still exists.
+    pub dev: Option<u64>,
+    /// Inode of the entry, when it still exists.
+    pub ino: Option<u64>,
+    /// Why the directory could not be named, when it could not.
+    pub unresolved: Option<String>,
+}
+
 /// A request from the agent to the warden. Every variant is one kernel operation
 /// the rootless agent cannot perform itself; the warden validates each against an
 /// allowlist before acting, so a compromised agent cannot turn the warden into an
@@ -337,6 +376,24 @@ pub enum Command {
     /// numbered in, so the agent can let it read the agent's links once the
     /// kernel refuses them to everybody else. Read-only.
     Identity,
+    /// Watch the filesystems holding each of `paths` for changes, answered by
+    /// [`Response::FimOpened`]. The watch belongs to this connection and ends
+    /// with it, and a second `FimOpen` replaces the first. A filesystem mark
+    /// needs `CAP_SYS_ADMIN` and resolving what it reports needs
+    /// `CAP_DAC_READ_SEARCH`, neither of which the agent holds. Read-only: the
+    /// group is a notification group, it can delay or refuse nothing.
+    FimOpen {
+        /// Paths in the warden's mount namespace; each marks the whole
+        /// filesystem it lives on.
+        paths: Vec<String>,
+    },
+    /// Hand over the changes the watch opened on this connection has seen,
+    /// waiting at most `max_wait_ms` for the first one, answered by
+    /// [`Response::FimEvents`].
+    FimRead {
+        /// How long to wait when nothing is queued, capped by the warden.
+        max_wait_ms: u32,
+    },
 }
 
 /// A thread group as one pid namespace numbers it.
@@ -444,6 +501,19 @@ pub enum Response {
     Identity {
         /// The warden, as its pid namespace numbers it.
         identity: TaskIdentity,
+    },
+    /// The outcome of every mark, answering [`Command::FimOpen`], in the
+    /// order the paths were given.
+    FimOpened {
+        /// One entry per path asked for.
+        marks: Vec<FimMark>,
+    },
+    /// The changes read since the last [`Command::FimRead`].
+    FimEvents {
+        /// In the order the kernel queued them.
+        events: Vec<FimEvent>,
+        /// The kernel's queue overflowed and changes were lost before these.
+        overflowed: bool,
     },
 }
 

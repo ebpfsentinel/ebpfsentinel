@@ -10,7 +10,9 @@ use std::process::{Child, Command as Proc, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
 
-use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame, write_frame};
+use ebpfsentinel_warden_proto::{
+    Command, FIM_NO_WATCH, PROTOCOL_VERSION, Response, read_frame, write_frame,
+};
 
 /// Spawn `warden serve <sock> --uid <uid>` and return the child handle.
 fn spawn_warden(sock: &str, uid: u32) -> Child {
@@ -87,6 +89,54 @@ fn handshake_then_conntrack() {
     write_frame(&mut s, &Command::ConntrackDump).unwrap();
     let resp: Response = read_frame(&mut s).unwrap();
     assert!(matches!(resp, Response::Conntrack { .. }), "got {resp:?}");
+
+    drop(guard);
+}
+
+#[test]
+fn a_file_read_without_a_watch_is_refused_and_a_refused_mark_is_named() {
+    let sock = sock_path("fim");
+    let guard = Guard {
+        child: spawn_warden(&sock, current_uid()),
+        sock: sock.clone(),
+    };
+    let mut s = connect(&sock);
+    write_frame(
+        &mut s,
+        &Command::Hello {
+            version: PROTOCOL_VERSION,
+        },
+    )
+    .unwrap();
+    let _: Response = read_frame(&mut s).unwrap();
+
+    write_frame(&mut s, &Command::FimRead { max_wait_ms: 0 }).unwrap();
+    let resp: Response = read_frame(&mut s).unwrap();
+    assert_eq!(
+        resp,
+        Response::Error {
+            message: FIM_NO_WATCH.into()
+        }
+    );
+
+    // A path that does not exist is answered with its reason, and the
+    // connection stays usable.
+    write_frame(
+        &mut s,
+        &Command::FimOpen {
+            paths: vec!["/no/such/path/anywhere".into()],
+        },
+    )
+    .unwrap();
+    let resp: Response = read_frame(&mut s).unwrap();
+    let Response::FimOpened { marks } = resp else {
+        panic!("got {resp:?}");
+    };
+    assert_eq!(marks.len(), 1);
+    assert!(marks[0].error.is_some());
+    write_frame(&mut s, &Command::FimRead { max_wait_ms: 0 }).unwrap();
+    let resp: Response = read_frame(&mut s).unwrap();
+    assert!(matches!(resp, Response::Error { .. }), "got {resp:?}");
 
     drop(guard);
 }

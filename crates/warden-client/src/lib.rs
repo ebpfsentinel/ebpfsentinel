@@ -29,8 +29,8 @@ use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame,
 // Re-exported under their real names so callers of the typed control methods can
 // build request values without taking a direct dependency on the protocol crate.
 pub use ebpfsentinel_warden_proto::{
-    ConntrackTuple, DlpTarget, ExecutableIdentity, HeldBpfObjects, NetworkProgram, PacketSocket,
-    RouteSpec, TaskIdentity,
+    ConntrackTuple, DlpTarget, ExecutableIdentity, FimEvent, FimMark, HeldBpfObjects,
+    NetworkProgram, PacketSocket, RouteSpec, TaskIdentity,
 };
 
 /// How long one warden call may take before the client gives up on it.
@@ -78,6 +78,8 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::PacketSockets => "PacketSockets",
         Command::NetworkPrograms => "NetworkPrograms",
         Command::Identity => "Identity",
+        Command::FimOpen { .. } => "FimOpen",
+        Command::FimRead { .. } => "FimRead",
     }
 }
 
@@ -256,6 +258,23 @@ impl WardenClient {
         match self.call(&Command::Identity)? {
             Response::Identity { identity } => Ok(identity),
             other => Err(unexpected("Identity", &other)),
+        }
+    }
+
+    /// Watch the filesystems holding `paths`, on this connection.
+    pub fn fim_open(&mut self, paths: Vec<String>) -> io::Result<Vec<FimMark>> {
+        match self.call(&Command::FimOpen { paths })? {
+            Response::FimOpened { marks } => Ok(marks),
+            other => Err(unexpected("FimOpen", &other)),
+        }
+    }
+
+    /// Read what the watch on this connection has seen, and whether the
+    /// kernel lost changes before it.
+    pub fn fim_read(&mut self, max_wait_ms: u32) -> io::Result<(Vec<FimEvent>, bool)> {
+        match self.call(&Command::FimRead { max_wait_ms })? {
+            Response::FimEvents { events, overflowed } => Ok((events, overflowed)),
+            other => Err(unexpected("FimRead", &other)),
         }
     }
 
@@ -560,6 +579,20 @@ impl ReconnectingClient {
     /// bounced. The closure re-clones `payload` because `with_retry` may replay it.
     pub fn extension(&mut self, kind: &str, payload: &[u8]) -> io::Result<Vec<u8>> {
         self.with_retry(|c| c.extension(kind, payload.to_vec()))
+    }
+
+    /// Watch the filesystems holding `paths`, reconnecting if the warden
+    /// bounced. Replayable: the watch belongs to the connection, so a watch
+    /// opened on a connection that died went with it.
+    pub fn fim_open(&mut self, paths: &[String]) -> io::Result<Vec<FimMark>> {
+        self.with_retry(|c| c.fim_open(paths.to_vec()))
+    }
+
+    /// Read the watch's changes. After a reconnect the new connection holds
+    /// no watch and the warden says so, which is the caller's cue to open it
+    /// again.
+    pub fn fim_read(&mut self, max_wait_ms: u32) -> io::Result<(Vec<FimEvent>, bool)> {
+        self.with_retry(|c| c.fim_read(max_wait_ms))
     }
 
     /// Tear down a single conntrack flow.

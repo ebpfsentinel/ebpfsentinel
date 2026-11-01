@@ -32,7 +32,7 @@ services:
     environment:
       EBPFSENTINEL_HOST_PROC: /host/proc
     cap_drop: [ALL]
-    cap_add: [SYS_ADMIN, NET_ADMIN, NET_RAW, SYS_PTRACE, BPF, PERFMON]
+    cap_add: [SYS_ADMIN, NET_ADMIN, NET_RAW, SYS_PTRACE, BPF, PERFMON, DAC_READ_SEARCH]
     security_opt:
       - apparmor=unconfined
       - seccomp=unconfined

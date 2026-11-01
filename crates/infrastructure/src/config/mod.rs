@@ -17,6 +17,7 @@ mod container;
 mod ddos;
 mod dlp;
 mod dns;
+mod file_watch;
 mod firewall;
 mod flow_export;
 mod geoip;
@@ -72,6 +73,7 @@ pub use dns::{
     DnsBlocklistFeedConfig, DnsBlocklistSectionConfig, DnsCacheConfig, DnsConfig,
     ReputationSectionConfig,
 };
+pub use file_watch::{FileWatchConfig, MAX_FILE_WATCH_FILESYSTEMS};
 pub use firewall::{
     DefaultPolicy, FirewallConfig, FirewallRuleConfig, PortRangeConfig, ScopeConfig, ScopeMap,
 };
@@ -288,6 +290,11 @@ pub struct AgentConfig {
     /// interface the packet was on. On by default.
     #[serde(default)]
     pub kernel_drops: KernelDropsConfig,
+
+    /// Changes to whole filesystems and the process behind each. Off by
+    /// default.
+    #[serde(default)]
+    pub file_watch: FileWatchConfig,
 
     /// Retransmissions, resets and connections opened, failed and closed,
     /// counted per edge between two services. On by default.
@@ -568,6 +575,7 @@ impl AgentConfig {
         // Validate the telemetry block
         self.telemetry.validate()?;
         self.kernel_drops.validate()?;
+        self.file_watch.validate()?;
         self.tcp_health.validate()?;
         self.network_inventory.validate()?;
         self.host_rules.validate()?;

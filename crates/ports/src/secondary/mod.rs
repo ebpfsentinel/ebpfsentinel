@@ -23,6 +23,7 @@ pub mod drop_counter_port;
 pub mod ebpf_map_port;
 pub mod ebpf_map_write_port;
 pub mod feed_source;
+pub mod file_watch_port;
 pub mod flow_sink_port;
 pub mod geoip_lpm_port;
 pub mod geoip_port;

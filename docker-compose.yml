@@ -72,6 +72,7 @@ services:
       - SYS_PTRACE # read a neighbour container's /proc/<pid>/root (DLP)
       - BPF # create the DLP uprobe BPF_LINK_CREATE
       - PERFMON # uprobe attach (perf/tracing)
+      - DAC_READ_SEARCH # name the directory a watched file changed in
     security_opt:
       - apparmor=unconfined # delegation does fsconfig/move_mount
       - seccomp=unconfined # mount/bpf/netlink syscalls

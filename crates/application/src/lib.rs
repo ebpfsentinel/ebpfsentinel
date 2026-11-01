@@ -73,6 +73,7 @@ pub mod dns_feed_update;
 pub mod domain_reputation_service_impl;
 pub mod exposure_service;
 pub mod feed_update;
+pub mod file_watch_service;
 pub mod firewall_aliases;
 pub mod firewall_service_impl;
 pub mod flow_export_service;

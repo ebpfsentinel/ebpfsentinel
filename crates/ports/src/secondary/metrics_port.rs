@@ -379,6 +379,17 @@ pub trait SystemMetrics: Send + Sync {
     /// borrow and every return, so a socket a capture never gave back is
     /// visible without reproducing the capture.
     fn set_pcap_sockets(&self, _in_use: u64, _total: u64) {}
+
+    /// Add `count` file changes of `kind` the file watch reported.
+    fn record_file_changes(&self, _kind: &str, _count: u64) {}
+
+    /// Count one reading the kernel said changes were lost before, because
+    /// its queue was full.
+    fn record_file_change_overflow(&self) {}
+
+    /// Set how many filesystems the file watch covers and how many it was
+    /// refused, published each time the watch is opened.
+    fn set_file_watch_filesystems(&self, _watched: u64, _refused: u64) {}
 }
 
 // ── Configuration metrics ──────────────────────────────────────────

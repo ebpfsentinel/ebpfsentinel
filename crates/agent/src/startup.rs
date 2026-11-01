@@ -4716,6 +4716,24 @@ pub async fn run(
         });
     }
 
+    // Changes to whole filesystems and the process behind each, watched by
+    // the warden when there is one and in-process otherwise.
+    if config.file_watch.enabled {
+        let source = adapters::warden::file_watch::FileWatch::new(open_local_file_watch);
+        let watcher = application::file_watch_service::FileWatcher::new(
+            Box::new(source),
+            config.file_watch.filesystems.clone(),
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+        );
+        info!(
+            source = watcher.source(),
+            filesystems = config.file_watch.filesystems.len(),
+            "file watch running"
+        );
+        let watch_cancel = cancel_token.clone();
+        tokio::task::spawn_blocking(move || watcher.run_blocking(&watch_cancel));
+    }
+
     // ── 11. Spawn event dispatcher (replaces flat event consumer) ───
     let dispatcher = EventDispatcher::new(
         Arc::clone(&ids_svc),
@@ -8197,6 +8215,19 @@ mod tests {
 /// Docker socket, so what can still fail here is the bind itself, which
 /// stops the agent: a container told to use a resolver that is not there
 /// resolves nothing at all.
+/// The in-process file watch, for an agent holding the privilege itself.
+fn open_local_file_watch(
+    paths: &[String],
+) -> (
+    Option<adapters::warden::file_watch::LocalRead>,
+    Vec<adapters::warden::file_watch::FimMark>,
+) {
+    let (watch, marks) = ebpfsentinel_warden::fim_watch::FimWatch::open(paths);
+    let read = watch
+        .map(|mut w| Box::new(move |wait| w.read(wait)) as adapters::warden::file_watch::LocalRead);
+    (read, marks)
+}
+
 async fn spawn_dns_allowlist_resolver(
     config: &AgentConfig,
     metrics: &Arc<AgentMetrics>,

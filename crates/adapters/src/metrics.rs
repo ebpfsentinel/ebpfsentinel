@@ -59,6 +59,13 @@ pub struct ComponentLabels {
     pub component: String,
 }
 
+/// Labels for the file change counter: `kind` is one of the six kinds of
+/// change the file watch names.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct FileChangeLabels {
+    pub kind: String,
+}
+
 /// Labels for the workload link hot-plug: `kind` is the link kind the
 /// watcher classified (`veth`, `netkit`, `macvlan`, `ipvlan`,
 /// `bridge-member`).
@@ -444,6 +451,10 @@ pub struct AgentMetrics {
     /// size. Set on every borrow and return.
     pub pcap_sockets_in_use: Gauge,
     pub pcap_sockets_pooled: Gauge,
+    pub file_changes_total: Family<FileChangeLabels, Counter>,
+    pub file_change_overflows_total: Counter,
+    pub file_watch_filesystems: Gauge,
+    pub file_watch_filesystems_refused: Gauge,
     pub dns_cache_entries: Gauge,
     pub dns_cache_hits_total: Counter,
     pub dns_cache_evictions_total: Counter,
@@ -900,6 +911,34 @@ impl AgentMetrics {
             pcap_sockets_pooled.clone(),
         );
 
+        let file_changes_total = Family::<FileChangeLabels, Counter>::default();
+        registry.register(
+            "file_changes",
+            "File changes the file watch reported, by kind of change",
+            file_changes_total.clone(),
+        );
+
+        let file_change_overflows_total = Counter::default();
+        registry.register(
+            "file_change_overflows",
+            "Readings of the file watch the kernel said changes were lost before",
+            file_change_overflows_total.clone(),
+        );
+
+        let file_watch_filesystems = Gauge::default();
+        registry.register(
+            "file_watch_filesystems",
+            "Filesystems the file watch covers",
+            file_watch_filesystems.clone(),
+        );
+
+        let file_watch_filesystems_refused = Gauge::default();
+        registry.register(
+            "file_watch_filesystems_refused",
+            "Filesystems the file watch was asked for and refused",
+            file_watch_filesystems_refused.clone(),
+        );
+
         let dns_cache_entries = Gauge::default();
         registry.register(
             "dns_cache_entries",
@@ -1353,6 +1392,10 @@ impl AgentMetrics {
             thread_count,
             pcap_sockets_in_use,
             pcap_sockets_pooled,
+            file_changes_total,
+            file_change_overflows_total,
+            file_watch_filesystems,
+            file_watch_filesystems_refused,
             dns_cache_entries,
             dns_cache_hits_total,
             dns_cache_evictions_total,
@@ -2000,6 +2043,25 @@ impl SystemMetrics for AgentMetrics {
             .set(in_use.try_into().unwrap_or(i64::MAX));
         self.pcap_sockets_pooled
             .set(total.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn record_file_changes(&self, kind: &str, count: u64) {
+        self.file_changes_total
+            .get_or_create(&FileChangeLabels {
+                kind: kind.to_string(),
+            })
+            .inc_by(count);
+    }
+
+    fn record_file_change_overflow(&self) {
+        self.file_change_overflows_total.inc();
+    }
+
+    fn set_file_watch_filesystems(&self, watched: u64, refused: u64) {
+        self.file_watch_filesystems
+            .set(watched.try_into().unwrap_or(i64::MAX));
+        self.file_watch_filesystems_refused
+            .set(refused.try_into().unwrap_or(i64::MAX));
     }
 }
 
@@ -2850,6 +2912,10 @@ mod tests {
         ("encrypted_dns_detections", "counter"),
         ("events_dropped", "counter"),
         ("false_positives", "counter"),
+        ("file_change_overflows", "counter"),
+        ("file_changes", "counter"),
+        ("file_watch_filesystems", "gauge"),
+        ("file_watch_filesystems_refused", "gauge"),
         ("fingerprints_seen", "counter"),
         ("flow_export_failures", "counter"),
         ("flows_dropped", "counter"),
@@ -3220,6 +3286,7 @@ mod tests {
             },
         );
         m.record_l7_port_promise(443, "mismatch");
+        m.record_file_changes("written", 1);
         m.dlp_scan_duration_seconds.observe(0.000_01);
         m.link_attach_gap_seconds
             .get_or_create(&LinkKindLabels {

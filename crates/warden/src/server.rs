@@ -16,9 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ebpfsentinel_warden_proto::{
-    Command, PROTOCOL_VERSION, Response, TaskIdentity, read_frame, write_frame,
+    Command, FIM_NO_WATCH, PROTOCOL_VERSION, Response, TaskIdentity, read_frame, write_frame,
 };
 
+use crate::fim_watch::FimWatch;
 use crate::host_ops::HostOps;
 use crate::pcap_slots::{PcapSlot, PcapSlots};
 use crate::{
@@ -258,6 +259,9 @@ fn handle_conn_with_timeouts(
     // agent's own pool keeps this connection open for its whole life, so the
     // sockets are in use for exactly as long as it is there to read them.
     let mut claimed: Vec<PcapSlot> = Vec::new();
+    // The file watch this connection opened, closed with it: the agent's
+    // watcher keeps one connection for the watch and reads it in a loop.
+    let mut fim: Option<FimWatch> = None;
     let Ok(mut reader) = conn.try_clone() else {
         return;
     };
@@ -307,7 +311,7 @@ fn handle_conn_with_timeouts(
     loop {
         match wait_for_frame(fd, idle_timeout) {
             Waited::Readable => {}
-            Waited::TimedOut if claimed.is_empty() => {
+            Waited::TimedOut if claimed.is_empty() && fim.is_none() => {
                 // Nothing of the warden's is held over this connection, so
                 // closing it costs the agent one reconnect on its next call and
                 // ends a thread that had nothing left to answer.
@@ -375,6 +379,33 @@ fn handle_conn_with_timeouts(
                 }
             }
             Command::Delegate => serve_delegate(&mut writer, btf, pcap.fds()),
+            Command::FimOpen { paths } => {
+                let (watch, marks) = FimWatch::open(paths);
+                for mark in &marks {
+                    match &mark.error {
+                        None => eprintln!("[warden] file watch marked {}", mark.path),
+                        Some(reason) => {
+                            eprintln!("[warden] file watch not marked on {}: {reason}", mark.path);
+                        }
+                    }
+                }
+                fim = watch;
+                write_frame(&mut writer, &Response::FimOpened { marks }).is_ok()
+            }
+            Command::FimRead { max_wait_ms } => {
+                let resp = match fim.as_mut() {
+                    Some(watch) => {
+                        match watch.read(Duration::from_millis(u64::from(*max_wait_ms))) {
+                            Ok((events, overflowed)) => Response::FimEvents { events, overflowed },
+                            Err(message) => Response::Error { message },
+                        }
+                    }
+                    None => Response::Error {
+                        message: FIM_NO_WATCH.into(),
+                    },
+                };
+                write_frame(&mut writer, &resp).is_ok()
+            }
             // `AttachUprobe` answers out-of-band: it first receives the agent's
             // program fd over `SCM_RIGHTS`, creates the link, then replies
             // `FdReady` + the link fd (or a typed `Error`).
