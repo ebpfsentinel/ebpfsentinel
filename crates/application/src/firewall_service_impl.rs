@@ -193,6 +193,17 @@ impl KernelRules {
     }
 }
 
+/// Turn a rule in shadow mode into one in force, refusing any other.
+fn enforce_shadow_rule(rule: &mut FirewallRule) -> Result<(), FirewallError> {
+    if rule.mode != RuleMode::Shadow {
+        return Err(FirewallError::RuleNotInShadow {
+            id: rule.id.to_string(),
+        });
+    }
+    rule.mode = RuleMode::Enforce;
+    Ok(())
+}
+
 /// Which rule each shadow slot holds, and every shadow rule in priority order.
 #[derive(Debug, Default)]
 struct ShadowIndex {
@@ -551,6 +562,48 @@ impl FirewallAppService {
             total = self.engine.rules().len(),
             "firewall rule removed"
         );
+        Ok(())
+    }
+
+    /// Put a rule that was only counting in force: from now on it decides the
+    /// traffic it matches.
+    ///
+    /// The rule keeps its identity, priority and matchers, so what it decides
+    /// is what its reading counted. The set of shadow rules changes with it,
+    /// so every remaining shadow rule starts counting afresh, and a caller
+    /// that wants the reading the decision was taken on reads it first. While
+    /// the deny-all posture is in force the rule is promoted in the set kept
+    /// for when the posture is lifted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no rule carries `id`, or when it is not in
+    /// shadow mode.
+    pub fn promote_rule(&mut self, id: &RuleId) -> Result<(), DomainError> {
+        if let Some(snapshot) = self.deny_all.as_mut() {
+            let rule = snapshot
+                .rules
+                .iter_mut()
+                .find(|r| r.id == *id)
+                .ok_or_else(|| FirewallError::RuleNotFound { id: id.to_string() })?;
+            enforce_shadow_rule(rule)?;
+            tracing::info!(
+                id = id.0,
+                "shadow rule promoted, in force when the deny-all posture is lifted"
+            );
+            return Ok(());
+        }
+        let rule = self
+            .engine
+            .rules_mut()
+            .iter_mut()
+            .find(|r| r.id == *id)
+            .ok_or_else(|| FirewallError::RuleNotFound { id: id.to_string() })?;
+        enforce_shadow_rule(rule)?;
+        let promoted = rule.clone();
+        self.sync_ebpf_maps();
+        self.enforce_flow_kill(&promoted);
+        tracing::info!(id = id.0, "shadow rule promoted to enforce");
         Ok(())
     }
 
@@ -1353,6 +1406,42 @@ mod tests {
         rule.action = action;
         rule.mode = RuleMode::Shadow;
         rule
+    }
+
+    #[test]
+    fn a_promoted_shadow_rule_moves_from_the_count_to_the_verdict() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(map.clone()));
+        svc.add_rule(make_rule("live", 10)).unwrap();
+        svc.add_rule(shadow("watched", 5, FirewallAction::Deny))
+            .unwrap();
+        assert_eq!(map.v4.lock().unwrap().len(), 1);
+
+        svc.promote_rule(&RuleId("watched".to_string())).unwrap();
+
+        assert_eq!(map.v4.lock().unwrap().len(), 2);
+        assert!(map.shadow_v4.lock().unwrap().is_empty());
+        let promoted = svc
+            .list_rules()
+            .iter()
+            .find(|r| r.id.0 == "watched")
+            .unwrap();
+        assert_eq!(promoted.mode, RuleMode::Enforce);
+    }
+
+    #[test]
+    fn only_a_rule_in_shadow_mode_can_be_promoted() {
+        let mut svc = make_service();
+        svc.add_rule(make_rule("live", 10)).unwrap();
+        assert!(matches!(
+            svc.promote_rule(&RuleId("live".to_string())),
+            Err(DomainError::InvalidRule(_))
+        ));
+        assert!(matches!(
+            svc.promote_rule(&RuleId("absent".to_string())),
+            Err(DomainError::RuleNotFound(_))
+        ));
     }
 
     #[test]
