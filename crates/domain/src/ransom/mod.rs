@@ -21,6 +21,7 @@ pub mod rename;
 pub mod replace;
 pub mod shadow;
 pub mod signal;
+pub mod thresholds;
 
 pub use actor::{Actor, actor_of};
 pub use backup::{
@@ -43,6 +44,7 @@ pub use note::{
 };
 pub use paths::{
     DistinctPaths, RANSOM_DISTINCT_REWRITES, RANSOM_ENTROPY_RISES, RANSOM_HEADER_MISMATCHES,
+    learned_evidence,
 };
 pub use rename::{
     MassRenames, RANSOM_MASS_RENAMES, RANSOM_RENAME_EXTENSIONS_MAX, renamed_to_new_extension,
@@ -53,3 +55,7 @@ pub use replace::{
 };
 pub use shadow::{RANSOM_SHADOW_RECENT_MAX, RansomShadow, ShadowVerdict};
 pub use signal::{RansomSignal, SignalKind, Tier, UnavailableSignal, unavailable};
+pub use thresholds::{
+    BASELINE_CEILING_FACTOR, BASELINE_FLOOR_DIVISOR, BASELINED, bounded_threshold,
+    shipped_threshold, threshold_band,
+};

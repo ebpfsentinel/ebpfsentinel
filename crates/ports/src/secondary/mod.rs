@@ -56,6 +56,7 @@ pub mod process_signal_map_port;
 pub mod qos_cgroup_shaping_port;
 pub mod qos_map_port;
 pub mod quarantine_map_port;
+pub mod ransom_baseline_port;
 pub mod ratelimit_lpm_port;
 pub mod ratelimit_map_port;
 pub mod raw_socket_port;

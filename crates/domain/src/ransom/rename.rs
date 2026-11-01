@@ -18,6 +18,7 @@ use crate::process::entity::ProcessKey;
 
 use super::actor::Actor;
 use super::engine::{RANSOM_ACTORS_MAX, RANSOM_WINDOW_NS};
+use super::paths::learned_evidence;
 use super::signal::{RansomSignal, SignalKind};
 
 /// How many distinct files one actor gives one new extension in a window
@@ -165,6 +166,20 @@ impl MassRenames {
         to: &str,
         at_ns: u64,
     ) -> Option<RansomSignal> {
+        self.record_against(actor, pid, (from, to), at_ns, None)
+    }
+
+    /// [`Self::record`] against `learned`, a threshold a baseline set for
+    /// this actor, where there is one.
+    pub fn record_against(
+        &mut self,
+        actor: &Actor,
+        pid: u32,
+        (from, to): (&str, &str),
+        at_ns: u64,
+        learned: Option<usize>,
+    ) -> Option<RansomSignal> {
+        let threshold = learned.unwrap_or(self.threshold).max(1);
         let extension = renamed_to_new_extension(from, to)?;
         if !self.runs.contains_key(&actor.key) {
             self.make_room(at_ns);
@@ -192,7 +207,7 @@ impl MassRenames {
         }
         let renamed = run.by_extension.entry(extension.clone()).or_default();
         renamed.insert(hash(to));
-        if renamed.len() < self.threshold {
+        if renamed.len() < threshold {
             return None;
         }
         run.raised = true;
@@ -203,9 +218,11 @@ impl MassRenames {
             actor: actor.clone(),
             pid,
             at_ns,
-            evidence: format!(
-                "{} files renamed to .{extension} in {seconds} s, the last {from} to {to}",
-                self.threshold
+            evidence: learned_evidence(
+                format!(
+                    "{threshold} files renamed to .{extension} in {seconds} s, the last {from} to {to}"
+                ),
+                learned.filter(|_| threshold != self.threshold),
             ),
         })
     }
@@ -331,6 +348,25 @@ mod tests {
         renames.record(&actor(2), 2, "/d/a.txt", "/d/a.x", 2 * S);
         renames.record(&actor(3), 3, "/d/a.txt", "/d/a.x", 3 * S);
         assert_eq!(renames.actors(), 2);
+    }
+
+    #[test]
+    fn a_learned_threshold_is_the_one_crossed_and_the_evidence_says_so() {
+        let mut renames = MassRenames::new(RANSOM_WINDOW_NS, 3, 8);
+        let a = actor(10);
+        let learned = Some(2);
+        assert!(
+            renames
+                .record_against(&a, 10, ("/d/a.txt", "/d/a.x"), S, learned)
+                .is_none()
+        );
+        let signal = renames
+            .record_against(&a, 10, ("/d/b.txt", "/d/b.x"), S, learned)
+            .unwrap();
+        assert_eq!(
+            signal.evidence,
+            "2 files renamed to .x in 0 s, the last /d/b.txt to /d/b.x, against a threshold of 2 learned for this executable"
+        );
     }
 
     #[test]

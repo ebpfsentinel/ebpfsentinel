@@ -72,6 +72,19 @@ fn evidence(kind: SignalKind, threshold: usize, seconds: u64, path: &str) -> Str
     }
 }
 
+/// `evidence`, followed where the threshold was a learned one by the words
+/// saying so, so an operator reading the alert knows which number was
+/// crossed and where it came from.
+#[must_use]
+pub fn learned_evidence(evidence: String, learned: Option<usize>) -> String {
+    match learned {
+        Some(threshold) => {
+            format!("{evidence}, against a threshold of {threshold} learned for this executable")
+        }
+        None => evidence,
+    }
+}
+
 impl DistinctPaths {
     /// Distinct files rewritten, counted on every rewrite.
     #[must_use]
@@ -134,6 +147,12 @@ impl DistinctPaths {
         self.runs.len()
     }
 
+    /// The signal this counter raises.
+    #[must_use]
+    pub fn kind(&self) -> SignalKind {
+        self.kind
+    }
+
     /// Count a change to `path` by `pid` on behalf of `actor`, and return the
     /// signal the first time the actor's window reaches the threshold.
     pub fn record(
@@ -143,6 +162,21 @@ impl DistinctPaths {
         path: &str,
         at_ns: u64,
     ) -> Option<RansomSignal> {
+        self.record_against(actor, pid, path, at_ns, None)
+    }
+
+    /// [`Self::record`] against `learned`, a threshold a baseline set for
+    /// this actor, where there is one. The evidence says which threshold was
+    /// crossed and that it was learned.
+    pub fn record_against(
+        &mut self,
+        actor: &Actor,
+        pid: u32,
+        path: &str,
+        at_ns: u64,
+        learned: Option<usize>,
+    ) -> Option<RansomSignal> {
+        let threshold = learned.unwrap_or(self.threshold).max(1);
         if !self.runs.contains_key(&actor.key) {
             self.make_room(at_ns);
         }
@@ -163,7 +197,7 @@ impl DistinctPaths {
             return None;
         }
         run.paths.insert(hash(path));
-        if run.paths.len() < self.threshold {
+        if run.paths.len() < threshold {
             return None;
         }
         run.raised = true;
@@ -174,7 +208,10 @@ impl DistinctPaths {
             actor: actor.clone(),
             pid,
             at_ns,
-            evidence: evidence(self.kind, self.threshold, seconds, path),
+            evidence: learned_evidence(
+                evidence(self.kind, threshold, seconds, path),
+                learned.filter(|_| threshold != self.threshold),
+            ),
         })
     }
 
@@ -211,6 +248,35 @@ mod tests {
             pid,
             exe: None,
         }
+    }
+
+    #[test]
+    fn a_learned_threshold_moves_the_count_and_is_named_in_the_evidence() {
+        let mut rewrites = DistinctPaths::new(SignalKind::DistinctRewrites, RANSOM_WINDOW_NS, 2, 8);
+        let a = actor(10);
+        let learned = Some(3);
+        assert!(
+            rewrites
+                .record_against(&a, 11, "/d/a", S, learned)
+                .is_none()
+        );
+        assert!(
+            rewrites
+                .record_against(&a, 11, "/d/b", S, learned)
+                .is_none()
+        );
+        let signal = rewrites.record_against(&a, 11, "/d/c", S, learned).unwrap();
+        assert!(
+            signal
+                .evidence
+                .ends_with("against a threshold of 3 learned for this executable"),
+            "{}",
+            signal.evidence
+        );
+        // A learned threshold equal to the shipped one is not named.
+        let mut same = DistinctPaths::new(SignalKind::DistinctRewrites, RANSOM_WINDOW_NS, 1, 8);
+        let signal = same.record_against(&a, 11, "/d/a", S, Some(1)).unwrap();
+        assert!(!signal.evidence.contains("learned"));
     }
 
     #[test]

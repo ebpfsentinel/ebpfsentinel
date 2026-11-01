@@ -7,7 +7,7 @@
 //! the engine, the host's own account of which sources it reads, and the
 //! alert channel.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use domain::alert::entity::Alert;
 use domain::file_watch::entity::FileChangeKind;
@@ -18,10 +18,12 @@ use domain::process::entity::ProcessEntry;
 use domain::ransom::{
     Actor, CryptoRates, DistinctPaths, MassRenames, RansomEngine, RansomNotes, RansomShadow,
     RansomSignal, RansomVerdict, Replacements, ShadowVerdict, SignalKind, UnavailableSignal,
-    actor_of, backup_destroyed, backup_destroyed_signal, backup_program, canary_touched,
-    entropy_rose, header_mismatch, initiator, original_of, renamed_over, unavailable,
+    actor_of, backup_destroyed, backup_destroyed_signal, backup_program, bounded_threshold,
+    canary_touched, entropy_rose, header_mismatch, initiator, original_of, renamed_over,
+    renamed_to_new_extension, unavailable,
 };
 use domain::workload::entity::{Workload, WorkloadSource};
+use ports::secondary::ransom_baseline_port::RansomBaselinePort;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -101,6 +103,7 @@ pub struct RansomService {
     command_lines: bool,
     mode: RuleMode,
     shadow: Mutex<RansomShadow>,
+    baseline: RwLock<Option<Arc<dyn RansomBaselinePort>>>,
     sources: HostSourcesReader,
     alerts: mpsc::Sender<AlertEvent>,
 }
@@ -122,6 +125,7 @@ impl RansomService {
             command_lines: false,
             mode: RuleMode::Shadow,
             shadow: Mutex::new(RansomShadow::default()),
+            baseline: RwLock::new(None),
             sources,
             alerts,
         }
@@ -308,11 +312,13 @@ impl RansomService {
             self.count(&self.header_mismatches, &held);
         }
         if let Some(from) = change.renamed_from {
+            let learned = renamed_to_new_extension(from, change.path)
+                .and_then(|_| self.learned(&actor, SignalKind::MassRename, at_ns));
             let raised = self
                 .renames
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .record(&actor, writer.pid, from, change.path, at_ns);
+                .record_against(&actor, writer.pid, (from, change.path), at_ns, learned);
             if let Some(signal) = raised {
                 self.observe(signal, writer, lineage);
             }
@@ -412,13 +418,40 @@ impl RansomService {
     /// Count the path toward its actor on one counter, and observe the
     /// signal that counter raises.
     fn count(&self, counter: &Mutex<DistinctPaths>, held: &Held<'_>) {
-        let raised = counter
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .record(held.actor, held.writer.pid, held.path, held.at_ns);
+        let mut counter = counter.lock().unwrap_or_else(PoisonError::into_inner);
+        let learned = self.learned(held.actor, counter.kind(), held.at_ns);
+        let raised =
+            counter.record_against(held.actor, held.writer.pid, held.path, held.at_ns, learned);
+        drop(counter);
         if let Some(signal) = raised {
             self.observe(signal, held.writer, held.lineage);
         }
+    }
+
+    /// Read the counts a baseline may move against what `baseline` learned
+    /// for each executable from here on. What it answers is held inside the
+    /// band the content fixes, and the decisive signals never ask it.
+    pub fn install_baseline(&self, baseline: Arc<dyn RansomBaselinePort>) {
+        *self
+            .baseline
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(baseline);
+    }
+
+    /// Report one file counted toward `kind` for `actor` to the baseline,
+    /// and return the threshold it learned for that executable, bounded.
+    fn learned(&self, actor: &Actor, kind: SignalKind, at_ns: u64) -> Option<usize> {
+        bounded_threshold(kind, 0)?;
+        let baseline = self
+            .baseline
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()?;
+        let exe = actor.exe.as_deref()?;
+        baseline.counted(exe, kind, at_ns);
+        baseline
+            .threshold(exe, kind)
+            .and_then(|learned| bounded_threshold(kind, learned))
     }
 
     /// Hold `signal`, produced by `writer`, and raise the verdict if its
@@ -943,6 +976,102 @@ mod tests {
         };
         assert!(alert.message.contains("mass_rename (pid 100)"));
         assert!(alert.message.contains("renamed to .locked"));
+    }
+
+    /// A baseline that has learned every executable runs at `threshold`,
+    /// and counts what it is told.
+    struct Learned {
+        threshold: usize,
+        counted: Mutex<Vec<(String, SignalKind)>>,
+    }
+
+    impl RansomBaselinePort for Learned {
+        fn counted(&self, exe: &str, kind: SignalKind, _at_ns: u64) {
+            self.counted
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((exe.to_string(), kind));
+        }
+
+        fn threshold(&self, _exe: &str, _kind: SignalKind) -> Option<usize> {
+            Some(self.threshold)
+        }
+    }
+
+    #[test]
+    fn a_learned_baseline_moves_the_counts_inside_their_band_and_never_a_canary() {
+        let (service, mut rx) = service();
+        let baseline = Arc::new(Learned {
+            threshold: usize::MAX,
+            counted: Mutex::new(Vec::new()),
+        });
+        service.install_baseline(Arc::clone(&baseline) as Arc<dyn RansomBaselinePort>);
+        let run = running(100, "/usr/bin/nightly-sync", 7);
+        let lineage = Lineage {
+            ancestors: Vec::new(),
+            truncated: false,
+            incomplete: false,
+        };
+        let rename = |n: usize| {
+            let from = format!("/srv/q{n}.xlsx");
+            service.record_file_change(
+                &run,
+                &lineage,
+                [FileChangeKind::MovedIn],
+                FileRewrite {
+                    path: &format!("/srv/q{n}.xlsx.locked"),
+                    entropy_before: Some(4_000),
+                    entropy_now: Some(7_950),
+                    head: None,
+                    renamed_from: Some(&from),
+                    size_before: None,
+                    size_now: None,
+                    written_now: false,
+                },
+                1,
+            );
+        };
+        // Past every shipped threshold and under every ceiling: the run this
+        // executable normally makes is not a verdict.
+        for n in 0..=RANSOM_DISTINCT_REWRITES {
+            rename(n);
+        }
+        assert!(rx.try_recv().is_err());
+        let counted = baseline
+            .counted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        assert!(
+            counted
+                .iter()
+                .all(|(exe, _)| exe == "/usr/bin/nightly-sync")
+        );
+        for kind in [
+            SignalKind::DistinctRewrites,
+            SignalKind::EntropyRise,
+            SignalKind::MassRename,
+        ] {
+            assert!(counted.iter().any(|(_, k)| *k == kind), "{kind:?}");
+        }
+        // The ceiling holds whatever was learned: four times the shipped
+        // renames are a signal, and with the entropy rises past their own
+        // ceiling the verdict is reached and names the learned threshold.
+        for n in RANSOM_DISTINCT_REWRITES + 1..4 * RANSOM_DISTINCT_REWRITES {
+            rename(n);
+        }
+        let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() else {
+            panic!("no verdict raised past the ceiling");
+        };
+        assert!(alert.message.contains("learned for this executable"));
+        // No baseline is asked about a canary, and one open still decides.
+        let (fresh, mut rx) = self::service();
+        fresh.install_baseline(Arc::clone(&baseline) as Arc<dyn RansomBaselinePort>);
+        fresh.record_canary(&run, &lineage, Some("/srv/.canary.docx"), 1);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AlertEvent::ProcessDetection { .. })
+        ));
     }
 
     #[test]
