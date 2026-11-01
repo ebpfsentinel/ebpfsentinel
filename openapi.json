@@ -12817,9 +12817,22 @@
           "dropped",
           "pending",
           "pending_refused",
+          "counting",
+          "counting_refused",
           "rules"
         ],
         "properties": {
+          "counting": {
+            "type": "integer",
+            "description": "Groups a count is running for now.",
+            "minimum": 0
+          },
+          "counting_refused": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Events not counted because the groups or the events held were at\ntheir bound.",
+            "minimum": 0
+          },
           "dropped": {
             "type": "integer",
             "format": "int64",

@@ -28,6 +28,7 @@ use crate::alert::filter::parse_severity;
 use crate::common::entity::Severity;
 use crate::firewall::workload::{WorkloadFacts, WorkloadSelector};
 
+use super::count::{Count, CountPer, compile_count};
 use super::error::HostRuleError;
 use super::event::IntentEvent;
 use super::field::{FieldSpec, FieldType, FieldValue, RESERVED_KEYS};
@@ -90,7 +91,7 @@ pub enum RawValue {
 }
 
 impl RawValue {
-    fn kind(&self) -> &'static str {
+    pub(super) fn kind(&self) -> &'static str {
         match self {
             Self::Boolean(_) => "a boolean",
             Self::Integer(_) => "an integer",
@@ -266,6 +267,8 @@ impl Matcher {
 pub struct IntentBlock {
     pub intent: Intent,
     pub matchers: Vec<Matcher>,
+    /// How many events matching the block must arrive before it holds.
+    pub count: Option<Count>,
 }
 
 impl IntentBlock {
@@ -374,12 +377,22 @@ impl HostRule {
     /// property test asserts over every intention.
     #[must_use]
     pub fn matches(&self, event: &IntentEvent, workload: Option<&WorkloadFacts<'_>>) -> bool {
-        if !self.when.blocks().iter().any(|b| b.holds(event)) {
-            return false;
-        }
+        self.matching_block(event, workload).is_some()
+    }
+
+    /// The first block of `when` that `event` matches, once the workload
+    /// selector agrees; a count on that block is still to be met.
+    pub(super) fn matching_block(
+        &self,
+        event: &IntentEvent,
+        workload: Option<&WorkloadFacts<'_>>,
+    ) -> Option<usize> {
+        let block = self.when.blocks().iter().position(|b| b.holds(event))?;
         match &self.spec.workload {
-            Some(selector) => workload.is_some_and(|facts| selector.matches(facts)),
-            None => true,
+            Some(selector) => workload
+                .is_some_and(|facts| selector.matches(facts))
+                .then_some(block),
+            None => Some(block),
         }
     }
 
@@ -399,10 +412,10 @@ impl HostRule {
     /// read nobody asks for.
     #[must_use]
     pub fn reads(&self, intent: Intent, field: &str) -> bool {
-        self.blocks()
-            .filter(|b| b.intent == intent)
-            .flat_map(|b| b.matchers.iter())
-            .any(|m| m.fields().any(|f| f == field))
+        self.blocks().filter(|b| b.intent == intent).any(|b| {
+            b.matchers.iter().any(|m| m.fields().any(|f| f == field))
+                || b.count.as_ref().and_then(|c| c.distinct) == Some(field)
+        })
     }
 
     /// Every block of both steps, `when` first.
@@ -414,8 +427,8 @@ impl HostRule {
     }
 
     /// The alert's line: what the rule says it catches, then the event as
-    /// it was matched, every field it carried, and for a sequence the
-    /// first step it followed.
+    /// it was matched, every field it carried, for a sequence the first
+    /// step it followed, and for a count what was counted.
     #[must_use]
     pub fn message(&self, event: &IntentEvent) -> String {
         let fields: Vec<String> = event
@@ -439,8 +452,20 @@ impl HostRule {
                 .collect();
             format!(" after {} within {}", first.join(" or "), f.within)
         });
+        let counted = if self.followed_by.is_none()
+            && let Some(count) = self
+                .when
+                .blocks()
+                .iter()
+                .find(|b| b.holds(event))
+                .and_then(|b| b.count.as_ref())
+        {
+            format!(", {count}")
+        } else {
+            String::new()
+        };
         format!(
-            "host rule {}: {} ({}{}){after}",
+            "host rule {}: {} ({}{}){after}{counted}",
             self.spec.id,
             self.spec
                 .description
@@ -547,6 +572,16 @@ fn check_then(then: &[HostRuleAction], when: &Condition) -> Result<(), String> {
                     block.intent
                 ));
             }
+            if let Some(count) = &block.count
+                && count.per != CountPer::Process
+            {
+                return Err(format!(
+                    "`kill_process` stops the process behind the event, and a count per {} is \
+                     reached by many processes at once: count `per: process`, or keep `alert` \
+                     alone",
+                    count.per.as_str()
+                ));
+            }
         }
     }
     Ok(())
@@ -590,10 +625,17 @@ fn compile_followed_by(
                 .to_string(),
         );
     };
-    let (within_ns, within) = parse_window(raw)?;
+    let (within_ns, within) = parse_window(raw, "and every first step is held for it")?;
     let mut rest = map.clone();
     rest.remove("within");
     let then = compile_condition(&rest, "`followed_by`")?;
+    if then.blocks().iter().any(|b| b.count.is_some()) {
+        return Err(
+            "a sequence closes on one event, so its second step carries no `count`: count the \
+             first step in `when`, or write the count as a rule of its own"
+                .to_string(),
+        );
+    }
     for block in when.blocks().iter().chain(then.blocks()) {
         if !names_a_process(block.intent) {
             return Err(format!(
@@ -611,8 +653,9 @@ fn compile_followed_by(
 }
 
 /// `within` as nanoseconds and as written: a whole number followed by
-/// `ms`, `s`, `m` or `h`, above zero and at most an hour.
-fn parse_window(raw: &RawValue) -> Result<(u64, String), String> {
+/// `ms`, `s`, `m` or `h`, above zero and at most an hour. `held` says what
+/// the window holds, for the refusal of one too long.
+pub(super) fn parse_window(raw: &RawValue, held: &str) -> Result<(u64, String), String> {
     let RawValue::Text(text) = raw else {
         return Err(format!(
             "`within` is a duration such as `30s`, `500ms`, `5m` or `1h`, and {} was given",
@@ -642,10 +685,7 @@ fn parse_window(raw: &RawValue) -> Result<(u64, String), String> {
         .filter(|ns| *ns > 0)
         .ok_or_else(|| format!("`within: {text}` is not a duration above zero"))?;
     if ns > HOST_RULE_WINDOW_MAX_NS {
-        return Err(format!(
-            "`within: {text}` is longer than an hour, and every first step is held for the whole \
-             window"
-        ));
+        return Err(format!("`within: {text}` is longer than an hour, {held}"));
     }
     Ok((ns, text.clone()))
 }
@@ -726,7 +766,16 @@ fn compile_alternative(
             block.kind()
         ));
     };
-    compile_block(intent, matchers).map(|matchers| IntentBlock { intent, matchers })
+    let mut matchers = matchers.clone();
+    let count = matchers
+        .remove("count")
+        .map(|raw| compile_count(intent, &raw))
+        .transpose()?;
+    compile_block(intent, &matchers).map(|matchers| IntentBlock {
+        intent,
+        matchers,
+        count,
+    })
 }
 
 /// The refusal for a reserved key written where an intent was expected.
@@ -761,10 +810,6 @@ fn misplaced_in_block(intent: Intent, key: &str) -> Option<String> {
         )),
         "workload" => Some(format!(
             "`workload` sits beside `when`, at the top of the rule, never inside `{intent}`"
-        )),
-        "count" => Some(format!(
-            "`count` is reserved inside `{intent}`, and this build evaluates each event alone: \
-             it holds no count of events over a window"
         )),
         "followed_by" => Some(format!(
             "`followed_by` sits beside `when`, at the top of the rule, never inside `{intent}`"
@@ -1332,7 +1377,7 @@ mod tests {
         let event = start("/bin/sh", 0)
             .with("exe_on_disk", FieldValue::Boolean(false))
             .unwrap();
-        let mut pending = crate::hostrule::sequence::PendingSequences::default();
+        let mut pending = crate::hostrule::sequence::HostRuleState::default();
         let ids: Vec<&str> = set
             .evaluate(
                 &mut pending,

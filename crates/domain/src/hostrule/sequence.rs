@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use crate::firewall::workload::WorkloadFacts;
 use crate::process::entity::ProcessKey;
 
+use super::count::WindowCounts;
 use super::event::IntentEvent;
 use super::rule::{HostRule, HostRuleSet};
 
@@ -30,6 +31,14 @@ pub struct Subject<'a> {
 struct Waiting {
     since_ns: u64,
     until_ns: u64,
+}
+
+/// What host rules remember between events: the first steps of sequences
+/// waiting for their second, and the counts still in their window.
+#[derive(Debug, Clone, Default)]
+pub struct HostRuleState {
+    pub sequences: PendingSequences,
+    pub counts: WindowCounts,
 }
 
 /// First steps waiting for their second, keyed by rule and process.
@@ -113,10 +122,11 @@ impl HostRuleSet {
     /// sequence whose first step waits for this process or one above it
     /// and whose second step it matches. A first step it matches is held
     /// after the second steps are tried, so one event never both opens
-    /// and closes the same sequence.
+    /// and closes the same sequence. A block of `when` carrying a count
+    /// holds only on the event that reaches it.
     pub fn evaluate<'a>(
         &'a self,
-        pending: &mut PendingSequences,
+        state: &mut HostRuleState,
         event: &IntentEvent,
         workload: Option<&WorkloadFacts<'_>>,
         subject: &Subject<'_>,
@@ -124,21 +134,31 @@ impl HostRuleSet {
     ) -> Vec<&'a HostRule> {
         let mut fired = Vec::new();
         for (index, rule) in self.rules().iter().enumerate() {
+            let first = rule.matching_block(event, workload).is_some_and(|block| {
+                rule.when.blocks()[block]
+                    .count
+                    .as_ref()
+                    .is_none_or(|count| {
+                        state
+                            .counts
+                            .record((index, block), count, event, workload, subject, at_ns)
+                    })
+            });
             let Some(followed_by) = &rule.followed_by else {
-                if rule.matches(event, workload) {
+                if first {
                     fired.push(rule);
                 }
                 continue;
             };
             if followed_by.then.blocks().iter().any(|b| b.holds(event))
-                && pending.close(index, subject, at_ns)
+                && state.sequences.close(index, subject, at_ns)
             {
                 fired.push(rule);
             }
-            if let Some(process) = subject.process
-                && rule.matches(event, workload)
-            {
-                pending.hold((index, process), at_ns, followed_by.within_ns);
+            if first && let Some(process) = subject.process {
+                state
+                    .sequences
+                    .hold((index, process), at_ns, followed_by.within_ns);
             }
         }
         fired
@@ -177,7 +197,7 @@ mod tests {
 
     fn fired(
         rules: &HostRuleSet,
-        pending: &mut PendingSequences,
+        pending: &mut HostRuleState,
         event: &IntentEvent,
         subject: &Subject<'_>,
         at: u64,
@@ -192,13 +212,13 @@ mod tests {
     #[test]
     fn the_second_step_below_the_first_closes_the_sequence_once() {
         let rules = shell_then_curl();
-        let mut pending = PendingSequences::default();
+        let mut pending = HostRuleState::default();
         let shell = Subject {
             process: Some(key(10)),
             ancestors: &[],
         };
         assert!(fired(&rules, &mut pending, &start("/bin/sh"), &shell, SECOND).is_empty());
-        assert_eq!(pending.len(), 1);
+        assert_eq!(pending.sequences.len(), 1);
         let parents = [key(10)];
         let curl = Subject {
             process: Some(key(11)),
@@ -214,7 +234,7 @@ mod tests {
             ),
             vec!["shell-then-curl"]
         );
-        assert!(pending.is_empty());
+        assert!(pending.sequences.is_empty());
         assert!(
             fired(
                 &rules,
@@ -230,7 +250,7 @@ mod tests {
     #[test]
     fn the_window_expires() {
         let rules = shell_then_curl();
-        let mut pending = PendingSequences::default();
+        let mut pending = HostRuleState::default();
         let process = Subject {
             process: Some(key(10)),
             ancestors: &[],
@@ -247,7 +267,7 @@ mod tests {
             .is_empty()
         );
         assert!(
-            pending.is_empty(),
+            pending.sequences.is_empty(),
             "an expired first step is dropped once read"
         );
         fired(
@@ -273,7 +293,7 @@ mod tests {
     #[test]
     fn another_process_does_not_close_it() {
         let rules = shell_then_curl();
-        let mut pending = PendingSequences::default();
+        let mut pending = HostRuleState::default();
         let shell = Subject {
             process: Some(key(10)),
             ancestors: &[],
@@ -310,13 +330,16 @@ mod tests {
             )
             .is_empty()
         );
-        assert_eq!(pending.len(), 1);
+        assert_eq!(pending.sequences.len(), 1);
     }
 
     #[test]
     fn the_bound_is_hit_counted_and_expired_entries_make_room() {
         let rules = shell_then_curl();
-        let mut pending = PendingSequences::new(2);
+        let mut pending = HostRuleState {
+            sequences: PendingSequences::new(2),
+            ..HostRuleState::default()
+        };
         for pid in 1..=3 {
             let subject = Subject {
                 process: Some(key(pid)),
@@ -324,19 +347,25 @@ mod tests {
             };
             fired(&rules, &mut pending, &start("/bin/sh"), &subject, SECOND);
         }
-        assert_eq!((pending.len(), pending.refused()), (2, 1));
+        assert_eq!(
+            (pending.sequences.len(), pending.sequences.refused()),
+            (2, 1)
+        );
         let late = Subject {
             process: Some(key(4)),
             ancestors: &[],
         };
         fired(&rules, &mut pending, &start("/bin/sh"), &late, 20 * SECOND);
-        assert_eq!((pending.len(), pending.refused()), (1, 1));
+        assert_eq!(
+            (pending.sequences.len(), pending.sequences.refused()),
+            (1, 1)
+        );
     }
 
     #[test]
     fn a_first_step_that_never_fires_holds_nothing() {
         let rules = shell_then_curl();
-        let mut pending = PendingSequences::default();
+        let mut pending = HostRuleState::default();
         for pid in 1..100 {
             let subject = Subject {
                 process: Some(key(pid)),
@@ -351,8 +380,8 @@ mod tests {
             );
             fired(&rules, &mut pending, &start("/bin/ls"), &subject, SECOND);
         }
-        assert!(pending.is_empty());
-        assert_eq!(pending.refused(), 0);
+        assert!(pending.sequences.is_empty());
+        assert_eq!(pending.sequences.refused(), 0);
     }
 
     #[test]
@@ -360,7 +389,7 @@ mod tests {
         let rules = set(r#"[{"id":"twice",
                  "when":{"process.starts":{"exe":"/bin/sh"}},
                  "followed_by":{"within":"10s","process.starts":{"exe":"/bin/sh"}}}]"#);
-        let mut pending = PendingSequences::default();
+        let mut pending = HostRuleState::default();
         let shell = Subject {
             process: Some(key(10)),
             ancestors: &[],
@@ -375,7 +404,11 @@ mod tests {
             fired(&rules, &mut pending, &start("/bin/sh"), &child, 2 * SECOND),
             vec!["twice"]
         );
-        assert_eq!(pending.len(), 1, "the child's own start opens its own");
+        assert_eq!(
+            pending.sequences.len(),
+            1,
+            "the child's own start opens its own"
+        );
     }
 
     #[test]
@@ -386,7 +419,7 @@ mod tests {
         .unwrap();
         specs.extend(shell_then_curl().rules().iter().map(|r| r.spec.clone()));
         let rules = HostRuleSet::compile(specs).unwrap();
-        let mut pending = PendingSequences::default();
+        let mut pending = HostRuleState::default();
         let shell = Subject {
             process: Some(key(10)),
             ancestors: &[],
@@ -400,6 +433,10 @@ mod tests {
             fired(&rules, &mut pending, &start("/bin/sh"), &unkeyed, SECOND),
             vec!["any-shell"],
         );
-        assert_eq!(pending.len(), 1, "an event with no process opens nothing");
+        assert_eq!(
+            pending.sequences.len(),
+            1,
+            "an event with no process opens nothing"
+        );
     }
 }

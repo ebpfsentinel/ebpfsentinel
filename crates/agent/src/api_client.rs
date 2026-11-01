@@ -2106,6 +2106,8 @@ pub struct HostRulesResponse {
     pub dropped: u64,
     pub pending: usize,
     pub pending_refused: u64,
+    pub counting: usize,
+    pub counting_refused: u64,
     pub rules: Vec<HostRuleEntry>,
 }
 

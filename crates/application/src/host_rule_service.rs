@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use domain::alert::entity::Alert;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use domain::hostrule::{FieldValue, HostRuleSet, Intent, IntentEvent, PendingSequences, Subject};
+use domain::hostrule::{FieldValue, HostRuleSet, HostRuleState, Intent, IntentEvent, Subject};
 use domain::process::engine::Lineage;
 use domain::process::entity::{ProcessEntry, ProcessKey};
 use domain::workload::entity::{Workload, WorkloadSource};
@@ -38,12 +38,26 @@ pub fn not_fed_reason(intent: Intent) -> String {
     format!("no source in this build delivers `{intent}` events to host rules")
 }
 
+/// What the rules remember between events, and what a bound turned away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HostRuleMemory {
+    /// First steps of sequences waiting for their second.
+    pub pending: usize,
+    /// First steps not held because the set of waiting ones was full.
+    pub pending_refused: u64,
+    /// Groups a count is running for.
+    pub counting: usize,
+    /// Events not counted because the groups or the events held were at
+    /// their bound.
+    pub counting_refused: u64,
+}
+
 /// The host rules and where their alerts go.
 pub struct HostRuleService {
     rules: HostRuleSet,
     alerts: mpsc::Sender<AlertEvent>,
     facts: Option<Arc<dyn ProcessFactsReader>>,
-    pending: Mutex<PendingSequences>,
+    state: Mutex<HostRuleState>,
     matched: AtomicU64,
     dropped: AtomicU64,
 }
@@ -55,7 +69,7 @@ impl HostRuleService {
             rules,
             alerts,
             facts: None,
-            pending: Mutex::new(PendingSequences::default()),
+            state: Mutex::new(HostRuleState::default()),
             matched: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
         }
@@ -85,12 +99,16 @@ impl HostRuleService {
         )
     }
 
-    /// First steps of sequences waiting now, and first steps not held
-    /// because the bounded set was full.
+    /// What the rules remember between events.
     #[must_use]
-    pub fn pending(&self) -> (usize, u64) {
-        let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        (pending.len(), pending.refused())
+    pub fn memory(&self) -> HostRuleMemory {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        HostRuleMemory {
+            pending: state.sequences.len(),
+            pending_refused: state.sequences.refused(),
+            counting: state.counts.len(),
+            counting_refused: state.counts.refused(),
+        }
     }
 
     /// Whether any rule names `intent`, so the table can skip the lineage
@@ -150,13 +168,15 @@ impl HostRuleService {
             process: Some(entry.key()),
             ancestors: &ancestors,
         };
-        // Every entry of the set is a whole waiting step, written in one
-        // insert, so a panic elsewhere leaves nothing half-written to
-        // recover from.
+        // A waiting step is written in one insert, and a count's window
+        // and the tally of events it holds can disagree at worst by the
+        // one event being recorded, which only moves when a bound is hit:
+        // nothing a panic elsewhere could leave is worth refusing to
+        // evaluate the next event for.
         let fired = {
-            let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             self.rules
-                .evaluate(&mut pending, event, Some(&facts), &subject, at_ns)
+                .evaluate(&mut state, event, Some(&facts), &subject, at_ns)
         };
         for rule in fired {
             self.matched.fetch_add(1, Ordering::Relaxed);
@@ -257,6 +277,37 @@ mod tests {
     }
 
     #[test]
+    fn a_count_fires_on_the_event_that_reaches_it() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let service = HostRuleService::new(
+            rules(
+                r#"[{"id":"fork-burst","when":{"process.starts":{
+                     "count":{"min":3,"within":"10s","per":"host"}}}}]"#,
+            ),
+            tx,
+        );
+        for pid in 1..=2 {
+            service.record_exec(
+                &entry(pid, "/bin/true", 0),
+                &Lineage::default(),
+                u64::from(pid),
+            );
+            assert!(rx.try_recv().is_err());
+        }
+        assert_eq!(service.memory().counting, 1);
+        service.record_exec(&entry(3, "/bin/true", 0), &Lineage::default(), 3);
+        let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() else {
+            panic!("expected one alert");
+        };
+        assert!(
+            alert.message.ends_with(", 3 events within 10s per host"),
+            "{}",
+            alert.message
+        );
+        assert_eq!(service.memory(), HostRuleMemory::default());
+    }
+
+    #[test]
     fn a_sequence_closes_on_a_child_and_reports_what_waits() {
         let (tx, mut rx) = mpsc::channel(4);
         let service = HostRuleService::new(
@@ -269,7 +320,7 @@ mod tests {
         let shell = entry(10, "/bin/sh", 0);
         service.record_exec(&shell, &Lineage::default(), 1_000);
         assert!(rx.try_recv().is_err());
-        assert_eq!(service.pending(), (1, 0));
+        assert_eq!(service.memory().pending, 1);
         let curl = entry(11, "/usr/bin/curl", 0);
         let lineage = Lineage {
             ancestors: vec![shell],
@@ -285,7 +336,7 @@ mod tests {
             "{}",
             alert.message
         );
-        assert_eq!(service.pending(), (0, 0));
+        assert_eq!(service.memory(), HostRuleMemory::default());
     }
 
     #[test]

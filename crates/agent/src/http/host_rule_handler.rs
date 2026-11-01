@@ -258,6 +258,11 @@ pub struct HostRulesResponse {
     /// First steps not held because the bounded set of waiting ones was
     /// full.
     pub pending_refused: u64,
+    /// Groups a count is running for now.
+    pub counting: usize,
+    /// Events not counted because the groups or the events held were at
+    /// their bound.
+    pub counting_refused: u64,
     pub rules: Vec<HostRuleBody>,
 }
 
@@ -288,16 +293,20 @@ fn rules_body(service: Option<&HostRuleService>, host: &HostSources) -> HostRule
             dropped: 0,
             pending: 0,
             pending_refused: 0,
+            counting: 0,
+            counting_refused: 0,
             rules: Vec::new(),
         };
     };
     let (matched, dropped) = service.counts();
-    let (pending, pending_refused) = service.pending();
+    let memory = service.memory();
     HostRulesResponse {
         matched,
         dropped,
-        pending,
-        pending_refused,
+        pending: memory.pending,
+        pending_refused: memory.pending_refused,
+        counting: memory.counting,
+        counting_refused: memory.counting_refused,
         rules: service
             .rules()
             .rules()
@@ -448,6 +457,7 @@ mod tests {
         assert!(body.rules[2].intents[0].reason.is_some());
         assert_eq!((body.matched, body.dropped), (0, 0));
         assert_eq!((body.pending, body.pending_refused), (0, 0));
+        assert_eq!((body.counting, body.counting_refused), (0, 0));
     }
 
     #[test]

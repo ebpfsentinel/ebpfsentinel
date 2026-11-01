@@ -6388,6 +6388,12 @@ pub async fn cmd_host_rules_list(client: &ApiClient, output: OutputFormat) -> Re
             resp.pending, resp.pending_refused
         );
     }
+    if resp.counting > 0 || resp.counting_refused > 0 {
+        println!(
+            "{} counts running, {} events not counted because a bound was hit.",
+            resp.counting, resp.counting_refused
+        );
+    }
     for rule in &resp.rules {
         for intent in &rule.intents {
             if let Some(reason) = &intent.reason {

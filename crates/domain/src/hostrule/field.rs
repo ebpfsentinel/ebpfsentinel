@@ -80,7 +80,7 @@ impl FieldType {
 }
 
 /// One value of one field of an event.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum FieldValue {
     /// True or false.
