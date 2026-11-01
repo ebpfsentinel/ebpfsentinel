@@ -2104,6 +2104,8 @@ pub struct HostRuleEntry {
 pub struct HostRulesResponse {
     pub matched: u64,
     pub dropped: u64,
+    pub pending: usize,
+    pub pending_refused: u64,
     pub rules: Vec<HostRuleEntry>,
 }
 

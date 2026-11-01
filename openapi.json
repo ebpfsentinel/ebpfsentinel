@@ -12815,6 +12815,8 @@
         "required": [
           "matched",
           "dropped",
+          "pending",
+          "pending_refused",
           "rules"
         ],
         "properties": {
@@ -12828,6 +12830,17 @@
             "type": "integer",
             "format": "int64",
             "description": "Events that matched a rule.",
+            "minimum": 0
+          },
+          "pending": {
+            "type": "integer",
+            "description": "First steps of sequences waiting for their second now.",
+            "minimum": 0
+          },
+          "pending_refused": {
+            "type": "integer",
+            "format": "int64",
+            "description": "First steps not held because the bounded set of waiting ones was\nfull.",
             "minimum": 0
           },
           "rules": {

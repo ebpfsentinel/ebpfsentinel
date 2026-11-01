@@ -6382,6 +6382,12 @@ pub async fn cmd_host_rules_list(client: &ApiClient, output: OutputFormat) -> Re
         resp.matched,
         resp.dropped
     );
+    if resp.pending > 0 || resp.pending_refused > 0 {
+        println!(
+            "{} first steps waiting for their second, {} not held because the set was full.",
+            resp.pending, resp.pending_refused
+        );
+    }
     for rule in &resp.rules {
         for intent in &rule.intents {
             if let Some(reason) = &intent.reason {

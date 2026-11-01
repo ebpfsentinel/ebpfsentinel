@@ -3,22 +3,24 @@
 //! The process table is the one place in the agent that hears of every exec
 //! and every exit with the binary, the user and the parent already
 //! resolved, so the events of `process.starts` and `process.ends` are built
-//! there and handed here. Each event is evaluated alone against every rule
-//! naming its intention; a match becomes an alert carrying the process and
-//! its ancestry, and a rule asking for it stops the process through the
-//! same kill the process detections use.
+//! there and handed here. Each event is evaluated against every rule
+//! naming its intention, and against the first steps of sequences waiting
+//! for its process or one above it; a match becomes an alert carrying the
+//! process and its ancestry, and a rule asking for it stops the process
+//! through the same kill the process detections use.
 //!
 //! Only the intentions in [`FED_INTENTS`] reach this service in this build.
 //! A rule naming another one loads, and the API says it is not applicable
 //! here rather than letting it sit silent.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use domain::alert::entity::Alert;
-use domain::hostrule::{FieldValue, HostRuleSet, Intent, IntentEvent};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use domain::hostrule::{FieldValue, HostRuleSet, Intent, IntentEvent, PendingSequences, Subject};
 use domain::process::engine::Lineage;
-use domain::process::entity::ProcessEntry;
+use domain::process::entity::{ProcessEntry, ProcessKey};
 use domain::workload::entity::{Workload, WorkloadSource};
 use ports::secondary::process_facts_port::ProcessFactsReader;
 use tokio::sync::mpsc;
@@ -41,6 +43,7 @@ pub struct HostRuleService {
     rules: HostRuleSet,
     alerts: mpsc::Sender<AlertEvent>,
     facts: Option<Arc<dyn ProcessFactsReader>>,
+    pending: Mutex<PendingSequences>,
     matched: AtomicU64,
     dropped: AtomicU64,
 }
@@ -52,6 +55,7 @@ impl HostRuleService {
             rules,
             alerts,
             facts: None,
+            pending: Mutex::new(PendingSequences::default()),
             matched: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
         }
@@ -79,6 +83,14 @@ impl HostRuleService {
             self.matched.load(Ordering::Relaxed),
             self.dropped.load(Ordering::Relaxed),
         )
+    }
+
+    /// First steps of sequences waiting now, and first steps not held
+    /// because the bounded set was full.
+    #[must_use]
+    pub fn pending(&self) -> (usize, u64) {
+        let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        (pending.len(), pending.refused())
     }
 
     /// Whether any rule names `intent`, so the table can skip the lineage
@@ -133,7 +145,20 @@ impl HostRuleService {
     fn evaluate(&self, event: &IntentEvent, entry: &ProcessEntry, lineage: &Lineage, at_ns: u64) {
         let resolved = workload_of(entry).with_ancestry(lineage);
         let facts = resolved.facts();
-        for rule in self.rules.matching(event, Some(&facts)) {
+        let ancestors: Vec<ProcessKey> = lineage.ancestors.iter().map(ProcessEntry::key).collect();
+        let subject = Subject {
+            process: Some(entry.key()),
+            ancestors: &ancestors,
+        };
+        // Every entry of the set is a whole waiting step, written in one
+        // insert, so a panic elsewhere leaves nothing half-written to
+        // recover from.
+        let fired = {
+            let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            self.rules
+                .evaluate(&mut pending, event, Some(&facts), &subject, at_ns)
+        };
+        for rule in fired {
             self.matched.fetch_add(1, Ordering::Relaxed);
             let workload = Workload::new(entry.pid, WorkloadSource::Process)
                 .map(|w| w.with_process(entry).with_lineage(lineage));
@@ -229,6 +254,38 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn a_sequence_closes_on_a_child_and_reports_what_waits() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let service = HostRuleService::new(
+            rules(
+                r#"[{"id":"shell-then-curl","when":{"process.starts":{"exe":"/bin/sh"}},
+                     "followed_by":{"within":"10s","process.starts":{"exe":"/usr/bin/curl"}}}]"#,
+            ),
+            tx,
+        );
+        let shell = entry(10, "/bin/sh", 0);
+        service.record_exec(&shell, &Lineage::default(), 1_000);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(service.pending(), (1, 0));
+        let curl = entry(11, "/usr/bin/curl", 0);
+        let lineage = Lineage {
+            ancestors: vec![shell],
+            ..Lineage::default()
+        };
+        service.record_exec(&curl, &lineage, 2_000);
+        let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() else {
+            panic!("expected one alert");
+        };
+        assert_eq!(alert.rule_id.0, "shell-then-curl");
+        assert!(
+            alert.message.contains("after process.starts within 10s"),
+            "{}",
+            alert.message
+        );
+        assert_eq!(service.pending(), (0, 0));
     }
 
     #[test]

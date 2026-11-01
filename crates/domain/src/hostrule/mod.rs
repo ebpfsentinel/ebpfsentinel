@@ -19,6 +19,7 @@ pub mod event;
 pub mod field;
 pub mod intent;
 pub mod rule;
+pub mod sequence;
 
 pub use binding::{Applicability, Binding, HostSources, Source, resolve};
 pub use error::HostRuleError;
@@ -26,6 +27,7 @@ pub use event::IntentEvent;
 pub use field::{FieldSpec, FieldType, FieldValue, RESERVED_KEYS};
 pub use intent::{Intent, IntentFamily};
 pub use rule::{
-    Condition, Glob, HOST_RULE_COMPONENT, HostRule, HostRuleAction, HostRuleSet, HostRuleSpec,
-    IntentBlock, Matcher, RawValue, Test,
+    Condition, FollowedBy, Glob, HOST_RULE_COMPONENT, HOST_RULE_WINDOW_MAX_NS, HostRule,
+    HostRuleAction, HostRuleSet, HostRuleSpec, IntentBlock, Matcher, RawValue, Test,
 };
+pub use sequence::{HOST_RULE_PENDING_MAX, PendingSequences, Subject};

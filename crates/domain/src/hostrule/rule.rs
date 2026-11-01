@@ -151,6 +151,10 @@ pub struct HostRuleSpec {
     pub workload: Option<WorkloadSelector>,
     /// The intention and its matchers.
     pub when: BTreeMap<String, RawValue>,
+    /// A second step, the window it must arrive in as `within`, and nothing
+    /// else: about the process `when` matched, or one started below it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub followed_by: Option<BTreeMap<String, RawValue>>,
     /// What to do when it matches.
     #[serde(default = "default_then")]
     pub then: Vec<HostRuleAction>,
@@ -265,7 +269,7 @@ pub struct IntentBlock {
 }
 
 impl IntentBlock {
-    fn holds(&self, event: &IntentEvent) -> bool {
+    pub(super) fn holds(&self, event: &IntentEvent) -> bool {
         self.intent == event.intent() && self.matchers.iter().all(|m| m.holds(event))
     }
 }
@@ -294,6 +298,18 @@ pub struct HostRule {
     pub spec: HostRuleSpec,
     pub severity: Severity,
     pub when: Condition,
+    /// The second step, where the rule is a sequence.
+    pub followed_by: Option<FollowedBy>,
+}
+
+/// The second step of a sequence and the window it must arrive in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FollowedBy {
+    pub then: Condition,
+    /// Nanoseconds after the first step, inclusive.
+    pub within_ns: u64,
+    /// The window as it was written, for the alert's line.
+    pub within: String,
 }
 
 impl HostRule {
@@ -328,11 +344,19 @@ impl HostRule {
                 .map_err(|e| refuse(format!("workload: {e}")))?;
         }
         let when = compile_when(&spec.when).map_err(refuse)?;
-        check_then(&spec.then, &when).map_err(refuse)?;
+        let followed_by = spec
+            .followed_by
+            .as_ref()
+            .map(|map| compile_followed_by(map, &when))
+            .transpose()
+            .map_err(refuse)?;
+        let acted_on = followed_by.as_ref().map_or(&when, |f| &f.then);
+        check_then(&spec.then, acted_on).map_err(refuse)?;
         Ok(Self {
             spec,
             severity,
             when,
+            followed_by,
         })
     }
 
@@ -342,7 +366,9 @@ impl HostRule {
         &self.spec.id
     }
 
-    /// Whether `event`, from a task whose workload is `workload`, matches.
+    /// Whether `event`, from a task whose workload is `workload`, matches
+    /// `when` and the workload selector: the whole rule for a single event,
+    /// the first step of a sequence.
     ///
     /// Total: no event and no workload makes it panic or fail, which a
     /// property test asserts over every intention.
@@ -361,7 +387,7 @@ impl HostRule {
     #[must_use]
     pub fn intents(&self) -> Vec<Intent> {
         let mut intents = Vec::new();
-        for block in self.when.blocks() {
+        for block in self.blocks() {
             if !intents.contains(&block.intent) {
                 intents.push(block.intent);
             }
@@ -373,16 +399,23 @@ impl HostRule {
     /// read nobody asks for.
     #[must_use]
     pub fn reads(&self, intent: Intent, field: &str) -> bool {
-        self.when
-            .blocks()
-            .iter()
+        self.blocks()
             .filter(|b| b.intent == intent)
             .flat_map(|b| b.matchers.iter())
             .any(|m| m.fields().any(|f| f == field))
     }
 
+    /// Every block of both steps, `when` first.
+    fn blocks(&self) -> impl Iterator<Item = &IntentBlock> {
+        self.when
+            .blocks()
+            .iter()
+            .chain(self.followed_by.iter().flat_map(|f| f.then.blocks()))
+    }
+
     /// The alert's line: what the rule says it catches, then the event as
-    /// it was matched, every field it carried.
+    /// it was matched, every field it carried, and for a sequence the
+    /// first step it followed.
     #[must_use]
     pub fn message(&self, event: &IntentEvent) -> String {
         let fields: Vec<String> = event
@@ -397,8 +430,17 @@ impl HostRule {
                 format!(" {name}={rendered}")
             })
             .collect();
+        let after = self.followed_by.as_ref().map_or(String::new(), |f| {
+            let first: Vec<&str> = self
+                .when
+                .blocks()
+                .iter()
+                .map(|b| b.intent.as_str())
+                .collect();
+            format!(" after {} within {}", first.join(" or "), f.within)
+        });
         format!(
-            "host rule {}: {} ({}{})",
+            "host rule {}: {} ({}{}){after}",
             self.spec.id,
             self.spec
                 .description
@@ -463,17 +505,6 @@ impl HostRuleSet {
     pub fn reads(&self, intent: Intent, field: &str) -> bool {
         self.rules.iter().any(|r| r.reads(intent, field))
     }
-
-    /// The rules `event` matches, in the order written.
-    pub fn matching<'a>(
-        &'a self,
-        event: &'a IntentEvent,
-        workload: Option<&'a WorkloadFacts<'a>>,
-    ) -> impl Iterator<Item = &'a HostRule> + 'a {
-        self.rules
-            .iter()
-            .filter(move |r| r.matches(event, workload))
-    }
 }
 
 fn check_id(id: &str) -> Result<(), String> {
@@ -527,18 +558,112 @@ fn names_a_process(intent: Intent) -> bool {
 }
 
 fn compile_when(when: &BTreeMap<String, RawValue>) -> Result<Condition, String> {
-    if when.is_empty() {
-        return Err("`when` names no intent: name one, such as `process.starts`".to_string());
-    }
-    let Some(any) = when.get(ANY_OF) else {
-        return compile_alternative(when, "`when`").map(Condition::All);
-    };
-    if when.len() > 1 {
+    compile_condition(when, "`when`")
+}
+
+/// The longest window a sequence may wait: every first step is held for
+/// that long, so the window is a memory bound as much as a semantic one.
+pub const HOST_RULE_WINDOW_MAX_NS: u64 = 3_600 * 1_000_000_000;
+
+fn compile_followed_by(
+    map: &BTreeMap<String, RawValue>,
+    when: &Condition,
+) -> Result<FollowedBy, String> {
+    if map.contains_key("followed_by") {
         return Err(
-            "`any_of` stands alone in `when`: write each other intent as one more entry of its \
-             list"
+            "a sequence is two steps and `followed_by` does not nest: what came before the \
+             first step is in the ancestry the alert carries, and a third step is a second rule"
                 .to_string(),
         );
+    }
+    if map.contains_key("workload") {
+        return Err(
+            "`workload` sits at the top of the rule and scopes the first step; the second is \
+             about the same process or one started below it"
+                .to_string(),
+        );
+    }
+    let Some(raw) = map.get("within") else {
+        return Err(
+            "`followed_by` needs `within`, the window the second step must arrive in, such as \
+             `within: 30s`: a sequence with no window is a first event held for ever"
+                .to_string(),
+        );
+    };
+    let (within_ns, within) = parse_window(raw)?;
+    let mut rest = map.clone();
+    rest.remove("within");
+    let then = compile_condition(&rest, "`followed_by`")?;
+    for block in when.blocks().iter().chain(then.blocks()) {
+        if !names_a_process(block.intent) {
+            return Err(format!(
+                "a sequence follows one process and the processes it starts, and an event of \
+                 `{}` names no process",
+                block.intent
+            ));
+        }
+    }
+    Ok(FollowedBy {
+        then,
+        within_ns,
+        within,
+    })
+}
+
+/// `within` as nanoseconds and as written: a whole number followed by
+/// `ms`, `s`, `m` or `h`, above zero and at most an hour.
+fn parse_window(raw: &RawValue) -> Result<(u64, String), String> {
+    let RawValue::Text(text) = raw else {
+        return Err(format!(
+            "`within` is a duration such as `30s`, `500ms`, `5m` or `1h`, and {} was given",
+            raw.kind()
+        ));
+    };
+    let split = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    let (digits, unit) = text.split_at(split);
+    let scale: u64 = match unit {
+        "ms" => 1_000_000,
+        "s" => 1_000_000_000,
+        "m" => 60_000_000_000,
+        "h" => 3_600_000_000_000,
+        _ => {
+            return Err(format!(
+                "`within: {text}` is not a duration: write a whole number followed by `ms`, \
+                 `s`, `m` or `h`"
+            ));
+        }
+    };
+    let ns = digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(scale))
+        .filter(|ns| *ns > 0)
+        .ok_or_else(|| format!("`within: {text}` is not a duration above zero"))?;
+    if ns > HOST_RULE_WINDOW_MAX_NS {
+        return Err(format!(
+            "`within: {text}` is longer than an hour, and every first step is held for the whole \
+             window"
+        ));
+    }
+    Ok((ns, text.clone()))
+}
+
+fn compile_condition(when: &BTreeMap<String, RawValue>, place: &str) -> Result<Condition, String> {
+    if when.is_empty() {
+        return Err(format!(
+            "{place} names no intent: name one, such as `process.starts`"
+        ));
+    }
+    let Some(any) = when.get(ANY_OF) else {
+        return compile_alternative(when, place).map(Condition::All);
+    };
+    if when.len() > 1 {
+        return Err(format!(
+            "`any_of` stands alone in {place}: write each other intent as one more entry of its \
+             list"
+        ));
     }
     let RawValue::List(entries) = any else {
         return Err(format!(
@@ -614,9 +739,15 @@ fn misplaced_at_when(key: &str) -> Option<String> {
         ),
         "workload" => Some("`workload` sits beside `when`, at the top of the rule".to_string()),
         "count" => Some("`count` is a key of an intent block, never of `when`".to_string()),
-        "followed_by" | "within" => Some(format!(
-            "`{key}` describes a sequence of two events, and a sequence is not a key of `when`"
-        )),
+        "followed_by" => Some(
+            "`followed_by` sits beside `when`, at the top of the rule, and holds the second step"
+                .to_string(),
+        ),
+        "within" => Some(
+            "`within` is the window of a sequence and sits in `followed_by`, beside the intent \
+             it waits for"
+                .to_string(),
+        ),
         _ => None,
     }
 }
@@ -635,8 +766,12 @@ fn misplaced_in_block(intent: Intent, key: &str) -> Option<String> {
             "`count` is reserved inside `{intent}`, and this build evaluates each event alone: \
              it holds no count of events over a window"
         )),
-        "followed_by" | "within" => Some(format!(
-            "`{key}` describes a sequence of two events and is never a key inside `{intent}`"
+        "followed_by" => Some(format!(
+            "`followed_by` sits beside `when`, at the top of the rule, never inside `{intent}`"
+        )),
+        "within" => Some(format!(
+            "`within` sits in `followed_by`, beside the intent it waits for, never inside \
+             `{intent}`"
         )),
         _ => None,
     }
@@ -1197,7 +1332,18 @@ mod tests {
         let event = start("/bin/sh", 0)
             .with("exe_on_disk", FieldValue::Boolean(false))
             .unwrap();
-        let ids: Vec<&str> = set.matching(&event, None).map(HostRule::id).collect();
+        let mut pending = crate::hostrule::sequence::PendingSequences::default();
+        let ids: Vec<&str> = set
+            .evaluate(
+                &mut pending,
+                &event,
+                None,
+                &crate::hostrule::sequence::Subject::default(),
+                0,
+            )
+            .into_iter()
+            .map(HostRule::id)
+            .collect();
         assert_eq!(ids, vec!["a"]);
     }
 
@@ -1211,6 +1357,92 @@ mod tests {
         assert_eq!(
             rule.message(&start("/bin/sh", 0)),
             "host rule shell-as-root: a shell started as root (process.starts exe=/bin/sh uid=0)"
+        );
+    }
+
+    #[test]
+    fn a_sequence_needs_a_window_and_stops_at_two_steps() {
+        let rule = |followed_by: &str| {
+            compile(&format!(
+                r#"{{"id":"s","when":{{"process.starts":{{"exe":"/bin/sh"}}}},"followed_by":{followed_by}}}"#
+            ))
+        };
+        let ok = rule(r#"{"within":"30s","any_of":[{"process.starts":{}},{"process.connects":{"remote_port":4444}}]}"#)
+            .unwrap();
+        let followed = ok.followed_by.as_ref().unwrap();
+        assert_eq!(followed.within_ns, 30_000_000_000);
+        assert_eq!(followed.then.blocks().len(), 2);
+        assert_eq!(
+            ok.intents(),
+            vec![Intent::ProcessStarts, Intent::ProcessConnects]
+        );
+        assert!(ok.reads(Intent::ProcessConnects, "remote_port"));
+        assert_eq!(
+            rule(r#"{"within":"500ms","process.ends":{}}"#)
+                .unwrap()
+                .followed_by
+                .unwrap()
+                .within_ns,
+            500_000_000
+        );
+        for (followed_by, expected) in [
+            (r#"{"process.starts":{}}"#, "needs `within`"),
+            (r#"{"within":"30","process.starts":{}}"#, "not a duration"),
+            (r#"{"within":"0s","process.starts":{}}"#, "above zero"),
+            (
+                r#"{"within":"2h","process.starts":{}}"#,
+                "longer than an hour",
+            ),
+            (r#"{"within":30,"process.starts":{}}"#, "a duration such as"),
+            (r#"{"within":"30s"}"#, "names no intent"),
+            (
+                r#"{"within":"30s","process.starts":{},"followed_by":{}}"#,
+                "does not nest",
+            ),
+            (
+                r#"{"within":"30s","process.starts":{},"workload":{}}"#,
+                "scopes the first step",
+            ),
+            (r#"{"within":"30s","port.hidden":{}}"#, "names no process"),
+            (
+                r#"{"within":"30s","process.starts":{"within":"1s"}}"#,
+                "beside the intent",
+            ),
+        ] {
+            let message = rule(followed_by).unwrap_err();
+            assert!(message.contains(expected), "{followed_by}: {message}");
+        }
+        let in_when = refused(r#"{"id":"s","when":{"process.starts":{},"within":"30s"}}"#);
+        assert!(in_when.contains("sits in `followed_by`"), "{in_when}");
+    }
+
+    #[test]
+    fn a_sequence_stops_the_process_of_its_second_step() {
+        assert!(
+            compile(
+                r#"{"id":"s","then":["alert","kill_process"],"when":{"process.ends":{}},
+                    "followed_by":{"within":"5s","process.starts":{}}}"#
+            )
+            .is_ok()
+        );
+        let message = refused(
+            r#"{"id":"s","then":["alert","kill_process"],"when":{"process.starts":{}},
+                "followed_by":{"within":"5s","process.ends":{}}}"#,
+        );
+        assert!(message.contains("already ended"), "{message}");
+    }
+
+    #[test]
+    fn the_message_of_a_sequence_names_the_first_step() {
+        let rule = compile(
+            r#"{"id":"shell-then-curl","when":{"process.starts":{"exe":"/bin/sh"}},
+                "followed_by":{"within":"30s","process.starts":{"exe":"/usr/bin/curl"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            rule.message(&start("/usr/bin/curl", 0)),
+            "host rule shell-then-curl: process.starts (process.starts exe=/usr/bin/curl uid=0) \
+             after process.starts within 30s"
         );
     }
 
@@ -1271,6 +1503,7 @@ mod tests {
                     severity: "low".to_string(),
                     workload: None,
                     when,
+                    followed_by: None,
                     then: vec![HostRuleAction::Alert],
                 };
                 if let Ok(rule) = HostRule::compile(rule) {

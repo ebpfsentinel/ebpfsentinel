@@ -253,6 +253,11 @@ pub struct HostRulesResponse {
     pub matched: u64,
     /// Of those, alerts lost to a full alert queue.
     pub dropped: u64,
+    /// First steps of sequences waiting for their second now.
+    pub pending: usize,
+    /// First steps not held because the bounded set of waiting ones was
+    /// full.
+    pub pending_refused: u64,
     pub rules: Vec<HostRuleBody>,
 }
 
@@ -281,13 +286,18 @@ fn rules_body(service: Option<&HostRuleService>, host: &HostSources) -> HostRule
         return HostRulesResponse {
             matched: 0,
             dropped: 0,
+            pending: 0,
+            pending_refused: 0,
             rules: Vec::new(),
         };
     };
     let (matched, dropped) = service.counts();
+    let (pending, pending_refused) = service.pending();
     HostRulesResponse {
         matched,
         dropped,
+        pending,
+        pending_refused,
         rules: service
             .rules()
             .rules()
@@ -437,6 +447,7 @@ mod tests {
         assert_eq!(body.rules[0].spec["when"]["process.starts"]["uid"], 0);
         assert!(body.rules[2].intents[0].reason.is_some());
         assert_eq!((body.matched, body.dropped), (0, 0));
+        assert_eq!((body.pending, body.pending_refused), (0, 0));
     }
 
     #[test]
