@@ -4506,6 +4506,55 @@
         ]
       }
     },
+    "/api/v1/host-rules/mass-encryption": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "`GET /api/v1/host-rules/mass-encryption` - the mass encryption verdict's\nmode and what it reached in shadow.",
+        "operationId": "get_mass_encryption",
+        "responses": {
+          "200": {
+            "description": "Whether the mass encryption verdict is evaluated, its mode, and the verdicts it reached in shadow by workload with the last ones as they would have read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MassEncryptionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/ids/rules": {
       "get": {
         "tags": [
@@ -15532,6 +15581,39 @@
           }
         }
       },
+      "MassEncryptionResponse": {
+        "type": "object",
+        "description": "The mass encryption verdict and what it reached in shadow.",
+        "required": [
+          "enabled",
+          "shadow",
+          "recent"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the verdict is evaluated here: the file watch feeds it, so it\nis off where the watch is."
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`shadow`, counting the verdicts and raising nothing, or `enforce`,\nraising an alert for each; absent where the verdict is off."
+          },
+          "recent": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ShadowVerdictBody"
+            },
+            "description": "The last verdicts reached in shadow, newest last."
+          },
+          "shadow": {
+            "$ref": "#/components/schemas/HostShadowBody",
+            "description": "The verdicts reached in shadow since the agent started, by workload."
+          }
+        }
+      },
       "MissingHelperEntry": {
         "type": "object",
         "description": "A helper an object needs that this kernel does not offer for its type.",
@@ -18906,6 +18988,47 @@
           "would": {
             "type": "string",
             "description": "`allow` or `deny`: what the action amounts to on the wire."
+          }
+        }
+      },
+      "ShadowVerdictBody": {
+        "type": "object",
+        "description": "One mass encryption verdict reached in shadow, as the alert would have\nread.",
+        "required": [
+          "at_ns",
+          "pid",
+          "message"
+        ],
+        "properties": {
+          "at_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was reached, boot-time nanoseconds.",
+            "minimum": 0
+          },
+          "exe": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The actor's executable, where the process table knew it."
+          },
+          "message": {
+            "type": "string",
+            "description": "The alert's message: the signals, their evidence and what this host\ncannot read."
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The actor's pid.",
+            "minimum": 0
+          },
+          "workload": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The container, else the cgroup, else the systemd unit it was counted\nunder."
           }
         }
       },

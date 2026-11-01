@@ -155,6 +155,9 @@ pub struct AppState {
     /// The host rules and their counters, installed with the process table
     /// whose events they are evaluated on; empty where the table is off.
     pub host_rule_service: ArcSwapOption<application::host_rule_service::HostRuleService>,
+    /// The mass encryption verdict and what it reached in shadow, installed
+    /// with the file watch it reads; empty where the watch is off.
+    pub ransom_service: ArcSwapOption<application::ransom_service::RansomService>,
     /// Which workloads the DLP probes are reading, when the configuration
     /// scopes DLP at all. Filled after the eBPF load, because the maps it
     /// reports on are installed there; empty on a node reading every task.
@@ -247,6 +250,7 @@ impl AppState {
             dlp_service: None,
             process_table_service: ArcSwapOption::empty(),
             host_rule_service: ArcSwapOption::empty(),
+            ransom_service: ArcSwapOption::empty(),
             dlp_scope_service: ArcSwapOption::empty(),
             workload_policy_service: ArcSwapOption::empty(),
             netpol_replay: ArcSwapOption::empty(),
@@ -447,6 +451,11 @@ impl AppState {
         svc: Arc<application::host_rule_service::HostRuleService>,
     ) {
         self.host_rule_service.store(Some(svc));
+    }
+
+    /// Hand the mass encryption verdict over, once the file watch feeds it.
+    pub fn install_ransom_service(&self, svc: Arc<application::ransom_service::RansomService>) {
+        self.ransom_service.store(Some(svc));
     }
 
     /// Hand the DLP scope resolver over, once its maps are installed.

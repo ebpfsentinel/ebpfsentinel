@@ -19,12 +19,13 @@ pub mod note;
 pub mod paths;
 pub mod rename;
 pub mod replace;
+pub mod shadow;
 pub mod signal;
 
 pub use actor::{Actor, actor_of};
 pub use backup::{
-    BACKUP_PRIOR_WINDOW_NS, BACKUP_UNIT_MARKERS, SHELLS, backup_destroyed, backup_destroyed_signal,
-    initiator,
+    BACKUP_PRIOR_WINDOW_NS, BACKUP_PROGRAMS, BACKUP_UNIT_MARKERS, SHELLS, backup_destroyed,
+    backup_destroyed_signal, backup_program, initiator,
 };
 pub use canary::{
     CANARIES_MAX, CANARY_DIRECTORIES, CANARY_EXEMPT, CANARY_NAMES, canary_exempt,
@@ -50,4 +51,5 @@ pub use replace::{
     RANSOM_REPLACEMENTS, REPLACEMENT_FRESH_NS, REPLACEMENT_HALVES_MAX, REPLACEMENT_OVERHEAD_BYTES,
     Replacements, original_of, renamed_over, replaces, written_now,
 };
+pub use shadow::{RANSOM_SHADOW_RECENT_MAX, RansomShadow, ShadowVerdict};
 pub use signal::{RansomSignal, SignalKind, Tier, UnavailableSignal, unavailable};

@@ -4432,20 +4432,14 @@ pub async fn run(
         }
         host_rules_for_files = Some(Arc::clone(&host_rules));
         if config.file_watch.enabled {
-            let sources: application::ransom_service::HostSourcesReader = Arc::new(|| {
-                crate::http::host_rule_handler::reported_sources(
-                    &std::collections::HashMap::new(),
-                    &[],
-                )
-            });
-            let ransom = Arc::new(
-                application::ransom_service::RansomService::new(alert_tx.clone(), sources)
-                    .with_command_lines(config.process_table.capture_command_line),
-            );
+            let ransom = mass_encryption_service(&config, alert_tx.clone());
             svc = svc.with_ransom(Arc::clone(&ransom));
             ransom_for_files = Some(ransom);
         }
         app_state.install_host_rule_service(host_rules);
+        if let Some(ref ransom) = ransom_for_files {
+            app_state.install_ransom_service(Arc::clone(ransom));
+        }
         let svc = Arc::new(svc);
         // The calls into the crypto libraries are read against the same
         // table, so they are counted only where mass encryption is.
@@ -7465,6 +7459,24 @@ const CRYPTO_CALLS_POLL: Duration = Duration::from_secs(1);
 /// How often the libraries running processes map are looked for again, so a
 /// container started after the agent is counted too.
 const CRYPTO_LIBRARIES_RESCAN: Duration = Duration::from_secs(30);
+
+/// The mass encryption verdict as the configuration asks for it, raising
+/// into `alerts`: the sources it names as unread are the ones this binary
+/// does not run.
+#[must_use]
+pub fn mass_encryption_service(
+    config: &AgentConfig,
+    alerts: tokio::sync::mpsc::Sender<application::alert_event::AlertEvent>,
+) -> Arc<application::ransom_service::RansomService> {
+    let sources: application::ransom_service::HostSourcesReader = Arc::new(|| {
+        crate::http::host_rule_handler::reported_sources(&std::collections::HashMap::new(), &[])
+    });
+    Arc::new(
+        application::ransom_service::RansomService::new(alerts, sources)
+            .with_command_lines(config.process_table.capture_command_line)
+            .with_mode(config.file_watch.mass_encryption.mode),
+    )
+}
 
 /// Count the calls into the system crypto libraries and hand each process's
 /// share to the mass encryption engine, which reads it beside the files the

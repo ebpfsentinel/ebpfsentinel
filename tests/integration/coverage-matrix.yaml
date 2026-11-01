@@ -139,6 +139,9 @@ suite_profiles:
   # 80 builds two chroots beside the agent and waits one inventory reading:
   # root on a throwaway host, so nightly.
   "80": nightly
+  # 81 writes a few thousand files through real tools and restarts the
+  # agent once to promote the verdict: root on a throwaway host, so nightly.
+  "81": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -695,6 +698,14 @@ coverage:
     kernel_min: "6.12"
     profile: nightly
     notes: "Host rules through /api/v1/host-rules and /api/v1/host-rules/intents: a written rule loads in shadow beside the shipped ones, its shadow count rises per workload with no alert, promotion to enforce kills the process and alerts, and an intention the host does not feed carries the same reason everywhere it is named"
+
+  - kind: cli_subcommand
+    feature: mass-encryption
+    suites: ["81"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "The mass encryption verdict through /api/v1/host-rules/mass-encryption and host-rules mass-encryption: evaluated in shadow by default, an archive extraction, rsync, cp, gzip over logs and a git checkout over a few hundred documents reach no verdict, a program rewriting and renaming the same documents is counted under its workload with no alert, and the verdict promoted to enforce raises the alert"
 
   - kind: cli_subcommand
     feature: surface

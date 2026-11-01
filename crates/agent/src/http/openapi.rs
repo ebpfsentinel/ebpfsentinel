@@ -153,6 +153,7 @@ use super::zone_handler;
         surface_handler::get_surface,
         host_rule_handler::get_host_intents,
         host_rule_handler::get_host_rules,
+        host_rule_handler::get_mass_encryption,
         exposure_handler::get_listeners,
         network_program_handler::get_foreign_programs,
         // DNS
@@ -420,6 +421,8 @@ use super::zone_handler;
         host_rule_handler::HostRuleExceptionBody,
         host_rule_handler::HostShadowBody,
         host_rule_handler::HostShadowWorkloadBody,
+        host_rule_handler::MassEncryptionResponse,
+        host_rule_handler::ShadowVerdictBody,
         host_rule_handler::RuleIntentBody,
         host_rule_handler::IntentBody,
         host_rule_handler::IntentFieldBody,

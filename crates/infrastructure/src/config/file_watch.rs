@@ -6,6 +6,7 @@
 //! directory lives.
 
 use domain::file_watch::{DECLARED_ORIGIN, WATCHED_PATHS_MAX, WatchedPaths, check_watched_path};
+use domain::firewall::entity::RuleMode;
 use domain::ransom::{
     CANARIES_MAX, CANARY_DIRECTORIES, CANARY_EXEMPT, CANARY_NAMES, canary_name_refusal,
     canary_paths,
@@ -54,6 +55,27 @@ pub struct FileWatchConfig {
     /// Canary files planted into data directories, any open of which is a
     /// decisive mass encryption signal.
     pub canaries: CanaryConfig,
+
+    /// What a mass encryption verdict does once it is reached.
+    pub mass_encryption: MassEncryptionConfig,
+}
+
+/// The composed mass encryption verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MassEncryptionConfig {
+    /// `shadow`, the default, counts each verdict by workload and keeps the
+    /// last ones without raising anything, so the thresholds can be watched
+    /// against this host's own work first; `enforce` raises an alert.
+    pub mode: RuleMode,
+}
+
+impl Default for MassEncryptionConfig {
+    fn default() -> Self {
+        Self {
+            mode: RuleMode::Shadow,
+        }
+    }
 }
 
 /// Canary files: names no legitimate process has a reason to open, planted
@@ -144,6 +166,7 @@ impl Default for FileWatchConfig {
             max_baselines: DEFAULT_MAX_BASELINES,
             paths: Vec::new(),
             canaries: CanaryConfig::default(),
+            mass_encryption: MassEncryptionConfig::default(),
         }
     }
 }
@@ -224,6 +247,7 @@ mod tests {
         let config = FileWatchConfig::default();
         assert!(!config.enabled);
         assert_eq!(config.filesystems, vec!["/".to_owned()]);
+        assert_eq!(config.mass_encryption.mode, RuleMode::Shadow);
         assert!(config.validate().is_ok());
     }
 

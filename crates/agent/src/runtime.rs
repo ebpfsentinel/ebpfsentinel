@@ -1559,8 +1559,13 @@ pub struct HostObservation {
     pub processes: Arc<application::process_table_service::ProcessTableService>,
     /// The rules evaluated on it, with their shadow readings.
     pub host_rules: Arc<application::host_rule_service::HostRuleService>,
+    /// The mass encryption verdict, fed by the file watch and the table;
+    /// absent where the file watch is off.
+    pub ransom: Option<Arc<application::ransom_service::RansomService>>,
     // The tracepoints stay attached while these live.
     _tracing: Option<(EbpfLoader, adapters::ebpf::ProcessTracingAttacher)>,
+    // And the probes counting calls into the crypto libraries.
+    _crypto: Option<EbpfLoader>,
 }
 
 /// Start the process table and the host rules, for a binary that does not
@@ -1626,6 +1631,7 @@ pub async fn start_host_observation(
     {
         table = table.with_dlp_scope(Arc::clone(scope));
     }
+    let alerts_for_ransom = alerts.clone();
     let host_rules = Arc::new(
         application::host_rule_service::HostRuleService::new(host_rules_set, alerts).with_facts(
             Arc::new(adapters::container::ProcFactsReader::new(&proc_root)),
@@ -1638,6 +1644,15 @@ pub async fn start_host_observation(
         "host rules loaded"
     );
     table = table.with_host_rules(Arc::clone(&host_rules));
+    // The mass encryption verdict lives where the file watch hands it each
+    // change, and the table each exec whose command line destroys backups.
+    let ransom = config
+        .file_watch
+        .enabled
+        .then(|| startup::mass_encryption_service(config, alerts_for_ransom));
+    if let Some(ref ransom) = ransom {
+        table = table.with_ransom(Arc::clone(ransom));
+    }
     // The table is where an exec is learned of, so it is where the kernel's
     // idea of which workload a task is gets written.
     if let Some(workload) = workload {
@@ -1650,6 +1665,18 @@ pub async fn start_host_observation(
         workload.watch_processes(&processes);
     }
     services.workloads.install_processes(Arc::clone(&processes));
+    // The calls into the crypto libraries are read against the same table,
+    // so they are counted only where mass encryption is.
+    let crypto = ransom.as_ref().and_then(|ransom| {
+        startup::start_crypto_calls(
+            &startup::resolve_ebpf_program_dir(config),
+            &startup::host_proc_root(),
+            &services.metrics,
+            Arc::clone(ransom),
+            Arc::clone(&processes),
+            cancel.clone(),
+        )
+    });
     let writer = Arc::clone(&processes);
     tokio::spawn(async move {
         writer.run(process_rx, cancel).await;
@@ -1662,7 +1689,9 @@ pub async fn start_host_observation(
     Ok(Some(HostObservation {
         processes,
         host_rules,
+        ransom,
         _tracing: tracing,
+        _crypto: crypto,
     }))
 }
 

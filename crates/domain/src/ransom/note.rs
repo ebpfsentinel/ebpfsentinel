@@ -6,7 +6,11 @@
 //! signal costs nothing and carries no privacy question. The count is of
 //! directories rather than files, since a run writes one note per directory.
 //! A few build, packaging and desktop tools also scatter one name widely, and
-//! those names are listed here and never counted.
+//! those names are listed here and never counted. A note is written for a
+//! person to open, so a name is counted only where its extension is one a
+//! person opens: a compiled message catalogue a package installs into every
+//! locale directory, or a `Kconfig` a checkout writes into every directory of
+//! a kernel tree, is never one.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -21,6 +25,11 @@ use super::signal::{RansomSignal, SignalKind};
 /// How many distinct directories one actor writes one new name into in a
 /// window before the signal is raised.
 pub const RANSOM_NOTE_DIRECTORIES: usize = 40;
+
+/// Extensions a note is written under: text, a page, a link or a picture.
+pub const RANSOM_NOTE_EXTENSIONS: &[&str] = &[
+    "txt", "html", "htm", "hta", "rtf", "md", "url", "png", "jpg", "jpeg", "bmp",
+];
 
 /// Names followed per actor at once. A build creates thousands of names, each
 /// in a directory or two; the name least recently seen is dropped first, so a
@@ -60,6 +69,20 @@ pub const SCATTERED_NAMES: &[&str] = &[
     "license.md",
     "license.txt",
     "changelog.md",
+    // Media libraries, which leave artwork beside every album and film.
+    "cover.jpg",
+    "folder.jpg",
+    "poster.jpg",
+    "fanart.jpg",
+    // Column stores, which write one layout per data part.
+    "columns.txt",
+    "checksums.txt",
+    "count.txt",
+    "default_compression_codec.txt",
+    "metadata_version.txt",
+    // Generated documentation and static sites.
+    "index.html",
+    "index.htm",
     // Other toolchains.
     "cargo.toml",
     ".cargo-ok",
@@ -78,6 +101,17 @@ pub const SCATTERED_NAMES: &[&str] = &[
     "thumbs.db",
     "desktop.ini",
 ];
+
+/// Whether `name` is written under an extension a person opens.
+#[must_use]
+pub fn reads_as_note(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(stem, extension)| {
+        !stem.is_empty()
+            && RANSOM_NOTE_EXTENSIONS
+                .iter()
+                .any(|listed| listed.eq_ignore_ascii_case(extension))
+    })
+}
 
 /// Whether `name` is one legitimate software also scatters.
 #[must_use]
@@ -151,7 +185,7 @@ impl RansomNotes {
         at_ns: u64,
     ) -> Option<RansomSignal> {
         let (directory, name) = path.rsplit_once('/')?;
-        if name.is_empty() || scattered(name) {
+        if name.is_empty() || scattered(name) || !reads_as_note(name) {
             return None;
         }
         if !self.runs.contains_key(&actor.key) {
@@ -278,6 +312,24 @@ mod tests {
             assert!(notes.record(&a, 1, &format!("/y/{name}"), S).is_none());
         }
         assert!(!scattered("README.txt"));
+    }
+
+    #[test]
+    fn a_name_nobody_opens_is_never_a_note() {
+        let mut notes = RansomNotes::new(RANSOM_WINDOW_NS, 2, 8);
+        let a = actor(1);
+        // A package's message catalogue in every locale, a kernel tree's
+        // build files and a file being written under its installer's name.
+        for name in ["coreutils.mo", "Kconfig", "Kbuild", "coreutils.mo.dpkg-new"] {
+            assert!(!reads_as_note(name));
+            assert!(notes.record(&a, 1, &format!("/x/{name}"), S).is_none());
+            assert!(notes.record(&a, 1, &format!("/y/{name}"), S).is_none());
+            assert!(notes.record(&a, 1, &format!("/z/{name}"), S).is_none());
+        }
+        for name in ["RESTORE.txt", "decrypt.HTA", "help.html", "wallpaper.bmp"] {
+            assert!(reads_as_note(name));
+        }
+        assert!(!reads_as_note(".txt"));
     }
 
     #[test]

@@ -743,6 +743,9 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
                 HostRulesCommand::Intents => {
                     commands::cmd_host_rules_intents(&client, output).await
                 }
+                HostRulesCommand::MassEncryption => {
+                    commands::cmd_host_rules_mass_encryption(&client, output).await
+                }
             }
         }
 

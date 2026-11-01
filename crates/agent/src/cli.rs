@@ -1209,6 +1209,9 @@ pub enum HostRulesCommand {
     /// List every intention a host rule may name, its fields, the hook
     /// serving it and whether this host serves it
     Intents,
+    /// Show the mass encryption verdict's mode and the verdicts it reached
+    /// in shadow, by workload and the last ones as they would have read
+    MassEncryption,
 }
 
 // ── Aliases ─────────────────────────────────────────────────────────────
@@ -2840,6 +2843,19 @@ mod tests {
             cli.command,
             Some(Command::HostRules(DomainArgs {
                 command: HostRulesCommand::List,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_host_rules_mass_encryption() {
+        let cli =
+            Cli::try_parse_from(["ebpfsentinel-agent", "host-rules", "mass-encryption"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::HostRules(DomainArgs {
+                command: HostRulesCommand::MassEncryption,
                 ..
             }))
         ));

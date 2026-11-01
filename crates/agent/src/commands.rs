@@ -6846,6 +6846,46 @@ fn print_learning_session(session: &LearningSessionResponse, output: OutputForma
     Ok(())
 }
 
+pub async fn cmd_host_rules_mass_encryption(
+    client: &ApiClient,
+    output: OutputFormat,
+) -> Result<()> {
+    let resp = client.mass_encryption().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    let Some(mode) = resp.mode.as_deref().filter(|_| resp.enabled) else {
+        println!(
+            "The mass encryption verdict is off: the file watch that feeds it is not enabled."
+        );
+        return Ok(());
+    };
+    println!(
+        "Mass encryption verdict in {mode}: {} verdicts reached in shadow since the start.",
+        resp.shadow.events
+    );
+    if !resp.shadow.workloads.is_empty() {
+        let mut table = Table::new(&[("WORKLOAD", Align::Left), ("VERDICTS", Align::Right)]);
+        for hits in &resp.shadow.workloads {
+            table.row(cells![hits.workload.as_deref().unwrap_or("-"), hits.events,]);
+        }
+        table.print();
+    }
+    if resp.shadow.unsampled > 0 {
+        println!(
+            "{} verdicts about a workload past the sample.",
+            resp.shadow.unsampled
+        );
+    }
+    for verdict in &resp.recent {
+        println!("- {}", verdict.message);
+    }
+    Ok(())
+}
+
 pub async fn cmd_host_rules_list(client: &ApiClient, output: OutputFormat) -> Result<()> {
     let resp = client.host_rules().await?;
 

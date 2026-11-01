@@ -70,7 +70,8 @@ pub struct HostShadowReading {
 }
 
 impl HostShadowReading {
-    fn record(&mut self, workload: Option<&str>) {
+    /// Count one event about `workload`, in the bounded sample when it fits.
+    pub fn record(&mut self, workload: Option<&str>) {
         self.events += 1;
         if let Some(hits) = self
             .workloads

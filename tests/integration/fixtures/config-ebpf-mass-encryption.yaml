@@ -1,0 +1,65 @@
+# config-ebpf-mass-encryption.yaml - the mass encryption verdict in shadow.
+#
+# The file watch reads the filesystem holding the data directory, the
+# process table keeps command lines so a snapshot destroyed is a prior, and
+# the verdict starts in shadow, which is its default; the suite promotes it
+# by rewriting `mode: shadow` to `mode: enforce` and restarting.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  allow_plaintext_api: true
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+process_table:
+  enabled: true
+  capture_command_line: true
+
+file_watch:
+  enabled: true
+  filesystems:
+    - __DATA_DIR__
+  mass_encryption:
+    mode: shadow
+
+# The firewall passes everything; it is loaded because it is what the
+# agent reports as its datapath being up.
+firewall:
+  enabled: true
+  mode: alert
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
+
+# The suites drive the datapath, not the control plane's identity: the
+# agent answers unauthenticated plaintext here, which the two opt-outs
+# above are what make legal on a non-loopback bind.
+auth:
+  enabled: false

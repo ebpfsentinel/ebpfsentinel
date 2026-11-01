@@ -46,6 +46,19 @@ pub const BACKUP_UNIT_MARKERS: &[&str] = &[
     "zfs-auto-snapshot",
 ];
 
+/// Backup programs, which prune their own repository and then write into it
+/// encrypted: what such a program writes is never judged against a prior,
+/// because the prior is held for a run like its own. Its writes still reach
+/// a verdict on what they show alone.
+pub const BACKUP_PROGRAMS: &[&str] = &[
+    "restic",
+    "rustic",
+    "borg",
+    "borgmatic",
+    "kopia",
+    "duplicity",
+];
+
 /// Interpreters a command line passes through on its way to the command,
 /// climbed past when naming who ran it.
 pub const SHELLS: &[&str] = &["sh", "bash", "dash", "zsh", "ash", "ksh", "busybox"];
@@ -68,6 +81,18 @@ fn backup_unit(unit: &str) -> bool {
     BACKUP_UNIT_MARKERS
         .iter()
         .any(|marker| unit.contains(marker))
+}
+
+/// Whether the process running `exe` with `command_line` is one of the
+/// [`BACKUP_PROGRAMS`], named by its executable or by the program its
+/// command line starts.
+#[must_use]
+pub fn backup_program(exe: Option<&str>, command_line: Option<&str>) -> bool {
+    let first = command_line.and_then(|line| line.split_whitespace().next());
+    [exe, first]
+        .into_iter()
+        .flatten()
+        .any(|path| BACKUP_PROGRAMS.contains(&base(path)))
 }
 
 /// What the command line destroys, in a few words, when it destroys
@@ -186,6 +211,20 @@ pub fn backup_destroyed_signal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_backup_program_is_named_by_its_executable_or_its_command_line() {
+        assert!(backup_program(Some("/usr/bin/restic"), None));
+        assert!(backup_program(
+            Some("/usr/bin/python3.12"),
+            Some("/usr/bin/borg create ::{now} /srv")
+        ));
+        assert!(!backup_program(
+            Some("/usr/bin/rsync"),
+            Some("rsync -a /a /b")
+        ));
+        assert!(!backup_program(None, None));
+    }
     use crate::process::entity::ProcessIdentity;
 
     fn found(exe: &str, line: &str) -> Option<String> {

@@ -95,7 +95,7 @@ use super::guest_handler::get_guests;
 use super::health_handler::{healthz, readyz};
 use super::hidden_port_handler::get_hidden_ports;
 use super::hidden_process_handler::get_hidden_processes;
-use super::host_rule_handler::{get_host_intents, get_host_rules};
+use super::host_rule_handler::{get_host_intents, get_host_rules, get_mass_encryption};
 use super::ids_handler::{ids_status, list_ids_rules, suricata_report};
 use super::ips_handler::{
     add_ips_blacklist, delete_ips_blacklist, list_ips_blacklist, list_ips_domain_blocks,
@@ -329,6 +329,10 @@ pub fn build_router(
             .route("/api/v1/surface/listening", get(get_listening))
             .route("/api/v1/host-rules", get(get_host_rules))
             .route("/api/v1/host-rules/intents", get(get_host_intents))
+            .route(
+                "/api/v1/host-rules/mass-encryption",
+                get(get_mass_encryption),
+            )
             .route("/api/v1/exposure/listeners", get(get_listeners))
             .route("/api/v1/ebpf/foreign-programs", get(get_foreign_programs))
             .route("/api/v1/dns/status", get(dns_status))

@@ -44,6 +44,22 @@ const PASSING: &[&str] = &[
     "bak",
     "old",
     "orig",
+    // A package manager installs a file under a name of its own and renames
+    // it into place, and sets aside the one an administrator edited.
+    "dpkg-new",
+    "dpkg-tmp",
+    "dpkg-dist",
+    "dpkg-old",
+    "dpkg-bak",
+    "ucf-new",
+    "ucf-dist",
+    "ucf-old",
+    "rpmnew",
+    "rpmsave",
+    "rpmorig",
+    "pacnew",
+    "pacsave",
+    "apk-new",
 ];
 
 fn last_name(path: &str) -> &str {
@@ -53,6 +69,18 @@ fn last_name(path: &str) -> &str {
 fn extension_of(name: &str) -> Option<String> {
     let (stem, extension) = name.rsplit_once('.')?;
     (!stem.is_empty() && !extension.is_empty()).then(|| extension.to_ascii_lowercase())
+}
+
+/// Whether `new` is `old` with a date or a number after it, the way log
+/// rotation names a file it sets aside (`app.log` to `app.log-20261101`).
+fn dated(old: &str, new: &str) -> bool {
+    new.strip_prefix(old).is_some_and(|rest| {
+        !rest.is_empty()
+            && rest.bytes().any(|b| b.is_ascii_digit())
+            && rest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b == b'-' || b == b'_')
+    })
 }
 
 /// The new extension `from` renamed to `to` gives a file, lowercased, when
@@ -67,9 +95,12 @@ pub fn renamed_to_new_extension(from: &str, to: &str) -> Option<String> {
     let new = extension_of(last_name(to))?;
     let old = extension_of(old_name);
     if old.as_deref() == Some(new.as_str())
-        || old.as_deref().is_some_and(|o| PASSING.contains(&o))
+        || old
+            .as_deref()
+            .is_some_and(|o| PASSING.contains(&o) || o.contains(';'))
         || PASSING.contains(&new.as_str())
         || new.bytes().all(|b| b.is_ascii_digit())
+        || old.as_deref().is_some_and(|o| dated(o, &new))
     {
         return None;
     }
@@ -233,6 +264,16 @@ mod tests {
         assert_eq!(new("/d/app.log", "/d/app.log.1"), None);
         assert_eq!(new("/d/app.conf", "/d/app.conf.bak"), None);
         assert_eq!(new("/d/a.txt", "/d/a"), None);
+        // A package manager renaming a file into place, under the name it
+        // was unpacked as or under the transaction suffix it carried.
+        assert_eq!(new("/u/changelog.gz.dpkg-new", "/u/changelog.gz"), None);
+        assert_eq!(new("/u/coreutils.mo.dpkg-new", "/u/coreutils.mo"), None);
+        assert_eq!(new("/u/util.py;65a1b2c3", "/u/util.py"), None);
+        assert_eq!(new("/etc/app.conf", "/etc/app.conf.rpmsave"), None);
+        assert_eq!(new("/etc/pacman.conf", "/etc/pacman.conf.pacnew"), None);
+        // Log rotation setting a file aside under the day it was rotated.
+        assert_eq!(new("/var/log/app.log", "/var/log/app.log-20261101"), None);
+        assert_eq!(new("/d/a.log", "/d/a.log-x1"), Some("log-x1".into()));
     }
 
     #[test]

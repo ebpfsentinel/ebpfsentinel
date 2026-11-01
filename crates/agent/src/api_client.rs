@@ -2488,6 +2488,26 @@ pub struct HostRulesResponse {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct ShadowVerdictEntry {
+    pub at_ns: u64,
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<String>,
+    pub message: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct MassEncryptionResponse {
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    pub shadow: HostShadowEntry,
+    pub recent: Vec<ShadowVerdictEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct HostRuleExceptionEntry {
     pub id: String,
     pub rules: Vec<String>,
@@ -4567,6 +4587,15 @@ impl ApiClient {
     pub async fn host_rules(&self) -> anyhow::Result<HostRulesResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/host-rules")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn mass_encryption(&self) -> anyhow::Result<MassEncryptionResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/host-rules/mass-encryption")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use application::host_rule_service::{FED_INTENTS, HostRuleService, not_fed_reason};
+use application::ransom_service::RansomService;
 use axum::Json;
 use axum::extract::State;
 use domain::hostrule::{
@@ -373,6 +374,94 @@ pub struct HostRuleExceptionBody {
     pub workload: serde_json::Value,
 }
 
+/// One mass encryption verdict reached in shadow, as the alert would have
+/// read.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ShadowVerdictBody {
+    /// When it was reached, boot-time nanoseconds.
+    pub at_ns: u64,
+    /// The actor's pid.
+    pub pid: u32,
+    /// The actor's executable, where the process table knew it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
+    /// The container, else the cgroup, else the systemd unit it was counted
+    /// under.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload: Option<String>,
+    /// The alert's message: the signals, their evidence and what this host
+    /// cannot read.
+    pub message: String,
+}
+
+/// The mass encryption verdict and what it reached in shadow.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MassEncryptionResponse {
+    /// Whether the verdict is evaluated here: the file watch feeds it, so it
+    /// is off where the watch is.
+    pub enabled: bool,
+    /// `shadow`, counting the verdicts and raising nothing, or `enforce`,
+    /// raising an alert for each; absent where the verdict is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<&'static str>,
+    /// The verdicts reached in shadow since the agent started, by workload.
+    pub shadow: HostShadowBody,
+    /// The last verdicts reached in shadow, newest last.
+    pub recent: Vec<ShadowVerdictBody>,
+}
+
+/// `GET /api/v1/host-rules/mass-encryption` - the mass encryption verdict's
+/// mode and what it reached in shadow.
+#[utoipa::path(
+    get, path = "/api/v1/host-rules/mass-encryption",
+    tag = "Operations",
+    responses((status = 200, description = "Whether the mass encryption verdict is evaluated, its mode, and the verdicts it reached in shadow by workload with the last ones as they would have read", body = MassEncryptionResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn get_mass_encryption(
+    State(state): State<Arc<AppState>>,
+) -> Json<MassEncryptionResponse> {
+    let service = state.ransom_service.load_full();
+    Json(mass_encryption_body(service.as_deref()))
+}
+
+/// The verdict's mode and shadow reading, or an empty reading where it is
+/// not evaluated.
+#[must_use]
+pub fn mass_encryption_body(service: Option<&RansomService>) -> MassEncryptionResponse {
+    let Some(service) = service else {
+        return MassEncryptionResponse {
+            enabled: false,
+            mode: None,
+            shadow: HostShadowReading::default().into(),
+            recent: Vec::new(),
+        };
+    };
+    let shadow = service.shadow();
+    MassEncryptionResponse {
+        enabled: true,
+        mode: Some(service.mode().as_str()),
+        shadow: shadow.reading.into(),
+        recent: shadow
+            .recent
+            .into_iter()
+            .map(|verdict| ShadowVerdictBody {
+                at_ns: verdict.at_ns,
+                pid: verdict.pid,
+                exe: verdict.exe,
+                workload: verdict.workload,
+                message: verdict.message,
+            })
+            .collect(),
+    }
+}
+
 /// `GET /api/v1/host-rules` - the loaded host rules and whether this host
 /// can match each of them.
 #[utoipa::path(
@@ -481,6 +570,20 @@ fn rule_body(rule: &HostRule, service: &HostRuleService, host: &HostSources) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mass_encryption_verdict_reads_off_where_the_watch_is_off() {
+        let body = mass_encryption_body(None);
+        assert!(!body.enabled);
+        assert!(body.mode.is_none());
+        assert_eq!(body.shadow.events, 0);
+        assert!(body.recent.is_empty());
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let service = RansomService::new(tx, Arc::new(|| HostSources::new(Some((6, 12)))));
+        let body = mass_encryption_body(Some(&service));
+        assert!(body.enabled);
+        assert_eq!(body.mode, Some("shadow"));
+    }
 
     #[test]
     fn every_intent_is_listed_with_its_fields() {

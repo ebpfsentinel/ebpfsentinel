@@ -11,20 +11,22 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use domain::alert::entity::Alert;
 use domain::file_watch::entity::FileChangeKind;
+use domain::firewall::entity::RuleMode;
 use domain::hostrule::HostSources;
 use domain::process::engine::Lineage;
 use domain::process::entity::ProcessEntry;
 use domain::ransom::{
-    Actor, CryptoRates, DistinctPaths, MassRenames, RansomEngine, RansomNotes, RansomSignal,
-    RansomVerdict, Replacements, SignalKind, UnavailableSignal, actor_of, backup_destroyed,
-    backup_destroyed_signal, canary_touched, entropy_rose, header_mismatch, initiator, original_of,
-    renamed_over, unavailable,
+    Actor, CryptoRates, DistinctPaths, MassRenames, RansomEngine, RansomNotes, RansomShadow,
+    RansomSignal, RansomVerdict, Replacements, ShadowVerdict, SignalKind, UnavailableSignal,
+    actor_of, backup_destroyed, backup_destroyed_signal, backup_program, canary_touched,
+    entropy_rose, header_mismatch, initiator, original_of, renamed_over, unavailable,
 };
 use domain::workload::entity::{Workload, WorkloadSource};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::alert_event::AlertEvent;
+use crate::workload_policy_service::workload_of;
 
 /// Why the encryption calls are not read before anything said otherwise.
 const CRYPTO_NOT_LOADED: &str = "the crypto library probes are not loaded";
@@ -97,6 +99,8 @@ pub struct RansomService {
     crypto: Mutex<CryptoRates>,
     crypto_unread: Mutex<Option<String>>,
     command_lines: bool,
+    mode: RuleMode,
+    shadow: Mutex<RansomShadow>,
     sources: HostSourcesReader,
     alerts: mpsc::Sender<AlertEvent>,
 }
@@ -116,6 +120,8 @@ impl RansomService {
             crypto: Mutex::new(CryptoRates::default()),
             crypto_unread: Mutex::new(Some(CRYPTO_NOT_LOADED.to_string())),
             command_lines: false,
+            mode: RuleMode::Shadow,
+            shadow: Mutex::new(RansomShadow::default()),
             sources,
             alerts,
         }
@@ -129,6 +135,30 @@ impl RansomService {
     pub fn with_command_lines(mut self, captured: bool) -> Self {
         self.command_lines = captured;
         self
+    }
+
+    /// Whether a verdict raises an alert, `Enforce`, or is only counted,
+    /// `Shadow`, the default: a verdict is put in force on a reading of what
+    /// it would have raised on this host.
+    #[must_use]
+    pub fn with_mode(mut self, mode: RuleMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// The mode verdicts are taken in.
+    #[must_use]
+    pub fn mode(&self) -> RuleMode {
+        self.mode
+    }
+
+    /// The verdicts reached in shadow since the agent started.
+    #[must_use]
+    pub fn shadow(&self) -> RansomShadow {
+        self.shadow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// An exec the process table recorded: when its command line destroys
@@ -258,13 +288,18 @@ impl RansomService {
             at_ns,
         };
         self.count(&self.rewrites, &held);
-        let raised = self
-            .crypto
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .wrote(&actor, writer.pid, at_ns);
-        if let Some(signal) = raised {
-            self.observe(signal, writer, lineage);
+        // The encryption rate is read against files that held content before
+        // the write: a download writes new files and encrypts a request for
+        // each, which is a rate with nothing rewritten behind it.
+        if change.size_before.is_some_and(|size| size > 0) {
+            let raised = self
+                .crypto
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .wrote(&actor, writer.pid, at_ns);
+            if let Some(signal) = raised {
+                self.observe(signal, writer, lineage);
+            }
         }
         if entropy_rose(change.entropy_before, change.entropy_now) {
             self.count(&self.entropy_rises, &held);
@@ -390,7 +425,15 @@ impl RansomService {
     /// actor now reaches one.
     fn observe(&self, signal: RansomSignal, writer: &ProcessEntry, lineage: &Lineage) {
         let at_ns = signal.at_ns;
-        let ancestry: Vec<_> = lineage.ancestors.iter().map(ProcessEntry::key).collect();
+        // A backup program prunes its repository and then writes into it
+        // encrypted, both under the job that started it: its writes are
+        // judged on what they show alone rather than against that prior.
+        let ancestry: Vec<_> =
+            if backup_program(writer.identity.path(), writer.command_line.as_deref()) {
+                Vec::new()
+            } else {
+                lineage.ancestors.iter().map(ProcessEntry::key).collect()
+            };
         let verdict = self
             .engine
             .lock()
@@ -403,6 +446,27 @@ impl RansomService {
 
     fn raise(&self, verdict: &RansomVerdict, writer: &ProcessEntry, lineage: &Lineage, at_ns: u64) {
         let workload = actor_workload(verdict, writer, lineage);
+        if self.mode == RuleMode::Shadow {
+            let actor = lineage
+                .ancestors
+                .iter()
+                .find(|entry| entry.key() == verdict.actor.key)
+                .unwrap_or(writer);
+            let facts = workload_of(actor);
+            let hit = facts.container_id.or(facts.cgroup).or(facts.unit);
+            let message = Alert::from_ransom_verdict(verdict, workload, at_ns).message;
+            self.shadow
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .record(ShadowVerdict {
+                    at_ns,
+                    pid: verdict.actor.pid,
+                    exe: verdict.actor.exe.clone(),
+                    workload: hit,
+                    message,
+                });
+            return;
+        }
         let alert = Alert::from_ransom_verdict(verdict, workload, at_ns);
         let sent = self.alerts.try_send(AlertEvent::ProcessDetection {
             alert: Box::new(alert),
@@ -471,7 +535,12 @@ mod tests {
                 .present(Source::ProcessTracing)
                 .present(Source::FileWatch)
         });
-        (RansomService::new(tx, sources).with_command_lines(true), rx)
+        (
+            RansomService::new(tx, sources)
+                .with_command_lines(true)
+                .with_mode(RuleMode::Enforce),
+            rx,
+        )
     }
 
     #[test]
@@ -580,9 +649,49 @@ mod tests {
         let lineage = Lineage::default();
         // Seen calling first, so the files after it count toward the rate.
         service.record_crypto_calls(&run, &lineage, 1, 900);
-        // One note in every directory walked: one strong signal, and as
-        // many files rewritten beside the calls.
+        // A download: new files beside the calls, which rewrite nothing and
+        // leave the rate unread.
+        let fetch = running(71, "/usr/lib/apt/methods/https", 10);
+        service.record_crypto_calls(&fetch, &lineage, 1, 900);
         for n in 0..RANSOM_NOTE_DIRECTORIES {
+            service.record_file_change(
+                &fetch,
+                &lineage,
+                [FileChangeKind::Created],
+                FileRewrite {
+                    path: &format!("/var/cache/p{n}.deb"),
+                    entropy_before: None,
+                    entropy_now: None,
+                    head: None,
+                    renamed_from: None,
+                    size_before: None,
+                    size_now: Some(10),
+                    written_now: true,
+                },
+                950,
+            );
+        }
+        service.record_crypto_calls(&fetch, &lineage, RANSOM_CRYPTO_CALLS, 960);
+        assert!(rx.try_recv().is_err());
+        // One note in every directory walked, one strong signal, and as many
+        // documents rewritten beside the calls.
+        for n in 0..RANSOM_NOTE_DIRECTORIES {
+            service.record_file_change(
+                &run,
+                &lineage,
+                [FileChangeKind::Written],
+                FileRewrite {
+                    path: &format!("/srv/d{n}/ledger.ods"),
+                    entropy_before: None,
+                    entropy_now: None,
+                    head: None,
+                    renamed_from: None,
+                    size_before: Some(4_096),
+                    size_now: Some(4_112),
+                    written_now: true,
+                },
+                1_000 + n as u64,
+            );
             service.record_file_change(
                 &run,
                 &lineage,
@@ -743,6 +852,54 @@ mod tests {
         };
         assert!(alert.message.contains("header_mismatch (pid 100)"));
         assert!(alert.message.contains("do not match their extension"));
+    }
+
+    #[test]
+    fn a_verdict_in_shadow_is_counted_by_workload_and_raises_nothing() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let sources: HostSourcesReader = Arc::new(|| {
+            HostSources::new(Some((6, 12)))
+                .present(Source::ProcessTracing)
+                .present(Source::FileWatch)
+        });
+        let service = RansomService::new(tx, sources);
+        assert_eq!(service.mode(), RuleMode::Shadow);
+        let run = running(100, "/tmp/enc", 7);
+        let lineage = Lineage {
+            ancestors: Vec::new(),
+            truncated: false,
+            incomplete: false,
+        };
+        for n in 0..RANSOM_HEADER_MISMATCHES {
+            service.record_file_change(
+                &run,
+                &lineage,
+                [FileChangeKind::Written],
+                FileRewrite {
+                    path: &format!("/srv/report{n}.docx"),
+                    entropy_before: None,
+                    entropy_now: None,
+                    head: Some([0x9A, 0x13, 0x7F, 0x02]),
+                    renamed_from: None,
+                    size_before: None,
+                    size_now: None,
+                    written_now: false,
+                },
+                2,
+            );
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "a verdict in shadow raised an alert"
+        );
+        let shadow = service.shadow();
+        assert_eq!(shadow.reading.events, 1);
+        let Some(verdict) = shadow.recent.back() else {
+            panic!("the verdict was not kept");
+        };
+        assert_eq!(verdict.pid, 100);
+        assert_eq!(verdict.exe.as_deref(), Some("/tmp/enc"));
+        assert!(verdict.message.contains("header_mismatch (pid 100)"));
     }
 
     #[test]

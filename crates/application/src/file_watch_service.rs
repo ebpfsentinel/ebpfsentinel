@@ -2250,7 +2250,9 @@ mod tests {
                 .present(domain::hostrule::Source::ProcessTracing)
                 .present(domain::hostrule::Source::FileWatch)
         });
-        let ransom = Arc::new(RansomService::new(tx, sources));
+        let ransom = Arc::new(
+            RansomService::new(tx, sources).with_mode(domain::firewall::entity::RuleMode::Enforce),
+        );
         let mut w = fed(rules, table().await, Arc::new(Memory::default()));
         if let Some(feed) = w.feed.as_mut() {
             feed.ransom = Some(ransom);
