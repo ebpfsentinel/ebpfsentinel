@@ -9369,7 +9369,7 @@
               "string",
               "null"
             ],
-            "description": "`DDoS`: mitigation status."
+            "description": "What was done about the source: a `DDoS` mitigation state, or the\noutcome of blocking the source of an application attack."
           },
           "mitre_tactic": {
             "type": [

@@ -142,7 +142,8 @@ pub struct AlertResponse {
     /// `DDoS`: current smoothed packets per second.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_pps: Option<u64>,
-    /// `DDoS`: mitigation status.
+    /// What was done about the source: a `DDoS` mitigation state, or the
+    /// outcome of blocking the source of an application attack.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mitigation_status: Option<String>,
     /// `DDoS`: total packets in attack.

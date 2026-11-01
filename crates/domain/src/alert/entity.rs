@@ -132,7 +132,10 @@ pub struct Alert {
     /// `DDoS`: current smoothed packets per second (EWMA).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_pps: Option<u64>,
-    /// `DDoS`: mitigation status (detecting, active, mitigated, expired).
+    /// What was done about the alert's source. `DDoS`: detecting, active,
+    /// mitigated, expired. An application attack blocked by an extension:
+    /// blocked, `already_blocked`, `allow_listed`, `ceiling_reached`,
+    /// `no_source` or failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mitigation_status: Option<String>,
     /// `DDoS`: total packets in attack.

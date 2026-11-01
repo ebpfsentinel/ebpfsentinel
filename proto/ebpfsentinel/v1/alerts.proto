@@ -86,7 +86,10 @@ message AlertEvent {
   uint64 peak_pps = 27;
   // DDoS: current smoothed packets per second / EWMA (0 if absent).
   uint64 current_pps = 28;
-  // DDoS: mitigation status (Detecting, Active, Mitigated, Expired). Empty if absent.
+  // What was done about the source: a DDoS mitigation state (Detecting,
+  // Active, Mitigated, Expired), or the outcome of blocking the source of an
+  // application attack (blocked, already_blocked, allow_listed,
+  // ceiling_reached, no_source, failed). Empty if absent.
   string mitigation_status = 29;
   // DDoS: total packets in attack (0 if absent).
   uint64 total_packets = 30;
