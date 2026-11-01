@@ -588,7 +588,7 @@ impl AgentConfig {
                     .to_string(),
             });
         }
-        if !self.process_table.enabled && !self.host_rules.rules.is_empty() {
+        if !self.process_table.enabled && self.host_rules.any() {
             return Err(ConfigError::Validation {
                 field: "host_rules.rules".to_string(),
                 message: "host rules are evaluated on the process table's events, and \

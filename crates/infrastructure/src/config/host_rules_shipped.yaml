@@ -1,0 +1,135 @@
+# The host rules the agent ships, loaded with `host_rules.shipped: true`.
+#
+# Each one is a detection every engine in the category carries, written in the
+# same syntax an operator writes, and each starts in shadow: it counts what it
+# would have raised, per workload, until somebody reads that and promotes it.
+# A rule here naming an intention this build does not deliver loads and is
+# reported `not_applicable` rather than silently matching nothing.
+rules:
+  - id: shipped-reverse-shell
+    description: a shell that opens a connection within seconds of starting
+    severity: critical
+    when:
+      process.starts:
+        exe_matches: ['*/sh', '*/bash', '*/dash', '*/zsh', '*/ksh', '*/ash', '*/busybox']
+    followed_by:
+      within: 10s
+      process.connects: {}
+
+  - id: shipped-shell-from-web-server
+    description: a shell started by a web server or an application runtime
+    severity: high
+    when:
+      process.starts:
+        exe_matches: ['*/sh', '*/bash', '*/dash', '*/zsh', '*/ksh', '*/ash']
+        parent_exe_matches: ['*/nginx', '*/apache2', '*/httpd', '*/php-fpm*', '*/lighttpd', '*/caddy', '*/java', '*/node', '*/tomcat*']
+
+  - id: shipped-web-server-child-connects-out
+    description: a program started by a web server that connects out on its own
+    severity: high
+    when:
+      process.starts:
+        parent_exe_matches: ['*/nginx', '*/apache2', '*/httpd', '*/php-fpm*', '*/lighttpd', '*/caddy']
+    followed_by:
+      within: 1m
+      process.connects: {}
+
+  - id: shipped-fileless-exec
+    description: a program started from an executable with no file on disk
+    severity: critical
+    when:
+      process.starts:
+        exe_on_disk: false
+
+  - id: shipped-fileless-connect
+    description: a connection opened by a program whose executable has no file on disk
+    severity: critical
+    when:
+      process.connects:
+        exe_on_disk: false
+
+  - id: shipped-exec-from-temporary-directory
+    description: a program started from a world-writable temporary directory
+    severity: high
+    when:
+      process.starts:
+        exe_matches: ['/tmp/*', '/var/tmp/*', '/dev/shm/*', '/run/user/*/*']
+
+  - id: shipped-connect-fan-out
+    description: one process connecting to many distinct addresses in seconds, the shape of a scan
+    severity: high
+    when:
+      process.connects:
+        count:
+          min: 100
+          within: 10s
+          per: process
+          distinct: remote_address
+
+  - id: shipped-dns-tunnel-shape
+    description: one process asking for many distinct TXT names in a minute
+    severity: high
+    when:
+      process.resolves:
+        query_type: TXT
+        count:
+          min: 50
+          within: 1m
+          per: process
+          distinct: domain
+
+  - id: shipped-hidden-port
+    description: a listening port the kernel holds and the socket listing omits
+    severity: critical
+    when:
+      port.hidden: {}
+
+  - id: shipped-hidden-process
+    description: a process the kernel holds and the process listing omits
+    severity: critical
+    when:
+      process.hidden: {}
+
+  - id: shipped-foreign-bpf-program
+    description: an eBPF program on the network path that the agent did not load
+    severity: high
+    when:
+      bpf.foreign_program: {}
+
+  - id: shipped-ssh-authorized-keys-change
+    description: a change to a file listing who may sign in over SSH
+    severity: high
+    when:
+      any_of:
+        - file.changes:
+            path_matches: ['*/.ssh/authorized_keys', '*/.ssh/authorized_keys2']
+        - file.appears:
+            path_matches: ['*/.ssh/authorized_keys', '*/.ssh/authorized_keys2']
+
+  - id: shipped-scheduled-task-change
+    description: a change to a cron table or a systemd timer, the usual way to come back after a reboot
+    severity: medium
+    when:
+      any_of:
+        - file.changes:
+            path_matches: ['/etc/crontab', '/etc/cron.*', '/var/spool/cron/*', '/etc/systemd/system/*.timer']
+        - file.appears:
+            path_matches: ['/etc/cron.*', '/var/spool/cron/*', '/etc/systemd/system/*.timer']
+
+  - id: shipped-preload-change
+    description: a change to the file that makes the dynamic linker load a library into every program
+    severity: critical
+    when:
+      any_of:
+        - file.changes:
+            path: /etc/ld.so.preload
+        - file.appears:
+            path: /etc/ld.so.preload
+
+  - id: shipped-setuid-bit-set
+    description: a file given the set-user-id bit, which runs it as its owner
+    severity: high
+    when:
+      file.permissions_change:
+        mode_gt: 2047
+        previous_mode_lt: 2048

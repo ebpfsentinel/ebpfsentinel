@@ -41,6 +41,10 @@ attribution:
 process_table:
   enabled: true
 
+# The shipped host rules, in shadow: a reading per workload, no alert.
+host_rules:
+  shipped: true
+
 firewall:
   enabled: true
   # Alert, not block. A node drops its own kubelet exactly once.
