@@ -3,7 +3,9 @@
 use std::time::Duration;
 
 use domain::common::error::DomainError;
-use domain::file_watch::{FileBaseline, FileChangeBatch, FileFacts, WatchedFilesystem};
+use domain::file_watch::{
+    FileBaseline, FileChangeBatch, FileFacts, PlantedCanary, WatchedFilesystem,
+};
 
 /// A watch over whole filesystems, read in a loop by one owner.
 ///
@@ -42,6 +44,15 @@ pub trait FileWatchSource: Send {
         paths: &[String],
         max_hash_bytes: u64,
     ) -> Result<Vec<FileFacts>, DomainError>;
+
+    /// Plant a canary at each of `paths` and report every open or read of
+    /// one in [`FileChangeBatch::opened`]. Each path must sit on a watched
+    /// filesystem; one that cannot be planted is reported in its own entry.
+    ///
+    /// # Errors
+    ///
+    /// No watch is open, or the planter is unreachable.
+    fn plant(&mut self, paths: &[String]) -> Result<Vec<PlantedCanary>, DomainError>;
 
     /// Where the watch lives: `warden` or `local`.
     fn source(&self) -> &'static str;

@@ -13,22 +13,27 @@
 //! writes are watched on the filesystem under it, where they land in the upper
 //! directory under the writer's own host pid.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
-use std::io;
+use std::fs::File;
+use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ebpfsentinel_warden_proto::{FimEvent, FimMark};
+use ebpfsentinel_warden_proto::{FimCanary, FimEvent, FimMark};
 
+/// A file was read.
+pub const FAN_ACCESS: u64 = 0x0000_0001;
 /// The attributes of an entry changed: mode, owner, times or an extended
 /// attribute.
 pub const FAN_ATTRIB: u64 = 0x0000_0004;
 /// A file opened for writing was closed.
 pub const FAN_CLOSE_WRITE: u64 = 0x0000_0008;
+/// A file was opened.
+pub const FAN_OPEN: u64 = 0x0000_0020;
 /// An entry was moved out of the directory.
 pub const FAN_MOVED_FROM: u64 = 0x0000_0040;
 /// An entry was moved into the directory.
@@ -59,6 +64,24 @@ pub const FIM_MASK: u64 = FAN_ATTRIB
     | FAN_RENAME
     | FAN_ONDIR;
 
+/// What a canary is watched for: any open and any read, whatever the access
+/// mode, which only a mark on the file itself can ask for without costing
+/// every open on the filesystem.
+pub const CANARY_MASK: u64 = FAN_OPEN | FAN_ACCESS;
+
+/// Canaries one watch may plant.
+pub const FIM_CANARIES_MAX: usize = 512;
+
+/// What a canary holds. It says what the file is, so an operator who finds
+/// one knows to leave it; a process that reads this far has already opened
+/// it, which is the event.
+pub const CANARY_CONTENT: &[u8] = b"This file is a canary planted by the eBPFsentinel agent.\n\
+Any process that opens it is reported. Leave it where it is.\n";
+
+/// The mode a canary is created with: readable by everyone, so a reading
+/// process fires whoever it runs as, and writable by its owner only.
+const CANARY_MODE: libc::c_uint = 0o644;
+
 /// The longest a read waits for a first event. Below the client's own call
 /// timeout, so a quiet filesystem answers with nothing instead of costing the
 /// agent its connection.
@@ -82,6 +105,7 @@ const FAN_CLOEXEC: libc::c_uint = 0x0000_0001;
 const FAN_NONBLOCK: libc::c_uint = 0x0000_0002;
 const FAN_REPORT_DFID_NAME: libc::c_uint = 0x0000_0c00;
 const FAN_MARK_ADD: libc::c_uint = 0x0000_0001;
+const FAN_MARK_DONT_FOLLOW: libc::c_uint = 0x0000_0004;
 const FAN_MARK_FILESYSTEM: libc::c_uint = 0x0000_0100;
 
 const METADATA_LEN: usize = 24;
@@ -280,6 +304,66 @@ pub(crate) fn fsid_of(fd: RawFd) -> io::Result<[u8; FSID_LEN]> {
     Ok(unsafe { std::mem::transmute::<libc::fsid_t, [u8; FSID_LEN]>(st.f_fsid) })
 }
 
+/// Why a canary was not planted, in the words an operator acts on.
+fn canary_refusal(err: &io::Error) -> String {
+    match err.raw_os_error() {
+        Some(libc::ENOENT) => "no such directory".to_owned(),
+        Some(libc::EACCES) => "the warden may not create a file in this directory: it holds \
+             no CAP_DAC_OVERRIDE, so only a directory its own uid can write to is seeded"
+            .to_owned(),
+        Some(libc::EROFS) => "the filesystem is read-only".to_owned(),
+        Some(libc::ELOOP) => "a symbolic link stands at this path".to_owned(),
+        _ => err.to_string(),
+    }
+}
+
+/// Create the canary at `path`, or accept the one already there.
+///
+/// # Errors
+///
+/// The reason no canary stands at `path`: the directory refused the file, or
+/// something other than a canary already holds the name.
+pub fn place_canary(path: &Path) -> Result<(), String> {
+    let c = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| "the path holds a NUL byte".to_owned())?;
+    // SAFETY: `c` is a NUL-terminated path that outlives the call, and the
+    // mode is passed because `O_CREAT` reads it.
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            CANARY_MODE,
+        )
+    };
+    if fd >= 0 {
+        // SAFETY: `open` returned a fresh descriptor nothing else owns.
+        let mut file = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+        return file
+            .write_all(CANARY_CONTENT)
+            .map_err(|e| format!("the canary could not be written: {e}"));
+    }
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() != Some(libc::EEXIST) {
+        return Err(canary_refusal(&err));
+    }
+    // A name already taken is kept only when it holds a canary: a file of the
+    // operator's own under that name would otherwise raise an alert each time
+    // its owner opened it.
+    let fd = open_path(path, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .map_err(|e| canary_refusal(&e))?;
+    let mut file = File::from(fd);
+    let regular = file.metadata().is_ok_and(|m| m.is_file());
+    let mut held = Vec::with_capacity(CANARY_CONTENT.len() + 1);
+    let read = (&mut file)
+        .take(CANARY_CONTENT.len() as u64 + 1)
+        .read_to_end(&mut held);
+    if regular && read.is_ok() && held == CANARY_CONTENT {
+        Ok(())
+    } else {
+        Err("a file the agent did not plant already holds this name".to_owned())
+    }
+}
+
 pub(crate) fn open_path(path: &Path, flags: libc::c_int) -> io::Result<OwnedFd> {
     let c = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
@@ -303,6 +387,11 @@ pub struct FimWatch {
     mounts: HashMap<[u8; FSID_LEN], OwnedFd>,
     /// Directories already named, by `(fsid, handle type, handle)`.
     dirs: HashMap<HandleKey, PathBuf>,
+    /// The canaries planted, by path. Their opens by this process are its
+    /// own reading and planting, never reported.
+    canaries: HashSet<PathBuf>,
+    /// This process, as the group reports it.
+    own_pid: u32,
     buf: Vec<u8>,
 }
 
@@ -359,6 +448,8 @@ impl FimWatch {
             group,
             mounts: HashMap::new(),
             dirs: HashMap::new(),
+            canaries: HashSet::new(),
+            own_pid: std::process::id(),
             buf: vec![0; READ_BUF_LEN],
         };
         let marks: Vec<FimMark> = paths
@@ -421,6 +512,85 @@ impl FimWatch {
         }
     }
 
+    /// Plant a canary at each of `paths` and mark it for any open or read.
+    ///
+    /// Answers one [`FimCanary`] per path, in order. A path that cannot be
+    /// planted or marked costs that path only.
+    pub fn plant(&mut self, paths: &[String]) -> Vec<FimCanary> {
+        if paths.len() > FIM_CANARIES_MAX {
+            let error = Some(format!(
+                "at most {FIM_CANARIES_MAX} canaries may be planted"
+            ));
+            return paths
+                .iter()
+                .map(|path| FimCanary {
+                    path: path.clone(),
+                    error: error.clone(),
+                })
+                .collect();
+        }
+        paths
+            .iter()
+            .map(|path| FimCanary {
+                path: path.clone(),
+                error: self.plant_one(Path::new(path)).err(),
+            })
+            .collect()
+    }
+
+    fn plant_one(&mut self, path: &Path) -> Result<(), String> {
+        if !path.is_absolute() {
+            return Err("not an absolute path".to_owned());
+        }
+        let parent = path
+            .parent()
+            .filter(|p| p.file_name().is_some() || p == &Path::new("/"))
+            .ok_or_else(|| "the path names no file".to_owned())?;
+        let dir =
+            open_path(parent, libc::O_PATH | libc::O_DIRECTORY).map_err(|e| canary_refusal(&e))?;
+        let fsid = fsid_of(dir.as_raw_fd()).map_err(|e| e.to_string())?;
+        if !self.covers(fsid) {
+            return Err("the directory is on a filesystem this watch did not mark".to_owned());
+        }
+        // Held before the file exists, so its creation, read on this same
+        // group, is already known as the warden's own.
+        let fresh = self.canaries.insert(path.to_path_buf());
+        if let Err(reason) = place_canary(path) {
+            if fresh {
+                self.canaries.remove(path);
+            }
+            return Err(reason);
+        }
+        let c = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| "the path holds a NUL byte".to_owned())?;
+        // SAFETY: the group is open and `c` is a NUL-terminated path that
+        // outlives the call.
+        let rc = unsafe {
+            libc::fanotify_mark(
+                self.group.as_raw_fd(),
+                FAN_MARK_ADD | FAN_MARK_DONT_FOLLOW,
+                CANARY_MASK,
+                libc::AT_FDCWD,
+                c.as_ptr(),
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(mark_refusal(&io::Error::last_os_error()))
+        }
+    }
+
+    /// Whether `event` is this process reading or planting one of its own
+    /// canaries.
+    fn own_canary(&self, event: &FimEvent) -> bool {
+        event.pid == self.own_pid
+            && event
+                .directory
+                .as_deref()
+                .is_some_and(|dir| self.canaries.contains(&Path::new(dir).join(&event.name)))
+    }
+
     /// Whether the filesystem `fsid` names is one this watch marked.
     #[must_use]
     pub fn covers(&self, fsid: [u8; FSID_LEN]) -> bool {
@@ -475,7 +645,10 @@ impl FimWatch {
             let parsed = parse_events(&self.buf[..len]);
             overflowed |= parsed.overflowed;
             for raw in parsed.events {
-                events.push(self.resolve(&raw));
+                let event = self.resolve(&raw);
+                if !self.own_canary(&event) {
+                    events.push(event);
+                }
             }
         }
         Ok((events, overflowed))
@@ -783,6 +956,32 @@ mod tests {
         let (_, marks) = FimWatch::open(&["/no/such/path/anywhere".to_owned()]);
         assert_eq!(marks.len(), 1);
         assert!(marks[0].error.is_some());
+    }
+
+    #[test]
+    fn a_canary_is_planted_once_and_a_foreign_file_is_never_taken() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("0000-archive.docx");
+        place_canary(&path).expect("planted");
+        assert_eq!(std::fs::read(&path).expect("read"), CANARY_CONTENT);
+        // Planting again accepts the canary already there.
+        place_canary(&path).expect("kept");
+        let foreign = dir.path().join("notes.txt");
+        std::fs::write(&foreign, b"the operator's own").expect("write");
+        assert!(place_canary(&foreign).is_err());
+        let link = dir.path().join("link.docx");
+        std::os::unix::fs::symlink(&path, &link).expect("symlink");
+        assert!(place_canary(&link).is_err());
+        assert_eq!(
+            place_canary(&dir.path().join("missing/x.docx")),
+            Err("no such directory".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_canary_is_watched_for_any_open_or_read_and_nothing_on_the_filesystem_is() {
+        assert_eq!(CANARY_MASK, FAN_OPEN | FAN_ACCESS);
+        assert_eq!(FIM_MASK & CANARY_MASK, 0);
     }
 
     #[test]

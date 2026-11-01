@@ -407,6 +407,24 @@ fn handle_conn_with_timeouts(
                 };
                 write_frame(&mut writer, &resp).is_ok()
             }
+            Command::FimCanaries { paths } => {
+                let resp = match fim.as_mut() {
+                    Some(watch) => {
+                        let canaries = watch.plant(paths);
+                        let refused = canaries.iter().filter(|c| c.error.is_some()).count();
+                        eprintln!(
+                            "[warden] file watch planted {} of {} canaries",
+                            canaries.len() - refused,
+                            canaries.len()
+                        );
+                        Response::FimCanaries { canaries }
+                    }
+                    None => Response::Error {
+                        message: FIM_NO_WATCH.into(),
+                    },
+                };
+                write_frame(&mut writer, &resp).is_ok()
+            }
             Command::FimFacts {
                 paths,
                 max_hash_bytes,

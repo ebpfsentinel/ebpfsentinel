@@ -39,12 +39,13 @@ use std::time::Duration;
 
 use domain::alert::entity::Alert;
 use domain::file_watch::{
-    ExpectedBaseline, ExpectedBaselines, FileBaseline, FileChangeBatch, FileChangeKind, FileDrift,
-    FileFacts, FileFingerprint, FileReading, OwnFiles, RootMount, RootedPath, SettledPath,
-    WatchedFilesystem, WatchedPaths, own_file_change, rooted, watched_path_change,
+    ExpectedBaseline, ExpectedBaselines, FileBaseline, FileChange, FileChangeBatch, FileChangeKind,
+    FileDrift, FileFacts, FileFingerprint, FileReading, OwnFiles, PlantedCanary, RootMount,
+    RootedPath, SettledPath, WatchedFilesystem, WatchedPaths, own_file_change, rooted,
+    watched_path_change,
 };
 use domain::hostrule::{Intent, SettledChange, file_events};
-use domain::ransom::written_now;
+use domain::ransom::{canary_exempt, written_now};
 use ports::secondary::file_watch_port::{FileBaselineStore, FileWatchSource, ProcessRootReader};
 use ports::secondary::metrics_port::MetricsPort;
 use tokio::sync::mpsc;
@@ -117,6 +118,48 @@ pub struct FileRuleFeed {
     /// Where every change by a named writer is counted toward a mass
     /// encryption verdict, whatever the rules ask for.
     pub ransom: Option<Arc<RansomService>>,
+}
+
+/// Canary files planted into data directories, and the executables whose
+/// opens of one are not a signal.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CanaryWatch {
+    /// Where each canary is planted.
+    pub paths: Vec<String>,
+    /// Executables, by full path, that read every file of a directory by
+    /// design: a backup tool or a virus scanner.
+    pub exempt: Vec<String>,
+}
+
+impl CanaryWatch {
+    /// The directories the canaries sit in, each once, in order.
+    #[must_use]
+    pub fn directories(&self) -> Vec<String> {
+        let mut dirs: Vec<String> = Vec::new();
+        for path in &self.paths {
+            let dir = match path.rsplit_once('/') {
+                Some(("", _)) => "/",
+                Some((dir, _)) => dir,
+                None => continue,
+            };
+            if !dirs.iter().any(|d| d == dir) {
+                dirs.push(dir.to_owned());
+            }
+        }
+        dirs
+    }
+}
+
+/// The path a change names: its directory joined with its name.
+fn change_path(change: &FileChange) -> Option<String> {
+    let directory = change.directory.as_deref()?;
+    Some(if change.name.is_empty() {
+        directory.to_owned()
+    } else if directory.ends_with('/') {
+        format!("{directory}{}", change.name)
+    } else {
+        format!("{directory}/{}", change.name)
+    })
 }
 
 /// The agent's own files, and where a change another process makes to one
@@ -293,6 +336,12 @@ pub struct FileWatcher {
     learned: BTreeSet<String>,
     /// The fleet's expected state, compared on a path's first sight.
     expected: Option<Arc<ExpectedBaselineSet>>,
+    canaries: Option<CanaryWatch>,
+    /// The canaries standing now, by path.
+    planted: BTreeSet<String>,
+    /// What the last planting answered, so an unchanged answer is not
+    /// logged again.
+    planted_last: Option<Vec<PlantedCanary>>,
 }
 
 impl FileWatcher {
@@ -321,6 +370,152 @@ impl FileWatcher {
             watching: (0, Arc::new(WatchedPaths::new())),
             learned: BTreeSet::new(),
             expected: None,
+            canaries: None,
+            planted: BTreeSet::new(),
+            planted_last: None,
+        }
+    }
+
+    /// Plant canary files and raise any open of one by a process not
+    /// exempt as a decisive mass encryption signal.
+    #[must_use]
+    pub fn with_canaries(mut self, canaries: CanaryWatch) -> Self {
+        for dir in canaries.directories() {
+            if !self.paths.contains(&dir) {
+                self.paths.push(dir);
+            }
+        }
+        self.canaries = Some(canaries);
+        self
+    }
+
+    /// Plant every canary, after an opening: a new watch holds no mark on
+    /// one, and a canary already standing is kept.
+    fn plant_canaries(&mut self) {
+        let Some(canaries) = self.canaries.as_ref().filter(|c| !c.paths.is_empty()) else {
+            return;
+        };
+        let planted = match self.source.plant(&canaries.paths) {
+            Ok(planted) => planted,
+            Err(e) => {
+                warn!(error = %e, "canary files could not be planted");
+                self.planted.clear();
+                return;
+            }
+        };
+        self.planted = planted
+            .iter()
+            .filter(|c| c.error.is_none())
+            .map(|c| c.path.clone())
+            .collect();
+        if self.planted_last.as_ref() != Some(&planted) {
+            info!(
+                planted = self.planted.len(),
+                refused = planted.len() - self.planted.len(),
+                "canary files planted"
+            );
+            for canary in &planted {
+                if let Some(reason) = &canary.error {
+                    warn!(path = %canary.path, reason = %reason, "no canary file is planted at this path");
+                }
+            }
+        }
+        self.planted_last = Some(planted);
+    }
+
+    /// Every canary one reading reports opened, moved or deleted, raised
+    /// once per process and path; a canary taken away is planted again.
+    fn canaries_touched(&mut self, batch: &FileChangeBatch) {
+        if self.planted.is_empty() {
+            return;
+        }
+        // Only a canary carries an open mark, so every open reported is one.
+        let mut touched: Vec<(u32, Option<String>)> = batch
+            .opened
+            .iter()
+            .map(|o| (o.pid, o.path.clone()))
+            .collect();
+        let mut gone: Vec<String> = Vec::new();
+        for change in &batch.changes {
+            let path = change_path(change);
+            let left = change
+                .renamed_from
+                .as_ref()
+                .filter(|from| self.planted.contains(from.as_str()));
+            if let Some(from) = left {
+                gone.push(from.clone());
+                touched.push((change.pid, Some(from.clone())));
+            }
+            let Some(path) = path.filter(|p| self.planted.contains(p)) else {
+                continue;
+            };
+            if change
+                .kinds
+                .iter()
+                .any(|k| matches!(k, FileChangeKind::Deleted | FileChangeKind::MovedOut))
+            {
+                gone.push(path.clone());
+            }
+            touched.push((change.pid, Some(path)));
+        }
+        touched.sort();
+        touched.dedup();
+        let at_ns = now_ns();
+        for (pid, path) in touched {
+            self.canary_touched(pid, path.as_deref(), at_ns);
+        }
+        if !gone.is_empty() {
+            gone.sort();
+            gone.dedup();
+            self.replant(&gone);
+        }
+    }
+
+    /// Plant again the canaries in `paths`, taken away by a process.
+    fn replant(&mut self, paths: &[String]) {
+        match self.source.plant(paths) {
+            Ok(planted) => {
+                for canary in planted {
+                    if let Some(reason) = canary.error {
+                        self.planted.remove(&canary.path);
+                        warn!(path = %canary.path, reason = %reason, "a canary file taken away could not be planted again");
+                    }
+                }
+            }
+            Err(e) => warn!(error = %e, "canary files taken away could not be planted again"),
+        }
+    }
+
+    /// One canary opened by `pid`: logged, and counted toward a verdict
+    /// unless its executable is exempt.
+    fn canary_touched(&self, pid: u32, path: Option<&str>, at_ns: u64) {
+        let shown = path.unwrap_or("-");
+        let feed = self.feed.as_ref();
+        let named = feed
+            .and_then(|f| f.processes.as_ref())
+            .and_then(|table| table.get(pid).map(|entry| (table.lineage(pid), entry)));
+        let Some((lineage, entry)) = named else {
+            warn!(
+                path = shown,
+                pid, "canary file opened by a process the agent could not name"
+            );
+            return;
+        };
+        let exe = entry.identity.path();
+        let exempt = self
+            .canaries
+            .as_ref()
+            .is_some_and(|c| canary_exempt(exe, &c.exempt));
+        if exempt {
+            debug!(
+                path = shown,
+                pid, exe, "canary file opened by an exempt executable"
+            );
+            return;
+        }
+        warn!(path = shown, pid, exe, "canary file opened");
+        if let Some(ransom) = feed.and_then(|f| f.ransom.as_ref()) {
+            ransom.record_canary(&entry, &lineage, path, at_ns);
         }
     }
 
@@ -687,15 +882,8 @@ impl FileWatcher {
     fn queue(&mut self, batch: &FileChangeBatch) {
         let mut lost = false;
         for change in &batch.changes {
-            let Some(directory) = change.directory.as_deref() else {
+            let Some(path) = change_path(change) else {
                 continue;
-            };
-            let path = if change.name.is_empty() {
-                directory.to_owned()
-            } else if directory.ends_with('/') {
-                format!("{directory}{}", change.name)
-            } else {
-                format!("{directory}/{}", change.name)
             };
             let full = self.pending.len() >= FILE_FACTS_PENDING_MAX;
             let pending = match self.pending.entry(path) {
@@ -1012,6 +1200,7 @@ impl FileWatcher {
                 }
                 self.prime_own();
                 self.prime_watched();
+                self.plant_canaries();
             } else if self.watched_moved() {
                 info!("the watched paths changed, opening the watch again");
                 open = false;
@@ -1026,6 +1215,7 @@ impl FileWatcher {
             match self.source.read(wait) {
                 Ok(batch) => {
                     self.record(&batch);
+                    self.canaries_touched(&batch);
                     self.queue(&batch);
                 }
                 Err(e) => {
@@ -1057,7 +1247,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use domain::common::error::DomainError;
-    use domain::file_watch::{FileBaseline, FileChange, FileType};
+    use domain::file_watch::{FileBaseline, FileChange, FileOpened, FileType};
     use ports::secondary::metrics_port::{
         AlertMetrics, AuditMetrics, ConfigMetrics, ConntrackMetrics, ContainerMetrics, CtMetrics,
         DdosMetrics, DlpMetrics, DnsMetrics, DomainMetrics, EventMetrics, FingerprintMetrics,
@@ -1229,6 +1419,17 @@ mod tests {
             Ok(answer)
         }
 
+        /// A path ending in `refused` is refused; every other stands.
+        fn plant(&mut self, paths: &[String]) -> Result<Vec<PlantedCanary>, DomainError> {
+            Ok(paths
+                .iter()
+                .map(|path| PlantedCanary {
+                    path: path.clone(),
+                    error: path.ends_with("refused").then(|| "read-only".to_owned()),
+                })
+                .collect())
+        }
+
         fn source(&self) -> &'static str {
             "local"
         }
@@ -1300,6 +1501,7 @@ mod tests {
                     change(vec![FileChangeKind::Written]),
                 ],
                 overflowed: true,
+                opened: Vec::new(),
             })],
             facts: vec![Ok(Vec::new())],
             cancel: cancel.clone(),
@@ -1595,6 +1797,7 @@ mod tests {
                     FileChangeKind::Written,
                 ])],
                 overflowed: false,
+                opened: Vec::new(),
             })],
             facts: vec![
                 Ok(vec![fact("/etc", FileReading::Present(file('d', 0o755)))]),
@@ -1732,6 +1935,7 @@ mod tests {
         FileChangeBatch {
             changes: vec![change(vec![FileChangeKind::Written])],
             overflowed: false,
+            opened: Vec::new(),
         }
     }
 
@@ -1887,6 +2091,7 @@ mod tests {
                 later,
             ],
             overflowed: false,
+            opened: Vec::new(),
         });
         let pending: Vec<_> = w
             .pending
@@ -1972,6 +2177,7 @@ mod tests {
         w.queue(&FileChangeBatch {
             changes: vec![change],
             overflowed: false,
+            opened: Vec::new(),
         });
         let source = Scripted {
             opens: Vec::new(),
@@ -2010,6 +2216,90 @@ mod tests {
     }
 
     const KEYS: &str = "/var/lib/c/9/fs/root/.ssh/authorized_keys";
+
+    #[test]
+    fn the_canaries_directories_are_watched_once_each() {
+        let canaries = CanaryWatch {
+            paths: vec![
+                "/srv/a.docx".into(),
+                "/srv/b.xlsx".into(),
+                "/c.docx".into(),
+                "relative".into(),
+            ],
+            exempt: Vec::new(),
+        };
+        assert_eq!(canaries.directories(), vec!["/srv", "/"]);
+        let source = Scripted {
+            opens: Vec::new(),
+            reads: Vec::new(),
+            facts: Vec::new(),
+            cancel: CancellationToken::new(),
+            opened: Arc::new(AtomicU64::new(0)),
+        };
+        let w = watcher(source, Arc::new(Counted::default())).with_canaries(canaries);
+        assert_eq!(w.paths.iter().filter(|p| *p == "/srv").count(), 1);
+        assert_eq!(w.paths.iter().filter(|p| *p == "/").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_open_of_a_canary_raises_the_verdict_and_a_canary_taken_away_is_planted_again() {
+        let (rules, _rules_rx) = rules(&[]);
+        let (tx, mut rx) = mpsc::channel(8);
+        let sources: crate::ransom_service::HostSourcesReader = Arc::new(|| {
+            domain::hostrule::HostSources::new(Some((6, 12)))
+                .present(domain::hostrule::Source::ProcessTracing)
+                .present(domain::hostrule::Source::FileWatch)
+        });
+        let ransom = Arc::new(RansomService::new(tx, sources));
+        let mut w = fed(rules, table().await, Arc::new(Memory::default()));
+        if let Some(feed) = w.feed.as_mut() {
+            feed.ransom = Some(ransom);
+        }
+        let mut w = w.with_canaries(CanaryWatch {
+            paths: vec!["/srv/0000-archive.docx".into(), "/mnt/refused".into()],
+            exempt: vec!["/usr/bin/restic".into()],
+        });
+        w.plant_canaries();
+        assert_eq!(
+            w.planted.iter().collect::<Vec<_>>(),
+            vec!["/srv/0000-archive.docx"]
+        );
+        // An open by a process nobody can name is logged and raises nothing.
+        w.canaries_touched(&FileChangeBatch {
+            opened: vec![FileOpened {
+                pid: 999,
+                path: Some("/srv/0000-archive.docx".into()),
+            }],
+            ..FileChangeBatch::default()
+        });
+        assert!(rx.try_recv().is_err());
+        w.canaries_touched(&FileChangeBatch {
+            opened: vec![FileOpened {
+                pid: 42,
+                path: Some("/srv/0000-archive.docx".into()),
+            }],
+            ..FileChangeBatch::default()
+        });
+        let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() else {
+            panic!("no verdict raised");
+        };
+        assert!(
+            alert
+                .message
+                .contains("canary /srv/0000-archive.docx opened")
+        );
+        // A deletion by another process is a touch, and the canary stands
+        // again afterwards.
+        let mut gone = change(vec![FileChangeKind::Deleted]);
+        gone.pid = 42;
+        gone.directory = Some("/srv".into());
+        gone.name = "0000-archive.docx".into();
+        w.canaries_touched(&FileChangeBatch {
+            changes: vec![gone],
+            ..FileChangeBatch::default()
+        });
+        assert!(w.planted.contains("/srv/0000-archive.docx"));
+    }
 
     #[tokio::test]
     async fn a_new_file_in_a_container_names_its_writer_and_ancestry() {
@@ -2091,6 +2381,7 @@ mod tests {
         w.queue(&FileChangeBatch {
             changes: vec![arrived, left],
             overflowed: false,
+            opened: Vec::new(),
         });
         w.source = Box::new(Scripted {
             opens: Vec::new(),

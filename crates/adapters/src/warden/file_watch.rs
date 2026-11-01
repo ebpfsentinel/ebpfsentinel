@@ -11,20 +11,22 @@ use std::time::Duration;
 
 use domain::common::error::DomainError;
 use domain::file_watch::{
-    FileBaseline, FileChange, FileChangeBatch, FileChangeKind, FileFacts, FileReading, FileType,
-    WatchedFilesystem, XattrDigest,
+    FileBaseline, FileChange, FileChangeBatch, FileChangeKind, FileFacts, FileOpened, FileReading,
+    FileType, PlantedCanary, WatchedFilesystem, XattrDigest,
 };
 use ebpfsentinel_warden_client::ReconnectingClient;
 pub use ebpfsentinel_warden_client::{
-    FimEvent, FimFacts, FimFile, FimFileType, FimMark, FimReading, FimXattr,
+    FimCanary, FimEvent, FimFacts, FimFile, FimFileType, FimMark, FimReading, FimXattr,
 };
 use ports::secondary::file_watch_port::FileWatchSource;
 
 /// Set to the warden's control socket when the agent runs rootless.
 const WARDEN_SOCK_ENV: &str = "EBPFSENTINEL_WARDEN_SOCK";
 
+const FAN_ACCESS: u64 = 0x0000_0001;
 const FAN_ATTRIB: u64 = 0x0000_0004;
 const FAN_CLOSE_WRITE: u64 = 0x0000_0008;
+const FAN_OPEN: u64 = 0x0000_0020;
 const FAN_MOVED_FROM: u64 = 0x0000_0040;
 const FAN_MOVED_TO: u64 = 0x0000_0080;
 const FAN_CREATE: u64 = 0x0000_0100;
@@ -43,6 +45,9 @@ pub trait LocalWatch: Send {
 
     /// What each path on a watched filesystem names.
     fn facts(&self, paths: &[String], max_hash_bytes: u64) -> Vec<FimFacts>;
+
+    /// Plant a canary at each path and watch it for any open or read.
+    fn plant(&mut self, paths: &[String]) -> Vec<FimCanary>;
 }
 
 /// Opens an in-process watch on the filesystems holding the paths given.
@@ -157,11 +162,40 @@ fn to_change(event: FimEvent) -> Option<FileChange> {
     })
 }
 
+/// The canary an event reports opened, when it reports an open.
+fn to_opened(event: &FimEvent) -> Option<FileOpened> {
+    if event.mask & (FAN_OPEN | FAN_ACCESS) == 0 {
+        return None;
+    }
+    Some(FileOpened {
+        pid: event.pid,
+        path: event.directory.as_deref().map(|dir| {
+            if dir.ends_with('/') {
+                format!("{dir}{}", event.name)
+            } else {
+                format!("{dir}/{}", event.name)
+            }
+        }),
+    })
+}
+
 fn to_batch(events: Vec<FimEvent>, overflowed: bool) -> FileChangeBatch {
+    let opened = events.iter().filter_map(to_opened).collect();
     FileChangeBatch {
         changes: events.into_iter().filter_map(to_change).collect(),
         overflowed,
+        opened,
     }
+}
+
+fn to_planted(canaries: Vec<FimCanary>) -> Vec<PlantedCanary> {
+    canaries
+        .into_iter()
+        .map(|c| PlantedCanary {
+            path: c.path,
+            error: c.error,
+        })
+        .collect()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -278,6 +312,19 @@ impl FileWatchSource for FileWatch {
         Ok(to_facts(facts))
     }
 
+    fn plant(&mut self, paths: &[String]) -> Result<Vec<PlantedCanary>, DomainError> {
+        let planted = match &mut self.source {
+            Source::Warden(client) => client.fim_canaries(paths).map_err(|e| {
+                DomainError::EngineError(format!("warden could not plant the canaries: {e}"))
+            })?,
+            Source::Local { watch, .. } => match watch {
+                Some(watch) => watch.plant(paths),
+                None => return Err(DomainError::EngineError(NO_LOCAL_WATCH.into())),
+            },
+        };
+        Ok(to_planted(planted))
+    }
+
     fn source(&self) -> &'static str {
         match self.source {
             Source::Warden(_) => "warden",
@@ -338,6 +385,16 @@ mod tests {
                 })
                 .collect()
         }
+
+        fn plant(&mut self, paths: &[String]) -> Vec<FimCanary> {
+            paths
+                .iter()
+                .map(|p| FimCanary {
+                    path: p.clone(),
+                    error: None,
+                })
+                .collect()
+        }
     }
 
     fn opens_one(paths: &[String]) -> (Option<Box<dyn LocalWatch>>, Vec<FimMark>) {
@@ -388,6 +445,33 @@ mod tests {
     }
 
     #[test]
+    fn an_open_of_a_canary_is_reported_apart_from_the_changes() {
+        let batch = to_batch(
+            vec![event(FAN_OPEN), event(FAN_ACCESS | FAN_CLOSE_WRITE)],
+            false,
+        );
+        assert_eq!(batch.changes.len(), 1);
+        assert_eq!(
+            batch.opened,
+            vec![
+                FileOpened {
+                    pid: 4242,
+                    path: Some("/etc/passwd".into())
+                };
+                2
+            ]
+        );
+        let mut root = event(FAN_OPEN);
+        root.directory = Some("/".into());
+        assert_eq!(
+            to_opened(&root).and_then(|o| o.path).as_deref(),
+            Some("/passwd")
+        );
+        root.directory = None;
+        assert_eq!(to_opened(&root).map(|o| o.path), Some(None));
+    }
+
+    #[test]
     fn merged_bits_become_every_kind_in_order() {
         assert_eq!(
             kinds_of(FAN_DELETE | FAN_CREATE | FAN_ATTRIB),
@@ -435,7 +519,13 @@ mod tests {
             },
         };
         assert!(watch.facts(&["/etc/hosts".into()], 1).is_err());
+        assert!(watch.plant(&["/srv/0000-archive.docx".into()]).is_err());
         let _ = watch.open(&["/".into()]);
+        let planted = watch
+            .plant(&["/srv/0000-archive.docx".into()])
+            .unwrap_or_default();
+        assert_eq!(planted.len(), 1);
+        assert!(planted[0].error.is_none());
         let facts = watch.facts(&["/etc/hosts".into()], 1).unwrap_or_default();
         let FileReading::Present(file) = &facts[0].reading else {
             panic!("expected an entry");

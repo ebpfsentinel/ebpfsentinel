@@ -67,11 +67,31 @@ pub struct FileChange {
     pub renamed_from: Option<String>,
 }
 
+/// A canary opened or read: the only file the watch reports an open of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileOpened {
+    /// The process that opened it, `0` when it could not be named.
+    pub pid: u32,
+    /// The canary's path, absent when its directory could not be named.
+    pub path: Option<String>,
+}
+
+/// A canary the watch was asked to plant, and whether one stands there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlantedCanary {
+    /// The path asked for.
+    pub path: String,
+    /// Why no canary is watched there, `None` when one is.
+    pub error: Option<String>,
+}
+
 /// What one reading handed over.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileChangeBatch {
     /// The changes, in the order the kernel queued them.
     pub changes: Vec<FileChange>,
+    /// Canaries opened or read, in the order the kernel queued them.
+    pub opened: Vec<FileOpened>,
     /// Changes were lost before these because the kernel's queue was full.
     pub overflowed: bool,
 }

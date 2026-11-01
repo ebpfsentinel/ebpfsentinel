@@ -6047,6 +6047,19 @@ pub fn start_file_watch(start: FileWatchStart<'_>) -> Option<FileWatchHandle> {
         alerts: start.alerts,
         workloads: start.workloads,
     });
+    let canaries = &config.file_watch.canaries;
+    if canaries.enabled {
+        let paths = canaries.paths();
+        info!(
+            canaries = paths.len(),
+            exempt = canaries.exempt.len(),
+            "canary files are planted"
+        );
+        watcher = watcher.with_canaries(application::file_watch_service::CanaryWatch {
+            paths,
+            exempt: canaries.exempt.clone(),
+        });
+    }
     if let Some(rules) = start.host_rules {
         let proc_root = resolver_proc_path(&config.container.resolver.proc_path, &host_proc_root());
         watcher = watcher.with_rules(FileRuleFeed {
@@ -8525,6 +8538,10 @@ impl adapters::warden::file_watch::LocalWatch for LocalFileWatch {
         ebpfsentinel_warden::file_facts::read_facts(paths, max_hash_bytes, &|fsid| {
             self.0.covers(fsid)
         })
+    }
+
+    fn plant(&mut self, paths: &[String]) -> Vec<adapters::warden::file_watch::FimCanary> {
+        self.0.plant(paths)
     }
 }
 

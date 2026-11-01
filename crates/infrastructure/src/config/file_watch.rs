@@ -6,6 +6,10 @@
 //! directory lives.
 
 use domain::file_watch::{DECLARED_ORIGIN, WATCHED_PATHS_MAX, WatchedPaths, check_watched_path};
+use domain::ransom::{
+    CANARIES_MAX, CANARY_DIRECTORIES, CANARY_EXEMPT, CANARY_NAMES, canary_name_refusal,
+    canary_paths,
+};
 use serde::{Deserialize, Serialize};
 
 use super::ConfigError;
@@ -46,6 +50,89 @@ pub struct FileWatchConfig {
     /// everything beneath it: a change under one is an alert, whichever
     /// process made it.
     pub paths: Vec<String>,
+
+    /// Canary files planted into data directories, any open of which is a
+    /// decisive mass encryption signal.
+    pub canaries: CanaryConfig,
+}
+
+/// Canary files: names no legitimate process has a reason to open, planted
+/// into the directories a run walks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CanaryConfig {
+    /// Whether canaries are planted. Off by default: planting writes files
+    /// into the operator's own directories.
+    pub enabled: bool,
+
+    /// Where canaries are planted, each an absolute directory as the
+    /// watch's holder reaches it. One absent on the host is reported and
+    /// skipped.
+    pub directories: Vec<String>,
+
+    /// The names planted into each directory.
+    pub names: Vec<String>,
+
+    /// Executables, by full path, whose opens of a canary are not a signal:
+    /// whatever walks these directories by design, a backup or a scanner.
+    pub exempt: Vec<String>,
+}
+
+impl Default for CanaryConfig {
+    fn default() -> Self {
+        let owned = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect();
+        Self {
+            enabled: false,
+            directories: owned(CANARY_DIRECTORIES),
+            names: owned(CANARY_NAMES),
+            exempt: owned(CANARY_EXEMPT),
+        }
+    }
+}
+
+impl CanaryConfig {
+    /// Every canary path, each name in each directory.
+    #[must_use]
+    pub fn paths(&self) -> Vec<String> {
+        canary_paths(&self.directories, &self.names)
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        let invalid = |field: &str, message: String| ConfigError::Validation {
+            field: format!("file_watch.canaries.{field}"),
+            message,
+        };
+        if let Some(dir) = self.directories.iter().find(|d| !d.starts_with('/')) {
+            return Err(invalid(
+                "directories",
+                format!("{dir:?} is not an absolute path"),
+            ));
+        }
+        for name in &self.names {
+            if let Some(why) = canary_name_refusal(name) {
+                return Err(invalid("names", format!("{name:?} {why}")));
+            }
+        }
+        if let Some(exe) = self.exempt.iter().find(|e| !e.starts_with('/')) {
+            return Err(invalid(
+                "exempt",
+                format!("{exe:?} is not an absolute path"),
+            ));
+        }
+        if self.enabled && self.names.is_empty() {
+            return Err(invalid(
+                "names",
+                "must name at least one canary when enabled".into(),
+            ));
+        }
+        if self.directories.len().saturating_mul(self.names.len()) > CANARIES_MAX {
+            return Err(invalid(
+                "directories",
+                format!("at most {CANARIES_MAX} canaries, every name in every directory"),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for FileWatchConfig {
@@ -56,6 +143,7 @@ impl Default for FileWatchConfig {
             max_hash_bytes: DEFAULT_MAX_HASH_BYTES,
             max_baselines: DEFAULT_MAX_BASELINES,
             paths: Vec::new(),
+            canaries: CanaryConfig::default(),
         }
     }
 }
@@ -110,7 +198,7 @@ impl FileWatchConfig {
         for path in &self.paths {
             check_watched_path(path).map_err(invalid_path)?;
         }
-        Ok(())
+        self.canaries.validate()
     }
 
     /// The declared paths, each watched through the configuration.
@@ -197,6 +285,66 @@ mod tests {
             ..FileWatchConfig::default()
         };
         assert!(many.validate().is_err());
+    }
+
+    #[test]
+    fn canaries_are_off_by_default_and_their_defaults_are_valid() {
+        let config = FileWatchConfig::default();
+        assert!(!config.canaries.enabled);
+        assert_eq!(
+            config.canaries.paths().len(),
+            CANARY_DIRECTORIES.len() * CANARY_NAMES.len()
+        );
+        assert!(
+            config
+                .canaries
+                .paths()
+                .contains(&"/srv/0000-archive.docx".to_owned())
+        );
+        let on = FileWatchConfig {
+            canaries: CanaryConfig {
+                enabled: true,
+                ..CanaryConfig::default()
+            },
+            ..FileWatchConfig::default()
+        };
+        assert!(on.validate().is_ok());
+    }
+
+    #[test]
+    fn a_canary_the_watch_cannot_plant_is_refused() {
+        let with = |canaries: CanaryConfig| FileWatchConfig {
+            canaries,
+            ..FileWatchConfig::default()
+        };
+        let base = CanaryConfig {
+            enabled: true,
+            ..CanaryConfig::default()
+        };
+        for bad in [
+            CanaryConfig {
+                directories: vec!["srv".into()],
+                ..base.clone()
+            },
+            CanaryConfig {
+                names: vec!["a/b".into()],
+                ..base.clone()
+            },
+            CanaryConfig {
+                names: Vec::new(),
+                ..base.clone()
+            },
+            CanaryConfig {
+                exempt: vec!["restic".into()],
+                ..base.clone()
+            },
+            CanaryConfig {
+                directories: (0..=CANARIES_MAX).map(|i| format!("/d{i}")).collect(),
+                ..base.clone()
+            },
+        ] {
+            assert!(with(bad.clone()).validate().is_err(), "{bad:?}");
+        }
     }
 
     #[test]

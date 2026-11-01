@@ -29,8 +29,8 @@ use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame,
 // Re-exported under their real names so callers of the typed control methods can
 // build request values without taking a direct dependency on the protocol crate.
 pub use ebpfsentinel_warden_proto::{
-    BindProbe, ConntrackTuple, DlpTarget, ExecutableIdentity, FileRoot, FimEvent, FimFacts,
-    FimFile, FimFileType, FimMark, FimReading, FimXattr, GoExecutable, GoExecutableScan,
+    BindProbe, ConntrackTuple, DlpTarget, ExecutableIdentity, FileRoot, FimCanary, FimEvent,
+    FimFacts, FimFile, FimFileType, FimMark, FimReading, FimXattr, GoExecutable, GoExecutableScan,
     HeldBpfObjects, HiddenProcessReading, ListedPort, MappedFile, MappingScan,
     NamespacePortReading, NetworkProgram, PacketSocket, PidObservation, ProcessMappings,
     ProcessStamp, ROOTED_CHUNK_MAX, RootedFile, RootedRead, RouteSpec, TaskIdentity,
@@ -84,6 +84,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::FimOpen { .. } => "FimOpen",
         Command::FimRead { .. } => "FimRead",
         Command::FimFacts { .. } => "FimFacts",
+        Command::FimCanaries { .. } => "FimCanaries",
         Command::HiddenPorts { .. } => "HiddenPorts",
         Command::HiddenProcesses { .. } => "HiddenProcesses",
         Command::FileRoots => "FileRoots",
@@ -368,6 +369,14 @@ impl WardenClient {
         })? {
             Response::FimFactsRead { facts } => Ok(facts),
             other => Err(unexpected("FimFacts", &other)),
+        }
+    }
+
+    /// Plant a canary at each path and watch it on this connection's watch.
+    pub fn fim_canaries(&mut self, paths: Vec<String>) -> io::Result<Vec<FimCanary>> {
+        match self.call(&Command::FimCanaries { paths })? {
+            Response::FimCanaries { canaries } => Ok(canaries),
+            other => Err(unexpected("FimCanaries", &other)),
         }
     }
 
@@ -740,6 +749,12 @@ impl ReconnectingClient {
         max_hash_bytes: u64,
     ) -> io::Result<Vec<FimFacts>> {
         self.with_retry(|c| c.fim_facts(paths.to_vec(), max_hash_bytes))
+    }
+
+    /// Plant and watch canaries. After a reconnect the new connection holds
+    /// no watch, and the warden says so.
+    pub fn fim_canaries(&mut self, paths: &[String]) -> io::Result<Vec<FimCanary>> {
+        self.with_retry(|c| c.fim_canaries(paths.to_vec()))
     }
 
     /// Tear down a single conntrack flow.

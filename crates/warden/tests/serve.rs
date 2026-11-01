@@ -119,6 +119,22 @@ fn a_file_read_without_a_watch_is_refused_and_a_refused_mark_is_named() {
         }
     );
 
+    // A canary needs the watch it is read through.
+    write_frame(
+        &mut s,
+        &Command::FimCanaries {
+            paths: vec!["/srv/0000-archive.docx".into()],
+        },
+    )
+    .unwrap();
+    let resp: Response = read_frame(&mut s).unwrap();
+    assert_eq!(
+        resp,
+        Response::Error {
+            message: FIM_NO_WATCH.into()
+        }
+    );
+
     // A path that does not exist is answered with its reason, and the
     // connection stays usable.
     write_frame(

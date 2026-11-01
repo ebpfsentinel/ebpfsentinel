@@ -194,6 +194,15 @@ pub struct FimMark {
     pub renames: bool,
 }
 
+/// A canary the warden was asked to plant, and whether it is watched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FimCanary {
+    /// The path the agent named, in the warden's mount namespace.
+    pub path: String,
+    /// Why no canary is watched at that path, `None` when one is.
+    pub error: Option<String>,
+}
+
 /// One change on a watched filesystem, its file handle already resolved.
 ///
 /// The kernel reports the directory as a file handle, which only a holder of
@@ -809,6 +818,17 @@ pub enum Command {
         /// A regular file larger than this is not hashed.
         max_hash_bytes: u64,
     },
+    /// Plant a canary at each path and watch it for any open or read,
+    /// answered by [`Response::FimCanaries`]. A canary is a small file of
+    /// fixed content created where none exists; a file already at the path
+    /// is kept only when it holds that content. Each path must sit on a
+    /// filesystem this connection's watch covers, and an open of one reads
+    /// through [`Command::FimRead`] like any other change. The warden's own
+    /// reads of a canary are never reported.
+    FimCanaries {
+        /// Absolute paths, as the warden's mount namespace reaches them.
+        paths: Vec<String>,
+    },
     /// In every network namespace `/proc` shows, read the TCP and UDP
     /// listings from `/proc/net` and `sock_diag`, then bind each of `ports`
     /// on both wildcards and both transports with no reuse option and
@@ -972,6 +992,12 @@ pub enum Response {
         events: Vec<FimEvent>,
         /// The kernel's queue overflowed and changes were lost before these.
         overflowed: bool,
+    },
+    /// The outcome of every canary, answering [`Command::FimCanaries`], in
+    /// the order the paths were given.
+    FimCanaries {
+        /// One entry per path asked for.
+        canaries: Vec<FimCanary>,
     },
     /// What the paths of a [`Command::FimFacts`] name, in the order asked.
     /// Fewer entries than paths means the warden's reading budget ran out

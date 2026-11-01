@@ -9,6 +9,7 @@
 //! reached it and the ones this host could not read.
 
 pub mod actor;
+pub mod canary;
 pub mod engine;
 pub mod entropy;
 pub mod header;
@@ -19,6 +20,10 @@ pub mod replace;
 pub mod signal;
 
 pub use actor::{Actor, actor_of};
+pub use canary::{
+    CANARIES_MAX, CANARY_DIRECTORIES, CANARY_EXEMPT, CANARY_NAMES, canary_exempt,
+    canary_name_refusal, canary_paths, canary_touched,
+};
 pub use engine::{
     Corroboration, MASS_ENCRYPTION_COMPONENT, MASS_ENCRYPTION_RULE_ID, RANSOM_ACTORS_MAX,
     RANSOM_WINDOW_NS, RansomEngine, RansomVerdict, corroborate,

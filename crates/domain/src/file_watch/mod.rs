@@ -13,7 +13,9 @@ pub mod rooted;
 pub mod watched;
 
 pub use baseline::{FileBaseline, FileDrift, FileFacts, FileReading, FileType, XattrDigest};
-pub use entity::{FileChange, FileChangeBatch, FileChangeKind, WatchedFilesystem};
+pub use entity::{
+    FileChange, FileChangeBatch, FileChangeKind, FileOpened, PlantedCanary, WatchedFilesystem,
+};
 pub use expected::{
     EXPECTED_BASELINES_MAX, ExpectedBaseline, ExpectedBaselines, ExpectedBaselinesDocument,
     FileFingerprint,

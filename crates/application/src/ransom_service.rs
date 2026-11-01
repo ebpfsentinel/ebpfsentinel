@@ -16,8 +16,8 @@ use domain::process::engine::Lineage;
 use domain::process::entity::ProcessEntry;
 use domain::ransom::{
     Actor, DistinctPaths, MassRenames, RansomEngine, RansomNotes, RansomSignal, RansomVerdict,
-    Replacements, SignalKind, actor_of, entropy_rose, header_mismatch, original_of, renamed_over,
-    unavailable,
+    Replacements, SignalKind, actor_of, canary_touched, entropy_rose, header_mismatch, original_of,
+    renamed_over, unavailable,
 };
 use domain::workload::entity::{Workload, WorkloadSource};
 use tokio::sync::mpsc;
@@ -32,6 +32,7 @@ pub type HostSourcesReader = Arc<dyn Fn() -> HostSources + Send + Sync>;
 /// every verdict as not read, so a verdict never reads as the whole engine
 /// when part of it is absent.
 const READ: &[SignalKind] = &[
+    SignalKind::CanaryTouched,
     SignalKind::DistinctRewrites,
     SignalKind::EntropyRise,
     SignalKind::HeaderMismatch,
@@ -172,6 +173,24 @@ impl RansomService {
             }
         }
         self.record_replacement(&actor, writer, lineage, &kinds, change, at_ns);
+    }
+
+    /// A canary at `path` opened by `opener`: decisive on its own, so the
+    /// verdict follows from this one open. `path` is absent when the
+    /// canary's directory could not be named.
+    pub fn record_canary(
+        &self,
+        opener: &ProcessEntry,
+        lineage: &Lineage,
+        path: Option<&str>,
+        at_ns: u64,
+    ) {
+        let actor = actor_of(opener, lineage);
+        self.observe(
+            canary_touched(&actor, opener.pid, path, at_ns),
+            opener,
+            lineage,
+        );
     }
 
     /// The half of a replacement a rewrite may be: a file renamed over a
@@ -762,8 +781,30 @@ mod tests {
         assert!(
             alert
                 .message
-                .contains("canary_touched (not read by this agent)")
+                .contains("crypto_rate (not read by this agent)")
         );
         assert!(!alert.message.contains("distinct_rewrites ("));
+        assert!(!alert.message.contains("canary_touched ("));
+    }
+
+    #[test]
+    fn one_open_of_a_canary_raises_the_verdict_alone() {
+        let (service, mut rx) = service();
+        let opener = running(300, "/tmp/enc", 9);
+        let lineage = Lineage {
+            ancestors: Vec::new(),
+            truncated: false,
+            incomplete: false,
+        };
+        service.record_canary(&opener, &lineage, Some("/srv/0000-archive.docx"), 1);
+        let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() else {
+            panic!("no verdict raised");
+        };
+        assert_eq!(alert.tgid, Some(300));
+        assert!(
+            alert
+                .message
+                .contains("canary /srv/0000-archive.docx opened")
+        );
     }
 }
