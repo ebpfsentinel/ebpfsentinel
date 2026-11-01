@@ -22,6 +22,7 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::alert::filter::parse_severity;
@@ -177,27 +178,28 @@ impl Glob {
 
     /// Whether `text` matches, in time bounded by the product of the two
     /// lengths: one star is remembered, so a later star never backtracks
-    /// into an earlier one.
+    /// into an earlier one. Nothing is allocated: `t` is a byte offset
+    /// into `text`, always on a character boundary.
     #[must_use]
     pub fn matches(&self, text: &str) -> bool {
-        let text: Vec<char> = text.chars().collect();
         let (mut p, mut t) = (0, 0);
         let mut star: Option<(usize, usize)> = None;
-        while t < text.len() {
+        while let Some(ch) = text[t..].chars().next() {
             match self.pattern.get(p) {
                 Some('*') => {
                     star = Some((p, t));
                     p += 1;
                 }
-                Some(&c) if c == '?' || c == text[t] => {
+                Some(&c) if c == '?' || c == ch => {
                     p += 1;
-                    t += 1;
+                    t += ch.len_utf8();
                 }
                 _ => match star {
                     Some((sp, st)) => {
+                        let skipped = text[st..].chars().next().map_or(1, char::len_utf8);
                         p = sp + 1;
-                        t = st + 1;
-                        star = Some((sp, st + 1));
+                        t = st + skipped;
+                        star = Some((sp, t));
                     }
                     None => return false,
                 },
@@ -206,6 +208,64 @@ impl Glob {
         self.pattern[p..].iter().all(|&c| c == '*')
     }
 }
+
+/// The most a regular expression may compile to, in bytes; a pattern
+/// above it is refused at load.
+pub const HOST_RULE_REGEX_SIZE_LIMIT: usize = 512 * 1024;
+
+/// The most the lazy DFA of one regular expression may cache, in bytes. A
+/// pattern whose search needs more is not refused: the engine falls back to
+/// a slower search of the same linear bound, so this caps memory rather
+/// than the patterns that load.
+pub const HOST_RULE_REGEX_DFA_LIMIT: usize = 512 * 1024;
+
+/// A regular expression in the `regex` crate's syntax: linear in the text
+/// by construction, with no backtracking, no lookaround and no
+/// backreference to bound. Unanchored, unlike a glob: `^` and `$` say so.
+#[derive(Debug, Clone)]
+pub struct Pattern(Regex);
+
+impl Pattern {
+    /// Compile `source` under both limits.
+    ///
+    /// # Errors
+    ///
+    /// The engine's reason, a syntax error or a compiled size above
+    /// [`HOST_RULE_REGEX_SIZE_LIMIT`].
+    pub fn new(source: &str) -> Result<Self, String> {
+        RegexBuilder::new(source)
+            .size_limit(HOST_RULE_REGEX_SIZE_LIMIT)
+            .dfa_size_limit(HOST_RULE_REGEX_DFA_LIMIT)
+            .build()
+            .map(Self)
+            .map_err(|e| match e {
+                regex::Error::CompiledTooBig(limit) => format!(
+                    "compiles to more than {limit} bytes; a counted repetition of a Unicode class \
+                     such as `\\w{{100}}` is the usual cause, and `(?-u)` or a narrower class \
+                     shrinks it"
+                ),
+                other => other.to_string(),
+            })
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    #[must_use]
+    pub fn is_match(&self, text: &str) -> bool {
+        self.0.is_match(text)
+    }
+}
+
+impl PartialEq for Pattern {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for Pattern {}
 
 /// One test on one field of an event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,6 +276,8 @@ pub enum Test {
     NotIn(Vec<FieldValue>),
     /// Matching one of these globs.
     Matches(Vec<Glob>),
+    /// Matching one of these regular expressions somewhere in the text.
+    Regex(Vec<Pattern>),
     /// Greater than this.
     Gt(i64),
     /// Less than this.
@@ -243,6 +305,10 @@ impl Matcher {
             Test::NotIn(values) => !values.contains(own),
             Test::Matches(globs) => match own {
                 FieldValue::Text(text) => globs.iter().any(|g| g.matches(text)),
+                _ => false,
+            },
+            Test::Regex(patterns) => match own {
+                FieldValue::Text(text) => patterns.iter().any(|p| p.is_match(text)),
                 _ => false,
             },
             Test::Gt(bound) => matches!(own, FieldValue::Integer(v) if v > bound),
@@ -860,13 +926,7 @@ fn compile_block(intent: Intent, map: &BTreeMap<String, RawValue>) -> Result<Vec
             None | Some(Op::In) => Test::In(values(intent, spec, key, value)?),
             Some(Op::NotIn) => Test::NotIn(values(intent, spec, key, value)?),
             Some(Op::Matches) => Test::Matches(globs(spec, key, value)?),
-            Some(Op::Regex) => {
-                return Err(format!(
-                    "`{key}`: this build evaluates no regular expression; `{}_matches` takes a \
-                     glob, with `*` for any run of characters and `?` for one",
-                    spec.name
-                ));
-            }
+            Some(Op::Regex) => Test::Regex(patterns(spec, key, value)?),
             Some(op @ (Op::Gt | Op::Lt)) => {
                 let bound = bound(intent, spec, key, value)?;
                 if op == Op::Gt {
@@ -959,6 +1019,37 @@ fn coerce(
         .with(spec.name, value.clone())
         .map(|_| value)
         .map_err(|e| format!("`{key}`: {e}"))
+}
+
+fn patterns(spec: &FieldSpec, key: &str, value: &RawValue) -> Result<Vec<Pattern>, String> {
+    if !matches!(spec.ty, FieldType::Text | FieldType::Path | FieldType::Hash) {
+        return Err(format!(
+            "`{key}`: a regular expression matches text, and `{}` is {}: use `{}_in`",
+            spec.name,
+            spec.ty.as_str(),
+            spec.name
+        ));
+    }
+    let items: &[RawValue] = match value {
+        RawValue::List(items) => items,
+        single => std::slice::from_ref(single),
+    };
+    check_list(key, items.len())?;
+    items
+        .iter()
+        .map(|item| match item {
+            RawValue::Text(source) if source.len() <= HOST_RULE_VALUE_MAX_LEN => {
+                Pattern::new(source).map_err(|reason| format!("`{key}: {source}` {reason}"))
+            }
+            RawValue::Text(_) => Err(format!(
+                "`{key}`: a regular expression is at most {HOST_RULE_VALUE_MAX_LEN} bytes"
+            )),
+            other => Err(format!(
+                "`{key}` takes a regular expression, and {} was given",
+                other.kind()
+            )),
+        })
+        .collect()
 }
 
 fn globs(spec: &FieldSpec, key: &str, value: &RawValue) -> Result<Vec<Glob>, String> {
@@ -1275,8 +1366,12 @@ mod tests {
                 .contains("a map was given")
         );
         assert!(
-            refused(r#"{"id":"r","when":{"process.starts":{"exe_regex":"^/tmp"}}}"#)
-                .contains("`exe_matches` takes a glob")
+            refused(r#"{"id":"r","when":{"process.starts":{"uid_regex":"^0$"}}}"#)
+                .contains("a regular expression matches text")
+        );
+        assert!(
+            refused(r#"{"id":"r","when":{"process.starts":{"exe_regex":"(unclosed"}}}"#)
+                .contains("`exe_regex: (unclosed`")
         );
         assert!(
             refused(r#"{"id":"r","when":{"process.starts":{"nope_in":["x"]}}}"#)
@@ -1489,6 +1584,46 @@ mod tests {
             "host rule shell-then-curl: process.starts (process.starts exe=/usr/bin/curl uid=0) \
              after process.starts within 30s"
         );
+    }
+
+    #[test]
+    fn a_regex_searches_the_text_and_is_bounded_at_load() {
+        let rule = compile(
+            r#"{"id":"r","when":{"process.starts":{"exe_regex":["^/tmp/[a-z0-9]{8}$","/\\.[^/]+/"]}}}"#,
+        )
+        .unwrap();
+        assert!(rule.matches(&start("/tmp/a1b2c3d4", 0), None));
+        assert!(
+            rule.matches(&start("/home/u/.cache/x", 0), None),
+            "unanchored"
+        );
+        assert!(!rule.matches(&start("/tmp/a1b2c3d4e", 0), None));
+        assert!(!rule.matches(&start("/usr/bin/curl", 0), None));
+        let too_big = refused(r#"{"id":"r","when":{"process.starts":{"exe_regex":"\\w{200}"}}}"#);
+        assert!(too_big.contains("compiles to more than"), "{too_big}");
+        assert!(too_big.contains("(?-u)"), "{too_big}");
+        let narrow =
+            compile(r#"{"id":"r","when":{"process.starts":{"exe_regex":"(?-u)\\w{200}"}}}"#);
+        assert!(narrow.is_ok(), "the way round it the refusal names loads");
+    }
+
+    #[test]
+    fn a_unicode_pattern_matches_with_its_dfa_cache_bounded() {
+        // The cache bound never refuses: a search needing more falls back
+        // to a slower engine of the same linear bound and still answers.
+        let pattern = Pattern::new(r"^(\w+\s+){8}\w*z$").unwrap();
+        let mut text = "wörd ".repeat(8);
+        assert!(!pattern.is_match(&text));
+        text.push('z');
+        assert!(pattern.is_match(&text));
+    }
+
+    #[test]
+    fn a_glob_steps_over_characters_rather_than_bytes() {
+        assert!(Glob::new("/tmp/caf?/*").matches("/tmp/caf\u{e9}/x"));
+        assert!(Glob::new("*\u{e9}*z").matches("\u{e9}a\u{e9}bz"));
+        assert!(!Glob::new("/tmp/caf?").matches("/tmp/caf\u{e9}\u{e9}"));
+        assert!(Glob::new("*/payload*").matches("/\u{4e2d}\u{6587}/payload.bin"));
     }
 
     #[test]

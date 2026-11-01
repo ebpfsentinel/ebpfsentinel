@@ -32,7 +32,8 @@ pub use event::IntentEvent;
 pub use field::{FieldSpec, FieldType, FieldValue, RESERVED_KEYS};
 pub use intent::{Intent, IntentFamily};
 pub use rule::{
-    Condition, FollowedBy, Glob, HOST_RULE_COMPONENT, HOST_RULE_WINDOW_MAX_NS, HostRule,
-    HostRuleAction, HostRuleSet, HostRuleSpec, IntentBlock, Matcher, RawValue, Test,
+    Condition, FollowedBy, Glob, HOST_RULE_COMPONENT, HOST_RULE_REGEX_DFA_LIMIT,
+    HOST_RULE_REGEX_SIZE_LIMIT, HOST_RULE_WINDOW_MAX_NS, HostRule, HostRuleAction, HostRuleSet,
+    HostRuleSpec, IntentBlock, Matcher, Pattern, RawValue, Test,
 };
 pub use sequence::{HOST_RULE_PENDING_MAX, HostRuleState, PendingSequences, Subject};

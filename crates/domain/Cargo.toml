@@ -88,3 +88,7 @@ harness = false
 [[bench]]
 name = "dns_engine"
 harness = false
+
+[[bench]]
+name = "host_rule_matcher"
+harness = false
