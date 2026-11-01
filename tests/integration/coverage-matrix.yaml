@@ -343,7 +343,7 @@ coverage:
     topology: none
     kernel_min: "6.12"
     profile: nightly
-    notes: "A writer's write-opens and truncations under a watched directory refused past a count inside a window, and nothing refused once the agent is gone. Needs the BPF LSM active at boot (lsm=bpf); the suite skips where it is not"
+    notes: "A writer's write-opens and truncations under a watched directory refused past a count inside a window, nothing refused once the agent is gone, and in shadow nothing refused or raised while the reading counts it by workload. Needs the BPF LSM active at boot (lsm=bpf); the suite skips where it is not"
 
   - kind: ebpf_program
     feature: tracepoint-drop-reason

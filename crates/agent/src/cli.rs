@@ -1212,6 +1212,9 @@ pub enum HostRulesCommand {
     /// Show the mass encryption verdict's mode and the verdicts it reached
     /// in shadow, by workload and the last ones as they would have read
     MassEncryption,
+    /// Show the write refusal's mode, when its reading started and the
+    /// writes it would have refused in shadow, by workload
+    WriteRefusal,
 }
 
 // ── Aliases ─────────────────────────────────────────────────────────────
@@ -2856,6 +2859,19 @@ mod tests {
             cli.command,
             Some(Command::HostRules(DomainArgs {
                 command: HostRulesCommand::MassEncryption,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_host_rules_write_refusal() {
+        let cli =
+            Cli::try_parse_from(["ebpfsentinel-agent", "host-rules", "write-refusal"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::HostRules(DomainArgs {
+                command: HostRulesCommand::WriteRefusal,
                 ..
             }))
         ));

@@ -121,4 +121,5 @@ pub mod threatintel_service_impl;
 pub mod vip_announcer_service_impl;
 pub mod workload_policy_service;
 pub mod workload_resolver;
+pub mod write_refusal_control;
 pub mod zone_service_impl;

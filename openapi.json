@@ -4555,6 +4555,55 @@
         ]
       }
     },
+    "/api/v1/host-rules/write-refusal": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "`GET /api/v1/host-rules/write-refusal` - the write refusal's mode and what\nit would have refused in shadow.",
+        "operationId": "get_write_refusal_shadow",
+        "responses": {
+          "200": {
+            "description": "Whether a write refusal runs, its mode, when its reading started, and the writes it would have refused in shadow by workload with the last ones as they would have read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WriteRefusalShadowResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/ids/rules": {
       "get": {
         "tags": [
@@ -20422,6 +20471,48 @@
             "type": "integer",
             "description": "How many of them are system paths, refused at the first write by an\nexecutable not expected there.",
             "minimum": 0
+          }
+        }
+      },
+      "WriteRefusalShadowResponse": {
+        "type": "object",
+        "description": "The write refusal's mode and the writes it would have refused in shadow.",
+        "required": [
+          "enabled",
+          "shadow",
+          "recent"
+        ],
+        "properties": {
+          "counting_since_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When this reading started, boot-time nanoseconds. A promotion names it,\nand is refused if the reading started again since.",
+            "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether a refusal runs here, on either route."
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`shadow`, counting the writers that reached the threshold and refusing\nnothing, or `enforce`, refusing their next open; absent where no\nrefusal runs."
+          },
+          "recent": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ShadowVerdictBody"
+            },
+            "description": "The last of them as the alert would have read, newest last."
+          },
+          "shadow": {
+            "$ref": "#/components/schemas/HostShadowBody",
+            "description": "The writes it would have refused, by the workload of the writer."
           }
         }
       },

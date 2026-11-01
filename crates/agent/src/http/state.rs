@@ -158,6 +158,10 @@ pub struct AppState {
     /// The mass encryption verdict and what it reached in shadow, installed
     /// with the file watch it reads; empty where the watch is off.
     pub ransom_service: ArcSwapOption<application::ransom_service::RansomService>,
+    /// The write refusal's mode and what it would have refused in shadow,
+    /// installed when the refusal starts; empty where it is off or could not
+    /// start.
+    pub write_refusal: ArcSwapOption<application::write_refusal_control::WriteRefusalControl>,
     /// Which workloads the DLP probes are reading, when the configuration
     /// scopes DLP at all. Filled after the eBPF load, because the maps it
     /// reports on are installed there; empty on a node reading every task.
@@ -251,6 +255,7 @@ impl AppState {
             process_table_service: ArcSwapOption::empty(),
             host_rule_service: ArcSwapOption::empty(),
             ransom_service: ArcSwapOption::empty(),
+            write_refusal: ArcSwapOption::empty(),
             dlp_scope_service: ArcSwapOption::empty(),
             workload_policy_service: ArcSwapOption::empty(),
             netpol_replay: ArcSwapOption::empty(),
@@ -456,6 +461,14 @@ impl AppState {
     /// Hand the mass encryption verdict over, once the file watch feeds it.
     pub fn install_ransom_service(&self, svc: Arc<application::ransom_service::RansomService>) {
         self.ransom_service.store(Some(svc));
+    }
+
+    /// Hand the write refusal's mode and shadow reading over, once it runs.
+    pub fn install_write_refusal_control(
+        &self,
+        control: Arc<application::write_refusal_control::WriteRefusalControl>,
+    ) {
+        self.write_refusal.store(Some(control));
     }
 
     /// Hand the DLP scope resolver over, once its maps are installed.

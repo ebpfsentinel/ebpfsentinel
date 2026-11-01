@@ -23,6 +23,10 @@
 #     fails open.
 #   * Killed with SIGKILL while a writer is working, the agent leaves the
 #     node writable at once: no open hangs and nothing more is refused.
+#   * In shadow every write goes through, no alert is raised, and the
+#     reading at /api/v1/host-rules/write-refusal counts the writer that
+#     would have been refused under its workload, with when it started
+#     counting.
 #
 # Needs the BPF LSM active at boot (`bpf` in /sys/kernel/security/lsm).
 
@@ -82,12 +86,14 @@ teardown_file() {
 
 # ── Helpers (suite-local) ───────────────────────────────────────────
 
+# _wait_enforcing [false] - the refusal reports itself attached and in
+# force, or with `false` attached and counting in shadow.
 _wait_enforcing() {
     local attempt=0 body
     while [ "${attempt}" -lt 30 ]; do
         body="$(api_get /api/v1/ebpf/kernel-features 2>/dev/null)" || body=""
         [ "$(jq -r '.write_refusal.attached' <<<"${body}" 2>/dev/null)" = "true" ] &&
-            [ "$(jq -r '.write_refusal.enforcing' <<<"${body}" 2>/dev/null)" = "true" ] &&
+            [ "$(jq -r '.write_refusal.enforcing' <<<"${body}" 2>/dev/null)" = "${1:-true}" ] &&
             [ "$(jq -r '.write_refusal.directories' <<<"${body}" 2>/dev/null)" = "3" ] &&
             [ "$(jq -r '.write_refusal.system_paths' <<<"${body}" 2>/dev/null)" = "2" ] &&
             [ "$(jq -r '.write_refusal.expected_writers' <<<"${body}" 2>/dev/null)" = "1" ] && return 0
@@ -249,4 +255,42 @@ _kill_agent_while_writing() {
     [ "$(grep -cx ok <<<"${output}")" -eq "${ATTEMPTS}" ]
     run timeout 5 tee "${DATA_DIR}/held.conf" <<<"after the kill"
     [ "$status" -eq 0 ]
+}
+
+@test "in shadow every write goes through, nothing is raised and the reading counts what would be refused" {
+    stop_ebpf_agent 2>/dev/null || true
+    local shadow_config="${PREPARED_CONFIG}.shadow"
+    sed 's/^    mode: enforce$/    mode: shadow/' "${PREPARED_CONFIG}" >"${shadow_config}"
+    grep -qx '    mode: shadow' "${shadow_config}"
+    start_ebpf_agent "${shadow_config}"
+    wait_for_ebpf_loaded 30
+    _wait_enforcing false
+    # The alerts the enforcing runs above raised are kept across restarts, so
+    # what this run raises is the difference.
+    local before
+    before="$(api_get /api/v1/alerts | jq '[(.alerts // .)[] | select(.rule_id == "write-refusal")] | length')"
+
+    local dir="${DATA_DIR}/watched/run/shadow"
+    mkdir -p "${dir}"
+    run _write "${dir}" "${ATTEMPTS}"
+    ! grep -qx EACCES <<<"${output}"
+    [ "$(grep -cx ok <<<"${output}")" -eq "${ATTEMPTS}" ]
+    [ "$(tail -n 1 <<<"${output}")" = "truncate ok" ]
+
+    local body="" attempt=0
+    while [ "${attempt}" -lt 30 ]; do
+        body="$(api_get /api/v1/host-rules/write-refusal 2>/dev/null)" || body=""
+        [ "$(jq -r '.shadow.events // 0' <<<"${body}" 2>/dev/null)" -ge 1 ] && break
+        sleep 0.5
+        attempt=$((attempt + 1))
+    done
+    jq -e '.enabled == true and .mode == "shadow" and .counting_since_ns > 0' <<<"${body}"
+    # One count per writer and window, as one alert would have been.
+    jq -e '.shadow.events >= 1' <<<"${body}"
+    jq -e '.shadow.workloads | length > 0' <<<"${body}"
+    jq -e '.recent | last | .message | contains("would refuse")' <<<"${body}"
+    local raised
+    raised="$(api_get /api/v1/alerts | jq '[(.alerts // .)[] | select(.rule_id == "write-refusal")] | length')"
+    [ "${raised}" -eq "${before}" ]
+    rm -f "${shadow_config}"
 }

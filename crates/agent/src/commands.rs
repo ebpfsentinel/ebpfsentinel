@@ -6918,6 +6918,44 @@ pub async fn cmd_host_rules_mass_encryption(
     Ok(())
 }
 
+pub async fn cmd_host_rules_write_refusal(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.write_refusal_shadow().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    let Some(mode) = resp.mode.as_deref().filter(|_| resp.enabled) else {
+        println!(
+            "No write refusal runs: it is off, or neither the BPF LSM nor fanotify could carry it."
+        );
+        return Ok(());
+    };
+    println!(
+        "Write refusal in {mode}, reading started at {} ns: {} writes it would have refused.",
+        resp.counting_since_ns.unwrap_or_default(),
+        resp.shadow.events
+    );
+    if !resp.shadow.workloads.is_empty() {
+        let mut table = Table::new(&[("WORKLOAD", Align::Left), ("WRITES", Align::Right)]);
+        for hits in &resp.shadow.workloads {
+            table.row(cells![hits.workload.as_deref().unwrap_or("-"), hits.events,]);
+        }
+        table.print();
+    }
+    if resp.shadow.unsampled > 0 {
+        println!(
+            "{} writes about a workload past the sample.",
+            resp.shadow.unsampled
+        );
+    }
+    for verdict in &resp.recent {
+        println!("- {}", verdict.message);
+    }
+    Ok(())
+}
+
 pub async fn cmd_host_rules_list(client: &ApiClient, output: OutputFormat) -> Result<()> {
     let resp = client.host_rules().await?;
 

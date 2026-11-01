@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use application::host_rule_service::{FED_INTENTS, HostRuleService, not_fed_reason};
 use application::ransom_service::RansomService;
+use application::write_refusal_control::WriteRefusalControl;
 use axum::Json;
 use axum::extract::State;
 use domain::hostrule::{
@@ -448,17 +449,91 @@ pub fn mass_encryption_body(service: Option<&RansomService>) -> MassEncryptionRe
         enabled: true,
         mode: Some(service.mode().as_str()),
         shadow: shadow.reading.into(),
-        recent: shadow
-            .recent
-            .into_iter()
-            .map(|verdict| ShadowVerdictBody {
-                at_ns: verdict.at_ns,
-                pid: verdict.pid,
-                exe: verdict.exe,
-                workload: verdict.workload,
-                message: verdict.message,
-            })
-            .collect(),
+        recent: recent_bodies(shadow.recent),
+    }
+}
+
+/// The last verdicts reached in shadow, as the API writes them.
+fn recent_bodies(
+    recent: impl IntoIterator<Item = domain::ransom::ShadowVerdict>,
+) -> Vec<ShadowVerdictBody> {
+    recent
+        .into_iter()
+        .map(|verdict| ShadowVerdictBody {
+            at_ns: verdict.at_ns,
+            pid: verdict.pid,
+            exe: verdict.exe,
+            workload: verdict.workload,
+            message: verdict.message,
+        })
+        .collect()
+}
+
+/// The write refusal's mode and the writes it would have refused in shadow.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WriteRefusalShadowResponse {
+    /// Whether a refusal runs here, on either route.
+    pub enabled: bool,
+    /// `shadow`, counting the writers that reached the threshold and refusing
+    /// nothing, or `enforce`, refusing their next open; absent where no
+    /// refusal runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<&'static str>,
+    /// When this reading started, boot-time nanoseconds. A promotion names it,
+    /// and is refused if the reading started again since.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counting_since_ns: Option<u64>,
+    /// The writes it would have refused, by the workload of the writer.
+    pub shadow: HostShadowBody,
+    /// The last of them as the alert would have read, newest last.
+    pub recent: Vec<ShadowVerdictBody>,
+}
+
+/// `GET /api/v1/host-rules/write-refusal` - the write refusal's mode and what
+/// it would have refused in shadow.
+#[utoipa::path(
+    get, path = "/api/v1/host-rules/write-refusal",
+    tag = "Operations",
+    responses((status = 200, description = "Whether a write refusal runs, its mode, when its reading started, and the writes it would have refused in shadow by workload with the last ones as they would have read", body = WriteRefusalShadowResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn get_write_refusal_shadow(
+    State(state): State<Arc<AppState>>,
+) -> Json<WriteRefusalShadowResponse> {
+    let control = state.write_refusal.load_full();
+    Json(write_refusal_body(control.as_deref()))
+}
+
+/// The refusal's mode and shadow reading, or an empty reading where none
+/// runs.
+#[must_use]
+pub fn write_refusal_body(control: Option<&WriteRefusalControl>) -> WriteRefusalShadowResponse {
+    let Some(control) = control else {
+        return WriteRefusalShadowResponse {
+            enabled: false,
+            mode: None,
+            counting_since_ns: None,
+            shadow: HostShadowReading::default().into(),
+            recent: Vec::new(),
+        };
+    };
+    let shadow = control.shadow();
+    WriteRefusalShadowResponse {
+        enabled: true,
+        mode: Some(if control.enforcing() {
+            "enforce"
+        } else {
+            "shadow"
+        }),
+        counting_since_ns: Some(control.since_ns()),
+        shadow: shadow.reading.into(),
+        recent: recent_bodies(shadow.recent),
     }
 }
 
@@ -583,6 +658,28 @@ mod tests {
         let body = mass_encryption_body(Some(&service));
         assert!(body.enabled);
         assert_eq!(body.mode, Some("shadow"));
+    }
+
+    #[test]
+    fn the_write_refusal_reading_names_its_start_and_turns_to_enforce_on_promotion() {
+        let body = write_refusal_body(None);
+        assert!(!body.enabled);
+        assert!(body.counting_since_ns.is_none());
+        let control = WriteRefusalControl::new(false, 42_000);
+        control.record(domain::ransom::ShadowVerdict {
+            at_ns: 43_000,
+            pid: 7,
+            exe: None,
+            workload: Some("/system.slice/batch.service".to_string()),
+            message: "write refusal would refuse".to_string(),
+        });
+        let body = write_refusal_body(Some(&control));
+        assert_eq!(body.mode, Some("shadow"));
+        assert_eq!(body.counting_since_ns, Some(42_000));
+        assert_eq!(body.shadow.events, 1);
+        assert_eq!(body.recent.len(), 1);
+        control.promote(42_000).unwrap();
+        assert_eq!(write_refusal_body(Some(&control)).mode, Some("enforce"));
     }
 
     #[test]

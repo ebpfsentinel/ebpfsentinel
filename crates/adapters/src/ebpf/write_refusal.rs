@@ -430,6 +430,27 @@ impl WriteRefusalMaps {
             .map_err(|e| anyhow::anyhow!("WRITE_REFUSAL_CONFIG write failed: {e}"))
     }
 
+    /// Turn the armed slot from counting to refusing, or back, leaving the
+    /// rest of it as written.
+    ///
+    /// # Errors
+    ///
+    /// Returns the kernel's refusal of the read or the write.
+    pub fn set_enforce(&mut self, enforce: bool) -> Result<(), anyhow::Error> {
+        let mut slot = self
+            .config
+            .get(&WRITE_REFUSAL_CONFIG_SLOT, 0)
+            .map_err(|e| anyhow::anyhow!("WRITE_REFUSAL_CONFIG read failed: {e}"))?;
+        slot.mode = if enforce {
+            WRITE_REFUSAL_MODE_ENFORCE
+        } else {
+            WRITE_REFUSAL_MODE_SHADOW
+        };
+        self.config
+            .set(WRITE_REFUSAL_CONFIG_SLOT, &slot, 0)
+            .map_err(|e| anyhow::anyhow!("WRITE_REFUSAL_CONFIG write failed: {e}"))
+    }
+
     /// Remove every writer whose window has passed, so the map holds the
     /// writers of the last window and not of the node's whole uptime.
     /// Returns how many went.

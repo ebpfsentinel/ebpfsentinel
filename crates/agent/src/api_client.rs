@@ -2508,6 +2508,17 @@ pub struct MassEncryptionResponse {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct WriteRefusalShadowResponse {
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counting_since_ns: Option<u64>,
+    pub shadow: HostShadowEntry,
+    pub recent: Vec<ShadowVerdictEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct HostRuleExceptionEntry {
     pub id: String,
     pub rules: Vec<String>,
@@ -4619,6 +4630,15 @@ impl ApiClient {
     pub async fn mass_encryption(&self) -> anyhow::Result<MassEncryptionResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/host-rules/mass-encryption")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn write_refusal_shadow(&self) -> anyhow::Result<WriteRefusalShadowResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/host-rules/write-refusal")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

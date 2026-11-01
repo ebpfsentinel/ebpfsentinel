@@ -636,6 +636,9 @@ pub struct FallbackSinks {
     pub metrics: Arc<dyn MetricsPort>,
     /// Where a writer that reached the refusal is reported.
     pub records: mpsc::Sender<WriteRefusalRecord>,
+    /// Whether to refuse, followed between two reads so a promotion takes
+    /// effect without a restart.
+    pub mode: tokio::sync::watch::Receiver<bool>,
 }
 
 /// A running fanotify refusal. Dropping it stops the handler and closes the
@@ -737,6 +740,11 @@ fn handle(
             }
             crate::ebpf::write_refusal::publish_status(plan.status(decider.enforce));
             decider.plan = plan;
+        }
+        let enforce = *sinks.mode.borrow();
+        if enforce != decider.enforce {
+            decider.enforce = enforce;
+            crate::ebpf::write_refusal::publish_status(decider.plan.status(enforce));
         }
         if last_sweep.elapsed() >= Duration::from_secs(30) {
             decider.counter.sweep(boottime_now_ns());
