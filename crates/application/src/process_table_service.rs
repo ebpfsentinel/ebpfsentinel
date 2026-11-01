@@ -34,6 +34,7 @@ use crate::dlp_scope_service::DlpScopeService;
 use crate::host_rule_service::HostRuleService;
 use crate::ids_workload_scope_service::IdsWorkloadScopeService;
 use crate::qos_cgroup_shaping_service::QosCgroupShapingService;
+use crate::ransom_service::RansomService;
 use crate::workload_policy_service::WorkloadPolicyService;
 
 /// How long the writer lets the metadata settle after it last changed before
@@ -54,6 +55,7 @@ pub struct ProcessTableService {
     ids_scope: Option<Arc<IdsWorkloadScopeService>>,
     shaping: Option<Arc<QosCgroupShapingService>>,
     host_rules: Option<Arc<HostRuleService>>,
+    ransom: Option<Arc<RansomService>>,
     metadata_changes: Option<watch::Receiver<u64>>,
     capture_command_line: bool,
 }
@@ -78,6 +80,7 @@ impl ProcessTableService {
             ids_scope: None,
             shaping: None,
             host_rules: None,
+            ransom: None,
             metadata_changes: None,
             capture_command_line,
         }
@@ -160,6 +163,14 @@ impl ProcessTableService {
     #[must_use]
     pub fn with_host_rules(mut self, service: Arc<HostRuleService>) -> Self {
         self.host_rules = Some(service);
+        self
+    }
+
+    /// Hand every exec, with its command line and ancestry, to the mass
+    /// encryption engine, which holds a prior for whoever destroys backups.
+    #[must_use]
+    pub fn with_ransom(mut self, service: Arc<RansomService>) -> Self {
+        self.ransom = Some(service);
         self
     }
 
@@ -286,6 +297,11 @@ impl ProcessTableService {
             .as_ref()
             .filter(|r| r.wants(domain::hostrule::Intent::ProcessStarts))
             .map(|r| (Arc::clone(r), entry.clone()));
+        let ransom = self
+            .ransom
+            .as_ref()
+            .filter(|_| entry.command_line.is_some())
+            .map(|r| (Arc::clone(r), entry.clone()));
         let replaced = self
             .table
             .write()
@@ -296,8 +312,14 @@ impl ProcessTableService {
             replaced = replaced.is_some(),
             "process table recorded an exec"
         );
-        if let Some((rules, entry)) = rules {
-            rules.record_exec(&entry, &self.lineage(pid), event.at_ns);
+        if rules.is_some() || ransom.is_some() {
+            let lineage = self.lineage(pid);
+            if let Some((rules, entry)) = rules {
+                rules.record_exec(&entry, &lineage, event.at_ns);
+            }
+            if let Some((ransom, entry)) = ransom {
+                ransom.record_exec(&entry, &lineage, event.at_ns);
+            }
         }
     }
 

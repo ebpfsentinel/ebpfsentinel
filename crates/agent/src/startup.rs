@@ -4361,6 +4361,10 @@ pub async fn run(
     > = None;
     let mut host_rules_for_files: Option<Arc<application::host_rule_service::HostRuleService>> =
         None;
+    // Mass encryption is counted where the writer is named, which is the
+    // process table, and fed from two sides: the file watch hands it each
+    // change, the table each exec whose command line destroys backups.
+    let mut ransom_for_files: Option<Arc<application::ransom_service::RansomService>> = None;
     if config.process_table.enabled {
         let mut svc = application::process_table_service::ProcessTableService::new(
             config.process_table.capacity,
@@ -4427,6 +4431,20 @@ pub async fn run(
             svc = svc.with_host_rules(Arc::clone(&host_rules));
         }
         host_rules_for_files = Some(Arc::clone(&host_rules));
+        if config.file_watch.enabled {
+            let sources: application::ransom_service::HostSourcesReader = Arc::new(|| {
+                crate::http::host_rule_handler::reported_sources(
+                    &std::collections::HashMap::new(),
+                    &[],
+                )
+            });
+            let ransom = Arc::new(
+                application::ransom_service::RansomService::new(alert_tx.clone(), sources)
+                    .with_command_lines(config.process_table.capture_command_line),
+            );
+            svc = svc.with_ransom(Arc::clone(&ransom));
+            ransom_for_files = Some(ransom);
+        }
         app_state.install_host_rule_service(host_rules);
         let svc = Arc::new(svc);
         // And the other way for a reload: a new policy renumbers the bits,
@@ -4714,6 +4732,7 @@ pub async fn run(
         alerts: alert_tx.clone(),
         workloads: workloads.clone(),
         host_rules: host_rules_for_files.clone(),
+        ransom: ransom_for_files.clone(),
         processes: process_table_for_learning.clone(),
         cancel: cancel_token.clone(),
     });
@@ -5960,6 +5979,9 @@ pub struct FileWatchStart<'a> {
     /// the writer. Both live with the process table, so with the table off
     /// there is no rule set to feed.
     pub host_rules: Option<Arc<application::host_rule_service::HostRuleService>>,
+    /// The mass encryption engine every change by a named writer counts
+    /// toward, shared with the process table.
+    pub ransom: Option<Arc<application::ransom_service::RansomService>>,
     pub processes: Option<Arc<application::process_table_service::ProcessTableService>>,
     pub cancel: CancellationToken,
 }
@@ -6030,17 +6052,6 @@ pub fn start_file_watch(start: FileWatchStart<'_>) -> Option<FileWatchHandle> {
     let watched = config.file_watch.watched_paths();
     info!(paths = watched.len(), "watched paths declared");
     let set = Arc::new(WatchedPathSet::new(watched));
-    // Every change by a named writer is counted toward a mass encryption
-    // verdict, so it lives where the writer is named: with the process table.
-    let ransom = start.host_rules.as_ref().map(|_| {
-        let sources: application::ransom_service::HostSourcesReader = Arc::new(|| {
-            crate::http::host_rule_handler::reported_sources(&std::collections::HashMap::new(), &[])
-        });
-        Arc::new(application::ransom_service::RansomService::new(
-            start.alerts.clone(),
-            sources,
-        ))
-    });
     watcher = watcher.with_watched_paths(WatchedPathGuard {
         set: Arc::clone(&set),
         own_pid: std::process::id(),
@@ -6068,7 +6079,7 @@ pub fn start_file_watch(start: FileWatchStart<'_>) -> Option<FileWatchHandle> {
             roots: Some(Arc::new(adapters::container::ProcRootReader::new(
                 &proc_root,
             ))),
-            ransom,
+            ransom: start.ransom,
         });
     }
     info!(

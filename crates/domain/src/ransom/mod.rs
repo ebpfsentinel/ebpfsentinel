@@ -9,6 +9,7 @@
 //! reached it and the ones this host could not read.
 
 pub mod actor;
+pub mod backup;
 pub mod canary;
 pub mod engine;
 pub mod entropy;
@@ -20,6 +21,10 @@ pub mod replace;
 pub mod signal;
 
 pub use actor::{Actor, actor_of};
+pub use backup::{
+    BACKUP_PRIOR_WINDOW_NS, BACKUP_UNIT_MARKERS, SHELLS, backup_destroyed, backup_destroyed_signal,
+    initiator,
+};
 pub use canary::{
     CANARIES_MAX, CANARY_DIRECTORIES, CANARY_EXEMPT, CANARY_NAMES, canary_exempt,
     canary_name_refusal, canary_paths, canary_touched,

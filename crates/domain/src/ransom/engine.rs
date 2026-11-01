@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::process::entity::ProcessKey;
 
 use super::actor::Actor;
+use super::backup::BACKUP_PRIOR_WINDOW_NS;
 use super::signal::{RansomSignal, SignalKind, Tier, UnavailableSignal};
 
 /// The component a verdict is raised under.
@@ -31,6 +32,10 @@ pub enum Corroboration {
     TwoStrong,
     /// One strong signal and two supporting ones of different kinds.
     StrongAndTwoSupporting,
+    /// One strong signal, after a prior.
+    StrongAfterPrior,
+    /// Two supporting signals of different kinds, after a prior.
+    TwoSupportingAfterPrior,
 }
 
 impl Corroboration {
@@ -41,22 +46,27 @@ impl Corroboration {
             Self::Decisive => "one decisive signal",
             Self::TwoStrong => "two strong signals",
             Self::StrongAndTwoSupporting => "one strong and two supporting signals",
+            Self::StrongAfterPrior => "one strong signal after backups were destroyed",
+            Self::TwoSupportingAfterPrior => "two supporting signals after backups were destroyed",
         }
     }
 }
 
 /// Whether the kinds seen reach a verdict, and by which rule. Each kind
-/// counts once however often it was seen, and a prior never counts.
+/// counts once however often it was seen. A prior reaches nothing alone: it
+/// lowers what the other tiers must add up to, by one strong signal or by
+/// the strong one of the strong-and-two-supporting rule.
 #[must_use]
 pub fn corroborate(kinds: impl IntoIterator<Item = SignalKind>) -> Option<Corroboration> {
     let mut seen: Vec<SignalKind> = kinds.into_iter().collect();
     seen.sort_unstable();
     seen.dedup();
     let count = |tier| seen.iter().filter(|kind| kind.tier() == tier).count();
-    let (decisive, strong, supporting) = (
+    let (decisive, strong, supporting, prior) = (
         count(Tier::Decisive),
         count(Tier::Strong),
         count(Tier::Supporting),
+        count(Tier::Prior),
     );
     if decisive >= 1 {
         Some(Corroboration::Decisive)
@@ -64,6 +74,10 @@ pub fn corroborate(kinds: impl IntoIterator<Item = SignalKind>) -> Option<Corrob
         Some(Corroboration::TwoStrong)
     } else if strong >= 1 && supporting >= 2 {
         Some(Corroboration::StrongAndTwoSupporting)
+    } else if prior >= 1 && strong >= 1 {
+        Some(Corroboration::StrongAfterPrior)
+    } else if prior >= 1 && supporting >= 2 {
+        Some(Corroboration::TwoSupportingAfterPrior)
     } else {
         None
     }
@@ -126,12 +140,17 @@ struct ActorState {
 /// A verdict is reported once per actor: further signals are held, and a new
 /// verdict is possible only after every signal of the actor has left the
 /// window. Memory is bounded twice: at most one signal per kind per actor,
-/// and at most `max_actors` actors.
+/// and at most `max_actors` actors. Priors are held apart, under the process
+/// that ran the command, for longer than the window, and count for every
+/// actor that process or one of its ancestors started; they too are bounded
+/// at `max_actors`.
 #[derive(Debug)]
 pub struct RansomEngine {
     window_ns: u64,
+    prior_window_ns: u64,
     max_actors: usize,
     actors: HashMap<ProcessKey, ActorState>,
+    priors: HashMap<ProcessKey, RansomSignal>,
     evicted: u64,
 }
 
@@ -148,8 +167,10 @@ impl RansomEngine {
     pub fn new(window_ns: u64, max_actors: usize) -> Self {
         Self {
             window_ns,
+            prior_window_ns: BACKUP_PRIOR_WINDOW_NS.max(window_ns),
             max_actors: max_actors.max(1),
             actors: HashMap::new(),
+            priors: HashMap::new(),
             evicted: 0,
         }
     }
@@ -166,6 +187,44 @@ impl RansomEngine {
         self.evicted
     }
 
+    /// How many priors are held now.
+    #[must_use]
+    pub fn priors(&self) -> usize {
+        self.priors.len()
+    }
+
+    /// Hold a prior under the process its actor names, the one that ran the
+    /// command. It reaches no verdict by itself.
+    pub fn hold_prior(&mut self, signal: RansomSignal) {
+        let at_ns = signal.at_ns;
+        let key = signal.actor.key;
+        if !self.priors.contains_key(&key) && self.priors.len() >= self.max_actors {
+            let window = self.prior_window_ns;
+            self.priors
+                .retain(|_, held| at_ns.saturating_sub(held.at_ns) <= window);
+            if self.priors.len() >= self.max_actors
+                && let Some(oldest) = self
+                    .priors
+                    .iter()
+                    .min_by_key(|(_, held)| held.at_ns)
+                    .map(|(key, _)| *key)
+            {
+                self.priors.remove(&oldest);
+            }
+        }
+        self.priors.insert(key, signal);
+    }
+
+    /// The freshest prior that counts for an actor started below one of
+    /// `keys`, still inside its window at `at_ns`.
+    fn prior_for(&self, keys: &[ProcessKey], at_ns: u64) -> Option<RansomSignal> {
+        keys.iter()
+            .filter_map(|key| self.priors.get(key))
+            .filter(|held| at_ns.saturating_sub(held.at_ns) <= self.prior_window_ns)
+            .max_by_key(|held| held.at_ns)
+            .cloned()
+    }
+
     /// Hold `signal`, and return a verdict if its actor now reaches one.
     /// `unavailable` is asked only when a verdict is reached.
     pub fn observe(
@@ -173,7 +232,22 @@ impl RansomEngine {
         signal: RansomSignal,
         unavailable: impl FnOnce() -> Vec<UnavailableSignal>,
     ) -> Option<RansomVerdict> {
+        self.observe_under(signal, &[], unavailable)
+    }
+
+    /// As `observe`, for an actor whose ancestors are `ancestry`: a prior
+    /// held under the actor or any of them counts toward its verdict.
+    pub fn observe_under(
+        &mut self,
+        signal: RansomSignal,
+        ancestry: &[ProcessKey],
+        unavailable: impl FnOnce() -> Vec<UnavailableSignal>,
+    ) -> Option<RansomVerdict> {
         let at_ns = signal.at_ns;
+        let mut keys = Vec::with_capacity(ancestry.len() + 1);
+        keys.push(signal.actor.key);
+        keys.extend_from_slice(ancestry);
+        let prior = self.prior_for(&keys, at_ns);
         let key = signal.actor.key;
         if !self.actors.contains_key(&key) {
             self.make_room(at_ns);
@@ -196,13 +270,21 @@ impl RansomEngine {
         if state.convicted {
             return None;
         }
-        let corroboration = corroborate(state.latest.keys().copied())?;
+        let corroboration = corroborate(
+            state
+                .latest
+                .keys()
+                .copied()
+                .chain(prior.as_ref().map(|p| p.kind)),
+        )?;
         state.convicted = true;
+        let mut signals: Vec<RansomSignal> = state.latest.values().cloned().collect();
+        signals.extend(prior);
         Some(RansomVerdict {
             actor: state.actor.clone(),
             at_ns,
             corroboration,
-            signals: state.latest.values().cloned().collect(),
+            signals,
             unavailable: unavailable(),
         })
     }
@@ -283,14 +365,74 @@ mod tests {
     }
 
     #[test]
-    fn a_prior_never_counts_toward_a_verdict() {
+    fn a_prior_alone_reaches_nothing_and_lowers_the_rest() {
         use SignalKind::*;
         assert_eq!(corroborate([BackupDestroyed]), None);
-        assert_eq!(corroborate([BackupDestroyed, MassRename]), None);
+        assert_eq!(corroborate([BackupDestroyed, DistinctRewrites]), None);
         assert_eq!(
-            corroborate([BackupDestroyed, CryptoRate, DistinctRewrites]),
-            None
+            corroborate([BackupDestroyed, MassRename]),
+            Some(Corroboration::StrongAfterPrior)
         );
+        assert_eq!(
+            corroborate([BackupDestroyed, EntropyRise, DistinctRewrites]),
+            Some(Corroboration::TwoSupportingAfterPrior)
+        );
+        assert_eq!(
+            corroborate([BackupDestroyed, CanaryTouched]),
+            Some(Corroboration::Decisive)
+        );
+    }
+
+    #[test]
+    fn a_prior_counts_for_runs_started_below_whoever_ran_the_command() {
+        let mut engine = RansomEngine::default();
+        let shell = actor(5);
+        engine.hold_prior(RansomSignal {
+            kind: SignalKind::BackupDestroyed,
+            actor: shell.clone(),
+            pid: 6,
+            at_ns: S,
+            evidence: "zfs dataset or snapshot destroyed: zfs destroy tank".into(),
+        });
+        assert_eq!(engine.priors(), 1);
+        // An unrelated actor gains nothing from it.
+        assert!(
+            engine
+                .observe(signal(SignalKind::MassRename, 10, 2), whole)
+                .is_none()
+        );
+        // An actor started below the shell does, within ten minutes.
+        let verdict = engine
+            .observe_under(signal(SignalKind::RansomNote, 20, 300), &[shell.key], whole)
+            .unwrap();
+        assert_eq!(verdict.corroboration, Corroboration::StrongAfterPrior);
+        let kinds: Vec<SignalKind> = verdict.signals.iter().map(|s| s.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![SignalKind::RansomNote, SignalKind::BackupDestroyed]
+        );
+        assert!(verdict.describe().contains("after backups were destroyed"));
+        // Past the prior's window it counts for nobody.
+        assert!(
+            engine
+                .observe_under(signal(SignalKind::MassRename, 30, 700), &[shell.key], whole)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn priors_are_bounded() {
+        let mut engine = RansomEngine::new(RANSOM_WINDOW_NS, 2);
+        for pid in 1..=3 {
+            engine.hold_prior(RansomSignal {
+                kind: SignalKind::BackupDestroyed,
+                actor: actor(pid),
+                pid,
+                at_ns: u64::from(pid) * S,
+                evidence: String::new(),
+            });
+        }
+        assert_eq!(engine.priors(), 2);
     }
 
     #[test]

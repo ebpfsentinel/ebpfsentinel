@@ -16,12 +16,13 @@ use domain::process::engine::Lineage;
 use domain::process::entity::ProcessEntry;
 use domain::ransom::{
     Actor, DistinctPaths, MassRenames, RansomEngine, RansomNotes, RansomSignal, RansomVerdict,
-    Replacements, SignalKind, actor_of, canary_touched, entropy_rose, header_mismatch, original_of,
+    Replacements, SignalKind, UnavailableSignal, actor_of, backup_destroyed,
+    backup_destroyed_signal, canary_touched, entropy_rose, header_mismatch, initiator, original_of,
     renamed_over, unavailable,
 };
 use domain::workload::entity::{Workload, WorkloadSource};
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::alert_event::AlertEvent;
 
@@ -32,6 +33,7 @@ pub type HostSourcesReader = Arc<dyn Fn() -> HostSources + Send + Sync>;
 /// every verdict as not read, so a verdict never reads as the whole engine
 /// when part of it is absent.
 const READ: &[SignalKind] = &[
+    SignalKind::BackupDestroyed,
     SignalKind::CanaryTouched,
     SignalKind::DistinctRewrites,
     SignalKind::EntropyRise,
@@ -88,6 +90,7 @@ pub struct RansomService {
     notes: Mutex<RansomNotes>,
     replaced: Mutex<DistinctPaths>,
     replacements: Mutex<Replacements>,
+    command_lines: bool,
     sources: HostSourcesReader,
     alerts: mpsc::Sender<AlertEvent>,
 }
@@ -104,9 +107,63 @@ impl RansomService {
             notes: Mutex::new(RansomNotes::default()),
             replaced: Mutex::new(DistinctPaths::replacements()),
             replacements: Mutex::new(Replacements::default()),
+            command_lines: false,
             sources,
             alerts,
         }
+    }
+
+    /// Whether the process table captures command lines, which is what the
+    /// destruction of backups is read from. Without them that prior is
+    /// named in every verdict as unavailable, with the setting that would
+    /// give it.
+    #[must_use]
+    pub fn with_command_lines(mut self, captured: bool) -> Self {
+        self.command_lines = captured;
+        self
+    }
+
+    /// An exec the process table recorded: when its command line destroys
+    /// snapshots or backups, a prior is held for whoever ran it, which then
+    /// counts for every run that process started.
+    pub fn record_exec(&self, entry: &ProcessEntry, lineage: &Lineage, at_ns: u64) {
+        let Some(line) = entry.command_line.as_deref() else {
+            return;
+        };
+        let Some(what) = backup_destroyed(entry.identity.path(), line) else {
+            return;
+        };
+        let Some(by) = initiator(lineage) else {
+            debug!(
+                pid = entry.pid,
+                what, "backups destroyed by a command no process ran but init"
+            );
+            return;
+        };
+        warn!(
+            pid = entry.pid,
+            initiator = by.pid,
+            what,
+            "backups destroyed: a later mass encryption by this process needs less to be raised"
+        );
+        let signal = backup_destroyed_signal(by, entry.pid, line, &what, at_ns);
+        self.engine
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .hold_prior(signal);
+    }
+
+    /// What this host cannot read, the command lines among it.
+    fn unavailable(&self) -> Vec<UnavailableSignal> {
+        let mut missing = unavailable(&(self.sources)(), READ);
+        if !self.command_lines {
+            missing.retain(|u| u.kind != SignalKind::BackupDestroyed);
+            missing.push(UnavailableSignal {
+                kind: SignalKind::BackupDestroyed,
+                reason: "process_table.capture_command_line is off".to_string(),
+            });
+        }
+        missing
     }
 
     /// A settled change by `writer`, as the file watcher reports it.
@@ -270,11 +327,12 @@ impl RansomService {
     /// actor now reaches one.
     fn observe(&self, signal: RansomSignal, writer: &ProcessEntry, lineage: &Lineage) {
         let at_ns = signal.at_ns;
+        let ancestry: Vec<_> = lineage.ancestors.iter().map(ProcessEntry::key).collect();
         let verdict = self
             .engine
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .observe(signal, || unavailable(&(self.sources)(), READ));
+            .observe_under(signal, &ancestry, || self.unavailable());
         if let Some(verdict) = verdict {
             self.raise(&verdict, writer, lineage, at_ns);
         }
@@ -349,7 +407,90 @@ mod tests {
                 .present(Source::ProcessTracing)
                 .present(Source::FileWatch)
         });
-        (RansomService::new(tx, sources), rx)
+        (RansomService::new(tx, sources).with_command_lines(true), rx)
+    }
+
+    #[test]
+    fn backups_destroyed_lower_what_a_run_started_by_the_same_hand_needs() {
+        let (service, mut rx) = service();
+        let session = running(40, "/usr/sbin/sshd", 2);
+        let shell = running(41, "/usr/bin/bash", 3);
+        let init = running(1, "/sbin/init", 1);
+        let mut zfs = running(50, "/usr/sbin/zfs", 4);
+        zfs.command_line = Some("zfs destroy -r tank/home@daily".into());
+        let above_zfs = Lineage {
+            ancestors: vec![shell.clone(), session.clone(), init.clone()],
+            truncated: false,
+            incomplete: false,
+        };
+        service.record_exec(&zfs, &above_zfs, 1_000);
+        // The prior is held for the session that ran the shell, and is no
+        // verdict by itself.
+        assert_eq!(service.engine.lock().unwrap().priors(), 1);
+        assert!(rx.try_recv().is_err());
+        // Another command by the same hand holds nothing more.
+        let mut ls = running(51, "/usr/bin/ls", 5);
+        ls.command_line = Some("ls /".into());
+        service.record_exec(&ls, &above_zfs, 1_001);
+        assert_eq!(service.engine.lock().unwrap().priors(), 1);
+
+        // A run started from the same session reaches a verdict on one
+        // strong signal.
+        let run = running(60, "/tmp/enc", 7);
+        let lineage = Lineage {
+            ancestors: vec![shell, session, init],
+            truncated: false,
+            incomplete: false,
+        };
+        for n in 0..RANSOM_NOTE_DIRECTORIES {
+            service.record_file_change(
+                &run,
+                &lineage,
+                [FileChangeKind::Created],
+                FileRewrite {
+                    path: &format!("/srv/d{n}/README_RESTORE.txt"),
+                    entropy_before: None,
+                    entropy_now: None,
+                    head: None,
+                    renamed_from: None,
+                    size_before: None,
+                    size_now: Some(10),
+                    written_now: true,
+                },
+                2_000 + n as u64,
+            );
+        }
+        let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() else {
+            panic!("a verdict after the prior");
+        };
+        assert!(alert.message.contains("after backups were destroyed"));
+        assert!(alert.message.contains("backup_destroyed (pid 50)"));
+        assert!(alert.message.contains("zfs destroy -r tank/home@daily"));
+    }
+
+    #[test]
+    fn without_command_lines_the_prior_is_named_unavailable_and_why() {
+        let (tx, _rx) = mpsc::channel(1);
+        let sources: HostSourcesReader = Arc::new(|| {
+            HostSources::new(Some((6, 12)))
+                .present(Source::ProcessTracing)
+                .present(Source::FileWatch)
+        });
+        let blind = RansomService::new(tx, sources);
+        let missing = blind.unavailable();
+        let prior: Vec<_> = missing
+            .iter()
+            .filter(|u| u.kind == SignalKind::BackupDestroyed)
+            .collect();
+        assert_eq!(prior.len(), 1);
+        assert_eq!(prior[0].reason, "process_table.capture_command_line is off");
+        let (service, _rx) = service();
+        assert!(
+            service
+                .unavailable()
+                .iter()
+                .all(|u| u.kind != SignalKind::BackupDestroyed)
+        );
     }
 
     #[test]
