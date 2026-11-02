@@ -2115,6 +2115,7 @@ mod tests {
             pid: 0,
             source: crate::workload::entity::WorkloadSource::Socket,
             exe: None,
+            command_line: None,
             uid: None,
             cgroup: None,
             container: None,

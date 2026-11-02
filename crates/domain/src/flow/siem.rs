@@ -374,6 +374,7 @@ mod tests {
                 pid: 4_242,
                 source: WorkloadSource::Socket,
                 exe: Some("/usr/bin/curl".to_string()),
+                command_line: None,
                 uid: Some(1_000),
                 cgroup: Some(9_876),
                 container: Some("c0ffee".to_string()),

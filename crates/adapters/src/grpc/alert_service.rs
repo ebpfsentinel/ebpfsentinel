@@ -70,6 +70,7 @@ fn workload_block(alert: &Alert) -> Option<proto::Workload> {
         pid: w.pid,
         source: w.source.as_str().to_string(),
         exe: w.exe.clone().unwrap_or_default(),
+        command_line: w.command_line.clone().unwrap_or_default(),
         uid: w.uid.unwrap_or(0),
         cgroup: w.cgroup.unwrap_or(0),
         container: w.container.clone().unwrap_or_default(),

@@ -283,8 +283,13 @@ impl ProcessTableService {
             if entry.parent_pid.is_none() {
                 entry.parent_pid = details.parent_pid;
             }
+            // Redacted here, at the one place argv enters the table, so a
+            // secret matched by the closed list never reaches the table, an
+            // alert, a freeze or a screen.
             if self.capture_command_line {
-                entry.command_line = details.command_line;
+                entry.command_line = details
+                    .command_line
+                    .map(|line| domain::process::redact::redact_command_line(&line));
             }
         }
 
@@ -999,6 +1004,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_command_line_is_stored_with_its_secrets_already_removed() {
+        let on = ProcessTableService::new(16, true).with_details(Arc::new(FixedDetails));
+        on.apply(exec(42, 1)).await;
+        let line = on.get(42).unwrap().command_line.unwrap();
+        assert!(!line.contains("secret"));
+        assert!(line.contains("user:[redacted]"));
+    }
+
+    #[tokio::test]
     async fn the_command_line_is_absent_until_it_is_turned_on() {
         let off = ProcessTableService::new(16, false).with_details(Arc::new(FixedDetails));
         off.apply(exec(42, 1)).await;
@@ -1008,7 +1022,7 @@ mod tests {
         on.apply(exec(42, 1)).await;
         assert_eq!(
             on.get(42).unwrap().command_line.as_deref(),
-            Some("curl -u user:secret https://example.test")
+            Some("curl -u user:[redacted] https://example.test")
         );
     }
 
@@ -1062,7 +1076,7 @@ mod tests {
         assert_eq!(child.identity.path(), Some("/usr/bin/curl"));
         assert_eq!(
             child.command_line.as_deref(),
-            Some("curl -u user:secret https://example.test")
+            Some("curl -u user:[redacted] https://example.test")
         );
         assert_eq!(child.parent_pid, Some(10));
         assert_eq!(service.stats().forks, 1);

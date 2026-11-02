@@ -20286,6 +20286,13 @@
             "description": "cgroup v2 id, as the kernel numbers it.",
             "minimum": 0
           },
+          "command_line": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The command line, where the operator turned its capture on. The\nsecret-bearing shapes were removed where argv was read, before it was\nstored, so what is here is what every reader of the process table saw."
+          },
           "container": {
             "type": [
               "string",

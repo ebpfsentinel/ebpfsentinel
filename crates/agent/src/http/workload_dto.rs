@@ -30,6 +30,11 @@ pub struct WorkloadResponse {
     /// process itself, which is why it is a path and not an identity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exe: Option<String>,
+    /// The command line, where the operator turned its capture on. The
+    /// secret-bearing shapes were removed where argv was read, before it was
+    /// stored, so what is here is what every reader of the process table saw.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_line: Option<String>,
     /// The real uid of the task when the socket was opened.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uid: Option<u32>,
@@ -166,6 +171,7 @@ pub fn workload_response(workload: Option<Workload>) -> Option<WorkloadResponse>
         pid: w.pid,
         source: w.source.as_str().to_string(),
         exe: w.exe,
+        command_line: w.command_line,
         uid: w.uid,
         cgroup: w.cgroup,
         container: w.container,

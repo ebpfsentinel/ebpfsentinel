@@ -154,6 +154,9 @@ message Workload {
   // The workload at the other end of the flow, where its address is on
   // another node of the fleet. Absent otherwise.
   PeerWorkload peer = 15;
+  // The command line, where the operator turned its capture on, with the
+  // secret-bearing shapes removed where argv was read. Empty if absent.
+  string command_line = 16;
 }
 
 // The other end of a flow, as the node holding its address published it.

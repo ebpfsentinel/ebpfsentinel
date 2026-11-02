@@ -190,6 +190,11 @@ pub struct Workload {
     /// The executable path, where the process table holds one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exe: Option<String>,
+    /// The command line, where the process table captured one: absent unless
+    /// the operator turned the capture on, and redacted of the secret-bearing
+    /// shapes before it was ever stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_line: Option<String>,
     /// The real uid of the task at the moment the socket was opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uid: Option<u32>,
@@ -389,6 +394,7 @@ impl Workload {
             pid,
             source,
             exe: None,
+            command_line: None,
             uid: None,
             cgroup: None,
             container: None,
@@ -410,6 +416,7 @@ impl Workload {
     #[must_use]
     pub fn with_process(mut self, entry: &ProcessEntry) -> Self {
         self.exe = entry.identity.path().map(ToOwned::to_owned);
+        self.command_line.clone_from(&entry.command_line);
         self.uid = Some(entry.uid);
         if entry.cgroup_id != 0 {
             self.cgroup = Some(entry.cgroup_id);
@@ -608,6 +615,7 @@ mod tests {
             pid: 0,
             source: WorkloadSource::Flow,
             exe: Some("/usr/bin/curl".to_string()),
+            command_line: None,
             uid: None,
             cgroup: None,
             container: None,
