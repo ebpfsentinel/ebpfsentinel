@@ -9,9 +9,9 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
-use serde::Serialize;
-use utoipa::ToSchema;
+use axum::extract::{Path, Query, State};
+use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 
 use super::error::{ApiError, ErrorBody};
 use super::state::AppState;
@@ -271,10 +271,32 @@ fn table(
 
 // ── Handlers ──────────────────────────────────────────────────────
 
+/// What a listing may be narrowed to.
+#[derive(Debug, Default, Deserialize, IntoParams)]
+pub struct ProcessListQuery {
+    /// Only the processes whose executable is this path, compared exactly.
+    /// A process whose executable could not be read never matches.
+    pub exe: Option<String>,
+}
+
+/// The entries a listing answers with, narrowed to one executable path
+/// where the request names one.
+fn listed(
+    entries: &[domain::process::entity::ProcessEntry],
+    exe: Option<&str>,
+) -> Vec<ProcessEntryResponse> {
+    entries
+        .iter()
+        .filter(|entry| exe.is_none_or(|exe| entry.identity.path() == Some(exe)))
+        .map(entry_response)
+        .collect()
+}
+
 /// `GET /api/v1/processes` - the processes alive on this node.
 #[utoipa::path(
     get, path = "/api/v1/processes",
     tag = "Processes",
+    params(ProcessListQuery),
     responses(
         (status = 200, description = "The process table", body = ProcessListResponse),
         (status = 401, description = "Authentication required", body = ErrorBody),
@@ -288,9 +310,10 @@ fn table(
 )]
 pub async fn list_processes(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<ProcessListQuery>,
 ) -> Result<Json<ProcessListResponse>, ApiError> {
     let svc = table(&state)?;
-    let processes = svc.list().iter().map(entry_response).collect();
+    let processes = listed(&svc.list(), query.exe.as_deref());
     Ok(Json(ProcessListResponse {
         tracing: tracing_response(),
         stats: stats_response(&svc.stats()),
@@ -349,6 +372,32 @@ mod tests {
         assert_eq!(json["identity"]["kind"], "path");
         assert_eq!(json["identity"]["path"], "/usr/bin/curl");
         assert_eq!(json["pid"], 42);
+    }
+
+    #[test]
+    fn a_listing_narrowed_to_an_executable_keeps_only_that_path() {
+        let with_path = |pid, path: &str| {
+            let mut entry = ProcessEntry::new(pid, "x", 0);
+            entry.identity = ProcessIdentity::Path {
+                path: path.to_string(),
+                dev: 1,
+                inode: u64::from(pid),
+            };
+            entry
+        };
+        let entries = vec![
+            with_path(1, "/usr/bin/curl"),
+            with_path(2, "/usr/bin/bash"),
+            ProcessEntry::new(3, "gone", 0),
+            with_path(4, "/usr/bin/curl"),
+        ];
+        let pids = |rows: Vec<ProcessEntryResponse>| rows.iter().map(|r| r.pid).collect::<Vec<_>>();
+        assert_eq!(pids(listed(&entries, Some("/usr/bin/curl"))), vec![1, 4]);
+        assert_eq!(
+            pids(listed(&entries, Some("/usr/bin/cur"))),
+            Vec::<u32>::new()
+        );
+        assert_eq!(pids(listed(&entries, None)), vec![1, 2, 3, 4]);
     }
 
     #[test]

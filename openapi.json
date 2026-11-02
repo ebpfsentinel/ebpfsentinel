@@ -6683,6 +6683,20 @@
         ],
         "summary": "`GET /api/v1/processes` - the processes alive on this node.",
         "operationId": "list_processes",
+        "parameters": [
+          {
+            "name": "exe",
+            "in": "query",
+            "description": "Only the processes whose executable is this path, compared exactly.\nA process whose executable could not be read never matches.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "The process table",
