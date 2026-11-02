@@ -1,4 +1,4 @@
-//! Three invariants this tree states about itself, asserted rather than reviewed.
+//! Four invariants this tree states about itself, asserted rather than reviewed.
 //!
 //! The repository's own rules say a dash is a plain hyphen and that a planning
 //! identifier belongs in a pull request rather than in a file somebody ships.
@@ -12,6 +12,13 @@
 //! the way in. A path added to a unit and not to that rewrite table installs
 //! cleanly and fails at the first start, which is the one failure a package
 //! must not have.
+//!
+//! The fourth is what the agent reads without linking. It probes the system
+//! cryptographic libraries with uprobes, reads the rpm database's SQLite file
+//! and the dpkg and apk databases as file formats, and watches files through
+//! fanotify. None of that needs an implementation of any of them in this
+//! tree, and the README says so where a licence reviewer looks; the lock files
+//! are where it would stop being true, so they are read here.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -355,4 +362,69 @@ fn the_rewrite_table_names_no_path_the_units_dropped() {
         stale.is_empty(),
         "the package build rewrites paths no unit names any more: {stale:#?}"
     );
+}
+
+/// Crates that would put an implementation of something the agent only reads
+/// or probes into this tree: a binding to the crypto libraries the uprobes
+/// attach to, an SQLite engine where the rpm database is walked as a file
+/// format, a package manager's own library, a fanotify wrapper where the
+/// syscalls are made directly.
+const IMPLEMENTATIONS_NEVER_LINKED: &[&str] = &[
+    "openssl",
+    "openssl-sys",
+    "boring",
+    "boring-sys",
+    "libsodium-sys",
+    "sodiumoxide",
+    "gcrypt",
+    "libgcrypt-sys",
+    "libsqlite3-sys",
+    "rusqlite",
+    "sqlite",
+    "sqlite3-sys",
+    "rpm",
+    "librpm",
+    "librpm-sys",
+    "debian-packaging",
+    "fanotify-rs",
+    "fanotify",
+];
+
+/// The `name = "..."` of every package a lock file resolves.
+fn locked_packages(lock: &str) -> Vec<&str> {
+    lock.lines()
+        .filter_map(|line| line.strip_prefix("name = \""))
+        .filter_map(|rest| rest.strip_suffix('"'))
+        .collect()
+}
+
+#[test]
+fn what_the_agent_reads_or_probes_is_never_linked() {
+    let root = workspace_root();
+    let locks: Vec<PathBuf> = tracked_files(&root)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "Cargo.lock"))
+        .collect();
+    assert!(!locks.is_empty(), "no tracked lock file");
+    let mut found = Vec::new();
+    for lock in &locks {
+        let text = std::fs::read_to_string(lock).expect("a tracked lock file reads");
+        for name in locked_packages(&text) {
+            if IMPLEMENTATIONS_NEVER_LINKED.contains(&name) {
+                found.push(format!("{}: {name}", relative(&root, lock)));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "an implementation of something the agent only reads entered the tree; the README's licence section says it does not:\n{}",
+        found.join("\n")
+    );
+}
+
+#[test]
+fn a_lock_file_is_read_by_its_package_names() {
+    let lock =
+        "[[package]]\nname = \"rusqlite\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"tokio\"\n";
+    assert_eq!(locked_packages(lock), ["rusqlite", "tokio"]);
 }
