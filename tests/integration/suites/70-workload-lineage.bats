@@ -17,6 +17,8 @@
 #   * Each refusal is counted against the rule that made it.
 #   * The reach endpoint, asked about a task below `python3`, lists the
 #     ancestor rule, read from the chain the process table holds.
+#   * `investigate --pid` on a task below `python3` prints the chain, parent
+#     first, and its command line with the secret it carried redacted.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
@@ -182,4 +184,43 @@ _denials() {
     kill "${python_pid}" "${child}" 2>/dev/null || true
     [[ "${rules}" == *"fw-under-python"* ]]
     [[ "${rules}" != *"fw-under-timeout"* ]]
+}
+
+@test "investigating a process prints its lineage and the command line as redacted" {
+    python3 -c 'import subprocess, sys; subprocess.call([sys.executable, "-c", "import time; time.sleep(20)", "--password=" + "hunter" + "2"])' &
+    local python_pid=$!
+    local child=""
+    local attempt=0
+    while [ -z "${child}" ] && [ "${attempt}" -lt 50 ]; do
+        child="$(pgrep -P "${python_pid}" -f -- "--password=hunter2" || true)"
+        sleep 0.1
+        attempt=$((attempt + 1))
+    done
+    [ -n "${child}" ]
+
+    local out=""
+    attempt=0
+    while [ "${attempt}" -lt 30 ]; do
+        out="$("$AGENT_BIN" investigate --host "$AGENT_HOST" --port "$AGENT_HTTP_PORT" \
+            --pid "${child}" 2>&1 || true)"
+        [[ "${out}" == *"Lineage"* && "${out}" == *"python3"* ]] && break
+        sleep 0.2
+        attempt=$((attempt + 1))
+    done
+    local json
+    json="$("$AGENT_BIN" investigate --host "$AGENT_HOST" --port "$AGENT_HTTP_PORT" \
+        --pid "${child}" -o json 2>&1 || true)"
+    kill "${python_pid}" "${child}" 2>/dev/null || true
+
+    # The secret is assembled inside python3 so that no command line but the
+    # child's ever carries it whole. The parent reads before the process it
+    # started, and the secret never leaves the agent while the rest of the line
+    # does.
+    [[ "${out}" == *"Lineage"* ]]
+    [[ "${out}" == *"python3"* ]]
+    [[ "${out}" == *"--password=[redacted]"* ]]
+    [[ "${out}" != *"hunter2"* ]]
+    [ "$(echo "${json}" | jq -r '.lineage[-1].pid')" = "${child}" ]
+    [ "$(echo "${json}" | jq -r '.lineage | length')" -ge 2 ]
+    [ "$(echo "${json}" | jq -r '.lineage[-2].pid')" = "${python_pid}" ]
 }

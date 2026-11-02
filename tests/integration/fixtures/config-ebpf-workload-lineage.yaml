@@ -42,6 +42,12 @@ firewall:
         ancestor: __PYTHON__
         mode: enforce
 
+# Command lines kept so `investigate --pid` has a line to print, and
+# redacted where they are read.
+process_table:
+  enabled: true
+  capture_command_line: true
+
 ids:
   enabled: false
 
