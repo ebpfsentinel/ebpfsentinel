@@ -109,10 +109,19 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
         Some(Command::Investigate {
             conn,
             ip,
+            pid,
             alert_limit,
         }) => {
             let client = ApiClient::new(&conn.host, conn.port, cli.token);
-            commands::cmd_investigate(&client, &ip, alert_limit, output).await
+            match (pid, ip) {
+                (Some(pid), _) => {
+                    commands::cmd_investigate_process(&client, pid, alert_limit, output).await
+                }
+                (None, Some(ip)) => {
+                    commands::cmd_investigate(&client, &ip, alert_limit, output).await
+                }
+                (None, None) => anyhow::bail!("investigate needs an IP address or --pid"),
+            }
         }
 
         Some(Command::Learning(args)) => {

@@ -144,13 +144,19 @@ pub enum Command {
         alert_limit: u64,
     },
 
-    /// Investigate an IP - correlate alerts, connections, DNS, blacklist, and fingerprints
+    /// Investigate an IP - correlate alerts, connections, DNS, blacklist, and fingerprints -
+    /// or, with `--pid`, a process: its lineage, command lines and the intents that fired
     Investigate {
         #[command(flatten)]
         conn: ConnectionArgs,
 
         /// IP address to investigate
-        ip: String,
+        #[arg(required_unless_present = "pid", conflicts_with = "pid")]
+        ip: Option<String>,
+
+        /// Investigate a process of this machine instead of an address
+        #[arg(long)]
+        pid: Option<u32>,
 
         /// Max alerts to fetch
         #[arg(long, default_value_t = 100)]
@@ -3091,5 +3097,40 @@ mod tests {
             },
             _ => panic!("expected Aliases command"),
         }
+    }
+
+    #[test]
+    fn investigate_takes_an_address_or_a_pid_and_never_both() {
+        let by_ip = Cli::try_parse_from(["ebpfsentinel-agent", "investigate", "203.0.113.9"])
+            .expect("an address");
+        assert!(matches!(
+            by_ip.command,
+            Some(Command::Investigate {
+                ip: Some(_),
+                pid: None,
+                ..
+            })
+        ));
+        let by_pid = Cli::try_parse_from(["ebpfsentinel-agent", "investigate", "--pid", "4410"])
+            .expect("a pid");
+        assert!(matches!(
+            by_pid.command,
+            Some(Command::Investigate {
+                ip: None,
+                pid: Some(4410),
+                ..
+            })
+        ));
+        assert!(Cli::try_parse_from(["ebpfsentinel-agent", "investigate"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "ebpfsentinel-agent",
+                "investigate",
+                "10.0.0.1",
+                "--pid",
+                "1"
+            ])
+            .is_err()
+        );
     }
 }

