@@ -115,6 +115,26 @@ pub fn upgrade_hint(release: &str, target: KernelVersion) -> String {
     format!("{lead}{}", above_the_floor(release))
 }
 
+/// The distribution family a release string names, for a log line or a
+/// report. "unknown" where no marker matched.
+#[must_use]
+pub fn distribution_family(release: &str) -> &'static str {
+    match family(release) {
+        Family::Azure => "azure",
+        Family::AmazonLinux2023 => "amazon_linux_2023",
+        Family::AmazonLinux2 => "amazon_linux_2",
+        Family::Talos => "talos",
+        Family::OracleUek => "oracle_uek",
+        Family::EnterpriseLinux => "enterprise_linux",
+        Family::Fedora => "fedora",
+        Family::Debian => "debian",
+        Family::Ubuntu => "ubuntu",
+        Family::Suse => "suse",
+        Family::ContainerOptimizedOs => "container_optimized_os",
+        Family::Unknown => "unknown",
+    }
+}
+
 /// The family a release string names, by the markers its packages append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Family {

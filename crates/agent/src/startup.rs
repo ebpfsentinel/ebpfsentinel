@@ -2058,22 +2058,10 @@ pub async fn run(
     // Whether the file kfuncs are usable here is a load, not a version: ask it
     // once, after the token is registered, because the agent's own LSM
     // objects load through that token and the probe must be asked the same way.
-    let file_kfuncs = adapters::ebpf::file_kfunc_probe::init_cached();
-    info!(
-        sleepable_lsm = ?file_kfuncs.sleepable.loads,
-        usable = file_kfuncs.kfuncs.iter().filter(|k| k.usable).count(),
-        of = file_kfuncs.kfuncs.len(),
-        "file kfunc probe"
-    );
-    let kfunc_features = adapters::ebpf::kfunc_feature_probe::init_cached();
-    info!(
-        confirmed = kfunc_features
-            .iter()
-            .filter(|f| f.usable == Some(true))
-            .count(),
-        of = kfunc_features.len(),
-        "kfunc feature probe"
-    );
+    // What they answer is logged with every other capability once the
+    // attaches below have answered too.
+    adapters::ebpf::file_kfunc_probe::init_cached();
+    adapters::ebpf::kfunc_feature_probe::init_cached();
 
     // In BPF-token mode the agent cannot open a kernel module's BTF object fd
     // itself (BTF_GET_FD_BY_ID needs CAP_SYS_ADMIN, which the token does not

@@ -63,6 +63,7 @@ dependencies = [
  "tower-http 0.7.0",
  "tower_governor",
  "tracing",
+ "tracing-subscriber",
  "utoipa",
  "utoipa-swagger-ui",
 ]

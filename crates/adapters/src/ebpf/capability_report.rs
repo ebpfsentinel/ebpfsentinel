@@ -21,7 +21,7 @@ use domain::ransom::refusal::WriteRefusalRoute;
 
 use super::capabilities::{CATALOGUE, Capability, KernelVersion};
 use super::file_kfunc_probe::FileKfuncStatus;
-use super::kernel_probe::upgrade_hint;
+use super::kernel_probe::{distribution_family, upgrade_hint};
 use super::kfunc_feature_probe::KfuncFeature;
 use super::lsm_probe::BpfLsmStatus;
 
@@ -446,12 +446,61 @@ pub fn from_host() -> CapabilityReport {
     build(release, lsm.active, lsm.remedy.as_deref(), &host_evidence)
 }
 
+/// Say what is on, what is off and how to switch it on: one summary line, then
+/// one line per inactive entry. Always `info`, because an optional capability
+/// a host does not offer is not a fault.
+pub fn log(report: &CapabilityReport) {
+    let release = report.release.as_deref().unwrap_or("unknown");
+    let kernel = report
+        .kernel
+        .map_or_else(|| "unknown".to_string(), |k| k.to_string());
+    tracing::info!(
+        kernel = %kernel,
+        release,
+        family = distribution_family(release),
+        active = report.active_count(),
+        of = report.entries.len(),
+        "kernel capabilities above the floor"
+    );
+    for entry in &report.entries {
+        let Some(inactive) = entry.inactive.as_ref() else {
+            continue;
+        };
+        let capability = entry.capability.id;
+        let reason = inactive.describe(report.kernel);
+        let fallback = entry.capability.fallback;
+        if let Some(hint) = entry.hint.as_deref() {
+            tracing::info!(
+                capability,
+                cause = inactive.code(),
+                reason = %reason,
+                fallback,
+                hint,
+                "capability inactive"
+            );
+        } else {
+            tracing::info!(
+                capability,
+                cause = inactive.code(),
+                reason = %reason,
+                fallback,
+                "capability inactive"
+            );
+        }
+    }
+}
+
 static REPORT: OnceLock<CapabilityReport> = OnceLock::new();
 
 /// Build the report once, after every probe and attach of the start-up has
-/// answered, and keep it.
+/// answered, log it, and keep it. Later calls return the same report and log
+/// nothing, so a reload or a timer never repeats the lines.
 pub fn init_cached() -> &'static CapabilityReport {
-    REPORT.get_or_init(from_host)
+    REPORT.get_or_init(|| {
+        let report = from_host();
+        log(&report);
+        report
+    })
 }
 
 /// The report the start-up built, or `None` before it has.
@@ -711,6 +760,127 @@ mod tests {
             "{hint}"
         );
         assert_eq!(hint_for(&ABOVE, &inactive, None, None), None);
+    }
+
+    /// Collects every formatted line a subscriber writes.
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn captured_log(report: &CapabilityReport) -> Vec<String> {
+        let sink = Captured::default();
+        let writer = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || log(report));
+        let bytes = sink
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        String::from_utf8(bytes)
+            .expect("utf-8")
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn a_debian_612_host_without_the_lsm_logs_what_is_off_and_how_to_switch_it_on() {
+        let lsm_off = "add bpf to the lsm= kernel boot parameter, keeping the modules already \
+                       active, and reboot: lsm=landlock,yama,apparmor,bpf";
+        let report = build(
+            Some("6.12.48+deb13-amd64".into()),
+            false,
+            Some(lsm_off),
+            &|id| match id {
+                "bpf_lsm" => Some(Evidence::Lsm {
+                    active: false,
+                    built: Some(true),
+                    read: true,
+                }),
+                "file_kfuncs" | "copy_from_user_str" => Some(Evidence::Kfunc {
+                    declared: Some(true),
+                    load: Load::Refused("sleepable programs need the BPF LSM".into()),
+                }),
+                "kprobe_session" | "tcp_reqsk_assign" => Some(Evidence::Kfunc {
+                    declared: Some(true),
+                    load: Load::Loaded,
+                }),
+                "attribution" | "process_tracing" | "workload_firewall" | "quarantine" => {
+                    Some(attach_evidence(true, None))
+                }
+                "process_signal" => Some(attach_evidence(
+                    false,
+                    Some("stopping a process is turned off in the configuration".into()),
+                )),
+                "network_executables" | "write_refusal" | "self_protection" => Some(
+                    attach_evidence(false, Some("the LSM program did not attach".into())),
+                ),
+                _ => None,
+            },
+        );
+        let lines = captured_log(&report);
+        assert!(lines.iter().all(|l| l.contains(" INFO ")), "{lines:#?}");
+        let summary: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("kernel capabilities above the floor"))
+            .collect();
+        assert_eq!(summary.len(), 1, "{lines:#?}");
+        assert!(summary[0].contains("kernel=6.12"), "{}", summary[0]);
+        assert!(summary[0].contains("family=\"debian\""), "{}", summary[0]);
+        assert!(summary[0].contains("active=6"), "{}", summary[0]);
+
+        let inactive: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("capability inactive"))
+            .collect();
+        assert_eq!(inactive.len(), report.entries.len() - report.active_count());
+        for entry in report.entries.iter().filter(|e| !e.active()) {
+            let line = inactive
+                .iter()
+                .find(|l| l.contains(&format!("capability=\"{}\"", entry.capability.id)))
+                .expect("a line for every inactive entry");
+            assert!(line.contains(entry.capability.fallback), "{line}");
+            match entry.inactive.as_ref().expect("inactive") {
+                Inactive::LsmInactive => assert!(line.contains("lsm="), "{line}"),
+                Inactive::NotProbed(_) => {
+                    assert!(!line.contains("hint="), "{line}");
+                    assert!(!line.contains("kernel stream"), "{line}");
+                    assert!(!line.contains("backports"), "{line}");
+                }
+                _ => {}
+            }
+        }
+        let signal = inactive
+            .iter()
+            .find(|l| l.contains("capability=\"process_signal\""))
+            .expect("signal line");
+        assert!(signal.contains("cause=\"not_probed\""), "{signal}");
+        assert!(signal.contains("off in the configuration"), "{signal}");
+        for id in ["bpf_lsm", "file_kfuncs", "write_refusal", "self_protection"] {
+            let line = inactive
+                .iter()
+                .find(|l| l.contains(&format!("capability=\"{id}\"")))
+                .expect("line");
+            assert!(line.contains("cause=\"lsm_inactive\""), "{line}");
+            assert!(line.contains("lsm=landlock,yama,apparmor,bpf"), "{line}");
+        }
     }
 
     #[test]
