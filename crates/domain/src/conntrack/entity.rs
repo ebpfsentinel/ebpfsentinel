@@ -191,6 +191,11 @@ pub struct ConnTrackSettings {
     /// TTL in seconds for overloaded source IPs in the blacklist (default: 3600).
     #[serde(default = "default_overload_ttl")]
     pub overload_ttl_secs: u32,
+    /// Whether a reader of the table needs its byte counters. The kernel
+    /// keeps them only with `nf_conntrack_acct` on, which is off by default on
+    /// most distributions, and without them every flow reads zero bytes.
+    #[serde(default)]
+    pub byte_accounting: bool,
 }
 
 fn default_rate_window() -> u32 {
@@ -215,6 +220,7 @@ impl Default for ConnTrackSettings {
             max_src_conn_rate: 0,
             conn_rate_window_secs: 5,
             overload_ttl_secs: 3600,
+            byte_accounting: false,
         }
     }
 }
@@ -333,6 +339,7 @@ mod tests {
             max_src_conn_rate: 0,
             conn_rate_window_secs: 5,
             overload_ttl_secs: 3600,
+            byte_accounting: false,
         };
         let cfg = settings.to_ebpf_config();
         assert_eq!(cfg.enabled, 1);

@@ -5025,6 +5025,7 @@ pub async fn run(
                     idle_timeout_ms: config.flow_export.idle_timeout_secs.saturating_mul(1_000),
                     sampling: 1,
                 },
+                tick_interval: Duration::from_secs(config.flow_export.tick_interval_secs),
                 ..application::flow_export_service::FlowExportSettings::default()
             };
             info!(

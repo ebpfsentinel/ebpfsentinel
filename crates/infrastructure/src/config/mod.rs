@@ -1727,6 +1727,9 @@ impl AgentConfig {
             max_src_conn_rate: self.conntrack.max_src_conn_rate,
             conn_rate_window_secs: self.conntrack.conn_rate_window_secs,
             overload_ttl_secs: self.conntrack.overload_ttl_secs,
+            // The flow export and the share-writes reading both count bytes
+            // per flow, which the kernel only keeps with accounting on.
+            byte_accounting: self.flow_export.enabled || self.share_writes.enabled,
             ..ConnTrackSettings::default()
         }
     }
@@ -5022,6 +5025,21 @@ conntrack:
         assert_eq!(settings.max_src_states, 0);
         assert_eq!(settings.conn_rate_window_secs, 5);
         assert_eq!(settings.overload_ttl_secs, 3600);
+    }
+
+    #[test]
+    fn a_reader_of_flow_bytes_turns_byte_accounting_on() {
+        let base = "agent:\n  interfaces: [eth0]\nconntrack:\n  enabled: true\n";
+        let off = AgentConfig::from_yaml(base).unwrap();
+        assert!(!off.conntrack_settings().byte_accounting);
+        let shares =
+            AgentConfig::from_yaml(&format!("{base}share_writes:\n  enabled: true\n")).unwrap();
+        assert!(shares.conntrack_settings().byte_accounting);
+        let export =
+            AgentConfig::from_yaml(&format!(
+            "{base}flow_export:\n  enabled: true\n  json_lines:\n    enabled: true\n    path: /var/log/flows.jsonl\n"
+        )).unwrap();
+        assert!(export.conntrack_settings().byte_accounting);
     }
 
     #[test]

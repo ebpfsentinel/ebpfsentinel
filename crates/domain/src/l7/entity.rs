@@ -124,10 +124,17 @@ pub struct FtpCommand {
 }
 
 /// Parsed SMB header metadata.
+///
+/// An SMB 3 session that encrypts its traffic sends every message behind a
+/// transform header, so the command is not on the wire: `command` is `None`
+/// and `encrypted` says why. A rule naming a command never matches such a
+/// message; what is left to read about the session is its volume, its peer
+/// and its timing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmbHeader {
-    pub command: u16,
+    pub command: Option<u16>,
     pub is_smb2: bool,
+    pub encrypted: bool,
 }
 
 /// Parsed SSH banner line (`SSH-<proto_version>-<software>`).
@@ -444,7 +451,7 @@ impl L7Rule {
                 ParsedProtocol::Smb(hdr),
             ) => {
                 if let Some(expected_cmd) = command
-                    && *expected_cmd != hdr.command
+                    && Some(*expected_cmd) != hdr.command
                 {
                     return false;
                 }
@@ -1003,22 +1010,34 @@ mod tests {
         };
 
         let parsed = ParsedProtocol::Smb(SmbHeader {
-            command: 0x05,
+            command: Some(0x05),
             is_smb2: true,
+            encrypted: false,
         });
         assert!(rule.matches_l7(&parsed));
 
         let parsed_wrong_cmd = ParsedProtocol::Smb(SmbHeader {
-            command: 0x06,
+            command: Some(0x06),
             is_smb2: true,
+            encrypted: false,
         });
         assert!(!rule.matches_l7(&parsed_wrong_cmd));
 
         let parsed_wrong_ver = ParsedProtocol::Smb(SmbHeader {
-            command: 0x05,
+            command: Some(0x05),
             is_smb2: false,
+            encrypted: false,
         });
         assert!(!rule.matches_l7(&parsed_wrong_ver));
+
+        // An encrypted message hides its command, so a rule naming one
+        // never matches it, whatever the command really was.
+        let encrypted = ParsedProtocol::Smb(SmbHeader {
+            command: None,
+            is_smb2: true,
+            encrypted: true,
+        });
+        assert!(!rule.matches_l7(&encrypted));
     }
 
     // ── FTP matching tests ─────────────────────────────────────────

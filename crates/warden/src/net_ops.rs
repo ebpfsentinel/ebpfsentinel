@@ -451,6 +451,61 @@ fn run_bounded(
     }
 }
 
+/// Dump the conntrack table with `conntrack -L`, bounded by [`CHILD_TIMEOUT`].
+///
+/// The fallback for a kernel built without `CONFIG_NF_CONNTRACK_PROCFS`, where
+/// the table is live and only the proc file is missing. `None` when
+/// conntrack-tools is not installed, so the caller can tell an absent tool from
+/// a dump that failed. The output differs from the proc file only by its two
+/// leading address-family fields, which the agent's parser detects.
+pub fn conntrack_list() -> Result<Option<Vec<u8>>, String> {
+    use std::io::Read as _;
+    let mut child = match Command::new("conntrack")
+        .arg("-L")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("failed to run `conntrack -L`: {e}")),
+    };
+    // Drained on its own thread: a table larger than the pipe buffer would
+    // otherwise block the child on a write nobody reads, and the wait below
+    // would read that as a hang.
+    let reader = child.stdout.take().map(|mut out| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            out.read_to_end(&mut bytes).map(|_| bytes)
+        })
+    });
+    let deadline = Instant::now() + CHILD_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => return Err(format!("failed to wait for `conntrack -L`: {e}")),
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "`conntrack -L` did not finish within {CHILD_TIMEOUT:?} and was killed"
+            ));
+        }
+        std::thread::sleep(CHILD_POLL_INTERVAL);
+    };
+    if !status.success() {
+        return Err(format!("`conntrack -L` exited with {status}"));
+    }
+    match reader.map(std::thread::JoinHandle::join) {
+        Some(Ok(Ok(bytes))) => Ok(Some(bytes)),
+        Some(Ok(Err(e))) => Err(format!("read `conntrack -L` output: {e}")),
+        Some(Err(_)) => Err("the `conntrack -L` reader thread panicked".to_owned()),
+        None => Ok(Some(Vec::new())),
+    }
+}
+
 /// Run `cmd args`, requiring success, bounded by [`CHILD_TIMEOUT`].
 fn run(cmd: &str, args: &[String]) -> Result<(), String> {
     let status = run_bounded(cmd, args, CHILD_TIMEOUT)?;

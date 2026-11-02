@@ -194,7 +194,10 @@ impl ShareWritesVerdict {
     }
 
     /// The alert's sentence. It says where the writes went and how much,
-    /// and that what was written was not read.
+    /// and that the reading is volume, server count and timing alone: no
+    /// operation is read, so a session that seals its messages reads the
+    /// same as a cleartext one, and the sentence never claims the files
+    /// were encrypted.
     #[must_use]
     pub fn message(&self) -> String {
         let writer = match &self.workload {
@@ -214,7 +217,8 @@ impl ShareWritesVerdict {
         }
         format!(
             "{writer} wrote {} bytes over SMB to {} file servers this host had never written to, \
-             within {secs} s: {peers}; the content was not read",
+             within {secs} s: {peers}; degraded reading: volume, server count and timing only, \
+             no SMB operation or content was read, sealed session or not",
             self.bytes(),
             self.peers.len(),
         )
@@ -505,7 +509,8 @@ mod tests {
         let message = verdict.message();
         assert!(message.contains("pid 4410 (/tmp/.x)"));
         assert!(message.contains("3 file servers"));
-        assert!(message.contains("the content was not read"));
+        assert!(message.contains("degraded reading: volume, server count and timing only"));
+        assert!(message.contains("no SMB operation or content was read"));
         assert!(!message.to_lowercase().contains("encrypt"));
 
         assert!(

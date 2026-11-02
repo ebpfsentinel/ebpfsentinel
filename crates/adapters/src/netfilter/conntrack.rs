@@ -387,6 +387,12 @@ impl ConnTrackMapPort for ProcNetfilterConntrackPort {
         // for a denied flow is destroyed, an in-flight reply packet must not
         // silently re-create an ESTABLISHED entry and resurrect the flow.
         write_sysctl("net.netfilter.nf_conntrack_tcp_loose", 0);
+        // Turned on for a reader that counts bytes and never turned off: other
+        // software on the host may rely on the counters, and accounting costs
+        // a few bytes per entry. It applies to connections opened after it.
+        if settings.byte_accounting {
+            write_sysctl("net.netfilter.nf_conntrack_acct", 1);
+        }
         debug!("kernel netfilter conntrack timeouts synced via sysctl");
         Ok(())
     }
@@ -567,7 +573,8 @@ pub fn is_proc_conntrack_available() -> bool {
     Path::new(DEFAULT_NF_CONNTRACK_PATH).exists()
 }
 
-/// Check whether the conntrack table can be read at all, by either source.
+/// Check whether the conntrack table can be read at all: through the warden
+/// when the agent is brokered, otherwise from the proc file or conntrack-tools.
 ///
 /// Used at startup to decide whether the event stream is wired. Gating that on
 /// the proc file alone silently retired the whole feature on any kernel built
@@ -576,6 +583,14 @@ pub fn is_proc_conntrack_available() -> bool {
 /// could dump it.
 #[must_use]
 pub fn is_conntrack_readable() -> bool {
+    // The rootless agent reads the table through the warden, which holds the
+    // capability the agent's own user namespace does not: neither the proc file
+    // nor a local `conntrack -L` says anything about that route.
+    if let Some(warden) = ProcNetfilterConntrackPort::new().warden {
+        return warden
+            .lock()
+            .is_ok_and(|mut client| client.conntrack_dump().is_ok());
+    }
     if is_proc_conntrack_available() {
         return true;
     }

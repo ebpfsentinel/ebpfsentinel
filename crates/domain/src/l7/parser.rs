@@ -26,7 +26,7 @@ pub fn detect_protocol(payload: &[u8]) -> DetectedProtocol {
     }
 
     // SMB: NetBIOS session header (4 bytes) then magic
-    if payload.len() >= 8 && (&payload[4..8] == b"\xffSMB" || &payload[4..8] == b"\xfeSMB") {
+    if payload.len() >= 8 && SMB_MAGICS.contains(&&payload[4..8]) {
         return DetectedProtocol::Smb;
     }
 
@@ -1008,7 +1008,19 @@ pub fn parse_ftp(payload: &[u8]) -> Result<FtpCommand, L7Error> {
 
 // ── SMB parser ─────────────────────────────────────────────────────
 
+/// The magics an SMB message opens with after its `NetBIOS` header: SMB 1,
+/// SMB 2 and 3, and the SMB 3 transform header an encrypted session puts in
+/// front of every message.
+const SMB_MAGICS: [&[u8]; 3] = [b"\xffSMB", b"\xfeSMB", SMB_TRANSFORM_MAGIC];
+
+/// The SMB 3 transform header: the message behind it is encrypted.
+const SMB_TRANSFORM_MAGIC: &[u8] = b"\xfdSMB";
+
 /// Parse an SMB header from raw payload bytes (after `NetBIOS` session header).
+///
+/// A message behind a transform header is encrypted: it parses, with no
+/// command, so the session is still known to be SMB while what it does is
+/// not.
 pub fn parse_smb(payload: &[u8]) -> Result<SmbHeader, L7Error> {
     // NetBIOS session header (4 bytes) + SMB magic (4 bytes) = 8 minimum
     if payload.len() < 8 {
@@ -1029,8 +1041,9 @@ pub fn parse_smb(payload: &[u8]) -> Result<SmbHeader, L7Error> {
             });
         }
         Ok(SmbHeader {
-            command: u16::from(payload[8]),
+            command: Some(u16::from(payload[8])),
             is_smb2: false,
+            encrypted: false,
         })
     } else if magic == b"\xfeSMB" {
         // SMB2/3: command at offset 16 (4 NetBIOS + 4 magic + 8 header fields) as u16 LE
@@ -1042,8 +1055,15 @@ pub fn parse_smb(payload: &[u8]) -> Result<SmbHeader, L7Error> {
         }
         let command = u16::from_le_bytes([payload[16], payload[17]]);
         Ok(SmbHeader {
-            command,
+            command: Some(command),
             is_smb2: true,
+            encrypted: false,
+        })
+    } else if magic == SMB_TRANSFORM_MAGIC {
+        Ok(SmbHeader {
+            command: None,
+            is_smb2: true,
+            encrypted: true,
         })
     } else {
         Err(L7Error::InvalidFormat {
@@ -2001,7 +2021,7 @@ mod tests {
         payload.extend_from_slice(&[0x00; 23]); // rest of header
 
         let result = parse_smb(&payload).unwrap();
-        assert_eq!(result.command, 0x72);
+        assert_eq!(result.command, Some(0x72));
         assert!(!result.is_smb2);
     }
 
@@ -2014,8 +2034,22 @@ mod tests {
         payload.extend_from_slice(&[0x00; 14]); // rest of header
 
         let result = parse_smb(&payload).unwrap();
-        assert_eq!(result.command, 1);
+        assert_eq!(result.command, Some(1));
         assert!(result.is_smb2);
+        assert!(!result.encrypted);
+    }
+
+    #[test]
+    fn an_encrypted_smb3_message_is_smb_with_no_command() {
+        let mut payload = vec![0x00, 0x00, 0x00, 0x60]; // NetBIOS header
+        payload.extend_from_slice(b"\xfdSMB"); // SMB3 transform header
+        payload.extend_from_slice(&[0x5a; 48]); // signature, nonce, ciphertext
+        assert_eq!(detect_protocol(&payload), DetectedProtocol::Smb);
+
+        let result = parse_smb(&payload).unwrap();
+        assert_eq!(result.command, None);
+        assert!(result.is_smb2);
+        assert!(result.encrypted);
     }
 
     #[test]
