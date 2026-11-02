@@ -10411,6 +10411,59 @@
           }
         }
       },
+      "CapabilityEntry": {
+        "type": "object",
+        "description": "One capability above the kernel floor, as this host answers it.",
+        "required": [
+          "id",
+          "unlocks",
+          "active",
+          "since",
+          "fallback"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "cause": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why not, as a word to match on: `kernel_older`, `not_declared`,\n`lsm_inactive`, `not_probed` or `refused`. Absent when active.\n`not_probed` says nothing about the kernel."
+          },
+          "fallback": {
+            "type": "string",
+            "description": "What runs where it is absent."
+          },
+          "hint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How to switch it on here: a kernel to install or a boot parameter to\nset. Absent when active, when the probe could not run and when the\nkernel refused, since none of those names a change that would help."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable identifier, the same as the metric's `capability` label."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why not, in one sentence. Absent when active."
+          },
+          "since": {
+            "type": "string",
+            "description": "The kernel that introduced what it rests on, or the floor. Used to\nword the hint, never to decide `active`."
+          },
+          "unlocks": {
+            "type": "string",
+            "description": "What it gives where it is active."
+          }
+        }
+      },
       "CaptureListResponse": {
         "type": "object",
         "required": [
@@ -14207,7 +14260,8 @@
           "write_refusal",
           "self_protection",
           "file_kfuncs",
-          "kfunc_features"
+          "kfunc_features",
+          "capabilities"
         ],
         "properties": {
           "attribution": {
@@ -14217,6 +14271,13 @@
           "bpf_lsm": {
             "$ref": "#/components/schemas/BpfLsmReport",
             "description": "Whether an LSM program can attach on this host. Read from the host\nrather than from any attach, because it is asked before anything that\nneeds it is configured, and the kernel version does not answer it."
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CapabilityEntry"
+            },
+            "description": "Every capability above the kernel floor, active or not, with why not\nand how to switch it on. The blocks above are the detail each probe\nor attach gives; this is the one answer an estate compares host by\nhost. A capability is active on evidence from this host, never because\nof the kernel's version."
           },
           "file_kfuncs": {
             "$ref": "#/components/schemas/FileKfuncReport",

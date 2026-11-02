@@ -2727,6 +2727,28 @@ pub struct KernelFeaturesResponse {
     /// Absent from an agent that predates the kfunc feature probe.
     #[serde(default)]
     pub kfunc_features: Option<KfuncFeaturesReport>,
+    /// Absent from an agent that predates the capability report.
+    #[serde(default)]
+    pub capabilities: Option<Vec<CapabilityEntry>>,
+}
+
+/// One capability above the kernel floor, as the node answered it.
+#[derive(Deserialize, Serialize)]
+pub struct CapabilityEntry {
+    pub id: String,
+    #[serde(default)]
+    pub unlocks: String,
+    pub active: bool,
+    #[serde(default)]
+    pub cause: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub since: String,
+    #[serde(default)]
+    pub fallback: String,
+    #[serde(default)]
+    pub hint: Option<String>,
 }
 
 /// The kernel facts a future program would rest on, as the node answered.

@@ -175,6 +175,56 @@ pub struct KernelFeaturesResponse {
     /// Kernel facts no shipped program uses yet, each with what it would be
     /// used for, so the day one is wired this host's answer is already here.
     pub kfunc_features: KfuncFeaturesReport,
+    /// Every capability above the kernel floor, active or not, with why not
+    /// and how to switch it on. The blocks above are the detail each probe
+    /// or attach gives; this is the one answer an estate compares host by
+    /// host. A capability is active on evidence from this host, never because
+    /// of the kernel's version.
+    pub capabilities: Vec<CapabilityEntry>,
+}
+
+/// One capability above the kernel floor, as this host answers it.
+#[derive(Serialize, ToSchema)]
+pub struct CapabilityEntry {
+    /// Stable identifier, the same as the metric's `capability` label.
+    pub id: String,
+    /// What it gives where it is active.
+    pub unlocks: String,
+    pub active: bool,
+    /// Why not, as a word to match on: `kernel_older`, `not_declared`,
+    /// `lsm_inactive`, `not_probed` or `refused`. Absent when active.
+    /// `not_probed` says nothing about the kernel.
+    pub cause: Option<String>,
+    /// Why not, in one sentence. Absent when active.
+    pub reason: Option<String>,
+    /// The kernel that introduced what it rests on, or the floor. Used to
+    /// word the hint, never to decide `active`.
+    pub since: String,
+    /// What runs where it is absent.
+    pub fallback: String,
+    /// How to switch it on here: a kernel to install or a boot parameter to
+    /// set. Absent when active, when the probe could not run and when the
+    /// kernel refused, since none of those names a change that would help.
+    pub hint: Option<String>,
+}
+
+impl CapabilityEntry {
+    fn all(report: &adapters::ebpf::capability_report::CapabilityReport) -> Vec<Self> {
+        report
+            .entries
+            .iter()
+            .map(|entry| Self {
+                id: entry.capability.id.to_string(),
+                unlocks: entry.capability.unlocks.to_string(),
+                active: entry.active(),
+                cause: entry.inactive.as_ref().map(|i| i.code().to_string()),
+                reason: entry.inactive.as_ref().map(|i| i.describe(report.kernel)),
+                since: entry.capability.since.to_string(),
+                fallback: entry.capability.fallback.to_string(),
+                hint: entry.hint.clone(),
+            })
+            .collect()
+    }
 }
 
 /// What this host answered about the kfuncs a future program would rest on.
@@ -794,6 +844,9 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
     let self_protection = SelfProtectionReport::from(adapters::ebpf::bpf_guard::status());
     let file_kfuncs = FileKfuncReport::from(adapters::ebpf::file_kfunc_probe::cached());
     let kfunc_features = KfuncFeaturesReport::from(adapters::ebpf::kfunc_feature_probe::cached());
+    // Read live, like every block above, so an attach that came up or went
+    // away since start-up is answered as it is now.
+    let capabilities = CapabilityEntry::all(&adapters::ebpf::capability_report::from_host());
 
     let Some(report) = report else {
         return KernelFeaturesResponse {
@@ -814,6 +867,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
             self_protection,
             file_kfuncs,
             kfunc_features,
+            capabilities,
         };
     };
 
@@ -864,6 +918,7 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
         self_protection,
         file_kfuncs,
         kfunc_features,
+        capabilities,
     }
 }
 

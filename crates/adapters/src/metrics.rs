@@ -86,6 +86,12 @@ pub struct ProgramLabels {
     pub program: String,
 }
 
+/// One capability above the kernel floor, by its catalogue identifier.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct CapabilityLabels {
+    pub capability: String,
+}
+
 /// One eBPF map, by the full name the ELF gives it.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct MapLabels {
@@ -563,6 +569,10 @@ pub struct AgentMetrics {
     /// loaded its programs via `BPF_TOKEN_CREATE` (the only supported
     /// path), `0` when running in API-only mode with no eBPF attached.
     pub bpf_token_used: Gauge,
+    /// Whether each capability above the kernel floor is active on this
+    /// host: `1` active, `0` inactive. Set once at start-up from the
+    /// capability report, one series per catalogue entry.
+    pub kernel_capability_active: Family<CapabilityLabels, Gauge>,
 }
 
 impl AgentMetrics {
@@ -1372,6 +1382,13 @@ impl AgentMetrics {
             bpf_token_used.clone(),
         );
 
+        let kernel_capability_active = Family::<CapabilityLabels, Gauge>::default();
+        registry.register(
+            "kernel_capability_active",
+            "Capability above the kernel floor active on this host (1=active, 0=inactive)",
+            kernel_capability_active.clone(),
+        );
+
         Self {
             registry,
             packets_total,
@@ -1485,6 +1502,7 @@ impl AgentMetrics {
             ids_ct_dying_total,
             fingerprints_seen_total,
             bpf_token_used,
+            kernel_capability_active,
         }
     }
 
@@ -1512,6 +1530,20 @@ impl AgentMetrics {
     /// agent is running in API-only mode with no eBPF (`false`).
     pub fn set_bpf_token_used(&self, token_loaded: bool) {
         self.bpf_token_used.set(i64::from(token_loaded));
+    }
+
+    /// Publish the capability report: one series per catalogue entry.
+    pub fn set_kernel_capabilities(
+        &self,
+        report: &crate::ebpf::capability_report::CapabilityReport,
+    ) {
+        for entry in &report.entries {
+            self.kernel_capability_active
+                .get_or_create(&CapabilityLabels {
+                    capability: entry.capability.id.to_string(),
+                })
+                .set(i64::from(entry.active()));
+        }
     }
 
     /// Encode all registered metrics to `OpenMetrics` text format.
@@ -2407,6 +2439,38 @@ mod tests {
     }
 
     #[test]
+    fn the_capability_gauge_carries_exactly_the_catalogue() {
+        use crate::ebpf::capabilities::CATALOGUE;
+        use crate::ebpf::capability_report::{Evidence, build};
+        let metrics = AgentMetrics::new();
+        let report = build(Some("6.12.48+deb13-amd64".into()), true, None, &|id| {
+            (id == "bpf_lsm").then_some(Evidence::Lsm {
+                active: true,
+                built: Some(true),
+                read: true,
+            })
+        });
+        metrics.set_kernel_capabilities(&report);
+        let encoded = metrics.encode();
+        let mut labels: Vec<&str> = encoded
+            .lines()
+            .filter(|l| l.starts_with("ebpfsentinel_kernel_capability_active{"))
+            .filter_map(|l| l.split('"').nth(1))
+            .collect();
+        labels.sort_unstable();
+        let mut catalogue: Vec<&str> = CATALOGUE.iter().map(|c| c.id).collect();
+        catalogue.sort_unstable();
+        assert_eq!(labels, catalogue);
+        assert!(
+            encoded.contains("ebpfsentinel_kernel_capability_active{capability=\"bpf_lsm\"} 1")
+        );
+        assert!(
+            encoded
+                .contains("ebpfsentinel_kernel_capability_active{capability=\"write_refusal\"} 0")
+        );
+    }
+
+    #[test]
     fn ebpf_program_status_loaded() {
         let metrics = AgentMetrics::new();
         metrics.set_ebpf_program_status("xdp_firewall", true);
@@ -2930,6 +2994,7 @@ mod tests {
         ("audit_failures", "counter"),
         ("auto_responses", "counter"),
         ("bpf_token_used", "gauge"),
+        ("kernel_capability_active", "gauge"),
         ("cgroup_shaping_achieved_bps", "gauge"),
         ("cgroup_shaping_bytes", "counter"),
         ("cgroup_shaping_dropped_horizon", "counter"),
@@ -3353,6 +3418,11 @@ mod tests {
                 kind: "veth".into(),
             })
             .observe(3.0);
+        m.kernel_capability_active
+            .get_or_create(&CapabilityLabels {
+                capability: "bpf_lsm".into(),
+            })
+            .set(1);
     }
 
     #[test]

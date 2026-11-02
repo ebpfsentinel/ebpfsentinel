@@ -5737,6 +5737,34 @@ fn print_lsm_blocks(resp: &crate::api_client::KernelFeaturesResponse) {
         Some(report) => print_kfunc_features(report),
         None => println!("\nKernel facts not yet used\n  Not reported by this agent."),
     }
+    match &resp.capabilities {
+        Some(entries) => print_capabilities(entries),
+        None => println!("\nCapabilities above the floor\n  Not reported by this agent."),
+    }
+}
+
+/// Print every capability above the kernel floor: active, or why not, what
+/// runs instead, and how to switch it on where a change would help.
+fn print_capabilities(entries: &[crate::api_client::CapabilityEntry]) {
+    let active = entries.iter().filter(|e| e.active).count();
+    println!(
+        "\nCapabilities above the floor ({active} of {} active)",
+        entries.len()
+    );
+    for entry in entries {
+        if entry.active {
+            println!("  {:<22} active", entry.id);
+            continue;
+        }
+        println!("  {:<22} inactive", entry.id);
+        if let Some(reason) = &entry.reason {
+            println!("    Why:     {reason}");
+        }
+        println!("    Instead: {}", entry.fallback);
+        if let Some(hint) = &entry.hint {
+            println!("    Switch on: {hint}");
+        }
+    }
 }
 
 /// Print each kernel fact no shipped program uses yet: whether this host
