@@ -5004,6 +5004,51 @@ pub async fn run(
             ),
         }
     }
+    // Writes this host pushes to file shares, read off a flow collector of
+    // its own: the export's sampling would make a volume here undercount.
+    if config.share_writes.enabled {
+        if let Some(tx) = conntrack_event_tx.as_ref() {
+            let reading = &config.share_writes;
+            let service = Arc::new(application::share_writes_service::ShareWritesService::new(
+                domain::share_writes::ShareWritesSettings {
+                    learning_ns: reading.learning_secs.saturating_mul(1_000_000_000),
+                    window_ns: reading.window_secs.saturating_mul(1_000_000_000),
+                    min_new_peers: reading.min_new_peers,
+                    min_bytes_per_peer: reading.min_bytes_per_peer,
+                },
+                alert_tx.clone(),
+            ));
+            let settings = application::flow_export_service::FlowExportSettings {
+                limits: domain::flow::entity::FlowTableLimits {
+                    capacity: config.flow_export.table_capacity,
+                    active_timeout_ms: config.flow_export.active_timeout_secs.saturating_mul(1_000),
+                    idle_timeout_ms: config.flow_export.idle_timeout_secs.saturating_mul(1_000),
+                    sampling: 1,
+                },
+                ..application::flow_export_service::FlowExportSettings::default()
+            };
+            info!(
+                learning_secs = reading.learning_secs,
+                min_new_peers = reading.min_new_peers,
+                "writes to file shares followed"
+            );
+            // The handle is not kept: the tasks run until cancellation
+            // and this collector has no sink an operator configured.
+            let _ = application::flow_export_service::spawn_flow_export(
+                settings,
+                workloads.clone(),
+                vec![service as Arc<dyn ports::secondary::flow_sink_port::FlowSink>],
+                Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+                tx.subscribe(),
+                cancel_token.clone(),
+            );
+        } else {
+            warn!(
+                "writes to file shares asked for but this host's conntrack table is unreadable: \
+                 nothing is followed"
+            );
+        }
+    }
     if let Some(store) = alert_store {
         alert_pipeline = alert_pipeline.with_alert_store(store);
     }

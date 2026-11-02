@@ -115,6 +115,7 @@ pub mod remote_identity_store;
 pub mod reputation_enforcement;
 pub mod routing_service_impl;
 pub mod schedule_service_impl;
+pub mod share_writes_service;
 pub mod tcp_health_service;
 pub mod telemetry_service;
 pub mod threatintel_service_impl;

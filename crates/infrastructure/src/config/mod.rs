@@ -40,6 +40,7 @@ mod qos;
 mod ratelimit;
 mod response;
 mod routing;
+mod share_writes;
 mod tcp_health;
 mod telemetry;
 mod threatintel;
@@ -109,6 +110,7 @@ pub use response::{
     MAX_RESPONSE_TTL_CEILING_SECS, MAX_SIGNAL_NUMBER, ResponseConfig,
 };
 pub use routing::{GatewayConfig, HealthCheckConfig, RoutingConfig};
+pub use share_writes::ShareWritesConfig;
 pub use tcp_health::{ResetScanConfig, TcpHealthConfig};
 pub use telemetry::{DISABLE_ENV as TELEMETRY_DISABLE_ENV, TelemetryConfig};
 pub use threatintel::{
@@ -309,6 +311,11 @@ pub struct AgentConfig {
     /// is attached to them. On by default.
     #[serde(default)]
     pub network_inventory: NetworkInventoryConfig,
+
+    /// Writes pushed over SMB to file servers this host never wrote to
+    /// before. Off by default.
+    #[serde(default)]
+    pub share_writes: ShareWritesConfig,
 
     /// Kernel state its own listings leave out: a port that refuses a bind
     /// and appears in no socket listing. On by default.
@@ -592,6 +599,7 @@ impl AgentConfig {
         self.file_watch.validate()?;
         self.tcp_health.validate()?;
         self.network_inventory.validate()?;
+        self.share_writes.validate()?;
         self.hidden_checks.validate()?;
         self.package_inventory.validate()?;
         self.host_rules.validate()?;

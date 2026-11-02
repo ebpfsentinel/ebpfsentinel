@@ -27,6 +27,7 @@ use crate::ransom::{
 };
 use crate::raw_socket::entity::{FilterState, RAW_SOCKET_COMPONENT, RawSocket};
 use crate::response::signal::ProcessKillOutcome;
+use crate::share_writes::{SHARE_WRITES_COMPONENT, ShareWritesVerdict};
 use crate::tcp_health::reset_scan::{ResetScan, TCP_HEALTH_COMPONENT};
 use crate::threatintel::entity::ThreatIntelAlert;
 use crate::workload::entity::Workload;
@@ -1099,6 +1100,83 @@ impl Alert {
             mitigation_status: None,
             total_packets: None,
             mitre_attack: Some(RawSocket::mitre()),
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
+            executable_path,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
+            workload,
+        }
+    }
+
+    /// Create an alert for a writer that pushed volume to file servers this
+    /// host had never written to. High severity: the history is learned and
+    /// a single new server never makes one. The first server written to is
+    /// the destination; the sentence names all of them.
+    #[must_use]
+    pub fn from_share_writes(verdict: &ShareWritesVerdict) -> Self {
+        let rule_id = ShareWritesVerdict::rule_id();
+        let first = verdict.peers.first();
+        let (dst_addr, is_ipv6) = match first.map(|p| p.peer) {
+            Some(std::net::IpAddr::V4(v4)) => ([u32::from(v4), 0, 0, 0], false),
+            Some(std::net::IpAddr::V6(v6)) => {
+                let o = v6.octets();
+                let word = |i: usize| u32::from_be_bytes([o[i], o[i + 1], o[i + 2], o[i + 3]]);
+                ([word(0), word(4), word(8), word(12)], true)
+            }
+            None => ([0; 4], false),
+        };
+        let workload = verdict.workload.clone();
+        let (tgid, executable_path) = match &workload {
+            Some(w) => (Some(w.pid), w.exe.clone()),
+            None => (None, None),
+        };
+        Self {
+            id: Self::generate_id(verdict.at_ns, &rule_id),
+            timestamp_ns: verdict.at_ns,
+            component: SHARE_WRITES_COMPONENT.to_string(),
+            severity: Severity::High,
+            rule_id,
+            action: DomainMode::Alert,
+            src_addr: [0; 4],
+            dst_addr,
+            src_port: 0,
+            dst_port: first.map_or(0, |p| p.port),
+            protocol: 6,
+            is_ipv6,
+            message: verdict.message(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: Some(ShareWritesVerdict::mitre()),
             ja4_fingerprint: None,
             ml_anomaly_score: None,
             ml_top_feature: None,
