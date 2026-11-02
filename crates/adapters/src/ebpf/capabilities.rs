@@ -232,6 +232,59 @@ pub const CATALOGUE: &[Capability] = &[
     },
 ];
 
+impl Capability {
+    /// What a host needs for this entry to be active, in one sentence. The
+    /// same words travel to every page that states the capability, so a claim
+    /// never reaches a reader without its condition.
+    #[must_use]
+    pub fn condition(&self) -> String {
+        if self.needs_lsm {
+            return "the BPF LSM active at boot, with bpf listed in the lsm= kernel parameter"
+                .to_owned();
+        }
+        match self.probe {
+            ProbeKind::AttachStatus => {
+                "turned on in the configuration and attached on the node".to_owned()
+            }
+            ProbeKind::Loaded | ProbeKind::DeclaredInBtf if self.since > KernelVersion::FLOOR => {
+                format!(
+                    "a kernel offering it, from Linux {} or through a vendor backport",
+                    self.since
+                )
+            }
+            ProbeKind::Loaded
+            | ProbeKind::DeclaredInBtf
+            | ProbeKind::SleepableLsm
+            | ProbeKind::ActiveSecurityModules => "a kernel built with it".to_owned(),
+        }
+    }
+}
+
+/// The catalogue as the documentation, the website and the sales material
+/// read it, through the `capabilities.json` file at the root of this
+/// repository rather than through this source.
+#[must_use]
+pub fn published() -> serde_json::Value {
+    let entries: Vec<serde_json::Value> = CATALOGUE
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id,
+                "unlocks": c.unlocks,
+                "condition": c.condition(),
+                "fallback": c.fallback,
+                "probe": c.probe.as_str(),
+                "since": c.since.to_string(),
+                "needs_lsm": c.needs_lsm,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "floor": KernelVersion::FLOOR.to_string(),
+        "capabilities": entries,
+    })
+}
+
 /// The entry with this identifier.
 #[must_use]
 pub fn find(id: &str) -> Option<&'static Capability> {
@@ -323,6 +376,31 @@ mod tests {
                 assert!(c.needs_lsm, "{} is asked through the LSM", c.id);
             }
         }
+    }
+
+    #[test]
+    fn the_published_file_is_the_catalogue() {
+        let file: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../capabilities.json"))
+                .expect("capabilities.json is valid JSON");
+        assert_eq!(
+            file,
+            published(),
+            "capabilities.json is stale: run cargo xtask emit-capabilities"
+        );
+    }
+
+    #[test]
+    fn every_condition_names_what_a_host_needs() {
+        for c in CATALOGUE {
+            let condition = c.condition();
+            assert!(!condition.ends_with('.'), "{}", c.id);
+            if c.needs_lsm {
+                assert!(condition.contains("lsm="), "{}", c.id);
+            }
+        }
+        let immediate = find("immediate_signal").expect("entry");
+        assert!(immediate.condition().contains("6.13"));
     }
 
     #[test]

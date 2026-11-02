@@ -1,0 +1,131 @@
+{
+  "capabilities": [
+    {
+      "condition": "the BPF LSM active at boot, with bpf listed in the lsm= kernel parameter",
+      "fallback": "each capability resting on it runs its own fallback, listed beside it",
+      "id": "bpf_lsm",
+      "needs_lsm": true,
+      "probe": "active_security_modules",
+      "since": "6.12",
+      "unlocks": "programs attached at security module hooks, which is where the kernel decides a call before it happens"
+    },
+    {
+      "condition": "the BPF LSM active at boot, with bpf listed in the lsm= kernel parameter",
+      "fallback": "executables are identified by the device and inode read in userspace, and paths and attributes are read off the filesystem",
+      "id": "file_kfuncs",
+      "needs_lsm": true,
+      "probe": "sleepable_lsm",
+      "since": "6.12",
+      "unlocks": "a task's executable, a rendered path and a file's extended attribute read in the kernel"
+    },
+    {
+      "condition": "a kernel built with it",
+      "fallback": "nothing changes: no shipped program rests on it yet",
+      "id": "kprobe_session",
+      "needs_lsm": false,
+      "probe": "loaded",
+      "since": "6.12",
+      "unlocks": "one program on a function's entry and return for the kernel TLS record path, instead of a kprobe, a kretprobe and a map correlating them"
+    },
+    {
+      "condition": "the BPF LSM active at boot, with bpf listed in the lsm= kernel parameter",
+      "fallback": "nothing changes: no shipped program rests on it yet",
+      "id": "copy_from_user_str",
+      "needs_lsm": true,
+      "probe": "sleepable_lsm",
+      "since": "6.12",
+      "unlocks": "the real argument vector of a process, read at exec"
+    },
+    {
+      "condition": "a kernel built with it",
+      "fallback": "nothing changes: no shipped program rests on it yet",
+      "id": "tcp_reqsk_assign",
+      "needs_lsm": false,
+      "probe": "declared_in_btf",
+      "since": "6.12",
+      "unlocks": "a validated SYN cookie handed to the stack as a request socket, so the stack does not revalidate a cookie it did not issue"
+    },
+    {
+      "condition": "turned on in the configuration and attached on the node",
+      "fallback": "flows carry no workload name and everything else is unchanged",
+      "id": "attribution",
+      "needs_lsm": false,
+      "probe": "attach_status",
+      "since": "6.12",
+      "unlocks": "the workload that opened a socket, named on every flow"
+    },
+    {
+      "condition": "turned on in the configuration and attached on the node",
+      "fallback": "flows and alerts carry no process and everything else is unchanged",
+      "id": "process_tracing",
+      "needs_lsm": false,
+      "probe": "attach_status",
+      "since": "6.12",
+      "unlocks": "the process behind a flow or an alert, with its command line and lineage"
+    },
+    {
+      "condition": "turned on in the configuration and attached on the node",
+      "fallback": "no workload rule is enforced, and a configuration that needs one refuses to start rather than running unenforced",
+      "id": "workload_firewall",
+      "needs_lsm": false,
+      "probe": "attach_status",
+      "since": "6.12",
+      "unlocks": "rules on what a named workload may connect to, send to or bind, decided in the syscall"
+    },
+    {
+      "condition": "turned on in the configuration and attached on the node",
+      "fallback": "a quarantine is refused with the reason and the alert still fires",
+      "id": "quarantine",
+      "needs_lsm": false,
+      "probe": "attach_status",
+      "since": "6.12",
+      "unlocks": "a workload cut off from the network in the kernel for a bounded time"
+    },
+    {
+      "condition": "turned on in the configuration and attached on the node",
+      "fallback": "a signal is refused with the reason and the alert still fires",
+      "id": "process_signal",
+      "needs_lsm": false,
+      "probe": "attach_status",
+      "since": "6.12",
+      "unlocks": "a process stopped by a signal sent from the kernel"
+    },
+    {
+      "condition": "a kernel offering it, from Linux 6.13 or through a vendor backport",
+      "fallback": "the signal waits for the target's next syscall, and a target making none within the window is reported as a survivor",
+      "id": "immediate_signal",
+      "needs_lsm": false,
+      "probe": "loaded",
+      "since": "6.13",
+      "unlocks": "a signal that reaches its target at once, even a process making no syscall"
+    },
+    {
+      "condition": "the BPF LSM active at boot, with bpf listed in the lsm= kernel parameter",
+      "fallback": "an observing list is skipped with the reason and an enforcing list refuses to start the agent",
+      "id": "network_executables",
+      "needs_lsm": true,
+      "probe": "attach_status",
+      "since": "6.12",
+      "unlocks": "the list of executables allowed to reach the network, decided before the socket exists"
+    },
+    {
+      "condition": "the BPF LSM active at boot, with bpf listed in the lsm= kernel parameter",
+      "fallback": "a fanotify permission group refuses on at most 4,096 marked inodes, and where that cannot run the mass encryption detection and its stop remain",
+      "id": "write_refusal",
+      "needs_lsm": true,
+      "probe": "attach_status",
+      "since": "6.12",
+      "unlocks": "a write-open refused past a count, before a byte is written"
+    },
+    {
+      "condition": "the BPF LSM active at boot, with bpf listed in the lsm= kernel parameter",
+      "fallback": "the agent's objects are guarded only by the privilege it takes to reach them, and the node reports itself unprotected",
+      "id": "self_protection",
+      "needs_lsm": true,
+      "probe": "attach_status",
+      "since": "6.12",
+      "unlocks": "the agent's own maps and links refused to every other task"
+    }
+  ],
+  "floor": "6.12"
+}

@@ -36,6 +36,16 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Emit the catalogue of capabilities above the kernel floor to JSON.
+    ///
+    /// Default output: `<workspace>/capabilities.json`, read by the
+    /// documentation, the website and the sales material, and held to the
+    /// catalogue by a test.
+    EmitCapabilities {
+        /// Output path. Defaults to `capabilities.json` at the workspace root.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -49,7 +59,18 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::EmitOpenapi { output } => emit_openapi(output),
+        Commands::EmitCapabilities { output } => emit_capabilities(output),
     }
+}
+
+fn emit_capabilities(output: Option<PathBuf>) -> Result<()> {
+    let path = output.unwrap_or_else(|| PathBuf::from("capabilities.json"));
+    let mut json = serde_json::to_string_pretty(&adapters::ebpf::capabilities::published())
+        .context("serialise the capability catalogue to JSON")?;
+    json.push('\n');
+    std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
+    println!("wrote the capability catalogue to {}", path.display());
+    Ok(())
 }
 
 fn emit_openapi(output: Option<PathBuf>) -> Result<()> {
