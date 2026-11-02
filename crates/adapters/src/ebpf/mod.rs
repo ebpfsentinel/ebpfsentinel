@@ -120,7 +120,7 @@ pub use ipset_map_manager::IpSetMapManager;
 pub use kernel_probe::{
     KernelFeatures, KernelProbeError, MIN_KERNEL_MAJOR, MIN_KERNEL_MINOR,
     probe as probe_kernel_features, probe_from as probe_kernel_features_from,
-    upgrade_path as kernel_upgrade_path,
+    upgrade_hint as kernel_upgrade_hint,
 };
 pub use kfunc::set_module_btf_fd;
 pub use l7_ports_manager::L7PortsManager;

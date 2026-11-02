@@ -21,8 +21,13 @@ use domain::ransom::refusal::WriteRefusalRoute;
 
 use super::capabilities::{CATALOGUE, Capability, KernelVersion};
 use super::file_kfunc_probe::FileKfuncStatus;
+use super::kernel_probe::upgrade_hint;
 use super::kfunc_feature_probe::KfuncFeature;
 use super::lsm_probe::BpfLsmStatus;
+
+/// What to do where the BPF LSM is not active and the probe named no remedy.
+const LSM_BOOT_PARAMETER: &str =
+    "add bpf to the lsm= kernel boot parameter, keeping the modules already active, and reboot";
 
 /// Where the running kernel names its release.
 const OSRELEASE_PATH: &str = "/proc/sys/kernel/osrelease";
@@ -121,6 +126,11 @@ pub struct CapabilityState {
     pub capability: &'static Capability,
     /// `None` when active.
     pub inactive: Option<Inactive>,
+    /// How to switch it on, where something on the host can: a kernel to
+    /// install or a boot parameter to set. `None` when active, and when the
+    /// probe could not run or the kernel refused, since neither names a
+    /// change that would help.
+    pub hint: Option<String>,
 }
 
 impl CapabilityState {
@@ -238,12 +248,32 @@ pub fn classify(
     }
 }
 
+/// How to switch an inactive entry on, for the reason it is off.
+fn hint_for(
+    capability: &Capability,
+    inactive: &Inactive,
+    release: Option<&str>,
+    lsm_remedy: Option<&str>,
+) -> Option<String> {
+    let lsm = || lsm_remedy.unwrap_or(LSM_BOOT_PARAMETER).to_string();
+    match inactive {
+        Inactive::LsmInactive => Some(lsm()),
+        // The LSM itself is switched on at boot, or by a kernel built with it,
+        // which is what the LSM probe's remedy already says.
+        Inactive::NotDeclared if capability.id == "bpf_lsm" => Some(lsm()),
+        Inactive::KernelOlder { since } => release.map(|r| upgrade_hint(r, *since)),
+        Inactive::NotDeclared => release.map(|r| upgrade_hint(r, capability.since)),
+        Inactive::NotProbed(_) | Inactive::Refused(_) => None,
+    }
+}
+
 /// Build the report from evidence keyed by catalogue identifier. An entry
 /// with no evidence is not probed.
 #[must_use]
 pub fn build(
     release: Option<String>,
     lsm_active: bool,
+    lsm_remedy: Option<&str>,
     evidence: &dyn Fn(&str) -> Option<Evidence>,
 ) -> CapabilityReport {
     let kernel = release.as_deref().and_then(KernelVersion::parse);
@@ -256,9 +286,13 @@ pub fn build(
                     "startup has not reached the probe that answers for it".to_string(),
                 )),
             };
+            let hint = inactive
+                .as_ref()
+                .and_then(|i| hint_for(capability, i, release.as_deref(), lsm_remedy));
             CapabilityState {
                 capability,
                 inactive,
+                hint,
             }
         })
         .collect();
@@ -408,7 +442,8 @@ pub fn from_host() -> CapabilityReport {
     let release = std::fs::read_to_string(OSRELEASE_PATH)
         .ok()
         .map(|r| r.trim().to_string());
-    build(release, super::lsm_probe::status().active, &host_evidence)
+    let lsm = super::lsm_probe::status();
+    build(release, lsm.active, lsm.remedy.as_deref(), &host_evidence)
 }
 
 static REPORT: OnceLock<CapabilityReport> = OnceLock::new();
@@ -606,7 +641,7 @@ mod tests {
 
     #[test]
     fn the_report_answers_every_entry_and_a_missing_one_is_not_probed() {
-        let report = build(Some("6.12.48+deb13-amd64".into()), true, &|id| {
+        let report = build(Some("6.12.48+deb13-amd64".into()), true, None, &|id| {
             (id == "bpf_lsm").then_some(Evidence::Lsm {
                 active: true,
                 built: Some(true),
@@ -619,6 +654,63 @@ mod tests {
         for e in report.entries.iter().filter(|e| !e.active()) {
             assert_eq!(e.inactive.as_ref().expect("inactive").code(), "not_probed");
         }
+    }
+
+    #[test]
+    fn each_reason_gets_the_hint_that_could_change_it() {
+        let lsm_off = "add bpf to the lsm= kernel boot parameter: lsm=landlock,bpf";
+        let report = build(
+            Some("6.12.48+deb13-amd64".into()),
+            false,
+            Some(lsm_off),
+            &|id| match id {
+                "bpf_lsm" => Some(Evidence::Lsm {
+                    active: false,
+                    built: Some(true),
+                    read: true,
+                }),
+                "tcp_reqsk_assign" => Some(Evidence::Kfunc {
+                    declared: Some(false),
+                    load: Load::NotAttempted,
+                }),
+                "kprobe_session" => Some(Evidence::Kfunc {
+                    declared: Some(true),
+                    load: Load::Refused("invalid argument".into()),
+                }),
+                _ => None,
+            },
+        );
+        let entry = |id: &str| {
+            report
+                .entries
+                .iter()
+                .find(|e| e.capability.id == id)
+                .expect("entry")
+        };
+        assert_eq!(entry("bpf_lsm").hint.as_deref(), Some(lsm_off));
+        assert_eq!(
+            entry("write_refusal").hint,
+            None,
+            "not probed names no change"
+        );
+        let declared = entry("tcp_reqsk_assign").hint.as_deref().expect("hint");
+        assert!(declared.contains("backports"), "{declared}");
+        assert_eq!(
+            entry("kprobe_session").hint,
+            None,
+            "a refusal names no change"
+        );
+    }
+
+    #[test]
+    fn an_older_kernel_is_pointed_at_the_version_it_lacks() {
+        let inactive = Inactive::KernelOlder { since: ABOVE.since };
+        let hint = hint_for(&ABOVE, &inactive, Some("6.12.48+deb13-amd64"), None).expect("hint");
+        assert!(
+            hint.starts_with("This needs 6.17 and the host runs 6.12"),
+            "{hint}"
+        );
+        assert_eq!(hint_for(&ABOVE, &inactive, None, None), None);
     }
 
     #[test]

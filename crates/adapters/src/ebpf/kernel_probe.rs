@@ -22,6 +22,8 @@
 use std::fs;
 use std::path::Path;
 
+use super::capabilities::KernelVersion;
+
 /// Minimum kernel version required by the agent.
 pub const MIN_KERNEL_MAJOR: u32 = 6;
 pub const MIN_KERNEL_MINOR: u32 = 12;
@@ -77,40 +79,77 @@ pub enum KernelProbeError {
         found: String,
         required: String,
         /// What to install, for the distribution the release string names.
-        upgrade: &'static str,
+        upgrade: String,
     },
 }
 
-/// The way up to the floor, read off the kernel release string.
+/// What to install to reach `target`, read off the kernel release string.
+///
+/// One function answers both questions an operator asks: how to reach the
+/// floor the agent refuses below, and how to switch on a capability above it.
+/// A host below the floor asked for the floor gets the way to the floor and
+/// nothing about extras, because on Ubuntu 24.04 the hardware enablement
+/// kernel is what reaches the base. Every other question gets the way to a
+/// newer kernel build than the one running.
 ///
 /// The release string is the only thing an agent in a container can trust
 /// about the host: `/etc/os-release` inside the image describes the image,
 /// and a distroless base calls itself Debian on every host it runs on. The
-/// markers below are the ones each family's kernel packages append.
+/// markers are the ones each family's kernel packages append.
+///
+/// Every kernel version written in either table was checked against the
+/// distribution's own release notes or package index on 2026-11-01. Where no
+/// version could be confirmed the hint says "a newer kernel" and names the
+/// command that lists what the distribution carries, rather than a number.
 #[must_use]
-pub fn upgrade_path(release: &str) -> &'static str {
+pub fn upgrade_hint(release: &str, target: KernelVersion) -> String {
+    let running = KernelVersion::parse(release);
+    let below_floor = running.is_none_or(|r| r < KernelVersion::FLOOR);
+    if target <= KernelVersion::FLOOR && below_floor {
+        return to_the_floor(release).to_string();
+    }
+    let lead = match running {
+        Some(r) if r < target => format!("This needs {target} and the host runs {r}: "),
+        _ => "This kernel was built without it: ".to_string(),
+    };
+    format!("{lead}{}", above_the_floor(release))
+}
+
+/// The family a release string names, by the markers its packages append.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    Azure,
+    AmazonLinux2023,
+    AmazonLinux2,
+    Talos,
+    OracleUek,
+    EnterpriseLinux,
+    Fedora,
+    Debian,
+    Ubuntu,
+    Suse,
+    ContainerOptimizedOs,
+    Unknown,
+}
+
+fn family(release: &str) -> Family {
     let r = release.to_ascii_lowercase();
     if r.contains("azure") || r.contains(".azl") || r.contains(".cm2") {
-        "This is an Azure kernel: an AKS node pool changes its kernel only with its node image, \
-         so move it to Ubuntu 26.04, which carries 7.0; the Azure Linux 3.0 and Ubuntu 22.04 node \
-         images are below 6.12. On a self-managed Ubuntu 24.04 VM, `linux-azure` tracks 7.0 \
-         (`apt install linux-azure`); elsewhere install a 6.12 or later kernel."
-    } else if r.contains("amzn2023") || r.contains("amzn2") {
-        "On Amazon Linux 2023 install the 6.12 kernel stream (`dnf install kernel6.12`) and \
-         reboot; on EKS use the AL2023 node image for Kubernetes 1.33 or later, or a custom AMI \
-         built from awslabs/amazon-eks-ami. Amazon Linux 2 has no 6.12 kernel."
+        Family::Azure
+    } else if r.contains("amzn2023") {
+        Family::AmazonLinux2023
+    } else if r.contains("amzn2") {
+        Family::AmazonLinux2
     } else if r.contains("-talos") {
-        "Upgrade the node to Talos 1.9 or later (`talosctl upgrade`), which ships 6.12."
+        Family::Talos
     } else if r.contains("uek") {
-        "Install the Oracle Unbreakable Enterprise Kernel 8, which is 6.12, and reboot."
+        Family::OracleUek
     } else if r.contains(".el") {
-        "RHEL, Rocky and AlmaLinux 10 ship 6.12; version 9 and earlier have no 6.12 kernel, so \
-         upgrade the host to 10 (`leapp`) or reinstall it."
+        Family::EnterpriseLinux
     } else if r.contains(".fc") {
-        "Upgrade the kernel (`dnf upgrade --refresh kernel`) or the release, and reboot."
+        Family::Fedora
     } else if r.contains("deb1") || r.contains("+deb") || r.contains("-cloud-") {
-        "Debian 13 ships 6.12; on Debian 12 install a newer kernel from bookworm-backports \
-         (`apt install -t bookworm-backports linux-image-amd64`) and reboot."
+        Family::Debian
     } else if r.contains("-generic")
         || r.contains("-aws")
         || r.contains("-gcp")
@@ -118,17 +157,108 @@ pub fn upgrade_path(release: &str) -> &'static str {
         || r.contains("-oracle")
         || r.contains("-lowlatency")
     {
-        "On Ubuntu 24.04 install the hardware enablement kernel \
+        Family::Ubuntu
+    } else if r.contains("-default") {
+        Family::Suse
+    } else if r.ends_with('+') && !r.contains('-') {
+        Family::ContainerOptimizedOs
+    } else {
+        Family::Unknown
+    }
+}
+
+/// The way past the running kernel on a host already above the floor. No
+/// version is written here: none beyond the floor's could be confirmed for
+/// every family, so each answer names what to install and how to list it.
+fn above_the_floor(release: &str) -> &'static str {
+    match family(release) {
+        Family::Azure => {
+            "an AKS node pool changes its kernel only with its node image, so move it to a \
+             newer node image; on a self-managed Ubuntu VM `linux-azure` tracks the newest \
+             kernel the release supports (`apt install linux-azure`)."
+        }
+        Family::AmazonLinux2023 | Family::AmazonLinux2 => {
+            "install a newer kernel stream when Amazon Linux publishes one (`dnf list \
+             --available 'kernel*'` lists them) and reboot; on EKS that is a newer AL2023 \
+             node image."
+        }
+        Family::Talos => "upgrade the node to a newer Talos release (`talosctl upgrade`).",
+        Family::OracleUek => {
+            "install a newer Unbreakable Enterprise Kernel when Oracle publishes one, and reboot."
+        }
+        Family::EnterpriseLinux => {
+            "RHEL, Rocky and AlmaLinux keep one kernel version for the life of a release, so \
+             there is no newer kernel in this release; Red Hat backports features into it, \
+             which is why the agent asks the kernel rather than reading its number."
+        }
+        Family::Fedora => {
+            "upgrade the kernel (`dnf upgrade --refresh kernel`) or the release, and reboot."
+        }
+        Family::Debian => {
+            "install a newer kernel from the release's backports when it carries one (`apt \
+             list -a linux-image-amd64` lists them) and reboot."
+        }
+        Family::Ubuntu => {
+            "on an Ubuntu LTS the hardware enablement kernel is the newest the release carries \
+             (`apt install linux-generic-hwe-24.04` on 24.04), and a newer one arrives with \
+             the release's next enablement stack; otherwise upgrade the release."
+        }
+        Family::Suse => {
+            "SLES and openSUSE Leap keep one kernel version per service pack, so a newer one \
+             comes with the next service pack or minor release."
+        }
+        Family::ContainerOptimizedOs => {
+            "upgrade the cluster to a version whose node image carries a newer COS milestone."
+        }
+        Family::Unknown => "install a newer kernel from your distribution and reboot.",
+    }
+}
+
+/// The way up to the floor.
+fn to_the_floor(release: &str) -> &'static str {
+    match family(release) {
+        Family::Azure => {
+            "This is an Azure kernel: an AKS node pool changes its kernel only with its node image, \
+         so move it to Ubuntu 26.04, which carries 7.0; the Azure Linux 3.0 and Ubuntu 22.04 node \
+         images are below 6.12. On a self-managed Ubuntu 24.04 VM, `linux-azure` tracks 7.0 \
+         (`apt install linux-azure`); elsewhere install a 6.12 or later kernel."
+        }
+        Family::AmazonLinux2023 | Family::AmazonLinux2 => {
+            "On Amazon Linux 2023 install the 6.12 kernel stream (`dnf install kernel6.12`) and \
+         reboot; on EKS use the AL2023 node image for Kubernetes 1.33 or later, or a custom AMI \
+         built from awslabs/amazon-eks-ami. Amazon Linux 2 has no 6.12 kernel."
+        }
+        Family::Talos => {
+            "Upgrade the node to Talos 1.9 or later (`talosctl upgrade`), which ships 6.12."
+        }
+        Family::OracleUek => {
+            "Install the Oracle Unbreakable Enterprise Kernel 8, which is 6.12, and reboot."
+        }
+        Family::EnterpriseLinux => {
+            "RHEL, Rocky and AlmaLinux 10 ship 6.12; version 9 and earlier have no 6.12 kernel, so \
+         upgrade the host to 10 (`leapp`) or reinstall it."
+        }
+        Family::Fedora => {
+            "Upgrade the kernel (`dnf upgrade --refresh kernel`) or the release, and reboot."
+        }
+        Family::Debian => {
+            "Debian 13 ships 6.12; on Debian 12 install a newer kernel from bookworm-backports \
+         (`apt install -t bookworm-backports linux-image-amd64`) and reboot."
+        }
+        Family::Ubuntu => {
+            "On Ubuntu 24.04 install the hardware enablement kernel \
          (`apt install linux-generic-hwe-24.04`, 7.0 today) and reboot; Ubuntu 22.04 and \
          earlier have no 6.12 kernel, so upgrade the release to 24.04 or 26.04."
-    } else if r.contains("-default") {
-        "SLES 16 and openSUSE Leap 16 ship 6.12; upgrade the host to one of them."
-    } else if r.ends_with('+') && !r.contains('-') {
-        "This looks like a GKE Container-Optimized OS kernel: there is no package manager, so \
+        }
+        Family::Suse => "SLES 16 and openSUSE Leap 16 ship 6.12; upgrade the host to one of them.",
+        Family::ContainerOptimizedOs => {
+            "This looks like a GKE Container-Optimized OS kernel: there is no package manager, so \
          upgrade the cluster to a version whose node image is COS milestone 125 or later."
-    } else {
-        "Install a 6.12 or later kernel from your distribution and reboot; the compatibility \
+        }
+        Family::Unknown => {
+            "Install a 6.12 or later kernel from your distribution and reboot; the compatibility \
          matrix in the documentation lists the releases that carry one."
+        }
     }
 }
 
@@ -168,7 +298,7 @@ pub fn probe_from(
         return Err(KernelProbeError::BelowMinimum {
             found: features.version_string(),
             required: format!("{MIN_KERNEL_MAJOR}.{MIN_KERNEL_MINOR}"),
-            upgrade: upgrade_path(release),
+            upgrade: upgrade_hint(release, KernelVersion::FLOOR),
         });
     }
 
@@ -339,10 +469,10 @@ mod tests {
             ("6.4.0-150600.23.25-default", "SLES 16"),
             ("6.6.56+", "COS milestone 125"),
         ];
-        let generic = upgrade_path("6.1.0-unknown-vendor");
+        let generic = upgrade_hint("6.1.0-unknown-vendor", KernelVersion::FLOOR);
         assert!(generic.contains("compatibility matrix"));
         for (release, expected) in cases {
-            let path = upgrade_path(release);
+            let path = upgrade_hint(release, KernelVersion::FLOOR);
             assert!(
                 path.contains(expected),
                 "{release}: expected `{expected}` in `{path}`"
@@ -352,6 +482,86 @@ mod tests {
                 "{release} fell through to the generic answer"
             );
         }
+    }
+
+    /// Above the floor, each family has its own way to a newer kernel, none
+    /// falls through to the generic answer, and none names the floor's way up.
+    #[test]
+    fn every_family_has_its_own_way_above_the_floor() {
+        let target = KernelVersion {
+            major: 6,
+            minor: 17,
+        };
+        let cases = [
+            ("6.12.0-1003-azure", "node image"),
+            ("6.12.40-63.114.amzn2023.x86_64", "kernel stream"),
+            ("6.12.18-talos", "newer Talos release"),
+            (
+                "6.12.0-100.28.2.el10uek.x86_64",
+                "Unbreakable Enterprise Kernel",
+            ),
+            (
+                "6.12.0-55.9.1.el10_0.x86_64",
+                "no newer kernel in this release",
+            ),
+            ("6.14.2-300.fc42.x86_64", "dnf upgrade"),
+            ("6.12.48+deb13-amd64", "backports"),
+            ("6.12.0-1004-cloud-amd64", "backports"),
+            ("7.0.0-15-generic", "enablement stack"),
+            ("7.0.0-1005-aws", "enablement stack"),
+            ("6.12.0-160000.5-default", "service pack"),
+            ("6.12.18+", "COS milestone"),
+        ];
+        let generic = upgrade_hint("6.12.0-unknown-vendor", target);
+        assert!(generic.contains("newer kernel from your distribution"));
+        for (release, expected) in cases {
+            let hint = upgrade_hint(release, target);
+            assert!(
+                hint.contains(expected),
+                "{release}: expected `{expected}` in `{hint}`"
+            );
+            assert_ne!(
+                hint, generic,
+                "{release} fell through to the generic answer"
+            );
+            assert!(
+                !hint.contains("6.12 or later") && !hint.contains("has no 6.12"),
+                "{release}: a way above the floor names the floor's: {hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_hint_names_the_shortfall_only_when_there_is_one() {
+        let target = KernelVersion {
+            major: 6,
+            minor: 17,
+        };
+        let older = upgrade_hint("6.12.48+deb13-amd64", target);
+        assert!(
+            older.starts_with("This needs 6.17 and the host runs 6.12"),
+            "{older}"
+        );
+        let built_without = upgrade_hint("7.0.0-15-generic", target);
+        assert!(
+            built_without.starts_with("This kernel was built without it"),
+            "{built_without}"
+        );
+        let at_floor = upgrade_hint("7.0.0-15-generic", KernelVersion::FLOOR);
+        assert!(
+            at_floor.starts_with("This kernel was built without it"),
+            "{at_floor}"
+        );
+    }
+
+    /// On Ubuntu 24.04 the hardware enablement kernel is what reaches the
+    /// base: the floor's refusal names it and says nothing about extras.
+    #[test]
+    fn the_ubuntu_ga_kernel_is_sent_to_the_floor_not_to_extras() {
+        let hint = upgrade_hint("6.8.0-48-generic", KernelVersion::FLOOR);
+        assert!(hint.contains("linux-generic-hwe-24.04"), "{hint}");
+        assert!(!hint.contains("built without it"), "{hint}");
+        assert!(!hint.contains("enablement stack"), "{hint}");
     }
 
     /// A kfunc newer than the 6.9 set is never inferred from the version:
