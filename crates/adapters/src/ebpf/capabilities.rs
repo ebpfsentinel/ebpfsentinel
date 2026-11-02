@@ -17,7 +17,7 @@
 //! number for its whole life carries work backported into it, and a kernel
 //! whose number says a kfunc is there may have been built without it.
 
-use super::kernel_probe::{MIN_KERNEL_MAJOR, MIN_KERNEL_MINOR};
+use super::kernel_probe::{MIN_KERNEL_MAJOR, MIN_KERNEL_MINOR, parse_version};
 
 /// A kernel release, as far as a hint needs one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -32,6 +32,15 @@ impl KernelVersion {
         major: MIN_KERNEL_MAJOR,
         minor: MIN_KERNEL_MINOR,
     };
+
+    /// The version a release string such as `6.12.48+deb13-amd64` names, or
+    /// `None` when it names none.
+    #[must_use]
+    pub fn parse(release: &str) -> Option<Self> {
+        parse_version(release)
+            .ok()
+            .map(|(major, minor)| Self { major, minor })
+    }
 }
 
 impl std::fmt::Display for KernelVersion {

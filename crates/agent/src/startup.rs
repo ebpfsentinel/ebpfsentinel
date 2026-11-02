@@ -3744,6 +3744,10 @@ pub async fn run(
         }
     } // end if ebpf_capable
 
+    // Every probe and every attach has answered by now: say once which
+    // capability above the floor is active here and why each other one is not.
+    adapters::ebpf::capability_report::init_cached();
+
     // Populate eBPF program status for the ops endpoint and the heartbeat.
     //
     // Both of those are read outside the agent, so the names here are the

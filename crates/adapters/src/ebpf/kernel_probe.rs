@@ -175,7 +175,7 @@ pub fn probe_from(
     Ok(features)
 }
 
-fn parse_version(raw: &str) -> Result<(u32, u32), KernelProbeError> {
+pub(crate) fn parse_version(raw: &str) -> Result<(u32, u32), KernelProbeError> {
     // /proc/sys/kernel/osrelease looks like "6.9.1-060900-generic".
     let head = raw
         .split(|c: char| !c.is_ascii_digit() && c != '.')

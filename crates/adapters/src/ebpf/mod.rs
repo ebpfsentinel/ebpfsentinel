@@ -2,6 +2,7 @@ pub mod attach_inspect;
 pub mod bpf_guard;
 pub mod bpf_token;
 pub mod capabilities;
+pub mod capability_report;
 // NOTE: `netkit` uses raw BPF_LINK_CREATE syscall - the module itself
 // has #[allow(unsafe_code)] at the top.
 pub mod attribution_attach;
