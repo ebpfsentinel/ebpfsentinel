@@ -41,6 +41,9 @@ pub struct SignalStatus {
     /// How many thread group ids the kernel refuses to signal whatever a rule
     /// asks. Never zero on a running node: the agent itself is one of them.
     pub protected: usize,
+    /// Whether a signal reaches its target at once rather than at the
+    /// target's next syscall, and why not.
+    pub immediate: super::signal_task::DirectSignalProbe,
 }
 
 /// The one status the whole process reports.
@@ -171,6 +174,11 @@ mod tests {
             signal: 9,
             window_ms: 2_000,
             protected: 3,
+            immediate: super::super::signal_task::DirectSignalProbe {
+                declared: Some(true),
+                loaded: true,
+                reason: None,
+            },
         };
         publish_status(s.clone());
         assert_eq!(status(), s);
@@ -188,6 +196,7 @@ mod tests {
             signal: 9,
             window_ms: 2_000,
             protected: 3,
+            ..SignalStatus::default()
         };
         publish_status(published.clone());
         let mut attacher = SignalAttacher::new();

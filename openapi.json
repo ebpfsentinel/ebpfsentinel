@@ -17222,12 +17222,24 @@
           "attached",
           "signal",
           "window_ms",
-          "protected"
+          "protected",
+          "immediate"
         ],
         "properties": {
           "attached": {
             "type": "boolean",
             "description": "True only when the capability is on in the configuration and the\ntracepoint attached. False is the ordinary answer: the capability is\noff unless a configuration asked for it."
+          },
+          "immediate": {
+            "type": "boolean",
+            "description": "True when a signal reaches its target at once, even a process making\nno syscall; false when it waits for the target's next syscall."
+          },
+          "immediate_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why a signal waits for the target's next syscall, in one sentence."
           },
           "protected": {
             "type": "integer",

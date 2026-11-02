@@ -339,6 +339,41 @@ fn test_run(
     Ok(attr)
 }
 
+/// Run a program that takes no packet, `BPF_PROG_TYPE_SYSCALL`, once with
+/// `ctx` as its argument, and return what it returned.
+///
+/// Everything but the context stays zero: the kernel refuses a syscall
+/// program's run that names a packet, an output buffer or a repeat count.
+///
+/// # Errors
+///
+/// [`TestRunError::Syscall`] for anything the kernel reported.
+pub fn run_with_context(prog_fd: BorrowedFd<'_>, ctx: &[u8]) -> Result<u32, TestRunError> {
+    let mut attr = TestRunAttr {
+        prog_fd: as_u32(prog_fd),
+        ctx_size_in: len_u32(ctx.len()),
+        ctx_in: ctx.as_ptr() as u64,
+        ..TestRunAttr::default()
+    };
+    // SAFETY: `ctx_in` names a buffer that outlives the call and whose length
+    // is the size written beside it; every other pointer is null.
+    let ret = unsafe {
+        bpf(
+            BPF_PROG_TEST_RUN,
+            std::ptr::from_mut(&mut attr).cast(),
+            size_of::<TestRunAttr>(),
+        )
+    };
+    if ret < 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(TestRunError::Syscall {
+            errno: err.raw_os_error().unwrap_or(0),
+            message: err.to_string(),
+        });
+    }
+    Ok(attr.retval)
+}
+
 fn len_u32(len: usize) -> u32 {
     u32::try_from(len).unwrap_or(u32::MAX)
 }

@@ -12,14 +12,21 @@
 //! reused once the process holding it exits, so an id left behind is a new
 //! process inheriting an immunity nobody granted it.
 
-use aya::maps::{Array, HashMap as AyaHashMap, MapData, RingBuf};
+use std::os::fd::AsFd;
+
+use aya::maps::{Array, HashMap as AyaHashMap, IterableMap, MapData, RingBuf};
 use domain::common::error::DomainError;
 use ebpf_common::signal::{SIGNAL_ARMED_SLOT, SignalEvent, SignalTarget};
 use ports::secondary::process_signal_map_port::ProcessSignalMapPort;
 use tracing::{info, warn};
 
+use crate::ebpf::map_batch::map_fd;
 use crate::ebpf::map_store::MapStore;
 use crate::ebpf::ringbuf_observer::boottime_now_ns;
+use crate::ebpf::signal_task::{DirectOutcome, DirectSignal, DirectSignalProbe};
+use ebpf_common::signal::{
+    SIGNAL_OUTCOME_HELPER_FAILED, SIGNAL_OUTCOME_PROTECTED, SIGNAL_OUTCOME_SENT,
+};
 
 /// Holds the four maps the service writes and reads.
 pub struct SignalMapManager {
@@ -27,6 +34,12 @@ pub struct SignalMapManager {
     targets: AyaHashMap<MapData, u32, SignalTarget>,
     protected: AyaHashMap<MapData, u32, u8>,
     events: RingBuf<MapData>,
+    /// The program that signals at once, where the kernel offers it.
+    direct: Option<DirectSignal>,
+    /// What the kernel answered when that program was offered to it.
+    direct_probe: DirectSignalProbe,
+    /// Outcomes of signals sent at once, which no ring carries.
+    settled: Vec<SignalEvent>,
 }
 
 impl SignalMapManager {
@@ -35,7 +48,8 @@ impl SignalMapManager {
     /// All four or none. A manager missing the ring would arm kills whose
     /// outcome nobody could read, and one missing the protected map would arm
     /// them with the kernel's own fence absent. The counters are left in the
-    /// object for the agent's metrics loop to take.
+    /// object for the agent's metrics loop to take, after this has read them:
+    /// the program that signals at once counts in the same slots.
     ///
     /// # Errors
     ///
@@ -58,13 +72,77 @@ impl SignalMapManager {
             ebpf.take_map("SIGNAL_EVENTS")
                 .ok_or_else(|| anyhow::anyhow!("map 'SIGNAL_EVENTS' not found"))?,
         )?;
+        let metrics = ebpf
+            .map("SIGNAL_METRICS")
+            .and_then(map_fd)
+            .ok_or_else(|| anyhow::anyhow!("map 'SIGNAL_METRICS' not found"))?;
+        let protected_fd = protected.map().fd().as_fd();
+        let (direct, direct_probe) = match DirectSignal::load(protected_fd, metrics) {
+            Ok(direct) => (
+                Some(direct),
+                DirectSignalProbe {
+                    declared: Some(true),
+                    loaded: true,
+                    reason: None,
+                },
+            ),
+            Err(probe) => {
+                info!(
+                    reason = probe.reason.as_deref().unwrap_or_default(),
+                    "a signal waits for its target's next syscall"
+                );
+                (None, probe)
+            }
+        };
         info!("signal maps acquired");
         Ok(Self {
             armed,
             targets,
             protected,
             events,
+            direct,
+            direct_probe,
+            settled: Vec::new(),
         })
+    }
+
+    /// What the kernel answered when the program that signals at once was
+    /// offered to it.
+    #[must_use]
+    pub fn immediate(&self) -> &DirectSignalProbe {
+        &self.direct_probe
+    }
+
+    /// Signal at once where the kernel offers it. `true` when the signal is
+    /// settled, sent or refused, and its outcome queued for the next drain;
+    /// `false` when the syscall-entry path has to carry it.
+    fn signal_now(&mut self, tgid: u32, signal: u32) -> bool {
+        let Some(direct) = self.direct.as_ref() else {
+            return false;
+        };
+        let outcome = match direct.signal(tgid, signal) {
+            Ok(DirectOutcome::Sent) => SIGNAL_OUTCOME_SENT,
+            Ok(DirectOutcome::Protected) => SIGNAL_OUTCOME_PROTECTED,
+            Ok(DirectOutcome::HelperFailed) => SIGNAL_OUTCOME_HELPER_FAILED,
+            // No task by that id now: armed, the target expires in the kernel
+            // and is reported as every expiry is.
+            Ok(DirectOutcome::Gone) => return false,
+            Err(e) => {
+                warn!(
+                    tgid,
+                    "the immediate signal did not run, arming the syscall path: {e}"
+                );
+                return false;
+            }
+        };
+        self.settled.push(SignalEvent {
+            at_ns: boottime_now_ns(),
+            tgid,
+            signal,
+            outcome,
+            _pad: 0,
+        });
+        true
     }
 
     /// Write the armed count the kernel reads before anything else.
@@ -102,6 +180,9 @@ impl ProcessSignalMapPort for SignalMapManager {
     }
 
     fn arm(&mut self, tgid: u32, signal: u32, window_ns: u64) -> Result<(), DomainError> {
+        if self.signal_now(tgid, signal) {
+            return Ok(());
+        }
         // The count goes up first: the kernel reads it as its fast path, so a
         // target inserted behind a zero is a target nothing looks for.
         self.set_armed(self.count_targets() + 1)?;
@@ -131,7 +212,7 @@ impl ProcessSignalMapPort for SignalMapManager {
     }
 
     fn drain_events(&mut self) -> Result<Vec<SignalEvent>, DomainError> {
-        let mut events = Vec::new();
+        let mut events = std::mem::take(&mut self.settled);
         while let Some(item) = self.events.next() {
             let bytes: &[u8] = &item;
             if bytes.len() < size_of::<SignalEvent>() {

@@ -191,6 +191,18 @@ pub const CATALOGUE: &[Capability] = &[
         fallback: "a signal is refused with the reason and the alert still fires",
     },
     Capability {
+        id: "immediate_signal",
+        unlocks: "a signal that reaches its target at once, even a process making no syscall",
+        probe: ProbeKind::Loaded,
+        since: KernelVersion {
+            major: 6,
+            minor: 13,
+        },
+        needs_lsm: false,
+        fallback: "the signal waits for the target's next syscall, and a target making none \
+                   within the window is reported as a survivor",
+    },
+    Capability {
         id: "network_executables",
         unlocks: "the list of executables allowed to reach the network, decided before the \
                   socket exists",
@@ -245,6 +257,7 @@ mod tests {
         "workload_firewall",
         "quarantine",
         "process_signal",
+        "immediate_signal",
         "network_executables",
         "write_refusal",
         "self_protection",

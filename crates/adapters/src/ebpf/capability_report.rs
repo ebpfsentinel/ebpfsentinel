@@ -24,6 +24,7 @@ use super::file_kfunc_probe::FileKfuncStatus;
 use super::kernel_probe::{distribution_family, upgrade_hint};
 use super::kfunc_feature_probe::KfuncFeature;
 use super::lsm_probe::BpfLsmStatus;
+use super::signal_task::DirectSignalProbe;
 
 /// What to do where the BPF LSM is not active and the probe named no remedy.
 const LSM_BOOT_PARAMETER: &str =
@@ -365,6 +366,25 @@ pub fn attach_evidence(active: bool, reason: Option<String>) -> Evidence {
     }
 }
 
+/// The program that signals at once, restated as evidence. Nothing was
+/// offered to the kernel while stopping a process is off.
+#[must_use]
+pub fn immediate_signal_evidence(probe: &DirectSignalProbe) -> Evidence {
+    let why = || probe.reason.clone().unwrap_or_default();
+    let load = match (probe.loaded, probe.declared) {
+        (true, _) => Load::Loaded,
+        (false, None) => Load::NotRun(probe.reason.clone().unwrap_or_else(|| {
+            "the program is offered to the kernel only when stopping a process is turned on"
+                .to_string()
+        })),
+        (false, Some(_)) => Load::Refused(why()),
+    };
+    Evidence::Kfunc {
+        declared: probe.declared,
+        load,
+    }
+}
+
 /// All declared, any not declared, or unreadable.
 fn fold_declared(answers: impl Iterator<Item = Option<bool>>) -> Option<bool> {
     let mut all = Some(true);
@@ -408,6 +428,9 @@ fn host_evidence(id: &str) -> Option<Evidence> {
             let s = signal_attach::status();
             Some(attach_evidence(s.attached, s.reason))
         }
+        "immediate_signal" => Some(immediate_signal_evidence(
+            &signal_attach::status().immediate,
+        )),
         "network_executables" => {
             let s = exec_network::status();
             Some(attach_evidence(s.attached, s.reason))
@@ -616,6 +639,51 @@ mod tests {
             load: Load::NotAttempted,
         };
         assert_eq!(classify(reqsk, Some(k(6, 12)), false, &e), None);
+    }
+
+    #[test]
+    fn the_immediate_signal_says_which_of_the_kernel_or_the_configuration_is_why() {
+        let entry = find("immediate_signal").expect("entry");
+        let loaded = immediate_signal_evidence(&DirectSignalProbe {
+            declared: Some(true),
+            loaded: true,
+            reason: None,
+        });
+        assert_eq!(classify(entry, Some(k(7, 0)), false, &loaded), None);
+
+        let undeclared = immediate_signal_evidence(&DirectSignalProbe {
+            declared: Some(false),
+            loaded: false,
+            reason: Some("the kernel does not declare bpf_send_signal_task".into()),
+        });
+        assert_eq!(
+            classify(entry, Some(k(6, 12)), false, &undeclared),
+            Some(Inactive::KernelOlder { since: k(6, 13) })
+        );
+        assert_eq!(
+            classify(entry, Some(k(6, 14)), false, &undeclared),
+            Some(Inactive::NotDeclared)
+        );
+
+        let refused = immediate_signal_evidence(&DirectSignalProbe {
+            declared: Some(true),
+            loaded: false,
+            reason: Some("the kernel refused the signal program (errno 22)".into()),
+        });
+        assert_eq!(
+            classify(entry, Some(k(6, 13)), false, &refused),
+            Some(Inactive::Refused(
+                "the kernel refused the signal program (errno 22)".into()
+            ))
+        );
+
+        let off = immediate_signal_evidence(&DirectSignalProbe::default());
+        assert_eq!(
+            classify(entry, Some(k(6, 13)), false, &off)
+                .expect("inactive")
+                .code(),
+            "not_probed"
+        );
     }
 
     #[test]
@@ -829,6 +897,10 @@ mod tests {
                     false,
                     Some("stopping a process is turned off in the configuration".into()),
                 )),
+                "immediate_signal" => Some(Evidence::Kfunc {
+                    declared: Some(false),
+                    load: Load::Refused("the kernel does not declare bpf_send_signal_task".into()),
+                }),
                 "network_executables" | "write_refusal" | "self_protection" => Some(
                     attach_evidence(false, Some("the LSM program did not attach".into())),
                 ),

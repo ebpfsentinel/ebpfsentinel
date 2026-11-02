@@ -1300,6 +1300,8 @@ pub(crate) const PROBE_LSM_MAC: u32 = BPF_LSM_MAC;
 /// `BPF_TRACE_KPROBE_SESSION`: one program run on a function's entry and on
 /// its return, whose session kfuncs the verifier offers to it alone.
 pub(crate) const PROBE_TRACE_KPROBE_SESSION: u32 = bpf_attach_type::BPF_TRACE_KPROBE_SESSION as u32;
+/// `BPF_PROG_TYPE_SYSCALL`: a program nothing attaches, run on demand.
+pub(crate) const PROBE_PROG_TYPE_SYSCALL: u32 = bpf_prog_type::BPF_PROG_TYPE_SYSCALL as u32;
 /// `BPF_F_SLEEPABLE`, for the probes that build their own programs.
 pub(crate) const PROBE_F_SLEEPABLE: u32 = BPF_F_SLEEPABLE;
 
@@ -1310,6 +1312,16 @@ pub(crate) const PROBE_F_SLEEPABLE: u32 = BPF_F_SLEEPABLE;
 /// be. Every kfunc a probe calls is a vmlinux one, so no `fd_array` is
 /// passed. Returns the errno and the verifier's log on refusal.
 pub(crate) fn load_probe_program(probe: &ProbeProgram) -> Result<(), (i32, String)> {
+    load_raw_program(probe, b"kernel_probe").map(drop)
+}
+
+/// Load a hand-assembled program and keep it, under `name` (at most fifteen
+/// bytes). The load goes through the process-wide token like every other,
+/// and the descriptor returned is the only reference to the program.
+pub(crate) fn load_raw_program(
+    probe: &ProbeProgram,
+    name: &[u8],
+) -> Result<OwnedFd, (i32, String)> {
     let license = b"GPL\0";
     let mut attr = ProgLoadAttr {
         prog_type: probe.prog_type,
@@ -1321,15 +1333,14 @@ pub(crate) fn load_probe_program(probe: &ProbeProgram) -> Result<(), (i32, Strin
         attach_btf_id: probe.attach_btf_id,
         ..Default::default()
     };
-    let name = b"kernel_probe";
-    attr.prog_name[..name.len()].copy_from_slice(name);
+    let len = name.len().min(attr.prog_name.len() - 1);
+    attr.prog_name[..len].copy_from_slice(&name[..len]);
     if let Some(token) = global_token_fd() {
         attr.prog_flags |= super::bpf_token::BPF_F_TOKEN_FD;
         attr.prog_token_fd = token;
     }
     let mut log = vec![0u8; 64 << 10];
     issue_prog_load(&mut attr, 1, &mut log)
-        .map(drop)
         .map_err(|(errno, raw)| (errno, raw.chars().filter(|&c| c != '\0').collect()))
 }
 

@@ -113,6 +113,24 @@ jobs:
           fi
           sudo -E "$binary" --nocapture --test-threads=1
 
+      # A process spinning in pure computation never enters the kernel, so
+      # only the program that names its target can reach it. The runner's
+      # kernel decides whether it can: below the kfunc, the test says so and
+      # returns.
+      - name: Signal a process that makes no syscall
+        env:
+          EBPFSENTINEL_EBPF_DIR: ${{ github.workspace }}/target/bpfel-unknown-none/release
+        run: |
+          set -eu
+          binary="$(cargo test -p adapters --test signal_task --no-run --message-format=json |
+            jq -r 'select(.executable != null and .target.name == "signal_task") | .executable' |
+            tail -1)"
+          if [ -z "$binary" ]; then
+            echo "::error::cargo built no signal_task binary"
+            exit 1
+          fi
+          sudo -E "$binary" --nocapture --test-threads=1
+
       - uses: actions/upload-artifact@v7
         with:
           name: ebpf-programs

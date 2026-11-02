@@ -2908,6 +2908,10 @@ pub struct ProcessSignalReport {
     pub window_ms: u64,
     #[serde(default)]
     pub protected: usize,
+    #[serde(default)]
+    pub immediate: bool,
+    #[serde(default)]
+    pub immediate_reason: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]

@@ -39,7 +39,8 @@ use super::lsm_probe::VMLINUX_BTF_PATH;
 /// register in the low nibble and the source in the high one, then a signed
 /// 16-bit offset and a signed 32-bit immediate.
 pub(crate) mod insn {
-    fn encode(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> u64 {
+    /// One instruction from its five fields.
+    pub(crate) fn encode(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> u64 {
         let off = off.to_le_bytes();
         let imm = imm.to_le_bytes();
         u64::from_le_bytes([

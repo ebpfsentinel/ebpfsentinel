@@ -5683,6 +5683,15 @@ fn print_process_signal(report: &crate::api_client::ProcessSignalReport) {
         println!("  Signal:     {}", report.signal);
         println!("  Window:     {} ms", report.window_ms);
         println!("  Protected:  {} pids", report.protected);
+        let reaches = if report.immediate {
+            "at once"
+        } else {
+            "at the target's next syscall"
+        };
+        println!("  Reaches:    {reaches}");
+        if let Some(why) = &report.immediate_reason {
+            println!("  Not at once: {why}");
+        }
     }
     if let Some(reason) = &report.reason {
         println!("  Reason:     {reason}");

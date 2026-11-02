@@ -63,6 +63,7 @@ pub mod ringbuf_observer;
 pub mod self_binding_manager;
 pub mod signal_attach;
 pub mod signal_map_manager;
+pub mod signal_task;
 pub mod socket_identity_reader;
 pub mod tcp_health;
 pub mod tcx_order;

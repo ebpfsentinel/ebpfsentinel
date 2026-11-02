@@ -3193,6 +3193,7 @@ pub async fn run(
                         // endpoint reports how many ids the kernel refuses and
                         // the guard is the only thing that knows.
                         let protected = guard.kernel_protected_pids().len();
+                        let immediate = maps.immediate().clone();
                         let executables = Arc::new(adapters::container::ProcExecutableResolver::new(
                             &coverage_proc,
                         ))
@@ -3229,6 +3230,7 @@ pub async fn run(
                                         signal: kill.signal,
                                         window_ms: kill.window_ms,
                                         protected,
+                                        immediate,
                                     },
                                 );
                                 warn!(
@@ -7347,8 +7349,10 @@ pub fn try_load_signal(
     let program_bytes = read_ebpf_program(ebpf_dir, "tracepoint-signal")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
-    let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "SIGNAL_METRICS").ok();
+    // The manager reads the counters' descriptor before the metrics loop
+    // takes the map: the program that signals at once counts in it too.
     let maps = adapters::ebpf::SignalMapManager::new(loader.ebpf_mut())?;
+    let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "SIGNAL_METRICS").ok();
     let mut attacher = adapters::ebpf::SignalAttacher::new();
     let status = attacher.attach(&loader);
     Ok((loader, metrics_rdr, maps, attacher, status))

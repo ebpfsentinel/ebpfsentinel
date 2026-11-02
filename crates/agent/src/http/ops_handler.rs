@@ -566,6 +566,11 @@ pub struct ProcessSignalReport {
     /// How many thread group ids the kernel refuses to signal whatever a rule
     /// asks, the agent's own among them.
     pub protected: usize,
+    /// True when a signal reaches its target at once, even a process making
+    /// no syscall; false when it waits for the target's next syscall.
+    pub immediate: bool,
+    /// Why a signal waits for the target's next syscall, in one sentence.
+    pub immediate_reason: Option<String>,
 }
 
 /// What this node can do to a workload short of stopping it.
@@ -941,6 +946,8 @@ fn process_signal_report(status: adapters::ebpf::SignalStatus) -> ProcessSignalR
         signal: status.signal,
         window_ms: status.window_ms,
         protected: status.protected,
+        immediate: status.immediate.loaded,
+        immediate_reason: status.immediate.reason,
     }
 }
 
