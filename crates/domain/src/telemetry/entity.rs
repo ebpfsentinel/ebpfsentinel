@@ -397,4 +397,72 @@ mod tests {
 
         assert_eq!(body["programs"][0]["state"], "loaded");
     }
+
+    /// Every place a string sits in a serialised beat, as a dotted path with
+    /// `[]` for an array element.
+    fn string_paths(value: &serde_json::Value, at: &str, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(_) => out.push(at.to_owned()),
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    string_paths(item, &format!("{at}[]"), out);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for (key, field) in fields {
+                    let next = if at.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{at}.{key}")
+                    };
+                    string_paths(field, &next, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn a_path_a_hash_or_a_command_line_has_no_field_to_travel_in() {
+        // What the host capabilities read - a file path, a content digest, a
+        // package, a command line - stays on the host, and the published
+        // privacy notice does not mention receiving them. That holds only
+        // while the beat has no string a value could be written into except
+        // the opaque identifier, the version and a program name, each bounded
+        // where the beat is built; a string anywhere else is a field the
+        // notice would have to answer for.
+        let beat = Heartbeat::new(
+            an_id(),
+            "1.2.3",
+            vec![
+                ProgramReport {
+                    program: "lsm_write_refusal".into(),
+                    state: ProgramState::NotLoaded,
+                },
+                ProgramReport {
+                    program: "uprobe_crypto".into(),
+                    state: ProgramState::Loaded,
+                },
+            ],
+        )
+        .expect("built");
+
+        let body = serde_json::to_value(&beat).expect("serialised");
+        let mut paths = Vec::new();
+        string_paths(&body, "", &mut paths);
+        paths.sort_unstable();
+        paths.dedup();
+        assert_eq!(
+            paths,
+            [
+                "installation_id",
+                "programs[].program",
+                "programs[].state",
+                "version"
+            ]
+        );
+        assert!(body["installation_id"].as_str().is_some_and(|id| id.len()
+            == INSTALLATION_ID_CHARS
+            && id.chars().all(|c| c.is_ascii_hexdigit())));
+    }
 }
