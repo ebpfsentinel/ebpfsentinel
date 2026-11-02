@@ -67,8 +67,9 @@ pub struct FileWatchConfig {
 
 /// The kernel refusing a write-open past a count.
 ///
-/// Needs the BPF LSM active at boot (`lsm=bpf`); without it the agent says
-/// so and refuses nothing. It fails open: an agent that stops refuses
+/// Refuses through the BPF LSM where it is active at boot (`lsm=bpf`), and
+/// through a fanotify permission group on a bounded set of paths where it is
+/// not; with neither the agent says so and refuses nothing. It fails open: an agent that stops refuses
 /// nothing, and the files written before the threshold are lost in every
 /// case.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
