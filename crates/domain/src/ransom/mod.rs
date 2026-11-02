@@ -25,7 +25,7 @@ pub mod signal;
 pub mod stop;
 pub mod thresholds;
 
-pub use actor::{Actor, actor_of};
+pub use actor::{Actor, RemoteClient, actor_of, served_actor, serves_files};
 pub use backup::{
     BACKUP_PRIOR_WINDOW_NS, BACKUP_PROGRAMS, BACKUP_UNIT_MARKERS, SHELLS, backup_destroyed,
     backup_destroyed_signal, backup_program, initiator,

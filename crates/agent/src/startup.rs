@@ -7538,10 +7538,14 @@ pub fn mass_encryption_service(
     let sources: application::ransom_service::HostSourcesReader = Arc::new(|| {
         crate::http::host_rule_handler::reported_sources(&std::collections::HashMap::new(), &[])
     });
+    // A write a file service made is counted against the client it served,
+    // named off the service process's own connection.
+    let served = adapters::net::ProcServedPeer::new(host_proc_root());
     Arc::new(
         application::ransom_service::RansomService::new(alerts, sources)
             .with_command_lines(config.process_table.capture_command_line)
-            .with_mode(config.file_watch.mass_encryption.mode),
+            .with_mode(config.file_watch.mass_encryption.mode)
+            .with_served_peers(Arc::new(move |pid| served.read(pid))),
     )
 }
 

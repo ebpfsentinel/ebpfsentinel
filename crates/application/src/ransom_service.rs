@@ -22,7 +22,7 @@ use domain::ransom::{
     ShadowVerdict, SignalKind, UnavailableSignal, actor_of, backup_destroyed,
     backup_destroyed_signal, backup_program, bounded_threshold, canary_touched, entropy_rose,
     header_mismatch, initiator, original_of, renamed_over, renamed_to_new_extension, run_members,
-    unavailable,
+    served_actor, serves_files, unavailable,
 };
 use domain::workload::entity::{Workload, WorkloadSource};
 use ports::secondary::ransom_baseline_port::RansomBaselinePort;
@@ -39,6 +39,10 @@ const CRYPTO_NOT_LOADED: &str = "the crypto library probes are not loaded";
 
 /// What this host reports reading, asked when a verdict is reached.
 pub type HostSourcesReader = Arc<dyn Fn() -> HostSources + Send + Sync>;
+
+/// The address of the one client a file service's process is connected to,
+/// asked with its pid; `None` where it holds none, or several.
+pub type ServedPeerReader = Arc<dyn Fn(u32) -> Option<std::net::IpAddr> + Send + Sync>;
 
 /// The signals this agent produces today. A signal missing here is named in
 /// every verdict as not read, so a verdict never reads as the whole engine
@@ -122,6 +126,7 @@ pub struct RansomService {
     stopper: RwLock<Option<Stopper>>,
     written: Arc<Mutex<FilesWritten>>,
     sources: HostSourcesReader,
+    served_peer: Option<ServedPeerReader>,
     alerts: mpsc::Sender<AlertEvent>,
 }
 
@@ -146,7 +151,28 @@ impl RansomService {
             stopper: RwLock::new(None),
             written: Arc::new(Mutex::new(FilesWritten::default())),
             sources,
+            served_peer: None,
             alerts,
+        }
+    }
+
+    /// How the client of a file service's process is named. Without it a
+    /// write a file service made is still the client's, with its address
+    /// stated as not read.
+    #[must_use]
+    pub fn with_served_peers(mut self, reader: ServedPeerReader) -> Self {
+        self.served_peer = Some(reader);
+        self
+    }
+
+    /// The actor a change by `writer` counts against: the client a file
+    /// service wrote for, or the writer's own run on this host.
+    fn actor(&self, writer: &ProcessEntry, lineage: &Lineage) -> Actor {
+        if serves_files(writer) {
+            let peer = self.served_peer.as_ref().and_then(|read| read(writer.pid));
+            served_actor(writer, peer)
+        } else {
+            actor_of(writer, lineage)
         }
     }
 
@@ -234,7 +260,9 @@ impl RansomService {
         calls: u64,
         at_ns: u64,
     ) {
-        if calls == 0 {
+        // A file service encrypts its own transport for every client, which
+        // is a rate of calls with no bearing on what its clients write.
+        if calls == 0 || serves_files(caller) {
             return;
         }
         let actor = actor_of(caller, lineage);
@@ -289,7 +317,7 @@ impl RansomService {
             && change.size_now.is_none()
             && let Some(size) = change.size_before
         {
-            let actor = actor_of(writer, lineage);
+            let actor = self.actor(writer, lineage);
             let completed = self
                 .replacements
                 .lock()
@@ -302,7 +330,7 @@ impl RansomService {
         if !rewrites(kinds.iter().copied()) {
             return;
         }
-        let actor = actor_of(writer, lineage);
+        let actor = self.actor(writer, lineage);
         self.written
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -379,7 +407,7 @@ impl RansomService {
         path: Option<&str>,
         at_ns: u64,
     ) {
-        let actor = actor_of(opener, lineage);
+        let actor = self.actor(opener, lineage);
         self.observe(
             canary_touched(&actor, opener.pid, path, at_ns),
             opener,
@@ -620,7 +648,12 @@ impl RansomService {
             return;
         }
         let alert = Alert::from_ransom_verdict(verdict, workload, at_ns);
-        self.stop(verdict, &alert);
+        // A run written through a file service is stopped where it runs, on
+        // the client's host: killing the service here would end every
+        // client's session and leave the run untouched.
+        if verdict.actor.remote.is_none() {
+            self.stop(verdict, &alert);
+        }
         let sent = self.alerts.try_send(AlertEvent::ProcessDetection {
             alert: Box::new(alert),
             kill_process: false,
@@ -1110,6 +1143,111 @@ mod tests {
         let mut armed = maps.lock().await.armed.clone();
         armed.sort_unstable();
         assert_eq!(armed, vec![100, 101, 102], "the run and nothing else");
+    }
+
+    fn mismatch(service: &RansomService, writer: &ProcessEntry, lineage: &Lineage, n: usize) {
+        service.record_file_change(
+            writer,
+            lineage,
+            [FileChangeKind::Written],
+            FileRewrite {
+                path: &format!("/srv/share/report{}-{n}.docx", writer.pid),
+                entropy_before: None,
+                entropy_now: None,
+                head: Some([0x9A, 0x13, 0x7F, 0x02]),
+                renamed_from: None,
+                size_before: None,
+                size_now: None,
+                written_now: false,
+            },
+            2,
+        );
+    }
+
+    fn samba_clients() -> (ProcessEntry, ProcessEntry, Lineage) {
+        let master = running(500, "/usr/sbin/smbd", 4);
+        let lineage = Lineage {
+            ancestors: vec![master],
+            truncated: false,
+            incomplete: false,
+        };
+        (
+            running(501, "/usr/sbin/smbd", 4),
+            running(502, "/usr/sbin/smbd", 4),
+            lineage,
+        )
+    }
+
+    fn peers_by_pid(pid: u32) -> Option<std::net::IpAddr> {
+        match pid {
+            501 => Some("10.0.0.7".parse().expect("ip")),
+            502 => Some("10.0.0.8".parse().expect("ip")),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_file_service_writing_for_one_client_raises_against_that_client() {
+        let (service, mut rx) = service();
+        let service = service.with_served_peers(Arc::new(peers_by_pid));
+        let (first, _, lineage) = samba_clients();
+        for n in 0..RANSOM_HEADER_MISMATCHES {
+            mismatch(&service, &first, &lineage, n);
+        }
+        let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() else {
+            panic!("no verdict raised");
+        };
+        assert!(alert.message.starts_with(
+            "mass encryption written for the client at 10.0.0.7 through /usr/sbin/smbd (pid 501)"
+        ));
+        assert_eq!(
+            alert.src_addr[0],
+            u32::from(std::net::Ipv4Addr::new(10, 0, 0, 7))
+        );
+    }
+
+    #[test]
+    fn two_clients_of_one_file_service_are_never_added_together() {
+        let (service, mut rx) = service();
+        let service = service.with_served_peers(Arc::new(peers_by_pid));
+        let (first, second, lineage) = samba_clients();
+        let half = RANSOM_HEADER_MISMATCHES / 2;
+        for n in 0..half {
+            mismatch(&service, &first, &lineage, n);
+            mismatch(&service, &second, &lineage, n);
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_client_and_a_process_of_this_host_are_never_one_actor() {
+        let (service, mut rx) = service();
+        let (first, _, lineage) = samba_clients();
+        let local = running(600, "/tmp/enc", 7);
+        let alone = Lineage {
+            ancestors: Vec::new(),
+            truncated: false,
+            incomplete: false,
+        };
+        let half = RANSOM_HEADER_MISMATCHES / 2;
+        for n in 0..half {
+            mismatch(&service, &first, &lineage, n);
+            mismatch(&service, &local, &alone, n);
+        }
+        assert!(rx.try_recv().is_err());
+        // Without a reader the client is still a client, unnamed.
+        for n in half..RANSOM_HEADER_MISMATCHES {
+            mismatch(&service, &first, &lineage, n);
+        }
+        let Ok(AlertEvent::ProcessDetection { alert, .. }) = rx.try_recv() else {
+            panic!("no verdict raised");
+        };
+        assert!(
+            alert
+                .message
+                .contains("a client on another host, address not read")
+        );
+        assert_eq!(alert.src_addr, [0; 4]);
     }
 
     #[test]

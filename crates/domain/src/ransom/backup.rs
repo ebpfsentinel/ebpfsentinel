@@ -201,6 +201,7 @@ pub fn backup_destroyed_signal(
             key,
             pid: initiator.pid,
             exe: initiator.identity.path().map(ToOwned::to_owned),
+            remote: None,
         },
         pid,
         at_ns,

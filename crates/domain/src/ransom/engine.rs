@@ -108,9 +108,16 @@ impl RansomVerdict {
             .iter()
             .map(|s| format!("{} (pid {}): {}", s.kind.as_str(), s.pid, s.evidence))
             .collect();
+        let by = match &self.actor.remote {
+            Some(remote) => format!(
+                "written for {} through {exe} (pid {})",
+                remote.describe(),
+                self.actor.pid
+            ),
+            None => format!("by {exe} (pid {})", self.actor.pid),
+        };
         let mut out = format!(
-            "mass encryption by {exe} (pid {}) on {}: {}",
-            self.actor.pid,
+            "mass encryption {by} on {}: {}",
             self.corroboration.as_str(),
             signals.join("; ")
         );
@@ -327,6 +334,7 @@ mod tests {
             },
             pid,
             exe: Some("/tmp/enc".to_string()),
+            remote: None,
         }
     }
 

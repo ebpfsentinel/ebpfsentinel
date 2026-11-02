@@ -1465,6 +1465,14 @@ impl Alert {
             }
             alert.workload = Some(w);
         }
+        // A run written through a file service is the client's: the alert
+        // carries the client's address as the source of the writes.
+        if let Some(peer) = verdict.actor.remote.as_ref().and_then(|r| r.peer) {
+            let (words, v6) = addr_words(peer);
+            alert.src_addr = words;
+            alert.is_ipv6 = v6;
+            alert.protocol = 6;
+        }
         alert
     }
 
@@ -2616,7 +2624,11 @@ mod host_rule_tests {
 mod ransom_tests {
     use super::*;
     use crate::process::entity::ProcessKey;
-    use crate::ransom::{Actor, Corroboration, RansomSignal, SignalKind, UnavailableSignal};
+    use std::net::Ipv4Addr;
+
+    use crate::ransom::{
+        Actor, Corroboration, RansomSignal, RemoteClient, SignalKind, UnavailableSignal,
+    };
     use crate::workload::entity::WorkloadSource;
 
     #[test]
@@ -2628,6 +2640,7 @@ mod ransom_tests {
             },
             pid: 40,
             exe: Some("/tmp/enc".to_string()),
+            remote: None,
         };
         let verdict = RansomVerdict {
             actor: actor.clone(),
@@ -2666,5 +2679,43 @@ mod ransom_tests {
         let alert = Alert::from_ransom_verdict(&verdict, Some(workload), 9);
         assert_eq!(alert.workload.as_ref().map(|w| w.pid), Some(40));
         assert_eq!(alert.executable_path.as_deref(), Some("/tmp/enc"));
+        assert_eq!(alert.src_addr, [0; 4]);
+    }
+
+    #[test]
+    fn a_run_written_through_a_file_service_names_its_client() {
+        let actor = Actor {
+            key: ProcessKey {
+                pid: 301,
+                start_ns: 31,
+            },
+            pid: 301,
+            exe: Some("/usr/sbin/smbd".to_string()),
+            remote: Some(RemoteClient {
+                peer: Some("10.0.0.7".parse().unwrap()),
+            }),
+        };
+        let verdict = RansomVerdict {
+            actor: actor.clone(),
+            at_ns: 9,
+            corroboration: Corroboration::Decisive,
+            signals: vec![RansomSignal {
+                kind: SignalKind::CanaryTouched,
+                actor,
+                pid: 301,
+                at_ns: 9,
+                evidence: "opened /srv/.canary".to_string(),
+            }],
+            unavailable: Vec::new(),
+        };
+        let alert = Alert::from_ransom_verdict(&verdict, None, 9);
+        assert_eq!(
+            alert.src_addr,
+            [u32::from(Ipv4Addr::new(10, 0, 0, 7)), 0, 0, 0]
+        );
+        assert!(!alert.is_ipv6);
+        assert!(alert.message.starts_with(
+            "mass encryption written for the client at 10.0.0.7 through /usr/sbin/smbd (pid 301)"
+        ));
     }
 }

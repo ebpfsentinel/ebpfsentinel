@@ -136,6 +136,7 @@ mod tests {
             },
             pid: 7,
             exe: Some("/tmp/x".to_owned()),
+            remote: None,
         };
         let signal = canary_touched(&actor, 8, Some("/srv/0000-archive.docx"), 5);
         assert_eq!(signal.tier(), Tier::Decisive);

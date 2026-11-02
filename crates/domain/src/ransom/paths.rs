@@ -247,6 +247,7 @@ mod tests {
             key: ProcessKey { pid, start_ns: 1 },
             pid,
             exe: None,
+            remote: None,
         }
     }
 
