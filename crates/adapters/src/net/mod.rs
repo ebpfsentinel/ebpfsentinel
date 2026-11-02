@@ -15,4 +15,4 @@ pub mod served_peer;
 pub use default_route::IpDefaultRoute;
 pub use gratuitous_arp::RawSocketGratuitousArp;
 pub use iface_mac::IoctlIfaceMacResolver;
-pub use served_peer::ProcServedPeer;
+pub use served_peer::{ProcServedPeer, ProcShareWriters};
