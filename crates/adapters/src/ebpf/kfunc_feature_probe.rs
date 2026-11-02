@@ -156,6 +156,13 @@ const ENTRIES: [Entry; 3] = [
     },
 ];
 
+/// Each fact's name and the one thing it would be used for, in the order
+/// they are reported.
+#[must_use]
+pub fn entry_consumers() -> Vec<(&'static str, &'static str)> {
+    ENTRIES.iter().map(|e| (e.name, e.consumer)).collect()
+}
+
 /// A kprobe program loaded with the session attach type, calling both session
 /// kfuncs. The verifier offers them to session programs alone.
 fn kprobe_session_program(funcs: &HashMap<String, u32>) -> Option<(&'static str, ProbeProgram)> {
