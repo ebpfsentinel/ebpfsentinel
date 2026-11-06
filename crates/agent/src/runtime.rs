@@ -68,6 +68,10 @@ pub struct ServiceHandles {
     pub nat_svc: Arc<RwLock<NatAppService>>,
     pub lb_svc: Arc<RwLock<application::lb_service_impl::LbAppService>>,
     pub qos_svc: Arc<RwLock<application::qos_service_impl::QosAppService>>,
+    /// The workloads held to the rates `qos.cgroup_shaping` names. Its
+    /// tables are handed over by each load of tc-qos and taken back when that
+    /// generation goes.
+    pub cgroup_shaping: Arc<application::qos_cgroup_shaping_service::QosCgroupShapingService>,
     pub zone_svc: Arc<RwLock<ZoneAppService>>,
     pub alias_svc: Arc<RwLock<AliasAppService>>,
     pub alias_resolver: Arc<dyn AliasResolutionPort>,
@@ -97,6 +101,17 @@ pub struct ServiceHandles {
     /// The addresses of the other nodes, as the console last handed them.
     /// Empty on a node no console has reached, which names no peer.
     pub remote_identities: Arc<application::remote_identity_store::RemoteIdentityStore>,
+
+    /// Which pods each workload link belongs to and whether the datapath
+    /// reaches them, fed by the link hot-plug watcher of each load and by the
+    /// pod inventory once one is installed.
+    pub pod_coverage: Arc<application::pod_coverage_service::PodCoverageService>,
+    /// The guests behind the node's tap and macvtap devices, fed by the link
+    /// hot-plug watcher of each load.
+    pub guests: Arc<application::guest_inventory_service::GuestInventoryService>,
+    /// The owner of each workload link the watcher finds, relayed to the
+    /// process table once [`start_host_observation`] starts one.
+    pub link_processes: Arc<ProcessRelay>,
 
     // ── Infrastructure ───────────────────────────────────────────
     pub metrics: Arc<AgentMetrics>,
@@ -130,9 +145,69 @@ impl ServiceHandles {
         reload_service.set_routing_service(Arc::clone(&self.routing_svc));
         reload_service.set_loadbalancer_service(Arc::clone(&self.lb_svc));
         reload_service.set_qos_service(Arc::clone(&self.qos_svc));
+        reload_service.set_cgroup_shaping_service(Arc::clone(&self.cgroup_shaping));
         reload_service.set_zone_service(Arc::clone(&self.zone_svc));
         reload_service.set_schedule_service(Arc::clone(&self.schedule_svc));
         reload_service
+    }
+}
+
+/// Process events relayed from a producer that starts before the process
+/// table to the table, once it exists. A send that finds the relay full is
+/// dropped, as every producer of these events already drops one.
+pub struct ProcessRelay {
+    tx: mpsc::Sender<domain::process::entity::ProcessLifecycleEvent>,
+    rx: std::sync::Mutex<Option<mpsc::Receiver<domain::process::entity::ProcessLifecycleEvent>>>,
+}
+
+impl ProcessRelay {
+    pub(crate) fn new() -> Self {
+        let (tx, rx) = mpsc::channel(1024);
+        Self {
+            tx,
+            rx: std::sync::Mutex::new(Some(rx)),
+        }
+    }
+
+    /// The sending half, for a producer.
+    #[must_use]
+    pub fn sender(&self) -> mpsc::Sender<domain::process::entity::ProcessLifecycleEvent> {
+        self.tx.clone()
+    }
+
+    /// Forward everything relayed to `table` until `cancel`. Only the first
+    /// caller gets the events: a second table would split them.
+    fn forward_to(
+        &self,
+        table: mpsc::Sender<domain::process::entity::ProcessLifecycleEvent>,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) {
+        // The guarded value is an `Option` taken whole, so a panic while it
+        // was held cannot have left it half written.
+        let taken = self
+            .rx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(mut rx) = taken else {
+            return;
+        };
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = cancel.cancelled() => break,
+                    event = rx.recv() => match event {
+                        Some(event) => {
+                            if table.send(event).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    },
+                }
+            }
+        });
     }
 }
 
@@ -743,6 +818,8 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
 
     let remote_identities =
         Arc::new(application::remote_identity_store::RemoteIdentityStore::new());
+    let cgroup_shaping = startup::cgroup_shaping_service(config, &metrics)?;
+    let guests = startup::guest_inventory_service(config, &ids_workload_scope);
     Ok(ServiceHandles {
         firewall_svc,
         ids_svc,
@@ -759,6 +836,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         nat_svc,
         lb_svc,
         qos_svc,
+        cgroup_shaping,
         zone_svc,
         alias_svc,
         alias_resolver,
@@ -778,6 +856,9 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         metrics,
         ebpf_loaded,
         remote_identities,
+        pod_coverage: Arc::new(application::pod_coverage_service::PodCoverageService::new()),
+        guests,
+        link_processes: Arc::new(ProcessRelay::new()),
     })
 }
 
@@ -1447,6 +1528,79 @@ pub async fn load_ebpf_programs(
     };
     program_status.insert("tc_scrub".to_string(), scrub_ok);
 
+    // ── TC QoS ──────────────────────────────────────────────────
+    let qos_ok = if config.qos.enabled {
+        match startup::try_load_tc_qos(&ebpf_dir, config) {
+            Ok((mut loader, qos_mgr, qos_rdr, opt_reader)) => {
+                if let Some(reader) = opt_reader {
+                    let event_tx_clone = event_tx.clone();
+                    let rb_obs = RingBufObserver::new(
+                        "tc-qos",
+                        Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
+                    );
+                    let task_cancel = readers.clone();
+                    tokio::spawn(async move {
+                        reader.run(event_tx_clone, task_cancel, rb_obs).await;
+                    });
+                }
+                {
+                    let mut svc = services.qos_svc.write().await;
+                    // Bind the maps, then resync the configuration so they
+                    // carry the pipes, queues and classifiers it names.
+                    svc.set_map_port(Box::new(qos_mgr));
+                    if let Ok(pipes) = config.qos_pipes() {
+                        let _ = svc.reload_pipes(pipes);
+                    }
+                    if let Ok(queues) = config.qos_queues() {
+                        let _ = svc.reload_queues(queues);
+                    }
+                    if let Ok(classifiers) = config.qos_classifiers() {
+                        let _ = svc.reload_classifiers(classifiers);
+                    }
+                }
+                if let Some(rdr) = qos_rdr {
+                    metrics_readers.push(rdr);
+                }
+                startup::install_cgroup_shaping(&services.cgroup_shaping, &mut loader);
+                iface_groups_mgr.add_map(loader.ebpf_mut());
+                tenant_vlan_mgr.add_map(loader.ebpf_mut());
+                tenant_ifindex_mgr.add_map(loader.ebpf_mut());
+                ebpf_state.add_loader(loader);
+                info!("eBPF tc-qos active");
+                true
+            }
+            Err(e) => {
+                warn!("tc-qos load failed (degraded mode): {e}");
+                services.cgroup_shaping.clear_maps();
+                false
+            }
+        }
+    } else {
+        services.metrics.clear_ebpf_program_status("tc_qos");
+        services.cgroup_shaping.clear_maps();
+        false
+    };
+    program_status.insert("tc_qos".to_string(), qos_ok);
+    if qos_ok && services.cgroup_shaping.supported() {
+        // The achieved rate is the bytes counted between two reads over the
+        // time between them, on the agent's own monotonic clock.
+        let polling = Arc::clone(&services.cgroup_shaping);
+        let poll_cancel = readers.clone();
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let mut ticker =
+                tokio::time::interval(infrastructure::constants::CGROUP_SHAPING_READ_INTERVAL);
+            loop {
+                tokio::select! {
+                    () = poll_cancel.cancelled() => break,
+                    _ = ticker.tick() => {}
+                }
+                let now_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                polling.poll(now_ns);
+            }
+        });
+    }
+
     // ── XDP Load Balancer ───────────────────────────────────────
     let lb_ok = if config.loadbalancer.enabled {
         match startup::try_load_xdp_loadbalancer(&ebpf_dir, config, fw_ok || rl_ok) {
@@ -1500,6 +1654,57 @@ pub async fn load_ebpf_programs(
         }
     }
     ebpf_map_holder.iface_groups = Some(iface_groups_mgr);
+
+    // ── Workload links ──────────────────────────────────────────
+    // The chain this generation loaded, attached on each workload link as it
+    // appears, or inside each selected pod for a pod profile, for as long as
+    // the generation lives.
+    {
+        use adapters::ebpf::link_watcher::HookSide;
+        let loaded = |name: &str| program_status.get(name).copied().unwrap_or(false);
+        let ids_egress = config.ids.inspect_egress || config.container.resolver.enabled;
+        let wanted = [
+            ("tc_ids", loaded("tc_ids"), HookSide::Ingress),
+            (
+                "tc_threatintel",
+                loaded("tc_threatintel"),
+                HookSide::Ingress,
+            ),
+            ("tc_dns", loaded("tc_dns"), HookSide::Ingress),
+            ("tc_conntrack", loaded("tc_conntrack"), HookSide::Ingress),
+            (
+                "tc_nat_ingress",
+                loaded("tc_nat_ingress"),
+                HookSide::Ingress,
+            ),
+            ("tc_scrub", loaded("tc_scrub"), HookSide::Ingress),
+            ("tc_qos_ingress", loaded("tc_qos"), HookSide::Ingress),
+            ("tc_ids", loaded("tc_ids") && ids_egress, HookSide::Egress),
+            ("tc_nat_egress", loaded("tc_nat_egress"), HookSide::Egress),
+            ("tc_qos", loaded("tc_qos"), HookSide::Egress),
+        ];
+        let chain = startup::TcChain::collect(&wanted, ebpf_state.loaders.iter());
+        if config.agent.profile == infrastructure::config::AgentProfile::Pod {
+            startup::spawn_pod_tc_attacher(config, &services.pod_coverage, &chain, readers.clone());
+        } else {
+            startup::start_link_watcher(
+                config,
+                &chain,
+                startup::LinkSinks {
+                    ids_workload_scope: &services.ids_workload_scope,
+                    cgroup_shaping: &services.cgroup_shaping,
+                    pod_coverage: &services.pod_coverage,
+                    guests: &services.guests,
+                    processes: config
+                        .process_table
+                        .enabled
+                        .then(|| services.link_processes.sender()),
+                },
+                &services.metrics,
+                &readers,
+            );
+        }
+    }
 
     info!(
         program_count = ebpf_state.loaders.len(),
@@ -1607,6 +1812,9 @@ pub async fn start_host_observation(
     let (process_tx, process_rx) =
         mpsc::channel::<domain::process::entity::ProcessLifecycleEvent>(4096);
 
+    services
+        .link_processes
+        .forward_to(process_tx.clone(), &cancel);
     let tracing = start_process_tracing(config, services, process_tx, &cancel);
 
     let mut table = process_table(config, services, &proc_root).await;
@@ -1702,7 +1910,8 @@ async fn process_table(
     .with_details(Arc::new(adapters::container::ProcDetailsResolver::new(
         proc_root,
     )))
-    .with_ids_workload_scope(Arc::clone(&services.ids_workload_scope));
+    .with_ids_workload_scope(Arc::clone(&services.ids_workload_scope))
+    .with_cgroup_shaping(Arc::clone(&services.cgroup_shaping));
     if let Some(resolver) = startup::container_resolver(config, proc_root) {
         table = table.with_containers(resolver);
     }
