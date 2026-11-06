@@ -920,6 +920,16 @@ pub enum Command {
         /// The process whose executable is opened.
         pid: u32,
     },
+    /// Read the one client process `pid` serves on a file-service port,
+    /// answered by [`Response::ServedPeer`]. A file server forks one process
+    /// per client, and naming that client means reading the process's socket
+    /// links, the ptrace access check the rootless agent fails against a
+    /// service running as root. Read-only: the `fd` links and the process's
+    /// own TCP tables, and what crosses back is one address.
+    ReadServedPeer {
+        /// The file service process whose client is read.
+        pid: u32,
+    },
 }
 
 /// The most threads one [`Command::OpenerReadings`] reads.
@@ -1112,6 +1122,10 @@ pub enum Response {
     /// The facts of one process, answering [`Command::ReadProcessFacts`];
     /// `None` when the process is gone or its `exe` link is unreadable.
     ProcessFacts { facts: Option<ProcessFactsReading> },
+    /// The client of one file service process, answering
+    /// [`Command::ReadServedPeer`]; `None` when the process is gone, holds no
+    /// file-service connection, or serves several addresses.
+    ServedPeer { peer: Option<std::net::IpAddr> },
 }
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
@@ -1242,6 +1256,7 @@ mod tests {
             },
             Command::ReadProcessFacts { pid: 4242 },
             Command::OpenExecutable { pid: 4242 },
+            Command::ReadServedPeer { pid: 4242 },
         ]
     }
 
@@ -1490,6 +1505,10 @@ mod tests {
                 }),
             },
             Response::ProcessFacts { facts: None },
+            Response::ServedPeer {
+                peer: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 7))),
+            },
+            Response::ServedPeer { peer: None },
         ]
     }
 

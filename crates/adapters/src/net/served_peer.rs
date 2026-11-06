@@ -14,8 +14,15 @@
 //! process holds, so it names nobody here.
 
 use std::collections::{HashMap, HashSet};
+use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use ebpfsentinel_warden_client::ReconnectingClient;
+
+/// Set to the warden's control socket when the agent runs rootless.
+const WARDEN_SOCK_ENV: &str = "EBPFSENTINEL_WARDEN_SOCK";
 
 /// The ports a file service listens on: SMB, the `NetBIOS` session, NFS.
 const FILE_SERVICE_PORTS: [u16; 3] = [445, 139, 2049];
@@ -26,14 +33,38 @@ const ESTABLISHED: &str = "01";
 /// Reads the client of a file service's process under a configurable proc
 /// root, so an agent holding the host procfs at `/host/proc` reads the
 /// node's processes.
+///
+/// A rootless agent fails the ptrace check the `fd` links ask for against a
+/// service running as root, which is how a file server usually runs. When
+/// `EBPFSENTINEL_WARDEN_SOCK` is set, a process whose descriptors the agent
+/// may not list is read by the warden instead; without a warden, or when it
+/// refuses, the process names nobody rather than a guess.
 pub struct ProcServedPeer {
     proc_root: PathBuf,
+    /// The warden, in a rootless deployment. Held behind a `Mutex` because the
+    /// client caches its connection and the reader is shared.
+    warden: Option<Mutex<ReconnectingClient>>,
 }
 
 impl ProcServedPeer {
     pub fn new(proc_root: impl Into<PathBuf>) -> Self {
+        let warden = std::env::var_os(WARDEN_SOCK_ENV)
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| Mutex::new(ReconnectingClient::new(p)));
         Self {
             proc_root: proc_root.into(),
+            warden,
+        }
+    }
+
+    /// Read through the warden at `sock` whenever the descriptors are not
+    /// readable here, whatever the environment says.
+    #[cfg(test)]
+    fn with_warden(proc_root: impl Into<PathBuf>, sock: impl Into<PathBuf>) -> Self {
+        Self {
+            proc_root: proc_root.into(),
+            warden: Some(Mutex::new(ReconnectingClient::new(sock))),
         }
     }
 
@@ -41,7 +72,16 @@ impl ProcServedPeer {
     #[must_use]
     pub fn read(&self, pid: u32) -> Option<IpAddr> {
         let pid_dir = self.proc_root.join(pid.to_string());
-        let inodes = socket_inodes(&pid_dir);
+        // An agent in a user namespace of its own may list the directory
+        // and still be refused every link in it, which is the same refusal.
+        let inodes = match std::fs::read_dir(pid_dir.join("fd")).map(socket_inodes) {
+            Ok(Some(inodes)) => inodes,
+            Ok(None) => return self.read_through_warden(pid),
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                return self.read_through_warden(pid);
+            }
+            Err(_) => return None,
+        };
         if inodes.is_empty() {
             return None;
         }
@@ -56,6 +96,23 @@ impl ProcServedPeer {
         match (peers.next(), peers.next()) {
             (Some(peer), None) => Some(peer),
             _ => None,
+        }
+    }
+
+    /// Ask the warden for the client of a process the agent may not read. A
+    /// warden that is down or refuses leaves the client unnamed, as a local
+    /// failure does.
+    fn read_through_warden(&self, pid: u32) -> Option<IpAddr> {
+        let warden = self.warden.as_ref()?;
+        let mut client = warden
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match client.read_served_peer(pid) {
+            Ok(peer) => peer,
+            Err(e) => {
+                tracing::debug!(pid, error = %e, "warden could not read the served client");
+                None
+            }
         }
     }
 }
@@ -92,7 +149,10 @@ impl ProcShareWriters {
             .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
             .filter(|pid| {
                 let pid_dir = self.proc_root.join(pid.to_string());
-                let inodes = socket_inodes(&pid_dir);
+                let Ok(entries) = std::fs::read_dir(pid_dir.join("fd")) else {
+                    return false;
+                };
+                let inodes = socket_inodes(entries).unwrap_or_default();
                 if inodes.is_empty() {
                     return false;
                 }
@@ -127,23 +187,27 @@ fn server_sockets(pid_dir: &Path, servers: &[IpAddr]) -> HashSet<u64> {
     held
 }
 
-/// The socket inodes of every descriptor the process holds.
-fn socket_inodes(pid_dir: &Path) -> HashSet<u64> {
-    let Ok(entries) = std::fs::read_dir(pid_dir.join("fd")) else {
-        return HashSet::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| std::fs::read_link(entry.path()).ok())
-        .filter_map(|target| {
-            target
-                .to_string_lossy()
-                .strip_prefix("socket:[")?
-                .strip_suffix(']')?
-                .parse()
-                .ok()
-        })
-        .collect()
+/// The socket inodes of every descriptor in one process's `fd` directory, or
+/// `None` when a link in it was refused, which is the ptrace access check a
+/// process in another user namespace fails.
+fn socket_inodes(entries: std::fs::ReadDir) -> Option<HashSet<u64>> {
+    let mut inodes = HashSet::new();
+    for entry in entries.filter_map(Result::ok) {
+        let target = match std::fs::read_link(entry.path()) {
+            Ok(target) => target,
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => return None,
+            Err(_) => continue,
+        };
+        if let Some(inode) = target
+            .to_string_lossy()
+            .strip_prefix("socket:[")
+            .and_then(|t| t.strip_suffix(']'))
+            .and_then(|t| t.parse().ok())
+        {
+            inodes.insert(inode);
+        }
+    }
+    Some(inodes)
 }
 
 /// The remote addresses of the established connections in one TCP table
@@ -377,6 +441,69 @@ mod tests {
             ProcServedPeer::new(root.path()).read(7),
             Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)))
         );
+    }
+
+    /// Answer one connection as the warden would: the handshake, then every
+    /// `ReadServedPeer` with `answer`. Returns how many reads it served.
+    fn fake_warden(sock: &Path, answer: IpAddr) -> std::thread::JoinHandle<usize> {
+        use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response};
+        use ebpfsentinel_warden_proto::{read_frame, write_frame};
+        let listener = std::os::unix::net::UnixListener::bind(sock).expect("bind");
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().expect("accept");
+            let Ok(Command::Hello { .. }) = read_frame::<_, Command>(&mut conn) else {
+                return 0;
+            };
+            write_frame(
+                &mut conn,
+                &Response::HelloOk {
+                    version: PROTOCOL_VERSION,
+                },
+            )
+            .expect("hello");
+            let mut served = 0;
+            while let Ok(cmd) = read_frame::<_, Command>(&mut conn) {
+                let Command::ReadServedPeer { pid: 7 } = cmd else {
+                    panic!("unexpected command {cmd:?}");
+                };
+                served += 1;
+                write_frame(&mut conn, &Response::ServedPeer { peer: Some(answer) })
+                    .expect("answer");
+            }
+            served
+        })
+    }
+
+    #[test]
+    fn a_service_the_agent_may_not_read_is_read_by_the_warden() {
+        use std::os::unix::fs::PermissionsExt;
+        let client = Ipv4Addr::new(10, 0, 0, 7);
+        let tcp = row(&local(), 445, &v4_hex(client), ESTABLISHED, 1);
+        let root = proc_with(&[1], &tcp, "");
+        let fd_dir = root.path().join("7/fd");
+        std::fs::set_permissions(&fd_dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        // A privileged test run lists the closed directory anyway, and then
+        // the warden is never asked.
+        let privileged = std::fs::read_dir(&fd_dir).is_ok();
+
+        let sock = root.path().join("warden.sock");
+        let warden = fake_warden(&sock, IpAddr::V4(client));
+        let peer = ProcServedPeer::with_warden(root.path(), &sock).read(7);
+        assert_eq!(peer, Some(IpAddr::V4(client)));
+
+        // Without a warden the same process names nobody.
+        let alone = ProcServedPeer {
+            proc_root: root.path().to_path_buf(),
+            warden: None,
+        }
+        .read(7);
+        std::fs::set_permissions(&fd_dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        if !privileged {
+            assert_eq!(alone, None);
+        }
+        drop(std::os::unix::net::UnixStream::connect(&sock));
+        let served = warden.join().expect("warden");
+        assert_eq!(served, usize::from(!privileged));
     }
 
     #[test]

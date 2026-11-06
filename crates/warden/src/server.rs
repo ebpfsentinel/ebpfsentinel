@@ -26,7 +26,7 @@ use crate::write_refusal;
 use crate::{
     bpf_inventory, cgroup_ops, delegate_over_fd, dlp_scan, exe_read, facts_read, go_executables,
     hidden_ports, hidden_processes, net_ops, netns_tcx_ops, packet_sockets, process_maps, recv_fd,
-    rooted_read, send_msg_fds, uprobe_ops,
+    rooted_read, send_msg_fds, served_peer, uprobe_ops,
 };
 
 /// How long a connection may hold a thread without saying `Hello`.
@@ -699,6 +699,9 @@ fn dispatch(cmd: &Command, host: &dyn HostOps, proc_root: &Path) -> Response {
         },
         Command::ReadProcessFacts { pid } => Response::ProcessFacts {
             facts: facts_read::read_facts(proc_root, *pid),
+        },
+        Command::ReadServedPeer { pid } => Response::ServedPeer {
+            peer: served_peer::read(proc_root, *pid),
         },
         Command::PacketSockets => Response::PacketSockets {
             sockets: packet_sockets::scan(proc_root),

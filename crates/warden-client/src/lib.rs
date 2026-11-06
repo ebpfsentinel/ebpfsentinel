@@ -96,6 +96,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::OpenerReadings { .. } => "OpenerReadings",
         Command::ReadProcessFacts { .. } => "ReadProcessFacts",
         Command::OpenExecutable { .. } => "OpenExecutable",
+        Command::ReadServedPeer { .. } => "ReadServedPeer",
     }
 }
 
@@ -258,6 +259,16 @@ impl WardenClient {
         match self.call(&Command::ReadProcessFacts { pid })? {
             Response::ProcessFacts { facts } => Ok(facts),
             other => Err(unexpected("ReadProcessFacts", &other)),
+        }
+    }
+
+    /// Read the one client file service process `pid` serves. `None` when
+    /// the process is gone, holds no file-service connection, or serves
+    /// several addresses.
+    pub fn read_served_peer(&mut self, pid: u32) -> io::Result<Option<std::net::IpAddr>> {
+        match self.call(&Command::ReadServedPeer { pid })? {
+            Response::ServedPeer { peer } => Ok(peer),
+            other => Err(unexpected("ReadServedPeer", &other)),
         }
     }
 
@@ -756,6 +767,12 @@ impl ReconnectingClient {
     /// bounced. A read, so replaying it is harmless.
     pub fn read_process_facts(&mut self, pid: u32) -> io::Result<Option<ProcessFactsReading>> {
         self.with_retry(|c| c.read_process_facts(pid))
+    }
+
+    /// Read one file service process's client through the warden,
+    /// reconnecting if it bounced.
+    pub fn read_served_peer(&mut self, pid: u32) -> io::Result<Option<std::net::IpAddr>> {
+        self.with_retry(|c| c.read_served_peer(pid))
     }
 
     /// Open one process's executable through the warden, reconnecting if it
