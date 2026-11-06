@@ -49,6 +49,7 @@ pub mod nat_map_port;
 pub mod netpol_map_port;
 pub mod network_program_port;
 pub mod package_inventory_port;
+pub mod packet_observer_port;
 pub mod pod_coverage_port;
 pub mod process_details_port;
 pub mod process_executable_port;

@@ -116,6 +116,8 @@ pub struct EventDispatcher {
     /// Extensions handed every TLS plaintext buffer the library probes read.
     tls_plaintext_observers:
         Vec<Arc<dyn ports::secondary::tls_plaintext_observer_port::TlsPlaintextObserver>>,
+    /// Extensions handed every L4 event once the dispatcher acted on it.
+    packet_observers: Vec<Arc<dyn ports::secondary::packet_observer_port::PacketObserver>>,
 }
 
 /// What one DLP event's process resolves to, read once per event.
@@ -180,6 +182,7 @@ impl EventDispatcher {
             l7_observers: Vec::new(),
             dns_query_observers: Vec::new(),
             tls_plaintext_observers: Vec::new(),
+            packet_observers: Vec::new(),
             metrics,
         }
     }
@@ -241,6 +244,18 @@ impl EventDispatcher {
     ) -> Self {
         tracing::info!(observer = observer.name(), "L7 observer registered");
         self.l7_observers.push(observer);
+        self
+    }
+
+    /// Hand every L4 event the datapath reports to `observer`, once the
+    /// dispatcher has acted on it.
+    #[must_use]
+    pub fn with_packet_observer(
+        mut self,
+        observer: Arc<dyn ports::secondary::packet_observer_port::PacketObserver>,
+    ) -> Self {
+        tracing::info!(observer = observer.name(), "Packet observer registered");
+        self.packet_observers.push(observer);
         self
     }
 
@@ -660,6 +675,13 @@ impl EventDispatcher {
     }
 
     fn dispatch_event(&self, event: PacketEvent) {
+        self.dispatch_event_rules(event);
+        for observer in &self.packet_observers {
+            observer.observe(&event);
+        }
+    }
+
+    fn dispatch_event_rules(&self, event: PacketEvent) {
         match event.event_type {
             EVENT_TYPE_FIREWALL => self.process_firewall_event(event),
             EVENT_TYPE_IDS => self.process_ids_event(event),
@@ -2635,6 +2657,33 @@ mod tests {
 
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "unknown");
+    }
+
+    struct CountingPacketObserver(std::sync::atomic::AtomicUsize);
+
+    impl ports::secondary::packet_observer_port::PacketObserver for CountingPacketObserver {
+        fn observe(&self, _event: &PacketEvent) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn every_l4_event_reaches_the_packet_observers_whatever_the_rules_did() {
+        let ids = make_service_with_rules(vec![make_ids_rule("ids-001")]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(100);
+        let observer = Arc::new(CountingPacketObserver(std::sync::atomic::AtomicUsize::new(
+            0,
+        )));
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_packet_observer(Arc::clone(&observer)
+                as Arc<dyn ports::secondary::packet_observer_port::PacketObserver>);
+
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 0));
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_FIREWALL, 0));
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_DLP, 0));
+
+        assert_eq!(observer.0.load(Ordering::Relaxed), 3);
     }
 
     #[tokio::test]
