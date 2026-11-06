@@ -347,8 +347,12 @@ impl ProcessTableService {
     /// A new process running its parent's image. The entry is the parent's,
     /// renamed: same executable, same command line, same container, since
     /// nothing has replaced any of them yet, and the exec that usually
-    /// follows rewrites it. A parent the table does not hold leaves a
-    /// minimal entry, still worth keeping for the lineage it names.
+    /// follows rewrites it. A parent the table does not hold, a daemon that
+    /// was running before the agent, is read once from `/proc` instead:
+    /// its image is the one the child runs, and reading the parent rather
+    /// than the child cannot race the child's exec. A parent that cannot be
+    /// read either leaves a minimal entry, still worth keeping for the
+    /// lineage it names.
     async fn record_fork(&self, event: ProcessLifecycleEvent) {
         let pid = event.tgid;
         let inherited = event.parent_pid.and_then(|parent| {
@@ -366,8 +370,17 @@ impl ProcessTableService {
         });
         let mut entry = ProcessEntry::new(pid, event.comm, event.at_ns);
         let mut container = None;
+        let unheld_parent = if inherited.is_none() {
+            event.parent_pid
+        } else {
+            None
+        };
+        if let Some(parent) = unheld_parent {
+            self.read_unheld_parent(parent, &mut entry);
+        }
         if let Some(parent) = inherited {
             entry.identity = parent.identity;
+            entry.exe_hash = parent.exe_hash;
             entry.command_line = parent.command_line;
             // The container belongs to the cgroup, not to the image: a child
             // cloned straight into another cgroup, the way a runtime starts
@@ -399,6 +412,31 @@ impl ProcessTableService {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .record_fork(entry);
         debug!(pid, "process table recorded a fork");
+    }
+
+    /// The executable and command line of a parent the table never held,
+    /// read from `/proc` onto the entry of the child it just forked.
+    fn read_unheld_parent(&self, parent: u32, entry: &mut ProcessEntry) {
+        if let Some(reader) = &self.executables
+            && let Some(executable) = reader.read_executable(parent)
+        {
+            if let Some(digester) = &self.digester {
+                entry.exe_hash = digester.digest(parent, executable.dev, executable.inode);
+            }
+            entry.identity = ProcessIdentity::Path {
+                path: executable.path,
+                dev: executable.dev,
+                inode: executable.inode,
+            };
+        }
+        if self.capture_command_line
+            && let Some(reader) = &self.details
+            && let Some(details) = reader.read_details(parent)
+        {
+            entry.command_line = details
+                .command_line
+                .map(|line| domain::process::redact::redact_command_line(&line));
+        }
     }
 
     /// Tell every service keyed on the task about an entry it should now
@@ -1144,6 +1182,58 @@ mod tests {
         assert_eq!(child.parent_pid, Some(10));
         assert_eq!(service.stats().forks, 1);
         assert_eq!(service.stats().recorded, 1);
+    }
+
+    /// Reads only the pid it was built for, so a test can tell which
+    /// process was read.
+    struct OnlyPid(u32);
+    impl ProcessExecutableReader for OnlyPid {
+        fn read_executable(&self, pid: u32) -> Option<DlpExecutable> {
+            (pid == self.0).then(|| DlpExecutable {
+                path: "/usr/sbin/smbd".to_string(),
+                dev: 64,
+                inode: 4242,
+                source: DlpIdentitySource::ProcessAtAlertTime,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fork_of_a_parent_never_seen_is_named_from_that_parent() {
+        let service = ProcessTableService::new(16, true)
+            .with_executables(Arc::new(OnlyPid(10)))
+            .with_digester(Arc::new(FixedDigest))
+            .with_details(Arc::new(FixedDetails));
+        let mut fork = lineage(exec(11, 2), 2, (10, 1));
+        fork.kind = ProcessEventKind::Fork;
+        service.apply(fork).await;
+        let child = service.get(11).unwrap();
+        assert_eq!(child.identity.path(), Some("/usr/sbin/smbd"));
+        assert!(child.exe_hash.is_some());
+        assert_eq!(
+            child.command_line.as_deref(),
+            Some("curl -u user:[redacted] https://example.test")
+        );
+        assert_eq!(child.parent_pid, Some(10));
+    }
+
+    #[tokio::test]
+    async fn a_fork_of_a_held_parent_reads_nothing_and_a_fork_of_an_unreadable_one_stays_unnamed() {
+        let service = ProcessTableService::new(16, false).with_executables(Arc::new(OnlyPid(10)));
+        // Held, but read under another pid's answer: inheriting must not ask.
+        let mut held = lineage(exec(20, 1), 1, (1, 0));
+        held.kind = ProcessEventKind::Fork;
+        service.apply(held).await;
+        assert!(service.get(20).unwrap().identity.path().is_none());
+        let mut child = lineage(exec(21, 2), 2, (20, 1));
+        child.kind = ProcessEventKind::Fork;
+        service.apply(child).await;
+        assert!(service.get(21).unwrap().identity.path().is_none());
+
+        let mut orphan = lineage(exec(31, 3), 3, (30, 1));
+        orphan.kind = ProcessEventKind::Fork;
+        service.apply(orphan).await;
+        assert!(service.get(31).unwrap().identity.path().is_none());
     }
 
     /// The host until the pid is 11, the container from there on: a
