@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use domain::common::entity::RuleId;
 use domain::common::error::DomainError;
-use domain::container::engine::CgroupReader;
+use domain::container::engine::{CgroupReader, CgroupTree, parse_cgroup_v2};
 use domain::container::entity::{ContainerInfo, ContainerMetadata};
 use domain::firewall::container_labels::{ContainerLabelPolicy, LABEL_PREFIX, ListedContainer};
 use domain::firewall::fqdn::{
@@ -120,6 +120,23 @@ impl ResolvedWorkload {
             service_account: self.service_account.as_deref(),
             ancestry: self.ancestry.as_deref(),
         }
+    }
+}
+
+/// What a cgroup path alone says about the workload it holds: the path, the
+/// unit it sits under and the container id it carries, and nothing a runtime
+/// would have to be asked for.
+#[must_use]
+pub fn workload_of_cgroup(path: &str) -> ResolvedWorkload {
+    let container_id = match parse_cgroup_v2(&format!("0::{path}"), 0) {
+        Some(ContainerInfo::Container { container_id, .. }) => Some(container_id),
+        _ => None,
+    };
+    ResolvedWorkload {
+        unit: unit_of(path).map(ToOwned::to_owned),
+        cgroup: Some(path.to_owned()),
+        container_id,
+        ..ResolvedWorkload::default()
     }
 }
 
@@ -355,6 +372,9 @@ pub struct WorkloadPolicyService {
     /// grant, so a reload and an answer never interleave.
     fqdn: Mutex<FqdnState>,
     cgroups: Option<Arc<dyn CgroupReader>>,
+    /// The live cgroups, read when a policy goes in force so that a cgroup
+    /// no task has exec'd or forked in since the agent started is named too.
+    tree: Option<Arc<dyn CgroupTree>>,
     /// The remote tables, as last written.
     peers: Mutex<PeerState>,
     /// Weak because the table holds this service: the table is what learns
@@ -382,6 +402,7 @@ impl WorkloadPolicyService {
             cgroup_masks: Mutex::new(HashMap::new()),
             fqdn: Mutex::new(fqdn),
             cgroups: None,
+            tree: None,
             peers: Mutex::new(PeerState::default()),
             processes: OnceLock::new(),
         }
@@ -403,6 +424,19 @@ impl WorkloadPolicyService {
     #[must_use]
     pub fn with_cgroups(mut self, reader: Arc<dyn CgroupReader>) -> Self {
         self.cgroups = Some(reader);
+        self
+    }
+
+    /// Name the live cgroups read through `tree` whenever a policy goes in
+    /// force, beside the tasks the process table holds.
+    ///
+    /// The table learns of a task when it forks or execs, so a container or a
+    /// unit started before the agent, whose processes do neither, would carry
+    /// no bits at all: a long-lived daemon connecting out of it would never
+    /// meet the rule that names its container.
+    #[must_use]
+    pub fn with_cgroup_tree(mut self, tree: Arc<dyn CgroupTree>) -> Self {
+        self.tree = Some(tree);
         self
     }
 
@@ -520,6 +554,7 @@ impl WorkloadPolicyService {
         // After the lock on the maps is released, because the replay takes
         // it once per task.
         self.replay();
+        self.seed_cgroups();
         Ok(())
     }
 
@@ -539,6 +574,68 @@ impl WorkloadPolicyService {
         debug!(
             tasks = entries.len(),
             "workload policy replayed over the process table"
+        );
+    }
+
+    /// Name every live cgroup the replay left without a mask, from what its
+    /// path alone says: the path itself, the unit and the container id.
+    ///
+    /// A cgroup a task already named is left as that task wrote it, because
+    /// a task carries more than its path - the container's name, its pod -
+    /// and the path alone can only say less. What this writes is the floor a
+    /// cgroup is named at until something in it forks or execs.
+    fn seed_cgroups(&self) {
+        let (Some(tree), Some(maps)) = (&self.tree, &self.maps) else {
+            return;
+        };
+        if self
+            .policy
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+        {
+            return;
+        }
+        let mut seeded = 0usize;
+        for (cgroup_id, path) in tree.cgroups() {
+            if cgroup_id == 0
+                || self
+                    .cgroup_masks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .contains_key(&cgroup_id)
+            {
+                continue;
+            }
+            let resolved = workload_of_cgroup(&path);
+            let masks = self.masks_for(&resolved.facts());
+            let peers = self.peer_targets(&resolved);
+            if masks.cgroup == 0 && peers == 0 {
+                continue;
+            }
+            let mut maps = maps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if masks.cgroup != 0 {
+                if let Err(err) = maps.set_cgroup_selectors(cgroup_id, masks.cgroup) {
+                    warn!(cgroup = path, error = %err, "a cgroup's workload selectors were not written");
+                    continue;
+                }
+                self.cgroup_masks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(cgroup_id, masks.cgroup);
+            }
+            if peers != 0
+                && let Err(err) = maps.set_peer_targets(cgroup_id, peers)
+            {
+                warn!(cgroup = path, error = %err, "a cgroup's remote workload rules were not written");
+            }
+            seeded += 1;
+        }
+        debug!(
+            cgroups = seeded,
+            "live cgroups named by the workload policy"
         );
     }
 
@@ -614,30 +711,40 @@ impl WorkloadPolicyService {
         }
         let resolved = self.resolve(entry);
         let masks = self.masks_for(&resolved.facts());
-        if entry.cgroup_id != 0 {
+        // The cgroup mask is a fact about the cgroup, and a task whose cgroup
+        // path could not be read - gone before the read, most often - says
+        // nothing about it. Writing what that task matched would clear the
+        // bits of a cgroup the policy names, for every task in it, until the
+        // next exec there.
+        let cgroup_id = if resolved.cgroup.is_some() {
+            entry.cgroup_id
+        } else {
+            0
+        };
+        if cgroup_id != 0 {
             let mut known = self
                 .cgroup_masks
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if masks.cgroup == 0 {
-                known.remove(&entry.cgroup_id);
+                known.remove(&cgroup_id);
             } else {
-                known.insert(entry.cgroup_id, masks.cgroup);
+                known.insert(cgroup_id, masks.cgroup);
             }
         }
         let mut maps = maps
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if entry.cgroup_id != 0
-            && let Err(err) = maps.set_cgroup_selectors(entry.cgroup_id, masks.cgroup)
+        if cgroup_id != 0
+            && let Err(err) = maps.set_cgroup_selectors(cgroup_id, masks.cgroup)
         {
             warn!(pid = entry.pid, error = %err, "a cgroup's workload selectors were not written");
         }
         if let Err(err) = maps.set_task_selectors(entry.pid, masks.task) {
             warn!(pid = entry.pid, error = %err, "a task's workload selectors were not written");
         }
-        if entry.cgroup_id != 0
-            && let Err(err) = maps.set_peer_targets(entry.cgroup_id, self.peer_targets(&resolved))
+        if cgroup_id != 0
+            && let Err(err) = maps.set_peer_targets(cgroup_id, self.peer_targets(&resolved))
         {
             warn!(pid = entry.pid, error = %err, "a cgroup's remote workload rules were not written");
         }
@@ -1386,6 +1493,88 @@ mod tests {
         assert_eq!(held.cgroups.get(&4242), Some(&0b10));
     }
 
+    /// A cgroup reader for a task that is already gone.
+    struct GoneCgroup;
+
+    impl CgroupReader for GoneCgroup {
+        fn read_cgroup(&self, _pid: u32) -> io::Result<String> {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+    }
+
+    #[test]
+    fn a_task_whose_cgroup_cannot_be_read_leaves_the_cgroup_s_bits_alone() {
+        let maps = SharedMaps::default();
+        let named = service(vec![unit_rule("unit", "nginx.service")], maps.clone());
+        named.record_exec(&entry(99, "/usr/bin/curl"));
+        assert_eq!(maps.0.lock().unwrap().cgroups.get(&4242), Some(&0b1));
+
+        // The same cgroup, seen through a task gone before its path was read.
+        let gone = WorkloadPolicyService::new(
+            WorkloadPolicy::new(vec![unit_rule("unit", "nginx.service")]).unwrap(),
+        )
+        .with_maps(Box::new(maps.clone()))
+        .with_cgroups(Arc::new(GoneCgroup));
+        maps.0.lock().unwrap().cgroups.insert(4242, 0b1);
+        gone.record_exec(&entry(100, "/usr/bin/curl"));
+        let held = maps.0.lock().unwrap();
+        assert_eq!(held.cgroups.get(&4242), Some(&0b1));
+        assert_eq!(held.tasks.get(&100), Some(&0));
+    }
+
+    struct Tree(Vec<(u64, String)>);
+
+    impl CgroupTree for Tree {
+        fn cgroups(&self) -> Vec<(u64, String)> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn a_cgroup_no_task_was_seen_in_is_named_from_its_path() {
+        const ID: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let maps = SharedMaps::default();
+        let container = rule(
+            "container",
+            WorkloadSelector::new(None, None, None, Some(ID.to_string())).expect("a valid id"),
+        );
+        let service = WorkloadPolicyService::new(
+            WorkloadPolicy::new(vec![unit_rule("unit", "nginx.service"), container]).unwrap(),
+        )
+        .with_maps(Box::new(maps.clone()))
+        .with_cgroup_tree(Arc::new(Tree(vec![
+            (7, "/system.slice/nginx.service".to_string()),
+            (8, format!("/system.slice/docker-{ID}.scope")),
+            (9, "/system.slice/cron.service".to_string()),
+        ])));
+
+        service.apply(service.policy()).unwrap();
+
+        let held = maps.0.lock().unwrap();
+        let unit = held.cgroups.get(&7).copied().unwrap_or_default();
+        let scope = held.cgroups.get(&8).copied().unwrap_or_default();
+        assert_eq!(unit.count_ones(), 1);
+        assert_eq!(scope.count_ones(), 1);
+        assert_ne!(unit, scope);
+        assert_eq!(held.cgroups.get(&9), None);
+    }
+
+    #[test]
+    fn a_cgroup_a_task_already_named_is_not_named_again_from_its_path() {
+        let maps = SharedMaps::default();
+        let service = service(vec![unit_rule("unit", "nginx.service")], maps.clone())
+            .with_cgroup_tree(Arc::new(Tree(vec![(
+                4242,
+                "/system.slice/nginx.service".to_string(),
+            )])));
+        service.record_exec(&entry(99, "/usr/bin/curl"));
+        maps.0.lock().unwrap().cgroups.insert(4242, 0b100);
+
+        service.seed_cgroups();
+
+        assert_eq!(maps.0.lock().unwrap().cgroups.get(&4242), Some(&0b100));
+    }
+
     fn lineage_rule(id: &str, exe: Option<&str>, ancestor: &str) -> WorkloadRule {
         rule(
             id,
@@ -1819,7 +2008,11 @@ mod tests {
 
         service.record_exec(&entry(31, "/usr/sbin/nginx"));
 
-        assert_eq!(maps.0.lock().unwrap().cgroups.get(&4242), Some(&0));
+        // Not even a cleared mask: a task whose cgroup path is unknown says
+        // nothing about its cgroup.
+        let held = maps.0.lock().unwrap();
+        assert_eq!(held.cgroups.get(&4242), None);
+        assert_eq!(held.tasks.get(&31), Some(&0));
     }
 
     #[test]

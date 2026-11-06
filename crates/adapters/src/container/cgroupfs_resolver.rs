@@ -1,7 +1,7 @@
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use domain::container::engine::CgroupIdResolver;
+use domain::container::engine::{CgroupIdResolver, CgroupTree};
 
 /// Maximum directory depth walked under the cgroup root. Container cgroup
 /// paths sit a handful of levels down (e.g.
@@ -79,6 +79,36 @@ impl CgroupIdResolver for CgroupfsResolver {
     }
 }
 
+impl CgroupfsResolver {
+    fn collect(&self, dir: &Path, depth: usize, found: &mut Vec<(u64, String)>) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if !meta.is_dir() {
+                continue;
+            }
+            let path = entry.path();
+            found.push((meta.ino(), self.relative_path(&path)));
+            self.collect(&path, depth + 1, found);
+        }
+    }
+}
+
+impl CgroupTree for CgroupfsResolver {
+    fn cgroups(&self) -> Vec<(u64, String)> {
+        let mut found = Vec::new();
+        self.collect(&self.root, 0, &mut found);
+        found
+    }
+}
+
 /// The id the kernel would report for the root of the unified hierarchy.
 ///
 /// The walk above answers id to path, and a fence has to answer the other way
@@ -117,6 +147,32 @@ mod tests {
     use tempfile::tempdir;
 
     const HEX64: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    #[test]
+    fn the_tree_lists_every_cgroup_below_the_root_with_its_id() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let scope = root
+            .join("system.slice")
+            .join(format!("docker-{HEX64}.scope"));
+        fs::create_dir_all(&scope).unwrap();
+        fs::write(root.join("cgroup.procs"), "").unwrap();
+        let mut listed = CgroupfsResolver::new(root).cgroups();
+        listed.sort_by(|a, b| a.1.cmp(&b.1));
+        assert_eq!(
+            listed,
+            vec![
+                (
+                    fs::metadata(root.join("system.slice")).unwrap().ino(),
+                    "/system.slice".to_string()
+                ),
+                (
+                    fs::metadata(&scope).unwrap().ino(),
+                    format!("/system.slice/docker-{HEX64}.scope")
+                ),
+            ]
+        );
+    }
 
     #[test]
     fn resolves_id_to_relative_cgroup_path() {

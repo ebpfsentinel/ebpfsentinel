@@ -2877,8 +2877,13 @@ pub async fn run(
                             workload_policy.clone(),
                         )
                         .with_maps(Box::new(manager))
-                        .with_cgroups(Arc::new(
-                            adapters::container::ProcContainerResolver::new(&coverage_proc),
+                        .with_cgroups(Arc::new(adapters::container::ProcContainerResolver::new(
+                            &coverage_proc,
+                        )))
+                        .with_cgroup_tree(Arc::new(
+                            adapters::container::CgroupfsResolver::new(
+                                &config.container.resolver.cgroup_root,
+                            ),
                         )),
                     );
                     // The rules go in before the table starts naming tasks,

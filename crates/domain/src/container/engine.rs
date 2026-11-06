@@ -26,6 +26,18 @@ pub trait CgroupIdResolver: Send + Sync {
     fn path_for_id(&self, cgroup_id: u64) -> Option<String>;
 }
 
+/// Every live cgroup of the unified hierarchy, as the kernel id beside the
+/// path, the path written the way a `/proc/<pid>/cgroup` line writes it.
+///
+/// What a cgroup is named by - its path, the unit and the container the
+/// path carries - is readable without a single task of it having been seen,
+/// which is what a policy needs for the workloads that were already running
+/// when it arrived.
+pub trait CgroupTree: Send + Sync {
+    /// Every cgroup found, in no particular order.
+    fn cgroups(&self) -> Vec<(u64, String)>;
+}
+
 /// Default LRU capacity if no configuration override is provided.
 pub const DEFAULT_CACHE_CAPACITY: usize = 4096;
 

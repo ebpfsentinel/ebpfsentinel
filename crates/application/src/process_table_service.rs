@@ -6,7 +6,9 @@
 //! it - and one container resolution, and whatever that pass could not read
 //! stays absent. A fork gets no `/proc` pass at all: the child runs its
 //! parent's image until it execs, so it inherits the parent's entry, and a
-//! read made at that instant would race the exec that usually follows. An
+//! read made at that instant would race the exec that usually follows. The
+//! container alone is resolved again when the child was cloned into another
+//! cgroup than its parent's. An
 //! exit removes the pid immediately, which is the only eviction that is
 //! correct: a pid is reused, and a table that let a dead entry linger would
 //! name the wrong binary on the next flow rather than naming none. An exited
@@ -363,13 +365,24 @@ impl ProcessTableService {
                 .cloned()
         });
         let mut entry = ProcessEntry::new(pid, event.comm, event.at_ns);
+        let mut container = None;
         if let Some(parent) = inherited {
             entry.identity = parent.identity;
             entry.command_line = parent.command_line;
-            entry.container = parent.container;
-        } else {
-            entry.container = self.resolve_container(pid, event.cgroup_id).await;
+            // The container belongs to the cgroup, not to the image: a child
+            // cloned straight into another cgroup, the way a runtime starts
+            // the first task of an exec into a container, is in the
+            // container its cgroup says and not in the host its parent ran
+            // on. Inheriting there names the container's cgroup as a host
+            // one, and the workload policy clears the container's rules.
+            if parent.cgroup_id == event.cgroup_id {
+                container = Some(parent.container);
+            }
         }
+        entry.container = match container {
+            Some(inherited) => inherited,
+            None => self.resolve_container(pid, event.cgroup_id).await,
+        };
         entry.uid = event.uid;
         entry.gid = event.gid;
         entry.cgroup_id = event.cgroup_id;
@@ -1131,6 +1144,46 @@ mod tests {
         assert_eq!(child.parent_pid, Some(10));
         assert_eq!(service.stats().forks, 1);
         assert_eq!(service.stats().recorded, 1);
+    }
+
+    /// The host until the pid is 11, the container from there on: a
+    /// runtime's child cloned straight into the container's cgroup.
+    struct ClonedIntoContainer;
+    impl domain::container::engine::CgroupReader for ClonedIntoContainer {
+        fn read_cgroup(&self, pid: u32) -> std::io::Result<String> {
+            if pid < 11 {
+                HostCgroups.read_cgroup(pid)
+            } else {
+                ContainerCgroups.read_cgroup(pid)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_child_cloned_into_another_cgroup_is_in_that_cgroup_s_container() {
+        let resolver = Arc::new(ContainerResolverEngine::new(
+            Arc::new(ClonedIntoContainer),
+            16,
+        ));
+        let service = ProcessTableService::new(16, false).with_containers(resolver);
+        let mut runtime = lineage(exec(10, 1), 1, (1, 0));
+        runtime.cgroup_id = 500;
+        service.apply(runtime).await;
+        assert!(service.get(10).unwrap().container.is_none());
+
+        let mut fork = lineage(exec(11, 2), 2, (10, 1));
+        fork.kind = ProcessEventKind::Fork;
+        service.apply(fork).await;
+        let child = service.get(11).unwrap();
+        assert!(child.container.is_some_and(|c| !c.info.is_host()));
+        assert_eq!(child.identity, service.get(10).unwrap().identity);
+
+        // A child left in its parent's cgroup still inherits, host included.
+        let mut sibling = lineage(exec(12, 3), 3, (10, 1));
+        sibling.kind = ProcessEventKind::Fork;
+        sibling.cgroup_id = 500;
+        service.apply(sibling).await;
+        assert!(service.get(12).unwrap().container.is_none());
     }
 
     #[tokio::test]
