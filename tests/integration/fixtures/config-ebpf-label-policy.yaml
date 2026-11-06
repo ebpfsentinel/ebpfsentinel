@@ -1,0 +1,68 @@
+# config-ebpf-label-policy.yaml - no workload rule in the file: every rule
+# in force comes from the policy labels the suite's containers carry, read
+# through the Docker socket and followed through its event stream.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  allow_plaintext_api: true
+  log_level: info
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: pass
+  rules: []
+
+container:
+  resolver:
+    enabled: true
+    cache_size: 4096
+    proc_path: /proc
+  docker:
+    enabled: true
+    socket: /var/run/docker.sock
+    cache_size: 256
+    cache_ttl_seconds: 60
+    timeout_ms: 2000
+    label_policy: true
+  kubernetes:
+    enabled: false
+
+process_table:
+  enabled: true
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 1
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+auth:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

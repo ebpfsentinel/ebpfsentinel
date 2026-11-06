@@ -193,7 +193,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `cgroup-attribution` | 67, perf/07 | none | 6.12 | pr | Socket hooks naming the cgroup and the process behind a connection; loaded on its defaults in 67, connect() cost with and without it measured in perf/07 |
 | `cgroup-clusterip` | No suite yet (kernel-network) | none | 6.12 | manual | Resolves the Service cluster addresses of opted-in pods at connect4/connect6 and answers with the cluster address at getpeername and recvmsg. Asserted beside Cilium and Calico in the operator's coexistence lane, which needs a cluster no lane here provisions |
 | `cgroup-connect-redirect` | No suite yet (kernel-network) | none | 6.12 | manual | Steers the TCP connections of selected cgroups to a local listener at connect4/connect6. No suite yet: the listener and the selection are the enterprise TLS interception's, so the suite that asserts a steered connection lands on the listener belongs beside it |
-| `cgroup-workload-firewall` | 67, 70, 92 | 2vm | 6.12 | nightly | Workload rules decided at connect/sendmsg/bind; suite 70 refuses a connect by the executable of the direct parent and of any ancestor, read from the live chain of parents |
+| `cgroup-workload-firewall` | 67, 70, 92, 98 | 2vm | 6.12 | nightly | Workload rules decided at connect/sendmsg/bind; suite 70 refuses a connect by the executable of the direct parent and of any ancestor, read from the live chain of parents |
 | `lsm-bpf-guard` | 88 | none | 6.12 | nightly | No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks; 88 has a detach of the agent's link refused with the BPF LSM active, which the agent VM's boot line now sets |
 | `lsm-exec-network` | 91 | none | 6.12 | nightly | Only the executables in the set reach the network, at socket_create and socket_connect: observe reports by pid and inode, enforce refuses with a permission error, the agent's own sockets and the listed binary pass. Needs the BPF LSM active at boot (lsm=bpf), which the agent VM's boot line sets |
 | `lsm-write-refusal` | 83 | none | 6.12 | nightly | A writer's write-opens and truncations under a watched directory refused past a count inside a window, nothing refused once the agent is gone, and in shadow nothing refused or raised while the reading counts it by workload. Needs the BPF LSM active at boot (lsm=bpf); the suite skips where it is not |
@@ -334,7 +334,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `quarantine` | No suite yet (workload-identity) | none | 6.12 | manual | No suite yet: nothing in this agent arms a quarantine, which only the enterprise automated response calls, so the suite that reads a workload's connections refused for the window belongs beside that response |
 | `self_protection` | 88 | none | 6.12 | nightly | 88 reads the guard as protected and has a detach of the agent's XDP link refused where the BPF LSM runs, and reads it unprotected with the detach succeeding where bpf is masked out of the module list |
 | `tcp_reqsk_assign` | 86 | none | 6.12 | nightly | No shipped program rests on it yet, so the report in 86 is all there is to assert |
-| `workload_firewall` | 70, 72, 92 | none | 6.12 | nightly | Rules on a workload's ancestry in 70 and inside LXC containers in 72 |
+| `workload_firewall` | 70, 72, 92, 98 | none | 6.12 | nightly | Rules on a workload's ancestry in 70, inside LXC containers in 72, and written as Docker container labels in 98: an enforced deny, an allow list with a default deny, observe raising without refusing, a malformed label refused and reported, and a container started after the agent policed without a reload |
 | `write_refusal` | 83, 84 | none | 6.12 | nightly | At the LSM hook in 83 and through the fanotify permission group in 84 |
 
 #### API paths (133)
@@ -397,9 +397,9 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/firewall/rules/{id}` | 03, 07, 11, 47, 76 |
 | `/api/v1/firewall/shadow` | 76 |
 | `/api/v1/firewall/workload/fqdn` | 92 |
-| `/api/v1/firewall/workload/labels` | 92 |
+| `/api/v1/firewall/workload/labels` | 92, 98 |
 | `/api/v1/firewall/workload/reach` | 70 |
-| `/api/v1/firewall/workload/rules` | 70, 72, 92, 95 |
+| `/api/v1/firewall/workload/rules` | 70, 72, 92, 95, 98 |
 | `/api/v1/flows/export` | 90 |
 | `/api/v1/geoip/lookup` | 30 |
 | `/api/v1/geoip/status` | 30 |

@@ -220,6 +220,7 @@ suite_profiles:
   "95": nightly
   "96": nightly
   "97": nightly
+  "98": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -363,7 +364,7 @@ coverage:
 
   - kind: ebpf_program
     feature: cgroup-workload-firewall
-    suites: ["67", "70", "92"]
+    suites: ["67", "70", "92", "98"]
     topology: 2vm
     kernel_min: "6.12"
     profile: nightly
@@ -1267,11 +1268,11 @@ coverage:
 
   - kind: capability
     feature: workload_firewall
-    suites: ["70", "72", "92"]
+    suites: ["70", "72", "92", "98"]
     topology: none
     kernel_min: "6.12"
     profile: nightly
-    notes: "Rules on a workload's ancestry in 70 and inside LXC containers in 72"
+    notes: "Rules on a workload's ancestry in 70, inside LXC containers in 72, and written as Docker container labels in 98: an enforced deny, an allow list with a default deny, observe raising without refusing, a malformed label refused and reported, and a container started after the agent policed without a reload"
 
   - kind: capability
     feature: quarantine
