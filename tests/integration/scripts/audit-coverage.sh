@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Coverage audit gate - enumerates the agent's observable surface
-# (eBPF programs, CLI subcommands, domain modules) and verifies that
-# every entry has a row in tests/integration/coverage-matrix.yaml.
+# (eBPF programs, CLI subcommands, domain modules, the capabilities of
+# capabilities.json and the paths of openapi.json) and verifies that
+# every entry has a row in tests/integration/coverage-matrix.yaml, or for
+# a path, a suite requesting it.
 #
 # Modes:
 #   audit-coverage.sh             check only - exit 1 on any missing row
@@ -41,6 +43,7 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 exec python3 - "${REPO_ROOT}" "${INTEG_DIR}" "${MODE}" <<'PY'
+import json
 import os
 import re
 import sys
@@ -81,6 +84,8 @@ skip_domains = set(matrix.get("skip_domains") or [])
 # extras.
 allowed_nested_cli = set(matrix.get("nested_cli_subcommands") or [])
 rows = matrix.get("coverage") or []
+owners = set((matrix.get("owners") or {}).keys())
+route_entries = matrix.get("routes") or {}
 
 # ── Enumerate observable surface on disk ────────────────────────────
 ebpf_dir = repo_root / "crates" / "ebpf-programs"
@@ -109,6 +114,17 @@ if cli_path.exists():
     variant_re = re.compile(r"^\s*([A-Z][A-Za-z0-9]*)\s*(\(|,|\{)", re.M)
     disk_cli = sorted({v.group(1).lower() for v in variant_re.finditer(body)})
 
+capabilities_path = repo_root / "capabilities.json"
+disk_capabilities: list[str] = []
+if capabilities_path.exists():
+    catalogue = json.loads(capabilities_path.read_text())
+    disk_capabilities = [c["id"] for c in catalogue.get("capabilities", [])]
+
+openapi_path = repo_root / "openapi.json"
+disk_routes: list[str] = []
+if openapi_path.exists():
+    disk_routes = sorted(json.loads(openapi_path.read_text()).get("paths", {}).keys())
+
 # ── Index matrix rows by kind ───────────────────────────────────────
 by_kind: dict[str, dict[str, dict]] = {}
 dups: list[str] = []
@@ -128,6 +144,7 @@ groups = [
     ("ebpf_program", disk_ebpf),
     ("cli_subcommand", disk_cli),
     ("domain_module", disk_domains),
+    ("capability", disk_capabilities),
 ]
 
 missing: list[str] = []
@@ -160,16 +177,65 @@ known_suites |= known_perf_suites
 
 stale_suite_refs: list[str] = []
 tbd_rows: list[str] = []
+bad_owners: list[str] = []
 for row in rows:
     feat = row.get("feature")
     kind = row.get("kind")
     suites = row.get("suites") or []
     if suites == ["TBD"]:
-        tbd_rows.append(f"  - {kind}/{feat}")
+        owner = row.get("owner")
+        if owner not in owners:
+            bad_owners.append(f"  - {kind}/{feat} owner={owner!r}")
+        tbd_rows.append(f"  - {kind}/{feat} (owner: {owner})")
         continue
     for s in suites:
         if s not in known_suites:
             stale_suite_refs.append(f"  - {kind}/{feat} references suite {s}")
+
+# ── Routes: found in the suites, or listed with suites or an owner ──
+suite_texts: dict[str, str] = {}
+if suites_dir.exists():
+    for p in sorted(suites_dir.iterdir()):
+        m = re.match(r"^(\d{2})-.*\.bats$", p.name)
+        if m:
+            suite_texts[m.group(1)] = p.read_text()
+
+def route_pattern(path: str) -> re.Pattern:
+    rx = re.escape(path)
+    rx = re.sub(r"\\\{[^}]*\\\}", r"[^/\\s\"']+", rx)
+    return re.compile(rx + r"(?![A-Za-z0-9_/-])")
+
+route_suites: dict[str, list[str]] = {}
+for path in disk_routes:
+    pat = route_pattern(path)
+    route_suites[path] = sorted(s for s, text in suite_texts.items() if pat.search(text))
+
+uncovered_routes: list[str] = []
+stale_route_entries: list[str] = []
+for path in disk_routes:
+    entry = route_entries.get(path)
+    found = route_suites[path]
+    if entry is None:
+        if not found:
+            uncovered_routes.append(f"  - {path}")
+        continue
+    if "owner" in entry:
+        if entry["owner"] not in owners:
+            bad_owners.append(f"  - route {path} owner={entry['owner']!r}")
+        if found:
+            stale_route_entries.append(
+                f"  - {path} is requested by {', '.join(found)}: drop its `routes` line"
+            )
+        else:
+            tbd_rows.append(f"  - route {path} (owner: {entry['owner']})")
+    else:
+        for s in entry.get("suites") or []:
+            if s not in known_suites:
+                stale_suite_refs.append(f"  - route {path} references suite {s}")
+        if not entry.get("suites"):
+            bad_owners.append(f"  - route {path} lists neither suites nor an owner")
+for path in sorted(set(route_entries) - set(disk_routes)):
+    stale_route_entries.append(f"  - {path} is not a path of openapi.json")
 
 # ── Validate suite_profiles map ─────────────────────────────────────
 suite_profiles_raw = matrix.get("suite_profiles") or {}
@@ -191,6 +257,8 @@ print("Coverage audit - tests/integration/coverage-matrix.yaml")
 print(f"  eBPF programs on disk : {len(disk_ebpf)}")
 print(f"  CLI subcommands       : {len(disk_cli)}")
 print(f"  Domain modules        : {len(disk_domains)} (skipped: {sorted(skip_domains)})")
+print(f"  Capabilities          : {len(disk_capabilities)}")
+print(f"  API paths             : {len(disk_routes)}")
 print(f"  Matrix rows total     : {len(rows)}")
 print(f"  Known suites on disk  : {len(known_suites)}")
 
@@ -212,6 +280,19 @@ if stale_suite_refs:
     print("\n".join(stale_suite_refs))
     failed = True
 
+if bad_owners:
+    banner("GAPS with no owner (owner must be a key of `owners`)")
+    print("\n".join(bad_owners))
+    failed = True
+if uncovered_routes:
+    banner("UNCOVERED routes (no suite requests them, no `routes` line)")
+    print("\n".join(uncovered_routes))
+    failed = True
+if stale_route_entries:
+    banner("STALE `routes` lines")
+    print("\n".join(stale_route_entries))
+    failed = True
+
 if bad_profile_values:
     banner("INVALID suite_profiles values (allowed: pr | nightly | manual)")
     print("\n".join(bad_profile_values))
@@ -226,7 +307,7 @@ if extra_profile_for_suite:
     failed = True
 
 if tbd_rows:
-    banner(f"Planned-but-unbuilt rows ({len(tbd_rows)}, suites: [TBD])")
+    banner(f"No suite yet ({len(tbd_rows)} rows and routes, each with its owner)")
     print("\n".join(tbd_rows))
 
 # ── Markdown render ─────────────────────────────────────────────────
@@ -241,7 +322,10 @@ def render_table(kind: str, header: str, disk: list[str]) -> str:
             out.append(f"| `{feat}` | _MISSING_ | - | - | - | - |")
             continue
         suites = row.get("suites") or []
-        suites_s = ", ".join(suites) if suites else "-"
+        if suites == ["TBD"]:
+            suites_s = f"No suite yet ({row.get('owner', '?')})"
+        else:
+            suites_s = ", ".join(suites) if suites else "-"
         out.append(
             f"| `{feat}` "
             f"| {suites_s} "
@@ -250,6 +334,23 @@ def render_table(kind: str, header: str, disk: list[str]) -> str:
             f"| {row.get('profile', '-')} "
             f"| {row.get('notes', '')} |"
         )
+    out.append("")
+    return "\n".join(out)
+
+def render_routes() -> str:
+    out = [f"#### API paths ({len(disk_routes)})", ""]
+    out.append("| Path | Suites |")
+    out.append("|---|---|")
+    for path in disk_routes:
+        entry = route_entries.get(path) or {}
+        found = route_suites.get(path) or []
+        if found:
+            cell = ", ".join(found)
+        elif "owner" in entry:
+            cell = f"No suite yet ({entry['owner']})"
+        else:
+            cell = ", ".join(entry.get("suites") or []) or "_MISSING_"
+        out.append(f"| `{path}` | {cell} |")
     out.append("")
     return "\n".join(out)
 
@@ -263,6 +364,8 @@ rendered_block = "\n".join(
         render_table("ebpf_program", f"eBPF programs ({len(disk_ebpf)})", disk_ebpf),
         render_table("cli_subcommand", f"CLI subcommands ({len(disk_cli)})", disk_cli),
         render_table("domain_module", f"Domain modules ({len(disk_domains)})", disk_domains),
+        render_table("capability", f"Capabilities above the floor ({len(disk_capabilities)})", disk_capabilities),
+        render_routes(),
         "<!-- coverage:end -->",
     ]
 )

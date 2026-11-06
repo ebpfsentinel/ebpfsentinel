@@ -5,9 +5,11 @@
 # that exercise it. Read by `scripts/audit-coverage.sh` on every CI run.
 #
 # Schema:
-#   coverage[].kind        one of: ebpf_program | cli_subcommand | domain_module
+#   coverage[].kind        one of: ebpf_program | cli_subcommand |
+#                          domain_module | capability
 #   coverage[].feature     identifier (must match enumerable name on disk)
 #   coverage[].suites      list of bats suite ids ("11", "32") or ["TBD"]
+#   coverage[].owner       required with ["TBD"]: a key of `owners` below
 #   coverage[].topology    none | 2vm | 3vm | docker | k8s
 #   coverage[].kernel_min  string ("6.12" minimum, "n/a" when no eBPF)
 #   coverage[].profile     pr | nightly | manual
@@ -21,7 +23,12 @@
 #   - Every dir under crates/domain/src/ except `common` MUST have a
 #     row of kind domain_module. `common` is shared types, no surface
 #     of its own, allowed to be skipped via `skip_domains` list below.
-#   - `suites: [TBD]` is permitted but tracked as a gap in CI summary.
+#   - Every entry of capabilities.json MUST have a row of kind
+#     capability with its id as feature.
+#   - Every path of openapi.json MUST be requested by a suite or listed
+#     under `routes` below.
+#   - `suites: [TBD]` is permitted with an owner, and tracked as a gap in
+#     the CI summary and the rendered README.
 #   - Suites listed must exist under tests/integration/suites/.
 
 # Domains intentionally not test-mapped (shared types, no behaviour).
@@ -34,6 +41,58 @@ skip_domains:
 # allowlist them rather than flag them as orphans.
 nested_cli_subcommands:
   - nptv6
+  - mass-encryption
+  - mass-encryption-stop
+
+# Who writes the suite a `suites: [TBD]` row or an uncovered route is
+# waiting on. Every gap names one of these, so a gap is a line of work
+# somebody holds rather than a cell left blank; `unplanned` says plainly
+# that nobody holds it yet.
+owners:
+  workload-identity: "Workload, ancestry and process identity on the wire: matchers, lineage, selectors, hot-plug, the exec network list, kill_process, the two-end peer"
+  kernel-network: "Network features the kernel decides: flow export, FQDN egress, NetworkPolicy, labels, segmentation, TLS redirect, drop reasons, RED metrics, the service graph, cgroup shaping, cluster addresses, exposure"
+  host-integrity: "Host integrity: foreign programs, raw sockets, the guard on the agent's own objects, file watch on the host and in containers, entropy blind spots"
+  restart-state: "State that survives a restart and the reports read from it: learning, the RCF baseline, MITRE coverage, eBPF coverage, crypto posture, trace, TLS probe coverage, DLP scope"
+  unplanned: "No suite is planned yet; listed so the gap reads as one"
+
+# Every path of openapi.json is asserted by a suite that names it. The audit
+# finds the suites itself by matching the path, with `{param}` read as one
+# segment, against every suite file, so a route a suite already requests
+# needs no line here. A route listed below either carries the suites that
+# reach it under a name built at run time (`suites`), or names the owner of
+# the suite it is waiting on (`owner`). A route listed with an owner that a
+# suite has since started requesting fails the audit, so the list shrinks
+# as the suites land.
+routes:
+  /api/v1/alerts/triage: {owner: unplanned}
+  /api/v1/alerts/{id}/triage: {owner: unplanned}
+  /api/v1/dlp/scope: {owner: restart-state}
+  /api/v1/ebpf/coverage: {owner: restart-state}
+  /api/v1/ebpf/drop-reasons: {owner: kernel-network}
+  /api/v1/ebpf/foreign-programs: {owner: host-integrity}
+  /api/v1/ebpf/hidden-ports: {suites: ["79"]}
+  /api/v1/ebpf/hidden-processes: {suites: ["79"]}
+  /api/v1/ebpf/raw-sockets: {owner: host-integrity}
+  /api/v1/exposure/listeners: {owner: kernel-network}
+  /api/v1/firewall/workload/fqdn: {owner: kernel-network}
+  /api/v1/firewall/workload/labels: {owner: kernel-network}
+  /api/v1/flows/export: {owner: kernel-network}
+  /api/v1/ids/suricata/report: {owner: unplanned}
+  /api/v1/lb/vips: {owner: unplanned}
+  /api/v1/lb/vips/bgp: {owner: unplanned}
+  /api/v1/lb/vips/grant: {owner: unplanned}
+  /api/v1/learning/sessions: {owner: restart-state}
+  /api/v1/learning/sessions/{id}: {owner: restart-state}
+  /api/v1/learning/sessions/{id}/edges: {owner: restart-state}
+  /api/v1/learning/sessions/{id}/policy: {owner: restart-state}
+  /api/v1/learning/sessions/{id}/segmentation: {owner: restart-state}
+  /api/v1/learning/sessions/{id}/stop: {owner: restart-state}
+  /api/v1/netpol/replay: {owner: kernel-network}
+  /api/v1/qos/shaping: {owner: kernel-network}
+  /api/v1/services/graph: {owner: kernel-network}
+  /api/v1/tls/handshakes: {owner: restart-state}
+  /api/v1/tls/posture: {owner: restart-state}
+  /api/v1/trace: {owner: restart-state}
 
 # Suite-level CI profile (consumed by scripts/list-suites-by-profile.sh
 # which drives .github/workflows/integration.yml).
@@ -148,6 +207,23 @@ suite_profiles:
   # 83 needs the BPF LSM active at boot, which no lane's kernel command line
   # sets yet; where it is not, it skips: nightly, so it runs the day one does.
   "83": nightly
+  # 72 to 75 each start an agent beside a container or a guest the suite
+  # builds itself (LXC, a tap device, libvirt): root on a throwaway host,
+  # so nightly.
+  "72": nightly
+  "73": nightly
+  "74": nightly
+  "75": nightly
+  # 76 drives ICMP and TCP through shadow rules and reads their counters.
+  "76": nightly
+  # 84 runs the fanotify permission fallback with the BPF LSM hidden from
+  # the agent through a private mount namespace: root, so nightly.
+  "84": nightly
+  # 85 writes to listeners on port 445 inside a test namespace and waits a
+  # learning window cut to seconds: nightly.
+  "85": nightly
+  # 86 hides bpf from the security module list in a private mount namespace.
+  "86": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -308,6 +384,7 @@ coverage:
   - kind: ebpf_program
     feature: cgroup-connect-redirect
     suites: ["TBD"]
+    owner: kernel-network
     topology: none
     kernel_min: "6.12"
     profile: manual
@@ -316,6 +393,7 @@ coverage:
   - kind: ebpf_program
     feature: cgroup-clusterip
     suites: ["TBD"]
+    owner: kernel-network
     topology: none
     kernel_min: "6.12"
     profile: manual
@@ -324,6 +402,7 @@ coverage:
   - kind: ebpf_program
     feature: lsm-exec-network
     suites: ["TBD"]
+    owner: workload-identity
     topology: none
     kernel_min: "6.12"
     profile: manual
@@ -332,6 +411,7 @@ coverage:
   - kind: ebpf_program
     feature: lsm-bpf-guard
     suites: ["TBD"]
+    owner: host-integrity
     topology: none
     kernel_min: "6.12"
     profile: manual
@@ -348,6 +428,7 @@ coverage:
   - kind: ebpf_program
     feature: tracepoint-drop-reason
     suites: ["TBD"]
+    owner: kernel-network
     topology: none
     kernel_min: "6.12"
     profile: manual
@@ -364,6 +445,7 @@ coverage:
   - kind: ebpf_program
     feature: uprobe-crypto
     suites: ["TBD"]
+    owner: host-integrity
     topology: none
     kernel_min: "6.12"
     profile: manual
@@ -380,6 +462,7 @@ coverage:
   - kind: ebpf_program
     feature: tracepoint-signal
     suites: ["TBD"]
+    owner: workload-identity
     topology: none
     kernel_min: "6.12"
     profile: manual
@@ -693,6 +776,7 @@ coverage:
   - kind: cli_subcommand
     feature: learning
     suites: ["TBD"]
+    owner: restart-state
     topology: none
     kernel_min: "6.12"
     profile: manual
@@ -701,6 +785,7 @@ coverage:
   - kind: cli_subcommand
     feature: netpol
     suites: ["TBD"]
+    owner: kernel-network
     topology: k8s
     kernel_min: "6.12"
     profile: manual
@@ -741,6 +826,7 @@ coverage:
   - kind: cli_subcommand
     feature: processes
     suites: ["TBD"]
+    owner: workload-identity
     topology: none
     kernel_min: "6.12"
     profile: manual
@@ -942,6 +1028,7 @@ coverage:
   - kind: domain_module
     feature: telemetry
     suites: ["TBD"]
+    owner: unplanned
     topology: none
     kernel_min: "n/a"
     profile: manual
@@ -966,6 +1053,7 @@ coverage:
   - kind: domain_module
     feature: coverage
     suites: ["TBD"]
+    owner: restart-state
     topology: k8s
     kernel_min: "6.12"
     profile: manual
@@ -974,6 +1062,7 @@ coverage:
   - kind: domain_module
     feature: drops
     suites: ["TBD"]
+    owner: kernel-network
     topology: none
     kernel_min: "6.12"
     profile: manual
@@ -990,6 +1079,7 @@ coverage:
   - kind: domain_module
     feature: flow
     suites: ["TBD"]
+    owner: kernel-network
     topology: none
     kernel_min: "6.12"
     profile: manual
@@ -998,6 +1088,7 @@ coverage:
   - kind: domain_module
     feature: learning
     suites: ["TBD"]
+    owner: restart-state
     topology: none
     kernel_min: "6.12"
     profile: manual
@@ -1006,6 +1097,7 @@ coverage:
   - kind: domain_module
     feature: netpol
     suites: ["TBD"]
+    owner: kernel-network
     topology: k8s
     kernel_min: "6.12"
     profile: manual
@@ -1026,6 +1118,232 @@ coverage:
     kernel_min: "6.12"
     profile: nightly
     notes: "The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry"
+
+  - kind: domain_module
+    feature: clusterip
+    suites: ["TBD"]
+    owner: kernel-network
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "The plan deciding which Services an opted-in workload resolves at connect and which stay with kube-proxy. No suite yet: nothing connects to a cluster address from a selected cgroup and reads the backend it reached"
+
+  - kind: domain_module
+    feature: exposure
+    suites: ["TBD"]
+    owner: kernel-network
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "What this node exposes, read off the socket hooks, and who bound it. No suite yet: nothing binds a listener in a namespace and reads it back from /api/v1/exposure/listeners"
+
+  - kind: domain_module
+    feature: file_watch
+    suites: ["TBD"]
+    owner: host-integrity
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "Changes to watched files and the process that made them, on the host and inside a container's upper layer. No suite yet: nothing changes a watched file and reads the report back"
+
+  - kind: domain_module
+    feature: guest
+    suites: ["73", "74", "75"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "The virtual machines whose traffic crosses this host: a tap device in 73, a policy decided on a guest in 74, a libvirt domain in 75"
+
+  - kind: domain_module
+    feature: identity
+    suites: ["TBD"]
+    owner: workload-identity
+    topology: 2vm
+    kernel_min: "6.12"
+    profile: manual
+    notes: "This node's addresses as names another node can read, and the peer's names on a flow. No suite yet: the two-end reading needs a second agent on the attacker VM"
+
+  - kind: domain_module
+    feature: network_program
+    suites: ["TBD"]
+    owner: host-integrity
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "Programs other than the agent's on the node's network path. No suite yet: nothing attaches a foreign XDP or tc program and reads /api/v1/ebpf/foreign-programs"
+
+  - kind: domain_module
+    feature: ransom
+    suites: ["81", "82", "83", "84"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "Mass encryption recognised by signals that agree: the shadow verdict in 81, the stop in 82, the write refusal with the BPF LSM in 83 and through fanotify in 84"
+
+  - kind: domain_module
+    feature: raw_socket
+    suites: ["TBD"]
+    owner: host-integrity
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "Packet sockets open on the node and the classic BPF filter behind them. No suite yet: nothing opens an AF_PACKET socket and reads /api/v1/ebpf/raw-sockets"
+
+  - kind: domain_module
+    feature: share_writes
+    suites: ["85"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "A host writing to file shares it never wrote to, read off its own flows, including the sealed SMB 3 case"
+
+  - kind: domain_module
+    feature: trace
+    suites: ["TBD"]
+    owner: restart-state
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "One crafted packet run through the loaded programs, each stage's verdict. No suite yet: nothing posts a trace for a denied five-tuple and reads the stage that decided"
+
+  - kind: cli_subcommand
+    feature: exposure
+    suites: ["TBD"]
+    owner: kernel-network
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "exposure listeners. No suite yet"
+
+  - kind: cli_subcommand
+    feature: trace
+    suites: ["TBD"]
+    owner: restart-state
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "trace through the loaded programs. No suite yet"
+
+  # ── Capabilities above the kernel floor ──────────────────────────────
+  # One row per entry of capabilities.json. 86 asserts every entry is
+  # reported with its cause and fallback; the suites listed here are the
+  # ones asserting what the capability does when it is active.
+
+  - kind: capability
+    feature: bpf_lsm
+    suites: ["83", "86"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "A write refused at an LSM hook in 83; the boot parameter named when bpf is missing from the module list in 86"
+
+  - kind: capability
+    feature: file_kfuncs
+    suites: ["77"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "Probed and reported in 77"
+
+  - kind: capability
+    feature: kprobe_session
+    suites: ["86"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "No shipped program rests on it yet, so the report in 86 is all there is to assert"
+
+  - kind: capability
+    feature: copy_from_user_str
+    suites: ["86"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "No shipped program rests on it yet, so the report in 86 is all there is to assert"
+
+  - kind: capability
+    feature: tcp_reqsk_assign
+    suites: ["86"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "No shipped program rests on it yet, so the report in 86 is all there is to assert"
+
+  - kind: capability
+    feature: attribution
+    suites: ["70"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "The workload named on a flow"
+
+  - kind: capability
+    feature: process_tracing
+    suites: ["70"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "The process and its lineage behind a flow"
+
+  - kind: capability
+    feature: workload_firewall
+    suites: ["70", "72"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "Rules on a workload's ancestry in 70 and inside LXC containers in 72"
+
+  - kind: capability
+    feature: quarantine
+    suites: ["TBD"]
+    owner: workload-identity
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "No suite yet: nothing quarantines a workload and reads its connections refused for the window"
+
+  - kind: capability
+    feature: process_signal
+    suites: ["82"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "A run encrypting files stopped by the signal"
+
+  - kind: capability
+    feature: immediate_signal
+    suites: ["TBD"]
+    owner: workload-identity
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "No suite yet: nothing signals a target making no syscall and reads that it went at once"
+
+  - kind: capability
+    feature: network_executables
+    suites: ["TBD"]
+    owner: workload-identity
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "No suite yet: needs the BPF LSM active at boot"
+
+  - kind: capability
+    feature: write_refusal
+    suites: ["83", "84"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "At the LSM hook in 83 and through the fanotify permission group in 84"
+
+  - kind: capability
+    feature: self_protection
+    suites: ["TBD"]
+    owner: host-integrity
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "No suite yet: needs the BPF LSM active at boot"
 
 # ── Attack suites (per-suite tagging) ────────────────────────────────
 # Rows above map features → suites. The block below tags each Wave-2
