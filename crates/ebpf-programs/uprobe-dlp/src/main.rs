@@ -123,6 +123,18 @@ static DLP_TASK_SOCKET: LruHashMap<u64, DlpTaskSocket, { DLP_TASK_SOCKET_MAX_TAS
 #[btf_map]
 static KTLS_READ_SOCKET: LruHashMap<u64, DlpSocket, 10240> = LruHashMap::new();
 
+/// The socket a kernel TLS receive read inside the `SSL_read` call that is
+/// still open on this thread, kept for that call's return probe.
+///
+/// Where OpenSSL drives kernel TLS, `SSL_read` reaches `tls_sw_recvmsg`, and
+/// the socket the kernel probe reads there is the one this very read comes
+/// off: a reading, not the correlation `DLP_TASK_SOCKET` stores for a later
+/// write. It lives exactly one call frame: `SSL_read`'s entry clears what an
+/// earlier frame left and its return probe takes it, so no later call on the
+/// thread is ever handed it.
+#[btf_map]
+static SSL_READ_SOCKET: LruHashMap<u64, DlpSocket, 10240> = LruHashMap::new();
+
 // ── Probes ──────────────────────────────────────────────────────────
 
 /// Intercept `SSL_write(ssl, buf, num)` at entry.
@@ -258,6 +270,9 @@ fn try_ssl_read_entry(ctx: &ProbeContext) -> Result<(), ()> {
     // SSL_read(SSL *ssl, void *buf, int num)
     //   arg(0) = ssl, arg(1) = buf, arg(2) = num
     stamp_uprobe_active();
+    let pid_tgid = bpf_get_current_pid_tgid();
+    // Whatever an earlier frame left belongs to another read.
+    let _ = SSL_READ_SOCKET.remove(&pid_tgid);
     let buf: *const u8 = ctx.arg(1).ok_or(())?;
     let num: i32 = ctx.arg(2).ok_or(())?;
 
@@ -265,7 +280,6 @@ fn try_ssl_read_entry(ctx: &ProbeContext) -> Result<(), ()> {
         return Ok(());
     }
 
-    let pid_tgid = bpf_get_current_pid_tgid();
     let args = SslReadArgs {
         buf_ptr: buf as u64,
         buf_len: num as u32,
@@ -285,8 +299,12 @@ fn try_ssl_read_ret(ctx: &RetProbeContext) -> Result<(), ()> {
     let args_ptr = SSL_READ_ARGS.get_ptr(&pid_tgid).ok_or(())?;
     let args = unsafe { *args_ptr };
 
-    // Always clean up the map entry.
+    // Always clean up the map entries.
     let _ = SSL_READ_ARGS.remove(&pid_tgid);
+    let read_socket = SSL_READ_SOCKET
+        .get_ptr(&pid_tgid)
+        .map(|ptr| unsafe { *ptr });
+    let _ = SSL_READ_SOCKET.remove(&pid_tgid);
 
     // SSL_read returns the number of bytes read, or ≤0 on error/EOF.
     let ret: i32 = ctx.ret();
@@ -301,11 +319,14 @@ fn try_ssl_read_ret(ctx: &RetProbeContext) -> Result<(), ()> {
         args.buf_len
     };
 
+    // The socket the kernel read under this call names the read itself; only
+    // a library doing its own record layer falls back to the correlation.
+    let socket = read_socket.unwrap_or_else(task_socket);
     emit_dlp_event(
         args.buf_ptr as *const u8,
         actual_len,
         DLP_DIRECTION_READ,
-        task_socket(),
+        socket,
     );
     increment_metric(DLP_METRIC_READ_EVENTS);
     Ok(())
@@ -782,6 +803,15 @@ fn try_ktls_recvmsg_entry(ctx: &ProbeContext) -> Result<(), ()> {
     };
 
     if uprobe_already_captured() {
+        // The library probe reports these bytes; what it cannot see is the
+        // socket, which this call is reading off, so it is handed to the
+        // `SSL_read` frame open on this thread. No frame open, nothing kept.
+        let pid_tgid = bpf_get_current_pid_tgid();
+        if let Some(socket) = socket
+            && SSL_READ_ARGS.get_ptr(&pid_tgid).is_some()
+        {
+            let _ = SSL_READ_SOCKET.insert(&pid_tgid, &socket, 0);
+        }
         increment_metric(DLP_METRIC_KTLS_SUPPRESSED);
         return Ok(());
     }
