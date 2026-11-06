@@ -163,14 +163,14 @@ for kind, disk in groups:
 known_suites: set[str] = set()
 if suites_dir.exists():
     for p in suites_dir.iterdir():
-        m = re.match(r"^(\d{2})-", p.name)
+        m = re.match(r"^(\d{2,})-", p.name)
         if m:
             known_suites.add(m.group(1))
 
 known_perf_suites: set[str] = set()
 if perf_dir.exists():
     for p in perf_dir.iterdir():
-        m = re.match(r"^(\d{2})-.*\.bats$", p.name)
+        m = re.match(r"^(\d{2,})-.*\.bats$", p.name)
         if m:
             known_perf_suites.add(f"perf/{m.group(1)}")
 known_suites |= known_perf_suites
@@ -196,7 +196,7 @@ for row in rows:
 suite_texts: dict[str, str] = {}
 if suites_dir.exists():
     for p in sorted(suites_dir.iterdir()):
-        m = re.match(r"^(\d{2})-.*\.bats$", p.name)
+        m = re.match(r"^(\d{2,})-.*\.bats$", p.name)
         if m:
             suite_texts[m.group(1)] = p.read_text()
 
