@@ -114,7 +114,7 @@ _wait_handshake() {
     return 1
 }
 
-# _wait_edge <port> <jq condition on .counts> - the posture edge to this
+# _wait_edge <port> <jq condition on the edge> - the posture edge to this
 # host on the port once the condition holds, waited for up to ten seconds.
 _wait_edge() {
     local port="$1" cond="$2" i body found
@@ -122,7 +122,7 @@ _wait_edge() {
         body="$(api_get /api/v1/tls/posture)"
         found="$(echo "$body" | jq -c --argjson p "$port" --arg s "$EBPF_HOST_IP" \
             "[.edges[] | select(.server_port == \$p and .server.address == \$s)
-              | select(.counts | ${cond})] | first // empty")"
+              | select(${cond})] | first // empty")"
         if [ -n "$found" ]; then
             echo "$found"
             return 0
@@ -173,8 +173,8 @@ _wait_edge() {
 
     local edge
     edge="$(_wait_edge "$TLS_PORT" '.post_quantum >= 1 and .classical >= 1')"
-    [ "$(echo "$edge" | jq -r '.counts.clear_text')" = "0" ]
-    [ "$(echo "$edge" | jq -r '.counts.legacy_tls')" = "0" ]
+    [ "$(echo "$edge" | jq -r '.clear_text')" = "0" ]
+    [ "$(echo "$edge" | jq -r '.legacy_tls')" = "0" ]
 }
 
 @test "a TLS 1.2 handshake carries the certificate window the server presented, where it was captured" {
@@ -218,8 +218,8 @@ _wait_edge() {
         "http://${EBPF_HOST_IP}:${HTTP_PORT}/"
     local edge
     edge="$(_wait_edge "$HTTP_PORT" '.clear_text >= 1')"
-    [ "$(echo "$edge" | jq -r '.counts.clear_text_protocols.http')" -ge 1 ]
-    [ "$(echo "$edge" | jq -r '.counts.post_quantum + .counts.classical + .counts.legacy_tls')" = "0" ]
+    [ "$(echo "$edge" | jq -r '.clear_text_protocols.http')" -ge 1 ]
+    [ "$(echo "$edge" | jq -r '.post_quantum + .classical + .legacy_tls')" = "0" ]
     [ "$(echo "$edge" | jq -r '.client.address')" = "$EBPF_NS_IP" ]
 
     local totals

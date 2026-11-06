@@ -370,11 +370,26 @@ start_ebpf_agent() {
             echo "$!" > "${AGENT_PID_FILE}.warden"
             local _i
             for _i in $(seq 1 100); do [ -S "$sock" ] && break; sleep 0.1; done
-            setsid env EBPF_PROGRAM_DIR="$staged_ebpf" \
-                EBPFSENTINEL_BPFFS=/sys/fs/bpf/ebpfsentinel \
-                EBPFSENTINEL_WARDEN_SOCK="$sock" \
-                "$staged_agent" --config "$config_file" "$@" \
-                </dev/null >"$AGENT_LOG_FILE" 2>&1 &
+            # EBPF_AGENT_LSM_FILE names a file the agent reads in place of
+            # /sys/kernel/security/lsm, bound over it in a mount namespace of
+            # the agent's own, so a suite can present a host whose security
+            # modules leave a given one out without rebooting it.
+            if [ -n "${EBPF_AGENT_LSM_FILE:-}" ]; then
+                setsid unshare --mount --propagation private sh -c \
+                    'mount --bind "$1" /sys/kernel/security/lsm && shift && exec "$@"' \
+                    sh "$EBPF_AGENT_LSM_FILE" \
+                    env EBPF_PROGRAM_DIR="$staged_ebpf" \
+                    EBPFSENTINEL_BPFFS=/sys/fs/bpf/ebpfsentinel \
+                    EBPFSENTINEL_WARDEN_SOCK="$sock" \
+                    "$staged_agent" --config "$config_file" "$@" \
+                    </dev/null >"$AGENT_LOG_FILE" 2>&1 &
+            else
+                setsid env EBPF_PROGRAM_DIR="$staged_ebpf" \
+                    EBPFSENTINEL_BPFFS=/sys/fs/bpf/ebpfsentinel \
+                    EBPFSENTINEL_WARDEN_SOCK="$sock" \
+                    "$staged_agent" --config "$config_file" "$@" \
+                    </dev/null >"$AGENT_LOG_FILE" 2>&1 &
+            fi
         else
             setsid env EBPF_PROGRAM_DIR="${EBPF_PROGRAM_DIR}" \
                 "$AGENT_BIN" --config "$config_file" "$@" \

@@ -110,14 +110,21 @@ _wait_socket_of() {
     echo "$entry"
 }
 
-# The agent's XDP link: the link whose program is the firewall.
+# The agent's XDP link: the link whose program is the firewall. Read from
+# the descriptors that hold it rather than listed by id, because with the
+# guard on the kernel refuses even root a descriptor to the link, and a
+# listing stops at the first link it cannot open.
 _agent_xdp_link() {
     local prog
     prog="$(bpftool -j prog show 2>/dev/null \
         | jq -r '[.[] | select(.name == "xdp_firewall") | .id] | first // empty')"
     [ -n "$prog" ] || return 1
-    bpftool -j link show 2>/dev/null \
-        | jq -r --argjson p "$prog" '[.[] | select(.prog_id == $p) | .id] | first // empty'
+    awk -v p="$prog" '
+        FNR == 1 { id = ""; xdp = 0 }
+        $1 == "link_type:" && $2 == "xdp" { xdp = 1 }
+        $1 == "link_id:" { id = $2 }
+        $1 == "prog_id:" && $2 == p && xdp && id != "" { print id; exit }
+    ' /proc/[0-9]*/fdinfo/* 2>/dev/null
 }
 
 @test "a packet socket opened after start-up is listed with its holder and alerts once" {
@@ -218,17 +225,9 @@ _agent_xdp_link() {
 
 @test "with bpf masked out of the modules, the node is unprotected and a detach alerts" {
     [ -r /sys/kernel/security/lsm ] || env_skip "securityfs is not mounted on this host"
-    local agent="${AGENT_BIN:-${PROJECT_ROOT}/target/release/ebpfsentinel-agent}"
-    [ -x "$agent" ] || soft_skip "no local agent build at $agent"
-
     local fake="${DATA_DIR}/lsm"
     tr ',' '\n' </sys/kernel/security/lsm | grep -vx 'bpf' | paste -sd, - | tr -d '\n' >"$fake"
-    chmod 640 "$PREPARED_CONFIG"
-    setsid unshare --mount --propagation private sh -c \
-        'mount --bind "$1" /sys/kernel/security/lsm && exec env EBPF_PROGRAM_DIR="$2" "$3" --config "$4"' \
-        sh "$fake" "${EBPF_PROGRAM_DIR:-${PROJECT_ROOT}/target/bpfel-unknown-none/release}" "$agent" "$PREPARED_CONFIG" \
-        </dev/null >"$AGENT_LOG_FILE" 2>&1 &
-    echo "$!" > "$AGENT_PID_FILE"
+    EBPF_AGENT_LSM_FILE="$fake" start_ebpf_agent "$PREPARED_CONFIG"
     wait_for_ebpf_loaded 30 || {
         tail -20 "$AGENT_LOG_FILE" >&2
         return 1
