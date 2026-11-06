@@ -1955,10 +1955,12 @@ pub struct ProcessKill {
 /// acted on. `None`, with the handles left without the capability, when the
 /// configuration turns the kill off or the kernel refuses it; the reason is
 /// published where the response routes read it. The object's counters are
-/// read by the agent's own metrics loop, which this path does not run.
+/// polled into the handles' metrics until `cancel`, the way the agent's own
+/// metrics loop reads them.
 pub async fn arm_process_kill(
     config: &AgentConfig,
     services: &mut ServiceHandles,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Option<ProcessKill> {
     let proc_root = startup::resolver_proc_path(
         &config.container.resolver.proc_path,
@@ -1973,6 +1975,11 @@ pub async fn arm_process_kill(
     )
     .await?;
     services.process_signal_svc = Some(armed.service);
+    poll_kernel_counters(
+        armed.metrics.into_iter().collect(),
+        &services.metrics,
+        cancel,
+    );
     Some(ProcessKill {
         _loader: armed.loader,
         _attacher: armed.attacher,
@@ -2983,7 +2990,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut config, mut services) = services_in(dir.path());
         config.response.kill_process.enabled = false;
-        assert!(arm_process_kill(&config, &mut services).await.is_none());
+        assert!(
+            arm_process_kill(
+                &config,
+                &mut services,
+                &tokio_util::sync::CancellationToken::new()
+            )
+            .await
+            .is_none()
+        );
         assert!(services.process_signal_svc.is_none());
     }
 
@@ -2997,7 +3012,15 @@ mod tests {
         let objects = dir.path().join("objects");
         std::fs::create_dir(&objects).unwrap();
         config.agent.ebpf_program_dir = Some(objects.display().to_string());
-        assert!(arm_process_kill(&config, &mut services).await.is_none());
+        assert!(
+            arm_process_kill(
+                &config,
+                &mut services,
+                &tokio_util::sync::CancellationToken::new()
+            )
+            .await
+            .is_none()
+        );
         assert!(services.process_signal_svc.is_none());
     }
 }
