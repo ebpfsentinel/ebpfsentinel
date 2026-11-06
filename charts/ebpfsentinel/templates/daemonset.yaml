@@ -116,6 +116,13 @@ spec:
               # uprobe link against a neighbouring container's libssl.
               mountPath: /host/proc
               readOnly: true
+            - name: host-cgroup
+              # The warden opens the cgroup the agent names and links a
+              # program to it. Its own /sys/fs/cgroup is the container's
+              # namespaced subtree, so without the node's every cgroup hook
+              # would cover the warden alone and no workload on the node.
+              mountPath: /sys/fs/cgroup
+              readOnly: true
             {{- range $i, $path := .Values.daemonset.warden.fileWatchHostPaths }}
             {{- if or (not (hasPrefix "/" $path)) (eq (trimSuffix "/" $path) "") }}
             {{- fail (printf "daemonset.warden.fileWatchHostPaths[%d]: %q must be an absolute directory other than /" $i $path) }}

@@ -39,6 +39,8 @@ services:
     volumes:
       - warden-sock:/run/ebpfsentinel
       - /proc:/host/proc:ro
+      # The cgroup hooks the warden links attach to the host's hierarchy.
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
     restart: unless-stopped
 
   agent:

@@ -81,6 +81,11 @@ services:
       # Read-only host /proc so the warden resolves the same
       # /host/proc/<pid>/root/<lib> path the agent sends for a brokered uprobe.
       - /proc:/host/proc:ro
+      # Read-only host cgroupfs: the warden opens the cgroup the agent names
+      # and links a program to it, and its own /sys/fs/cgroup is a namespaced
+      # subtree holding only itself, so every cgroup hook would cover the
+      # warden alone.
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
       # The file watch (`file_watch` in the configuration, off by default) is
       # opened by the warden, so every path it names - `filesystems`, `paths`,
       # the profiles - is read in this container's mount namespace, where the
