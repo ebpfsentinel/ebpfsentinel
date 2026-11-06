@@ -384,7 +384,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/ebpf/guests` | 73, 74, 75 |
 | `/api/v1/ebpf/hidden-ports` | 79 |
 | `/api/v1/ebpf/hidden-processes` | 79 |
-| `/api/v1/ebpf/kernel-features` | 27, 77, 82, 83, 84, 86, 88, 95, 99 |
+| `/api/v1/ebpf/kernel-features` | 100, 27, 77, 82, 83, 84, 86, 88, 95, 99 |
 | `/api/v1/ebpf/raw-sockets` | 88 |
 | `/api/v1/ebpf/status` | 06, 16, 62, 68 |
 | `/api/v1/ebpf/uprobes` | 60 |
@@ -405,7 +405,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/geoip/status` | 30 |
 | `/api/v1/host-rules` | 78 |
 | `/api/v1/host-rules/intents` | 78 |
-| `/api/v1/host-rules/mass-encryption` | 81, 82, 96 |
+| `/api/v1/host-rules/mass-encryption` | 100, 101, 81, 82, 96 |
 | `/api/v1/host-rules/write-refusal` | 83, 84 |
 | `/api/v1/ids/rules` | 12, 16, 55, 59 |
 | `/api/v1/ids/status` | 12, 16, 33 |

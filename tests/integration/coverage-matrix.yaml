@@ -223,6 +223,7 @@ suite_profiles:
   "98": nightly
   "99": nightly
   "100": nightly
+  "101": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -803,11 +804,11 @@ coverage:
 
   - kind: cli_subcommand
     feature: mass-encryption-stop
-    suites: ["82", "100", "perf/08"]
+    suites: ["82", "100", "101", "perf/08"]
     topology: none
     kernel_min: "6.12"
     profile: nightly
-    notes: "The mass encryption stop: with the verdict in enforce and the stop armed, one process encrypting a tree is killed in the middle of it with a second alert counting the files written before it stopped, and a run forking one worker per directory is stopped whole, the parent and every worker still alive at the verdict; the time from the verdict to the last member gone, and the files written meanwhile, measured in perf/08; in 100 an archive extraction, a copy, a mirror, a checkout, a package upgrade replacing compressed files through a rename, an index rebuild, a log rotation, a media encoder, a database compaction, a compressed backup and snapshot pruning all run to their end with the stop armed, and nothing is raised"
+    notes: "The mass encryption stop: with the verdict in enforce and the stop armed, one process encrypting a tree is killed in the middle of it with a second alert counting the files written before it stopped, and a run forking one worker per directory is stopped whole, the parent and every worker still alive at the verdict; the time from the verdict to the last member gone, and the files written meanwhile, measured in perf/08; in 100 an archive extraction, a copy, a mirror, a checkout, a package upgrade replacing compressed files through a rename, an index rebuild, a log rotation, a media encoder, a database compaction, a compressed backup and snapshot pruning all run to their end with the stop armed, and nothing is raised; in 101 a client on another address encrypting a Samba share is named by that address through smbd, and neither the session nor smbd is stopped"
 
   - kind: cli_subcommand
     feature: surface
