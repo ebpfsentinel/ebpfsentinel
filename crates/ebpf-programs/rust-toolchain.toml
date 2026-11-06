@@ -8,9 +8,9 @@
 # it as `cargo +<channel>`, because a bare `+nightly` on the command line
 # overrides a toolchain file and a `RUSTUP_TOOLCHAIN` in the environment
 # overrides both. Moving the date is therefore one edit here, and the next
-# `cargo xtask build-ebpf` has rustup install it.
+# `cargo xtask ebpf-build` has rustup install it.
 #
-# Moving it is a deliberate act: build all sixteen objects, load the set into
+# Moving it is a deliberate act: build every object, load the set into
 # a kernel (suite 67), and keep the old date in the commit message so a
 # regression has two compilers to bisect between.
 [toolchain]
