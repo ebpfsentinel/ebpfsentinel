@@ -1726,6 +1726,10 @@ pub struct WorkloadFirewall {
     /// configuration turns it on: the response that cuts a workload off
     /// reaches the kernel through it, and refuses without it.
     pub quarantine: Option<Arc<application::quarantine_service::QuarantineService>>,
+    /// What the cluster's `NetworkPolicy` lets a workload reach, read off
+    /// the same cluster cache the policy is compiled from, when network
+    /// policy is turned on and the cluster could be read.
+    pub netpol_replay: Option<Arc<application::netpol_replay_service::NetpolReplayService>>,
     _loader: EbpfLoader,
     _attacher: adapters::ebpf::workload_firewall_attach::WorkloadFirewallAttacher,
 }
@@ -1774,19 +1778,22 @@ pub fn start_package_inventory(
 /// Load the workload firewall off the configuration's workload rules, for a
 /// binary that does not run the agent's own start-up path.
 ///
-/// `None` when the configuration carries no workload rule, or when the
-/// kernel refused the hooks under a policy that only observes: the reason is
-/// published where the status route reads it either way. The rules' DNS
-/// answers, refusals and counters are read until `cancel`, and the remote
-/// tables follow `services.remote_identities`.
+/// `None` when the configuration carries no workload rule, arms no
+/// quarantine and turns network policy off, or when the kernel refused the
+/// hooks under a policy that only observes: the reason is published where the
+/// status route reads it either way. The rules' DNS answers, refusals and
+/// counters are read until `cancel`, the remote tables follow
+/// `services.remote_identities`, and the cluster's `NetworkPolicy` is
+/// compiled into the same object when the configuration turns it on.
 ///
 /// # Errors
 ///
 /// Returns an error when the rules do not convert, when the policy cannot be
-/// written to the kernel's tables, and when the hooks did not attach under a
-/// policy that refuses: an agent reporting healthy while a rule in the file
-/// enforces nothing is the outcome worth refusing to start over.
-pub fn start_workload_firewall(
+/// written to the kernel's tables, and when the hooks did not attach, or the
+/// cluster could not be read, under a policy that refuses: an agent reporting
+/// healthy while a rule in the file enforces nothing is the outcome worth
+/// refusing to start over.
+pub async fn start_workload_firewall(
     config: &AgentConfig,
     services: &ServiceHandles,
     alerts: mpsc::Sender<application::alert_event::AlertEvent>,
@@ -1794,9 +1801,12 @@ pub fn start_workload_firewall(
 ) -> anyhow::Result<Option<WorkloadFirewall>> {
     let policy = domain::firewall::workload::WorkloadPolicy::from_rules(&config.firewall_rules()?)?
         .with_dns(config.workload_dns()?)?;
-    // A quarantine rides on the same object, so turning it on loads the
-    // object even while the file carries no workload rule.
-    if policy.is_empty() && !config.response.quarantine.enabled {
+    // A quarantine and `NetworkPolicy` ride on the same object, so turning
+    // either on loads the object even while the file carries no workload
+    // rule.
+    let netpol_mode = config.container.kubernetes.network_policy.mode;
+    let netpol_on = netpol_mode != infrastructure::config::NetworkPolicyMode::Off;
+    if policy.is_empty() && !config.response.quarantine.enabled && !netpol_on {
         services
             .metrics
             .clear_ebpf_program_status("cgroup_workload_firewall");
@@ -1838,23 +1848,14 @@ pub fn start_workload_firewall(
                 &services.workloads,
                 cancel,
             );
-            // The program's own counters, polled the way every other
-            // program's are: a per-CPU array wakes nobody.
-            let readers: Vec<_> = metrics_rdr.into_iter().chain(quarantine_metrics).collect();
-            if !readers.is_empty() {
-                let readers = Arc::new(RwLock::new(readers));
-                let port = Arc::clone(&services.metrics) as Arc<dyn MetricsPort>;
-                let metrics_cancel = cancel.clone();
-                tokio::spawn(async move {
-                    crate::ebpf_metrics::run_kernel_metrics_loop(
-                        readers,
-                        port,
-                        infrastructure::constants::KERNEL_METRICS_INTERVAL,
-                        metrics_cancel,
-                    )
-                    .await;
-                });
-            }
+            let mut readers: Vec<_> = metrics_rdr.into_iter().chain(quarantine_metrics).collect();
+            let netpol_replay = if netpol_on {
+                startup::start_network_policy(&mut loader, config, &mut readers, cancel.clone())
+                    .await?
+            } else {
+                None
+            };
+            poll_kernel_counters(readers, &services.metrics, cancel);
             services
                 .metrics
                 .set_ebpf_program_status("cgroup_workload_firewall", true);
@@ -1866,6 +1867,7 @@ pub fn start_workload_firewall(
             return Ok(Some(WorkloadFirewall {
                 service,
                 quarantine,
+                netpol_replay,
                 _loader: loader,
                 _attacher: attacher,
             }));
@@ -1880,6 +1882,14 @@ pub fn start_workload_firewall(
         return Err(anyhow::anyhow!(
             adapters::ebpf::workload_firewall_attach::enforcement_unavailable(&reason)
         ));
+    }
+    if netpol_mode == infrastructure::config::NetworkPolicyMode::Enforce {
+        return Err(anyhow::anyhow!(startup::network_policy_unavailable(
+            &reason
+        )));
+    }
+    if netpol_on {
+        warn!("network policy observes nothing, the cgroup hooks did not attach: {reason}");
     }
     warn!("workload firewall not loaded, the rules that observe observe nothing: {reason}");
     Ok(None)
@@ -2137,4 +2147,403 @@ fn start_process_tracing(
             None
         }
     }
+}
+
+/// Poll a program's own counters until `cancel`, the way every other
+/// program's are: a per-CPU array wakes nobody.
+fn poll_kernel_counters(
+    readers: Vec<MetricsReader>,
+    metrics: &Arc<AgentMetrics>,
+    cancel: &tokio_util::sync::CancellationToken,
+) {
+    if readers.is_empty() {
+        return;
+    }
+    let readers = Arc::new(RwLock::new(readers));
+    let port = Arc::clone(metrics) as Arc<dyn MetricsPort>;
+    let cancel = cancel.clone();
+    tokio::spawn(async move {
+        crate::ebpf_metrics::run_kernel_metrics_loop(
+            readers,
+            port,
+            infrastructure::constants::KERNEL_METRICS_INTERVAL,
+            cancel,
+        )
+        .await;
+    });
+}
+
+/// The executables allowed to reach the network, put in force for a binary
+/// that does not run the agent's own start-up path. The hooks stay attached
+/// while this lives.
+pub struct NetworkExecutables {
+    _loader: EbpfLoader,
+    _attacher: adapters::ebpf::exec_network::ExecNetworkAttacher,
+}
+
+/// Put `firewall.network_executables` in force: the set written, the hooks
+/// attached, every refusal raised as an alert on `alerts`, and the set kept on
+/// the files the paths name until `cancel`.
+///
+/// `None` when the configuration carries no list, or when a list that only
+/// observes cannot be applied on this host: the reason is published where
+/// the status route reads it either way.
+///
+/// # Errors
+///
+/// Returns an error when the list does not convert, and when a list that
+/// enforces cannot be applied here: an enforcing list that is not in force is
+/// a promise the node does not keep.
+pub fn start_network_executables(
+    config: &AgentConfig,
+    services: &ServiceHandles,
+    alerts: mpsc::Sender<application::alert_event::AlertEvent>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> anyhow::Result<Option<NetworkExecutables>> {
+    use adapters::ebpf::exec_network::{ExecNetworkStatus, publish_status};
+
+    let Some(list) = config.network_executables()? else {
+        services
+            .metrics
+            .clear_ebpf_program_status("lsm_exec_network");
+        publish_status(ExecNetworkStatus {
+            reason: Some(
+                "the network executables list is turned off in the configuration".to_string(),
+            ),
+            ..ExecNetworkStatus::default()
+        });
+        return Ok(None);
+    };
+    let enforce = list.mode == domain::firewall::workload::WorkloadMode::Enforce;
+    let ebpf_dir = startup::resolve_ebpf_program_dir(config);
+    let started = match startup::start_exec_network(&ebpf_dir, &list, enforce) {
+        Ok(started) => started,
+        Err(reason) => {
+            services
+                .metrics
+                .set_ebpf_program_status("lsm_exec_network", false);
+            publish_status(ExecNetworkStatus {
+                reason: Some(reason.clone()),
+                ..ExecNetworkStatus::default()
+            });
+            if enforce {
+                anyhow::bail!(
+                    "firewall.network_executables is set to enforce and cannot be applied here: {reason}"
+                );
+            }
+            warn!("network executables unavailable, nothing is observed: {reason}");
+            return Ok(None);
+        }
+    };
+    let startup::ExecNetworkStarted {
+        loader,
+        metrics_rdr,
+        maps,
+        attacher,
+        reader,
+    } = started;
+    poll_kernel_counters(metrics_rdr.into_iter().collect(), &services.metrics, cancel);
+    services
+        .metrics
+        .set_ebpf_program_status("lsm_exec_network", true);
+
+    let (record_tx, mut record_rx) =
+        mpsc::channel::<domain::firewall::exec_network::ExecNetworkRecord>(
+            infrastructure::constants::WORKLOAD_DENIAL_CHANNEL_CAPACITY,
+        );
+    let rb_obs = RingBufObserver::new(
+        adapters::ebpf::exec_network::EXEC_NETWORK_OBJECT,
+        Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
+    );
+    let reader_cancel = cancel.clone();
+    tokio::spawn(async move {
+        reader.run(record_tx, reader_cancel, rb_obs).await;
+    });
+    tokio::spawn(async move {
+        while let Some(record) = record_rx.recv().await {
+            // Named by the pipeline off the thread group, like a workload
+            // refusal: the hook has no flow to look the workload up by.
+            let alert = domain::alert::entity::Alert::from_exec_network(&record);
+            if alerts
+                .send(application::alert_event::AlertEvent::WorkloadDenial(
+                    Box::new(alert),
+                ))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    tokio::spawn(startup::refresh_exec_network(
+        maps,
+        list.executables.clone(),
+        enforce,
+        cancel.clone(),
+    ));
+    if enforce {
+        warn!(
+            executables = list.executables.len(),
+            "network executables enforce: an executable outside the list is refused an internet socket"
+        );
+    } else {
+        info!(
+            executables = list.executables.len(),
+            "network executables observe: an executable outside the list is reported, not refused"
+        );
+    }
+    Ok(Some(NetworkExecutables {
+        _loader: loader,
+        _attacher: attacher,
+    }))
+}
+
+/// Cluster addresses resolved at `connect()`, for a binary that does not run
+/// the agent's own start-up path. The hooks stay attached while this lives.
+pub struct ClusterAddresses {
+    _loader: EbpfLoader,
+    _attacher: adapters::ebpf::clusterip::ClusterIpAttacher,
+}
+
+/// Resolve cluster addresses at `connect()` for the workloads the
+/// configuration names, kept equal to the cluster until `cancel`.
+///
+/// `None` when the configuration turns it off, or when the object could not
+/// be attached: every connection then keeps going through kube-proxy, and the
+/// reason is published where the status route reads it.
+pub async fn start_cluster_addresses(
+    config: &AgentConfig,
+    services: &ServiceHandles,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Option<ClusterAddresses> {
+    if !config.container.kubernetes.cluster_ip.enabled {
+        services
+            .metrics
+            .clear_ebpf_program_status("cgroup_clusterip");
+        adapters::ebpf::clusterip::publish_status(
+            adapters::ebpf::clusterip::ClusterIpStatus::default(),
+        );
+        return None;
+    }
+    let ebpf_dir = startup::resolve_ebpf_program_dir(config);
+    let mut readers = Vec::new();
+    match startup::start_cluster_ip(&ebpf_dir, config, &mut readers, cancel.clone()).await {
+        Ok((loader, attacher)) => {
+            poll_kernel_counters(readers, &services.metrics, cancel);
+            services
+                .metrics
+                .set_ebpf_program_status("cgroup_clusterip", true);
+            Some(ClusterAddresses {
+                _loader: loader,
+                _attacher: attacher,
+            })
+        }
+        Err(e) => {
+            services
+                .metrics
+                .set_ebpf_program_status("cgroup_clusterip", false);
+            startup::publish_cluster_ip_refusal(config, &e);
+            None
+        }
+    }
+}
+
+/// Answer the governed containers' DNS from the allow-list, until `cancel`,
+/// when the configuration turns it on.
+///
+/// # Errors
+///
+/// Returns an error when the section is incomplete or the listener cannot be
+/// bound: a container told to ask this resolver would otherwise resolve
+/// nothing.
+pub async fn start_dns_allowlist(
+    config: &AgentConfig,
+    services: &ServiceHandles,
+    alerts: &mpsc::Sender<application::alert_event::AlertEvent>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> anyhow::Result<()> {
+    if !config.dns.allowlist.enabled {
+        return Ok(());
+    }
+    startup::spawn_dns_allowlist_resolver(config, &services.metrics, alerts, cancel.clone()).await
+}
+
+/// The pods this node runs, read from the Kubernetes API, for the pod
+/// coverage a status route reports and the pods a pod profile attaches in.
+///
+/// `None` when Kubernetes is off in the configuration, when the agent does
+/// not run in a cluster, or when no client could be built.
+pub async fn start_pod_inventory(
+    config: &AgentConfig,
+) -> Option<Arc<dyn ports::secondary::pod_coverage_port::PodInventoryPort>> {
+    #[cfg(feature = "kubernetes")]
+    if config.container.kubernetes.enabled
+        && adapters::container::is_running_in_kubernetes()
+        && let Some(client) = adapters::container::try_build_client().await
+    {
+        let cache = Arc::new(adapters::container::PodCache::new());
+        let metrics =
+            adapters::container::KubernetesEnricher::with_cache(Arc::clone(&cache)).metrics();
+        let node_name = if config.container.kubernetes.node_name.is_empty() {
+            adapters::container::resolve_node_name()
+        } else {
+            config.container.kubernetes.node_name.clone()
+        };
+        let _namespaces = adapters::container::spawn_namespace_watcher(
+            client.clone(),
+            Arc::clone(&cache),
+            Arc::clone(&metrics),
+        );
+        let _pods = adapters::container::spawn_pod_watcher(
+            client,
+            node_name,
+            config.container.kubernetes.label_filter.join(","),
+            Arc::clone(&cache),
+            metrics,
+        );
+        return Some(cache);
+    }
+    let _ = config;
+    None
+}
+
+/// The connection events the kernel's conntrack table yields, polled until
+/// `cancel`, for the event stream and whatever else subscribes.
+///
+/// `None` when this host's conntrack table cannot be read, which is said.
+#[must_use]
+pub fn start_conntrack_events(
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Option<tokio::sync::broadcast::Sender<domain::conntrack::entity::ConntrackEvent>> {
+    if !adapters::netfilter::conntrack::is_conntrack_readable() {
+        warn!(
+            "conntrack table unreadable (no /proc/net/nf_conntrack and no \
+             usable conntrack-tools): event stream disabled"
+        );
+        return None;
+    }
+    let (tx, _) = tokio::sync::broadcast::channel::<domain::conntrack::entity::ConntrackEvent>(256);
+    let poller_tx = tx.clone();
+    let poller_cancel = cancel.clone();
+    tokio::spawn(async move {
+        adapters::netfilter::event_stream::run_conntrack_event_poller(
+            adapters::netfilter::conntrack::ProcNetfilterConntrackPort::new(),
+            poller_tx,
+            std::time::Duration::from_secs(2),
+            poller_cancel,
+        )
+        .await;
+    });
+    info!("conntrack event poller started (2s interval)");
+    Some(tx)
+}
+
+/// Learning mode, for a binary that does not run the agent's own start-up
+/// path: a window an operator opens records the edges the node's workloads
+/// use, sampled until `cancel`. `None` when the configuration turns it off.
+#[must_use]
+pub fn start_learning(
+    config: &AgentConfig,
+    services: &ServiceHandles,
+    processes: Option<&Arc<application::process_table_service::ProcessTableService>>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Option<Arc<application::learning_service::LearningAppService>> {
+    if !config.learning.enabled {
+        return None;
+    }
+    let mut svc = application::learning_service::LearningAppService::new(
+        config.learning.max_edges,
+        Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
+    );
+    // A window that cannot be written down is a window that does not
+    // survive a restart, which the progress report states as a gap.
+    if !config.learning.storage_path.is_empty() {
+        let path = Path::new(&config.learning.storage_path);
+        match adapters::storage::redb_learning_store::RedbLearningStore::open(path) {
+            Ok(store) => {
+                svc = svc.with_store(Arc::new(store)
+                    as Arc<dyn ports::secondary::learning_store_port::LearningStorePort>);
+            }
+            Err(e) => warn!(
+                error = %e,
+                path = %config.learning.storage_path,
+                "learning store unavailable, a window will not survive a restart"
+            ),
+        }
+    }
+    let svc = Arc::new(svc);
+    svc.restore(application::learning_service::now_ns());
+    let collector = Arc::new(application::learning_collector::LearningCollector::new(
+        Arc::clone(&svc),
+        Arc::clone(&services.conntrack_svc),
+        services.workloads.clone(),
+    ));
+    if let Some(table) = processes {
+        collector.install_processes(Arc::clone(table));
+    }
+    let interval = std::time::Duration::from_secs(config.learning.sample_interval_secs);
+    let cancel = cancel.clone();
+    tokio::spawn(async move {
+        collector.run(interval, cancel).await;
+    });
+    info!(
+        max_edges = config.learning.max_edges,
+        sample_interval_secs = config.learning.sample_interval_secs,
+        "learning mode ready"
+    );
+    Some(svc)
+}
+
+/// The reputation each resolved domain earns, scored from the DNS blocklist's
+/// `GeoIP` factors and, when auto-blocking is on, enforced through the IPS
+/// blacklist with its alerts on `alerts`. `None` when DNS or the reputation
+/// is turned off in the configuration.
+#[must_use]
+pub fn start_domain_reputation(
+    config: &AgentConfig,
+    services: &ServiceHandles,
+    geoip: Option<&Arc<dyn ports::secondary::geoip_port::GeoIpPort>>,
+    alerts: Option<&mpsc::Sender<application::alert_event::AlertEvent>>,
+) -> Option<Arc<application::domain_reputation_service_impl::DomainReputationAppService>> {
+    if !config.dns.enabled || !config.dns.reputation.enabled {
+        return None;
+    }
+    let (Some(cache), Some(blocklist)) = (
+        services.dns_cache_svc.as_ref(),
+        services.dns_blocklist_svc.as_ref(),
+    ) else {
+        return None;
+    };
+    let rep_config = config.dns.reputation.to_domain_config();
+    let mut rep_svc = application::domain_reputation_service_impl::DomainReputationAppService::new(
+        rep_config.clone(),
+        Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
+    );
+    if rep_config.auto_block_enabled {
+        let ips = Arc::new(IpsBlacklistAdapter::new(Arc::clone(&services.ips_svc)));
+        let mut enforcement =
+            application::reputation_enforcement::ReputationEnforcementService::new(
+                &rep_config,
+                Arc::clone(cache) as Arc<dyn ports::secondary::dns_cache_port::DnsCachePort>,
+                ips as Arc<dyn ports::secondary::ips_blacklist_port::IpsBlacklistPort>,
+                Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
+            );
+        if let Some(alerts) = alerts {
+            enforcement = enforcement.with_alert_tx(alerts.clone());
+        }
+        rep_svc = rep_svc.with_enforcement(Arc::new(enforcement));
+        info!(
+            threshold = rep_config.auto_block_threshold,
+            ttl_secs = rep_config.auto_block_ttl_secs,
+            "reputation auto-blocking enabled"
+        );
+    }
+    let rep_svc = Arc::new(rep_svc);
+    if let Some(geoip) = geoip {
+        blocklist.set_geoip_port(Arc::clone(geoip));
+        blocklist.set_reputation_port(Arc::clone(&rep_svc)
+            as Arc<dyn ports::secondary::domain_reputation_port::DomainReputationPort>);
+        blocklist.set_high_risk_countries(config.dns.reputation.high_risk_countries.clone());
+    }
+    Some(rep_svc)
 }

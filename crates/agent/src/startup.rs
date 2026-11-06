@@ -183,7 +183,7 @@ const GUEST_NAMES_REFRESH: Duration = Duration::from_secs(5);
 /// The warden control socket path when the agent runs against a privilege broker,
 /// or `None` when it runs standalone (host root). A set-but-empty value is treated
 /// as unset.
-fn warden_sock_from_env() -> Option<std::path::PathBuf> {
+pub(crate) fn warden_sock_from_env() -> Option<std::path::PathBuf> {
     std::env::var_os("EBPFSENTINEL_WARDEN_SOCK")
         .map(std::path::PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
@@ -7103,7 +7103,7 @@ fn follow_container_labels(
 }
 
 /// Why an agent told to enforce `NetworkPolicy` refuses to start.
-fn network_policy_unavailable(reason: &str) -> String {
+pub(crate) fn network_policy_unavailable(reason: &str) -> String {
     format!(
         "container.kubernetes.network_policy.mode is enforce, and the agent cannot enforce it, so \
          it would run with every pod of this node open while the cluster believes otherwise: \
@@ -7123,7 +7123,7 @@ fn network_policy_unavailable(reason: &str) -> String {
 /// What comes back is the replay, which reads the same cluster cache, and
 /// nothing when the cluster could not be read.
 #[cfg(feature = "kubernetes")]
-async fn start_network_policy(
+pub(crate) async fn start_network_policy(
     loader: &mut EbpfLoader,
     config: &AgentConfig,
     metrics_readers: &mut Vec<MetricsReader>,
@@ -7283,7 +7283,7 @@ pub(crate) async fn start_cluster_ip(
 }
 
 #[cfg(not(feature = "kubernetes"))]
-async fn start_network_policy(
+pub(crate) async fn start_network_policy(
     _loader: &mut EbpfLoader,
     config: &AgentConfig,
     _metrics_readers: &mut Vec<MetricsReader>,
@@ -7667,11 +7667,11 @@ pub fn start_crypto_calls(
 
 /// What a started network executables list hands back to start-up.
 pub struct ExecNetworkStarted {
-    loader: EbpfLoader,
-    metrics_rdr: Option<MetricsReader>,
-    maps: adapters::ebpf::exec_network::ExecNetworkMaps,
-    attacher: adapters::ebpf::exec_network::ExecNetworkAttacher,
-    reader: adapters::ebpf::exec_network::ExecNetworkEventReader,
+    pub(crate) loader: EbpfLoader,
+    pub(crate) metrics_rdr: Option<MetricsReader>,
+    pub(crate) maps: adapters::ebpf::exec_network::ExecNetworkMaps,
+    pub(crate) attacher: adapters::ebpf::exec_network::ExecNetworkAttacher,
+    pub(crate) reader: adapters::ebpf::exec_network::ExecNetworkEventReader,
 }
 
 /// Load the network executables object, write the set and the layout, then
@@ -7744,7 +7744,7 @@ pub fn start_exec_network(
 const EXEC_NETWORK_REFRESH: Duration = Duration::from_secs(30);
 
 /// Keep the kernel's set on the files the paths name now.
-async fn refresh_exec_network(
+pub(crate) async fn refresh_exec_network(
     mut maps: adapters::ebpf::exec_network::ExecNetworkMaps,
     paths: Vec<String>,
     enforce: bool,
@@ -9336,7 +9336,7 @@ fn open_local_file_watch(
     (watch, marks)
 }
 
-async fn spawn_dns_allowlist_resolver(
+pub(crate) async fn spawn_dns_allowlist_resolver(
     config: &AgentConfig,
     metrics: &Arc<AgentMetrics>,
     alert_tx: &tokio::sync::mpsc::Sender<application::alert_event::AlertEvent>,
