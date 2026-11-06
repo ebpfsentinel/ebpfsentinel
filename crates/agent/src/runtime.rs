@@ -1722,6 +1722,10 @@ async fn process_table(
 pub struct WorkloadFirewall {
     /// The policy in force, what it refused and the remote tables.
     pub service: Arc<application::workload_policy_service::WorkloadPolicyService>,
+    /// Quarantining a workload, armed off the same object when the
+    /// configuration turns it on: the response that cuts a workload off
+    /// reaches the kernel through it, and refuses without it.
+    pub quarantine: Option<Arc<application::quarantine_service::QuarantineService>>,
     _loader: EbpfLoader,
     _attacher: adapters::ebpf::workload_firewall_attach::WorkloadFirewallAttacher,
 }
@@ -1790,7 +1794,9 @@ pub fn start_workload_firewall(
 ) -> anyhow::Result<Option<WorkloadFirewall>> {
     let policy = domain::firewall::workload::WorkloadPolicy::from_rules(&config.firewall_rules()?)?
         .with_dns(config.workload_dns()?)?;
-    if policy.is_empty() {
+    // A quarantine rides on the same object, so turning it on loads the
+    // object even while the file carries no workload rule.
+    if policy.is_empty() && !config.response.quarantine.enabled {
         services
             .metrics
             .clear_ebpf_program_status("cgroup_workload_firewall");
@@ -1825,10 +1831,18 @@ pub fn start_workload_firewall(
                 &services.remote_identities,
                 cancel,
             );
+            let (quarantine, quarantine_metrics) = startup::arm_quarantine(
+                &mut loader,
+                config,
+                services.audit_svc.store(),
+                &services.workloads,
+                cancel,
+            );
             // The program's own counters, polled the way every other
             // program's are: a per-CPU array wakes nobody.
-            if let Some(rdr) = metrics_rdr {
-                let readers = Arc::new(RwLock::new(vec![rdr]));
+            let readers: Vec<_> = metrics_rdr.into_iter().chain(quarantine_metrics).collect();
+            if !readers.is_empty() {
+                let readers = Arc::new(RwLock::new(readers));
                 let port = Arc::clone(&services.metrics) as Arc<dyn MetricsPort>;
                 let metrics_cancel = cancel.clone();
                 tokio::spawn(async move {
@@ -1851,6 +1865,7 @@ pub fn start_workload_firewall(
             );
             return Ok(Some(WorkloadFirewall {
                 service,
+                quarantine,
                 _loader: loader,
                 _attacher: attacher,
             }));
@@ -1860,6 +1875,19 @@ pub fn start_workload_firewall(
             .unwrap_or_else(|| "the kernel refused the attach".to_string()),
         Err(e) => e.to_string(),
     };
+    publish_unattached(config, services, &reason);
+    if policy.enforces() {
+        return Err(anyhow::anyhow!(
+            adapters::ebpf::workload_firewall_attach::enforcement_unavailable(&reason)
+        ));
+    }
+    warn!("workload firewall not loaded, the rules that observe observe nothing: {reason}");
+    Ok(None)
+}
+
+/// Say on the status routes that the workload firewall object did not
+/// attach, and that a quarantine riding on it is not armed either.
+fn publish_unattached(config: &AgentConfig, services: &ServiceHandles, reason: &str) {
     services
         .metrics
         .set_ebpf_program_status("cgroup_workload_firewall", false);
@@ -1868,17 +1896,18 @@ pub fn start_workload_firewall(
             attached: false,
             cgroup: config.attribution.cgroup_root.clone(),
             hooks: Vec::new(),
-            reason: Some(reason.clone()),
+            reason: Some(reason.to_string()),
             brokered: false,
         },
     );
-    if policy.enforces() {
-        return Err(anyhow::anyhow!(
-            adapters::ebpf::workload_firewall_attach::enforcement_unavailable(&reason)
-        ));
+    if config.response.quarantine.enabled {
+        adapters::ebpf::quarantine_map_manager::publish_status(adapters::ebpf::QuarantineStatus {
+            reason: Some(format!(
+                "the workload firewall object the quarantine rides on did not attach: {reason}"
+            )),
+            ..adapters::ebpf::QuarantineStatus::default()
+        });
     }
-    warn!("workload firewall not loaded, the rules that observe observe nothing: {reason}");
-    Ok(None)
 }
 
 /// Read the answers named workloads are given, so the addresses a rule names

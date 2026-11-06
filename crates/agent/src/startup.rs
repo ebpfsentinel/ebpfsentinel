@@ -2896,126 +2896,19 @@ pub async fn run(
                     );
 
                     // The quarantine's own two maps, taken from the same
-                    // object. Turned off, they are left in it: an unused map
-                    // costs its own size and nothing else, and a manager
-                    // nobody holds cannot arm anything.
-                    if config.response.quarantine.enabled {
-                        match adapters::ebpf::QuarantineMapManager::new(loader.ebpf_mut()) {
-                            Ok(maps) => {
-                                if let Ok(rdr) =
-                                    MetricsReader::new(loader.ebpf_mut(), "QUARANTINE_METRICS")
-                                {
-                                    metrics_readers.push(rdr);
-                                }
-                                let quarantine = &config.response.quarantine;
-                                let root = &config.attribution.cgroup_root;
-                                let guard =
-                                    domain::response::quarantine::CgroupQuarantineGuard::new(
-                                        adapters::container::self_cgroup_id(root).unwrap_or(0),
-                                        adapters::container::root_cgroup_id(root).unwrap_or(0),
-                                        &quarantine.protected_paths,
-                                        &quarantine.protected_ids,
-                                    );
-                                let settings =
-                                    application::quarantine_service::QuarantineSettings {
-                                        window: Duration::from_secs(quarantine.window_secs),
-                                        max_window: Duration::from_secs(quarantine.max_window_secs),
-                                        max_flows_scanned: quarantine.max_flows_scanned,
-                                    };
-                                let mut svc = application::quarantine_service::QuarantineService::new(
-                                    Arc::new(tokio::sync::Mutex::new(maps))
-                                        as Arc<tokio::sync::Mutex<dyn ports::secondary::quarantine_map_port::QuarantineMapPort>>,
-                                    Arc::new(adapters::container::CgroupfsResolver::new(
-                                        root.clone(),
-                                    )),
-                                    guard,
-                                    settings,
-                                );
-                                if let Some(store) = audit_store_handle.clone() {
-                                    svc = svc.with_audit(store);
-                                }
-                                if quarantine.tear_down_flows {
-                                    // One port for both halves: the table a
-                                    // teardown reads and the delete it then
-                                    // issues are the same netfilter view, so
-                                    // a row that was there to read is a row
-                                    // this can name.
-                                    let nf = Arc::new(
-                                        adapters::netfilter::conntrack::ProcNetfilterConntrackPort::new(),
-                                    );
-                                    svc = svc.with_flow_teardown(
-                                        Arc::clone(&nf)
-                                            as Arc<dyn ports::secondary::conntrack_map_port::ConnTrackMapPort>,
-                                        nf as Arc<dyn ports::secondary::conntrack_kill_port::ConnTrackKillPort>,
-                                        workloads.clone(),
-                                    );
-                                }
-                                let svc = Arc::new(svc);
-
-                                // The kernel stops refusing at the deadline it
-                                // was given whether or not this runs, so the
-                                // sweep is what keeps the map from filling and
-                                // what makes a listed quarantine a live one.
-                                let sweeper = Arc::clone(&svc);
-                                let sweep_cancel = workload_cancel.clone();
-                                let sweep_interval =
-                                    Duration::from_secs(quarantine.sweep_interval_secs);
-                                tokio::spawn(async move {
-                                    let mut ticker = tokio::time::interval(sweep_interval);
-                                    loop {
-                                        tokio::select! {
-                                            () = sweep_cancel.cancelled() => break,
-                                            _ = ticker.tick() => {}
-                                        }
-                                        if let Err(e) = sweeper.sweep_expired("expiry").await {
-                                            warn!("lapsed quarantines not swept: {e}");
-                                        }
-                                    }
-                                });
-
-                                let tears_down = svc.tears_flows_down();
-                                adapters::ebpf::quarantine_map_manager::publish_status(
-                                    adapters::ebpf::QuarantineStatus {
-                                        armed: true,
-                                        reason: None,
-                                        window_ms: quarantine.window_secs.saturating_mul(1_000),
-                                        tears_down_flows: tears_down,
-                                        protected: svc.protected_count(),
-                                    },
-                                );
-                                quarantine_svc = Some(svc);
-                                warn!(
-                                    window_secs = quarantine.window_secs,
-                                    tear_down_flows = tears_down,
-                                    "quarantining a workload is armed: a matching rule can cut a running workload off the network"
-                                );
-                            }
-                            Err(e) => {
-                                // The rules still work: the object attached,
-                                // and only the maps this capability needs are
-                                // absent. A rule asking for a quarantine is
-                                // then refused by a service nobody built.
-                                adapters::ebpf::quarantine_map_manager::publish_status(
-                                    adapters::ebpf::QuarantineStatus {
-                                        reason: Some(format!(
-                                            "the workload firewall object carries no quarantine map: {e}"
-                                        )),
-                                        ..adapters::ebpf::QuarantineStatus::default()
-                                    },
-                                );
-                                warn!("quarantine unavailable, its maps were not acquired: {e}");
-                            }
-                        }
-                    } else {
-                        adapters::ebpf::quarantine_map_manager::publish_status(
-                            adapters::ebpf::QuarantineStatus {
-                                reason: Some(
-                                    "quarantining a workload is off in the configuration"
-                                        .to_string(),
-                                ),
-                                ..adapters::ebpf::QuarantineStatus::default()
-                            },
-                        );
+                    // object.
+                    let (armed, quarantine_metrics) = arm_quarantine(
+                        &mut loader,
+                        &config,
+                        audit_store_handle.clone(),
+                        &workloads,
+                        &workload_cancel,
+                    );
+                    if let Some(rdr) = quarantine_metrics {
+                        metrics_readers.push(rdr);
+                    }
+                    if armed.is_some() {
+                        quarantine_svc = armed;
                     }
 
                     if netpol_on {
@@ -6941,6 +6834,122 @@ pub fn try_load_cgroup_attribution(
     }
     let status = attacher.attach_all(&loader, &config.attribution.cgroup_root);
     Ok((loader, metrics_rdr, socket_reader, attacher, status))
+}
+
+/// Arm quarantining a workload off the workload firewall's own object, when
+/// the configuration turns it on, and publish what the status route reads.
+///
+/// Turned off, the two maps are left in the object: an unused map costs its
+/// own size and nothing else, and a manager nobody holds cannot arm anything.
+/// Returns the service, and the counters to poll beside the object's own.
+/// The sweep of lapsed quarantines runs until `cancel`.
+pub fn arm_quarantine(
+    loader: &mut EbpfLoader,
+    config: &AgentConfig,
+    audit: Option<Arc<dyn AuditStore>>,
+    workloads: &application::workload_resolver::WorkloadResolver,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> (
+    Option<Arc<application::quarantine_service::QuarantineService>>,
+    Option<MetricsReader>,
+) {
+    if !config.response.quarantine.enabled {
+        adapters::ebpf::quarantine_map_manager::publish_status(adapters::ebpf::QuarantineStatus {
+            reason: Some("quarantining a workload is off in the configuration".to_string()),
+            ..adapters::ebpf::QuarantineStatus::default()
+        });
+        return (None, None);
+    }
+    let maps = match adapters::ebpf::QuarantineMapManager::new(loader.ebpf_mut()) {
+        Ok(maps) => maps,
+        Err(e) => {
+            // The rules still work: the object attached, and only the maps
+            // this capability needs are absent. A rule asking for a
+            // quarantine is then refused by a service nobody built.
+            adapters::ebpf::quarantine_map_manager::publish_status(
+                adapters::ebpf::QuarantineStatus {
+                    reason: Some(format!(
+                        "the workload firewall object carries no quarantine map: {e}"
+                    )),
+                    ..adapters::ebpf::QuarantineStatus::default()
+                },
+            );
+            warn!("quarantine unavailable, its maps were not acquired: {e}");
+            return (None, None);
+        }
+    };
+    let metrics = MetricsReader::new(loader.ebpf_mut(), "QUARANTINE_METRICS").ok();
+    let quarantine = &config.response.quarantine;
+    let root = &config.attribution.cgroup_root;
+    let guard = domain::response::quarantine::CgroupQuarantineGuard::new(
+        adapters::container::self_cgroup_id(root).unwrap_or(0),
+        adapters::container::root_cgroup_id(root).unwrap_or(0),
+        &quarantine.protected_paths,
+        &quarantine.protected_ids,
+    );
+    let settings = application::quarantine_service::QuarantineSettings {
+        window: Duration::from_secs(quarantine.window_secs),
+        max_window: Duration::from_secs(quarantine.max_window_secs),
+        max_flows_scanned: quarantine.max_flows_scanned,
+    };
+    let mut svc = application::quarantine_service::QuarantineService::new(
+        Arc::new(tokio::sync::Mutex::new(maps))
+            as Arc<
+                tokio::sync::Mutex<dyn ports::secondary::quarantine_map_port::QuarantineMapPort>,
+            >,
+        Arc::new(adapters::container::CgroupfsResolver::new(root.clone())),
+        guard,
+        settings,
+    );
+    if let Some(store) = audit {
+        svc = svc.with_audit(store);
+    }
+    if quarantine.tear_down_flows {
+        // One port for both halves: the table a teardown reads and the
+        // delete it then issues are the same netfilter view, so a row that
+        // was there to read is a row this can name.
+        let nf = Arc::new(adapters::netfilter::conntrack::ProcNetfilterConntrackPort::new());
+        svc = svc.with_flow_teardown(
+            Arc::clone(&nf) as Arc<dyn ports::secondary::conntrack_map_port::ConnTrackMapPort>,
+            nf as Arc<dyn ports::secondary::conntrack_kill_port::ConnTrackKillPort>,
+            workloads.clone(),
+        );
+    }
+    let svc = Arc::new(svc);
+
+    // The kernel stops refusing at the deadline it was given whether or not
+    // this runs, so the sweep is what keeps the map from filling and what
+    // makes a listed quarantine a live one.
+    let sweeper = Arc::clone(&svc);
+    let sweep_cancel = cancel.clone();
+    let sweep_interval = Duration::from_secs(quarantine.sweep_interval_secs);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(sweep_interval);
+        loop {
+            tokio::select! {
+                () = sweep_cancel.cancelled() => break,
+                _ = ticker.tick() => {}
+            }
+            if let Err(e) = sweeper.sweep_expired("expiry").await {
+                warn!("lapsed quarantines not swept: {e}");
+            }
+        }
+    });
+
+    let tears_down = svc.tears_flows_down();
+    adapters::ebpf::quarantine_map_manager::publish_status(adapters::ebpf::QuarantineStatus {
+        armed: true,
+        reason: None,
+        window_ms: quarantine.window_secs.saturating_mul(1_000),
+        tears_down_flows: tears_down,
+        protected: svc.protected_count(),
+    });
+    warn!(
+        window_secs = quarantine.window_secs,
+        tear_down_flows = tears_down,
+        "quarantining a workload is armed: a matching rule can cut a running workload off the network"
+    );
+    (Some(svc), metrics)
 }
 
 /// Load the workload firewall and attach its eight cgroup hooks.

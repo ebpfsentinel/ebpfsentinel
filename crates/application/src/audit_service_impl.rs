@@ -68,6 +68,12 @@ impl AuditAppService {
         self.store.is_some()
     }
 
+    /// The persistent store, for a service that writes its own records
+    /// beside this one's.
+    pub fn store(&self) -> Option<Arc<dyn AuditStore>> {
+        self.store.clone()
+    }
+
     /// Whether a rule change store is available for version history.
     pub fn has_rule_change_store(&self) -> bool {
         self.rule_change_store.is_some()
