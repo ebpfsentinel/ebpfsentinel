@@ -224,12 +224,20 @@ fn http_is_complete(buf: &[u8]) -> bool {
     };
     let headers = &buf[..header_end];
     let body_start = header_end + 4; // skip "\r\n\r\n"
-    let Some(content_length) = extract_content_length(headers) else {
-        return false;
-    };
-    body_start
-        .checked_add(content_length)
-        .is_some_and(|end| buf.len() >= end)
+    match header_value(headers, "Content-Length") {
+        Some(value) => value.trim().parse::<usize>().is_ok_and(|length| {
+            body_start
+                .checked_add(length)
+                .is_some_and(|end| buf.len() >= end)
+        }),
+        // A request carrying neither length nor transfer coding has no body,
+        // so its headers are the whole message. A response without a length
+        // runs until the connection closes, and a chunked body until its last
+        // chunk, so both wait for the idle flush.
+        None => {
+            !headers.starts_with(b"HTTP/") && header_value(headers, "Transfer-Encoding").is_none()
+        }
+    }
 }
 
 fn find_double_crlf(buf: &[u8]) -> Option<usize> {
@@ -257,18 +265,15 @@ fn tls_record_is_complete(buf: &[u8]) -> bool {
 
 /// Case-insensitive `Content-Length:` value extractor. Returns `None`
 /// when the header is absent, malformed, or larger than `usize::MAX`.
-fn extract_content_length(headers: &[u8]) -> Option<usize> {
+/// The value of the first header named `name`, compared without case, or
+/// `None` when the headers do not carry it or are not text.
+fn header_value<'a>(headers: &'a [u8], name: &str) -> Option<&'a str> {
     let text = std::str::from_utf8(headers).ok()?;
-    for line in text.split("\r\n") {
-        let Some((name, value)) = line.split_once(':') else {
-            // Request/status line has no colon - skip instead of aborting.
-            continue;
-        };
-        if name.eq_ignore_ascii_case("Content-Length") {
-            return value.trim().parse::<usize>().ok();
-        }
-    }
-    None
+    text.split("\r\n").find_map(|line| {
+        // The request or status line has no colon and is skipped.
+        let (header, value) = line.split_once(':')?;
+        header.eq_ignore_ascii_case(name).then_some(value)
+    })
 }
 
 #[cfg(test)]
@@ -349,6 +354,39 @@ mod tests {
         );
         assert_eq!(out, Ingest::Pending);
         assert_eq!(r.flow_count(), 1);
+    }
+
+    #[test]
+    fn http_request_without_a_body_completes_at_the_end_of_its_headers() {
+        let r = StreamReassembler::new(ReassemblerConfig::default());
+        let flow = flow(80);
+        assert_eq!(
+            r.ingest(flow, b"GET / HTTP/1.1\r\nHost: x\r\n", 1),
+            Ingest::Pending
+        );
+        match r.ingest(flow, b"Accept: */*\r\n\r\n", 2) {
+            Ingest::Complete(buf) => assert!(buf.starts_with(b"GET / HTTP/1.1")),
+            Ingest::Pending => panic!("a GET with no body is complete once its headers are"),
+        }
+        assert_eq!(r.flow_count(), 0);
+    }
+
+    #[test]
+    fn http_request_with_a_chunked_body_stays_pending() {
+        let r = StreamReassembler::new(ReassemblerConfig::default());
+        let out = r.ingest(
+            flow(80),
+            b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello",
+            1,
+        );
+        assert_eq!(out, Ingest::Pending);
+    }
+
+    #[test]
+    fn http_response_without_a_length_runs_until_the_flush() {
+        let r = StreamReassembler::new(ReassemblerConfig::default());
+        let out = r.ingest(flow(80), b"HTTP/1.0 200 OK\r\nServer: x\r\n\r\n<html>", 1);
+        assert_eq!(out, Ingest::Pending);
     }
 
     #[test]
