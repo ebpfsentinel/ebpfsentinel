@@ -79,3 +79,9 @@ alerting:
 
 auth:
   enabled: false
+
+# The audit store sits in the data directory, which is also where the
+# agent claims its state directory.
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
