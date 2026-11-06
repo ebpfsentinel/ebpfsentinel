@@ -8234,11 +8234,11 @@ async fn refresh_fanotify_write_refusal(
 
 /// What a started guard hands back to start-up.
 pub struct BpfGuardStarted {
-    loader: EbpfLoader,
-    metrics_rdr: Option<MetricsReader>,
-    maps: adapters::ebpf::bpf_guard::BpfGuardMaps,
-    attacher: adapters::ebpf::bpf_guard::BpfGuardAttacher,
-    tasks: adapters::ebpf::bpf_guard::GuardTasks,
+    pub(crate) loader: EbpfLoader,
+    pub(crate) metrics_rdr: Option<MetricsReader>,
+    pub(crate) maps: adapters::ebpf::bpf_guard::BpfGuardMaps,
+    pub(crate) attacher: adapters::ebpf::bpf_guard::BpfGuardAttacher,
+    pub(crate) tasks: adapters::ebpf::bpf_guard::GuardTasks,
 }
 
 /// Load the guard, write the allowed tasks and the agent's own ids, arm it,
@@ -8312,7 +8312,7 @@ const BPF_GUARD_REFRESH: Duration = Duration::from_secs(30);
 
 /// Keep the guard on what the agent holds now and on the warden as it runs
 /// now.
-async fn refresh_bpf_guard(
+pub(crate) async fn refresh_bpf_guard(
     mut maps: adapters::ebpf::bpf_guard::BpfGuardMaps,
     mut tasks: adapters::ebpf::bpf_guard::GuardTasks,
     cancel: CancellationToken,

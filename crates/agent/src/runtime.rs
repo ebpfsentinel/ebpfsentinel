@@ -929,6 +929,11 @@ pub struct EbpfLoadResult {
     /// use this to enable/disable forensic packet mirroring at runtime without
     /// reloading the eBPF program.
     pub ids_mirror_mgr: Option<IdsMirrorMapManager>,
+    /// The guard on this generation's own maps and links, `None` where the
+    /// BPF LSM is not active. Declared last so it is dropped after every
+    /// other field: until then no other task is handed a descriptor to the
+    /// generation's objects.
+    pub bpf_guard: Option<adapters::ebpf::bpf_guard::BpfGuardAttacher>,
 }
 
 /// What a trace in `direction` runs on the generation `loaders` hold:
@@ -1763,6 +1768,47 @@ pub async fn load_ebpf_programs(
         "eBPF programs loaded via load_ebpf_programs()"
     );
 
+    // ── Guard ──────────────────────────────────────────────────
+    // Loaded last, so that its first reading of the agent's descriptors
+    // already names every object this generation loaded.
+    let bpf_guard = match startup::start_bpf_guard(&ebpf_dir) {
+        Ok(started) => {
+            let startup::BpfGuardStarted {
+                loader,
+                metrics_rdr,
+                maps,
+                attacher,
+                tasks,
+            } = started;
+            if let Some(rdr) = metrics_rdr {
+                metrics_readers.push(rdr);
+            }
+            services
+                .metrics
+                .set_ebpf_program_status("lsm_bpf_guard", true);
+            tokio::spawn(startup::refresh_bpf_guard(
+                maps,
+                tasks,
+                readers.child_token(),
+            ));
+            ebpf_state.add_loader(loader);
+            Some(attacher)
+        }
+        Err(reason) => {
+            services
+                .metrics
+                .set_ebpf_program_status("lsm_bpf_guard", false);
+            warn!(
+                "the agent's maps and links are unprotected: any task holding CAP_SYS_ADMIN can detach or rewrite them; {reason}"
+            );
+            adapters::ebpf::bpf_guard::publish_status(adapters::ebpf::bpf_guard::BpfGuardStatus {
+                reason: Some(reason),
+                ..adapters::ebpf::bpf_guard::BpfGuardStatus::default()
+            });
+            None
+        }
+    };
+
     Ok(EbpfLoadResult {
         state: ebpf_state,
         map_holder: ebpf_map_holder,
@@ -1775,6 +1821,7 @@ pub async fn load_ebpf_programs(
         tenant_subnet_mgr,
         tenant_cgroup_mgr,
         ids_mirror_mgr,
+        bpf_guard,
     })
 }
 
