@@ -7,7 +7,7 @@ End-to-end test suite for the eBPFsentinel agent. Covers agent lifecycle, REST/g
 ```
 tests/integration/
 ├── Makefile                            # Test orchestration (30+ targets)
-├── suites/                             # BATS test suites (01-89)
+├── suites/                             # BATS test suites (01-90)
 │   ├── 01-agent-lifecycle.bats
 │   ├── 02-rest-api-health.bats
 │   ├── ...
@@ -205,7 +205,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `tc-qos` | 28, 67 | 2vm | 6.12 | pr | Traffic shaping (TC egress) |
 | `tc-scrub` | 23, 40, 46, 67 | 3vm | 6.12 | pr | Packet normalization; spoofed-source amplification drop in 40; byte-level pcap assertions (TTL floor, MSS clamp, DF clear, IP-ID rand) in 46 |
 | `tc-threatintel` | 17, 33, 67 | 2vm | 6.12 | pr | OSINT feed IOC matching (TC) |
-| `tracepoint-drop-reason` | No suite yet (kernel-network) | none | 6.12 | manual | Counts the packets the kernel frees undelivered, under the skb_drop_reason it gives. No suite yet: nothing provokes a drop of a known reason and reads the counter back |
+| `tracepoint-drop-reason` | 90 | none | 6.12 | nightly | Counts the packets the kernel frees undelivered, under the skb_drop_reason it gives; 90 sends datagrams to a closed port and reads them back as NO_SOCKET on the interface they arrived on |
 | `tracepoint-process` | 67, 70, perf/07 | none | 6.12 | pr | Exec, fork and exit feeding the process table; 67 reads a program that execed after the hooks attached, 70 decides workload rules on the chain of parents it records, exec() cost measured in perf/07 |
 | `tracepoint-signal` | No suite yet (workload-identity) | none | 6.12 | manual | Signals the task behind a flow from inside that task, for the process response. No suite yet: nothing asserts a named process is stopped |
 | `tracepoint-tcp-health` | 71 | none | 6.12 | nightly | Retransmissions, resets and connections opened, failed and closed, counted per pair of ends at the TCP stack's own tracepoints; 71 provokes resets to a closed port and full connections, and reads both ends back |
@@ -234,7 +234,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `dns` | 04, 19 | 2vm | 6.12 | pr | DNS cache, stats, blocklist |
 | `domains` | 04 | none | n/a | pr | Domain reputation + blocklist |
 | `ebpf` | 16, 60, 62, 77, 79 | 2vm | 6.12 | pr | Program load status through /api/v1/ebpf/status; the per-container uprobe inventory in 60; the kernel floor refusal and the kernel-features verdicts in 77; the hidden port and hidden process sweeps in 79 |
-| `exposure` | No suite yet (kernel-network) | none | 6.12 | manual | exposure listeners. No suite yet |
+| `exposure` | 90 | none | 6.12 | nightly | exposure listeners; 90 reads the same listing through the API, and no suite drives the CLI |
 | `fingerprints` | 29, 41 | 2vm | 6.12 | nightly | JA4+ cache + client-diversity (curl/openssl/python/go/MHDDoS) on suite 41 |
 | `firewall` | 03, 11, 26, 40 | 2vm | 6.12 | pr | L3/L4 rule CRUD + eBPF scenarios; amplification UDP-port denies in 40 |
 | `flows` | 04, 18 | 2vm | 6.12 | pr | Aggregated connection map |
@@ -284,11 +284,11 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `ddos` | 15, 22, 38, 39, 40 | 2vm | 6.12 | pr | DDoS detection + policy; MHDDoS flood matrix in 38; service-exhaustion in 39; amplification in 40 |
 | `dlp` | 16, 27, 60, 62, perf/06 | 2vm | 6.12 | pr | Data loss prevention; suite 27 covers pattern match + uprobe attach, suite 60 the per-container attach path, suite 62 the brokered DlpScan + AttachUprobe half. TLS-MITM proxy is enterprise-only; wire-level malicious-MITM + decrypted-payload assertions remain 3-VM deferrals (need mitmproxy + injected-CA topology). uprobe SSL-inspection goodput cost benched in perf/06 |
 | `dns` | 04, 19, 45, 55 | 3vm | 6.12 | pr | DNS intel; DoH/DoT detection via ClientHello SNI + dst_port 853 in 45; AAAA query parser-readiness asserted in 55 |
-| `drops` | No suite yet (kernel-network) | none | 6.12 | manual | Kernel drop reasons as readable counts, fed by tracepoint-drop-reason. Untested for the same reason as that program |
-| `exposure` | No suite yet (kernel-network) | none | 6.12 | manual | What this node exposes, read off the socket hooks, and who bound it. No suite yet: nothing binds a listener in a namespace and reads it back from /api/v1/exposure/listeners |
+| `drops` | 90 | none | 6.12 | nightly | Kernel drop reasons as readable counts, fed by tracepoint-drop-reason; 90 reads NO_SOCKET back with its description |
+| `exposure` | 90 | none | 6.12 | nightly | What this node exposes, read off the socket hooks, and who bound it; 90 binds two listeners after start and reads one reachable by the default policy and one closed by a deny rule |
 | `file_watch` | No suite yet (host-integrity) | none | 6.12 | manual | Changes to watched files and the process that made them, on the host and inside a container's upper layer. No suite yet: nothing changes a watched file and reads the report back |
 | `firewall` | 03, 11, 24, 26, 40, 47, 55 | 3vm | 6.12 | pr | Stateful L3/L4 firewall; amplification UDP-port denies in 40; mid-flow block + CT-kill in 47; IPv6 CIDR rule round-trip + v4↔v6 co-existence asserted in 55 |
-| `flow` | No suite yet (kernel-network) | none | 6.12 | manual | Flow records and their IPFIX, OTLP, JSON and SIEM encodings. No suite exports a flow and decodes it at a collector; 61 asserts the alert sinks, not the flow export |
+| `flow` | 90 | none | 6.12 | nightly | Flow records and their IPFIX, OTLP, JSON and SIEM encodings; 90 exports a connection to the JSON lines sink and reads it back with the export status, and no suite decodes IPFIX, OTLP or the SIEM encodings at a collector |
 | `guest` | 73, 74, 75 | none | 6.12 | nightly | The virtual machines whose traffic crosses this host: a tap device in 73, a policy decided on a guest in 74, a libvirt domain in 75 |
 | `hidden` | 79 | none | 6.12 | nightly | Hidden ports and hidden processes on a busy host: listeners in two network namespaces, SO_REUSEPORT, TIME_WAIT, a many-threaded process and process churn, and neither sweep reports anything twice in a row; the process sweep stays inside its time and CPU budget. The positive case is unit-tested at the port boundary, since a real one needs a rootkit |
 | `hostrule` | 78 | none | 6.12 | nightly | Intent catalogue, typed matchers, shadow book and promotion, decided on process start and exit fed by tracepoint-process; the rule and event grammar is also fuzzed by fuzz_host_rule |
@@ -379,7 +379,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/domains/blocklist/{domain}` | 04 |
 | `/api/v1/domains/reputation` | 04 |
 | `/api/v1/ebpf/coverage` | 87 |
-| `/api/v1/ebpf/drop-reasons` | No suite yet (kernel-network) |
+| `/api/v1/ebpf/drop-reasons` | 90 |
 | `/api/v1/ebpf/foreign-programs` | 88 |
 | `/api/v1/ebpf/guests` | 73, 74, 75 |
 | `/api/v1/ebpf/hidden-ports` | 79 |
@@ -388,7 +388,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/ebpf/raw-sockets` | 88 |
 | `/api/v1/ebpf/status` | 06, 16, 62, 68 |
 | `/api/v1/ebpf/uprobes` | 60 |
-| `/api/v1/exposure/listeners` | No suite yet (kernel-network) |
+| `/api/v1/exposure/listeners` | 90 |
 | `/api/v1/fingerprints/ja4s` | 41 |
 | `/api/v1/fingerprints/summary` | 41 |
 | `/api/v1/firewall/l7-rules` | 04, 29, 30, 56 |
@@ -400,7 +400,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/firewall/workload/labels` | No suite yet (kernel-network) |
 | `/api/v1/firewall/workload/reach` | 70 |
 | `/api/v1/firewall/workload/rules` | 70, 72 |
-| `/api/v1/flows/export` | No suite yet (kernel-network) |
+| `/api/v1/flows/export` | 90 |
 | `/api/v1/geoip/lookup` | 30 |
 | `/api/v1/geoip/status` | 30 |
 | `/api/v1/host-rules` | 78 |
@@ -452,7 +452,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/routing/gateways/{id}` | 32, 53 |
 | `/api/v1/routing/routes` | 32 |
 | `/api/v1/routing/status` | 16, 32, 53 |
-| `/api/v1/services/graph` | No suite yet (kernel-network) |
+| `/api/v1/services/graph` | 90 |
 | `/api/v1/surface` | 80 |
 | `/api/v1/surface/listening` | 80 |
 | `/api/v1/surface/loaded` | 80 |

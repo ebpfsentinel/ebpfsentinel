@@ -66,20 +66,16 @@ owners:
 routes:
   /api/v1/alerts/triage: {owner: unplanned}
   /api/v1/alerts/{id}/triage: {owner: unplanned}
-  /api/v1/ebpf/drop-reasons: {owner: kernel-network}
   /api/v1/ebpf/hidden-ports: {suites: ["79"]}
   /api/v1/ebpf/hidden-processes: {suites: ["79"]}
-  /api/v1/exposure/listeners: {owner: kernel-network}
   /api/v1/firewall/workload/fqdn: {owner: kernel-network}
   /api/v1/firewall/workload/labels: {owner: kernel-network}
-  /api/v1/flows/export: {owner: kernel-network}
   /api/v1/ids/suricata/report: {owner: unplanned}
   /api/v1/lb/vips: {owner: unplanned}
   /api/v1/lb/vips/bgp: {owner: unplanned}
   /api/v1/lb/vips/grant: {owner: unplanned}
   /api/v1/netpol/replay: {owner: kernel-network}
   /api/v1/qos/shaping: {owner: kernel-network}
-  /api/v1/services/graph: {owner: kernel-network}
 
 # Suite-level CI profile (consumed by scripts/list-suites-by-profile.sh
 # which drives .github/workflows/integration.yml).
@@ -217,6 +213,8 @@ suite_profiles:
   "88": nightly
   # 89 serves TLS and HTTP on the host and reads them from the test namespace.
   "89": nightly
+  # 90 serves on the host and in the namespace and hooks conntrack: nightly.
+  "90": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -419,12 +417,11 @@ coverage:
 
   - kind: ebpf_program
     feature: tracepoint-drop-reason
-    suites: ["TBD"]
-    owner: kernel-network
+    suites: ["90"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "Counts the packets the kernel frees undelivered, under the skb_drop_reason it gives. No suite yet: nothing provokes a drop of a known reason and reads the counter back"
+    profile: nightly
+    notes: "Counts the packets the kernel frees undelivered, under the skb_drop_reason it gives; 90 sends datagrams to a closed port and reads them back as NO_SOCKET on the interface they arrived on"
 
   - kind: ebpf_program
     feature: tracepoint-tcp-health
@@ -1053,12 +1050,11 @@ coverage:
 
   - kind: domain_module
     feature: drops
-    suites: ["TBD"]
-    owner: kernel-network
+    suites: ["90"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "Kernel drop reasons as readable counts, fed by tracepoint-drop-reason. Untested for the same reason as that program"
+    profile: nightly
+    notes: "Kernel drop reasons as readable counts, fed by tracepoint-drop-reason; 90 reads NO_SOCKET back with its description"
 
   - kind: domain_module
     feature: tcp_health
@@ -1070,12 +1066,11 @@ coverage:
 
   - kind: domain_module
     feature: flow
-    suites: ["TBD"]
-    owner: kernel-network
+    suites: ["90"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "Flow records and their IPFIX, OTLP, JSON and SIEM encodings. No suite exports a flow and decodes it at a collector; 61 asserts the alert sinks, not the flow export"
+    profile: nightly
+    notes: "Flow records and their IPFIX, OTLP, JSON and SIEM encodings; 90 exports a connection to the JSON lines sink and reads it back with the export status, and no suite decodes IPFIX, OTLP or the SIEM encodings at a collector"
 
   - kind: domain_module
     feature: learning
@@ -1121,12 +1116,11 @@ coverage:
 
   - kind: domain_module
     feature: exposure
-    suites: ["TBD"]
-    owner: kernel-network
+    suites: ["90"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "What this node exposes, read off the socket hooks, and who bound it. No suite yet: nothing binds a listener in a namespace and reads it back from /api/v1/exposure/listeners"
+    profile: nightly
+    notes: "What this node exposes, read off the socket hooks, and who bound it; 90 binds two listeners after start and reads one reachable by the default policy and one closed by a deny rule"
 
   - kind: domain_module
     feature: file_watch
@@ -1196,12 +1190,11 @@ coverage:
 
   - kind: cli_subcommand
     feature: exposure
-    suites: ["TBD"]
-    owner: kernel-network
+    suites: ["90"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "exposure listeners. No suite yet"
+    profile: nightly
+    notes: "exposure listeners; 90 reads the same listing through the API, and no suite drives the CLI"
 
   - kind: cli_subcommand
     feature: trace
