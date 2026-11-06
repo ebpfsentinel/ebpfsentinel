@@ -1290,12 +1290,11 @@ coverage:
 
   - kind: capability
     feature: immediate_signal
-    suites: ["TBD"]
-    owner: workload-identity
+    suites: ["82"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "No suite yet: nothing signals a target making no syscall and reads that it went at once"
+    profile: nightly
+    notes: "A run spinning without a syscall after its writes killed at once; skipped where the kernel signals at the next syscall only"
 
   - kind: capability
     feature: network_executables

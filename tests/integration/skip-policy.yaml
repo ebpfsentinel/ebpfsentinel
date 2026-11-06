@@ -62,6 +62,7 @@ env:
   - "ebpfsentinel-agent CLI not installed on agent VM"
   - "ebpfsentinel-agent not found on agent VM"
   - "kernel refused 802.1Q sub-interface on veth"
+  - "this kernel signals at the next syscall only:"
   - "kubectl not installed"
   - "minikube not installed"
   - "no eBPF environment (no local build, no Docker image '"

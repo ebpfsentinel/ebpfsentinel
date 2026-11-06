@@ -11,6 +11,10 @@
 #   * The same program forking one worker per directory is stopped whole:
 #     the parent and every worker are gone, and the alert counts them.
 #   * Both alerts carry the signals the verdict was reached on.
+#   * A run that stops making syscalls once it has written its files, and
+#     spins in pure computation instead, is still killed: the signal is
+#     sent to it by name rather than waiting for its next syscall, which
+#     it would never make.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
@@ -191,4 +195,55 @@ PY
     done <"${DATA_DIR}/work/workers"
     ! pgrep -x me-encrypt
     [ "$(_rewritten "${victim}")" -lt "${DOCUMENTS}" ]
+}
+
+@test "a run spinning without a syscall after its writes is still killed, at once" {
+    local features why
+    features="$(api_get /api/v1/ebpf/kernel-features)"
+    if ! jq -e '.capabilities[] | select(.id == "immediate_signal") | .active == true' \
+        <<<"${features}" >/dev/null; then
+        why="$(jq -r '.capabilities[] | select(.id == "immediate_signal") | .reason' <<<"${features}")"
+        env_skip "this kernel signals at the next syscall only: ${why}"
+    fi
+
+    local victim="${DATA_DIR}/work/spinning" burst=25
+    _tree "${victim}"
+    # The burst is written with no pause, then the run enters a loop that
+    # never enters the kernel. Without a signal sent to it by name, the
+    # tracepoint waits for a syscall that never comes and the timeout below
+    # ends it with its own status, 124, rather than the 137 of a kill.
+    run timeout 30 "${DATA_DIR}/me-encrypt" - "${victim}" "${burst}" <<'PY'
+import os, sys
+root, burst = sys.argv[1], int(sys.argv[2])
+done = 0
+for directory, _, names in sorted(os.walk(root)):
+    for name in sorted(names):
+        if done == burst:
+            break
+        if not name.endswith(".pdf"):
+            continue
+        path = os.path.join(directory, name)
+        size = os.path.getsize(path)
+        with open(path, "r+b") as f:
+            f.write(os.urandom(size))
+        os.rename(path, path + ".lockd")
+        done += 1
+x = 0
+while True:
+    x += 1
+PY
+    [ "$status" -eq 137 ]
+    local alert
+    alert="$(_stop_alert "${victim}")"
+    [ "$(jq -r '.mitigation_status' <<<"${alert}")" = "stopped" ]
+    jq -e '.message | test("; 1 of 1 processes of the run gone [0-9]+ ms after the verdict")' <<<"${alert}"
+    # Gone well inside the window the tracepoint would have waited out.
+    local latency
+    latency="$(jq -r '.message | capture("gone (?<ms>[0-9]+) ms").ms' <<<"${alert}")"
+    [ "${latency}" -lt 2000 ]
+    # Every file of the burst was written and counted: the verdict landed
+    # after the last write, while the run was in its loop, so no syscall
+    # was there to carry the signal.
+    [ "$(_rewritten "${victim}")" -eq "${burst}" ]
+    [ "$(jq -r '.message | capture("^(?<n>[0-9]+) files").n' <<<"${alert}")" -eq "${burst}" ]
 }
