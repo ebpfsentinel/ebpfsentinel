@@ -616,13 +616,22 @@ impl EventDispatcher {
     /// Events from the same source always go to the same worker,
     /// preserving per-source ordering. XOR-folds all 4 address words
     /// for good distribution across both IPv4 and IPv6.
+    ///
+    /// L7 payloads are the exception: they are keyed on the connection,
+    /// both directions folded together, because an answer is only read as
+    /// one when the request it answers was seen first. Keyed on the source,
+    /// a request and its answer land on two workers and the answer can be
+    /// processed before the request it belongs to.
     fn worker_index(event: &AgentEvent, num_workers: usize) -> usize {
         let hash = match event {
             AgentEvent::L4(pkt) => {
                 pkt.src_addr[0] ^ pkt.src_addr[1] ^ pkt.src_addr[2] ^ pkt.src_addr[3]
             }
             AgentEvent::L7 { header, .. } => {
-                header.src_addr[0] ^ header.src_addr[1] ^ header.src_addr[2] ^ header.src_addr[3]
+                let fold = |addr: &[u32; 4]| addr[0] ^ addr[1] ^ addr[2] ^ addr[3];
+                fold(&header.src_addr)
+                    ^ fold(&header.dst_addr)
+                    ^ u32::from(header.src_port ^ header.dst_port)
             }
             AgentEvent::Dns { header, .. } => {
                 header.src_addr[0] ^ header.src_addr[1] ^ header.src_addr[2] ^ header.src_addr[3]
@@ -2848,6 +2857,29 @@ mod tests {
             .find(|(key, _)| key.server_port == 6379)
             .map(|(_, edge)| edge.clear_text_connections());
         assert_eq!(redis, Some(1));
+    }
+
+    #[test]
+    fn a_request_and_its_answer_land_on_the_same_worker() {
+        let request = make_event(EVENT_TYPE_L7, 0);
+        let answer = PacketEvent {
+            src_addr: request.dst_addr,
+            dst_addr: request.src_addr,
+            src_port: request.dst_port,
+            dst_port: request.src_port,
+            ..request
+        };
+        let l7 = |header| AgentEvent::L7 {
+            header,
+            payload: Vec::new(),
+        };
+        for workers in 2..=16 {
+            assert_eq!(
+                EventDispatcher::worker_index(&l7(request), workers),
+                EventDispatcher::worker_index(&l7(answer), workers),
+                "{workers} workers"
+            );
+        }
     }
 
     #[tokio::test]
