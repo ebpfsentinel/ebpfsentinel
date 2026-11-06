@@ -72,6 +72,9 @@ pub struct ServiceHandles {
     /// tables are handed over by each load of tc-qos and taken back when that
     /// generation goes.
     pub cgroup_shaping: Arc<application::qos_cgroup_shaping_service::QosCgroupShapingService>,
+    /// The L2 VIP announcer. Each load behind a firewall hands it the
+    /// announcer's maps; a load without one takes them back.
+    pub vip_svc: Arc<RwLock<application::vip_announcer_service_impl::VipAnnouncerService>>,
     pub zone_svc: Arc<RwLock<ZoneAppService>>,
     pub alias_svc: Arc<RwLock<AliasAppService>>,
     pub alias_resolver: Arc<dyn AliasResolutionPort>,
@@ -122,9 +125,7 @@ impl ServiceHandles {
     /// The reload service over these handles, for a caller that owns the
     /// services but not the standalone startup path.
     ///
-    /// It carries every service the handles hold. The L2 VIP announcer is not
-    /// one of them: nothing built here announces a VIP, so there is no state
-    /// for a reload to replace.
+    /// It carries every service the handles hold.
     #[must_use]
     pub fn config_reload_service(&self) -> application::config_reload::ConfigReloadService {
         let mut reload_service = application::config_reload::ConfigReloadService::new(
@@ -146,10 +147,68 @@ impl ServiceHandles {
         reload_service.set_loadbalancer_service(Arc::clone(&self.lb_svc));
         reload_service.set_qos_service(Arc::clone(&self.qos_svc));
         reload_service.set_cgroup_shaping_service(Arc::clone(&self.cgroup_shaping));
+        reload_service.set_vip_announcer_service(Arc::clone(&self.vip_svc));
         reload_service.set_zone_service(Arc::clone(&self.zone_svc));
         reload_service.set_schedule_service(Arc::clone(&self.schedule_svc));
         reload_service
     }
+}
+
+/// Load the VIP announcer behind this load's firewall when the configuration
+/// names a role, and otherwise take the previous generation's maps back from
+/// the service, so a VIP is never written into a table nothing reads.
+async fn load_vip_announcer(
+    config: &AgentConfig,
+    services: &ServiceHandles,
+    ebpf_dir: &str,
+    fw: Option<&mut EbpfLoader>,
+    readers: &tokio_util::sync::CancellationToken,
+) -> Option<EbpfLoader> {
+    let wanted = match config.lb_announce().and_then(|announce| {
+        let bgp = config.lb_announce_bgp()?;
+        Ok((announce, bgp))
+    }) {
+        Ok((announce, bgp))
+            if announce.role != domain::loadbalancer::vip::AnnounceRole::Disabled =>
+        {
+            Some((announce, bgp))
+        }
+        Ok(_) => None,
+        Err(e) => {
+            warn!("VIP announce configuration unreadable (VIP announce disabled): {e}");
+            None
+        }
+    };
+    let asked = wanted.is_some();
+    let started = match (fw, wanted) {
+        (Some(fw), Some((announce, bgp))) => startup::start_vip_announcer(
+            ebpf_dir,
+            fw,
+            &services.vip_svc,
+            announce,
+            bgp,
+            readers.child_token(),
+        )
+        .await
+        .map_err(|e| warn!("xdp-vip-announcer load failed (VIP announce disabled): {e}"))
+        .ok(),
+        _ => None,
+    };
+    if started.is_none() {
+        let mut svc = services.vip_svc.write().await;
+        svc.clear_map_port();
+        svc.clear_binding_port();
+    }
+    if asked {
+        services
+            .metrics
+            .set_ebpf_program_status("xdp_vip_announcer", started.is_some());
+    } else {
+        services
+            .metrics
+            .clear_ebpf_program_status("xdp_vip_announcer");
+    }
+    started
 }
 
 /// Process events relayed from a producer that starts before the process
@@ -820,6 +879,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         Arc::new(application::remote_identity_store::RemoteIdentityStore::new());
     let cgroup_shaping = startup::cgroup_shaping_service(config, &metrics)?;
     let guests = startup::guest_inventory_service(config, &ids_workload_scope);
+    let vip_svc = startup::vip_announcer_service(config, &metrics);
     Ok(ServiceHandles {
         firewall_svc,
         ids_svc,
@@ -837,6 +897,7 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         lb_svc,
         qos_svc,
         cgroup_shaping,
+        vip_svc,
         zone_svc,
         alias_svc,
         alias_resolver,
@@ -1243,6 +1304,12 @@ pub async fn load_ebpf_programs(
         tenant_subnet_mgr.add_map(loader.ebpf_mut());
         tenant_subnet_mgr.add_v6_map(loader.ebpf_mut());
     }
+    // ── XDP VIP announcer, reached through the firewall's ARP slot ──
+    let vip_ok = load_vip_announcer(config, services, &ebpf_dir, fw_loader.as_mut(), &readers)
+        .await
+        .map(|loader| ebpf_state.add_loader(loader))
+        .is_some();
+    program_status.insert("xdp_vip_announcer".to_string(), vip_ok);
     if let Some(loader) = fw_loader {
         ebpf_state.add_loader(loader);
     }

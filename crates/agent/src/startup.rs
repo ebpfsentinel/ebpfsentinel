@@ -770,27 +770,7 @@ pub async fn run(
     // ── 5c⅝¾. Build L2 VIP announcer service ────────────────────────
     let vip_announce_cfg = config.lb_announce()?;
     let vip_bgp_cfg = config.lb_announce_bgp()?;
-    let vip_svc = {
-        let mut svc = application::vip_announcer_service_impl::VipAnnouncerService::new(
-            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
-        );
-        svc.set_mac_resolver(Arc::new(adapters::net::IoctlIfaceMacResolver));
-        // Rootless warden-client mode cannot open an AF_PACKET socket to emit the
-        // takeover ARP, so route it through the warden; otherwise broadcast it
-        // directly from a raw socket.
-        let arp_port: Arc<dyn ports::secondary::vip_announcer_port::GratuitousArpPort> =
-            match warden_sock_from_env() {
-                Some(sock) => Arc::new(adapters::warden::arp::WardenGratuitousArp::new(sock)),
-                None => Arc::new(adapters::net::RawSocketGratuitousArp),
-            };
-        svc.set_gratuitous_arp(arp_port);
-        let bgp = &config.loadbalancer.announce.bgp;
-        svc.set_bgp_port(Arc::new(adapters::net::bird::BirdDaemon::new(
-            &bgp.socket,
-            &bgp.config_path,
-        )));
-        Arc::new(RwLock::new(svc))
-    };
+    let vip_svc = vip_announcer_service(&config, &metrics);
     info!(
         role = vip_announce_cfg.role.as_str(),
         vips = vip_announce_cfg.vips.len(),
@@ -2660,46 +2640,23 @@ pub async fn run(
         }
 
         // Wire FW → VIP announcer (slot 3) when the announcer is enabled
-        // and the firewall XDP entry point is active. The bounded ARP
-        // responder is a separate tail-call target from the LB hot path;
-        // xdp-firewall dispatches to it only for ARP frames. Split-brain
-        // safety lives in VipAnnouncerService: VIP_SET is populated only
-        // while this node is the elected speaker.
+        // and the firewall XDP entry point is active.
         if fw_ok
             && vip_announce_cfg.role != domain::loadbalancer::vip::AnnounceRole::Disabled
             && let Some(ref mut fw) = fw_loader
         {
-            match try_load_xdp_vip_announcer(&ebpf_dir) {
-                Ok((vip_loader, vip_mgr, binding_mgr)) => {
-                    if let Ok(vip_fd) = vip_loader.program_raw_fd("xdp_vip_announcer") {
-                        if let Err(e) = fw.set_tail_call_raw("XDP_PROG_ARRAY", 3, vip_fd) {
-                            warn!("firewall → VIP announcer tail-call wiring failed: {e}");
-                        } else {
-                            info!("XDP tail-call: firewall → vip-announcer wired (FW slot 3)");
-                        }
-                    }
-                    {
-                        let mut svc = vip_svc.write().await;
-                        // Binding port first: set_map_port triggers the
-                        // reconcile that also writes SELF_OWNED_BINDINGS.
-                        svc.set_binding_port(Box::new(binding_mgr));
-                        if let Err(e) = svc.set_map_port(Box::new(vip_mgr)) {
-                            warn!("vip announcer map port wiring failed: {e}");
-                        }
-                        if let Err(e) = svc.configure(vip_announce_cfg.clone()) {
-                            warn!("vip announcer configure failed: {e}");
-                        }
-                        if let Err(e) = svc.configure_bgp(vip_bgp_cfg.clone()) {
-                            warn!("vip announcer bgp configure failed: {e}");
-                        }
-                    }
+            match start_vip_announcer(
+                &ebpf_dir,
+                fw,
+                &vip_svc,
+                vip_announce_cfg.clone(),
+                vip_bgp_cfg.clone(),
+                readers.child_token(),
+            )
+            .await
+            {
+                Ok(vip_loader) => {
                     managed.push(("xdp_vip_announcer", vip_loader, readers.child_token()));
-                    // Lapse unrenewed speaker grants and mirror the kernel
-                    // per-VIP forged-reply counters into Prometheus.
-                    tokio::spawn(crate::ebpf_lifecycle::vip_announcer_tick(
-                        Arc::clone(&vip_svc),
-                        readers.child_token(),
-                    ));
                     metrics.set_ebpf_program_status("xdp_vip_announcer", true);
                     vip_announcer_ok = true;
                     info!(
@@ -3932,6 +3889,7 @@ pub async fn run(
                 lb_svc: Arc::clone(&lb_svc),
                 qos_svc: Arc::clone(&qos_svc),
                 cgroup_shaping: Arc::clone(&cgroup_shaping),
+                vip_svc: Arc::clone(&vip_svc),
                 pod_coverage: Arc::clone(&app_state.pod_coverage),
                 guests: guest_inventory_service(&config, &ids_workload_scope),
                 link_processes: Arc::new(crate::runtime::ProcessRelay::new()),
@@ -9073,6 +9031,83 @@ pub fn try_load_xdp_loadbalancer(
     let reader = EventReader::new(loader.ebpf_mut())?;
 
     Ok((loader, lb_mgr, metrics_rdr, reader))
+}
+
+/// The L2 VIP announcer with the ports it speaks through. It announces
+/// nothing until a load hands it the announcer's maps.
+pub(crate) fn vip_announcer_service(
+    config: &AgentConfig,
+    metrics: &Arc<AgentMetrics>,
+) -> Arc<RwLock<application::vip_announcer_service_impl::VipAnnouncerService>> {
+    let mut svc = application::vip_announcer_service_impl::VipAnnouncerService::new(Arc::clone(
+        metrics,
+    )
+        as Arc<dyn MetricsPort>);
+    svc.set_mac_resolver(Arc::new(adapters::net::IoctlIfaceMacResolver));
+    // Rootless warden-client mode cannot open an AF_PACKET socket to emit the
+    // takeover ARP, so route it through the warden; otherwise broadcast it
+    // directly from a raw socket.
+    let arp_port: Arc<dyn ports::secondary::vip_announcer_port::GratuitousArpPort> =
+        match warden_sock_from_env() {
+            Some(sock) => Arc::new(adapters::warden::arp::WardenGratuitousArp::new(sock)),
+            None => Arc::new(adapters::net::RawSocketGratuitousArp),
+        };
+    svc.set_gratuitous_arp(arp_port);
+    let bgp = &config.loadbalancer.announce.bgp;
+    svc.set_bgp_port(Arc::new(adapters::net::bird::BirdDaemon::new(
+        &bgp.socket,
+        &bgp.config_path,
+    )));
+    Arc::new(RwLock::new(svc))
+}
+
+/// Load the VIP announcer behind a loaded firewall, wire it into the
+/// firewall's ARP slot, hand the service its maps and configuration and start
+/// its tick under `cancel`. The returned loader has to live as long as the
+/// firewall points at it.
+///
+/// The bounded ARP responder is a separate tail-call target from the LB hot
+/// path; xdp-firewall dispatches to it only for ARP frames. Split-brain
+/// safety lives in `VipAnnouncerService`: `VIP_SET` is populated only while
+/// this node is the elected speaker.
+pub(crate) async fn start_vip_announcer(
+    ebpf_dir: &str,
+    fw: &mut EbpfLoader,
+    vip_svc: &Arc<RwLock<application::vip_announcer_service_impl::VipAnnouncerService>>,
+    announce: domain::loadbalancer::vip::VipAnnounceConfig,
+    bgp: domain::loadbalancer::bgp::BgpConfig,
+    cancel: CancellationToken,
+) -> anyhow::Result<EbpfLoader> {
+    let (vip_loader, vip_mgr, binding_mgr) = try_load_xdp_vip_announcer(ebpf_dir)?;
+    if let Ok(vip_fd) = vip_loader.program_raw_fd("xdp_vip_announcer") {
+        if let Err(e) = fw.set_tail_call_raw("XDP_PROG_ARRAY", 3, vip_fd) {
+            warn!("firewall → VIP announcer tail-call wiring failed: {e}");
+        } else {
+            info!("XDP tail-call: firewall → vip-announcer wired (FW slot 3)");
+        }
+    }
+    {
+        let mut svc = vip_svc.write().await;
+        // Binding port first: set_map_port triggers the reconcile that also
+        // writes SELF_OWNED_BINDINGS.
+        svc.set_binding_port(Box::new(binding_mgr));
+        if let Err(e) = svc.set_map_port(Box::new(vip_mgr)) {
+            warn!("vip announcer map port wiring failed: {e}");
+        }
+        if let Err(e) = svc.configure(announce) {
+            warn!("vip announcer configure failed: {e}");
+        }
+        if let Err(e) = svc.configure_bgp(bgp) {
+            warn!("vip announcer bgp configure failed: {e}");
+        }
+    }
+    // Lapse unrenewed speaker grants and mirror the kernel per-VIP
+    // forged-reply counters into Prometheus.
+    tokio::spawn(crate::ebpf_lifecycle::vip_announcer_tick(
+        Arc::clone(vip_svc),
+        cancel,
+    ));
+    Ok(vip_loader)
 }
 
 /// Load the bounded XDP VIP announcer program.
