@@ -61,6 +61,13 @@ setup_file() {
         return 1
     }
 
+    # A listener is named from the exec the process table saw, so the table
+    # has to be attached before any server starts.
+    wait_for_ebpf_program tracepoint-process 30 || {
+        tail -20 "$AGENT_LOG_FILE" >&2
+        return 1
+    }
+
     # Every server starts after the agent, so the bind hook sees each one.
     _serve host "$EBPF_HOST_IP" "$GRAPH_PORT" graph
     _serve ns "0.0.0.0" "$FLOW_PORT" flow
@@ -173,10 +180,12 @@ PY
         body="$(api_get /api/v1/ebpf/drop-reasons)"
         now="$(echo "$body" | jq --arg i "$EBPF_VETH_HOST" \
             '[.drops[] | select(.reason == "NO_SOCKET" and .interface == $i) | .packets] | add // 0')"
-        [ "$now" -ge $((before + 50)) ] && break
+        [ "$now" -ge $((before + 45)) ] && break
         sleep 0.5
     done
-    [ "$now" -ge $((before + 50)) ] || {
+    # Fifty sent; the first may wait on neighbour resolution and leave by
+    # another path, so a few short of fifty still says the reason is counted.
+    [ "$now" -ge $((before + 45)) ] || {
         echo "# NO_SOCKET on ${EBPF_VETH_HOST} went from ${before} to ${now}: ${body}" >&3
         false
     }

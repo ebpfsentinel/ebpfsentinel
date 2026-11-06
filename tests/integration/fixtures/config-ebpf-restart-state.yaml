@@ -50,3 +50,6 @@ learning:
 audit:
   enabled: true
   storage_path: __DATA_DIR__/audit.redb
+
+auth:
+  enabled: false

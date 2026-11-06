@@ -52,6 +52,11 @@ ddos:
 conntrack:
   enabled: true
 
+# A listener is named by the binary its process runs, which the process
+# table holds.
+process_table:
+  enabled: true
+
 flow_export:
   enabled: true
   active_timeout_secs: 2
