@@ -930,7 +930,21 @@ pub enum Command {
         /// The file service process whose client is read.
         pid: u32,
     },
+    /// List the processes holding an established connection to a
+    /// file-service port of one of `servers`, answered by
+    /// [`Response::ShareWriters`]. Naming them means reading every process's
+    /// socket links, the ptrace access check the rootless agent fails against
+    /// any process of another user. Read-only: the `fd` links and the TCP
+    /// tables of each network namespace, and what crosses back is pids. At
+    /// most [`MAX_SHARE_SERVERS`] servers are read; the rest are ignored.
+    ReadShareWriters {
+        /// The file servers whose clients are listed.
+        servers: Vec<std::net::IpAddr>,
+    },
 }
+
+/// The most servers one [`Command::ReadShareWriters`] reads.
+pub const MAX_SHARE_SERVERS: usize = 64;
 
 /// The most threads one [`Command::OpenerReadings`] reads.
 pub const OPENER_READINGS_MAX: usize = 1_024;
@@ -1126,6 +1140,9 @@ pub enum Response {
     /// [`Command::ReadServedPeer`]; `None` when the process is gone, holds no
     /// file-service connection, or serves several addresses.
     ServedPeer { peer: Option<std::net::IpAddr> },
+    /// The processes connected to a file-service port of one of the servers
+    /// asked, lowest pid first, answering [`Command::ReadShareWriters`].
+    ShareWriters { pids: Vec<u32> },
 }
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
@@ -1257,6 +1274,9 @@ mod tests {
             Command::ReadProcessFacts { pid: 4242 },
             Command::OpenExecutable { pid: 4242 },
             Command::ReadServedPeer { pid: 4242 },
+            Command::ReadShareWriters {
+                servers: vec![std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2))],
+            },
         ]
     }
 
@@ -1509,6 +1529,9 @@ mod tests {
                 peer: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 7))),
             },
             Response::ServedPeer { peer: None },
+            Response::ShareWriters {
+                pids: vec![4242, 4243],
+            },
         ]
     }
 

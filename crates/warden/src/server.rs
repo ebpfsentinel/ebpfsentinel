@@ -16,7 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ebpfsentinel_warden_proto::{
-    Command, FIM_NO_WATCH, PROTOCOL_VERSION, Response, TaskIdentity, read_frame, write_frame,
+    Command, FIM_NO_WATCH, MAX_SHARE_SERVERS, PROTOCOL_VERSION, Response, TaskIdentity, read_frame,
+    write_frame,
 };
 
 use crate::fim_watch::FimWatch;
@@ -702,6 +703,12 @@ fn dispatch(cmd: &Command, host: &dyn HostOps, proc_root: &Path) -> Response {
         },
         Command::ReadServedPeer { pid } => Response::ServedPeer {
             peer: served_peer::read(proc_root, *pid),
+        },
+        Command::ReadShareWriters { servers } => Response::ShareWriters {
+            pids: served_peer::share_writers(
+                proc_root,
+                &servers[..servers.len().min(MAX_SHARE_SERVERS)],
+            ),
         },
         Command::PacketSockets => Response::PacketSockets {
             sockets: packet_sockets::scan(proc_root),

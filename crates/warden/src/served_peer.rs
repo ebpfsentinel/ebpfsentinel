@@ -8,7 +8,7 @@
 //! holding no such connection, or connections from several addresses, names
 //! nobody.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
@@ -41,6 +41,59 @@ pub fn read(proc_root: &Path, pid: u32) -> Option<IpAddr> {
     }
 }
 
+/// Every process in the procfs at `proc_root` holding an established
+/// connection to a file-service port of one of `servers`, lowest pid first.
+///
+/// The TCP tables are read once per network namespace rather than once per
+/// process, since every process of a namespace reads the same ones.
+#[must_use]
+pub fn share_writers(proc_root: &Path, servers: &[IpAddr]) -> Vec<u32> {
+    if servers.is_empty() {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(proc_root) else {
+        return Vec::new();
+    };
+    let mut tables: HashMap<String, HashSet<u64>> = HashMap::new();
+    let mut writers: Vec<u32> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| {
+            let pid_dir = proc_root.join(pid.to_string());
+            let inodes = socket_inodes(&pid_dir);
+            if inodes.is_empty() {
+                return false;
+            }
+            let namespace = std::fs::read_link(pid_dir.join("ns/net"))
+                .map_or_else(|_| pid.to_string(), |n| n.to_string_lossy().into_owned());
+            let held = tables
+                .entry(namespace)
+                .or_insert_with(|| server_sockets(&pid_dir, servers));
+            !held.is_disjoint(&inodes)
+        })
+        .collect();
+    writers.sort_unstable();
+    writers
+}
+
+/// The inodes of the established connections, in the TCP tables of the
+/// namespace `pid_dir` lives in, to a file-service port of one of `servers`.
+fn server_sockets(pid_dir: &Path, servers: &[IpAddr]) -> HashSet<u64> {
+    let mut held = HashSet::new();
+    for (table, v6) in [("tcp", false), ("tcp6", true)] {
+        let Ok(text) = std::fs::read_to_string(pid_dir.join("net").join(table)) else {
+            continue;
+        };
+        held.extend(
+            connections(&text, v6)
+                .filter(|c| FILE_SERVICE_PORTS.contains(&c.remote_port))
+                .filter(|c| servers.contains(&c.remote))
+                .map(|c| c.inode),
+        );
+    }
+    held
+}
+
 /// The socket inodes of every descriptor the process holds.
 fn socket_inodes(pid_dir: &Path) -> HashSet<u64> {
     let Ok(entries) = std::fs::read_dir(pid_dir.join("fd")) else {
@@ -67,6 +120,21 @@ fn served_peers<'a>(
     v6: bool,
     inodes: &'a HashSet<u64>,
 ) -> impl Iterator<Item = IpAddr> + 'a {
+    connections(text, v6)
+        .filter(|c| inodes.contains(&c.inode) && FILE_SERVICE_PORTS.contains(&c.local_port))
+        .map(|c| c.remote)
+}
+
+/// One established connection of a TCP table.
+struct Connection {
+    local_port: u16,
+    remote: IpAddr,
+    remote_port: u16,
+    inode: u64,
+}
+
+/// The established connections of one TCP table.
+fn connections(text: &str, v6: bool) -> impl Iterator<Item = Connection> + '_ {
     text.lines().skip(1).filter_map(move |line| {
         let fields: Vec<&str> = line.split_whitespace().collect();
         let (local, remote, state, inode) = (
@@ -75,15 +143,17 @@ fn served_peers<'a>(
             fields.get(3)?,
             fields.get(9)?,
         );
-        if *state != ESTABLISHED || !inodes.contains(&inode.parse().ok()?) {
+        if *state != ESTABLISHED {
             return None;
         }
         let (_, local_port) = local.split_once(':')?;
-        if !FILE_SERVICE_PORTS.contains(&u16::from_str_radix(local_port, 16).ok()?) {
-            return None;
-        }
-        let (addr, _) = remote.split_once(':')?;
-        if v6 { v6_addr(addr) } else { v4_addr(addr) }
+        let (addr, remote_port) = remote.split_once(':')?;
+        Some(Connection {
+            local_port: u16::from_str_radix(local_port, 16).ok()?,
+            remote: if v6 { v6_addr(addr) } else { v4_addr(addr) }?,
+            remote_port: u16::from_str_radix(remote_port, 16).ok()?,
+            inode: inode.parse().ok()?,
+        })
     })
 }
 
@@ -201,6 +271,35 @@ mod tests {
             read(root.path(), 7),
             Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)))
         );
+    }
+
+    #[test]
+    fn the_processes_connected_to_a_named_share_are_listed() {
+        let share = Ipv4Addr::new(10, 0, 0, 9);
+        let other = Ipv4Addr::new(10, 0, 0, 8);
+        // Process 7 (from `proc_with`) holds 1, the connection to the share's
+        // SMB port; 2 is to another server and 3 to the share's SSH port.
+        let tcp = row(&here(), 40000, &v4_hex(share), ESTABLISHED, 1);
+        let root = proc_with(&[1], &tcp, "");
+        let mut rows = std::fs::read_to_string(root.path().join("7/net/tcp")).expect("tcp");
+        // `row` writes the remote port as C350; rewrite it as 445 for the
+        // share and as 22 for the decoy, which a writer never holds.
+        rows = rows.replacen(":C350", ":01BD", 1);
+        rows.push_str(
+            &row(&here(), 40001, &v4_hex(other), ESTABLISHED, 2).replace(":C350", ":01BD"),
+        );
+        rows.push_str(
+            &row(&here(), 40002, &v4_hex(share), ESTABLISHED, 3).replace(":C350", ":0016"),
+        );
+        std::fs::write(root.path().join("7/net/tcp"), rows).expect("tcp");
+        let decoy = root.path().join("8");
+        std::fs::create_dir_all(decoy.join("fd")).expect("fd");
+        std::fs::create_dir_all(decoy.join("net")).expect("net");
+        symlink("socket:[2]", decoy.join("fd/0")).expect("link");
+        symlink("socket:[3]", decoy.join("fd/1")).expect("link");
+        std::fs::copy(root.path().join("7/net/tcp"), decoy.join("net/tcp")).expect("tcp");
+        assert_eq!(share_writers(root.path(), &[IpAddr::V4(share)]), vec![7]);
+        assert!(share_writers(root.path(), &[]).is_empty());
     }
 
     #[test]

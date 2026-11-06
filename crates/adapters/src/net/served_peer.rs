@@ -48,13 +48,9 @@ pub struct ProcServedPeer {
 
 impl ProcServedPeer {
     pub fn new(proc_root: impl Into<PathBuf>) -> Self {
-        let warden = std::env::var_os(WARDEN_SOCK_ENV)
-            .map(PathBuf::from)
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(|p| Mutex::new(ReconnectingClient::new(p)));
         Self {
             proc_root: proc_root.into(),
-            warden,
+            warden: warden_from_env(),
         }
     }
 
@@ -119,14 +115,34 @@ impl ProcServedPeer {
 
 /// Reads the processes connected to a set of file servers, under a
 /// configurable proc root.
+///
+/// A rootless agent fails the ptrace check the `fd` links ask for against
+/// every process of another user, which is most of the processes that
+/// write to a share. When `EBPFSENTINEL_WARDEN_SOCK` is set and a process's
+/// descriptors were refused, the whole list is read by the warden instead;
+/// without a warden, or when it refuses, the list holds what this side
+/// could read.
 pub struct ProcShareWriters {
     proc_root: PathBuf,
+    /// The warden, in a rootless deployment.
+    warden: Option<Mutex<ReconnectingClient>>,
 }
 
 impl ProcShareWriters {
     pub fn new(proc_root: impl Into<PathBuf>) -> Self {
         Self {
             proc_root: proc_root.into(),
+            warden: warden_from_env(),
+        }
+    }
+
+    /// Read through the warden at `sock` whenever a process's descriptors
+    /// are not readable here, whatever the environment says.
+    #[cfg(test)]
+    fn with_warden(proc_root: impl Into<PathBuf>, sock: impl Into<PathBuf>) -> Self {
+        Self {
+            proc_root: proc_root.into(),
+            warden: Some(Mutex::new(ReconnectingClient::new(sock))),
         }
     }
 
@@ -144,15 +160,23 @@ impl ProcShareWriters {
             return Vec::new();
         };
         let mut tables: HashMap<String, HashSet<u64>> = HashMap::new();
+        let mut refused = false;
         let mut writers: Vec<u32> = entries
             .filter_map(Result::ok)
             .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
             .filter(|pid| {
                 let pid_dir = self.proc_root.join(pid.to_string());
-                let Ok(entries) = std::fs::read_dir(pid_dir.join("fd")) else {
-                    return false;
+                let inodes = match std::fs::read_dir(pid_dir.join("fd")).map(socket_inodes) {
+                    Ok(Some(inodes)) => inodes,
+                    Ok(None) => {
+                        refused = true;
+                        return false;
+                    }
+                    Err(e) => {
+                        refused |= e.kind() == ErrorKind::PermissionDenied;
+                        return false;
+                    }
                 };
-                let inodes = socket_inodes(entries).unwrap_or_default();
                 if inodes.is_empty() {
                     return false;
                 }
@@ -164,9 +188,37 @@ impl ProcShareWriters {
                 !held.is_disjoint(&inodes)
             })
             .collect();
+        if refused && let Some(pids) = self.read_through_warden(servers) {
+            return pids;
+        }
         writers.sort_unstable();
         writers
     }
+
+    /// Ask the warden for the writers when this side was refused a process.
+    /// `None` without a warden or when it fails, so what was read here
+    /// stands.
+    fn read_through_warden(&self, servers: &[IpAddr]) -> Option<Vec<u32>> {
+        let warden = self.warden.as_ref()?;
+        let mut client = warden
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match client.read_share_writers(servers) {
+            Ok(pids) => Some(pids),
+            Err(e) => {
+                tracing::debug!(error = %e, "warden could not list the share writers");
+                None
+            }
+        }
+    }
+}
+
+/// The warden named by `EBPFSENTINEL_WARDEN_SOCK`, in a rootless deployment.
+fn warden_from_env() -> Option<Mutex<ReconnectingClient>> {
+    std::env::var_os(WARDEN_SOCK_ENV)
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| Mutex::new(ReconnectingClient::new(p)))
 }
 
 /// The inodes of the established connections, in the TCP tables of the
@@ -510,5 +562,62 @@ mod tests {
     fn an_unreadable_process_names_nobody() {
         let root = tempfile::tempdir().expect("tempdir");
         assert_eq!(ProcServedPeer::new(root.path()).read(7), None);
+    }
+
+    #[test]
+    fn writers_the_agent_may_not_read_are_listed_by_the_warden() {
+        use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response};
+        use ebpfsentinel_warden_proto::{read_frame, write_frame};
+        use std::os::unix::fs::PermissionsExt;
+        let share = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 20));
+        let tcp = client_row(&v4_hex(Ipv4Addr::new(10, 0, 0, 20)), 445, 10);
+        let root = tempfile::tempdir().expect("tempdir");
+        add_process(root.path(), 900, &[10], &tcp);
+        let fd_dir = root.path().join("900/fd");
+        std::fs::set_permissions(&fd_dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        // A privileged test run lists the closed directory anyway, and then
+        // the warden is never asked.
+        let privileged = std::fs::read_dir(&fd_dir).is_ok();
+
+        let sock = root.path().join("warden.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind");
+        let warden = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().expect("accept");
+            let Ok(Command::Hello { .. }) = read_frame::<_, Command>(&mut conn) else {
+                return 0;
+            };
+            write_frame(
+                &mut conn,
+                &Response::HelloOk {
+                    version: PROTOCOL_VERSION,
+                },
+            )
+            .expect("hello");
+            let mut served = 0;
+            while let Ok(cmd) = read_frame::<_, Command>(&mut conn) {
+                let Command::ReadShareWriters { servers } = cmd else {
+                    panic!("unexpected command {cmd:?}");
+                };
+                assert_eq!(servers, vec![share]);
+                served += 1;
+                write_frame(&mut conn, &Response::ShareWriters { pids: vec![900] })
+                    .expect("answer");
+            }
+            served
+        });
+        let writers = ProcShareWriters::with_warden(root.path(), &sock).read(&[share]);
+        let alone = ProcShareWriters {
+            proc_root: root.path().to_path_buf(),
+            warden: None,
+        }
+        .read(&[share]);
+        std::fs::set_permissions(&fd_dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert_eq!(writers, vec![900]);
+        if !privileged {
+            assert!(alone.is_empty());
+        }
+        drop(std::os::unix::net::UnixStream::connect(&sock));
+        let served = warden.join().expect("warden");
+        assert_eq!(served, usize::from(!privileged));
     }
 }

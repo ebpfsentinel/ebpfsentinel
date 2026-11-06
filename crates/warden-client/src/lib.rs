@@ -97,6 +97,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::ReadProcessFacts { .. } => "ReadProcessFacts",
         Command::OpenExecutable { .. } => "OpenExecutable",
         Command::ReadServedPeer { .. } => "ReadServedPeer",
+        Command::ReadShareWriters { .. } => "ReadShareWriters",
     }
 }
 
@@ -269,6 +270,17 @@ impl WardenClient {
         match self.call(&Command::ReadServedPeer { pid })? {
             Response::ServedPeer { peer } => Ok(peer),
             other => Err(unexpected("ReadServedPeer", &other)),
+        }
+    }
+
+    /// List the processes connected to a file-service port of one of
+    /// `servers`, lowest pid first.
+    pub fn read_share_writers(&mut self, servers: &[std::net::IpAddr]) -> io::Result<Vec<u32>> {
+        match self.call(&Command::ReadShareWriters {
+            servers: servers.to_vec(),
+        })? {
+            Response::ShareWriters { pids } => Ok(pids),
+            other => Err(unexpected("ReadShareWriters", &other)),
         }
     }
 
@@ -773,6 +785,13 @@ impl ReconnectingClient {
     /// reconnecting if it bounced.
     pub fn read_served_peer(&mut self, pid: u32) -> io::Result<Option<std::net::IpAddr>> {
         self.with_retry(|c| c.read_served_peer(pid))
+    }
+
+    /// List the processes writing to a set of file servers through the
+    /// warden, reconnecting if it bounced. A read, so replaying it is
+    /// harmless.
+    pub fn read_share_writers(&mut self, servers: &[std::net::IpAddr]) -> io::Result<Vec<u32>> {
+        self.with_retry(|c| c.read_share_writers(servers))
     }
 
     /// Open one process's executable through the warden, reconnecting if it
