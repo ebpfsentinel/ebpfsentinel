@@ -68,6 +68,12 @@ _start() {
         tail -20 "$AGENT_LOG_FILE" >&2
         return 1
     }
+    # The list attaches after the datapath reports ready.
+    local attempt=0
+    while ! grep -q "network executables ${mode}" "$AGENT_LOG_FILE" && [ "$attempt" -lt 30 ]; do
+        sleep 0.5
+        attempt=$((attempt + 1))
+    done
     grep -q "network executables ${mode}" "$AGENT_LOG_FILE" || {
         echo "# the list did not start in ${mode}" >&3
         tail -30 "$AGENT_LOG_FILE" >&3
