@@ -25,6 +25,10 @@ const ALLOWED_ATTACH_TYPES: &[u32] = &[
     BPF_CGROUP_UDP6_SENDMSG,
     BPF_CGROUP_SOCK_OPS,
     BPF_CGROUP_INET_SOCK_RELEASE,
+    BPF_CGROUP_UDP4_RECVMSG,
+    BPF_CGROUP_UDP6_RECVMSG,
+    BPF_CGROUP_INET4_GETPEERNAME,
+    BPF_CGROUP_INET6_GETPEERNAME,
 ];
 
 /// `BPF_CGROUP_INET_INGRESS` from `enum bpf_attach_type`.
@@ -55,6 +59,20 @@ pub const BPF_CGROUP_INET6_POST_BIND: u32 = 13;
 pub const BPF_CGROUP_UDP4_SENDMSG: u32 = 14;
 /// `BPF_CGROUP_UDP6_SENDMSG` from `enum bpf_attach_type`.
 pub const BPF_CGROUP_UDP6_SENDMSG: u32 = 15;
+/// `BPF_CGROUP_UDP4_RECVMSG` from `enum bpf_attach_type`.
+///
+/// Cluster address resolution puts the Service address back on a datagram's
+/// source here, so a UDP client sees the address it sent to.
+pub const BPF_CGROUP_UDP4_RECVMSG: u32 = 19;
+/// `BPF_CGROUP_UDP6_RECVMSG` from `enum bpf_attach_type`.
+pub const BPF_CGROUP_UDP6_RECVMSG: u32 = 20;
+/// `BPF_CGROUP_INET4_GETPEERNAME` from `enum bpf_attach_type`.
+///
+/// Cluster address resolution answers `getpeername()` with the Service
+/// address rather than the backend it chose at connect.
+pub const BPF_CGROUP_INET4_GETPEERNAME: u32 = 29;
+/// `BPF_CGROUP_INET6_GETPEERNAME` from `enum bpf_attach_type`.
+pub const BPF_CGROUP_INET6_GETPEERNAME: u32 = 30;
 /// `BPF_CGROUP_INET_SOCK_RELEASE` from `enum bpf_attach_type`.
 ///
 /// The close of a socket, which is what takes a listener out of the table the
@@ -193,6 +211,24 @@ mod tests {
         assert!(ALLOWED_ATTACH_TYPES.contains(&BPF_CGROUP_INET_EGRESS));
         // `BPF_CGROUP_DEVICE` is 6.
         assert!(!ALLOWED_ATTACH_TYPES.contains(&6));
+    }
+
+    #[test]
+    fn the_reverse_hooks_of_cluster_address_resolution_are_attachable() {
+        for attach_type in [
+            BPF_CGROUP_INET4_CONNECT,
+            BPF_CGROUP_INET6_CONNECT,
+            BPF_CGROUP_UDP4_SENDMSG,
+            BPF_CGROUP_UDP6_SENDMSG,
+            BPF_CGROUP_UDP4_RECVMSG,
+            BPF_CGROUP_UDP6_RECVMSG,
+            BPF_CGROUP_INET4_GETPEERNAME,
+            BPF_CGROUP_INET6_GETPEERNAME,
+        ] {
+            assert!(ALLOWED_ATTACH_TYPES.contains(&attach_type), "{attach_type}");
+        }
+        // `BPF_CGROUP_SYSCTL` is 18 and sits between them: still refused.
+        assert!(!ALLOWED_ATTACH_TYPES.contains(&18));
     }
 
     #[test]
