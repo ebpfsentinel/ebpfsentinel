@@ -68,8 +68,6 @@ routes:
   /api/v1/alerts/{id}/triage: {owner: unplanned}
   /api/v1/ebpf/hidden-ports: {suites: ["79"]}
   /api/v1/ebpf/hidden-processes: {suites: ["79"]}
-  /api/v1/firewall/workload/fqdn: {owner: kernel-network}
-  /api/v1/firewall/workload/labels: {owner: kernel-network}
   /api/v1/ids/suricata/report: {owner: unplanned}
   /api/v1/lb/vips: {owner: unplanned}
   /api/v1/lb/vips/bgp: {owner: unplanned}
@@ -216,6 +214,9 @@ suite_profiles:
   # 90 serves on the host and in the namespace and hooks conntrack: nightly.
   "90": nightly
   "91": nightly
+  "92": nightly
+  "93": nightly
+  "94": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -359,7 +360,7 @@ coverage:
 
   - kind: ebpf_program
     feature: cgroup-workload-firewall
-    suites: ["67", "70"]
+    suites: ["67", "70", "92"]
     topology: 2vm
     kernel_min: "6.12"
     profile: nightly
@@ -394,7 +395,6 @@ coverage:
   - kind: ebpf_program
     feature: lsm-exec-network
     suites: ["91"]
-    owner: workload-identity
     topology: none
     kernel_min: "6.12"
     profile: nightly
@@ -765,12 +765,11 @@ coverage:
 
   - kind: cli_subcommand
     feature: learning
-    suites: ["TBD"]
-    owner: restart-state
+    suites: ["87"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "Learning window start, status and result. No suite drives the CLI or the window it opens"
+    profile: nightly
+    notes: "Learning window list and status, read back in 87 after the window came back from a restart"
 
   - kind: cli_subcommand
     feature: netpol
@@ -815,12 +814,11 @@ coverage:
 
   - kind: cli_subcommand
     feature: processes
-    suites: ["TBD"]
-    owner: workload-identity
+    suites: ["93"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "What a pid is, from its exec to its exit. The REST route it reads is asserted in 67; the CLI itself is not driven by any suite"
+    profile: nightly
+    notes: "What a pid is, from its exec to its exit. The REST route it reads is asserted in 67; show and list are driven in 93 on the shell a detection named"
 
   # ── Domain modules (24, excl. common) ───────────────────────────
   - kind: domain_module
@@ -1092,15 +1090,15 @@ coverage:
 
   - kind: domain_module
     feature: process
-    suites: ["67", "70"]
+    suites: ["67", "70", "93"]
     topology: none
     kernel_min: "6.12"
     profile: nightly
-    notes: "The process table: a pid from exec to exit with its chain of ancestors; read through REST in 67, the chain decides workload rules in 70"
+    notes: "The process table: a pid from exec to exit with its chain of ancestors; read through REST in 67, the chain decides workload rules in 70, the reverse shell, fileless and server-descendant detections and their process kill in 93"
 
   - kind: domain_module
     feature: workload
-    suites: ["67", "70"]
+    suites: ["67", "70", "92"]
     topology: none
     kernel_min: "6.12"
     profile: nightly
@@ -1125,12 +1123,11 @@ coverage:
 
   - kind: domain_module
     feature: file_watch
-    suites: ["TBD"]
-    owner: host-integrity
+    suites: ["94"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "Changes to watched files and the process that made them, on the host and inside a container's upper layer. No suite yet: nothing changes a watched file and reads the report back"
+    profile: nightly
+    notes: "Changes to watched files and the process that made them on the host, and a change to the agent's own configuration, asserted in 94. Inside a container's upper layer: no suite yet"
 
   - kind: domain_module
     feature: guest
@@ -1199,12 +1196,11 @@ coverage:
 
   - kind: cli_subcommand
     feature: trace
-    suites: ["TBD"]
-    owner: restart-state
+    suites: ["87"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "trace through the loaded programs. No suite yet"
+    profile: nightly
+    notes: "trace through the loaded programs, naming the deny rule a crafted packet meets, in 87"
 
   # ── Capabilities above the kernel floor ──────────────────────────────
   # One row per entry of capabilities.json. 86 asserts every entry is
@@ -1269,7 +1265,7 @@ coverage:
 
   - kind: capability
     feature: workload_firewall
-    suites: ["70", "72"]
+    suites: ["70", "72", "92"]
     topology: none
     kernel_min: "6.12"
     profile: nightly
@@ -1304,7 +1300,6 @@ coverage:
   - kind: capability
     feature: network_executables
     suites: ["91"]
-    owner: workload-identity
     topology: none
     kernel_min: "6.12"
     profile: nightly

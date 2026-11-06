@@ -1,0 +1,126 @@
+# config-ebpf-workload-matchers.yaml - workload rules naming a task by its
+# executable's path, by the digest of its bytes, by its systemd unit and by
+# its cgroup, one port each, and a cgroup allowed out by DNS name only.
+#
+# The placeholders are written by the suite: __PYCOPY__ is a copy of
+# python3, __PYMARK_HASH__ the SHA-256 of a copy carrying one byte more.
+# The rule on 7205 says no mode and therefore observes.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  allow_plaintext_api: true
+  log_level: info
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: pass
+  workload_dns:
+    resolvers: ["10.200.0.2"]
+    grace_secs: 30
+  rules:
+    - id: fw-wl-exe
+      priority: 10
+      action: deny
+      protocol: tcp
+      dst_port: 7201
+      workload:
+        exe: __PYCOPY__
+        mode: enforce
+    - id: fw-wl-hash
+      priority: 20
+      action: deny
+      protocol: tcp
+      dst_port: 7202
+      workload:
+        exe_hash: __PYMARK_HASH__
+        mode: enforce
+    - id: fw-wl-unit
+      priority: 30
+      action: deny
+      protocol: tcp
+      dst_port: 7203
+      workload:
+        unit: ebpf-wl-unit.scope
+        mode: enforce
+    - id: fw-wl-cgroup
+      priority: 40
+      action: deny
+      protocol: tcp
+      dst_port: 7204
+      workload:
+        cgroup: /ebpf-wl-cgroup
+        mode: enforce
+    - id: fw-wl-observe
+      priority: 50
+      action: deny
+      protocol: tcp
+      dst_port: 7205
+      workload:
+        exe: __PYCOPY__
+    - id: fw-wl-dns
+      priority: 60
+      action: allow
+      protocol: udp
+      dst_ip: 10.200.0.2/32
+      dst_port: 53
+      workload:
+        cgroup: /ebpf-wl-fqdn
+        mode: enforce
+    - id: fw-wl-by-name
+      priority: 70
+      action: allow
+      protocol: tcp
+      dst_port: 7206
+      workload:
+        cgroup: /ebpf-wl-fqdn
+        fqdn: ["allowed.wl.test"]
+        mode: enforce
+    - id: fw-wl-fqdn-elsewhere
+      priority: 80
+      action: deny
+      workload:
+        cgroup: /ebpf-wl-fqdn
+        mode: enforce
+
+process_table:
+  enabled: true
+  capture_command_line: true
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 1
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+auth:
+  enabled: false
+
+# The audit store sits in the data directory, which is also where the
+# agent claims its state directory.
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

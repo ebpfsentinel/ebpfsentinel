@@ -7,7 +7,7 @@ End-to-end test suite for the eBPFsentinel agent. Covers agent lifecycle, REST/g
 ```
 tests/integration/
 ├── Makefile                            # Test orchestration (30+ targets)
-├── suites/                             # BATS test suites (01-91)
+├── suites/                             # BATS test suites (01-94)
 │   ├── 01-agent-lifecycle.bats
 │   ├── 02-rest-api-health.bats
 │   ├── ...
@@ -193,7 +193,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `cgroup-attribution` | 67, perf/07 | none | 6.12 | pr | Socket hooks naming the cgroup and the process behind a connection; loaded on its defaults in 67, connect() cost with and without it measured in perf/07 |
 | `cgroup-clusterip` | No suite yet (kernel-network) | none | 6.12 | manual | Resolves the Service cluster addresses of opted-in pods at connect4/connect6 and answers with the cluster address at getpeername and recvmsg. Asserted beside Cilium and Calico in the operator's coexistence lane, which needs a cluster no lane here provisions |
 | `cgroup-connect-redirect` | No suite yet (kernel-network) | none | 6.12 | manual | Steers the TCP connections of selected cgroups to a local listener at connect4/connect6. No suite yet: nothing asserts a steered connection lands on the listener |
-| `cgroup-workload-firewall` | 67, 70 | 2vm | 6.12 | nightly | Workload rules decided at connect/sendmsg/bind; suite 70 refuses a connect by the executable of the direct parent and of any ancestor, read from the live chain of parents |
+| `cgroup-workload-firewall` | 67, 70, 92 | 2vm | 6.12 | nightly | Workload rules decided at connect/sendmsg/bind; suite 70 refuses a connect by the executable of the direct parent and of any ancestor, read from the live chain of parents |
 | `lsm-bpf-guard` | 88 | none | 6.12 | nightly | No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks; 88 has a detach of the agent's link refused with the BPF LSM active, which the agent VM's boot line now sets |
 | `lsm-exec-network` | 91 | none | 6.12 | nightly | Only the executables in the set reach the network, at socket_create and socket_connect: observe reports by pid and inode, enforce refuses with a permission error, the agent's own sockets and the listed binary pass. Needs the BPF LSM active at boot (lsm=bpf), which the agent VM's boot line sets |
 | `lsm-write-refusal` | 83 | none | 6.12 | nightly | A writer's write-opens and truncations under a watched directory refused past a count inside a window, nothing refused once the agent is gone, and in shadow nothing refused or raised while the reading counts it by workload. Needs the BPF LSM active at boot (lsm=bpf); the suite skips where it is not |
@@ -247,12 +247,12 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `ips` | 13, 16, 38, 39 | 2vm | 6.12 | pr | Intrusion prevention + auto-blacklist; MHDDoS flood matrix in 38; slowhttptest in 39 |
 | `l7` | 16, 29, 38, 39 | 2vm | 6.12 | pr | L7 firewall rules (HTTP/SMTP/FTP/SMB inspection); MHDDoS flood matrix in 38; slow-request timeout in 39 |
 | `lb` | 16, 20, 37 | 2vm | 6.12 | pr | Load balancer services + VIPs |
-| `learning` | No suite yet (restart-state) | none | 6.12 | manual | Learning window start, status and result. No suite drives the CLI or the window it opens |
+| `learning` | 87 | none | 6.12 | nightly | Learning window list and status, read back in 87 after the window came back from a restart |
 | `metrics` | 02 | none | n/a | pr | Prometheus metrics |
 | `mitre` | 16, 51, 87 | 2vm | 6.12 | nightly | MITRE coverage matrix; suite 87 asserts a disabled IDS is listed under switched_off and not as coverage; suite 16 asserts GET /api/v1/mitre/coverage (technique/tactic consistency), suite 51 enforces that every alert-producing suite carries a MITRE assertion |
 | `nat` | 16, 21, 50 | 2vm | 6.12 | pr | NAT + NPTv6; NPTv6 prefix translation covered by suite 50 |
 | `netpol` | No suite yet (kernel-network) | k8s | 6.12 | manual | NetworkPolicy compiled for the pods of one node. No suite yet: the kubernetes lane does not apply a policy and read the compiled rules back |
-| `processes` | No suite yet (workload-identity) | none | 6.12 | manual | What a pid is, from its exec to its exit. The REST route it reads is asserted in 67; the CLI itself is not driven by any suite |
+| `processes` | 93 | none | 6.12 | nightly | What a pid is, from its exec to its exit. The REST route it reads is asserted in 67; show and list are driven in 93 on the shell a detection named |
 | `qos` | 16, 28 | 2vm | 6.12 | pr | QoS / traffic shaping |
 | `ratelimit` | 04, 14, 16, 38 | 2vm | 6.12 | pr | Rate limit policies; MHDDoS flood matrix in 38 |
 | `responses` | 48 | 2vm | 6.12 | nightly | Manual time-bounded response actions (create/list/revoke + TTL auto-expire) asserted via REST + CLI parity in 48 |
@@ -263,7 +263,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `threatintel` | 16, 17, 33 | 2vm | 6.12 | pr | OSINT feed CRUD + IOC matching + STIX feed |
 | `tls` | 58 | none | n/a | nightly | TLS status through /api/v1/tls/status, read while the PQ-hybrid handshake sweep runs in 58 |
 | `top` | 04 | none | n/a | pr | Top talkers by traffic volume |
-| `trace` | No suite yet (restart-state) | none | 6.12 | manual | trace through the loaded programs. No suite yet |
+| `trace` | 87 | none | 6.12 | nightly | trace through the loaded programs, naming the deny rule a crafted packet meets, in 87 |
 | `version` | 01 | none | n/a | pr | Version + build info |
 | `watch` | 34 | none | n/a | pr | SSE alerts stream (tail -f) |
 | `zones` | 31 | 2vm | 6.12 | pr | Zone, policy and status reads through /api/v1/zones in 31 |
@@ -286,7 +286,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `dns` | 04, 19, 45, 55 | 3vm | 6.12 | pr | DNS intel; DoH/DoT detection via ClientHello SNI + dst_port 853 in 45; AAAA query parser-readiness asserted in 55 |
 | `drops` | 90 | none | 6.12 | nightly | Kernel drop reasons as readable counts, fed by tracepoint-drop-reason; 90 reads NO_SOCKET back with its description |
 | `exposure` | 90 | none | 6.12 | nightly | What this node exposes, read off the socket hooks, and who bound it; 90 binds two listeners after start and reads one reachable by the default policy and one closed by a deny rule |
-| `file_watch` | No suite yet (host-integrity) | none | 6.12 | manual | Changes to watched files and the process that made them, on the host and inside a container's upper layer. No suite yet: nothing changes a watched file and reads the report back |
+| `file_watch` | 94 | none | 6.12 | nightly | Changes to watched files and the process that made them on the host, and a change to the agent's own configuration, asserted in 94. Inside a container's upper layer: no suite yet |
 | `firewall` | 03, 11, 24, 26, 40, 47, 55 | 3vm | 6.12 | pr | Stateful L3/L4 firewall; amplification UDP-port denies in 40; mid-flow block + CT-kill in 47; IPv6 CIDR rule round-trip + v4↔v6 co-existence asserted in 55 |
 | `flow` | 90 | none | 6.12 | nightly | Flow records and their IPFIX, OTLP, JSON and SIEM encodings; 90 exports a connection to the JSON lines sink and reads it back with the export status, and no suite decodes IPFIX, OTLP or the SIEM encodings at a collector |
 | `guest` | 73, 74, 75 | none | 6.12 | nightly | The virtual machines whose traffic crosses this host: a tap device in 73, a policy decided on a guest in 74, a libvirt domain in 75 |
@@ -303,7 +303,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `nat` | 16, 21, 50, perf/03, perf/06 | 2vm | 6.12 | pr | SNAT/DNAT/NPTv6; NPTv6 rule CRUD + tc-nat-egress config surface asserted in 50; NPTv6 control-plane add latency in perf/03; SNAT/DNAT datapath throughput overhead in perf/06 |
 | `netpol` | No suite yet (kernel-network) | k8s | 6.12 | manual | Kubernetes NetworkPolicy compiled for the pods of one node. No suite applies a policy |
 | `network_program` | 88 | none | 6.12 | nightly | Programs other than the agent's on the node's network path; 88 attaches an XDP program from outside the agent and reads it back as foreign, and detaches the agent's own link without the guard and reads the alert |
-| `process` | 67, 70 | none | 6.12 | nightly | The process table: a pid from exec to exit with its chain of ancestors; read through REST in 67, the chain decides workload rules in 70 |
+| `process` | 67, 70, 93 | none | 6.12 | nightly | The process table: a pid from exec to exit with its chain of ancestors; read through REST in 67, the chain decides workload rules in 70, the reverse shell, fileless and server-descendant detections and their process kill in 93 |
 | `qos` | 16, 28 | 2vm | 6.12 | pr | Traffic shaping policies |
 | `ransom` | 81, 82, 83, 84 | none | 6.12 | nightly | Mass encryption recognised by signals that agree: the shadow verdict in 81, the stop in 82, the write refusal with the BPF LSM in 83 and through fanotify in 84 |
 | `ratelimit` | 04, 14, 38 | 2vm | 6.12 | pr | Token bucket + variants; exhaustion under flood in 38 |
@@ -315,7 +315,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `telemetry` | No suite yet (unplanned) | none | n/a | manual | Anonymous heartbeat of version and eBPF load state. No suite exercises it: the destination is a build-time constant that no test build carries, so a community or CI binary has nowhere to send one and there is nothing to receive it |
 | `threatintel` | 16, 17, 33 | 2vm | 6.12 | pr | OSINT feeds + IOC + STIX |
 | `trace` | 87 | none | 6.12 | nightly | One crafted packet run through the loaded programs, each stage's verdict; 87 traces a five-tuple a deny rule names and reads the stage that stopped it, and one it does not name |
-| `workload` | 67, 70 | none | 6.12 | nightly | The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry |
+| `workload` | 67, 70, 92 | none | 6.12 | nightly | The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry |
 | `zone` | 31 | 2vm | 6.12 | pr | Zone-based policy |
 
 #### Capabilities above the floor (14)
@@ -334,7 +334,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `quarantine` | No suite yet (workload-identity) | none | 6.12 | manual | No suite yet: nothing quarantines a workload and reads its connections refused for the window |
 | `self_protection` | 88 | none | 6.12 | nightly | 88 reads the guard as protected and has a detach of the agent's XDP link refused where the BPF LSM runs, and reads it unprotected with the detach succeeding where bpf is masked out of the module list |
 | `tcp_reqsk_assign` | 86 | none | 6.12 | nightly | No shipped program rests on it yet, so the report in 86 is all there is to assert |
-| `workload_firewall` | 70, 72 | none | 6.12 | nightly | Rules on a workload's ancestry in 70 and inside LXC containers in 72 |
+| `workload_firewall` | 70, 72, 92 | none | 6.12 | nightly | Rules on a workload's ancestry in 70 and inside LXC containers in 72 |
 | `write_refusal` | 83, 84 | none | 6.12 | nightly | At the LSM hook in 83 and through the fanotify permission group in 84 |
 
 #### API paths (133)
@@ -343,7 +343,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 |---|---|
 | `/api/v1/agent/identity` | 35, 36 |
 | `/api/v1/agent/status` | 02, 08, 30 |
-| `/api/v1/alerts` | 04, 12, 13, 14, 25, 27, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 52, 53, 54, 55, 56, 59, 60, 61, 71, 79, 83, 84, 91 |
+| `/api/v1/alerts` | 04, 12, 13, 14, 25, 27, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 52, 53, 54, 55, 56, 59, 60, 61, 71, 79, 83, 84, 91, 92, 93, 94 |
 | `/api/v1/alerts/stream` | 25, 34 |
 | `/api/v1/alerts/triage` | No suite yet (unplanned) |
 | `/api/v1/alerts/{id}` | 25, 34 |
@@ -396,10 +396,10 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/firewall/rules` | 03, 07, 11, 26, 30, 47, 55, 76 |
 | `/api/v1/firewall/rules/{id}` | 03, 07, 11, 47, 76 |
 | `/api/v1/firewall/shadow` | 76 |
-| `/api/v1/firewall/workload/fqdn` | No suite yet (kernel-network) |
-| `/api/v1/firewall/workload/labels` | No suite yet (kernel-network) |
+| `/api/v1/firewall/workload/fqdn` | 92 |
+| `/api/v1/firewall/workload/labels` | 92 |
 | `/api/v1/firewall/workload/reach` | 70 |
-| `/api/v1/firewall/workload/rules` | 70, 72 |
+| `/api/v1/firewall/workload/rules` | 70, 72, 92 |
 | `/api/v1/flows/export` | 90 |
 | `/api/v1/geoip/lookup` | 30 |
 | `/api/v1/geoip/status` | 30 |
