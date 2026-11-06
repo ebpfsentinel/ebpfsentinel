@@ -3266,60 +3266,14 @@ pub async fn run(
         }
 
         // 10f-quinquies-b. Why the kernel drops packets
-        if config.kernel_drops.enabled {
-            match try_load_drop_reasons(&ebpf_dir) {
-                Ok((loader, counter, mut attacher)) => {
-                    let status = attacher.attach(&loader);
-                    if status.attached {
-                        let service =
-                            Arc::new(application::kernel_drop_service::KernelDropService::new(
-                                Box::new(counter),
-                                Arc::clone(&metrics)
-                                    as Arc<dyn ports::secondary::metrics_port::PacketMetrics>,
-                            ));
-                        app_state.install_kernel_drops(Arc::clone(&service));
-                        ebpf_state.add_loader(loader);
-                        metrics.set_ebpf_program_status("tracepoint_drop_reason", true);
-                        let interval = Duration::from_secs(config.kernel_drops.poll_interval_secs);
-                        let drops_cancel = cancel_token.clone();
-                        tokio::spawn(async move {
-                            // The link lives as long as the loop reading what
-                            // it counts.
-                            let _attacher = attacher;
-                            let mut tick = tokio::time::interval(interval);
-                            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                            loop {
-                                tokio::select! {
-                                    () = drops_cancel.cancelled() => break,
-                                    _ = tick.tick() => service.poll(),
-                                }
-                            }
-                        });
-                    } else {
-                        metrics.set_ebpf_program_status("tracepoint_drop_reason", false);
-                    }
-                }
-                Err(e) => {
-                    warn!("kernel drop reasons not counted: {e}");
-                    metrics.set_ebpf_program_status("tracepoint_drop_reason", false);
-                    adapters::ebpf::drop_reason::publish_status(
-                        adapters::ebpf::drop_reason::DropReasonStatus {
-                            attached: false,
-                            reason: Some(e.to_string()),
-                        },
-                    );
-                }
-            }
-        } else {
-            metrics.clear_ebpf_program_status("tracepoint_drop_reason");
-            adapters::ebpf::drop_reason::publish_status(
-                adapters::ebpf::drop_reason::DropReasonStatus {
-                    attached: false,
-                    reason: Some(
-                        "counting kernel drops is turned off in the configuration".to_string(),
-                    ),
-                },
-            );
+        if let Some((service, loader)) = start_kernel_drops(
+            &config.kernel_drops,
+            &ebpf_dir,
+            &metrics,
+            cancel_token.clone(),
+        ) {
+            app_state.install_kernel_drops(service);
+            ebpf_state.add_loader(loader);
         }
 
         // 10f-quinquies-c. TCP health per edge
@@ -7301,6 +7255,72 @@ pub fn try_load_drop_reasons(
         counter,
         adapters::ebpf::drop_reason::DropReasonAttacher::new(),
     ))
+}
+
+/// Count the packets the kernel drops, by the reason it gives, polled into
+/// the metrics and the API until `cancel`. `None` when the configuration
+/// turns it off or this host cannot run it, which is published either way.
+/// The returned loader has to live as long as the count is read.
+pub fn start_kernel_drops(
+    config: &infrastructure::config::KernelDropsConfig,
+    ebpf_dir: &str,
+    metrics: &Arc<AgentMetrics>,
+    cancel: CancellationToken,
+) -> Option<(
+    Arc<application::kernel_drop_service::KernelDropService>,
+    EbpfLoader,
+)> {
+    if !config.enabled {
+        metrics.clear_ebpf_program_status("tracepoint_drop_reason");
+        adapters::ebpf::drop_reason::publish_status(
+            adapters::ebpf::drop_reason::DropReasonStatus {
+                attached: false,
+                reason: Some(
+                    "counting kernel drops is turned off in the configuration".to_string(),
+                ),
+            },
+        );
+        return None;
+    }
+    let (loader, counter, mut attacher) = match try_load_drop_reasons(ebpf_dir) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            warn!("kernel drop reasons not counted: {e}");
+            metrics.set_ebpf_program_status("tracepoint_drop_reason", false);
+            adapters::ebpf::drop_reason::publish_status(
+                adapters::ebpf::drop_reason::DropReasonStatus {
+                    attached: false,
+                    reason: Some(e.to_string()),
+                },
+            );
+            return None;
+        }
+    };
+    let status = attacher.attach(&loader);
+    if !status.attached {
+        metrics.set_ebpf_program_status("tracepoint_drop_reason", false);
+        return None;
+    }
+    let service = Arc::new(application::kernel_drop_service::KernelDropService::new(
+        Box::new(counter),
+        Arc::clone(metrics) as Arc<dyn ports::secondary::metrics_port::PacketMetrics>,
+    ));
+    metrics.set_ebpf_program_status("tracepoint_drop_reason", true);
+    let interval = Duration::from_secs(config.poll_interval_secs);
+    let polled = Arc::clone(&service);
+    tokio::spawn(async move {
+        // The link lives as long as the loop reading what it counts.
+        let _attacher = attacher;
+        let mut tick = tokio::time::interval(interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => break,
+                _ = tick.tick() => polled.poll(),
+            }
+        }
+    });
+    Some((service, loader))
 }
 
 /// Load the TCP health object and write the layout its programs read.
