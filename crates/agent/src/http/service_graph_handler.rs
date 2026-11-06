@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use adapters::ebpf::ringbuf_observer::boottime_now_ns;
+use adapters::ebpf::ringbuf_observer::{boottime_now_ns, boottime_to_epoch_ns};
 use axum::Json;
 use axum::extract::{Query, State};
 use domain::l7::service_graph::{
@@ -184,13 +184,17 @@ pub async fn service_graph(
         code: "SERVICE_NOT_AVAILABLE",
         message: "the L7 dispatcher is not running on this node".to_string(),
     })?;
-    let now = boottime_now_ns();
+    // The round trips are polled on the boot clock, while an L7 event has its
+    // kernel stamp moved onto the wall clock when it is drained, so each
+    // reading is asked on the clock it was recorded on.
+    let boot_now = boottime_now_ns();
     let round_trips = state
         .tcp_health
         .load_full()
-        .map(|tcp| tcp.round_trips(now, minutes))
+        .map(|tcp| tcp.round_trips(boot_now, minutes))
         .unwrap_or_default();
-    Ok(Json(response(meter.graph(now, minutes), &round_trips)))
+    let graph = meter.graph(boottime_to_epoch_ns(boot_now), minutes);
+    Ok(Json(response(graph, &round_trips)))
 }
 
 #[cfg(test)]

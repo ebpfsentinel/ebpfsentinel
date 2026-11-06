@@ -198,7 +198,7 @@ impl L7RedMeter {
     }
 
     /// The service graph over the last `minutes` minutes up to `now_ns`,
-    /// read on the same clock the kernel stamps events with.
+    /// read on the clock the events carry once drained, the wall clock.
     #[must_use]
     pub fn graph(&self, now_ns: u64, minutes: u64) -> GraphReading {
         self.graph

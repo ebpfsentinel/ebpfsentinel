@@ -4850,9 +4850,12 @@ pub async fn run(
                 tokio::select! {
                     () = sweep_cancel.cancelled() => break,
                     _ = ticker.tick() => {
-                        // The kernel stamps L7 events on the boot clock, so the
-                        // idle timeout is measured on that clock too.
-                        let now_ns = adapters::ebpf::ringbuf_observer::boottime_now_ns();
+                        // An L7 event's kernel stamp is moved onto the wall
+                        // clock when it is drained, so the idle timeout is
+                        // measured on that clock too.
+                        let now_ns = adapters::ebpf::ringbuf_observer::boottime_to_epoch_ns(
+                            adapters::ebpf::ringbuf_observer::boottime_now_ns(),
+                        );
                         let count = sweep_dispatcher.flush_reassembled(now_ns);
                         if count > 0 {
                             tracing::debug!(count, "l7 reassembler flushed + parsed idle flows");
