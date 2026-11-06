@@ -5,6 +5,7 @@ pub mod brokered;
 pub mod dns_resolver;
 pub mod ebpf_lifecycle;
 pub mod ebpf_metrics;
+pub mod feed_fetch;
 pub mod http;
 pub mod mitigation_restore;
 pub mod reload;

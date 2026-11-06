@@ -82,65 +82,6 @@ use tracing::{debug, error, info, warn};
 
 use infrastructure::config::{LogFormat, LogLevel};
 
-/// Raises the shared "a feed cycle is fetching" flag for as long as it is held.
-///
-/// The manual refresh route reads that flag to refuse a second outbound fetch,
-/// so the flag has to fall again however the cycle ends - which is what makes
-/// this a guard rather than a pair of stores around the call.
-struct FeedCycleGuard(Arc<AtomicBool>);
-
-impl FeedCycleGuard {
-    fn claim(flag: &Arc<AtomicBool>) -> Self {
-        flag.store(true, Ordering::SeqCst);
-        Self(Arc::clone(flag))
-    }
-}
-
-impl Drop for FeedCycleGuard {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
-}
-
-/// Run one threat-intel feed fetch cycle: fetch every enabled feed, reload
-/// the IOC set, stamp `last_fetched`, and inject any STIX domain indicators
-/// into the DNS blocklist. Shared by the startup fetch, the periodic timer,
-/// and the manual refresh trigger.
-async fn run_ti_feed_cycle(
-    ti_svc: &Arc<ArcSwap<ThreatIntelAppService>>,
-    fetcher: &adapters::threatintel::HttpFeedFetcher,
-    metrics: &Arc<dyn MetricsPort>,
-    dns_blocklist: Option<&Arc<DnsBlocklistAppService>>,
-    phase: &'static str,
-) {
-    let feeds = ti_svc.load().list_feeds().to_vec();
-    let result = application::feed_update::fetch_all_feeds_v2(&feeds, fetcher, metrics).await;
-
-    let mut svc = (**ti_svc.load()).clone();
-    if !result.iocs.is_empty()
-        && let Err(e) = svc.reload_iocs(result.iocs)
-    {
-        warn!(phase, "feed IOC reload failed: {e}");
-    }
-    // Retain URL indicators so they surface read-only via the API (the
-    // IP-only threat-intel engine has no place for them).
-    svc.reload_urls(result.urls);
-    // Stamp the fetch time on every cycle, even when no IOCs changed, so the
-    // feed status reflects the most recent fetch attempt.
-    svc.mark_fetched();
-    ti_svc.store(Arc::new(svc));
-
-    // Distribute STIX domain indicators to the DNS blocklist.
-    if let Some(bl_svc) = dns_blocklist {
-        for domain in &result.domains {
-            let source_tag = domain.source.clone();
-            if let Err(e) = bl_svc.add_pattern_with_source(&domain.domain, source_tag) {
-                tracing::debug!(domain = %domain.domain, error = %e, "domain blocklist inject skipped");
-            }
-        }
-    }
-}
-
 /// Translate the configured DNS blocklist feeds into fetch specs.
 ///
 /// The format string is validated at config load, so anything other than
@@ -1271,21 +1212,12 @@ pub async fn run(
     let reload_complete = Arc::new(tokio::sync::Notify::new());
     // Manual threat-intel feed re-fetch channel. Only wired into AppState
     // when the feed fetcher task actually runs (threat intel enabled with
-    // ≥1 feed); otherwise the refresh endpoint reports the feature off.
-    let ti_feeds_active = config.threatintel.enabled && config.threatintel.has_feeds();
-    let mut feed_refresh_rx: Option<mpsc::Receiver<()>> = None;
-    let feed_refresh_tx = if ti_feeds_active {
-        let (tx, rx) = mpsc::channel::<()>(4);
-        feed_refresh_rx = Some(rx);
-        Some(tx)
-    } else {
-        None
+    // at least one feed); otherwise the refresh endpoint reports the feature
+    // off.
+    let (feed_trigger, mut feed_fetcher) = match crate::feed_fetch::channel(&config) {
+        Some((trigger, fetcher)) => (Some(trigger), Some(fetcher)),
+        None => (None, None),
     };
-    // Raised for as long as a feed cycle is fetching, so the manual refresh
-    // route can refuse a second outbound fetch rather than queue one behind the
-    // first. Shared with the fetcher task below, which clears it when the cycle
-    // it started ends.
-    let feed_refresh_in_flight = Arc::new(AtomicBool::new(false));
     let ebpf_program_status: Arc<RwLock<std::collections::HashMap<String, bool>>> =
         Arc::new(RwLock::new(std::collections::HashMap::new()));
 
@@ -1367,8 +1299,8 @@ pub async fn run(
     );
     app_state.config_path = Some(Arc::from(config_path));
     app_state.reload_complete = Some(Arc::clone(&reload_complete));
-    if let Some(tx) = feed_refresh_tx {
-        app_state = app_state.with_feed_refresh_trigger(tx, Arc::clone(&feed_refresh_in_flight));
+    if let Some(trigger) = feed_trigger {
+        app_state = app_state.with_feed_refresh_trigger(trigger.tx, trigger.in_flight);
     }
     if let Some(ref store) = alert_store {
         app_state = app_state.with_alert_store(Arc::clone(store));
@@ -5302,95 +5234,25 @@ pub async fn run(
     });
 
     // ── 11c. Spawn threat intel feed fetcher (periodic) ───────────────
-    let _feed_fetch_handle = if ti_feeds_active {
-        let fetcher = adapters::threatintel::HttpFeedFetcher::default();
-        let feed_ti_svc = Arc::clone(&ti_svc);
-        let feed_metrics = Arc::clone(&metrics) as Arc<dyn MetricsPort>;
-        let feed_cancel = cancel_token.clone();
-        let feed_dns_blocklist = dns_blocklist_ref.clone();
-        // Use the minimum refresh interval across all enabled feeds (floor: 60s).
-        let refresh_secs = config
-            .threatintel
-            .feeds
-            .iter()
-            .filter(|f| f.enabled)
-            .map(|f| f.refresh_interval_secs)
-            .chain(
-                config
-                    .threatintel
-                    .crowdsec
-                    .enabled
-                    .then_some(config.threatintel.crowdsec.refresh_interval_secs),
-            )
-            .filter(|s| *s > 0)
-            .min()
-            .unwrap_or(3600)
-            .max(60);
+    let _feed_fetch_handle = feed_fetcher.take().map(|fetcher| {
+        let refresh_secs = crate::feed_fetch::refresh_interval_secs(&config);
         info!(
             refresh_interval_secs = refresh_secs,
             feed_count = config.threatintel.feeds.len(),
             crowdsec = config.threatintel.crowdsec.enabled,
             "threat intel feed fetcher starting"
         );
-        let mut refresh_rx = feed_refresh_rx
-            .take()
-            .expect("feed refresh rx present when feeds active");
-        let cycle_flag = Arc::clone(&feed_refresh_in_flight);
-        Some(tokio::spawn(async move {
-            // Initial fetch at startup.
-            {
-                let _running = FeedCycleGuard::claim(&cycle_flag);
-                run_ti_feed_cycle(
-                    &feed_ti_svc,
-                    &fetcher,
-                    &feed_metrics,
-                    feed_dns_blocklist.as_ref(),
-                    "initial",
-                )
-                .await;
-            }
-
-            let mut interval = tokio::time::interval(Duration::from_secs(refresh_secs));
-            interval.tick().await; // skip the first immediate tick (already fetched above)
-            loop {
-                tokio::select! {
-                    () = feed_cancel.cancelled() => break,
-                    _ = interval.tick() => {
-                        let _running = FeedCycleGuard::claim(&cycle_flag);
-                        run_ti_feed_cycle(
-                            &feed_ti_svc,
-                            &fetcher,
-                            &feed_metrics,
-                            feed_dns_blocklist.as_ref(),
-                            "periodic",
-                        )
-                        .await;
-                    }
-                    msg = refresh_rx.recv() => match msg {
-                        Some(()) => {
-                            info!("manual threat intel feed refresh triggered");
-                            // The route already claimed the slot before queueing
-                            // this message; claiming again keeps the flag raised
-                            // for the whole cycle and releases it on the way out.
-                            let _running = FeedCycleGuard::claim(&cycle_flag);
-                            run_ti_feed_cycle(
-                                &feed_ti_svc,
-                                &fetcher,
-                                &feed_metrics,
-                                feed_dns_blocklist.as_ref(),
-                                "manual",
-                            )
-                            .await;
-                        }
-                        // All refresh senders dropped - happens only at shutdown.
-                        None => break,
-                    },
-                }
-            }
-        }))
-    } else {
-        None
-    };
+        fetcher.spawn(
+            Arc::new(adapters::threatintel::HttpFeedFetcher::default()),
+            crate::feed_fetch::FeedSinks {
+                ti_svc: Arc::clone(&ti_svc),
+                dns_blocklist: dns_blocklist_ref.clone(),
+                metrics: Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+            },
+            refresh_secs,
+            cancel_token.clone(),
+        )
+    });
 
     // ── 11c¼. Spawn DNS blocklist feed fetcher (periodic) ─────────────
     let _dns_feed_handle = match dns_blocklist_ref.clone() {
