@@ -22,6 +22,7 @@ use domain::process::engine::{Lineage, ProcessTable, PurgeOutcome};
 use domain::process::entity::{
     ProcessEntry, ProcessEventKind, ProcessIdentity, ProcessLifecycleEvent, ProcessTableStats,
 };
+use ports::secondary::executable_digest_port::ExecutableDigester;
 use ports::secondary::metadata_enricher_port::MetadataEnricher;
 use ports::secondary::process_details_port::ProcessDetailsReader;
 use ports::secondary::process_executable_port::ProcessExecutableReader;
@@ -47,6 +48,7 @@ const REFRESH_SETTLE: Duration = Duration::from_secs(1);
 pub struct ProcessTableService {
     table: RwLock<ProcessTable>,
     executables: Option<Arc<dyn ProcessExecutableReader>>,
+    digester: Option<Arc<dyn ExecutableDigester>>,
     details: Option<Arc<dyn ProcessDetailsReader>>,
     containers: Option<Arc<ContainerResolverEngine>>,
     metadata_enrichers: Vec<Arc<dyn MetadataEnricher>>,
@@ -72,6 +74,7 @@ impl ProcessTableService {
         Self {
             table: RwLock::new(ProcessTable::new(capacity)),
             executables: None,
+            digester: None,
             details: None,
             containers: None,
             metadata_enrichers: Vec::new(),
@@ -90,6 +93,14 @@ impl ProcessTableService {
     #[must_use]
     pub fn with_executables(mut self, reader: Arc<dyn ProcessExecutableReader>) -> Self {
         self.executables = Some(reader);
+        self
+    }
+
+    /// Name each executable by its digest through `digester` as well as by
+    /// its path.
+    #[must_use]
+    pub fn with_digester(mut self, digester: Arc<dyn ExecutableDigester>) -> Self {
+        self.digester = Some(digester);
         self
     }
 
@@ -268,6 +279,9 @@ impl ProcessTableService {
         if let Some(reader) = &self.executables
             && let Some(executable) = reader.read_executable(pid)
         {
+            if let Some(digester) = &self.digester {
+                entry.exe_hash = digester.digest(pid, executable.dev, executable.inode);
+            }
             entry.identity = ProcessIdentity::Path {
                 path: executable.path,
                 dev: executable.dev,
@@ -580,6 +594,25 @@ mod tests {
                 dev: 64,
                 inode: 4242,
                 source: DlpIdentitySource::ProcessAtAlertTime,
+            })
+        }
+    }
+
+    /// Answers a digest only for the file the table read, so a test can
+    /// tell whether the identity it was handed was the one it checked.
+    struct FixedDigest;
+    impl ExecutableDigester for FixedDigest {
+        fn digest(
+            &self,
+            _pid: u32,
+            dev: u64,
+            inode: u64,
+        ) -> Option<domain::process::digest::ExeHash> {
+            ((dev, inode) == (64, 4242)).then(|| {
+                domain::process::digest::ExeHash::new(
+                    domain::process::digest::DigestSource::Content,
+                    [7; 32],
+                )
             })
         }
     }
@@ -1001,6 +1034,23 @@ mod tests {
         assert_eq!(entry.parent_pid, Some(1));
         assert_eq!(entry.uid, 1000);
         assert_eq!(entry.cgroup_id, 777);
+    }
+
+    #[tokio::test]
+    async fn an_exec_carries_the_digest_of_the_file_it_was_named_by() {
+        let service = ProcessTableService::new(16, false)
+            .with_executables(Arc::new(FixedExecutable))
+            .with_digester(Arc::new(FixedDigest));
+        service.apply(exec(42, 1)).await;
+        let hash = service.get(42).unwrap().exe_hash.expect("a digest");
+        assert_eq!(hash.digest(), &[7; 32]);
+
+        // No path, no file to hash: the digest never stands alone.
+        let unnamed = ProcessTableService::new(16, false)
+            .with_executables(Arc::new(NoExecutable))
+            .with_digester(Arc::new(FixedDigest));
+        unnamed.apply(exec(43, 1)).await;
+        assert!(unnamed.get(43).unwrap().exe_hash.is_none());
     }
 
     #[tokio::test]

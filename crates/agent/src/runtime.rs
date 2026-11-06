@@ -1696,6 +1696,9 @@ async fn process_table(
     .with_executables(Arc::new(adapters::container::ProcExecutableResolver::new(
         proc_root,
     )))
+    .with_digester(Arc::new(adapters::container::ProcExecutableDigester::new(
+        proc_root,
+    )))
     .with_details(Arc::new(adapters::container::ProcDetailsResolver::new(
         proc_root,
     )))

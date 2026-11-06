@@ -14,6 +14,7 @@ pub mod pod_cgroups;
 pub mod pod_claims;
 pub mod podman_enricher;
 pub mod proc_details;
+pub mod proc_digest;
 pub mod proc_executable;
 pub mod proc_facts;
 pub mod proc_namespaces;
@@ -53,6 +54,7 @@ pub use podman_enricher::{
     PodmanReach, PodmanRuntime, rootless_socket as podman_rootless_socket,
 };
 pub use proc_details::ProcDetailsResolver;
+pub use proc_digest::ProcExecutableDigester;
 pub use proc_executable::ProcExecutableResolver;
 pub use proc_facts::ProcFactsReader;
 pub use proc_resolver::ProcContainerResolver;

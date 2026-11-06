@@ -583,6 +583,7 @@ mod tests {
             pid: 42,
             source: WorkloadSource::Flow,
             exe: Some("/usr/sbin/nginx".into()),
+            exe_hash: None,
             command_line: None,
             uid: None,
             cgroup: None,

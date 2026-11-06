@@ -89,6 +89,9 @@ fn write_workload(out: &mut String, workload: &Workload) {
     number(out, otlp::PROCESS_PID, u64::from(workload.pid));
     text(out, otlp::WORKLOAD_SOURCE, workload.source.as_str());
     optional_text(out, otlp::PROCESS_EXECUTABLE_PATH, workload.exe.as_deref());
+    if let Some(hash) = workload.exe_hash {
+        text(out, otlp::WORKLOAD_EXE_HASH, &hash.to_string());
+    }
     if let Some(uid) = workload.uid {
         number(out, otlp::WORKLOAD_UID, u64::from(uid));
     }
@@ -280,6 +283,7 @@ mod tests {
                 pid: 4_242,
                 source: WorkloadSource::Socket,
                 exe: Some("/usr/bin/curl".to_string()),
+                exe_hash: None,
                 command_line: None,
                 uid: Some(1_000),
                 cgroup: Some(9_876),

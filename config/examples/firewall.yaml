@@ -331,6 +331,22 @@ firewall:
         exe: /usr/bin/curl
         mode: observe
 
+    # A path names where a binary sits, and anything able to write a file
+    # can put other bytes there. `exe_hash` names the bytes: `sha256:` is
+    # what `sha256sum` prints, `fsverity-sha256:` what `fsverity digest`
+    # prints for a file with fs-verity on, and the two never match each
+    # other. A task the agent could not hash is not matched.
+    - id: fw-allow-pinned-curl-to-registry
+      priority: 39
+      action: allow
+      protocol: tcp
+      dst_ip: "10.20.0.0/16"
+      dst_port: 443
+      workload:
+        exe: /usr/bin/curl
+        exe_hash: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        mode: observe
+
     # A destination by host name. Exact names and one leading `*.` label
     # are accepted; the rule must allow, and its selector cannot be an
     # executable, because an answer is credited to the cgroup that asked.

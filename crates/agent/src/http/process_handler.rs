@@ -89,9 +89,8 @@ pub struct ProcessAncestryResponse {
     pub truncated: bool,
 }
 
-/// What the table knows a process by. `kind` is `path` or `unknown`; the
-/// hash of the executable is not computed yet, and when it is it arrives as
-/// a third kind rather than as a field nobody can tell apart from absent.
+/// What the table knows a process by. `kind` is `path` or `unknown`, and a
+/// path may carry the digest of the file it named beside it.
 #[derive(Serialize, ToSchema)]
 pub struct ProcessIdentityResponse {
     /// `path` or `unknown`.
@@ -99,6 +98,12 @@ pub struct ProcessIdentityResponse {
     /// The executable path, where the identity carries one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Digest of the file behind the path: `fsverity-sha256:<hex>` where the
+    /// kernel measured a file with fs-verity on, `sha256:<hex>` where the
+    /// agent read its contents. Absent where the file could not be opened,
+    /// which a rootless agent cannot do for another user's process.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exe_hash: Option<String>,
 }
 
 /// The container a process runs in, where it runs in one. Absent means the
@@ -184,12 +189,11 @@ fn stats_response(stats: &domain::process::entity::ProcessTableStats) -> Process
     }
 }
 
-fn identity_response(
-    identity: &domain::process::entity::ProcessIdentity,
-) -> ProcessIdentityResponse {
+fn identity_response(entry: &domain::process::entity::ProcessEntry) -> ProcessIdentityResponse {
     ProcessIdentityResponse {
-        kind: identity.kind().to_string(),
-        path: identity.path().map(ToString::to_string),
+        kind: entry.identity.kind().to_string(),
+        path: entry.identity.path().map(ToString::to_string),
+        exe_hash: entry.exe_hash.map(|hash| hash.to_string()),
     }
 }
 
@@ -202,7 +206,7 @@ fn ancestry_response(lineage: &domain::process::engine::Lineage) -> ProcessAnces
                 pid: a.pid,
                 start_ns: a.start_ns,
                 comm: a.comm.clone(),
-                identity: identity_response(&a.identity),
+                identity: identity_response(a),
                 uid: a.uid,
                 exited_at_ns: a.exited_at_ns,
             })
@@ -217,7 +221,7 @@ fn entry_response(entry: &domain::process::entity::ProcessEntry) -> ProcessEntry
         pid: entry.pid,
         parent_pid: entry.parent_pid,
         comm: entry.comm.clone(),
-        identity: identity_response(&entry.identity),
+        identity: identity_response(entry),
         command_line: entry.command_line.clone(),
         uid: entry.uid,
         gid: entry.gid,

@@ -4384,6 +4384,9 @@ pub async fn run(
         .with_executables(Arc::new(adapters::container::ProcExecutableResolver::new(
             &coverage_proc,
         )))
+        .with_digester(Arc::new(adapters::container::ProcExecutableDigester::new(
+            &coverage_proc,
+        )))
         .with_details(Arc::new(adapters::container::ProcDetailsResolver::new(
             &coverage_proc,
         )));

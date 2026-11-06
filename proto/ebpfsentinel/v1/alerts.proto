@@ -157,6 +157,10 @@ message Workload {
   // The command line, where the operator turned its capture on, with the
   // secret-bearing shapes removed where argv was read. Empty if absent.
   string command_line = 16;
+  // Digest of the executable, `fsverity-sha256:<hex>` where the kernel
+  // measured a file with fs-verity on, `sha256:<hex>` where the agent read
+  // its contents. Empty where the agent could not open the file.
+  string exe_hash = 17;
 }
 
 // The other end of a flow, as the node holding its address published it.

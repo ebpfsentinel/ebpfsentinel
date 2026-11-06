@@ -14,6 +14,7 @@ use domain::firewall::workload::{
 };
 use domain::firewall::workload_peer::PeerSelector;
 use domain::netpol::LabelSelector;
+use domain::process::digest::ExeHash;
 use serde::{Deserialize, Serialize};
 
 use super::alias::AliasConfig;
@@ -563,6 +564,13 @@ pub struct WorkloadMatchConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exe: Option<String>,
 
+    /// Digest of the executable, `sha256:<hex>` for the SHA-256 of its
+    /// contents or `fsverity-sha256:<hex>` for its fs-verity digest. Names
+    /// the bytes rather than the place, so a copy of an allowed path holding
+    /// other bytes does not match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe_hash: Option<String>,
+
     /// systemd unit name, such as `nginx.service`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
@@ -640,8 +648,19 @@ impl WorkloadMatchConfig {
             expected: "observe, enforce".to_string(),
         })?;
 
-        let selector = WorkloadSelector::with_lineage(
+        let exe_hash = self
+            .exe_hash
+            .as_deref()
+            .map(ExeHash::parse)
+            .transpose()
+            .map_err(|e| ConfigError::Validation {
+                field: format!("{prefix}.workload.exe_hash"),
+                message: e.to_string(),
+            })?;
+
+        let selector = WorkloadSelector::with_digest(
             self.exe.clone(),
+            exe_hash,
             self.unit.clone(),
             self.cgroup.clone(),
             self.container.clone(),
@@ -1331,6 +1350,47 @@ workload:
         );
 
         assert!(refused.is_err());
+    }
+
+    #[test]
+    fn a_rule_may_name_an_executable_by_its_digest_alone() {
+        let rule = workload_rule(
+            r"
+id: fw-curl-pinned
+priority: 10
+action: allow
+workload:
+  exe_hash: sha256:E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855
+",
+        );
+
+        rule.validate(0).expect("a valid rule");
+        let domain_rule = rule.to_domain_rule(&HashMap::new()).expect("a domain rule");
+        let selector = domain_rule.workload.expect("the workload half").selector;
+        assert_eq!(
+            selector.exe_hash.map(|h| h.to_string()).as_deref(),
+            Some("sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
+        assert!(selector.exe.is_none());
+    }
+
+    #[test]
+    fn a_digest_without_its_source_is_refused_by_name() {
+        let rule = workload_rule(
+            r"
+id: fw-bare
+priority: 10
+action: allow
+workload:
+  exe_hash: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+",
+        );
+
+        let refused = rule.validate(0).expect_err("a bare digest is refused");
+        assert!(
+            refused.to_string().contains("workload.exe_hash"),
+            "{refused}"
+        );
     }
 
     #[test]

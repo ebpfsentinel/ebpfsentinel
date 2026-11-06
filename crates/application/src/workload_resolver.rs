@@ -268,6 +268,7 @@ fn unreachable_owner(owner: SocketOwner) -> Workload {
         pid: owner.pid,
         source: owner.source,
         exe: None,
+        exe_hash: None,
         command_line: None,
         uid: None,
         cgroup: None,

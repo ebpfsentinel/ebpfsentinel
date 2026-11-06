@@ -20,6 +20,7 @@ use std::net::IpAddr;
 use crate::container::entity::{ContainerContext, ContainerInfo, ContainerMetadata};
 use crate::identity::IdentityKind;
 use crate::identity::remote::RemoteEntry;
+use crate::process::digest::ExeHash;
 use crate::process::engine::Lineage;
 use crate::process::entity::ProcessEntry;
 
@@ -176,11 +177,11 @@ impl WorkloadAncestry {
 /// process table that has not seen the exec gives a pid and nothing more, a
 /// host process has no container, and a node outside Kubernetes has no pod.
 ///
-/// There is deliberately no hash of the executable. The process table records
-/// the path `/proc/<pid>/exe` answered and says so in its own identity type,
-/// and until it can hash the file there is nothing truthful to put in such a
-/// field. An always-absent key on the wire would be a promise the agent does
-/// not keep.
+/// `exe` is where the binary sat and `exe_hash` is what it was. The path is
+/// forgeable by anything able to write a file; the digest is not, and it says
+/// how it was obtained, so a reader can weigh a kernel measurement against a
+/// read of the contents. A block whose process table could not hash the file
+/// carries the path alone, and a reader then knows a path is all there was.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workload {
     /// The process that owns the socket. Never zero in a block that exists.
@@ -190,6 +191,9 @@ pub struct Workload {
     /// The executable path, where the process table holds one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exe: Option<String>,
+    /// The digest of the executable, where the process table holds one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe_hash: Option<ExeHash>,
     /// The command line, where the process table captured one: absent unless
     /// the operator turned the capture on, and redacted of the secret-bearing
     /// shapes before it was ever stored.
@@ -394,6 +398,7 @@ impl Workload {
             pid,
             source,
             exe: None,
+            exe_hash: None,
             command_line: None,
             uid: None,
             cgroup: None,
@@ -416,6 +421,7 @@ impl Workload {
     #[must_use]
     pub fn with_process(mut self, entry: &ProcessEntry) -> Self {
         self.exe = entry.identity.path().map(ToOwned::to_owned);
+        self.exe_hash = entry.exe_hash;
         self.command_line.clone_from(&entry.command_line);
         self.uid = Some(entry.uid);
         if entry.cgroup_id != 0 {
@@ -615,6 +621,7 @@ mod tests {
             pid: 0,
             source: WorkloadSource::Flow,
             exe: Some("/usr/bin/curl".to_string()),
+            exe_hash: None,
             command_line: None,
             uid: None,
             cgroup: None,

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::container::entity::ContainerContext;
+use crate::process::digest::ExeHash;
 
 /// Which of the kernel notifications a lifecycle event carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,10 +74,10 @@ impl ProcessLifecycleEvent {
 /// a binary can be named anything, a path can be replaced under a running
 /// process, and a container can present its own filesystem. The variant is
 /// therefore part of the answer rather than a detail of it, so a reader is
-/// never left to assume a path was verified. A second variant naming a
-/// content hash is what will make the claim provable, and until the hashing
-/// exists this enum has no field to put one in: an entry says `path` or it
-/// says `unknown`.
+/// never left to assume a path was verified. What makes the claim provable
+/// is the digest of the file, which the entry carries beside this rather
+/// than in it: the path is still the name the file was reached by, and the
+/// digest exists only where the agent could open that file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ProcessIdentity {
@@ -148,6 +149,13 @@ pub struct ProcessEntry {
     pub comm: String,
     /// What the entry claims about the binary, and how good the claim is.
     pub identity: ProcessIdentity,
+    /// The digest of the file behind `identity`, where the agent could
+    /// obtain one: the kernel's fs-verity measurement on a file that has
+    /// verity on, the SHA-256 of its contents otherwise. Absent where no
+    /// hasher is wired, where the file could not be read, or where it is
+    /// larger than the agent reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe_hash: Option<ExeHash>,
     /// The argv of the exec, joined with spaces, where the configuration
     /// allows it to be captured. Absent otherwise, and absent rather than
     /// empty for a kernel thread, which has no argv at all.
@@ -182,6 +190,7 @@ impl ProcessEntry {
             start_ns: None,
             comm: comm.into(),
             identity: ProcessIdentity::Unknown,
+            exe_hash: None,
             command_line: None,
             uid: 0,
             gid: 0,

@@ -45,6 +45,8 @@ pub const KEY_RECEIPT_TIME: &str = "rt";
 pub const KEY_PID: &str = "spid";
 pub const KEY_PROCESS: &str = "sproc";
 pub const KEY_FILE_PATH: &str = "filePath";
+/// CEF's own key for the digest of the file named by `filePath`.
+pub const KEY_FILE_HASH: &str = "fileHash";
 pub const KEY_UID: &str = "suid";
 
 /// What a flow has and an alert does not.
@@ -141,6 +143,9 @@ fn push_workload(fields: &mut Vec<(&'static str, String)>, workload: &Workload) 
     if let Some(exe) = workload.exe.as_deref().filter(|exe| !exe.is_empty()) {
         fields.push((KEY_PROCESS, binary_name(exe).to_string()));
         fields.push((KEY_FILE_PATH, exe.to_string()));
+    }
+    if let Some(hash) = workload.exe_hash {
+        fields.push((KEY_FILE_HASH, hash.to_string()));
     }
     if let Some(uid) = workload.uid {
         fields.push((KEY_UID, uid.to_string()));
@@ -374,6 +379,7 @@ mod tests {
                 pid: 4_242,
                 source: WorkloadSource::Socket,
                 exe: Some("/usr/bin/curl".to_string()),
+                exe_hash: None,
                 command_line: None,
                 uid: Some(1_000),
                 cgroup: Some(9_876),

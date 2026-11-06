@@ -57,6 +57,10 @@ pub const FLOW_END_REASON_CODE: &str = "ebpfsentinel.flow.end_reason_code";
 pub const FLOW_SAMPLING: &str = "ebpfsentinel.flow.sampling";
 pub const WORKLOAD_SOURCE: &str = "ebpfsentinel.workload.source";
 pub const WORKLOAD_UID: &str = "ebpfsentinel.workload.uid";
+/// The executable's digest, written with its source as a prefix
+/// (`fsverity-sha256:` or `sha256:`), so a reader never mistakes one for the
+/// other.
+pub const WORKLOAD_EXE_HASH: &str = "ebpfsentinel.workload.exe_hash";
 pub const WORKLOAD_CGROUP_ID: &str = "ebpfsentinel.workload.cgroup_id";
 pub const WORKLOAD_UNIT: &str = "ebpfsentinel.workload.unit";
 pub const WORKLOAD_SERVICE_ACCOUNT: &str = "ebpfsentinel.workload.service_account";
@@ -140,6 +144,9 @@ fn push_workload(attributes: &mut Vec<(&'static str, String)>, workload: &Worklo
     attributes.push((PROCESS_PID, workload.pid.to_string()));
     attributes.push((WORKLOAD_SOURCE, workload.source.as_str().to_string()));
     push_text(attributes, PROCESS_EXECUTABLE_PATH, workload.exe.as_deref());
+    if let Some(hash) = workload.exe_hash {
+        attributes.push((WORKLOAD_EXE_HASH, hash.to_string()));
+    }
     if let Some(uid) = workload.uid {
         attributes.push((WORKLOAD_UID, uid.to_string()));
     }
@@ -220,6 +227,7 @@ mod tests {
             pid: 4_242,
             source: WorkloadSource::Socket,
             exe: Some("/usr/bin/curl".to_string()),
+            exe_hash: None,
             command_line: None,
             uid: Some(1_000),
             cgroup: Some(78_912),

@@ -2201,6 +2201,7 @@ mod tests {
             pid: 0,
             source: crate::workload::entity::WorkloadSource::Socket,
             exe: None,
+            exe_hash: None,
             command_line: None,
             uid: None,
             cgroup: None,

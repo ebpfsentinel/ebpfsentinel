@@ -30,6 +30,12 @@ pub struct WorkloadResponse {
     /// process itself, which is why it is a path and not an identity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exe: Option<String>,
+    /// Digest of the executable, which is what names the bytes rather than
+    /// the place: `fsverity-sha256:<hex>` where the kernel measured a file
+    /// with fs-verity on, `sha256:<hex>` where the agent read its contents.
+    /// Absent where the agent could not open the file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exe_hash: Option<String>,
     /// The command line, where the operator turned its capture on. The
     /// secret-bearing shapes were removed where argv was read, before it was
     /// stored, so what is here is what every reader of the process table saw.
@@ -171,6 +177,7 @@ pub fn workload_response(workload: Option<Workload>) -> Option<WorkloadResponse>
         pid: w.pid,
         source: w.source.as_str().to_string(),
         exe: w.exe,
+        exe_hash: w.exe_hash.map(|h| h.to_string()),
         command_line: w.command_line,
         uid: w.uid,
         cgroup: w.cgroup,
@@ -238,6 +245,19 @@ mod tests {
         let json = serde_json::to_string(&workload_response(Some(w)).expect("a block"))
             .expect("the block serialises");
         assert_eq!(json, r#"{"pid":4242,"source":"flow"}"#);
+    }
+
+    #[test]
+    fn the_digest_travels_in_its_written_form() {
+        use domain::process::digest::ExeHash;
+
+        let written =
+            "fsverity-sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let mut w = Workload::new(4242, WorkloadSource::Socket).expect("a pid builds a block");
+        w.exe_hash = Some(ExeHash::parse(written).expect("a digest"));
+        let json = serde_json::to_value(workload_response(Some(w)).expect("a block"))
+            .expect("the block serialises");
+        assert_eq!(json["exe_hash"], written);
     }
 
     #[test]

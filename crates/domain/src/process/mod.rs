@@ -17,6 +17,7 @@
 //! performs is the oldest exec first, counted so the operator sees it.
 
 pub mod detection;
+pub mod digest;
 pub mod engine;
 pub mod entity;
 pub mod redact;

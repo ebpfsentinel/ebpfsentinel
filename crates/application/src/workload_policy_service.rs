@@ -48,6 +48,7 @@ use domain::firewall::workload::{
 };
 use domain::firewall::workload_peer::{PeerEnds, PeerRuleEnds, source_matches_remote};
 use domain::identity::remote::RemoteIdentities;
+use domain::process::digest::ExeHash;
 use domain::process::engine::Lineage;
 use domain::process::entity::{ProcessEntry, ProcessIdentity};
 use ebpf_common::workload_policy::WORKLOAD_POLICY_MAX_RULES;
@@ -63,6 +64,8 @@ use tracing::{debug, info, warn};
 pub struct ResolvedWorkload {
     /// Absolute path of the executable.
     pub exe: Option<String>,
+    /// Digest of the executable, where the process table holds one.
+    pub exe_hash: Option<ExeHash>,
     /// systemd unit, derived from the cgroup path.
     pub unit: Option<String>,
     /// Absolute cgroup v2 path.
@@ -107,6 +110,7 @@ impl ResolvedWorkload {
     pub fn facts(&self) -> WorkloadFacts<'_> {
         WorkloadFacts {
             exe: self.exe.as_deref(),
+            exe_hash: self.exe_hash,
             unit: self.unit.as_deref(),
             cgroup: self.cgroup.as_deref(),
             container_id: self.container_id.as_deref(),
@@ -131,6 +135,7 @@ impl ResolvedWorkload {
 pub fn workload_of(entry: &ProcessEntry) -> ResolvedWorkload {
     let mut resolved = ResolvedWorkload {
         exe: entry.identity.path().map(ToOwned::to_owned),
+        exe_hash: entry.exe_hash,
         ..ResolvedWorkload::default()
     };
     if let Some(context) = entry.container.as_ref() {

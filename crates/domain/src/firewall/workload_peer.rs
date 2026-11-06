@@ -305,6 +305,7 @@ pub fn source_matches_remote(selector: &WorkloadSelector, identity: &AddressIden
 pub fn source_unreadable(selector: &WorkloadSelector) -> Option<&'static str> {
     [
         ("exe", selector.exe.is_some()),
+        ("exe_hash", selector.exe_hash.is_some()),
         ("unit", selector.unit.is_some()),
         ("cgroup", selector.cgroup.is_some()),
         ("parent", selector.parent.is_some()),

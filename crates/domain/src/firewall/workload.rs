@@ -40,6 +40,7 @@ use ebpf_common::workload_policy::{
 use crate::common::entity::{Protocol, RuleId};
 use crate::guest::GuestIdentity;
 use crate::netpol::LabelSelector;
+use crate::process::digest::ExeHash;
 
 use super::entity::{FirewallAction, FirewallRule, IpNetwork, PortRange};
 use super::error::FirewallError;
@@ -73,12 +74,21 @@ pub struct WorkloadSelector {
     ///
     /// A path is what the task's own `/proc/<pid>/exe` points at, and it is
     /// forgeable: a process that can write a binary somewhere and exec it
-    /// under a name a rule allows is allowed by that rule. Closing that
-    /// needs the hash of the mapped file, which this build does not compute,
-    /// so a path matcher is a statement about the name and not about the
-    /// bytes behind it.
+    /// under a name a rule allows is allowed by that rule. A path matcher is
+    /// a statement about the name and not about the bytes behind it, which
+    /// is what `exe_hash` is for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exe: Option<String>,
+    /// Digest of the executable, compared exactly, source included: an
+    /// fs-verity digest never matches a content digest of the same file.
+    ///
+    /// This is the matcher a copied or bind-mounted binary does not pass,
+    /// because other bytes have another digest whatever their name. A task
+    /// whose executable the agent could not hash has no digest to compare
+    /// and is not matched, so a rule allowing by digest refuses rather than
+    /// opens when the hash is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe_hash: Option<ExeHash>,
     /// systemd unit name, such as `nginx.service`, compared exactly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
@@ -226,7 +236,30 @@ impl WorkloadSelector {
         kubernetes: KubernetesMatchers,
         lineage: LineageMatchers,
     ) -> Result<Self, FirewallError> {
-        Self::with_guest(exe, unit, cgroup, container, kubernetes, lineage, None)
+        Self::with_digest(exe, None, unit, cgroup, container, kubernetes, lineage)
+    }
+
+    /// Build a selector that may also name the executable by its digest.
+    ///
+    /// # Errors
+    ///
+    /// The refusals [`Self::with_lineage`] documents. A digest alone is a
+    /// selector: it names a workload more narrowly than a path does.
+    pub fn with_digest(
+        exe: Option<String>,
+        exe_hash: Option<ExeHash>,
+        unit: Option<String>,
+        cgroup: Option<String>,
+        container: Option<String>,
+        kubernetes: KubernetesMatchers,
+        lineage: LineageMatchers,
+    ) -> Result<Self, FirewallError> {
+        let selector = Self {
+            exe_hash,
+            ..Self::assemble(exe, unit, cgroup, container, kubernetes, lineage, None)
+        };
+        selector.validate()?;
+        Ok(selector)
     }
 
     /// Build a selector that may also name a virtual machine.
@@ -245,8 +278,24 @@ impl WorkloadSelector {
         lineage: LineageMatchers,
         guest: Option<String>,
     ) -> Result<Self, FirewallError> {
-        let selector = Self {
+        let selector = Self::assemble(exe, unit, cgroup, container, kubernetes, lineage, guest);
+        selector.validate()?;
+        Ok(selector)
+    }
+
+    /// The fields, blanks trimmed, before anything is checked.
+    fn assemble(
+        exe: Option<String>,
+        unit: Option<String>,
+        cgroup: Option<String>,
+        container: Option<String>,
+        kubernetes: KubernetesMatchers,
+        lineage: LineageMatchers,
+        guest: Option<String>,
+    ) -> Self {
+        Self {
             exe: trimmed(exe),
+            exe_hash: None,
             unit: trimmed(unit),
             cgroup: trimmed(cgroup),
             container: trimmed(container),
@@ -256,9 +305,19 @@ impl WorkloadSelector {
             parent: trimmed(lineage.parent),
             ancestor: trimmed(lineage.ancestor),
             guest: trimmed(guest),
-        };
-        selector.validate()?;
-        Ok(selector)
+        }
+    }
+
+    /// The same selector also naming the executable by its digest.
+    ///
+    /// # Errors
+    ///
+    /// The refusals [`Self::validate`] documents, which here means a guest
+    /// named beside a digest.
+    pub fn with_exe_hash(mut self, exe_hash: Option<ExeHash>) -> Result<Self, FirewallError> {
+        self.exe_hash = exe_hash;
+        self.validate()?;
+        Ok(self)
     }
 
     /// Check every matcher this selector carries.
@@ -269,9 +328,9 @@ impl WorkloadSelector {
     pub fn validate(&self) -> Result<(), FirewallError> {
         if self.is_empty() {
             return Err(FirewallError::InvalidWorkloadSelector {
-                reason: "a workload selector must name at least one of exe, unit, cgroup, \
-                         container, pods, namespaces, service_account, parent, ancestor or \
-                         guest"
+                reason: "a workload selector must name at least one of exe, exe_hash, unit, \
+                         cgroup, container, pods, namespaces, service_account, parent, ancestor \
+                         or guest"
                     .to_string(),
             });
         }
@@ -297,7 +356,9 @@ impl WorkloadSelector {
             }
         }
         if self.guest.is_some()
-            && (self.matchers().count() > 1 || self.label_selectors().next().is_some())
+            && (self.matchers().count() > 1
+                || self.exe_hash.is_some()
+                || self.label_selectors().next().is_some())
         {
             return Err(FirewallError::InvalidWorkloadSelector {
                 reason: "a guest is named alone: its processes, units, cgroups and containers \
@@ -366,7 +427,9 @@ impl WorkloadSelector {
     /// Whether no matcher is set.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.matchers().next().is_none() && self.label_selectors().next().is_none()
+        self.matchers().next().is_none()
+            && self.exe_hash.is_none()
+            && self.label_selectors().next().is_none()
     }
 
     /// Whether the selector names anything only a Kubernetes node can tell:
@@ -396,7 +459,7 @@ impl WorkloadSelector {
     /// predicate that decides which.
     #[must_use]
     pub fn names_executable(&self) -> bool {
-        self.exe.is_some()
+        self.exe.is_some() || self.exe_hash.is_some()
     }
 
     /// Whether this selector names what the task was started under.
@@ -416,6 +479,7 @@ impl WorkloadSelector {
     pub fn lineage_only(&self) -> bool {
         self.names_lineage()
             && self.exe.is_none()
+            && self.exe_hash.is_none()
             && self.unit.is_none()
             && self.cgroup.is_none()
             && self.container.is_none()
@@ -493,6 +557,11 @@ impl WorkloadSelector {
         {
             return false;
         }
+        if let Some(hash) = self.exe_hash
+            && facts.exe_hash != Some(hash)
+        {
+            return false;
+        }
         if let Some(unit) = self.unit.as_deref()
             && facts.unit != Some(unit)
         {
@@ -536,6 +605,7 @@ impl WorkloadSelector {
     pub fn describe(&self) -> String {
         self.matchers()
             .map(|(field, value)| format!("{field}={value}"))
+            .chain(self.exe_hash.map(|hash| format!("exe_hash={hash}")))
             .chain(self.label_selectors().map(|(field, selector)| {
                 if selector.is_empty() {
                     format!("{field}=*")
@@ -647,6 +717,8 @@ impl WorkloadMatch {
 pub struct WorkloadFacts<'a> {
     /// Absolute path of the executable, as the process table resolved it.
     pub exe: Option<&'a str>,
+    /// Digest of the executable, where the process table holds one.
+    pub exe_hash: Option<ExeHash>,
     /// systemd unit the task belongs to, such as `nginx.service`.
     pub unit: Option<&'a str>,
     /// Absolute cgroup v2 path of the task.
@@ -1378,6 +1450,80 @@ mod tests {
 
     fn selector(exe: &str) -> WorkloadSelector {
         WorkloadSelector::new(Some(exe.to_string()), None, None, None).expect("a valid selector")
+    }
+
+    const CURL: &str = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    fn digest(written: &str) -> ExeHash {
+        ExeHash::parse(written).expect("a digest")
+    }
+
+    #[test]
+    fn a_digest_alone_is_a_selector_that_names_an_executable() {
+        let selector = WorkloadSelector::default()
+            .with_exe_hash(Some(digest(CURL)))
+            .expect("a digest names a workload");
+        assert!(!selector.is_empty());
+        assert!(selector.names_executable());
+        assert!(!selector.lineage_only());
+        assert_eq!(selector.describe(), format!("exe_hash={CURL}"));
+    }
+
+    #[test]
+    fn a_digest_matches_the_bytes_and_not_the_name() {
+        let selector = selector("/usr/bin/curl")
+            .with_exe_hash(Some(digest(CURL)))
+            .expect("valid");
+        let genuine = WorkloadFacts {
+            exe: Some("/usr/bin/curl"),
+            exe_hash: Some(digest(CURL)),
+            ..WorkloadFacts::default()
+        };
+        assert!(selector.matches(&genuine));
+
+        let copied = WorkloadFacts {
+            exe_hash: Some(digest(&CURL.replace("e3b0", "0000"))),
+            ..genuine
+        };
+        assert!(!selector.matches(&copied), "same name, other bytes");
+
+        let unhashed = WorkloadFacts {
+            exe_hash: None,
+            ..genuine
+        };
+        assert!(!selector.matches(&unhashed), "no digest is no match");
+
+        let verity = WorkloadFacts {
+            exe_hash: Some(digest(&CURL.replace("sha256:", "fsverity-sha256:"))),
+            ..genuine
+        };
+        assert!(
+            !selector.matches(&verity),
+            "a verity digest is another function of the file"
+        );
+    }
+
+    #[test]
+    fn a_guest_is_not_named_beside_a_digest() {
+        let guest = WorkloadSelector::with_guest(
+            None,
+            None,
+            None,
+            None,
+            KubernetesMatchers::default(),
+            LineageMatchers::default(),
+            Some("vm-1".to_string()),
+        )
+        .expect("a guest alone");
+        assert!(guest.with_exe_hash(Some(digest(CURL))).is_err());
+    }
+
+    #[test]
+    fn a_selector_reads_its_digest_from_the_written_form() {
+        let selector: WorkloadSelector =
+            serde_json::from_str(&format!(r#"{{"exe_hash":"{CURL}"}}"#)).expect("parses");
+        assert_eq!(selector.exe_hash, Some(digest(CURL)));
+        assert!(serde_json::from_str::<WorkloadSelector>(r#"{"exe_hash":"abc"}"#).is_err());
     }
 
     fn rule(id: &str, priority: u32, action: FirewallAction) -> FirewallRule {

@@ -17173,11 +17173,18 @@
       },
       "ProcessIdentityResponse": {
         "type": "object",
-        "description": "What the table knows a process by. `kind` is `path` or `unknown`; the\nhash of the executable is not computed yet, and when it is it arrives as\na third kind rather than as a field nobody can tell apart from absent.",
+        "description": "What the table knows a process by. `kind` is `path` or `unknown`, and a\npath may carry the digest of the file it named beside it.",
         "required": [
           "kind"
         ],
         "properties": {
+          "exe_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Digest of the file behind the path: `fsverity-sha256:<hex>` where the\nkernel measured a file with fs-verity on, `sha256:<hex>` where the\nagent read its contents. Absent where the file could not be opened,\nwhich a rootless agent cannot do for another user's process."
+          },
           "kind": {
             "type": "string",
             "description": "`path` or `unknown`."
@@ -20393,6 +20400,13 @@
               "null"
             ],
             "description": "The executable path the process table recorded. Forgeable by the\nprocess itself, which is why it is a path and not an identity."
+          },
+          "exe_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Digest of the executable, which is what names the bytes rather than\nthe place: `fsverity-sha256:<hex>` where the kernel measured a file\nwith fs-verity on, `sha256:<hex>` where the agent read its contents.\nAbsent where the agent could not open the file."
           },
           "image": {
             "type": [
