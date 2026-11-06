@@ -334,7 +334,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `quarantine` | No suite yet (workload-identity) | none | 6.12 | manual | No suite yet: nothing in this agent arms a quarantine, which only the enterprise automated response calls, so the suite that reads a workload's connections refused for the window belongs beside that response |
 | `self_protection` | 88 | none | 6.12 | nightly | 88 reads the guard as protected and has a detach of the agent's XDP link refused where the BPF LSM runs, and reads it unprotected with the detach succeeding where bpf is masked out of the module list |
 | `tcp_reqsk_assign` | 86 | none | 6.12 | nightly | No shipped program rests on it yet, so the report in 86 is all there is to assert |
-| `workload_firewall` | 70, 72, 92, 98 | none | 6.12 | nightly | Rules on a workload's ancestry in 70, inside LXC containers in 72, and written as Docker container labels in 98: an enforced deny, an allow list with a default deny, observe raising without refusing, a malformed label refused and reported, and a container started after the agent policed without a reload |
+| `workload_firewall` | 70, 72, 92, 98, 99 | none | 6.12 | nightly | Rules on a workload's ancestry in 70, inside LXC containers in 72, and written as Docker container labels in 98: an enforced deny, an allow list with a default deny, observe raising without refusing, a malformed label refused and reported, and a container started after the agent policed without a reload. Hooks the kernel refused to attach stop an agent whose rule or labels would refuse, are reported off with the reason under a rule that observes, and turn a reload to enforce away in 99 |
 | `write_refusal` | 83, 84 | none | 6.12 | nightly | At the LSM hook in 83 and through the fanotify permission group in 84 |
 
 #### API paths (133)
@@ -357,8 +357,8 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/captures/manual` | 49, 62 |
 | `/api/v1/captures/{id}` | 49, 62 |
 | `/api/v1/config` | 16, 23, 25 |
-| `/api/v1/config/reload` | 16, 17, 35, 52 |
-| `/api/v1/config/{section}` | 16, 17, 27, 35, 52 |
+| `/api/v1/config/reload` | 16, 17, 35, 52, 99 |
+| `/api/v1/config/{section}` | 16, 17, 27, 35, 52, 99 |
 | `/api/v1/conntrack/connections` | 16, 18 |
 | `/api/v1/conntrack/events` | 16 |
 | `/api/v1/conntrack/flush` | 16, 18, 62 |
@@ -384,7 +384,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/ebpf/guests` | 73, 74, 75 |
 | `/api/v1/ebpf/hidden-ports` | 79 |
 | `/api/v1/ebpf/hidden-processes` | 79 |
-| `/api/v1/ebpf/kernel-features` | 27, 77, 82, 83, 84, 86, 88, 95 |
+| `/api/v1/ebpf/kernel-features` | 27, 77, 82, 83, 84, 86, 88, 95, 99 |
 | `/api/v1/ebpf/raw-sockets` | 88 |
 | `/api/v1/ebpf/status` | 06, 16, 62, 68 |
 | `/api/v1/ebpf/uprobes` | 60 |
@@ -471,7 +471,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/zones/policies/{id}` | 31 |
 | `/api/v1/zones/status` | 31 |
 | `/api/v1/zones/{id}` | 31 |
-| `/healthz` | 01, 02, 06, 07, 08, 09, 11, 17, 23, 26, 27, 38, 43, 52, 55, 56, 58, 60, 68, 91 |
+| `/healthz` | 01, 02, 06, 07, 08, 09, 11, 17, 23, 26, 27, 38, 43, 52, 55, 56, 58, 60, 68, 91, 99 |
 | `/metrics` | 02, 06, 10, 11, 12, 14, 17, 18, 19, 20, 21, 22, 23, 24, 27, 28, 29, 30, 31, 32, 33, 34, 38, 40, 52, 53, 54, 61, 62, 64, 65, 66, 67, 71 |
 | `/readyz` | 01, 02, 06, 07, 23, 55, 56 |
 

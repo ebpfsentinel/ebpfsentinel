@@ -221,6 +221,7 @@ suite_profiles:
   "96": nightly
   "97": nightly
   "98": nightly
+  "99": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -1268,11 +1269,11 @@ coverage:
 
   - kind: capability
     feature: workload_firewall
-    suites: ["70", "72", "92", "98"]
+    suites: ["70", "72", "92", "98", "99"]
     topology: none
     kernel_min: "6.12"
     profile: nightly
-    notes: "Rules on a workload's ancestry in 70, inside LXC containers in 72, and written as Docker container labels in 98: an enforced deny, an allow list with a default deny, observe raising without refusing, a malformed label refused and reported, and a container started after the agent policed without a reload"
+    notes: "Rules on a workload's ancestry in 70, inside LXC containers in 72, and written as Docker container labels in 98: an enforced deny, an allow list with a default deny, observe raising without refusing, a malformed label refused and reported, and a container started after the agent policed without a reload. Hooks the kernel refused to attach stop an agent whose rule or labels would refuse, are reported off with the reason under a rule that observes, and turn a reload to enforce away in 99"
 
   - kind: capability
     feature: quarantine
