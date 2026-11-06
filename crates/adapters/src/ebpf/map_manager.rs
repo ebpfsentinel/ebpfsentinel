@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::ebpf::feature_gates::{self, Feature};
 use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, HashMap, MapData, PerCpuArray, PerCpuValues};
@@ -347,6 +349,87 @@ fn has_extended_match(rule: &FirewallRuleEntry) -> bool {
         || rule.dscp_mark != DSCP_MARK_NONE
 }
 
+/// The exact five-tuple a fast-path entry is keyed on.
+type FiveTupleKey = (u32, u32, u16, u16, u8);
+
+/// Where the loader puts one IPv4 rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// The exact five-tuple map.
+    FiveTuple(FiveTupleKey),
+    /// The protocol and destination port map.
+    Port((u16, u8)),
+    /// A rule before it holds the same fast-path key and matches every packet
+    /// this one would, so this one is never reached and is written nowhere.
+    Covered,
+    /// The array the datapath scans in priority order.
+    Array,
+}
+
+/// Route each rule, given in ascending priority, to a fast-path map or to the
+/// array.
+///
+/// The datapath checks the O(1) hash fast-paths BEFORE the linear array scan,
+/// so a rule may only be fast-pathed while no higher-priority rule has already
+/// been routed to the array - otherwise the hash hit would short-circuit and
+/// skip that higher-priority rule (e.g. a broad whitelist `allow` losing to a
+/// narrow `reject` on the same port). Once the first array-bound rule is seen,
+/// every subsequent fast-path candidate is demoted to the array so priority
+/// order is preserved.
+///
+/// A map holds one action per key, so a later rule on a key already taken
+/// would overwrite the earlier rule's action and reverse their priority. The
+/// earlier rule matches everything the later one does, which leaves the later
+/// one nothing to decide: it is covered rather than written.
+fn route_v4(rules: &[FirewallRuleEntry], five_tuple_map: bool, port_map: bool) -> Vec<Route> {
+    let mut routes = Vec::with_capacity(rules.len());
+    let mut five_tuples: HashSet<FiveTupleKey> = HashSet::new();
+    let mut ports: HashSet<(u16, u8)> = HashSet::new();
+    let mut seen_array_rule = false;
+    for rule in rules {
+        let flags = rule.match_flags;
+        let fast = !seen_array_rule && !has_extended_match(rule);
+        let route = if fast
+            && five_tuple_map
+            && flags
+                == (MATCH_SRC_IP | MATCH_DST_IP | MATCH_SRC_PORT | MATCH_DST_PORT | MATCH_PROTO)
+            && rule.src_port_start == rule.src_port_end
+            && rule.dst_port_start == rule.dst_port_end
+            && rule.src_mask == 0xFFFF_FFFF
+            && rule.dst_mask == 0xFFFF_FFFF
+        {
+            let key = (
+                rule.src_ip,
+                rule.dst_ip,
+                rule.src_port_start,
+                rule.dst_port_start,
+                rule.protocol,
+            );
+            if five_tuples.insert(key) {
+                Route::FiveTuple(key)
+            } else {
+                Route::Covered
+            }
+        } else if fast
+            && port_map
+            && flags == (MATCH_DST_PORT | MATCH_PROTO)
+            && rule.dst_port_start == rule.dst_port_end
+        {
+            let key = (rule.dst_port_start, rule.protocol);
+            if ports.insert(key) {
+                Route::Port(key)
+            } else {
+                Route::Covered
+            }
+        } else {
+            seen_array_rule = true;
+            Route::Array
+        };
+        routes.push(route);
+    }
+    routes
+}
+
 impl FirewallArrayMapPort for FirewallMapManager {
     #[allow(clippy::cast_possible_truncation)] // count ≤ MAX_FIREWALL_RULES (4096)
     fn load_v4_rules(
@@ -362,92 +445,63 @@ impl FirewallArrayMapPort for FirewallMapManager {
         // Flush fast-path HashMaps before reload to remove stale entries.
         self.clear_hash_maps();
 
-        // Classify rules into fast-path HashMaps vs array fallback.
-        //
-        // `rules` arrive sorted by ascending priority (lowest number wins). The
-        // eBPF datapath checks the O(1) hash fast-paths BEFORE the linear array
-        // scan, so a rule may only be fast-pathed while no higher-priority rule
-        // has already been routed to the array - otherwise the hash hit would
-        // short-circuit and skip that higher-priority rule (e.g. a broad
-        // whitelist `allow` losing to a narrow `reject` on the same port).
-        // Once the first array-bound rule is seen, every subsequent fast-path
-        // candidate is demoted to the array so priority order is preserved.
+        // Classify rules into fast-path HashMaps vs array fallback; `rules`
+        // arrive sorted by ascending priority (lowest number wins).
         let mut array_rules: Vec<FirewallRuleEntry> = Vec::new();
         let mut placements = Vec::with_capacity(rules.len());
         let mut hash_5tuple_count = 0u32;
         let mut hash_port_count = 0u32;
-        let mut seen_array_rule = false;
 
-        for rule in rules {
-            let flags = rule.match_flags;
-            let has_extended = has_extended_match(rule);
-
-            if !seen_array_rule
-                && !has_extended
-                && flags
-                    == (MATCH_SRC_IP | MATCH_DST_IP | MATCH_SRC_PORT | MATCH_DST_PORT | MATCH_PROTO)
-                && rule.src_port_start == rule.src_port_end
-                && rule.dst_port_start == rule.dst_port_end
-                && rule.src_mask == 0xFFFF_FFFF
-                && rule.dst_mask == 0xFFFF_FFFF
-            {
-                // Exact 5-tuple match → fast-path HashMap
-                if let Some(ref mut map) = self.hash_5tuple {
-                    let key = FwHashKey5Tuple {
-                        src_ip: rule.src_ip,
-                        dst_ip: rule.dst_ip,
-                        src_port: rule.src_port_start,
-                        dst_port: rule.dst_port_start,
-                        protocol: rule.protocol,
-                        _pad: [0; 3],
-                    };
-                    let val = FwHashValue {
-                        action: rule.action,
-                        _pad: [0; 3],
-                    };
-                    placements.push(if map.insert(&key, &val, 0).is_ok() {
-                        RulePlacement::Hash5Tuple
-                    } else {
-                        RulePlacement::NotInstalled
-                    });
-                    hash_5tuple_count += 1;
-                    continue;
+        let routes = route_v4(rules, self.hash_5tuple.is_some(), self.hash_port.is_some());
+        for (rule, route) in rules.iter().zip(routes) {
+            let val = FwHashValue {
+                action: rule.action,
+                _pad: [0; 3],
+            };
+            match route {
+                Route::FiveTuple((src_ip, dst_ip, src_port, dst_port, protocol)) => {
+                    if let Some(ref mut map) = self.hash_5tuple {
+                        let key = FwHashKey5Tuple {
+                            src_ip,
+                            dst_ip,
+                            src_port,
+                            dst_port,
+                            protocol,
+                            _pad: [0; 3],
+                        };
+                        placements.push(if map.insert(&key, &val, 0).is_ok() {
+                            RulePlacement::Hash5Tuple
+                        } else {
+                            RulePlacement::NotInstalled
+                        });
+                        hash_5tuple_count += 1;
+                    }
                 }
-            } else if !seen_array_rule
-                && !has_extended
-                && flags == (MATCH_DST_PORT | MATCH_PROTO)
-                && rule.dst_port_start == rule.dst_port_end
-            {
-                // Protocol+port match → fast-path HashMap
-                if let Some(ref mut map) = self.hash_port {
-                    let key = FwHashKeyPort {
-                        dst_port: rule.dst_port_start,
-                        protocol: rule.protocol,
-                        _pad: 0,
-                    };
-                    let val = FwHashValue {
-                        action: rule.action,
-                        _pad: [0; 3],
-                    };
-                    placements.push(if map.insert(&key, &val, 0).is_ok() {
-                        RulePlacement::HashPort
+                Route::Port((dst_port, protocol)) => {
+                    if let Some(ref mut map) = self.hash_port {
+                        let key = FwHashKeyPort {
+                            dst_port,
+                            protocol,
+                            _pad: 0,
+                        };
+                        placements.push(if map.insert(&key, &val, 0).is_ok() {
+                            RulePlacement::HashPort
+                        } else {
+                            RulePlacement::NotInstalled
+                        });
+                        hash_port_count += 1;
+                    }
+                }
+                Route::Covered => placements.push(RulePlacement::NotInstalled),
+                Route::Array => {
+                    placements.push(if array_rules.len() < MAX_FIREWALL_RULES as usize {
+                        RulePlacement::Array(array_rules.len() as u32)
                     } else {
                         RulePlacement::NotInstalled
                     });
-                    hash_port_count += 1;
-                    continue;
+                    array_rules.push(*rule);
                 }
             }
-
-            // Fallback: complex rule (or a fast-path candidate demoted because a
-            // higher-priority rule already went to the array) → linear scan.
-            placements.push(if array_rules.len() < MAX_FIREWALL_RULES as usize {
-                RulePlacement::Array(array_rules.len() as u32)
-            } else {
-                RulePlacement::NotInstalled
-            });
-            array_rules.push(*rule);
-            seen_array_rule = true;
         }
 
         // Load remaining rules into the array
@@ -675,5 +729,55 @@ mod tests {
         // The mark is read off the matched rule index, which a fast-path hit
         // does not have, so the traffic would pass unmarked.
         assert!(has_extended_match(&rule));
+    }
+
+    /// A rule on the protocol and destination port alone, the shape the port
+    /// map exists for.
+    fn port_rule(dst_port: u16, action: u8) -> FirewallRuleEntry {
+        FirewallRuleEntry {
+            src_ip: 0,
+            src_mask: 0,
+            dst_ip: 0,
+            dst_mask: 0,
+            src_port_start: 0,
+            src_port_end: 0,
+            dst_port_start: dst_port,
+            dst_port_end: dst_port,
+            match_flags: MATCH_DST_PORT | MATCH_PROTO,
+            action,
+            ..fast_path_candidate()
+        }
+    }
+
+    #[test]
+    fn a_later_rule_on_a_port_already_taken_does_not_overwrite_it() {
+        // An allow at a better priority and a deny on the same port later on,
+        // the shape a tier ordered before another one compiles to.
+        let routes = route_v4(&[port_rule(9997, 1), port_rule(9997, 2)], true, true);
+        assert_eq!(routes, vec![Route::Port((9997, 6)), Route::Covered]);
+    }
+
+    #[test]
+    fn a_later_exact_tuple_already_taken_is_covered_the_same_way() {
+        let rule = fast_path_candidate();
+        let routes = route_v4(&[rule, rule], true, true);
+        assert!(matches!(routes[0], Route::FiveTuple(_)));
+        assert_eq!(routes[1], Route::Covered);
+    }
+
+    #[test]
+    fn a_fast_path_rule_after_an_array_rule_is_demoted() {
+        let mut ranged = port_rule(80, 1);
+        ranged.dst_port_end = 90;
+        let routes = route_v4(&[ranged, port_rule(85, 2)], true, true);
+        assert_eq!(routes, vec![Route::Array, Route::Array]);
+    }
+
+    #[test]
+    fn without_the_port_map_a_port_rule_goes_to_the_array() {
+        assert_eq!(
+            route_v4(&[port_rule(53, 1)], true, false),
+            vec![Route::Array]
+        );
     }
 }

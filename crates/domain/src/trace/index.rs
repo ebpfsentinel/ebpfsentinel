@@ -25,7 +25,8 @@ pub enum RulePlacement {
     Hash5Tuple,
     /// The protocol and destination port map.
     HashPort,
-    /// Not installed: the array was full.
+    /// Not installed: the array was full, or a rule before it holds the same
+    /// fast-path key and decides every packet this one would.
     NotInstalled,
 }
 
