@@ -1,10 +1,11 @@
 //! Attaching the socket-attribution hooks, and saying so when they cannot be.
 //!
-//! The eight programs of the attribution object sit on a cgroup rather than
+//! The nine programs of the attribution object sit on a cgroup rather than
 //! on an interface: `connect4`/`connect6` and `sendmsg4`/`sendmsg6` fire in
 //! the syscall of the task that opens the socket, `post_bind4`/`post_bind6`
-//! when it binds one, `sock_release` when it closes one, and the `sock_ops`
-//! join fires once the connection is established. Attaching to the root of the v2 hierarchy covers every task
+//! when it binds one, `sock_release` when it closes one, the `cgroup_skb`
+//! egress hook joins each outgoing UDP datagram to its socket, and the
+//! `sock_ops` join fires once a TCP connection is established. Attaching to the root of the v2 hierarchy covers every task
 //! on the node, which is what a node agent wants.
 //!
 //! Nothing here enforces. Every program returns the allow verdict and the
@@ -23,6 +24,8 @@ use tracing::{info, warn};
 use super::kfunc_attach;
 use super::loader::EbpfLoader;
 
+/// `BPF_CGROUP_INET_EGRESS` from `enum bpf_attach_type`.
+pub const BPF_CGROUP_INET_EGRESS: u32 = 1;
 /// `BPF_CGROUP_SOCK_OPS` from `enum bpf_attach_type`.
 pub const BPF_CGROUP_SOCK_OPS: u32 = 3;
 /// `BPF_CGROUP_INET4_CONNECT` from `enum bpf_attach_type`.
@@ -69,6 +72,7 @@ pub const ATTRIBUTION_HOOKS: &[(&str, u32)] = &[
     ("attribution_sock_release", BPF_CGROUP_INET_SOCK_RELEASE),
     ("attribution_sendmsg4", BPF_CGROUP_UDP4_SENDMSG),
     ("attribution_sendmsg6", BPF_CGROUP_UDP6_SENDMSG),
+    ("attribution_udp_egress", BPF_CGROUP_INET_EGRESS),
     ("attribution_sockops", BPF_CGROUP_SOCK_OPS),
 ];
 
@@ -300,6 +304,13 @@ mod tests {
             .map(|(name, _)| *name)
             .expect("the hook table is never empty");
         assert_eq!(last, ATTRIBUTION_JOIN_HOOK);
+    }
+
+    #[test]
+    fn an_outgoing_datagram_is_joined_to_its_socket_on_the_egress_hook() {
+        // UDP never reaches `sockops`, so without this hook a DNS query from
+        // another namespace carries no workload at all.
+        assert!(ATTRIBUTION_HOOKS.contains(&("attribution_udp_egress", BPF_CGROUP_INET_EGRESS)));
     }
 
     #[test]

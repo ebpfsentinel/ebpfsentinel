@@ -18,7 +18,11 @@
 //! is the node's listeners as the kernel holds them and not a history. Every
 //! connection the node accepts is counted in `LISTENER_ACCEPTS` against the
 //! address and port it arrived on, which is what says whether anybody uses a
-//! listener rather than only that it exists. Nothing is
+//! listener rather than only that it exists. The `cgroup_skb` egress hook
+//! reads no task at all: it joins an outgoing UDP datagram's five-tuple to the
+//! identity its socket already carries, in `SOCKET_FLOW`, which is how a DNS
+//! query seen on the node's interface, after it left a pod's namespace and its
+//! socket behind, is still named. Nothing is
 //! enforced, nothing is dropped, and no verdict depends on what is recorded:
 //! every program returns allow unconditionally, so a failure here costs
 //! attribution and never connectivity.
@@ -32,8 +36,8 @@ use aya_ebpf::{
         bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_get_current_uid_gid,
         bpf_ktime_get_boot_ns, generated,
     },
-    macros::{btf_map, cgroup_sock, cgroup_sock_addr, sock_ops},
-    programs::{SockAddrContext, SockContext, SockOpsContext},
+    macros::{btf_map, cgroup_skb, cgroup_sock, cgroup_sock_addr, sock_ops},
+    programs::{SkBuffContext, SockAddrContext, SockContext, SockOpsContext},
 };
 use ebpf_common::attribution::{
     ATTRIBUTION_FAMILY_IPV4, ATTRIBUTION_FAMILY_IPV6, ATTRIBUTION_HOOK_CONNECT,
@@ -80,8 +84,11 @@ static DLP_TASK_SOCKET: LruHashMap<u64, DlpTaskSocket, { DLP_TASK_SOCKET_MAX_TAS
 /// `SOCKET_IDENTITY` answers a reader holding a socket cookie, which every
 /// packet hook has and no row of the kernel's conntrack table does. A
 /// connection listed out of that table is addresses and ports and nothing
-/// else, so it needs an index keyed on exactly that, and this is it. Written
-/// only here, because `sockops` is the one hook that knows both ends at once.
+/// else, so it needs an index keyed on exactly that, and this is it. A TCP
+/// connection is written by `sockops`, the one socket hook that knows both
+/// ends at once; a UDP socket has no such moment, so its datagrams are read on
+/// the way out by the `cgroup_skb` egress hook, which holds the socket and the
+/// packet together.
 ///
 /// LRU for the same reason as the socket table: a node holding more
 /// connections than the table was sized for loses the coldest rather than
@@ -175,7 +182,124 @@ pub fn attribution_sock_release(ctx: SockContext) -> i32 {
     ALLOW
 }
 
+/// A packet leaving a socket of this node, in the namespace of its sender.
+///
+/// UDP has no handshake, so `sockops` never fires for it and a datagram
+/// reaches the wire with no five-tuple recorded against its task. A DNS query
+/// from a pod is exactly that: the resolver library connects or sends, the
+/// socket hooks name the task against the cookie, and by the time the query
+/// crosses the node's interface the packet has left the pod's namespace and
+/// carries no socket any more. This hook runs before that, with the socket
+/// and the headers both in hand, and writes the datagram's tuple into
+/// `SOCKET_FLOW` against the identity the socket hooks recorded.
+///
+/// TCP is left to `sockops`, an IPv6 packet carrying extension headers and a
+/// fragment past the first are not read, and a tuple already holding this
+/// socket's identity is not written again, so a busy socket costs one lookup
+/// per datagram and no write.
+#[cgroup_skb(egress)]
+pub fn attribution_udp_egress(ctx: SkBuffContext) -> i32 {
+    join_datagram(&ctx);
+    ALLOW
+}
+
 // ── Recording ───────────────────────────────────────────────────────
+
+/// `ETH_P_IP` and `ETH_P_IPV6`, host order, as `__sk_buff.protocol` carries
+/// them once swapped.
+const ETH_P_IP: u16 = 0x0800;
+const ETH_P_IPV6: u16 = 0x86dd;
+/// UDP, as the IP header numbers it.
+const IPPROTO_UDP: u8 = 17;
+
+/// Write the tuple of one outgoing UDP datagram against its socket's opener.
+#[inline(always)]
+fn join_datagram(ctx: &SkBuffContext) {
+    let protocol = u16::from_be(ctx.skb.protocol() as u16);
+    let mut flow = FlowIdentityKey {
+        local_addr: [0; 4],
+        remote_addr: [0; 4],
+        local_port: 0,
+        remote_port: 0,
+        protocol: IPPROTO_UDP,
+        family: 0,
+        _pad: [0; 2],
+    };
+    let l4 = if protocol == ETH_P_IP {
+        let Ok(first) = ctx.load::<u8>(0) else {
+            return;
+        };
+        if first >> 4 != 4 {
+            return;
+        }
+        let Ok(next) = ctx.load::<u8>(9) else {
+            return;
+        };
+        if next != IPPROTO_UDP {
+            return;
+        }
+        let Ok(fragment) = ctx.load::<u16>(6) else {
+            return;
+        };
+        if u16::from_be(fragment) & 0x1fff != 0 {
+            return;
+        }
+        let (Ok(src), Ok(dst)) = (ctx.load::<u32>(12), ctx.load::<u32>(16)) else {
+            return;
+        };
+        flow.local_addr[0] = u32::from_be(src);
+        flow.remote_addr[0] = u32::from_be(dst);
+        flow.family = ATTRIBUTION_FAMILY_IPV4;
+        usize::from(first & 0x0f) * 4
+    } else if protocol == ETH_P_IPV6 {
+        let Ok(next) = ctx.load::<u8>(6) else {
+            return;
+        };
+        if next != IPPROTO_UDP {
+            return;
+        }
+        let mut word = 0usize;
+        while word < 4 {
+            let (Ok(src), Ok(dst)) = (
+                ctx.load::<u32>(8 + word * 4),
+                ctx.load::<u32>(24 + word * 4),
+            ) else {
+                return;
+            };
+            flow.local_addr[word] = u32::from_be(src);
+            flow.remote_addr[word] = u32::from_be(dst);
+            word += 1;
+        }
+        flow.family = ATTRIBUTION_FAMILY_IPV6;
+        40
+    } else {
+        return;
+    };
+    let (Ok(sport), Ok(dport)) = (ctx.load::<u16>(l4), ctx.load::<u16>(l4 + 2)) else {
+        return;
+    };
+    flow.local_port = u16::from_be(sport);
+    flow.remote_port = u16::from_be(dport);
+
+    let cookie = unsafe { generated::bpf_get_socket_cookie(ctx.skb.skb.cast()) };
+    if cookie == 0 {
+        return;
+    }
+    let Some(identity_ptr) = SOCKET_IDENTITY.get_ptr(&cookie) else {
+        return;
+    };
+    let identity = unsafe { *identity_ptr };
+    if let Some(known) = SOCKET_FLOW.get_ptr(&flow)
+        && unsafe { (*known).at_ns } == identity.at_ns
+    {
+        return;
+    }
+    if SOCKET_FLOW.insert(&flow, &identity, 0).is_err() {
+        increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_INSERT_FAILED);
+        return;
+    }
+    increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_FLOW);
+}
 
 /// `BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB`: a connection this node opened is up.
 const SOCK_OPS_ACTIVE_ESTABLISHED: u32 = 4;
