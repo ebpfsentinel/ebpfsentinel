@@ -7,7 +7,7 @@ End-to-end test suite for the eBPFsentinel agent. Covers agent lifecycle, REST/g
 ```
 tests/integration/
 ├── Makefile                            # Test orchestration (30+ targets)
-├── suites/                             # BATS test suites (01-90)
+├── suites/                             # BATS test suites (01-91)
 │   ├── 01-agent-lifecycle.bats
 │   ├── 02-rest-api-health.bats
 │   ├── ...
@@ -195,7 +195,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `cgroup-connect-redirect` | No suite yet (kernel-network) | none | 6.12 | manual | Steers the TCP connections of selected cgroups to a local listener at connect4/connect6. No suite yet: nothing asserts a steered connection lands on the listener |
 | `cgroup-workload-firewall` | 67, 70 | 2vm | 6.12 | nightly | Workload rules decided at connect/sendmsg/bind; suite 70 refuses a connect by the executable of the direct parent and of any ancestor, read from the live chain of parents |
 | `lsm-bpf-guard` | 88 | none | 6.12 | nightly | No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks; 88 has a detach of the agent's link refused with the BPF LSM active, which the agent VM's boot line now sets |
-| `lsm-exec-network` | No suite yet (workload-identity) | none | 6.12 | manual | Only the executables in the set reach the network, at socket_create and socket_connect. Needs the BPF LSM active at boot (lsm=bpf), which the agent VM's boot line sets |
+| `lsm-exec-network` | 91 | none | 6.12 | nightly | Only the executables in the set reach the network, at socket_create and socket_connect: observe reports by pid and inode, enforce refuses with a permission error, the agent's own sockets and the listed binary pass. Needs the BPF LSM active at boot (lsm=bpf), which the agent VM's boot line sets |
 | `lsm-write-refusal` | 83 | none | 6.12 | nightly | A writer's write-opens and truncations under a watched directory refused past a count inside a window, nothing refused once the agent is gone, and in shadow nothing refused or raised while the reading counts it by workload. Needs the BPF LSM active at boot (lsm=bpf); the suite skips where it is not |
 | `tc-conntrack` | 18, 24, 47, 67 | 3vm | 6.12 | pr | Connection tracking; kernel-CT kill via kill_flow_via_xdp_ct/skb_ct asserted in 47 |
 | `tc-dns` | 19, 45, 67 | 3vm | 6.12 | pr | Passive DNS capture; DoH/DoT detection via ClientHello SNI + dst_port 853 asserted in 45 |
@@ -328,7 +328,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `file_kfuncs` | 77 | none | 6.12 | nightly | Probed and reported in 77 |
 | `immediate_signal` | No suite yet (workload-identity) | none | 6.12 | manual | No suite yet: nothing signals a target making no syscall and reads that it went at once |
 | `kprobe_session` | 86 | none | 6.12 | nightly | No shipped program rests on it yet, so the report in 86 is all there is to assert |
-| `network_executables` | No suite yet (workload-identity) | none | 6.12 | manual | No suite yet: needs the BPF LSM active at boot |
+| `network_executables` | 91 | none | 6.12 | nightly | Needs the BPF LSM active at boot, which the agent VM's boot line sets |
 | `process_signal` | 82 | none | 6.12 | nightly | A run encrypting files stopped by the signal |
 | `process_tracing` | 70 | none | 6.12 | nightly | The process and its lineage behind a flow |
 | `quarantine` | No suite yet (workload-identity) | none | 6.12 | manual | No suite yet: nothing quarantines a workload and reads its connections refused for the window |
@@ -343,7 +343,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 |---|---|
 | `/api/v1/agent/identity` | 35, 36 |
 | `/api/v1/agent/status` | 02, 08, 30 |
-| `/api/v1/alerts` | 04, 12, 13, 14, 25, 27, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 52, 53, 54, 55, 56, 59, 60, 61, 71, 79, 83, 84 |
+| `/api/v1/alerts` | 04, 12, 13, 14, 25, 27, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 52, 53, 54, 55, 56, 59, 60, 61, 71, 79, 83, 84, 91 |
 | `/api/v1/alerts/stream` | 25, 34 |
 | `/api/v1/alerts/triage` | No suite yet (unplanned) |
 | `/api/v1/alerts/{id}` | 25, 34 |
@@ -471,7 +471,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/zones/policies/{id}` | 31 |
 | `/api/v1/zones/status` | 31 |
 | `/api/v1/zones/{id}` | 31 |
-| `/healthz` | 01, 02, 06, 07, 08, 09, 11, 17, 23, 26, 27, 38, 43, 52, 55, 56, 58, 60, 68 |
+| `/healthz` | 01, 02, 06, 07, 08, 09, 11, 17, 23, 26, 27, 38, 43, 52, 55, 56, 58, 60, 68, 91 |
 | `/metrics` | 02, 06, 10, 11, 12, 14, 17, 18, 19, 20, 21, 22, 23, 24, 27, 28, 29, 30, 31, 32, 33, 34, 38, 40, 52, 53, 54, 61, 62, 64, 65, 66, 67, 71 |
 | `/readyz` | 01, 02, 06, 07, 23, 55, 56 |
 

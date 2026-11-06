@@ -215,6 +215,7 @@ suite_profiles:
   "89": nightly
   # 90 serves on the host and in the namespace and hooks conntrack: nightly.
   "90": nightly
+  "91": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -392,12 +393,12 @@ coverage:
 
   - kind: ebpf_program
     feature: lsm-exec-network
-    suites: ["TBD"]
+    suites: ["91"]
     owner: workload-identity
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "Only the executables in the set reach the network, at socket_create and socket_connect. Needs the BPF LSM active at boot (lsm=bpf), which the agent VM's boot line sets"
+    profile: nightly
+    notes: "Only the executables in the set reach the network, at socket_create and socket_connect: observe reports by pid and inode, enforce refuses with a permission error, the agent's own sockets and the listed binary pass. Needs the BPF LSM active at boot (lsm=bpf), which the agent VM's boot line sets"
 
   - kind: ebpf_program
     feature: lsm-bpf-guard
@@ -1302,12 +1303,12 @@ coverage:
 
   - kind: capability
     feature: network_executables
-    suites: ["TBD"]
+    suites: ["91"]
     owner: workload-identity
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "No suite yet: needs the BPF LSM active at boot"
+    profile: nightly
+    notes: "Needs the BPF LSM active at boot, which the agent VM's boot line sets"
 
   - kind: capability
     feature: write_refusal
