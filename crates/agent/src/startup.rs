@@ -3160,109 +3160,21 @@ pub async fn run(
         };
 
         // 10f-quinquies. Stopping the process behind a flow
-        if config.response.kill_process.enabled {
-            match try_load_signal(&ebpf_dir) {
-                Ok((loader, metrics_rdr, maps, attacher, status)) => {
-                    if status.attached {
-                        let kill = &config.response.kill_process;
-                        let guard = domain::response::signal::ProcessSignalGuard::new(
-                            std::process::id(),
-                            &kill.protected_commands,
-                            &kill.protected_pids,
-                        );
-                        // Read before the guard is handed over, because the
-                        // endpoint reports how many ids the kernel refuses and
-                        // the guard is the only thing that knows.
-                        let protected = guard.kernel_protected_pids().len();
-                        let immediate = maps.immediate().clone();
-                        let executables = Arc::new(adapters::container::ProcExecutableResolver::new(
-                            &coverage_proc,
-                        ))
-                            as Arc<dyn ports::secondary::process_executable_port::ProcessExecutableReader>;
-                        let settings = application::process_signal_service::ProcessSignalSettings {
-                            signal: kill.signal,
-                            window: Duration::from_millis(kill.window_ms),
-                            poll_interval: Duration::from_millis(
-                                (kill.window_ms / 20).clamp(5, 100),
-                            ),
-                        };
-                        match application::process_signal_service::ProcessSignalService::new(
-                            Arc::new(tokio::sync::Mutex::new(maps))
-                                as Arc<tokio::sync::Mutex<dyn ports::secondary::process_signal_map_port::ProcessSignalMapPort>>,
-                            executables,
-                            audit_store_handle.clone(),
-                            guard,
-                            settings,
-                        )
-                        .await
-                        {
-                            Ok(svc) => {
-                                process_signal_svc = Some(Arc::new(svc));
-                                signal_attacher = Some(attacher);
-                                if let Some(rdr) = metrics_rdr {
-                                    metrics_readers.push(rdr);
-                                }
-                                ebpf_state.add_loader(loader);
-                                metrics.set_ebpf_program_status("tracepoint_signal", true);
-                                adapters::ebpf::signal_attach::publish_status(
-                                    adapters::ebpf::SignalStatus {
-                                        attached: true,
-                                        reason: None,
-                                        signal: kill.signal,
-                                        window_ms: kill.window_ms,
-                                        protected,
-                                        immediate,
-                                    },
-                                );
-                                warn!(
-                                    signal = kill.signal,
-                                    window_ms = kill.window_ms,
-                                    "stopping the process behind a flow is armed: a matching rule can terminate a running process"
-                                );
-                            }
-                            Err(e) => {
-                                // The protected set could not be written, so
-                                // the kernel's own fence is absent: the
-                                // capability goes rather than running without
-                                // the one check configuration cannot remove.
-                                warn!("process signalling disabled, the protected set was refused: {e}");
-                                metrics.set_ebpf_program_status("tracepoint_signal", false);
-                                adapters::ebpf::signal_attach::publish_status(
-                                    adapters::ebpf::SignalStatus {
-                                        attached: false,
-                                        reason: Some(format!(
-                                            "the kernel refused the protected set: {e}"
-                                        )),
-                                        ..adapters::ebpf::SignalStatus::default()
-                                    },
-                                );
-                            }
-                        }
-                    } else {
-                        let reason = status
-                            .reason
-                            .unwrap_or_else(|| "the kernel refused the attach".to_string());
-                        warn!("process signalling unavailable: {reason}");
-                        metrics.set_ebpf_program_status("tracepoint_signal", false);
-                    }
-                }
-                Err(e) => {
-                    warn!("process signalling load failed: {e}");
-                    metrics.set_ebpf_program_status("tracepoint_signal", false);
-                    adapters::ebpf::signal_attach::publish_status(adapters::ebpf::SignalStatus {
-                        attached: false,
-                        reason: Some(format!("the object did not load: {e}")),
-                        ..adapters::ebpf::SignalStatus::default()
-                    });
-                }
+        if let Some(armed) = arm_process_kill(
+            &config,
+            &ebpf_dir,
+            &coverage_proc,
+            audit_store_handle.clone(),
+            &metrics,
+        )
+        .await
+        {
+            process_signal_svc = Some(armed.service);
+            signal_attacher = Some(armed.attacher);
+            if let Some(rdr) = armed.metrics {
+                metrics_readers.push(rdr);
             }
-        } else {
-            metrics.clear_ebpf_program_status("tracepoint_signal");
-            adapters::ebpf::signal_attach::publish_status(adapters::ebpf::SignalStatus {
-                attached: false,
-                reason: Some("stopping a process is turned off in the configuration".to_string()),
-                ..adapters::ebpf::SignalStatus::default()
-            });
+            ebpf_state.add_loader(armed.loader);
         }
 
         // 10f-quinquies-b. Why the kernel drops packets
@@ -7196,6 +7108,127 @@ pub fn try_load_process_tracing(
         lineage_reason,
     );
     Ok((loader, metrics_rdr, reader, attacher, status))
+}
+
+/// The process kill once armed: the service rules stop a process through, and
+/// the object and link it needs, which must live as long as the service does.
+pub struct ArmedProcessKill {
+    pub service: Arc<application::process_signal_service::ProcessSignalService>,
+    pub loader: EbpfLoader,
+    pub attacher: adapters::ebpf::SignalAttacher,
+    pub metrics: Option<MetricsReader>,
+}
+
+/// Load the signal object, attach it and build the service that arms it.
+///
+/// `None` when the configuration turns the kill off or the kernel refuses any
+/// step, with the reason published where the response routes read it: a rule
+/// asking to stop a process is then refused by a service that was never
+/// built, rather than accepted by one that cannot act.
+pub async fn arm_process_kill(
+    config: &AgentConfig,
+    ebpf_dir: &str,
+    proc_root: &Path,
+    audit_store: Option<Arc<dyn AuditStore>>,
+    metrics: &AgentMetrics,
+) -> Option<ArmedProcessKill> {
+    if !config.response.kill_process.enabled {
+        metrics.clear_ebpf_program_status("tracepoint_signal");
+        adapters::ebpf::signal_attach::publish_status(adapters::ebpf::SignalStatus {
+            attached: false,
+            reason: Some("stopping a process is turned off in the configuration".to_string()),
+            ..adapters::ebpf::SignalStatus::default()
+        });
+        return None;
+    }
+    let (loader, metrics_rdr, maps, attacher, status) = match try_load_signal(ebpf_dir) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            warn!("process signalling load failed: {e}");
+            metrics.set_ebpf_program_status("tracepoint_signal", false);
+            adapters::ebpf::signal_attach::publish_status(adapters::ebpf::SignalStatus {
+                attached: false,
+                reason: Some(format!("the object did not load: {e}")),
+                ..adapters::ebpf::SignalStatus::default()
+            });
+            return None;
+        }
+    };
+    if !status.attached {
+        let reason = status
+            .reason
+            .unwrap_or_else(|| "the kernel refused the attach".to_string());
+        warn!("process signalling unavailable: {reason}");
+        metrics.set_ebpf_program_status("tracepoint_signal", false);
+        return None;
+    }
+    let kill = &config.response.kill_process;
+    let guard = domain::response::signal::ProcessSignalGuard::new(
+        std::process::id(),
+        &kill.protected_commands,
+        &kill.protected_pids,
+    );
+    // Read before the guard is handed over, because the endpoint reports how
+    // many ids the kernel refuses and the guard is the only thing that knows.
+    let protected = guard.kernel_protected_pids().len();
+    let immediate = maps.immediate().clone();
+    let executables = Arc::new(adapters::container::ProcExecutableResolver::new(proc_root))
+        as Arc<dyn ports::secondary::process_executable_port::ProcessExecutableReader>;
+    let settings = application::process_signal_service::ProcessSignalSettings {
+        signal: kill.signal,
+        window: Duration::from_millis(kill.window_ms),
+        poll_interval: Duration::from_millis((kill.window_ms / 20).clamp(5, 100)),
+    };
+    match application::process_signal_service::ProcessSignalService::new(
+        Arc::new(tokio::sync::Mutex::new(maps))
+            as Arc<
+                tokio::sync::Mutex<
+                    dyn ports::secondary::process_signal_map_port::ProcessSignalMapPort,
+                >,
+            >,
+        executables,
+        audit_store,
+        guard,
+        settings,
+    )
+    .await
+    {
+        Ok(svc) => {
+            metrics.set_ebpf_program_status("tracepoint_signal", true);
+            adapters::ebpf::signal_attach::publish_status(adapters::ebpf::SignalStatus {
+                attached: true,
+                reason: None,
+                signal: kill.signal,
+                window_ms: kill.window_ms,
+                protected,
+                immediate,
+            });
+            warn!(
+                signal = kill.signal,
+                window_ms = kill.window_ms,
+                "stopping the process behind a flow is armed: a matching rule can terminate a running process"
+            );
+            Some(ArmedProcessKill {
+                service: Arc::new(svc),
+                loader,
+                attacher,
+                metrics: metrics_rdr,
+            })
+        }
+        Err(e) => {
+            // The protected set could not be written, so the kernel's own
+            // fence is absent: the capability goes rather than running
+            // without the one check configuration cannot remove.
+            warn!("process signalling disabled, the protected set was refused: {e}");
+            metrics.set_ebpf_program_status("tracepoint_signal", false);
+            adapters::ebpf::signal_attach::publish_status(adapters::ebpf::SignalStatus {
+                attached: false,
+                reason: Some(format!("the kernel refused the protected set: {e}")),
+                ..adapters::ebpf::SignalStatus::default()
+            });
+            None
+        }
+    }
 }
 
 /// Load the signal object, take its maps and attach its tracepoint.

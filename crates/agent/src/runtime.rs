@@ -906,7 +906,8 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         audit_svc,
         dns_cache_svc,
         // Nothing is loaded here, so there is no map to arm through: the
-        // capability exists only where the object was loaded and attached.
+        // capability exists only where the object was loaded and attached,
+        // which `arm_process_kill` does before the handles are shared.
         process_signal_svc: None,
         quarantine_svc: None,
         workloads: {
@@ -1939,6 +1940,45 @@ pub struct HostObservation {
     _crypto: Option<EbpfLoader>,
 }
 
+/// The process kill held by a binary that does not run the agent's own
+/// start-up path. The tracepoint stays attached while this lives.
+pub struct ProcessKill {
+    _loader: EbpfLoader,
+    _attacher: adapters::ebpf::SignalAttacher,
+}
+
+/// Arm stopping a process, for a binary that does not run the agent's own
+/// start-up path, before the handles are shared.
+///
+/// Loads and attaches the signal object exactly as the agent does and sets
+/// `process_signal_svc`, so a rule asking to stop a process is accepted and
+/// acted on. `None`, with the handles left without the capability, when the
+/// configuration turns the kill off or the kernel refuses it; the reason is
+/// published where the response routes read it. The object's counters are
+/// read by the agent's own metrics loop, which this path does not run.
+pub async fn arm_process_kill(
+    config: &AgentConfig,
+    services: &mut ServiceHandles,
+) -> Option<ProcessKill> {
+    let proc_root = startup::resolver_proc_path(
+        &config.container.resolver.proc_path,
+        &startup::host_proc_root(),
+    );
+    let armed = startup::arm_process_kill(
+        config,
+        &startup::resolve_ebpf_program_dir(config),
+        &proc_root,
+        services.audit_svc.store(),
+        &services.metrics,
+    )
+    .await?;
+    services.process_signal_svc = Some(armed.service);
+    Some(ProcessKill {
+        _loader: armed.loader,
+        _attacher: armed.attacher,
+    })
+}
+
 /// Start the process table and the host rules, for a binary that does not
 /// run the agent's own start-up path.
 ///
@@ -2921,4 +2961,43 @@ pub fn start_domain_reputation(
         blocklist.set_high_risk_countries(config.dns.reputation.high_risk_countries.clone());
     }
     Some(rep_svc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn services_in(dir: &std::path::Path) -> (AgentConfig, ServiceHandles) {
+        let path = dir.join("agent.yaml");
+        std::fs::write(&path, "agent:\n  interfaces: [lo]\n").unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+        let mut config = AgentConfig::load(&path).unwrap();
+        config.audit.storage_path = dir.join("audit.redb").display().to_string();
+        let services = build_services(&config).unwrap();
+        (config, services)
+    }
+
+    #[tokio::test]
+    async fn the_kill_stays_absent_where_the_configuration_turns_it_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut config, mut services) = services_in(dir.path());
+        config.response.kill_process.enabled = false;
+        assert!(arm_process_kill(&config, &mut services).await.is_none());
+        assert!(services.process_signal_svc.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_kill_stays_absent_where_its_object_does_not_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut config, mut services) = services_in(dir.path());
+        config.response.kill_process.enabled = true;
+        // An object directory holding nothing: the load is refused, and the
+        // handles keep refusing a rule that asks to stop a process.
+        let objects = dir.path().join("objects");
+        std::fs::create_dir(&objects).unwrap();
+        config.agent.ebpf_program_dir = Some(objects.display().to_string());
+        assert!(arm_process_kill(&config, &mut services).await.is_none());
+        assert!(services.process_signal_svc.is_none());
+    }
 }
