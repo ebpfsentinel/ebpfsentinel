@@ -7,7 +7,7 @@ End-to-end test suite for the eBPFsentinel agent. Covers agent lifecycle, REST/g
 ```
 tests/integration/
 ├── Makefile                            # Test orchestration (30+ targets)
-├── suites/                             # BATS test suites (01-30)
+├── suites/                             # BATS test suites (01-87)
 │   ├── 01-agent-lifecycle.bats
 │   ├── 02-rest-api-health.bats
 │   ├── ...
@@ -249,7 +249,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `lb` | 16, 20, 37 | 2vm | 6.12 | pr | Load balancer services + VIPs |
 | `learning` | No suite yet (restart-state) | none | 6.12 | manual | Learning window start, status and result. No suite drives the CLI or the window it opens |
 | `metrics` | 02 | none | n/a | pr | Prometheus metrics |
-| `mitre` | 16, 51 | 2vm | 6.12 | nightly | MITRE coverage matrix; suite 16 asserts GET /api/v1/mitre/coverage (technique/tactic consistency), suite 51 enforces that every alert-producing suite carries a MITRE assertion |
+| `mitre` | 16, 51, 87 | 2vm | 6.12 | nightly | MITRE coverage matrix; suite 87 asserts a disabled IDS is listed under switched_off and not as coverage; suite 16 asserts GET /api/v1/mitre/coverage (technique/tactic consistency), suite 51 enforces that every alert-producing suite carries a MITRE assertion |
 | `nat` | 16, 21, 50 | 2vm | 6.12 | pr | NAT + NPTv6; NPTv6 prefix translation covered by suite 50 |
 | `netpol` | No suite yet (kernel-network) | k8s | 6.12 | manual | NetworkPolicy compiled for the pods of one node. No suite yet: the kubernetes lane does not apply a policy and read the compiled rules back |
 | `processes` | No suite yet (workload-identity) | none | 6.12 | manual | What a pid is, from its exec to its exit. The REST route it reads is asserted in 67; the CLI itself is not driven by any suite |
@@ -280,7 +280,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `clusterip` | No suite yet (kernel-network) | none | 6.12 | manual | The plan deciding which Services an opted-in workload resolves at connect and which stay with kube-proxy. No suite yet: nothing connects to a cluster address from a selected cgroup and reads the backend it reached |
 | `conntrack` | 16, 18, 24, 47, 62, 66 | 3vm | 6.12 | pr | Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; what the kernel confirmed it tore down against what the agent decided, on both sides of the tc hook order, in 66; GET /api/v1/conntrack/events SSE stream asserted in 16 (skipped when /proc/net/nf_conntrack is absent); brokered teardown from the user-namespace agent asserted in 62 |
 | `container` | 54 | 2vm | 6.12 | nightly | cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 54; AlertResponse container fields and k8s pod enrichment tracked as deferred ACs in the suite header. Per-tenant cgroup filtering is enterprise-only and is tested in the enterprise repo |
-| `coverage` | No suite yet (restart-state) | k8s | 6.12 | manual | What the node agent sees of each pod and why it misses what it misses. No suite reads the per-pod coverage report |
+| `coverage` | No suite yet (restart-state) | k8s | 6.12 | manual | What the node agent sees of each pod and why it misses what it misses. No suite reads the per-pod coverage report; 87 asserts only the refusal on a node without a pod inventory |
 | `ddos` | 15, 22, 38, 39, 40 | 2vm | 6.12 | pr | DDoS detection + policy; MHDDoS flood matrix in 38; service-exhaustion in 39; amplification in 40 |
 | `dlp` | 16, 27, 60, 62, perf/06 | 2vm | 6.12 | pr | Data loss prevention; suite 27 covers pattern match + uprobe attach, suite 60 the per-container attach path, suite 62 the brokered DlpScan + AttachUprobe half. TLS-MITM proxy is enterprise-only; wire-level malicious-MITM + decrypted-payload assertions remain 3-VM deferrals (need mitmproxy + injected-CA topology). uprobe SSL-inspection goodput cost benched in perf/06 |
 | `dns` | 04, 19, 45, 55 | 3vm | 6.12 | pr | DNS intel; DoH/DoT detection via ClientHello SNI + dst_port 853 in 45; AAAA query parser-readiness asserted in 55 |
@@ -298,7 +298,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `ips` | 13, 16, 38, 39, 55, 59, perf/03 | 2vm | 6.12 | pr | Auto-blacklist + whitelist; MHDDoS flood matrix in 38; slowhttptest in 39; IPv6 blacklist-write surface asserted in 55; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 59; in-kernel blacklist-injection control-plane latency (100/1K) benched in perf/03 |
 | `l2` | 37, 44, 62 | 2vm | 6.12 | nightly | L2 binding + self-whitelist; DSR end-to-end covered by suite 44; gratuitous ARP brokered through the warden (ArpAnnounce) asserted in 62 |
 | `l7` | 16, 29, 38, 39, 56 | 2vm | 6.12 | pr | HTTP/TLS/SNI/gRPC/SMTP/FTP/SMB; slow-request timeout in 39; SMTP/FTP/SMB matcher round-trip + parser robustness (truncated TCP, invalid-protocol POST rejection) asserted in 56. Wire-level swaks/lftp/smbclient per-command behaviour deferred (needs extra deps on test VMs; covered by domain l7::engine unit tests) |
-| `learning` | No suite yet (restart-state) | none | 6.12 | manual | Watching a node for a window and holding what it reached. No suite opens a window |
+| `learning` | 87 | none | 6.12 | nightly | Watching a node for a window and holding what it reached; 87 opens windows, restarts the agent and reads one back running with the downtime as a gap and one interrupted past its deadline, then its edges, policy, segmentation and stop |
 | `loadbalancer` | 16, 20, 37, 44 | 2vm | 6.12 | pr | Maglev + DSR; 3-VM end-to-end coverage via suite 44 |
 | `nat` | 16, 21, 50, perf/03, perf/06 | 2vm | 6.12 | pr | SNAT/DNAT/NPTv6; NPTv6 rule CRUD + tc-nat-egress config surface asserted in 50; NPTv6 control-plane add latency in perf/03; SNAT/DNAT datapath throughput overhead in perf/06 |
 | `netpol` | No suite yet (kernel-network) | k8s | 6.12 | manual | Kubernetes NetworkPolicy compiled for the pods of one node. No suite applies a policy |
@@ -314,7 +314,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `tcp_health` | 71 | none | 6.12 | nightly | TCP health per edge as named counters, fed by tracepoint-tcp-health; 71 reads the no_listener resets and both ends of a connection |
 | `telemetry` | No suite yet (unplanned) | none | n/a | manual | Anonymous heartbeat of version and eBPF load state. No suite exercises it: the destination is a build-time constant that no test build carries, so a community or CI binary has nowhere to send one and there is nothing to receive it |
 | `threatintel` | 16, 17, 33 | 2vm | 6.12 | pr | OSINT feeds + IOC + STIX |
-| `trace` | No suite yet (restart-state) | none | 6.12 | manual | One crafted packet run through the loaded programs, each stage's verdict. No suite yet: nothing posts a trace for a denied five-tuple and reads the stage that decided |
+| `trace` | 87 | none | 6.12 | nightly | One crafted packet run through the loaded programs, each stage's verdict; 87 traces a five-tuple a deny rule names and reads the stage that stopped it, and one it does not name |
 | `workload` | 67, 70 | none | 6.12 | nightly | The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry |
 | `zone` | 31 | 2vm | 6.12 | pr | Zone-based policy |
 
@@ -369,7 +369,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/ddos/policies/{id}` | 15, 22 |
 | `/api/v1/ddos/status` | 15, 22, 30 |
 | `/api/v1/dlp/patterns` | 16, 27 |
-| `/api/v1/dlp/scope` | No suite yet (restart-state) |
+| `/api/v1/dlp/scope` | 87 |
 | `/api/v1/dlp/status` | 16, 27 |
 | `/api/v1/dns/blocklist` | 04, 17, 19, 33 |
 | `/api/v1/dns/cache` | 04, 19 |
@@ -378,7 +378,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/domains/blocklist` | 04 |
 | `/api/v1/domains/blocklist/{domain}` | 04 |
 | `/api/v1/domains/reputation` | 04 |
-| `/api/v1/ebpf/coverage` | No suite yet (restart-state) |
+| `/api/v1/ebpf/coverage` | 87 |
 | `/api/v1/ebpf/drop-reasons` | No suite yet (kernel-network) |
 | `/api/v1/ebpf/foreign-programs` | No suite yet (host-integrity) |
 | `/api/v1/ebpf/guests` | 73, 74, 75 |
@@ -421,13 +421,13 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/lb/vips` | No suite yet (unplanned) |
 | `/api/v1/lb/vips/bgp` | No suite yet (unplanned) |
 | `/api/v1/lb/vips/grant` | No suite yet (unplanned) |
-| `/api/v1/learning/sessions` | No suite yet (restart-state) |
-| `/api/v1/learning/sessions/{id}` | No suite yet (restart-state) |
-| `/api/v1/learning/sessions/{id}/edges` | No suite yet (restart-state) |
-| `/api/v1/learning/sessions/{id}/policy` | No suite yet (restart-state) |
-| `/api/v1/learning/sessions/{id}/segmentation` | No suite yet (restart-state) |
-| `/api/v1/learning/sessions/{id}/stop` | No suite yet (restart-state) |
-| `/api/v1/mitre/coverage` | 16 |
+| `/api/v1/learning/sessions` | 87 |
+| `/api/v1/learning/sessions/{id}` | 87 |
+| `/api/v1/learning/sessions/{id}/edges` | 87 |
+| `/api/v1/learning/sessions/{id}/policy` | 87 |
+| `/api/v1/learning/sessions/{id}/segmentation` | 87 |
+| `/api/v1/learning/sessions/{id}/stop` | 87 |
+| `/api/v1/mitre/coverage` | 16, 87 |
 | `/api/v1/nat/nptv6` | 21, 50 |
 | `/api/v1/nat/nptv6/{id}` | 21, 50 |
 | `/api/v1/nat/rules` | 16, 21 |
@@ -465,7 +465,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/tls/handshakes` | No suite yet (restart-state) |
 | `/api/v1/tls/posture` | No suite yet (restart-state) |
 | `/api/v1/tls/status` | 58 |
-| `/api/v1/trace` | No suite yet (restart-state) |
+| `/api/v1/trace` | 87 |
 | `/api/v1/zones` | 31 |
 | `/api/v1/zones/policies` | 31 |
 | `/api/v1/zones/policies/{id}` | 31 |

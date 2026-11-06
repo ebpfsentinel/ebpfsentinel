@@ -174,6 +174,31 @@ _wait_for_program_set() {
     fi
 }
 
+@test "the FQDN egress and cgroup shaping paths are inside objects the verifier accepted" {
+    require_root
+    require_tool bpftool
+    require_tool jq
+
+    # Neither path has an object of its own: FQDN egress is the connect hook
+    # of the workload firewall reading a per-rule allow table, and cgroup
+    # shaping is the tc-qos classifier reading a per-cgroup rate table. The
+    # verifier walks every branch of a program whatever its tables hold, so
+    # both objects accepted with those tables in the kernel is both paths
+    # accepted. The names are cut to the fifteen bytes the kernel keeps.
+    _wait_for_program_set >/dev/null
+
+    local maps name
+    maps="$(bpftool -j map show 2>/dev/null | jq -r '.[].name // empty')"
+    [ -n "$maps" ]
+    for name in WORKLOAD_FQDN_A QOS_CGROUP_SHAP QOS_CGROUP_LINK; do
+        echo "$maps" | grep -qx "$name" || {
+            echo "# no map named ${name} in the kernel" >&3
+            _load_log >&3
+            false
+        }
+    done
+}
+
 @test "the process table names a program that execed after the hooks attached" {
     require_root
     require_tool jq

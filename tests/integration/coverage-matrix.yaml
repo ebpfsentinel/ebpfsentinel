@@ -66,8 +66,6 @@ owners:
 routes:
   /api/v1/alerts/triage: {owner: unplanned}
   /api/v1/alerts/{id}/triage: {owner: unplanned}
-  /api/v1/dlp/scope: {owner: restart-state}
-  /api/v1/ebpf/coverage: {owner: restart-state}
   /api/v1/ebpf/drop-reasons: {owner: kernel-network}
   /api/v1/ebpf/foreign-programs: {owner: host-integrity}
   /api/v1/ebpf/hidden-ports: {suites: ["79"]}
@@ -81,18 +79,11 @@ routes:
   /api/v1/lb/vips: {owner: unplanned}
   /api/v1/lb/vips/bgp: {owner: unplanned}
   /api/v1/lb/vips/grant: {owner: unplanned}
-  /api/v1/learning/sessions: {owner: restart-state}
-  /api/v1/learning/sessions/{id}: {owner: restart-state}
-  /api/v1/learning/sessions/{id}/edges: {owner: restart-state}
-  /api/v1/learning/sessions/{id}/policy: {owner: restart-state}
-  /api/v1/learning/sessions/{id}/segmentation: {owner: restart-state}
-  /api/v1/learning/sessions/{id}/stop: {owner: restart-state}
   /api/v1/netpol/replay: {owner: kernel-network}
   /api/v1/qos/shaping: {owner: kernel-network}
   /api/v1/services/graph: {owner: kernel-network}
   /api/v1/tls/handshakes: {owner: restart-state}
   /api/v1/tls/posture: {owner: restart-state}
-  /api/v1/trace: {owner: restart-state}
 
 # Suite-level CI profile (consumed by scripts/list-suites-by-profile.sh
 # which drives .github/workflows/integration.yml).
@@ -224,6 +215,8 @@ suite_profiles:
   "85": nightly
   # 86 hides bpf from the security module list in a private mount namespace.
   "86": nightly
+  # 87 stops and starts the agent twice around learning windows: nightly.
+  "87": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -663,11 +656,11 @@ coverage:
 
   - kind: cli_subcommand
     feature: mitre
-    suites: ["16", "51"]
+    suites: ["16", "51", "87"]
     topology: 2vm
     kernel_min: "6.12"
     profile: nightly
-    notes: "MITRE coverage matrix; suite 16 asserts GET /api/v1/mitre/coverage (technique/tactic consistency), suite 51 enforces that every alert-producing suite carries a MITRE assertion"
+    notes: "MITRE coverage matrix; suite 87 asserts a disabled IDS is listed under switched_off and not as coverage; suite 16 asserts GET /api/v1/mitre/coverage (technique/tactic consistency), suite 51 enforces that every alert-producing suite carries a MITRE assertion"
 
   - kind: cli_subcommand
     feature: fingerprints
@@ -1057,7 +1050,7 @@ coverage:
     topology: k8s
     kernel_min: "6.12"
     profile: manual
-    notes: "What the node agent sees of each pod and why it misses what it misses. No suite reads the per-pod coverage report"
+    notes: "What the node agent sees of each pod and why it misses what it misses. No suite reads the per-pod coverage report; 87 asserts only the refusal on a node without a pod inventory"
 
   - kind: domain_module
     feature: drops
@@ -1087,12 +1080,11 @@ coverage:
 
   - kind: domain_module
     feature: learning
-    suites: ["TBD"]
-    owner: restart-state
+    suites: ["87"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "Watching a node for a window and holding what it reached. No suite opens a window"
+    profile: nightly
+    notes: "Watching a node for a window and holding what it reached; 87 opens windows, restarts the agent and reads one back running with the downtime as a gap and one interrupted past its deadline, then its edges, policy, segmentation and stop"
 
   - kind: domain_module
     feature: netpol
@@ -1199,12 +1191,11 @@ coverage:
 
   - kind: domain_module
     feature: trace
-    suites: ["TBD"]
-    owner: restart-state
+    suites: ["87"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "One crafted packet run through the loaded programs, each stage's verdict. No suite yet: nothing posts a trace for a denied five-tuple and reads the stage that decided"
+    profile: nightly
+    notes: "One crafted packet run through the loaded programs, each stage's verdict; 87 traces a five-tuple a deny rule names and reads the stage that stopped it, and one it does not name"
 
   - kind: cli_subcommand
     feature: exposure
