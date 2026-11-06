@@ -127,6 +127,7 @@ env:
   - "suite 97 runs its container beside the agent (local lane only)"
   - "suite 98 runs its containers beside the agent (local lane only)"
   - "suite 99 starts the agent over a cgroup root of its own (local lane only)"
+  - "suite 100 runs its workloads on the agent's host (local lane only)"
   - "no statically linked busybox to build the test image from"
   - "suite 93 starts its processes on the agent's host (local lane only)"
   - "suite 94 writes its files on the agent's host (local lane only)"

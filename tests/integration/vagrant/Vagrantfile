@@ -175,7 +175,12 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
         iperf3 hping3 ncat stress-ng bc \
         nmap wrk tshark \
         hydra \
-        conntrack
+        conntrack \
+        plocate sqlite3 ffmpeg logrotate rsync zstd
+      # plocate, sqlite3, ffmpeg, logrotate, rsync and zstd are the ordinary
+      # workloads the mass encryption verdict and the write refusal must
+      # stay quiet through: an index rebuild, a database compaction, a media
+      # encoder, log rotation, a mirror and a compressed backup.
       # Real-client tools that drive the local-lane netns scenario suites on
       # this VM: dnsperf (19 DNS load), t50 (22 multi-proto flood), swaks/lftp/
       # smbclient (56 L7 SMTP/FTP/SMB clients), ncrack/sshpass (59 SSH brute).

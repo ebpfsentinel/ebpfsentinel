@@ -335,7 +335,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `self_protection` | 88 | none | 6.12 | nightly | 88 reads the guard as protected and has a detach of the agent's XDP link refused where the BPF LSM runs, and reads it unprotected with the detach succeeding where bpf is masked out of the module list |
 | `tcp_reqsk_assign` | 86 | none | 6.12 | nightly | No shipped program rests on it yet, so the report in 86 is all there is to assert |
 | `workload_firewall` | 70, 72, 92, 98, 99 | none | 6.12 | nightly | Rules on a workload's ancestry in 70, inside LXC containers in 72, and written as Docker container labels in 98: an enforced deny, an allow list with a default deny, observe raising without refusing, a malformed label refused and reported, and a container started after the agent policed without a reload. Hooks the kernel refused to attach stop an agent whose rule or labels would refuse, are reported off with the reason under a rule that observes, and turn a reload to enforce away in 99 |
-| `write_refusal` | 83, 84 | none | 6.12 | nightly | At the LSM hook in 83 and through the fanotify permission group in 84 |
+| `write_refusal` | 83, 84, 100 | none | 6.12 | nightly | At the LSM hook in 83 and through the fanotify permission group in 84; in 100 the ordinary workloads writing under a counted directory at the shipped threshold, and a package upgrade by the expected writer under a held one, refuse nothing |
 
 #### API paths (133)
 
