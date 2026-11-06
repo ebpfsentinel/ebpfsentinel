@@ -677,7 +677,7 @@ UNIT
     #
     # bats runs on this VM, so its kernel gates the require_kernel checks
     # of every eBPF suite, and suite 61 starts a local agent here - and the
-    # agent hard-refuses to start below 6.9. The bento/ubuntu-24.04 box
+    # agent hard-refuses to start below 6.12. The bento/ubuntu-24.04 box
     # ships 6.8, so without this the kernel-gated suites all skip and the
     # PQ-handshake suite's setup_file fails. Mirror the agent VM: install
     # the HWE kernel (>= 6.12) and reboot into it.

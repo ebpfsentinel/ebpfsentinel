@@ -37,6 +37,19 @@ l7:
   # destination, replies as the source, so server-side content is parsed too.
   ports: [80, 443, 8080, 8443, 25, 21, 445]
 
+  # ── Port promise ───────────────────────────────────────────────────
+  # The first payload of each connection on a well-known port is compared
+  # with the protocols that port promises (22 promises SSH, 53 DNS, 443
+  # TLS, ...), and a connection speaking something else raises an alert.
+  # On by default; uncomment to switch it off or to leave a port out.
+  # A listed port must be one that promises something, or the file is
+  # refused at load: an ignored port that promises nothing ignores nothing.
+  #
+  # port_mismatch:
+  #   enabled: true
+  #   # A host that multiplexes SSH and TLS on 443 leaves 443 out.
+  #   ignore_ports: [443]
+
   # ── Rules ──────────────────────────────────────────────────────────
   #
   # Fields:

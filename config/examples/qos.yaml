@@ -225,6 +225,31 @@ qos:
       queue_id: queue-default
       match: {}                # Empty match = wildcard (all traffic)
 
+  # ── Per-workload shaping ───────────────────────────────────────────
+  # Egress traffic of one workload held to a rate, decided per cgroup and
+  # paced by departure time, so it needs an `fq` root qdisc on the
+  # interface: `GET /api/v1/qos/shaping` says whether departure times are
+  # honoured there. The first rule whose workload matches a cgroup is the
+  # one it is held to, so a narrow rule goes above a wide one. The
+  # workload block takes the same matchers as an IDS rule (unit, cgroup,
+  # container, pods, namespaces, service_account).
+  #
+  # cgroup_shaping:
+  #   - id: shape-backup
+  #     workload:
+  #       unit: restic-backup.service
+  #     rate: "50mbps"
+  #     # How far ahead a packet may be scheduled before it is dropped
+  #     # instead, in milliseconds. Default 2000.
+  #     horizon_ms: 2000
+  #
+  #   - id: shape-batch-pods
+  #     workload:
+  #       namespaces:
+  #         match_labels:
+  #           tier: batch
+  #     rate: "200mbps"
+
 # ── Firewall (companion rules) ───────────────────────────────────────
 
 firewall:

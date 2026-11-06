@@ -116,6 +116,14 @@ spec:
               # uprobe link against a neighbouring container's libssl.
               mountPath: /host/proc
               readOnly: true
+            {{- range $i, $path := .Values.daemonset.warden.fileWatchHostPaths }}
+            {{- if or (not (hasPrefix "/" $path)) (eq (trimSuffix "/" $path) "") }}
+            {{- fail (printf "daemonset.warden.fileWatchHostPaths[%d]: %q must be an absolute directory other than /" $i $path) }}
+            {{- end }}
+            - name: fim-host-{{ $i }}
+              mountPath: {{ $path | quote }}
+              readOnly: true
+            {{- end }}
         {{- with .Values.daemonset.initContainers }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -306,6 +314,12 @@ spec:
           hostPath:
             path: /etc/machine-id
             type: File
+        {{- end }}
+        {{- range $i, $path := .Values.daemonset.warden.fileWatchHostPaths }}
+        - name: fim-host-{{ $i }}
+          hostPath:
+            path: {{ $path | quote }}
+            type: Directory
         {{- end }}
         {{- with .Values.daemonset.extraVolumes }}
         {{- toYaml . | nindent 8 }}

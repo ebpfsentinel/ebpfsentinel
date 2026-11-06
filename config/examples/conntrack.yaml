@@ -114,3 +114,28 @@ firewall:
       priority: 100
       action: log
       protocol: icmp
+
+# ── Kernel drops ─────────────────────────────────────────────────────
+# Packets the kernel drops, counted by the reason it gives and the
+# interface the packet was on. On by default; uncomment to switch it off
+# or to read the counts less often (1 to 3600 seconds).
+#
+# kernel_drops:
+#   enabled: true
+#   poll_interval_secs: 10
+
+# ── Writes to new file shares ────────────────────────────────────────
+# Writes pushed over SMB to file servers this host never wrote to before,
+# read off the flow records the conntrack table yields. Off by default.
+# The learning period is held in memory, so a restart learns again.
+#
+# share_writes:
+#   enabled: true
+#   # Every server written to during the first seven days is ordinary.
+#   learning_secs: 604800
+#   # One process's writes to new servers are added up over five minutes.
+#   window_secs: 300
+#   # New servers in one window that raise the alert (2 to 256).
+#   min_new_peers: 5
+#   # Bytes a new server must receive in the window to count.
+#   min_bytes_per_peer: 1048576

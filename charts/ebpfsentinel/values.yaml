@@ -175,6 +175,22 @@ daemonset:
         type: Unconfined
       seccompProfile:
         type: Unconfined
+    # -- Host directories the file watch reaches. The watch (`file_watch` in
+    # the agent configuration, off by default) is opened by the warden, so the
+    # paths it names are read in the warden's mount namespace, where the
+    # node's files are not. Each entry is an absolute host directory mounted
+    # read-only into the warden at the same path, so a change is reported
+    # under the name the node gives it. A container's root is an overlay that
+    # cannot be watched: its writes land on the filesystem holding the
+    # runtime's upper directories, /var/lib/containerd on containerd and
+    # CRI-O's /var/lib/containers, which is the entry that covers them. The
+    # mark is taken on the whole filesystem, so one directory per filesystem
+    # is enough. `/` is refused: it would cover the warden's own image. The
+    # mounts are read-only, so a directory meant to receive canaries is not
+    # covered by this list.
+    fileWatchHostPaths: []
+    # - /var/lib/containerd
+    # - /etc/kubernetes
     # -- Warden resource requests and limits
     resources:
       requests:

@@ -81,6 +81,20 @@ services:
       # Read-only host /proc so the warden resolves the same
       # /host/proc/<pid>/root/<lib> path the agent sends for a brokered uprobe.
       - /proc:/host/proc:ro
+      # The file watch (`file_watch` in the configuration, off by default) is
+      # opened by the warden, so every path it names - `filesystems`, `paths`,
+      # the profiles - is read in this container's mount namespace, where the
+      # host's own files are not. Mount each host directory it should watch
+      # here, read-only and at the same path, so a change is reported under
+      # the name the host gives it. A container's writes land on the
+      # filesystem holding the runtime's upper directories, which is
+      # /var/lib/docker for this host. The mark is taken on the whole
+      # filesystem, so a read-only bind of one directory is enough to see
+      # every write to that filesystem; never mount the host's / over the
+      # warden's own. A directory meant to receive canaries needs a writable
+      # mount instead.
+      # - /var/lib/docker:/var/lib/docker:ro
+      # - /etc/ssh:/etc/ssh:ro
     restart: unless-stopped
     # The agent is stopped first and can be mid-call here, so the broker gets
     # the same budget rather than a shorter one: killing it under a call in

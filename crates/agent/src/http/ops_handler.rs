@@ -850,7 +850,12 @@ fn kernel_features_body(report: Option<&adapters::ebpf::HelperReport>) -> Kernel
     let file_kfuncs = FileKfuncReport::from(adapters::ebpf::file_kfunc_probe::cached());
     let kfunc_features = KfuncFeaturesReport::from(adapters::ebpf::kfunc_feature_probe::cached());
     // Read live, like every block above, so an attach that came up or went
-    // away since start-up is answered as it is now.
+    // away since start-up is answered as it is now. `capability_report::cached()`
+    // is deliberately not used here: it is the start-up snapshot behind the log
+    // lines and the metric, and serving it would let this block contradict the
+    // `self_protection`, `write_refusal` or `network_executables` block of the
+    // same response once one of them changes. The rebuild costs one read of
+    // `osrelease` plus in-memory status reads, and issues no probe syscall.
     let capabilities = CapabilityEntry::all(&adapters::ebpf::capability_report::from_host());
 
     let Some(report) = report else {
