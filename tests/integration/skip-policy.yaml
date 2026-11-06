@@ -122,6 +122,7 @@ env:
   - "suite 84 writes its files on the agent's host (local lane only)"
   - "suite 85 writes from the agent's own host (local lane only)"
   - "suite 92 runs its clients beside the agent (local lane only)"
+  - "suite 95 runs its clients beside the agent (local lane only)"
   - "suite 93 starts its processes on the agent's host (local lane only)"
   - "suite 94 writes its files on the agent's host (local lane only)"
   - "systemd-run is not installed on this host"

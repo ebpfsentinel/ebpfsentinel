@@ -315,7 +315,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `telemetry` | No suite yet (unplanned) | none | n/a | manual | Anonymous heartbeat of version and eBPF load state. No suite exercises it: the destination is a build-time constant that no test build carries, so a community or CI binary has nowhere to send one and there is nothing to receive it |
 | `threatintel` | 16, 17, 33 | 2vm | 6.12 | pr | OSINT feeds + IOC + STIX |
 | `trace` | 87 | none | 6.12 | nightly | One crafted packet run through the loaded programs, each stage's verdict; 87 traces a five-tuple a deny rule names and reads the stage that stopped it, and one it does not name |
-| `workload` | 67, 70, 92 | none | 6.12 | nightly | The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry |
+| `workload` | 67, 70, 92, 95 | none | 6.12 | nightly | The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry, 92 on its executable, unit and cgroup, 95 the processes allowed to resolve and the resolvers every process may use |
 | `zone` | 31 | 2vm | 6.12 | pr | Zone-based policy |
 
 #### Capabilities above the floor (14)
@@ -326,7 +326,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `bpf_lsm` | 83, 86 | none | 6.12 | nightly | A write refused at an LSM hook in 83; the boot parameter named when bpf is missing from the module list in 86 |
 | `copy_from_user_str` | 86 | none | 6.12 | nightly | No shipped program rests on it yet, so the report in 86 is all there is to assert |
 | `file_kfuncs` | 77 | none | 6.12 | nightly | Probed and reported in 77 |
-| `immediate_signal` | No suite yet (workload-identity) | none | 6.12 | manual | No suite yet: nothing signals a target making no syscall and reads that it went at once |
+| `immediate_signal` | 82 | none | 6.12 | nightly | A run spinning without a syscall after its writes killed at once; skipped where the kernel signals at the next syscall only |
 | `kprobe_session` | 86 | none | 6.12 | nightly | No shipped program rests on it yet, so the report in 86 is all there is to assert |
 | `network_executables` | 91 | none | 6.12 | nightly | Needs the BPF LSM active at boot, which the agent VM's boot line sets |
 | `process_signal` | 82 | none | 6.12 | nightly | A run encrypting files stopped by the signal |
@@ -343,7 +343,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 |---|---|
 | `/api/v1/agent/identity` | 35, 36 |
 | `/api/v1/agent/status` | 02, 08, 30 |
-| `/api/v1/alerts` | 04, 12, 13, 14, 25, 27, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 52, 53, 54, 55, 56, 59, 60, 61, 71, 79, 83, 84, 91, 92, 93, 94 |
+| `/api/v1/alerts` | 04, 12, 13, 14, 25, 27, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 52, 53, 54, 55, 56, 59, 60, 61, 71, 79, 83, 84, 91, 92, 93, 94, 95 |
 | `/api/v1/alerts/stream` | 25, 34 |
 | `/api/v1/alerts/triage` | No suite yet (unplanned) |
 | `/api/v1/alerts/{id}` | 25, 34 |
@@ -384,7 +384,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/ebpf/guests` | 73, 74, 75 |
 | `/api/v1/ebpf/hidden-ports` | 79 |
 | `/api/v1/ebpf/hidden-processes` | 79 |
-| `/api/v1/ebpf/kernel-features` | 27, 77, 83, 84, 86, 88 |
+| `/api/v1/ebpf/kernel-features` | 27, 77, 82, 83, 84, 86, 88, 95 |
 | `/api/v1/ebpf/raw-sockets` | 88 |
 | `/api/v1/ebpf/status` | 06, 16, 62, 68 |
 | `/api/v1/ebpf/uprobes` | 60 |
@@ -399,7 +399,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/firewall/workload/fqdn` | 92 |
 | `/api/v1/firewall/workload/labels` | 92 |
 | `/api/v1/firewall/workload/reach` | 70 |
-| `/api/v1/firewall/workload/rules` | 70, 72, 92 |
+| `/api/v1/firewall/workload/rules` | 70, 72, 92, 95 |
 | `/api/v1/flows/export` | 90 |
 | `/api/v1/geoip/lookup` | 30 |
 | `/api/v1/geoip/status` | 30 |

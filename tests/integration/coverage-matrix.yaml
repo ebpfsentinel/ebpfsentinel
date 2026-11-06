@@ -217,6 +217,7 @@ suite_profiles:
   "92": nightly
   "93": nightly
   "94": nightly
+  "95": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -1098,11 +1099,11 @@ coverage:
 
   - kind: domain_module
     feature: workload
-    suites: ["67", "70", "92"]
+    suites: ["67", "70", "92", "95"]
     topology: none
     kernel_min: "6.12"
     profile: nightly
-    notes: "The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry"
+    notes: "The workload block naming the process, cgroup and container behind a flow; 70 asserts rules decided on its ancestry, 92 on its executable, unit and cgroup, 95 the processes allowed to resolve and the resolvers every process may use"
 
   - kind: domain_module
     feature: clusterip
