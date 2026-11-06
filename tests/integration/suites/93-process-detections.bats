@@ -88,8 +88,19 @@ teardown() {
 _listen() {
     local port="${1:?usage: _listen <port>}"
     # The far end keeps every connection open and sends nothing, so the
-    # shell on the near end waits on its socket.
-    ip netns exec "$EBPF_TEST_NS" ncat -l "$EBPF_NS_IP" "$port" -k --recv-only >/dev/null 2>&1 &
+    # shell on the near end waits on its socket. Not `ncat --recv-only`:
+    # it half-closes its side, the shell reads end of file on its stdin and
+    # exits before a sample can see it.
+    ip netns exec "$EBPF_TEST_NS" python3 -c '
+import socket, sys
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind((sys.argv[1], int(sys.argv[2])))
+server.listen(64)
+held = []
+while True:
+    held.append(server.accept()[0])
+' "$EBPF_NS_IP" "$port" >/dev/null 2>&1 &
     local pid=$!
     local attempt=0
     while [ "$attempt" -lt 25 ]; do
