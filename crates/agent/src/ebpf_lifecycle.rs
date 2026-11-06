@@ -105,8 +105,8 @@ pub struct EbpfProgramManager {
 
 /// The programs a trace can run, in the order the hooks run them: the
 /// manager's key, the program's name inside its loader, and the hook.
-const XDP_ROOTS: [&str; 3] = ["xdp_firewall", "xdp_ratelimit", "xdp_loadbalancer"];
-const TC_INGRESS: [(&str, &str); 6] = [
+pub(crate) const XDP_ROOTS: [&str; 3] = ["xdp_firewall", "xdp_ratelimit", "xdp_loadbalancer"];
+pub(crate) const TC_INGRESS: [(&str, &str); 6] = [
     ("tc_ids", "tc_ids"),
     ("tc_threatintel", "tc_threatintel"),
     ("tc_dns", "tc_dns"),

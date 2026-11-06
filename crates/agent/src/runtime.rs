@@ -931,6 +931,58 @@ pub struct EbpfLoadResult {
     pub ids_mirror_mgr: Option<IdsMirrorMapManager>,
 }
 
+/// What a trace in `direction` runs on the generation `loaders` hold:
+/// duplicates of the loaded programs' fds, in the order the hooks run them,
+/// and the programs of that direction the generation did not load, which is
+/// all of them when nothing is loaded. `ids_egress` is whether the IDS
+/// classifier is attached on egress as well.
+#[must_use]
+pub fn trace_plan(
+    loaders: &[EbpfLoader],
+    direction: domain::trace::TraceDirection,
+    ids_egress: bool,
+) -> adapters::ebpf::datapath_trace::TracePlan {
+    use adapters::ebpf::datapath_trace::{TracePlan, TracedProgram};
+    use domain::trace::{TraceDirection, TraceHook};
+    let fd = |name: &str| {
+        loaders
+            .iter()
+            .find_map(|loader| loader.program_fd_owned(name))
+    };
+    let mut plan = TracePlan::default();
+    let mut take = |name: &str, hook: TraceHook| match fd(name) {
+        Some(fd) => plan.programs.push(TracedProgram {
+            name: name.to_string(),
+            hook,
+            fd,
+        }),
+        None => plan.not_loaded.push(name.to_string()),
+    };
+    match direction {
+        TraceDirection::Ingress => {
+            // The XDP entry program follows the tail calls itself, so
+            // only the first one attached is run.
+            let root = crate::ebpf_lifecycle::XDP_ROOTS
+                .iter()
+                .find(|name| fd(name).is_some())
+                .unwrap_or(&crate::ebpf_lifecycle::XDP_ROOTS[0]);
+            take(root, TraceHook::Xdp);
+            for (_, name) in crate::ebpf_lifecycle::TC_INGRESS {
+                take(name, TraceHook::TcIngress);
+            }
+            take("tc_qos_ingress", TraceHook::TcIngress);
+        }
+        TraceDirection::Egress => {
+            if ids_egress {
+                take("tc_ids", TraceHook::TcEgress);
+            }
+            take("tc_nat_egress", TraceHook::TcEgress);
+            take("tc_qos", TraceHook::TcEgress);
+        }
+    }
+    plan
+}
+
 /// Hand the firewall's shared maps to the services that write into them.
 ///
 /// The pins were wiped before this load, so every map here is new and the
