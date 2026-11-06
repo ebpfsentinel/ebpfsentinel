@@ -207,7 +207,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `tc-threatintel` | 17, 33, 67 | 2vm | 6.12 | pr | OSINT feed IOC matching (TC) |
 | `tracepoint-drop-reason` | 90 | none | 6.12 | nightly | Counts the packets the kernel frees undelivered, under the skb_drop_reason it gives; 90 sends datagrams to a closed port and reads them back as NO_SOCKET on the interface they arrived on |
 | `tracepoint-process` | 67, 70, perf/07 | none | 6.12 | pr | Exec, fork and exit feeding the process table; 67 reads a program that execed after the hooks attached, 70 decides workload rules on the chain of parents it records, exec() cost measured in perf/07 |
-| `tracepoint-signal` | No suite yet (workload-identity) | none | 6.12 | manual | Signals the task behind a flow from inside that task, for the process response. No suite yet: nothing asserts a named process is stopped |
+| `tracepoint-signal` | 82, 93 | none | 6.12 | nightly | Signals the named task at its next syscall: the mass encryption run stopped in 82, the reverse shell stopped in 93 |
 | `tracepoint-tcp-health` | 71 | none | 6.12 | nightly | Retransmissions, resets and connections opened, failed and closed, counted per pair of ends at the TCP stack's own tracepoints; 71 provokes resets to a closed port and full connections, and reads both ends back |
 | `uprobe-crypto` | No suite yet (host-integrity) | none | 6.12 | manual | Calls into the encryption entry point of libcrypto, libgcrypt and libsodium, counted per process for the mass encryption engine. No suite yet: nothing runs a program that encrypts files through the library and reads the signal back |
 | `uprobe-dlp` | 27, 60, 62, perf/06, 67 | 2vm | 6.12 | pr | SSL/TLS DLP via uprobes; per-container uprobe attach across cgroups in suite 60; TLS-MITM inspection is enterprise-only; uprobe SSL-inspection goodput cost (loopback libssl) measured in perf/06 |
@@ -305,7 +305,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `network_program` | 88 | none | 6.12 | nightly | Programs other than the agent's on the node's network path; 88 attaches an XDP program from outside the agent and reads it back as foreign, and detaches the agent's own link without the guard and reads the alert |
 | `process` | 67, 70, 93 | none | 6.12 | nightly | The process table: a pid from exec to exit with its chain of ancestors; read through REST in 67, the chain decides workload rules in 70, the reverse shell, fileless and server-descendant detections and their process kill in 93 |
 | `qos` | 16, 28 | 2vm | 6.12 | pr | Traffic shaping policies |
-| `ransom` | 81, 82, 83, 84 | none | 6.12 | nightly | Mass encryption recognised by signals that agree: the shadow verdict in 81, the stop in 82, the write refusal with the BPF LSM in 83 and through fanotify in 84 |
+| `ransom` | 81, 82, 83, 84, 96 | none | 6.12 | nightly | Mass encryption recognised by signals that agree: the shadow verdict in 81, the stop in 82, the write refusal with the BPF LSM in 83 and through fanotify in 84, and in 96 a partial encryption raised on the header while the sampled entropy stays flat, and one past the sampled window that nothing reads |
 | `ratelimit` | 04, 14, 38 | 2vm | 6.12 | pr | Token bucket + variants; exhaustion under flood in 38 |
 | `raw_socket` | 88 | none | 6.12 | nightly | Packet sockets open on the node and the classic BPF filter behind them; 88 opens an AF_PACKET socket, with and without a classic filter, and reads its holder, its filter length and the alert |
 | `response` | 48 | 2vm | 6.12 | nightly | In-memory ResponseEngine create/list/revoke + TTL auto-expire asserted in 48; auto_response → IpsService → firewall-map mirroring exercised separately by the auto-response pipeline (not in 48) |
@@ -343,7 +343,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 |---|---|
 | `/api/v1/agent/identity` | 35, 36 |
 | `/api/v1/agent/status` | 02, 08, 30 |
-| `/api/v1/alerts` | 04, 12, 13, 14, 25, 27, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 52, 53, 54, 55, 56, 59, 60, 61, 71, 79, 83, 84, 91, 92, 93, 94, 95 |
+| `/api/v1/alerts` | 04, 12, 13, 14, 25, 27, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 52, 53, 54, 55, 56, 59, 60, 61, 71, 79, 83, 84, 91, 92, 93, 94, 95, 96 |
 | `/api/v1/alerts/stream` | 25, 34 |
 | `/api/v1/alerts/triage` | No suite yet (unplanned) |
 | `/api/v1/alerts/{id}` | 25, 34 |
@@ -405,7 +405,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/geoip/status` | 30 |
 | `/api/v1/host-rules` | 78 |
 | `/api/v1/host-rules/intents` | 78 |
-| `/api/v1/host-rules/mass-encryption` | 81, 82 |
+| `/api/v1/host-rules/mass-encryption` | 81, 82, 96 |
 | `/api/v1/host-rules/write-refusal` | 83, 84 |
 | `/api/v1/ids/rules` | 12, 16, 55, 59 |
 | `/api/v1/ids/status` | 12, 16, 33 |

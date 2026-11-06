@@ -218,6 +218,7 @@ suite_profiles:
   "93": nightly
   "94": nightly
   "95": nightly
+  "96": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -452,12 +453,11 @@ coverage:
 
   - kind: ebpf_program
     feature: tracepoint-signal
-    suites: ["TBD"]
-    owner: workload-identity
+    suites: ["82", "93"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "Signals the task behind a flow from inside that task, for the process response. No suite yet: nothing asserts a named process is stopped"
+    profile: nightly
+    notes: "Signals the named task at its next syscall: the mass encryption run stopped in 82, the reverse shell stopped in 93"
 
   # ── CLI subcommands (37) ────────────────────────────────────────
   - kind: cli_subcommand
@@ -1157,11 +1157,11 @@ coverage:
 
   - kind: domain_module
     feature: ransom
-    suites: ["81", "82", "83", "84"]
+    suites: ["81", "82", "83", "84", "96"]
     topology: none
     kernel_min: "6.12"
     profile: nightly
-    notes: "Mass encryption recognised by signals that agree: the shadow verdict in 81, the stop in 82, the write refusal with the BPF LSM in 83 and through fanotify in 84"
+    notes: "Mass encryption recognised by signals that agree: the shadow verdict in 81, the stop in 82, the write refusal with the BPF LSM in 83 and through fanotify in 84, and in 96 a partial encryption raised on the header while the sampled entropy stays flat, and one past the sampled window that nothing reads"
 
   - kind: domain_module
     feature: raw_socket
