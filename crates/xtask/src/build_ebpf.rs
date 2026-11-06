@@ -112,6 +112,32 @@ fn ebpf_toolchain() -> Result<&'static str> {
     )
 }
 
+/// Adds `rust-src` to the eBPF toolchain before the first build.
+///
+/// `cargo +<channel>` installs a missing toolchain on its own, but from the
+/// command line rather than from the toolchain file, so the `components` list
+/// written there is never read and `-Z build-std` then stops on a missing
+/// `library/Cargo.lock`. Asking rustup is idempotent: a toolchain that already
+/// carries the component costs one local check. A machine without rustup
+/// manages its toolchains some other way and is left to it.
+fn ensure_rust_src(toolchain: &str) -> Result<()> {
+    let status = match Command::new("rustup")
+        .args(["component", "add", "rust-src", "--toolchain", toolchain])
+        .status()
+    {
+        Ok(status) => status,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).context("failed to run rustup"),
+    };
+    if !status.success() {
+        anyhow::bail!(
+            "rustup could not add rust-src to {toolchain}, which -Z build-std needs \
+             to build the eBPF programs"
+        );
+    }
+    Ok(())
+}
+
 pub fn build_all() -> Result<()> {
     let workspace_root = std::env::var("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
@@ -148,6 +174,7 @@ pub fn build_all() -> Result<()> {
 
     let toolchain = ebpf_toolchain()?;
     println!("eBPF toolchain: {toolchain}");
+    ensure_rust_src(toolchain)?;
 
     for program in EBPF_PROGRAMS {
         let program_dir = ebpf_base.join(program);
