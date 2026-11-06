@@ -80,8 +80,6 @@ routes:
   /api/v1/netpol/replay: {owner: kernel-network}
   /api/v1/qos/shaping: {owner: kernel-network}
   /api/v1/services/graph: {owner: kernel-network}
-  /api/v1/tls/handshakes: {owner: restart-state}
-  /api/v1/tls/posture: {owner: restart-state}
 
 # Suite-level CI profile (consumed by scripts/list-suites-by-profile.sh
 # which drives .github/workflows/integration.yml).
@@ -217,6 +215,8 @@ suite_profiles:
   "87": nightly
   # 88 restarts the agent once per test and once under a masked module list: nightly.
   "88": nightly
+  # 89 serves TLS and HTTP on the host and reads them from the test namespace.
+  "89": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly

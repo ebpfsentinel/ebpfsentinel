@@ -7,7 +7,7 @@ End-to-end test suite for the eBPFsentinel agent. Covers agent lifecycle, REST/g
 ```
 tests/integration/
 ├── Makefile                            # Test orchestration (30+ targets)
-├── suites/                             # BATS test suites (01-88)
+├── suites/                             # BATS test suites (01-89)
 │   ├── 01-agent-lifecycle.bats
 │   ├── 02-rest-api-health.bats
 │   ├── ...
@@ -462,8 +462,8 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/threatintel/iocs` | 04, 17, 33 |
 | `/api/v1/threatintel/status` | 04, 17, 33 |
 | `/api/v1/threatintel/urls` | 33 |
-| `/api/v1/tls/handshakes` | No suite yet (restart-state) |
-| `/api/v1/tls/posture` | No suite yet (restart-state) |
+| `/api/v1/tls/handshakes` | 89 |
+| `/api/v1/tls/posture` | 89 |
 | `/api/v1/tls/status` | 58 |
 | `/api/v1/trace` | 87 |
 | `/api/v1/zones` | 31 |

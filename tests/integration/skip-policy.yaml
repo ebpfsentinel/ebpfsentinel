@@ -104,6 +104,7 @@ env:
   - "docker daemon not reachable"
   - "cannot pull"
   - "securityfs is not mounted on this host"
+  - "this host's openssl has no ML-KEM"
   - "the BPF LSM is not among this host's security modules"
 
 
@@ -194,3 +195,4 @@ masking:
   - "no local agent build at $agent"
   - "no xdp-pass object at $obj"
   - "no capabilities.json at $CATALOGUE"
+  - "the host's openssl negotiates nothing below TLS 1.2"

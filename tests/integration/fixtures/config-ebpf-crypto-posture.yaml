@@ -1,0 +1,65 @@
+# config-ebpf-crypto-posture.yaml - TLS handshakes and the cryptographic
+# posture of each edge.
+#
+# L7 inspection on the two TLS ports the suite serves (8443 at the host's
+# own security level, 8444 lowered so a legacy client can still be answered)
+# and on one clear-text HTTP port (8880). tc-ids is attached on egress as
+# well as ingress: the server's flight leaves the host towards the test
+# namespace, and the handshake is read from that flight.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  allow_plaintext_api: true
+  log_level: info
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+  inspect_egress: true
+
+ips:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+dlp:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+ddos:
+  enabled: false
+
+l7:
+  enabled: true
+  ports: [8443, 8444, 8880]
+  reassembly:
+    enabled: true
+    max_flows: 4096
+    max_buffer_per_flow: 16384
+    idle_timeout_secs: 30
+    sweep_interval_secs: 5
+  rules: []
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+auth:
+  enabled: false
