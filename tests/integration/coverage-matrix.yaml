@@ -382,7 +382,7 @@ coverage:
     topology: none
     kernel_min: "6.12"
     profile: manual
-    notes: "Steers the TCP connections of selected cgroups to a local listener at connect4/connect6. No suite yet: nothing asserts a steered connection lands on the listener"
+    notes: "Steers the TCP connections of selected cgroups to a local listener at connect4/connect6. No suite yet: the listener and the selection are the enterprise TLS interception's, so the suite that asserts a steered connection lands on the listener belongs beside it"
 
   - kind: ebpf_program
     feature: cgroup-clusterip
@@ -1279,7 +1279,7 @@ coverage:
     topology: none
     kernel_min: "6.12"
     profile: manual
-    notes: "No suite yet: nothing quarantines a workload and reads its connections refused for the window"
+    notes: "No suite yet: nothing in this agent arms a quarantine, which only the enterprise automated response calls, so the suite that reads a workload's connections refused for the window belongs beside that response"
 
   - kind: capability
     feature: process_signal
