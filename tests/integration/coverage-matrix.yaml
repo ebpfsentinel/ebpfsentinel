@@ -67,10 +67,8 @@ routes:
   /api/v1/alerts/triage: {owner: unplanned}
   /api/v1/alerts/{id}/triage: {owner: unplanned}
   /api/v1/ebpf/drop-reasons: {owner: kernel-network}
-  /api/v1/ebpf/foreign-programs: {owner: host-integrity}
   /api/v1/ebpf/hidden-ports: {suites: ["79"]}
   /api/v1/ebpf/hidden-processes: {suites: ["79"]}
-  /api/v1/ebpf/raw-sockets: {owner: host-integrity}
   /api/v1/exposure/listeners: {owner: kernel-network}
   /api/v1/firewall/workload/fqdn: {owner: kernel-network}
   /api/v1/firewall/workload/labels: {owner: kernel-network}
@@ -195,8 +193,8 @@ suite_profiles:
   # 82 encrypts a tree under a promoted verdict and is killed by the stop:
   # root on a throwaway host, so nightly.
   "82": nightly
-  # 83 needs the BPF LSM active at boot, which no lane's kernel command line
-  # sets yet; where it is not, it skips: nightly, so it runs the day one does.
+  # 83 needs the BPF LSM active at boot, which the agent VM's boot line sets;
+  # where it is not, it skips: nightly.
   "83": nightly
   # 72 to 75 each start an agent beside a container or a guest the suite
   # builds itself (LXC, a tap device, libvirt): root on a throwaway host,
@@ -217,6 +215,8 @@ suite_profiles:
   "86": nightly
   # 87 stops and starts the agent twice around learning windows: nightly.
   "87": nightly
+  # 88 restarts the agent once per test and once under a masked module list: nightly.
+  "88": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -399,16 +399,15 @@ coverage:
     topology: none
     kernel_min: "6.12"
     profile: manual
-    notes: "Only the executables in the set reach the network, at socket_create and socket_connect. Needs the BPF LSM active at boot (lsm=bpf), which no lane's kernel command line sets yet"
+    notes: "Only the executables in the set reach the network, at socket_create and socket_connect. Needs the BPF LSM active at boot (lsm=bpf), which the agent VM's boot line sets"
 
   - kind: ebpf_program
     feature: lsm-bpf-guard
-    suites: ["TBD"]
-    owner: host-integrity
+    suites: ["88"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks. Needs the BPF LSM active at boot (lsm=bpf), which no lane's kernel command line sets yet"
+    profile: nightly
+    notes: "No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks; 88 has a detach of the agent's link refused with the BPF LSM active, which the agent VM's boot line now sets"
 
   - kind: ebpf_program
     feature: lsm-write-refusal
@@ -1157,12 +1156,11 @@ coverage:
 
   - kind: domain_module
     feature: network_program
-    suites: ["TBD"]
-    owner: host-integrity
+    suites: ["88"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "Programs other than the agent's on the node's network path. No suite yet: nothing attaches a foreign XDP or tc program and reads /api/v1/ebpf/foreign-programs"
+    profile: nightly
+    notes: "Programs other than the agent's on the node's network path; 88 attaches an XDP program from outside the agent and reads it back as foreign, and detaches the agent's own link without the guard and reads the alert"
 
   - kind: domain_module
     feature: ransom
@@ -1174,12 +1172,11 @@ coverage:
 
   - kind: domain_module
     feature: raw_socket
-    suites: ["TBD"]
-    owner: host-integrity
+    suites: ["88"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "Packet sockets open on the node and the classic BPF filter behind them. No suite yet: nothing opens an AF_PACKET socket and reads /api/v1/ebpf/raw-sockets"
+    profile: nightly
+    notes: "Packet sockets open on the node and the classic BPF filter behind them; 88 opens an AF_PACKET socket, with and without a classic filter, and reads its holder, its filter length and the alert"
 
   - kind: domain_module
     feature: share_writes
@@ -1329,12 +1326,11 @@ coverage:
 
   - kind: capability
     feature: self_protection
-    suites: ["TBD"]
-    owner: host-integrity
+    suites: ["88"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "No suite yet: needs the BPF LSM active at boot"
+    profile: nightly
+    notes: "88 reads the guard as protected and has a detach of the agent's XDP link refused where the BPF LSM runs, and reads it unprotected with the detach succeeding where bpf is masked out of the module list"
 
 # ── Attack suites (per-suite tagging) ────────────────────────────────
 # Rows above map features → suites. The block below tags each Wave-2

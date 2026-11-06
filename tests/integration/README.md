@@ -7,7 +7,7 @@ End-to-end test suite for the eBPFsentinel agent. Covers agent lifecycle, REST/g
 ```
 tests/integration/
 ├── Makefile                            # Test orchestration (30+ targets)
-├── suites/                             # BATS test suites (01-87)
+├── suites/                             # BATS test suites (01-88)
 │   ├── 01-agent-lifecycle.bats
 │   ├── 02-rest-api-health.bats
 │   ├── ...
@@ -194,8 +194,8 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `cgroup-clusterip` | No suite yet (kernel-network) | none | 6.12 | manual | Resolves the Service cluster addresses of opted-in pods at connect4/connect6 and answers with the cluster address at getpeername and recvmsg. Asserted beside Cilium and Calico in the operator's coexistence lane, which needs a cluster no lane here provisions |
 | `cgroup-connect-redirect` | No suite yet (kernel-network) | none | 6.12 | manual | Steers the TCP connections of selected cgroups to a local listener at connect4/connect6. No suite yet: nothing asserts a steered connection lands on the listener |
 | `cgroup-workload-firewall` | 67, 70 | 2vm | 6.12 | nightly | Workload rules decided at connect/sendmsg/bind; suite 70 refuses a connect by the executable of the direct parent and of any ancestor, read from the live chain of parents |
-| `lsm-bpf-guard` | No suite yet (host-integrity) | none | 6.12 | manual | No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks. Needs the BPF LSM active at boot (lsm=bpf), which no lane's kernel command line sets yet |
-| `lsm-exec-network` | No suite yet (workload-identity) | none | 6.12 | manual | Only the executables in the set reach the network, at socket_create and socket_connect. Needs the BPF LSM active at boot (lsm=bpf), which no lane's kernel command line sets yet |
+| `lsm-bpf-guard` | 88 | none | 6.12 | nightly | No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks; 88 has a detach of the agent's link refused with the BPF LSM active, which the agent VM's boot line now sets |
+| `lsm-exec-network` | No suite yet (workload-identity) | none | 6.12 | manual | Only the executables in the set reach the network, at socket_create and socket_connect. Needs the BPF LSM active at boot (lsm=bpf), which the agent VM's boot line sets |
 | `lsm-write-refusal` | 83 | none | 6.12 | nightly | A writer's write-opens and truncations under a watched directory refused past a count inside a window, nothing refused once the agent is gone, and in shadow nothing refused or raised while the reading counts it by workload. Needs the BPF LSM active at boot (lsm=bpf); the suite skips where it is not |
 | `tc-conntrack` | 18, 24, 47, 67 | 3vm | 6.12 | pr | Connection tracking; kernel-CT kill via kill_flow_via_xdp_ct/skb_ct asserted in 47 |
 | `tc-dns` | 19, 45, 67 | 3vm | 6.12 | pr | Passive DNS capture; DoH/DoT detection via ClientHello SNI + dst_port 853 asserted in 45 |
@@ -302,12 +302,12 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `loadbalancer` | 16, 20, 37, 44 | 2vm | 6.12 | pr | Maglev + DSR; 3-VM end-to-end coverage via suite 44 |
 | `nat` | 16, 21, 50, perf/03, perf/06 | 2vm | 6.12 | pr | SNAT/DNAT/NPTv6; NPTv6 rule CRUD + tc-nat-egress config surface asserted in 50; NPTv6 control-plane add latency in perf/03; SNAT/DNAT datapath throughput overhead in perf/06 |
 | `netpol` | No suite yet (kernel-network) | k8s | 6.12 | manual | Kubernetes NetworkPolicy compiled for the pods of one node. No suite applies a policy |
-| `network_program` | No suite yet (host-integrity) | none | 6.12 | manual | Programs other than the agent's on the node's network path. No suite yet: nothing attaches a foreign XDP or tc program and reads /api/v1/ebpf/foreign-programs |
+| `network_program` | 88 | none | 6.12 | nightly | Programs other than the agent's on the node's network path; 88 attaches an XDP program from outside the agent and reads it back as foreign, and detaches the agent's own link without the guard and reads the alert |
 | `process` | 67, 70 | none | 6.12 | nightly | The process table: a pid from exec to exit with its chain of ancestors; read through REST in 67, the chain decides workload rules in 70 |
 | `qos` | 16, 28 | 2vm | 6.12 | pr | Traffic shaping policies |
 | `ransom` | 81, 82, 83, 84 | none | 6.12 | nightly | Mass encryption recognised by signals that agree: the shadow verdict in 81, the stop in 82, the write refusal with the BPF LSM in 83 and through fanotify in 84 |
 | `ratelimit` | 04, 14, 38 | 2vm | 6.12 | pr | Token bucket + variants; exhaustion under flood in 38 |
-| `raw_socket` | No suite yet (host-integrity) | none | 6.12 | manual | Packet sockets open on the node and the classic BPF filter behind them. No suite yet: nothing opens an AF_PACKET socket and reads /api/v1/ebpf/raw-sockets |
+| `raw_socket` | 88 | none | 6.12 | nightly | Packet sockets open on the node and the classic BPF filter behind them; 88 opens an AF_PACKET socket, with and without a classic filter, and reads its holder, its filter length and the alert |
 | `response` | 48 | 2vm | 6.12 | nightly | In-memory ResponseEngine create/list/revoke + TTL auto-expire asserted in 48; auto_response → IpsService → firewall-map mirroring exercised separately by the auto-response pipeline (not in 48) |
 | `routing` | 32, 53 | 2vm | 6.12 | nightly | Multi-WAN routing; failover ordering + REST + metrics surface asserted in 53 (priority-ordered list, gateways_total gauge, failovers_total counter, SIGHUP-driven priority swap). Active health probe loop + WAN_ALL_DOWN alert + real link-down egress reroute tracked as deferred ACs in the suite header |
 | `share_writes` | 85 | none | 6.12 | nightly | A host writing to file shares it never wrote to, read off its own flows, including the sealed SMB 3 case |
@@ -332,7 +332,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `process_signal` | 82 | none | 6.12 | nightly | A run encrypting files stopped by the signal |
 | `process_tracing` | 70 | none | 6.12 | nightly | The process and its lineage behind a flow |
 | `quarantine` | No suite yet (workload-identity) | none | 6.12 | manual | No suite yet: nothing quarantines a workload and reads its connections refused for the window |
-| `self_protection` | No suite yet (host-integrity) | none | 6.12 | manual | No suite yet: needs the BPF LSM active at boot |
+| `self_protection` | 88 | none | 6.12 | nightly | 88 reads the guard as protected and has a detach of the agent's XDP link refused where the BPF LSM runs, and reads it unprotected with the detach succeeding where bpf is masked out of the module list |
 | `tcp_reqsk_assign` | 86 | none | 6.12 | nightly | No shipped program rests on it yet, so the report in 86 is all there is to assert |
 | `workload_firewall` | 70, 72 | none | 6.12 | nightly | Rules on a workload's ancestry in 70 and inside LXC containers in 72 |
 | `write_refusal` | 83, 84 | none | 6.12 | nightly | At the LSM hook in 83 and through the fanotify permission group in 84 |
@@ -380,12 +380,12 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/domains/reputation` | 04 |
 | `/api/v1/ebpf/coverage` | 87 |
 | `/api/v1/ebpf/drop-reasons` | No suite yet (kernel-network) |
-| `/api/v1/ebpf/foreign-programs` | No suite yet (host-integrity) |
+| `/api/v1/ebpf/foreign-programs` | 88 |
 | `/api/v1/ebpf/guests` | 73, 74, 75 |
 | `/api/v1/ebpf/hidden-ports` | 79 |
 | `/api/v1/ebpf/hidden-processes` | 79 |
-| `/api/v1/ebpf/kernel-features` | 27, 77, 83, 84, 86 |
-| `/api/v1/ebpf/raw-sockets` | No suite yet (host-integrity) |
+| `/api/v1/ebpf/kernel-features` | 27, 77, 83, 84, 86, 88 |
+| `/api/v1/ebpf/raw-sockets` | 88 |
 | `/api/v1/ebpf/status` | 06, 16, 62, 68 |
 | `/api/v1/ebpf/uprobes` | 60 |
 | `/api/v1/exposure/listeners` | No suite yet (kernel-network) |

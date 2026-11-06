@@ -103,6 +103,8 @@ env:
   - "no warden binary: this lane runs the agent without a broker"
   - "docker daemon not reachable"
   - "cannot pull"
+  - "securityfs is not mounted on this host"
+  - "the BPF LSM is not among this host's security modules"
 
 
 masking:
@@ -189,3 +191,6 @@ masking:
   - "the agent would not start against a namespaced broker"
   - "no XDP program attached to"
   - "agent pid unknown"
+  - "no local agent build at $agent"
+  - "no xdp-pass object at $obj"
+  - "no capabilities.json at $CATALOGUE"

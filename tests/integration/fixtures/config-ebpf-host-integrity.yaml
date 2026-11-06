@@ -1,0 +1,36 @@
+# config-ebpf-host-integrity.yaml - who else reads the node's traffic or sits
+# on its network path, and whether the agent's own programs can be taken away.
+#
+# The inventory is read every two seconds so a socket or a program the suite
+# opens is seen within the test's patience rather than the production default
+# of thirty. The firewall is the one program family loaded: its XDP link is
+# the one the guard tests try to detach.
+#
+# Network topology (placeholders substituted by prepare_ebpf_config):
+#   Host: __HOST_IP__  (veth-ebpf0 or agent VM eth1)
+#   NS:   __NS_IP__    (veth-ebpf1 or attacker VM)
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  allow_plaintext_api: true
+  log_level: info
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  mode: alert
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+network_inventory:
+  enabled: true
+  interval_secs: 2

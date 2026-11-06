@@ -139,6 +139,28 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     SHELL
 
     # ----------------------------------------------------------
+    # Provisioner: bpf-lsm
+    #
+    # Adds `bpf` to the security modules the kernel starts, after the ones
+    # it already runs, so the agent's LSM programs load here the way they
+    # do on a host whose boot line asks for them. Ubuntu leaves it out by
+    # default, and without it every LSM-backed capability is reported
+    # inactive and nothing exercises it. A suite that wants the host
+    # without it masks the module list in a private mount namespace, so
+    # one lane covers both. Takes effect on the next boot.
+    # ----------------------------------------------------------
+    agent.vm.provision "shell", name: "bpf-lsm", reboot: true, inline: <<-SHELL
+      set -euxo pipefail
+      conf=/etc/default/grub.d/91-bpf-lsm.cfg
+      if ! grep -qw bpf /sys/kernel/security/lsm || [ ! -f "$conf" ]; then
+        modules="$(tr ',' '\\n' </sys/kernel/security/lsm | grep -vx -e capability -e bpf | paste -sd, -)"
+        want="GRUB_CMDLINE_LINUX=\\"\\$GRUB_CMDLINE_LINUX lsm=${modules},bpf\\""
+        printf '%s\\n' "$want" > "$conf"
+        update-grub
+      fi
+    SHELL
+
+    # ----------------------------------------------------------
     # Provisioner: base-packages
     # ----------------------------------------------------------
     agent.vm.provision "shell", name: "base-packages", inline: <<-SHELL
