@@ -561,12 +561,15 @@ fn is_policy_write(path: &str) -> bool {
 
 /// Count every policy write the API accepted, so whoever wrote the document
 /// can tell a node that still runs it from one somebody changed by hand.
-/// Only an accepted write counts: a refusal changed nothing.
-async fn record_policy_write(req: Request, next: middleware::Next) -> Response {
+/// Only an accepted write counts: a refusal changed nothing, and a read
+/// changes nothing either, so a router that serves both can layer this over
+/// the whole of it.
+pub async fn record_policy_write(req: Request, next: middleware::Next) -> Response {
+    let read = req.method().is_safe();
     let method = req.method().to_string();
     let path = req.uri().path().to_owned();
     let response = next.run(req).await;
-    if response.status().is_success() && is_policy_write(&path) {
+    if !read && response.status().is_success() && is_policy_write(&path) {
         infrastructure::config::provenance::record_runtime_write(&method, &path);
     }
     response
