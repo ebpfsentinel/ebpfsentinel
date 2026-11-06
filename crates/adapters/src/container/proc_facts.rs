@@ -1,8 +1,14 @@
 use std::collections::HashSet;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use domain::process::detection::ProcessFacts;
+use ebpfsentinel_warden_client::ReconnectingClient;
 use ports::secondary::process_facts_port::ProcessFactsReader;
+
+/// Set to the warden's control socket when the agent runs rootless.
+const WARDEN_SOCK_ENV: &str = "EBPFSENTINEL_WARDEN_SOCK";
 
 /// Suffix the kernel appends to `/proc/<pid>/exe` once the binary is unlinked.
 const DELETED_SUFFIX: &str = " (deleted)";
@@ -28,16 +34,59 @@ const STREAMS: [u32; 2] = [0, 1];
 /// network apart from a service whose output goes to the journal over a unix
 /// socket.
 ///
-/// A link the agent may not read, which is every process outside its user
-/// namespace when it runs rootless, answers nothing rather than a guess.
+/// A rootless agent fails the ptrace check these links ask for against every
+/// process outside its user namespace. When `EBPFSENTINEL_WARDEN_SOCK` is set,
+/// a process whose `exe` link the agent may not read is read by the warden
+/// instead; without a warden, or when it refuses, the process answers nothing
+/// rather than a guess. A process that is simply gone costs no round trip.
 pub struct ProcFactsReader {
     proc_root: PathBuf,
+    /// The warden, in a rootless deployment. Held behind a `Mutex` because the
+    /// client caches its connection and the port reads through `&self`.
+    warden: Option<Mutex<ReconnectingClient>>,
 }
 
 impl ProcFactsReader {
     pub fn new(proc_root: impl Into<PathBuf>) -> Self {
+        let warden = std::env::var_os(WARDEN_SOCK_ENV)
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| Mutex::new(ReconnectingClient::new(p)));
         Self {
             proc_root: proc_root.into(),
+            warden,
+        }
+    }
+
+    /// Read through the warden at `sock` whenever the local link is not
+    /// readable, whatever the environment says.
+    #[cfg(test)]
+    fn with_warden(proc_root: impl Into<PathBuf>, sock: impl Into<PathBuf>) -> Self {
+        Self {
+            proc_root: proc_root.into(),
+            warden: Some(Mutex::new(ReconnectingClient::new(sock))),
+        }
+    }
+
+    /// Ask the warden for the facts of a process the agent may not read. A
+    /// warden that is down or refuses leaves the process unread, as a local
+    /// failure does.
+    fn read_through_warden(&self, pid: u32) -> Option<ProcessFacts> {
+        let warden = self.warden.as_ref()?;
+        // The client holds a connection and nothing the facts depend on, so
+        // a poisoned lock leaves it usable.
+        let mut client = warden
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match client.read_process_facts(pid) {
+            Ok(found) => found.map(|facts| ProcessFacts {
+                streams_on_socket: facts.streams_on_socket,
+                fileless: facts.fileless,
+            }),
+            Err(e) => {
+                tracing::debug!(pid, error = %e, "warden could not read the process facts");
+                None
+            }
         }
     }
 
@@ -69,7 +118,13 @@ impl ProcFactsReader {
 impl ProcessFactsReader for ProcFactsReader {
     fn read_facts(&self, pid: u32) -> Option<ProcessFacts> {
         let pid_dir = self.proc_root.join(pid.to_string());
-        let exe = std::fs::read_link(pid_dir.join("exe")).ok()?;
+        let exe = match std::fs::read_link(pid_dir.join("exe")) {
+            Ok(exe) => exe,
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                return self.read_through_warden(pid);
+            }
+            Err(_) => return None,
+        };
         let exe = exe.to_string_lossy();
         let fileless = exe.ends_with(DELETED_SUFFIX) || exe.starts_with(MEMFD_PREFIX);
         let sockets = Self::stream_sockets(&pid_dir);
@@ -179,6 +234,105 @@ mod tests {
     fn a_gone_process_answers_nothing() {
         let root = tempfile::tempdir().expect("tempdir");
         assert_eq!(ProcFactsReader::new(root.path()).read_facts(7), None);
+    }
+
+    /// Answer one connection as the warden would: the handshake, then every
+    /// `ReadProcessFacts` with `answer`. Returns how many reads it served.
+    fn fake_warden(
+        sock: &Path,
+        answer: ebpfsentinel_warden_proto::ProcessFactsReading,
+    ) -> std::thread::JoinHandle<usize> {
+        use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response};
+        use ebpfsentinel_warden_proto::{read_frame, write_frame};
+        let listener = std::os::unix::net::UnixListener::bind(sock).unwrap();
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let Ok(Command::Hello { .. }) = read_frame::<_, Command>(&mut conn) else {
+                return 0;
+            };
+            write_frame(
+                &mut conn,
+                &Response::HelloOk {
+                    version: PROTOCOL_VERSION,
+                },
+            )
+            .unwrap();
+            let mut served = 0;
+            while let Ok(cmd) = read_frame::<_, Command>(&mut conn) {
+                let Command::ReadProcessFacts { .. } = cmd else {
+                    panic!("unexpected command {cmd:?}");
+                };
+                served += 1;
+                write_frame(
+                    &mut conn,
+                    &Response::ProcessFacts {
+                        facts: Some(answer),
+                    },
+                )
+                .unwrap();
+            }
+            served
+        })
+    }
+
+    #[test]
+    fn a_process_the_agent_may_not_read_is_read_by_the_warden() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = proc_with("/usr/bin/bash", &["/dev/null", "/dev/null"], &[]);
+        let pid_dir = root.path().join("7");
+        std::fs::set_permissions(&pid_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // A privileged test run reads through the closed directory anyway,
+        // and then the warden is never asked.
+        let privileged = std::fs::read_dir(&pid_dir).is_ok();
+
+        let sock = root.path().join("warden.sock");
+        let warden = fake_warden(
+            &sock,
+            ebpfsentinel_warden_proto::ProcessFactsReading {
+                streams_on_socket: true,
+                fileless: true,
+            },
+        );
+        let reader = ProcFactsReader::with_warden(root.path(), &sock);
+        let facts = reader.read_facts(7).expect("facts");
+        if !privileged {
+            assert!(
+                facts.streams_on_socket && facts.fileless,
+                "the warden's answer"
+            );
+        }
+
+        // A process that is gone is not worth a round trip.
+        assert_eq!(reader.read_facts(999_999), None);
+
+        drop(reader);
+        if privileged {
+            // Nobody connected; unblock the accept so the thread ends.
+            drop(std::os::unix::net::UnixStream::connect(&sock));
+        }
+        let served = warden.join().unwrap();
+        std::fs::set_permissions(&pid_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !privileged {
+            assert_eq!(served, 1);
+        }
+    }
+
+    #[test]
+    fn without_a_warden_an_unreadable_process_answers_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = proc_with("/usr/bin/bash", &[], &[]);
+        let pid_dir = root.path().join("7");
+        std::fs::set_permissions(&pid_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let privileged = std::fs::read_dir(&pid_dir).is_ok();
+        let reader = ProcFactsReader {
+            proc_root: root.path().to_path_buf(),
+            warden: None,
+        };
+        let facts = reader.read_facts(7);
+        std::fs::set_permissions(&pid_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !privileged {
+            assert_eq!(facts, None);
+        }
     }
 
     #[test]

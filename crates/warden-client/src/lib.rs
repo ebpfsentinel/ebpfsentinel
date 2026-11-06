@@ -33,8 +33,8 @@ pub use ebpfsentinel_warden_proto::{
     FimFacts, FimFile, FimFileType, FimMark, FimReading, FimXattr, GoExecutable, GoExecutableScan,
     HeldBpfObjects, HiddenProcessReading, ListedPort, MappedFile, MappingScan,
     NamespacePortReading, NetworkProgram, OPENER_READINGS_MAX, OpenIntent, OpenerReading,
-    PacketSocket, PidObservation, ProcessMappings, ProcessStamp, ROOTED_CHUNK_MAX, RootedFile,
-    RootedRead, RouteSpec, TaskIdentity,
+    PacketSocket, PidObservation, ProcessFactsReading, ProcessMappings, ProcessStamp,
+    ROOTED_CHUNK_MAX, RootedFile, RootedRead, RouteSpec, TaskIdentity,
 };
 
 /// How long one warden call may take before the client gives up on it.
@@ -94,6 +94,8 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::ProcessMappings { .. } => "ProcessMappings",
         Command::WriteRefusalGroup => "WriteRefusalGroup",
         Command::OpenerReadings { .. } => "OpenerReadings",
+        Command::ReadProcessFacts { .. } => "ReadProcessFacts",
+        Command::OpenExecutable { .. } => "OpenExecutable",
     }
 }
 
@@ -247,6 +249,30 @@ impl WardenClient {
         match self.call(&Command::ReadExecutable { pid })? {
             Response::Executable { executable } => Ok(executable),
             other => Err(unexpected("ReadExecutable", &other)),
+        }
+    }
+
+    /// Read the two facts the process detection weighs about `pid`. `None`
+    /// when the process is gone or its `exe` link is unreadable.
+    pub fn read_process_facts(&mut self, pid: u32) -> io::Result<Option<ProcessFactsReading>> {
+        match self.call(&Command::ReadProcessFacts { pid })? {
+            Response::ProcessFacts { facts } => Ok(facts),
+            other => Err(unexpected("ReadProcessFacts", &other)),
+        }
+    }
+
+    /// Ask the warden to open the file `pid` runs, read-only, and receive the
+    /// descriptor over `SCM_RIGHTS`. A process that is gone answers a typed
+    /// error rather than a descriptor.
+    #[cfg(feature = "fd-pass")]
+    pub fn open_executable(&mut self, pid: u32) -> io::Result<std::os::fd::OwnedFd> {
+        self.send(&Command::OpenExecutable { pid })?;
+        match self.recv("OpenExecutable")? {
+            Response::FdReady => {
+                let result = fd_pass::recv_one_fd(&self.stream);
+                self.classify("OpenExecutable", "waiting for the executable from", result)
+            }
+            other => Err(unexpected("OpenExecutable", &other)),
         }
     }
 
@@ -724,6 +750,19 @@ impl ReconnectingClient {
     /// bounced. A read, so replaying it is harmless.
     pub fn read_executable(&mut self, pid: u32) -> io::Result<Option<ExecutableIdentity>> {
         self.with_retry(|c| c.read_executable(pid))
+    }
+
+    /// Read one process's facts through the warden, reconnecting if it
+    /// bounced. A read, so replaying it is harmless.
+    pub fn read_process_facts(&mut self, pid: u32) -> io::Result<Option<ProcessFactsReading>> {
+        self.with_retry(|c| c.read_process_facts(pid))
+    }
+
+    /// Open one process's executable through the warden, reconnecting if it
+    /// bounced. Opening read-only twice leaves nothing behind.
+    #[cfg(feature = "fd-pass")]
+    pub fn open_executable(&mut self, pid: u32) -> io::Result<std::os::fd::OwnedFd> {
+        self.with_retry(|c| c.open_executable(pid))
     }
 
     /// List every packet socket on the node through the warden, reconnecting

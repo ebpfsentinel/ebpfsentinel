@@ -24,9 +24,9 @@ use crate::host_ops::HostOps;
 use crate::pcap_slots::{PcapSlot, PcapSlots};
 use crate::write_refusal;
 use crate::{
-    bpf_inventory, cgroup_ops, delegate_over_fd, dlp_scan, exe_read, go_executables, hidden_ports,
-    hidden_processes, net_ops, netns_tcx_ops, packet_sockets, process_maps, recv_fd, rooted_read,
-    send_msg_fds, uprobe_ops,
+    bpf_inventory, cgroup_ops, delegate_over_fd, dlp_scan, exe_read, facts_read, go_executables,
+    hidden_ports, hidden_processes, net_ops, netns_tcx_ops, packet_sockets, process_maps, recv_fd,
+    rooted_read, send_msg_fds, uprobe_ops,
 };
 
 /// How long a connection may hold a thread without saying `Hello`.
@@ -394,6 +394,17 @@ fn handle_conn_with_timeouts(
                     serve_passed_fd(&mut writer, Err(message))
                 }
             },
+            // `OpenExecutable` answers out-of-band: the descriptor of the file
+            // the process runs, opened read-only, after an `FdReady`.
+            Command::OpenExecutable { pid } => {
+                match exe_read::open_executable(proc_root, *pid) {
+                    Ok(file) => {
+                        // Dup'd into the agent by `SCM_RIGHTS`; ours closes here.
+                        serve_passed_fd(&mut writer, Ok(file.as_raw_fd()))
+                    }
+                    Err(message) => serve_passed_fd(&mut writer, Err(message)),
+                }
+            }
             Command::FimOpen { paths } => {
                 let (watch, marks) = FimWatch::open(paths);
                 for mark in &marks {
@@ -685,6 +696,9 @@ fn dispatch(cmd: &Command, host: &dyn HostOps, proc_root: &Path) -> Response {
         },
         Command::ReadExecutable { pid } => Response::Executable {
             executable: exe_read::read_executable(proc_root, *pid),
+        },
+        Command::ReadProcessFacts { pid } => Response::ProcessFacts {
+            facts: facts_read::read_facts(proc_root, *pid),
         },
         Command::PacketSockets => Response::PacketSockets {
             sockets: packet_sockets::scan(proc_root),

@@ -75,6 +75,17 @@ pub struct ExecutableIdentity {
     pub ino: u64,
 }
 
+/// What the process detection weighs about one process, read from its
+/// `/proc/<pid>` directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessFactsReading {
+    /// Standard input or output is an internet socket of the process's own
+    /// network namespace.
+    pub streams_on_socket: bool,
+    /// The image was removed from disk or is an anonymous memory file.
+    pub fileless: bool,
+}
+
 /// One `AF_PACKET` socket open on the node, as the kernel lists it.
 ///
 /// A packet socket sees frames before the network stack does, which is what a
@@ -888,6 +899,27 @@ pub enum Command {
         /// The threads, as the agent's pid namespace numbers them.
         tids: Vec<u32>,
     },
+    /// Read the two facts the process detection weighs about process `pid`,
+    /// answered by [`Response::ProcessFacts`]. The `exe` link and the
+    /// standard stream links are ptrace access checks the rootless agent
+    /// fails against every process outside its user namespace. Read-only:
+    /// three link targets and the process's own internet socket tables, and
+    /// what crosses back is two booleans, never a path or a file name.
+    ReadProcessFacts {
+        /// The process whose facts are read.
+        pid: u32,
+    },
+    /// Open the file process `pid` runs, read-only, through its `exe` link,
+    /// and hand the descriptor over in an `SCM_RIGHTS` cmsg after
+    /// [`Response::FdReady`], so the agent can digest the file the process
+    /// mapped. Opening that link is the same ptrace access check as reading
+    /// it. The descriptor reaches the file on disk and nothing of the
+    /// process's memory or environment; a process that is gone, or whose
+    /// image is not a regular file, answers a typed `Error`.
+    OpenExecutable {
+        /// The process whose executable is opened.
+        pid: u32,
+    },
 }
 
 /// The most threads one [`Command::OpenerReadings`] reads.
@@ -1077,6 +1109,9 @@ pub enum Response {
     ProcessMappings { scan: MappingScan },
     /// One reading per thread asked, answering [`Command::OpenerReadings`].
     OpenerReadings { readings: Vec<OpenerReading> },
+    /// The facts of one process, answering [`Command::ReadProcessFacts`];
+    /// `None` when the process is gone or its `exe` link is unreadable.
+    ProcessFacts { facts: Option<ProcessFactsReading> },
 }
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
@@ -1113,8 +1148,9 @@ mod tests {
         BindProbe, Command, ConntrackTuple, DlpTarget, ExecutableIdentity, FileRoot, GoExecutable,
         GoExecutableScan, HiddenProcessReading, ListedPort, MAX_FRAME_LEN, MappedFile, MappingScan,
         NamespacePortReading, NetworkProgram, OpenIntent, OpenerReading, PacketSocket,
-        PidObservation, ProcessMappings, ProcessStamp, ROOTED_CHUNK_MAX, Response, RootedFile,
-        RootedRead, RouteSpec, TaskIdentity, read_frame, valid_dpkg_list_name, write_frame,
+        PidObservation, ProcessFactsReading, ProcessMappings, ProcessStamp, ROOTED_CHUNK_MAX,
+        Response, RootedFile, RootedRead, RouteSpec, TaskIdentity, read_frame,
+        valid_dpkg_list_name, write_frame,
     };
     use std::io::Cursor;
 
@@ -1204,6 +1240,8 @@ mod tests {
             Command::OpenerReadings {
                 tids: vec![4242, 4243],
             },
+            Command::ReadProcessFacts { pid: 4242 },
+            Command::OpenExecutable { pid: 4242 },
         ]
     }
 
@@ -1445,6 +1483,13 @@ mod tests {
                     OpenerReading::GONE,
                 ],
             },
+            Response::ProcessFacts {
+                facts: Some(ProcessFactsReading {
+                    streams_on_socket: true,
+                    fileless: false,
+                }),
+            },
+            Response::ProcessFacts { facts: None },
         ]
     }
 
