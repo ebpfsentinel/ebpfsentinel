@@ -219,6 +219,7 @@ suite_profiles:
   "94": nightly
   "95": nightly
   "96": nightly
+  "97": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -1124,11 +1125,11 @@ coverage:
 
   - kind: domain_module
     feature: file_watch
-    suites: ["94"]
+    suites: ["94","97"]
     topology: none
     kernel_min: "6.12"
     profile: nightly
-    notes: "Changes to watched files and the process that made them on the host, and a change to the agent's own configuration, asserted in 94. Inside a container's upper layer: no suite yet"
+    notes: "Changes to watched files and the process that made them on the host, and a change to the agent's own configuration, asserted in 94. A file a container writes, matched by a host rule at the path the container sees and never at the path under Docker storage, asserted in 97"
 
   - kind: domain_module
     feature: guest

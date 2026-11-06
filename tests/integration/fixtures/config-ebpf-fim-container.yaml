@@ -1,0 +1,72 @@
+# config-ebpf-fim-container.yaml - a host rule on a path as a container
+# sees it, read through the file watch on the filesystem beneath the
+# container's overlay.
+#
+# An overlay cannot be watched itself, so the watch marks the filesystem
+# holding Docker's storage, where every container's upper directory lives.
+# The rule names `/etc/cron.d/*`, which no host path under that storage
+# matches: it fires only on the path rooted inside the container.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  allow_plaintext_api: true
+  log_level: info
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+file_watch:
+  enabled: true
+  filesystems:
+    - __DOCKER_ROOT__
+
+host_rules:
+  shipped: false
+  rules:
+    - id: fim-container-cron
+      description: a scheduled task dropped inside a container
+      severity: high
+      when:
+        file.appears:
+          path_matches: ['/etc/cron.d/*']
+      then: [alert]
+      mode: enforce
+
+process_table:
+  enabled: true
+  capture_command_line: true
+
+firewall:
+  enabled: true
+  mode: alert
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: true
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
+
+auth:
+  enabled: false

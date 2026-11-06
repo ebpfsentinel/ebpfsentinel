@@ -124,6 +124,8 @@ env:
   - "suite 92 runs its clients beside the agent (local lane only)"
   - "suite 95 runs its clients beside the agent (local lane only)"
   - "suite 96 writes its files on the agent's host (local lane only)"
+  - "suite 97 runs its container beside the agent (local lane only)"
+  - "no statically linked busybox to build the test image from"
   - "suite 93 starts its processes on the agent's host (local lane only)"
   - "suite 94 writes its files on the agent's host (local lane only)"
   - "systemd-run is not installed on this host"
