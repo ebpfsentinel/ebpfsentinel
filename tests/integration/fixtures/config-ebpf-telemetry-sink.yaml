@@ -1,0 +1,31 @@
+# config-ebpf-telemetry-sink.yaml - anonymous heartbeat towards a sink on
+# this machine. The destination is not configurable: it is the loopback
+# endpoint the lane's build carries, so this file only places the
+# installation identifier somewhere the suite owns.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  allow_plaintext_api: true
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: pass
+  rules: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
+
+telemetry:
+  enabled: true
+  state_path: __DATA_DIR__/telemetry/installation
+  machine_id_path: ""

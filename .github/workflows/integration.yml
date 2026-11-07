@@ -132,6 +132,11 @@ jobs:
         run: cargo xtask ebpf-build
 
       - name: Build agent + warden (release)
+        # The heartbeat's destination is fixed at build time. A loopback one
+        # gives suite 106 a sink to receive it on; loopback is the only place
+        # the agent sends a beat in clear, and nothing outside the lane hears it.
+        env:
+          EBPFSENTINEL_TELEMETRY_ENDPOINT: http://127.0.0.1:18321/v1/heartbeat
         run: cargo build --release --bin ebpfsentinel-agent --bin warden
 
       - name: Upload agent binary
