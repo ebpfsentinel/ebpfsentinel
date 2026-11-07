@@ -7640,7 +7640,11 @@ pub fn start_crypto_calls(
                     attacher.reconcile();
                 }
                 _ = tick.tick() => {
-                    let at_ns = adapters::ebpf::ringbuf_observer::boottime_now_ns();
+                    // The file watch stamps the rewrites on the wall clock,
+                    // and the verdict compares the two inside one window.
+                    let at_ns = adapters::ebpf::ringbuf_observer::boottime_to_epoch_ns(
+                        adapters::ebpf::ringbuf_observer::boottime_now_ns(),
+                    );
                     for (tgid, calls) in counter.deltas() {
                         // A caller the table never saw exec cannot be named,
                         // and an unnamed actor cannot be raised against.
