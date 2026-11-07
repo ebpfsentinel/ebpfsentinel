@@ -13,11 +13,11 @@ use core::ffi::c_void;
 use ebpf_common::dlp::{
     DLP_DIRECTION_READ, DLP_DIRECTION_WRITE, DLP_FLOW_FAMILY_IPV4, DLP_FLOW_FAMILY_IPV6,
     DLP_FLOW_PROTOCOL_TCP, DLP_FLOW_SOURCE_CORRELATED, DLP_FLOW_SOURCE_KERNEL_SOCKET,
-    DLP_JOINED_SOCKET_WINDOW_NS, DLP_KTLS_SUPPRESS_WINDOW_NS, DLP_MAX_EXCERPT, DLP_METRIC_COUNT, DLP_METRIC_ERRORS,
-    DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_KTLS_EVENTS, DLP_METRIC_KTLS_SUPPRESSED,
-    DLP_METRIC_KTLS_UNREADABLE, DLP_METRIC_OUT_OF_SCOPE, DLP_METRIC_READ_EVENTS,
-    DLP_METRIC_TOTAL_SEEN, DLP_METRIC_WRITE_EVENTS, DLP_SCOPE_ANCESTOR_LEVELS,
-    DLP_SCOPE_MAX_CGROUPS, DLP_SCOPE_MODE_WORKLOADS, DLP_SMALL_EXCERPT,
+    DLP_JOINED_SOCKET_WINDOW_NS, DLP_KTLS_SUPPRESS_WINDOW_NS, DLP_MAX_EXCERPT, DLP_METRIC_COUNT,
+    DLP_METRIC_ERRORS, DLP_METRIC_EVENTS_DROPPED, DLP_METRIC_KTLS_EVENTS,
+    DLP_METRIC_KTLS_SUPPRESSED, DLP_METRIC_KTLS_UNREADABLE, DLP_METRIC_OUT_OF_SCOPE,
+    DLP_METRIC_READ_EVENTS, DLP_METRIC_TOTAL_SEEN, DLP_METRIC_WRITE_EVENTS,
+    DLP_SCOPE_ANCESTOR_LEVELS, DLP_SCOPE_MAX_CGROUPS, DLP_SCOPE_MODE_WORKLOADS, DLP_SMALL_EXCERPT,
     DLP_TASK_SOCKET_MAX_TASKS, DLP_TASK_SOCKET_WINDOW_NS, DlpEvent, DlpEventSmall, DlpSocket,
     DlpTaskSocket, KtlsIterOffsets, SockOffsets, SslReadArgs,
 };
@@ -389,7 +389,12 @@ fn try_go_tls_write(ctx: &ProbeContext) -> Result<(), ()> {
     if buf == 0 || len == 0 || len > i32::MAX as u64 {
         return Ok(());
     }
-    emit_dlp_event(buf as *const u8, len as u32, DLP_DIRECTION_WRITE, task_socket());
+    emit_dlp_event(
+        buf as *const u8,
+        len as u32,
+        DLP_DIRECTION_WRITE,
+        task_socket(),
+    );
     increment_metric(DLP_METRIC_WRITE_EVENTS);
     Ok(())
 }
@@ -782,7 +787,12 @@ fn try_ktls_sendmsg(ctx: &ProbeContext) -> Result<(), ()> {
         return Ok(());
     }
 
-    emit_dlp_event(buf.base as *const u8, buf.len as u32, DLP_DIRECTION_WRITE, socket);
+    emit_dlp_event(
+        buf.base as *const u8,
+        buf.len as u32,
+        DLP_DIRECTION_WRITE,
+        socket,
+    );
     increment_metric(DLP_METRIC_WRITE_EVENTS);
     increment_metric(DLP_METRIC_KTLS_EVENTS);
     Ok(())
@@ -877,7 +887,12 @@ fn try_ktls_recvmsg_ret(ctx: &RetProbeContext) -> Result<(), ()> {
         args.buf_len
     };
 
-    emit_dlp_event(args.buf_ptr as *const u8, actual_len, DLP_DIRECTION_READ, socket);
+    emit_dlp_event(
+        args.buf_ptr as *const u8,
+        actual_len,
+        DLP_DIRECTION_READ,
+        socket,
+    );
     increment_metric(DLP_METRIC_READ_EVENTS);
     increment_metric(DLP_METRIC_KTLS_EVENTS);
     Ok(())

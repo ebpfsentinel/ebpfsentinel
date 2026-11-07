@@ -31,6 +31,7 @@ use ebpf_helpers::net::{
     ones_complement_add, prefix_to_mask, u16_from_be_bytes, u32_from_be_bytes, u32x4_to_bytes,
 };
 use ebpf_helpers::pktmeta;
+use ebpf_helpers::raw_skb;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::trace::{self, reason, stage};
 use network_types::{ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
@@ -230,7 +231,7 @@ fn increment_metric(ctx: &TcContext, index: u32) {
 /// Get the interface group membership for the current packet's ingress interface.
 #[inline(always)]
 fn get_iface_groups(ctx: &TcContext) -> u32 {
-    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+    let ifindex = unsafe { (*raw_skb(ctx)).ifindex };
     match unsafe { INTERFACE_GROUPS.get(&ifindex) } {
         Some(&groups) => groups,
         None => 0,
@@ -599,7 +600,7 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
     }
 
     let iface_groups = get_iface_groups(ctx);
-    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+    let ifindex = unsafe { (*raw_skb(ctx)).ifindex };
     let tenant_id = chain_tenant(ctx, || unsafe {
         resolve_tenant_id(ifindex, vlan_id, src_ip)
     });
@@ -607,7 +608,7 @@ fn process_dnat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
     // Read IPsec xfrm interface metadata from the incoming packet.
     // Non-zero xfrm_if_id means the packet arrived through an xfrmi
     // device - NAT rules with NAT_MATCH_XFRM can match on the tunnel.
-    let xfrm_if_id = unsafe { skb_get_xfrm_info(ctx.skb.skb as *mut _) }
+    let xfrm_if_id = unsafe { skb_get_xfrm_info(raw_skb(ctx) as *mut _) }
         .map(|info| info.if_id)
         .unwrap_or(0);
 
@@ -845,11 +846,11 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
     }
 
     let iface_groups = get_iface_groups(ctx);
-    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+    let ifindex = unsafe { (*raw_skb(ctx)).ifindex };
     let tenant_id = chain_tenant(ctx, || unsafe {
         resolve_tenant_id_v6(ifindex, vlan_id, &src_addr)
     });
-    let xfrm_if_id = unsafe { skb_get_xfrm_info(ctx.skb.skb as *mut _) }
+    let xfrm_if_id = unsafe { skb_get_xfrm_info(raw_skb(ctx) as *mut _) }
         .map(|info| info.if_id)
         .unwrap_or(0);
 
@@ -951,7 +952,7 @@ fn rewrite_dst_ip(
     let dst_off = (l3_offset + IPV4_DST_OFFSET) as u32;
     let ret = unsafe {
         bpf_skb_store_bytes(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             dst_off,
             new_be.as_ptr() as *const _,
             4,
@@ -966,7 +967,7 @@ fn rewrite_dst_ip(
     let ip_csum_off = (l3_offset + IPV4_CSUM_OFFSET) as u32;
     let ret = unsafe {
         bpf_l3_csum_replace(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             ip_csum_off,
             u32::from_be_bytes(old_be) as u64,
             u32::from_be_bytes(new_be) as u64,
@@ -986,7 +987,7 @@ fn rewrite_dst_ip(
 
     let ret = unsafe {
         bpf_l4_csum_replace(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             l4_csum_off,
             u32::from_be_bytes(old_be) as u64,
             u32::from_be_bytes(new_be) as u64,
@@ -1029,7 +1030,7 @@ fn rewrite_src_ip(
     let src_off = (l3_offset + IPV4_SRC_OFFSET) as u32;
     let ret = unsafe {
         bpf_skb_store_bytes(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             src_off,
             new_be.as_ptr() as *const _,
             4,
@@ -1044,7 +1045,7 @@ fn rewrite_src_ip(
     let ip_csum_off = (l3_offset + IPV4_CSUM_OFFSET) as u32;
     let ret = unsafe {
         bpf_l3_csum_replace(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             ip_csum_off,
             u32::from_be_bytes(old_be) as u64,
             u32::from_be_bytes(new_be) as u64,
@@ -1064,7 +1065,7 @@ fn rewrite_src_ip(
 
     let ret = unsafe {
         bpf_l4_csum_replace(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             l4_csum_off,
             u32::from_be_bytes(old_be) as u64,
             u32::from_be_bytes(new_be) as u64,
@@ -1102,7 +1103,7 @@ fn rewrite_dst_ip_v6(
     let new_bytes = u32x4_to_bytes(new_addr);
     let ret = unsafe {
         bpf_skb_store_bytes(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             dst_off,
             new_bytes.as_ptr() as *const _,
             16,
@@ -1124,7 +1125,7 @@ fn rewrite_dst_ip_v6(
         if old_w != new_w {
             let ret = unsafe {
                 bpf_l4_csum_replace(
-                    ctx.skb.skb as *mut _,
+                    raw_skb(ctx) as *mut _,
                     l4_csum_off,
                     old_w as u64,
                     new_w as u64,
@@ -1163,7 +1164,7 @@ fn rewrite_dst_port(
     let new_be = new_port.to_be_bytes();
     let ret = unsafe {
         bpf_skb_store_bytes(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             port_off,
             new_be.as_ptr() as *const _,
             2,
@@ -1183,7 +1184,7 @@ fn rewrite_dst_port(
 
     let ret = unsafe {
         bpf_l4_csum_replace(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             l4_csum_off,
             old_port as u64,
             new_port as u64,
@@ -1312,7 +1313,7 @@ fn apply_nptv6_dst(
     let new_bytes = u32x4_to_bytes(&new_addr);
     let ret = unsafe {
         bpf_skb_store_bytes(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             dst_off,
             new_bytes.as_ptr() as *const _,
             16,

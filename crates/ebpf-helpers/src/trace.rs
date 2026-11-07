@@ -48,7 +48,7 @@ pub fn xdp(ctx: &XdpContext) -> bool {
 #[inline(always)]
 #[must_use]
 pub fn tc(ctx: &TcContext) -> bool {
-    let skb = ctx.skb.skb;
+    let skb = crate::raw_skb(ctx);
     // SAFETY: `mark` and `priority` are readable fields of the classifier's
     // `__sk_buff`.
     unsafe { (*skb).mark == TC_TRACE_MARK && (*skb).priority == TC_TRACE_PRIORITY }
@@ -97,7 +97,7 @@ pub fn tc_record(ctx: &TcContext, stage: u8, reason: u8, rule_id: u32, detail: u
     if !tc(ctx) {
         return;
     }
-    let skb = ctx.skb.skb;
+    let skb = crate::raw_skb(ctx);
     // SAFETY: `cb` is writable by a classifier; the agent runs a traced
     // packet through one classifier at a time, so nothing reads the
     // control block after this.

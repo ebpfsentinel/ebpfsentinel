@@ -2,6 +2,10 @@
 #![no_main]
 #![cfg_attr(target_arch = "bpf", feature(asm_experimental_arch))]
 
+use aya_ebpf::bindings::{
+    BPF_FIB_LKUP_RET_NO_NEIGH, BPF_FIB_LKUP_RET_SUCCESS, bpf_fib_lookup as BpfFibLookupParams,
+};
+use aya_ebpf::helpers::generated::{bpf_fib_lookup, bpf_redirect};
 use aya_ebpf::{
     bindings::xdp_action,
     btf_maps::{DevMap, HashMap, PerCpuArray, RingBuf},
@@ -9,10 +13,6 @@ use aya_ebpf::{
     macros::{btf_map, xdp},
     programs::XdpContext,
 };
-use aya_ebpf_bindings::bindings::{
-    BPF_FIB_LKUP_RET_NO_NEIGH, BPF_FIB_LKUP_RET_SUCCESS, bpf_fib_lookup as BpfFibLookupParams,
-};
-use aya_ebpf_bindings::helpers::{bpf_fib_lookup, bpf_redirect};
 use ebpf_common::{
     event::{FLAG_IPV6, FLAG_VLAN, PacketEvent},
     loadbalancer::{
@@ -617,8 +617,11 @@ fn forward_to_backend(
     if rc == BPF_FIB_LKUP_RET_SUCCESS as i64 {
         let egress = unsafe { (*params).ifindex };
         unsafe {
-            copy_mac_asm!(p, (*params).dmac.as_ptr());
-            copy_mac_asm!(p.add(6), (*params).smac.as_ptr());
+            copy_mac_asm!(p, (*params).__bindgen_anon_6.__bindgen_anon_2.dmac.as_ptr());
+            copy_mac_asm!(
+                p.add(6),
+                (*params).__bindgen_anon_6.__bindgen_anon_2.smac.as_ptr()
+            );
         }
         if egress == ingress {
             return Ok(xdp_action::XDP_TX);

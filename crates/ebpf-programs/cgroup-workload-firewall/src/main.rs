@@ -69,11 +69,10 @@ use ebpf_common::netpol::{
     NETPOL_DIR_EGRESS, NETPOL_DIR_INGRESS, NETPOL_FLAG_EGRESS_ISOLATED, NETPOL_FLAG_ENFORCE,
     NETPOL_FLAG_INGRESS_ISOLATED, NETPOL_KEY_LEN, NETPOL_MAX_CGROUPS, NETPOL_MAX_ENTRIES,
     NETPOL_MAX_RANGES, NETPOL_MAX_REPLIES, NETPOL_METRIC_COUNT, NETPOL_METRIC_EGRESS_CHECKED,
-    NETPOL_METRIC_EGRESS_REFUSED, NETPOL_METRIC_EGRESS_WOULD_REFUSE,
-    NETPOL_METRIC_INGRESS_CHECKED, NETPOL_METRIC_INGRESS_REFUSED,
-    NETPOL_METRIC_INGRESS_WOULD_REFUSE, NETPOL_METRIC_REPLY_ADMITTED, NETPOL_REPLY_WINDOW_NS,
-    NetpolCgroup, NetpolEntry, NetpolReplyKey, netpol_key_data, netpol_key_word,
-    netpol_prefix_len,
+    NETPOL_METRIC_EGRESS_REFUSED, NETPOL_METRIC_EGRESS_WOULD_REFUSE, NETPOL_METRIC_INGRESS_CHECKED,
+    NETPOL_METRIC_INGRESS_REFUSED, NETPOL_METRIC_INGRESS_WOULD_REFUSE,
+    NETPOL_METRIC_REPLY_ADMITTED, NETPOL_REPLY_WINDOW_NS, NetpolCgroup, NetpolEntry,
+    NetpolReplyKey, netpol_key_data, netpol_key_word, netpol_prefix_len,
 };
 use ebpf_common::quarantine::{
     QUARANTINE_EVENTS_RINGBUF_BYTES, QUARANTINE_MAX_CGROUPS, QUARANTINE_METRIC_COUNT,
@@ -85,17 +84,18 @@ use ebpf_common::workload_policy::{
     WORKLOAD_ACTION_DENY, WORKLOAD_DNS_MAX_PAYLOAD, WORKLOAD_DNS_QUERY, WORKLOAD_DNS_RESPONSE,
     WORKLOAD_DNS_RINGBUF_BYTES, WORKLOAD_EVENTS_RINGBUF_BYTES, WORKLOAD_FAMILY_ANY,
     WORKLOAD_FAMILY_IPV4, WORKLOAD_FAMILY_IPV6, WORKLOAD_FQDN_MAX_ALLOWED, WORKLOAD_HOOK_BIND,
-    WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_INGRESS, WORKLOAD_HOOK_SENDMSG, WORKLOAD_LINEAGE_MAX_DEPTH,
-    WORKLOAD_LINEAGE_MAX_EXECUTABLES, WORKLOAD_METRIC_ALLOWED, WORKLOAD_METRIC_BIND,
-    WORKLOAD_METRIC_CONNECT, WORKLOAD_METRIC_COUNT, WORKLOAD_METRIC_DNS_LOST,
-    WORKLOAD_METRIC_EVENT_LOST, WORKLOAD_METRIC_LINEAGE_TRUNCATED, WORKLOAD_METRIC_NO_RULE, WORKLOAD_METRIC_REFUSED,
-    WORKLOAD_METRIC_SENDMSG, WORKLOAD_METRIC_UNRESOLVED, WORKLOAD_METRIC_WOULD_REFUSE,
-    WORKLOAD_MODE_ENFORCE, WORKLOAD_PEER_MAX_ADDRS, WORKLOAD_PEER_MAX_TARGETS,
-    WORKLOAD_POLICY_MAX_CGROUPS, WORKLOAD_POLICY_MAX_RULES,
+    WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_INGRESS, WORKLOAD_HOOK_SENDMSG,
+    WORKLOAD_LINEAGE_MAX_DEPTH, WORKLOAD_LINEAGE_MAX_EXECUTABLES, WORKLOAD_METRIC_ALLOWED,
+    WORKLOAD_METRIC_BIND, WORKLOAD_METRIC_CONNECT, WORKLOAD_METRIC_COUNT, WORKLOAD_METRIC_DNS_LOST,
+    WORKLOAD_METRIC_EVENT_LOST, WORKLOAD_METRIC_LINEAGE_TRUNCATED, WORKLOAD_METRIC_NO_RULE,
+    WORKLOAD_METRIC_REFUSED, WORKLOAD_METRIC_SENDMSG, WORKLOAD_METRIC_UNRESOLVED,
+    WORKLOAD_METRIC_WOULD_REFUSE, WORKLOAD_MODE_ENFORCE, WORKLOAD_PEER_MAX_ADDRS,
+    WORKLOAD_PEER_MAX_TARGETS, WORKLOAD_POLICY_MAX_CGROUPS, WORKLOAD_POLICY_MAX_RULES,
     WORKLOAD_POLICY_MAX_TASKS, WORKLOAD_PROTOCOL_ANY, WORKLOAD_RULE_FQDN, WORKLOAD_RULE_PEER,
-    WorkloadDenialEvent, WorkloadDnsEvent,
-    WorkloadExeKey, WorkloadFqdnKey, WorkloadPeerKey, WorkloadLineageBits, WorkloadLineageConfig, WorkloadRuleEntry,
+    WorkloadDenialEvent, WorkloadDnsEvent, WorkloadExeKey, WorkloadFqdnKey, WorkloadLineageBits,
+    WorkloadLineageConfig, WorkloadPeerKey, WorkloadRuleEntry,
 };
+use ebpf_helpers::raw_skb;
 use ebpf_helpers::{increment_metric, opaque_usize};
 
 // ── Maps ────────────────────────────────────────────────────────────
@@ -236,8 +236,7 @@ static NETPOL_RULES: LpmTrie<[u8; NETPOL_KEY_LEN], NetpolEntry, { NETPOL_MAX_ENT
 /// A plain hash map, for the reason the selectors have one: an eviction would
 /// be a pod quietly leaving its policy while it runs.
 #[btf_map]
-static NETPOL_CGROUPS: HashMap<u64, NetpolCgroup, { NETPOL_MAX_CGROUPS as usize }> =
-    HashMap::new();
+static NETPOL_CGROUPS: HashMap<u64, NetpolCgroup, { NETPOL_MAX_CGROUPS as usize }> = HashMap::new();
 
 /// (cgroup, peer, peer port, family) -> instant the way back closes.
 ///
@@ -386,7 +385,7 @@ fn capture(ctx: &SkBuffContext, direction: u8) {
     if *flag == 0 {
         return;
     }
-    let cgroup = unsafe { bpf_skb_cgroup_id(ctx.skb.skb) };
+    let cgroup = unsafe { bpf_skb_cgroup_id(raw_skb(ctx)) };
     if unsafe { WORKLOAD_CGROUP_SELECTORS.get(&cgroup) }.is_none() {
         return;
     }
@@ -487,7 +486,7 @@ fn capture(ctx: &SkBuffContext, direction: u8) {
         // bound across the spill; the barrier and the clamp put it back.
         let load_len = opaque_usize(payload_len).clamp(1, WORKLOAD_DNS_MAX_PAYLOAD);
         bpf_skb_load_bytes(
-            ctx.skb.skb as *const _,
+            raw_skb(ctx) as *const _,
             offset as u32,
             payload as *mut _,
             load_len as u32,
@@ -1107,7 +1106,7 @@ fn transport(protocol: u8) -> bool {
 /// The entry is only rewritten once half its window has gone, so a pod
 /// streaming datagrams costs a lookup per packet and not an update.
 fn remember_reply(ctx: &SkBuffContext) {
-    let cgroup = unsafe { bpf_skb_cgroup_id(ctx.skb.skb) };
+    let cgroup = unsafe { bpf_skb_cgroup_id(raw_skb(ctx)) };
     if netpol_target(cgroup, NETPOL_FLAG_INGRESS_ISOLATED).is_none() {
         return;
     }
@@ -1138,7 +1137,7 @@ fn remember_reply(ctx: &SkBuffContext) {
 
 /// The policy's answer to a packet arriving at an ingress-isolated pod.
 fn admit(ctx: &SkBuffContext) -> i32 {
-    let cgroup = unsafe { bpf_skb_cgroup_id(ctx.skb.skb) };
+    let cgroup = unsafe { bpf_skb_cgroup_id(raw_skb(ctx)) };
     let Some(target) = netpol_target(cgroup, NETPOL_FLAG_INGRESS_ISOLATED) else {
         return SKB_PASS;
     };
@@ -1201,7 +1200,7 @@ fn admit(ctx: &SkBuffContext) -> i32 {
 /// are the ones userspace computed as decidable at this end, so walking them
 /// in order gives the same first match the source would have found.
 fn peer_ingress(ctx: &SkBuffContext) -> i32 {
-    let cgroup = unsafe { bpf_skb_cgroup_id(ctx.skb.skb) };
+    let cgroup = unsafe { bpf_skb_cgroup_id(raw_skb(ctx)) };
     let Some(targets) = (unsafe { WORKLOAD_PEER_TARGETS.get(&cgroup) }).copied() else {
         return SKB_PASS;
     };

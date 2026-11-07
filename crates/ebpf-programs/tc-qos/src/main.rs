@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+use aya_ebpf::bindings::_bindgen_ty_28::BPF_SKB_TSTAMP_DELIVERY_MONO;
+use aya_ebpf::helpers::generated::{bpf_skb_cgroup_id, bpf_skb_ecn_set_ce, bpf_skb_set_tstamp};
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
@@ -12,8 +14,6 @@ use aya_ebpf::{
     macros::{btf_map, classifier},
     programs::TcContext,
 };
-use aya_ebpf_bindings::bindings::_bindgen_ty_28::BPF_SKB_TSTAMP_DELIVERY_MONO;
-use aya_ebpf_bindings::helpers::{bpf_skb_cgroup_id, bpf_skb_ecn_set_ce, bpf_skb_set_tstamp};
 use ebpf_common::{
     event::{EVENT_TYPE_QOS, FLAG_IPV6, PacketEvent},
     firewall::FW_EMPTY_QOS_CLASSIFIERS,
@@ -34,6 +34,7 @@ use ebpf_helpers::net::{
     u32_from_be_bytes,
 };
 use ebpf_helpers::pktmeta;
+use ebpf_helpers::raw_skb;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::trace::{self, reason, stage};
 use ebpf_helpers::{emit_packet_event, increment_metric};
@@ -219,7 +220,7 @@ fn increment_qos_metric(traced: bool, index: u32) {
 /// Get the interface group membership for the current packet's ingress interface.
 #[inline(always)]
 fn get_iface_groups(ctx: &TcContext) -> u32 {
-    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+    let ifindex = unsafe { (*raw_skb(ctx)).ifindex };
     match unsafe { INTERFACE_GROUPS.get(&ifindex) } {
         Some(&groups) => groups,
         None => 0,
@@ -340,7 +341,7 @@ fn dispatch(ctx: &TcContext, is_ingress: bool) -> i32 {
 /// step. A receive timestamp is on another clock and is never compared.
 #[inline(always)]
 fn delivery_time_on_packet(ctx: &TcContext) -> u64 {
-    let skb = ctx.skb.skb;
+    let skb = raw_skb(ctx);
     if unsafe { (*skb).tstamp_type } as u32 == BPF_SKB_TSTAMP_DELIVERY_MONO {
         unsafe { (*skb).tstamp }
     } else {
@@ -357,7 +358,7 @@ fn delivery_time_on_packet(ctx: &TcContext) -> u64 {
 /// no cgroup, or of a cgroup without a rate, is left as it came.
 #[inline(always)]
 fn shape_cgroup(ctx: &TcContext, traced: bool) -> bool {
-    let skb = ctx.skb.skb;
+    let skb = raw_skb(ctx);
     let leaves_on = unsafe { (*skb).ifindex };
     if unsafe { QOS_EDT_INTERFACES.get(&leaves_on) }.is_none() {
         return false;
@@ -775,7 +776,7 @@ fn lookup(
         dscp,
         vlan_id,
     };
-    unsafe { QOS_CLASSIFIERS.get(key) }.copied()
+    unsafe { QOS_CLASSIFIERS.get(&key) }.copied()
 }
 
 // ── Flow hashing ────────────────────────────────────────────────────
@@ -838,7 +839,7 @@ fn apply_qos(
     let tenant_id = match pktmeta::read_cb(ctx).and_then(|m| m.tenant()) {
         Some(t) => t,
         None => {
-            let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+            let ifindex = unsafe { (*raw_skb(ctx)).ifindex };
             let t = if (flags & FLAG_IPV6) != 0 {
                 unsafe { resolve_tenant_id_v6(ifindex, vlan_id, src_addr) }
             } else {
@@ -943,7 +944,7 @@ fn apply_qos(
                     // This provides early congestion signalling without dropping the packet,
                     // allowing TCP to reduce its window before the queue overflows.
                     if tokens - pkt_len < pipe_cfg.burst_bytes / 4 {
-                        unsafe { bpf_skb_ecn_set_ce(ctx.skb.skb) };
+                        unsafe { bpf_skb_ecn_set_ce(raw_skb(ctx)) };
                     }
                     false
                 } else {
@@ -1022,7 +1023,7 @@ fn apply_qos(
         };
 
         unsafe {
-            bpf_skb_set_tstamp(ctx.skb.skb, edt, BPF_SKB_TSTAMP_DELIVERY_MONO);
+            bpf_skb_set_tstamp(raw_skb(ctx), edt, BPF_SKB_TSTAMP_DELIVERY_MONO);
         }
 
         increment_qos_metric(traced, QOS_METRIC_DELAYED);

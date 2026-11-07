@@ -14,6 +14,10 @@
 #![no_main]
 #![cfg_attr(target_arch = "bpf", feature(asm_experimental_arch))]
 
+use aya_ebpf::bindings::{iphdr, ipv6hdr, tcphdr};
+use aya_ebpf::helpers::generated::{
+    bpf_tcp_raw_gen_syncookie_ipv4, bpf_tcp_raw_gen_syncookie_ipv6,
+};
 use aya_ebpf::{
     bindings::xdp_action,
     btf_maps::PerCpuArray,
@@ -21,8 +25,6 @@ use aya_ebpf::{
     macros::{btf_map, xdp},
     programs::XdpContext,
 };
-use aya_ebpf_bindings::bindings::{iphdr, ipv6hdr, tcphdr};
-use aya_ebpf_bindings::helpers::{bpf_tcp_raw_gen_syncookie_ipv4, bpf_tcp_raw_gen_syncookie_ipv6};
 use ebpf_common::ddos::{DDOS_METRIC_COUNT, DDOS_METRIC_SYNCOOKIE_SENT, SyncookieCtx};
 use ebpf_common::event::FLAG_IPV6;
 use ebpf_helpers::checksum::{compute_ipv4_csum, compute_tcp_csum_v4_24, compute_tcp_csum_v6_24};

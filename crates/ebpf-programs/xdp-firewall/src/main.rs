@@ -2,6 +2,10 @@
 #![no_main]
 #![cfg_attr(target_arch = "bpf", feature(asm_experimental_arch))]
 
+use aya_ebpf::bindings::{
+    BPF_FIB_LKUP_RET_SUCCESS, BPF_FIB_LOOKUP_DIRECT, bpf_fib_lookup as BpfFibLookupParams,
+};
+use aya_ebpf::helpers::generated::{bpf_fib_lookup, bpf_probe_read_kernel};
 use aya_ebpf::{
     bindings::xdp_action,
     btf_maps::{
@@ -13,10 +17,6 @@ use aya_ebpf::{
     macros::{btf_map, xdp},
     programs::XdpContext,
 };
-use aya_ebpf_bindings::bindings::{
-    BPF_FIB_LKUP_RET_SUCCESS, BPF_FIB_LOOKUP_DIRECT, bpf_fib_lookup as BpfFibLookupParams,
-};
-use aya_ebpf_bindings::helpers::{bpf_fib_lookup, bpf_probe_read_kernel};
 use ebpf_common::{
     conntrack::{
         CT_SRC_COUNTER_MAX, CT_STATE_ESTABLISHED, CT_STATE_NEW, CT_STATE_RELATED, ConnTrackConfig,

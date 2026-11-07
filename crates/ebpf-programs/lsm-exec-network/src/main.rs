@@ -19,13 +19,13 @@
 #![no_std]
 #![no_main]
 
+use aya_ebpf::helpers::generated::bpf_probe_read_kernel;
 use aya_ebpf::{
     btf_maps::{Array, HashMap, LruHashMap, PerCpuArray, RingBuf},
     helpers::{bpf_get_current_pid_tgid, bpf_get_current_task, bpf_ktime_get_boot_ns},
     macros::{btf_map, lsm},
     programs::LsmContext,
 };
-use aya_ebpf_bindings::helpers::bpf_probe_read_kernel;
 use ebpf_common::exec_network::{
     EXEC_NET_AF_INET, EXEC_NET_AF_INET6, EXEC_NET_CONFIG_SLOT, EXEC_NET_EVENTS_RINGBUF_BYTES,
     EXEC_NET_HOOK_CONNECT, EXEC_NET_HOOK_CREATE, EXEC_NET_MAX_EXECUTABLES, EXEC_NET_MAX_REPORTED,

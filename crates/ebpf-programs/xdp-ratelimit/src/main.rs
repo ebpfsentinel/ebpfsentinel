@@ -16,8 +16,8 @@ use aya_ebpf::{
 // Sufficient for rate limiting (window checks, token bucket refill) where
 // sub-millisecond precision is not required. Syncookie generation and event
 // timestamps continue to use bpf_ktime_get_boot_ns for monotonic accuracy.
-use aya_ebpf_bindings::bindings::{iphdr, ipv6hdr, tcphdr};
-use aya_ebpf_bindings::helpers::{
+use aya_ebpf::bindings::{iphdr, ipv6hdr, tcphdr};
+use aya_ebpf::helpers::generated::{
     bpf_ktime_get_coarse_ns, bpf_tcp_raw_check_syncookie_ipv4, bpf_tcp_raw_check_syncookie_ipv6,
 };
 use ebpf_common::{

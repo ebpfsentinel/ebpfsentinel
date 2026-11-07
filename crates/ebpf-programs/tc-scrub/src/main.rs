@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+use core::ptr::NonNull;
+
 use aya_ebpf::{
     EbpfContext,
     bindings::{__sk_buff, TC_ACT_OK, TC_ACT_SHOT},
@@ -22,6 +24,7 @@ use ebpf_common::scrub::{
 use ebpf_helpers::increment_metric;
 use ebpf_helpers::net::{IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP};
 use ebpf_helpers::pktmeta;
+use ebpf_helpers::raw_skb;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::trace::{self, reason, stage};
 use network_types::ip::Ipv4Hdr;
@@ -400,7 +403,7 @@ fn strip_ts_option(ctx: &mut TcContext, pos: usize, tcp_csum_offset: u32) -> Res
 #[repr(C)]
 struct ScrubOptCtx {
     /// Packet handle, re-wrapped as a `TcContext` inside the callback.
-    skb: *mut __sk_buff,
+    skb: NonNull<__sk_buff>,
     /// Byte offset of the first TCP option.
     opts_start: u32,
     /// Length of the option area (TCP header length − 20).
@@ -543,7 +546,7 @@ fn scrub_tcp_options(ctx: &mut TcContext, cfg: &ScrubFlags, l4_offset: usize) ->
     let opts_len = tcp_hdr_len - 20;
 
     let mut opt_ctx = ScrubOptCtx {
-        skb: ctx.skb.skb,
+        skb: NonNull::new(raw_skb(ctx)).ok_or(())?,
         opts_start: (l4_offset + 20) as u32,
         opts_len: opts_len as u32,
         scanned: 0,

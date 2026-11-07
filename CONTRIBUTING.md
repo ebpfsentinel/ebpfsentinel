@@ -265,8 +265,15 @@ read the legacy 4-byte layout and still agree.
 minor line, and two copies in the tree mean the `aya_obj::Map` we parse is not the
 type `aya::maps::MapData` wraps. `cargo tree -d -p aya-obj` must print nothing.
 
-On the kernel side, `aya-ebpf` and `aya-ebpf-bindings` stay where
-`crates/ebpf-helpers/Cargo.toml` says and why. `aya-log`, `aya-log-common` and
+On the kernel side, every program and `crates/ebpf-helpers` take `aya-ebpf`
+0.3.0 and reach kernel types and raw helpers through it, as `aya_ebpf::bindings`
+and `aya_ebpf::helpers::generated`, never by declaring `aya-ebpf-bindings`
+themselves: a direct declaration is a second copy of every kernel struct the day
+its version and the one `aya-ebpf` pins drift apart. `aya-ebpf` and its bindings,
+macros and cty move as one, and a move is diffed object by object against the
+previous build. `cargo tree -d` in a program crate must print no aya crate twice.
+The raw `__sk_buff` behind a classifier or `cgroup_skb` context is private in
+`SkBuff`, so a program reads it through `ebpf_helpers::raw_skb`. `aya-log`, `aya-log-common` and
 `aya-log-parser` are not used and are refused: no program logs through aya, and
 an event leaves the kernel through a ring buffer the agent decodes. `cargo deny`
 reports duplicate versions as a warning, not an error, so a second copy of an

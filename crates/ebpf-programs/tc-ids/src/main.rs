@@ -1,6 +1,9 @@
 #![no_std]
 #![no_main]
 
+use aya_ebpf::helpers::generated::{
+    bpf_clone_redirect, bpf_get_socket_cookie, bpf_skb_cgroup_id, bpf_skb_load_bytes,
+};
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
@@ -11,9 +14,6 @@ use aya_ebpf::{
     },
     macros::{btf_map, classifier},
     programs::TcContext,
-};
-use aya_ebpf_bindings::helpers::{
-    bpf_clone_redirect, bpf_get_socket_cookie, bpf_skb_cgroup_id, bpf_skb_load_bytes,
 };
 use ebpf_common::{
     config_flags::ConfigFlags,
@@ -42,6 +42,7 @@ use ebpf_helpers::net::{
     u32_from_be_bytes,
 };
 use ebpf_helpers::pktmeta;
+use ebpf_helpers::raw_skb;
 use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::trace::{self, reason, stage};
@@ -270,7 +271,7 @@ fn get_iface_groups(ctx: &TcContext, gates: u32) -> u32 {
     if feature_empty(gates, FW_EMPTY_IFACE_GROUPS) {
         return 0;
     }
-    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+    let ifindex = unsafe { (*raw_skb(ctx)).ifindex };
     match unsafe { INTERFACE_GROUPS.get(&ifindex) } {
         Some(&groups) => groups,
         None => 0,
@@ -390,10 +391,10 @@ unsafe fn resolve_tenant_id_v6(
 /// of every scope.
 #[inline(always)]
 fn workload_scope_matches(ctx: &TcContext, rule_id: u32) -> bool {
-    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+    let ifindex = unsafe { (*raw_skb(ctx)).ifindex };
     let cgroup_id = match unsafe { WORKLOAD_LINKS.get(&ifindex) } {
         Some(&id) => id,
-        None => unsafe { bpf_skb_cgroup_id(ctx.skb.skb as *mut _) },
+        None => unsafe { bpf_skb_cgroup_id(raw_skb(ctx) as *mut _) },
     };
     if cgroup_id == 0 {
         return false;
@@ -423,7 +424,7 @@ fn workload_scope_matches(ctx: &TcContext, rule_id: u32) -> bool {
 #[inline(always)]
 unsafe fn resolve_skb_cgroup_id(ctx: &TcContext) -> u64 {
     unsafe {
-        let from_skb = bpf_skb_cgroup_id(ctx.skb.skb as *mut _);
+        let from_skb = bpf_skb_cgroup_id(raw_skb(ctx) as *mut _);
         if from_skb != 0 {
             increment_metric(trace::tc(ctx), METRIC_CGROUP_ATTRIBUTED);
             return from_skb;
@@ -677,7 +678,7 @@ fn process_ids_pattern(
     let tenant_id = match pktmeta::read_cb(_ctx).and_then(|m| m.tenant()) {
         Some(t) => t,
         None => {
-            let ifindex = unsafe { (*_ctx.skb.skb).ifindex };
+            let ifindex = unsafe { (*raw_skb(_ctx)).ifindex };
             let t = if (flags & FLAG_IPV6) != 0 {
                 unsafe { resolve_tenant_id_v6(ifindex, vlan_id, src_addr, gates, traced) }
             } else {
@@ -746,7 +747,7 @@ fn process_ids_pattern(
             let target_ifindex = *ifindex;
             unsafe {
                 bpf_clone_redirect(
-                    _ctx.skb.skb as *mut _,
+                    raw_skb(_ctx) as *mut _,
                     target_ifindex,
                     0, // flags: 0 = transmit on the target's egress (BPF_F_INGRESS unset)
                 );
@@ -784,7 +785,7 @@ fn process_ids_pattern(
         // The helper reports whether an entry was found and the kernel
         // accepted the tear-down, which is the kernel's own word on the
         // enforcement rather than ours.
-        if !traced && unsafe { kill_flow_via_skb_ct(_ctx.skb.skb as *mut _, tuple, &mut opts) } {
+        if !traced && unsafe { kill_flow_via_skb_ct(raw_skb(_ctx) as *mut _, tuple, &mut opts) } {
             increment_metric(traced, METRIC_CT_KILL_CONFIRMED);
         }
 
@@ -856,13 +857,13 @@ fn emit_l7_event(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize) {
     // Detect incoming FOU/GUE overlay encapsulation. Non-None means
     // the packet arrived through a FOU/GUE tunnel - useful for
     // overlay-aware IDS rules in cloud environments.
-    let _fou_encap = unsafe { skb_get_fou_encap(ctx.skb.skb as *mut _) };
+    let _fou_encap = unsafe { skb_get_fou_encap(raw_skb(ctx) as *mut _) };
 
     // Full packet size including non-linear fragments, which `ctx.len()`
     // alone does not count. Falls back to `ctx.len()` if the dynptr cannot
     // be created (should not happen on the 6.12 floor). Protocol classification is
     // userspace work: the payload below is what it runs on.
-    let pkt_len = unsafe { skb_packet_size(ctx.skb.skb as *mut _) }
+    let pkt_len = unsafe { skb_packet_size(raw_skb(ctx) as *mut _) }
         .map_or(ctx.len() as usize, |total| total as usize);
     let payload_avail = pkt_len.saturating_sub(l7_offset);
 
@@ -908,7 +909,7 @@ fn emit_l7_small(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_ava
             // needed - an explicit memset of a RingBuf reservation explodes
             // verifier state on the byte-by-byte `compiler_builtins` lowering.
             bpf_skb_load_bytes(
-                ctx.skb.skb as *const _,
+                raw_skb(ctx) as *const _,
                 l7_offset as u32,
                 (*ptr).payload.as_mut_ptr() as *mut _,
                 to_load as u32,
@@ -968,7 +969,7 @@ fn emit_l7_full(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_avai
             // needed - an explicit memset of a RingBuf reservation explodes
             // verifier state on the byte-by-byte `compiler_builtins` lowering.
             bpf_skb_load_bytes(
-                ctx.skb.skb as *const _,
+                raw_skb(ctx) as *const _,
                 l7_offset as u32,
                 (*ptr).payload.as_mut_ptr() as *mut _,
                 to_load as u32,
@@ -1021,7 +1022,7 @@ unsafe fn fill_l7_header(
         header.vlan_id = vlan_id;
         header.cpu_id = bpf_get_smp_processor_id() as u16;
         // Populate socket cookie for TC context (not available in XDP).
-        header.socket_cookie = bpf_get_socket_cookie(ctx.skb.skb as *mut _);
+        header.socket_cookie = bpf_get_socket_cookie(raw_skb(ctx) as *mut _);
         // The skb's socket cgroup on egress (container that sent it), or
         // the current task as a fallback; 0 when neither applies.
         header.cgroup_id = resolve_skb_cgroup_id(ctx);

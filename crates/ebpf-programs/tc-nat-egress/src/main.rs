@@ -30,6 +30,7 @@ use ebpf_helpers::net::{
     ones_complement_add, prefix_to_mask, u16_from_be_bytes, u32_from_be_bytes, u32x4_to_bytes,
 };
 use ebpf_helpers::pktmeta;
+use ebpf_helpers::raw_skb;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::trace::{self, reason, stage};
 use network_types::{ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
@@ -210,7 +211,7 @@ fn increment_metric(ctx: &TcContext, index: u32) {
 /// Get the interface group membership for the current packet's ingress interface.
 #[inline(always)]
 fn get_iface_groups(ctx: &TcContext) -> u32 {
-    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+    let ifindex = unsafe { (*raw_skb(ctx)).ifindex };
     match unsafe { INTERFACE_GROUPS.get(&ifindex) } {
         Some(&groups) => groups,
         None => 0,
@@ -545,7 +546,7 @@ fn process_snat_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
     }
 
     let iface_groups = get_iface_groups(ctx);
-    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+    let ifindex = unsafe { (*raw_skb(ctx)).ifindex };
     let tenant_id = chain_tenant(ctx, || unsafe {
         resolve_tenant_id(ifindex, vlan_id, src_ip)
     });
@@ -645,7 +646,7 @@ fn apply_xfrm_and_fou(ctx: &TcContext, scan: &SnatScanCtx) {
             if_id: scan.xfrm_if_id,
             link: scan.xfrm_link,
         };
-        if unsafe { skb_set_xfrm_info(ctx.skb.skb as *mut _, &info) } {
+        if unsafe { skb_set_xfrm_info(raw_skb(ctx) as *mut _, &info) } {
             increment_metric(ctx, NAT_METRIC_XFRM_STEERED);
         }
     }
@@ -659,7 +660,7 @@ fn apply_xfrm_and_fou(ctx: &TcContext, scan: &SnatScanCtx) {
         } else {
             FouEncapType::Fou
         };
-        if unsafe { skb_set_fou_encap(ctx.skb.skb as *mut _, &encap, encap_type) } {
+        if unsafe { skb_set_fou_encap(raw_skb(ctx) as *mut _, &encap, encap_type) } {
             increment_metric(ctx, NAT_METRIC_FOU_ENCAP);
         }
     }
@@ -770,7 +771,7 @@ fn process_snat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
     }
 
     let iface_groups = get_iface_groups(ctx);
-    let ifindex = unsafe { (*ctx.skb.skb).ifindex };
+    let ifindex = unsafe { (*raw_skb(ctx)).ifindex };
     let tenant_id = chain_tenant(ctx, || unsafe {
         resolve_tenant_id_v6(ifindex, vlan_id, &src_addr)
     });
@@ -968,7 +969,7 @@ fn apply_nptv6_src(
     let new_bytes = u32x4_to_bytes(&new_addr);
     let ret = unsafe {
         bpf_skb_store_bytes(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             src_off,
             new_bytes.as_ptr() as *const _,
             16,
@@ -1039,7 +1040,7 @@ fn rewrite_src_ip(
     let src_off = (l3_offset + IPV4_SRC_OFFSET) as u32;
     let ret = unsafe {
         bpf_skb_store_bytes(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             src_off,
             new_be.as_ptr() as *const _,
             4,
@@ -1054,7 +1055,7 @@ fn rewrite_src_ip(
     let ip_csum_off = (l3_offset + IPV4_CSUM_OFFSET) as u32;
     let ret = unsafe {
         bpf_l3_csum_replace(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             ip_csum_off,
             u32::from_be_bytes(old_be) as u64,
             u32::from_be_bytes(new_be) as u64,
@@ -1074,7 +1075,7 @@ fn rewrite_src_ip(
 
     let ret = unsafe {
         bpf_l4_csum_replace(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             l4_csum_off,
             u32::from_be_bytes(old_be) as u64,
             u32::from_be_bytes(new_be) as u64,
@@ -1111,7 +1112,7 @@ fn rewrite_src_ip_v6(
     let new_bytes = u32x4_to_bytes(new_addr);
     let ret = unsafe {
         bpf_skb_store_bytes(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             src_off,
             new_bytes.as_ptr() as *const _,
             16,
@@ -1133,7 +1134,7 @@ fn rewrite_src_ip_v6(
         if old_w != new_w {
             let ret = unsafe {
                 bpf_l4_csum_replace(
-                    ctx.skb.skb as *mut _,
+                    raw_skb(ctx) as *mut _,
                     l4_csum_off,
                     old_w as u64,
                     new_w as u64,
@@ -1172,7 +1173,7 @@ fn rewrite_src_port(
     let new_be = new_port.to_be_bytes();
     let ret = unsafe {
         bpf_skb_store_bytes(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             port_off,
             new_be.as_ptr() as *const _,
             2,
@@ -1192,7 +1193,7 @@ fn rewrite_src_port(
 
     let ret = unsafe {
         bpf_l4_csum_replace(
-            ctx.skb.skb as *mut _,
+            raw_skb(ctx) as *mut _,
             l4_csum_off,
             old_port as u64,
             new_port as u64,

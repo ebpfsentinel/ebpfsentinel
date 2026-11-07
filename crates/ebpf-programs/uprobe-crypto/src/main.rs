@@ -10,8 +10,8 @@
 #![no_main]
 
 use aya_ebpf::{
-    btf_maps::LruPerCpuHashMap, helpers::bpf_get_current_pid_tgid, macros::btf_map,
-    macros::uprobe, programs::ProbeContext,
+    btf_maps::LruPerCpuHashMap, helpers::bpf_get_current_pid_tgid, macros::btf_map, macros::uprobe,
+    programs::ProbeContext,
 };
 use ebpf_common::crypto::CRYPTO_CALLS_MAX_TASKS;
 
@@ -20,8 +20,7 @@ const BPF_NOEXIST: u64 = 1;
 
 /// Calls counted per thread group, per CPU.
 #[btf_map]
-static CRYPTO_CALLS: LruPerCpuHashMap<u32, u64, CRYPTO_CALLS_MAX_TASKS> =
-    LruPerCpuHashMap::new();
+static CRYPTO_CALLS: LruPerCpuHashMap<u32, u64, CRYPTO_CALLS_MAX_TASKS> = LruPerCpuHashMap::new();
 
 #[uprobe]
 pub fn crypto_call(_ctx: ProbeContext) -> u32 {

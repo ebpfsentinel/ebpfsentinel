@@ -1,7 +1,7 @@
 //! Kfunc bindings for kernel 5.18 → 6.9 features used by the eBPF
 //! programs.
 //!
-//! aya-ebpf 0.13 has no native kfunc infrastructure (see upstream
+//! aya-ebpf 0.3.0 has no native kfunc infrastructure (see upstream
 //! aya-rs issue #432). Every kernel-resident kfunc the programs want
 //! to call must therefore be declared manually as an `extern "C"` item
 //! so the verifier and the BTF relocator can resolve it at load time.

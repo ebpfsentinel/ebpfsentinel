@@ -2,13 +2,13 @@
 #![no_main]
 #![cfg_attr(target_arch = "bpf", feature(asm_experimental_arch))]
 
+use aya_ebpf::helpers::generated::bpf_probe_read_kernel;
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     btf_maps::{Array, PerCpuArray},
     macros::{btf_map, classifier},
     programs::TcContext,
 };
-use aya_ebpf_bindings::helpers::bpf_probe_read_kernel;
 use ebpf_common::conntrack::{
     CT_METRIC_COUNT, CT_METRIC_ERRORS, CT_METRIC_KFUNC_HITS, CT_METRIC_KFUNC_LOOKUPS,
     CT_METRIC_KFUNC_MARKED, CT_METRIC_KFUNC_MISSES, CT_METRIC_KFUNC_READ_ERRORS,
@@ -22,6 +22,7 @@ use ebpf_helpers::net::{
     u16_from_be_bytes, u32_from_be_bytes,
 };
 use ebpf_helpers::pktmeta;
+use ebpf_helpers::raw_skb;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::trace::{self, reason, stage};
 use ebpf_helpers::{copy_16b_asm, increment_metric};
@@ -55,7 +56,7 @@ pub fn tc_conntrack(ctx: TcContext) -> i32 {
     // trusted-ctx type required by `bpf_skb_ct_lookup` (`KF_TRUSTED_ARGS`).
     // Reloading it from `&TcContext` in an outlined subprogram would yield a
     // plain scalar and the kfunc call would be rejected.
-    let skb_raw: *mut core::ffi::c_void = ctx.skb.skb.cast();
+    let skb_raw: *mut core::ffi::c_void = raw_skb(&ctx).cast();
     let action = match try_tc_conntrack(&ctx, skb_raw, traced) {
         Ok(action) => action,
         Err(()) => {

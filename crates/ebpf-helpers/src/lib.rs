@@ -32,6 +32,18 @@ pub mod tc;
 pub mod trace;
 pub mod xdp;
 
+/// The raw `__sk_buff` behind a classifier or `cgroup_skb` context.
+///
+/// aya-ebpf keeps the pointer inside `SkBuff` private, and the context's
+/// `EbpfContext::as_ptr` is the one public way to it. Reading a field of the
+/// kernel struct, or handing it to a raw helper, goes through here so that
+/// every program reaches it the same way.
+#[inline(always)]
+#[must_use]
+pub fn raw_skb<C: aya_ebpf::EbpfContext>(ctx: &C) -> *mut aya_ebpf::bindings::__sk_buff {
+    ctx.as_ptr().cast()
+}
+
 /// Compiler barrier: prevents LLVM from reordering memory accesses across this
 /// point. Insert after any BPF helper that invalidates packet pointers
 /// (`bpf_xdp_adjust_tail`, `bpf_skb_store_bytes`, `bpf_skb_pull_data`, etc.)

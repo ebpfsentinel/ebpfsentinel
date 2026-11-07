@@ -128,7 +128,7 @@ impl PktMeta {
 
 #[inline(always)]
 fn check_word(ctx: &TcContext, w: [u32; 4]) -> u32 {
-    let skb = ctx.skb.skb;
+    let skb = crate::raw_skb(ctx);
     // SAFETY: `skb` is the live `__sk_buff` of this invocation; the three
     // fields are readable by a classifier.
     let (len, ifindex, ingress) = unsafe { ((*skb).len, (*skb).ifindex, (*skb).ingress_ifindex) };
@@ -153,7 +153,7 @@ fn pack(meta: &PktMeta) -> [u32; 4] {
 #[inline(always)]
 #[must_use]
 pub fn read_cb(ctx: &TcContext) -> Option<PktMeta> {
-    let skb = ctx.skb.skb;
+    let skb = crate::raw_skb(ctx);
     // SAFETY: `cb` is a readable field of the classifier's `__sk_buff`.
     let w = unsafe { (*skb).cb };
     if w[0] >> 24 != MAGIC {
@@ -184,7 +184,7 @@ pub fn write_cb(ctx: &TcContext, meta: &PktMeta) {
     }
     let w = pack(meta);
     let check = check_word(ctx, w);
-    let skb = ctx.skb.skb;
+    let skb = crate::raw_skb(ctx);
     // SAFETY: `cb` is writable by a classifier, and nothing else in the
     // chain owns it.
     unsafe {
@@ -203,7 +203,7 @@ pub fn invalidate(ctx: &TcContext) {
     if crate::trace::tc(ctx) {
         return;
     }
-    let skb = ctx.skb.skb;
+    let skb = crate::raw_skb(ctx);
     // SAFETY: as in [`write_cb`].
     unsafe {
         (*skb).cb[0] = 0;
@@ -219,7 +219,7 @@ pub fn write_tenant(ctx: &TcContext, tenant_id: u32) {
     if crate::trace::tc(ctx) {
         return;
     }
-    let skb = ctx.skb.skb;
+    let skb = crate::raw_skb(ctx);
     // SAFETY: as in [`read_cb`] and [`write_cb`].
     let w = unsafe { (*skb).cb };
     if w[0] >> 24 != MAGIC {

@@ -27,13 +27,13 @@
 #![no_std]
 #![no_main]
 
+use aya_ebpf::helpers::generated::bpf_send_signal;
 use aya_ebpf::{
     btf_maps::{Array, HashMap, PerCpuArray, RingBuf},
     helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_boot_ns},
     macros::{btf_map, raw_tracepoint},
     programs::RawTracePointContext,
 };
-use aya_ebpf_bindings::helpers::bpf_send_signal;
 use ebpf_common::signal::{
     SIGNAL_ARMED_SLOT, SIGNAL_EVENTS_RINGBUF_BYTES, SIGNAL_MAX_PROTECTED, SIGNAL_MAX_TARGETS,
     SIGNAL_METRIC_COUNT, SIGNAL_METRIC_EVENT_LOST, SIGNAL_METRIC_EXPIRED,

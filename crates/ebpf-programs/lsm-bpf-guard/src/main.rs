@@ -17,13 +17,13 @@
 #![no_std]
 #![no_main]
 
+use aya_ebpf::bindings::bpf_pidns_info;
+use aya_ebpf::helpers::generated::{bpf_get_ns_current_pid_tgid, bpf_probe_read_kernel};
 use aya_ebpf::{
     btf_maps::{Array, HashMap, PerCpuArray},
     macros::{btf_map, lsm},
     programs::LsmContext,
 };
-use aya_ebpf_bindings::bindings::bpf_pidns_info;
-use aya_ebpf_bindings::helpers::{bpf_get_ns_current_pid_tgid, bpf_probe_read_kernel};
 use ebpf_common::bpf_guard::{
     BPF_GUARD_CMD_LINK_GET_FD_BY_ID, BPF_GUARD_CONFIG_SLOT, BPF_GUARD_FMODE_WRITE,
     BPF_GUARD_MAX_LINKS, BPF_GUARD_MAX_MAPS, BPF_GUARD_MAX_TASKS, BPF_GUARD_METRIC_CHECKED,

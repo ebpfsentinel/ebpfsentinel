@@ -42,11 +42,11 @@ use aya_ebpf::{
 use ebpf_common::attribution::{
     ATTRIBUTION_FAMILY_IPV4, ATTRIBUTION_FAMILY_IPV6, ATTRIBUTION_HOOK_CONNECT,
     ATTRIBUTION_HOOK_POST_BIND, ATTRIBUTION_HOOK_SENDMSG, ATTRIBUTION_IDENTITY_TTL_NS,
-    ATTRIBUTION_MAX_FLOWS, ATTRIBUTION_MAX_SOCKETS, ATTRIBUTION_METRIC_CONNECT,
-    ATTRIBUTION_METRIC_COUNT, ATTRIBUTION_METRIC_FLOW, ATTRIBUTION_METRIC_INSERT_FAILED,
-    ATTRIBUTION_METRIC_NO_COOKIE, ATTRIBUTION_METRIC_POST_BIND, ATTRIBUTION_METRIC_SENDMSG,
-    ATTRIBUTION_METRIC_LISTENER, ATTRIBUTION_METRIC_LISTENER_GONE, ATTRIBUTION_METRIC_SOCK_OPS,
-    ATTRIBUTION_MAX_LISTENERS, ATTRIBUTION_METRIC_ACCEPT, FlowIdentityKey, LISTENER_STATE_BOUND,
+    ATTRIBUTION_MAX_FLOWS, ATTRIBUTION_MAX_LISTENERS, ATTRIBUTION_MAX_SOCKETS,
+    ATTRIBUTION_METRIC_ACCEPT, ATTRIBUTION_METRIC_CONNECT, ATTRIBUTION_METRIC_COUNT,
+    ATTRIBUTION_METRIC_FLOW, ATTRIBUTION_METRIC_INSERT_FAILED, ATTRIBUTION_METRIC_LISTENER,
+    ATTRIBUTION_METRIC_LISTENER_GONE, ATTRIBUTION_METRIC_NO_COOKIE, ATTRIBUTION_METRIC_POST_BIND,
+    ATTRIBUTION_METRIC_SENDMSG, ATTRIBUTION_METRIC_SOCK_OPS, FlowIdentityKey, LISTENER_STATE_BOUND,
     LISTENER_STATE_LISTEN, ListenerAcceptKey, ListenerAccepts, ListeningSocket, SocketIdentity,
 };
 use ebpf_common::dlp::{
@@ -54,6 +54,7 @@ use ebpf_common::dlp::{
     DLP_FLOW_SOURCE_KERNEL_SOCKET, DLP_TASK_SOCKET_MAX_TASKS, DlpSocket, DlpTaskSocket,
 };
 use ebpf_helpers::increment_metric;
+use ebpf_helpers::raw_skb;
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -94,8 +95,11 @@ static DLP_TASK_SOCKET: LruHashMap<u64, DlpTaskSocket, { DLP_TASK_SOCKET_MAX_TAS
 /// connections than the table was sized for loses the coldest rather than
 /// stopping, and a flow with no workload reads as absent everywhere.
 #[btf_map]
-static SOCKET_FLOW: LruHashMap<FlowIdentityKey, SocketIdentity, { ATTRIBUTION_MAX_FLOWS as usize }> =
-    LruHashMap::new();
+static SOCKET_FLOW: LruHashMap<
+    FlowIdentityKey,
+    SocketIdentity,
+    { ATTRIBUTION_MAX_FLOWS as usize },
+> = LruHashMap::new();
 
 /// Socket cookie -> a socket holding a local address, and who bound it.
 ///
@@ -105,11 +109,8 @@ static SOCKET_FLOW: LruHashMap<FlowIdentityKey, SocketIdentity, { ATTRIBUTION_MA
 /// since it was a client all along. LRU so a node binding more than the table
 /// holds loses its coldest entry rather than its newest listener.
 #[btf_map]
-static LISTENING_SOCKETS: LruHashMap<
-    u64,
-    ListeningSocket,
-    { ATTRIBUTION_MAX_LISTENERS as usize },
-> = LruHashMap::new();
+static LISTENING_SOCKETS: LruHashMap<u64, ListeningSocket, { ATTRIBUTION_MAX_LISTENERS as usize }> =
+    LruHashMap::new();
 
 /// Local address and port -> the TCP connections accepted on it.
 ///
@@ -281,7 +282,7 @@ fn join_datagram(ctx: &SkBuffContext) {
     flow.local_port = u16::from_be(sport);
     flow.remote_port = u16::from_be(dport);
 
-    let cookie = unsafe { generated::bpf_get_socket_cookie(ctx.skb.skb.cast()) };
+    let cookie = unsafe { generated::bpf_get_socket_cookie(raw_skb(ctx).cast()) };
     if cookie == 0 {
         return;
     }
@@ -432,10 +433,7 @@ fn join_socket(ctx: &SockOpsContext) {
     let Some(socket) = tuple_of(ctx, identity.family) else {
         return;
     };
-    let entry = DlpTaskSocket {
-        socket,
-        at_ns: now,
-    };
+    let entry = DlpTaskSocket { socket, at_ns: now };
     let pid_tgid = (u64::from(identity.tgid) << 32) | u64::from(identity.pid);
     if DLP_TASK_SOCKET.insert(&pid_tgid, &entry, 0).is_err() {
         increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_INSERT_FAILED);
@@ -580,7 +578,13 @@ fn record_listener(ctx: &SockContext, cookie: u64, identity: SocketIdentity, hoo
 /// before a socket is fully set up. There is no key then, and inventing one
 /// would attribute the next flow to whoever ran last.
 #[inline(always)]
-fn insert(cookie: u64, hook: u8, family: u32, protocol: u32, metric: u32) -> Option<SocketIdentity> {
+fn insert(
+    cookie: u64,
+    hook: u8,
+    family: u32,
+    protocol: u32,
+    metric: u32,
+) -> Option<SocketIdentity> {
     if cookie == 0 {
         increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_NO_COOKIE);
         return None;

@@ -60,8 +60,11 @@ macro_rules! emit_packet_event {
                 (*ptr).rule_id = $rule_id;
                 (*ptr).vlan_id = $vlan_id;
                 (*ptr).cpu_id = aya_ebpf::helpers::bpf_get_smp_processor_id() as u16;
+                // `Borrow` takes the context whether the caller holds it or a
+                // reference to it.
+                let skb: &aya_ebpf::programs::TcContext = ::core::borrow::Borrow::borrow(&$ctx);
                 (*ptr).socket_cookie =
-                    aya_ebpf::helpers::bpf_get_socket_cookie($ctx.skb.skb as *mut _);
+                    aya_ebpf::helpers::bpf_get_socket_cookie($crate::raw_skb(skb) as *mut _);
                 (*ptr).cgroup_id = $cgroup_id;
                 (*ptr).cgroup1_id = 0;
                 (*ptr).rss_hash = 0;
@@ -99,8 +102,11 @@ macro_rules! emit_packet_event {
                 (*ptr).rule_id = $rule_id;
                 (*ptr).vlan_id = $vlan_id;
                 (*ptr).cpu_id = aya_ebpf::helpers::bpf_get_smp_processor_id() as u16;
+                // `Borrow` takes the context whether the caller holds it or a
+                // reference to it.
+                let skb: &aya_ebpf::programs::TcContext = ::core::borrow::Borrow::borrow(&$ctx);
                 (*ptr).socket_cookie =
-                    aya_ebpf::helpers::bpf_get_socket_cookie($ctx.skb.skb as *mut _);
+                    aya_ebpf::helpers::bpf_get_socket_cookie($crate::raw_skb(skb) as *mut _);
                 // Valid only when current task owns the skb (egress).
                 // Ingress softirq has no process context, so this returns
                 // 0 and userspace falls back to /proc parsing.

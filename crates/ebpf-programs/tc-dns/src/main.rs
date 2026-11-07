@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+use aya_ebpf::helpers::generated::bpf_skb_load_bytes;
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     btf_maps::{PerCpuArray, RingBuf},
@@ -8,7 +9,6 @@ use aya_ebpf::{
     macros::{btf_map, classifier},
     programs::TcContext,
 };
-use aya_ebpf_bindings::helpers::bpf_skb_load_bytes;
 use core::mem;
 use ebpf_common::dns::{
     DNS_DIRECTION_QUERY, DNS_DIRECTION_RESPONSE, DNS_MAX_PAYLOAD, DNS_METRIC_ERRORS,
@@ -21,6 +21,7 @@ use ebpf_helpers::net::{
     u32_from_be_bytes,
 };
 use ebpf_helpers::pktmeta;
+use ebpf_helpers::raw_skb;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::trace::{self, reason, stage};
 use ebpf_helpers::{increment_metric, opaque_usize};
@@ -458,7 +459,7 @@ unsafe fn load_dns_payload<const CAP: usize>(
         // bounds.
         let load_len = opaque_usize(payload_len).clamp(1, CAP);
         bpf_skb_load_bytes(
-            ctx.skb.skb as *const _,
+            raw_skb(ctx) as *const _,
             dns_offset as u32,
             dst as *mut _,
             load_len as u32,
