@@ -1,0 +1,104 @@
+# eBPFsentinel - the Docker Compose file a release publishes.
+#
+# Downloaded from the release beside `ebpfsentinel-agent.json`, the agent's
+# seccomp profile, and run from the directory holding both. It names no build
+# context and no path outside that directory: the images are the published
+# ones, and the release build replaces the `0.0.0-dev` tag below with the
+# version it publishes, so a file downloaded from release N runs release N.
+# docker-compose.yml at the repository root is the file that builds the images
+# from a checkout instead.
+#
+# The directory needs, beside this file:
+#   - ebpfsentinel-agent.json : the seccomp profile, from the same release
+#   - ebpfsentinel.yaml       : the agent configuration, owned by 65534 and
+#                               mode 0640, since the agent refuses a
+#                               world-readable file that may hold secrets
+#
+# Host prerequisites: Linux 6.12 or later with BTF, unprivileged user
+# namespaces allowed (on Ubuntu 24.04 and later,
+# kernel.apparmor_restrict_unprivileged_userns=0), and /etc/machine-id present.
+#
+#   docker compose up -d
+#   docker compose logs -f
+#   docker compose down
+
+name: ebpfsentinel
+
+services:
+  # The privileged broker: it delegates a bpffs to the agent and performs the
+  # host network operations a user namespace cannot (conntrack, routes, ARP,
+  # pcap) and the DLP uprobe link. It loads no eBPF and holds no maps.
+  warden:
+    image: ghcr.io/ebpfsentinel/ebpfsentinel-warden:0.0.0-dev
+    container_name: ebpfsentinel-warden
+    command: ["serve", "/run/ebpfsentinel/warden.sock", "--uid", "65534"]
+    network_mode: host
+    environment:
+      EBPFSENTINEL_HOST_PROC: /host/proc
+    cap_drop: [ALL]
+    cap_add: [SYS_ADMIN, NET_ADMIN, NET_RAW, SYS_PTRACE, BPF, PERFMON, DAC_READ_SEARCH]
+    security_opt:
+      # Delegation does fsconfig and move_mount, and the broker speaks netlink.
+      - apparmor=unconfined
+      - seccomp=unconfined
+    volumes:
+      - warden-sock:/run/ebpfsentinel
+      - /proc:/host/proc:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  # The rootless agent: uid 65534, every capability dropped. It unshares a user
+  # namespace, mounts the bpffs the warden delegated and loads its eBPF through
+  # a BPF token.
+  agent:
+    image: ghcr.io/ebpfsentinel/ebpfsentinel:0.0.0-dev
+    container_name: ebpfsentinel
+    depends_on: [warden]
+    command: ["--config", "/etc/ebpfsentinel/config.yaml"]
+    environment:
+      EBPFSENTINEL_WARDEN_SOCK: /run/ebpfsentinel/warden.sock
+      EBPFSENTINEL_HOST_PROC: /host/proc
+    network_mode: host
+    user: "65534:65534"
+    cap_drop: [ALL]
+    security_opt:
+      # The Docker default profile plus an unconditional allow for unshare, the
+      # mount family and bpf, which the default gates on CAP_SYS_ADMIN and the
+      # agent calls holding no capability. Tighter than unconfined. Docker
+      # resolves the path from the directory `docker compose` runs in.
+      - seccomp=./ebpfsentinel-agent.json
+      - apparmor=unconfined
+    volumes:
+      - ./ebpfsentinel.yaml:/etc/ebpfsentinel/config.yaml
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - /proc:/host/proc:ro
+      - warden-sock:/run/ebpfsentinel:ro
+      # Read by `container.docker` for the container's name, image and labels.
+      # The Docker API is root on this host whatever the :ro says: drop this
+      # line and set `container.docker.enabled: false` to run without it.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ebpfsentinel-state:/var/lib/ebpfsentinel
+      - ebpfsentinel-captures:/var/lib/ebpfsentinel/captures
+      - type: bind
+        source: /etc/machine-id
+        target: /etc/machine-id
+        read_only: true
+      # A container's /sys is read-only: the delegated bpffs is mounted here.
+      - type: tmpfs
+        target: /sys/fs/bpf
+        tmpfs:
+          mode: 0o1777
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "ebpfsentinel-agent", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  warden-sock:
+  ebpfsentinel-state:
+  ebpfsentinel-captures:
