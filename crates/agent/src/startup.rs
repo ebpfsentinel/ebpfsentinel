@@ -8666,7 +8666,16 @@ pub fn establish_bpf_token(
     config: &AgentConfig,
     warden: bool,
 ) -> Option<adapters::ebpf::BpfLoadingHandle> {
-    let bpf_policy = adapters::ebpf::BpfTokenPolicy::new(config.agent.bpf_token.bpffs_path.clone());
+    establish_bpf_token_at(&config.agent.bpf_token.bpffs_path, warden)
+}
+
+/// [`establish_bpf_token`] against a bpffs named directly, for a process that
+/// loads the agent's objects without carrying an agent configuration.
+pub fn establish_bpf_token_at(
+    bpffs_path: &str,
+    warden: bool,
+) -> Option<adapters::ebpf::BpfLoadingHandle> {
+    let bpf_policy = adapters::ebpf::BpfTokenPolicy::new(bpffs_path);
     let bpf_handle = match adapters::ebpf::bootstrap_bpf(&bpf_policy) {
         Ok(h) => {
             info!(

@@ -1956,12 +1956,14 @@ pub fn load_object_token(
 
 /// Like [`load_object_token`], but no map is pinned and none is reused: the
 /// object shares nothing with any other, and once the agent closes its fds
-/// no map of it is left in the kernel or on bpffs.
+/// no map of it is left in the kernel or on bpffs. `dev_bound_ifindex` binds
+/// the XDP programs to that device the way [`load_object_token`] does.
 pub fn load_object_token_unpinned(
     elf: &[u8],
+    dev_bound_ifindex: Option<u32>,
     optional: &[&str],
 ) -> Result<TokenLoadedObject, KfuncLoaderError> {
-    load_object_token_maps(elf, None, None, optional)
+    load_object_token_maps(elf, None, dev_bound_ifindex, optional)
 }
 
 fn load_object_token_maps(

@@ -112,7 +112,7 @@ impl EbpfLoader {
     /// Returns an error when the object does not parse, a map cannot be
     /// created or a program is refused.
     pub fn load_unpinned(program_bytes: &[u8]) -> Result<Self, anyhow::Error> {
-        let loaded = kfunc_loader::load_object_token_unpinned(program_bytes, &[])?;
+        let loaded = kfunc_loader::load_object_token_unpinned(program_bytes, None, &[])?;
         Ok(Self::from_token_object(loaded))
     }
 

@@ -14,6 +14,7 @@ aya-obj = { workspace = true }
 libc = { workspace = true }
 anyhow = { workspace = true }
 ebpfsentinel-agent = { workspace = true }
+ebpfsentinel-warden = { workspace = true }
 serde_json = { workspace = true }
 utoipa = { workspace = true }
 # Pin a k8s-openapi version feature here - the agent's default `kubernetes`

@@ -4623,6 +4623,7 @@ dependencies = [
  "clap",
  "ebpf-common",
  "ebpfsentinel-agent",
+ "ebpfsentinel-warden",
  "k8s-openapi",
  "libc",
  "serde_json",

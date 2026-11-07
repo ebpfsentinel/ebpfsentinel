@@ -1,5 +1,6 @@
 mod build_ebpf;
 mod ebpf_cost;
+mod ebpf_load;
 
 use std::path::PathBuf;
 
@@ -25,6 +26,20 @@ enum Commands {
     /// rules loaded and with every emptiness gate set, since `bpf_stats` on a
     /// live interface bills a tail call to whichever program was entered.
     EbpfCost,
+    /// Load every built eBPF object and report what the kernel did with each.
+    ///
+    /// Needs root. Loads with the process's own capabilities, or through a
+    /// BPF token when `EBPFSENTINEL_WARDEN_SOCK` names a running warden, the
+    /// way the agent loads. Exits non-zero when any object is refused.
+    EbpfLoad {
+        /// Directory holding the objects. Defaults to the build output.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Bind the XDP objects reading receive metadata to this interface,
+        /// so their metadata kfunc calls reach the verifier.
+        #[arg(long, value_name = "IFACE")]
+        dev_bound: Option<String>,
+    },
     /// Generate code from proto files
     Codegen,
     /// Emit the agent's OpenAPI spec to JSON.
@@ -54,6 +69,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::EbpfBuild => build_ebpf::build_all(),
         Commands::EbpfCost => ebpf_cost::run(),
+        Commands::EbpfLoad { dir, dev_bound } => ebpf_load::run(dir, dev_bound),
         Commands::Codegen => {
             println!("codegen: not yet implemented");
             Ok(())

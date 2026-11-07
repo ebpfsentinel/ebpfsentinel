@@ -227,6 +227,9 @@ suite_profiles:
   "130": nightly
   "131": nightly
   "132": nightly
+  # 133 hands every object of the build to the loader twice, privileged and
+  # through a token; it needs cargo or a prebuilt xtask, which the VM lane has.
+  "133": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
