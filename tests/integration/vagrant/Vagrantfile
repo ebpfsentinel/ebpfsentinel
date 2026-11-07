@@ -275,9 +275,11 @@ LIMITS
     # instead (kernel.ubuntu.com/mainline, built from the stable tree with
     # Ubuntu's own configuration, BTF and module BTF included), which is how
     # the objects are put in front of the 6.12 verifier and the newest one.
-    # Unset, any pin left by an earlier run is removed and the VM goes back
-    # to the HWE kernel. Only the image and the modules are installed: the
-    # mainline header package may want a newer libc than 24.04 has.
+    # Unset, the VM goes back to the HWE kernel: the newest kernel that is
+    # not a mainline build is pinned, since a mainline kernel left installed
+    # by an earlier run sorts above it and would otherwise be the default.
+    # Only the image and the modules are installed: the mainline header
+    # package may want a newer libc than 24.04 has.
     #
     # bpftool is a userspace tool and has no mainline package, so the
     # running kernel's tools directory is pointed at the HWE one, which is
@@ -290,11 +292,12 @@ LIMITS
       conf=/etc/default/grub.d/92-agent-kernel.cfg
 
       if [ -z "${AGENT_KERNEL}" ]; then
-        if [ -f "$conf" ]; then
-          rm -f "$conf"
-          update-grub
-        fi
-        echo "AGENT_KERNEL unset: booting the HWE kernel"
+        hwe="$(ls /boot/vmlinuz-*-generic | sed 's|^/boot/vmlinuz-||' \
+          | grep -vE -- '-[0-9]{6,}-generic$' | sort -V | tail -1)"
+        test -n "$hwe"
+        printf 'GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux %s"\n' "$hwe" > "$conf"
+        update-grub
+        echo "AGENT_KERNEL unset: next boot is the HWE kernel ${hwe}"
         exit 0
       fi
 
