@@ -54,7 +54,13 @@ services:
     user: "65534:65534"
     cap_drop: [ALL]
     security_opt:
-      - seccomp=../dist/seccomp/ebpfsentinel-agent.json
+      # The agent unshares a user namespace and issues mount and bpf calls
+      # holding no capability, which the Docker default profile refuses. This
+      # is that default plus those calls, never unconfined. Docker reads the
+      # path from the working directory, which demo.sh sets to this one. In a
+      # checkout it links to dist/seccomp/; the release copies the file in
+      # its place, so the downloaded lab carries it.
+      - seccomp=./seccomp/ebpfsentinel-agent.json
       - apparmor=unconfined
     volumes:
       # Written by demo.sh: owned by 65534 and mode 0640, which the agent

@@ -10,7 +10,8 @@
 # The agent drops every capability, self-unshares a user namespace, has the warden
 # delegate a bpffs, and loads its own eBPF through a BPF token - never root, never
 # CAP_BPF. It does the userns + mount + bpf syscalls itself, so it needs
-# apparmor/seccomp unconfined (no CAP_SYS_ADMIN to satisfy the default profiles).
+# apparmor unconfined and the seccomp profile in dist/seccomp/ (the default
+# profiles gate those calls on CAP_SYS_ADMIN, which it does not hold).
 # A container's /sys is read-only, so back the bpffs mountpoint with a writable
 # /sys/fs/bpf (host bind or tmpfs).
 #
