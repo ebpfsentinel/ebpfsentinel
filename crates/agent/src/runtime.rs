@@ -2131,7 +2131,10 @@ async fn process_table(
     .with_ids_workload_scope(Arc::clone(&services.ids_workload_scope))
     .with_cgroup_shaping(Arc::clone(&services.cgroup_shaping));
     if let Some(resolver) = startup::container_resolver(config, proc_root) {
-        table = table.with_containers(resolver);
+        table = table
+            .with_containers(resolver)
+            .with_container_metrics(Arc::clone(&services.metrics)
+                as Arc<dyn ports::secondary::metrics_port::ContainerMetrics>);
     }
     for enricher in build_workload_enrichers(config).await {
         table = table.with_metadata_enricher(enricher);

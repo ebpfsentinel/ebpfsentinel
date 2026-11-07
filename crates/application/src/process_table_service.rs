@@ -18,7 +18,7 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use domain::container::engine::ContainerResolverEngine;
+use domain::container::engine::{ContainerResolverEngine, ResolveOutcome};
 use domain::container::entity::ContainerContext;
 use domain::process::engine::{Lineage, ProcessTable, PurgeOutcome};
 use domain::process::entity::{
@@ -26,6 +26,7 @@ use domain::process::entity::{
 };
 use ports::secondary::executable_digest_port::ExecutableDigester;
 use ports::secondary::metadata_enricher_port::MetadataEnricher;
+use ports::secondary::metrics_port::ContainerMetrics;
 use ports::secondary::process_details_port::ProcessDetailsReader;
 use ports::secondary::process_executable_port::ProcessExecutableReader;
 use tokio::sync::{mpsc, watch};
@@ -53,6 +54,7 @@ pub struct ProcessTableService {
     digester: Option<Arc<dyn ExecutableDigester>>,
     details: Option<Arc<dyn ProcessDetailsReader>>,
     containers: Option<Arc<ContainerResolverEngine>>,
+    container_metrics: Option<Arc<dyn ContainerMetrics>>,
     metadata_enrichers: Vec<Arc<dyn MetadataEnricher>>,
     workload: Option<Arc<WorkloadPolicyService>>,
     dlp_scope: Option<Arc<DlpScopeService>>,
@@ -79,6 +81,7 @@ impl ProcessTableService {
             digester: None,
             details: None,
             containers: None,
+            container_metrics: None,
             metadata_enrichers: Vec::new(),
             workload: None,
             dlp_scope: None,
@@ -117,6 +120,16 @@ impl ProcessTableService {
     #[must_use]
     pub fn with_containers(mut self, resolver: Arc<ContainerResolverEngine>) -> Self {
         self.containers = Some(resolver);
+        self
+    }
+
+    /// Count each container resolution on the resolver's hit, miss and error
+    /// counters. The table shares its resolver with the alert pipeline, so an
+    /// exec it resolves first is the miss and the alert after it a hit: left
+    /// uncounted here, a container's first lookup would never show as a miss.
+    #[must_use]
+    pub fn with_container_metrics(mut self, metrics: Arc<dyn ContainerMetrics>) -> Self {
+        self.container_metrics = Some(metrics);
         self
     }
 
@@ -514,7 +527,14 @@ impl ProcessTableService {
     /// a reader checks to know whether there is a container at all.
     async fn resolve_container(&self, pid: u32, cgroup_id: u64) -> Option<ContainerContext> {
         let resolver = self.containers.as_ref()?;
-        let (info, _outcome) = resolver.resolve(pid, cgroup_id);
+        let (info, outcome) = resolver.resolve(pid, cgroup_id);
+        if let Some(ref metrics) = self.container_metrics {
+            match outcome {
+                ResolveOutcome::CacheHit => metrics.record_container_cache_hit(),
+                ResolveOutcome::CacheMiss => metrics.record_container_cache_miss(),
+                ResolveOutcome::ReadError => metrics.record_container_resolver_error(),
+            }
+        }
         if info.is_host() {
             return None;
         }
@@ -1274,6 +1294,49 @@ mod tests {
         sibling.cgroup_id = 500;
         service.apply(sibling).await;
         assert!(service.get(12).unwrap().container.is_none());
+    }
+
+    /// Counts each outcome it is told of.
+    #[derive(Default)]
+    struct ResolveCounts {
+        hits: std::sync::atomic::AtomicU64,
+        misses: std::sync::atomic::AtomicU64,
+        errors: std::sync::atomic::AtomicU64,
+    }
+
+    impl ContainerMetrics for ResolveCounts {
+        fn record_container_cache_hit(&self) {
+            self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn record_container_cache_miss(&self) {
+            self.misses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn record_container_resolver_error(&self) {
+            self.errors
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_container_resolved_from_an_exec_counts_as_the_resolver_miss() {
+        let resolver = Arc::new(ContainerResolverEngine::new(Arc::new(ContainerCgroups), 16));
+        let counts = Arc::new(ResolveCounts::default());
+        let service = ProcessTableService::new(16, false)
+            .with_containers(Arc::clone(&resolver))
+            .with_container_metrics(Arc::clone(&counts) as Arc<dyn ContainerMetrics>);
+
+        // The first exec in a cgroup reads it, the second finds it cached.
+        service.apply(exec(40, 1)).await;
+        service.apply(exec(41, 2)).await;
+
+        let load = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(load(&counts.misses), 1);
+        assert_eq!(load(&counts.hits), 1);
+        assert_eq!(load(&counts.errors), 0);
+        // The alert path shares the cache, so its lookup of the same cgroup
+        // is the hit that follows the miss counted here.
+        assert_eq!(resolver.resolve_by_id(777).1, ResolveOutcome::CacheHit);
     }
 
     #[tokio::test]

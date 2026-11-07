@@ -4042,7 +4042,9 @@ pub async fn run(
             &coverage_proc,
         )));
         if let Some(ref resolver) = container_resolver {
-            svc = svc.with_containers(Arc::clone(resolver));
+            svc = svc
+                .with_containers(Arc::clone(resolver))
+                .with_container_metrics(Arc::clone(&metrics) as Arc<dyn ContainerMetrics>);
         }
         if let Some(ref enricher) = docker_enricher {
             svc = svc.with_metadata_enricher(Arc::clone(enricher));
