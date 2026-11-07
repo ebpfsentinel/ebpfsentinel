@@ -48,6 +48,8 @@ const SCRATCH_MAPS: &[&str] = &[
     "FIB_PARAMS",
     "REJECT_SCRATCH",
     "SYNCOOKIE_CTX",
+    "BLOOM_PROBE",
+    "SHADOW_META",
 ];
 
 const BPF_MAP_LOOKUP_ELEM: libc::c_long = 1;

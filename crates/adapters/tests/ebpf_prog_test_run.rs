@@ -20,6 +20,11 @@ use adapters::ebpf::loader::EbpfLoader;
 use adapters::ebpf::prog_test_run::{
     self, TC_ACT_OK, TC_ACT_SHOT, XDP_ABORTED, XDP_DROP, XDP_PASS, XDP_REDIRECT, XDP_TX,
 };
+use aya::maps::{Array, BloomFilter, HashMap, MapData};
+use ebpf_common::config_flags::ConfigFlags;
+use ebpf_common::threatintel::{
+    THREATINTEL_ACTION_DROP, ThreatIntelKey, ThreatIntelKeyV6, ThreatIntelValue,
+};
 
 /// What a program is, for the purpose of reading its return value back.
 #[derive(Clone, Copy)]
@@ -73,6 +78,24 @@ fn tcp_syn() -> Vec<u8> {
     pkt.extend_from_slice(&[10, 0, 0, 1]);
     pkt.extend_from_slice(&[10, 0, 0, 2]);
     // TCP: 1024 -> 80, SYN, window 8192.
+    pkt.extend_from_slice(&[0x04, 0x00, 0x00, 0x50]);
+    pkt.extend_from_slice(&[0, 0, 0, 1]);
+    pkt.extend_from_slice(&[0, 0, 0, 0]);
+    pkt.extend_from_slice(&[0x50, 0x02, 0x20, 0x00]);
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+    pkt
+}
+
+/// A TCP SYN over IPv6 over Ethernet, `fd00::1` to `fd00::2`.
+fn tcp_syn_v6() -> Vec<u8> {
+    let mut pkt = Vec::with_capacity(74);
+    pkt.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x01]);
+    pkt.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x02]);
+    pkt.extend_from_slice(&[0x86, 0xdd]);
+    // IPv6: 20 bytes of payload, TCP, hop limit 64.
+    pkt.extend_from_slice(&[0x60, 0, 0, 0, 0x00, 0x14, 0x06, 0x40]);
+    pkt.extend_from_slice(&[0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    pkt.extend_from_slice(&[0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
     pkt.extend_from_slice(&[0x04, 0x00, 0x00, 0x50]);
     pkt.extend_from_slice(&[0, 0, 0, 1]);
     pkt.extend_from_slice(&[0, 0, 0, 0]);
@@ -208,9 +231,12 @@ fn a_tc_program_passes_an_unmatched_packet() {
     std::mem::forget(owned);
 
     match outcome {
-        Ok(outcome) => assert_eq!(
-            outcome.retval, TC_ACT_OK,
-            "a SYN matching no signature must be let through"
+        // A pass is handed on as `TCX_NEXT` (-1) so the programs after this
+        // one on the hook still run; `TC_ACT_OK` would end the chain.
+        Ok(outcome) => assert!(
+            outcome.retval == TC_ACT_OK || outcome.retval == u32::MAX,
+            "a SYN matching no signature must be let through, got {}",
+            outcome.retval
         ),
         Err(e) if e.is_unavailable() => eprintln!("skipped: {e}"),
         Err(e) => panic!("tc_ids could not be run: {e}"),
@@ -256,4 +282,106 @@ fn a_refusal_by_the_host_is_told_apart_from_a_broken_object() {
         "program xdp_firewall rejected by the verifier (errno 22)"
     ));
     assert!(!is_environment("object parse failed"));
+}
+
+/// Which address family a threat intelligence indicator is written for.
+#[derive(Clone, Copy, Debug)]
+enum Family {
+    V4,
+    V6,
+}
+
+/// Load `tc-threatintel`, switch it on, write `10.0.0.1` or `fd00::1` as a
+/// blocking indicator into both the bloom filter and the table, and hand back
+/// the loaded object with the SYN from that address. `None` means the host
+/// cannot load it.
+fn threatintel_listing(family: Family) -> Option<(EbpfLoader, Vec<u8>)> {
+    let dir = objects_dir();
+    let bytes = std::fs::read(dir.join("tc-threatintel")).ok()?;
+    let Ok(mut loaded) = EbpfLoader::load_unpinned(&bytes) else {
+        eprintln!("skipped: cannot load eBPF objects here");
+        return None;
+    };
+    let maps = loaded.ebpf_mut();
+
+    let mut flags: Array<MapData, ConfigFlags> =
+        Array::try_from(maps.take_map("CONFIG_FLAGS").expect("CONFIG_FLAGS map"))
+            .expect("CONFIG_FLAGS typed");
+    let on = ConfigFlags {
+        firewall_enabled: 0,
+        ids_enabled: 0,
+        ips_enabled: 0,
+        dlp_enabled: 0,
+        ratelimit_enabled: 0,
+        threatintel_enabled: 1,
+        conntrack_enabled: 0,
+        nat_enabled: 0,
+    };
+    flags.set(0, &on, 0).expect("switch threat intelligence on");
+
+    let block = ThreatIntelValue {
+        action: THREATINTEL_ACTION_DROP,
+        feed_id: 0,
+        confidence: 100,
+        threat_type: 0,
+    };
+    let packet = match family {
+        Family::V4 => {
+            let key = ThreatIntelKey {
+                ip: u32::from(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+            };
+            let mut bloom: BloomFilter<MapData, ThreatIntelKey> = BloomFilter::try_from(
+                maps.take_map("THREATINTEL_BLOOM_V4")
+                    .expect("THREATINTEL_BLOOM_V4 map"),
+            )
+            .expect("bloom typed");
+            bloom.insert(&key, 0).expect("bloom insert");
+            let mut iocs: HashMap<MapData, ThreatIntelKey, ThreatIntelValue> =
+                HashMap::try_from(maps.take_map("THREATINTEL_IOCS").expect("IOC map"))
+                    .expect("IOC map typed");
+            iocs.insert(&key, &block, 0).expect("IOC insert");
+            tcp_syn()
+        }
+        Family::V6 => {
+            let key = ThreatIntelKeyV6 {
+                ip: [0xfd00_0000, 0, 0, 1],
+            };
+            let mut bloom: BloomFilter<MapData, ThreatIntelKeyV6> = BloomFilter::try_from(
+                maps.take_map("THREATINTEL_BLOOM_V6")
+                    .expect("THREATINTEL_BLOOM_V6 map"),
+            )
+            .expect("bloom typed");
+            bloom.insert(&key, 0).expect("bloom insert");
+            let mut iocs: HashMap<MapData, ThreatIntelKeyV6, ThreatIntelValue> =
+                HashMap::try_from(maps.take_map("THREATINTEL_IOCS_V6").expect("IOC map"))
+                    .expect("IOC map typed");
+            iocs.insert(&key, &block, 0).expect("IOC insert");
+            tcp_syn_v6()
+        }
+    };
+
+    Some((loaded, packet))
+}
+
+/// The bloom filter is probed before the table, so a probe the verifier
+/// accepts but that never answers "maybe" would let every listed address
+/// through while the program still loads.
+#[test]
+fn a_listed_source_is_dropped_by_threat_intelligence() {
+    for family in [Family::V4, Family::V6] {
+        let Some((loaded, packet)) = threatintel_listing(family) else {
+            continue;
+        };
+        let fd = loaded
+            .program_fd_owned("tc_threatintel")
+            .expect("tc_threatintel entry program");
+        match prog_test_run::run(borrow(&fd), &packet, 1) {
+            Ok(outcome) => assert_eq!(
+                outcome.retval, TC_ACT_SHOT,
+                "{family:?}: a SYN from a blocking indicator must be dropped"
+            ),
+            Err(e) if e.is_unavailable() => eprintln!("skipped: {e}"),
+            Err(e) => panic!("tc_threatintel could not be run: {e}"),
+        }
+    }
 }

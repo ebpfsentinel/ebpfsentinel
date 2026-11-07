@@ -69,6 +69,53 @@ static THREATINTEL_BLOOM_V4: BloomFilter<ThreatIntelKey, { THREATINTEL_MAX_ENTRI
 static THREATINTEL_BLOOM_V6: BloomFilter<ThreatIntelKeyV6, { THREATINTEL_MAX_ENTRIES as usize }> =
     BloomFilter::new();
 
+/// The keys a bloom filter is probed with, held in a map value rather than
+/// on the stack.
+///
+/// `bpf_map_peek_elem` is declared as writing through its value argument,
+/// since a queue or a stack map hands an element back through it, while a
+/// bloom filter reads that argument. A verifier that tracks stack liveness
+/// therefore takes the store of a key nothing reads after the probe for a
+/// dead store, poisons the slot, and refuses the probe that reads it. A key
+/// in a map value is outside that analysis on every kernel.
+#[repr(C)]
+struct BloomProbe {
+    v4: ThreatIntelKey,
+    v6: ThreatIntelKeyV6,
+}
+
+#[btf_map]
+static BLOOM_PROBE: PerCpuArray<BloomProbe, 1> = PerCpuArray::new();
+
+/// Whether the IPv4 bloom filter may hold `key`. Without its scratch slot
+/// the answer is "maybe", so the hash map stays the one that decides.
+#[inline(always)]
+fn bloom_may_contain_v4(key: ThreatIntelKey) -> bool {
+    let Some(probe) = BLOOM_PROBE.get_ptr_mut(0) else {
+        return true;
+    };
+    // SAFETY: `probe` points at this CPU's slot of a per-CPU array, which
+    // nothing else touches while this program runs on the CPU.
+    unsafe {
+        (*probe).v4 = key;
+        THREATINTEL_BLOOM_V4.contains(&(*probe).v4).is_ok()
+    }
+}
+
+/// Whether the IPv6 bloom filter may hold `key`; see
+/// [`bloom_may_contain_v4`].
+#[inline(always)]
+fn bloom_may_contain_v6(key: ThreatIntelKeyV6) -> bool {
+    let Some(probe) = BLOOM_PROBE.get_ptr_mut(0) else {
+        return true;
+    };
+    // SAFETY: as in `bloom_may_contain_v4`.
+    unsafe {
+        (*probe).v6 = key;
+        THREATINTEL_BLOOM_V6.contains(&(*probe).v6).is_ok()
+    }
+}
+
 /// Per-CPU counters. Index: 0=matched, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen.
 #[btf_map]
 static THREATINTEL_METRICS: PerCpuArray<u64, 5> = PerCpuArray::new();
@@ -221,8 +268,8 @@ fn process_threatintel_v4(
     let src_key = ThreatIntelKey { ip: src_ip };
     let dst_key = ThreatIntelKey { ip: dst_ip };
 
-    let src_maybe = THREATINTEL_BLOOM_V4.contains(&src_key).is_ok();
-    let dst_maybe = THREATINTEL_BLOOM_V4.contains(&dst_key).is_ok();
+    let src_maybe = bloom_may_contain_v4(src_key);
+    let dst_maybe = bloom_may_contain_v4(dst_key);
 
     if !src_maybe && !dst_maybe {
         trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
@@ -309,8 +356,8 @@ fn process_threatintel_v6(
     let src_key = ThreatIntelKeyV6 { ip: src_addr };
     let dst_key = ThreatIntelKeyV6 { ip: dst_addr };
 
-    let src_maybe = THREATINTEL_BLOOM_V6.contains(&src_key).is_ok();
-    let dst_maybe = THREATINTEL_BLOOM_V6.contains(&dst_key).is_ok();
+    let src_maybe = bloom_may_contain_v6(src_key);
+    let dst_maybe = bloom_may_contain_v6(dst_key);
 
     if !src_maybe && !dst_maybe {
         trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
