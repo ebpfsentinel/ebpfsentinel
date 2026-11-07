@@ -64,16 +64,9 @@ owners:
 # suite has since started requesting fails the audit, so the list shrinks
 # as the suites land.
 routes:
-  /api/v1/alerts/triage: {owner: unplanned}
-  /api/v1/alerts/{id}/triage: {owner: unplanned}
   /api/v1/ebpf/hidden-ports: {suites: ["79"]}
   /api/v1/ebpf/hidden-processes: {suites: ["79"]}
-  /api/v1/ids/suricata/report: {owner: unplanned}
-  /api/v1/lb/vips: {owner: unplanned}
-  /api/v1/lb/vips/bgp: {owner: unplanned}
-  /api/v1/lb/vips/grant: {owner: unplanned}
   /api/v1/netpol/replay: {owner: kernel-network}
-  /api/v1/qos/shaping: {owner: kernel-network}
 
 # Suite-level CI profile (consumed by scripts/list-suites-by-profile.sh
 # which drives .github/workflows/integration.yml).
@@ -224,6 +217,11 @@ suite_profiles:
   "99": nightly
   "100": nightly
   "101": nightly
+  "102": nightly
+  "103": nightly
+  "104": nightly
+  "105": nightly
+  "106": nightly
   "130": nightly
   "131": nightly
   "132": nightly
@@ -400,7 +398,7 @@ coverage:
     topology: none
     kernel_min: "6.12"
     profile: manual
-    notes: "Resolves the Service cluster addresses of opted-in pods at connect4/connect6 and answers with the cluster address at getpeername and recvmsg. Asserted beside Cilium and Calico in the operator's coexistence lane, which needs a cluster no lane here provisions"
+    notes: "Resolves the Service cluster addresses of opted-in pods at connect4/connect6 and answers with the cluster address at getpeername and recvmsg. Asserted beside Cilium and Calico by the operator's coexistence suite 03-clusterip.bats on kind, which reads the translated counter for the labelled pod and none for its bystander; no lane here provisions a cluster with Services"
 
   - kind: ebpf_program
     feature: lsm-exec-network
@@ -444,12 +442,11 @@ coverage:
 
   - kind: ebpf_program
     feature: uprobe-crypto
-    suites: ["TBD"]
-    owner: host-integrity
+    suites: ["104"]
     topology: none
     kernel_min: "6.12"
-    profile: manual
-    notes: "Calls into the encryption entry point of libcrypto, libgcrypt and libsodium, counted per process for the mass encryption engine. No suite yet: nothing runs a program that encrypts files through the library and reads the signal back"
+    profile: nightly
+    notes: "Calls into the encryption entry point of libcrypto, libgcrypt and libsodium, counted per process for the mass encryption engine. Suite 104 rewrites the body of each document twice, once with bytes it made itself and once through EVP_EncryptUpdate, and only the second reaches a verdict, on the crypto rate"
 
   - kind: ebpf_program
     feature: tracepoint-process
@@ -787,7 +784,7 @@ coverage:
     topology: k8s
     kernel_min: "6.12"
     profile: manual
-    notes: "NetworkPolicy compiled for the pods of one node. No suite yet: the kubernetes lane does not apply a policy and read the compiled rules back"
+    notes: "NetworkPolicy compiled for the pods of one node. No suite here: the operator's coexistence suite 04-networkpolicy-enforce.bats applies a policy to an agent in enforce mode on kind and asserts the open path stays open, and no lane here runs a cluster whose pods the agent inventories, so reading the compiled rules back belongs beside it"
 
   - kind: cli_subcommand
     feature: hostrules
@@ -1024,12 +1021,11 @@ coverage:
 
   - kind: domain_module
     feature: telemetry
-    suites: ["TBD"]
-    owner: unplanned
+    suites: ["106"]
     topology: none
     kernel_min: "n/a"
-    profile: manual
-    notes: "Anonymous heartbeat of version and eBPF load state. No suite exercises it: the destination is a build-time constant that no test build carries, so a community or CI binary has nowhere to send one and there is nothing to receive it"
+    profile: nightly
+    notes: "Anonymous heartbeat of version and eBPF load state. The destination is a build-time constant, so the lane's build carries a loopback one and suite 106 receives the beat on a sink beside the agent: three fields and nothing else, the identifier kept across a restart, silence under EBPFSENTINEL_TELEMETRY_DISABLE"
 
   - kind: domain_module
     feature: threatintel
@@ -1054,7 +1050,7 @@ coverage:
     topology: k8s
     kernel_min: "6.12"
     profile: manual
-    notes: "What the node agent sees of each pod and why it misses what it misses. No suite reads the per-pod coverage report; 87 asserts only the refusal on a node without a pod inventory"
+    notes: "What the node agent sees of each pod and why it misses what it misses. 87 asserts the refusal on a node without a pod inventory; the per-pod report needs an agent watching a cluster's pods, which only the operator's kind lanes run, and none of their suites reads it yet"
 
   - kind: domain_module
     feature: drops
@@ -1095,7 +1091,7 @@ coverage:
     topology: k8s
     kernel_min: "6.12"
     profile: manual
-    notes: "Kubernetes NetworkPolicy compiled for the pods of one node. No suite applies a policy"
+    notes: "Kubernetes NetworkPolicy compiled for the pods of one node. Applied in enforce mode by the operator's coexistence suite 04-networkpolicy-enforce.bats on kind; the compilation needs the node's pod inventory, which no lane here provides"
 
   - kind: domain_module
     feature: process
@@ -1120,7 +1116,7 @@ coverage:
     topology: none
     kernel_min: "6.12"
     profile: manual
-    notes: "The plan deciding which Services an opted-in workload resolves at connect and which stay with kube-proxy. No suite yet: nothing connects to a cluster address from a selected cgroup and reads the backend it reached"
+    notes: "The plan deciding which Services an opted-in workload resolves at connect and which stay with kube-proxy. Exercised by the operator's coexistence suite 03-clusterip.bats on kind, where an opted-in pod's connection is translated and a bystander's stays with kube-proxy; the plan is built from the cluster's Services and EndpointSlices, which no lane here serves"
 
   - kind: domain_module
     feature: exposure
@@ -1153,7 +1149,7 @@ coverage:
     topology: 2vm
     kernel_min: "6.12"
     profile: manual
-    notes: "This node's addresses as names another node can read, and the peer's names on a flow. No suite yet: the two-end reading needs a second agent on the attacker VM"
+    notes: "This node's addresses as names another node can read, and the peer's names on a flow. No suite yet: the two-end reading needs a second agent on the attacker VM, a 2VM lane this host could not hold beside the other agent's work when the rest of the gaps were closed"
 
   - kind: domain_module
     feature: network_program

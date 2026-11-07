@@ -90,6 +90,11 @@ env:
   - "suite 71 runs its clients beside the agent (local lane only)"
   - "suite 72 runs its containers beside the agent (local lane only)"
   - "suite 73 makes its guest devices beside the agent (local lane only)"
+  - "suite 103 runs its sender beside the agent (local lane only)"
+  - "suite 104 writes its files on the agent's host (local lane only)"
+  - "libcrypto.so.3 is not installed on this host"
+  - "suite 105 edits the configuration beside the agent (local lane only)"
+  - "suite 106 listens on the agent's own loopback (local lane only)"
   - "suite 74 makes its guest devices beside the agent (local lane only)"
   - "suite 75 runs its guests beside the agent (local lane only)"
   - "suite 76 sends its traffic from the local namespace (local lane only)"
@@ -141,6 +146,7 @@ env:
 
 
 masking:
+  - "this agent build carries no loopback telemetry endpoint:"
   - "no containerd or dockerd runs on this host"
   - "warden log missing at"
   - "API not reachable at"
