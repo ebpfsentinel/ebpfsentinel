@@ -103,7 +103,7 @@ value that produced it.
 - daemonset.hostNetwork=true shares the node's network namespace, which {{ $level }} forbids. The XDP and TC programs attach to the node's own interfaces, so turning it off limits the datapath to the pod's veth.
 {{- end }}
 {{- if .Values.daemonset.hostPID }}
-- daemonset.hostPID=true shares the node's pid namespace, which {{ $level }} forbids. Cross-container DLP no longer needs it: the warden and the agent read the host procfs through the read-only /host/proc mount.
+- daemonset.hostPID=true shares the node's pid namespace, which {{ $level }} forbids. DLP does not need it: the warden and the agent read the host procfs through the read-only /host/proc mount. Only the hidden process sweep does, and it is skipped without it.
 {{- end }}
 {{- with .Values.daemonset.warden.securityContext.capabilities }}
 {{- range .add }}

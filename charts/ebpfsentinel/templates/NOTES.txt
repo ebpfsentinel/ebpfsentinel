@@ -68,16 +68,18 @@ Pod Security Admission: this release declares `{{ .Values.daemonset.podSecurityA
 {{- if .Values.daemonset.hostPID }} and the node's pid namespace{{- end }}.
 {{- if .Values.daemonset.hostPID }}
 
-  hostPID is ENABLED. Cross-container DLP does not need it: the warden and the
-  agent read the host procfs through the read-only /host/proc mount, and the
-  uprobe link is created against a path and an offset rather than a pid. What
-  it adds is the node's process list and command lines inside the pod.
+  hostPID is ENABLED, so the warden's hidden process sweep runs. hostPID is a
+  pod field: the rootless agent shares the node's pid namespace as well, sees
+  the node's process table in its own /proc and can signal node processes
+  running as uid 65534. DLP does not need it.
   Turn it off with: --set daemonset.hostPID=false
 {{- else }}
 
   hostPID is DISABLED, and DLP still covers every process on the node: the
   scan walks the read-only /host/proc mount and the uprobe attaches by path
-  and offset, so a library is covered wherever it is mapped.
+  and offset, so a library is covered wherever it is mapped. The hidden process
+  sweep is skipped, since the warden must signal in the pid namespace
+  /host/proc lists; last_error on /api/v1/ebpf/hidden-processes says so.
 {{- end }}
 {{- if .Values.auto_response.enabled }}
 

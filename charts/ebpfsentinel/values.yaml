@@ -108,13 +108,15 @@ daemonset:
   # node's own interfaces, which only exist in it; turning it off leaves the
   # datapath with the pod's veth and nothing else. Forbidden by `baseline`.
   hostNetwork: true
-  # -- Share the host PID namespace. Off: cross-container TLS DLP no longer
-  # needs it. The warden and the agent both read the host procfs through the
-  # read-only `/host/proc` mount (`EBPFSENTINEL_HOST_PROC`), the library path
-  # they exchange is rooted on it, and the uprobe link is created against a
-  # path and an offset with `pid = 0`, so it covers every process that maps the
-  # library whatever namespace it is in. Turning it on adds the node's command
-  # lines to what the pod can see and buys no coverage; `baseline` forbids it.
+  # -- Share the host PID namespace. DLP needs no host pid namespace: the warden
+  # and the agent both read the host procfs through the read-only `/host/proc`
+  # mount (`EBPFSENTINEL_HOST_PROC`) and the uprobe link is created against a
+  # path and an offset with `pid = 0`. The hidden process sweep does need it:
+  # the warden signals every pid and compares the answers with that listing, so
+  # with this off the sweep is skipped and `last_error` on
+  # `/api/v1/ebpf/hidden-processes` says why. The field is per pod, so turning
+  # it on gives the node's pid namespace to the agent as well as the warden;
+  # `baseline` forbids it.
   hostPID: false
   # -- DaemonSet update strategy
   updateStrategy:

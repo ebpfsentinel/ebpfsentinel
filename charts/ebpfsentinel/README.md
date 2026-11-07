@@ -68,9 +68,23 @@ pod mounts the node's `/proc` read-only at `/host/proc`, both containers are
 told about it through `EBPFSENTINEL_HOST_PROC`, and the library path the warden
 hands back is rooted on that mount. The uprobe itself is a `BPF_LINK_CREATE`
 against a path and an offset with `pid = 0`, so it fires for every process that
-maps `libssl.so.3`, in whatever namespace. Turning `hostPID` on adds the node's
-process list and command lines to what the pod can see and buys no coverage,
-and Pod Security Admission `baseline` forbids it.
+maps `libssl.so.3`, in whatever namespace. DLP needs no host pid namespace.
+
+**The hidden process sweep does**, and `hidden_checks.processes` runs it by
+default. The warden sends the null signal to every pid and compares the
+answers with the `/host/proc` listing, which only means something when the
+warden signals in the pid namespace that mount lists. With `hostPID` off the
+sweep is skipped, and `last_error` on `/api/v1/ebpf/hidden-processes` says the
+procfs lists another pid namespace; DLP and every other feature run unchanged.
+
+`hostPID` is a pod field, and the warden and the agent share one pod, so the
+chart cannot give the host pid namespace to the warden alone. Turning it on
+runs the sweep, and puts both containers, the rootless agent included, in the
+node's pid namespace: the agent's own `/proc` becomes the node's process
+table, and it can signal any process on the node that runs as its uid, 65534.
+Pod Security Admission `baseline` forbids it. Leave it off unless the sweep is
+worth that, or set `hidden_checks.processes.enabled: false` to stop the
+skipped sweep from reporting.
 
 ### CNI Compatibility
 
@@ -262,7 +276,7 @@ helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel --versi
 | daemonset.extraVolumeMounts | list | `[]` | Extra volume mounts (e.g., GeoIP database, TLS certs) |
 | daemonset.extraVolumes | list | `[]` | Extra volumes |
 | daemonset.hostNetwork | bool | `true` | Share the host network namespace. The XDP and TC programs attach to the node's own interfaces, which only exist in it; turning it off leaves the datapath with the pod's veth and nothing else. Forbidden by `baseline`. |
-| daemonset.hostPID | bool | `false` | Share the host PID namespace. Off: cross-container TLS DLP no longer needs it. The warden and the agent both read the host procfs through the read-only `/host/proc` mount (`EBPFSENTINEL_HOST_PROC`), the library path they exchange is rooted on it, and the uprobe link is created against a path and an offset with `pid = 0`, so it covers every process that maps the library whatever namespace it is in. Turning it on adds the node's command lines to what the pod can see and buys no coverage; `baseline` forbids it. |
+| daemonset.hostPID | bool | `false` | Share the host PID namespace. DLP needs no host pid namespace: the warden and the agent both read the host procfs through the read-only `/host/proc` mount (`EBPFSENTINEL_HOST_PROC`) and the uprobe link is created against a path and an offset with `pid = 0`. The hidden process sweep does need it: the warden signals every pid and compares the answers with that listing, so with this off the sweep is skipped and `last_error` on `/api/v1/ebpf/hidden-processes` says why. The field is per pod, so turning it on gives the node's pid namespace to the agent as well as the warden; `baseline` forbids it. |
 | daemonset.initContainers | list | `[]` | Init containers |
 | daemonset.minReadySeconds | int | `0` | Minimum seconds a pod must be ready before considered available |
 | daemonset.nodeSelector | object | `{}` | Node selector |
