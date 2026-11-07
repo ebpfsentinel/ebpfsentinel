@@ -9,7 +9,7 @@
 #   ./run-in-2vm.sh                        # Run the two-machine suites
 #   ./run-in-2vm.sh --all                  # Every suite on disk, lane faults included
 #   ./run-in-2vm.sh --suite 11             # Run a single suite by number
-#   ./run-in-2vm.sh --ebpf                 # eBPF scenario suites only
+#   ./run-in-2vm.sh --ebpf                 # Two-machine suites on an XDP or TC surface
 #   ./run-in-2vm.sh --performance          # Performance suites only
 #   ./run-in-2vm.sh --perf-comparison      # Binary vs Docker perf comparison
 #   ./run-in-2vm.sh --skip-provision       # Skip vagrant up (VMs already running)
@@ -83,15 +83,29 @@ list_2vm_suites() {
     #
     # Performance suites stay behind --performance: the matrix tags perf/04 as
     # two-machine, but it lives in tests/perf/ and is timed rather than asserted.
-    awk '
+    #
+    # With `datapath` as the first argument only the rows whose surfaces name
+    # an XDP or TC program are kept, which is what --ebpf selects. It used to
+    # name suites 11 to 22 by hand, and none of them is written for this lane:
+    # they drive traffic out of the agent's network namespace, so here every
+    # test expecting a connection failed and every test expecting a drop passed
+    # without a packet sent.
+    local filter="${1:-}"
+    awk -v filter="$filter" '
         /^attack_suites:/ { inblk=1; next }
         inblk && /^[a-z_]+:/ { inblk=0 }
         inblk && /^[[:space:]]*-?[[:space:]]*suite:/ {
-            s=$NF; gsub(/[\042\047]/,"",s); last=s; next
+            s=$NF; gsub(/[\042\047]/,"",s); last=s; keep=""; next
         }
         inblk && /^[[:space:]]*lanes:/ {
-            if (last!="" && last !~ /\// && index($0, "2vm") > 0) print last
+            if (last!="" && last !~ /\// && index($0, "2vm") > 0) {
+                if (filter == "") print last; else keep=last
+            }
             last=""
+        }
+        inblk && /^[[:space:]]*surfaces:/ {
+            if (keep!="" && $0 ~ /"(xdp|tc)-/) print keep
+            keep=""
         }
     ' "${INTEGRATION_DIR}/coverage-matrix.yaml" | sort -u
 }
@@ -109,20 +123,6 @@ build_suite_args() {
         return
     fi
 
-    if [ "$EBPF_ONLY" = "true" ]; then
-        ls "${SUITE_DIR}"/11-*.bats \
-           "${SUITE_DIR}"/12-*.bats \
-           "${SUITE_DIR}"/13-*.bats \
-           "${SUITE_DIR}"/14-*.bats \
-           "${SUITE_DIR}"/17-*.bats \
-           "${SUITE_DIR}"/18-*.bats \
-           "${SUITE_DIR}"/19-*.bats \
-           "${SUITE_DIR}"/20-*.bats \
-           "${SUITE_DIR}"/21-*.bats \
-           "${SUITE_DIR}"/22-*.bats \
-           2>/dev/null || true
-        return
-    fi
 
     if [ "$PERF_ONLY" = "true" ]; then
         # Performance suites now live in tests/perf/ (run on the same VMs).
@@ -135,9 +135,14 @@ build_suite_args() {
         return
     fi
 
-    # Default: the suites written for this topology.
+    # Default: the suites written for this topology, narrowed to the ones on
+    # an XDP or TC surface under --ebpf.
     local names paths
-    names="$(list_2vm_suites)"
+    if [ "$EBPF_ONLY" = "true" ]; then
+        names="$(list_2vm_suites datapath)"
+    else
+        names="$(list_2vm_suites)"
+    fi
     if [ -z "$names" ]; then
         echo "ERROR: No suite in coverage-matrix.yaml is tagged for the 2-VM topology" >&2
         exit 1
