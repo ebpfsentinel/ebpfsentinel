@@ -273,6 +273,27 @@ reports duplicate versions as a warning, not an error, so a second copy of an
 aya crate never fails the gate on its own: the `cargo tree -d` above is the
 check.
 
+#### Kernel-side surface added in aya-ebpf 0.3, decided one by one
+
+A helper nobody calls is a dependency, not a capability, so each addition in
+`aya-ebpf` 0.3.0 carries a decision, the no as explicitly as the yes. A yes
+means a caller and a test; a no is reopened only by a program that needs it.
+
+| Addition | Decision | Why |
+|---|---|---|
+| `TcContext::set_tc_classid` | no | `tc-qos` paces by earliest departure time through `bpf_skb_set_tstamp`; no classful qdisc reads a classid |
+| `change_head` / `change_tail` on `TcContext` and `SkBuffContext` | no | no program grows or shrinks a packet; `tc-scrub` and the NAT programs rewrite in place |
+| `SkBuffContext::data`, `data_end`, `family` | no | the cgroup skb programs read through `load`, the TC ones through `TcContext::data` already |
+| Static ring-buffer alignment check | yes, inherited | always on and needs no caller; every event type is aligned to 8 bytes or less |
+| Safe `CgrpStorage`, `InodeStorage`, `SkStorage` accessors | no | no program declares a local-storage map |
+| `SockHash` / `SockMap` taking `&mut K` or `&ctx` | no | no sockmap and no `sk_msg` or `sk_skb` program |
+| `btf_maps::Pinned<M>` and `#[btf_map(pin_by_name)]` | no | the loader owns pinning and sharing (`is_shareable_map`, `MapStore`); a pin flag in the ELF would be a second source of truth |
+| `PerfEventArray::read_value` and `PerfEventValue` | no | no perf event array; events leave the kernel through ring buffers |
+| `const fn` context accessors | yes, inherited | nothing to call and nothing to change |
+
+Nothing in 0.3.0 resolves kfuncs, so `crates/ebpf-helpers/src/kfuncs.rs` keeps
+declaring them by hand.
+
 Adopting upstream `EbpfLoader` only becomes possible once aya can pass a token
 fd on map-create and prog-load **and** relocate module kfunc calls. Until then,
 treat `kfunc_loader.rs`, `kfunc_attach.rs`, `bpf_token.rs` and `map_store.rs` as
