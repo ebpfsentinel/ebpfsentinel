@@ -15,6 +15,11 @@
 //! per socket, started the first time a container of that owner is seen, so
 //! a user who logs in after the agent started is followed without a rescan.
 //!
+//! A user's socket sits in a `0700` directory the agent's own user namespace
+//! cannot enter, so where the agent runs beside a warden and its own connect
+//! is refused, the warden connects to that user's socket and hands the stream
+//! over; the inspect and the event stream then run on it unchanged.
+//!
 //! A runtime the agent cannot reach is recorded per owner with the reason -
 //! no socket, refused, or not answering - and reported by
 //! [`PodmanEnricher::runtimes`], so a rootless container that stays unnamed
@@ -27,16 +32,16 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::Serialize;
-use tokio::net::UnixStream;
 use tracing::{info, warn};
 
 use domain::container::engine::rootless_uid;
 use domain::container::entity::{ContainerInfo, ContainerMetadata, ContainerRuntime};
 use domain::container::error::ContainerError;
+use ebpfsentinel_warden_client::ReconnectingClient;
 use ports::secondary::metadata_enricher_port::MetadataEnricher;
 
 use super::docker_cache::DockerCache;
-use super::docker_client::DockerClient;
+use super::docker_client::{Dialer, DockerClient};
 use super::docker_events::DockerEventWatcher;
 
 /// The socket root's containers are served on.
@@ -84,7 +89,7 @@ pub struct PodmanRuntime {
 }
 
 struct Seen {
-    socket: PathBuf,
+    dialer: Dialer,
     reach: PodmanReach,
     checked: Instant,
     watcher: Option<DockerEventWatcher>,
@@ -98,6 +103,9 @@ pub struct PodmanEnricher {
     timeout_ms: u64,
     cache: Arc<DockerCache>,
     seen: Mutex<BTreeMap<PodmanOwner, Seen>>,
+    /// The warden, in a rootless deployment: it connects to a user's socket
+    /// the agent's user namespace cannot reach.
+    warden: Option<Arc<Mutex<ReconnectingClient>>>,
 }
 
 /// The socket a user's Podman serves its API on.
@@ -109,9 +117,9 @@ pub fn rootless_socket(run_user_root: &Path, uid: u32) -> PathBuf {
         .join("podman.sock")
 }
 
-/// What connecting to `socket` says about it.
-async fn probe(socket: &Path, timeout: Duration) -> PodmanReach {
-    match tokio::time::timeout(timeout, UnixStream::connect(socket)).await {
+/// What connecting through `dialer` says about the socket.
+async fn probe(dialer: &Dialer, timeout: Duration) -> PodmanReach {
+    match tokio::time::timeout(timeout, dialer.connect()).await {
         Ok(Ok(_)) => PodmanReach::Reachable,
         Ok(Err(err)) => match err.kind() {
             std::io::ErrorKind::NotFound => PodmanReach::NoSocket,
@@ -137,6 +145,34 @@ impl PodmanEnricher {
             timeout_ms,
             cache,
             seen: Mutex::new(BTreeMap::new()),
+            warden: std::env::var_os(super::proc_digest::WARDEN_SOCK_ENV)
+                .map(PathBuf::from)
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| Arc::new(Mutex::new(ReconnectingClient::new(p)))),
+        }
+    }
+
+    /// Connect to users' sockets through the warden at `sock` whenever the
+    /// agent's own connect is refused, whatever the environment says.
+    #[cfg(test)]
+    fn with_warden(mut self, sock: impl Into<PathBuf>) -> Self {
+        self.warden = Some(Arc::new(Mutex::new(ReconnectingClient::new(sock))));
+        self
+    }
+
+    /// Reach `owner`'s runtime at `socket`: directly, and for a user whose
+    /// socket refused the agent, through the warden when there is one.
+    async fn reach(&self, owner: PodmanOwner, socket: &Path) -> (Dialer, PodmanReach) {
+        let timeout = Duration::from_millis(self.timeout_ms);
+        let direct = Dialer::direct(socket);
+        let reach = probe(&direct, timeout).await;
+        match (owner, reach, &self.warden) {
+            (PodmanOwner::User(uid), PodmanReach::Refused, Some(warden)) => {
+                let brokered = Dialer::podman_through_warden(socket, Arc::clone(warden), uid);
+                let reach = probe(&brokered, timeout).await;
+                (brokered, reach)
+            }
+            _ => (direct, reach),
         }
     }
 
@@ -149,7 +185,7 @@ impl PodmanEnricher {
             .iter()
             .map(|(owner, seen)| PodmanRuntime {
                 owner: *owner,
-                socket: seen.socket.display().to_string(),
+                socket: seen.dialer.socket().display().to_string(),
                 reach: seen.reach,
             })
             .collect()
@@ -168,24 +204,34 @@ impl PodmanEnricher {
 
     /// Record what was found, saying so once each time it changes, and start
     /// the owner's event stream the first time its socket answers.
-    fn record(&self, owner: PodmanOwner, socket: &Path, reach: PodmanReach) {
+    fn record(&self, owner: PodmanOwner, dialer: &Dialer, reach: PodmanReach) {
+        let socket = dialer.socket();
         let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
         let first = !seen.contains_key(&owner);
         let entry = seen.entry(owner).or_insert_with(|| Seen {
-            socket: socket.to_path_buf(),
+            dialer: dialer.clone(),
             reach,
             checked: Instant::now(),
             watcher: None,
         });
         let changed = first || entry.reach != reach;
         entry.reach = reach;
+        if entry.watcher.is_none() {
+            entry.dialer = dialer.clone();
+        }
         entry.checked = Instant::now();
         if reach == PodmanReach::Reachable && entry.watcher.is_none() {
-            entry.watcher = Some(DockerEventWatcher::spawn(
-                socket.to_path_buf(),
+            entry.watcher = Some(DockerEventWatcher::spawn_dialing(
+                dialer.clone(),
                 Arc::clone(&self.cache),
+                None,
             ));
-            info!(?owner, socket = %socket.display(), "Podman runtime reached, following its events");
+            info!(
+                ?owner,
+                socket = %socket.display(),
+                through_warden = dialer.through_warden(),
+                "Podman runtime reached, following its events"
+            );
         } else if changed && reach != PodmanReach::Reachable {
             warn!(
                 ?owner,
@@ -197,11 +243,12 @@ impl PodmanEnricher {
         }
     }
 
-    /// What is known of `owner` and whether it is worth asking again.
-    fn known(&self, owner: PodmanOwner) -> Option<(PodmanReach, bool)> {
+    /// What is known of `owner`, whether it is worth asking again, and how
+    /// it was last reached.
+    fn known(&self, owner: PodmanOwner) -> Option<(PodmanReach, bool, Dialer)> {
         let seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
         seen.get(&owner)
-            .map(|s| (s.reach, s.checked.elapsed() >= RECHECK))
+            .map(|s| (s.reach, s.checked.elapsed() >= RECHECK, s.dialer.clone()))
     }
 }
 
@@ -246,26 +293,30 @@ impl MetadataEnricher for PodmanEnricher {
             if self.known(owner).is_none() {
                 self.record(
                     owner,
-                    &rootless_socket(Path::new(DEFAULT_RUN_USER_ROOT), uid_of(owner)),
+                    &Dialer::direct(rootless_socket(
+                        Path::new(DEFAULT_RUN_USER_ROOT),
+                        uid_of(owner),
+                    )),
                     PodmanReach::RootlessOff,
                 );
             }
             return stream_only();
         };
 
-        match self.known(owner) {
-            Some((PodmanReach::Reachable, _)) => {}
-            Some((_, false)) => return stream_only(),
+        let dialer = match self.known(owner) {
+            Some((PodmanReach::Reachable, _, dialer)) => dialer,
+            Some((_, false, _)) => return stream_only(),
             _ => {
-                let reach = probe(&socket, Duration::from_millis(self.timeout_ms)).await;
-                self.record(owner, &socket, reach);
+                let (dialer, reach) = self.reach(owner, &socket).await;
+                self.record(owner, &dialer, reach);
                 if reach != PodmanReach::Reachable {
                     return stream_only();
                 }
+                dialer
             }
-        }
+        };
 
-        match DockerClient::new(&socket, self.timeout_ms)
+        match DockerClient::with_dialer(dialer.clone(), self.timeout_ms)
             .inspect_container(container_id)
             .await
         {
@@ -276,7 +327,7 @@ impl MetadataEnricher for PodmanEnricher {
             Err(
                 ContainerError::DockerUnavailable { .. } | ContainerError::DockerTimeout { .. },
             ) => {
-                self.record(owner, &socket, PodmanReach::Unavailable);
+                self.record(owner, &dialer, PodmanReach::Unavailable);
                 stream_only()
             }
             Err(_) => stream_only(),
@@ -295,6 +346,7 @@ fn uid_of(owner: PodmanOwner) -> u32 {
 mod tests {
     use super::*;
     use domain::container::entity::DockerMetadata;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
 
@@ -381,6 +433,145 @@ mod tests {
             }]
         );
         server.abort();
+    }
+
+    /// Answer as the warden would: the handshake, then every
+    /// `ConnectPodman` for `uid` with a stream connected to `runtime`, and
+    /// any other uid with the refusal of a socket that is not there. Counts
+    /// the connections handed over; the thread lives as long as the test.
+    fn fake_warden(sock: &Path, uid: u32, runtime: PathBuf) -> Arc<AtomicUsize> {
+        use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response};
+        use ebpfsentinel_warden_proto::{read_frame, write_frame};
+        use std::os::fd::AsRawFd;
+        let listener = std::os::unix::net::UnixListener::bind(sock).unwrap();
+        let served = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&served);
+        std::thread::spawn(move || {
+            while let Ok((mut conn, _)) = listener.accept() {
+                let Ok(Command::Hello { .. }) = read_frame::<_, Command>(&mut conn) else {
+                    continue;
+                };
+                let hello = Response::HelloOk {
+                    version: PROTOCOL_VERSION,
+                };
+                write_frame(&mut conn, &hello).unwrap();
+                let (counter, runtime) = (Arc::clone(&counter), runtime.clone());
+                std::thread::spawn(move || {
+                    while let Ok(cmd) = read_frame::<_, Command>(&mut conn) {
+                        let Command::ConnectPodman { uid: asked } = cmd else {
+                            panic!("unexpected command {cmd:?}");
+                        };
+                        if asked != uid {
+                            let message = format!(
+                                "Podman socket of uid {asked}: No such file or directory (os error 2)"
+                            );
+                            write_frame(&mut conn, &Response::Error { message }).unwrap();
+                            continue;
+                        }
+                        let stream = std::os::unix::net::UnixStream::connect(&runtime).unwrap();
+                        write_frame(&mut conn, &Response::FdReady).unwrap();
+                        super::super::proc_digest::tests::send_fd(&conn, stream.as_raw_fd());
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+        served
+    }
+
+    /// A user's socket behind a directory the agent may not enter, as a
+    /// `0700` runtime directory is to the agent's user namespace. `None`
+    /// when this run is privileged and enters it anyway.
+    fn closed_runtime_dir(root: &Path, uid: u32) -> Option<PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = root.join(uid.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&dir).is_ok() {
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return None;
+        }
+        Some(dir)
+    }
+
+    #[tokio::test]
+    async fn a_users_socket_the_agent_may_not_reach_is_reached_through_the_warden() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let Some(closed) = closed_runtime_dir(dir.path(), 1000) else {
+            return;
+        };
+        let runtime = dir.path().join("runtime.sock");
+        let server = serve_inspect(&runtime);
+        let sock = dir.path().join("warden.sock");
+        let warden = fake_warden(&sock, 1000, runtime);
+
+        let enricher = PodmanEnricher::new(
+            dir.path().join("rootful.sock"),
+            Some(dir.path().to_path_buf()),
+            2_000,
+            cache(),
+        )
+        .with_warden(&sock);
+        let md = enricher.enrich(&rootless(1000)).await.unwrap();
+        let Some(ContainerMetadata::Docker(md)) = md else {
+            panic!("expected metadata, runtimes {:?}", enricher.runtimes());
+        };
+        assert_eq!(md.name, "web");
+        assert_eq!(md.image, "quay.io/acme/web:1");
+        let runtimes = enricher.runtimes();
+        assert_eq!(runtimes[0].reach, PodmanReach::Reachable);
+        assert_eq!(
+            runtimes[0].socket,
+            rootless_socket(dir.path(), 1000).display().to_string()
+        );
+
+        // A user the warden has no socket for is reported as such.
+        let Some(_closed) = closed_runtime_dir(dir.path(), 1001) else {
+            return;
+        };
+        let ContainerInfo::Container { cgroup_path, .. } = rootless(1001) else {
+            unreachable!()
+        };
+        let other = ContainerInfo::Container {
+            container_id: "0".repeat(64),
+            runtime: ContainerRuntime::Podman,
+            cgroup_path: cgroup_path.replace(ID, &"0".repeat(64)),
+            pid: 1,
+        };
+        assert!(enricher.enrich(&other).await.unwrap().is_none());
+        assert_eq!(enricher.runtimes()[1].reach, PodmanReach::NoSocket);
+
+        drop(enricher);
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(
+            dir.path().join("1001"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        server.abort();
+        assert!(
+            warden.load(Ordering::Relaxed) >= 2,
+            "probe and inspect both brokered"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_warden_a_refused_users_socket_stays_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let Some(closed) = closed_runtime_dir(dir.path(), 1000) else {
+            return;
+        };
+        let enricher = PodmanEnricher::new(
+            dir.path().join("rootful.sock"),
+            Some(dir.path().to_path_buf()),
+            200,
+            cache(),
+        );
+        assert!(enricher.enrich(&rootless(1000)).await.unwrap().is_none());
+        assert_eq!(enricher.runtimes()[0].reach, PodmanReach::Refused);
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[tokio::test]

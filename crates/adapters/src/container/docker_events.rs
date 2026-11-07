@@ -17,14 +17,13 @@
 //! and a dropped event costs one inspect.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -33,7 +32,7 @@ use domain::container::entity::DockerMetadata;
 use domain::firewall::container_labels::ListedContainer;
 
 use super::docker_cache::DockerCache;
-use super::docker_client::{DEFAULT_TIMEOUT_MS, DockerClient};
+use super::docker_client::{DEFAULT_TIMEOUT_MS, Dialer, DockerClient};
 
 /// Events we ask Docker for. Anything else is noise for a metadata cache.
 const WANTED_ACTIONS: [&str; 4] = ["create", "start", "die", "destroy"];
@@ -327,12 +326,12 @@ fn events_request() -> String {
 /// Read one connection to the end, handing every event to `tx`. Returns once
 /// the stream closes or breaks.
 async fn stream_once(
-    socket: &Path,
+    dialer: &Dialer,
     tx: &mpsc::Sender<ContainerEvent>,
     labels: Option<&mpsc::Sender<LabelUpdate>>,
     stats: &DockerEventStats,
 ) -> std::io::Result<()> {
-    let mut stream = UnixStream::connect(socket).await?;
+    let mut stream = dialer.connect().await?;
     stream.write_all(events_request().as_bytes()).await?;
     stream.flush().await?;
     stats.connects.fetch_add(1, Ordering::Relaxed);
@@ -376,7 +375,7 @@ async fn stream_once(
             // Listed once the stream is open, so nothing that happens after
             // the list is missed: it is already queued on the socket.
             if let Some(labels) = labels {
-                send_snapshot(socket, labels).await;
+                send_snapshot(dialer, labels).await;
             }
             let mut payload = Vec::new();
             let mut lines = Vec::new();
@@ -402,8 +401,8 @@ async fn stream_once(
 /// List every running container and hand the list to the label consumer.
 /// A list that fails leaves the previous state in place and is logged; the
 /// events that follow still apply.
-async fn send_snapshot(socket: &Path, labels: &mpsc::Sender<LabelUpdate>) {
-    match DockerClient::new(socket, DEFAULT_TIMEOUT_MS)
+async fn send_snapshot(dialer: &Dialer, labels: &mpsc::Sender<LabelUpdate>) {
+    match DockerClient::with_dialer(dialer.clone(), DEFAULT_TIMEOUT_MS)
         .list_containers()
         .await
     {
@@ -454,7 +453,17 @@ impl DockerEventWatcher {
         cache: Arc<DockerCache>,
         labels: Option<mpsc::Sender<LabelUpdate>>,
     ) -> Self {
-        let socket = socket.into();
+        Self::spawn_dialing(Dialer::direct(socket), cache, labels)
+    }
+
+    /// As [`Self::spawn_with_labels`], with every connection opened by
+    /// `dialer`.
+    pub fn spawn_dialing(
+        dialer: Dialer,
+        cache: Arc<DockerCache>,
+        labels: Option<mpsc::Sender<LabelUpdate>>,
+    ) -> Self {
+        let socket = dialer.socket().to_path_buf();
         let applier_labels = labels.clone();
         let stats = Arc::new(DockerEventStats::default());
         let (tx, mut rx) = mpsc::channel::<ContainerEvent>(EVENT_BACKLOG);
@@ -476,7 +485,7 @@ impl DockerEventWatcher {
         let reader = tokio::spawn(async move {
             let mut attempt = 0u32;
             loop {
-                match stream_once(&socket, &tx, labels.as_ref(), &reader_stats).await {
+                match stream_once(&dialer, &tx, labels.as_ref(), &reader_stats).await {
                     Ok(()) => {
                         debug!(socket = %socket.display(), "docker event stream closed, reconnecting");
                         attempt = 0;

@@ -45,7 +45,7 @@ use ports::secondary::executable_digest_port::ExecutableDigester;
 use sha2::{Digest, Sha256};
 
 /// Set to the warden's control socket when the agent runs rootless.
-const WARDEN_SOCK_ENV: &str = "EBPFSENTINEL_WARDEN_SOCK";
+pub(crate) const WARDEN_SOCK_ENV: &str = "EBPFSENTINEL_WARDEN_SOCK";
 
 /// `FS_IOC_MEASURE_VERITY`: `_IOWR('f', 134, struct fsverity_digest)`, the
 /// struct being four bytes of header in front of a flexible array.
@@ -274,7 +274,7 @@ impl ExecutableDigester for ProcExecutableDigester {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
@@ -347,7 +347,10 @@ mod tests {
 
     /// Hand `fd` over `conn` the way the warden does: one sentinel byte
     /// carrying the descriptor in an `SCM_RIGHTS` cmsg.
-    fn send_fd(conn: &std::os::unix::net::UnixStream, fd: std::os::fd::RawFd) {
+    pub(in crate::container) fn send_fd(
+        conn: &std::os::unix::net::UnixStream,
+        fd: std::os::fd::RawFd,
+    ) {
         let byte = [0u8];
         let mut iov = libc::iovec {
             iov_base: byte.as_ptr() as *mut libc::c_void,

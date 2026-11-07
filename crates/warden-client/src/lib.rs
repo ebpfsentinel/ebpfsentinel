@@ -98,6 +98,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::OpenExecutable { .. } => "OpenExecutable",
         Command::ReadServedPeer { .. } => "ReadServedPeer",
         Command::ReadShareWriters { .. } => "ReadShareWriters",
+        Command::ConnectPodman { .. } => "ConnectPodman",
     }
 }
 
@@ -296,6 +297,25 @@ impl WardenClient {
                 self.classify("OpenExecutable", "waiting for the executable from", result)
             }
             other => Err(unexpected("OpenExecutable", &other)),
+        }
+    }
+
+    /// Ask the warden to connect to user `uid`'s rootless Podman API and
+    /// receive the connected stream over `SCM_RIGHTS`. A user with no socket,
+    /// or a socket somebody else owns, answers a typed error.
+    #[cfg(feature = "fd-pass")]
+    pub fn connect_podman(&mut self, uid: u32) -> io::Result<std::os::fd::OwnedFd> {
+        self.send(&Command::ConnectPodman { uid })?;
+        match self.recv("ConnectPodman")? {
+            Response::FdReady => {
+                let result = fd_pass::recv_one_fd(&self.stream);
+                self.classify(
+                    "ConnectPodman",
+                    "waiting for the Podman connection from",
+                    result,
+                )
+            }
+            other => Err(unexpected("ConnectPodman", &other)),
         }
     }
 
@@ -799,6 +819,14 @@ impl ReconnectingClient {
     #[cfg(feature = "fd-pass")]
     pub fn open_executable(&mut self, pid: u32) -> io::Result<std::os::fd::OwnedFd> {
         self.with_retry(|c| c.open_executable(pid))
+    }
+
+    /// Connect to one user's rootless Podman API through the warden,
+    /// reconnecting if it bounced. A connection opened twice is two
+    /// connections, each closed by whoever holds it.
+    #[cfg(feature = "fd-pass")]
+    pub fn connect_podman(&mut self, uid: u32) -> io::Result<std::os::fd::OwnedFd> {
+        self.with_retry(|c| c.connect_podman(uid))
     }
 
     /// List every packet socket on the node through the warden, reconnecting

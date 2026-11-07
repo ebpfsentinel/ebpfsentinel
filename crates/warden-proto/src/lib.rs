@@ -941,6 +941,18 @@ pub enum Command {
         /// The file servers whose clients are listed.
         servers: Vec<std::net::IpAddr>,
     },
+    /// Connect to the rootless Podman API of user `uid` and hand the
+    /// connected stream over, answered out-of-band by [`Response::FdReady`]
+    /// and the descriptor. A user's socket is mode `0600` inside a `0700`
+    /// directory, which the agent's own user namespace cannot enter. The
+    /// path is the warden's, `/run/user/<uid>/podman/podman.sock`, never the
+    /// agent's, and a socket not owned by `uid` is refused, so what crosses
+    /// is a connection to that one user's runtime and nothing else. Root's
+    /// runtime is not served here: the agent reaches it itself.
+    ConnectPodman {
+        /// The user whose runtime is connected to; never 0.
+        uid: u32,
+    },
 }
 
 /// The most servers one [`Command::ReadShareWriters`] reads.
@@ -1277,6 +1289,7 @@ mod tests {
             Command::ReadShareWriters {
                 servers: vec![std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2))],
             },
+            Command::ConnectPodman { uid: 1000 },
         ]
     }
 

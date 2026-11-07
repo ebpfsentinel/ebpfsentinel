@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -20,6 +21,7 @@ use tokio::time::timeout;
 use domain::container::entity::DockerMetadata;
 use domain::container::error::ContainerError;
 use domain::learning::segmentation::{BridgeMember, BridgeNetwork, BridgeSubnet};
+use ebpfsentinel_warden_client::ReconnectingClient;
 use ports::secondary::bridge_network_port::BridgeNetworkPort;
 
 /// Default socket path.
@@ -66,24 +68,114 @@ struct DockerConfig {
     labels: Option<std::collections::BTreeMap<String, String>>,
 }
 
+/// How a connection to a runtime's API socket is opened: by the agent
+/// itself, or by the warden on behalf of the user owning the socket, whose
+/// inode the agent's user namespace cannot reach.
+#[derive(Clone)]
+pub struct Dialer {
+    socket: PathBuf,
+    warden: Option<(Arc<Mutex<ReconnectingClient>>, u32)>,
+}
+
+impl Dialer {
+    /// The agent connects to `socket` itself.
+    pub fn direct(socket: impl Into<PathBuf>) -> Self {
+        Self {
+            socket: socket.into(),
+            warden: None,
+        }
+    }
+
+    /// The warden connects to user `uid`'s rootless Podman socket and hands
+    /// the stream over; `socket` is where the agent would have found it, kept
+    /// for what is reported.
+    pub fn podman_through_warden(
+        socket: impl Into<PathBuf>,
+        warden: Arc<Mutex<ReconnectingClient>>,
+        uid: u32,
+    ) -> Self {
+        Self {
+            socket: socket.into(),
+            warden: Some((warden, uid)),
+        }
+    }
+
+    /// The socket this dialer reaches, as the agent names it.
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
+    /// Whether connections go through the warden.
+    pub fn through_warden(&self) -> bool {
+        self.warden.is_some()
+    }
+
+    /// One fresh connection.
+    ///
+    /// # Errors
+    ///
+    /// The connect's own error, or the warden's refusal as `PermissionDenied`
+    /// when it answered and `Other` when it could not be reached.
+    pub async fn connect(&self) -> std::io::Result<UnixStream> {
+        let Some((warden, uid)) = &self.warden else {
+            return UnixStream::connect(&self.socket).await;
+        };
+        let (warden, uid) = (Arc::clone(warden), *uid);
+        let fd = tokio::task::spawn_blocking(move || {
+            // The client holds a connection and nothing the stream depends
+            // on, so a poisoned lock leaves it usable.
+            warden
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .connect_podman(uid)
+        })
+        .await
+        .map_err(std::io::Error::other)?
+        .map_err(warden_refusal)?;
+        let stream = std::os::unix::net::UnixStream::from(fd);
+        stream.set_nonblocking(true)?;
+        UnixStream::from_std(stream)
+    }
+}
+
+/// What the warden's answer means for the socket: its own refusal names the
+/// user's socket missing (`NotFound`) or anything else about it
+/// (`PermissionDenied`); a warden that could not be asked keeps its error.
+fn warden_refusal(e: std::io::Error) -> std::io::Error {
+    if e.kind() != std::io::ErrorKind::Other {
+        return e;
+    }
+    let kind = if e.to_string().contains("(os error 2)") {
+        std::io::ErrorKind::NotFound
+    } else {
+        std::io::ErrorKind::PermissionDenied
+    };
+    std::io::Error::new(kind, e.to_string())
+}
+
 /// Docker Engine API client.
 pub struct DockerClient {
-    socket: PathBuf,
+    dialer: Dialer,
     timeout: Duration,
     timeout_ms: u64,
 }
 
 impl DockerClient {
     pub fn new(socket: impl Into<PathBuf>, timeout_ms: u64) -> Self {
+        Self::with_dialer(Dialer::direct(socket), timeout_ms)
+    }
+
+    /// A client whose connections `dialer` opens.
+    pub fn with_dialer(dialer: Dialer, timeout_ms: u64) -> Self {
         Self {
-            socket: socket.into(),
+            dialer,
             timeout: Duration::from_millis(timeout_ms),
             timeout_ms,
         }
     }
 
     pub fn socket_path(&self) -> &Path {
-        &self.socket
+        self.dialer.socket()
     }
 
     /// `GET /v1.43/containers/{id}/json` - returns parsed metadata.
@@ -153,14 +245,14 @@ impl DockerClient {
              \r\n"
         );
 
-        let connect = UnixStream::connect(&self.socket);
+        let connect = self.dialer.connect();
         let mut stream = timeout(self.timeout, connect)
             .await
             .map_err(|_| ContainerError::DockerTimeout {
                 timeout_ms: self.timeout_ms,
             })?
             .map_err(|_| ContainerError::DockerUnavailable {
-                socket: self.socket.display().to_string(),
+                socket: self.dialer.socket().display().to_string(),
             })?;
 
         timeout(self.timeout, async {
@@ -188,7 +280,7 @@ impl DockerClient {
             timeout_ms: self.timeout_ms,
         })?
         .map_err(|_| ContainerError::DockerUnavailable {
-            socket: self.socket.display().to_string(),
+            socket: self.dialer.socket().display().to_string(),
         })
     }
 }

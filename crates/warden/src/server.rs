@@ -26,8 +26,8 @@ use crate::pcap_slots::{PcapSlot, PcapSlots};
 use crate::write_refusal;
 use crate::{
     bpf_inventory, cgroup_ops, delegate_over_fd, dlp_scan, exe_read, facts_read, go_executables,
-    hidden_ports, hidden_processes, net_ops, netns_tcx_ops, packet_sockets, process_maps, recv_fd,
-    rooted_read, send_msg_fds, served_peer, uprobe_ops,
+    hidden_ports, hidden_processes, net_ops, netns_tcx_ops, packet_sockets, podman_connect,
+    process_maps, recv_fd, rooted_read, send_msg_fds, served_peer, uprobe_ops,
 };
 
 /// How long a connection may hold a thread without saying `Hello`.
@@ -177,9 +177,9 @@ pub fn serve_loop(
     }
 }
 
-/// Confirm the connected peer's uid matches the one the warden serves, read via
-/// `SO_PEERCRED` (the stable-Rust path; `UnixStream::peer_cred` is still nightly).
-fn peer_allowed(conn: &UnixStream, allowed_uid: u32) -> bool {
+/// The uid of the process at the other end of `conn`, read via `SO_PEERCRED`
+/// (the stable-Rust path; `UnixStream::peer_cred` is still nightly).
+pub(crate) fn peer_uid(conn: &UnixStream) -> Option<u32> {
     // SAFETY: `ucred` is plain old data, for which all-zero is valid.
     let mut cred: libc::ucred = unsafe { mem::zeroed() };
     let mut len = mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -194,17 +194,19 @@ fn peer_allowed(conn: &UnixStream, allowed_uid: u32) -> bool {
             &raw mut len,
         )
     };
-    if rc != 0 {
+    (rc == 0).then_some(cred.uid)
+}
+
+/// Confirm the connected peer's uid matches the one the warden serves.
+fn peer_allowed(conn: &UnixStream, allowed_uid: u32) -> bool {
+    let Some(uid) = peer_uid(conn) else {
         eprintln!("[warden] getsockopt(SO_PEERCRED) failed");
         return false;
-    }
-    if cred.uid == allowed_uid {
+    };
+    if uid == allowed_uid {
         true
     } else {
-        eprintln!(
-            "[warden] rejecting peer uid {} (expected {allowed_uid})",
-            cred.uid
-        );
+        eprintln!("[warden] rejecting peer uid {uid} (expected {allowed_uid})");
         false
     }
 }
@@ -404,6 +406,20 @@ fn handle_conn_with_timeouts(
                         serve_passed_fd(&mut writer, Ok(file.as_raw_fd()))
                     }
                     Err(message) => serve_passed_fd(&mut writer, Err(message)),
+                }
+            }
+            // `ConnectPodman` answers out-of-band: a stream connected to one
+            // user's rootless Podman API, after an `FdReady`.
+            Command::ConnectPodman { uid } => {
+                match podman_connect::connect(Path::new(podman_connect::RUN_USER_ROOT), *uid) {
+                    Ok(stream) => {
+                        // Dup'd into the agent by `SCM_RIGHTS`; ours closes here.
+                        serve_passed_fd(&mut writer, Ok(stream.as_raw_fd()))
+                    }
+                    Err(message) => {
+                        eprintln!("[warden] podman connect for uid {uid} refused: {message}");
+                        serve_passed_fd(&mut writer, Err(message))
+                    }
                 }
             }
             Command::FimOpen { paths } => {
