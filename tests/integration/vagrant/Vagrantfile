@@ -33,6 +33,11 @@
 #   AGENT_VM_CPUS     Agent VM vCPUs (default: 4)
 #   AGENT_VM_MEMORY   Agent VM RAM in MB (default: 4096)
 #   VAGRANT_3VM       Set to "1" / "true" to enable the 3-VM transit topology
+#   AGENT_KERNEL      Boot the agent VM on an Ubuntu mainline kernel build, by
+#                     version (e.g. "6.12.116" for the floor, or the newest
+#                     mainline release). Unset: the 24.04 HWE kernel. Applied by
+#                     the kernel-mainline provisioner, which reboots:
+#                       AGENT_KERNEL=6.12.116 vagrant provision agent --provision-with kernel-mainline
 #
 # Provider: VirtualBox (default) or VMware Workstation (vmware_desktop)
 # Base box: bento/ubuntu-24.04 (provisioned inline)
@@ -46,6 +51,9 @@ VAGRANTFILE_API_VERSION = "2"
 
 # 3-VM mode toggle (transit topology with a dedicated backend VM).
 VAGRANT_3VM = %w[1 true yes on].include?((ENV["VAGRANT_3VM"] || "").downcase)
+
+# Mainline kernel the agent VM boots instead of the HWE one (empty: HWE).
+AGENT_KERNEL = (ENV["AGENT_KERNEL"] || "").strip
 
 # Internal network name shared by both VMs (faster than host-only)
 
@@ -170,7 +178,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
       apt-get update
       apt-get install -y --no-install-recommends \
         build-essential pkg-config libssl-dev libpcap-dev protobuf-compiler llvm-dev \
-        linux-headers-$(uname -r) iproute2 tcpdump curl wget jq git \
+        iproute2 tcpdump curl wget jq git \
         ca-certificates openssl \
         iperf3 hping3 ncat stress-ng bc \
         nmap wrk tshark \
@@ -193,6 +201,13 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
         apt-get install -y --no-install-recommends "$optpkg" \
           || echo "  (optional tool '$optpkg' unavailable in repo - its scenario test will skip)"
       done
+
+      # Headers for the running kernel where the archive has them. A mainline
+      # kernel (AGENT_KERNEL) has none there, and its own header package may
+      # want a newer libc than this release carries; nothing here builds
+      # against them.
+      apt-get install -y --no-install-recommends "linux-headers-$(uname -r)" \
+        || echo "  (no headers for $(uname -r) in the archive)"
 
       # Install bpftool if available
       apt-get install -y --no-install-recommends linux-tools-$(uname -r) bpftool 2>/dev/null || true
@@ -249,6 +264,74 @@ LIMITS
 
       apt-get install -y --no-install-recommends linux-generic-hwe-24.04
       echo "HWE kernel + tools installed; rebooting into >= 6.12"
+    SHELL
+
+    # ----------------------------------------------------------
+    # Provisioner: kernel-mainline
+    #
+    # The HWE line moves on, so the kernel this lane runs is whatever it
+    # reached, never the floor itself and never the newest release. Setting
+    # AGENT_KERNEL boots an Ubuntu mainline build of that exact version
+    # instead (kernel.ubuntu.com/mainline, built from the stable tree with
+    # Ubuntu's own configuration, BTF and module BTF included), which is how
+    # the objects are put in front of the 6.12 verifier and the newest one.
+    # Unset, any pin left by an earlier run is removed and the VM goes back
+    # to the HWE kernel. Only the image and the modules are installed: the
+    # mainline header package may want a newer libc than 24.04 has.
+    #
+    # bpftool is a userspace tool and has no mainline package, so the
+    # running kernel's tools directory is pointed at the HWE one, which is
+    # where the /usr/sbin/bpftool wrapper looks.
+    # ----------------------------------------------------------
+    agent.vm.provision "shell", name: "kernel-mainline", reboot: true,
+      env: { "AGENT_KERNEL" => AGENT_KERNEL }, inline: <<-SHELL
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      conf=/etc/default/grub.d/92-agent-kernel.cfg
+
+      if [ -z "${AGENT_KERNEL}" ]; then
+        if [ -f "$conf" ]; then
+          rm -f "$conf"
+          update-grub
+        fi
+        echo "AGENT_KERNEL unset: booting the HWE kernel"
+        exit 0
+      fi
+
+      base="https://kernel.ubuntu.com/mainline/v${AGENT_KERNEL}/amd64"
+      listing="$(curl -fsSL --retry 3 "${base}/")"
+      image="$(grep -oE 'linux-image-unsigned-[^"]*-generic_[^"]*_amd64\.deb' <<<"$listing" | head -1)"
+      modules="$(grep -oE 'linux-modules-[^"]*-generic_[^"]*_amd64\.deb' <<<"$listing" | head -1)"
+      test -n "$image" && test -n "$modules"
+      release="${image#linux-image-unsigned-}"
+      release="${release%%_*}"
+
+      if [ ! -e "/boot/vmlinuz-${release}" ]; then
+        dir="$(mktemp -d)"
+        curl -fsSL --retry 3 -o "${dir}/${modules}" "${base}/${modules}"
+        curl -fsSL --retry 3 -o "${dir}/${image}" "${base}/${image}"
+        # Newer mainline packaging hands run-parts two directories, the
+        # second under /usr/share/kernel; run-parts on 24.04 takes one and
+        # that directory does not exist here, so the operand is dropped.
+        if [ ! -d /usr/share/kernel ]; then
+          dpkg-deb -R "${dir}/${image}" "${dir}/unpacked"
+          sed -i -E 's| /usr/share/kernel/[a-z]+[.]d$||' "${dir}"/unpacked/DEBIAN/{preinst,postinst,prerm,postrm}
+          dpkg-deb -b "${dir}/unpacked" "${dir}/${image}"
+          rm -rf "${dir}/unpacked"
+        fi
+        apt-get install -y --no-install-recommends "${dir}/${modules}" "${dir}/${image}"
+        rm -rf "$dir"
+      fi
+
+      hwe_tools="$(ls -d /usr/lib/linux-tools/*-generic 2>/dev/null | grep -v "/${release}$" | sort -V | tail -1)"
+      if [ -n "$hwe_tools" ] && [ ! -e "/usr/lib/linux-tools/${release}" ]; then
+        ln -s "$hwe_tools" "/usr/lib/linux-tools/${release}"
+      fi
+      test -e "/boot/vmlinuz-${release}"
+
+      printf 'GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux %s"\n' "$release" > "$conf"
+      update-grub
+      echo "next boot: ${release}"
     SHELL
 
     # ----------------------------------------------------------
