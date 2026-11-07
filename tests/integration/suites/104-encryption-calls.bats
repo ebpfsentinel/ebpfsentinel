@@ -11,6 +11,10 @@
 #   * The same program producing those bytes through EVP_EncryptUpdate, a
 #     few calls per file, reaches the verdict in shadow, on the evidence
 #     that its encryption calls tracked its rewrites.
+#   * The self-made rewrite, run by a process that has just destroyed a
+#     snapshot, reaches the verdict on the prior: the exec is read on the
+#     boot clock and the rewrites on the wall clock, so the two are only
+#     paired inside one window when the exec is moved onto the wall clock.
 #
 # Requires: root, kernel >= 6.12, jq, python3, libcrypto.so.3.
 
@@ -44,6 +48,12 @@ setup_file() {
     mkdir -p "${DATA_DIR}/work"
     cp "$(readlink -f "$(command -v python3)")" "${DATA_DIR}/me-encrypt"
     chmod 0755 "${DATA_DIR}/me-encrypt"
+    # A `zfs destroy` with no pool behind it: an interpreter under the name
+    # the prior is read from, running a script called `destroy` that stays
+    # alive long enough for the table to read its command line.
+    cp "$(readlink -f "$(command -v python3)")" "${DATA_DIR}/zfs"
+    chmod 0755 "${DATA_DIR}/zfs"
+    printf 'import time\ntime.sleep(2)\n' >"${DATA_DIR}/destroy"
 
     # The library is probed where a running process maps it, so one process
     # holds it mapped from before the agent starts.
@@ -112,8 +122,9 @@ for n in range(documents):
 PY
 }
 
-# _rewrite <dir> <evp|self> [pause] - rewrite every document's body in place,
-# the header kept, through EVP_EncryptUpdate or through os.urandom, pausing
+# _rewrite <dir> <evp|self|prior> [pause] - rewrite every document's body in
+# place, the header kept, through EVP_EncryptUpdate or through os.urandom
+# (`prior` destroys a snapshot first, then writes as `self` does), pausing
 # `pause` seconds after each. The calls are read once a second and a file
 # counts against a run only once its writer was seen calling the library, so
 # a run over in a few milliseconds would end before the first reading.
@@ -144,6 +155,13 @@ if how == "evp":
             out += buf.raw[:n.value]
         return bytes(out)
 else:
+    if how == "prior":
+        import subprocess
+        here = os.path.dirname(os.path.realpath(sys.executable))
+        subprocess.run([os.path.join(here, "zfs"), "destroy", "tank/home@daily"],
+                       cwd=here, check=True)
+        time.sleep(1)
+
     def seal(data):
         return os.urandom(len(data))
 
@@ -209,6 +227,37 @@ PY
     jq -e '.recent | last | .exe | endswith("/me-encrypt")' <<<"${body}" >/dev/null || { echo "${body}" >&2; return 1; }
     jq -e '.recent | last | .message | contains("encryption calls beside")' <<<"${body}" >/dev/null || {
         echo "the verdict does not name the crypto rate: ${body}" >&2
+        return 1
+    }
+}
+
+@test "the self-made rewrite after a snapshot destroyed reaches the verdict on the prior" {
+    local victim="${DATA_DIR}/work/after-prior"
+    _tree "${victim}"
+    _settle
+    local before
+    before="$(_shadow_events)"
+    run _rewrite "${victim}" prior 0.05
+    [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+    local attempt=0
+    while [ "${attempt}" -lt 30 ] && [ "$(_shadow_events)" -le "${before}" ]; do
+        sleep 0.5
+        attempt=$((attempt + 1))
+    done
+    local body
+    body="$(_verdict)"
+    [ "$(jq -r '.shadow.events' <<<"${body}")" -gt "${before}" ] || {
+        echo "no verdict for a rewrite after a snapshot destroyed: ${body}" >&2
+        grep -iE 'backups destroyed|ransom|me-encrypt' "${AGENT_LOG_FILE}" | tail -15 | cut -c1-400 >&2
+        return 1
+    }
+    jq -e '.recent | last | .exe | endswith("/me-encrypt")' <<<"${body}" >/dev/null || { echo "${body}" >&2; return 1; }
+    jq -e '.recent | last | .message | contains("after backups were destroyed")' <<<"${body}" >/dev/null || {
+        echo "the verdict does not rest on the prior: ${body}" >&2
+        return 1
+    }
+    jq -e '.recent | last | .message | contains("zfs dataset or snapshot destroyed")' <<<"${body}" >/dev/null || {
+        echo "the verdict does not name the snapshot destroyed: ${body}" >&2
         return 1
     }
 }
