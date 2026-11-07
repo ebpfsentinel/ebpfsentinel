@@ -64,7 +64,7 @@ pub struct HttpRequest {
     pub headers: Vec<(String, String)>,
 }
 
-/// Parsed TLS `ClientHello` with SNI and JA4+ fingerprint fields.
+/// Parsed TLS `ClientHello` with SNI and JA4 fingerprint fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TlsClientHello {
     /// Server Name Indication (extension 0x0000).
@@ -89,15 +89,13 @@ pub struct TlsClientHello {
     pub session_id: Option<Vec<u8>>,
 }
 
-/// Parsed TLS `ServerHello` with JA4S fingerprint fields.
+/// Parsed TLS `ServerHello`: what the server settled on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TlsServerHello {
     /// Selected cipher suite.
     pub selected_cipher: u16,
     /// Selected protocol version.
     pub selected_version: u16,
-    /// Extension type IDs in the order they appear.
-    pub extensions: Vec<u16>,
     /// Selected named group (from `KeyShare` or `ServerKeyExchange`).
     pub selected_group: Option<u16>,
 }

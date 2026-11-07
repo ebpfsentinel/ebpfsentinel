@@ -238,7 +238,6 @@ use super::zone_handler;
         mitre_handler::mitre_coverage,
         // Fingerprints
         fingerprint_handler::fingerprint_summary,
-        fingerprint_handler::ja4s_summary,
         // Captures
         capture_handler::start_capture,
         capture_handler::list_captures,
@@ -508,7 +507,6 @@ use super::zone_handler;
         process_handler::ProcessTableStatsResponse,
         process_handler::ProcessTracingResponse,
         fingerprint_handler::FingerprintSummaryResponse,
-        fingerprint_handler::Ja4sSummaryResponse,
         // Captures
         capture_handler::StartCaptureRequest,
         capture_handler::CaptureResponse,
@@ -548,7 +546,7 @@ use super::zone_handler;
         (name = "QoS", description = "Traffic shaping: pipes, queues, and classifiers"),
         (name = "Zones", description = "Security zone configuration and policies"),
         (name = "MITRE ATT&CK", description = "MITRE ATT&CK coverage and technique mapping"),
-        (name = "Fingerprints", description = "JA4+ TLS fingerprint cache and analysis"),
+        (name = "Fingerprints", description = "JA4 TLS client fingerprint cache"),
         (name = "Processes", description = "The process table: what a pid is, from its exec to its exit"),
         (name = "Captures", description = "Manual packet capture (pcap)"),
         (name = "Responses", description = "Manual time-bounded response actions (block/throttle with TTL)"),

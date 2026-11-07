@@ -255,7 +255,7 @@ pub enum Command {
     /// MITRE ATT&CK: coverage matrix
     Mitre(DomainArgs<MitreCommand>),
 
-    /// TLS fingerprints: JA4+ cache and analysis
+    /// TLS fingerprints: JA4 client fingerprint cache
     Fingerprints(DomainArgs<FingerprintsCommand>),
 
     /// Processes: what a pid is, from its exec to its exit
@@ -685,10 +685,8 @@ pub enum MitreCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum FingerprintsCommand {
-    /// Show JA4+ fingerprint cache summary
+    /// Show the JA4 client fingerprint cache summary
     Summary,
-    /// Show the JA4S server-fingerprint cache summary
-    Ja4s,
 }
 
 // ── Processes ───────────────────────────────────────────────────────────
@@ -2453,18 +2451,6 @@ mod tests {
             },
             _ => panic!("expected Threatintel command"),
         }
-    }
-
-    #[test]
-    fn cli_fingerprints_ja4s() {
-        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "fingerprints", "ja4s"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Fingerprints(DomainArgs {
-                command: FingerprintsCommand::Ja4s,
-                ..
-            }))
-        ));
     }
 
     #[test]

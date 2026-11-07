@@ -673,7 +673,7 @@ coverage:
     topology: 2vm
     kernel_min: "6.12"
     profile: nightly
-    notes: "JA4+ cache + client-diversity (curl/openssl/python/go/MHDDoS) on suite 41"
+    notes: "JA4 cache + client-diversity (curl/openssl/python/go/MHDDoS) on suite 41"
 
   - kind: cli_subcommand
     feature: responses

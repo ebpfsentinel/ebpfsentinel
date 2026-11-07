@@ -192,7 +192,6 @@ masking:
   - "no IPS rules available to patch"
   - "no IPv6 probe reached backend - transit link not established"
   - "no OTLP export recorded yet"
-  - "no TLS client available to drive ServerHello"
   - "no TLS client available to drive malicious SNI"
   - "burst produced"
   - "no alert_id from previous test"

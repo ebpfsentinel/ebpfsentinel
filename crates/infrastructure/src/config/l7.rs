@@ -23,7 +23,7 @@ pub struct L7Config {
     #[serde(default)]
     pub reassembly: ReassemblyConfig,
 
-    /// JA4 / JA4S fingerprint cache persistence.
+    /// JA4 fingerprint cache persistence.
     #[serde(default)]
     pub fingerprints: FingerprintsConfig,
 
@@ -87,12 +87,12 @@ impl PortMismatchConfig {
     }
 }
 
-/// JA4 / JA4S fingerprint cache persistence configuration.
+/// JA4 fingerprint cache persistence configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FingerprintsConfig {
     /// Optional filesystem path for the redb store. When set, the JA4
-    /// and JA4S caches mirror their entries to this database so the
-    /// agent can repopulate them after a restart.
+    /// cache mirrors its entries to this database so the agent can
+    /// repopulate it after a restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persistence_path: Option<String>,
 }

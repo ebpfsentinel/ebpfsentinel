@@ -11,7 +11,7 @@ use crate::alert_event::AlertEvent;
 use arc_swap::ArcSwap;
 use domain::dns::encrypted_dns::EncryptedDnsDetector;
 use domain::l7::entity::{DetectedProtocol, ParsedProtocol};
-use domain::l7::ja4::{self, FingerprintCache, FlowKey, Ja4sFingerprintCache};
+use domain::l7::ja4::{self, FingerprintCache, FlowKey};
 use domain::l7::parser::{detect_protocol, parse_payload_with};
 use domain::threatintel::entity::ThreatIntelAlert;
 use ebpf_common::ddos::{
@@ -81,7 +81,6 @@ pub struct EventDispatcher {
     ddos_service: Option<Arc<ArcSwap<DdosAppService>>>,
     dns_blocklist_svc: Option<Arc<DnsBlocklistAppService>>,
     fingerprint_cache: Arc<FingerprintCache>,
-    ja4s_fingerprint_cache: Arc<Ja4sFingerprintCache>,
     /// What the most recent TLS handshakes negotiated.
     handshake_log: Arc<domain::l7::handshake::HandshakeLog>,
     encrypted_dns_detector: EncryptedDnsDetector,
@@ -149,10 +148,6 @@ impl EventDispatcher {
             ddos_service: None,
             dns_blocklist_svc: None,
             fingerprint_cache: Arc::new(FingerprintCache::new(
-                10_000,
-                std::time::Duration::from_mins(5),
-            )),
-            ja4s_fingerprint_cache: Arc::new(Ja4sFingerprintCache::new(
                 10_000,
                 std::time::Duration::from_mins(5),
             )),
@@ -394,11 +389,6 @@ impl EventDispatcher {
         Arc::clone(&self.fingerprint_cache)
     }
 
-    /// Return a shared reference to the JA4S fingerprint cache.
-    pub fn ja4s_fingerprint_cache(&self) -> Arc<Ja4sFingerprintCache> {
-        Arc::clone(&self.ja4s_fingerprint_cache)
-    }
-
     /// Return a shared reference to the log of recent TLS handshakes.
     pub fn handshake_log(&self) -> Arc<domain::l7::handshake::HandshakeLog> {
         Arc::clone(&self.handshake_log)
@@ -429,14 +419,6 @@ impl EventDispatcher {
     #[must_use]
     pub fn with_fingerprint_cache(mut self, cache: Arc<FingerprintCache>) -> Self {
         self.fingerprint_cache = cache;
-        self
-    }
-
-    /// Replace the dispatcher's JA4S fingerprint cache with an externally
-    /// supplied one.
-    #[must_use]
-    pub fn with_ja4s_fingerprint_cache(mut self, cache: Arc<Ja4sFingerprintCache>) -> Self {
-        self.ja4s_fingerprint_cache = cache;
         self
     }
 
@@ -1226,18 +1208,8 @@ impl EventDispatcher {
             self.check_encrypted_dns(tls_hello, header);
         }
 
-        // Compute and cache JA4S fingerprint for TLS ServerHello replies.
-        // The flow key swaps src/dst so it matches the originating ClientHello
-        // direction (server → client view of the same 4-tuple).
-        if let ParsedProtocol::TlsServer(ref server_hello) = parsed {
-            let fp = ja4::compute_ja4s(server_hello);
-            let flow_key = FlowKey {
-                src_addr: header.dst_addr,
-                src_port: header.dst_port,
-                dst_addr: header.src_addr,
-                dst_port: header.src_port,
-            };
-            self.ja4s_fingerprint_cache.insert(flow_key, fp);
+        // A ServerHello names what the handshake settled on.
+        if matches!(parsed, ParsedProtocol::TlsServer(_)) {
             self.record_handshake(header, payload);
         }
 

@@ -598,7 +598,6 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
                 FingerprintsCommand::Summary => {
                     commands::cmd_fingerprints_summary(&client, output).await
                 }
-                FingerprintsCommand::Ja4s => commands::cmd_fingerprints_ja4s(&client, output).await,
             }
         }
 

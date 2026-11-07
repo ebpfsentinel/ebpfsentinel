@@ -1489,7 +1489,7 @@ pub async fn cmd_fingerprints_summary(client: &ApiClient, output: OutputFormat) 
         return Ok(());
     }
 
-    println!("JA4+ Fingerprint Cache");
+    println!("JA4 Fingerprint Cache");
     println!("  Cached entries:  {}", resp.cached_count);
     println!("  Max size:        {}", resp.max_size);
     println!("  TTL:             {}s", resp.ttl_seconds);
@@ -6661,24 +6661,6 @@ pub async fn cmd_ips_blacklist_delete(
     }
 
     println!("Removed from blacklist: {}", resp.ip);
-    Ok(())
-}
-
-// ── JA4S ────────────────────────────────────────────────────────────────
-
-pub async fn cmd_fingerprints_ja4s(client: &ApiClient, output: OutputFormat) -> Result<()> {
-    let resp = client.ja4s_summary().await?;
-
-    if output == OutputFormat::Json {
-        println!("{}", serde_json::to_string_pretty(&resp)?);
-        return Ok(());
-    }
-
-    println!("JA4S Fingerprint Cache");
-    println!("  Cached entries:  {}", resp.cached_count);
-    println!("  Max size:        {}", resp.max_size);
-    println!("  TTL:             {}s", resp.ttl_seconds);
-    println!("  Persistent:      {}", yes_no(resp.persistent));
     Ok(())
 }
 

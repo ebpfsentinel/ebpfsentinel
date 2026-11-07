@@ -3109,16 +3109,6 @@ pub struct BlacklistMutationResponse {
     pub ttl_remaining_secs: u64,
 }
 
-// ── JA4S ────────────────────────────────────
-
-#[derive(Deserialize, Serialize)]
-pub struct Ja4sSummaryResponse {
-    pub cached_count: usize,
-    pub max_size: usize,
-    pub ttl_seconds: u64,
-    pub persistent: bool,
-}
-
 // ── Conntrack flush ──────────────────────────
 
 #[derive(Deserialize, Serialize)]
@@ -4860,17 +4850,6 @@ impl ApiClient {
                 reqwest::Method::DELETE,
                 &format!("/api/v1/ips/blacklist/{ip}"),
             )
-            .send()
-            .await
-            .map_err(|e| connection_error(&self.base_url, &e))?;
-        handle_response(resp).await
-    }
-
-    // ── JA4S ────────────────────────────────────────────────────────
-
-    pub async fn ja4s_summary(&self) -> anyhow::Result<Ja4sSummaryResponse> {
-        let resp = self
-            .request(reqwest::Method::GET, "/api/v1/fingerprints/ja4s")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

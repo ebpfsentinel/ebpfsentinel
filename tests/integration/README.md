@@ -235,7 +235,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `domains` | 04 | none | n/a | pr | Domain reputation + blocklist |
 | `ebpf` | 16, 60, 62, 77, 79 | 2vm | 6.12 | pr | Program load status through /api/v1/ebpf/status; the per-container uprobe inventory in 60; the kernel floor refusal and the kernel-features verdicts in 77; the hidden port and hidden process sweeps in 79 |
 | `exposure` | 90 | none | 6.12 | nightly | exposure listeners; 90 reads the same listing through the API, and no suite drives the CLI |
-| `fingerprints` | 29, 41 | 2vm | 6.12 | nightly | JA4+ cache + client-diversity (curl/openssl/python/go/MHDDoS) on suite 41 |
+| `fingerprints` | 29, 41 | 2vm | 6.12 | nightly | JA4 cache + client-diversity (curl/openssl/python/go/MHDDoS) on suite 41 |
 | `firewall` | 03, 11, 26, 40 | 2vm | 6.12 | pr | L3/L4 rule CRUD + eBPF scenarios; amplification UDP-port denies in 40 |
 | `flows` | 04, 18 | 2vm | 6.12 | pr | Aggregated connection map |
 | `geoip` | 30 | 2vm | 6.12 | pr | GeoIP status and address lookup against the fixture database in 30 |
@@ -337,7 +337,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `workload_firewall` | 70, 72, 92, 98, 99 | none | 6.12 | nightly | Rules on a workload's ancestry in 70, inside LXC containers in 72, and written as Docker container labels in 98: an enforced deny, an allow list with a default deny, observe raising without refusing, a malformed label refused and reported, and a container started after the agent policed without a reload. Hooks the kernel refused to attach stop an agent whose rule or labels would refuse, are reported off with the reason under a rule that observes, and turn a reload to enforce away in 99 |
 | `write_refusal` | 83, 84, 100 | none | 6.12 | nightly | At the LSM hook in 83 and through the fanotify permission group in 84; in 100 the ordinary workloads writing under a counted directory at the shipped threshold, and a package upgrade by the expected writer under a held one, refuse nothing |
 
-#### API paths (133)
+#### API paths (132)
 
 | Path | Suites |
 |---|---|
@@ -389,7 +389,6 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/ebpf/status` | 06, 16, 62, 68 |
 | `/api/v1/ebpf/uprobes` | 60 |
 | `/api/v1/exposure/listeners` | 90 |
-| `/api/v1/fingerprints/ja4s` | 41 |
 | `/api/v1/fingerprints/summary` | 41 |
 | `/api/v1/firewall/l7-rules` | 04, 29, 30, 56 |
 | `/api/v1/firewall/l7-rules/{id}` | 04, 29, 56 |

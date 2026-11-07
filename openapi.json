@@ -3359,55 +3359,6 @@
         ]
       }
     },
-    "/api/v1/fingerprints/ja4s": {
-      "get": {
-        "tags": [
-          "Fingerprints"
-        ],
-        "summary": "`GET /api/v1/fingerprints/ja4s` - JA4S server-side fingerprint cache status.",
-        "operationId": "ja4s_summary",
-        "responses": {
-          "200": {
-            "description": "JA4S server fingerprint cache summary",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Ja4sSummaryResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Authentication required",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Insufficient permissions",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          },
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
     "/api/v1/fingerprints/summary": {
       "get": {
         "tags": [
@@ -12648,7 +12599,7 @@
       },
       "FingerprintSummaryResponse": {
         "type": "object",
-        "description": "Response for `GET /api/v1/fingerprints/summary`.",
+        "description": "Response for `GET /api/v1/fingerprints/summary`, the JA4 client fingerprint cache.",
         "required": [
           "cached_count",
           "max_size",
@@ -14206,38 +14157,6 @@
           },
           "severity": {
             "type": "string"
-          }
-        }
-      },
-      "Ja4sSummaryResponse": {
-        "type": "object",
-        "description": "Response for `GET /api/v1/fingerprints/ja4s`.",
-        "required": [
-          "cached_count",
-          "max_size",
-          "ttl_seconds",
-          "persistent"
-        ],
-        "properties": {
-          "cached_count": {
-            "type": "integer",
-            "description": "Number of cached JA4S server fingerprints.",
-            "minimum": 0
-          },
-          "max_size": {
-            "type": "integer",
-            "description": "Maximum cache size.",
-            "minimum": 0
-          },
-          "persistent": {
-            "type": "boolean",
-            "description": "Whether the cache is backed by a persistent store that survives restarts."
-          },
-          "ttl_seconds": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Cache TTL in seconds.",
-            "minimum": 0
           }
         }
       },
@@ -20832,7 +20751,7 @@
     },
     {
       "name": "Fingerprints",
-      "description": "JA4+ TLS fingerprint cache and analysis"
+      "description": "JA4 TLS client fingerprint cache"
     },
     {
       "name": "Processes",

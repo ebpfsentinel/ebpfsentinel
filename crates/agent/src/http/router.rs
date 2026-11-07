@@ -84,7 +84,7 @@ use super::dns_handler::{
 use super::domain_handler::{add_to_blocklist, list_domain_reputations, remove_from_blocklist};
 use super::drop_reason_handler::get_drop_reasons;
 use super::exposure_handler::get_listeners;
-use super::fingerprint_handler::{fingerprint_summary, ja4s_summary};
+use super::fingerprint_handler::fingerprint_summary;
 use super::firewall_handler::{
     create_rule, delete_rule, list_rules, list_workload_rules, shadow_report, workload_fqdn,
     workload_labels, workload_reach,
@@ -384,7 +384,6 @@ pub fn build_router(
             .route("/api/v1/processes", get(list_processes))
             .route("/api/v1/processes/{pid}", get(get_process))
             .route("/api/v1/fingerprints/summary", get(fingerprint_summary))
-            .route("/api/v1/fingerprints/ja4s", get(ja4s_summary))
             .route("/api/v1/responses", get(list_response_actions))
             .route("/api/v1/captures", get(list_captures))
             .layer(GovernorLayer::new(read_governor));

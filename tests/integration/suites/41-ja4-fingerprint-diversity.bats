@@ -15,9 +15,7 @@
 #      response carries a non-null ja4_fingerprint and a MITRE
 #      technique id (T1071-family, via dst_port 443 / 8443 mapping).
 #   3. A "legit" SNI does NOT match the deny rule.
-#   4. JA4S server-side fingerprints populate the JA4S cache and surface
-#      on /api/v1/fingerprints/ja4s after ServerHello observation.
-#   5. JA4/JA4S caches persist across agent restart when
+#   4. The JA4 cache persists across agent restart when
 #      l7.fingerprints.persistence_path is configured: cached_count
 #      after restart is non-zero (redb-backed persistence).
 
@@ -187,38 +185,11 @@ _ja4_drive_available_clients() {
     }
 }
 
-@test "JA4S server fingerprints surface on /api/v1/fingerprints/ja4s" {
-    # Drive available TLS clients against the legit SNI so the agent
-    # observes ServerHello bytes and computes JA4S per flow.
-    local fired
-    fired="$(_ja4_drive_available_clients "$LEGIT_SNI")"
-    [ "$fired" -ge 1 ] || soft_skip "no TLS client available to drive ServerHello"
-
-    # Let the userspace L7 pipeline ingest server-side handshake bytes.
-    sleep 2
-
-    local ja4s_count
-    ja4s_count="$(ja4s_summary_count || echo 0)"
-    [ -z "$ja4s_count" ] && ja4s_count=0
-
-    # JA4S fingerprints a ServerHello, which travels server→client and so
-    # carries the TLS port as its *source*. The datapath captures a
-    # conversation on either end's port, so the reply direction reaches the
-    # L7 pipeline whichever hook observes it.
-    [ "$ja4s_count" -ge 1 ] || {
-        echo "no JA4S fingerprint cached after ${fired} TLS handshake(s)" >&2
-        api_get /api/v1/fingerprints/ja4s >&2 || true
-        return 1
-    }
-}
-
-@test "JA4/JA4S caches persist across agent restart (redb-backed)" {
-    # Pre-condition: caches populated by earlier tests in this suite.
-    local before_ja4 before_ja4s
+@test "JA4 cache persists across agent restart (redb-backed)" {
+    # Pre-condition: cache populated by earlier tests in this suite.
+    local before_ja4
     before_ja4="$(ja4_summary_count || echo 0)"
-    before_ja4s="$(ja4s_summary_count || echo 0)"
     [ -z "$before_ja4" ] && before_ja4=0
-    [ -z "$before_ja4s" ] && before_ja4s=0
 
     [ "$before_ja4" -ge 1 ] || soft_skip "JA4 cache empty before restart (no clients fired earlier)"
 
@@ -249,22 +220,12 @@ _ja4_drive_available_clients() {
         return 1
     }
 
-    local after_ja4 after_ja4s
+    local after_ja4
     after_ja4="$(ja4_summary_count || echo 0)"
-    after_ja4s="$(ja4s_summary_count || echo 0)"
     [ -z "$after_ja4" ] && after_ja4=0
-    [ -z "$after_ja4s" ] && after_ja4s=0
 
     [ "$after_ja4" -ge 1 ] || {
         echo "JA4 cache did NOT persist across restart: before=${before_ja4} after=${after_ja4}" >&2
         return 1
     }
-
-    # JA4S persistence is asserted only if we had any server hashes pre-restart.
-    if [ "$before_ja4s" -ge 1 ]; then
-        [ "$after_ja4s" -ge 1 ] || {
-            echo "JA4S cache did NOT persist across restart: before=${before_ja4s} after=${after_ja4s}" >&2
-            return 1
-        }
-    fi
 }

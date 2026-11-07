@@ -188,7 +188,7 @@ static L7_PORTS: HashMap<u16, u8, { MAX_L7_PORTS as usize }> = HashMap::new();
 /// A configured port identifies a *service*, and only the client→server
 /// direction carries it as the destination. Matching the destination alone
 /// would therefore capture requests and drop every response - no server
-/// banner, no `ServerHello`, so no JA4S. Both ends are checked so a
+/// banner and no `ServerHello`. Both ends are checked so a
 /// conversation is captured whole, whichever hook sees the packet.
 #[inline(always)]
 fn l7_port_configured(gates: u32, src_port: u16, dst_port: u16) -> bool {

@@ -449,7 +449,7 @@ pub fn parse_http(payload: &[u8]) -> Result<HttpRequest, L7Error> {
 
 // ── TLS/SNI parser ─────────────────────────────────────────────────
 
-/// Parse a TLS `ClientHello` message and extract SNI + JA4+ fingerprint fields.
+/// Parse a TLS `ClientHello` message and extract SNI + JA4 fingerprint fields.
 pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, L7Error> {
     let (record_version, hs) = validate_tls_record(payload)?;
     let handshake_version = u16::from_be_bytes([hs[0], hs[1]]);
@@ -609,7 +609,7 @@ fn peek_tls_handshake_type(payload: &[u8]) -> Option<u8> {
     Some(payload[5])
 }
 
-/// Parse a TLS `ServerHello` message and extract JA4S fingerprint fields.
+/// Parse a TLS `ServerHello` message and extract the version, cipher and group it selected.
 ///
 /// `ServerHello` body layout:
 ///   - 2 bytes `legacy_version`
@@ -628,7 +628,6 @@ pub fn parse_tls_server_hello(payload: &[u8]) -> Result<TlsServerHello, L7Error>
         return Ok(TlsServerHello {
             selected_cipher: 0,
             selected_version: legacy_version,
-            extensions: Vec::new(),
             selected_group: None,
         });
     }
@@ -640,7 +639,6 @@ pub fn parse_tls_server_hello(payload: &[u8]) -> Result<TlsServerHello, L7Error>
         return Ok(TlsServerHello {
             selected_cipher: 0,
             selected_version: legacy_version,
-            extensions: Vec::new(),
             selected_group: None,
         });
     }
@@ -652,7 +650,6 @@ pub fn parse_tls_server_hello(payload: &[u8]) -> Result<TlsServerHello, L7Error>
         return Ok(TlsServerHello {
             selected_cipher,
             selected_version: legacy_version,
-            extensions: Vec::new(),
             selected_group: None,
         });
     }
@@ -663,7 +660,6 @@ pub fn parse_tls_server_hello(payload: &[u8]) -> Result<TlsServerHello, L7Error>
         return Ok(TlsServerHello {
             selected_cipher,
             selected_version: legacy_version,
-            extensions: Vec::new(),
             selected_group: None,
         });
     }
@@ -671,7 +667,6 @@ pub fn parse_tls_server_hello(payload: &[u8]) -> Result<TlsServerHello, L7Error>
     pos += 2;
     let ext_end = pos + extensions_len.min(hs.len().saturating_sub(pos));
 
-    let mut extension_types: Vec<u16> = Vec::new();
     let mut selected_version = legacy_version;
     let mut selected_group: Option<u16> = None;
 
@@ -682,10 +677,6 @@ pub fn parse_tls_server_hello(payload: &[u8]) -> Result<TlsServerHello, L7Error>
         p += 4;
         let data_end = p + ext_len.min(hs.len().saturating_sub(p));
         let data = &hs[p..data_end];
-
-        if !is_grease(ext_type) {
-            extension_types.push(ext_type);
-        }
 
         match ext_type {
             // supported_versions extension in ServerHello carries the
@@ -711,7 +702,6 @@ pub fn parse_tls_server_hello(payload: &[u8]) -> Result<TlsServerHello, L7Error>
     Ok(TlsServerHello {
         selected_cipher,
         selected_version,
-        extensions: extension_types,
         selected_group,
     })
 }
@@ -726,7 +716,7 @@ struct ExtensionFields {
     supported_versions: Vec<u16>,
 }
 
-/// Walk the extensions section of a `ClientHello` and collect JA4+ fields.
+/// Walk the extensions section of a `ClientHello` and collect JA4 fields.
 fn parse_extensions(hs: &[u8], mut pos: usize, ext_end: usize) -> ExtensionFields {
     let mut fields = ExtensionFields {
         sni: None,
@@ -1698,9 +1688,9 @@ mod tests {
         assert_eq!(result.sni.as_deref(), Some("tls13.example.com"));
     }
 
-    // ── JA4+ field extraction tests ───────────────────────────────
+    // ── JA4 field extraction tests ───────────────────────────────
 
-    /// Build a full `ClientHello` with multiple extensions for JA4+ testing.
+    /// Build a full `ClientHello` with multiple extensions for JA4 testing.
     fn build_full_client_hello() -> Vec<u8> {
         let hostname = b"ja4.example.com";
 

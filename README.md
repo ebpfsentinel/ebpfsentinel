@@ -58,7 +58,7 @@ A snapshot of the capabilities below - see the [Features guide](https://github.c
 | **Self-Protection** | No other process detaches the agent's links or writes its maps. Needs the BPF LSM active at boot, like the executables list |
 | **Learning Mode** | A declared window of what each workload dialled, rendered back as workload firewall rules in observe mode |
 | **MITRE ATT&CK Mapping** | Every alert tagged with tactic + technique ID |
-| **JA4+ Fingerprinting** | TLS client fingerprinting for C2 and malware detection |
+| **JA4 Fingerprinting** | TLS client fingerprinting for C2 and malware detection, following the JA4 method by FoxIO (BSD 3-Clause) |
 | **Network Cryptography** | Which flows negotiate a post-quantum hybrid, a classical curve or less than TLS 1.2, read off the handshakes without decrypting |
 | **GeoIP Enforcement** | MaxMind country resolution shared across all engines |
 | **Automated Response** | Time-bounded block and throttle, manual or on severity-based policies, expiring on their own |

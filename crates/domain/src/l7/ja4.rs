@@ -1,3 +1,10 @@
+//! JA4 fingerprint of a TLS `ClientHello`.
+//!
+//! Follows the JA4 method by [FoxIO](https://github.com/FoxIO-LLC/ja4),
+//! which is licensed BSD 3-Clause.
+//! Only the client fingerprint is computed: the other methods of that
+//! family are under a different licence and are not implemented here.
+
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::Arc;
@@ -6,7 +13,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::entity::{TlsClientHello, TlsServerHello};
+use super::entity::TlsClientHello;
 
 /// JA4 fingerprint for a TLS `ClientHello`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,51 +40,6 @@ pub fn compute_ja4(hello: &TlsClientHello) -> Ja4Fingerprint {
         ja4_a,
         ja4_b,
         ja4_c,
-    }
-}
-
-/// JA4S fingerprint for a TLS `ServerHello`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Ja4sFingerprint {
-    /// Full JA4S hash: `{a}_{b}_{c}`.
-    pub ja4s: String,
-    /// Section a: `t{version}{ext_count:02}`.
-    pub ja4s_a: String,
-    /// Section b: selected cipher as 4 hex chars.
-    pub ja4s_b: String,
-    /// Section c: truncated SHA-256 of sorted extensions.
-    pub ja4s_c: String,
-}
-
-/// Compute the JA4S fingerprint from a parsed `TlsServerHello`.
-pub fn compute_ja4s(hello: &TlsServerHello) -> Ja4sFingerprint {
-    // Section a: t{version}{ext_count:02}
-    let version = tls_version_str(hello.selected_version);
-    let ext_count = hello.extensions.len().min(99);
-    let ja4s_a = format!("t{version}{ext_count:02}");
-
-    // Section b: selected cipher as 4 hex chars
-    let ja4s_b = format!("{:04x}", hello.selected_cipher);
-
-    // Section c: SHA-256(sorted extensions), truncated to 12 hex chars
-    let mut sorted_ext = hello.extensions.clone();
-    sorted_ext.sort_unstable();
-    let ext_csv = sorted_ext.iter().fold(String::new(), |mut acc, &ext| {
-        if !acc.is_empty() {
-            acc.push(',');
-        }
-        let _ = write!(acc, "{ext:04x}");
-        acc
-    });
-    let ja4s_c = sha256_12(&ext_csv);
-
-    let ja4s = format!("{ja4s_a}_{ja4s_b}_{ja4s_c}");
-
-    Ja4sFingerprint {
-        ja4s,
-        ja4s_a,
-        ja4s_b,
-        ja4s_c,
     }
 }
 
@@ -217,12 +179,6 @@ pub trait Ja4Persist: Send + Sync {
     fn load_all(&self) -> Vec<(FlowKey, Ja4Fingerprint, SystemTime)>;
 }
 
-/// Persistence port for the JA4S fingerprint cache.
-pub trait Ja4sPersist: Send + Sync {
-    fn save(&self, key: &FlowKey, fp: &Ja4sFingerprint, inserted_at: SystemTime);
-    fn load_all(&self) -> Vec<(FlowKey, Ja4sFingerprint, SystemTime)>;
-}
-
 /// LRU-ish fingerprint cache with configurable TTL and max size.
 ///
 /// Uses interior mutability (`Mutex`) so all methods take `&self`.
@@ -357,114 +313,6 @@ fn evict_expired_or_oldest<T>(
     }
 }
 
-/// JA4S server-side fingerprint cache. Mirrors [`FingerprintCache`] but
-/// stores [`Ja4sFingerprint`] entries keyed by the same 4-tuple.
-pub struct Ja4sFingerprintCache {
-    entries: std::sync::Mutex<HashMap<FlowKey, CacheEntry<Ja4sFingerprint>>>,
-    max_size: usize,
-    ttl: Duration,
-    persist: Option<Arc<dyn Ja4sPersist>>,
-}
-
-impl Ja4sFingerprintCache {
-    pub fn new(max_size: usize, ttl: Duration) -> Self {
-        Self {
-            entries: std::sync::Mutex::new(HashMap::new()),
-            max_size,
-            ttl,
-            persist: None,
-        }
-    }
-
-    pub fn with_persist(max_size: usize, ttl: Duration, persist: Arc<dyn Ja4sPersist>) -> Self {
-        let mut map: HashMap<FlowKey, CacheEntry<Ja4sFingerprint>> = HashMap::new();
-        let now = SystemTime::now();
-        for (key, fp, ts) in persist.load_all() {
-            if now.duration_since(ts).is_ok_and(|d| d <= ttl) && map.len() < max_size {
-                map.insert(
-                    key,
-                    CacheEntry {
-                        fingerprint: fp,
-                        inserted_at: ts,
-                    },
-                );
-            }
-        }
-        Self {
-            entries: std::sync::Mutex::new(map),
-            max_size,
-            ttl,
-            persist: Some(persist),
-        }
-    }
-
-    pub fn get(&self, key: &FlowKey) -> Option<Ja4sFingerprint> {
-        let entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entry = entries.get(key)?;
-        if entry.inserted_at.elapsed().is_ok_and(|d| d > self.ttl) {
-            return None;
-        }
-        Some(entry.fingerprint.clone())
-    }
-
-    pub fn insert(&self, key: FlowKey, fingerprint: Ja4sFingerprint) {
-        let now = SystemTime::now();
-        if let Some(persist) = self.persist.as_ref() {
-            persist.save(&key, &fingerprint, now);
-        }
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if entries.len() >= self.max_size {
-            evict_expired_or_oldest(&mut entries, self.ttl, self.max_size);
-        }
-        entries.insert(
-            key,
-            CacheEntry {
-                fingerprint,
-                inserted_at: now,
-            },
-        );
-    }
-
-    pub fn len(&self) -> usize {
-        self.entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty()
-    }
-
-    pub fn is_persistent(&self) -> bool {
-        self.persist.is_some()
-    }
-
-    /// How many entries the cache holds before it evicts, as it was built.
-    ///
-    /// Read rather than restated, because a reader asking how full the cache
-    /// is compares this against `len()` and two copies of the number drift.
-    #[must_use]
-    pub fn capacity(&self) -> usize {
-        self.max_size
-    }
-
-    /// How long an entry stays before it expires, as the cache was built.
-    #[must_use]
-    pub fn ttl(&self) -> Duration {
-        self.ttl
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,65 +440,6 @@ mod tests {
         assert_eq!(tls_version_str(0x0300), "00");
     }
 
-    // ── JA4S tests ──────────────────────────────────────────────────
-
-    fn make_server_hello() -> TlsServerHello {
-        TlsServerHello {
-            selected_cipher: 0x1301,
-            selected_version: 0x0304,
-            extensions: vec![0x002B, 0x0033], // supported_versions + key_share
-            selected_group: Some(0x001D),
-        }
-    }
-
-    #[test]
-    fn ja4s_section_a_format() {
-        let hello = make_server_hello();
-        let fp = compute_ja4s(&hello);
-        // t (TCP) + 13 (TLS 1.3) + 02 (2 extensions)
-        assert_eq!(fp.ja4s_a, "t1302");
-    }
-
-    #[test]
-    fn ja4s_section_b_cipher_hex() {
-        let hello = make_server_hello();
-        let fp = compute_ja4s(&hello);
-        assert_eq!(fp.ja4s_b, "1301");
-    }
-
-    #[test]
-    fn ja4s_section_c_is_12_hex() {
-        let hello = make_server_hello();
-        let fp = compute_ja4s(&hello);
-        assert_eq!(fp.ja4s_c.len(), 12);
-        assert!(fp.ja4s_c.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn ja4s_full_format() {
-        let hello = make_server_hello();
-        let fp = compute_ja4s(&hello);
-        let parts: Vec<&str> = fp.ja4s.split('_').collect();
-        assert_eq!(parts.len(), 3);
-        assert_eq!(parts[0], fp.ja4s_a);
-        assert_eq!(parts[1], fp.ja4s_b);
-        assert_eq!(parts[2], fp.ja4s_c);
-    }
-
-    #[test]
-    fn ja4s_deterministic() {
-        let hello = make_server_hello();
-        assert_eq!(compute_ja4s(&hello), compute_ja4s(&hello));
-    }
-
-    #[test]
-    fn ja4s_different_cipher_different_hash() {
-        let hello1 = make_server_hello();
-        let mut hello2 = make_server_hello();
-        hello2.selected_cipher = 0x1302;
-        assert_ne!(compute_ja4s(&hello1).ja4s_b, compute_ja4s(&hello2).ja4s_b);
-    }
-
     // ── Cache tests ──────────────────────────────────────────────────
 
     fn make_flow_key(port: u16) -> FlowKey {
@@ -695,9 +484,5 @@ mod tests {
         let cache = FingerprintCache::new(64, Duration::from_secs(90));
         assert_eq!(cache.capacity(), 64);
         assert_eq!(cache.ttl(), Duration::from_secs(90));
-
-        let server = Ja4sFingerprintCache::new(32, Duration::from_secs(45));
-        assert_eq!(server.capacity(), 32);
-        assert_eq!(server.ttl(), Duration::from_secs(45));
     }
 }
