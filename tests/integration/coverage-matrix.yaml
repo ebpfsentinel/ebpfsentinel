@@ -391,7 +391,7 @@ coverage:
     topology: none
     kernel_min: "6.12"
     profile: manual
-    notes: "Steers the TCP connections of selected cgroups to a local listener at connect4/connect6. No suite yet: the listener and the selection are the enterprise TLS interception's, so the suite that asserts a steered connection lands on the listener belongs beside it"
+    notes: "Steers the TCP connections of selected cgroups to a local listener at connect4/connect6. The listener and the selection are the enterprise TLS interception's, so the suite lives in that repository: ebpfsentinel-enterprise/tests/integration/suites/27-enterprise-tls-redirect.bats asserts a process in the selected cgroup is answered by the agent's listener while one outside it reaches the server"
 
   - kind: ebpf_program
     feature: cgroup-clusterip
@@ -1284,7 +1284,7 @@ coverage:
     topology: none
     kernel_min: "6.12"
     profile: manual
-    notes: "No suite yet: nothing in this agent arms a quarantine, which only the enterprise automated response calls, so the suite that reads a workload's connections refused for the window belongs beside that response"
+    notes: "Nothing in this agent arms a quarantine, which only the enterprise automated response calls, so the suite lives beside that response: ebpfsentinel-enterprise/tests/integration/suites/26-enterprise-quarantine.bats reads the workload's connections refused for the window, reaching the network again once it closes, and the release audited"
 
   - kind: capability
     feature: process_signal
