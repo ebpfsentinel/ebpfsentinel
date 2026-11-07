@@ -122,9 +122,21 @@ _tenant_gate_map_id() {
     done | head -1
 }
 
-# Current mask, whether bpftool decoded it through BTF or printed raw bytes.
+# The agent's maps are read and written through the descriptor the agent
+# already holds. Where the BPF LSM is active the agent refuses any other task a
+# writable descriptor on them, which is every `bpftool map lookup|update|delete
+# id`, so the hand-written entries below go through scripts/agent-map.py on the
+# agent host instead. The path is the same on every lane: the tree is synced to
+# one place on each machine.
+_AGENT_MAP="$(cd "${BATS_TEST_DIRNAME}/../scripts" && pwd)/agent-map.py"
+
+_agent_map() {
+    _agent_ssh_sudo python3 "${_AGENT_MAP}" "$@"
+}
+
+# Current mask, read off the little-endian value bytes.
 _tenant_gate_mask() {
-    bpftool -j map lookup id "$1" key hex 00 00 00 00 2>/dev/null | jq -r '
+    _agent_map lookup "$1" 00 00 00 00 2>/dev/null | jq -r '
         def hex: ascii_downcase | ltrimstr("0x") | explode
             | reduce .[] as $c (0; . * 16 + (if $c >= 97 then $c - 87 else $c - 48 end));
         (.formatted.value // .value)
@@ -134,7 +146,7 @@ _tenant_gate_mask() {
 
 _tenant_gate_write() {
     # shellcheck disable=SC2046  # the hex bytes must expand to separate args
-    bpftool map update id "$1" key hex 00 00 00 00 value hex $(_le_hex "$2" 4)
+    _agent_map update "$1" 00 00 00 00 -- $(_le_hex "$2" 4)
 }
 
 # Clear FW_EMPTY_TENANTS and remember the mask it replaced, for the restore.
@@ -231,19 +243,18 @@ _wait_cgroup_resolved_above() {
     return 1
 }
 
-# True when a bpftool lookup dump holds the probe tenant id, in either the
-# BTF-decoded form (`"value": 7`) or the untyped hex form (`07 00 00 00`).
+# True when a lookup dump holds the probe tenant id as its value bytes.
 _lookup_holds_probe_tenant() {
     local dump="$1"
-    [ "$(echo "${dump}" | jq -r '.value // empty' 2>/dev/null)" = "${TENANT_PROBE_ID}" ] && return 0
-    echo "${dump}" | grep -q "$(_le_hex "${TENANT_PROBE_ID}" 4)"
+    [ "$(echo "${dump}" | jq -r '.value | map(ltrimstr("0x")) | join(" ")' 2>/dev/null)" = \
+        "$(_le_hex "${TENANT_PROBE_ID}" 4)" ]
 }
 
 _tenant_cgroup_cleanup() {
     local map_id="${1:-}" cgroup_id="${2:-}"
     if [ -n "${map_id}" ] && [ -n "${cgroup_id}" ]; then
         # shellcheck disable=SC2046  # the hex bytes must expand to separate args
-        bpftool map delete id "${map_id}" key hex $(_le_hex "${cgroup_id}" 8) >/dev/null 2>&1 || true
+        _agent_map delete "${map_id}" $(_le_hex "${cgroup_id}" 8) >/dev/null 2>&1 || true
     fi
     _remove_probe_cgroup
     _restore_tenant_gate
@@ -377,7 +388,10 @@ teardown_file() {
     # traffic must have produced at least one resolver lookup.
     [ "$(echo "${after} > ${before}" | bc -l 2>/dev/null)" = "1" ] || {
         echo "container resolver observed no miss (${before} → ${after})" >&2
+        echo "resolver hits: $(get_metrics_value ebpfsentinel_container_resolver_cache_hits_total 2>/dev/null)" >&2
         echo "resolver errors: $(get_metrics_value ebpfsentinel_container_resolver_errors_total 2>/dev/null)" >&2
+        curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/api/v1/alerts?limit=200" 2>/dev/null |
+            jq -c '[.alerts[] | {component, dst_port, container: (.container.id // null)}] | .[0:5]' >&2 || true
         return 1
     }
 }
@@ -504,17 +518,13 @@ teardown_file() {
     [ -n "${cgroup_id}" ]
 
     # shellcheck disable=SC2046  # the hex bytes must expand to separate args
-    run bpftool map update id "${map_id}" \
-        key hex $(_le_hex "${cgroup_id}" 8) \
-        value hex $(_le_hex "${TENANT_PROBE_ID}" 4)
+    run _agent_map update "${map_id}" \
+        $(_le_hex "${cgroup_id}" 8) -- $(_le_hex "${TENANT_PROBE_ID}" 4)
     [ "${status}" -eq 0 ]
 
     # shellcheck disable=SC2046
-    run bpftool map lookup id "${map_id}" key hex $(_le_hex "${cgroup_id}" 8)
+    run _agent_map lookup "${map_id}" $(_le_hex "${cgroup_id}" 8)
     [ "${status}" -eq 0 ]
-    # The map carries BTF, so bpftool decodes the entry to typed JSON instead
-    # of printing raw bytes. Read the decoded value, and fall back to the hex
-    # form for a bpftool that has no type information to work from.
     _lookup_holds_probe_tenant "${output}" || {
         echo "lookup returned a value the write never put there" >&2
         echo "  map id   : ${map_id}" >&2
@@ -550,9 +560,8 @@ teardown_file() {
         return 1
     }
     # shellcheck disable=SC2046
-    bpftool map update id "${map_id}" \
-        key hex $(_le_hex "${cgroup_id}" 8) \
-        value hex $(_le_hex "${TENANT_PROBE_ID}" 4)
+    _agent_map update "${map_id}" \
+        $(_le_hex "${cgroup_id}" 8) -- $(_le_hex "${TENANT_PROBE_ID}" 4)
 
     _probe_from_cgroup
 
@@ -592,7 +601,7 @@ teardown_file() {
     [ -n "${cgroup_id}" ]
     _tenant_cgroup_cleanup "${map_id}" "${cgroup_id}"
     # shellcheck disable=SC2046
-    run bpftool map lookup id "${map_id}" key hex $(_le_hex "${cgroup_id}" 8)
+    run _agent_map lookup "${map_id}" $(_le_hex "${cgroup_id}" 8)
     if [ "${status}" -eq 0 ] && _lookup_holds_probe_tenant "${output}"; then
         echo "cgroup ${cgroup_id} still maps to the probe tenant after removal" >&2
         echo "${output}" >&2
