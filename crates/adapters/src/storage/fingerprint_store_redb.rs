@@ -7,11 +7,6 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 const JA4_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("ja4_fingerprints");
-/// Server-side fingerprints were once kept beside the client ones. The
-/// method is no longer computed, so a database written by an earlier agent
-/// has this table dropped when it is opened rather than left on disk.
-const RETIRED_SERVER_TABLE: TableDefinition<&str, &[u8]> =
-    TableDefinition::new("ja4s_fingerprints");
 
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedJa4 {
@@ -37,7 +32,6 @@ impl RedbFingerprintStore {
         {
             let _ = txn.open_table(JA4_TABLE)?;
         }
-        txn.delete_table(RETIRED_SERVER_TABLE)?;
         txn.commit()?;
         Ok(Self {
             db,
@@ -196,31 +190,5 @@ mod tests {
         Ja4Persist::save(&store, &key, &fp, SystemTime::now());
         let loaded = Ja4Persist::load_all(&store);
         assert_eq!(loaded.len(), 1);
-    }
-
-    #[test]
-    fn a_retired_server_fingerprint_table_is_dropped_on_open() {
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        {
-            let db = crate::storage::create_database(&path).unwrap();
-            let txn = db.begin_write().unwrap();
-            {
-                let mut table = txn.open_table(RETIRED_SERVER_TABLE).unwrap();
-                table.insert("flow", b"{}".as_slice()).unwrap();
-            }
-            txn.commit().unwrap();
-        }
-        let store = RedbFingerprintStore::open(&path).unwrap();
-        let txn = store.db.begin_read().unwrap();
-        assert!(txn.open_table(RETIRED_SERVER_TABLE).is_err());
-        drop(txn);
-        Ja4Persist::save(
-            &store,
-            &flow(1),
-            &compute_ja4(&client_hello()),
-            SystemTime::now(),
-        );
-        assert_eq!(Ja4Persist::load_all(&store).len(), 1);
     }
 }
