@@ -1,7 +1,7 @@
 # Native package definition, one file for both formats.
 #
-# It is driven by environment variables rather than edited per build, and
-# `build-packages.sh` is what sets them: STAGE is the directory holding the
+# It is driven by four names rather than edited per build, and
+# `build-packages.sh` substitutes them into a copy: STAGE is the directory holding the
 # binaries, the eBPF objects and the unit files with their paths already
 # rewritten, PKG_VERSION is the version the release manifest pinned, and
 # PKG_ARCH is nfpm's architecture name (amd64 or arm64), which nfpm maps to

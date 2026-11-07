@@ -105,10 +105,23 @@ for unit in ebpfsentinel.service ebpfsentinel-warden.service; do
   fi
 done
 
-export STAGE PACKAGING="${PACKAGING_DIR}" PKG_VERSION="${VERSION}" PKG_ARCH="${ARCH}"
+# nfpm expands the environment in a handful of fields (version, arch) and
+# not in `contents` or `scripts`, where a literal ${STAGE} becomes a glob that
+# matches nothing. The four names are substituted here instead, into a copy,
+# and a name left over fails before nfpm reads it.
+sed \
+  -e "s#\${STAGE}#${STAGE}#g" \
+  -e "s#\${PACKAGING}#${PACKAGING_DIR}#g" \
+  -e "s#\${PKG_VERSION}#${VERSION}#g" \
+  -e "s#\${PKG_ARCH}#${ARCH}#g" \
+  "${PACKAGING_DIR}/nfpm.yaml" > "${STAGE}/nfpm.yaml"
+if grep -n '^[^#]*\${' "${STAGE}/nfpm.yaml" >&2; then
+  echo "nfpm.yaml names a variable $(basename "${BASH_SOURCE[0]}") does not substitute" >&2
+  exit 1
+fi
 
 for format in deb rpm; do
-  nfpm package --config "${PACKAGING_DIR}/nfpm.yaml" --packager "${format}" --target "${OUT_DIR}"
+  nfpm package --config "${STAGE}/nfpm.yaml" --packager "${format}" --target "${OUT_DIR}"
 done
 
 ls -l "${OUT_DIR}"

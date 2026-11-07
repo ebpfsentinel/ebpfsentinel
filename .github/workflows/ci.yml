@@ -258,3 +258,44 @@ jobs:
             target/release/ebpfsentinel-agent
             target/release/warden
           retention-days: 7
+
+  # The .deb and the .rpm are built by the release, and a definition that
+  # broke since the last one would only be found there. This builds both from
+  # the binaries above and drives each through install, upgrade over an
+  # operator's configuration, removal and purge on Ubuntu and Fedora. The eBPF
+  # objects are stand-ins named after every program in the tree: the package
+  # layout does not depend on their bytes, and building the real ones is the
+  # eBPF workflow's job. The release runs the same script on its static
+  # binaries, with --require-static.
+  packages:
+    name: Package lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: ebpfsentinel-agent-x86_64
+          path: bin
+      - name: Install nfpm
+        env:
+          NFPM_VERSION: 2.48.0
+          NFPM_SHA256: 6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750
+        run: |
+          set -euo pipefail
+          url="https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          curl -sSfL -o nfpm.tar.gz "$url"
+          echo "${NFPM_SHA256}  nfpm.tar.gz" | sha256sum -c -
+          tar xzf nfpm.tar.gz nfpm
+          sudo install -m 0755 nfpm /usr/local/bin/nfpm
+          rm -f nfpm.tar.gz nfpm
+      - name: Install, upgrade, remove and purge both packages
+        run: |
+          set -euo pipefail
+          chmod 0755 bin/ebpfsentinel-agent bin/warden
+          mkdir -p ebpf-stand-ins
+          for dir in crates/ebpf-programs/*/; do
+            [ -f "${dir}Cargo.toml" ] && : > "ebpf-stand-ins/$(basename "${dir}")"
+          done
+          dist/packaging/test-packages.sh --bin-dir bin --ebpf-dir ebpf-stand-ins

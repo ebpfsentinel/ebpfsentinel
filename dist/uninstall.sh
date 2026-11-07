@@ -54,11 +54,17 @@ if [[ "${packaged}" != no ]]; then
     deb) echo "  Remove it with:  apt-get remove ebpfsentinel      (keeps ${ETC} and ${STATE})" ;;
     rpm) echo "  Remove it with:  dnf remove ebpfsentinel          (keeps ${ETC} and ${STATE})" ;;
   esac
-  [[ "${packaged}" == deb ]] && echo "  Or, to drop the configuration and the state too:  apt-get purge ebpfsentinel"
+  case "${packaged}" in
+    deb) echo "  Or, to drop the configuration and the state too:  apt-get purge ebpfsentinel" ;;
+    rpm) echo "  rpm has no purge; after the removal:  rm -rf ${ETC} ${STATE}" ;;
+  esac
 else
   echo "Removing the manually installed files..."
   rm -f /usr/local/bin/ebpfsentinel-agent /usr/local/bin/warden
   rm -rf /usr/local/lib/ebpfsentinel
+  # The host profiles and this script. bash holds the script open, so
+  # removing it from under the running copy is safe.
+  rm -rf /usr/local/share/ebpfsentinel
   rm -f /etc/systemd/system/ebpfsentinel.service /etc/systemd/system/ebpfsentinel-warden.service
   rm -f /etc/apparmor.d/ebpfsentinel-agent
   rm -f /etc/sysctl.d/60-ebpfsentinel-userns.conf
@@ -76,7 +82,16 @@ for pin in /sys/fs/bpf/ebpfsentinel /sys/fs/bpf/ebpfsentinel-dlp; do
   rm -rf "${pin}" 2>/dev/null || true
 done
 
-if [[ "${PURGE}" == yes ]]; then
+# On a packaged host the configuration is the package's conffile and the
+# purge is the package manager's to perform: deleting it here would leave
+# dpkg or rpm recording a file that is not there, and the next upgrade would
+# put the reference back over a host the operator believed purged.
+if [[ "${PURGE}" == yes && "${packaged}" != no ]]; then
+  echo ""
+  echo "Nothing deleted: on a packaged host the purge belongs to the package manager (see above)."
+  [[ -e "${ETC}" ]] && LEFT+=("${ETC} (the configuration, owned by the package)")
+  [[ -e "${STATE}" ]] && LEFT+=("${STATE} (alerts, flows, captures and the API key)")
+elif [[ "${PURGE}" == yes ]]; then
   echo "Removing the configuration and the stored state..."
   rm -rf "${STATE}"
   rm -rf "${ETC}"
@@ -99,5 +114,7 @@ else
     echo "  - ${item}"
   done
   echo ""
-  echo "Run this script with --purge to remove the configuration and the state as well."
+  if [[ "${packaged}" == no ]]; then
+    echo "Run this script with --purge to remove the configuration and the state as well."
+  fi
 fi
