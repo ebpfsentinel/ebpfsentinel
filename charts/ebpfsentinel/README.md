@@ -10,7 +10,7 @@ Deploys [eBPFsentinel](https://github.com/ebpfsentinel/ebpfsentinel) - a kernel-
 
 ## Edition: OSS (AGPL-3.0)
 
-This chart deploys the **open-source edition**. All 14 security domains are included:
+This chart deploys the **open-source edition**. Every security domain is included; the table lists the engines the chart switches on or off by default:
 
 | Domain | Default |
 |--------|---------|
