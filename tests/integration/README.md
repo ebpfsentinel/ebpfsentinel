@@ -292,7 +292,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `guest` | 73, 74, 75 | none | 6.12 | nightly | The virtual machines whose traffic crosses this host: a tap device in 73, a policy decided on a guest in 74, a libvirt domain in 75 |
 | `hidden` | 79 | none | 6.12 | nightly | Hidden ports and hidden processes on a busy host: listeners in two network namespaces, SO_REUSEPORT, TIME_WAIT, a many-threaded process and process churn, and neither sweep reports anything twice in a row; the process sweep stays inside its time and CPU budget. The positive case is unit-tested at the port boundary, since a real one needs a rootkit |
 | `hostrule` | 78 | none | 6.12 | nightly | Intent catalogue, typed matchers, shadow book and promotion, decided on process start and exit fed by tracepoint-process; the rule and event grammar is also fuzzed by fuzz_host_rule |
-| `identity` | No suite yet (workload-identity) | 2vm | 6.12 | manual | This node's addresses as names another node can read, and the peer's names on a flow. No suite yet: the two-end reading needs a second agent on the attacker VM, a 2VM lane this host could not hold beside the other agent's work when the rest of the gaps were closed |
+| `identity` | 107 | 2vm | 6.12 | nightly | This node's addresses as names another node can read, and the peer's names on a flow. 107 opens a TCP connection and sends UDP datagrams from a named program on the agent's machine to the attacker VM, reads both back off /api/v1/conntrack/connections with that program's pid and executable while the far end records the agent's address, and asserts no flow carries a peer, since no list of remote identities was handed to this agent. The two-end reading, a peer named from the list another agent publishes, needs the routes that publish and take that list, which are the enterprise agent's, so it is asserted beside them |
 | `ids` | 12, 25, 38, 39, 55, 59, 66 | 2vm | 6.12 | pr | Intrusion detection engine; the block branch's two counters - the attempt and the kernel's own confirmation of the conntrack tear-down - asserted against each other in 66; behavioural signatures stressed in 38; slow-attack signatures in 39; IPv6-scoped signature surface asserted in 55 (wire-level v6 IDS alert via tc-ids deferred - needs dual-stack 2-VM topology); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 59 (real hydra/ncrack credential bursts deferred - same dataplane contract is driven by the SYN-burst path) |
 | `inventory` | 80 | none | 6.12 | nightly | The host's dpkg database agrees with dpkg-query, a chroot's Alpine database is read under kind other, and a link climbing out of a root finds nothing. rpm's sqlite reader and every parser are unit-tested against databases taken from real images |
 | `ips` | 13, 16, 38, 39, 55, 59, perf/03 | 2vm | 6.12 | pr | Auto-blacklist + whitelist; MHDDoS flood matrix in 38; slowhttptest in 39; IPv6 blacklist-write surface asserted in 55; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 59; in-kernel blacklist-injection control-plane latency (100/1K) benched in perf/03 |
@@ -305,7 +305,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `network_program` | 88 | none | 6.12 | nightly | Programs other than the agent's on the node's network path; 88 attaches an XDP program from outside the agent and reads it back as foreign, and detaches the agent's own link without the guard and reads the alert |
 | `process` | 67, 70, 93 | none | 6.12 | nightly | The process table: a pid from exec to exit with its chain of ancestors; read through REST in 67, the chain decides workload rules in 70, the reverse shell, fileless and server-descendant detections and their process kill in 93 |
 | `qos` | 16, 28 | 2vm | 6.12 | pr | Traffic shaping policies |
-| `ransom` | 81, 82, 83, 84, 96 | none | 6.12 | nightly | Mass encryption recognised by signals that agree: the shadow verdict in 81, the stop in 82, the write refusal with the BPF LSM in 83 and through fanotify in 84, and in 96 a partial encryption raised on the header while the sampled entropy stays flat, and one past the sampled window that nothing reads |
+| `ransom` | 81, 82, 83, 84, 96, 101, 104, 108 | none | 6.12 | nightly | Mass encryption recognised by signals that agree: the shadow verdict in 81, the stop in 82, the write refusal with the BPF LSM in 83 and through fanotify in 84, and in 96 a partial encryption raised on the header while the sampled entropy stays flat, and one past the sampled window that nothing reads; a share encrypted by a client on another address in 101 and from a second machine in 108, the writer named by its address through smbd rather than smbd named as the run; and in 104 the encryption call counter, including a self-made rewrite reaching the verdict on a snapshot destroyed just before it |
 | `ratelimit` | 04, 14, 38 | 2vm | 6.12 | pr | Token bucket + variants; exhaustion under flood in 38 |
 | `raw_socket` | 88 | none | 6.12 | nightly | Packet sockets open on the node and the classic BPF filter behind them; 88 opens an AF_PACKET socket, with and without a classic filter, and reads its holder, its filter length and the alert |
 | `response` | 48 | 2vm | 6.12 | nightly | In-memory ResponseEngine create/list/revoke + TTL auto-expire asserted in 48; auto_response → IpsService → firewall-map mirroring exercised separately by the auto-response pipeline (not in 48) |
@@ -359,7 +359,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/config` | 16, 23, 25 |
 | `/api/v1/config/reload` | 16, 17, 35, 52, 99 |
 | `/api/v1/config/{section}` | 16, 17, 27, 35, 52, 99 |
-| `/api/v1/conntrack/connections` | 16, 18 |
+| `/api/v1/conntrack/connections` | 107, 16, 18 |
 | `/api/v1/conntrack/events` | 16 |
 | `/api/v1/conntrack/flush` | 16, 18, 62 |
 | `/api/v1/conntrack/status` | 16, 18, 21, 65 |
@@ -405,7 +405,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/geoip/status` | 30 |
 | `/api/v1/host-rules` | 78 |
 | `/api/v1/host-rules/intents` | 78 |
-| `/api/v1/host-rules/mass-encryption` | 100, 101, 104, 81, 82, 96 |
+| `/api/v1/host-rules/mass-encryption` | 100, 101, 104, 108, 81, 82, 96 |
 | `/api/v1/host-rules/write-refusal` | 83, 84 |
 | `/api/v1/ids/rules` | 102, 12, 16, 55, 59 |
 | `/api/v1/ids/status` | 12, 16, 33 |

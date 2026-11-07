@@ -222,6 +222,8 @@ suite_profiles:
   "104": nightly
   "105": nightly
   "106": nightly
+  "107": nightly
+  "108": nightly
   "130": nightly
   "131": nightly
   "132": nightly
@@ -804,11 +806,11 @@ coverage:
 
   - kind: cli_subcommand
     feature: mass-encryption-stop
-    suites: ["82", "100", "101", "perf/08"]
+    suites: ["82", "100", "101", "108", "perf/08"]
     topology: none
     kernel_min: "6.12"
     profile: nightly
-    notes: "The mass encryption stop: with the verdict in enforce and the stop armed, one process encrypting a tree is killed in the middle of it with a second alert counting the files written before it stopped, and a run forking one worker per directory is stopped whole, the parent and every worker still alive at the verdict; the time from the verdict to the last member gone, and the files written meanwhile, measured in perf/08; in 100 an archive extraction, a copy, a mirror, a checkout, a package upgrade replacing compressed files through a rename, an index rebuild, a log rotation, a media encoder, a database compaction, a compressed backup and snapshot pruning all run to their end with the stop armed, and nothing is raised; in 101 a client on another address encrypting a Samba share is named by that address through smbd, and neither the session nor smbd is stopped"
+    notes: "The mass encryption stop: with the verdict in enforce and the stop armed, one process encrypting a tree is killed in the middle of it with a second alert counting the files written before it stopped, and a run forking one worker per directory is stopped whole, the parent and every worker still alive at the verdict; the time from the verdict to the last member gone, and the files written meanwhile, measured in perf/08; in 100 an archive extraction, a copy, a mirror, a checkout, a package upgrade replacing compressed files through a rename, an index rebuild, a log rotation, a media encoder, a database compaction, a compressed backup and snapshot pruning all run to their end with the stop armed, and nothing is raised; in 101 a client on another address encrypting a Samba share is named by that address through smbd, and neither the session nor smbd is stopped; in 108 the same run from a second machine across the 2VM lane's network is named by that machine's address, runs to its end, and the share still answers it"
 
   - kind: cli_subcommand
     feature: surface
@@ -1144,12 +1146,11 @@ coverage:
 
   - kind: domain_module
     feature: identity
-    suites: ["TBD"]
-    owner: workload-identity
+    suites: ["107"]
     topology: 2vm
     kernel_min: "6.12"
-    profile: manual
-    notes: "This node's addresses as names another node can read, and the peer's names on a flow. No suite yet: the two-end reading needs a second agent on the attacker VM, a 2VM lane this host could not hold beside the other agent's work when the rest of the gaps were closed"
+    profile: nightly
+    notes: "This node's addresses as names another node can read, and the peer's names on a flow. 107 opens a TCP connection and sends UDP datagrams from a named program on the agent's machine to the attacker VM, reads both back off /api/v1/conntrack/connections with that program's pid and executable while the far end records the agent's address, and asserts no flow carries a peer, since no list of remote identities was handed to this agent. The two-end reading, a peer named from the list another agent publishes, needs the routes that publish and take that list, which are the enterprise agent's, so it is asserted beside them"
 
   - kind: domain_module
     feature: network_program
@@ -1161,11 +1162,11 @@ coverage:
 
   - kind: domain_module
     feature: ransom
-    suites: ["81", "82", "83", "84", "96"]
+    suites: ["81", "82", "83", "84", "96", "101", "104", "108"]
     topology: none
     kernel_min: "6.12"
     profile: nightly
-    notes: "Mass encryption recognised by signals that agree: the shadow verdict in 81, the stop in 82, the write refusal with the BPF LSM in 83 and through fanotify in 84, and in 96 a partial encryption raised on the header while the sampled entropy stays flat, and one past the sampled window that nothing reads"
+    notes: "Mass encryption recognised by signals that agree: the shadow verdict in 81, the stop in 82, the write refusal with the BPF LSM in 83 and through fanotify in 84, and in 96 a partial encryption raised on the header while the sampled entropy stays flat, and one past the sampled window that nothing reads; a share encrypted by a client on another address in 101 and from a second machine in 108, the writer named by its address through smbd rather than smbd named as the run; and in 104 the encryption call counter, including a self-made rewrite reaching the verdict on a snapshot destroyed just before it"
 
   - kind: domain_module
     feature: raw_socket
@@ -1541,3 +1542,21 @@ attack_suites:
     profile: nightly
     surfaces: ["ids", "ips"]
     notes: "SSH brute-force IDS + IPS sweep: pre-loaded threshold rules (port 22, count=5 in 30s, track_by=src_ip) round-trip via /api/v1/ids/rules + /api/v1/ips/rules; a SYN burst from the test netns to TCP/22 fires an alert with rule_id=ids-ssh-bruteforce, severity=high, MITRE T1110(.001) per the domain dst-port mapping; the IPS auto-blacklist captures the source under the same threshold. Real hydra/ncrack credential bursts and the sshd no-successful-auth negative assertion are deferred (extra deps + multi-VM topology)"
+
+  - suite: "107"
+    name: identity-across-hosts
+    topology: 2vm
+    lanes: ["2vm"]
+    kernel_min: "6.12"
+    profile: nightly
+    surfaces: ["identity", "conntrack"]
+    notes: "A TCP connection and UDP datagrams from a named program on the agent's machine to the attacker VM, named on this end by pid and executable and on the far end by nothing"
+
+  - suite: "108"
+    name: encryption-from-another-machine
+    topology: 2vm
+    lanes: ["2vm"]
+    kernel_min: "6.12"
+    profile: nightly
+    surfaces: ["ransom", "file_watch"]
+    notes: "The attacker VM encrypting a Samba share the agent's machine serves: the verdict names the client by its address through smbd, and neither the session nor smbd is stopped"
