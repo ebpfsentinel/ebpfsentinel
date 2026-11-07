@@ -10,9 +10,13 @@
 # `version` and `hashes` are required arguments and deliberately have no
 # defaults. A default version ages into a lie the first time a release is cut,
 # and a hash cannot be guessed: an evaluation without them fails saying so.
+# `version` is the agent's, which names the tarball; `release` is the product
+# release whose tag carries it in ebpfsentinel-release, and is the same number
+# unless the release notes say otherwise.
 #
 #   pkgs.callPackage ./package.nix {
 #     version = "2026.6.1";
+#     release = "2026.6.1";
 #     hashes = {
 #       x86_64-linux = "sha256-...";
 #       aarch64-linux = "sha256-...";
@@ -28,6 +32,7 @@
   stdenvNoCC,
   fetchurl,
   version,
+  release ? version,
   hashes,
 }:
 
@@ -49,7 +54,9 @@ stdenvNoCC.mkDerivation {
   inherit version;
 
   src = fetchurl {
-    url = "https://github.com/ebpfsentinel/ebpfsentinel/releases/download/v${version}/ebpfsentinel-${version}-linux-${arch}.tar.gz";
+    # The release repository is where every artifact is published; the
+    # component repository carries no release assets.
+    url = "https://github.com/ebpfsentinel/ebpfsentinel-release/releases/download/v${release}/ebpfsentinel-${version}-linux-${arch}.tar.gz";
     inherit hash;
   };
 

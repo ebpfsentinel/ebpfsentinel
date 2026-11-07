@@ -47,6 +47,7 @@ in
       example = lib.literalExpression ''
         pkgs.callPackage ./package.nix {
           version = "2026.6.1";
+          release = "2026.6.1";
           hashes.x86_64-linux = "sha256-...";
         }
       '';

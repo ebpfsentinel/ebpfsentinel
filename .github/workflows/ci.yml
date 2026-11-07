@@ -299,3 +299,16 @@ jobs:
             [ -f "${dir}Cargo.toml" ] && : > "ebpf-stand-ins/$(basename "${dir}")"
           done
           dist/packaging/test-packages.sh --bin-dir bin --ebpf-dir ebpf-stand-ins
+
+  # The NixOS module and the package derivation have no host to boot here, so
+  # they are held to what an evaluation produces: the URL the tarball comes
+  # from, the units beside the ones the packages install, the kernel floor
+  # and the exclusive configuration sources. Nothing is built.
+  nix-eval:
+    name: NixOS module evaluation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Evaluate the module and the package against the pinned nixpkgs
+        run: dist/nix/check.sh
