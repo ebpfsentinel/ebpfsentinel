@@ -90,7 +90,9 @@ _wait_enforced() {
 }
 
 # _start_smbd - a Samba of the suite's own, on the host side of the veth
-# alone, serving one guest-writable share.
+# alone, serving one guest-writable share. Every directory it writes is its
+# own: the distribution's service is disabled on the VM, so /run/samba is
+# never created and smbd refuses to start on the default.
 _start_smbd() {
     local samba="${DATA_DIR}/samba"
     cat >"${samba}/smb.conf" <<EOF
@@ -107,6 +109,7 @@ _start_smbd() {
   state directory = ${samba}
   cache directory = ${samba}
   private dir = ${samba}/private
+  ncalrpc dir = ${samba}/ncalrpc
   log file = ${samba}/log.smbd
   server min protocol = SMB3
 [share]
