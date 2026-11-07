@@ -17156,12 +17156,13 @@
               "null"
             ],
             "format": "int64",
-            "description": "When the process started, which precedes `started_at_ns` for a\nprocess that forked before it exec'd.",
+            "description": "When the process started, on the kernel's boot clock: an identity\nthat tells this process apart from a later one given its pid.",
             "minimum": 0
           },
           "started_at_ns": {
             "type": "integer",
             "format": "int64",
+            "description": "When the exec, or the fork for a process that has not exec'd, was\nseen, in nanoseconds since the Unix epoch.",
             "minimum": 0
           },
           "uid": {

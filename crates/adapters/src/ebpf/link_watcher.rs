@@ -66,7 +66,7 @@ use tracing::{debug, info, warn};
 use super::attach_inspect::{find_attr, nla_align};
 use super::ids_workload_scope::cgroup_id_of;
 use super::netkit::{BPF_NETKIT_PEER, BPF_NETKIT_PRIMARY, netkit_attach};
-use super::ringbuf_observer::boottime_now_ns;
+use super::ringbuf_observer::{boottime_now_ns, boottime_to_epoch_ns};
 use super::{kfunc_attach, tcx_order};
 use crate::container::pod_cgroups::pod_uid;
 use crate::container::pod_claims::{PodClaimsDir, now_secs};
@@ -681,7 +681,8 @@ impl OwnerReporting {
             gid: meta.gid(),
             cgroup_id,
             comm: comm.trim_end().to_owned(),
-            at_ns: boottime_now_ns(),
+            // On the wall clock, as the kernel's exec records are once read.
+            at_ns: boottime_to_epoch_ns(boottime_now_ns()),
             start_ns: None,
             parent_pid: None,
             parent_start_ns: None,

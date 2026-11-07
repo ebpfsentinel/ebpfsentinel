@@ -2,7 +2,7 @@
 
 use crate::ebpf::event_reader::{drain_tick, watch_ringbuf};
 use crate::ebpf::map_store::MapStore;
-use crate::ebpf::ringbuf_observer::{DrainTrigger, RingBufObserver};
+use crate::ebpf::ringbuf_observer::{DrainTrigger, RingBufObserver, boottime_to_epoch_ns};
 use aya::maps::{MapData, RingBuf};
 use domain::process::entity::{ProcessEventKind, ProcessLifecycleEvent};
 use ebpf_common::process::{
@@ -132,7 +132,12 @@ fn parse(raw: &ProcessEvent) -> Option<ProcessLifecycleEvent> {
         gid: raw.gid,
         cgroup_id: raw.cgroup_id,
         comm: comm_to_string(&raw.comm),
-        at_ns: raw.at_ns,
+        // The file watch and the encryption calls are stamped on the wall
+        // clock, and the ransom verdict and the host rules pair an exec with
+        // them inside one window, so the exec is moved onto that clock here.
+        // The start instants stay on the boot clock: they are an identity
+        // compared only with each other, never a time compared with an event.
+        at_ns: boottime_to_epoch_ns(raw.at_ns),
         start_ns: known_u64(raw.start_ns),
         parent_pid: (raw.parent_tgid != 0).then_some(raw.parent_tgid),
         parent_start_ns: known_u64(raw.parent_start_ns),
@@ -181,6 +186,26 @@ mod tests {
         assert_eq!(event.tgid, 42);
         assert_eq!(event.comm, "curl");
         assert_eq!(event.cgroup_id, 777);
+    }
+
+    #[test]
+    fn the_event_instant_is_moved_onto_the_wall_clock_and_the_start_is_not() {
+        let mut record = raw(PROCESS_EVENT_EXEC);
+        record.at_ns = crate::ebpf::ringbuf_observer::boottime_now_ns();
+        let event = parse(&record).unwrap();
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let wall = u64::try_from(wall).unwrap();
+        // Read a moment apart, so the two agree to within a second rather
+        // than to the nanosecond.
+        assert!(
+            event.at_ns.abs_diff(wall) < 1_000_000_000,
+            "{} vs {wall}",
+            event.at_ns
+        );
+        assert_eq!(event.start_ns, Some(900));
     }
 
     #[test]

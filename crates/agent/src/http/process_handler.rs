@@ -137,9 +137,11 @@ pub struct ProcessEntryResponse {
     pub cgroup_id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<ProcessContainerResponse>,
+    /// When the exec, or the fork for a process that has not exec'd, was
+    /// seen, in nanoseconds since the Unix epoch.
     pub started_at_ns: u64,
-    /// When the process started, which precedes `started_at_ns` for a
-    /// process that forked before it exec'd.
+    /// When the process started, on the kernel's boot clock: an identity
+    /// that tells this process apart from a later one given its pid.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_ns: Option<u64>,
     /// When the parent started, read in the kernel with its pid.

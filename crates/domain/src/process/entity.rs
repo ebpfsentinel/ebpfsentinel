@@ -33,9 +33,11 @@ pub struct ProcessLifecycleEvent {
     pub cgroup_id: u64,
     /// The kernel's `comm`, already trimmed of its NUL padding.
     pub comm: String,
-    /// `bpf_ktime_get_boot_ns` at the tracepoint.
+    /// The tracepoint's `bpf_ktime_get_boot_ns`, moved onto the wall clock
+    /// (nanoseconds since the Unix epoch) by the reader, which is the clock
+    /// the file and encryption signals it is paired with are stamped on.
     pub at_ns: u64,
-    /// When the process itself started, on the same boot clock: with the
+    /// When the process itself started, on the kernel's boot clock: with the
     /// pid, the identity a reused pid cannot take over. `None` where the
     /// kernel could not read it.
     pub start_ns: Option<u64>,
@@ -140,9 +142,9 @@ pub struct ProcessEntry {
     /// later process that took its pid. Only the kernel read gives it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_start_ns: Option<u64>,
-    /// When this process started, on the boot clock `started_at_ns` uses.
-    /// Earlier than `started_at_ns` for a process that forked and then
-    /// exec'd, and absent where the kernel could not read it.
+    /// When this process started, on the kernel's boot clock. An identity
+    /// compared only with other start instants, never with `started_at_ns`,
+    /// which is on the wall clock; absent where the kernel could not read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_ns: Option<u64>,
     /// The kernel's `comm`: sixteen bytes, truncated by the kernel, a hint.
@@ -169,9 +171,10 @@ pub struct ProcessEntry {
     /// could add. Absent on a host process and on a node with no resolver.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<ContainerContext>,
-    /// `bpf_ktime_get_boot_ns` at the exec or the fork that recorded the
-    /// entry. A boot clock, so it survives a wall-clock change, and it is
-    /// what orders the table for eviction.
+    /// When the exec or the fork that recorded the entry happened, in
+    /// nanoseconds since the Unix epoch: the kernel's boot clock plus an
+    /// offset read once at start-up, so it moves with neither a wall-clock
+    /// change nor a suspend, and it is what orders the table for eviction.
     pub started_at_ns: u64,
     /// When the kernel said the process exited. Only an entry kept as an
     /// ancestor carries one; a live entry never does.
