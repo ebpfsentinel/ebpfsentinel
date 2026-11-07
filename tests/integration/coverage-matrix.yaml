@@ -224,6 +224,9 @@ suite_profiles:
   "99": nightly
   "100": nightly
   "101": nightly
+  "130": nightly
+  "131": nightly
+  "132": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -877,11 +880,11 @@ coverage:
 
   - kind: domain_module
     feature: container
-    suites: ["54"]
+    suites: ["54", "130", "131"]
     topology: 2vm
     kernel_min: "6.12"
     profile: nightly
-    notes: "cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 54; AlertResponse container fields and k8s pod enrichment tracked as deferred ACs in the suite header. Per-tenant cgroup filtering is enterprise-only and is tested in the enterprise repo"
+    notes: "cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 54; a Podman container named by id, name and image, rootful and rootless through its user's own socket, with each runtime reported reachable, in 130; a container containerd and CRI-O start through the CRI attributed to its id, its runtime and its scope in 131, both on the vagrant-runtimes lane. The agent itself running as a Podman container has no suite: no agent image is published to pull, and building one is a full Rust build per run. Per-tenant cgroup filtering is enterprise-only and is tested in the enterprise repo"
 
   - kind: domain_module
     feature: ddos
@@ -1304,11 +1307,11 @@ coverage:
 
   - kind: capability
     feature: network_executables
-    suites: ["91"]
+    suites: ["91", "132"]
     topology: none
     kernel_min: "6.12"
     profile: nightly
-    notes: "Needs the BPF LSM active at boot, which the agent VM's boot line sets"
+    notes: "Needs the BPF LSM active at boot, which the agent VM's boot line sets; 132 has an enforcing list refuse to start where bpf is masked out of the module list, naming the lsm= parameter, an observing one start, and an enforcing one refuse to start with no BPF token rather than serve an API enforcing nothing"
 
   - kind: capability
     feature: write_refusal
