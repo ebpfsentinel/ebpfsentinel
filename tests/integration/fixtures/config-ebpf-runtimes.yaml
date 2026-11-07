@@ -1,0 +1,92 @@
+# config-ebpf-runtimes.yaml - attribution per container runtime.
+#
+# The resolver names every container from its cgroup path; the Podman
+# enricher names a Podman container, rootful and rootless, through the
+# runtime's Docker-compatible socket. containerd and CRI-O outside
+# Kubernetes have no enricher, so their containers carry the id and the
+# runtime only. Docker is off: the lane has no Docker engine, and its
+# socket missing must not be what a runtime's suite reads.
+# IDS carries one signature on TCP/65501, the port every probe container
+# dials, so each container produces a deterministic alert.
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  allow_plaintext_api: true
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  default_policy: pass
+  rules: []
+
+ids:
+  enabled: true
+  mode: alert
+  # Inspect the egress hook too: the container's outbound request to the
+  # probe port is seen on egress, where the originating socket is bound to
+  # the skb so the container's cgroup is recoverable for enrichment.
+  inspect_egress: true
+  rules:
+    - id: ids-container-probe
+      description: "Container cgroup-enrichment probe target"
+      severity: high
+      protocol: tcp
+      dst_port: 65501
+      enabled: true
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+container:
+  resolver:
+    enabled: true
+    cache_size: 4096
+    proc_path: /proc
+  docker:
+    enabled: false
+  podman:
+    enabled: true
+    socket: /run/podman/podman.sock
+    rootless: true
+    run_user_root: /run/user
+    cache_size: 256
+    cache_ttl_seconds: 60
+    timeout_ms: 2000
+  kubernetes:
+    enabled: false
+
+alerting:
+  enabled: true
+  dedup_window_secs: 5
+  throttle_window_secs: 60
+  throttle_max: 1000
+  routes: []
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
+
+# The suites drive the datapath, not the control plane's identity: the
+# agent answers unauthenticated plaintext here, which the two opt-outs
+# above are what make legal on a non-loopback bind.
+auth:
+  enabled: false

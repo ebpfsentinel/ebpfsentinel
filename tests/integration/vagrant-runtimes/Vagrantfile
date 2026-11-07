@@ -1,0 +1,203 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+#
+# Container runtimes lane: one VM carrying every runtime the agent names a
+# container for outside Kubernetes - Podman rootful and rootless, containerd
+# and CRI-O driven through the CRI with the systemd cgroup driver - so the
+# suites that assert attribution per runtime run against the runtime itself
+# rather than against a cgroup path written by hand.
+#
+# Kept apart from ../vagrant on purpose: that lane's agent VM carries the
+# datapath suites and their tools, and four runtimes on one host is a
+# different machine from the one those suites describe. Nothing is built
+# here: the agent, the warden and the eBPF objects are the ones the host
+# built, synced from target/ the way the source tree is.
+#
+# Usage:
+#   cargo build --release -p ebpfsentinel-agent -p ebpfsentinel-warden  # on the host
+#   cargo xtask ebpf-build                                               # on the host
+#   vagrant up runtimes
+#   vagrant ssh -c 'cd ebpfsentinel/tests/integration && \
+#       sudo bats suites/130-*.bats suites/131-*.bats suites/132-*.bats'
+#   vagrant rsync           # after a host rebuild
+#
+# Environment variables:
+#   RUNTIMES_VM_CPUS     vCPUs (default: 2)
+#   RUNTIMES_VM_MEMORY   RAM in MB (default: 3072)
+#
+# Provider: VMware Workstation (vmware_desktop) or VirtualBox.
+# Base box: bento/ubuntu-24.04, moved onto the HWE kernel (>= 6.12).
+
+# The CRI-O and cri-tools release lines installed. Both come from the
+# Kubernetes project's own repositories, which publish one line per minor.
+CRI_LINE = "v1.34"
+
+Vagrant.configure("2") do |config|
+  config.vm.define "runtimes", primary: true do |rt|
+    rt.vm.box = "bento/ubuntu-24.04"
+    rt.vm.hostname = "ebpf-runtimes"
+    rt.vm.boot_timeout = 600
+
+    rt.vm.synced_folder ".", "/vagrant", disabled: true
+    rt.vm.synced_folder "../../../", "/home/vagrant/ebpfsentinel",
+      type: "rsync",
+      rsync__exclude: [".git/", "target/", "node_modules/", ".vagrant/", "ebpf-out/"]
+    # Only what the suites start: the two release binaries and the objects.
+    rt.vm.synced_folder "../../../target/", "/home/vagrant/ebpfsentinel/target",
+      type: "rsync",
+      rsync__args: [
+        "--archive", "--delete", "--copy-links", "--prune-empty-dirs",
+        "--include=/release/", "--include=/release/ebpfsentinel-agent",
+        "--include=/release/warden",
+        "--include=/bpfel-unknown-none/", "--include=/bpfel-unknown-none/release/",
+        "--include=/bpfel-unknown-none/release/*", "--exclude=*"
+      ]
+
+    rt.vm.provider "vmware_desktop" do |v|
+      v.vmx["memsize"] = ENV.fetch("RUNTIMES_VM_MEMORY", "3072")
+      v.vmx["numvcpus"] = ENV.fetch("RUNTIMES_VM_CPUS", "2")
+      v.vmx["displayname"] = "eBPFsentinel Runtimes VM"
+      v.gui = false
+      v.linked_clone = false
+      v.vmx["ethernet0.virtualDev"] = "vmxnet3"
+    end
+
+    rt.vm.provider "virtualbox" do |vb|
+      vb.memory = ENV.fetch("RUNTIMES_VM_MEMORY", "3072").to_i
+      vb.cpus = ENV.fetch("RUNTIMES_VM_CPUS", "2").to_i
+      vb.name = "eBPFsentinel Runtimes VM"
+      vb.gui = false
+    end
+
+    # ----------------------------------------------------------
+    # Provisioner: kernel-hwe
+    # The box ships 6.8, below the agent's floor. The HWE line is above it.
+    # ----------------------------------------------------------
+    rt.vm.provision "shell", name: "kernel-hwe", reboot: true, inline: <<-SHELL
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y --no-install-recommends linux-tools-generic-hwe-24.04
+      running="$(uname -r | sed 's/-generic//')"
+      if dpkg --compare-versions "$running" ge 6.12; then
+        exit 0
+      fi
+      apt-get install -y --no-install-recommends linux-generic-hwe-24.04
+    SHELL
+
+    # ----------------------------------------------------------
+    # Provisioner: bpf-lsm
+    # `bpf` among the security modules the kernel starts, as ../vagrant
+    # does: a suite that wants a host without it masks the list in a
+    # private mount namespace.
+    # ----------------------------------------------------------
+    rt.vm.provision "shell", name: "bpf-lsm", reboot: true, inline: <<-SHELL
+      set -euxo pipefail
+      conf=/etc/default/grub.d/91-bpf-lsm.cfg
+      if ! grep -qw bpf /sys/kernel/security/lsm || [ ! -f "$conf" ]; then
+        modules="$(tr ',' '\\n' </sys/kernel/security/lsm | grep -vx -e capability -e bpf | paste -sd, -)"
+        want="GRUB_CMDLINE_LINUX=\\"\\$GRUB_CMDLINE_LINUX lsm=${modules},bpf\\""
+        printf '%s\\n' "$want" > "$conf"
+        update-grub
+      fi
+    SHELL
+
+    # ----------------------------------------------------------
+    # Provisioner: base
+    # The tools the suites drive, and the token prerequisites: the warden
+    # delegates a bpffs into a user namespace, which Ubuntu's AppArmor
+    # restriction refuses unless relaxed.
+    # ----------------------------------------------------------
+    rt.vm.provision "shell", name: "base", inline: <<-SHELL
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y --no-install-recommends \
+        iproute2 curl jq ncat bc git ca-certificates gpg uidmap dbus-user-session \
+        libpcap0.8t64 bats
+      cat > /etc/sysctl.d/99-ebpfsentinel-userns.conf <<SYSCTL
+kernel.apparmor_restrict_unprivileged_userns=0
+SYSCTL
+      sysctl -p /etc/sysctl.d/99-ebpfsentinel-userns.conf
+      cat > /etc/security/limits.d/99-ebpfsentinel.conf <<LIMITS
+*  soft  memlock  unlimited
+*  hard  memlock  unlimited
+LIMITS
+      mountpoint -q /sys/fs/bpf || mount -t bpf bpffs /sys/fs/bpf
+      # The firewall's conntrack kfuncs are registered by nf_conntrack, which
+      # nothing on a host without a netfilter rule loads, and the intrusion
+      # detector's encapsulation kfunc by fou, which nothing loads either.
+      printf '%s\\n' nf_conntrack fou > /etc/modules-load.d/ebpfsentinel.conf
+      modprobe nf_conntrack
+      modprobe fou
+    SHELL
+
+    # ----------------------------------------------------------
+    # Provisioner: podman
+    # Rootful on /run/podman/podman.sock, and rootless for the vagrant
+    # user on /run/user/<uid>/podman/podman.sock: lingering keeps that
+    # user's manager running with nobody logged in, the way a service
+    # account's runtime lives on a real host.
+    # ----------------------------------------------------------
+    rt.vm.provision "shell", name: "podman", inline: <<-SHELL
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get install -y --no-install-recommends podman crun conmon netavark aardvark-dns
+      systemctl enable --now podman.socket
+      grep -q '^vagrant:' /etc/subuid || usermod --add-subuids 100000-165535 vagrant
+      grep -q '^vagrant:' /etc/subgid || usermod --add-subgids 100000-165535 vagrant
+      loginctl enable-linger vagrant
+      uid="$(id -u vagrant)"
+      for _ in $(seq 1 30); do [ -S "/run/user/${uid}/bus" ] && break; sleep 1; done
+      sudo -u vagrant XDG_RUNTIME_DIR="/run/user/${uid}" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" \
+        systemctl --user enable --now podman.socket
+      podman pull docker.io/library/busybox:1.36
+      sudo -u vagrant XDG_RUNTIME_DIR="/run/user/${uid}" podman pull docker.io/library/busybox:1.36
+    SHELL
+
+    # ----------------------------------------------------------
+    # Provisioner: containerd
+    # The CRI plugin on, the systemd cgroup driver on, which is how a
+    # kubelet on a systemd host drives it and what puts a container in a
+    # cri-containerd-<id>.scope.
+    # ----------------------------------------------------------
+    rt.vm.provision "shell", name: "containerd", inline: <<-SHELL
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get install -y --no-install-recommends containerd runc
+      mkdir -p /etc/containerd
+      containerd config default > /etc/containerd/config.toml
+      sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+      grep -q 'SystemdCgroup = true' /etc/containerd/config.toml
+      systemctl restart containerd
+      systemctl enable containerd
+    SHELL
+
+    # ----------------------------------------------------------
+    # Provisioner: cri-o and crictl
+    # From the Kubernetes project's repositories. CRI-O's default cgroup
+    # manager is systemd, which puts a container in crio-<id>.scope.
+    # ----------------------------------------------------------
+    rt.vm.provision "shell", name: "cri-o", inline: <<-SHELL
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      install -d -m 0755 /etc/apt/keyrings
+      if [ ! -f /etc/apt/sources.list.d/cri-o.list ]; then
+        curl -fsSL "https://pkgs.k8s.io/core:/stable:/#{CRI_LINE}/deb/Release.key" \
+          | gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/kubernetes.gpg] https://pkgs.k8s.io/core:/stable:/#{CRI_LINE}/deb/ /" \
+          > /etc/apt/sources.list.d/kubernetes.list
+        curl -fsSL "https://download.opensuse.org/repositories/isv:/cri-o:/stable:/#{CRI_LINE}/deb/Release.key" \
+          | gpg --dearmor --yes -o /etc/apt/keyrings/cri-o.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/cri-o.gpg] https://download.opensuse.org/repositories/isv:/cri-o:/stable:/#{CRI_LINE}/deb/ /" \
+          > /etc/apt/sources.list.d/cri-o.list
+        apt-get update
+      fi
+      apt-get install -y --no-install-recommends cri-o cri-tools
+      systemctl enable --now crio
+      crictl --runtime-endpoint unix:///run/containerd/containerd.sock pull docker.io/library/busybox:1.36
+      crictl --runtime-endpoint unix:///var/run/crio/crio.sock pull docker.io/library/busybox:1.36
+    SHELL
+  end
+end
