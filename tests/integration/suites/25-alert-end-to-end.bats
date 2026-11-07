@@ -8,6 +8,10 @@
 #   3. Validate alert fields (source, destination, protocol)
 #   4. Mark the alert as false positive
 #   5. Verify FP flag is persisted and filterable
+#   6. Triage one alert (status, assignee, note) and read it back through
+#      the query's triage filters
+#   7. Triage several alerts at once, where one id is no longer held, and
+#      refuse an unknown status or an alert that does not exist
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
@@ -505,4 +509,92 @@ _drive_alert_traffic() {
         echo "row:   ${row}" >&2
         return 1
     }
+}
+
+# _triage_alert_id - the id of one alert this suite raised, driving the
+# traffic again when none is held yet.
+_triage_alert_id() {
+    local id
+    id="$(api_get "/api/v1/alerts?limit=200" \
+        | jq -r '[.alerts[] | select(.rule_id == "ids-alert-test")][0].id // empty')"
+    if [ -z "${id}" ]; then
+        _drive_alert_traffic
+        sleep 3
+        id="$(api_get "/api/v1/alerts?limit=200" \
+            | jq -r '[.alerts[] | select(.rule_id == "ids-alert-test")][0].id // empty')"
+    fi
+    echo "${id}"
+}
+
+@test "one alert is triaged and the query finds it by status and assignee" {
+    local id body
+    id="$(_triage_alert_id)"
+    [ -n "${id}" ] || { echo "no ids-alert-test alert to triage" >&2; return 1; }
+
+    body="$(api_patch "/api/v1/alerts/${id}/triage" \
+        '{"status":"investigating","assignee":"analyst-1","note":"port 4444 from the lab namespace","author":"suite-25"}')"
+    _load_http_status
+    [ "${HTTP_STATUS}" = "200" ] || { echo "PATCH triage: ${HTTP_STATUS} ${body}" >&2; return 1; }
+    echo "${body}" | jq -e --arg id "${id}" '
+        .alert_id == $id
+        and .status == "investigating"
+        and .assignee == "analyst-1"
+        and ([.notes[] | select(.author == "suite-25" and .text == "port 4444 from the lab namespace")] | length) == 1
+        and .updated_ns > 0
+    ' >/dev/null || { echo "triage answer: ${body}" >&2; return 1; }
+
+    # The triage lives beside the alert, and the query reads it back.
+    api_get "/api/v1/alerts?status=investigating&limit=1000" \
+        | jq -e --arg id "${id}" '[.alerts[] | select(.id == $id)] | length == 1' >/dev/null || {
+        echo "status=investigating does not return ${id}" >&2; return 1; }
+    api_get "/api/v1/alerts?assignee=analyst-1&limit=1000" \
+        | jq -e --arg id "${id}" '[.alerts[] | select(.id == $id)] | length == 1' >/dev/null || {
+        echo "assignee=analyst-1 does not return ${id}" >&2; return 1; }
+    api_get "/api/v1/alerts?unassigned=true&limit=1000" \
+        | jq -e --arg id "${id}" '[.alerts[] | select(.id == $id)] | length == 0' >/dev/null || {
+        echo "unassigned=true still returns ${id}" >&2; return 1; }
+    api_get "/api/v1/alerts?status=open&limit=1000" \
+        | jq -e --arg id "${id}" '[.alerts[] | select(.id == $id)] | length == 0' >/dev/null || {
+        echo "status=open still returns ${id}" >&2; return 1; }
+}
+
+@test "bulk triage resolves the alerts it holds and names the one it does not" {
+    local id body
+    id="$(_triage_alert_id)"
+    [ -n "${id}" ] || { echo "no ids-alert-test alert to triage" >&2; return 1; }
+
+    body="$(api_post "/api/v1/alerts/triage" \
+        "{\"ids\":[\"${id}\",\"suite-25-no-such-alert\"],\"status\":\"resolved\",\"assignee\":null,\"note\":\"closed in bulk\"}")"
+    _load_http_status
+    [ "${HTTP_STATUS}" = "200" ] || { echo "POST bulk triage: ${HTTP_STATUS} ${body}" >&2; return 1; }
+    echo "${body}" | jq -e --arg id "${id}" '
+        .updated == [$id] and .missing == ["suite-25-no-such-alert"]
+    ' >/dev/null || { echo "bulk answer: ${body}" >&2; return 1; }
+
+    # Resolved, and taken off whoever held it.
+    api_get "/api/v1/alerts?status=resolved&limit=1000" \
+        | jq -e --arg id "${id}" '[.alerts[] | select(.id == $id)] | length == 1' >/dev/null || {
+        echo "status=resolved does not return ${id}" >&2; return 1; }
+    api_get "/api/v1/alerts?unassigned=true&limit=1000" \
+        | jq -e --arg id "${id}" '[.alerts[] | select(.id == $id)] | length == 1' >/dev/null || {
+        echo "unassigned=true does not return ${id} after assignee null" >&2; return 1; }
+}
+
+@test "triage refuses an unknown status and an alert that does not exist" {
+    local id body
+    id="$(_triage_alert_id)"
+    [ -n "${id}" ] || { echo "no ids-alert-test alert to triage" >&2; return 1; }
+
+    body="$(api_patch "/api/v1/alerts/${id}/triage" '{"status":"ignored"}')"
+    _load_http_status
+    [ "${HTTP_STATUS}" = "400" ] || { echo "unknown status answered ${HTTP_STATUS}: ${body}" >&2; return 1; }
+
+    body="$(api_patch "/api/v1/alerts/suite-25-no-such-alert/triage" '{"status":"acknowledged"}')"
+    _load_http_status
+    [ "${HTTP_STATUS}" = "404" ] || { echo "missing alert answered ${HTTP_STATUS}: ${body}" >&2; return 1; }
+    echo "${body}" | grep -q 'ALERT_NOT_FOUND'
+
+    body="$(api_post "/api/v1/alerts/triage" '{"ids":[],"status":"resolved"}')"
+    _load_http_status
+    [ "${HTTP_STATUS}" = "400" ] || { echo "empty bulk answered ${HTTP_STATUS}: ${body}" >&2; return 1; }
 }
