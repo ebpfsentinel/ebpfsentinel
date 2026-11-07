@@ -2152,6 +2152,9 @@ pub async fn run(
     };
     let ebpf_capable = bpf_handle.is_some();
     metrics.set_bpf_token_used(ebpf_capable);
+    if !ebpf_capable && let Some(refusal) = enforcement_without_ebpf(&config, &workload_policy)? {
+        anyhow::bail!(refusal);
+    }
 
     // Register the token fd process-wide BEFORE any eBPF load so every
     // map/BTF/program syscall (aya and the kfunc loader) is authorized by
@@ -6871,6 +6874,48 @@ pub(crate) fn network_policy_unavailable(reason: &str) -> String {
     )
 }
 
+/// What the agent says when it has no BPF token, so nothing loads.
+const NO_BPF_TOKEN: &str = "no BPF token could be created, so no eBPF program loads; the warden \
+     delegates the bpffs: start the agent with EBPFSENTINEL_WARDEN_SOCK pointing at a running \
+     warden";
+
+/// Why an agent with no BPF token refuses to start, if its configuration
+/// enforces something only an eBPF program carries out.
+///
+/// Without a token the agent serves its API and loads nothing. That is a
+/// fair way to run for whatever only observes, and a promise the node does
+/// not keep for a list, a rule or a policy in enforce: each refuses when its
+/// own hooks fail to attach, and a missing token must not be the one way past
+/// those refusals.
+///
+/// # Errors
+///
+/// Returns an error when the executables list cannot be read.
+pub(crate) fn enforcement_without_ebpf(
+    config: &AgentConfig,
+    workload_policy: &domain::firewall::workload::WorkloadPolicy,
+) -> anyhow::Result<Option<String>> {
+    if let Some(list) = config.network_executables()?
+        && list.mode == domain::firewall::workload::WorkloadMode::Enforce
+    {
+        return Ok(Some(format!(
+            "firewall.network_executables is set to enforce and cannot be applied here: \
+             {NO_BPF_TOKEN}"
+        )));
+    }
+    if workload_policy.enforces() {
+        return Ok(Some(
+            adapters::ebpf::workload_firewall_attach::enforcement_unavailable(NO_BPF_TOKEN),
+        ));
+    }
+    if config.container.kubernetes.network_policy.mode
+        == infrastructure::config::NetworkPolicyMode::Enforce
+    {
+        return Ok(Some(network_policy_unavailable(NO_BPF_TOKEN)));
+    }
+    Ok(None)
+}
+
 /// Start compiling the cluster's `NetworkPolicy` into the workload firewall
 /// object, once its hooks are attached.
 ///
@@ -9272,6 +9317,55 @@ fn attach_tc_egress_auto(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn refusal_without_ebpf(yaml: &str) -> Option<String> {
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let policy = domain::firewall::workload::WorkloadPolicy::from_rules(
+            &config.firewall_rules().unwrap(),
+        )
+        .unwrap()
+        .with_dns(config.workload_dns().unwrap())
+        .unwrap();
+        enforcement_without_ebpf(&config, &policy).unwrap()
+    }
+
+    const NO_ENFORCE: &str = "agent:\n  interfaces: [eth0]\n";
+
+    #[test]
+    fn an_agent_enforcing_nothing_runs_without_a_token() {
+        assert_eq!(refusal_without_ebpf(NO_ENFORCE), None);
+        let observing = "agent:\n  interfaces: [eth0]\nfirewall:\n  network_executables:\n    \
+                         enabled: true\n    mode: observe\n    executables: [/usr/bin/curl]\n";
+        assert_eq!(refusal_without_ebpf(observing), None);
+    }
+
+    #[test]
+    fn an_enforcing_executables_list_refuses_without_a_token() {
+        let yaml = "agent:\n  interfaces: [eth0]\nfirewall:\n  network_executables:\n    \
+                    enabled: true\n    mode: enforce\n    executables: [/usr/bin/curl]\n";
+        let refusal = refusal_without_ebpf(yaml).unwrap();
+        assert!(refusal.starts_with("firewall.network_executables is set to enforce"));
+        assert!(refusal.contains("EBPFSENTINEL_WARDEN_SOCK"));
+    }
+
+    #[test]
+    fn an_enforcing_workload_rule_refuses_without_a_token() {
+        let yaml = "agent:\n  interfaces: [eth0]\nfirewall:\n  rules:\n    - id: deny-curl\n      \
+                    priority: 10\n      action: deny\n      workload:\n        exe: /usr/bin/curl\n        \
+                    mode: enforce\n";
+        let refusal = refusal_without_ebpf(yaml).unwrap();
+        assert!(refusal.contains("workload rule that refuses"));
+        assert!(refusal.contains("no BPF token"));
+    }
+
+    #[test]
+    fn an_enforcing_network_policy_refuses_without_a_token() {
+        let yaml = "agent:\n  interfaces: [eth0]\ncontainer:\n  kubernetes:\n    enabled: true\n    \
+                    network_policy:\n      mode: enforce\n";
+        let refusal = refusal_without_ebpf(yaml).unwrap();
+        assert!(refusal.starts_with("container.kubernetes.network_policy.mode is enforce"));
+        assert!(refusal.contains("no BPF token"));
+    }
 
     #[test]
     fn the_agent_api_ports_are_always_kept_open() {
