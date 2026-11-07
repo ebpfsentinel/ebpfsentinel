@@ -87,7 +87,12 @@ done
 
 # Copy STIX fixtures
 if [ -d "${INTEGRATION_DIR}/fixtures/stix" ]; then
-    cp -r "${INTEGRATION_DIR}/fixtures/stix" "${DATA_DIR}/stix"
+    # Replaced rather than copied over: a suite running as root leaves the
+    # directory root-owned, and `cp -r` onto an existing directory nests the
+    # copy inside it instead of refreshing it, so a second provision failed.
+    sudo rm -rf "${DATA_DIR}/stix"
+    sudo install -d -m 0755 "${DATA_DIR}/stix"
+    sudo cp -r "${INTEGRATION_DIR}/fixtures/stix/." "${DATA_DIR}/stix/"
 fi
 
 echo ""
