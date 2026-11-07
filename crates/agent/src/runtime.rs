@@ -677,6 +677,12 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
     let ct_settings = config.conntrack_settings();
     let mut ct_svc = ConnTrackAppService::new(Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     ct_svc.set_enabled(config.conntrack.enabled);
+    startup::wire_kernel_conntrack(&mut ct_svc, config);
+    // One resolver names the process behind a socket for every reader, the
+    // connection listing included, so a flow read here and the alert raised
+    // on it name the same workload.
+    let workloads = application::workload_resolver::WorkloadResolver::new();
+    ct_svc.set_workload_resolver(workloads.clone());
     if config.conntrack.enabled
         && let Err(e) = ct_svc.reload_settings(ct_settings)
     {
@@ -911,7 +917,6 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         process_signal_svc: None,
         quarantine_svc: None,
         workloads: {
-            let workloads = application::workload_resolver::WorkloadResolver::new();
             workloads.install_remote(Arc::clone(&remote_identities));
             workloads
         },

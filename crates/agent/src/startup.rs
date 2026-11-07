@@ -815,19 +815,7 @@ pub async fn run(
     let ct_settings = config.conntrack_settings();
     let mut ct_svc = ConnTrackAppService::new(Arc::clone(&metrics) as Arc<dyn MetricsPort>);
     ct_svc.set_enabled(config.conntrack.enabled);
-    // Inject the kernel netfilter conntrack port. It owns both the
-    // authoritative read view (coherent with `conntrack -L`) and the kernel
-    // sysctl writes (timeouts + tcp_loose hardening). Wire it whenever
-    // conntrack is enabled, BEFORE reload_settings, so the settings sync
-    // actually reaches the kernel - those writes are no-ops until the port is
-    // present. On kernels without CONFIG_NF_CONNTRACK_PROCFS the sysctl knobs
-    // still exist but /proc/net/nf_conntrack does not, and the port falls back
-    // to dumping through conntrack-tools.
-    if config.conntrack.enabled {
-        ct_svc.set_netfilter_port(Box::new(
-            adapters::netfilter::conntrack::ProcNetfilterConntrackPort::new(),
-        ));
-    }
+    wire_kernel_conntrack(&mut ct_svc, &config);
     let nf_ct_available = adapters::netfilter::conntrack::is_conntrack_readable();
     let conntrack_event_tx = if nf_ct_available {
         info!(
@@ -2106,57 +2094,12 @@ pub async fn run(
     // Bootstrap the BPF token before any program load, so the loader can
     // attach the token fd and the Prometheus gauge is set before eBPF
     // attachment races with the metrics scrape.
-    let bpf_policy = adapters::ebpf::BpfTokenPolicy::new(config.agent.bpf_token.bpffs_path.clone());
-    let bpf_handle = match adapters::ebpf::bootstrap_bpf(&bpf_policy) {
-        Ok(h) => {
-            info!(
-                kernel = h.kernel.version_string(),
-                reason = h.reason,
-                warden = warden_sock.is_some(),
-                "eBPF loading via BPF token"
-            );
-            Some(h)
-        }
-        Err(e) => {
-            error!(
-                error = %e,
-                "BPF token unavailable - running in API-only mode (no eBPF). The warden \
-                 delegates the bpffs: start the agent with EBPFSENTINEL_WARDEN_SOCK pointing \
-                 at a running warden."
-            );
-            None
-        }
-    };
+    let bpf_handle = establish_bpf_token(&config, warden_sock.is_some());
     let ebpf_capable = bpf_handle.is_some();
     metrics.set_bpf_token_used(ebpf_capable);
     if !ebpf_capable && let Some(refusal) = enforcement_without_ebpf(&config, &workload_policy)? {
         anyhow::bail!(refusal);
     }
-
-    // Register the token fd process-wide BEFORE any eBPF load so every
-    // map/BTF/program syscall (aya and the kfunc loader) is authorized by
-    // the token. The token fd is kept alive for the process lifetime by
-    // `ebpf_state.bpf_handle`.
-    if let Some(handle) = bpf_handle.as_ref() {
-        adapters::ebpf::set_bpf_token_fd(handle.token_fd.as_raw_fd());
-    }
-
-    // Whether the file kfuncs are usable here is a load, not a version: ask it
-    // once, after the token is registered, because the agent's own LSM
-    // objects load through that token and the probe must be asked the same way.
-    // What they answer is logged with every other capability once the
-    // attaches below have answered too.
-    adapters::ebpf::file_kfunc_probe::init_cached();
-    adapters::ebpf::kfunc_feature_probe::init_cached();
-
-    // In BPF-token mode the agent cannot open a kernel module's BTF object fd
-    // itself (BTF_GET_FD_BY_ID needs CAP_SYS_ADMIN, which the token does not
-    // grant), yet that fd is required to load programs that call module kfuncs
-    // (e.g. conntrack). A privileged setup component opens those fds and passes
-    // them in, inherited across exec, advertised via `EBPF_MODULE_BTF_FDS` as a
-    // comma-separated `module=fd` list. Register each so the kfunc loader can
-    // splice it into the program-load `fd_array`.
-    register_module_btf_fds();
 
     let mut ebpf_state = EbpfState::new();
     // Every task spawned below outlives the loaders unless something stops
@@ -8685,6 +8628,87 @@ fn resolve_sock_offsets() -> anyhow::Result<ebpf_common::dlp::SockOffsets> {
         valid: 1,
         _pad: [0; 3],
     })
+}
+
+/// Hand the conntrack service the kernel's own table.
+///
+/// The netfilter port owns both the authoritative read view (coherent with
+/// `conntrack -L`) and the kernel sysctl writes (timeouts and the `tcp_loose`
+/// hardening), and it is the only source the connection list reads. It is
+/// wired whenever conntrack is enabled, before the settings are reloaded, so
+/// the settings sync actually reaches the kernel: those writes are no-ops
+/// until the port is present. On kernels without
+/// `CONFIG_NF_CONNTRACK_PROCFS` the sysctl knobs still exist but
+/// `/proc/net/nf_conntrack` does not, and the port falls back to dumping
+/// through conntrack-tools, or through the warden in a rootless deployment.
+pub(crate) fn wire_kernel_conntrack(ct_svc: &mut ConnTrackAppService, config: &AgentConfig) {
+    if config.conntrack.enabled {
+        ct_svc.set_netfilter_port(Box::new(
+            adapters::netfilter::conntrack::ProcNetfilterConntrackPort::new(),
+        ));
+    }
+}
+
+/// Create the BPF token against the bpffs the warden delegated, and make it
+/// the authority every later eBPF syscall in this process runs under.
+///
+/// The token fd is registered process-wide before anything loads, so every
+/// map, BTF and program syscall (aya and the kfunc loader alike) carries it;
+/// the returned handle owns that fd and must outlive every loaded program. The
+/// file kfuncs and the kfunc features are probed after the registration,
+/// because the agent's own objects load through the token and the probe must
+/// be asked the same way. The module BTF fds a privileged setup component
+/// passed in are registered last, since a token cannot open them itself.
+///
+/// `None` means no token: the caller decides whether that is API-only mode or
+/// a refusal to start.
+pub fn establish_bpf_token(
+    config: &AgentConfig,
+    warden: bool,
+) -> Option<adapters::ebpf::BpfLoadingHandle> {
+    let bpf_policy = adapters::ebpf::BpfTokenPolicy::new(config.agent.bpf_token.bpffs_path.clone());
+    let bpf_handle = match adapters::ebpf::bootstrap_bpf(&bpf_policy) {
+        Ok(h) => {
+            info!(
+                kernel = h.kernel.version_string(),
+                reason = h.reason,
+                warden,
+                "eBPF loading via BPF token"
+            );
+            Some(h)
+        }
+        Err(e) => {
+            error!(
+                error = %e,
+                "BPF token unavailable - running in API-only mode (no eBPF). The warden \
+                 delegates the bpffs: start the agent with EBPFSENTINEL_WARDEN_SOCK pointing \
+                 at a running warden."
+            );
+            None
+        }
+    };
+    if let Some(handle) = bpf_handle.as_ref() {
+        adapters::ebpf::set_bpf_token_fd(handle.token_fd.as_raw_fd());
+    }
+    adapters::ebpf::file_kfunc_probe::init_cached();
+    adapters::ebpf::kfunc_feature_probe::init_cached();
+    register_module_btf_fds();
+    bpf_handle
+}
+
+/// The BPF token for a process another binary started, when a warden is
+/// configured: the warden is told to answer for the TCX chains this user
+/// namespace cannot read back, and the token is established as the agent's
+/// own startup does. Without a warden this does nothing and returns `None`,
+/// because a process loading with its own capabilities needs no token.
+pub fn bpf_token_under_warden(config: &AgentConfig) -> Option<adapters::ebpf::BpfLoadingHandle> {
+    let sock = warden_sock_from_env()?;
+    adapters::ebpf::tcx_order::use_warden(sock);
+    let handle = establish_bpf_token(config, true);
+    if handle.is_none() {
+        warn!("a warden is configured but no BPF token could be created; eBPF will not load");
+    }
+    handle
 }
 
 /// Search for a usable SSL/TLS shared library on the system.
