@@ -16,7 +16,7 @@ runs:
     - name: Install LLVM and bpf-linker
       shell: bash
       # The version is pinned rather than taken from the distribution: Ubuntu
-      # 24.04 packages LLVM 18 and bpf-linker 0.12.0 links against 21, 22 or 23,
+      # 24.04 packages LLVM 18 and bpf-linker 0.13.0 links against 21, 22 or 23,
       # 23 by default. Nothing catches
       # the mismatch while installing - bpf-linker pulls llvm-sys with
       # `no-llvm-linking` and does the linking itself, so no build step compares
@@ -30,9 +30,16 @@ runs:
       # this tree changed is a build that cannot be reproduced from its commit.
       # The enterprise image and its Vagrant provisioner install the same
       # version and move with this one.
+      #
+      # 0.13.0 replaced 0.12.0 after every program was built with both against
+      # LLVM 23 and the objects compared: they are byte for byte identical. Its
+      # one functional change is asking LLVM for the static relocation model,
+      # as clang does, where 0.12.0 left the backend's default, and the BPF
+      # backend emits the same relocations either way. The LLVM range it links
+      # against, 21 to 23, did not move.
       env:
         LLVM_VERSION: "23"
-        BPF_LINKER_VERSION: "0.12.0"
+        BPF_LINKER_VERSION: "0.13.0"
         SOURCE_ROOT: ${{ inputs.source-root }}
       run: |
         set -euo pipefail

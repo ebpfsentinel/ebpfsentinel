@@ -442,13 +442,13 @@ SYSCTL
 
       # Same LLVM, same linker version and same dated nightly as the
       # install-bpf-linker action, for the reasons written there: the box
-      # packages LLVM 18 and bpf-linker 0.12.0 links against 21 to 23, and
+      # packages LLVM 18 and bpf-linker 0.13.0 links against 21 to 23, and
       # without LLVM_PREFIX its build script stops at /usr/lib64, which holds
       # no libLLVM, and the link fails. --locked freezes the linker's
       # dependencies, not the linker itself. Checked separately from rustc so a
       # machine whose first run stopped here finishes on the next provision.
       LLVM_VERSION=23
-      BPF_LINKER_VERSION=0.12.0
+      BPF_LINKER_VERSION=0.13.0
       channel="$(awk -F'"' '/^channel/ {print $2}' \
         /home/vagrant/ebpfsentinel/crates/ebpf-programs/rust-toolchain.toml)"
       test -n "$channel"
