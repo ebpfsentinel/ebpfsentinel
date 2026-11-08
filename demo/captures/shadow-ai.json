@@ -1,0 +1,108 @@
+{
+  "id": "shadow-ai",
+  "agent_version": "0.0.0-dev",
+  "agent_commit": "e3fa3e6b50fcafb574e08ef27f5a140b1205e51d",
+  "kernel": "7.0.0-42-generic",
+  "date": "2026-11-08T13:29:22Z",
+  "steps": [
+    {
+      "where": "agent",
+      "argv": [
+        "ebpfsentinel-agent",
+        "l7",
+        "list"
+      ],
+      "stdout": "ID                   PRI  ACTION  SRC IP  DST IP  DST PORT  ENABLED\nshadow-ai-openai      10  deny    -       -              -  yes\nshadow-ai-anthropic   11  deny    -       -              -  yes\n\n2 rule(s) total.\n",
+      "stderr": "",
+      "exit": 0
+    },
+    {
+      "where": "app",
+      "argv": [
+        "curl",
+        "-sk",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}\\n",
+        "--max-time",
+        "3",
+        "https://172.30.66.1/"
+      ],
+      "stdout": "200\n",
+      "stderr": "",
+      "exit": 0
+    },
+    {
+      "where": "app",
+      "argv": [
+        "curl",
+        "-sk",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}\\n",
+        "--max-time",
+        "3",
+        "https://api.openai.com/v1/models"
+      ],
+      "stdout": "000\n",
+      "stderr": "",
+      "exit": 28
+    },
+    {
+      "where": "agent",
+      "argv": [
+        "ebpfsentinel-agent",
+        "alerts",
+        "list",
+        "--component",
+        "l7"
+      ],
+      "stdout": "ID                                      COMPONENT  SEVERITY  RULE ID           ACTION  SRC IP        DST IP       SPORT  DPORT  FP  SRC DOMAIN  DST DOMAIN  MESSAGE\n1794144566163954273-shadow-ai-openai-8  l7         medium    shadow-ai-openai  block   172.30.66.20  172.30.66.1  48060    443  no  -           -           L7 tls deny rule=shadow-ai-openai\n1794144564500255422-shadow-ai-openai-6  l7         medium    shadow-ai-openai  block   172.30.66.20  172.30.66.1  48060    443  no  -           -           L7 tls deny rule=shadow-ai-openai\n1794144563683963624-shadow-ai-openai-4  l7         medium    shadow-ai-openai  block   172.30.66.20  172.30.66.1  48060    443  no  -           -           L7 tls deny rule=shadow-ai-openai\n1794144563276064859-shadow-ai-openai-2  l7         medium    shadow-ai-openai  block   172.30.66.20  172.30.66.1  48060    443  no  -           -           L7 tls deny rule=shadow-ai-openai\n1794144563064946071-shadow-ai-openai-0  l7         medium    shadow-ai-openai  block   172.30.66.20  172.30.66.1  48060    443  no  -           -           L7 tls deny rule=shadow-ai-openai\n\nShowing 5/5 alert(s) (offset=0).\n",
+      "stderr": "",
+      "exit": 0
+    },
+    {
+      "where": "agent",
+      "argv": [
+        "ebpfsentinel-agent",
+        "ips",
+        "blacklist"
+      ],
+      "stdout": "IP            REASON                                                                        AUTO  TTL (s)\n172.30.66.20  auto-response:contain-shadow-ai alert=1794144563064946071-shadow-ai-openai-0  no        114\n\n1 entry(ies) total.\n",
+      "stderr": "",
+      "exit": 0
+    },
+    {
+      "where": "app",
+      "argv": [
+        "curl",
+        "-sk",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}\\n",
+        "--max-time",
+        "3",
+        "https://172.30.66.1/"
+      ],
+      "stdout": "000\n",
+      "stderr": "",
+      "exit": 28
+    },
+    {
+      "where": "agent",
+      "argv": [
+        "ebpfsentinel-agent",
+        "audit",
+        "logs",
+        "--component",
+        "responses"
+      ],
+      "stdout": "COMPONENT  ACTION      SRC IP        DST IP  SPORT  DPORT  RULE ID            DETAIL\nresponses  rule_added  172.30.66.20  -           0      0  contain-shadow-ai  auto-response block_ip on 172.30.66.20 for al...\n\nShowing 1/1 entry(ies) (offset=0).\n",
+      "stderr": "",
+      "exit": 0
+    }
+  ]
+}

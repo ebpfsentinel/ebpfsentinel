@@ -1,0 +1,50 @@
+{
+  "id": "refused-connect",
+  "agent_version": "0.0.0-dev",
+  "agent_commit": "e3fa3e6b50fcafb574e08ef27f5a140b1205e51d",
+  "kernel": "7.0.0-42-generic",
+  "date": "2026-11-08T13:11:15Z",
+  "steps": [
+    {
+      "where": "host",
+      "argv": [
+        "curl",
+        "-s",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}\\n",
+        "http://127.0.0.1:8080/healthz"
+      ],
+      "stdout": "200\n",
+      "stderr": "",
+      "exit": 0
+    },
+    {
+      "where": "host",
+      "argv": [
+        "python3",
+        "-c",
+        "import socket; socket.create_connection((\"127.0.0.1\", 8080))"
+      ],
+      "stdout": "",
+      "stderr": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n  File \"/usr/lib/python3.12/socket.py\", line 852, in create_connection\n    raise exceptions[0]\n  File \"/usr/lib/python3.12/socket.py\", line 832, in create_connection\n    sock = socket(af, socktype, proto)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/socket.py\", line 233, in __init__\n    _socket.socket.__init__(self, family, type, proto, fileno)\nPermissionError: [Errno 1] Operation not permitted\n",
+      "exit": 1
+    },
+    {
+      "where": "host",
+      "argv": [
+        "ebpfsentinel-agent",
+        "alerts",
+        "list",
+        "--component",
+        "workload-firewall",
+        "--limit",
+        "1"
+      ],
+      "stdout": "ID                                  COMPONENT          SEVERITY  RULE ID              ACTION  SRC IP  DST IP  SPORT  DPORT  FP  SRC DOMAIN  DST DOMAIN  MESSAGE\n758902566573-network-executables-1  workload-firewall  medium    network-executables  block   -       -           0      0  no  -           -           network executables refused pid 7422 creating...\n\nShowing 1/2 alert(s) (offset=0).\n",
+      "stderr": "",
+      "exit": 0
+    }
+  ]
+}

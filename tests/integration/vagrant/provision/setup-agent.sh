@@ -118,6 +118,12 @@ install_from_prebuilt() {
     if [ -d "$ebpf_src" ]; then
         sudo mkdir -p "$EBPF_INSTALL_DIR"
         sudo cp -r "${ebpf_src}/." "${EBPF_INSTALL_DIR}/"
+        # The agent image copies ebpf-out/, for the Docker build below and for
+        # the demo lab's `up --local`. The rsync leaves it out on purpose, so
+        # it is staged here from the objects this build just produced, as CI does.
+        rm -rf "${PROJECT_DIR}/ebpf-out"
+        mkdir -p "${PROJECT_DIR}/ebpf-out"
+        cp -r "${ebpf_src}/." "${PROJECT_DIR}/ebpf-out/"
     fi
 }
 

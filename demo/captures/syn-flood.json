@@ -1,0 +1,136 @@
+{
+  "id": "syn-flood",
+  "agent_version": "0.0.0-dev",
+  "agent_commit": "e3fa3e6b50fcafb574e08ef27f5a140b1205e51d",
+  "kernel": "7.0.0-42-generic",
+  "date": "2026-11-08T13:26:46Z",
+  "steps": [
+    {
+      "where": "agent",
+      "argv": [
+        "ebpfsentinel-agent",
+        "status"
+      ],
+      "stdout": "eBPFsentinel v0.0.0-dev -- up 6s -- 6 rules loaded\n\n  Programs  9/23 loaded    tracepoint-process ✓ tc-ids ✓ tc-conntrack ✓ uprobe-dlp ✓ cgroup-attribution ✓ tracepoint-drop-reason ✓ tracepoint-tcp-health ✓ xdp-ratelimit ✓ xdp-firewall ✓\n\n  Conntrack  39 active connections\n  DDoS       no active attacks (0 mitigated total)\n  Containers /host/proc (host procfs), ids yes, docker off by configuration, podman off by configuration, lxc on, kubernetes off by configuration\n\n  Recent Alerts (0 total)\n  (none)\n",
+      "stderr": "",
+      "exit": 0
+    },
+    {
+      "where": "attacker",
+      "argv": [
+        "curl",
+        "-s",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}\\n",
+        "--max-time",
+        "3",
+        "http://172.30.66.1/"
+      ],
+      "stdout": "200\n",
+      "stderr": "",
+      "exit": 0
+    },
+    {
+      "where": "attacker",
+      "argv": [
+        "timeout",
+        "10",
+        "hping3",
+        "-S",
+        "-p",
+        "80",
+        "--flood",
+        "172.30.66.1"
+      ],
+      "stdout": "HPING 172.30.66.1 (eth0 172.30.66.1): S set, 40 headers + 0 data bytes\n",
+      "stderr": "hping in flood mode, no replies will be shown\n\n--- 172.30.66.1 hping statistic ---\n2725944 packets transmitted, 0 packets received, 100% packet loss\nround-trip min/avg/max = 0.0/0.0/0.0 ms\n",
+      "exit": 124
+    },
+    {
+      "where": "agent",
+      "argv": [
+        "ebpfsentinel-agent",
+        "ddos",
+        "attacks"
+      ],
+      "stdout": "ID      ATTACK TYPE  STATUS     COUNTRY  PEAK PPS  CUR PPS  TOTAL PKTS  SOURCES\nddos-1  syn_flood    detecting  -            2438       16        3225        1\n\n1 active attack(s).\n",
+      "stderr": "",
+      "exit": 0
+    },
+    {
+      "where": "agent",
+      "argv": [
+        "ebpfsentinel-agent",
+        "alerts",
+        "list",
+        "--component",
+        "ddos",
+        "--limit",
+        "1"
+      ],
+      "stdout": "ID                            COMPONENT  SEVERITY  RULE ID  ACTION  SRC IP        DST IP       SPORT  DPORT  FP  SRC DOMAIN  DST DOMAIN  MESSAGE\n1794144406805421734-ddos-1-0  ddos       critical  ddos-1   block   172.30.66.66  172.30.66.1   2106     80  no  -           -           DDoS SynFlood attack ddos-1 - status: Detecti...\n\nShowing 1/1 alert(s) (offset=0).\n",
+      "stderr": "",
+      "exit": 0
+    },
+    {
+      "where": "agent",
+      "argv": [
+        "ebpfsentinel-agent",
+        "ips",
+        "blacklist"
+      ],
+      "stdout": "IP            REASON                                                         AUTO  TTL (s)\n172.30.66.66  auto-response:contain-ddos alert=1794144406805421734-ddos-1-0  no        286\n\n1 entry(ies) total.\n",
+      "stderr": "",
+      "exit": 0
+    },
+    {
+      "where": "attacker",
+      "argv": [
+        "curl",
+        "-s",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}\\n",
+        "--max-time",
+        "3",
+        "http://172.30.66.1/"
+      ],
+      "stdout": "000\n",
+      "stderr": "",
+      "exit": 28
+    },
+    {
+      "where": "app",
+      "argv": [
+        "curl",
+        "-s",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}\\n",
+        "--max-time",
+        "3",
+        "http://172.30.66.1/"
+      ],
+      "stdout": "200\n",
+      "stderr": "",
+      "exit": 0
+    },
+    {
+      "where": "agent",
+      "argv": [
+        "ebpfsentinel-agent",
+        "audit",
+        "logs",
+        "--component",
+        "responses"
+      ],
+      "stdout": "COMPONENT  ACTION      SRC IP        DST IP  SPORT  DPORT  RULE ID       DETAIL\nresponses  rule_added  172.30.66.66  -           0      0  contain-ddos  auto-response block_ip on 172.30.66.66 for al...\n\nShowing 1/1 entry(ies) (offset=0).\n",
+      "stderr": "",
+      "exit": 0
+    }
+  ]
+}

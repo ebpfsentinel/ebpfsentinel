@@ -1,0 +1,63 @@
+{
+  "id": "dlp-tls",
+  "agent_version": "0.0.0-dev",
+  "agent_commit": "e3fa3e6b50fcafb574e08ef27f5a140b1205e51d",
+  "kernel": "7.0.0-42-generic",
+  "date": "2026-11-08T13:27:40Z",
+  "steps": [
+    {
+      "where": "agent",
+      "argv": [
+        "ebpfsentinel-agent",
+        "dlp",
+        "status"
+      ],
+      "stdout": "Data Loss Prevention\n  Enabled:   yes\n  Mode:      alert\n  Patterns:  17\n",
+      "stderr": "",
+      "exit": 0
+    },
+    {
+      "where": "app",
+      "argv": [
+        "curl",
+        "-sk",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}\\n",
+        "https://172.30.66.1/orders",
+        "-d",
+        "card=4111111111111111&name=demo"
+      ],
+      "stdout": "200\n",
+      "stderr": "",
+      "exit": 0
+    },
+    {
+      "where": "agent",
+      "argv": [
+        "ebpfsentinel-agent",
+        "alerts",
+        "list",
+        "--component",
+        "dlp"
+      ],
+      "stdout": "ID                                  COMPONENT  SEVERITY  RULE ID       ACTION  SRC IP  DST IP  SPORT  DPORT  FP  SRC DOMAIN  DST DOMAIN  MESSAGE\n1794144460562683853-dlp-pci-visa-1  dlp        critical  dlp-pci-visa  alert   -       -           0      0  no  -           -           DLP pattern Visa Card Number (pci) matched on...\n1794144460562681594-dlp-pci-visa-0  dlp        critical  dlp-pci-visa  alert   -       -           0      0  no  -           -           DLP pattern Visa Card Number (pci) matched on...\n\nShowing 2/2 alert(s) (offset=0).\n",
+      "stderr": "",
+      "exit": 0
+    },
+    {
+      "where": "agent",
+      "argv": [
+        "ebpfsentinel-agent",
+        "audit",
+        "logs",
+        "--component",
+        "dlp"
+      ],
+      "stdout": "COMPONENT  ACTION            SRC IP  DST IP  SPORT  DPORT  RULE ID       DETAIL\ndlp        policy_violation  -       -           0      0  dlp-pci-visa  DLP Visa Card Number (pci) pid=24148\ndlp        policy_violation  -       -           0      0  dlp-pci-visa  DLP Visa Card Number (pci) pid=24148\n\nShowing 2/2 entry(ies) (offset=0).\n",
+      "stderr": "",
+      "exit": 0
+    }
+  ]
+}

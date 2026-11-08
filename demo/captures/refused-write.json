@@ -1,0 +1,46 @@
+{
+  "id": "refused-write",
+  "agent_version": "0.0.0-dev",
+  "agent_commit": "e3fa3e6b50fcafb574e08ef27f5a140b1205e51d",
+  "kernel": "7.0.0-42-generic",
+  "date": "2026-11-08T13:11:21Z",
+  "steps": [
+    {
+      "where": "host",
+      "argv": [
+        "sh",
+        "-c",
+        "for n in $(seq 1 12); do echo payload >/var/tmp/ebpfsentinel-capture/watched/doc$n.txt && echo doc$n.txt written; done"
+      ],
+      "stdout": "doc1.txt written\ndoc2.txt written\ndoc3.txt written\ndoc4.txt written\ndoc5.txt written\ndoc6.txt written\ndoc7.txt written\ndoc8.txt written\ndoc9.txt written\n",
+      "stderr": "sh: 1: cannot create /var/tmp/ebpfsentinel-capture/watched/doc10.txt: Permission denied\nsh: 1: cannot create /var/tmp/ebpfsentinel-capture/watched/doc11.txt: Permission denied\nsh: 1: cannot create /var/tmp/ebpfsentinel-capture/watched/doc12.txt: Permission denied\n",
+      "exit": 2
+    },
+    {
+      "where": "host",
+      "argv": [
+        "ebpfsentinel-agent",
+        "alerts",
+        "list",
+        "--component",
+        "mass_encryption",
+        "--limit",
+        "1"
+      ],
+      "stdout": "ID                            COMPONENT        SEVERITY  RULE ID        ACTION  SRC IP  DST IP  SPORT  DPORT  FP  SRC DOMAIN  DST DOMAIN  MESSAGE\n765276678461-write-refusal-0  mass_encryption  high      write-refusal  block   -       -           0      0  no  -           -           write refusal refused pid 7653 opening for wr...\n\nShowing 1/1 alert(s) (offset=0).\n",
+      "stderr": "",
+      "exit": 0
+    },
+    {
+      "where": "host",
+      "argv": [
+        "ebpfsentinel-agent",
+        "host-rules",
+        "write-refusal"
+      ],
+      "stdout": "Write refusal in enforce, reading started at 764781941274 ns: 0 writes it would have refused.\n",
+      "stderr": "",
+      "exit": 0
+    }
+  ]
+}

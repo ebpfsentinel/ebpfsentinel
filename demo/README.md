@@ -68,6 +68,29 @@ agent to it alone, so nothing the lab does touches the host's own uplink.
 The agent's configuration is `agent.yaml`, read as it stands by every
 scenario.
 
+## Recording a scenario
+
+```bash
+sudo ./capture.sh syn-flood
+sudo ./demo.sh down && sudo ./demo.sh up
+sudo ./capture.sh dlp-tls
+```
+
+`capture.sh` runs a scenario's commands against the compose lab, in the
+tutorial's order, and writes `captures/<id>.json`. That file holds the agent's
+version and commit, the kernel and the date, and for each command the argv,
+what it printed and its exit status. The website draws its terminals from these
+files and from nothing else, so a session on a page is one somebody ran.
+`syn-flood`, `dlp-tls`, `shadow-ai` and `trace` need the lab, one fresh lab
+each, because a scenario leaves its source blocked. `host-check` needs no lab.
+
+The two refusals that need `bpf` in the host's `lsm=` cannot be shown by a
+lab running in a container. The integration lane's agent VM records them
+through `tests/integration/scripts/capture-refusals.sh`, which uses this
+script's `begin` and `step` verbs. The site refuses a capture taken from an
+agent older than the one the release manifest pins, so record again after a
+release moves the pin.
+
 ## GitOps lab
 
 ```bash

@@ -1,0 +1,24 @@
+{
+  "id": "trace",
+  "agent_version": "0.0.0-dev",
+  "agent_commit": "e3fa3e6b50fcafb574e08ef27f5a140b1205e51d",
+  "kernel": "7.0.0-42-generic",
+  "date": "2026-11-08T13:26:08Z",
+  "steps": [
+    {
+      "where": "agent",
+      "argv": [
+        "ebpfsentinel-agent",
+        "trace",
+        "172.30.66.1",
+        "--src",
+        "172.30.66.66",
+        "--dport",
+        "80"
+      ],
+      "stdout": "TCP 172.30.66.66 -> 172.30.66.1 40000 -> 80 (ingress)\nSTAGE       HOOK        VERDICT  REASON   RULE  DETAIL\nfirewall    xdp         pass     default  -     -\nrate_limit  xdp         pass     default  -     -\nids         tc_ingress  pass     default  -     -\nconntrack   tc_ingress  pass     default  -     connection state untracked\nWent through every loaded stage.\nNot loaded, so not asked: tc_threatintel, tc_dns, tc_nat_ingress, tc_scrub, tc_qos_ingress.\n",
+      "stderr": "",
+      "exit": 0
+    }
+  ]
+}

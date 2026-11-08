@@ -1,0 +1,20 @@
+{
+  "id": "host-check",
+  "agent_version": "0.0.0-dev",
+  "agent_commit": "e3fa3e6b50fcafb574e08ef27f5a140b1205e51d",
+  "kernel": "7.0.0-42-generic",
+  "date": "2026-11-08T13:12:12Z",
+  "steps": [
+    {
+      "where": "host",
+      "argv": [
+        "ebpfsentinel-agent",
+        "ebpf",
+        "host-check"
+      ],
+      "stdout": "\nBPF LSM\n  Active:     yes\n  Built in:   yes\n  Modules:    lockdown,capability,landlock,yama,apparmor,bpf,ima,evm\n",
+      "stderr": "",
+      "exit": 0
+    }
+  ]
+}
