@@ -119,8 +119,10 @@ every map.
 Rate limiting is most of it: `RL_BUCKETS` (22 MB) and `CONN_TABLE` (12 MB) are
 per-CPU maps, which **hold one copy of every entry per CPU**. On a 32-core node
 they are eight times larger, so scale this column by core count before setting
-a container memory limit. The chart's default of 512Mi fits the full fixture on
-a small node.
+a container memory limit. These are steady figures, and the limit is set by the
+startup peak instead: while the agent loads and verifies its programs its
+container reaches about 830 MiB on a 4 vCPU node, which is why the chart's
+default limit is 1Gi and why 512Mi got the agent OOMKilled before it was Ready.
 
 ## Throughput on a real NIC
 

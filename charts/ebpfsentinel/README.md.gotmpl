@@ -64,6 +64,14 @@ The agent container runs `seccompProfile: Unconfined` by default. It holds no ca
 
 A `Localhost` profile is a file the kubelet reads on the node, so with this on a `seccomp-profile` init container, run from the warden image that carries the profile compiled in, writes it to `<kubeletRootDir>/seccomp/ebpfsentinel/ebpfsentinel-agent.json` before the agent starts, and the agent container runs with `seccompProfile.type: Localhost`. No cluster operator is needed. `daemonset.tailoredSeccomp.kubeletRootDir` defaults to `/var/lib/kubelet`; set it on distributions that move the kubelet's root (k0s, MicroK8s). The warden keeps its Unconfined profile either way.
 
+### Memory
+
+The agent's memory limit defaults to `1Gi` and its request to `256Mi`. Once running, the agent container holds about 120 MiB, most of it the eBPF maps the kernel charges to its cgroup; while it loads and verifies its programs at startup it peaks at roughly 830 MiB, measured on a 4 vCPU node, and a limit below that peak gets the container OOMKilled before it is ever Ready. Per-CPU maps grow with the node's CPU count, so raise the limit on large nodes and when enabling features with large tables:
+
+```bash
+--set daemonset.resources.limits.memory=2Gi
+```
+
 ### Feature Limitations in Kubernetes
 
 | Feature | DaemonSet | Notes |

@@ -16,10 +16,6 @@ PROFILE_ON_NODE="/var/lib/kubelet/seccomp/ebpfsentinel/ebpfsentinel-agent.json"
 # does not build it again.
 AGENT_IMAGE="${AGENT_IMAGE:-ebpfsentinel:latest}"
 WARDEN_IMAGE="${WARDEN_IMAGE:-ebpfsentinel-warden:latest}"
-# The chart's default memory limit is below what the agent's maps take on
-# start with its default configuration, and an agent killed for memory says
-# nothing about its seccomp profile.
-AGENT_MEMORY_LIMIT="${AGENT_MEMORY_LIMIT:-1Gi}"
 
 agent_pod() {
     kubectl -n "$NAMESPACE" get pod \
@@ -108,7 +104,6 @@ setup_file() {
         --set "wardenImage.repository=${WARDEN_IMAGE%:*},wardenImage.tag=${WARDEN_IMAGE##*:}" \
         --set daemonset.bpfToken.bpffsEmptyDir=true \
         --set daemonset.state.ephemeral=true \
-        --set "daemonset.resources.limits.memory=${AGENT_MEMORY_LIMIT}" \
         --set daemonset.tailoredSeccomp.enabled=true
 
     # Running is what every test needs; Ready is asserted on its own below,
@@ -165,6 +160,22 @@ teardown_file() {
     echo "phase=${phase} agent restarts=${restarts}" >&3
     [ "$phase" = "Running" ]
     [ "$restarts" = "0" ]
+}
+
+@test "the agent fits the chart's default memory limit and was never OOMKilled" {
+    # The release sets no resources, so the limit is the chart default; the
+    # agent's startup peak is what a too small default kills.
+    local pod overrides limit reason
+    pod="$(agent_pod)"
+    overrides="$(helm get values "$RELEASE" --namespace "$NAMESPACE" -o json)"
+    limit="$(kubectl -n "$NAMESPACE" get pod "$pod" \
+        -o jsonpath='{.spec.containers[?(@.name=="agent")].resources.limits.memory}')"
+    reason="$(kubectl -n "$NAMESPACE" get pod "$pod" \
+        -o jsonpath='{.status.containerStatuses[?(@.name=="agent")].lastState.terminated.reason}')"
+    echo "agent memory limit=${limit} last termination=${reason:-none}" >&3
+    [[ "$overrides" != *resources* ]]
+    [ -n "$limit" ]
+    [ "$reason" != "OOMKilled" ]
 }
 
 @test "the kernel holds a seccomp filter on the agent and none on the warden" {

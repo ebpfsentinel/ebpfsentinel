@@ -60,8 +60,8 @@ data:
       enabled: true
       storage_path: /data/audit.redb
 
-# The suites drive the datapath, not the control plane's identity: the
-# agent answers unauthenticated plaintext here, which the two opt-outs
-# above are what make legal on a non-loopback bind.
-auth:
-  enabled: false
+    # The suites drive the datapath, not the control plane's identity: the
+    # agent answers unauthenticated plaintext here, which the two opt-outs
+    # above are what make legal on a non-loopback bind.
+    auth:
+      enabled: false

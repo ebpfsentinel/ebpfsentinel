@@ -7,6 +7,9 @@ load '../lib/helpers'
 
 K8S_NAMESPACE="ebpfsentinel-test"
 K8S_FIXTURES="${BATS_TEST_DIRNAME}/../fixtures/k8s"
+# Overridable, like 134-kubernetes-tailored-seccomp, so a lane that already
+# built the agent image under another tag does not build it again.
+AGENT_IMAGE="${AGENT_IMAGE:-ebpfsentinel:latest}"
 
 setup_file() {
     # Skip if minikube is not available
@@ -62,22 +65,22 @@ setup_file() {
     fi
 
     # Ensure the agent image exists, then load it into minikube. The DaemonSet
-    # pulls ebpfsentinel:latest with imagePullPolicy:IfNotPresent, so the image
+    # pulls ${AGENT_IMAGE} with imagePullPolicy:IfNotPresent, so the image
     # must be present inside the cluster (otherwise ImagePullBackOff). Build it
     # from source if it is missing - staging the pre-built eBPF objects into
     # ebpf-out/ first (the Dockerfile COPYs that dir) so the in-cluster agent
     # can actually load its datapath and reach readiness.
-    if ! docker image inspect ebpfsentinel:latest &>/dev/null 2>&1; then
+    if ! docker image inspect "$AGENT_IMAGE" &>/dev/null 2>&1; then
         echo "# Staging eBPF programs for Docker build..." >&3
         stage_ebpf_objects "$PROJECT_ROOT" \
             || env_skip "no eBPF objects available to build the agent image"
-        echo "# Building ebpfsentinel:latest..." >&3
-        docker build -f "${PROJECT_ROOT}/Dockerfile.agent" -t ebpfsentinel:latest "${PROJECT_ROOT}" || {
+        echo "# Building ${AGENT_IMAGE}..." >&3
+        docker build -f "${PROJECT_ROOT}/Dockerfile.agent" -t "$AGENT_IMAGE" "${PROJECT_ROOT}" || {
             echo "# Docker build failed - tests will be skipped" >&3
         }
     fi
-    if docker image inspect ebpfsentinel:latest &>/dev/null 2>&1; then
-        minikube image load ebpfsentinel:latest
+    if docker image inspect "$AGENT_IMAGE" &>/dev/null 2>&1; then
+        minikube image load "$AGENT_IMAGE"
     fi
 
     # Wait for namespace to be fully deleted if still terminating
@@ -92,7 +95,8 @@ setup_file() {
     kubectl apply -f "${K8S_FIXTURES}/serviceaccount.yaml"
     kubectl apply -f "${K8S_FIXTURES}/rbac.yaml"
     kubectl apply -f "${K8S_FIXTURES}/configmap.yaml"
-    kubectl apply -f "${K8S_FIXTURES}/daemonset.yaml"
+    sed "s|image: ebpfsentinel:latest|image: ${AGENT_IMAGE}|" "${K8S_FIXTURES}/daemonset.yaml" \
+        | kubectl apply -f -
 
     # Wait for pod to be ready (up to 120s)
     kubectl -n "$K8S_NAMESPACE" wait --for=condition=Ready pod \
