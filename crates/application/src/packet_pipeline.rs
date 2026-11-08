@@ -1177,12 +1177,15 @@ impl EventDispatcher {
 
         // Consult the optional extended L7 parser (enterprise protocols
         // like MQTT / AMQP / NATS / Cassandra). When the built-in
-        // detector returned Unknown, fall back to the extension label.
+        // detector returned Unknown, fall back to the extension label and
+        // keep the verdict its own rules reached on the parsed fields.
+        let mut extended_verdict = None;
         if protocol == DetectedProtocol::Unknown
             && let Some(ref parser) = self.extended_l7_parser
-            && let Some(label) = parser.detect_label(payload)
+            && let Some(reading) = parser.inspect(header, payload)
         {
-            protocol_label = label;
+            protocol_label = reading.label;
+            extended_verdict = reading.verdict;
         }
 
         self.red_meter.observe(header, protocol_label, payload);
@@ -1215,7 +1218,7 @@ impl EventDispatcher {
 
         // Evaluate L7 rules against parsed content
         let l7_svc = self.l7_service.load();
-        let l7_result = l7_svc.evaluate(header, &parsed);
+        let l7_result = l7_svc.evaluate(header, &parsed).or(extended_verdict);
         drop(l7_svc);
 
         self.apply_l7_rule_result(header, protocol_label, l7_result);
@@ -3392,6 +3395,62 @@ mod tests {
         // Service disabled → no deny, just protocol metric
         assert_eq!(*metrics.last_component.lock().unwrap(), "l7");
         assert_eq!(*metrics.last_action.lock().unwrap(), "http");
+    }
+
+    /// Extension that recognises NATS `PUB` and refuses one subject.
+    struct SubjectGate;
+
+    impl ports::secondary::l7_extended_parser_port::L7ExtendedParser for SubjectGate {
+        fn detect_label(&self, payload: &[u8]) -> Option<&'static str> {
+            payload.starts_with(b"PUB ").then_some("nats")
+        }
+
+        fn inspect(
+            &self,
+            _header: &PacketEvent,
+            payload: &[u8],
+        ) -> Option<ports::secondary::l7_extended_parser_port::ExtendedL7Reading> {
+            let label = self.detect_label(payload)?;
+            let verdict = payload
+                .starts_with(b"PUB secrets.")
+                .then(|| (FirewallAction::Deny, RuleId("nats-secrets".to_string())));
+            Some(ports::secondary::l7_extended_parser_port::ExtendedL7Reading { label, verdict })
+        }
+    }
+
+    #[tokio::test]
+    async fn l7_extension_verdict_is_applied_when_no_builtin_rule_matched() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dispatcher =
+            make_dispatcher_with_l7(ids, make_l7_service(), Arc::clone(&metrics), alert_tx)
+                .with_extended_l7_parser(Arc::new(SubjectGate));
+
+        let header = make_event(EVENT_TYPE_L7, 0);
+        let payload = b"PUB secrets.vault 5\r\nhello\r\n".to_vec();
+        dispatcher.dispatch_agent_event(AgentEvent::L7 { header, payload });
+
+        assert_eq!(*metrics.last_component.lock().unwrap(), "l7");
+        assert_eq!(*metrics.last_action.lock().unwrap(), "deny");
+        assert!(alert_rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn l7_extension_without_verdict_only_labels_the_protocol() {
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dispatcher =
+            make_dispatcher_with_l7(ids, make_l7_service(), Arc::clone(&metrics), alert_tx)
+                .with_extended_l7_parser(Arc::new(SubjectGate));
+
+        let header = make_event(EVENT_TYPE_L7, 0);
+        let payload = b"PUB telemetry.cpu 2\r\n42\r\n".to_vec();
+        dispatcher.dispatch_agent_event(AgentEvent::L7 { header, payload });
+
+        assert_eq!(*metrics.last_action.lock().unwrap(), "nats");
+        assert!(alert_rx.try_recv().is_err());
     }
 
     // ── DNS-aware IDS pipeline tests ──────────────────────────────
