@@ -1605,6 +1605,7 @@ mod tests {
             },
             mode: WorkloadMode::Enforce,
             fqdn: Vec::new(),
+            outbound_only: false,
         });
         let value = serde_json::to_value(RuleResponse::from(&rule)).unwrap();
         assert_eq!(

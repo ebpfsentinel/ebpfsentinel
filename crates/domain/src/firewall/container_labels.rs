@@ -377,6 +377,7 @@ fn build_rules(
             dst_ip: destination.and_then(|d| d.network),
             dst_port: destination.and_then(|d| d.port),
             dst_fqdn: Vec::new(),
+            outbound_only: false,
             enabled: true,
         });
     };

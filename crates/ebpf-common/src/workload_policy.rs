@@ -190,6 +190,12 @@ pub const WORKLOAD_RULE_FQDN: u8 = 1;
 /// `WORKLOAD_PEER_DESTINATIONS` rather than against `dst_addr`.
 pub const WORKLOAD_RULE_PEER: u8 = 2;
 
+/// `fqdn` on a rule: the destination is `dst_addr`, and the rule speaks only
+/// about what the workload sends there. It is not consulted at the bind hook,
+/// so a rule about where a workload may send on a port never stops a server
+/// on the node from taking that port as its own local address.
+pub const WORKLOAD_RULE_SENT: u8 = 3;
+
 /// Capacity of `WORKLOAD_PEER_DESTINATIONS` and `WORKLOAD_PEER_SOURCES`, one
 /// entry per peer address a rule names.
 ///
@@ -322,8 +328,10 @@ pub struct WorkloadRuleEntry {
     /// the first disabled slot, so the array is written in priority order
     /// with no holes.
     pub enabled: u8,
-    /// `WORKLOAD_RULE_FQDN` when the destination is learned from DNS, zero
-    /// when it is `dst_addr`.
+    /// `WORKLOAD_RULE_FQDN` when the destination is learned from DNS,
+    /// `WORKLOAD_RULE_PEER` when it is a workload on another node,
+    /// `WORKLOAD_RULE_SENT` when it is `dst_addr` and the rule is never
+    /// consulted at bind, zero when it is `dst_addr` at every hook.
     pub fqdn: u8,
 }
 

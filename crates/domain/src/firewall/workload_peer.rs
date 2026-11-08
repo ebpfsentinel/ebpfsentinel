@@ -493,6 +493,7 @@ mod tests {
             dst_port: None,
             dst_fqdn: Vec::new(),
             dst_peer: Some(peer),
+            outbound_only: false,
             enabled: true,
         }
     }

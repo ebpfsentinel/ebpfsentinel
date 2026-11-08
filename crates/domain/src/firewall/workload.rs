@@ -680,6 +680,13 @@ pub struct WorkloadMatch {
     /// address; see [`super::workload_peer`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer: Option<PeerSelector>,
+    /// Whether the rule speaks only about what the workload sends.
+    ///
+    /// A workload rule is otherwise also decided when a socket takes a local
+    /// address, so a refusal on a port would stop a server on the node from
+    /// listening on it. A rule about where a workload may send sets this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outbound_only: bool,
 }
 
 impl WorkloadMatch {
@@ -691,6 +698,7 @@ impl WorkloadMatch {
             mode: WorkloadMode::Observe,
             fqdn: Vec::new(),
             peer: None,
+            outbound_only: false,
         }
     }
 
@@ -702,6 +710,7 @@ impl WorkloadMatch {
             mode: WorkloadMode::Enforce,
             fqdn: Vec::new(),
             peer: None,
+            outbound_only: false,
         }
     }
 }
@@ -804,6 +813,10 @@ pub struct WorkloadRule {
     /// The destination named as a workload on another node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dst_peer: Option<PeerSelector>,
+    /// Whether the rule is left out where a socket takes a local address,
+    /// being about what the workload sends and not about what it serves.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outbound_only: bool,
     /// Whether the rule is in force.
     pub enabled: bool,
 }
@@ -1159,6 +1172,7 @@ impl WorkloadPolicy {
                 dst_port: rule.dst_port,
                 dst_fqdn: workload.fqdn.clone(),
                 dst_peer: workload.peer.clone(),
+                outbound_only: workload.outbound_only,
                 enabled: rule.enabled,
             });
         }

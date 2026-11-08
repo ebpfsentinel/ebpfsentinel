@@ -703,6 +703,7 @@ impl WorkloadMatchConfig {
             selector,
             mode,
             fqdn,
+            outbound_only: false,
         })
     }
 }

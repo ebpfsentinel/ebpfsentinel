@@ -803,6 +803,7 @@ mod tests {
                 dst_ip: None,
                 dst_port: None,
                 dst_fqdn: Vec::new(),
+                outbound_only: false,
                 enabled: true,
             }])
             .unwrap(),
@@ -1493,6 +1494,7 @@ mod tests {
             dst_ip: None,
             dst_port: None,
             dst_fqdn: Vec::new(),
+            outbound_only: false,
             enabled: true,
         }])
         .expect("inside the ceiling");
@@ -1529,6 +1531,7 @@ mod tests {
                 dst_ip: None,
                 dst_port: None,
                 dst_fqdn: Vec::new(),
+                outbound_only: false,
                 enabled: true,
             }])
             .expect("inside the ceiling")

@@ -216,6 +216,10 @@ impl DnsClients {
                 selector,
                 mode: self.mode,
                 fqdn: Vec::new(),
+                // The block decides what a task sends to the DNS ports, and a
+                // server on the node taking one of them as its own address is
+                // not a client sending DNS.
+                outbound_only: true,
             }),
         }
     }
@@ -311,6 +315,19 @@ mod tests {
         };
         assert!(rest.admits_destination(&elsewhere));
         assert!(rest.enforces());
+    }
+
+    #[test]
+    fn every_rule_of_the_block_leaves_a_server_binding_the_dns_ports_alone() {
+        let agent = exe("/usr/local/bin/ebpfsentinel-agent");
+        let rules = block().rules(Some(&agent)).unwrap();
+        assert!(
+            rules
+                .iter()
+                .all(|r| r.workload.as_ref().unwrap().outbound_only)
+        );
+        let policy = WorkloadPolicy::from_rules(&rules).unwrap();
+        assert!(policy.rules().iter().all(|r| r.outbound_only));
     }
 
     #[test]

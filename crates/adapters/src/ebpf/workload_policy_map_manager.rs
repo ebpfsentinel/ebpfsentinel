@@ -41,8 +41,8 @@ use ebpf_common::exec_network::ExecNetKey;
 use ebpf_common::workload_policy::{
     WORKLOAD_ACTION_ALLOW, WORKLOAD_ACTION_DENY, WORKLOAD_FAMILY_ANY, WORKLOAD_FAMILY_IPV4,
     WORKLOAD_FAMILY_IPV6, WORKLOAD_MODE_ENFORCE, WORKLOAD_MODE_OBSERVE, WORKLOAD_POLICY_MAX_RULES,
-    WORKLOAD_RULE_FQDN, WORKLOAD_RULE_PEER, WorkloadExeKey, WorkloadFqdnKey, WorkloadLineageBits,
-    WorkloadLineageConfig, WorkloadPeerKey, WorkloadRuleEntry,
+    WORKLOAD_RULE_FQDN, WORKLOAD_RULE_PEER, WORKLOAD_RULE_SENT, WorkloadExeKey, WorkloadFqdnKey,
+    WorkloadLineageBits, WorkloadLineageConfig, WorkloadPeerKey, WorkloadRuleEntry,
 };
 use ports::secondary::workload_policy_map_port::WorkloadPolicyMapPort;
 use tracing::{info, warn};
@@ -590,10 +590,12 @@ pub fn entry_for(rule: &WorkloadRule, bit: usize) -> WorkloadRuleEntry {
         enabled: 1,
         fqdn: if rule.dst_peer.is_some() {
             WORKLOAD_RULE_PEER
-        } else if rule.dst_fqdn.is_empty() {
-            0
-        } else {
+        } else if !rule.dst_fqdn.is_empty() {
             WORKLOAD_RULE_FQDN
+        } else if rule.outbound_only {
+            WORKLOAD_RULE_SENT
+        } else {
+            0
         },
     }
 }
@@ -625,6 +627,7 @@ mod tests {
                 end: 443,
             }),
             dst_fqdn: Vec::new(),
+            outbound_only: false,
             enabled: true,
         }
     }
@@ -684,6 +687,20 @@ mod tests {
         assert_eq!(entry.dst_addr[0], 0x2001_0000);
         assert_eq!(entry.dst_addr[3], 1);
         assert_eq!(entry.prefix_len, 64);
+    }
+
+    #[test]
+    fn a_rule_about_what_a_workload_sends_goes_out_kept_from_the_bind_hook() {
+        let mut sent = rule(FirewallAction::Deny, WorkloadMode::Enforce);
+        sent.outbound_only = true;
+        let entry = entry_for(&sent, 0);
+        assert_eq!(entry.fqdn, WORKLOAD_RULE_SENT);
+        assert_eq!(entry.prefix_len, 8);
+        assert_eq!(entry.dst_addr[0], 0x0a00_0000);
+        assert_eq!(
+            entry_for(&rule(FirewallAction::Deny, WorkloadMode::Enforce), 0).fqdn,
+            0
+        );
     }
 
     #[test]

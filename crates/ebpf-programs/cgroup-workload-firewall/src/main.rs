@@ -92,8 +92,8 @@ use ebpf_common::workload_policy::{
     WORKLOAD_METRIC_WOULD_REFUSE, WORKLOAD_MODE_ENFORCE, WORKLOAD_PEER_MAX_ADDRS,
     WORKLOAD_PEER_MAX_TARGETS, WORKLOAD_POLICY_MAX_CGROUPS, WORKLOAD_POLICY_MAX_RULES,
     WORKLOAD_POLICY_MAX_TASKS, WORKLOAD_PROTOCOL_ANY, WORKLOAD_RULE_FQDN, WORKLOAD_RULE_PEER,
-    WorkloadDenialEvent, WorkloadDnsEvent, WorkloadExeKey, WorkloadFqdnKey, WorkloadLineageBits,
-    WorkloadLineageConfig, WorkloadPeerKey, WorkloadRuleEntry,
+    WORKLOAD_RULE_SENT, WorkloadDenialEvent, WorkloadDnsEvent, WorkloadExeKey, WorkloadFqdnKey,
+    WorkloadLineageBits, WorkloadLineageConfig, WorkloadPeerKey, WorkloadRuleEntry,
 };
 use ebpf_helpers::raw_skb;
 use ebpf_helpers::{increment_metric, opaque_usize};
@@ -873,6 +873,11 @@ fn applies(rule: &WorkloadRuleEntry, slot: usize, mask: u64, op: &Operation<'_>)
     }
     if rule.fqdn == WORKLOAD_RULE_PEER {
         return remote(slot, op);
+    }
+    // A rule about where a workload sends says nothing about the local
+    // address a server takes, so it does not apply at the bind hook.
+    if rule.fqdn == WORKLOAD_RULE_SENT && op.hook == WORKLOAD_HOOK_BIND {
+        return false;
     }
     inside(&rule.dst_addr, rule.prefix_len, op.addr)
 }
