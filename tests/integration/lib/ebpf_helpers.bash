@@ -165,7 +165,35 @@ create_test_netns() {
 # destroy_test_netns - tear down namespace and veth pair
 destroy_test_netns() {
     ip netns del "$EBPF_TEST_NS" 2>/dev/null || true
+    _release_buried_netns_mount "/run/netns/${EBPF_TEST_NS}"
     ip link delete "$EBPF_VETH_HOST" 2>/dev/null || true
+}
+
+# _release_buried_netns_mount <file> - free a namespace file `ip netns del`
+# could not reach.
+#
+# A process holding another mount namespace while /run/netns lost its shared
+# propagation (an `lxc-execute` on the node's own root does that) can leave
+# the namespace mounted on the file underneath a second bind of /run/netns.
+# The path then resolves to the upper bind, `umount` reports nothing mounted,
+# the file cannot be unlinked, and the next `ip netns add` fails with "File
+# exists". The upper bind is lifted only when no namespace is mounted on it,
+# so no other named namespace is lost, and `ip netns add` lays it again.
+_release_buried_netns_mount() {
+    local file="$1"
+    [ -e "$file" ] || return 0
+    umount -l "$file" 2>/dev/null || true
+    rm -f "$file" 2>/dev/null || true
+    [ -e "$file" ] || return 0
+    local top
+    top="$(awk '$5 == "/run/netns" { id = $1 } END { print id }' /proc/self/mountinfo)"
+    [ -n "$top" ] || return 0
+    if awk -v p="$top" '$2 == p { found = 1 } END { exit !found }' /proc/self/mountinfo; then
+        return 0
+    fi
+    umount -l /run/netns 2>/dev/null || true
+    umount -l "$file" 2>/dev/null || true
+    rm -f "$file" 2>/dev/null || true
 }
 
 # ── Packet generation helpers ────────────────────────────────────────

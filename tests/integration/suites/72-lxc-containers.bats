@@ -74,8 +74,18 @@ teardown_file() {
     kill "${LISTENER_PID_A:-}" "${LISTENER_PID_B:-}" 2>/dev/null || true
     lxc-stop -k -n 4101 2>/dev/null || true
     lxc-stop -k -n ct-plain 2>/dev/null || true
+    # A container started in the background ends before the namespace goes,
+    # so no copy of the mount table outlives the suite.
+    local attempt=0
+    while pgrep -x lxc-execute >/dev/null 2>&1 && [ "${attempt}" -lt 50 ]; do
+        sleep 0.1
+        attempt=$((attempt + 1))
+    done
     stop_ebpf_agent 2>/dev/null || true
     destroy_test_netns 2>/dev/null || true
+    # `lxc-execute` on the node's own root turns /run/netns private; the
+    # suites after this one expect it shared, as `ip netns add` leaves it.
+    mount --make-shared /run/netns 2>/dev/null || true
     rm -rf "${DATA_DIR:-/tmp/ebpfsentinel-test-data-lxc-$$}"
     rm -f "${PREPARED_CONFIG:-}"
 }
