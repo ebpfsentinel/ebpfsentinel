@@ -209,3 +209,33 @@ bench lists every map above 1 MiB with its size.
 The DNS clients bind refusal, the LXC namespace leak, the mirror loop and every
 enterprise failure above predate the aya move: the code each one lives in is an
 ancestor of the commit the move started from, `76c9fc94`.
+
+## Addendum, 2026-11-08: the container runtimes lane
+
+The two skips the local lane recorded for suites 130 and 131 were the wrong
+lane, not a missing tool: both suites are written for `vagrant-runtimes/`, the
+VM that carries Podman (rootful and rootless), containerd and CRI-O, and the
+agent VM carries none of them. The agent VM's lane ran them only because they
+had no row in `coverage-matrix.yaml`, and a suite without a row defaults to the
+local lane.
+
+They now have one, with `lanes: ["runtimes"]`, and `scripts/run-local-lane.sh`
+drives that lane under `EBPFSENTINEL_LANE=runtimes` (`make test-runtimes` from
+the host). The agent VM's lane leaves them out, reports `NOT RUN` naming the
+runtimes lane if one is passed to it by number, and the suites' own skip says
+where they run rather than which tool is absent (`07d628f9`).
+
+Run on the runtimes VM (kernel `7.0.0-42-generic`, `bpf` in `lsm=`) with
+`EBPFSENTINEL_STRICT_SKIPS=1`, on the agent, warden and objects built on the
+host from `19e9ad75` (agent sha256 `2aa72cf4...`) and synced as its Vagrantfile
+intends:
+
+| suite | tests | pass | skip | fail |
+|---|---:|---:|---:|---:|
+| 130 Podman attribution, rootful and rootless | 2 | 2 | 0 | 0 |
+| 131 containerd and CRI-O through the CRI | 2 | 2 | 0 | 0 |
+| 132 start-up refusals, also on this lane | 4 | 4 | 0 | 0 |
+
+No provisioner change and no product or harness fix was needed beyond the lane
+selection. The local lane's skip table above is superseded: no skip is left in
+it.
