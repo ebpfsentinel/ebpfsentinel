@@ -28,9 +28,10 @@ use ebpf_common::{
     ids::{
         IDS_ACTION_DROP, IDS_METRIC_CGROUP_ATTRIBUTED, IDS_METRIC_CGROUP_TENANT_RESOLVED,
         IDS_METRIC_COUNT, IDS_METRIC_CT_KILL_CONFIRMED, IDS_METRIC_DROPPED, IDS_METRIC_ERRORS,
-        IDS_METRIC_EVENTS_DROPPED, IDS_METRIC_MATCHED, IDS_METRIC_TOTAL_SEEN, IDS_SAMPLING_RANDOM,
-        IDS_SCOPE_WORKLOAD, IDS_WORKLOAD_SCOPE_MAX_ENTRIES, IdsPatternKey, IdsPatternValue,
-        IdsSamplingConfig, IdsWorkloadScopeKey, WORKLOAD_LINK_MAX_ENTRIES,
+        IDS_METRIC_EVENTS_DROPPED, IDS_METRIC_MATCHED, IDS_METRIC_TOTAL_SEEN, IDS_MIRROR_COPY_MARK,
+        IDS_SAMPLING_RANDOM, IDS_SCOPE_WORKLOAD, IDS_WORKLOAD_SCOPE_MAX_ENTRIES, IdsPatternKey,
+        IdsPatternValue, IdsSamplingConfig, IdsWorkloadScopeKey, WORKLOAD_LINK_MAX_ENTRIES,
+        is_mirror_copy,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
@@ -439,6 +440,13 @@ unsafe fn resolve_skb_cgroup_id(ctx: &TcContext) -> u64 {
 /// (NFR15: default-to-pass on internal error).
 #[classifier]
 pub fn tc_ids(ctx: TcContext) -> i32 {
+    // A forensics mirror copy is this program's own output, not traffic. On a
+    // mirror target that carries the chain it would match the rule that
+    // mirrored it and be cloned again, so it passes untouched and uncounted.
+    // SAFETY: `mark` is a readable field of the classifier's `__sk_buff`.
+    if is_mirror_copy(unsafe { (*raw_skb(&ctx)).mark }) {
+        return -1;
+    }
     // A traced packet is matched like any other, and moves no counter,
     // raises no event, mirrors nothing and tears no flow down.
     let traced = trace::tc(&ctx);
@@ -745,12 +753,21 @@ fn process_ids_pattern(
             && *ifindex > 0
         {
             let target_ifindex = *ifindex;
+            let skb = raw_skb(_ctx);
+            // The copy carries the mirror mark, which every tc_ids it meets on
+            // the way to the sink passes untouched; the packet itself goes on
+            // with the mark it came with.
+            // SAFETY: `mark` is a readable and writable field of the
+            // classifier's `__sk_buff`, and `skb` is the program's own context.
             unsafe {
+                let mark = (*skb).mark;
+                (*skb).mark = IDS_MIRROR_COPY_MARK;
                 bpf_clone_redirect(
-                    raw_skb(_ctx) as *mut _,
+                    skb.cast(),
                     target_ifindex,
                     0, // flags: 0 = transmit on the target's egress (BPF_F_INGRESS unset)
                 );
+                (*skb).mark = mark;
             }
         }
     }

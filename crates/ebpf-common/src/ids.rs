@@ -41,6 +41,32 @@ pub const IDS_METRIC_CT_KILL_CONFIRMED: u32 = 7;
 /// Total number of IDS metric slots (one past the last index).
 pub const IDS_METRIC_COUNT: u32 = 8;
 
+/// `skb->mark` of a forensics mirror copy.
+///
+/// The copy leaves through the mirror target's egress, and a target carrying
+/// the agent's own chain, a configured interface or a veth or tap the link
+/// watcher attached to, runs the IDS program on it again; so does the
+/// target's veth peer when it sits in the host namespace too. A copy that
+/// cannot be told from traffic matches the rule that mirrored it and is
+/// cloned again: inside the target's own transmit path until the kernel's
+/// recursion limit, and around the veth pair for as long as the mirror is on.
+///
+/// The mark is written on the copy only, and the packet's own mark is put
+/// back before it goes on. A workload cannot forge it, because a packet
+/// leaving its network namespace has its mark cleared on the way out; on the
+/// host only `CAP_NET_ADMIN` sets one, which already holds the power to
+/// detach the programs. The value differs from the trace mark, so a copy is
+/// never read as a trace.
+pub const IDS_MIRROR_COPY_MARK: u32 = 0x4D49_5252;
+
+/// Whether a packet with this `skb->mark` is a forensics mirror copy rather
+/// than traffic.
+#[inline(always)]
+#[must_use]
+pub const fn is_mirror_copy(mark: u32) -> bool {
+    mark == IDS_MIRROR_COPY_MARK
+}
+
 /// Kernel-side IDS sampling configuration.
 /// Stored in a single-entry Array map (`IDS_SAMPLING_CONFIG`).
 /// Size: 8 bytes (aligned to 4 bytes).
@@ -194,6 +220,16 @@ mod tests {
     fn test_ids_scope_constants() {
         assert_eq!(IDS_SCOPE_ALL, 0);
         assert_eq!(IDS_SCOPE_WORKLOAD, 1);
+    }
+
+    #[test]
+    fn mirror_copy_is_told_from_traffic_and_from_a_trace() {
+        assert!(is_mirror_copy(IDS_MIRROR_COPY_MARK));
+        // An unmarked packet, and a packet whose mark was cleared leaving a
+        // workload's namespace, is traffic.
+        assert!(!is_mirror_copy(0));
+        assert!(!is_mirror_copy(crate::trace::TC_TRACE_MARK));
+        assert_ne!(IDS_MIRROR_COPY_MARK, crate::trace::TC_TRACE_MARK);
     }
 
     #[test]

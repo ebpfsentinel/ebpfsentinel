@@ -17,7 +17,9 @@
 //!   XDP program on this host or the test run itself can place there.
 //! - **tc**: `skb->mark` and `skb->priority` both set to a fixed value. A
 //!   socket sets either only with `CAP_NET_ADMIN`, which already holds the
-//!   power to detach the programs, and no program of the agent writes them.
+//!   power to detach the programs, and no program of the agent writes them
+//!   but the IDS, which marks a forensics mirror copy with another value and
+//!   puts the packet's own mark back.
 //!
 //! A program reports what it decided for a traced packet in the same place:
 //! the XDP stages append a record to the metadata, and a tc classifier, which
