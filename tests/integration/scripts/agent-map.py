@@ -143,7 +143,11 @@ def main(argv):
             ("flags", ctypes.c_uint64),
         ]
 
-    attr = Attr(fd, 0, ctypes.addressof(key_buf), ctypes.addressof(val_buf), 0)
+    # A delete names a key and nothing else: the kernel refuses any attribute
+    # byte past the last field a command reads, so a value pointer left in the
+    # attribute turns a delete into EINVAL.
+    value_ptr = 0 if op == "delete" else ctypes.addressof(val_buf)
+    attr = Attr(fd, 0, ctypes.addressof(key_buf), value_ptr, 0)
     cmd = {"lookup": BPF_MAP_LOOKUP_ELEM, "update": BPF_MAP_UPDATE_ELEM, "delete": BPF_MAP_DELETE_ELEM}[op]
     rc, err = syscall("bpf", ctypes.c_int(cmd), ctypes.byref(attr), ctypes.c_uint(ctypes.sizeof(attr)))
     os.close(fd)
