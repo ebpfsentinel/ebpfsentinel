@@ -159,6 +159,16 @@ test-perf-host-to-vm-quick: ## Quick host-to-VM perf test
 
 # ── 2-VM topology (agent + attacker VMs) ─────────────────────────
 
+RUNTIMES_DIR := $(INTEGRATION_DIR)/vagrant-runtimes
+
+.PHONY: test-runtimes
+test-runtimes: ## Run the container runtimes lane (Podman, containerd, CRI-O) on vagrant-runtimes; host release build + ebpf-build first
+	cd $(RUNTIMES_DIR) && vagrant up runtimes && vagrant rsync runtimes
+	cd $(RUNTIMES_DIR) && vagrant ssh runtimes -c \
+		'cd /home/vagrant/ebpfsentinel/tests/integration && \
+		 sudo EBPFSENTINEL_LANE=runtimes EBPFSENTINEL_STRICT_SKIPS=1 BATS_FILTER="$(BATS_FILTER)" \
+		 bash scripts/run-local-lane.sh $(SUITES); cat /tmp/local-lane-result.txt'
+
 .PHONY: vagrant-2vm-up
 vagrant-2vm-up: ## Start both agent and attacker VMs
 	cd $(VAGRANT_DIR) && vagrant up agent attacker

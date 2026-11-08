@@ -5,7 +5,28 @@
 #
 # Usage (on the agent VM):
 #   sudo PROJECT_ROOT=/home/vagrant/ebpfsentinel bash scripts/run-local-lane.sh 33 52 57 58
+#
+# The same runner drives the container runtimes lane, which is one machine
+# too but a different one: ../vagrant-runtimes carries Podman, containerd and
+# CRI-O, and the suites written for it run there and nowhere else. On that VM:
+#   sudo EBPFSENTINEL_LANE=runtimes PROJECT_ROOT=/home/vagrant/ebpfsentinel \
+#       bash scripts/run-local-lane.sh
+#
+# BATS_FILTER, when set, is handed to bats as --filter, so a fix reruns only
+# the tests it touches.
 set -u
+
+# Which one-machine lane this is: `local` (../vagrant, the agent VM) or
+# `runtimes` (../vagrant-runtimes). Read against the `lanes` field of
+# coverage-matrix.yaml.
+LANE="${EBPFSENTINEL_LANE:-local}"
+case "${LANE}" in
+    local|runtimes) ;;
+    *)
+        echo "ERROR: EBPFSENTINEL_LANE must be local or runtimes, not '${LANE}'" >&2
+        exit 1
+        ;;
+esac
 
 PROJECT_ROOT="${PROJECT_ROOT:-/home/vagrant/ebpfsentinel}"
 # The canonical lane provisions every prerequisite a suite owns, so a
@@ -87,6 +108,37 @@ list_off_lane_suites() {
     ' coverage-matrix.yaml | sort -u
 }
 
+# Suites whose row names the runtimes lane and not the local one: they need
+# the runtimes the agent VM does not carry.
+list_runtimes_only_suites() {
+    awk '
+        /^attack_suites:/ { inblk=1; next }
+        inblk && /^[a-z_]+:/ { inblk=0 }
+        inblk && /^[[:space:]]*-?[[:space:]]*suite:/ {
+            s=$NF; gsub(/[\042\047]/,"",s); last=s; next
+        }
+        inblk && /^[[:space:]]*lanes:/ {
+            if (last != "" && index($0, "runtimes") > 0 && index($0, "local") == 0) print last
+            last=""
+        }
+    ' coverage-matrix.yaml | sort -u
+}
+
+# Suites a row writes for the runtimes lane, with or without the local one.
+list_runtimes_suites() {
+    awk '
+        /^attack_suites:/ { inblk=1; next }
+        inblk && /^[a-z_]+:/ { inblk=0 }
+        inblk && /^[[:space:]]*-?[[:space:]]*suite:/ {
+            s=$NF; gsub(/[\042\047]/,"",s); last=s; next
+        }
+        inblk && /^[[:space:]]*lanes:/ {
+            if (last != "" && index($0, "runtimes") > 0) print last
+            last=""
+        }
+    ' coverage-matrix.yaml | sort -n -u
+}
+
 list_local_suites() {
     local off
     off=" $(list_off_lane_suites | tr '\n' ' ')"
@@ -102,19 +154,35 @@ list_local_suites() {
 
 if [ "$#" -gt 0 ]; then
     SUITES="$*"
+elif [ "${LANE}" = runtimes ]; then
+    SUITES="$(list_runtimes_suites | tr '\n' ' ')"
 else
     SUITES="$(list_local_suites | tr '\n' ' ')"
-    if [ -z "${SUITES// /}" ]; then
-        echo "ERROR: no suite under suites/ is written for the local lane" >&2
-        exit 1
-    fi
 fi
+if [ -z "${SUITES// /}" ]; then
+    echo "ERROR: no suite under suites/ is written for the ${LANE} lane" >&2
+    exit 1
+fi
+RUNTIMES_ONLY=" $(list_runtimes_only_suites | tr '\n' ' ')"
+BATS_ARGS=()
+[ -n "${BATS_FILTER:-}" ] && BATS_ARGS=(--filter "${BATS_FILTER}")
 
 for s in $SUITES; do
     suite="$(ls suites/${s}-*.bats 2>/dev/null | head -1)"
     if [ -z "$suite" ]; then
         echo "SUITE ${s}: NOT FOUND" >>"$OUT"
         continue
+    fi
+    # Named on the command line of the agent VM's lane, a runtimes suite
+    # would only skip on the runtimes it cannot find there. Say where it runs
+    # rather than report a skip that is a fact about the machine.
+    if [ "${LANE}" = local ]; then
+        case "${RUNTIMES_ONLY}" in
+            *" ${s} "*)
+                echo "SUITE ${s}: NOT RUN (written for the runtimes lane: EBPFSENTINEL_LANE=runtimes on ../vagrant-runtimes)" >>"$OUT"
+                continue
+                ;;
+        esac
     fi
     clean_slate
     log="/tmp/ll-${s}.tap"
@@ -135,9 +203,9 @@ for s in $SUITES; do
         sudo -u "$SUDO_USER" env \
             PROJECT_ROOT="$PROJECT_ROOT" \
             EBPFSENTINEL_STRICT_SKIPS="$EBPFSENTINEL_STRICT_SKIPS" \
-            timeout "$UNPRIVILEGED_TIMEOUT" bats "$suite" >"$log" 2>&1
+            timeout "$UNPRIVILEGED_TIMEOUT" bats "${BATS_ARGS[@]}" "$suite" >"$log" 2>&1
     else
-        PROJECT_ROOT="$PROJECT_ROOT" timeout "$DEFAULT_TIMEOUT" bats "$suite" >"$log" 2>&1
+        PROJECT_ROOT="$PROJECT_ROOT" timeout "$DEFAULT_TIMEOUT" bats "${BATS_ARGS[@]}" "$suite" >"$log" 2>&1
     fi
     rc=$?
     pass=$(grep -cE '^ok ' "$log" 2>/dev/null)

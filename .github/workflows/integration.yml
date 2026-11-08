@@ -538,7 +538,7 @@ jobs:
           # Every attack-suite row names the lanes it is written for. That field
           # is what the three runners select on, so a row without it is a suite
           # no lane runs, which reads as coverage.
-          lanes_allowed = {"local", "2vm", "3vm"}
+          lanes_allowed = {"local", "2vm", "3vm", "runtimes"}
           bad_lanes = []
           for row in doc.get("attack_suites", []) or []:
               suite = row.get("suite")

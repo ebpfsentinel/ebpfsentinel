@@ -97,6 +97,8 @@ env:
   - "suite 106 listens on the agent's own loopback (local lane only)"
   - "suite 107 needs a second machine at the far end (2VM lane only)"
   - "suite 108 needs the client on a second machine (2VM lane only)"
+  - "suite 130 runs its containers through Podman (runtimes lane only: ../vagrant-runtimes)"
+  - "suite 131 runs its containers through containerd and CRI-O (runtimes lane only: ../vagrant-runtimes)"
   - "cannot SSH to the agent VM"
   - "smbd not installed on the agent VM"
   - "suite 74 makes its guest devices beside the agent (local lane only)"

@@ -153,11 +153,12 @@ Require **root** and **kernel >= 6.12** (or 2-VM mode). Measure agent overhead u
 
 Per-suite mapping lives in the `suite_profiles:` block of `coverage-matrix.yaml`. The audit gate (`scripts/audit-coverage.sh`) fails the build if a new suite lands without an explicit profile pin. The workflow reads this block via `scripts/list-suites-by-profile.sh`, so adding a new suite needs **no** workflow edit.
 
-**Lanes** (consumed by the three runners):
+**Lanes** (consumed by the runners below):
 
 - `scripts/run-local-lane.sh` - one machine. The suite runs on the host that runs the agent, and traffic comes out of a network namespace beside it.
 - `scripts/run-in-2vm.sh` - the suite runs on the attacker VM and drives an agent on a machine of its own.
 - `scripts/run-in-3vm.sh` - the same, with a backend behind the agent so the agent is a transit hop.
+- `scripts/run-local-lane.sh` with `EBPFSENTINEL_LANE=runtimes` - one machine again, but the `vagrant-runtimes/` VM, which carries Podman (rootful and rootless), containerd and CRI-O. The container attribution suites written for those runtimes (`lanes: ["runtimes"]`) run there and nowhere else; the agent VM's lane leaves them out and reports `NOT RUN` naming this lane if one is passed to it by number. `make test-runtimes` brings the VM up, syncs the host's release build and runs the lane.
 
 The `lanes` field on each `attack_suites` row names the lanes a suite is written for, and is the one field the three runners select on. It is deliberately not `topology`, which is the fewest machines a suite needs: a suite needing a second machine for its wire assertions can still carry API-surface tests that run on a single one, and a suite can be unrunnable on a lane for a reason of the lane rather than of the product - suite 59 drives TCP/22, which sshd already holds on the machine the two-machine lane reaches over SSH, so seven of its eight tests skipped there while all eight pass on one machine. A suite with no row runs on the local lane, which is every suite below 38.
 

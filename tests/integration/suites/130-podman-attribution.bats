@@ -29,7 +29,10 @@ setup_file() {
     require_kernel 6 12
     require_tool jq
     require_tool curl
-    require_tool podman
+    # Only ../vagrant-runtimes carries the runtimes; elsewhere the skip says
+    # where the suite runs rather than what this machine lacks.
+    command -v podman >/dev/null 2>&1 ||
+        env_skip "suite 130 runs its containers through Podman (runtimes lane only: ../vagrant-runtimes)"
 
     export PROJECT_ROOT
     PROJECT_ROOT="$(find_project_root)"

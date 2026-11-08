@@ -1563,3 +1563,30 @@ attack_suites:
     profile: nightly
     surfaces: ["ransom", "file_watch"]
     notes: "The attacker VM encrypting a Samba share the agent's machine serves: the verdict names the client by its address through smbd, and neither the session nor smbd is stopped"
+
+  - suite: "130"
+    name: podman-attribution
+    topology: none
+    lanes: ["runtimes"]
+    kernel_min: "6.12"
+    profile: nightly
+    surfaces: ["container"]
+    notes: "A rootful and a rootless Podman container named on their alerts by id, name and image, each runtime reported reachable. Podman lives on the vagrant-runtimes VM only, so the agent VM's lane does not run it"
+
+  - suite: "131"
+    name: cri-runtimes-attribution
+    topology: none
+    lanes: ["runtimes"]
+    kernel_min: "6.12"
+    profile: nightly
+    surfaces: ["container"]
+    notes: "A container containerd and CRI-O start through the CRI, with the systemd cgroup driver, attributed to its id, its runtime and its scope. Both runtimes and crictl live on the vagrant-runtimes VM only"
+
+  - suite: "132"
+    name: start-up-refusals
+    topology: none
+    lanes: ["local", "runtimes"]
+    kernel_min: "6.12"
+    profile: nightly
+    surfaces: ["startup"]
+    notes: "The agent refuses to start where running would promise what the node does not do, and starts with less where it can, saying what it lacks. Needs nothing but the BPF LSM, so both one-machine lanes run it"

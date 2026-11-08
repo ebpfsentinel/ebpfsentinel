@@ -18,8 +18,14 @@
 #   cargo xtask ebpf-build                                               # on the host
 #   vagrant up runtimes
 #   vagrant ssh -c 'cd ebpfsentinel/tests/integration && \
-#       sudo bats suites/130-*.bats suites/131-*.bats suites/132-*.bats'
+#       sudo EBPFSENTINEL_LANE=runtimes EBPFSENTINEL_STRICT_SKIPS=1 \
+#       bash scripts/run-local-lane.sh; cat /tmp/local-lane-result.txt'
 #   vagrant rsync           # after a host rebuild
+#
+# The suites run are the rows of ../coverage-matrix.yaml whose `lanes` name
+# `runtimes`; `make test-runtimes` from .. does all of the above. The agent
+# VM's lane leaves the runtimes-only suites out, because they would only skip
+# there on a runtime that machine does not carry.
 #
 # Environment variables:
 #   RUNTIMES_VM_CPUS     vCPUs (default: 2)
