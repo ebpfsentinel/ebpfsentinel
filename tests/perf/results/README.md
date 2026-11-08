@@ -9,6 +9,29 @@ Nothing in this directory is a target. A guest with four vCPUs is not a
 production node, and the suite says so in its own output: the bounds it
 asserts are what the lane can hold, not what the product promises.
 
+## `2026-11-08-memory-footprint.json`
+
+`tests/perf/measure-footprint.sh` on the agent VM of `tests/integration/vagrant`,
+kernel 7.0.0-42-generic, 3.9 GB, at 4 vCPUs and again at 8, possible CPUs
+equal to online both times. Three starts of each configuration under each
+launch (the OSS agent under the warden over a BPF token, the enterprise agent
+the same way and as root with capabilities), each start in a systemd service
+of its own and read 30 s after it was ready. `starts` carries every start's
+map memory, RSS, steady `memory.current`, its `kernel` and `percpu` lines and
+`memory.peak`; `charge_probe` is one more start per case with the node's
+`/proc/meminfo` and every cgroup's `memory.stat` read before and after;
+`oss_all_maps_by_cpus` lists every map of the every-feature start at both CPU
+counts.
+
+**What to quote.** With every feature enabled the OSS agent's container sits
+at 336 MiB and peaks at 872 MiB while it loads, the same at 8 vCPUs; the
+enterprise agent over a BPF token at 429 MiB and 928 MiB. The peak comes from
+loading an XDP program, not from the tables. The maps lock 229 MB on 4 vCPUs
+and 265 MB on 8, about 9 MB per CPU, all of the growth in per-CPU maps; the
+per-CPU values, about 7.9 MiB per CPU, are charged to no cgroup, so the node
+pays them and a container limit does not see them. `BENCHMARK-RESULTS.md`
+carries the tables.
+
 ## `2026-11-01-mass-encryption-kill-latency.json`
 
 `08-mass-encryption-kill-latency.bats` on the local lane: a tree of 2,000 small

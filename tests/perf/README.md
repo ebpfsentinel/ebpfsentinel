@@ -13,7 +13,9 @@ tests/perf/
 ├── README.md
 ├── Makefile                       # convenience targets (run on the agent VM, as root)
 ├── BENCHMARK-RESULTS.md           # methodology + recorded resource-consumption numbers
+├── measure-footprint.sh           # memory per configuration: maps, RSS, steady cgroup, startup peak (run from the host)
 ├── fixtures/                      # perf-only agent configs
+├── results/                       # dated output of a run, the source of every figure quoted elsewhere
 └── *.bats                         # the perf suites
 ```
 

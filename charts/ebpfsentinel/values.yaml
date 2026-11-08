@@ -244,9 +244,9 @@ daemonset:
     # on kubeadm, kind, minikube, EKS, GKE and AKS; k0s uses
     # `/var/lib/k0s/kubelet` and MicroK8s `/var/snap/microk8s/common/var/lib/kubelet`.
     kubeletRootDir: /var/lib/kubelet
-  # -- Resource requests and limits. The request is about twice the agent's
-  # steady use under the default configuration; the limit covers the peak while it
-  # loads its programs, which is several times that (see Memory in the README).
+  # -- Resource requests and limits. The request covers the agent's steady use
+  # with the benchmark configuration's features, about 240 MiB; the limit covers
+  # the peak while it loads its programs, about 870 MiB (see Memory in the README).
   resources:
     requests:
       memory: "256Mi"

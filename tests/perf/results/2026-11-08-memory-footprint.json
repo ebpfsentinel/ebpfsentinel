@@ -1,0 +1,4681 @@
+{
+ "script": "tests/perf/measure-footprint.sh",
+ "measured": "2026-11-08",
+ "kernel": "7.0.0-42-generic",
+ "host": "VMware agent guest of tests/integration/vagrant, 3.9 GB, 4 then 8 vCPUs, possible CPUs equal to online",
+ "settle_seconds": 30,
+ "starts": [
+  {
+   "launch": "enterprise",
+   "cpus_online": 4,
+   "cpus_possible": 4,
+   "profile": "none",
+   "programs": 20,
+   "maps": 27,
+   "maps_bytes_memlock": [
+    31035832,
+    31035832,
+    31035832
+   ],
+   "agent_rss_kb": [
+    168444,
+    168944,
+    167992
+   ],
+   "warden_rss_kb": [
+    0,
+    0,
+    0
+   ],
+   "cgroup_current_bytes": [
+    278048768,
+    280104960,
+    279130112
+   ],
+   "cgroup_kernel_bytes": [
+    33816576,
+    35307520,
+    35303424
+   ],
+   "cgroup_percpu_bytes": [
+    5280,
+    4872,
+    4872
+   ],
+   "cgroup_peak_bytes": [
+    295391232,
+    297705472,
+    296472576
+   ],
+   "seconds_to_ready": [
+    0.7,
+    0.7,
+    0.7
+   ]
+  },
+  {
+   "launch": "enterprise",
+   "cpus_online": 4,
+   "cpus_possible": 4,
+   "profile": "benchmark",
+   "programs": 27,
+   "maps": 125,
+   "maps_bytes_memlock": [
+    133643952,
+    133643952,
+    133643952
+   ],
+   "agent_rss_kb": [
+    207716,
+    205016,
+    207372
+   ],
+   "warden_rss_kb": [
+    0,
+    0,
+    0
+   ],
+   "cgroup_current_bytes": [
+    378699776,
+    377311232,
+    380030976
+   ],
+   "cgroup_kernel_bytes": [
+    111149056,
+    112451584,
+    112373760
+   ],
+   "cgroup_percpu_bytes": [
+    7608,
+    7608,
+    7608
+   ],
+   "cgroup_peak_bytes": [
+    772726784,
+    772644864,
+    772640768
+   ],
+   "seconds_to_ready": [
+    3.1,
+    3.1,
+    3.1
+   ]
+  },
+  {
+   "launch": "enterprise",
+   "cpus_online": 4,
+   "cpus_possible": 4,
+   "profile": "all",
+   "programs": 49,
+   "maps": 187,
+   "maps_bytes_memlock": [
+    229224520,
+    229224520,
+    229224520
+   ],
+   "agent_rss_kb": [
+    223284,
+    222668,
+    223252
+   ],
+   "warden_rss_kb": [
+    0,
+    0,
+    0
+   ],
+   "cgroup_current_bytes": [
+    476254208,
+    477048832,
+    477024256
+   ],
+   "cgroup_kernel_bytes": [
+    204017664,
+    205103104,
+    205242368
+   ],
+   "cgroup_percpu_bytes": [
+    14184,
+    14184,
+    14184
+   ],
+   "cgroup_peak_bytes": [
+    772698112,
+    772538368,
+    772915200
+   ],
+   "seconds_to_ready": [
+    4.1,
+    4.1,
+    4.1
+   ]
+  },
+  {
+   "launch": "enterprise",
+   "cpus_online": 8,
+   "cpus_possible": 8,
+   "profile": "none",
+   "programs": 20,
+   "maps": 27,
+   "maps_bytes_memlock": [
+    33922296,
+    33922296,
+    33922296
+   ],
+   "agent_rss_kb": [
+    168360,
+    169500,
+    168656
+   ],
+   "warden_rss_kb": [
+    0,
+    0,
+    0
+   ],
+   "cgroup_current_bytes": [
+    280535040,
+    281407488,
+    280739840
+   ],
+   "cgroup_kernel_bytes": [
+    36012032,
+    35971072,
+    35950592
+   ],
+   "cgroup_percpu_bytes": [
+    8800,
+    8800,
+    8800
+   ],
+   "cgroup_peak_bytes": [
+    297631744,
+    298684416,
+    297803776
+   ],
+   "seconds_to_ready": [
+    0.7,
+    0.7,
+    0.7
+   ]
+  },
+  {
+   "launch": "enterprise",
+   "cpus_online": 8,
+   "cpus_possible": 8,
+   "profile": "benchmark",
+   "programs": 27,
+   "maps": 125,
+   "maps_bytes_memlock": [
+    164359472,
+    164359472,
+    164359472
+   ],
+   "agent_rss_kb": [
+    203300,
+    205372,
+    205368
+   ],
+   "warden_rss_kb": [
+    0,
+    0,
+    0
+   ],
+   "cgroup_current_bytes": [
+    377647104,
+    379637760,
+    379154432
+   ],
+   "cgroup_kernel_bytes": [
+    113020928,
+    113094656,
+    113065984
+   ],
+   "cgroup_percpu_bytes": [
+    12840,
+    12840,
+    12840
+   ],
+   "cgroup_peak_bytes": [
+    773332992,
+    772984832,
+    773566464
+   ],
+   "seconds_to_ready": [
+    3.2,
+    3.4,
+    3.3
+   ]
+  },
+  {
+   "launch": "enterprise",
+   "cpus_online": 8,
+   "cpus_possible": 8,
+   "profile": "all",
+   "programs": 49,
+   "maps": 187,
+   "maps_bytes_memlock": [
+    265201672,
+    265201672,
+    265201672
+   ],
+   "agent_rss_kb": [
+    221060,
+    222988,
+    225440
+   ],
+   "warden_rss_kb": [
+    0,
+    0,
+    0
+   ],
+   "cgroup_current_bytes": [
+    476684288,
+    478515200,
+    480858112
+   ],
+   "cgroup_kernel_bytes": [
+    206237696,
+    206229504,
+    206315520
+   ],
+   "cgroup_percpu_bytes": [
+    23800,
+    23800,
+    23800
+   ],
+   "cgroup_peak_bytes": [
+    773296128,
+    773218304,
+    773533696
+   ],
+   "seconds_to_ready": [
+    4.1,
+    4.1,
+    4.1
+   ]
+  },
+  {
+   "launch": "enterprise-token",
+   "cpus_online": 4,
+   "cpus_possible": 4,
+   "profile": "none",
+   "programs": 20,
+   "maps": 27,
+   "maps_bytes_memlock": [
+    31035832,
+    31035832,
+    31035832
+   ],
+   "agent_rss_kb": [
+    168308,
+    168728,
+    169480
+   ],
+   "warden_rss_kb": [
+    6636,
+    6508,
+    7176
+   ],
+   "cgroup_current_bytes": [
+    251015168,
+    252051456,
+    252764160
+   ],
+   "cgroup_kernel_bytes": [
+    31014912,
+    31059968,
+    30969856
+   ],
+   "cgroup_percpu_bytes": [
+    5280,
+    4872,
+    5280
+   ],
+   "cgroup_peak_bytes": [
+    272265216,
+    272973824,
+    273715200
+   ],
+   "seconds_to_ready": [
+    0.7,
+    0.7,
+    0.7
+   ]
+  },
+  {
+   "launch": "enterprise-token",
+   "cpus_online": 4,
+   "cpus_possible": 4,
+   "profile": "firewall",
+   "programs": 21,
+   "maps": 69,
+   "maps_bytes_memlock": [
+    47446560,
+    47446560,
+    47446560
+   ],
+   "agent_rss_kb": [
+    194720,
+    191772,
+    190528
+   ],
+   "warden_rss_kb": [
+    7104,
+    7064,
+    7136
+   ],
+   "cgroup_current_bytes": [
+    289468416,
+    286539776,
+    285171712
+   ],
+   "cgroup_kernel_bytes": [
+    48308224,
+    48316416,
+    47972352
+   ],
+   "cgroup_percpu_bytes": [
+    5832,
+    5832,
+    5832
+   ],
+   "cgroup_peak_bytes": [
+    972599296,
+    972734464,
+    972623872
+   ],
+   "seconds_to_ready": [
+    2.8,
+    2.8,
+    2.8
+   ]
+  },
+  {
+   "launch": "enterprise-token",
+   "cpus_online": 4,
+   "cpus_possible": 4,
+   "profile": "ratelimit",
+   "programs": 22,
+   "maps": 89,
+   "maps_bytes_memlock": [
+    95044208,
+    95044208,
+    95044208
+   ],
+   "agent_rss_kb": [
+    195512,
+    192864,
+    195812
+   ],
+   "warden_rss_kb": [
+    7092,
+    6508,
+    7088
+   ],
+   "cgroup_current_bytes": [
+    309141504,
+    307134464,
+    310792192
+   ],
+   "cgroup_kernel_bytes": [
+    68562944,
+    68501504,
+    68595712
+   ],
+   "cgroup_percpu_bytes": [
+    6096,
+    6000,
+    6096
+   ],
+   "cgroup_peak_bytes": [
+    972226560,
+    972337152,
+    972513280
+   ],
+   "seconds_to_ready": [
+    3.2,
+    3.4,
+    3.2
+   ]
+  },
+  {
+   "launch": "enterprise-token",
+   "cpus_online": 4,
+   "cpus_possible": 4,
+   "profile": "threatintel",
+   "programs": 21,
+   "maps": 36,
+   "maps_bytes_memlock": [
+    32801424,
+    32801424,
+    32801424
+   ],
+   "agent_rss_kb": [
+    194888,
+    194648,
+    195064
+   ],
+   "warden_rss_kb": [
+    7188,
+    7100,
+    7140
+   ],
+   "cgroup_current_bytes": [
+    273260544,
+    273104896,
+    273678336
+   ],
+   "cgroup_kernel_bytes": [
+    33013760,
+    32989184,
+    33001472
+   ],
+   "cgroup_percpu_bytes": [
+    5544,
+    5544,
+    5544
+   ],
+   "cgroup_peak_bytes": [
+    294039552,
+    294113280,
+    294658048
+   ],
+   "seconds_to_ready": [
+    0.7,
+    0.8,
+    0.8
+   ]
+  },
+  {
+   "launch": "enterprise-token",
+   "cpus_online": 4,
+   "cpus_possible": 4,
+   "profile": "benchmark",
+   "programs": 27,
+   "maps": 125,
+   "maps_bytes_memlock": [
+    133643952,
+    133643952,
+    133643952
+   ],
+   "agent_rss_kb": [
+    206164,
+    207028,
+    206884
+   ],
+   "warden_rss_kb": [
+    7220,
+    7216,
+    7156
+   ],
+   "cgroup_current_bytes": [
+    350679040,
+    352063488,
+    351494144
+   ],
+   "cgroup_kernel_bytes": [
+    108118016,
+    108167168,
+    108126208
+   ],
+   "cgroup_percpu_bytes": [
+    7704,
+    7608,
+    7704
+   ],
+   "cgroup_peak_bytes": [
+    972427264,
+    972959744,
+    972492800
+   ],
+   "seconds_to_ready": [
+    3.6,
+    3.5,
+    3.7
+   ]
+  },
+  {
+   "launch": "enterprise-token",
+   "cpus_online": 4,
+   "cpus_possible": 4,
+   "profile": "all",
+   "programs": 49,
+   "maps": 187,
+   "maps_bytes_memlock": [
+    229224520,
+    229224520,
+    229224520
+   ],
+   "agent_rss_kb": [
+    224196,
+    224016,
+    224276
+   ],
+   "warden_rss_kb": [
+    7400,
+    7376,
+    7404
+   ],
+   "cgroup_current_bytes": [
+    449630208,
+    449777664,
+    450072576
+   ],
+   "cgroup_kernel_bytes": [
+    200945664,
+    200933376,
+    200929280
+   ],
+   "cgroup_percpu_bytes": [
+    14280,
+    14280,
+    14280
+   ],
+   "cgroup_peak_bytes": [
+    972414976,
+    972623872,
+    972992512
+   ],
+   "seconds_to_ready": [
+    4.5,
+    4.9,
+    4.6
+   ]
+  },
+  {
+   "launch": "enterprise-token",
+   "cpus_online": 8,
+   "cpus_possible": 8,
+   "profile": "none",
+   "programs": 20,
+   "maps": 27,
+   "maps_bytes_memlock": [
+    33922296,
+    33922296,
+    33922296
+   ],
+   "agent_rss_kb": [
+    169036,
+    167768,
+    169708
+   ],
+   "warden_rss_kb": [
+    6640,
+    7160,
+    7120
+   ],
+   "cgroup_current_bytes": [
+    253022208,
+    251772928,
+    253468672
+   ],
+   "cgroup_kernel_bytes": [
+    31174656,
+    31166464,
+    31186944
+   ],
+   "cgroup_percpu_bytes": [
+    8800,
+    8800,
+    8800
+   ],
+   "cgroup_peak_bytes": [
+    274268160,
+    272265216,
+    273948672
+   ],
+   "seconds_to_ready": [
+    0.7,
+    0.7,
+    0.7
+   ]
+  },
+  {
+   "launch": "enterprise-token",
+   "cpus_online": 8,
+   "cpus_possible": 8,
+   "profile": "firewall",
+   "programs": 21,
+   "maps": 69,
+   "maps_bytes_memlock": [
+    50369824,
+    50369824,
+    50369824
+   ],
+   "agent_rss_kb": [
+    191680,
+    191132,
+    194632
+   ],
+   "warden_rss_kb": [
+    6580,
+    7180,
+    6672
+   ],
+   "cgroup_current_bytes": [
+    287309824,
+    287006720,
+    290447360
+   ],
+   "cgroup_kernel_bytes": [
+    48508928,
+    48529408,
+    48533504
+   ],
+   "cgroup_percpu_bytes": [
+    9720,
+    9720,
+    9720
+   ],
+   "cgroup_peak_bytes": [
+    972951552,
+    973070336,
+    973238272
+   ],
+   "seconds_to_ready": [
+    2.8,
+    2.8,
+    2.8
+   ]
+  },
+  {
+   "launch": "enterprise-token",
+   "cpus_online": 8,
+   "cpus_possible": 8,
+   "profile": "ratelimit",
+   "programs": 22,
+   "maps": 89,
+   "maps_bytes_memlock": [
+    125756432,
+    125756432,
+    125756432
+   ],
+   "agent_rss_kb": [
+    194268,
+    193640,
+    194544
+   ],
+   "warden_rss_kb": [
+    7096,
+    7096,
+    6552
+   ],
+   "cgroup_current_bytes": [
+    309133312,
+    308719616,
+    309485568
+   ],
+   "cgroup_kernel_bytes": [
+    68739072,
+    68755456,
+    68706304
+   ],
+   "cgroup_percpu_bytes": [
+    10160,
+    10160,
+    10160
+   ],
+   "cgroup_peak_bytes": [
+    973266944,
+    973062144,
+    973295616
+   ],
+   "seconds_to_ready": [
+    3.4,
+    3.3,
+    3.5
+   ]
+  },
+  {
+   "launch": "enterprise-token",
+   "cpus_online": 8,
+   "cpus_possible": 8,
+   "profile": "threatintel",
+   "programs": 21,
+   "maps": 36,
+   "maps_bytes_memlock": [
+    35688144,
+    35688144,
+    35688144
+   ],
+   "agent_rss_kb": [
+    194964,
+    191840,
+    194704
+   ],
+   "warden_rss_kb": [
+    7104,
+    7188,
+    6524
+   ],
+   "cgroup_current_bytes": [
+    273883136,
+    271732736,
+    274280448
+   ],
+   "cgroup_kernel_bytes": [
+    33185792,
+    33112064,
+    33189888
+   ],
+   "cgroup_percpu_bytes": [
+    9240,
+    9240,
+    9240
+   ],
+   "cgroup_peak_bytes": [
+    295133184,
+    292462592,
+    295014400
+   ],
+   "seconds_to_ready": [
+    0.8,
+    0.8,
+    0.8
+   ]
+  },
+  {
+   "launch": "enterprise-token",
+   "cpus_online": 8,
+   "cpus_possible": 8,
+   "profile": "benchmark",
+   "programs": 27,
+   "maps": 125,
+   "maps_bytes_memlock": [
+    164359472,
+    164359472,
+    164359472
+   ],
+   "agent_rss_kb": [
+    207132,
+    206560,
+    205532
+   ],
+   "warden_rss_kb": [
+    7124,
+    7228,
+    7172
+   ],
+   "cgroup_current_bytes": [
+    352083968,
+    352485376,
+    351404032
+   ],
+   "cgroup_kernel_bytes": [
+    108298240,
+    108347392,
+    108335104
+   ],
+   "cgroup_percpu_bytes": [
+    12840,
+    12840,
+    12840
+   ],
+   "cgroup_peak_bytes": [
+    973418496,
+    972992512,
+    972906496
+   ],
+   "seconds_to_ready": [
+    3.8,
+    3.7,
+    4.0
+   ]
+  },
+  {
+   "launch": "enterprise-token",
+   "cpus_online": 8,
+   "cpus_possible": 8,
+   "profile": "all",
+   "programs": 49,
+   "maps": 187,
+   "maps_bytes_memlock": [
+    265201672,
+    265201672,
+    265201672
+   ],
+   "agent_rss_kb": [
+    224388,
+    224524,
+    224188
+   ],
+   "warden_rss_kb": [
+    7388,
+    7436,
+    6836
+   ],
+   "cgroup_current_bytes": [
+    451457024,
+    452435968,
+    451297280
+   ],
+   "cgroup_kernel_bytes": [
+    201646080,
+    201621504,
+    201646080
+   ],
+   "cgroup_percpu_bytes": [
+    23800,
+    23800,
+    23800
+   ],
+   "cgroup_peak_bytes": [
+    972738560,
+    973975552,
+    973185024
+   ],
+   "seconds_to_ready": [
+    4.8,
+    4.8,
+    4.7
+   ]
+  },
+  {
+   "launch": "oss",
+   "cpus_online": 4,
+   "cpus_possible": 4,
+   "profile": "none",
+   "programs": 20,
+   "maps": 27,
+   "maps_bytes_memlock": [
+    31035832,
+    31035832,
+    31035832
+   ],
+   "agent_rss_kb": [
+    123132,
+    120144,
+    117200
+   ],
+   "warden_rss_kb": [
+    7652,
+    7492,
+    7268
+   ],
+   "cgroup_current_bytes": [
+    177188864,
+    174882816,
+    172003328
+   ],
+   "cgroup_kernel_bytes": [
+    30625792,
+    30646272,
+    30691328
+   ],
+   "cgroup_percpu_bytes": [
+    5280,
+    4872,
+    5280
+   ],
+   "cgroup_peak_bytes": [
+    191463424,
+    190394368,
+    189861888
+   ],
+   "seconds_to_ready": [
+    3.9,
+    3.9,
+    4.0
+   ]
+  },
+  {
+   "launch": "oss",
+   "cpus_online": 4,
+   "cpus_possible": 4,
+   "profile": "firewall",
+   "programs": 22,
+   "maps": 71,
+   "maps_bytes_memlock": [
+    47538016,
+    47538016,
+    47538016
+   ],
+   "agent_rss_kb": [
+    117792,
+    118224,
+    117756
+   ],
+   "warden_rss_kb": [
+    7132,
+    7068,
+    7172
+   ],
+   "cgroup_current_bytes": [
+    189345792,
+    189349888,
+    189235200
+   ],
+   "cgroup_kernel_bytes": [
+    47960064,
+    47960064,
+    48054272
+   ],
+   "cgroup_percpu_bytes": [
+    6192,
+    6192,
+    6192
+   ],
+   "cgroup_peak_bytes": [
+    911228928,
+    911007744,
+    910962688
+   ],
+   "seconds_to_ready": [
+    2.3,
+    2.3,
+    2.3
+   ]
+  },
+  {
+   "launch": "oss",
+   "cpus_online": 4,
+   "cpus_possible": 4,
+   "profile": "ratelimit",
+   "programs": 24,
+   "maps": 91,
+   "maps_bytes_memlock": [
+    95135664,
+    95135664,
+    95135664
+   ],
+   "agent_rss_kb": [
+    120088,
+    120328,
+    120456
+   ],
+   "warden_rss_kb": [
+    7120,
+    7084,
+    7048
+   ],
+   "cgroup_current_bytes": [
+    210214912,
+    210591744,
+    210395136
+   ],
+   "cgroup_kernel_bytes": [
+    68190208,
+    68214784,
+    68161536
+   ],
+   "cgroup_percpu_bytes": [
+    6768,
+    6672,
+    6768
+   ],
+   "cgroup_peak_bytes": [
+    910606336,
+    910884864,
+    910946304
+   ],
+   "seconds_to_ready": [
+    2.2,
+    2.8,
+    2.8
+   ]
+  },
+  {
+   "launch": "oss",
+   "cpus_online": 4,
+   "cpus_possible": 4,
+   "profile": "threatintel",
+   "programs": 21,
+   "maps": 36,
+   "maps_bytes_memlock": [
+    32801424,
+    32801424,
+    32801424
+   ],
+   "agent_rss_kb": [
+    116340,
+    117120,
+    119288
+   ],
+   "warden_rss_kb": [
+    7116,
+    7060,
+    7084
+   ],
+   "cgroup_current_bytes": [
+    170553344,
+    171417600,
+    174329856
+   ],
+   "cgroup_kernel_bytes": [
+    32522240,
+    32432128,
+    32501760
+   ],
+   "cgroup_percpu_bytes": [
+    5544,
+    5544,
+    5544
+   ],
+   "cgroup_peak_bytes": [
+    191537152,
+    192172032,
+    195059712
+   ],
+   "seconds_to_ready": [
+    4.0,
+    3.9,
+    3.9
+   ]
+  },
+  {
+   "launch": "oss",
+   "cpus_online": 4,
+   "cpus_possible": 4,
+   "profile": "benchmark",
+   "programs": 29,
+   "maps": 127,
+   "maps_bytes_memlock": [
+    133735408,
+    133735408,
+    133735408
+   ],
+   "agent_rss_kb": [
+    130736,
+    131172,
+    130980
+   ],
+   "warden_rss_kb": [
+    6652,
+    6556,
+    6588
+   ],
+   "cgroup_current_bytes": [
+    251797504,
+    251564032,
+    251604992
+   ],
+   "cgroup_kernel_bytes": [
+    107556864,
+    107634688,
+    107556864
+   ],
+   "cgroup_percpu_bytes": [
+    8376,
+    8280,
+    8376
+   ],
+   "cgroup_peak_bytes": [
+    910659584,
+    910843904,
+    910573568
+   ],
+   "seconds_to_ready": [
+    2.3,
+    2.2,
+    2.3
+   ]
+  },
+  {
+   "launch": "oss",
+   "cpus_online": 4,
+   "cpus_possible": 4,
+   "profile": "all",
+   "programs": 51,
+   "maps": 189,
+   "maps_bytes_memlock": [
+    229315976,
+    229315976,
+    229315976
+   ],
+   "agent_rss_kb": [
+    147492,
+    147936,
+    147596
+   ],
+   "warden_rss_kb": [
+    7300,
+    7352,
+    7392
+   ],
+   "cgroup_current_bytes": [
+    352264192,
+    352911360,
+    352702464
+   ],
+   "cgroup_kernel_bytes": [
+    202956800,
+    202952704,
+    202948608
+   ],
+   "cgroup_percpu_bytes": [
+    14952,
+    14952,
+    14952
+   ],
+   "cgroup_peak_bytes": [
+    913645568,
+    914001920,
+    913928192
+   ],
+   "seconds_to_ready": [
+    2.2,
+    2.3,
+    2.3
+   ]
+  },
+  {
+   "launch": "oss",
+   "cpus_online": 8,
+   "cpus_possible": 8,
+   "profile": "none",
+   "programs": 20,
+   "maps": 27,
+   "maps_bytes_memlock": [
+    33922296,
+    33922296,
+    33922296
+   ],
+   "agent_rss_kb": [
+    115292,
+    115020,
+    115036
+   ],
+   "warden_rss_kb": [
+    6612,
+    7096,
+    7160
+   ],
+   "cgroup_current_bytes": [
+    170172416,
+    170258432,
+    169717760
+   ],
+   "cgroup_kernel_bytes": [
+    30797824,
+    30826496,
+    30814208
+   ],
+   "cgroup_percpu_bytes": [
+    7640,
+    8800,
+    8800
+   ],
+   "cgroup_peak_bytes": [
+    190881792,
+    190238720,
+    190451712
+   ],
+   "seconds_to_ready": [
+    4.0,
+    4.0,
+    3.9
+   ]
+  },
+  {
+   "launch": "oss",
+   "cpus_online": 8,
+   "cpus_possible": 8,
+   "profile": "firewall",
+   "programs": 22,
+   "maps": 71,
+   "maps_bytes_memlock": [
+    50461472,
+    50461472,
+    50461472
+   ],
+   "agent_rss_kb": [
+    118248,
+    118740,
+    118572
+   ],
+   "warden_rss_kb": [
+    7132,
+    7188,
+    7220
+   ],
+   "cgroup_current_bytes": [
+    189657088,
+    189984768,
+    190046208
+   ],
+   "cgroup_kernel_bytes": [
+    48119808,
+    48136192,
+    48173056
+   ],
+   "cgroup_percpu_bytes": [
+    10320,
+    10320,
+    10320
+   ],
+   "cgroup_peak_bytes": [
+    911835136,
+    911814656,
+    911618048
+   ],
+   "seconds_to_ready": [
+    3.4,
+    2.8,
+    2.8
+   ]
+  },
+  {
+   "launch": "oss",
+   "cpus_online": 8,
+   "cpus_possible": 8,
+   "profile": "ratelimit",
+   "programs": 24,
+   "maps": 91,
+   "maps_bytes_memlock": [
+    125848080,
+    125848080,
+    125848080
+   ],
+   "agent_rss_kb": [
+    120168,
+    120452,
+    119748
+   ],
+   "warden_rss_kb": [
+    7104,
+    7104,
+    7116
+   ],
+   "cgroup_current_bytes": [
+    211439616,
+    211091456,
+    211087360
+   ],
+   "cgroup_kernel_bytes": [
+    68382720,
+    68358144,
+    68349952
+   ],
+   "cgroup_percpu_bytes": [
+    11280,
+    11280,
+    11280
+   ],
+   "cgroup_peak_bytes": [
+    911663104,
+    911388672,
+    911679488
+   ],
+   "seconds_to_ready": [
+    2.3,
+    2.3,
+    2.3
+   ]
+  },
+  {
+   "launch": "oss",
+   "cpus_online": 8,
+   "cpus_possible": 8,
+   "profile": "threatintel",
+   "programs": 21,
+   "maps": 36,
+   "maps_bytes_memlock": [
+    35688144,
+    35688144,
+    35688144
+   ],
+   "agent_rss_kb": [
+    117000,
+    116880,
+    117756
+   ],
+   "warden_rss_kb": [
+    7164,
+    7136,
+    7188
+   ],
+   "cgroup_current_bytes": [
+    172040192,
+    171515904,
+    173199360
+   ],
+   "cgroup_kernel_bytes": [
+    32694272,
+    32681984,
+    32727040
+   ],
+   "cgroup_percpu_bytes": [
+    9240,
+    9240,
+    9240
+   ],
+   "cgroup_peak_bytes": [
+    192770048,
+    192778240,
+    193679360
+   ],
+   "seconds_to_ready": [
+    4.0,
+    4.0,
+    4.0
+   ]
+  },
+  {
+   "launch": "oss",
+   "cpus_online": 8,
+   "cpus_possible": 8,
+   "profile": "benchmark",
+   "programs": 29,
+   "maps": 127,
+   "maps_bytes_memlock": [
+    164451120,
+    164451120,
+    164451120
+   ],
+   "agent_rss_kb": [
+    131032,
+    130972,
+    130684
+   ],
+   "warden_rss_kb": [
+    7172,
+    7132,
+    6608
+   ],
+   "cgroup_current_bytes": [
+    253181952,
+    253005824,
+    251887616
+   ],
+   "cgroup_kernel_bytes": [
+    107802624,
+    107814912,
+    107806720
+   ],
+   "cgroup_percpu_bytes": [
+    13960,
+    13960,
+    13960
+   ],
+   "cgroup_peak_bytes": [
+    911646720,
+    911540224,
+    911831040
+   ],
+   "seconds_to_ready": [
+    2.3,
+    2.8,
+    2.3
+   ]
+  },
+  {
+   "launch": "oss",
+   "cpus_online": 8,
+   "cpus_possible": 8,
+   "profile": "all",
+   "programs": 51,
+   "maps": 189,
+   "maps_bytes_memlock": [
+    265293320,
+    265293320,
+    265293320
+   ],
+   "agent_rss_kb": [
+    147644,
+    147388,
+    147544
+   ],
+   "warden_rss_kb": [
+    7392,
+    7380,
+    7324
+   ],
+   "cgroup_current_bytes": [
+    353624064,
+    353611776,
+    353738752
+   ],
+   "cgroup_kernel_bytes": [
+    203628544,
+    203599872,
+    203599872
+   ],
+   "cgroup_percpu_bytes": [
+    24920,
+    24920,
+    24920
+   ],
+   "cgroup_peak_bytes": [
+    914046976,
+    914829312,
+    914771968
+   ],
+   "seconds_to_ready": [
+    2.3,
+    2.3,
+    2.3
+   ]
+  }
+ ],
+ "charge_probe": [
+  {
+   "launch": "enterprise",
+   "cpus_online": 4,
+   "profile": "all",
+   "maps_bytes_memlock": 229224520,
+   "percpu_map_types_bytes_memlock": 61965416,
+   "node_growth_bytes": {
+    "Slab": -2142208,
+    "SUnreclaim": -4468736,
+    "VmallocUsed": 196300800,
+    "Percpu": 34816000
+   },
+   "charged": [
+    {
+     "cgroup": "/",
+     "counter": "kernel",
+     "bytes": 206831616
+    },
+    {
+     "cgroup": "/system.slice",
+     "counter": "kernel",
+     "bytes": 206053376
+    },
+    {
+     "cgroup": "/system.slice/fp-agent.service",
+     "counter": "kernel",
+     "bytes": 205733888
+    }
+   ]
+  },
+  {
+   "launch": "oss",
+   "cpus_online": 4,
+   "profile": "all",
+   "maps_bytes_memlock": 229315976,
+   "percpu_map_types_bytes_memlock": 61965928,
+   "node_growth_bytes": {
+    "Slab": 3596288,
+    "SUnreclaim": 352256,
+    "VmallocUsed": 196571136,
+    "Percpu": 33259520
+   },
+   "charged": [
+    {
+     "cgroup": "/",
+     "counter": "kernel",
+     "bytes": 210149376
+    },
+    {
+     "cgroup": "/system.slice",
+     "counter": "kernel",
+     "bytes": 209473536
+    },
+    {
+     "cgroup": "/system.slice/fp-agent.service",
+     "counter": "kernel",
+     "bytes": 202919936
+    },
+    {
+     "cgroup": "/system.slice/fp-warden.service",
+     "counter": "kernel",
+     "bytes": 6516736
+    }
+   ]
+  },
+  {
+   "launch": "oss",
+   "cpus_online": 4,
+   "profile": "ratelimit",
+   "maps_bytes_memlock": 95135664,
+   "percpu_map_types_bytes_memlock": 51601224,
+   "node_growth_bytes": {
+    "Slab": 4173824,
+    "SUnreclaim": 1323008,
+    "VmallocUsed": 77152256,
+    "Percpu": 30425088
+   },
+   "charged": [
+    {
+     "cgroup": "/",
+     "counter": "kernel",
+     "bytes": 74936320
+    },
+    {
+     "cgroup": "/system.slice",
+     "counter": "kernel",
+     "bytes": 74399744
+    },
+    {
+     "cgroup": "/system.slice/fp-agent.service",
+     "counter": "kernel",
+     "bytes": 68153344
+    },
+    {
+     "cgroup": "/system.slice/fp-warden.service",
+     "counter": "kernel",
+     "bytes": 5971968
+    }
+   ]
+  },
+  {
+   "launch": "enterprise",
+   "cpus_online": 8,
+   "profile": "all",
+   "maps_bytes_memlock": 265201672,
+   "percpu_map_types_bytes_memlock": 97404264,
+   "node_growth_bytes": {
+    "Slab": -12591104,
+    "SUnreclaim": -14884864,
+    "VmallocUsed": 191365120,
+    "Percpu": 70025216
+   },
+   "charged": [
+    {
+     "cgroup": "/",
+     "counter": "kernel",
+     "bytes": 207261696
+    },
+    {
+     "cgroup": "/system.slice",
+     "counter": "kernel",
+     "bytes": 206553088
+    },
+    {
+     "cgroup": "/system.slice/fp-agent.service",
+     "counter": "kernel",
+     "bytes": 206180352
+    }
+   ]
+  },
+  {
+   "launch": "oss",
+   "cpus_online": 8,
+   "profile": "all",
+   "maps_bytes_memlock": 265293320,
+   "percpu_map_types_bytes_memlock": 97404968,
+   "node_growth_bytes": {
+    "Slab": -7933952,
+    "SUnreclaim": -10670080,
+    "VmallocUsed": 190713856,
+    "Percpu": 66060288
+   },
+   "charged": [
+    {
+     "cgroup": "/",
+     "counter": "kernel",
+     "bytes": 210759680
+    },
+    {
+     "cgroup": "/system.slice",
+     "counter": "kernel",
+     "bytes": 210014208
+    },
+    {
+     "cgroup": "/system.slice/fp-agent.service",
+     "counter": "kernel",
+     "bytes": 203554816
+    },
+    {
+     "cgroup": "/system.slice/fp-warden.service",
+     "counter": "kernel",
+     "bytes": 6389760
+    }
+   ]
+  },
+  {
+   "launch": "oss",
+   "cpus_online": 8,
+   "profile": "ratelimit",
+   "maps_bytes_memlock": 125848080,
+   "percpu_map_types_bytes_memlock": 82308072,
+   "node_growth_bytes": {
+    "Slab": -10158080,
+    "SUnreclaim": -12533760,
+    "VmallocUsed": 69533696,
+    "Percpu": 56819712
+   },
+   "charged": [
+    {
+     "cgroup": "/",
+     "counter": "kernel",
+     "bytes": 75276288
+    },
+    {
+     "cgroup": "/system.slice",
+     "counter": "kernel",
+     "bytes": 74371072
+    },
+    {
+     "cgroup": "/system.slice/fp-agent.service",
+     "counter": "kernel",
+     "bytes": 68395008
+    },
+    {
+     "cgroup": "/system.slice/fp-warden.service",
+     "counter": "kernel",
+     "bytes": 5857280
+    }
+   ]
+  }
+ ],
+ "oss_all_maps_by_cpus": {
+  "4": [
+   {
+    "name": "LB_MAGLEV",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 131074,
+    "bytes_memlock": 34100384
+   },
+   {
+    "name": "RL_BUCKETS",
+    "type": "lru_percpu_hash",
+    "max_entries": 65536,
+    "bytes_key": 8,
+    "bytes_value": 64,
+    "bytes_memlock": 22020992
+   },
+   {
+    "name": "CONN_TABLE",
+    "type": "lru_percpu_hash",
+    "max_entries": 65536,
+    "bytes_key": 12,
+    "bytes_value": 24,
+    "bytes_memlock": 12059520
+   },
+   {
+    "name": "SOCKET_FLOW",
+    "type": "lru_hash",
+    "max_entries": 65536,
+    "bytes_key": 40,
+    "bytes_value": 40,
+    "bytes_memlock": 9438080
+   },
+   {
+    "name": "QOS_FLOW_STATE",
+    "type": "lru_percpu_hash",
+    "max_entries": 65536,
+    "bytes_key": 4,
+    "bytes_value": 16,
+    "bytes_memlock": 9438080
+   },
+   {
+    "name": "NAT_SNAT_REVERS",
+    "type": "lru_hash",
+    "max_entries": 65536,
+    "bytes_key": 40,
+    "bytes_value": 20,
+    "bytes_memlock": 8389504
+   },
+   {
+    "name": "NAT_DNAT_REVERS",
+    "type": "lru_hash",
+    "max_entries": 65536,
+    "bytes_key": 40,
+    "bytes_value": 20,
+    "bytes_memlock": 8389504
+   },
+   {
+    "name": "SOCKET_IDENTITY",
+    "type": "lru_hash",
+    "max_entries": 65536,
+    "bytes_key": 8,
+    "bytes_value": 40,
+    "bytes_memlock": 7340928
+   },
+   {
+    "name": "LB_BACKENDS",
+    "type": "hash",
+    "max_entries": 65536,
+    "bytes_key": 4,
+    "bytes_value": 28,
+    "bytes_memlock": 6817024
+   },
+   {
+    "name": "NETPOL_REPLIES",
+    "type": "lru_hash",
+    "max_entries": 65536,
+    "bytes_key": 32,
+    "bytes_value": 8,
+    "bytes_memlock": 6816640
+   },
+   {
+    "name": "WORKLOAD_PEER_D",
+    "type": "hash",
+    "max_entries": 65536,
+    "bytes_key": 20,
+    "bytes_value": 8,
+    "bytes_memlock": 6292704
+   },
+   {
+    "name": "WORKLOAD_PEER_S",
+    "type": "hash",
+    "max_entries": 65536,
+    "bytes_key": 20,
+    "bytes_value": 8,
+    "bytes_memlock": 6292704
+   },
+   {
+    "name": "FW_HASH_5TUPLE",
+    "type": "hash",
+    "max_entries": 65536,
+    "bytes_key": 16,
+    "bytes_value": 4,
+    "bytes_memlock": 5768384
+   },
+   {
+    "name": "NAT_DNAT_REVERS",
+    "type": "lru_hash",
+    "max_entries": 65536,
+    "bytes_key": 16,
+    "bytes_value": 8,
+    "bytes_memlock": 5768064
+   },
+   {
+    "name": "NAT_SNAT_REVERS",
+    "type": "lru_hash",
+    "max_entries": 65536,
+    "bytes_key": 16,
+    "bytes_value": 8,
+    "bytes_memlock": 5768064
+   },
+   {
+    "name": "FW_IPSET_V4",
+    "type": "hash",
+    "max_entries": 65536,
+    "bytes_key": 8,
+    "bytes_value": 1,
+    "bytes_memlock": 5244064
+   },
+   {
+    "name": "LB_BACKEND_MAC",
+    "type": "hash",
+    "max_entries": 65536,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 5244064
+   },
+   {
+    "name": "EVENTS",
+    "type": "ringbuf",
+    "max_entries": 4194304,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 4223304
+   },
+   {
+    "name": "EVENTS",
+    "type": "ringbuf",
+    "max_entries": 4194304,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 4223304
+   },
+   {
+    "name": "LISTENER_ACCEPT",
+    "type": "lru_percpu_hash",
+    "max_entries": 16384,
+    "bytes_key": 20,
+    "bytes_value": 16,
+    "bytes_memlock": 2622336
+   },
+   {
+    "name": "TCP_EDGES",
+    "type": "percpu_hash",
+    "max_entries": 8192,
+    "bytes_key": 48,
+    "bytes_value": 48,
+    "bytes_memlock": 2556800
+   },
+   {
+    "name": "SYN_RATE_TRACKE",
+    "type": "lru_percpu_hash",
+    "max_entries": 16384,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 2360192
+   },
+   {
+    "name": "AMP_RATE_BUCKET",
+    "type": "lru_percpu_hash",
+    "max_entries": 16384,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 2360192
+   },
+   {
+    "name": "FLOOD_COUNTERS",
+    "type": "lru_percpu_hash",
+    "max_entries": 16384,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 2360192
+   },
+   {
+    "name": "ICMP_RATE_BUCKE",
+    "type": "lru_percpu_hash",
+    "max_entries": 16384,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 2360192
+   },
+   {
+    "name": "LISTENING_SOCKE",
+    "type": "lru_hash",
+    "max_entries": 16384,
+    "bytes_key": 8,
+    "bytes_value": 64,
+    "bytes_memlock": 2229120
+   },
+   {
+    "name": "TCP_RTT",
+    "type": "hash",
+    "max_entries": 8192,
+    "bytes_key": 48,
+    "bytes_value": 144,
+    "bytes_memlock": 2099040
+   },
+   {
+    "name": "DLP_TASK_SOCKET",
+    "type": "lru_hash",
+    "max_entries": 16384,
+    "bytes_key": 8,
+    "bytes_value": 48,
+    "bytes_memlock": 1966976
+   },
+   {
+    "name": "FW_SHADOW_FLOWS",
+    "type": "lru_hash",
+    "max_entries": 16384,
+    "bytes_key": 40,
+    "bytes_value": 1,
+    "bytes_memlock": 1835904
+   },
+   {
+    "name": "HALF_OPEN_COUNT",
+    "type": "lru_percpu_hash",
+    "max_entries": 16384,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 1835904
+   },
+   {
+    "name": "WORKLOAD_FQDN_A",
+    "type": "hash",
+    "max_entries": 16384,
+    "bytes_key": 32,
+    "bytes_value": 8,
+    "bytes_memlock": 1705216
+   },
+   {
+    "name": "IDS_WORKLOAD_SC",
+    "type": "hash",
+    "max_entries": 16384,
+    "bytes_key": 16,
+    "bytes_value": 1,
+    "bytes_memlock": 1443008
+   },
+   {
+    "name": "FW_HASH_PORT",
+    "type": "hash",
+    "max_entries": 16384,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 1311904
+   },
+   {
+    "name": "WORKLOAD_TASK_S",
+    "type": "lru_hash",
+    "max_entries": 16384,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 1311616
+   },
+   {
+    "name": "SSL_READ_SOCKET",
+    "type": "lru_hash",
+    "max_entries": 10240,
+    "bytes_key": 8,
+    "bytes_value": 40,
+    "bytes_memlock": 1246080
+   },
+   {
+    "name": "KTLS_READ_SOCKE",
+    "type": "lru_hash",
+    "max_entries": 10240,
+    "bytes_key": 8,
+    "bytes_value": 40,
+    "bytes_memlock": 1246080
+   },
+   {
+    "name": "RATELIMIT_CONFI",
+    "type": "hash",
+    "max_entries": 10240,
+    "bytes_key": 8,
+    "bytes_value": 32,
+    "bytes_memlock": 1164544
+   },
+   {
+    "name": "GO_READ_ARGS",
+    "type": "lru_hash",
+    "max_entries": 10240,
+    "bytes_key": 16,
+    "bytes_value": 16,
+    "bytes_memlock": 1082240
+   },
+   {
+    "name": "EVENTS",
+    "type": "ringbuf",
+    "max_entries": 1048576,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 1065288
+   },
+   {
+    "name": "EVENTS",
+    "type": "ringbuf",
+    "max_entries": 1048576,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 1065288
+   },
+   {
+    "name": "EVENTS",
+    "type": "ringbuf",
+    "max_entries": 1048576,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 1065288
+   },
+   {
+    "name": "EVENTS",
+    "type": "ringbuf",
+    "max_entries": 1048576,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 1065288
+   },
+   {
+    "name": "PROCESS_EVENTS",
+    "type": "ringbuf",
+    "max_entries": 1048576,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 1065288
+   },
+   {
+    "name": "EVENTS",
+    "type": "ringbuf",
+    "max_entries": 1048576,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 1065288
+   },
+   {
+    "name": "IDS_PATTERNS",
+    "type": "hash",
+    "max_entries": 10240,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 1000640
+   },
+   {
+    "name": "IDS_SRC_PATTERN",
+    "type": "hash",
+    "max_entries": 10240,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 1000640
+   },
+   {
+    "name": "KTLS_READ_ARGS",
+    "type": "lru_hash",
+    "max_entries": 10240,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 1000320
+   },
+   {
+    "name": "SSL_READ_ARGS",
+    "type": "lru_hash",
+    "max_entries": 10240,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 1000320
+   },
+   {
+    "name": "DLP_UPROBE_ACTI",
+    "type": "lru_hash",
+    "max_entries": 10240,
+    "bytes_key": 8,
+    "bytes_value": 8,
+    "bytes_memlock": 918400
+   },
+   {
+    "name": "QOS_CGROUP_COUN",
+    "type": "percpu_hash",
+    "max_entries": 4096,
+    "bytes_key": 8,
+    "bytes_value": 24,
+    "bytes_memlock": 721792
+   },
+   {
+    "name": "NETPOL_CGROUPS",
+    "type": "hash",
+    "max_entries": 8192,
+    "bytes_key": 8,
+    "bytes_value": 8,
+    "bytes_memlock": 656544
+   },
+   {
+    "name": "DROP_COUNTS",
+    "type": "percpu_hash",
+    "max_entries": 4096,
+    "bytes_key": 24,
+    "bytes_value": 8,
+    "bytes_memlock": 525184
+   },
+   {
+    "name": "DROP_WORKLOADS",
+    "type": "percpu_hash",
+    "max_entries": 4096,
+    "bytes_key": 16,
+    "bytes_value": 8,
+    "bytes_memlock": 492416
+   },
+   {
+    "name": "FIREWALL_RULES_",
+    "type": "array",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 112,
+    "bytes_memlock": 459064
+   },
+   {
+    "name": "LB_SERVICES",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 20,
+    "bytes_value": 8,
+    "bytes_memlock": 394464
+   },
+   {
+    "name": "QOS_CGROUP_SHAP",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 361664
+   },
+   {
+    "name": "THREATINTEL_IOC",
+    "type": "lru_hash",
+    "max_entries": 4096,
+    "bytes_key": 16,
+    "bytes_value": 4,
+    "bytes_memlock": 361344
+   },
+   {
+    "name": "TENANT_CGROUP_M",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 8,
+    "bytes_value": 4,
+    "bytes_memlock": 328864
+   },
+   {
+    "name": "WORKLOAD_LINKS",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 328864
+   },
+   {
+    "name": "DLP_CGROUP_ALLO",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 8,
+    "bytes_value": 1,
+    "bytes_memlock": 328864
+   },
+   {
+    "name": "WORKLOAD_PEER_T",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 8,
+    "bytes_value": 8,
+    "bytes_memlock": 328864
+   },
+   {
+    "name": "WORKLOAD_CGROUP",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 8,
+    "bytes_value": 8,
+    "bytes_memlock": 328864
+   },
+   {
+    "name": "QOS_CGROUP_EDT",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 8,
+    "bytes_value": 8,
+    "bytes_memlock": 328864
+   },
+   {
+    "name": "QOS_CGROUP_LINK",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 328864
+   },
+   {
+    "name": "BPF_GUARD_MAPS",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 1,
+    "bytes_memlock": 328864
+   },
+   {
+    "name": "THREATINTEL_IOC",
+    "type": "lru_hash",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 328576
+   },
+   {
+    "name": "DNS_EVENTS",
+    "type": "ringbuf",
+    "max_entries": 262144,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 275784
+   },
+   {
+    "name": "WORKLOAD_DNS_EV",
+    "type": "ringbuf",
+    "max_entries": 262144,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 275784
+   },
+   {
+    "name": "FIREWALL_RULES",
+    "type": "array",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 64,
+    "bytes_memlock": 262456
+   },
+   {
+    "name": "LB_RR_STATE",
+    "type": "percpu_array",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 164152
+   },
+   {
+    "name": "CT_SRC_COUNTERS",
+    "type": "hash",
+    "max_entries": 1024,
+    "bytes_key": 16,
+    "bytes_value": 32,
+    "bytes_memlock": 116000
+   },
+   {
+    "name": "QOS_CLASSIFIERS",
+    "type": "hash",
+    "max_entries": 1024,
+    "bytes_key": 16,
+    "bytes_value": 12,
+    "bytes_memlock": 99552
+   },
+   {
+    "name": "NAT_HAIRPIN_CT",
+    "type": "lru_hash",
+    "max_entries": 1024,
+    "bytes_key": 16,
+    "bytes_value": 12,
+    "bytes_memlock": 99200
+   },
+   {
+    "name": "QUARANTINE_CGRO",
+    "type": "hash",
+    "max_entries": 1024,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 91328
+   },
+   {
+    "name": "REJECT_RATELIMI",
+    "type": "lru_hash",
+    "max_entries": 1024,
+    "bytes_key": 4,
+    "bytes_value": 16,
+    "bytes_memlock": 91008
+   },
+   {
+    "name": "TENANT_IFINDEX_",
+    "type": "hash",
+    "max_entries": 1024,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 83104
+   },
+   {
+    "name": "TENANT_VLAN_MAP",
+    "type": "hash",
+    "max_entries": 1024,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 83104
+   },
+   {
+    "name": "BPF_GUARD_LINKS",
+    "type": "hash",
+    "max_entries": 1024,
+    "bytes_key": 4,
+    "bytes_value": 1,
+    "bytes_memlock": 83104
+   },
+   {
+    "name": "WORKLOAD_EVENTS",
+    "type": "ringbuf",
+    "max_entries": 65536,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 78408
+   },
+   {
+    "name": "QUARANTINE_EVEN",
+    "type": "ringbuf",
+    "max_entries": 65536,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 78408
+   },
+   {
+    "name": "FW_SHADOW_SAMPL",
+    "type": "lru_hash",
+    "max_entries": 256,
+    "bytes_key": 40,
+    "bytes_value": 32,
+    "bytes_memlock": 35712
+   },
+   {
+    "name": "FW_RULE_STATE_C",
+    "type": "array",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 33080
+   },
+   {
+    "name": "VIP_ARP_REPLIES",
+    "type": "percpu_hash",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 29568
+   },
+   {
+    "name": "WORKLOAD_LINEAG",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 16,
+    "bytes_value": 16,
+    "bytes_memlock": 25824
+   },
+   {
+    "name": "ZONE_DEFAULT_PO",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 1,
+    "bytes_value": 1,
+    "bytes_memlock": 21664
+   },
+   {
+    "name": "ZONE_MAP",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 1,
+    "bytes_memlock": 21664
+   },
+   {
+    "name": "SELF_OWNED_BIND",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 21664
+   },
+   {
+    "name": "VIP_SET",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 21664
+   },
+   {
+    "name": "L7_PORTS",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 2,
+    "bytes_value": 1,
+    "bytes_memlock": 21664
+   },
+   {
+    "name": "QOS_EDT_INTERFA",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 1,
+    "bytes_memlock": 21664
+   },
+   {
+    "name": "FW_SHADOW_STATS",
+    "type": "percpu_array",
+    "max_entries": 128,
+    "bytes_key": 4,
+    "bytes_value": 32,
+    "bytes_memlock": 17720
+   },
+   {
+    "name": "NAT_DNAT_RULES",
+    "type": "array",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 60,
+    "bytes_memlock": 16696
+   },
+   {
+    "name": "NAT_SNAT_RULES",
+    "type": "array",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 60,
+    "bytes_memlock": 16696
+   },
+   {
+    "name": "NAT_DNAT_RULES_",
+    "type": "array",
+    "max_entries": 128,
+    "bytes_key": 4,
+    "bytes_value": 120,
+    "bytes_memlock": 15672
+   },
+   {
+    "name": "NAT_SNAT_RULES_",
+    "type": "array",
+    "max_entries": 128,
+    "bytes_key": 4,
+    "bytes_value": 120,
+    "bytes_memlock": 15672
+   },
+   {
+    "name": "ZONE_METRICS_PA",
+    "type": "percpu_array",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 10552
+   },
+   {
+    "name": "ZONE_METRICS_DR",
+    "type": "percpu_array",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 10552
+   },
+   {
+    "name": "FW_SHADOW_RULES",
+    "type": "array",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 112,
+    "bytes_memlock": 7480
+   },
+   {
+    "name": "INTERFACE_GROUP",
+    "type": "hash",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 6304
+   },
+   {
+    "name": "ZONE_POLICY_MAP",
+    "type": "hash",
+    "max_entries": 64,
+    "bytes_key": 2,
+    "bytes_value": 1,
+    "bytes_memlock": 6304
+   },
+   {
+    "name": "AMP_PROTECT_CON",
+    "type": "hash",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 6304
+   },
+   {
+    "name": "IFACE_MAC",
+    "type": "hash",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 6304
+   },
+   {
+    "name": "DROP_WATCHED",
+    "type": "hash",
+    "max_entries": 64,
+    "bytes_key": 8,
+    "bytes_value": 1,
+    "bytes_memlock": 6304
+   },
+   {
+    "name": "FW_SHADOW_RULES",
+    "type": "array",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 64,
+    "bytes_memlock": 4408
+   },
+   {
+    "name": "THREATINTEL_BLO",
+    "type": "bloom_filter",
+    "max_entries": 4096,
+    "bytes_key": 0,
+    "bytes_value": 16,
+    "bytes_memlock": 4408
+   },
+   {
+    "name": "THREATINTEL_BLO",
+    "type": "bloom_filter",
+    "max_entries": 4096,
+    "bytes_key": 0,
+    "bytes_value": 4,
+    "bytes_memlock": 4408
+   },
+   {
+    "name": "NPTV6_RULES",
+    "type": "array",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 44,
+    "bytes_memlock": 3384
+   },
+   {
+    "name": "WORKLOAD_RULE_D",
+    "type": "percpu_array",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 2872
+   },
+   {
+    "name": "QOS_PIPE_CONFIG",
+    "type": "array",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 40,
+    "bytes_memlock": 2872
+   },
+   {
+    "name": "LB_DEVMAP",
+    "type": "devmap",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 2392
+   },
+   {
+    "name": "WORKLOAD_RULES",
+    "type": "array",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 28,
+    "bytes_memlock": 2360
+   },
+   {
+    "name": "QOS_QUEUE_CONFI",
+    "type": "array",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 2360
+   },
+   {
+    "name": "QOS_PIPE_STATE",
+    "type": "array",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 16,
+    "bytes_memlock": 1336
+   },
+   {
+    "name": "DDOS_METRICS",
+    "type": "percpu_array",
+    "max_entries": 18,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 1032
+   },
+   {
+    "name": "CT_METRICS",
+    "type": "percpu_array",
+    "max_entries": 18,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 1032
+   },
+   {
+    "name": "SCRUB_METRICS",
+    "type": "percpu_array",
+    "max_entries": 13,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 832
+   },
+   {
+    "name": "RL_TIER_CONFIG",
+    "type": "array",
+    "max_entries": 16,
+    "bytes_key": 4,
+    "bytes_value": 32,
+    "bytes_memlock": 824
+   },
+   {
+    "name": "NAT_METRICS",
+    "type": "percpu_array",
+    "max_entries": 12,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 792
+   },
+   {
+    "name": "WORKLOAD_METRIC",
+    "type": "percpu_array",
+    "max_entries": 11,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 752
+   },
+   {
+    "name": "ATTRIBUTION_MET",
+    "type": "percpu_array",
+    "max_entries": 10,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 712
+   },
+   {
+    "name": "DLP_METRICS",
+    "type": "percpu_array",
+    "max_entries": 9,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 672
+   },
+   {
+    "name": "PKT_CTX",
+    "type": "percpu_array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 76,
+    "bytes_memlock": 640
+   },
+   {
+    "name": "FIREWALL_METRIC",
+    "type": "percpu_array",
+    "max_entries": 8,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 632
+   },
+   {
+    "name": "IDS_METRICS",
+    "type": "percpu_array",
+    "max_entries": 8,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 632
+   },
+   {
+    "name": "RATELIMIT_METRI",
+    "type": "percpu_array",
+    "max_entries": 7,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 592
+   },
+   {
+    "name": "NETPOL_METRICS",
+    "type": "percpu_array",
+    "max_entries": 7,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 592
+   },
+   {
+    "name": "PROCESS_METRICS",
+    "type": "percpu_array",
+    "max_entries": 7,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 592
+   },
+   {
+    "name": "QOS_METRICS",
+    "type": "percpu_array",
+    "max_entries": 7,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 592
+   },
+   {
+    "name": "FIB_PARAMS",
+    "type": "percpu_array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 64,
+    "bytes_memlock": 576
+   },
+   {
+    "name": "LB_METRICS",
+    "type": "percpu_array",
+    "max_entries": 6,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 552
+   },
+   {
+    "name": "SYNCOOKIE_CTX",
+    "type": "percpu_array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 56,
+    "bytes_memlock": 544
+   },
+   {
+    "name": "REJECT_SCRATCH",
+    "type": "percpu_array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 48,
+    "bytes_memlock": 512
+   },
+   {
+    "name": "THREATINTEL_MET",
+    "type": "percpu_array",
+    "max_entries": 5,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 512
+   },
+   {
+    "name": "DNS_METRICS",
+    "type": "percpu_array",
+    "max_entries": 5,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 512
+   },
+   {
+    "name": "QUARANTINE_METR",
+    "type": "percpu_array",
+    "max_entries": 4,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 472
+   },
+   {
+    "name": "TCP_HEALTH_METR",
+    "type": "percpu_array",
+    "max_entries": 4,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 472
+   },
+   {
+    "name": "SHADOW_META",
+    "type": "percpu_array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 32,
+    "bytes_memlock": 448
+   },
+   {
+    "name": "DROP_METRICS",
+    "type": "percpu_array",
+    "max_entries": 3,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 432
+   },
+   {
+    "name": "BPF_GUARD_METRI",
+    "type": "percpu_array",
+    "max_entries": 3,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 432
+   },
+   {
+    "name": "BLOOM_PROBE",
+    "type": "percpu_array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 20,
+    "bytes_memlock": 416
+   },
+   {
+    "name": "BPF_GUARD_TASKS",
+    "type": "array",
+    "max_entries": 4,
+    "bytes_key": 4,
+    "bytes_value": 24,
+    "bytes_memlock": 408
+   },
+   {
+    "name": "VIP_METRICS",
+    "type": "percpu_array",
+    "max_entries": 2,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 392
+   },
+   {
+    "name": "TCP_HEALTH_CONF",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 80,
+    "bytes_memlock": 392
+   },
+   {
+    "name": "CT_CONFIG",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 72,
+    "bytes_memlock": 384
+   },
+   {
+    "name": "WORKLOAD_LINEAG",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 48,
+    "bytes_memlock": 360
+   },
+   {
+    "name": "DROP_CONFIG",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 44,
+    "bytes_memlock": 360
+   },
+   {
+    "name": "CT_STATE_SCRATC",
+    "type": "percpu_array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 352
+   },
+   {
+    "name": "SOCK_OFFSETS",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 36,
+    "bytes_memlock": 352
+   },
+   {
+    "name": "XDP_PROG_ARRAY",
+    "type": "prog_array",
+    "max_entries": 4,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 344
+   },
+   {
+    "name": "RL_PROG_ARRAY",
+    "type": "prog_array",
+    "max_entries": 4,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 344
+   },
+   {
+    "name": "CONNTRACK_CONFI",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 32,
+    "bytes_memlock": 344
+   },
+   {
+    "name": "KTLS_ITER_OFFSE",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 32,
+    "bytes_memlock": 344
+   },
+   {
+    "name": "PROCESS_LAYOUT",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 24,
+    "bytes_memlock": 336
+   },
+   {
+    "name": "FW_SHADOW_COUNT",
+    "type": "array",
+    "max_entries": 2,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 328
+   },
+   {
+    "name": "CT_NF_CONN_OFFS",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 16,
+    "bytes_memlock": 328
+   },
+   {
+    "name": "DDOS_SYN_CONFIG",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 16,
+    "bytes_memlock": 328
+   },
+   {
+    "name": "IDS_MIRROR_CONF",
+    "type": "array",
+    "max_entries": 2,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 328
+   },
+   {
+    "name": "NAT_HAIRPIN_CON",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 16,
+    "bytes_memlock": 328
+   },
+   {
+    "name": "SCRUB_CONFIG",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 14,
+    "bytes_memlock": 328
+   },
+   {
+    "name": "FW_EMPTY_FEATUR",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": ".rodata",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 1,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "FIREWALL_RULE_C",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "FIREWALL_RULE_C",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "FIREWALL_DEFAUL",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 1,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "FW_CT_GATE",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 1,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "ICMP_CONFIG",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 320
+   },
+   {
+    "name": ".rodata.cst8",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "IDS_SAMPLING_CO",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "CONFIG_FLAGS",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "DLP_SCOPE",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "WORKLOAD_DNS_CA",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "DROP_WATCHING",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": ".rodata.cst8",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "NAT_SNAT_RULE_C",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "NAT_SNAT_RULE_C",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "NAT_DNAT_RULE_C",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "NAT_DNAT_RULE_C",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "NPTV6_RULE_COUN",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "QOS_EMPTY_SHAPE",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "BPF_GUARD_CONFI",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "TENANT_SUBNET_V",
+    "type": "lpm_trie",
+    "max_entries": 4096,
+    "bytes_key": 8,
+    "bytes_value": 4,
+    "bytes_memlock": 0
+   },
+   {
+    "name": "TENANT_SUBNET_V",
+    "type": "lpm_trie",
+    "max_entries": 2048,
+    "bytes_key": 20,
+    "bytes_value": 4,
+    "bytes_memlock": 0
+   },
+   {
+    "name": "FW_LPM_SRC_V6",
+    "type": "lpm_trie",
+    "max_entries": 131072,
+    "bytes_key": 20,
+    "bytes_value": 4,
+    "bytes_memlock": 0
+   },
+   {
+    "name": "FW_LPM_DST_V4",
+    "type": "lpm_trie",
+    "max_entries": 131072,
+    "bytes_key": 8,
+    "bytes_value": 4,
+    "bytes_memlock": 0
+   },
+   {
+    "name": "FW_LPM_DST_V6",
+    "type": "lpm_trie",
+    "max_entries": 131072,
+    "bytes_key": 20,
+    "bytes_value": 4,
+    "bytes_memlock": 0
+   },
+   {
+    "name": "FW_LPM_SRC_V4",
+    "type": "lpm_trie",
+    "max_entries": 131072,
+    "bytes_key": 8,
+    "bytes_value": 4,
+    "bytes_memlock": 0
+   },
+   {
+    "name": "RL_LPM_SRC_V4",
+    "type": "lpm_trie",
+    "max_entries": 131072,
+    "bytes_key": 8,
+    "bytes_value": 4,
+    "bytes_memlock": 0
+   },
+   {
+    "name": "RL_LPM_SRC_V6",
+    "type": "lpm_trie",
+    "max_entries": 131072,
+    "bytes_key": 20,
+    "bytes_value": 4,
+    "bytes_memlock": 0
+   },
+   {
+    "name": "NETPOL_RULES",
+    "type": "lpm_trie",
+    "max_entries": 65536,
+    "bytes_key": 24,
+    "bytes_value": 98,
+    "bytes_memlock": 0
+   }
+  ],
+  "8": [
+   {
+    "name": "RL_BUCKETS",
+    "type": "lru_percpu_hash",
+    "max_entries": 65536,
+    "bytes_key": 8,
+    "bytes_value": 64,
+    "bytes_memlock": 38798208
+   },
+   {
+    "name": "LB_MAGLEV",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 131074,
+    "bytes_memlock": 34624960
+   },
+   {
+    "name": "CONN_TABLE",
+    "type": "lru_percpu_hash",
+    "max_entries": 65536,
+    "bytes_key": 12,
+    "bytes_value": 24,
+    "bytes_memlock": 18350976
+   },
+   {
+    "name": "QOS_FLOW_STATE",
+    "type": "lru_percpu_hash",
+    "max_entries": 65536,
+    "bytes_key": 4,
+    "bytes_value": 16,
+    "bytes_memlock": 13632384
+   },
+   {
+    "name": "SOCKET_FLOW",
+    "type": "lru_hash",
+    "max_entries": 65536,
+    "bytes_key": 40,
+    "bytes_value": 40,
+    "bytes_memlock": 9438080
+   },
+   {
+    "name": "NAT_DNAT_REVERS",
+    "type": "lru_hash",
+    "max_entries": 65536,
+    "bytes_key": 40,
+    "bytes_value": 20,
+    "bytes_memlock": 8389504
+   },
+   {
+    "name": "NAT_SNAT_REVERS",
+    "type": "lru_hash",
+    "max_entries": 65536,
+    "bytes_key": 40,
+    "bytes_value": 20,
+    "bytes_memlock": 8389504
+   },
+   {
+    "name": "SOCKET_IDENTITY",
+    "type": "lru_hash",
+    "max_entries": 65536,
+    "bytes_key": 8,
+    "bytes_value": 40,
+    "bytes_memlock": 7340928
+   },
+   {
+    "name": "LB_BACKENDS",
+    "type": "hash",
+    "max_entries": 65536,
+    "bytes_key": 4,
+    "bytes_value": 28,
+    "bytes_memlock": 6817408
+   },
+   {
+    "name": "NETPOL_REPLIES",
+    "type": "lru_hash",
+    "max_entries": 65536,
+    "bytes_key": 32,
+    "bytes_value": 8,
+    "bytes_memlock": 6816640
+   },
+   {
+    "name": "WORKLOAD_PEER_D",
+    "type": "hash",
+    "max_entries": 65536,
+    "bytes_key": 20,
+    "bytes_value": 8,
+    "bytes_memlock": 6293056
+   },
+   {
+    "name": "WORKLOAD_PEER_S",
+    "type": "hash",
+    "max_entries": 65536,
+    "bytes_key": 20,
+    "bytes_value": 8,
+    "bytes_memlock": 6293056
+   },
+   {
+    "name": "FW_HASH_5TUPLE",
+    "type": "hash",
+    "max_entries": 65536,
+    "bytes_key": 16,
+    "bytes_value": 4,
+    "bytes_memlock": 5768704
+   },
+   {
+    "name": "NAT_DNAT_REVERS",
+    "type": "lru_hash",
+    "max_entries": 65536,
+    "bytes_key": 16,
+    "bytes_value": 8,
+    "bytes_memlock": 5768064
+   },
+   {
+    "name": "NAT_SNAT_REVERS",
+    "type": "lru_hash",
+    "max_entries": 65536,
+    "bytes_key": 16,
+    "bytes_value": 8,
+    "bytes_memlock": 5768064
+   },
+   {
+    "name": "FW_IPSET_V4",
+    "type": "hash",
+    "max_entries": 65536,
+    "bytes_key": 8,
+    "bytes_value": 1,
+    "bytes_memlock": 5244352
+   },
+   {
+    "name": "LB_BACKEND_MAC",
+    "type": "hash",
+    "max_entries": 65536,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 5244352
+   },
+   {
+    "name": "EVENTS",
+    "type": "ringbuf",
+    "max_entries": 4194304,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 4223304
+   },
+   {
+    "name": "EVENTS",
+    "type": "ringbuf",
+    "max_entries": 4194304,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 4223304
+   },
+   {
+    "name": "TCP_EDGES",
+    "type": "percpu_hash",
+    "max_entries": 8192,
+    "bytes_key": 48,
+    "bytes_value": 48,
+    "bytes_memlock": 4129664
+   },
+   {
+    "name": "LISTENER_ACCEPT",
+    "type": "lru_percpu_hash",
+    "max_entries": 16384,
+    "bytes_key": 20,
+    "bytes_value": 16,
+    "bytes_memlock": 3670912
+   },
+   {
+    "name": "FLOOD_COUNTERS",
+    "type": "lru_percpu_hash",
+    "max_entries": 16384,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 3408768
+   },
+   {
+    "name": "SYN_RATE_TRACKE",
+    "type": "lru_percpu_hash",
+    "max_entries": 16384,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 3408768
+   },
+   {
+    "name": "ICMP_RATE_BUCKE",
+    "type": "lru_percpu_hash",
+    "max_entries": 16384,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 3408768
+   },
+   {
+    "name": "AMP_RATE_BUCKET",
+    "type": "lru_percpu_hash",
+    "max_entries": 16384,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 3408768
+   },
+   {
+    "name": "HALF_OPEN_COUNT",
+    "type": "lru_percpu_hash",
+    "max_entries": 16384,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 2360192
+   },
+   {
+    "name": "LISTENING_SOCKE",
+    "type": "lru_hash",
+    "max_entries": 16384,
+    "bytes_key": 8,
+    "bytes_value": 64,
+    "bytes_memlock": 2229120
+   },
+   {
+    "name": "TCP_RTT",
+    "type": "hash",
+    "max_entries": 8192,
+    "bytes_key": 48,
+    "bytes_value": 144,
+    "bytes_memlock": 2100032
+   },
+   {
+    "name": "DLP_TASK_SOCKET",
+    "type": "lru_hash",
+    "max_entries": 16384,
+    "bytes_key": 8,
+    "bytes_value": 48,
+    "bytes_memlock": 1966976
+   },
+   {
+    "name": "FW_SHADOW_FLOWS",
+    "type": "lru_hash",
+    "max_entries": 16384,
+    "bytes_key": 40,
+    "bytes_value": 1,
+    "bytes_memlock": 1835904
+   },
+   {
+    "name": "WORKLOAD_FQDN_A",
+    "type": "hash",
+    "max_entries": 16384,
+    "bytes_key": 32,
+    "bytes_value": 8,
+    "bytes_memlock": 1705600
+   },
+   {
+    "name": "IDS_WORKLOAD_SC",
+    "type": "hash",
+    "max_entries": 16384,
+    "bytes_key": 16,
+    "bytes_value": 1,
+    "bytes_memlock": 1443328
+   },
+   {
+    "name": "FW_HASH_PORT",
+    "type": "hash",
+    "max_entries": 16384,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 1312192
+   },
+   {
+    "name": "WORKLOAD_TASK_S",
+    "type": "lru_hash",
+    "max_entries": 16384,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 1311616
+   },
+   {
+    "name": "KTLS_READ_SOCKE",
+    "type": "lru_hash",
+    "max_entries": 10240,
+    "bytes_key": 8,
+    "bytes_value": 40,
+    "bytes_memlock": 1246080
+   },
+   {
+    "name": "SSL_READ_SOCKET",
+    "type": "lru_hash",
+    "max_entries": 10240,
+    "bytes_key": 8,
+    "bytes_value": 40,
+    "bytes_memlock": 1246080
+   },
+   {
+    "name": "RATELIMIT_CONFI",
+    "type": "hash",
+    "max_entries": 10240,
+    "bytes_key": 8,
+    "bytes_value": 32,
+    "bytes_memlock": 1164928
+   },
+   {
+    "name": "QOS_CGROUP_COUN",
+    "type": "percpu_hash",
+    "max_entries": 4096,
+    "bytes_key": 8,
+    "bytes_value": 24,
+    "bytes_memlock": 1115008
+   },
+   {
+    "name": "GO_READ_ARGS",
+    "type": "lru_hash",
+    "max_entries": 10240,
+    "bytes_key": 16,
+    "bytes_value": 16,
+    "bytes_memlock": 1082240
+   },
+   {
+    "name": "EVENTS",
+    "type": "ringbuf",
+    "max_entries": 1048576,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 1065288
+   },
+   {
+    "name": "EVENTS",
+    "type": "ringbuf",
+    "max_entries": 1048576,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 1065288
+   },
+   {
+    "name": "EVENTS",
+    "type": "ringbuf",
+    "max_entries": 1048576,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 1065288
+   },
+   {
+    "name": "EVENTS",
+    "type": "ringbuf",
+    "max_entries": 1048576,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 1065288
+   },
+   {
+    "name": "PROCESS_EVENTS",
+    "type": "ringbuf",
+    "max_entries": 1048576,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 1065288
+   },
+   {
+    "name": "EVENTS",
+    "type": "ringbuf",
+    "max_entries": 1048576,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 1065288
+   },
+   {
+    "name": "IDS_SRC_PATTERN",
+    "type": "hash",
+    "max_entries": 10240,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 1000960
+   },
+   {
+    "name": "IDS_PATTERNS",
+    "type": "hash",
+    "max_entries": 10240,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 1000960
+   },
+   {
+    "name": "KTLS_READ_ARGS",
+    "type": "lru_hash",
+    "max_entries": 10240,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 1000320
+   },
+   {
+    "name": "SSL_READ_ARGS",
+    "type": "lru_hash",
+    "max_entries": 10240,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 1000320
+   },
+   {
+    "name": "DLP_UPROBE_ACTI",
+    "type": "lru_hash",
+    "max_entries": 10240,
+    "bytes_key": 8,
+    "bytes_value": 8,
+    "bytes_memlock": 918400
+   },
+   {
+    "name": "NETPOL_CGROUPS",
+    "type": "hash",
+    "max_entries": 8192,
+    "bytes_key": 8,
+    "bytes_value": 8,
+    "bytes_memlock": 656832
+   },
+   {
+    "name": "DROP_COUNTS",
+    "type": "percpu_hash",
+    "max_entries": 4096,
+    "bytes_key": 24,
+    "bytes_value": 8,
+    "bytes_memlock": 656256
+   },
+   {
+    "name": "DROP_WORKLOADS",
+    "type": "percpu_hash",
+    "max_entries": 4096,
+    "bytes_key": 16,
+    "bytes_value": 8,
+    "bytes_memlock": 623488
+   },
+   {
+    "name": "FIREWALL_RULES_",
+    "type": "array",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 112,
+    "bytes_memlock": 459064
+   },
+   {
+    "name": "LB_SERVICES",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 20,
+    "bytes_value": 8,
+    "bytes_memlock": 394816
+   },
+   {
+    "name": "QOS_CGROUP_SHAP",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 361984
+   },
+   {
+    "name": "THREATINTEL_IOC",
+    "type": "lru_hash",
+    "max_entries": 4096,
+    "bytes_key": 16,
+    "bytes_value": 4,
+    "bytes_memlock": 361344
+   },
+   {
+    "name": "TENANT_CGROUP_M",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 8,
+    "bytes_value": 4,
+    "bytes_memlock": 329152
+   },
+   {
+    "name": "WORKLOAD_LINKS",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 329152
+   },
+   {
+    "name": "DLP_CGROUP_ALLO",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 8,
+    "bytes_value": 1,
+    "bytes_memlock": 329152
+   },
+   {
+    "name": "WORKLOAD_PEER_T",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 8,
+    "bytes_value": 8,
+    "bytes_memlock": 329152
+   },
+   {
+    "name": "WORKLOAD_CGROUP",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 8,
+    "bytes_value": 8,
+    "bytes_memlock": 329152
+   },
+   {
+    "name": "QOS_CGROUP_EDT",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 8,
+    "bytes_value": 8,
+    "bytes_memlock": 329152
+   },
+   {
+    "name": "QOS_CGROUP_LINK",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 329152
+   },
+   {
+    "name": "BPF_GUARD_MAPS",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 1,
+    "bytes_memlock": 329152
+   },
+   {
+    "name": "THREATINTEL_IOC",
+    "type": "lru_hash",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 328576
+   },
+   {
+    "name": "LB_RR_STATE",
+    "type": "percpu_array",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 295224
+   },
+   {
+    "name": "DNS_EVENTS",
+    "type": "ringbuf",
+    "max_entries": 262144,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 275784
+   },
+   {
+    "name": "WORKLOAD_DNS_EV",
+    "type": "ringbuf",
+    "max_entries": 262144,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 275784
+   },
+   {
+    "name": "FIREWALL_RULES",
+    "type": "array",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 64,
+    "bytes_memlock": 262456
+   },
+   {
+    "name": "CT_SRC_COUNTERS",
+    "type": "hash",
+    "max_entries": 1024,
+    "bytes_key": 16,
+    "bytes_value": 32,
+    "bytes_memlock": 116416
+   },
+   {
+    "name": "QOS_CLASSIFIERS",
+    "type": "hash",
+    "max_entries": 1024,
+    "bytes_key": 16,
+    "bytes_value": 12,
+    "bytes_memlock": 99904
+   },
+   {
+    "name": "NAT_HAIRPIN_CT",
+    "type": "lru_hash",
+    "max_entries": 1024,
+    "bytes_key": 16,
+    "bytes_value": 12,
+    "bytes_memlock": 99200
+   },
+   {
+    "name": "QUARANTINE_CGRO",
+    "type": "hash",
+    "max_entries": 1024,
+    "bytes_key": 8,
+    "bytes_value": 16,
+    "bytes_memlock": 91648
+   },
+   {
+    "name": "REJECT_RATELIMI",
+    "type": "lru_hash",
+    "max_entries": 1024,
+    "bytes_key": 4,
+    "bytes_value": 16,
+    "bytes_memlock": 91008
+   },
+   {
+    "name": "TENANT_IFINDEX_",
+    "type": "hash",
+    "max_entries": 1024,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 83392
+   },
+   {
+    "name": "TENANT_VLAN_MAP",
+    "type": "hash",
+    "max_entries": 1024,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 83392
+   },
+   {
+    "name": "BPF_GUARD_LINKS",
+    "type": "hash",
+    "max_entries": 1024,
+    "bytes_key": 4,
+    "bytes_value": 1,
+    "bytes_memlock": 83392
+   },
+   {
+    "name": "QUARANTINE_EVEN",
+    "type": "ringbuf",
+    "max_entries": 65536,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 78408
+   },
+   {
+    "name": "WORKLOAD_EVENTS",
+    "type": "ringbuf",
+    "max_entries": 65536,
+    "bytes_key": 0,
+    "bytes_value": 0,
+    "bytes_memlock": 78408
+   },
+   {
+    "name": "VIP_ARP_REPLIES",
+    "type": "percpu_hash",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 37760
+   },
+   {
+    "name": "FW_SHADOW_SAMPL",
+    "type": "lru_hash",
+    "max_entries": 256,
+    "bytes_key": 40,
+    "bytes_value": 32,
+    "bytes_memlock": 35712
+   },
+   {
+    "name": "FW_SHADOW_STATS",
+    "type": "percpu_array",
+    "max_entries": 128,
+    "bytes_key": 4,
+    "bytes_value": 32,
+    "bytes_memlock": 34104
+   },
+   {
+    "name": "FW_RULE_STATE_C",
+    "type": "array",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 33080
+   },
+   {
+    "name": "WORKLOAD_LINEAG",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 16,
+    "bytes_value": 16,
+    "bytes_memlock": 26176
+   },
+   {
+    "name": "ZONE_DEFAULT_PO",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 1,
+    "bytes_value": 1,
+    "bytes_memlock": 21952
+   },
+   {
+    "name": "ZONE_MAP",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 1,
+    "bytes_memlock": 21952
+   },
+   {
+    "name": "SELF_OWNED_BIND",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 21952
+   },
+   {
+    "name": "VIP_SET",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 21952
+   },
+   {
+    "name": "L7_PORTS",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 2,
+    "bytes_value": 1,
+    "bytes_memlock": 21952
+   },
+   {
+    "name": "QOS_EDT_INTERFA",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 1,
+    "bytes_memlock": 21952
+   },
+   {
+    "name": "ZONE_METRICS_DR",
+    "type": "percpu_array",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 18744
+   },
+   {
+    "name": "ZONE_METRICS_PA",
+    "type": "percpu_array",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 18744
+   },
+   {
+    "name": "NAT_DNAT_RULES",
+    "type": "array",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 60,
+    "bytes_memlock": 16696
+   },
+   {
+    "name": "NAT_SNAT_RULES",
+    "type": "array",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 60,
+    "bytes_memlock": 16696
+   },
+   {
+    "name": "NAT_DNAT_RULES_",
+    "type": "array",
+    "max_entries": 128,
+    "bytes_key": 4,
+    "bytes_value": 120,
+    "bytes_memlock": 15672
+   },
+   {
+    "name": "NAT_SNAT_RULES_",
+    "type": "array",
+    "max_entries": 128,
+    "bytes_key": 4,
+    "bytes_value": 120,
+    "bytes_memlock": 15672
+   },
+   {
+    "name": "FW_SHADOW_RULES",
+    "type": "array",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 112,
+    "bytes_memlock": 7480
+   },
+   {
+    "name": "ZONE_POLICY_MAP",
+    "type": "hash",
+    "max_entries": 64,
+    "bytes_key": 2,
+    "bytes_value": 1,
+    "bytes_memlock": 6592
+   },
+   {
+    "name": "INTERFACE_GROUP",
+    "type": "hash",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 6592
+   },
+   {
+    "name": "AMP_PROTECT_CON",
+    "type": "hash",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 6592
+   },
+   {
+    "name": "IFACE_MAC",
+    "type": "hash",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 6592
+   },
+   {
+    "name": "DROP_WATCHED",
+    "type": "hash",
+    "max_entries": 64,
+    "bytes_key": 8,
+    "bytes_value": 1,
+    "bytes_memlock": 6592
+   },
+   {
+    "name": "WORKLOAD_RULE_D",
+    "type": "percpu_array",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 4920
+   },
+   {
+    "name": "FW_SHADOW_RULES",
+    "type": "array",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 64,
+    "bytes_memlock": 4408
+   },
+   {
+    "name": "THREATINTEL_BLO",
+    "type": "bloom_filter",
+    "max_entries": 4096,
+    "bytes_key": 0,
+    "bytes_value": 16,
+    "bytes_memlock": 4408
+   },
+   {
+    "name": "THREATINTEL_BLO",
+    "type": "bloom_filter",
+    "max_entries": 4096,
+    "bytes_key": 0,
+    "bytes_value": 4,
+    "bytes_memlock": 4408
+   },
+   {
+    "name": "NPTV6_RULES",
+    "type": "array",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 44,
+    "bytes_memlock": 3384
+   },
+   {
+    "name": "QOS_PIPE_CONFIG",
+    "type": "array",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 40,
+    "bytes_memlock": 2872
+   },
+   {
+    "name": "LB_DEVMAP",
+    "type": "devmap",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 2392
+   },
+   {
+    "name": "WORKLOAD_RULES",
+    "type": "array",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 28,
+    "bytes_memlock": 2360
+   },
+   {
+    "name": "QOS_QUEUE_CONFI",
+    "type": "array",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 2360
+   },
+   {
+    "name": "DDOS_METRICS",
+    "type": "percpu_array",
+    "max_entries": 18,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 1608
+   },
+   {
+    "name": "CT_METRICS",
+    "type": "percpu_array",
+    "max_entries": 18,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 1608
+   },
+   {
+    "name": "QOS_PIPE_STATE",
+    "type": "array",
+    "max_entries": 64,
+    "bytes_key": 4,
+    "bytes_value": 16,
+    "bytes_memlock": 1336
+   },
+   {
+    "name": "SCRUB_METRICS",
+    "type": "percpu_array",
+    "max_entries": 13,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 1248
+   },
+   {
+    "name": "NAT_METRICS",
+    "type": "percpu_array",
+    "max_entries": 12,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 1176
+   },
+   {
+    "name": "WORKLOAD_METRIC",
+    "type": "percpu_array",
+    "max_entries": 11,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 1104
+   },
+   {
+    "name": "ATTRIBUTION_MET",
+    "type": "percpu_array",
+    "max_entries": 10,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 1032
+   },
+   {
+    "name": "PKT_CTX",
+    "type": "percpu_array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 76,
+    "bytes_memlock": 960
+   },
+   {
+    "name": "DLP_METRICS",
+    "type": "percpu_array",
+    "max_entries": 9,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 960
+   },
+   {
+    "name": "FIREWALL_METRIC",
+    "type": "percpu_array",
+    "max_entries": 8,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 888
+   },
+   {
+    "name": "IDS_METRICS",
+    "type": "percpu_array",
+    "max_entries": 8,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 888
+   },
+   {
+    "name": "FIB_PARAMS",
+    "type": "percpu_array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 64,
+    "bytes_memlock": 832
+   },
+   {
+    "name": "RL_TIER_CONFIG",
+    "type": "array",
+    "max_entries": 16,
+    "bytes_key": 4,
+    "bytes_value": 32,
+    "bytes_memlock": 824
+   },
+   {
+    "name": "RATELIMIT_METRI",
+    "type": "percpu_array",
+    "max_entries": 7,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 816
+   },
+   {
+    "name": "NETPOL_METRICS",
+    "type": "percpu_array",
+    "max_entries": 7,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 816
+   },
+   {
+    "name": "PROCESS_METRICS",
+    "type": "percpu_array",
+    "max_entries": 7,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 816
+   },
+   {
+    "name": "QOS_METRICS",
+    "type": "percpu_array",
+    "max_entries": 7,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 816
+   },
+   {
+    "name": "SYNCOOKIE_CTX",
+    "type": "percpu_array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 56,
+    "bytes_memlock": 768
+   },
+   {
+    "name": "LB_METRICS",
+    "type": "percpu_array",
+    "max_entries": 6,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 744
+   },
+   {
+    "name": "REJECT_SCRATCH",
+    "type": "percpu_array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 48,
+    "bytes_memlock": 704
+   },
+   {
+    "name": "THREATINTEL_MET",
+    "type": "percpu_array",
+    "max_entries": 5,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 672
+   },
+   {
+    "name": "DNS_METRICS",
+    "type": "percpu_array",
+    "max_entries": 5,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 672
+   },
+   {
+    "name": "QUARANTINE_METR",
+    "type": "percpu_array",
+    "max_entries": 4,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 600
+   },
+   {
+    "name": "TCP_HEALTH_METR",
+    "type": "percpu_array",
+    "max_entries": 4,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 600
+   },
+   {
+    "name": "SHADOW_META",
+    "type": "percpu_array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 32,
+    "bytes_memlock": 576
+   },
+   {
+    "name": "DROP_METRICS",
+    "type": "percpu_array",
+    "max_entries": 3,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 528
+   },
+   {
+    "name": "BPF_GUARD_METRI",
+    "type": "percpu_array",
+    "max_entries": 3,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 528
+   },
+   {
+    "name": "BLOOM_PROBE",
+    "type": "percpu_array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 20,
+    "bytes_memlock": 512
+   },
+   {
+    "name": "VIP_METRICS",
+    "type": "percpu_array",
+    "max_entries": 2,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 456
+   },
+   {
+    "name": "BPF_GUARD_TASKS",
+    "type": "array",
+    "max_entries": 4,
+    "bytes_key": 4,
+    "bytes_value": 24,
+    "bytes_memlock": 408
+   },
+   {
+    "name": "TCP_HEALTH_CONF",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 80,
+    "bytes_memlock": 392
+   },
+   {
+    "name": "CT_CONFIG",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 72,
+    "bytes_memlock": 384
+   },
+   {
+    "name": "CT_STATE_SCRATC",
+    "type": "percpu_array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 384
+   },
+   {
+    "name": "WORKLOAD_LINEAG",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 48,
+    "bytes_memlock": 360
+   },
+   {
+    "name": "DROP_CONFIG",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 44,
+    "bytes_memlock": 360
+   },
+   {
+    "name": "SOCK_OFFSETS",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 36,
+    "bytes_memlock": 352
+   },
+   {
+    "name": "XDP_PROG_ARRAY",
+    "type": "prog_array",
+    "max_entries": 4,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 344
+   },
+   {
+    "name": "CONNTRACK_CONFI",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 32,
+    "bytes_memlock": 344
+   },
+   {
+    "name": "RL_PROG_ARRAY",
+    "type": "prog_array",
+    "max_entries": 4,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 344
+   },
+   {
+    "name": "KTLS_ITER_OFFSE",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 32,
+    "bytes_memlock": 344
+   },
+   {
+    "name": "PROCESS_LAYOUT",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 24,
+    "bytes_memlock": 336
+   },
+   {
+    "name": "CT_NF_CONN_OFFS",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 16,
+    "bytes_memlock": 328
+   },
+   {
+    "name": "FW_SHADOW_COUNT",
+    "type": "array",
+    "max_entries": 2,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 328
+   },
+   {
+    "name": "DDOS_SYN_CONFIG",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 16,
+    "bytes_memlock": 328
+   },
+   {
+    "name": "IDS_MIRROR_CONF",
+    "type": "array",
+    "max_entries": 2,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 328
+   },
+   {
+    "name": "NAT_HAIRPIN_CON",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 16,
+    "bytes_memlock": 328
+   },
+   {
+    "name": "SCRUB_CONFIG",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 14,
+    "bytes_memlock": 328
+   },
+   {
+    "name": "FIREWALL_RULE_C",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "FW_EMPTY_FEATUR",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "FIREWALL_DEFAUL",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 1,
+    "bytes_memlock": 320
+   },
+   {
+    "name": ".rodata",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 1,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "FW_CT_GATE",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 1,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "FIREWALL_RULE_C",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "ICMP_CONFIG",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 320
+   },
+   {
+    "name": ".rodata.cst8",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "IDS_SAMPLING_CO",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "CONFIG_FLAGS",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "DLP_SCOPE",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "WORKLOAD_DNS_CA",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": ".rodata.cst8",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "DROP_WATCHING",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "NAT_SNAT_RULE_C",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "NAT_DNAT_RULE_C",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "NAT_SNAT_RULE_C",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "NAT_DNAT_RULE_C",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "NPTV6_RULE_COUN",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "QOS_EMPTY_SHAPE",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "BPF_GUARD_CONFI",
+    "type": "array",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 320
+   },
+   {
+    "name": "TENANT_SUBNET_V",
+    "type": "lpm_trie",
+    "max_entries": 2048,
+    "bytes_key": 20,
+    "bytes_value": 4,
+    "bytes_memlock": 0
+   },
+   {
+    "name": "FW_LPM_DST_V4",
+    "type": "lpm_trie",
+    "max_entries": 131072,
+    "bytes_key": 8,
+    "bytes_value": 4,
+    "bytes_memlock": 0
+   },
+   {
+    "name": "FW_LPM_SRC_V4",
+    "type": "lpm_trie",
+    "max_entries": 131072,
+    "bytes_key": 8,
+    "bytes_value": 4,
+    "bytes_memlock": 0
+   },
+   {
+    "name": "TENANT_SUBNET_V",
+    "type": "lpm_trie",
+    "max_entries": 4096,
+    "bytes_key": 8,
+    "bytes_value": 4,
+    "bytes_memlock": 0
+   },
+   {
+    "name": "FW_LPM_SRC_V6",
+    "type": "lpm_trie",
+    "max_entries": 131072,
+    "bytes_key": 20,
+    "bytes_value": 4,
+    "bytes_memlock": 0
+   },
+   {
+    "name": "FW_LPM_DST_V6",
+    "type": "lpm_trie",
+    "max_entries": 131072,
+    "bytes_key": 20,
+    "bytes_value": 4,
+    "bytes_memlock": 0
+   },
+   {
+    "name": "RL_LPM_SRC_V4",
+    "type": "lpm_trie",
+    "max_entries": 131072,
+    "bytes_key": 8,
+    "bytes_value": 4,
+    "bytes_memlock": 0
+   },
+   {
+    "name": "RL_LPM_SRC_V6",
+    "type": "lpm_trie",
+    "max_entries": 131072,
+    "bytes_key": 20,
+    "bytes_value": 4,
+    "bytes_memlock": 0
+   },
+   {
+    "name": "NETPOL_RULES",
+    "type": "lpm_trie",
+    "max_entries": 65536,
+    "bytes_key": 24,
+    "bytes_value": 98,
+    "bytes_memlock": 0
+   }
+  ]
+ }
+}
