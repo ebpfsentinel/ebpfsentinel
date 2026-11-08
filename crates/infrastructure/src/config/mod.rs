@@ -93,7 +93,8 @@ pub use kernel_drops::KernelDropsConfig;
 pub use l7::{L7Config, L7RuleConfig};
 pub use learning::LearningConfig;
 pub use loadbalancer::{
-    AnnounceConfig, LbBackendConfig, LbServiceConfig as LbServiceCfg, LoadBalancerConfig, VipConfig,
+    AnnounceConfig, LB_MIN_BACKEND_CAPACITY, LbBackendConfig, LbServiceConfig as LbServiceCfg,
+    LoadBalancerConfig, VipConfig,
 };
 pub use management::ManagementConfig;
 pub use nat::{HairpinNatConfig, NatConfig, NatRuleConfig, NptV6RuleConfig};
@@ -1136,6 +1137,7 @@ impl AgentConfig {
         for (idx, svc_cfg) in self.loadbalancer.services.iter().enumerate() {
             svc_cfg.validate(idx)?;
         }
+        self.loadbalancer.validate_capacity()?;
         let lb_services = self.lb_services()?;
         for (idx, svc) in lb_services.iter().enumerate() {
             if let Some(other) = lb_services[idx + 1..]

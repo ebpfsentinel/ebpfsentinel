@@ -42,6 +42,8 @@
 #   benchmark    config-ebpf-benchmark.yaml as it stands
 #   all          tests/integration/fixtures/config-ebpf-all-programs.yaml, every
 #                feature that carries a kernel program
+#   all-lb-off   the same with the load balancer off, which leaves its program
+#                and its tables unloaded
 # The enterprise launches append the perf lane's enterprise block
 # (ebpfsentinel-enterprise/tests/perf/fixtures/enterprise-features.yaml) to
 # every profile but `none`.
@@ -54,7 +56,7 @@
 #   tests/perf/measure-footprint.sh --summary DIR     # tables out of DIR/*.json
 #
 # Options:
-#   --profiles a,b,c   subset of the profiles above (default: all six)
+#   --profiles a,b,c   subset of the profiles above (default: all seven)
 #   --runs N           starts per profile (default 3); the median start is kept
 #                      for steady figures, the highest for the peak
 # Environment:
@@ -76,7 +78,7 @@ SIEM_PORT=6514
 
 LAUNCH=""
 OUT=""
-PROFILES="none,firewall,ratelimit,threatintel,benchmark,all"
+PROFILES="none,firewall,ratelimit,threatintel,benchmark,all,all-lb-off"
 RUNS=3
 ENTERPRISE_BIN=""
 LICENSE_FILE=""
@@ -109,7 +111,7 @@ for path in sorted(glob.glob(os.path.join(out, "*.json"))):
 
 MB = 1e6
 MIB = 1048576
-order = ["none", "firewall", "ratelimit", "threatintel", "benchmark", "all"]
+order = ["none", "firewall", "ratelimit", "threatintel", "benchmark", "all", "all-lb-off"]
 
 def median_run(rs):
     rs = sorted(rs, key=lambda r: r["steady"]["cgroup_current"])
@@ -180,8 +182,18 @@ render() {
 only_sections() {
     awk -v keep="$1" '
         BEGIN { n = split(keep, k, ","); for (i = 1; i <= n; i++) kept[k[i]] = 1 }
-        /^[a-z_]+:/ { section = $1; sub(":", "", section) }
+        /^[a-z_0-9]+:/ { section = $1; sub(":", "", section) }
         /^  enabled: true/ && !(section in kept) { sub("enabled: true", "enabled: false") }
+        { print }
+    '
+}
+
+# Turns the named top-level sections off and leaves every other one as it is.
+sections_off() {
+    awk -v off="$1" '
+        BEGIN { n = split(off, k, ","); for (i = 1; i <= n; i++) dropped[k[i]] = 1 }
+        /^[a-z_0-9]+:/ { section = $1; sub(":", "", section) }
+        /^  enabled: true/ && (section in dropped) { sub("enabled: true", "enabled: false") }
         { print }
     '
 }
@@ -194,6 +206,7 @@ profile_config() {
         threatintel) render < "${BENCH}" | only_sections threatintel ;;
         benchmark) render < "${BENCH}" ;;
         all) render < "${OSS_ROOT}/tests/integration/fixtures/config-ebpf-all-programs.yaml" ;;
+        all-lb-off) render < "${OSS_ROOT}/tests/integration/fixtures/config-ebpf-all-programs.yaml" | sections_off loadbalancer ;;
         *) echo "unknown profile $1" >&2; return 1 ;;
     esac
     if [ "${LAUNCH}" != oss ] && [ "$1" != none ]; then

@@ -289,3 +289,28 @@ teardown_file() {
     [ -n "$metrics" ]
     echo "$metrics" | grep -qE "ebpfsentinel_lb|ebpfsentinel_loadbalancer" || true
 }
+
+@test "a Maglev service past the rings reserved at start is refused" {
+    require_root
+
+    # The fixture lists no Maglev service and sets no max_maglev_services,
+    # so the kernel table was created with one ring: the first service takes
+    # it and the second is refused whole, naming the key to raise.
+    local first='{"id":"lb-maglev-001","name":"maglev-a","protocol":"tcp","listen_port":19101,"algorithm":"maglev","backends":[{"id":"b1","addr":"10.200.0.1","port":9101,"enabled":true}],"enabled":true}'
+    local second='{"id":"lb-maglev-002","name":"maglev-b","protocol":"tcp","listen_port":19102,"algorithm":"maglev","backends":[{"id":"b1","addr":"10.200.0.1","port":9102,"enabled":true}],"enabled":true}'
+
+    api_post /api/v1/lb/services "$first" >/dev/null
+    _load_http_status
+    [ "$HTTP_STATUS" = "201" ]
+
+    local body
+    body="$(api_post /api/v1/lb/services "$second")"
+    _load_http_status
+    # api_delete sets HTTP_STATUS in this shell, so keep the refusal's own.
+    local refused="$HTTP_STATUS"
+    api_delete /api/v1/lb/services/lb-maglev-001 >/dev/null 2>&1 || true
+    api_delete /api/v1/lb/services/lb-maglev-002 >/dev/null 2>&1 || true
+
+    [ "$refused" = "400" ]
+    [[ "$body" == *"loadbalancer.max_maglev_services"* ]]
+}

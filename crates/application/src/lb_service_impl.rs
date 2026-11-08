@@ -10,7 +10,7 @@ use ebpf_common::loadbalancer::{
     LB_FAMILY_V4, LB_FAMILY_V6, LB_MAX_BACKENDS_V2, LB_MODE_DNAT, LB_MODE_L2DSR, LbBackendEntry,
     LbServiceConfigV2, LbServiceKey, lb_service_index,
 };
-use ports::secondary::loadbalancer_map_port::LoadBalancerMapPort;
+use ports::secondary::loadbalancer_map_port::{LbMapCapacity, LoadBalancerMapPort};
 use ports::secondary::metrics_port::MetricsPort;
 
 /// Application-level load balancer service.
@@ -64,6 +64,7 @@ impl LbAppService {
     /// Reload all services atomically.
     pub fn reload_services(&mut self, services: Vec<LbService>) -> Result<(), DomainError> {
         let count = services.len();
+        self.check_capacity(services.iter())?;
         self.engine.reload(services)?;
         self.sync_ebpf_maps();
         self.update_metrics();
@@ -73,6 +74,12 @@ impl LbAppService {
 
     /// Add a service.
     pub fn add_service(&mut self, service: LbService) -> Result<(), DomainError> {
+        self.check_capacity(
+            self.engine
+                .services()
+                .into_iter()
+                .chain(std::iter::once(&service)),
+        )?;
         self.engine.add_service(service)?;
         self.sync_ebpf_maps();
         self.update_metrics();
@@ -137,6 +144,50 @@ impl LbAppService {
 
         self.publish_backend_health();
 
+        Ok(())
+    }
+
+    /// Refuse a service set the kernel tables cannot hold.
+    ///
+    /// The tables are sized once, when the agent starts, from
+    /// `loadbalancer.max_maglev_services` and `loadbalancer.max_backends` or
+    /// from the services the file lists. A set that outgrows them would be
+    /// written half way, so it is refused whole and the running set stays.
+    fn check_capacity<'a>(
+        &self,
+        services: impl Iterator<Item = &'a LbService>,
+    ) -> Result<(), DomainError> {
+        let Some(port) = self.map_port.as_ref() else {
+            return Ok(());
+        };
+        let LbMapCapacity {
+            maglev_services: maglev_room,
+            backends: backend_room,
+        } = port.capacity();
+        let (maglev, backends) =
+            services
+                .filter(|s| s.enabled)
+                .fold((0_u64, 0_u64), |(m, b), s| {
+                    let ring = u64::from(s.algorithm == LbAlgorithm::Maglev);
+                    let slots = s.backends.len().min(LB_MAX_BACKENDS_V2 as usize) as u64;
+                    (m + ring, b + slots)
+                });
+        if let Some(room) = maglev_room
+            && maglev > u64::from(room)
+        {
+            return Err(DomainError::InvalidConfig(format!(
+                "{maglev} Maglev services need {maglev} rings but the kernel table holds {room}; \
+                 raise loadbalancer.max_maglev_services and restart the agent"
+            )));
+        }
+        if let Some(room) = backend_room
+            && backends > u64::from(room)
+        {
+            return Err(DomainError::InvalidConfig(format!(
+                "the services list {backends} backends but the kernel table holds {room}; \
+                 raise loadbalancer.max_backends and restart the agent"
+            )));
+        }
         Ok(())
     }
 
@@ -664,5 +715,153 @@ mod tests {
         be.enabled = false;
         let entry = backend_to_ebpf_entry(&be);
         assert_eq!(entry.healthy, 0);
+    }
+
+    /// A map port that holds nothing and reports a fixed capacity, counting
+    /// the Maglev rings and backends it is asked to write.
+    struct SizedPort {
+        capacity: LbMapCapacity,
+        rings: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl LoadBalancerMapPort for SizedPort {
+        fn sync_service(
+            &mut self,
+            _: &LbServiceKey,
+            _: &LbServiceConfigV2,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn remove_service(&mut self, _: &LbServiceKey) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn sync_backend(&mut self, _: u32, _: &LbBackendEntry) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn remove_backend(&mut self, _: u32) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn update_backend_health(&mut self, _: u32, _: bool) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn sync_maglev_table(&mut self, _: u32, _: &[u16]) -> Result<(), DomainError> {
+            self.rings
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+        fn remove_maglev_table(&mut self, _: u32) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn sync_backend_mac(&mut self, _: u32, _: [u8; 6]) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn remove_backend_mac(&mut self, _: u32) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn clear_all(&mut self) -> Result<(), DomainError> {
+            self.rings.store(0, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+        fn service_count(&self) -> Result<usize, DomainError> {
+            Ok(0)
+        }
+        fn capacity(&self) -> LbMapCapacity {
+            self.capacity
+        }
+    }
+
+    fn sized(
+        maglev_services: Option<u32>,
+        backends: Option<u32>,
+    ) -> (LbAppService, Arc<std::sync::atomic::AtomicUsize>) {
+        let rings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(SizedPort {
+            capacity: LbMapCapacity {
+                maglev_services,
+                backends,
+            },
+            rings: Arc::clone(&rings),
+        }));
+        (svc, rings)
+    }
+
+    fn maglev(id: &str, port: u16) -> LbService {
+        let mut s = make_lb_service(id, port);
+        s.algorithm = LbAlgorithm::Maglev;
+        s
+    }
+
+    #[test]
+    fn a_maglev_service_past_the_reserved_rings_is_refused_by_the_api() {
+        let (mut svc, rings) = sized(Some(1), None);
+        svc.add_service(maglev("m1", 80))
+            .expect("one ring is reserved");
+        assert_eq!(rings.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        let err = svc
+            .add_service(maglev("m2", 81))
+            .expect_err("no second ring");
+        assert!(matches!(err, DomainError::InvalidConfig(_)), "{err:?}");
+        assert!(
+            err.to_string().contains("loadbalancer.max_maglev_services"),
+            "{err}"
+        );
+        assert_eq!(svc.service_count(), 1, "the running set stays");
+
+        // Services that need no ring still fit.
+        svc.add_service(make_lb_service("rr", 82))
+            .expect("round robin needs no ring");
+        let mut off = maglev("m3", 83);
+        off.enabled = false;
+        svc.add_service(off)
+            .expect("a disabled service reserves nothing");
+    }
+
+    #[test]
+    fn a_reload_past_the_reserved_backends_is_refused_and_keeps_the_running_set() {
+        let (mut svc, _) = sized(None, Some(4));
+        svc.reload_services(vec![make_lb_service("a", 80), make_lb_service("b", 81)])
+            .expect("four backends fit four slots");
+
+        let err = svc
+            .reload_services(vec![
+                make_lb_service("a", 80),
+                make_lb_service("b", 81),
+                make_lb_service("c", 82),
+            ])
+            .expect_err("six backends in four slots");
+        assert!(
+            err.to_string().contains("loadbalancer.max_backends"),
+            "{err}"
+        );
+        assert_eq!(svc.service_count(), 2);
+    }
+
+    #[test]
+    fn a_reload_past_the_reserved_rings_is_refused() {
+        let (mut svc, rings) = sized(Some(2), Some(1_024));
+        svc.reload_services(vec![maglev("a", 80), maglev("b", 81)])
+            .expect("two rings reserved");
+        assert_eq!(rings.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert!(
+            svc.reload_services(vec![maglev("a", 80), maglev("b", 81), maglev("c", 82)])
+                .is_err()
+        );
+        assert_eq!(svc.service_count(), 2);
+    }
+
+    #[test]
+    fn no_table_or_no_reported_capacity_sets_no_ceiling() {
+        let mut svc = make_service();
+        for i in 0..4_u16 {
+            svc.add_service(maglev(&format!("m{i}"), 80 + i))
+                .expect("no map port");
+        }
+        let (mut svc, _) = sized(None, None);
+        for i in 0..4_u16 {
+            svc.add_service(maglev(&format!("m{i}"), 80 + i))
+                .expect("no capacity read");
+        }
     }
 }

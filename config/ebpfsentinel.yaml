@@ -393,6 +393,13 @@ routing:
 
 loadbalancer:
   enabled: false
+  # Kernel table capacities, reserved when the agent starts. Unset, they
+  # follow the services listed here: one Maglev ring (128 KiB) per maglev
+  # service, floor 1, and one backend slot per backend, floor 256. Set them
+  # when services are added through the API rather than listed here; a
+  # service that does not fit is refused with the key to raise.
+  # max_maglev_services: 8
+  # max_backends: 1024
 
 # GeoIP is disabled by default: leave the whole block commented out.
 # Unlike other sections it has no standalone on/off - enabling it requires a

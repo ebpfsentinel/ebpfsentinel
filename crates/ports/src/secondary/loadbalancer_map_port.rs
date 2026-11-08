@@ -1,6 +1,20 @@
 use domain::common::error::DomainError;
 use ebpf_common::loadbalancer::{LbBackendEntry, LbServiceConfigV2, LbServiceKey};
 
+/// The room the kernel load balancer tables were created with, read back
+/// from the tables themselves.
+///
+/// They are sized once, when the agent starts, so a service set that
+/// outgrows them is refused rather than half written. `None` is a table the
+/// loaded object does not carry, which sets no ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LbMapCapacity {
+    /// Maglev rings `LB_MAGLEV` holds, one per Maglev service.
+    pub maglev_services: Option<u32>,
+    /// Backend slots `LB_BACKENDS` holds, across every service.
+    pub backends: Option<u32>,
+}
+
 /// Secondary port for load balancer eBPF map operations.
 ///
 /// Provides a typed interface to the kernel `LB_SERVICES`, `LB_BACKENDS`,
@@ -46,6 +60,9 @@ pub trait LoadBalancerMapPort: Send + Sync {
 
     /// Return the number of service entries currently in the map.
     fn service_count(&self) -> Result<usize, DomainError>;
+
+    /// The capacity the kernel tables were created with.
+    fn capacity(&self) -> LbMapCapacity;
 }
 
 #[cfg(test)]

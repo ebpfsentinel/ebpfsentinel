@@ -9,9 +9,9 @@
 | CPU added at 90 kpps on a 4-vCPU node | under 0.1 core, host CPU unchanged within 0.01 core |
 | throughput loss, native XDP on a real NIC | within noise |
 | throughput loss, generic XDP | about 23% (why `xdp_mode: auto` picks native) |
-| locked map memory, every feature on | 229 MB on 4 vCPUs, 265 MB on 8 (about 9 MB per CPU) |
+| locked map memory, every feature on | 184 MB on 4 vCPUs, 220 MB on 8 (about 9 MB per CPU) |
 | agent RSS, every feature on | 151 MB, plus 7 MB for the warden |
-| agent container memory, every feature on | 336 MiB steady, 356 MiB peak while loading |
+| agent container memory, every feature on | 293 MiB steady, 313 MiB peak while loading |
 
 ## CPU per packet
 
@@ -117,14 +117,26 @@ build described below, which the verifier checks the same way: at 4 vCPUs the
 two builds' figures sit within 3 MiB of each other.
 Every start is in `results/2026-11-08-memory-footprint.json`.
 
+The load balancer's Maglev and backend tables are sized from the services the
+configuration lists, with one Maglev ring and 256 backends as the floor while
+the load balancer is on. Before that they were reserved whole, 256 rings of
+128 KiB and 65,536 backends, which is 45.5 MB of maps at either CPU count:
+every feature enabled then read 229.3 MB of maps, 336 MiB steady and a
+356 MiB peak. The first, second-to-last and last rows below were measured
+again, at 4 vCPUs, after the change; the others load no load balancer, so it
+does not move them. The 8 vCPU figures quoted further down are the starts
+taken before the change less those 45.5 MB, which are not per-CPU and weigh
+the same at both CPU counts.
+
 | configuration | programs | maps | map memory | agent RSS | steady cgroup | startup peak |
 |---|---:|---:|---:|---:|---:|---:|
-| No feature enabled | 20 | 27 | 31.0 MB | 118 MB | 161 MiB | 181 MiB |
+| No feature enabled | 20 | 27 | 31.0 MB | 117 MB | 160 MiB | 180 MiB |
 | Firewall only | 22 | 71 | 47.5 MB | 120 MB | 180 MiB | 200 MiB |
 | Rate limiting only | 24 | 91 | 95.1 MB | 122 MB | 201 MiB | 221 MiB |
 | Threat intelligence only | 21 | 36 | 32.8 MB | 119 MB | 164 MiB | 186 MiB |
 | Benchmark configuration | 29 | 127 | 133.7 MB | 134 MB | 240 MiB | 260 MiB |
-| Every feature enabled | 51 | 189 | 229.3 MB | 151 MB | 336 MiB | 356 MiB |
+| Every feature but the load balancer | 50 | 181 | 181.5 MB | 149 MB | 290 MiB | 310 MiB |
+| Every feature enabled | 51 | 189 | 183.9 MB | 151 MB | 293 MiB | 313 MiB |
 
 - **map memory** is `bytes_memlock` summed over every map the start created:
   what the kernel reserved for the maps, whether a slot is used or not.
@@ -139,11 +151,13 @@ Every start is in `results/2026-11-08-memory-footprint.json`.
   BPF LSM guards). "Benchmark configuration" is the fixture the CPU figures
   above were measured with; "Every feature enabled" is
   `tests/integration/fixtures/config-ebpf-all-programs.yaml`, which loads every
-  program the agent has.
+  program the agent has; "every feature but the load balancer" is the same
+  fixture with `loadbalancer.enabled: false`, whose tables are then not
+  created at all.
 
 The peak sits about 20 MiB above the steady figure in every configuration,
 the same at 8 vCPUs as at 4, so the steady figure is what sizes a limit; the
-chart's 512Mi default keeps about 40% over the peak with every feature
+chart's 512Mi default keeps about 60% over the peak with every feature
 enabled. It is the memory the kernel's verifier holds while it checks a
 program, charged to the cgroup of the process loading it and freed once the
 program is accepted. The XDP firewall's rule scans run inside global
@@ -214,6 +228,9 @@ At 8 vCPUs, every feature enabled: 265.2 MB of maps, 429 MiB steady and a
 450 MiB peak over a BPF token, 456 MiB and 473 MiB as root. Either way the
 peak sits about 20 MiB above the steady figure, so the enterprise chart's
 640Mi default keeps about 40% over the peak with every feature enabled.
+These enterprise starts were taken before the load balancer's tables were
+sized from the configuration, which takes the same 45.5 MB of maps out of
+every row whose configuration turns the load balancer on.
 
 ### Which memory a container limit sees
 
@@ -227,17 +244,19 @@ no container limit sees them.
 
 Measured by snapshotting every cgroup's `memory.stat` and the node's
 `/proc/meminfo` before a start and again at steady state, every feature
-enabled, OSS agent:
+enabled, OSS agent. At 8 vCPUs, map memory, the `kernel` line,
+`memory.current` and `VmallocUsed` are the start taken before the load
+balancer's tables were sized, less those tables:
 
 | | 4 vCPUs | 8 vCPUs |
 |---|---:|---:|
-| map memory (`bytes_memlock`) | 229.3 MB | 265.3 MB |
+| map memory (`bytes_memlock`) | 183.9 MB | 219.8 MB |
 | of which per-CPU map types | 62.0 MB | 97.4 MB |
-| agent cgroup, `kernel` | 193 MiB | 194 MiB |
-| agent cgroup, `percpu` | 14 KiB | 24 KiB |
-| agent cgroup, `memory.current` | 336 MiB | 337 MiB |
+| agent cgroup, `kernel` | 150 MiB | 151 MiB |
+| agent cgroup, `percpu` | 15 KiB | 24 KiB |
+| agent cgroup, `memory.current` | 293 MiB | 294 MiB |
 | node `Percpu` growth (`/proc/meminfo`) | 31.7 MiB | 63.0 MiB |
-| node `VmallocUsed` growth | 187.5 MiB | 181.9 MiB |
+| node `VmallocUsed` growth | 145.1 MiB | 138.5 MiB |
 
 No cgroup's `percpu` counter grew by as much as a MiB, the root's included,
 while the node's `Percpu` line grew by the size of the per-CPU values. The
@@ -249,9 +268,10 @@ cgroup gains about 6 MiB of its own.
 
 So, for sizing:
 
-- **The container limit** sees the steady cgroup figure, 336 MiB (352 MB)
-  with every feature enabled, and before that the startup peak, 356 MiB.
-  Neither moves with the CPU count: 337 MiB and 358 MiB at 8 vCPUs.
+- **The container limit** sees the steady cgroup figure, 293 MiB (307 MB)
+  with every feature enabled, and before that the startup peak, 313 MiB.
+  Neither moves with the CPU count: before the load balancer's tables were
+  sized, 337 MiB and 358 MiB at 8 vCPUs against 336 MiB and 356 MiB at 4.
 - **The node** pays the per-CPU values outside any container, so no pod
   limit holds them and the scheduler, which counts requests, never sees them.
   With every feature enabled at the default capacities that is about
@@ -287,7 +307,7 @@ Every feature enabled, OSS agent, map memory by type:
 
 | map type | maps | 4 vCPUs | 8 vCPUs | per extra CPU |
 |---|---:|---:|---:|---:|
-| hash | 43 | 84.3 MB | 84.8 MB | 0.13 MB |
+| hash | 43 | 38.8 MB | 39.4 MB | 0.13 MB |
 | lru_hash | 22 | 66.7 MB | 66.7 MB | 0 |
 | lru_percpu_hash | 9 | 57.4 MB | 90.4 MB | 8.26 MB |
 | ringbuf | 12 | 15.5 MB | 15.5 MB | 0 |
@@ -295,10 +315,10 @@ Every feature enabled, OSS agent, map memory by type:
 | array | 51 | 0.9 MB | 0.9 MB | 0 |
 | percpu_array | 33 | 0.2 MB | 0.4 MB | 0.04 MB |
 | bloom_filter, devmap, prog_array, lpm_trie | 14 | under 0.1 MB | under 0.1 MB | 0 |
-| total | 189 | 229.3 MB | 265.3 MB | 8.99 MB |
+| total | 189 | 183.9 MB | 219.8 MB | 8.99 MB |
 
 `hash` grows a little because a preallocated hash map keeps one spare element
-per CPU, and `LB_MAGLEV`'s element is 128 KiB. The per-CPU tables, each
+per CPU, whatever its `max_entries`, and `LB_MAGLEV`'s element is 128 KiB. The per-CPU tables, each
 growing by its value size per slot per CPU:
 
 | map | type | max_entries | value | 4 vCPUs | 8 vCPUs | per extra CPU |
@@ -330,7 +350,6 @@ sources.
 
 | map | type | max_entries | key | value | 4 vCPUs | 8 vCPUs |
 |---|---|---:|---:|---:|---:|---:|
-| `LB_MAGLEV` | hash | 256 | 4 B | 131,074 B | 34.10 MB | 34.62 MB |
 | `RL_BUCKETS` | lru_percpu_hash | 65,536 | 8 B | 64 B | 22.02 MB | 38.80 MB |
 | `CONN_TABLE` | lru_percpu_hash | 65,536 | 12 B | 24 B | 12.06 MB | 18.35 MB |
 | `QOS_FLOW_STATE` | lru_percpu_hash | 65,536 | 4 B | 16 B | 9.44 MB | 13.63 MB |
@@ -338,7 +357,6 @@ sources.
 | `NAT_DNAT_REVERSE_V6` | lru_hash | 65,536 | 40 B | 20 B | 8.39 MB | 8.39 MB |
 | `NAT_SNAT_REVERSE_V6` | lru_hash | 65,536 | 40 B | 20 B | 8.39 MB | 8.39 MB |
 | `SOCKET_IDENTITY` | lru_hash | 65,536 | 8 B | 40 B | 7.34 MB | 7.34 MB |
-| `LB_BACKENDS` | hash | 65,536 | 4 B | 28 B | 6.82 MB | 6.82 MB |
 | `NETPOL_REPLIES` | lru_hash | 65,536 | 32 B | 8 B | 6.82 MB | 6.82 MB |
 | `WORKLOAD_PEER_DESTINATIONS` | hash | 65,536 | 20 B | 8 B | 6.29 MB | 6.29 MB |
 | `WORKLOAD_PEER_SOURCES` | hash | 65,536 | 20 B | 8 B | 6.29 MB | 6.29 MB |
@@ -346,7 +364,6 @@ sources.
 | `NAT_DNAT_REVERSE` | lru_hash | 65,536 | 16 B | 8 B | 5.77 MB | 5.77 MB |
 | `NAT_SNAT_REVERSE` | lru_hash | 65,536 | 16 B | 8 B | 5.77 MB | 5.77 MB |
 | `FW_IPSET_V4` | hash | 65,536 | 8 B | 1 B | 5.24 MB | 5.24 MB |
-| `LB_BACKEND_MAC` | hash | 65,536 | 4 B | 8 B | 5.24 MB | 5.24 MB |
 | `EVENTS` | ringbuf | 4,194,304 | 0 B | 0 B | 4.22 MB | 4.22 MB |
 | `EVENTS` | ringbuf | 4,194,304 | 0 B | 0 B | 4.22 MB | 4.22 MB |
 | `LISTENER_ACCEPTS` | lru_percpu_hash | 16,384 | 20 B | 16 B | 2.62 MB | 3.67 MB |
@@ -355,10 +372,17 @@ sources.
 | `FLOOD_COUNTERS` | lru_percpu_hash | 16,384 | 8 B | 16 B | 2.36 MB | 3.41 MB |
 | `ICMP_RATE_BUCKETS` | lru_percpu_hash | 16,384 | 8 B | 16 B | 2.36 MB | 3.41 MB |
 | `SYN_RATE_TRACKER` | lru_percpu_hash | 16,384 | 8 B | 16 B | 2.36 MB | 3.41 MB |
+| `LISTENING_SOCKETS` | lru_hash | 16,384 | 8 B | 64 B | 2.23 MB | 2.23 MB |
+| `TCP_RTT` | hash | 8,192 | 48 B | 144 B | 2.10 MB | 2.10 MB |
+| `DLP_TASK_SOCKET` | lru_hash | 16,384 | 8 B | 48 B | 1.97 MB | 1.97 MB |
 
-The two `EVENTS` maps are the event rings of two programs, 4 MiB each.
-`LB_MAGLEV` is the single largest: 256 Maglev lookup tables of 131,074 bytes
-each.
+The two `EVENTS` maps are the event rings of two programs, 4 MiB each. The
+4 vCPU column is the start after the load balancer's tables were sized and the
+8 vCPU column the start before, which these 25 maps share. `LB_MAGLEV` was the
+single largest at 34.10 MB, 256 Maglev lookup tables of 131,074 bytes each; it
+now holds one per Maglev service configured, 0.66 MB with the one ring this
+fixture gets, and `LB_BACKENDS` and `LB_BACKEND_MAC` hold 256 backends
+instead of 65,536.
 
 ### Measuring it
 

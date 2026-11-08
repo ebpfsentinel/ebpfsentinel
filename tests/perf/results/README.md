@@ -21,13 +21,17 @@ map memory, RSS, steady `memory.current`, its `kernel` and `percpu` lines and
 `memory.peak`; `charge_probe` is one more start per case with the node's
 `/proc/meminfo` and every cgroup's `memory.stat` read before and after;
 `oss_all_maps_by_cpus` lists every map of the every-feature start at both CPU
-counts.
+counts. `load_balancer_sized_from_configuration` is the OSS agent at 4 vCPUs
+once more, after the load balancer's Maglev and backend tables were sized from
+the services configured instead of reserved whole: the same three starts per
+configuration, the every-feature fixture again and with the load balancer off.
 
 **What to quote.** With every feature enabled the OSS agent's container sits
-at 336 MiB and peaks at 872 MiB while it loads, the same at 8 vCPUs; the
-enterprise agent over a BPF token at 429 MiB and 928 MiB. The peak comes from
-loading an XDP program, not from the tables. The maps lock 229 MB on 4 vCPUs
-and 265 MB on 8, about 9 MB per CPU, all of the growth in per-CPU maps; the
+at 293 MiB and peaks at 313 MiB while it loads; the enterprise agent over a
+BPF token was measured at 429 MiB and 450 MiB before the load balancer's
+tables were sized, which took the same 45.5 MB of maps out of both. The maps
+lock 184 MB on 4 vCPUs and 220 MB on 8, about 9 MB per CPU, all of the growth
+in per-CPU maps; the
 per-CPU values, about 7.9 MiB per CPU, are charged to no cgroup, so the node
 pays them and a container limit does not see them. `BENCHMARK-RESULTS.md`
 carries the tables.

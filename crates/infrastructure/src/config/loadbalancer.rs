@@ -42,6 +42,120 @@ pub struct LoadBalancerConfig {
     /// L2 VIP announcer policy (ARP responder + gratuitous ARP failover).
     #[serde(default)]
     pub announce: AnnounceConfig,
+
+    /// Maglev lookup tables the kernel reserves at start, one per service
+    /// using `maglev`. Unset, it is the number of `maglev` services in
+    /// `services`, at least one. Set it to leave room for services added
+    /// through the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_maglev_services: Option<u32>,
+
+    /// Backend slots the kernel reserves at start, across every service.
+    /// Unset, it is the backends listed in `services`, at least
+    /// [`LB_MIN_BACKEND_CAPACITY`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_backends: Option<u32>,
+}
+
+/// Most Maglev tables the data plane declares room for.
+pub const LB_MAX_MAGLEV_CAPACITY: u32 = ebpf_common::loadbalancer::MAX_MAGLEV_SERVICES;
+/// Most backends the data plane declares room for.
+pub const LB_MAX_BACKEND_CAPACITY: u32 = ebpf_common::loadbalancer::MAX_LB_BACKENDS_TOTAL;
+/// Fewest backend slots a running load balancer is created with: one
+/// service at its full backend count, so a service added through the API
+/// fits without a restart.
+pub const LB_MIN_BACKEND_CAPACITY: u32 = ebpf_common::loadbalancer::LB_MAX_BACKENDS_V2;
+
+impl LoadBalancerConfig {
+    /// The Maglev lookup tables the kernel creates room for.
+    ///
+    /// Each is a 128 KiB ring, so the table is sized by what is configured
+    /// rather than by the 256 the data plane could address: `max_maglev_services`
+    /// when set, otherwise the `maglev` services listed. Never zero, which
+    /// the kernel refuses, and never above the data plane's ceiling. A load
+    /// balancer that is off gets the floor, since its program is not loaded.
+    #[must_use]
+    pub fn maglev_capacity(&self) -> u32 {
+        if !self.enabled {
+            return 1;
+        }
+        let wanted = self.max_maglev_services.unwrap_or_else(|| {
+            let n = self
+                .services
+                .iter()
+                .filter(|s| parse_lb_algorithm(&s.algorithm) == Ok(LbAlgorithm::Maglev))
+                .count();
+            u32::try_from(n).unwrap_or(u32::MAX)
+        });
+        wanted.clamp(1, LB_MAX_MAGLEV_CAPACITY)
+    }
+
+    /// The backend slots the kernel creates room for, shared by
+    /// `LB_BACKENDS` and `LB_BACKEND_MAC`.
+    ///
+    /// `max_backends` when set, otherwise the backends listed across every
+    /// service, held at or above [`LB_MIN_BACKEND_CAPACITY`] and at or below
+    /// the data plane's ceiling. A load balancer that is off gets one slot.
+    #[must_use]
+    pub fn backend_capacity(&self) -> u32 {
+        if !self.enabled {
+            return 1;
+        }
+        if let Some(n) = self.max_backends {
+            return n.clamp(1, LB_MAX_BACKEND_CAPACITY);
+        }
+        let listed: usize = self.services.iter().map(|s| s.backends.len()).sum();
+        u32::try_from(listed)
+            .unwrap_or(u32::MAX)
+            .clamp(LB_MIN_BACKEND_CAPACITY, LB_MAX_BACKEND_CAPACITY)
+    }
+
+    /// Bounds on the two explicit capacities, and room in each for what the
+    /// file itself lists.
+    pub(super) fn validate_capacity(&self) -> Result<(), ConfigError> {
+        let maglev = self
+            .services
+            .iter()
+            .filter(|s| parse_lb_algorithm(&s.algorithm) == Ok(LbAlgorithm::Maglev))
+            .count();
+        if let Some(n) = self.max_maglev_services {
+            if !(1..=LB_MAX_MAGLEV_CAPACITY).contains(&n) {
+                return Err(ConfigError::Validation {
+                    field: "loadbalancer.max_maglev_services".to_string(),
+                    message: format!("must be between 1 and {LB_MAX_MAGLEV_CAPACITY}, got {n}"),
+                });
+            }
+            if (n as usize) < maglev {
+                return Err(ConfigError::Validation {
+                    field: "loadbalancer.max_maglev_services".to_string(),
+                    message: format!("{n} is fewer than the {maglev} maglev services listed"),
+                });
+            }
+        } else if maglev > LB_MAX_MAGLEV_CAPACITY as usize {
+            return Err(ConfigError::Validation {
+                field: "loadbalancer.services".to_string(),
+                message: format!(
+                    "{maglev} services use maglev; at most {LB_MAX_MAGLEV_CAPACITY} can"
+                ),
+            });
+        }
+        let listed: usize = self.services.iter().map(|s| s.backends.len()).sum();
+        if let Some(n) = self.max_backends {
+            if !(1..=LB_MAX_BACKEND_CAPACITY).contains(&n) {
+                return Err(ConfigError::Validation {
+                    field: "loadbalancer.max_backends".to_string(),
+                    message: format!("must be between 1 and {LB_MAX_BACKEND_CAPACITY}, got {n}"),
+                });
+            }
+            if (n as usize) < listed {
+                return Err(ConfigError::Validation {
+                    field: "loadbalancer.max_backends".to_string(),
+                    message: format!("{n} is fewer than the {listed} backends listed"),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Maximum number of owned VIPs (matches eBPF `MAX_VIPS` capacity).
@@ -1118,5 +1232,114 @@ mod tests {
         assert!(no_peers.validate().is_err());
         let off = bgp_announce("bgp:\n  enabled: false\n");
         assert!(off.validate().is_ok());
+    }
+
+    fn lb_with(services: Vec<LbServiceConfig>) -> LoadBalancerConfig {
+        LoadBalancerConfig {
+            enabled: true,
+            services,
+            ..LoadBalancerConfig::default()
+        }
+    }
+
+    fn maglev_service(id: &str, backends: usize) -> LbServiceConfig {
+        let mut s = make_service_config(id);
+        s.algorithm = "maglev".to_string();
+        s.backends = (0..backends)
+            .map(|i| make_backend_config(&format!("be-{i}")))
+            .collect();
+        s
+    }
+
+    #[test]
+    fn a_load_balancer_that_is_off_reserves_the_floor() {
+        let mut cfg = lb_with(vec![maglev_service("a", 4)]);
+        cfg.enabled = false;
+        cfg.max_maglev_services = Some(64);
+        cfg.max_backends = Some(4_096);
+        assert_eq!(cfg.maglev_capacity(), 1);
+        assert_eq!(cfg.backend_capacity(), 1);
+    }
+
+    #[test]
+    fn no_maglev_service_still_reserves_one_table() {
+        let cfg = lb_with(Vec::new());
+        assert_eq!(cfg.maglev_capacity(), 1);
+        assert_eq!(cfg.backend_capacity(), LB_MIN_BACKEND_CAPACITY);
+        let cfg = lb_with(vec![make_service_config("rr")]);
+        assert_eq!(cfg.maglev_capacity(), 1);
+    }
+
+    #[test]
+    fn n_maglev_services_reserve_n_tables() {
+        let services = (0..5)
+            .map(|i| maglev_service(&format!("m{i}"), 2))
+            .chain(std::iter::once(make_service_config("rr")))
+            .collect();
+        assert_eq!(lb_with(services).maglev_capacity(), 5);
+    }
+
+    #[test]
+    fn listed_backends_size_the_backend_tables_above_one_service() {
+        let services = (0..4)
+            .map(|i| maglev_service(&format!("m{i}"), 200))
+            .collect();
+        assert_eq!(lb_with(services).backend_capacity(), 800);
+        let services = vec![maglev_service("small", 3)];
+        assert_eq!(
+            lb_with(services).backend_capacity(),
+            LB_MIN_BACKEND_CAPACITY
+        );
+    }
+
+    #[test]
+    fn an_explicit_capacity_wins_and_is_clamped_to_the_data_plane() {
+        let mut cfg = lb_with(Vec::new());
+        cfg.max_maglev_services = Some(32);
+        cfg.max_backends = Some(8);
+        assert_eq!(cfg.maglev_capacity(), 32);
+        assert_eq!(cfg.backend_capacity(), 8);
+        cfg.max_maglev_services = Some(10_000);
+        cfg.max_backends = Some(10_000_000);
+        assert_eq!(cfg.maglev_capacity(), LB_MAX_MAGLEV_CAPACITY);
+        assert_eq!(cfg.backend_capacity(), LB_MAX_BACKEND_CAPACITY);
+        cfg.max_maglev_services = Some(0);
+        cfg.max_backends = Some(0);
+        assert_eq!(cfg.maglev_capacity(), 1);
+        assert_eq!(cfg.backend_capacity(), 1);
+    }
+
+    #[test]
+    fn an_explicit_capacity_is_bounded_and_holds_what_the_file_lists() {
+        let mut cfg = lb_with(vec![maglev_service("a", 2), maglev_service("b", 2)]);
+        assert!(cfg.validate_capacity().is_ok());
+        cfg.max_maglev_services = Some(0);
+        assert!(cfg.validate_capacity().is_err());
+        cfg.max_maglev_services = Some(LB_MAX_MAGLEV_CAPACITY + 1);
+        assert!(cfg.validate_capacity().is_err());
+        cfg.max_maglev_services = Some(1);
+        let err = cfg
+            .validate_capacity()
+            .expect_err("one table for two services");
+        assert!(err.to_string().contains("max_maglev_services"), "{err}");
+        cfg.max_maglev_services = Some(2);
+        cfg.max_backends = Some(3);
+        let err = cfg
+            .validate_capacity()
+            .expect_err("three slots for four backends");
+        assert!(err.to_string().contains("max_backends"), "{err}");
+        cfg.max_backends = Some(LB_MAX_BACKEND_CAPACITY + 1);
+        assert!(cfg.validate_capacity().is_err());
+        cfg.max_backends = Some(4);
+        assert!(cfg.validate_capacity().is_ok());
+    }
+
+    #[test]
+    fn the_capacities_parse_from_yaml() {
+        let cfg: LoadBalancerConfig =
+            serde_norway::from_str("enabled: true\nmax_maglev_services: 12\nmax_backends: 2048\n")
+                .expect("load balancer block parses");
+        assert_eq!(cfg.maglev_capacity(), 12);
+        assert_eq!(cfg.backend_capacity(), 2_048);
     }
 }

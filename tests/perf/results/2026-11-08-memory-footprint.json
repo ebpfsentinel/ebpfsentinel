@@ -4677,5 +4677,284 @@
     "bytes_memlock": 0
    }
   ]
+ },
+ "load_balancer_sized_from_configuration": {
+  "note": "OSS agent at 4 vCPUs after the load balancer's Maglev and backend tables were sized from configuration instead of reserved whole. Same guest, kernel and settle time as above; `starts` and `charge_probe` keep the schema of the top-level keys, which are the measurement before the change. The all-lb-off profile is the every-feature fixture with the load balancer turned off.",
+  "starts": [
+   {
+    "launch": "oss",
+    "cpus_online": 4,
+    "cpus_possible": 4,
+    "profile": "none",
+    "programs": 20,
+    "maps": 27,
+    "maps_bytes_memlock": [
+     31035832,
+     31035832,
+     31035832
+    ],
+    "agent_rss_kb": [
+     114576,
+     114260,
+     114280
+    ],
+    "warden_rss_kb": [
+     7076,
+     7132,
+     7080
+    ],
+    "cgroup_current_bytes": [
+     167419904,
+     167768064,
+     168382464
+    ],
+    "cgroup_kernel_bytes": [
+     30638080,
+     30658560,
+     30654464
+    ],
+    "cgroup_percpu_bytes": [
+     4872,
+     4872,
+     5280
+    ],
+    "cgroup_peak_bytes": [
+     188522496,
+     188928000,
+     189116416
+    ],
+    "seconds_to_ready": [
+     3.9,
+     3.9,
+     3.8
+    ]
+   },
+   {
+    "launch": "oss",
+    "cpus_online": 4,
+    "cpus_possible": 4,
+    "profile": "all",
+    "programs": 51,
+    "maps": 189,
+    "maps_bytes_memlock": [
+     183860696,
+     183860696,
+     183860696
+    ],
+    "agent_rss_kb": [
+     147480,
+     147276,
+     147084
+    ],
+    "warden_rss_kb": [
+     7348,
+     6780,
+     7388
+    ],
+    "cgroup_current_bytes": [
+     307040256,
+     306438144,
+     306868224
+    ],
+    "cgroup_kernel_bytes": [
+     157519872,
+     157528064,
+     157523968
+    ],
+    "cgroup_percpu_bytes": [
+     15048,
+     15048,
+     15048
+    ],
+    "cgroup_peak_bytes": [
+     327815168,
+     327987200,
+     327884800
+    ],
+    "seconds_to_ready": [
+     0.7,
+     0.7,
+     0.7
+    ]
+   },
+   {
+    "launch": "oss",
+    "cpus_online": 4,
+    "cpus_possible": 4,
+    "profile": "all-lb-off",
+    "programs": 50,
+    "maps": 181,
+    "maps_bytes_memlock": [
+     181527656,
+     181527656,
+     181527656
+    ],
+    "agent_rss_kb": [
+     145404,
+     145752,
+     145808
+    ],
+    "warden_rss_kb": [
+     6728,
+     6892,
+     7368
+    ],
+    "cgroup_current_bytes": [
+     303849472,
+     304566272,
+     303919104
+    ],
+    "cgroup_kernel_bytes": [
+     155123712,
+     155119616,
+     155123712
+    ],
+    "cgroup_percpu_bytes": [
+     14784,
+     14784,
+     14784
+    ],
+    "cgroup_peak_bytes": [
+     324857856,
+     325451776,
+     325132288
+    ],
+    "seconds_to_ready": [
+     0.7,
+     0.7,
+     0.7
+    ]
+   }
+  ],
+  "charge_probe": [
+   {
+    "launch": "oss",
+    "cpus_online": 4,
+    "profile": "all",
+    "maps_bytes_memlock": 183860696,
+    "percpu_map_types_bytes_memlock": 61965928,
+    "node_growth_bytes": {
+     "Slab": 6701056,
+     "SUnreclaim": 3846144,
+     "VmallocUsed": 152125440,
+     "Percpu": 33226752
+    },
+    "charged": [
+     {
+      "cgroup": "/",
+      "counter": "kernel",
+      "bytes": 164667392
+     },
+     {
+      "cgroup": "/system.slice",
+      "counter": "kernel",
+      "bytes": 164093952
+     },
+     {
+      "cgroup": "/system.slice/fp-agent.service",
+      "counter": "kernel",
+      "bytes": 157519872
+     },
+     {
+      "cgroup": "/system.slice/fp-warden.service",
+      "counter": "kernel",
+      "bytes": 6492160
+     }
+    ]
+   },
+   {
+    "launch": "oss",
+    "cpus_online": 4,
+    "profile": "all-lb-off",
+    "maps_bytes_memlock": 181527656,
+    "percpu_map_types_bytes_memlock": 61801224,
+    "node_growth_bytes": {
+     "Slab": -712704,
+     "SUnreclaim": -3760128,
+     "VmallocUsed": 147693568,
+     "Percpu": 34979840
+    },
+    "charged": [
+     {
+      "cgroup": "/",
+      "counter": "kernel",
+      "bytes": 162455552
+     },
+     {
+      "cgroup": "/system.slice",
+      "counter": "kernel",
+      "bytes": 161705984
+     },
+     {
+      "cgroup": "/system.slice/fp-agent.service",
+      "counter": "kernel",
+      "bytes": 155123712
+     },
+     {
+      "cgroup": "/system.slice/fp-warden.service",
+      "counter": "kernel",
+      "bytes": 6488064
+     }
+    ]
+   }
+  ],
+  "oss_all_lb_maps_4cpu": [
+   {
+    "name": "LB_MAGLEV",
+    "type": "hash",
+    "max_entries": 1,
+    "bytes_key": 4,
+    "bytes_value": 131074,
+    "bytes_memlock": 656624
+   },
+   {
+    "name": "LB_SERVICES",
+    "type": "hash",
+    "max_entries": 4096,
+    "bytes_key": 20,
+    "bytes_value": 8,
+    "bytes_memlock": 394464
+   },
+   {
+    "name": "LB_BACKENDS",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 28,
+    "bytes_memlock": 27904
+   },
+   {
+    "name": "LB_BACKEND_MAC",
+    "type": "hash",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 21664
+   },
+   {
+    "name": "LB_METRICS",
+    "type": "percpu_array",
+    "max_entries": 6,
+    "bytes_key": 4,
+    "bytes_value": 8,
+    "bytes_memlock": 552
+   },
+   {
+    "name": "LB_DEVMAP",
+    "type": "devmap",
+    "max_entries": 256,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 2392
+   },
+   {
+    "name": "LB_RR_STATE",
+    "type": "percpu_array",
+    "max_entries": 4096,
+    "bytes_key": 4,
+    "bytes_value": 4,
+    "bytes_memlock": 164152
+   }
+  ]
  }
 }

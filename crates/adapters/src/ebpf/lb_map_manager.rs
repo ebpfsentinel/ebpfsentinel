@@ -1,10 +1,10 @@
 use crate::ebpf::map_store::MapStore;
-use aya::maps::{DevMap, HashMap, MapData};
+use aya::maps::{DevMap, HashMap, IterableMap, MapData};
 use domain::common::error::DomainError;
 use ebpf_common::loadbalancer::{
     BackendMac, LbBackendEntry, LbServiceConfigV2, LbServiceKey, MAGLEV_RING_SIZE, MaglevLookup,
 };
-use ports::secondary::loadbalancer_map_port::LoadBalancerMapPort;
+use ports::secondary::loadbalancer_map_port::{LbMapCapacity, LoadBalancerMapPort};
 use tracing::{debug, info, warn};
 
 /// Manages the load balancer eBPF maps: `LB_SERVICES` and `LB_BACKENDS`.
@@ -25,6 +25,14 @@ pub struct LbMapManager {
     /// `LB_BACKEND_MAC`: resolved backend MACs for L2 DSR forwarding.
     /// Optional - only present in the `xdp-loadbalancer` program.
     backend_mac_map: Option<HashMap<MapData, u32, BackendMac>>,
+    /// What `LB_MAGLEV` and `LB_BACKENDS` were created to hold.
+    capacity: LbMapCapacity,
+}
+
+/// The `max_entries` a table was created with, or `None` when the kernel
+/// does not answer, which sets no ceiling rather than a wrong one.
+fn created_capacity<K: aya::Pod, V: aya::Pod>(map: &HashMap<MapData, K, V>) -> Option<u32> {
+    map.map().info().ok().map(|i| i.max_entries())
 }
 
 impl LbMapManager {
@@ -71,13 +79,22 @@ impl LbMapManager {
             info!("LB_BACKEND_MAC acquired for L2 DSR forwarding");
         }
 
-        info!("LB_SERVICES and LB_BACKENDS maps acquired");
+        let capacity = LbMapCapacity {
+            maglev_services: maglev_map.as_ref().and_then(created_capacity),
+            backends: created_capacity(&backends_map),
+        };
+        info!(
+            maglev_services = ?capacity.maglev_services,
+            backends = ?capacity.backends,
+            "LB_SERVICES and LB_BACKENDS maps acquired"
+        );
         Ok(Self {
             services_map,
             backends_map,
             devmap,
             maglev_map,
             backend_mac_map,
+            capacity,
         })
     }
 
@@ -336,6 +353,10 @@ impl LoadBalancerMapPort for LbMapManager {
 
     fn service_count(&self) -> Result<usize, DomainError> {
         Ok(self.service_count())
+    }
+
+    fn capacity(&self) -> LbMapCapacity {
+        self.capacity
     }
 }
 

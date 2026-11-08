@@ -57,6 +57,9 @@ pub const SIZED_MAPS: &[(&str, &str)] = &[
     ("REJECT_RATELIMIT", "firewall.rules[].action"),
     ("SOCKET_IDENTITY", "attribution.max_sockets"),
     ("SOCKET_FLOW", "attribution.max_sockets"),
+    ("LB_MAGLEV", "loadbalancer.max_maglev_services"),
+    ("LB_BACKENDS", "loadbalancer.max_backends"),
+    ("LB_BACKEND_MAC", "loadbalancer.max_backends"),
 ];
 
 /// What a table belonging to a feature the configuration switches off is
@@ -74,6 +77,18 @@ pub const IDLE_TABLE_ENTRIES: u32 = 1_024;
 /// declaration carries. It is declared here rather than imported because the
 /// program is built for another target and shares no crate with this one.
 pub const REJECT_RATELIMIT_ENTRIES: u32 = 65_536;
+
+/// Most entries the kernel creates a hash table with. Its bucket count is
+/// `max_entries` rounded up to a power of two and the bucket array must stay
+/// under 4 GiB at 16 bytes a bucket, so 2^27 is the last capacity it accepts.
+pub const KERNEL_MAX_TABLE_ENTRIES: u32 = 1 << 27;
+
+/// A capacity the kernel accepts: never zero, which `BPF_MAP_CREATE`
+/// refuses, and never above [`KERNEL_MAX_TABLE_ENTRIES`].
+#[must_use]
+pub fn kernel_capacity(n: u32) -> u32 {
+    n.clamp(1, KERNEL_MAX_TABLE_ENTRIES)
+}
 
 /// The capacity every sized map is created with, derived from one
 /// configuration.
@@ -130,6 +145,8 @@ impl MapSizing {
         } else {
             IDLE_TABLE_ENTRIES
         };
+        let maglev = config.loadbalancer.maglev_capacity();
+        let lb_backends = config.loadbalancer.backend_capacity();
         let entries = SIZED_MAPS
             .iter()
             .map(|(name, field)| {
@@ -143,9 +160,11 @@ impl MapSizing {
                     "nat.enabled" => nat_reverse,
                     "firewall.rules[].action" => reject,
                     "attribution.max_sockets" => sockets,
+                    "loadbalancer.max_maglev_services" => maglev,
+                    "loadbalancer.max_backends" => lb_backends,
                     other => unreachable!("unmapped sizing field {other}"),
                 };
-                (*name, n)
+                (*name, kernel_capacity(n))
             })
             .collect();
         Self { entries }
@@ -241,6 +260,7 @@ pub fn override_for(name: &str, map_type: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
 
     fn default_config() -> AgentConfig {
         AgentConfig::from_yaml("agent:\n  interfaces: [eth0]\n").expect("minimal config parses")
@@ -353,6 +373,112 @@ mod tests {
         assert_eq!(p.get("ICMP_RATE_BUCKETS"), Some(4_096));
         assert_eq!(p.get("CONN_TABLE"), Some(8_192));
         assert_eq!(p.get("THREATINTEL_IOCS_V6"), Some(262_144));
+    }
+
+    fn load_balancer(yaml: &str) -> MapSizing {
+        let config = AgentConfig::from_yaml(&format!(
+            "agent:\n  interfaces: [eth0]\nloadbalancer:\n{yaml}"
+        ))
+        .expect("config with a load balancer block parses");
+        MapSizing::from_config(&config)
+    }
+
+    fn lb_service(id: &str, port: u16, algorithm: &str, backends: usize) -> String {
+        let mut s = format!(
+            "    - id: {id}\n      name: {id}\n      listen_port: {port}\n      algorithm: {algorithm}\n      backends:\n"
+        );
+        for i in 0..backends {
+            let _ = write!(
+                s,
+                "        - id: {id}-b{i}\n          addr: 10.0.{}.{}\n          port: 8080\n",
+                i / 250,
+                i % 250 + 1
+            );
+        }
+        s
+    }
+
+    #[test]
+    fn a_load_balancer_that_is_off_gets_the_smallest_tables() {
+        let p = plan();
+        assert_eq!(p.get("LB_MAGLEV"), Some(1));
+        assert_eq!(p.get("LB_BACKENDS"), Some(1));
+        assert_eq!(p.get("LB_BACKEND_MAC"), Some(1));
+    }
+
+    #[test]
+    fn a_load_balancer_with_no_maglev_service_keeps_one_ring() {
+        let p = load_balancer("  enabled: true\n  services: []\n");
+        assert_eq!(p.get("LB_MAGLEV"), Some(1));
+        assert_eq!(
+            p.get("LB_BACKENDS"),
+            Some(infrastructure::config::LB_MIN_BACKEND_CAPACITY)
+        );
+        assert_eq!(
+            p.get("LB_BACKEND_MAC"),
+            Some(infrastructure::config::LB_MIN_BACKEND_CAPACITY)
+        );
+    }
+
+    #[test]
+    fn n_maglev_services_get_n_rings() {
+        let mut yaml = String::from("  enabled: true\n  services:\n");
+        for i in 0..3_u16 {
+            yaml.push_str(&lb_service(&format!("m{i}"), 8000 + i, "maglev", 2));
+        }
+        yaml.push_str(&lb_service("rr", 9000, "round_robin", 2));
+        let p = load_balancer(&yaml);
+        assert_eq!(p.get("LB_MAGLEV"), Some(3));
+    }
+
+    #[test]
+    fn the_backend_tables_follow_the_backends_listed() {
+        let mut yaml = String::from("  enabled: true\n  services:\n");
+        for i in 0..3_u16 {
+            yaml.push_str(&lb_service(&format!("s{i}"), 8000 + i, "round_robin", 200));
+        }
+        let p = load_balancer(&yaml);
+        assert_eq!(p.get("LB_BACKENDS"), Some(600));
+        assert_eq!(p.get("LB_BACKEND_MAC"), Some(600));
+    }
+
+    #[test]
+    fn explicit_load_balancer_capacities_are_held_to_the_data_plane() {
+        let p = load_balancer("  enabled: true\n  max_maglev_services: 16\n  max_backends: 4096\n");
+        assert_eq!(p.get("LB_MAGLEV"), Some(16));
+        assert_eq!(p.get("LB_BACKENDS"), Some(4_096));
+        let mut config = default_config();
+        config.loadbalancer.enabled = true;
+        config.loadbalancer.max_maglev_services = Some(u32::MAX);
+        config.loadbalancer.max_backends = Some(u32::MAX);
+        let p = MapSizing::from_config(&config);
+        assert_eq!(
+            p.get("LB_MAGLEV"),
+            Some(ebpf_common::loadbalancer::MAX_MAGLEV_SERVICES)
+        );
+        assert_eq!(
+            p.get("LB_BACKENDS"),
+            Some(ebpf_common::loadbalancer::MAX_LB_BACKENDS_TOTAL)
+        );
+    }
+
+    #[test]
+    fn no_plan_asks_the_kernel_for_an_empty_or_oversized_table() {
+        let mut config = default_config();
+        config.ratelimit.max_buckets = 0;
+        config.ddos.max_tracked_sources = u32::MAX;
+        config.attribution.enabled = true;
+        config.attribution.max_sockets = 0;
+        let p = MapSizing::from_config(&config);
+        assert_eq!(p.get("RL_BUCKETS"), Some(1));
+        assert_eq!(p.get("SOCKET_FLOW"), Some(1));
+        assert_eq!(p.get("SYN_RATE_TRACKER"), Some(KERNEL_MAX_TABLE_ENTRIES));
+        for (name, n) in p.iter() {
+            assert!((1..=KERNEL_MAX_TABLE_ENTRIES).contains(&n), "{name}={n}");
+        }
+        assert_eq!(kernel_capacity(0), 1);
+        assert_eq!(kernel_capacity(u32::MAX), KERNEL_MAX_TABLE_ENTRIES);
+        assert_eq!(kernel_capacity(4_096), 4_096);
     }
 
     #[test]
