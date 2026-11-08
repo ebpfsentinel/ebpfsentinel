@@ -62,9 +62,24 @@ const KFUNC_EXPORTS: &[&str] = &[
     "bpf_xdp_xfrm_state_release",
 ];
 
+// Global functions defined by the eBPF programs. The kernel verifies a function
+// with global linkage on its own, once, against the signature its BTF gives,
+// which is how the firewall's rule scans are verified once rather than once
+// per state of the packet path that reaches them. Internalized, the linker
+// would be free to rewrite that signature (`fastcc`, dropped or promoted
+// arguments) and the registers would no longer say what the BTF does, so each
+// is exported like a kfunc.
+const GLOBAL_FUNCTION_EXPORTS: &[&str] = &[
+    "fw_scan_rules_v4",
+    "fw_scan_rules_v6",
+    "fw_scan_shadow_v4",
+    "fw_scan_shadow_v6",
+];
+
 /// Build the `CARGO_ENCODED_RUSTFLAGS` value: base flags plus a
-/// `--export <kfunc>` link-arg pair for each kfunc. Components are separated
-/// by the ASCII unit separator (`\x1f`) as cargo expects.
+/// `--export <symbol>` link-arg pair for each kfunc and global function.
+/// Components are separated by the ASCII unit separator (`\x1f`) as cargo
+/// expects.
 fn encoded_rustflags() -> String {
     let mut parts: Vec<String> = vec![
         "-C".into(),
@@ -72,11 +87,11 @@ fn encoded_rustflags() -> String {
         "-C".into(),
         "link-arg=--btf".into(),
     ];
-    for kfunc in KFUNC_EXPORTS {
+    for symbol in KFUNC_EXPORTS.iter().chain(GLOBAL_FUNCTION_EXPORTS) {
         parts.push("-C".into());
         parts.push("link-arg=--export".into());
         parts.push("-C".into());
-        parts.push(format!("link-arg={kfunc}"));
+        parts.push(format!("link-arg={symbol}"));
     }
     parts.join("\x1f")
 }

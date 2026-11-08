@@ -11,7 +11,7 @@
 | throughput loss, generic XDP | about 23% (why `xdp_mode: auto` picks native) |
 | locked map memory, every feature on | 229 MB on 4 vCPUs, 265 MB on 8 (about 9 MB per CPU) |
 | agent RSS, every feature on | 151 MB, plus 7 MB for the warden |
-| agent container memory, every feature on | 336 MiB steady, 872 MiB peak while loading |
+| agent container memory, every feature on | 336 MiB steady, 356 MiB peak while loading |
 
 ## CPU per packet
 
@@ -111,17 +111,20 @@ Measured 2026-11-08 on kernel 7.0.0-42-generic, in the VMware agent guest of
 Each figure is the median of three agent starts on an otherwise idle guest,
 the peak the highest of the three. The OSS agent runs under the warden in its
 own user namespace over a BPF token, as the chart runs it. The table is the
-4 vCPU run; at 8 vCPUs the steady cgroup and the peak moved by under 5 MiB.
+4 vCPU run of the build in the tree; at 8 vCPUs the steady cgroup and the peak
+moved by under 5 MiB. The 8 vCPU starts were taken with the call-per-rule
+build described below, which the verifier checks the same way: at 4 vCPUs the
+two builds' figures sit within 3 MiB of each other.
 Every start is in `results/2026-11-08-memory-footprint.json`.
 
 | configuration | programs | maps | map memory | agent RSS | steady cgroup | startup peak |
 |---|---:|---:|---:|---:|---:|---:|
-| No feature enabled | 20 | 27 | 31.0 MB | 123 MB | 167 MiB | 183 MiB |
-| Firewall only | 22 | 71 | 47.5 MB | 121 MB | 181 MiB | 869 MiB |
-| Rate limiting only | 24 | 91 | 95.1 MB | 123 MB | 201 MiB | 869 MiB |
-| Threat intelligence only | 21 | 36 | 32.8 MB | 120 MB | 163 MiB | 186 MiB |
-| Benchmark configuration | 29 | 127 | 133.7 MB | 134 MB | 240 MiB | 869 MiB |
-| Every feature enabled | 51 | 189 | 229.3 MB | 151 MB | 336 MiB | 872 MiB |
+| No feature enabled | 20 | 27 | 31.0 MB | 118 MB | 161 MiB | 181 MiB |
+| Firewall only | 22 | 71 | 47.5 MB | 120 MB | 180 MiB | 200 MiB |
+| Rate limiting only | 24 | 91 | 95.1 MB | 122 MB | 201 MiB | 221 MiB |
+| Threat intelligence only | 21 | 36 | 32.8 MB | 119 MB | 164 MiB | 186 MiB |
+| Benchmark configuration | 29 | 127 | 133.7 MB | 134 MB | 240 MiB | 260 MiB |
+| Every feature enabled | 51 | 189 | 229.3 MB | 151 MB | 336 MiB | 356 MiB |
 
 - **map memory** is `bytes_memlock` summed over every map the start created:
   what the kernel reserved for the maps, whether a slot is used or not.
@@ -138,11 +141,54 @@ Every start is in `results/2026-11-08-memory-footprint.json`.
   `tests/integration/fixtures/config-ebpf-all-programs.yaml`, which loads every
   program the agent has.
 
-The peak is set by loading an XDP program rather than by the tables: every
-configuration that attaches the XDP firewall or the rate limiter peaks at
-about 870 MiB, the ones that attach neither stay under 190 MiB, and the peak
-is the same at 8 vCPUs as at 4. That peak is what sets the chart's 1Gi default
-limit, and why 512Mi got the agent OOMKilled before it was ever Ready.
+The peak sits about 20 MiB above the steady figure in every configuration,
+the same at 8 vCPUs as at 4, so the steady figure is what sizes a limit; the
+chart's 512Mi default keeps about 40% over the peak with every feature
+enabled. It is the memory the kernel's verifier holds while it checks a
+program, charged to the cgroup of the process loading it and freed once the
+program is accepted. The XDP firewall's rule scans run inside global
+functions, which the verifier checks once each rather than once per path that
+reaches them; before that, every configuration attaching the XDP firewall or
+the rate limiter peaked at about 870 MiB.
+
+### What verifying the rule scans once costs a packet
+
+A global function is a real call, so it is placed where a packet makes one
+call per scan rather than one per rule. What that leaves was measured on the
+same guest, the same day, through `BPF_PROG_TEST_RUN` (one 64-byte UDP packet
+through `xdp_firewall`, the best of five batches of a million, every rule an
+IPv4 source rule that misses):
+
+| rules | scans inline (before) | one call per scan (now) | one call per rule (rejected) |
+|---:|---:|---:|---:|
+| 0 | 68 to 79 ns | 72 to 73 ns | 70 to 72 ns |
+| 1 | 88 to 94 ns | 95 to 96 ns | 92 to 93 ns |
+| 16 | 173 to 188 ns | 176 to 190 ns | 180 to 194 ns |
+| 64 | 414 to 425 ns | 416 to 421 ns | 472 to 483 ns |
+| 256 | 1293 to 1336 ns | 1318 to 1424 ns | 1601 to 1642 ns |
+| 1024 | 5054 to 5142 ns | 5017 to 5487 ns | 6148 to 6300 ns |
+
+Each range is the spread between runs of one object: three for the first
+column, two for the others. Up to 64 rules the scans cost what they did (421 ns
+against 414 to 425 ns); at 256 rules the slower run is 1424 ns against about
+1330 ns, up to 7% above the slowest run before. That is the trade-off taken:
+about 5 to 7% per packet on a long rule list, against a startup peak that now
+sits about 20 MiB above the steady figure instead of about 870 MiB. A call per rule, the other way to verify the
+scans once, costs about 14% more at 64 rules and about 20% more from 256.
+
+The CPU-per-packet lane, run the same day with the benchmark configuration,
+reads within its own noise:
+
+| rate | OSS before | OSS now | Enterprise before | Enterprise now |
+|---|---:|---:|---:|---:|
+| 25 kpps | 1575 / 1722 ns/pkt | 1848 ns/pkt | 1675 / 1887 ns/pkt | 1842 ns/pkt |
+| 50 kpps | 1237 / 1323 ns/pkt | 1360 ns/pkt | 1315 / 1396 ns/pkt | 1445 ns/pkt |
+| highest rate | 1224 / 1211 ns/pkt | 1238 ns/pkt | 1299 / 1158 ns/pkt | 1293 ns/pkt |
+
+"Before" is two runs of the previous object, one in the morning and one
+straight after the run of the new one; the two differ by 9 to 13% from each
+other at 25 kpps, which is the lane's repeatability rather than the program's
+cost.
 
 ### Enterprise
 
@@ -154,20 +200,20 @@ the enterprise lab runs it.
 
 | configuration | launch | programs | map memory | agent RSS | steady cgroup | startup peak |
 |---|---|---:|---:|---:|---:|---:|
-| No feature enabled | BPF token | 20 | 31.0 MB | 173 MB | 240 MiB | 261 MiB |
-| Firewall only | BPF token | 21 | 47.4 MB | 196 MB | 273 MiB | 928 MiB |
-| Rate limiting only | BPF token | 22 | 95.0 MB | 200 MB | 295 MiB | 927 MiB |
-| Threat intelligence only | BPF token | 21 | 32.8 MB | 200 MB | 261 MiB | 281 MiB |
-| Benchmark configuration | BPF token | 27 | 133.6 MB | 212 MB | 335 MiB | 928 MiB |
-| Every feature enabled | BPF token | 49 | 229.2 MB | 229 MB | 429 MiB | 928 MiB |
-| No feature enabled | root | 20 | 31.0 MB | 172 MB | 266 MiB | 284 MiB |
-| Benchmark configuration | root | 27 | 133.6 MB | 213 MB | 361 MiB | 737 MiB |
-| Every feature enabled | root | 49 | 229.2 MB | 229 MB | 455 MiB | 737 MiB |
+| No feature enabled | BPF token | 20 | 31.0 MB | 173 MB | 241 MiB | 261 MiB |
+| Firewall only | BPF token | 21 | 47.4 MB | 198 MB | 276 MiB | 296 MiB |
+| Rate limiting only | BPF token | 22 | 95.0 MB | 201 MB | 296 MiB | 317 MiB |
+| Threat intelligence only | BPF token | 21 | 32.8 MB | 199 MB | 261 MiB | 281 MiB |
+| Benchmark configuration | BPF token | 27 | 133.6 MB | 213 MB | 336 MiB | 356 MiB |
+| Every feature enabled | BPF token | 49 | 229.2 MB | 228 MB | 429 MiB | 450 MiB |
+| No feature enabled | root | 20 | 31.0 MB | 171 MB | 265 MiB | 283 MiB |
+| Benchmark configuration | root | 27 | 133.6 MB | 211 MB | 361 MiB | 377 MiB |
+| Every feature enabled | root | 49 | 229.2 MB | 227 MB | 453 MiB | 471 MiB |
 
-At 8 vCPUs, every feature enabled: 265.2 MB of maps, 431 MiB steady and a
-929 MiB peak over a BPF token, 456 MiB and 738 MiB as root. Loading over a
-BPF token peaks about 190 MiB higher than loading with capabilities, for the
-same programs; the steady figures are within 30 MiB of each other.
+At 8 vCPUs, every feature enabled: 265.2 MB of maps, 429 MiB steady and a
+450 MiB peak over a BPF token, 456 MiB and 473 MiB as root. Either way the
+peak sits about 20 MiB above the steady figure, so the enterprise chart's
+640Mi default keeps about 40% over the peak with every feature enabled.
 
 ### Which memory a container limit sees
 
@@ -204,8 +250,8 @@ cgroup gains about 6 MiB of its own.
 So, for sizing:
 
 - **The container limit** sees the steady cgroup figure, 336 MiB (352 MB)
-  with every feature enabled, and before that the startup peak, 872 MiB.
-  Neither moves with the CPU count: 337 MiB and 872 MiB at 8 vCPUs.
+  with every feature enabled, and before that the startup peak, 356 MiB.
+  Neither moves with the CPU count: 337 MiB and 358 MiB at 8 vCPUs.
 - **The node** pays the per-CPU values outside any container, so no pod
   limit holds them and the scheduler, which counts requests, never sees them.
   With every feature enabled at the default capacities that is about
@@ -277,7 +323,10 @@ names them.
 ### Largest maps
 
 Every feature enabled, OSS agent, the 25 largest maps by `bytes_memlock`.
-`bpftool` shows the first 15 characters of a map's name.
+The kernel keeps at most 15 characters of a map's name (`BPF_OBJ_NAME_LEN` is
+16 bytes, the last one the terminating NUL), so `bpftool` and the results file
+carry the name cut there; the names below are the full ones from the programs'
+sources.
 
 | map | type | max_entries | key | value | 4 vCPUs | 8 vCPUs |
 |---|---|---:|---:|---:|---:|---:|

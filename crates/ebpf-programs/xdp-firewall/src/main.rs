@@ -498,32 +498,15 @@ unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4], 
 
 // ── bpf_loop context structs ─────────────────────────────────────────
 //
-// Stack budget analysis (eBPF limit: 512 bytes per stack frame):
-//
-// RuleScanCtx (IPv4):
-//   count(4) + src_ip(4) + dst_ip(4) + src_port(2) + dst_port(2) +
-//   protocol(1) + vlan_id(2) + ct_state(1) + tcp_flags(1) + icmp_type(1) +
-//   icmp_code(1) + dscp(1) + src_mac(6) + dst_mac(6) + matched_action(4) +
-//   matched_rule_idx(4) + matched_max_states(2)
-//   = ~46 bytes (with padding, ~48 bytes)
-//
-// RuleScanCtxV6 (IPv6):
-//   count(4) + src_addr(16) + dst_addr(16) + src_port(2) + dst_port(2) +
-//   protocol(1) + vlan_id(2) + ct_state(1) + tcp_flags(1) + icmp_type(1) +
-//   icmp_code(1) + dscp(1) + src_mac(6) + dst_mac(6) + matched_action(4) +
-//   matched_rule_idx(4) + matched_max_states(2)
-//   = ~70 bytes (with padding, ~72 bytes)
-//
-// Both are well within the 512-byte limit. Crucially, process_firewall_v4
-// and process_firewall_v6 are both #[inline(never)], so the V4 and V6
-// scan contexts never coexist on the same stack frame. The compiler gives
-// each function its own 512-byte budget:
-//   - process_firewall_v4: RuleScanCtx (~48 bytes) + locals (~60 bytes)
-//   - process_firewall_v6: RuleScanCtxV6 (~72 bytes) + locals (~80 bytes)
-//
-// The bpf_loop callbacks (scan_rule_v4, scan_rule_v6) are also
-// #[inline(never)], so their stack usage (pointer casts, map lookups) does
-// not accumulate with the caller's frame.
+// Each context lives on the stack of process_firewall_v4 / process_firewall_v6
+// (both #[inline(never)], so the two never share a 512-byte frame) and is
+// handed to a global scan function as a pointer. The kernel checks every
+// byte behind such a pointer as initialised stack, so the fields are ordered
+// widest first and the tail is an explicit, zeroed `_pad`: no layout gap is
+// left for the compiler to skip writing.
+//   - RuleScanCtx:   56 bytes
+//   - RuleScanCtxV6: 80 bytes
+//   - ShadowScanCtx: 104 bytes (in settle_shadow's frame)
 
 /// Opaque context passed through `bpf_loop` to the IPv4 rule-scan callback.
 #[repr(C)]
@@ -531,10 +514,20 @@ struct RuleScanCtx {
     count: u32,
     src_ip: u32,
     dst_ip: u32,
+    /// -1 = no match yet, 0+ = matched rule action.
+    matched_action: i32,
+    /// Index of the matched rule (-1 = none).
+    matched_rule_idx: i32,
+    /// Interface group membership bitmask for the ingress interface.
+    iface_groups: u32,
+    /// Resolved tenant ID for the current packet.
+    tenant_id: u32,
     src_port: u16,
     dst_port: u16,
-    protocol: u8,
     vlan_id: u16,
+    /// Max states for the matched rule (0 = unlimited).
+    matched_max_states: u16,
+    protocol: u8,
     /// Conntrack state for this packet (CT_STATE_* constant, 0xFF = unknown).
     ct_state: u8,
     /// Raw TCP flags byte from the TCP header (0 if not TCP).
@@ -549,16 +542,7 @@ struct RuleScanCtx {
     src_mac: [u8; 6],
     /// Destination MAC address from Ethernet header.
     dst_mac: [u8; 6],
-    /// -1 = no match yet, 0+ = matched rule action.
-    matched_action: i32,
-    /// Index of the matched rule (-1 = none).
-    matched_rule_idx: i32,
-    /// Max states for the matched rule (0 = unlimited).
-    matched_max_states: u16,
-    /// Interface group membership bitmask for the ingress interface.
-    iface_groups: u32,
-    /// Resolved tenant ID for the current packet.
-    tenant_id: u32,
+    _pad: [u8; 2],
 }
 
 /// Opaque context passed through `bpf_loop` to the IPv6 rule-scan callback.
@@ -567,10 +551,20 @@ struct RuleScanCtxV6 {
     count: u32,
     src_addr: [u32; 4],
     dst_addr: [u32; 4],
+    /// -1 = no match yet, 0+ = matched rule action.
+    matched_action: i32,
+    /// Index of the matched rule (-1 = none).
+    matched_rule_idx: i32,
+    /// Interface group membership bitmask for the ingress interface.
+    iface_groups: u32,
+    /// Resolved tenant ID for the current packet.
+    tenant_id: u32,
     src_port: u16,
     dst_port: u16,
-    protocol: u8,
     vlan_id: u16,
+    /// Max states for the matched rule (0 = unlimited).
+    matched_max_states: u16,
+    protocol: u8,
     /// Conntrack state for this packet (CT_STATE_* constant, 0xFF = unknown).
     ct_state: u8,
     /// Raw TCP flags byte from the TCP header (0 if not TCP).
@@ -585,19 +579,234 @@ struct RuleScanCtxV6 {
     src_mac: [u8; 6],
     /// Destination MAC address from Ethernet header.
     dst_mac: [u8; 6],
-    /// -1 = no match yet, 0+ = matched rule action.
-    matched_action: i32,
-    /// Index of the matched rule (-1 = none).
-    matched_rule_idx: i32,
-    /// Max states for the matched rule (0 = unlimited).
-    matched_max_states: u16,
-    /// Interface group membership bitmask for the ingress interface.
-    iface_groups: u32,
-    /// Resolved tenant ID for the current packet.
-    tenant_id: u32,
+    _pad: [u8; 2],
 }
 
+// The sizes are the sums of the fields: a struct that grew a gap fails here
+// rather than at load, where the verifier would refuse the uninitialised byte.
+const _: () = assert!(core::mem::size_of::<RuleScanCtx>() == 56);
+const _: () = assert!(core::mem::size_of::<RuleScanCtxV6>() == 80);
+
 // PacketCtx imported from ebpf_common::firewall (shared with xdp-firewall-reject).
+
+// ── Rule scans, verified once ───────────────────────────────────────
+//
+// A `bpf_loop` callback is verified as a loop body: the kernel walks it again
+// for every state the caller reaches the loop with, and inside it keeps each
+// combination of taken and untaken match branches as a state of its own until
+// the loop converges. Called straight from the packet path, the rule scans
+// cost the firewall several hundred thousand stored states at load time,
+// charged to the agent's memory for the seconds verification lasts. A global
+// function is verified once, on its own, against its signature, and a call to
+// it costs the caller one instruction, so each scan below runs its `bpf_loop`
+// from inside a global function: the loop is verified against that one entry
+// state, and the packet pays one call for the whole scan rather than one per
+// rule.
+//
+// `#[unsafe(no_mangle)]` gives each function global linkage in the object's
+// BTF, which is what makes the kernel verify it separately, and the build
+// exports the symbol so the linker keeps the C argument registers the kernel
+// checks the call against. The kernel types the pointer argument as memory
+// that may be null, hence the check on entry, and `bpf_loop` only takes a
+// context on the stack, hence the copy each function scans through.
+
+/// Whether IPv4 rule `rule` applies to the packet in `scan`: interface group,
+/// tenant, then every match field.
+#[inline(always)]
+fn rule_matches_v4(rule: &FirewallRuleEntry, scan: &RuleScanCtx) -> bool {
+    if !group_matches(rule.group_mask, scan.iface_groups) {
+        return false;
+    }
+    if rule.tenant_id != 0 && rule.tenant_id != scan.tenant_id {
+        return false;
+    }
+    match_rule_v4(
+        rule,
+        scan.src_ip,
+        scan.dst_ip,
+        scan.src_port,
+        scan.dst_port,
+        scan.protocol,
+        scan.vlan_id,
+        scan.ct_state,
+        scan.tcp_flags,
+        scan.icmp_type,
+        scan.icmp_code,
+        scan.dscp,
+        &scan.src_mac,
+        &scan.dst_mac,
+    )
+}
+
+/// Whether IPv6 rule `rule` applies to the packet in `scan`.
+#[inline(always)]
+fn rule_matches_v6(rule: &FirewallRuleEntryV6, scan: &RuleScanCtxV6) -> bool {
+    if !group_matches(rule.group_mask, scan.iface_groups) {
+        return false;
+    }
+    if rule.tenant_id != 0 && rule.tenant_id != scan.tenant_id {
+        return false;
+    }
+    match_rule_v6(
+        rule,
+        &scan.src_addr,
+        &scan.dst_addr,
+        scan.src_port,
+        scan.dst_port,
+        scan.protocol,
+        scan.vlan_id,
+        scan.ct_state,
+        scan.tcp_flags,
+        scan.icmp_type,
+        scan.icmp_code,
+        scan.dscp,
+        &scan.src_mac,
+        &scan.dst_mac,
+    )
+}
+
+/// Whether IPv4 shadow rule `rule` applies to the packet in `scan`.
+#[inline(always)]
+fn shadow_matches_v4(rule: &FirewallRuleEntry, scan: &ShadowScanCtx) -> bool {
+    if !group_matches(rule.group_mask, scan.iface_groups) {
+        return false;
+    }
+    if rule.tenant_id != 0 && rule.tenant_id != scan.tenant_id {
+        return false;
+    }
+    match_rule_v4(
+        rule,
+        scan.src_addr[0],
+        scan.dst_addr[0],
+        scan.src_port,
+        scan.dst_port,
+        scan.protocol,
+        scan.vlan_id,
+        scan.ct_state,
+        scan.tcp_flags,
+        scan.icmp_type,
+        scan.icmp_code,
+        scan.dscp,
+        &scan.src_mac,
+        &scan.dst_mac,
+    )
+}
+
+/// Whether IPv6 shadow rule `rule` applies to the packet in `scan`.
+#[inline(always)]
+fn shadow_matches_v6(rule: &FirewallRuleEntryV6, scan: &ShadowScanCtx) -> bool {
+    if !group_matches(rule.group_mask, scan.iface_groups) {
+        return false;
+    }
+    if rule.tenant_id != 0 && rule.tenant_id != scan.tenant_id {
+        return false;
+    }
+    match_rule_v6(
+        rule,
+        &scan.src_addr,
+        &scan.dst_addr,
+        scan.src_port,
+        scan.dst_port,
+        scan.protocol,
+        scan.vlan_id,
+        scan.ct_state,
+        scan.tcp_flags,
+        scan.icmp_type,
+        scan.icmp_code,
+        scan.dscp,
+        &scan.src_mac,
+        &scan.dst_mac,
+    )
+}
+
+/// Scan the IPv4 rules for the first that applies to the packet in `scan`,
+/// leaving its action, index and state limit in `scan`. Returns 1 on a match.
+#[unsafe(no_mangle)]
+#[inline(never)]
+extern "C" fn fw_scan_rules_v4(scan: *mut RuleScanCtx) -> u32 {
+    let Some(scan) = (unsafe { scan.as_mut() }) else {
+        return 0;
+    };
+    let mut local = unsafe { core::ptr::read(scan) };
+    unsafe {
+        bpf_loop(
+            MAX_FIREWALL_RULES,
+            scan_rule_v4 as *mut c_void,
+            &mut local as *mut RuleScanCtx as *mut c_void,
+            0,
+        );
+    }
+    scan.matched_action = local.matched_action;
+    scan.matched_rule_idx = local.matched_rule_idx;
+    scan.matched_max_states = local.matched_max_states;
+    u32::from(local.matched_action >= 0)
+}
+
+/// Scan the IPv6 rules, as `fw_scan_rules_v4` does the IPv4 ones.
+#[unsafe(no_mangle)]
+#[inline(never)]
+extern "C" fn fw_scan_rules_v6(scan: *mut RuleScanCtxV6) -> u32 {
+    let Some(scan) = (unsafe { scan.as_mut() }) else {
+        return 0;
+    };
+    let mut local = unsafe { core::ptr::read(scan) };
+    unsafe {
+        bpf_loop(
+            MAX_FIREWALL_RULES,
+            scan_rule_v6 as *mut c_void,
+            &mut local as *mut RuleScanCtxV6 as *mut c_void,
+            0,
+        );
+    }
+    scan.matched_action = local.matched_action;
+    scan.matched_rule_idx = local.matched_rule_idx;
+    scan.matched_max_states = local.matched_max_states;
+    u32::from(local.matched_action >= 0)
+}
+
+/// Read every IPv4 shadow rule against the packet in `scan`, leaving the
+/// rules that matched and those that would have denied in `scan`. Returns 1
+/// when any matched.
+#[unsafe(no_mangle)]
+#[inline(never)]
+extern "C" fn fw_scan_shadow_v4(scan: *mut ShadowScanCtx) -> u32 {
+    let Some(scan) = (unsafe { scan.as_mut() }) else {
+        return 0;
+    };
+    let mut local = unsafe { core::ptr::read(scan) };
+    unsafe {
+        bpf_loop(
+            MAX_SHADOW_RULES,
+            scan_shadow_v4 as *mut c_void,
+            &mut local as *mut ShadowScanCtx as *mut c_void,
+            0,
+        );
+    }
+    scan.matched = local.matched;
+    scan.would_deny = local.would_deny;
+    u32::from(local.matched != 0)
+}
+
+/// Read every IPv6 shadow rule, as `fw_scan_shadow_v4` does the IPv4 ones.
+#[unsafe(no_mangle)]
+#[inline(never)]
+extern "C" fn fw_scan_shadow_v6(scan: *mut ShadowScanCtx) -> u32 {
+    let Some(scan) = (unsafe { scan.as_mut() }) else {
+        return 0;
+    };
+    let mut local = unsafe { core::ptr::read(scan) };
+    unsafe {
+        bpf_loop(
+            MAX_SHADOW_RULES,
+            scan_shadow_v6 as *mut c_void,
+            &mut local as *mut ShadowScanCtx as *mut c_void,
+            0,
+        );
+    }
+    scan.matched = local.matched;
+    scan.would_deny = local.would_deny;
+    u32::from(local.matched != 0)
+}
 
 // ── bpf_loop callbacks ──────────────────────────────────────────────
 
@@ -609,35 +818,13 @@ unsafe extern "C" fn scan_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
         if index >= lctx.count {
             return 1;
         }
-        if let Some(rule) = FIREWALL_RULES.get(index) {
-            // Check interface group membership before evaluating rule fields.
-            if !group_matches(rule.group_mask, lctx.iface_groups) {
-                return 0; // group mismatch, continue to next rule
-            }
-            if rule.tenant_id != 0 && rule.tenant_id != lctx.tenant_id {
-                return 0; // tenant mismatch, continue to next rule
-            }
-            if match_rule_v4(
-                rule,
-                lctx.src_ip,
-                lctx.dst_ip,
-                lctx.src_port,
-                lctx.dst_port,
-                lctx.protocol,
-                lctx.vlan_id,
-                lctx.ct_state,
-                lctx.tcp_flags,
-                lctx.icmp_type,
-                lctx.icmp_code,
-                lctx.dscp,
-                &lctx.src_mac,
-                &lctx.dst_mac,
-            ) {
-                lctx.matched_action = rule.action as i32;
-                lctx.matched_rule_idx = index as i32;
-                lctx.matched_max_states = rule.max_states;
-                return 1;
-            }
+        if let Some(rule) = FIREWALL_RULES.get(index)
+            && rule_matches_v4(rule, lctx)
+        {
+            lctx.matched_action = rule.action as i32;
+            lctx.matched_rule_idx = index as i32;
+            lctx.matched_max_states = rule.max_states;
+            return 1;
         }
         0
     }
@@ -651,35 +838,13 @@ unsafe extern "C" fn scan_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
         if index >= lctx.count {
             return 1;
         }
-        if let Some(rule) = FIREWALL_RULES_V6.get(index) {
-            // Check interface group membership before evaluating rule fields.
-            if !group_matches(rule.group_mask, lctx.iface_groups) {
-                return 0; // group mismatch, continue to next rule
-            }
-            if rule.tenant_id != 0 && rule.tenant_id != lctx.tenant_id {
-                return 0; // tenant mismatch, continue to next rule
-            }
-            if match_rule_v6(
-                rule,
-                &lctx.src_addr,
-                &lctx.dst_addr,
-                lctx.src_port,
-                lctx.dst_port,
-                lctx.protocol,
-                lctx.vlan_id,
-                lctx.ct_state,
-                lctx.tcp_flags,
-                lctx.icmp_type,
-                lctx.icmp_code,
-                lctx.dscp,
-                &lctx.src_mac,
-                &lctx.dst_mac,
-            ) {
-                lctx.matched_action = rule.action as i32;
-                lctx.matched_rule_idx = index as i32;
-                lctx.matched_max_states = rule.max_states;
-                return 1;
-            }
+        if let Some(rule) = FIREWALL_RULES_V6.get(index)
+            && rule_matches_v6(rule, lctx)
+        {
+            lctx.matched_action = rule.action as i32;
+            lctx.matched_rule_idx = index as i32;
+            lctx.matched_max_states = rule.max_states;
+            return 1;
         }
         0
     }
@@ -1050,7 +1215,7 @@ fn try_xdp_firewall(ctx: &XdpContext, ctx_raw: *mut core::ffi::c_void) -> Result
 /// IPv4 firewall processing: linear scan of FIREWALL_RULES array.
 ///
 /// `#[inline(never)]` ensures this function gets its own stack frame
-/// (~48 bytes for `RuleScanCtx` + locals), separate from the IPv6 path.
+/// (56 bytes for `RuleScanCtx` + locals), separate from the IPv6 path.
 #[inline(never)]
 fn process_firewall_v4(
     ctx_raw: *mut core::ffi::c_void,
@@ -1292,8 +1457,9 @@ fn process_firewall_v4(
         None => 0,
     };
 
-    // Scan rules via bpf_loop (kernel 5.17+): verifier analyzes the callback
-    // body only once, allowing up to 4096 rules without complexity limits.
+    // Scan rules via bpf_loop: the instruction count does not grow with the
+    // rule count, so up to 4096 rules load without complexity limits. The
+    // match itself is a global function, verified once (see above).
     // The scan context is on the stack (not a PerCpuArray map value) because
     // kernel 6.17+ requires the bpf_loop callback_ctx (R3) to be a stack
     // frame pointer, not a map_value pointer.
@@ -1341,17 +1507,11 @@ fn process_firewall_v4(
             matched_max_states: 0,
             iface_groups,
             tenant_id,
+            _pad: [0; 2],
         };
         scan_ctx.src_mac = src_mac;
         scan_ctx.dst_mac = dst_mac;
-        unsafe {
-            bpf_loop(
-                MAX_FIREWALL_RULES,
-                scan_rule_v4 as *mut c_void,
-                &mut scan_ctx as *mut RuleScanCtx as *mut c_void,
-                0,
-            );
-        }
+        fw_scan_rules_v4(&mut scan_ctx);
         (
             scan_ctx.matched_action,
             scan_ctx.matched_rule_idx,
@@ -1468,11 +1628,20 @@ struct ShadowScanCtx {
     count: u32,
     src_addr: [u32; 4],
     dst_addr: [u32; 4],
+    iface_groups: u32,
+    tenant_id: u32,
+    /// First counter slot of the family.
+    slot_base: u32,
+    now_ns: u64,
+    /// Bit `i` set: rule `i` of the family matched the packet.
+    matched: u64,
+    /// Bit `i` set: rule `i` would have dropped or rejected it.
+    would_deny: u64,
     src_port: u16,
     dst_port: u16,
+    vlan_id: u16,
     protocol: u8,
     live_verdict: u8,
-    vlan_id: u16,
     ct_state: u8,
     tcp_flags: u8,
     icmp_type: u8,
@@ -1480,16 +1649,11 @@ struct ShadowScanCtx {
     dscp: u8,
     src_mac: [u8; 6],
     dst_mac: [u8; 6],
-    iface_groups: u32,
-    tenant_id: u32,
-    now_ns: u64,
-    /// Bit `i` set: rule `i` of the family matched the packet.
-    matched: u64,
-    /// Bit `i` set: rule `i` would have dropped or rejected it.
-    would_deny: u64,
-    /// First counter slot of the family.
-    slot_base: u32,
+    _pad: [u8; 7],
 }
+
+// The sum of the fields, as for the rule scan contexts above.
+const _: () = assert!(core::mem::size_of::<ShadowScanCtx>() == 104);
 
 /// Read every shadow rule of the packet's family against the verdict already
 /// taken. Only a pass and a drop or reject are verdicts a rule could have
@@ -1561,22 +1725,20 @@ fn read_shadow(meta: *mut ShadowMeta) {
             matched: 0,
             would_deny: 0,
             slot_base: if v6 { MAX_SHADOW_RULES } else { 0 },
+            _pad: [0; 7],
         }
-    };
-    let callback = if v6 {
-        scan_shadow_v6 as *mut c_void
-    } else {
-        scan_shadow_v4 as *mut c_void
     };
     // Matching and counting are two passes: in one callback the verifier
     // would walk every counting branch once per matching path.
-    let scan_ptr = &mut scan as *mut ShadowScanCtx as *mut c_void;
-    unsafe {
-        bpf_loop(MAX_SHADOW_RULES, callback, scan_ptr, 0);
-    }
-    if scan.matched == 0 {
+    let any = if v6 {
+        fw_scan_shadow_v6(&mut scan)
+    } else {
+        fw_scan_shadow_v4(&mut scan)
+    };
+    if any == 0 {
         return;
     }
+    let scan_ptr = &mut scan as *mut ShadowScanCtx as *mut c_void;
     unsafe {
         bpf_loop(
             MAX_SHADOW_RULES,
@@ -1627,31 +1789,10 @@ unsafe extern "C" fn scan_shadow_v4(index: u32, ctx: *mut c_void) -> i64 {
         if index >= lctx.count {
             return 1;
         }
-        if let Some(rule) = FW_SHADOW_RULES.get(index) {
-            if !group_matches(rule.group_mask, lctx.iface_groups) {
-                return 0;
-            }
-            if rule.tenant_id != 0 && rule.tenant_id != lctx.tenant_id {
-                return 0;
-            }
-            if match_rule_v4(
-                rule,
-                lctx.src_addr[0],
-                lctx.dst_addr[0],
-                lctx.src_port,
-                lctx.dst_port,
-                lctx.protocol,
-                lctx.vlan_id,
-                lctx.ct_state,
-                lctx.tcp_flags,
-                lctx.icmp_type,
-                lctx.icmp_code,
-                lctx.dscp,
-                &lctx.src_mac,
-                &lctx.dst_mac,
-            ) {
-                mark_shadow(lctx, index, rule.action);
-            }
+        if let Some(rule) = FW_SHADOW_RULES.get(index)
+            && shadow_matches_v4(rule, lctx)
+        {
+            mark_shadow(lctx, index, rule.action);
         }
         0
     }
@@ -1664,31 +1805,10 @@ unsafe extern "C" fn scan_shadow_v6(index: u32, ctx: *mut c_void) -> i64 {
         if index >= lctx.count {
             return 1;
         }
-        if let Some(rule) = FW_SHADOW_RULES_V6.get(index) {
-            if !group_matches(rule.group_mask, lctx.iface_groups) {
-                return 0;
-            }
-            if rule.tenant_id != 0 && rule.tenant_id != lctx.tenant_id {
-                return 0;
-            }
-            if match_rule_v6(
-                rule,
-                &lctx.src_addr,
-                &lctx.dst_addr,
-                lctx.src_port,
-                lctx.dst_port,
-                lctx.protocol,
-                lctx.vlan_id,
-                lctx.ct_state,
-                lctx.tcp_flags,
-                lctx.icmp_type,
-                lctx.icmp_code,
-                lctx.dscp,
-                &lctx.src_mac,
-                &lctx.dst_mac,
-            ) {
-                mark_shadow(lctx, index, rule.action);
-            }
+        if let Some(rule) = FW_SHADOW_RULES_V6.get(index)
+            && shadow_matches_v6(rule, lctx)
+        {
+            mark_shadow(lctx, index, rule.action);
         }
         0
     }
@@ -2210,8 +2330,8 @@ fn lpm_lookup_v6(pkt_ctx: *const PacketCtx) -> i32 {
 /// IPv6 firewall processing: linear scan of FIREWALL_RULES_V6 array.
 ///
 /// `#[inline(never)]` is critical here: it gives this function its own
-/// 512-byte stack frame, preventing `RuleScanCtxV6` (~72 bytes) from
-/// accumulating with `RuleScanCtx` (~48 bytes) in `process_firewall_v4`.
+/// 512-byte stack frame, preventing `RuleScanCtxV6` (80 bytes) from
+/// accumulating with `RuleScanCtx` (56 bytes) in `process_firewall_v4`.
 #[inline(never)]
 fn process_firewall_v6(
     ctx_raw: *mut core::ffi::c_void,
@@ -2396,17 +2516,11 @@ fn process_firewall_v6(
             matched_max_states: 0,
             iface_groups,
             tenant_id,
+            _pad: [0; 2],
         };
         scan_ctx.src_mac = src_mac;
         scan_ctx.dst_mac = dst_mac;
-        unsafe {
-            bpf_loop(
-                MAX_FIREWALL_RULES,
-                scan_rule_v6 as *mut c_void,
-                &mut scan_ctx as *mut RuleScanCtxV6 as *mut c_void,
-                0,
-            );
-        }
+        fw_scan_rules_v6(&mut scan_ctx);
         (
             scan_ctx.matched_action,
             scan_ctx.matched_rule_idx,

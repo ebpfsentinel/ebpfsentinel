@@ -245,14 +245,15 @@ daemonset:
     # `/var/lib/k0s/kubelet` and MicroK8s `/var/snap/microk8s/common/var/lib/kubelet`.
     kubeletRootDir: /var/lib/kubelet
   # -- Resource requests and limits. The request covers the agent's steady use
-  # with the benchmark configuration's features, about 240 MiB; the limit covers
-  # the peak while it loads its programs, about 870 MiB (see Memory in the README).
+  # with the benchmark configuration's features, about 240 MiB; the limit keeps
+  # about 40% over the peak while it loads its programs with every feature on,
+  # about 360 MiB (see Memory in the README).
   resources:
     requests:
       memory: "256Mi"
       cpu: "100m"
     limits:
-      memory: "1Gi"
+      memory: "512Mi"
       cpu: "1000m"
   # -- Node selector
   nodeSelector: {}
