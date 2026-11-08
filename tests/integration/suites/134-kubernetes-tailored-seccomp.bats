@@ -49,7 +49,7 @@ container_seccomp_mode() {
 
 setup_file() {
     for tool in minikube kubectl helm docker; do
-        command -v "$tool" &>/dev/null || env_skip "$tool not installed"
+        command -v "$tool" &>/dev/null || env_skip "${tool} not installed"
     done
 
     export PROJECT_ROOT

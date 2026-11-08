@@ -38,6 +38,7 @@ env:
   - "kernel conntrack table unreadable by either source - event stream not wired"
   - "Agent binary not found:"
   - "the rootful podman.socket is not listening"
+  - "kernel.apparmor_restrict_unprivileged_userns=1 on this host refuses the user namespace before seccomp is consulted"
   - "no user runs a rootless podman.socket"
   - "containerd's CRI socket is not answering"
   - "CRI-O's socket is not answering"

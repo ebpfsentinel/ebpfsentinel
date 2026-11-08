@@ -67,7 +67,10 @@ teardown_file() {
 _on_agent() {
     local snippet="${1:?usage: _on_agent <snippet>}"
     if [ "${EBPF_2VM_MODE:-false}" = "true" ]; then
-        _agent_ssh_sudo "${snippet}" 2>/dev/null | tr -d '\r'
+        # ssh joins its arguments into one line for the remote shell, so the
+        # snippet travels quoted and runs under bash rather than as sudo's
+        # own arguments.
+        _agent_ssh_sudo bash -c "$(printf '%q' "${snippet}")" 2>/dev/null | tr -d '\r'
     else
         bash -c "${snippet}" 2>/dev/null
     fi
