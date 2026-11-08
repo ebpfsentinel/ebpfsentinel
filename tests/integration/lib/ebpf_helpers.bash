@@ -466,7 +466,20 @@ stop_ebpf_agent() {
             # the broker is the init of a pid namespace whose parent is the
             # `unshare` this pid names, and an orphaned init keeps the namespace
             # - and the capabilities - alive for the rest of the run.
+            # SIGTERM alone does not end that posture: `unshare --fork` hands
+            # the signal to its child, and the kernel drops a signal sent from
+            # an ancestor namespace to a namespace init that installed no
+            # handler for it. Both then outlive the suite, the broker's private
+            # mount namespace pins the test netns file so the next suite cannot
+            # create it, and the inherited descriptors keep bats waiting. Give
+            # the session a moment to leave on SIGTERM, then SIGKILL it.
             kill -- "-${wpid}" 2>/dev/null || kill "${wpid}" 2>/dev/null || true
+            local _w
+            for _w in $(seq 1 20); do
+                kill -0 -- "-${wpid}" 2>/dev/null || break
+                sleep 0.1
+            done
+            kill -KILL -- "-${wpid}" 2>/dev/null || true
             rm -f "${AGENT_PID_FILE}.warden"
         fi
     fi

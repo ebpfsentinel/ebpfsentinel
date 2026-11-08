@@ -29,6 +29,14 @@ DEFAULT_TIMEOUT=400
 
 clean_slate() {
     pkill -9 -f ebpfsentinel-agent 2>/dev/null || true
+    # A broker a suite left behind goes with its whole session: in its own
+    # mount namespace it pins the test netns file, and the next suite could
+    # not create the namespace again.
+    local wp wpg
+    for wp in $(pgrep -f 'warden serve /tmp/ebpfsentinel-warden-' 2>/dev/null); do
+        wpg="$(ps -o pgid= -p "${wp}" 2>/dev/null | tr -d ' ')"
+        [ -n "${wpg}" ] && kill -KILL -- "-${wpg}" 2>/dev/null || true
+    done
     sleep 1
     ip netns del ebpf-test-ns 2>/dev/null || true
     ip link del veth-ebpf0 2>/dev/null || true
