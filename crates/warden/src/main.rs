@@ -1,8 +1,12 @@
 //! `warden` - the privileged kernel-operation control plane for a fully rootless
 //! eBPFsentinel agent.
 //!
-//! The agent runs non-root with every capability dropped and the runtime-default
-//! seccomp profile, so it can issue neither `bpf()` nor netlink/`mount` syscalls.
+//! The agent runs non-root with every capability dropped, so it can issue
+//! `bpf()` only through the token it creates in a user namespace of its own, and
+//! no netlink or `mount` operation against the host's namespaces. Its seccomp
+//! profile is either `Unconfined` or the tailored one this binary installs on a
+//! Kubernetes node with `install-seccomp-profile`; the runtime's default profile
+//! would refuse even the user namespace.
 //! It connects to this process over an `AF_UNIX` socket and asks for a narrow set
 //! of typed operations defined by `ebpfsentinel-warden-proto`. The warden holds
 //! the extended privileges (`CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, `CAP_NET_RAW`) and
@@ -23,8 +27,8 @@ use std::process::ExitCode;
 use ebpfsentinel_warden::host_ops::LocalHostOps;
 use ebpfsentinel_warden::server::serve_loop;
 use ebpfsentinel_warden::{
-    collect_module_btf_fds, enable_tcp_syncookies, open_pcap_pool, prepare_state_dir,
-    prioritize_and_cap_btf,
+    AGENT_SECCOMP_PROFILE_FILE, ProfileInstall, collect_module_btf_fds, enable_tcp_syncookies,
+    install_seccomp_profile, open_pcap_pool, prepare_state_dir, prioritize_and_cap_btf,
 };
 use ebpfsentinel_warden_proto::PROTOCOL_VERSION;
 
@@ -41,8 +45,13 @@ const DEFAULT_UID: u32 = 65534;
 /// of the host's instead.
 const HOST_PROC_ENV: &str = "EBPFSENTINEL_HOST_PROC";
 
-const USAGE: &str =
-    "usage: warden serve <socket> [--uid <n>]\n       warden prepare-state <dir> [--uid <n>]";
+const USAGE: &str = "usage: warden serve <socket> [--uid <n>]\n       warden prepare-state <dir> [--uid <n>]\n       warden install-seccomp-profile <dir>";
+
+/// The agent's seccomp profile, compiled in from the one file the compose
+/// deployment and the release read, so the copy a cluster installs cannot
+/// drift from it.
+const AGENT_SECCOMP_PROFILE: &[u8] =
+    include_bytes!("../../../dist/seccomp/ebpfsentinel-agent.json");
 
 /// The procfs host pids are read from: `EBPFSENTINEL_HOST_PROC` when it is set and
 /// not empty, `/proc` otherwise.
@@ -83,9 +92,41 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("install-seccomp-profile") => {
+            let Some(dir) = args.get(2) else {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            };
+            install_profile(Path::new(dir), AGENT_SECCOMP_PROFILE)
+        }
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// Install the agent's seccomp profile into `dir` and say what was done.
+fn install_profile(dir: &Path, profile: &[u8]) -> ExitCode {
+    let target = dir.join(AGENT_SECCOMP_PROFILE_FILE);
+    match install_seccomp_profile(dir, profile) {
+        Ok(ProfileInstall::Written) => {
+            eprintln!("[warden] seccomp profile written to {}", target.display());
+            ExitCode::SUCCESS
+        }
+        Ok(ProfileInstall::Unchanged) => {
+            eprintln!(
+                "[warden] seccomp profile at {} already current",
+                target.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!(
+                "[warden] install seccomp profile into {}: {e}",
+                dir.display()
+            );
+            ExitCode::FAILURE
         }
     }
 }

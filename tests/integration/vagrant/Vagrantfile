@@ -511,6 +511,23 @@ SYSCTL
         minikube version >/dev/null
       fi
 
+      # helm installs the chart itself in the suites that test what it
+      # renders on a node. Same version as the chart job in CI.
+      HELM_VERSION="v4.0.3"
+      if ! command -v helm &>/dev/null; then
+        HELM_TGZ="helm-${HELM_VERSION}-linux-${ARCH}.tar.gz"
+        HELM_TMP="$(mktemp -d)"
+        curl -fsSL --retry 3 --retry-delay 5 --max-time 180 -o "${HELM_TMP}/${HELM_TGZ}" \
+          "https://get.helm.sh/${HELM_TGZ}"
+        curl -fsSL --retry 3 --retry-delay 5 --max-time 60 -o "${HELM_TMP}/${HELM_TGZ}.sha256sum" \
+          "https://get.helm.sh/${HELM_TGZ}.sha256sum"
+        (cd "${HELM_TMP}" && sha256sum -c "${HELM_TGZ}.sha256sum")
+        tar -xzf "${HELM_TMP}/${HELM_TGZ}" -C "${HELM_TMP}" "linux-${ARCH}/helm"
+        install -m 0755 "${HELM_TMP}/linux-${ARCH}/helm" /usr/local/bin/helm
+        rm -rf "${HELM_TMP}"
+        helm version >/dev/null
+      fi
+
       # conntrack is a minikube hard dependency; ensure it is present.
       command -v conntrack &>/dev/null || apt-get install -y --no-install-recommends conntrack
     SHELL

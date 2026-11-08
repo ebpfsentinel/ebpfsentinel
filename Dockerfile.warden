@@ -33,6 +33,9 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml deny.toml ./
 COPY .cargo/ .cargo/
 COPY crates/ crates/
 COPY proto/ proto/
+# The agent's seccomp profile is compiled into the warden, which installs it on
+# a Kubernetes node when the chart asks for it.
+COPY dist/seccomp/ dist/seccomp/
 
 # Build only the `warden` control-plane binary (static, musl).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

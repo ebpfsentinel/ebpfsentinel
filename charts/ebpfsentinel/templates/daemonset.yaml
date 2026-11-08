@@ -86,6 +86,29 @@ spec:
             - name: state
               mountPath: /var/lib/ebpfsentinel
         {{- end }}
+        {{- if .Values.daemonset.tailoredSeccomp.enabled }}
+        # The kubelet reads a Localhost seccomp profile from a file under its
+        # own root, so the profile has to be on the node before the agent
+        # container is created. The warden image carries it compiled in and
+        # writes it there as root, with every capability dropped: the directory
+        # is root's, and nothing else is writable.
+        - name: seccomp-profile
+          image: {{ include "ebpfsentinel.wardenImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["install-seccomp-profile", "/seccomp/ebpfsentinel"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: seccomp-profile
+              mountPath: /seccomp/ebpfsentinel
+        {{- end }}
         - name: warden
           image: {{ include "ebpfsentinel.wardenImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -139,7 +162,7 @@ spec:
           image: {{ include "ebpfsentinel.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
-            {{- toYaml .Values.daemonset.securityContext | nindent 12 }}
+            {{- include "ebpfsentinel.agentSecurityContext" . | nindent 12 }}
           # The agent connects to the warden sidecar over the shared socket, then
           # self-unshares a user namespace and loads its own eBPF. It mounts the
           # delegated bpffs at EBPFSENTINEL_BPFFS (set below to bpffsPath; its
@@ -321,6 +344,12 @@ spec:
           hostPath:
             path: /etc/machine-id
             type: File
+        {{- end }}
+        {{- if .Values.daemonset.tailoredSeccomp.enabled }}
+        - name: seccomp-profile
+          hostPath:
+            path: {{ include "ebpfsentinel.seccompProfileDir" . | quote }}
+            type: DirectoryOrCreate
         {{- end }}
         {{- range $i, $path := .Values.daemonset.warden.fileWatchHostPaths }}
         - name: fim-host-{{ $i }}

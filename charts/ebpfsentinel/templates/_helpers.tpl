@@ -125,13 +125,13 @@ value that produced it.
 {{- if eq (.Values.daemonset.warden.securityContext.appArmorProfile).type "Unconfined" }}
 - daemonset.warden.securityContext.appArmorProfile.type=Unconfined, which {{ $level }} forbids.
 {{- end }}
-{{- if eq (.Values.daemonset.securityContext.seccompProfile).type "Unconfined" }}
+{{- if and (not .Values.daemonset.tailoredSeccomp.enabled) (eq (.Values.daemonset.securityContext.seccompProfile).type "Unconfined") }}
 - daemonset.securityContext.seccompProfile.type=Unconfined, which {{ $level }} forbids. The agent unshares a user namespace and loads eBPF through its token.
 {{- end }}
 {{- if eq (.Values.daemonset.securityContext.appArmorProfile).type "Unconfined" }}
 - daemonset.securityContext.appArmorProfile.type=Unconfined, which {{ $level }} forbids.
 {{- end }}
-- hostPath volumes are mounted (/sys/fs/bpf, /sys/kernel/debug, /sys/fs/cgroup, /proc, the state directory and /etc/machine-id), and {{ $level }} admits no hostPath volume. The programs, the pinned maps and the host procfs are all read through them.
+- hostPath volumes are mounted (/sys/fs/bpf, /sys/kernel/debug, /sys/fs/cgroup, /proc, the state directory{{ if .Values.daemonset.tailoredSeccomp.enabled }}, the kubelet's seccomp directory{{ end }} and /etc/machine-id), and {{ $level }} admits no hostPath volume. The programs, the pinned maps and the host procfs are all read through them.
 {{- if .Values.daemonset.hostNetwork }}
 - the agent declares ports {{ .Values.agent.httpPort }}, {{ .Values.agent.grpcPort }} and {{ .Values.agent.metricsPort }}, and with daemonset.hostNetwork=true those are host ports, which {{ $level }} forbids.
 {{- end }}
@@ -145,3 +145,25 @@ value that produced it.
 {{- end }}
 {{- end -}}
 {{- end }}
+
+{{/*
+The agent container's security context: the values as written, except that the
+tailored seccomp profile replaces whatever seccompProfile they carry when it is
+on. The profile is read by the kubelet from <kubeletRootDir>/seccomp, under the
+name the seccomp-profile init container writes.
+*/}}
+{{- define "ebpfsentinel.agentSecurityContext" -}}
+{{- $context := deepCopy .Values.daemonset.securityContext }}
+{{- if .Values.daemonset.tailoredSeccomp.enabled }}
+{{- $_ := set $context "seccompProfile" (dict "type" "Localhost" "localhostProfile" "ebpfsentinel/ebpfsentinel-agent.json") }}
+{{- end }}
+{{- toYaml $context }}
+{{- end -}}
+
+{{/*
+The node directory the tailored seccomp profile is written to, under the
+kubelet's root.
+*/}}
+{{- define "ebpfsentinel.seccompProfileDir" -}}
+{{- printf "%s/seccomp/ebpfsentinel" (trimSuffix "/" .Values.daemonset.tailoredSeccomp.kubeletRootDir) }}
+{{- end -}}

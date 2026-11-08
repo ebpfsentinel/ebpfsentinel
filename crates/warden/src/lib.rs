@@ -718,3 +718,58 @@ pub fn prepare_state_dir(path: &std::path::Path, uid: u32) -> std::io::Result<()
     }
     std::os::unix::fs::chown(path, Some(uid), Some(uid))
 }
+
+/// File name the agent's seccomp profile is installed under, in the directory
+/// handed to [`install_seccomp_profile`].
+pub const AGENT_SECCOMP_PROFILE_FILE: &str = "ebpfsentinel-agent.json";
+
+/// Whether [`install_seccomp_profile`] wrote the profile or found it in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileInstall {
+    /// The file was missing or held other bytes, and now holds the profile.
+    Written,
+    /// The file already held exactly the profile and was left alone.
+    Unchanged,
+}
+
+/// Put the agent's seccomp profile where the kubelet resolves a `Localhost`
+/// profile from, before the agent container is created.
+///
+/// The kubelet reads a `Localhost` profile from a file under its own root on
+/// the node, and nothing in a pod spec can carry the profile itself, so this
+/// runs once, as root, in an init container whose only writable mount is the
+/// directory `dir`. The profile is written to a temporary file in that same
+/// directory, flushed, made world-readable and renamed over
+/// [`AGENT_SECCOMP_PROFILE_FILE`], so a container created at the same moment
+/// on the node reads either the old file or the new one and never half of
+/// one. A file that already holds the same bytes is not rewritten, which
+/// keeps a rollout across many pods on one node from churning it.
+pub fn install_seccomp_profile(
+    dir: &std::path::Path,
+    profile: &[u8],
+) -> std::io::Result<ProfileInstall> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir)?;
+    let target = dir.join(AGENT_SECCOMP_PROFILE_FILE);
+    if std::fs::read(&target).is_ok_and(|current| current == profile) {
+        return Ok(ProfileInstall::Unchanged);
+    }
+    let staging = dir.join(format!(
+        ".{AGENT_SECCOMP_PROFILE_FILE}.{}",
+        std::process::id()
+    ));
+    let written = (|| {
+        let mut file = std::fs::File::create(&staging)?;
+        file.write_all(profile)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o644))?;
+        file.sync_all()?;
+        std::fs::rename(&staging, &target)
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&staging);
+        return Err(e);
+    }
+    std::fs::File::open(dir)?.sync_all()?;
+    Ok(ProfileInstall::Written)
+}

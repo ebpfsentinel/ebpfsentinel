@@ -225,6 +225,25 @@ daemonset:
       type: Unconfined
     seccompProfile:
       type: Unconfined
+  # Confine the agent with its tailored seccomp profile instead of Unconfined:
+  # Docker's default profile plus an unconditional allow for the userns, mount
+  # and bpf syscalls the agent issues without CAP_SYS_ADMIN, the
+  # same file the compose deployment applies. A `Localhost` profile is read from
+  # a file on the node, so when this is on a `seccomp-profile` init container
+  # (the warden image, which carries the profile compiled in) writes it to
+  # `<kubeletRootDir>/seccomp/ebpfsentinel/ebpfsentinel-agent.json` and the
+  # agent container runs with `seccompProfile.type: Localhost` pointing at it,
+  # whatever `securityContext.seccompProfile` above says. No cluster operator is
+  # involved. Off by default because it writes into the kubelet's directory on
+  # every node the pod lands on.
+  tailoredSeccomp:
+    # -- Install the tailored profile and run the agent container under it.
+    enabled: false
+    # -- The kubelet's root directory on the nodes (its `--root-dir`), under
+    # which it resolves `Localhost` profiles from `seccomp/`. `/var/lib/kubelet`
+    # on kubeadm, kind, minikube, EKS, GKE and AKS; k0s uses
+    # `/var/lib/k0s/kubelet` and MicroK8s `/var/snap/microk8s/common/var/lib/kubelet`.
+    kubeletRootDir: /var/lib/kubelet
   # -- Resource requests and limits
   resources:
     requests:

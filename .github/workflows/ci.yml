@@ -240,6 +240,8 @@ jobs:
           version: v4.0.3
       - run: helm lint charts/ebpfsentinel
       - run: helm template test charts/ebpfsentinel --namespace ebpfsentinel > /dev/null
+      - name: Compare the renders with the committed ones
+        run: ./scripts/check-chart-golden.sh
 
   # ── Build release binary ──────────────────────────────────────────
   build:

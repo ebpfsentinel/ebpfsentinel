@@ -48,11 +48,21 @@ See [OSS vs Enterprise](https://github.com/ebpfsentinel/ebpfsentinel-docs/blob/m
 | Requirement | Reason |
 |-------------|--------|
 | `hostNetwork: true` | XDP/TC programs attach to host interfaces, not pod veth |
-| `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` + `CAP_NET_RAW` on the **warden sidecar** only | eBPF loads **exclusively** through a BPF token - there is no capability-based loading path. The warden broker holds these capabilities for bpffs delegation, conntrack/routes, and the pcap pool/ARP. The `agent` container drops every capability (`cap_drop: ALL`, non-root): it self-unshares a user namespace and loads its own eBPF through the token. Both run Unconfined seccomp/AppArmor (the mount/userns/bpf syscalls). |
+| `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` + `CAP_NET_RAW` on the **warden sidecar** only | eBPF loads **exclusively** through a BPF token - there is no capability-based loading path. The warden broker holds these capabilities for bpffs delegation, conntrack/routes, and the pcap pool/ARP. The `agent` container drops every capability (`cap_drop: ALL`, non-root): it self-unshares a user namespace and loads its own eBPF through the token. Both run Unconfined seccomp/AppArmor by default (the mount/userns/bpf syscalls); `daemonset.tailoredSeccomp.enabled=true` confines the agent with its tailored profile instead (see below). |
 | unprivileged user namespaces enabled on the node | `BPF_TOKEN_CREATE` is `EOPNOTSUPP` outside a user namespace |
 | `/sys/fs/bpf` mount | BPF filesystem for map pinning + delegated token bpffs |
 | `/sys/kernel/debug` mount | eBPF tracing (debugfs) |
 | Kernel 6.12+ with BTF | Agent minimum: BPF token delegation, ARENA maps, kfuncs; CO-RE requires BTF |
+
+### Tailored seccomp profile for the agent
+
+The agent container runs `seccompProfile: Unconfined` by default. It holds no capability, yet it unshares a user namespace, mounts the delegated bpffs and loads eBPF through its token, and the runtime's default profile only allows those syscalls to a container holding `CAP_SYS_ADMIN`. The tailored profile is that default plus an unconditional allow for exactly those syscalls, the same file the compose deployment applies.
+
+```bash
+--set daemonset.tailoredSeccomp.enabled=true
+```
+
+A `Localhost` profile is a file the kubelet reads on the node, so with this on a `seccomp-profile` init container, run from the warden image that carries the profile compiled in, writes it to `<kubeletRootDir>/seccomp/ebpfsentinel/ebpfsentinel-agent.json` before the agent starts, and the agent container runs with `seccompProfile.type: Localhost`. No cluster operator is needed. `daemonset.tailoredSeccomp.kubeletRootDir` defaults to `/var/lib/kubelet`; set it on distributions that move the kubelet's root (k0s, MicroK8s). The warden keeps its Unconfined profile either way.
 
 ### Feature Limitations in Kubernetes
 

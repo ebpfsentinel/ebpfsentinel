@@ -1,0 +1,431 @@
+---
+# Source: ebpfsentinel/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ebpfsentinel
+  namespace: ebpfsentinel
+  labels:
+    helm.sh/chart: ebpfsentinel-0.1.0
+    app.kubernetes.io/name: ebpfsentinel
+    app.kubernetes.io/instance: ebpfsentinel
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+automountServiceAccountToken: false
+
+---
+# Source: ebpfsentinel/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ebpfsentinel-config
+  namespace: ebpfsentinel
+  labels:
+    helm.sh/chart: ebpfsentinel-0.1.0
+    app.kubernetes.io/name: ebpfsentinel
+    app.kubernetes.io/instance: ebpfsentinel
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+data:
+  config.yaml: |
+    agent:
+      interfaces: ["eth0"]
+      bind_address: "0.0.0.0"
+      allow_unauthenticated_api: false
+      allow_plaintext_api: true
+      http_port: 8080
+      grpc_port: 50051
+      metrics_port: 9090
+      log_level: info
+      log_format: json
+      swagger_ui: false
+      grpc_reflection: false
+      xdp_mode: auto
+      event_workers: 4
+      bpf_token:
+        # Must match the EBPFSENTINEL_BPFFS env in the DaemonSet command.
+        bpffs_path: "/sys/fs/bpf/ebpfsentinel"
+    firewall:
+      enabled: true
+    ids:
+      enabled: true
+    ips:
+      enabled: true
+    dlp:
+      enabled: true
+    ratelimit:
+      enabled: true
+    threatintel:
+      enabled: true
+    dns:
+      enabled: true
+    alerting:
+      enabled: false
+    audit:
+      enabled: false
+    auth:
+      enabled: true
+      metrics_auth_required: false
+    conntrack:
+      enabled: false
+    ddos:
+      enabled: false
+    l7:
+      enabled: false
+    nat:
+      enabled: false
+    routing:
+      enabled: false
+    loadbalancer:
+      enabled: false
+    zones:
+      enabled: false
+    qos:
+      enabled: false
+    auto_response:
+      enabled: false
+    auto_capture:
+      enabled: false
+
+---
+# Source: ebpfsentinel/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: ebpfsentinel
+  namespace: ebpfsentinel
+  labels:
+    helm.sh/chart: ebpfsentinel-0.1.0
+    app.kubernetes.io/name: ebpfsentinel
+    app.kubernetes.io/instance: ebpfsentinel
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  clusterIP: None  # headless - each node is its own endpoint
+  selector:
+    app.kubernetes.io/name: ebpfsentinel
+    app.kubernetes.io/instance: ebpfsentinel
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP
+
+---
+# Source: ebpfsentinel/templates/daemonset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ebpfsentinel
+  namespace: ebpfsentinel
+  labels:
+    helm.sh/chart: ebpfsentinel-0.1.0
+    app.kubernetes.io/name: ebpfsentinel
+    app.kubernetes.io/instance: ebpfsentinel
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ebpfsentinel
+      app.kubernetes.io/instance: ebpfsentinel
+  updateStrategy:
+    rollingUpdate:
+      maxUnavailable: 1
+    type: RollingUpdate
+  minReadySeconds: 0
+  revisionHistoryLimit: 10
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ebpfsentinel
+        app.kubernetes.io/instance: ebpfsentinel
+      annotations:
+        checksum/config: 0d0106b675875e5a45f1b72cfc6a3182f7e9c796d4ab1a4a70b0f2ec2c82002b
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      hostNetwork: true
+      hostPID: false
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: ebpfsentinel
+      # Only the Kubernetes enricher talks to the API server, so the token is
+      # mounted only when it is on.
+      automountServiceAccountToken: false
+      securityContext:
+        # The agent drops to uid/gid 65534 before self-mapping its user namespace
+        # (it cannot map namespace-0 to real root under a stock container
+        # runtime), so it runs as host gid 65534. This fsGroup makes the 0640
+        # configMap group-readable by it.
+        fsGroup: 65534
+      # The warden runs as a NATIVE SIDECAR (init container with
+      # restartPolicy: Always, Kubernetes 1.29+): it starts before the agent and
+      # runs for the pod's life, holding the host capabilities and brokering
+      # kernel ops over the shared socket. The agent loads its own eBPF.
+      initContainers:
+        # The kubelet creates a hostPath root-owned and 0755, and fsGroup is never
+        # applied to one, so the agent (uid 65534) could not write its state. The
+        # warden image runs once as root with CHOWN and FOWNER alone, creates the
+        # directory, closes it to 0700 and hands it to the agent's uid.
+        - name: state-dir
+          image: ghcr.io/ebpfsentinel/ebpfsentinel-warden:0.0.0-dev
+          imagePullPolicy: IfNotPresent
+          args: ["prepare-state", "/var/lib/ebpfsentinel", "--uid", "65534"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              add: [CHOWN, FOWNER]
+              drop: [ALL]
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/ebpfsentinel
+        # The kubelet reads a Localhost seccomp profile from a file under its
+        # own root, so the profile has to be on the node before the agent
+        # container is created. The warden image carries it compiled in and
+        # writes it there as root, with every capability dropped: the directory
+        # is root's, and nothing else is writable.
+        - name: seccomp-profile
+          image: ghcr.io/ebpfsentinel/ebpfsentinel-warden:0.0.0-dev
+          imagePullPolicy: IfNotPresent
+          args: ["install-seccomp-profile", "/seccomp/ebpfsentinel"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: seccomp-profile
+              mountPath: /seccomp/ebpfsentinel
+        - name: warden
+          image: ghcr.io/ebpfsentinel/ebpfsentinel-warden:0.0.0-dev
+          imagePullPolicy: IfNotPresent
+          restartPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: true
+            appArmorProfile:
+              type: Unconfined
+            capabilities:
+              add:
+              - SYS_ADMIN
+              - NET_ADMIN
+              - NET_RAW
+              - SYS_PTRACE
+              - BPF
+              - PERFMON
+              - DAC_READ_SEARCH
+              drop:
+              - ALL
+            runAsUser: 0
+            seccompProfile:
+              type: Unconfined
+          args:
+            - "serve"
+            - "/run/ebpfsentinel/warden.sock"
+            - "--uid"
+            - "65534" # only the agent's uid is served (SO_PEERCRED gate)
+          env:
+            # The DLP scan walks this procfs rather than its own /proc, which
+            # is what lets the pod run without the host pid namespace: the
+            # mount below carries every node process the agent asks about.
+            - name: EBPFSENTINEL_HOST_PROC
+              value: /host/proc
+          resources:
+            limits:
+              cpu: 1000m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - name: warden-sock
+              mountPath: /run/ebpfsentinel
+            - name: host-proc
+              # Read-only host /proc so the warden resolves the same
+              # /host/proc/<pid>/root/<lib> path the agent sends and creates the
+              # uprobe link against a neighbouring container's libssl.
+              mountPath: /host/proc
+              readOnly: true
+            - name: host-cgroup
+              # The warden opens the cgroup the agent names and links a
+              # program to it. Its own /sys/fs/cgroup is the container's
+              # namespaced subtree, so without the node's every cgroup hook
+              # would cover the warden alone and no workload on the node.
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+      containers:
+        - name: agent
+          image: ghcr.io/ebpfsentinel/ebpfsentinel:0.0.0-dev
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: true
+            appArmorProfile:
+              type: Unconfined
+            capabilities:
+              drop:
+              - ALL
+            runAsGroup: 65534
+            runAsUser: 65534
+            seccompProfile:
+              localhostProfile: ebpfsentinel/ebpfsentinel-agent.json
+              type: Localhost
+          # The agent connects to the warden sidecar over the shared socket, then
+          # self-unshares a user namespace and loads its own eBPF. It mounts the
+          # delegated bpffs at EBPFSENTINEL_BPFFS (set below to bpffsPath; its
+          # bpf_token.bpffs_path config must match).
+          args:
+            - "--config"
+            - "/etc/ebpfsentinel/config.yaml"
+          env:
+            - name: EBPFSENTINEL_WARDEN_SOCK
+              value: /run/ebpfsentinel/warden.sock
+            - name: EBPFSENTINEL_BPFFS
+              value: "/sys/fs/bpf/ebpfsentinel"
+            # Host proc root for cross-container DLP discovery: the agent resolves
+            # neighbouring containers' libssl through this mounted host /proc.
+            - name: EBPFSENTINEL_HOST_PROC
+              value: /host/proc
+            # Scopes the Kubernetes enricher's pod watcher to this node and
+            # names the node on exported alerts.
+            - name: EBPFSENTINEL_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+            - containerPort: 50051
+              name: grpc
+              protocol: TCP
+            - containerPort: 9090
+              name: metrics
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          lifecycle:
+            # Kubernetes sends SIGTERM and removes the endpoint at the same
+            # time, so without this the agent drains while kube-proxy is still
+            # routing to it. The hook holds the container for long enough for
+            # every node's rules to drop this endpoint, and only then does the
+            # ordered stop start. It is counted inside
+            # terminationGracePeriodSeconds, so the hook plus the agent's own
+            # 20s stop budget is what that number has to cover.
+            preStop:
+              sleep:
+                seconds: 5
+          resources:
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: warden-sock
+              mountPath: /run/ebpfsentinel
+              readOnly: true
+            - name: config
+              mountPath: /etc/ebpfsentinel
+              readOnly: true
+            - name: bpf
+              mountPath: /sys/fs/bpf
+              # The agent mounts the delegated bpffs over this path inside its
+              # own private mount namespace; expose the host bpffs to the pod.
+              # (Omitted for an in-pod tmpfs, where there is no host bpffs.)
+              mountPropagation: HostToContainer
+            - name: debug
+              mountPath: /sys/kernel/debug
+              readOnly: true
+            - name: host-cgroup
+              # Read-only host cgroupfs so the container resolver can map a
+              # packet's cgroup id (from bpf_skb_cgroup_id on the TC egress
+              # hook) to a container. The pod's own /sys/fs/cgroup is a
+              # namespaced subtree that lacks the host cgroup inodes.
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: host-proc
+              # Read-only host /proc (EBPFSENTINEL_HOST_PROC) so the agent
+              # resolves every node process's libssl for cross-container TLS DLP.
+              mountPath: /host/proc
+              readOnly: true
+            - name: state
+              # Stores, captures, GeoIP databases, the telemetry installation
+              # identifier and, unless a Secret is named below, the API key the
+              # agent drew for itself. The agent creates what it needs under it.
+              mountPath: /var/lib/ebpfsentinel
+            - name: machine-id
+              # Read for the telemetry installation identifier, which is a keyed
+              # hash of it, so the node keeps one name whatever happens to state.
+              mountPath: /etc/machine-id
+              readOnly: true
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: warden-sock
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: ebpfsentinel-config
+            # The agent rejects a world-readable config; configMap volumes
+            # default to 0644, so pin a stricter mode.
+            defaultMode: 0640
+        - name: bpf
+          # A container's /sys is read-only, so the agent needs this writable
+          # host bpffs to create the delegated mountpoint. On nested runtimes
+          # (kind, minikube) whose /sys/fs/bpf is read-only or absent, set
+          # daemonset.bpfToken.bpffsEmptyDir=true to use an in-pod tmpfs instead.
+          hostPath:
+            path: /sys/fs/bpf
+        - name: debug
+          hostPath:
+            path: /sys/kernel/debug
+        - name: host-cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+        - name: host-proc
+          hostPath:
+            path: /proc
+        - name: state
+          # Survives the pod being replaced, so the stores and the installation
+          # identifier carry over a rollout. One directory per release unless
+          # the values name one; the state-dir init container owns it to 65534.
+          hostPath:
+            path: "/var/lib/ebpfsentinel/k8s/ebpfsentinel/ebpfsentinel"
+            type: DirectoryOrCreate
+        - name: machine-id
+          hostPath:
+            path: /etc/machine-id
+            type: File
+        - name: seccomp-profile
+          hostPath:
+            path: "/var/lib/kubelet/seccomp/ebpfsentinel"
+            type: DirectoryOrCreate
+      tolerations:
+        - operator: Exists

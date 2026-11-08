@@ -230,6 +230,9 @@ suite_profiles:
   # 133 hands every object of the build to the loader twice, privileged and
   # through a token; it needs cargo or a prebuilt xtask, which the VM lane has.
   "133": nightly
+  # 134 installs the chart with the tailored seccomp profile on a minikube
+  # node; it needs minikube, helm and docker, which the VM lane provisions.
+  "134": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly

@@ -131,7 +131,15 @@
         "extraVolumes": { "type": "array" },
         "extraContainers": { "type": "array" },
         "initContainers": { "type": "array" },
-        "securityContext": { "type": "object" }
+        "securityContext": { "type": "object" },
+        "tailoredSeccomp": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "kubeletRootDir": { "type": "string", "pattern": "^/" }
+          }
+        }
       }
     },
     "podDisruptionBudget": {
