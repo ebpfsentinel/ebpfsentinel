@@ -12,7 +12,6 @@ metadata:
     app.kubernetes.io/version: "0.0.0-dev"
     app.kubernetes.io/managed-by: Helm
 automountServiceAccountToken: false
-
 ---
 # Source: ebpfsentinel/templates/configmap.yaml
 apiVersion: v1
@@ -86,7 +85,6 @@ data:
       enabled: false
     auto_capture:
       enabled: false
-
 ---
 # Source: ebpfsentinel/templates/service.yaml
 apiVersion: v1
@@ -119,7 +117,6 @@ spec:
       port: 9090
       targetPort: metrics
       protocol: TCP
-
 ---
 # Source: ebpfsentinel/templates/daemonset.yaml
 apiVersion: apps/v1

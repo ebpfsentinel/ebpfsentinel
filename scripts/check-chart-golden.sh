@@ -23,8 +23,15 @@ TAILORED=(--set daemonset.tailoredSeccomp.enabled=true)
 command -v helm >/dev/null || { echo "missing helm" >&2; exit 2; }
 cd "$(dirname "$0")/.."
 
+# Helm releases disagree on whether a blank line precedes each `---`
+# separator, so those blank lines are dropped and only those: a blank line
+# anywhere else may sit inside a block scalar.
 render() {
-  helm template "$RELEASE" "$CHART" --namespace "$NAMESPACE" "$@"
+  helm template "$RELEASE" "$CHART" --namespace "$NAMESPACE" "$@" |
+    awk '/^$/ { blank++; next }
+         /^---$/ { blank = 0 }
+         { while (blank > 0) { print ""; blank-- } print }
+         END { while (blank > 0) { print ""; blank-- } }'
 }
 
 if [ "${1:-}" = "--update" ]; then

@@ -237,7 +237,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
         with:
-          version: v4.0.3
+          version: v4.3.1
       - run: helm lint charts/ebpfsentinel
       - run: helm template test charts/ebpfsentinel --namespace ebpfsentinel > /dev/null
       - name: Compare the renders with the committed ones
