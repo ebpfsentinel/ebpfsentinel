@@ -144,6 +144,12 @@ jobs:
         run: |
           mkdir -p fuzz/corpus/fuzz_rpm_database
           cargo +nightly fuzz run fuzz_rpm_database fuzz/corpus/fuzz_rpm_database fuzz/seeds/fuzz_rpm_database -- -max_len=262144 -max_total_time=30
+      - name: Fuzz cgroup, LSM and tracepoint ring records
+        run: cargo +nightly fuzz run fuzz_ebpf_ring_records -- -max_len=512 -max_total_time=30
+      - name: Fuzz tracepoint and cgroup map entries
+        run: cargo +nightly fuzz run fuzz_ebpf_map_entries -- -max_len=4096 -max_total_time=30
+      - name: Fuzz cluster address plan
+        run: cargo +nightly fuzz run fuzz_clusterip_plan -- -max_len=2048 -max_total_time=30
 
   # ── SBOM generation ──────────────────────────────────────────────
   sbom:

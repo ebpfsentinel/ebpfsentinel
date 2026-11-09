@@ -619,7 +619,7 @@ fn drain(
 /// Turn a kernel record into the domain record, converting the device back
 /// into the encoding `stat(2)` and the rest of the alerts use.
 #[must_use]
-fn parse(raw: &WriteRefusalEvent, directory: Option<String>) -> Option<WriteRefusalRecord> {
+pub fn parse(raw: &WriteRefusalEvent, directory: Option<String>) -> Option<WriteRefusalRecord> {
     let hook = WriteRefusalHook::from_kernel(raw.hook)?;
     let regime = WriteRefusalRegime::from_kernel(raw.regime)?;
     let len = raw

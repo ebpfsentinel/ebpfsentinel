@@ -114,7 +114,7 @@ fn drain(
 /// Turn a kernel record into the domain event, or nothing when the record
 /// carries a kind this build does not know.
 #[must_use]
-fn parse(raw: &ProcessEvent) -> Option<ProcessLifecycleEvent> {
+pub fn parse(raw: &ProcessEvent) -> Option<ProcessLifecycleEvent> {
     let kind = match raw.kind {
         PROCESS_EVENT_EXEC => ProcessEventKind::Exec,
         PROCESS_EVENT_FORK => ProcessEventKind::Fork,

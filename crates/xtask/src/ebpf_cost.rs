@@ -20,6 +20,11 @@
 //! an empty control block, so each parses the packet itself; in the real chain
 //! only the first one does, and the rest read the parse back.
 //!
+//! Of the hooks that carry no packet, none gets a row: the kernel offers no
+//! test run for LSM programs, socket hooks or probes, and runs a raw
+//! tracepoint once with no time. Their cost is read off the live kernel's own
+//! clock instead, `kernel.bpf_stats_enabled`, by the perf suites.
+//!
 //! The IDS classifier is measured a second time, on a packet its pattern table
 //! claims, to price what a rule scoped to a workload adds over a rule that is
 //! not: the link table lookup and the scope table lookup, on a hit, on a miss
@@ -132,15 +137,16 @@ pub fn run() -> Result<()> {
         for program in &programs {
             let kind = match prog_kind(program.prog_type) {
                 Some(k) => k,
-                // `BPF_PROG_TEST_RUN` takes a packet, so it reaches the two
-                // hooks that carry one and nothing else. Say so rather than
+                // `BPF_PROG_TEST_RUN` times a program only where it takes a
+                // packet, so it reaches the hooks that carry one and nothing
+                // else. Say so rather than
                 // passing over the program in silence: a report listing
                 // fifteen of sixteen with no word about the sixteenth reads
                 // as a measurement, and the absence is the interesting part.
                 None => {
                     skipped.push((
                         object,
-                        format!("{}: no test run for this program type", program.name),
+                        format!("{}: {}", program.name, no_test_run(program.prog_type)),
                     ));
                     continue;
                 }
@@ -356,12 +362,41 @@ fn test_run(fd: BorrowedFd<'_>, packet: &[u8], repeat: u32) -> Result<(u64, u32)
     Ok((u64::from(test.duration), test.retval))
 }
 
-/// The two hooks this harness can hand a packet to.
+/// The hooks this harness can hand a packet to and get a time back from.
+///
+/// A cgroup socket buffer program takes the same frame: the kernel strips the
+/// Ethernet header before the run, which is where the cgroup hook sees a
+/// packet start.
 fn prog_kind(prog_type: u32) -> Option<&'static str> {
     match prog_type {
         t if t == bpf_prog_type::BPF_PROG_TYPE_XDP as u32 => Some("XDP"),
         t if t == bpf_prog_type::BPF_PROG_TYPE_SCHED_CLS as u32 => Some("TC"),
+        t if t == bpf_prog_type::BPF_PROG_TYPE_CGROUP_SKB as u32 => Some("cg_skb"),
         _ => None,
+    }
+}
+
+/// Why a program of this type gets no row, in the kernel's terms.
+fn no_test_run(prog_type: u32) -> &'static str {
+    match prog_type {
+        t if t == bpf_prog_type::BPF_PROG_TYPE_RAW_TRACEPOINT as u32
+            || t == bpf_prog_type::BPF_PROG_TYPE_SYSCALL as u32 =>
+        {
+            "the kernel runs this type once and refuses a repeat count, so it reports no time"
+        }
+        t if t == bpf_prog_type::BPF_PROG_TYPE_LSM as u32 => {
+            "the kernel offers no test run for LSM programs"
+        }
+        t if t == bpf_prog_type::BPF_PROG_TYPE_CGROUP_SOCK_ADDR as u32
+            || t == bpf_prog_type::BPF_PROG_TYPE_CGROUP_SOCK as u32
+            || t == bpf_prog_type::BPF_PROG_TYPE_SOCK_OPS as u32 =>
+        {
+            "the kernel offers no test run for socket hooks"
+        }
+        t if t == bpf_prog_type::BPF_PROG_TYPE_KPROBE as u32 => {
+            "the kernel offers no test run for probes"
+        }
+        _ => "no test run for this program type",
     }
 }
 

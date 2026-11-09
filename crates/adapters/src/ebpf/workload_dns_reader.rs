@@ -120,7 +120,7 @@ fn drain(
 
 /// Turn a kernel record into a capture, oriented from the workload's side.
 #[must_use]
-fn parse(raw: &WorkloadDnsEvent) -> Option<DnsCapture> {
+pub fn parse(raw: &WorkloadDnsEvent) -> Option<DnsCapture> {
     let (direction, client_port, resolver) = match raw.direction {
         WORKLOAD_DNS_QUERY => (DnsDirection::Query, raw.src_port, raw.dst_addr),
         WORKLOAD_DNS_RESPONSE => (DnsDirection::Response, raw.dst_port, raw.src_addr),

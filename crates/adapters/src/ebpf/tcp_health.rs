@@ -148,7 +148,12 @@ fn key_address(family: u8, words: &[u32; 4]) -> IpAddr {
 
 /// One kernel key, its counts summed over the CPUs and its round-trip time
 /// samples, in domain words.
-fn raw_edge(key: &TcpEdgeKey, per_cpu: &[TcpEdgeCounts], rtt: Option<&TcpEdgeRtt>) -> RawTcpEdge {
+#[must_use]
+pub fn raw_edge(
+    key: &TcpEdgeKey,
+    per_cpu: &[TcpEdgeCounts],
+    rtt: Option<&TcpEdgeRtt>,
+) -> RawTcpEdge {
     let mut counts = TcpCounts::default();
     for c in per_cpu {
         counts.add(&TcpCounts {

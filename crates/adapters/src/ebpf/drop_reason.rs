@@ -351,7 +351,8 @@ impl DropReasonCounter {
 }
 
 /// The device name a key carries, up to its first NUL.
-fn key_name(name: &[u8]) -> String {
+#[must_use]
+pub fn key_name(name: &[u8]) -> String {
     let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
     String::from_utf8_lossy(&name[..end]).into_owned()
 }

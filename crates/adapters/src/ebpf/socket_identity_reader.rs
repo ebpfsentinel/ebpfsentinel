@@ -252,7 +252,8 @@ fn address_of(family: u8, words: &[u32; 4]) -> Option<IpAddr> {
 
 /// The domain's reading of one table entry, or `None` for an entry that names
 /// no process or carries a protocol that is not a listener.
-fn bound_socket(listener: &ListeningSocket) -> Option<BoundSocket> {
+#[must_use]
+pub fn bound_socket(listener: &ListeningSocket) -> Option<BoundSocket> {
     let identity = listener.identity;
     if identity.tgid == 0 {
         return None;

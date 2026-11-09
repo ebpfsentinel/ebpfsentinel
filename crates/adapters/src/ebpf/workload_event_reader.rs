@@ -123,7 +123,7 @@ fn drain(
 /// Turn a kernel record into the domain record, or nothing when it names a
 /// hook this build does not know.
 #[must_use]
-fn parse(raw: &WorkloadDenialEvent) -> Option<WorkloadDenialRecord> {
+pub fn parse(raw: &WorkloadDenialEvent) -> Option<WorkloadDenialRecord> {
     let hook = WorkloadHook::from_kernel(raw.hook)?;
     Some(WorkloadDenialRecord {
         slot: raw.rule,

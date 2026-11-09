@@ -102,7 +102,41 @@ How to read it:
   so `tc_conntrack`, `tc_dns`, `tc_scrub` and `tc_threatintel` return early:
   `tc_conntrack` is 6 ns here and 292 ns on live traffic. Use the per-packet
   figures above for sizing.
-- `uprobe-dlp` is not measured: `BPF_PROG_TEST_RUN` only takes packets.
+- The programs that carry no packet have no row here; the next section
+  covers them.
+
+## Programs that carry no packet
+
+`BPF_PROG_TEST_RUN` times a program only where it hands it a packet. The kernel
+offers no test run for LSM programs, socket hooks (`cgroup_sock_addr`,
+`cgroup_sock`, `sock_ops`) or probes, and runs a raw tracepoint once with no
+time. These programs are timed on a live kernel instead, with
+`kernel.bpf_stats_enabled=1` and `bpftool prog show` read before and after a
+known number of events: run time divided by run count, entry to exit, so an
+upper bound that includes any preemption.
+
+| program | hook | measured | per run | per event | source |
+|---|---|---|---:|---:|---|
+| `cgroup-attribution` (7 hooks) | `cgroup_sock_addr`, `cgroup_sock`, `sock_ops` | 2026-10-19 | 195 ns | 1364 ns per loopback `connect()` | `results/2026-10-19-attribution-overhead.json` |
+| `tracepoint-process` | raw tracepoint | 2026-10-19 | 10713 ns | 21444 ns per `execve()` | `results/2026-10-19-attribution-overhead.json` |
+| `tracepoint-drop-reason` | raw tracepoint | 2026-10-30 | 50-53 ns | same, per dropped packet | `results/2026-10-30-kernel-drops-overhead.json` |
+
+The first two were measured on a 4-vCPU Vagrant guest, kernel
+7.0.0-28-generic, the third on a developer workstation, kernel
+7.0.0-42-generic, i7-1370P; `results/README.md` has the method and every run.
+
+Not measured yet, and why:
+
+| program | hook | why there is no figure |
+|---|---|---|
+| `cgroup-attribution` `cgroup_skb` egress, `cgroup-workload-firewall` `cgroup_skb` ingress and egress | `cgroup_skb` | `cargo xtask ebpf-cost` now runs them, but it needs root and loads eBPF, so it has not been run since; the next run fills the table above |
+| `cgroup-workload-firewall` socket hooks | `cgroup_sock_addr` | no test run; no perf suite drives it with a rule set loaded |
+| `cgroup-clusterip` | `cgroup_sock_addr` | no test run; needs a Kubernetes view with opted-in workloads, which no perf lane provides |
+| `cgroup-connect-redirect` | `cgroup_sock_addr`, `sock_ops` | no test run; no perf suite configures a redirect listener |
+| `lsm-exec-network`, `lsm-bpf-guard`, `lsm-write-refusal` | BPF LSM | no test run; the agent guest boots with `bpf` in `lsm=`, so they attach there, but no perf suite times them under `bpf_stats` yet |
+| `tracepoint-tcp-health` | raw tracepoint | no timed test run; no perf suite counts its events under `bpf_stats` yet |
+| `tracepoint-signal` | raw tracepoint on `sys_enter` | no timed test run; it runs on every syscall of the host, so its figure is a per-syscall cost no suite measures yet |
+| `uprobe-crypto`, `uprobe-dlp` | uprobe | no test run for probes; `06-ebpf-feature-overhead-nat-dlp.bats` measures the DLP probe as goodput lost on a local openssl transfer, not per run |
 
 ## Memory
 

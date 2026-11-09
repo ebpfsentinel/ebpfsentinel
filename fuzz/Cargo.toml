@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+adapters = { path = "../crates/adapters", default-features = false }
 application = { path = "../crates/application" }
 domain = { path = "../crates/domain", package = "ebpfsentinel-domain" }
 ebpf-common = { path = "../crates/ebpf-common" }
@@ -162,4 +163,19 @@ doc = false
 [[bin]]
 name = "fuzz_rpm_database"
 path = "fuzz_targets/fuzz_rpm_database.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ebpf_ring_records"
+path = "fuzz_targets/fuzz_ebpf_ring_records.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ebpf_map_entries"
+path = "fuzz_targets/fuzz_ebpf_map_entries.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_clusterip_plan"
+path = "fuzz_targets/fuzz_clusterip_plan.rs"
 doc = false

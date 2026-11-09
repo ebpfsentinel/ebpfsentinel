@@ -379,7 +379,7 @@ fn drain(
 /// Turn a kernel record into the domain record, converting the device back
 /// into the encoding `stat(2)` and the rest of the alerts use.
 #[must_use]
-fn parse(raw: &ExecNetEvent) -> Option<ExecNetworkRecord> {
+pub fn parse(raw: &ExecNetEvent) -> Option<ExecNetworkRecord> {
     let hook = ExecNetworkHook::from_kernel(raw.hook)?;
     let executable = (raw.ino != 0 || raw.dev != 0)
         .then(|| (libc::makedev(raw.dev >> 20, raw.dev & 0x000f_ffff), raw.ino));
