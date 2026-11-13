@@ -175,13 +175,44 @@ if perf_dir.exists():
             known_perf_suites.add(f"perf/{m.group(1)}")
 known_suites |= known_perf_suites
 
+# A surface whose only caller lives in a sibling repository is asserted
+# there: `elsewhere` names `<sibling>/<id>` and resolves under that
+# sibling's suites directory when it is checked out beside this tree.
+sibling_suite_dirs = {
+    "ebpfsentinel-enterprise": Path("tests/integration/suites"),
+    "ebpfsentinel-operator/coexistence": Path("tests/coexistence/suites"),
+}
+sibling_root = repo_root.parent
+
+def resolve_elsewhere(ref: str) -> str | None:
+    """None when the reference resolves or its sibling is absent, else why not."""
+    m = re.match(r"^(.+)/(\d{2,})$", ref)
+    if not m or m.group(1) not in sibling_suite_dirs:
+        return f"`{ref}` is not <sibling>/<id> with a known sibling"
+    repo = m.group(1).split("/")[0]
+    if not (sibling_root / repo).is_dir():
+        unverified_elsewhere.append(ref)
+        return None
+    d = sibling_root / repo / sibling_suite_dirs[m.group(1)]
+    if d.is_dir() and any(p.name.startswith(m.group(2) + "-") and p.suffix == ".bats" for p in d.iterdir()):
+        return None
+    return f"`{ref}` names no suite under {repo}/{sibling_suite_dirs[m.group(1)]}"
+
 stale_suite_refs: list[str] = []
 tbd_rows: list[str] = []
 bad_owners: list[str] = []
+unverified_elsewhere: list[str] = []
 for row in rows:
     feat = row.get("feature")
     kind = row.get("kind")
     suites = row.get("suites") or []
+    elsewhere = row.get("elsewhere") or []
+    for ref in elsewhere:
+        why = resolve_elsewhere(ref)
+        if why:
+            stale_suite_refs.append(f"  - {kind}/{feat} elsewhere: {why}")
+    if not suites and not elsewhere:
+        stale_suite_refs.append(f"  - {kind}/{feat} lists neither suites nor elsewhere")
     if suites == ["TBD"]:
         owner = row.get("owner")
         if owner not in owners:
@@ -306,6 +337,10 @@ if extra_profile_for_suite:
     print("\n".join(f"  - {s}" for s in extra_profile_for_suite))
     failed = True
 
+if unverified_elsewhere:
+    banner("Suites in a sibling not checked out here (not verified)")
+    print("\n".join(f"  - {r}" for r in sorted(set(unverified_elsewhere))))
+
 if tbd_rows:
     banner(f"No suite yet ({len(tbd_rows)} rows and routes, each with its owner)")
     print("\n".join(tbd_rows))
@@ -325,7 +360,7 @@ def render_table(kind: str, header: str, disk: list[str]) -> str:
         if suites == ["TBD"]:
             suites_s = f"No suite yet ({row.get('owner', '?')})"
         else:
-            suites_s = ", ".join(suites) if suites else "-"
+            suites_s = ", ".join(suites + (row.get("elsewhere") or [])) or "-"
         out.append(
             f"| `{feat}` "
             f"| {suites_s} "

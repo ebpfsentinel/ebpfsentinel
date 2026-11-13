@@ -131,7 +131,7 @@ _assert_attributed() {
 }
 
 @test "a container containerd starts through the CRI is attributed to its id and runtime" {
-    _endpoint_up "${CONTAINERD_SOCK}" || env_skip "containerd's CRI socket is not answering"
+    _endpoint_up "${CONTAINERD_SOCK}" || soft_skip "containerd's CRI socket is not answering"
     local id
     id="$(_run_probe "${CONTAINERD_SOCK}" containerd)"
     [ -n "${id}" ]
@@ -139,7 +139,7 @@ _assert_attributed() {
 }
 
 @test "a container CRI-O starts is attributed to its id and runtime" {
-    _endpoint_up "${CRIO_SOCK}" || env_skip "CRI-O's socket is not answering"
+    _endpoint_up "${CRIO_SOCK}" || soft_skip "CRI-O's socket is not answering"
     local id
     id="$(_run_probe "${CRIO_SOCK}" crio)"
     [ -n "${id}" ]

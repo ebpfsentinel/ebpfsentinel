@@ -9,6 +9,10 @@
 #                          domain_module | capability
 #   coverage[].feature     identifier (must match enumerable name on disk)
 #   coverage[].suites      list of bats suite ids ("11", "32") or ["TBD"]
+#   coverage[].elsewhere   suites of a sibling repository, as
+#                          `ebpfsentinel-enterprise/27` or
+#                          `ebpfsentinel-operator/coexistence/03`; with
+#                          `suites: []` when the sibling is the only caller
 #   coverage[].owner       required with ["TBD"]: a key of `owners` below
 #   coverage[].topology    none | 2vm | 3vm | docker | k8s
 #   coverage[].kernel_min  string ("6.12" minimum, "n/a" when no eBPF)
@@ -392,8 +396,8 @@ coverage:
 
   - kind: ebpf_program
     feature: cgroup-connect-redirect
-    suites: ["TBD"]
-    owner: kernel-network
+    suites: []
+    elsewhere: ["ebpfsentinel-enterprise/27"]
     topology: none
     kernel_min: "6.12"
     profile: manual
@@ -401,8 +405,8 @@ coverage:
 
   - kind: ebpf_program
     feature: cgroup-clusterip
-    suites: ["TBD"]
-    owner: kernel-network
+    suites: []
+    elsewhere: ["ebpfsentinel-operator/coexistence/03"]
     topology: none
     kernel_min: "6.12"
     profile: manual
@@ -1094,8 +1098,8 @@ coverage:
 
   - kind: domain_module
     feature: netpol
-    suites: ["TBD"]
-    owner: kernel-network
+    suites: []
+    elsewhere: ["ebpfsentinel-operator/coexistence/04"]
     topology: k8s
     kernel_min: "6.12"
     profile: manual
@@ -1119,8 +1123,8 @@ coverage:
 
   - kind: domain_module
     feature: clusterip
-    suites: ["TBD"]
-    owner: kernel-network
+    suites: []
+    elsewhere: ["ebpfsentinel-operator/coexistence/03"]
     topology: none
     kernel_min: "6.12"
     profile: manual
@@ -1285,8 +1289,8 @@ coverage:
 
   - kind: capability
     feature: quarantine
-    suites: ["TBD"]
-    owner: workload-identity
+    suites: []
+    elsewhere: ["ebpfsentinel-enterprise/26"]
     topology: none
     kernel_min: "6.12"
     profile: manual

@@ -7,7 +7,9 @@
 //!
 //! This needs the built objects, the privilege to load them and a kernel that
 //! declares `bpf_send_signal_task`, and says so and returns without any of
-//! them.
+//! them. It never returns quietly where it should have run: objects missing
+//! from a directory named by `EBPFSENTINEL_EBPF_DIR`, or a kernel whose BTF
+//! declares the kfunc refusing the program to root, fail the test.
 
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
@@ -49,27 +51,59 @@ fn wait_for_exit(child: &mut Child, within: Duration) -> Option<std::process::Ex
     None
 }
 
+/// Whether the running kernel's BTF names the kfunc the immediate path calls.
+fn kernel_declares_kfunc() -> bool {
+    std::fs::read("/sys/kernel/btf/vmlinux").is_ok_and(|btf| {
+        btf.windows(b"bpf_send_signal_task\0".len())
+            .any(|w| w == b"bpf_send_signal_task\0")
+    })
+}
+
+/// Whether this process runs as root, so a refused load is the program's
+/// fault rather than the caller's.
+fn is_root() -> bool {
+    std::fs::read_to_string("/proc/self/status").is_ok_and(|status| {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix("Uid:"))
+            .and_then(|uids| uids.split_whitespace().nth(1))
+            == Some("0")
+    })
+}
+
 /// The manager, or `None` with the reason printed when this host cannot say.
 fn manager() -> Option<(EbpfLoader, SignalMapManager)> {
     let path = objects_dir().join("tracepoint-signal");
     let Ok(bytes) = std::fs::read(&path) else {
+        assert!(
+            std::env::var_os("EBPFSENTINEL_EBPF_DIR").is_none(),
+            "EBPFSENTINEL_EBPF_DIR names a directory without {}",
+            path.display()
+        );
         eprintln!("skipped: no eBPF objects at {}", path.display());
         return None;
     };
+    let must_run = kernel_declares_kfunc() && is_root();
     EbpfLoader::cleanup_pin_path(PIN_PATH);
     let mut loader = match EbpfLoader::load_with_pin_path(&bytes, PIN_PATH) {
         Ok(loader) => loader,
         Err(e) => {
+            assert!(
+                !must_run,
+                "the kernel declares the kfunc and root cannot load the objects: {e}"
+            );
             eprintln!("skipped: cannot load eBPF objects here: {e}");
             return None;
         }
     };
     let maps = SignalMapManager::new(loader.ebpf_mut()).expect("signal maps");
     if !maps.immediate().loaded {
-        eprintln!(
-            "skipped: no immediate signal on this kernel: {}",
-            maps.immediate().reason.as_deref().unwrap_or_default()
+        let reason = maps.immediate().reason.as_deref().unwrap_or_default();
+        assert!(
+            !must_run,
+            "the kernel declares bpf_send_signal_task and the immediate path did not load: {reason}"
         );
+        eprintln!("skipped: no immediate signal on this kernel: {reason}");
         return None;
     }
     Some((loader, maps))

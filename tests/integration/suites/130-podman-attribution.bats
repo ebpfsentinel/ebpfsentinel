@@ -109,7 +109,7 @@ _runtime_reach() {
 }
 
 @test "a rootful Podman container is named by id, name and image" {
-    [ -S /run/podman/podman.sock ] || env_skip "the rootful podman.socket is not listening"
+    [ -S /run/podman/podman.sock ] || soft_skip "the rootful podman.socket is not listening"
     local name="probe-rootful-$$" id
     id="$(podman run -d --name "${name}" --network host "${PROBE_IMAGE}" sh -c "$(_probe_script)")"
     podman wait "${name}" >/dev/null
@@ -129,7 +129,7 @@ _runtime_reach() {
 }
 
 @test "a rootless Podman container is named through its user's own socket" {
-    [ -n "${ROOTLESS_USER}" ] || env_skip "no user runs a rootless podman.socket"
+    [ -n "${ROOTLESS_USER}" ] || soft_skip "no user runs a rootless podman.socket"
     local uid name="probe-rootless-$$" id
     uid="$(id -u "${ROOTLESS_USER}")"
     id="$(_rootless podman run -d --name "${name}" --network host "${PROBE_IMAGE}" sh -c "$(_probe_script)")"

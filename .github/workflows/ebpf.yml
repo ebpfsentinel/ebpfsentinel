@@ -115,8 +115,9 @@ jobs:
 
       # A process spinning in pure computation never enters the kernel, so
       # only the program that names its target can reach it. The runner's
-      # kernel decides whether it can: below the kfunc, the test says so and
-      # returns.
+      # kernel decides whether it can: on a kernel whose BTF lacks the kfunc
+      # the test says so and returns; on one that declares it, a program
+      # that does not load fails the step.
       - name: Signal a process that makes no syscall
         env:
           EBPFSENTINEL_EBPF_DIR: ${{ github.workspace }}/target/bpfel-unknown-none/release
