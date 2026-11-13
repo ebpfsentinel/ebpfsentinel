@@ -156,10 +156,10 @@ impl WorkloadResolver {
         let processes = self.processes.load();
         let processes = processes.as_ref()?;
         let entry = processes.get(pid)?;
-        Some(
-            base.with_process(&entry)
-                .with_lineage(&processes.lineage(pid)),
-        )
+        let workload = base
+            .with_process(&entry)
+            .with_lineage(&processes.lineage(pid));
+        Some(with_unit(workload, processes))
     }
 
     /// The workload holding a cgroup, named after the oldest live process
@@ -254,8 +254,18 @@ impl WorkloadResolver {
             // never saw has no parent recorded to start the walk from.
             workload = workload.with_lineage(&processes.lineage(owner.pid));
         }
-        workload
+        with_unit(workload, processes)
     }
+}
+
+/// Name the systemd unit of a host process, which is what the workload is
+/// called wherever no pod or container names it. A container's own cgroup is
+/// the runtime's scope and says nothing a person would call it by.
+fn with_unit(mut workload: Workload, processes: &ProcessTableService) -> Workload {
+    if workload.container.is_none() && workload.unit.is_none() {
+        workload.unit = processes.unit_of(workload.pid, workload.cgroup.unwrap_or(0));
+    }
+    workload
 }
 
 /// A reader never hands back a pid of zero, and the type system does not know
@@ -491,6 +501,56 @@ mod tests {
         // the opening task, and that is the one a reader is owed.
         assert_eq!(workload.uid, Some(1_000));
         assert_eq!(workload.cgroup, Some(77));
+    }
+
+    struct CgroupOf(&'static str);
+    impl domain::container::engine::CgroupReader for CgroupOf {
+        fn read_cgroup(&self, _pid: u32) -> std::io::Result<String> {
+            Ok(format!("0::{}\n", self.0))
+        }
+    }
+
+    async fn table_in_cgroup(pid: u32, cgroup: &'static str) -> Arc<ProcessTableService> {
+        use domain::container::engine::ContainerResolverEngine;
+        let engine = ContainerResolverEngine::new(Arc::new(CgroupOf(cgroup)), 16);
+        let service = ProcessTableService::new(16, false).with_containers(Arc::new(engine));
+        service
+            .apply(ProcessLifecycleEvent::bare(
+                ProcessEventKind::Exec,
+                pid,
+                "curl",
+                1,
+            ))
+            .await;
+        Arc::new(service)
+    }
+
+    #[tokio::test]
+    async fn a_host_process_in_a_service_is_named_by_its_unit() {
+        let table = table_in_cgroup(4_242, "/system.slice/backup.service").await;
+        let resolver = WorkloadResolver::new()
+            .with_sockets(Box::new(FixedSocket(Some(owner()))))
+            .with_processes(table);
+        let workload = resolver.by_originated_flow(&flow()).unwrap();
+        assert_eq!(workload.unit.as_deref(), Some("backup.service"));
+        assert_eq!(domain::l7::red::service_name(&workload), "backup.service");
+        assert_eq!(
+            resolver.by_pid(4_242).unwrap().unit.as_deref(),
+            Some("backup.service")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_container_process_is_not_named_by_the_runtime_scope() {
+        let table = table_in_cgroup(
+            4_242,
+            "/system.slice/docker-3f2a1b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708.scope",
+        )
+        .await;
+        let resolver = WorkloadResolver::new().with_processes(table);
+        let workload = resolver.by_pid(4_242).unwrap();
+        assert!(workload.container.is_some());
+        assert_eq!(workload.unit, None);
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use lru::LruCache;
 
 use crate::container::entity::{ContainerInfo, ContainerRuntime};
+use crate::firewall::workload::{cgroup_path_of, unit_of};
 
 /// Abstraction over the source of cgroup data. The domain crate cannot
 /// depend on `ports`, so it defines its own minimal reader trait; the
@@ -276,17 +277,47 @@ pub enum ResolveOutcome {
 /// populates the cache.
 pub struct ContainerResolverEngine {
     cache: CgroupCache,
+    /// The systemd unit each cgroup belongs to, or that it belongs to none,
+    /// so a host cgroup costs one `/proc/<pid>/cgroup` read for its lifetime
+    /// rather than one per flow it opens.
+    units: Mutex<LruCache<u64, Option<String>>>,
     reader: Arc<dyn CgroupReader>,
     id_resolver: Option<Arc<dyn CgroupIdResolver>>,
 }
 
 impl ContainerResolverEngine {
     pub fn new(reader: Arc<dyn CgroupReader>, cache_capacity: usize) -> Self {
+        let units = NonZeroUsize::new(cache_capacity.max(1)).unwrap_or(NonZeroUsize::MIN);
         Self {
             cache: CgroupCache::new(cache_capacity),
+            units: Mutex::new(LruCache::new(units)),
             reader,
             id_resolver: None,
         }
+    }
+
+    /// The systemd unit the task `pid` runs under, read off its cgroup path:
+    /// `nginx.service` for a process of `/system.slice/nginx.service`. `None`
+    /// for a cgroup no unit names, for a cgroup v1 host and when the task is
+    /// gone. A known `cgroup_id` is answered from the cache, a zero is read
+    /// every time because it names no cgroup to key on.
+    pub fn unit(&self, pid: u32, cgroup_id: u64) -> Option<String> {
+        if cgroup_id != 0
+            && let Ok(mut units) = self.units.lock()
+            && let Some(known) = units.get(&cgroup_id)
+        {
+            return known.clone();
+        }
+        let payload = self.reader.read_cgroup(pid).ok()?;
+        let unit = cgroup_path_of(&payload)
+            .and_then(unit_of)
+            .map(ToOwned::to_owned);
+        if cgroup_id != 0
+            && let Ok(mut units) = self.units.lock()
+        {
+            units.put(cgroup_id, unit.clone());
+        }
+        unit
     }
 
     /// Attach a cgroup-id resolver, enabling [`Self::resolve_by_id`] for
@@ -660,6 +691,34 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing"))
         }
+    }
+
+    #[test]
+    fn a_service_cgroup_names_its_unit_once_per_cgroup() {
+        let reader = Arc::new(FakeReader::new());
+        reader.insert(42, "0::/system.slice/nginx.service\n");
+        let engine = ContainerResolverEngine::new(reader.clone(), 16);
+        assert_eq!(engine.unit(42, 7).as_deref(), Some("nginx.service"));
+        // The task is gone, and the cgroup still answers from the cache.
+        reader.fail_all();
+        assert_eq!(engine.unit(43, 7).as_deref(), Some("nginx.service"));
+    }
+
+    #[test]
+    fn a_cgroup_no_unit_names_answers_none_and_keeps_answering_it() {
+        let reader = Arc::new(FakeReader::new());
+        reader.insert(42, "0::/user.slice/user-1000.slice\n");
+        let engine = ContainerResolverEngine::new(reader.clone(), 16);
+        assert_eq!(engine.unit(42, 9), None);
+        reader.insert(42, "0::/system.slice/late.service\n");
+        assert_eq!(engine.unit(42, 9), None);
+    }
+
+    #[test]
+    fn a_task_gone_before_the_read_names_no_unit() {
+        let reader = Arc::new(FakeReader::new());
+        let engine = ContainerResolverEngine::new(reader, 16);
+        assert_eq!(engine.unit(42, 0), None);
     }
 
     #[test]

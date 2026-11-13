@@ -521,6 +521,14 @@ impl ProcessTableService {
         }
     }
 
+    /// The systemd unit a host task runs under, read off its cgroup path
+    /// once per cgroup. `None` where no container resolver is wired, which
+    /// is also where nothing reads `/proc/<pid>/cgroup` at all.
+    #[must_use]
+    pub fn unit_of(&self, pid: u32, cgroup_id: u64) -> Option<String> {
+        self.containers.as_ref()?.unit(pid, cgroup_id)
+    }
+
     /// The container an exec happened in, with runtime metadata where an
     /// enricher could add some. A host process resolves to nothing rather
     /// than to a `ContainerContext` saying "host", because the field is what

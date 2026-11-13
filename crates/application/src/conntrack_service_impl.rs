@@ -46,6 +46,9 @@ pub struct ConnTrackAppService {
     /// why every row's block is optional rather than defaulted.
     workloads: WorkloadResolver,
     enabled: bool,
+    /// A reader outside the configuration ranks connections by bytes, so
+    /// kernel byte accounting stays asked for across every reload.
+    bytes_read: bool,
 }
 
 impl ConnTrackAppService {
@@ -57,6 +60,7 @@ impl ConnTrackAppService {
             metrics,
             workloads: WorkloadResolver::new(),
             enabled: false,
+            bytes_read: false,
         }
     }
 
@@ -109,9 +113,22 @@ impl ConnTrackAppService {
     /// Reload conntrack settings and sync to eBPF.
     pub fn reload_settings(&mut self, settings: ConnTrackSettings) -> Result<(), DomainError> {
         self.settings = settings;
+        self.settings.byte_accounting |= self.bytes_read;
         self.sync_ebpf_config();
         tracing::info!("conntrack settings reloaded");
         Ok(())
+    }
+
+    /// Ask the kernel to count bytes per connection for a reader the
+    /// configuration does not name, and keep asking on every reload. The
+    /// kernel keeps no counters without it, and a ranking by bytes over
+    /// zeroes reads as idle traffic. Applies to connections opened after.
+    pub fn require_byte_accounting(&mut self) {
+        self.bytes_read = true;
+        if self.enabled && !self.settings.byte_accounting {
+            self.settings.byte_accounting = true;
+            self.sync_ebpf_config();
+        }
     }
 
     /// Get active connections, up to `limit`, from the kernel netfilter port.
@@ -286,6 +303,38 @@ mod tests {
         assert_eq!(seen.max_src_conn_rate, 3);
         assert_eq!(seen.conn_rate_window_secs, 60);
         assert_eq!(seen.overload_ttl_secs, 3600);
+    }
+
+    #[test]
+    fn a_byte_reader_turns_accounting_on_and_a_reload_keeps_it() {
+        let mut svc = make_service();
+        svc.set_enabled(true);
+        let last = Arc::new(std::sync::Mutex::new(None));
+        svc.set_netfilter_port(Box::new(RecordingMapPort {
+            last: Arc::clone(&last),
+        }));
+        svc.require_byte_accounting();
+        let pushed = last.lock().expect("recording port lock").clone();
+        assert!(pushed.expect("nothing pushed").byte_accounting);
+
+        svc.reload_settings(ConnTrackSettings {
+            enabled: true,
+            ..ConnTrackSettings::default()
+        })
+        .expect("reload");
+        let pushed = last.lock().expect("recording port lock").clone();
+        assert!(pushed.expect("nothing pushed").byte_accounting);
+    }
+
+    #[test]
+    fn a_byte_reader_on_a_disabled_table_writes_nothing() {
+        let mut svc = make_service();
+        let last = Arc::new(std::sync::Mutex::new(None));
+        svc.set_netfilter_port(Box::new(RecordingMapPort {
+            last: Arc::clone(&last),
+        }));
+        svc.require_byte_accounting();
+        assert!(last.lock().expect("recording port lock").is_none());
     }
 
     #[test]
