@@ -125,7 +125,6 @@ nat:
 # the rate is high enough that no test traffic is shaped by accident.
 qos:
   enabled: true
-  scheduler: fifo
   pipes:
     - id: pipe-load-gate
       bandwidth: "1gbps"

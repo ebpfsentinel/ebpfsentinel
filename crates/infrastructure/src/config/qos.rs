@@ -156,6 +156,11 @@ pub struct QosQueueConfig {
     /// Whether this queue is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// Relative share of the pipe when it is saturated, at least 1. The
+    /// enabled queues of one pipe split it in proportion to their weights.
+    #[serde(default = "domain::qos::entity::default_weight")]
+    pub weight: u16,
 }
 
 // ── Classifier config ───────────────────────────────────────────────
@@ -586,6 +591,13 @@ impl QosQueueConfig {
             });
         }
 
+        if self.weight == 0 {
+            return Err(ConfigError::Validation {
+                field: format!("{prefix}.weight"),
+                message: "weight must be at least 1".to_string(),
+            });
+        }
+
         Ok(())
     }
 
@@ -594,6 +606,7 @@ impl QosQueueConfig {
             id: self.id.clone(),
             pipe_id: self.pipe_id.clone(),
             enabled: self.enabled,
+            weight: self.weight,
         })
     }
 }
@@ -941,6 +954,20 @@ pipe_id: pipe-1
         let mut q = valid_queue_yaml();
         q.pipe_id = String::new();
         assert!(q.validate(0).is_err());
+    }
+
+    #[test]
+    fn a_queue_naming_no_weight_is_weighted_one() {
+        assert_eq!(valid_queue_yaml().weight, 1);
+        assert_eq!(valid_queue_yaml().to_domain_queue().unwrap().weight, 1);
+    }
+
+    #[test]
+    fn a_queue_weighted_zero_is_refused_with_its_field() {
+        let mut q = valid_queue_yaml();
+        q.weight = 0;
+        let err = q.validate(2).unwrap_err().to_string();
+        assert!(err.contains("qos.queues[2].weight"), "{err}");
     }
 
     // ── Classifier validation ───────────────────────────────────────

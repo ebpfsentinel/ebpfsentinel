@@ -302,13 +302,11 @@ teardown_file() {
 
 # ── Queue to pipe binding ───────────────────────────────────────
 
-@test "QoS queues bind to their pipe and carry no scheduling of their own" {
+@test "QoS queues bind to their pipe and carry their weight" {
     require_root
 
-    # Shaping lives entirely on the pipe, so a queue is a binding and nothing
-    # more. Two queues on the same pipe therefore differ only by id: any
-    # scheduling parameter on the response would be a surface the data plane
-    # does not read.
+    # A queue naming no weight is weighted one, an even split with its
+    # neighbours; a queue naming one gets it back.
     local body_q1 body_q2
     body_q1="$(api_post /api/v1/qos/queues \
         '{"id":"bind-q1","pipe_id":"pipe-test-10m"}')"
@@ -316,7 +314,7 @@ teardown_file() {
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
 
     body_q2="$(api_post /api/v1/qos/queues \
-        '{"id":"bind-q2","pipe_id":"pipe-test-10m"}')"
+        '{"id":"bind-q2","pipe_id":"pipe-test-10m","weight":3}')"
     _load_http_status
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
 
@@ -328,32 +326,84 @@ teardown_file() {
     local queues
     queues="$(echo "$list_body" | jq 'if type == "array" then . else .queues end' 2>/dev/null)" || true
 
-    # Both queues are listed against the pipe they named.
-    local bound
-    bound="$(echo "$queues" | jq '[.[]
+    local seen
+    seen="$(echo "$queues" | jq -c '[.[]
         | select(.id == "bind-q1" or .id == "bind-q2")
-        | select(.pipe_id == "pipe-test-10m")] | length' 2>/dev/null)" || bound=0
-    [ "${bound:-0}" -eq 2 ] || {
-        echo "queues did not come back bound to pipe-test-10m" >&2
-        echo "${queues}" | jq -c '.' >&2 || true
-        api_delete /api/v1/qos/queues/bind-q1 >/dev/null 2>&1 || true
-        api_delete /api/v1/qos/queues/bind-q2 >/dev/null 2>&1 || true
-        return 1
-    }
-
-    # A weight would imply a scheduler the pipe does not run.
-    local weights
-    weights="$(echo "$queues" | jq '[.[] | select(has("weight"))] | length' 2>/dev/null)" || weights=0
-    [ "${weights:-0}" -eq 0 ] || {
-        echo "queue response carries a scheduling parameter the data plane ignores" >&2
-        echo "${queues}" | jq -c '.' >&2 || true
-        api_delete /api/v1/qos/queues/bind-q1 >/dev/null 2>&1 || true
-        api_delete /api/v1/qos/queues/bind-q2 >/dev/null 2>&1 || true
-        return 1
-    }
-
+        | select(.pipe_id == "pipe-test-10m")
+        | [.id, .weight]] | sort' 2>/dev/null)" || seen=""
     api_delete /api/v1/qos/queues/bind-q1 >/dev/null 2>&1 || true
     api_delete /api/v1/qos/queues/bind-q2 >/dev/null 2>&1 || true
+    [ "$seen" = '[["bind-q1",1],["bind-q2",3]]' ] || {
+        echo "queues did not come back bound with their weights: ${seen}" >&2
+        return 1
+    }
+
+    # A weight of zero would be owed nothing: refused, not stored.
+    api_post /api/v1/qos/queues \
+        '{"id":"bind-q0","pipe_id":"pipe-test-10m","weight":0}' >/dev/null
+    _load_http_status
+    api_delete /api/v1/qos/queues/bind-q0 >/dev/null 2>&1 || true
+    [ "$HTTP_STATUS" = "400" ]
+}
+
+# ── Weighted share of a saturated pipe ───────────────────────────
+
+# _udp_received_bps <server_log>
+# Bits per second the iperf3 server on that log received.
+_udp_received_bps() {
+    jq -r '.end.sum.bits_per_second // empty' "$1" 2>/dev/null | cut -d. -f1
+}
+
+@test "QoS queues weighted three to one split a saturated pipe three to one" {
+    require_root
+    require_tool iperf3
+
+    # pipe-test-split carries 10 Mbit/s. queue-test-heavy (weight 3, UDP/5301)
+    # is owed 7.5 of it and queue-test-light (weight 1, UDP/5302) 2.5. Each
+    # stream offers 20 Mbit/s, twice the whole pipe, so neither leaves any
+    # of its share to lend and the split measured is the weighted one. The
+    # heavy stream's part of what got through must sit within ten points of
+    # three quarters; the shaper itself is held to three in a unit test, the
+    # rest is iperf3's own pacing and the length of a five second sample.
+    local heavy_log="/tmp/iperf3-qos-heavy-$$.json"
+    local light_log="/tmp/iperf3-qos-light-$$.json"
+    rm -f "$heavy_log" "$light_log"
+    iperf3 -s -p 5301 -1 -J -D --logfile "$heavy_log" 2>/dev/null || true
+    iperf3 -s -p 5302 -1 -J -D --logfile "$light_log" 2>/dev/null || true
+    sleep 1
+
+    iperf3_from_ns "$EBPF_HOST_IP" 5 "-u" -p 5301 -b 20M >/dev/null 2>&1 &
+    local heavy_pid=$!
+    iperf3_from_ns "$EBPF_HOST_IP" 5 "-u" -p 5302 -b 20M >/dev/null 2>&1 &
+    local light_pid=$!
+    wait "$heavy_pid" "$light_pid" || true
+    sleep 2
+
+    local heavy light
+    heavy="$(_udp_received_bps "$heavy_log")"
+    light="$(_udp_received_bps "$light_log")"
+    pkill -f "iperf3 -s -p 530[12]" 2>/dev/null || true
+    rm -f "$heavy_log" "$light_log"
+
+    [ -n "$heavy" ] && [ -n "$light" ] || {
+        echo "an iperf3 server reported nothing: heavy='${heavy}' light='${light}'" >&2
+        return 1
+    }
+    [ "$light" -gt 0 ] || { echo "the light queue was starved" >&2; return 1; }
+
+    local total=$((heavy + light))
+    local heavy_pct=$((heavy * 100 / total))
+    echo "heavy ${heavy} bps, light ${light} bps, heavy share ${heavy_pct}%" >&2
+
+    # Both streams together stay under the pipe, two bursts of headroom.
+    [ "$total" -le 12582912 ] || {
+        echo "the two queues together passed ${total} bps through a 10 Mbit/s pipe" >&2
+        return 1
+    }
+    [ "$heavy_pct" -ge 65 ] && [ "$heavy_pct" -le 85 ] || {
+        echo "heavy share ${heavy_pct}% is not within ten points of 75%" >&2
+        return 1
+    }
 }
 
 # ── Pipe rate persistence ───────────────────────────────────────

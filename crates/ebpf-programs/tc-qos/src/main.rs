@@ -25,7 +25,8 @@ use ebpf_common::{
         QOS_SHAPE_DSCP, QOS_SHAPE_FULL, QOS_SHAPE_HOSTS, QOS_SHAPE_HOSTS_DPORT, QOS_SHAPE_NO_DSCP,
         QOS_SHAPE_PORTS, QOS_SHAPE_PROTO, QOS_SHAPE_SPORT, QosCgroupCounters, QosCgroupShape,
         QosClassifierKey, QosClassifierValue, QosFlowState, QosPipeConfig, QosPipeState,
-        QosQueueConfig, VLAN_ANY, qos_direction_matches, qos_spacing_ns,
+        QosCharge, QosQueueConfig, QosQueueState, VLAN_ANY, qos_charge, qos_direction_matches,
+        qos_spacing_ns,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
@@ -119,6 +120,11 @@ fn shape_empty(scope: u32, shape: u32) -> bool {
 /// the core count.
 #[btf_map]
 static QOS_PIPE_STATE: Array<QosPipeState, 64> = Array::new();
+
+/// Per-queue token bucket: the queue's own share of its pipe. Index =
+/// queue_id (0-255). Shared across CPUs for the same reason as the pipe's.
+#[btf_map]
+static QOS_QUEUE_STATE: Array<QosQueueState, 256> = Array::new();
 
 /// Per-flow pacing state. Per-CPU LRU eliminates cross-CPU contention, and a
 /// flow's departure times only ever matter relative to its own past packets.
@@ -909,55 +915,53 @@ fn apply_qos(
         }
     }
 
-    // Step 4: Token bucket bandwidth enforcement, charged to the pipe.
+    // Step 4: Token bucket bandwidth enforcement. The queue's own share
+    // passes first, whatever the other queues of the pipe are doing; beyond
+    // it the packet passes only on credit the pipe still holds. A trace reads
+    // both buckets as they stand and writes neither back.
     if pipe_cfg.ns_per_byte > 0 {
         let now_ns = unsafe { bpf_ktime_get_boot_ns() };
         let pkt_len = ctx.data_end().saturating_sub(ctx.data()) as u64;
 
-        let should_drop = match QOS_PIPE_STATE.get_ptr_mut(pipe_id) {
-            Some(state_ptr) => {
-                let state = unsafe { &mut *state_ptr };
-                // Refill tokens - use division (supported) not multiplication
-                // (u64*u64 triggers __multi3 which eBPF lacks).
-                // ns_per_byte is precomputed by userspace; grant one byte of
-                // credit per ns_per_byte elapsed: new_tokens = elapsed_ns / ns_per_byte.
-                //
-                // A never-used pipe holds zeros, so the first packet measures
-                // its elapsed time from the boot clock's origin and fills the
-                // bucket to the brim, which is where a fresh pipe should start.
-                let elapsed_ns = now_ns.saturating_sub(state.last_refill_ns);
-                let new_tokens = elapsed_ns / pipe_cfg.ns_per_byte;
-                let tokens = state
-                    .tokens
-                    .saturating_add(new_tokens)
-                    .min(pipe_cfg.burst_bytes);
-
-                // Check if we can consume tokens. A trace reads the bucket
-                // as it stands and takes nothing from it.
-                if tokens >= pkt_len {
-                    if !traced {
-                        state.tokens = tokens - pkt_len;
-                        state.last_refill_ns = now_ns;
-                    }
-                    // ECN Congestion Experienced: when token bucket is below 25% of burst,
-                    // mark the packet with CE to signal the sender to slow down proactively.
-                    // This provides early congestion signalling without dropping the packet,
-                    // allowing TCP to reduce its window before the queue overflows.
-                    if tokens - pkt_len < pipe_cfg.burst_bytes / 4 {
-                        unsafe { bpf_skb_ecn_set_ce(raw_skb(ctx)) };
-                    }
-                    false
-                } else {
-                    if !traced {
-                        state.tokens = tokens;
-                        state.last_refill_ns = now_ns;
-                    }
-                    true // over bandwidth
+        let should_drop = match (
+            QOS_PIPE_STATE.get_ptr_mut(pipe_id),
+            QOS_QUEUE_STATE.get_ptr_mut(queue_id),
+        ) {
+            (Some(pipe_ptr), Some(queue_ptr)) => {
+                let pipe_state = unsafe { &mut *pipe_ptr };
+                let queue_state = unsafe { &mut *queue_ptr };
+                let mut pipe_now = *pipe_state;
+                let mut queue_now = *queue_state;
+                let verdict = qos_charge(
+                    &mut pipe_now,
+                    pipe_cfg,
+                    &mut queue_now,
+                    queue_cfg,
+                    now_ns,
+                    pkt_len,
+                );
+                if !traced {
+                    *pipe_state = pipe_now;
+                    *queue_state = queue_now;
                 }
+                // ECN Congestion Experienced when the credit the packet was
+                // paid from runs below a quarter of its burst, so TCP slows
+                // before the bucket drops it. A packet within its share is
+                // judged on its share: the pipe running dry because another
+                // queue borrowed it says nothing about this queue's pace.
+                let low = match verdict {
+                    QosCharge::Share => queue_now.tokens < queue_cfg.burst_bytes / 4,
+                    QosCharge::Borrow => pipe_now.tokens < (pipe_cfg.burst_bytes / 4) as i64,
+                    QosCharge::Drop => false,
+                };
+                if low && !traced {
+                    unsafe { bpf_skb_ecn_set_ce(raw_skb(ctx)) };
+                }
+                verdict == QosCharge::Drop
             }
-            // The array is sized for every pipe id a config can hold, so this
+            // Both arrays are sized for every id a config can hold, so this
             // is unreachable; passing is the safe reading of "no bucket".
-            None => false,
+            _ => false,
         };
 
         if should_drop {

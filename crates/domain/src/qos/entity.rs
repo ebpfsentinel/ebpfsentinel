@@ -75,10 +75,14 @@ impl QosPipe {
     }
 }
 
-/// A `QoS` queue - the indirection classifiers point at to reach a pipe.
+/// A `QoS` queue - the indirection classifiers point at to reach a pipe, and
+/// the share of that pipe its traffic is owed.
 ///
-/// Traffic is shaped by the pipe, not by the queue: disabling a queue detaches
-/// every classifier that names it in one move, without editing them.
+/// Disabling a queue detaches every classifier that names it in one move,
+/// without editing them. The queues of one pipe split it by weight when it is
+/// saturated: each is owed `weight / sum of the enabled queues' weights` of
+/// the pipe's rate, and a share a queue leaves unused goes to whoever is
+/// sending, so a queue alone on its pipe has all of it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QosQueue {
     /// Unique queue identifier.
@@ -87,6 +91,29 @@ pub struct QosQueue {
     pub pipe_id: String,
     /// Whether this queue is enabled.
     pub enabled: bool,
+    /// Relative share of the pipe, at least 1. Equal weights split the pipe
+    /// evenly.
+    #[serde(default = "default_weight")]
+    pub weight: u16,
+}
+
+/// The weight of a queue that names none: an even split with its neighbours.
+pub const fn default_weight() -> u16 {
+    1
+}
+
+impl QosQueue {
+    /// Reject a queue the shaper could not honour: a weight of zero would be
+    /// owed nothing and divide by nothing.
+    pub fn validate(&self) -> Result<(), QosError> {
+        if self.weight == 0 {
+            return Err(QosError::InvalidQueue(format!(
+                "queue '{}': weight must be at least 1",
+                self.id
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Match criteria for a `QoS` classifier:
@@ -156,6 +183,25 @@ mod tests {
     #[test]
     fn direction_default_is_egress() {
         assert_eq!(QosDirection::default(), QosDirection::Egress);
+    }
+
+    #[test]
+    fn a_queue_with_no_weight_reads_as_weight_one() {
+        let queue: QosQueue =
+            serde_json::from_str(r#"{"id":"q","pipe_id":"p","enabled":true}"#).unwrap();
+        assert_eq!(queue.weight, 1);
+        assert!(queue.validate().is_ok());
+    }
+
+    #[test]
+    fn a_queue_weighted_zero_is_refused() {
+        let queue = QosQueue {
+            id: "q".into(),
+            pipe_id: "p".into(),
+            enabled: true,
+            weight: 0,
+        };
+        assert!(queue.validate().is_err());
     }
 
     #[test]

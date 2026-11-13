@@ -117,12 +117,23 @@ impl QosMapManager {
         }
     }
 
-    /// Convert a domain `QosQueue` to a `QosQueueConfig` eBPF struct.
-    fn queue_to_ebpf(queue: &QosQueue, pipe_index: u8) -> QosQueueConfig {
+    /// Convert a domain `QosQueue` to a `QosQueueConfig` eBPF struct, with
+    /// its share of `pipe` out of `total_weight`, the sum of the weights of
+    /// the pipe's enabled queues.
+    fn queue_to_ebpf(
+        queue: &QosQueue,
+        pipe_index: u8,
+        pipe: &QosPipe,
+        total_weight: u64,
+    ) -> QosQueueConfig {
+        let (ns_per_byte, burst_bytes) = queue_share(pipe, queue.weight, total_weight);
         QosQueueConfig {
+            ns_per_byte,
+            burst_bytes,
+            weight: queue.weight,
             pipe_id: pipe_index,
             enabled: u8::from(queue.enabled),
-            _padding: [0; 2],
+            _padding: [0; 4],
         }
     }
 
@@ -182,14 +193,9 @@ impl QosMapManager {
         queues: &[QosQueue],
         pipes: &[QosPipe],
     ) -> Result<(), anyhow::Error> {
-        for (i, queue) in queues.iter().enumerate() {
-            let pipe_index = pipes
-                .iter()
-                .position(|p| p.id == queue.pipe_id)
-                .unwrap_or(0) as u8;
-            let config = Self::queue_to_ebpf(queue, pipe_index);
+        for (i, config) in queue_entries(queues, pipes).iter().enumerate() {
             self.queue_config
-                .set(i as u32, &config, 0)
+                .set(i as u32, config, 0)
                 .map_err(|e| anyhow::anyhow!("QOS_QUEUE_CONFIG set at index {i} failed: {e}"))?;
         }
         info!(count = queues.len(), "QoS queues loaded into eBPF map");
@@ -220,12 +226,8 @@ impl QosMapManager {
 
         let mut loaded = 0usize;
         let mut written: Vec<QosClassifierKey> = Vec::new();
-        for index in winning_classifier_indices(classifiers, queues) {
+        for (index, queue_index) in winning_classifier_indices(classifiers, queues) {
             let cls = &classifiers[index];
-            let queue_index = queues
-                .iter()
-                .position(|q| q.id == cls.queue_id)
-                .unwrap_or(0) as u8;
             let (key, value) = Self::classifier_to_ebpf(cls, queue_index);
             self.classifiers
                 .insert(&key, &value, 0)
@@ -270,13 +272,8 @@ impl QosMapManager {
 
     /// Zero out queue array entries.
     fn clear_queues(&mut self, count: u32) {
-        let zero = QosQueueConfig {
-            pipe_id: 0,
-            enabled: 0,
-            _padding: [0; 2],
-        };
         for i in 0..count {
-            let _ = self.queue_config.set(i, &zero, 0);
+            let _ = self.queue_config.set(i, &QUEUE_UNSET, 0);
         }
     }
 
@@ -300,20 +297,17 @@ impl QosMapManager {
 }
 
 impl QosMapPort for QosMapManager {
-    fn load_pipes(&mut self, pipes: &[QosPipe]) -> Result<(), DomainError> {
+    fn load(
+        &mut self,
+        pipes: &[QosPipe],
+        queues: &[QosQueue],
+        classifiers: &[QosClassifier],
+    ) -> Result<(), DomainError> {
         self.load_pipes_inner(pipes)
-            .map_err(|e| DomainError::EngineError(format!("qos pipe map load failed: {e}")))
-    }
-
-    fn load_queues(&mut self, queues: &[QosQueue]) -> Result<(), DomainError> {
-        // We need pipe info for pipe_id -> index mapping but we don't have it here.
-        // The port trait only passes queues; we do best-effort index = 0 when pipe unknown.
-        self.load_queues_inner(queues, &[])
-            .map_err(|e| DomainError::EngineError(format!("qos queue map load failed: {e}")))
-    }
-
-    fn load_classifiers(&mut self, classifiers: &[QosClassifier]) -> Result<(), DomainError> {
-        self.load_classifiers_inner(classifiers, &[])
+            .map_err(|e| DomainError::EngineError(format!("qos pipe map load failed: {e}")))?;
+        self.load_queues_inner(queues, pipes)
+            .map_err(|e| DomainError::EngineError(format!("qos queue map load failed: {e}")))?;
+        self.load_classifiers_inner(classifiers, queues)
             .map_err(|e| DomainError::EngineError(format!("qos classifier map load failed: {e}")))
     }
 
@@ -388,28 +382,33 @@ fn shapes_mask(keys: impl Iterator<Item = QosClassifierKey>) -> u32 {
 /// arbitrate between them, so the tie is settled here by the documented meaning
 /// of `priority` - lower is matched first. Ties on priority keep the earlier
 /// rule, which is the order the configuration file lists them in.
-fn winning_classifier_indices(classifiers: &[QosClassifier], queues: &[QosQueue]) -> Vec<usize> {
+fn winning_classifier_indices(
+    classifiers: &[QosClassifier],
+    queues: &[QosQueue],
+) -> Vec<(usize, u8)> {
     let mut winner_by_key: std::collections::HashMap<QosClassifierKey, usize> =
         std::collections::HashMap::new();
-    let mut order: Vec<usize> = Vec::new();
+    let mut order: Vec<(usize, u8)> = Vec::new();
 
     for (index, cls) in classifiers.iter().enumerate() {
+        // A classifier naming no loaded queue has nowhere to send traffic,
+        // and writing it against another queue would shape the wrong pipe.
+        let Some(queue_index) = queues.iter().position(|q| q.id == cls.queue_id) else {
+            continue;
+        };
         #[allow(clippy::cast_possible_truncation)]
-        let queue_index = queues
-            .iter()
-            .position(|q| q.id == cls.queue_id)
-            .unwrap_or(0) as u8;
+        let queue_index = queue_index as u8;
         let (key, _) = QosMapManager::classifier_to_ebpf(cls, queue_index);
 
         match winner_by_key.get(&key).copied() {
             Some(current) if classifiers[current].priority <= cls.priority => {}
             Some(current) => {
-                order.retain(|&i| i != current);
-                order.push(index);
+                order.retain(|&(i, _)| i != current);
+                order.push((index, queue_index));
                 winner_by_key.insert(key, index);
             }
             None => {
-                order.push(index);
+                order.push((index, queue_index));
                 winner_by_key.insert(key, index);
             }
         }
@@ -417,6 +416,71 @@ fn winning_classifier_indices(classifiers: &[QosClassifier], queues: &[QosQueue]
 
     order.sort_unstable();
     order
+}
+
+/// The queue map's entries, in the order of `queues`: each written against
+/// its own pipe's index, with its share of that pipe.
+///
+/// A queue naming no loaded pipe is written disabled, so the shaper passes
+/// its traffic rather than charging it to another pipe.
+#[allow(clippy::cast_possible_truncation)]
+fn queue_entries(queues: &[QosQueue], pipes: &[QosPipe]) -> Vec<QosQueueConfig> {
+    queues
+        .iter()
+        .map(
+            |queue| match pipes.iter().position(|p| p.id == queue.pipe_id) {
+                Some(pipe_index) => {
+                    let total_weight: u64 = queues
+                        .iter()
+                        .filter(|q| q.enabled && q.pipe_id == queue.pipe_id)
+                        .map(|q| u64::from(q.weight))
+                        .sum();
+                    QosMapManager::queue_to_ebpf(
+                        queue,
+                        pipe_index as u8,
+                        &pipes[pipe_index],
+                        total_weight,
+                    )
+                }
+                None => QUEUE_UNSET,
+            },
+        )
+        .collect()
+}
+
+/// A queue slot nothing is loaded into: disabled, so the shaper passes.
+const QUEUE_UNSET: QosQueueConfig = QosQueueConfig {
+    ns_per_byte: 0,
+    burst_bytes: 0,
+    weight: 0,
+    pipe_id: 0,
+    enabled: 0,
+    _padding: [0; 4],
+};
+
+/// The smallest burst a queue's share is given: one full Ethernet frame, so
+/// a share sliced thin by a large total weight still passes a packet.
+const MIN_SHARE_BURST: u64 = 1_514;
+
+/// A queue's share of `pipe` for `weight` out of `total_weight`, as the
+/// nanoseconds per byte and the burst the kernel bucket takes.
+///
+/// A pipe without a rate has nothing to share, which the kernel reads from a
+/// zero rate. A share too thin to express is paced at one bit per second
+/// rather than written as zero, which would read as unlimited.
+fn queue_share(pipe: &QosPipe, weight: u16, total_weight: u64) -> (u64, u64) {
+    if pipe.rate_bps == 0 {
+        return (0, 0);
+    }
+    let weight = u128::from(weight.max(1));
+    let total = u128::from(total_weight).max(weight);
+    let share_bps = (u128::from(pipe.rate_bps) * weight / total).max(1);
+    let ns_per_byte = u64::try_from(8_000_000_000u128 / share_bps).unwrap_or(u64::MAX);
+    let burst = u64::try_from(u128::from(pipe.burst_bytes) * weight / total).unwrap_or(u64::MAX);
+    (
+        ns_per_byte,
+        burst.max(MIN_SHARE_BURST.min(pipe.burst_bytes)),
+    )
 }
 
 /// Encode a domain direction for the eBPF pipe config.
@@ -622,29 +686,118 @@ mod tests {
         }
     }
 
+    fn pipe(id: &str, rate_bps: u64, burst_bytes: u64) -> QosPipe {
+        QosPipe {
+            id: id.to_string(),
+            rate_bps,
+            burst_bytes,
+            delay_ms: 0,
+            loss_pct: 0.0,
+            direction: QosDirection::Egress,
+            enabled: true,
+            group_mask: 0,
+            tenant_id: 0,
+        }
+    }
+
     #[test]
     fn queue_to_ebpf_basic() {
-        use domain::qos::entity::QosQueue;
-        let queue = QosQueue {
-            id: "q-1".to_string(),
-            pipe_id: "p-1".to_string(),
-            enabled: true,
-        };
-        let config = QosMapManager::queue_to_ebpf(&queue, 3);
+        let config =
+            QosMapManager::queue_to_ebpf(&queue("q-1"), 3, &pipe("p-1", 8_000_000, 100_000), 1);
         assert_eq!(config.pipe_id, 3);
         assert_eq!(config.enabled, 1);
+        assert_eq!(config.weight, 1);
+        // Alone on its pipe the queue is owed all of it: 1 MB/s, 1000 ns a byte.
+        assert_eq!(config.ns_per_byte, 1_000);
+        assert_eq!(config.burst_bytes, 100_000);
     }
 
     #[test]
     fn a_disabled_queue_reaches_the_map_disabled() {
-        use domain::qos::entity::QosQueue;
-        let queue = QosQueue {
-            id: "q-2".to_string(),
-            pipe_id: "p-1".to_string(),
-            enabled: false,
-        };
-        let config = QosMapManager::queue_to_ebpf(&queue, 0);
+        let mut q = queue("q-2");
+        q.enabled = false;
+        let config = QosMapManager::queue_to_ebpf(&q, 0, &pipe("p-1", 8_000_000, 100_000), 1);
         assert_eq!(config.enabled, 0);
+    }
+
+    #[test]
+    fn the_total_weight_counts_only_the_enabled_queues_of_the_same_pipe() {
+        let pipes = vec![
+            pipe("p-1", 8_000_000, 100_000),
+            pipe("p-2", 8_000_000, 100_000),
+        ];
+        let mut heavy = queue("q-heavy");
+        heavy.weight = 3;
+        let mut off = queue("q-off");
+        off.enabled = false;
+        off.weight = 100;
+        let mut elsewhere = queue("q-elsewhere");
+        elsewhere.pipe_id = "p-2".into();
+        elsewhere.weight = 100;
+        let entries = queue_entries(&[heavy, queue("q-light"), off, elsewhere], &pipes);
+        assert_eq!(entries[0].ns_per_byte, 1_333);
+        assert_eq!(entries[1].ns_per_byte, 4_000);
+        assert_eq!(entries[3].ns_per_byte, 1_000, "alone on p-2, all of it");
+    }
+
+    #[test]
+    fn weights_three_to_one_give_three_quarters_and_one_quarter() {
+        let p = pipe("p-1", 8_000_000, 100_000);
+        let mut heavy = queue("q-heavy");
+        heavy.weight = 3;
+        let light = queue("q-light");
+        let heavy_cfg = QosMapManager::queue_to_ebpf(&heavy, 0, &p, 4);
+        let light_cfg = QosMapManager::queue_to_ebpf(&light, 0, &p, 4);
+        // 6 Mbit/s and 2 Mbit/s: 1333 and 4000 ns a byte.
+        assert_eq!(heavy_cfg.ns_per_byte, 1_333);
+        assert_eq!(light_cfg.ns_per_byte, 4_000);
+        assert_eq!(heavy_cfg.burst_bytes, 75_000);
+        assert_eq!(light_cfg.burst_bytes, 25_000);
+    }
+
+    #[test]
+    fn a_thin_share_still_bursts_one_frame() {
+        let p = pipe("p-1", 8_000_000, 10_000);
+        let config = QosMapManager::queue_to_ebpf(&queue("q"), 0, &p, 100);
+        assert_eq!(config.burst_bytes, 1_514);
+    }
+
+    #[test]
+    fn a_pipe_without_a_rate_gives_its_queues_none() {
+        let config = QosMapManager::queue_to_ebpf(&queue("q"), 0, &pipe("p-1", 0, 0), 1);
+        assert_eq!((config.ns_per_byte, config.burst_bytes), (0, 0));
+    }
+
+    #[test]
+    fn each_queue_and_classifier_is_written_against_its_own_pipe_and_queue() {
+        let pipes = vec![
+            pipe("p-a", 8_000_000, 10_000),
+            pipe("p-b", 8_000_000, 10_000),
+        ];
+        let mut on_b = queue("q-b");
+        on_b.pipe_id = "p-b".into();
+        let mut on_a = queue("q-a");
+        on_a.pipe_id = "p-a".into();
+        let queues = vec![on_b, on_a];
+        let classifiers = vec![
+            classifier_on_port("c-a", "q-a", 80, 100),
+            classifier_on_port("c-b", "q-b", 443, 100),
+            classifier_on_port("c-none", "q-missing", 22, 100),
+        ];
+        let mut orphan = queue("q-orphan");
+        orphan.pipe_id = "p-missing".into();
+        let entries = queue_entries(&[queues.clone(), vec![orphan]].concat(), &pipes);
+        assert_eq!((entries[0].pipe_id, entries[0].enabled), (1, 1));
+        assert_eq!((entries[1].pipe_id, entries[1].enabled), (0, 1));
+        assert_eq!(
+            entries[2].enabled, 0,
+            "a queue naming no pipe shapes nothing"
+        );
+        assert_eq!(
+            winning_classifier_indices(&classifiers, &queues),
+            vec![(0, 1), (1, 0)],
+            "c-a reaches q-a at index 1, c-b q-b at index 0, c-none nothing"
+        );
     }
 
     #[test]
@@ -735,6 +888,7 @@ mod tests {
             id: id.to_string(),
             pipe_id: "p-1".to_string(),
             enabled: true,
+            weight: 1,
         }
     }
 
@@ -747,7 +901,7 @@ mod tests {
         ];
         assert_eq!(
             winning_classifier_indices(&classifiers, &queues),
-            vec![0, 1]
+            vec![(0, 0), (1, 0)]
         );
     }
 
@@ -758,7 +912,10 @@ mod tests {
             classifier_on_port("c-loser", "q-1", 5201, 200),
             classifier_on_port("c-winner", "q-2", 5201, 10),
         ];
-        assert_eq!(winning_classifier_indices(&classifiers, &queues), vec![1]);
+        assert_eq!(
+            winning_classifier_indices(&classifiers, &queues),
+            vec![(1, 1)]
+        );
     }
 
     #[test]
@@ -768,7 +925,10 @@ mod tests {
             classifier_on_port("c-first", "q-1", 5201, 100),
             classifier_on_port("c-second", "q-2", 5201, 100),
         ];
-        assert_eq!(winning_classifier_indices(&classifiers, &queues), vec![0]);
+        assert_eq!(
+            winning_classifier_indices(&classifiers, &queues),
+            vec![(0, 0)]
+        );
     }
 
     #[test]
@@ -779,6 +939,9 @@ mod tests {
             classifier_on_port("c-best", "q-1", 5201, 10),
             classifier_on_port("c-worst", "q-1", 5201, 900),
         ];
-        assert_eq!(winning_classifier_indices(&classifiers, &queues), vec![1]);
+        assert_eq!(
+            winning_classifier_indices(&classifiers, &queues),
+            vec![(1, 0)]
+        );
     }
 }

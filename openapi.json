@@ -11929,6 +11929,12 @@
           },
           "pipe_id": {
             "type": "string"
+          },
+          "weight": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Relative share of the pipe when it is saturated, at least 1.",
+            "minimum": 0
           }
         }
       },
@@ -18178,7 +18184,8 @@
         "required": [
           "id",
           "pipe_id",
-          "enabled"
+          "enabled",
+          "weight"
         ],
         "properties": {
           "enabled": {
@@ -18189,6 +18196,12 @@
           },
           "pipe_id": {
             "type": "string"
+          },
+          "weight": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Relative share of the pipe when it is saturated.",
+            "minimum": 0
           }
         }
       },

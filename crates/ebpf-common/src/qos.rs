@@ -93,19 +93,41 @@ pub const fn qos_direction_matches(direction: u8, is_ingress: bool) -> bool {
 
 /// `QoS` queue configuration written by userspace, read by eBPF.
 ///
-/// A queue names the pipe that shapes the traffic reaching it. Shaping itself
-/// lives entirely on the pipe, so the queue carries no scheduling parameters.
+/// A queue names the pipe that shapes the traffic reaching it and the share of
+/// that pipe it is owed. Userspace turns the queue's weight into a rate and a
+/// burst of its own, `weight / sum of the weights` of the pipe's rate and
+/// burst, so the datapath divides nothing.
 ///
-/// Size: 4 bytes.
+/// Size: 24 bytes (aligned to 8 bytes due to u64 fields).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct QosQueueConfig {
+    /// The queue's share of the pipe as nanoseconds per byte. 0 = the pipe
+    /// has no rate, so there is nothing to share.
+    pub ns_per_byte: u64,
+    /// The queue's share of the pipe's burst, in bytes.
+    pub burst_bytes: u64,
+    /// The configured weight, kept for whoever reads the map back.
+    pub weight: u16,
     /// Pipe this queue is attached to.
     pub pipe_id: u8,
     /// Whether this queue is enabled (1) or disabled (0).
     pub enabled: u8,
-    /// Explicit trailing padding to reach 4-byte alignment.
-    pub _padding: [u8; 2],
+    /// Explicit trailing padding to reach 8-byte alignment.
+    pub _padding: [u8; 4],
+}
+
+/// Per-queue token bucket managed by the eBPF program: the credit for the
+/// queue's own share of its pipe.
+///
+/// Size: 16 bytes (aligned to 8 bytes due to u64 fields).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct QosQueueState {
+    /// Current token count (bytes) of the queue's share.
+    pub tokens: u64,
+    /// Last token refill timestamp from `bpf_ktime_get_boot_ns()`.
+    pub last_refill_ns: u64,
 }
 
 /// Key for the `QoS` classifier `HashMap`.
@@ -168,7 +190,11 @@ pub struct QosClassifierValue {
 pub struct QosPipeState {
     /// Current token count (bytes). Zero on a never-used pipe, which the
     /// first packet turns into a full bucket via the elapsed-time refill.
-    pub tokens: u64,
+    /// Signed because a queue sending within its own share is charged here
+    /// even when the pipe's credit was lent to another queue: the pipe then
+    /// owes, at most one burst, and lends nothing until the debt is repaid,
+    /// so the shares and the ceiling hold together.
+    pub tokens: i64,
     /// Last token refill timestamp from `bpf_ktime_get_boot_ns()`.
     pub last_refill_ns: u64,
 }
@@ -207,6 +233,8 @@ unsafe impl aya::Pod for QosClassifierValue {}
 unsafe impl aya::Pod for QosFlowState {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for QosPipeState {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for QosQueueState {}
 
 // ── Classifier shapes ────────────────────────────────────────────────
 
@@ -422,6 +450,117 @@ pub const fn qos_spacing_ns(len: u32, ps_per_byte: u64) -> u64 {
     len * whole + len * rest / 1000
 }
 
+// ── Shares of a pipe ─────────────────────────────────────────────────
+
+/// What a packet costs its pipe and its queue, as the shaper decides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QosCharge {
+    /// Paid from the queue's own share; the pipe is charged too, and may owe.
+    Share,
+    /// Paid from credit the pipe had left over, which no queue was using.
+    Borrow,
+    /// Neither the queue's share nor the pipe had the credit: dropped.
+    Drop,
+}
+
+/// Refill a bucket by the time elapsed at `ns_per_byte`, capped at `burst`.
+#[inline(always)]
+fn qos_refill(elapsed_ns: u64, ns_per_byte: u64, burst: u64) -> u64 {
+    if ns_per_byte == 0 {
+        return burst;
+    }
+    let earned = elapsed_ns / ns_per_byte;
+    if earned > burst { burst } else { earned }
+}
+
+/// Charge one packet of `len` bytes to its queue and its pipe at `now_ns`.
+///
+/// A queue owns `weight / sum of the weights` of its pipe, as a token bucket
+/// of its own. A packet within that share passes whatever the other queues
+/// are doing, and is charged to the pipe as well; the pipe may go into debt
+/// by at most one burst for it. A packet beyond its queue's share passes only
+/// on credit the pipe still holds, which exists only when some queue is
+/// sending under its share, so a saturated pipe splits by weight and an idle
+/// queue's share goes to whoever is sending. Over any interval the pipe
+/// passes its rate plus at most two bursts, its own and the debt.
+///
+/// A queue whose `ns_per_byte` is zero owns no share, so every packet of it
+/// borrows. Both states are refilled and stamped whatever the verdict, so a
+/// dropped packet leaves no credit behind. The caller writes the states back,
+/// or does not, for a trace.
+#[inline(always)]
+pub fn qos_charge(
+    pipe: &mut QosPipeState,
+    pipe_cfg: &QosPipeConfig,
+    queue: &mut QosQueueState,
+    queue_cfg: &QosQueueConfig,
+    now_ns: u64,
+    len: u64,
+) -> QosCharge {
+    let pipe_burst = if pipe_cfg.burst_bytes > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        pipe_cfg.burst_bytes as i64
+    };
+    let earned = qos_refill(
+        now_ns.saturating_sub(pipe.last_refill_ns),
+        pipe_cfg.ns_per_byte,
+        pipe_cfg.burst_bytes,
+    );
+    let earned = if earned > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        earned as i64
+    };
+    let pipe_tokens = pipe.tokens.saturating_add(earned);
+    let pipe_tokens = if pipe_tokens > pipe_burst {
+        pipe_burst
+    } else {
+        pipe_tokens
+    };
+    pipe.last_refill_ns = now_ns;
+
+    let queue_tokens = if queue_cfg.ns_per_byte == 0 {
+        0
+    } else {
+        let earned = qos_refill(
+            now_ns.saturating_sub(queue.last_refill_ns),
+            queue_cfg.ns_per_byte,
+            queue_cfg.burst_bytes,
+        );
+        let tokens = queue.tokens.saturating_add(earned);
+        if tokens > queue_cfg.burst_bytes {
+            queue_cfg.burst_bytes
+        } else {
+            tokens
+        }
+    };
+    queue.last_refill_ns = now_ns;
+
+    let cost = if len > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        len as i64
+    };
+    if queue_cfg.ns_per_byte != 0 && queue_tokens >= len {
+        queue.tokens = queue_tokens - len;
+        let owed = pipe_tokens.saturating_sub(cost);
+        pipe.tokens = if owed < -pipe_burst {
+            -pipe_burst
+        } else {
+            owed
+        };
+        return QosCharge::Share;
+    }
+    queue.tokens = queue_tokens;
+    if pipe_tokens >= cost {
+        pipe.tokens = pipe_tokens - cost;
+        return QosCharge::Borrow;
+    }
+    pipe.tokens = pipe_tokens;
+    QosCharge::Drop
+}
+
 // SAFETY: both are #[repr(C)], Copy, 'static and made of u64 fields only, so
 // they hold no padding and every bit pattern is a valid value.
 #[cfg(feature = "userspace")]
@@ -492,6 +631,148 @@ mod tests {
         assert_eq!(qos_shape_of(0, 0, 0, 4, 6, 46), Some(QOS_SHAPE_DPORT));
     }
 
+    // ── Shares of a pipe ─────────────────────────────────────────────
+
+    const PIPE_BPS: u64 = 10_000_000;
+    const BURST: u64 = 64_000;
+    const PACKET: u64 = 1_500;
+    const SECONDS: u64 = 10;
+
+    fn pipe_cfg() -> QosPipeConfig {
+        QosPipeConfig {
+            ns_per_byte: 8_000_000_000 / PIPE_BPS,
+            burst_bytes: BURST,
+            delay_ns: 0,
+            loss_rate: 0,
+            pipe_id: 0,
+            enabled: 1,
+            group_mask: 0,
+            tenant_id: 0,
+            direction: QOS_DIR_EGRESS,
+            _pad: [0; 3],
+        }
+    }
+
+    /// The share userspace writes for `weight` out of `total`.
+    fn queue_cfg(weight: u64, total: u64) -> QosQueueConfig {
+        QosQueueConfig {
+            ns_per_byte: 8_000_000_000 * total / (PIPE_BPS * weight),
+            burst_bytes: BURST * weight / total,
+            weight: weight as u16,
+            pipe_id: 0,
+            enabled: 1,
+            _padding: [0; 4],
+        }
+    }
+
+    /// Run two queues into one pipe for [`SECONDS`], each offering
+    /// `offered_bps`, and answer the bits per second each got through.
+    fn run(queues: [QosQueueConfig; 2], offered_bps: [u64; 2]) -> [u64; 2] {
+        let pipe_cfg = pipe_cfg();
+        let mut pipe = QosPipeState {
+            tokens: 0,
+            last_refill_ns: 0,
+        };
+        let mut states = [QosQueueState {
+            tokens: 0,
+            last_refill_ns: 0,
+        }; 2];
+        let mut next = [0u64, 1];
+        let mut passed = [0u64; 2];
+        let end = SECONDS * 1_000_000_000;
+        loop {
+            let q = if next[0] <= next[1] { 0 } else { 1 };
+            if next[q] >= end {
+                break;
+            }
+            let verdict = qos_charge(
+                &mut pipe,
+                &pipe_cfg,
+                &mut states[q],
+                &queues[q],
+                next[q],
+                PACKET,
+            );
+            if verdict != QosCharge::Drop {
+                passed[q] += PACKET;
+            }
+            next[q] = match offered_bps[q] {
+                0 => u64::MAX,
+                bps => next[q] + PACKET * 8 * 1_000_000_000 / bps,
+            };
+        }
+        passed.map(|bytes| bytes * 8 / SECONDS)
+    }
+
+    fn within(got: u64, want: u64, percent: u64) -> bool {
+        got.abs_diff(want) * 100 <= want * percent
+    }
+
+    #[test]
+    fn a_saturated_pipe_splits_three_to_one_by_weight() {
+        let [a, b] = run([queue_cfg(3, 4), queue_cfg(1, 4)], [50_000_000, 50_000_000]);
+        assert!(within(a, 7_500_000, 3), "weight 3 got {a} bit/s");
+        assert!(within(b, 2_500_000, 3), "weight 1 got {b} bit/s");
+        assert!(
+            a + b <= PIPE_BPS + 2 * BURST * 8 / SECONDS,
+            "ceiling: {}",
+            a + b
+        );
+    }
+
+    #[test]
+    fn an_idle_queue_leaves_its_share_to_the_one_sending() {
+        let [a, b] = run([queue_cfg(3, 4), queue_cfg(1, 4)], [0, 50_000_000]);
+        assert_eq!(a, 0);
+        assert!(within(b, PIPE_BPS, 3), "the only sender got {b} bit/s");
+    }
+
+    #[test]
+    fn a_queue_under_its_share_keeps_it_and_the_rest_is_lent() {
+        let [a, b] = run([queue_cfg(3, 4), queue_cfg(1, 4)], [5_000_000, 50_000_000]);
+        assert!(within(a, 5_000_000, 3), "under its share, got {a} bit/s");
+        assert!(within(b, 5_000_000, 3), "the leftover, got {b} bit/s");
+    }
+
+    #[test]
+    fn one_queue_alone_is_the_pipe() {
+        let [a, _] = run([queue_cfg(1, 1), queue_cfg(1, 1)], [50_000_000, 0]);
+        assert!(within(a, PIPE_BPS, 3), "got {a} bit/s");
+    }
+
+    #[test]
+    fn the_debt_a_share_runs_up_is_bounded_by_one_burst() {
+        let pipe_cfg = pipe_cfg();
+        let queue = queue_cfg(1, 1);
+        let mut pipe = QosPipeState {
+            tokens: -(BURST as i64),
+            last_refill_ns: 1_000,
+        };
+        let mut state = QosQueueState {
+            tokens: BURST,
+            last_refill_ns: 1_000,
+        };
+        let verdict = qos_charge(&mut pipe, &pipe_cfg, &mut state, &queue, 1_000, PACKET);
+        assert_eq!(verdict, QosCharge::Share);
+        assert_eq!(pipe.tokens, -(BURST as i64));
+        let verdict = qos_charge(
+            &mut pipe,
+            &pipe_cfg,
+            &mut queue_state(0),
+            &queue,
+            1_000,
+            PACKET,
+        );
+        assert_eq!(verdict, QosCharge::Drop, "a pipe in debt lends nothing");
+    }
+
+    fn queue_state(tokens: u64) -> QosQueueState {
+        QosQueueState {
+            tokens,
+            last_refill_ns: 1_000,
+        }
+    }
+
     // ── Size tests ───────────────────────────────────────────────────
 
     #[test]
@@ -506,12 +787,17 @@ mod tests {
 
     #[test]
     fn qos_queue_config_size() {
-        assert_eq!(mem::size_of::<QosQueueConfig>(), 4);
+        assert_eq!(mem::size_of::<QosQueueConfig>(), 24);
     }
 
     #[test]
     fn qos_queue_config_alignment() {
-        assert_eq!(mem::align_of::<QosQueueConfig>(), 1);
+        assert_eq!(mem::align_of::<QosQueueConfig>(), 8);
+    }
+
+    #[test]
+    fn qos_queue_state_size() {
+        assert_eq!(mem::size_of::<QosQueueState>(), 16);
     }
 
     #[test]
@@ -598,9 +884,12 @@ mod tests {
 
     #[test]
     fn qos_queue_config_field_offsets() {
-        assert_eq!(mem::offset_of!(QosQueueConfig, pipe_id), 0);
-        assert_eq!(mem::offset_of!(QosQueueConfig, enabled), 1);
-        assert_eq!(mem::offset_of!(QosQueueConfig, _padding), 2);
+        assert_eq!(mem::offset_of!(QosQueueConfig, ns_per_byte), 0);
+        assert_eq!(mem::offset_of!(QosQueueConfig, burst_bytes), 8);
+        assert_eq!(mem::offset_of!(QosQueueConfig, weight), 16);
+        assert_eq!(mem::offset_of!(QosQueueConfig, pipe_id), 18);
+        assert_eq!(mem::offset_of!(QosQueueConfig, enabled), 19);
+        assert_eq!(mem::offset_of!(QosQueueConfig, _padding), 20);
     }
 
     #[test]

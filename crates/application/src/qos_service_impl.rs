@@ -164,18 +164,12 @@ impl QosAppService {
             return;
         }
 
-        if let Err(e) = port.load_pipes(self.engine.pipes()) {
-            tracing::warn!("failed to sync QoS pipes to eBPF map: {e}");
-            return;
-        }
-
-        if let Err(e) = port.load_queues(self.engine.queues()) {
-            tracing::warn!("failed to sync QoS queues to eBPF map: {e}");
-            return;
-        }
-
-        if let Err(e) = port.load_classifiers(self.engine.classifiers()) {
-            tracing::warn!("failed to sync QoS classifiers to eBPF map: {e}");
+        if let Err(e) = port.load(
+            self.engine.pipes(),
+            self.engine.queues(),
+            self.engine.classifiers(),
+        ) {
+            tracing::warn!("failed to sync QoS rules to eBPF maps: {e}");
         }
     }
 
@@ -216,6 +210,7 @@ mod tests {
             id: id.to_string(),
             pipe_id: pipe_id.to_string(),
             enabled: true,
+            weight: 1,
         }
     }
 

@@ -95,6 +95,7 @@ impl QosEngine {
         if self.queues.len() >= MAX_QUEUES {
             return Err(QosError::InvalidQueue("maximum queue count reached".to_string()).into());
         }
+        queue.validate()?;
         self.queues.push(queue);
         Ok(())
     }
@@ -116,6 +117,7 @@ impl QosEngine {
             return Err(QosError::InvalidQueue("maximum queue count exceeded".to_string()).into());
         }
         for (i, queue) in queues.iter().enumerate() {
+            queue.validate()?;
             if queues[i + 1..].iter().any(|q| q.id == queue.id) {
                 return Err(QosError::DuplicateQueue {
                     id: queue.id.clone(),
@@ -205,6 +207,7 @@ mod tests {
             id: id.to_string(),
             pipe_id: pipe_id.to_string(),
             enabled: true,
+            weight: 1,
         }
     }
 

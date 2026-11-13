@@ -49,6 +49,8 @@ pub struct QosQueueResponse {
     pub id: String,
     pub pipe_id: String,
     pub enabled: bool,
+    /// Relative share of the pipe when it is saturated.
+    pub weight: u16,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -111,6 +113,9 @@ fn default_direction() -> String {
 pub struct CreateQosQueueRequest {
     pub id: String,
     pub pipe_id: String,
+    /// Relative share of the pipe when it is saturated, at least 1.
+    #[serde(default = "domain::qos::entity::default_weight")]
+    pub weight: u16,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -169,6 +174,7 @@ impl QosQueueResponse {
             id: queue.id.clone(),
             pipe_id: queue.pipe_id.clone(),
             enabled: queue.enabled,
+            weight: queue.weight,
         }
     }
 }
@@ -566,6 +572,7 @@ pub async fn create_qos_queue(
         id: req.id,
         pipe_id: req.pipe_id,
         enabled: true,
+        weight: req.weight,
     };
 
     let svc = state.qos_service()?;
@@ -776,11 +783,13 @@ mod tests {
             id: "q-1".to_string(),
             pipe_id: "p-1".to_string(),
             enabled: true,
+            weight: 3,
         };
         let resp = QosQueueResponse::from_domain(&queue);
         assert_eq!(resp.id, "q-1");
         assert_eq!(resp.pipe_id, "p-1");
         assert!(resp.enabled);
+        assert_eq!(resp.weight, 3);
     }
 
     #[test]
@@ -837,11 +846,13 @@ mod tests {
             id: "q-1".to_string(),
             pipe_id: "p-1".to_string(),
             enabled: true,
+            weight: 3,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "q-1");
         assert_eq!(json["pipe_id"], "p-1");
         assert!(json["enabled"].as_bool().unwrap());
+        assert_eq!(json["weight"], 3);
     }
 
     #[test]

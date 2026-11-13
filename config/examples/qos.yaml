@@ -10,17 +10,21 @@
 #   Classifiers → Queues → Pipes
 #
 #   - Pipes hold every shaping parameter: bandwidth, delay, loss, burst
-#   - Queues name the pipe that shapes them; disabling a queue detaches
-#     every classifier pointing at it without editing them
+#   - Queues name the pipe that shapes them and their weight on it: when
+#     the pipe is saturated its enabled queues split it in proportion to
+#     their weights, and a share a queue leaves unused goes to the others.
+#     Disabling a queue detaches every classifier pointing at it without
+#     editing them
 #   - Classifiers match traffic (5-tuple + DSCP) and assign it to a queue
 #
 # The program is attached to both TC hooks, and each pipe declares the hook
 # it shapes, so a pipe is only charged once for a forwarded packet.
 #
-# Bandwidth enforcement uses EDT (Earliest Departure Time) timestamps
-# when available, falling back to kernel-side token bucket drops. EDT only
-# paces on the way out, so `delay` needs the `fq` qdisc on the interface
-# and has no effect on an ingress-only pipe.
+# Bandwidth is enforced by dropping what exceeds the token buckets, not by
+# queueing it: a pipe sheds its excess rather than delaying it, and keeps no
+# backlog to manage. `delay` sets an EDT (Earliest Departure Time) timestamp,
+# which only paces on the way out, so it needs the `fq` qdisc on the
+# interface and has no effect on an ingress-only pipe.
 #
 # Fields (QosPipe):
 #   id         - Unique pipe identifier (required)
@@ -119,17 +123,22 @@ qos:
       enabled: false           # Disabled - for testing only
 
   # ── Queues ─────────────────────────────────────────────────────────
-  # Queues group the classifiers that share a pipe.
+  # Queues group the classifiers that share a pipe. `weight` (default 1, at
+  # least 1) is the queue's share of its pipe once the pipe is full: each
+  # enabled queue is owed weight / sum of the pipe's enabled weights.
 
   queues:
-    # Default queue on the WAN pipe - catch-all traffic
+    # Default queue on the WAN pipe - catch-all traffic, one part in four
+    # when interactive traffic fills the pipe
     - id: queue-default
       pipe_id: pipe-wan
+      weight: 1
       enabled: true
 
-    # Interactive traffic (SSH, web browsing)
+    # Interactive traffic (SSH, web browsing), three parts in four
     - id: queue-interactive
       pipe_id: pipe-wan
+      weight: 3
       enabled: true
 
     # VoIP queue - attached to the reserved VoIP pipe

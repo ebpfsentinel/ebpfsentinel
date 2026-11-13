@@ -40,7 +40,6 @@ l7:
 
 qos:
   enabled: true
-  scheduler: fifo
   pipes:
     - id: pipe-test-10m
       bandwidth: "10mbps"
@@ -54,9 +53,24 @@ qos:
       # measure an unshaped path while reporting on the shaper.
       direction: both
       enabled: true
+    # Shared by two queues weighted three to one, each fed more than the
+    # whole pipe, so the split between them is the shaper's and nothing else.
+    - id: pipe-test-split
+      bandwidth: "10mbps"
+      burst: "64kb"
+      direction: both
+      enabled: true
   queues:
     - id: queue-test-1
       pipe_id: pipe-test-10m
+      enabled: true
+    - id: queue-test-heavy
+      pipe_id: pipe-test-split
+      weight: 3
+      enabled: true
+    - id: queue-test-light
+      pipe_id: pipe-test-split
+      weight: 1
       enabled: true
   classifiers:
     - id: cls-test-iperf
@@ -65,6 +79,18 @@ qos:
       match:
         dst_port: 5201
         protocol: tcp
+    - id: cls-test-heavy
+      queue_id: queue-test-heavy
+      priority: 0
+      match:
+        dst_port: 5301
+        protocol: udp
+    - id: cls-test-light
+      queue_id: queue-test-light
+      priority: 0
+      match:
+        dst_port: 5302
+        protocol: udp
 
 alerting:
   enabled: true
