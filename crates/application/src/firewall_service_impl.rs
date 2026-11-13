@@ -1062,7 +1062,12 @@ impl FirewallAppService {
                     action: FirewallAction::Allow,
                     protocol: Protocol::Tcp,
                     src_ip: None,
-                    dst_ip: None,
+                    // Named, so that this copy is the IPv4 one and the copy
+                    // below the IPv6 one, each listed under its own id.
+                    dst_ip: Some(IpNetwork::V4 {
+                        addr: 0,
+                        prefix_len: 0,
+                    }),
                     src_port: None,
                     src_port_alias: None,
                     dst_port: Some(PortRange {
@@ -1172,21 +1177,31 @@ impl FirewallAppService {
                     return None;
                 }
             };
-        Some(
-            kernel_rules
-                .into_iter()
-                .map(|kernel_rule| {
-                    if kernel_rule.rule.is_v6() {
-                        KernelEntry::V6(kernel_rule.rule.to_ebpf_entry_v6())
-                    } else {
-                        KernelEntry::V4(kernel_rule.rule.to_ebpf_entry_with_sets(
-                            kernel_rule.src_set_id,
-                            kernel_rule.dst_set_id,
-                        ))
-                    }
-                })
-                .collect(),
-        )
+        // A rule naming no address matches both families, as the engine and
+        // the exposure reading take it, and each family's packets are matched
+        // against their own array only, so it is held in both. A set is
+        // looked up against IPv4 addresses only, so a rule naming one stays
+        // in the IPv4 array.
+        let mut entries = Vec::with_capacity(kernel_rules.len());
+        for kernel_rule in kernel_rules {
+            let rule = &kernel_rule.rule;
+            if rule.is_v6() {
+                entries.push(KernelEntry::V6(rule.to_ebpf_entry_v6()));
+                continue;
+            }
+            entries.push(KernelEntry::V4(rule.to_ebpf_entry_with_sets(
+                kernel_rule.src_set_id,
+                kernel_rule.dst_set_id,
+            )));
+            if rule.src_ip.is_none()
+                && rule.dst_ip.is_none()
+                && kernel_rule.src_set_id == 0
+                && kernel_rule.dst_set_id == 0
+            {
+                entries.push(KernelEntry::V6(rule.to_ebpf_entry_v6()));
+            }
+        }
+        Some(entries)
     }
 
     /// Full-reload sync: partition rules into V4/V6, apply mode overrides,
@@ -1499,8 +1514,13 @@ mod tests {
         let map = RecordingMap::default();
         let mut svc = make_service();
         svc.set_map_port(Box::new(map.clone()));
-        svc.add_rule(shadow("block-a", 5, FirewallAction::Deny))
-            .unwrap();
+        // An IPv4 rule and an IPv6 one, so each holds slot 0 of its family.
+        let mut v4 = shadow("block-a", 5, FirewallAction::Deny);
+        v4.src_ip = Some(IpNetwork::V4 {
+            addr: 0x0a00_0001,
+            prefix_len: 32,
+        });
+        svc.add_rule(v4).unwrap();
         let mut v6 = shadow("block-b", 6, FirewallAction::Allow);
         v6.src_ip = Some(IpNetwork::V6 {
             addr: [0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]
@@ -1658,6 +1678,32 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_naming_no_address_is_held_for_both_families() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(map.clone()));
+        let mut any = make_rule("any-9999", 10);
+        any.action = FirewallAction::Deny;
+        any.dst_port = Some(PortRange {
+            start: 9999,
+            end: 9999,
+        });
+        let mut only_v4 = make_rule("only-v4", 20);
+        only_v4.dst_ip = Some(IpNetwork::V4 {
+            addr: 0x0a00_0001,
+            prefix_len: 32,
+        });
+        svc.reload_rules(vec![any, only_v4]).unwrap();
+
+        let v4 = map.v4.lock().unwrap();
+        let v6 = map.v6.lock().unwrap();
+        assert_eq!(v4.len(), 2);
+        assert_eq!(v6.len(), 1);
+        assert_eq!(v6[0].dst_port_start, 9999);
+        assert_eq!(v6[0].action, v4[0].action);
+    }
+
+    #[test]
     fn a_workload_rule_never_reaches_the_packet_path() {
         let map = RecordingMap::default();
         let mut svc = make_service();
@@ -1677,10 +1723,11 @@ mod tests {
         svc.reload_rules(vec![dns, make_rule("plain", 20)]).unwrap();
 
         // Both rules are the engine's, and only the one naming no workload is
-        // the kernel array's: the other would refuse port 53 to every task.
+        // the kernel arrays': the other would refuse port 53 to every task.
+        // Naming no address, it is held for both families.
         assert_eq!(svc.list_rules().len(), 2);
         assert_eq!(map.v4.lock().unwrap().len(), 1);
-        assert!(map.v6.lock().unwrap().is_empty());
+        assert_eq!(map.v6.lock().unwrap().len(), 1);
     }
 
     #[test]
