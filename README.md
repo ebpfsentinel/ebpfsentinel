@@ -24,7 +24,7 @@ A snapshot of the capabilities below - see the [Features guide](https://github.c
 | **DDoS Mitigation** | XDP-speed SYN cookies + SYN/ICMP/UDP flood detection, drops attacks before the TCP stack |
 | **Stateful Firewall** | L3/L4 filtering with conntrack, GeoIP, zones, scheduling, shadow rules, VLAN/QinQ, IPv4/IPv6 |
 | **Workload Firewall** | Rules naming an executable, a systemd unit, a cgroup or a container, decided at `connect()`, `sendmsg()` and `bind()`, with destinations by name or by remote workload |
-| **Executables Allowed on the Network** | Only listed executables open internet sockets, decided in the kernel from the calling task. Needs the BPF LSM active at boot (`lsm=` including `bpf`), which not every distribution or host provider sets: `/api/v1/ebpf/kernel-features` answers for your own host |
+| **Executables Allowed on the Network** | Only listed executables open internet sockets, decided in the kernel from the calling task. Needs the BPF LSM active at boot (`lsm=` including `bpf`), which not every distribution or host provider sets: `ebpfsentinel-agent ebpf host-check` answers for your own host in one line, as any user with no agent running, and names the `lsm=` value to set; a running agent reports the same in `/api/v1/ebpf/kernel-features`. Without it an observing list is skipped and an enforcing one refuses to start the agent |
 | **Kubernetes NetworkPolicy** | Enforces `NetworkPolicy` objects where the CNI leaves them unenforced (Flannel, kubenet) |
 | **Cluster IP at connect()** | An opted-in pod's connection to a Service address sent straight to a ready backend, without kube-proxy's NAT |
 | **L7 Filtering** | Protocol-aware rules for HTTP, TLS/SNI, gRPC, SMTP, FTP, SMB |

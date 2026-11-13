@@ -5719,11 +5719,57 @@ fn print_bpf_lsm(report: &crate::api_client::BpfLsmReport) {
     }
 }
 
+/// What the list of executables allowed to reach the network is called in
+/// the one line a buyer reads first.
+const NETWORK_EXECUTABLES_LABEL: &str = "Executables allowed to reach the network";
+
+/// The plain answer read before any detail: whether the list of executables
+/// allowed to reach the network loads on this host and, where it does not,
+/// what to change. `below_floor` is the agent's own refusal of this kernel,
+/// `None` when the kernel meets the floor or could not be read, the BPF LSM
+/// answer then deciding alone.
+fn network_executables_verdict(
+    below_floor: Option<&str>,
+    report: &crate::api_client::BpfLsmReport,
+) -> Vec<String> {
+    if below_floor.is_none() && report.active {
+        return vec![format!(
+            "{NETWORK_EXECUTABLES_LABEL}: will load on this host."
+        )];
+    }
+    let mut lines = vec![format!(
+        "{NETWORK_EXECUTABLES_LABEL}: will not load on this host."
+    )];
+    if let Some(refusal) = below_floor {
+        lines.push(format!(
+            "  Why:        the agent refuses this kernel: {refusal}"
+        ));
+    }
+    if !report.active {
+        if let Some(reason) = &report.reason {
+            lines.push(format!("  Why:        {reason}"));
+        }
+        if let Some(remedy) = &report.remedy {
+            lines.push(format!("  To change:  {remedy}"));
+        }
+    }
+    if let Some(capability) = adapters::ebpf::capabilities::find("network_executables") {
+        lines.push(format!("  Until then: {}.", capability.fallback));
+    }
+    lines
+}
+
 /// Print the two blocks that depend on the BPF LSM, saying so when an older
 /// agent does not report one.
 fn print_lsm_blocks(resp: &crate::api_client::KernelFeaturesResponse) {
     match &resp.bpf_lsm {
-        Some(report) => print_bpf_lsm(report),
+        Some(report) => {
+            println!();
+            for line in network_executables_verdict(None, report) {
+                println!("{line}");
+            }
+            print_bpf_lsm(report);
+        }
         None => println!("\nBPF LSM\n  Not reported by this agent."),
     }
     match &resp.network_executables {
@@ -5896,14 +5942,24 @@ fn print_write_refusal(report: &crate::api_client::WriteRefusalReport) {
 }
 
 /// Answer for the host this runs on, with no agent running and nothing
-/// configured: whether an LSM program could attach here. It reads the same
-/// two files the agent reads, so it cannot disagree with what the agent
-/// would report once installed.
+/// configured: whether the list of executables allowed to reach the network
+/// loads here, in one line, then whether an LSM program could attach. It
+/// reads the same files the agent reads, so it cannot disagree with what the
+/// agent would report once installed.
 pub fn cmd_ebpf_host_check(output: OutputFormat) -> Result<()> {
     let report = crate::api_client::BpfLsmReport::from(adapters::ebpf::lsm_probe::status());
     if output == OutputFormat::Json {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
+    }
+    let below_floor = match adapters::ebpf::kernel_probe::probe() {
+        Err(e @ adapters::ebpf::kernel_probe::KernelProbeError::BelowMinimum { .. }) => {
+            Some(e.to_string())
+        }
+        _ => None,
+    };
+    for line in network_executables_verdict(below_floor.as_deref(), &report) {
+        println!("{line}");
     }
     print_bpf_lsm(&report);
     Ok(())
@@ -7380,6 +7436,55 @@ fn print_source_only(rules: &[crate::api_client::WorkloadReachEntry]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lsm(active: bool) -> crate::api_client::BpfLsmReport {
+        crate::api_client::BpfLsmReport {
+            active,
+            built: Some(true),
+            modules: vec!["capability".into(), "apparmor".into()],
+            reason: (!active).then(|| "bpf is not among the active security modules".into()),
+            remedy: (!active).then(|| {
+                "add bpf to the lsm= kernel boot parameter, keeping the modules already \
+                 active, and reboot: lsm=apparmor,bpf"
+                    .into()
+            }),
+        }
+    }
+
+    #[test]
+    fn the_verdict_says_in_one_line_that_the_list_loads() {
+        let lines = network_executables_verdict(None, &lsm(true));
+        assert_eq!(
+            lines,
+            ["Executables allowed to reach the network: will load on this host."]
+        );
+    }
+
+    #[test]
+    fn the_verdict_names_the_boot_parameter_where_the_list_does_not_load() {
+        let lines = network_executables_verdict(None, &lsm(false));
+        assert_eq!(
+            lines[0],
+            "Executables allowed to reach the network: will not load on this host."
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("  To change:") && l.ends_with("lsm=apparmor,bpf"))
+        );
+        assert!(lines.iter().any(|l| l.starts_with("  Until then:")));
+    }
+
+    #[test]
+    fn the_verdict_refuses_a_kernel_below_the_floor_even_with_the_lsm_active() {
+        let lines = network_executables_verdict(
+            Some("kernel 6.8 is below the required minimum 6.12. x"),
+            &lsm(true),
+        );
+        assert!(lines[0].ends_with("will not load on this host."));
+        assert!(lines[1].contains("the agent refuses this kernel: kernel 6.8"));
+        assert!(!lines.iter().any(|l| l.contains("To change:  add bpf")));
+    }
 
     fn process(value: serde_json::Value) -> ProcessEntryResponse {
         serde_json::from_value(value).expect("a process entry")
