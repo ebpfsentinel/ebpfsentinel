@@ -11,7 +11,7 @@ use domain::auth::entity::JwtClaims;
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
 use crate::brokered::brokered;
 
@@ -55,8 +55,16 @@ pub struct ConnectionResponse {
 
 // ── Query params ─────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+/// Response to `POST /api/v1/conntrack/flush`.
+#[derive(Serialize, ToSchema)]
+pub struct FlushResponse {
+    /// How many tracked connections were removed.
+    pub flushed: u64,
+}
+
+#[derive(Deserialize, IntoParams)]
 pub struct ListQuery {
+    /// How many connections to return, 100 when absent.
     #[serde(default = "default_limit")]
     pub limit: usize,
 }
@@ -72,6 +80,7 @@ fn default_limit() -> usize {
     get, path = "/api/v1/conntrack/status",
     tag = "ConnTrack",
     responses((status = 200, description = "Conntrack status", body = ConnTrackStatusResponse),
+        (status = 404, description = "Feature not enabled on this agent", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -100,7 +109,10 @@ pub async fn conntrack_status(
 #[utoipa::path(
     get, path = "/api/v1/conntrack/connections",
     tag = "ConnTrack",
+    params(ListQuery),
     responses((status = 200, description = "Connection list", body = Vec<ConnectionResponse>),
+        (status = 404, description = "Conntrack not enabled", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -152,7 +164,9 @@ pub async fn list_connections(
 #[utoipa::path(
     post, path = "/api/v1/conntrack/flush",
     tag = "ConnTrack",
-    responses((status = 200, description = "Connections flushed"),
+    responses((status = 200, description = "Connections flushed", body = FlushResponse),
+        (status = 404, description = "Conntrack not enabled", body = ErrorBody),
+        (status = 500, description = "The table could not be flushed", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -180,10 +194,7 @@ pub async fn flush_connections(
             message: format!("conntrack flush failed: {e}"),
         })?;
     tracing::info!(count, "conntrack table flushed via API");
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({ "flushed": count })),
-    ))
+    Ok((StatusCode::OK, Json(FlushResponse { flushed: count })))
 }
 
 /// `GET /api/v1/conntrack/events` - Server-Sent Events stream of

@@ -86,6 +86,8 @@ fn ensure_path_safe_id(id: &str) -> Result<(), ApiError> {
     responses(
         (status = 201, description = "Capture started", body = CaptureResponse),
         (status = 409, description = "Another capture is already running", body = ErrorBody),
+        (status = 400, description = "Invalid request", body = ErrorBody),
+        (status = 503, description = "Service not available on this agent", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -219,6 +221,7 @@ pub async fn start_capture(
     tag = "Captures",
     responses(
         (status = 200, description = "Capture sessions", body = CaptureListResponse),
+        (status = 503, description = "Service not available on this agent", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -251,6 +254,7 @@ pub async fn list_captures(
     responses(
         (status = 200, description = "Capture stopped", body = CaptureResponse),
         (status = 404, description = "Capture not found", body = ErrorBody),
+        (status = 503, description = "Service not available on this agent", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),

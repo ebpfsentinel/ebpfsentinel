@@ -70,6 +70,7 @@ pub struct ResponseListResponse {
     responses(
         (status = 201, description = "Response action created", body = ResponseActionResponse),
         (status = 400, description = "Invalid request", body = ErrorBody),
+        (status = 503, description = "Service not available on this agent", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -196,6 +197,7 @@ pub async fn create_response_action(
     tag = "Responses",
     responses(
         (status = 200, description = "Active response actions", body = ResponseListResponse),
+        (status = 503, description = "Service not available on this agent", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -241,6 +243,7 @@ pub async fn list_response_actions(
     responses(
         (status = 200, description = "Action revoked", body = ResponseActionResponse),
         (status = 404, description = "Action not found", body = ErrorBody),
+        (status = 503, description = "Service not available on this agent", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),

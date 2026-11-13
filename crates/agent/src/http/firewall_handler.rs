@@ -552,6 +552,7 @@ pub async fn list_rules(State(state): State<Arc<AppState>>) -> Json<Vec<RuleResp
         (status = 201, description = "Rule created", body = RuleResponse),
         (status = 400, description = "Validation error", body = ErrorBody),
         (status = 409, description = "Duplicate rule", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -870,6 +871,7 @@ pub async fn shadow_report(
     tag = "Firewall",
     responses(
         (status = 200, description = "The workload rules in force, in kernel order", body = WorkloadRulesResponse),
+        (status = 500, description = "Internal error", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
         (status = 503, description = "The workload firewall is not loaded", body = ErrorBody),
@@ -1109,6 +1111,7 @@ fn entry_of(reach: domain::firewall::workload::WorkloadReach) -> WorkloadReachEn
     responses(
         (status = 200, description = "Rules naming the workload, in kernel order", body = WorkloadReachResponse),
         (status = 400, description = "No workload named", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
         (status = 404, description = "No such task in the process table", body = ErrorBody),

@@ -4,7 +4,8 @@
     "title": "eBPFsentinel Agent API",
     "description": "REST API for the eBPFsentinel network security agent.\n\nProvides endpoints for managing firewall rules, IPS/IDS policies, rate limiting, L7 filtering, threat intelligence, alerts, and audit logs.\n\nMost endpoints require authentication via JWT Bearer token or API key.",
     "license": {
-      "name": "Apache-2.0"
+      "name": "AGPL-3.0-only",
+      "identifier": "AGPL-3.0-only"
     },
     "version": "v0.0.0-dev"
   },
@@ -310,6 +311,16 @@
               }
             }
           },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "503": {
             "description": "Alert store not configured",
             "content": {
@@ -573,6 +584,16 @@
               }
             }
           },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "503": {
             "description": "Alert store not configured",
             "content": {
@@ -645,6 +666,26 @@
           },
           "404": {
             "description": "Alert not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service not available on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -801,6 +842,16 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -824,6 +875,7 @@
           {
             "name": "id",
             "in": "path",
+            "description": "Identifier of an External alias",
             "required": true,
             "schema": {
               "type": "string"
@@ -842,7 +894,14 @@
         },
         "responses": {
           "200": {
-            "description": "Content loaded"
+            "description": "Content loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExternalAliasContentResponse"
+                }
+              }
+            }
           },
           "400": {
             "description": "Invalid content or alias is not External",
@@ -875,7 +934,7 @@
             }
           },
           "404": {
-            "description": "Alias not found",
+            "description": "Alias service not enabled",
             "content": {
               "application/json": {
                 "schema": {
@@ -1025,6 +1084,16 @@
               }
             }
           },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "503": {
             "description": "Audit store not configured",
             "content": {
@@ -1108,6 +1177,16 @@
               }
             }
           },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "503": {
             "description": "Rule change store not configured",
             "content": {
@@ -1166,6 +1245,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Service not available on this agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -1206,6 +1295,16 @@
               }
             }
           },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Authentication required",
             "content": {
@@ -1228,6 +1327,16 @@
           },
           "409": {
             "description": "Another capture is already running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service not available on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -1305,6 +1414,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Service not available on this agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -1326,7 +1445,14 @@
         "operationId": "get_config",
         "responses": {
           "200": {
-            "description": "Current sanitized configuration"
+            "description": "Current sanitized configuration, secrets removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
           },
           "401": {
             "description": "Authentication required",
@@ -1373,6 +1499,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ReloadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -1515,6 +1651,18 @@
         ],
         "summary": "`GET /api/v1/conntrack/connections` - list tracked connections.",
         "operationId": "list_connections",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many connections to return, 100 when absent.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Connection list",
@@ -1541,6 +1689,26 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Conntrack not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
             "content": {
               "application/json": {
                 "schema": {
@@ -1625,7 +1793,14 @@
         "operationId": "flush_connections",
         "responses": {
           "200": {
-            "description": "Connections flushed"
+            "description": "Connections flushed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlushResponse"
+                }
+              }
+            }
           },
           "401": {
             "description": "Authentication required",
@@ -1639,6 +1814,26 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Conntrack not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The table could not be flushed",
             "content": {
               "application/json": {
                 "schema": {
@@ -1688,6 +1883,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -1747,6 +1952,16 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -1766,6 +1981,18 @@
         ],
         "summary": "`GET /api/v1/ddos/attacks/history` - attack history.",
         "operationId": "ddos_history",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many past attacks to return, 100 when absent.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Attack history",
@@ -1792,6 +2019,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "DDoS protection not enabled",
             "content": {
               "application/json": {
                 "schema": {
@@ -1844,6 +2081,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -1911,6 +2158,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -2030,6 +2287,16 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -2075,6 +2342,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -2141,6 +2418,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -2183,6 +2470,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -2324,6 +2621,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DnsCacheListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -3717,6 +4024,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -4091,6 +4408,16 @@
               }
             }
           },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The workload firewall is not loaded",
             "content": {
@@ -4142,6 +4469,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
             "content": {
               "application/json": {
                 "schema": {
@@ -5162,6 +5499,16 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -5222,6 +5569,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -5402,6 +5759,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -6304,6 +6671,16 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -6364,6 +6741,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -6486,6 +6873,16 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -6528,6 +6925,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -6608,6 +7015,16 @@
           },
           "404": {
             "description": "Network policy or connection tracking is off on this node",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
             "content": {
               "application/json": {
                 "schema": {
@@ -7695,6 +8112,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Service not available on this agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -7757,6 +8184,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service not available on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -7834,6 +8271,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Service not available on this agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -7879,6 +8326,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -7944,8 +8401,28 @@
               }
             }
           },
+          "404": {
+            "description": "Feature not enabled on this agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "409": {
             "description": "Gateway conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
             "content": {
               "application/json": {
                 "schema": {
@@ -7987,6 +8464,16 @@
           "204": {
             "description": "Gateway deleted"
           },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Authentication required",
             "content": {
@@ -8009,6 +8496,16 @@
           },
           "404": {
             "description": "Gateway not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
             "content": {
               "application/json": {
                 "schema": {
@@ -8068,6 +8565,16 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -8110,6 +8617,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -8932,6 +9449,16 @@
               }
             }
           },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The kernel refused to run the programs",
             "content": {
@@ -8986,6 +9513,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -9061,6 +9598,16 @@
               }
             }
           },
+          "404": {
+            "description": "Feature not enabled on this agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "409": {
             "description": "Zone conflict",
             "content": {
@@ -9115,6 +9662,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -9182,6 +9739,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -9304,6 +9871,16 @@
           },
           "403": {
             "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Feature not enabled on this agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -12458,6 +13035,30 @@
           }
         }
       },
+      "ExternalAliasContentResponse": {
+        "type": "object",
+        "description": "Response to `PUT /api/v1/aliases/{id}/content`.",
+        "required": [
+          "status",
+          "alias",
+          "ips_loaded"
+        ],
+        "properties": {
+          "alias": {
+            "type": "string",
+            "description": "The alias the content was loaded into."
+          },
+          "ips_loaded": {
+            "type": "integer",
+            "description": "How many addresses the alias now holds.",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "description": "Always `ok`: a refused content answers 400."
+          }
+        }
+      },
       "FalsePositiveResponse": {
         "type": "object",
         "required": [
@@ -12764,6 +13365,21 @@
           "records_sent": {
             "type": "integer",
             "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "FlushResponse": {
+        "type": "object",
+        "description": "Response to `POST /api/v1/conntrack/flush`.",
+        "required": [
+          "flushed"
+        ],
+        "properties": {
+          "flushed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many tracked connections were removed.",
             "minimum": 0
           }
         }
@@ -20690,16 +21306,24 @@
       "description": "Threat intel feeds and IOC status"
     },
     {
-      "name": "Ops",
-      "description": "Operational endpoints: config reload, eBPF status"
+      "name": "Operations",
+      "description": "Operational endpoints: configuration, eBPF state, host inventory and host rules"
     },
     {
-      "name": "DNS",
+      "name": "DNS Intelligence",
       "description": "DNS cache, stats, and blocklist management"
     },
     {
-      "name": "Domains",
+      "name": "Domain Intelligence",
       "description": "Domain reputation and blocklist management"
+    },
+    {
+      "name": "GeoIP",
+      "description": "Country and AS lookups for an address"
+    },
+    {
+      "name": "TLS",
+      "description": "TLS handshakes seen on the wire and the posture they add up to"
     },
     {
       "name": "DDoS",

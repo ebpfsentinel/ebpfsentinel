@@ -183,6 +183,7 @@ fn default_enabled() -> bool {
     get, path = "/api/v1/lb/status",
     tag = "Load Balancer",
     responses((status = 200, description = "LB status", body = LbStatusResponse),
+        (status = 404, description = "Feature not enabled on this agent", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -213,6 +214,7 @@ pub async fn lb_status(
     get, path = "/api/v1/lb/services",
     tag = "Load Balancer",
     responses((status = 200, description = "LB services", body = Vec<LbServiceResponse>),
+        (status = 404, description = "Feature not enabled on this agent", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -335,6 +337,7 @@ pub async fn get_lb_service(
     responses(
         (status = 201, description = "Service created", body = LbServiceResponse),
         (status = 400, description = "Validation error", body = ErrorBody),
+        (status = 404, description = "Feature not enabled on this agent", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),

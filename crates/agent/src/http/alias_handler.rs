@@ -18,6 +18,17 @@ pub struct AliasStatusResponse {
     pub alias_count: usize,
 }
 
+/// Response to `PUT /api/v1/aliases/{id}/content`.
+#[derive(Serialize, ToSchema)]
+pub struct ExternalAliasContentResponse {
+    /// Always `ok`: a refused content answers 400.
+    pub status: &'static str,
+    /// The alias the content was loaded into.
+    pub alias: String,
+    /// How many addresses the alias now holds.
+    pub ips_loaded: usize,
+}
+
 /// Request body for `PUT /api/v1/aliases/{id}/content`.
 #[derive(Deserialize, ToSchema)]
 pub struct ExternalAliasContent {
@@ -32,6 +43,7 @@ pub struct ExternalAliasContent {
     get, path = "/api/v1/aliases/status",
     tag = "Aliases",
     responses((status = 200, description = "Alias status", body = AliasStatusResponse),
+        (status = 404, description = "Feature not enabled on this agent", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -57,10 +69,11 @@ pub async fn alias_status(
 #[utoipa::path(
     put, path = "/api/v1/aliases/{id}/content",
     tag = "Aliases",
+    params(("id" = String, Path, description = "Identifier of an External alias")),
     request_body = ExternalAliasContent,
     responses(
-        (status = 200, description = "Content loaded"),
-        (status = 404, description = "Alias not found", body = ErrorBody),
+        (status = 200, description = "Content loaded", body = ExternalAliasContentResponse),
+        (status = 404, description = "Alias service not enabled", body = ErrorBody),
         (status = 400, description = "Invalid content or alias is not External", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
@@ -75,7 +88,7 @@ pub async fn set_external_alias_content(
     claims: Option<Extension<JwtClaims>>,
     Path(alias_id): Path<String>,
     Json(body): Json<ExternalAliasContent>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<ExternalAliasContentResponse>, ApiError> {
     if let Some(Extension(ref claims)) = claims {
         require_write_access(claims)?;
     }
@@ -101,9 +114,9 @@ pub async fn set_external_alias_content(
             message: e.to_string(),
         })?;
 
-    Ok(Json(serde_json::json!({
-        "status": "ok",
-        "alias": alias_id,
-        "ips_loaded": body.ips.len()
-    })))
+    Ok(Json(ExternalAliasContentResponse {
+        status: "ok",
+        alias: alias_id,
+        ips_loaded: body.ips.len(),
+    }))
 }

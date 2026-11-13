@@ -65,7 +65,7 @@ use super::zone_handler;
             Provides endpoints for managing firewall rules, IPS/IDS policies, \
             rate limiting, L7 filtering, threat intelligence, alerts, and audit logs.\n\n\
             Most endpoints require authentication via JWT Bearer token or API key.",
-        license(name = "Apache-2.0"),
+        license(name = "AGPL-3.0-only", identifier = "AGPL-3.0-only"),
     ),
     modifiers(&SecurityAddon),
     paths(
@@ -388,6 +388,7 @@ use super::zone_handler;
         ddos_handler::CreateDdosPolicyRequest,
         // ConnTrack
         conntrack_handler::ConnTrackStatusResponse,
+        conntrack_handler::FlushResponse,
         flow_handler::FlowExportStatusResponse,
         flow_handler::FlowSinkStatusResponse,
         drop_reason_handler::DropReasonsResponse,
@@ -452,6 +453,7 @@ use super::zone_handler;
         // Aliases
         alias_handler::AliasStatusResponse,
         alias_handler::ExternalAliasContent,
+        alias_handler::ExternalAliasContentResponse,
         // Routing
         routing_handler::RoutingStatusResponse,
         routing_handler::GatewayResponse,
@@ -531,9 +533,11 @@ use super::zone_handler;
         (name = "Alerts", description = "Alert queries and false-positive marking"),
         (name = "Audit", description = "Audit log queries and rule history"),
         (name = "Threat Intelligence", description = "Threat intel feeds and IOC status"),
-        (name = "Ops", description = "Operational endpoints: config reload, eBPF status"),
-        (name = "DNS", description = "DNS cache, stats, and blocklist management"),
-        (name = "Domains", description = "Domain reputation and blocklist management"),
+        (name = "Operations", description = "Operational endpoints: configuration, eBPF state, host inventory and host rules"),
+        (name = "DNS Intelligence", description = "DNS cache, stats, and blocklist management"),
+        (name = "Domain Intelligence", description = "Domain reputation and blocklist management"),
+        (name = "GeoIP", description = "Country and AS lookups for an address"),
+        (name = "TLS", description = "TLS handshakes seen on the wire and the posture they add up to"),
         (name = "DDoS", description = "DDoS detection, mitigation, and policy management"),
         (name = "ConnTrack", description = "Connection tracking status and management"),
         (name = "Flows", description = "Flow record export status"),

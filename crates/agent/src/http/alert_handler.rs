@@ -478,6 +478,7 @@ pub fn triaged_response(a: Alert, triage: Option<&AlertTriage>) -> AlertResponse
     responses(
         (status = 200, description = "Paginated alerts", body = AlertListResponse),
         (status = 503, description = "Alert store not configured", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -570,6 +571,7 @@ pub async fn list_alerts(
         (status = 200, description = "The stored alert", body = AlertResponse),
         (status = 404, description = "Alert not found", body = ErrorBody),
         (status = 503, description = "Alert store not configured", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -918,6 +920,8 @@ pub fn apply_bulk_triage(
     responses(
         (status = 200, description = "Alert marked as false positive", body = FalsePositiveResponse),
         (status = 404, description = "Alert not found", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+        (status = 503, description = "Service not available on this agent", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),

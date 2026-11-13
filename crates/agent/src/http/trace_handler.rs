@@ -200,6 +200,7 @@ fn trace_error(error: &TraceError) -> ApiError {
     request_body = TraceRequestBody,
     responses((status = 200, description = "Each stage the packet crossed and where it stopped", body = TraceResponse),
         (status = 400, description = "The request does not describe one packet, or the workload has no address", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
         (status = 404, description = "No eBPF program is loaded on this node", body = ErrorBody),

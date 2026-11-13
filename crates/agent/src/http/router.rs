@@ -1418,6 +1418,59 @@ mod tests {
         assert_eq!(spec.info.version, concat!("v", env!("CARGO_PKG_VERSION")));
     }
 
+    #[test]
+    fn the_document_declares_the_licence_the_agent_ships_under() {
+        use utoipa::OpenApi;
+
+        let spec = crate::http::openapi::ApiDoc::openapi();
+        let licence = spec.info.license.expect("the document names a licence");
+        assert_eq!(licence.identifier.as_deref(), Some("AGPL-3.0-only"));
+    }
+
+    #[test]
+    fn every_tag_an_operation_carries_is_declared_and_every_declared_tag_is_used() {
+        use utoipa::OpenApi;
+
+        let spec = crate::http::openapi::ApiDoc::openapi();
+        let declared: std::collections::BTreeSet<String> = spec
+            .tags
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        let used: std::collections::BTreeSet<String> = spec
+            .paths
+            .paths
+            .values()
+            .flat_map(|item| {
+                [
+                    &item.get,
+                    &item.put,
+                    &item.post,
+                    &item.delete,
+                    &item.patch,
+                    &item.head,
+                    &item.options,
+                    &item.trace,
+                ]
+                .into_iter()
+                .flatten()
+                .flat_map(|op| op.tags.clone().unwrap_or_default())
+                .collect::<Vec<_>>()
+            })
+            .collect();
+        let undeclared: Vec<_> = used.difference(&declared).collect();
+        let unused: Vec<_> = declared.difference(&used).collect();
+        assert!(
+            undeclared.is_empty(),
+            "operations carry undeclared tags {undeclared:?}"
+        );
+        assert!(
+            unused.is_empty(),
+            "declared tags no operation carries {unused:?}"
+        );
+    }
+
     // ── CORS localhost origin validation ─────────────────────────────
 
     #[test]

@@ -79,6 +79,7 @@ const MAX_LIMIT: usize = 1000;
     responses(
         (status = 200, description = "Paginated audit log entries", body = AuditLogResponse),
         (status = 503, description = "Audit store not configured", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -184,6 +185,7 @@ const HISTORY_MAX_LIMIT: usize = 500;
     responses(
         (status = 200, description = "Rule version history", body = RuleHistoryResponse),
         (status = 503, description = "Rule change store not configured", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),

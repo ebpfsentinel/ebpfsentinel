@@ -11,7 +11,7 @@ use domain::ddos::entity::{
     DdosAttackType, DdosMitigationAction, DdosMitigationStatus, DdosPolicy,
 };
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
 use super::error::{ApiError, ErrorBody};
 use super::middleware::rbac::require_write_access;
@@ -128,8 +128,9 @@ fn default_enabled() -> bool {
     true
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
 pub struct HistoryQuery {
+    /// How many past attacks to return, 100 when absent.
     #[serde(default = "default_limit")]
     pub limit: usize,
 }
@@ -145,6 +146,7 @@ fn default_limit() -> usize {
     get, path = "/api/v1/ddos/status",
     tag = "DDoS",
     responses((status = 200, description = "DDoS status", body = DdosStatusResponse),
+        (status = 404, description = "Feature not enabled on this agent", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -174,6 +176,7 @@ pub async fn ddos_status(
     get, path = "/api/v1/ddos/attacks",
     tag = "DDoS",
     responses((status = 200, description = "Active attacks", body = Vec<DdosAttackResponse>),
+        (status = 404, description = "Feature not enabled on this agent", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -202,7 +205,9 @@ pub async fn ddos_attacks(
 #[utoipa::path(
     get, path = "/api/v1/ddos/attacks/history",
     tag = "DDoS",
+    params(HistoryQuery),
     responses((status = 200, description = "Attack history", body = Vec<DdosAttackResponse>),
+        (status = 404, description = "DDoS protection not enabled", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -233,6 +238,7 @@ pub async fn ddos_history(
     get, path = "/api/v1/ddos/policies",
     tag = "DDoS",
     responses((status = 200, description = "DDoS policies", body = Vec<DdosPolicyResponse>),
+        (status = 404, description = "Feature not enabled on this agent", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -265,6 +271,7 @@ pub async fn list_ddos_policies(
     responses(
         (status = 201, description = "Policy created", body = DdosPolicyResponse),
         (status = 400, description = "Validation error", body = ErrorBody),
+        (status = 404, description = "Feature not enabled on this agent", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),

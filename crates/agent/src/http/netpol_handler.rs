@@ -113,6 +113,7 @@ fn replay_response(report: ReplayReport) -> NetpolReplayResponse {
     request_body = NetpolReplayRequest,
     responses((status = 200, description = "What the proposal would have refused, by pod", body = NetpolReplayResponse),
         (status = 400, description = "The manifests are not namespaced NetworkPolicy objects", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
         (status = 404, description = "Network policy or connection tracking is off on this node", body = ErrorBody),

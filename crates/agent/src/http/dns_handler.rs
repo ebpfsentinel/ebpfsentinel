@@ -165,6 +165,7 @@ pub async fn dns_status(State(state): State<Arc<AppState>>) -> Json<DnsStatusRes
     responses(
         (status = 200, description = "DNS cache entries", body = DnsCacheListResponse),
         (status = 503, description = "DNS not enabled", body = ErrorBody),
+        (status = 400, description = "Invalid request", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),

@@ -612,6 +612,7 @@ const RELOAD_CONFIRM_TIMEOUT: Duration = Duration::from_secs(8);
     responses(
         (status = 200, description = "Reload triggered successfully", body = ReloadResponse),
         (status = 500, description = "Failed to trigger reload", body = ErrorBody),
+        (status = 400, description = "Invalid request", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -707,7 +708,7 @@ pub(crate) async fn trigger_and_confirm_reload(
     get, path = "/api/v1/config",
     tag = "Operations",
     responses(
-        (status = 200, description = "Current sanitized configuration"),
+        (status = 200, description = "Current sanitized configuration, secrets removed", body = Object),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
