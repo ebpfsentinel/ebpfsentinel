@@ -3257,6 +3257,95 @@ pub fn with_stream_reassembly(
     dispatcher
 }
 
+/// Open the store that keeps a blocked source blocked across a restart, and
+/// attach it to the IPS service so every block it takes is written there.
+///
+/// Losing it costs the agent its memory of the decisions it took, never the
+/// decisions themselves: every write through it logs and carries on, so an
+/// unwritable disk degrades containment to what it was before the store
+/// existed. `None` when the file cannot be opened.
+pub fn open_mitigation_store(
+    config: &AgentConfig,
+    ips_svc: &ArcSwap<IpsAppService>,
+) -> Option<Arc<dyn ports::secondary::mitigation_store::MitigationStore>> {
+    use adapters::storage::redb_mitigation_store::RedbMitigationStore;
+    use ports::secondary::mitigation_store::MitigationStore;
+
+    let path = Path::new(&config.audit.storage_path).with_file_name("mitigations.redb");
+    let store: Arc<dyn MitigationStore> = match RedbMitigationStore::open(&path) {
+        Ok(store) => {
+            info!(path = %path.display(), "mitigation store initialized (redb)");
+            Arc::new(store)
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                path = %path.display(),
+                "mitigation store unavailable, blocks and responses will not survive a restart"
+            );
+            return None;
+        }
+    };
+    let mut svc = (**ips_svc.load()).clone();
+    svc.set_mitigation_store(Arc::clone(&store));
+    ips_svc.store(Arc::new(svc));
+    Some(store)
+}
+
+/// The engine holding the manual response actions, and the sweeper that
+/// lifts each one off the data plane when its TTL runs out.
+///
+/// The ceiling is the `response.max_ttl_secs` key, validated at load. An
+/// expiry is lifted, forgotten by the mitigation store and audited; a revoke
+/// is lifted and audited at revoke time, so the sweeper skips it rather than
+/// writing the event twice.
+pub fn start_response_engine(
+    config: &AgentConfig,
+    ips_svc: &Arc<ArcSwap<IpsAppService>>,
+    rl_svc: &Arc<RwLock<RateLimitAppService>>,
+    audit_svc: &Arc<AuditAppService>,
+    mitigation_store: Option<&Arc<dyn ports::secondary::mitigation_store::MitigationStore>>,
+) -> Arc<RwLock<domain::response::engine::ResponseEngine>> {
+    let engine = Arc::new(RwLock::new(domain::response::engine::ResponseEngine::new(
+        config.response.max_ttl_secs,
+    )));
+    let sweeper_engine = Arc::clone(&engine);
+    let sweeper_audit = Arc::clone(audit_svc);
+    let sweeper_ips = Arc::clone(ips_svc);
+    let sweeper_rl = Arc::clone(rl_svc);
+    let sweeper_store = mitigation_store.cloned();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            tick.tick().await;
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .try_into()
+                .unwrap_or(u64::MAX);
+            let expired = {
+                let mut engine = sweeper_engine.write().await;
+                engine.drain_expired(now_ns)
+            };
+            for action in expired {
+                if action.revoked {
+                    continue;
+                }
+                crate::http::response_handler::withdraw(&sweeper_ips, &sweeper_rl, &action).await;
+                crate::http::response_handler::forget(sweeper_store.as_ref(), &action.id);
+                sweeper_audit.record_response_action(
+                    domain::audit::entity::AuditAction::RuleRemoved,
+                    &action.target,
+                    &action.rule_id,
+                    &format!("response on {} expired after ttl", action.target),
+                );
+            }
+        }
+    });
+    engine
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

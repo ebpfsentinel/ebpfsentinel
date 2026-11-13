@@ -23,7 +23,6 @@ use adapters::grpc::server::{GrpcTlsConfig, run_grpc_server};
 use adapters::metrics::AgentMetrics;
 use adapters::storage::redb_alert_store::RedbAlertStore;
 use adapters::storage::redb_audit_store::RedbAuditStore;
-use adapters::storage::redb_mitigation_store::RedbMitigationStore;
 use adapters::storage::redb_rule_change_store::RedbRuleChangeStore;
 use adapters::system_metrics;
 use application::alert_pipeline::AlertPipeline;
@@ -74,7 +73,6 @@ use ports::secondary::audit_store::AuditStore;
 use ports::secondary::auth_provider::AuthProvider;
 use ports::secondary::ebpf_map_port::FirewallArrayMapPort;
 use ports::secondary::metrics_port::{ContainerMetrics, FirewallMetrics, MetricsPort};
-use ports::secondary::mitigation_store::MitigationStore;
 use ports::secondary::rule_change_store::RuleChangeStore;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -1135,35 +1133,8 @@ pub async fn run(
         .map(|s| Arc::clone(s) as Arc<dyn AlertTriageStore>);
 
     // Attach the mitigation store (redb) - graceful degradation on failure.
-    //
-    // This is what keeps a blocked source blocked across a restart. Losing it
-    // costs the agent its memory of the decisions it took, never the decisions
-    // themselves: every write through it logs and carries on, so an unwritable
-    // disk degrades containment to what it was before the store existed.
-    let mitigation_store_path = storage_path.with_file_name("mitigations.redb");
-    let mitigation_store: Option<Arc<dyn MitigationStore>> =
-        match RedbMitigationStore::open(&mitigation_store_path) {
-            Ok(store) => {
-                info!(
-                    path = %mitigation_store_path.display(),
-                    "mitigation store initialized (redb)"
-                );
-                Some(Arc::new(store) as Arc<dyn MitigationStore>)
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    path = %mitigation_store_path.display(),
-                    "mitigation store unavailable, blocks and responses will not survive a restart"
-                );
-                None
-            }
-        };
-    if let Some(ref store) = mitigation_store {
-        let mut svc = (**ips_svc.load()).clone();
-        svc.set_mitigation_store(Arc::clone(store));
-        ips_svc.store(Arc::new(svc));
-    }
+    // This is what keeps a blocked source blocked across a restart.
+    let mitigation_store = crate::runtime::open_mitigation_store(&config, &ips_svc);
 
     // ── 5f. Initialize auth provider (JWT, OIDC, and/or API keys) ────
     let crate::auth_bootstrap::AuthStack {
@@ -1292,56 +1263,18 @@ pub async fn run(
         app_state = app_state.with_pcap_pool(Arc::clone(pool));
     }
 
-    // Wire response engine for manual TTL actions. The ceiling is the
-    // `response.max_ttl_secs` key, validated at load.
-    let response_engine = Arc::new(RwLock::new(domain::response::engine::ResponseEngine::new(
-        config.response.max_ttl_secs,
-    )));
+    // Wire response engine for manual TTL actions, and the sweeper that lifts
+    // each off the data plane when its TTL runs out.
+    let response_engine = crate::runtime::start_response_engine(
+        &config,
+        &ips_svc,
+        &rl_svc,
+        &audit_svc,
+        mitigation_store.as_ref(),
+    );
     app_state = app_state.with_response_engine(Arc::clone(&response_engine));
     if let Some(ref store) = mitigation_store {
         app_state = app_state.with_mitigation_store(Arc::clone(store));
-    }
-
-    // Background sweeper: lift response actions whose TTL has elapsed off the
-    // data plane and emit a `responses` audit entry for each genuine expiry
-    // (revokes are lifted and audited at revoke time, so they are skipped here
-    // to avoid a duplicate event).
-    {
-        let sweeper_engine = Arc::clone(&response_engine);
-        let sweeper_audit = Arc::clone(&audit_svc);
-        let sweeper_ips = Arc::clone(&ips_svc);
-        let sweeper_rl = Arc::clone(&rl_svc);
-        let sweeper_store = mitigation_store.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
-            loop {
-                tick.tick().await;
-                let now_ns = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-                    .try_into()
-                    .unwrap_or(u64::MAX);
-                let expired = {
-                    let mut engine = sweeper_engine.write().await;
-                    engine.drain_expired(now_ns)
-                };
-                for action in expired {
-                    if action.revoked {
-                        continue;
-                    }
-                    crate::http::response_handler::withdraw(&sweeper_ips, &sweeper_rl, &action)
-                        .await;
-                    crate::http::response_handler::forget(sweeper_store.as_ref(), &action.id);
-                    sweeper_audit.record_response_action(
-                        domain::audit::entity::AuditAction::RuleRemoved,
-                        &action.target,
-                        &action.rule_id,
-                        &format!("response on {} expired after ttl", action.target),
-                    );
-                }
-            }
-        });
     }
 
     // Wire the JA4 cache built earlier so handlers can report counts
