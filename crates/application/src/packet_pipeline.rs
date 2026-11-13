@@ -413,6 +413,16 @@ impl EventDispatcher {
         self
     }
 
+    /// Replace the meter counting each service's rate, errors and duration
+    /// with one the caller keeps, so the service graph it reads outlives this
+    /// dispatcher. Called after `with_workload_resolver`, which builds a fresh
+    /// one.
+    #[must_use]
+    pub fn with_red_meter(mut self, meter: Arc<crate::l7_red_meter::L7RedMeter>) -> Self {
+        self.red_meter = meter;
+        self
+    }
+
     /// Replace the dispatcher's JA4 fingerprint cache with an externally
     /// supplied one. Used when the agent wires a redb-backed cache so it
     /// survives restarts (the same `Arc` is also handed to `AppState`).
