@@ -233,22 +233,21 @@ qos:
   # one it is held to, so a narrow rule goes above a wide one. The
   # workload block takes the same matchers as an IDS rule (unit, cgroup,
   # container, pods, namespaces, service_account).
-  #
-  # cgroup_shaping:
-  #   - id: shape-backup
-  #     workload:
-  #       unit: restic-backup.service
-  #     rate: "50mbps"
-  #     # How far ahead a packet may be scheduled before it is dropped
-  #     # instead, in milliseconds. Default 2000.
-  #     horizon_ms: 2000
-  #
-  #   - id: shape-batch-pods
-  #     workload:
-  #       namespaces:
-  #         match_labels:
-  #           tier: batch
-  #     rate: "200mbps"
+  cgroup_shaping:
+    - id: shape-backup
+      workload:
+        unit: restic-backup.service
+      rate: "50mbps"
+      # How far ahead a packet may be scheduled before it is dropped
+      # instead, in milliseconds. Default 2000.
+      horizon_ms: 2000
+
+    - id: shape-batch-pods
+      workload:
+        namespaces:
+          match_labels:
+            tier: batch
+      rate: "200mbps"
 
 # ── Firewall (companion rules) ───────────────────────────────────────
 

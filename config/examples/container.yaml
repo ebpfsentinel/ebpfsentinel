@@ -43,6 +43,34 @@ container:
     enabled: true
     # node_name: ""           # Empty = EBPFSENTINEL_NODE_NAME, HOSTNAME, then kernel hostname
     label_filter: []           # One key=value pair per entry; empty = every pod on the node
+    # NetworkPolicy objects read from the cluster: off (not read), observe
+    # (evaluated on every new connection, refusals counted and let through)
+    # or enforce. Where the CNI already enforces NetworkPolicy, leave it off.
+    network_policy:
+      mode: observe
+    # Service cluster addresses resolved at connect time for the workloads
+    # opted in, so their traffic reaches a backend without the kube-proxy
+    # rewrite. A workload block takes pods and namespaces selectors.
+    cluster_ip:
+      enabled: true
+      workloads:
+        - namespaces:
+            match_labels:
+              kubernetes.io/metadata.name: shop
+          pods:
+            match_labels:
+              app: checkout
+
+  # Podman metadata enrichment, rootful socket plus each user's rootless
+  # socket under run_user_root.
+  podman:
+    enabled: true
+    socket: /run/podman/podman.sock
+    rootless: true
+    run_user_root: /run/user
+    cache_size: 1024
+    cache_ttl_seconds: 300
+    timeout_ms: 2000
 
 # ── Example: DLP with pod context ─────────────────────────────────
 #

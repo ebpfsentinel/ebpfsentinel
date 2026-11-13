@@ -1,0 +1,72 @@
+# eBPFsentinel - Host Sensors Configuration Example
+# =================================================
+#
+# What the agent reads off the host it runs on, beside the packets:
+#   - Hidden checks: entries the kernel holds that its own listings leave out
+#   - Network inventory: the node's packet sockets
+#   - Kernel drops: packets the kernel drops, by reason and interface
+#   - Writes to new file shares: SMB writes to servers never written to before
+#   - File watch: changes under watched directories, detected, never prevented
+#
+# Hidden checks, network inventory and kernel drops are on by default;
+# share writes and file watch are off unless enabled.
+#
+# Usage:
+#   sudo ebpfsentinel-agent --config config/examples/host-sensors.yaml
+
+agent:
+  interfaces: [eth0]
+
+# Writes to new shares are read off the flow records the conntrack table
+# yields, so the table must be on.
+conntrack:
+  enabled: true
+
+# ── Hidden checks ─────────────────────────────────────────────────────
+# Two readings of the same kernel state compared. Each port sweep binds
+# every probed port for an instant, so the floor is a minute. At the
+# default rate a full 22-bit pid space takes 42 seconds.
+hidden_checks:
+  ports:
+    enabled: true
+    interval_secs: 300
+    well_known: true           # ports 1 to 1024
+    extra_ports: [31337]       # a backdoor's usual high port
+  processes:
+    enabled: true
+    interval_secs: 900
+    pids_per_second: 100000
+
+# ── Network inventory ─────────────────────────────────────────────────
+# A socket opened and closed between two readings is never seen.
+network_inventory:
+  enabled: true
+  interval_secs: 30            # 1 to 3600
+
+# ── Kernel drops ──────────────────────────────────────────────────────
+kernel_drops:
+  enabled: true
+  poll_interval_secs: 10       # 1 to 3600
+
+# ── Writes to new file shares ─────────────────────────────────────────
+# The learning period is held in memory, so a restart learns again.
+share_writes:
+  enabled: true
+  learning_secs: 604800        # every server written to in the first week is ordinary
+  window_secs: 300             # one process's writes to new servers added up over five minutes
+  min_new_peers: 5             # new servers in one window that raise the alert (2 to 256)
+  min_bytes_per_peer: 1048576  # bytes a new server must receive to count
+
+# ── File watch ────────────────────────────────────────────────────────
+# Read through fanotify by the warden, which needs CAP_DAC_READ_SEARCH to
+# name the directory a change happened in; containerized, each watched
+# host directory must be mounted into the warden.
+file_watch:
+  enabled: true
+  filesystems:
+    - /
+  max_hash_bytes: 16777216
+  max_baselines: 500000
+  paths:
+    - /etc/ssh
+    - /etc/shadow

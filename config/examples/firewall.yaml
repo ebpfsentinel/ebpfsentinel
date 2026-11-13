@@ -109,6 +109,24 @@ firewall:
       - /usr/sbin/sshd
       - /usr/bin/curl
 
+  # ── Processes allowed to send DNS ─────────────────────────────────
+  # DNS from any other process may reach only the resolvers listed, so a
+  # tool speaking DNS straight to the internet is seen (observe) or
+  # refused (enforce). The allowances take `priority`, the refusal the
+  # next one. A client is an executable path or a workload selector.
+  dns_clients:
+    enabled: true
+    mode: observe
+    priority: 1
+    resolvers:
+      - 127.0.0.53
+      - 10.96.0.10
+    clients:
+      - exe: /usr/lib/systemd/systemd-resolved
+      - pods:
+          match_labels:
+            k8s-app: kube-dns
+
   # ── Aliases ────────────────────────────────────────────────────────
   #
   # Named groups of IPs, CIDRs, or ports reusable across rules.
