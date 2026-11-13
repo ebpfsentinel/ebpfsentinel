@@ -48,6 +48,7 @@ pub mod map_sizing;
 pub mod map_store;
 pub mod metrics_reader;
 pub mod nat_map_manager;
+pub mod nat_reverse_manager;
 pub mod netkit;
 pub mod netpol_map_manager;
 pub mod process_attach;
@@ -135,6 +136,7 @@ pub use map_fill::{
 pub use map_manager::FirewallMapManager;
 pub use metrics_reader::MetricsReader;
 pub use nat_map_manager::NatMapManager;
+pub use nat_reverse_manager::NatReverseMapManager;
 pub use netpol_map_manager::NetpolMapManager;
 pub use process_attach::{ProcessTracingAttacher, ProcessTracingStatus};
 pub use process_event_reader::ProcessEventReader;

@@ -27,9 +27,10 @@ use std::sync::Mutex;
 
 use domain::common::error::DomainError;
 use domain::conntrack::entity::{ConnTrackSettings, Connection, ConnectionState, ReplyTuple};
-use ebpfsentinel_warden_client::{ConntrackTuple, ReconnectingClient};
+use ebpfsentinel_warden_client::{ConntrackRestore, ConntrackTuple, ReconnectingClient};
 use ports::secondary::conntrack_kill_port::{ConnTrackFlow, ConnTrackKillPort};
 use ports::secondary::conntrack_map_port::ConnTrackMapPort;
+use ports::secondary::conntrack_restore_port::ConnTrackRestorePort;
 use tracing::{debug, warn};
 
 /// Default path to the kernel conntrack table.
@@ -244,6 +245,64 @@ impl ConnTrackKillPort for ProcNetfilterConntrackPort {
             "conntrack flow deleted to enforce a quarantine"
         );
         Ok(deleted)
+    }
+}
+
+impl ConnTrackRestorePort for ProcNetfilterConntrackPort {
+    fn restore_flow(&self, flow: &Connection) -> Result<bool, DomainError> {
+        let restore = ConntrackRestore {
+            flow: ConntrackTuple {
+                proto: flow.protocol,
+                src_ip: flow.src_ip.clone(),
+                dst_ip: flow.dst_ip.clone(),
+                src_port: flow.src_port,
+                dst_port: flow.dst_port,
+            },
+            reply: flow.reply.as_ref().map(|r| ConntrackTuple {
+                proto: flow.protocol,
+                src_ip: r.src_ip.clone(),
+                dst_ip: r.dst_ip.clone(),
+                src_port: r.src_port,
+                dst_port: r.dst_port,
+            }),
+        };
+        let Some(args) = restore.args() else {
+            return Err(DomainError::EngineError(
+                "only a fully named TCP flow is restored".into(),
+            ));
+        };
+        // Rootless agent: the insert is a CAP_NET_ADMIN netlink operation the
+        // warden runs. It answers success or failure only, and an entry it
+        // already held is a success there too.
+        if let Some(warden) = &self.warden {
+            warden
+                .lock()
+                .map_err(|_| DomainError::EngineError("warden client lock poisoned".into()))?
+                .conntrack_restore(&restore)
+                .map_err(|e| {
+                    DomainError::EngineError(format!("warden conntrack restore failed: {e}"))
+                })?;
+            return Ok(true);
+        }
+        let output = std::process::Command::new("conntrack")
+            .args(&args)
+            .output()
+            .map_err(|e| {
+                DomainError::EngineError(format!(
+                    "failed to run `conntrack -I`: {e} (conntrack-tools installed?)"
+                ))
+            })?;
+        if output.status.success() {
+            return Ok(true);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("File exists") {
+            return Ok(false);
+        }
+        Err(DomainError::EngineError(format!(
+            "`conntrack -I` refused the flow: {}",
+            stderr.trim()
+        )))
     }
 }
 

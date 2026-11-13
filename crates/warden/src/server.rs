@@ -700,6 +700,9 @@ fn dispatch(cmd: &Command, host: &dyn HostOps, proc_root: &Path) -> Response {
         // Host-network ops needing authority over the init netns, performed
         // directly by the host-root warden.
         Command::ConntrackDelete { tuple } => result_to_response(host.conntrack_delete(tuple)),
+        Command::ConntrackRestore { restore } => {
+            result_to_response(host.conntrack_restore(restore))
+        }
         Command::ConntrackFlush => result_to_response(host.conntrack_flush()),
         Command::RouteAdd { route } => result_to_response(host.route_add(route)),
         Command::RouteDel { route } => result_to_response(host.route_del(route)),
@@ -787,7 +790,8 @@ mod tests {
         handle_conn, handle_conn_with_timeouts, wait_for_frame,
     };
     use ebpfsentinel_warden_proto::{
-        Command, ConntrackTuple, PROTOCOL_VERSION, Response, RouteSpec, read_frame, write_frame,
+        Command, ConntrackRestore, ConntrackTuple, PROTOCOL_VERSION, Response, RouteSpec,
+        read_frame, write_frame,
     };
     use std::os::fd::{AsRawFd, RawFd};
     use std::os::unix::net::UnixStream;
@@ -807,6 +811,9 @@ mod tests {
             Err("unused".into())
         }
         fn conntrack_flush(&self) -> Result<(), String> {
+            Err("unused".into())
+        }
+        fn conntrack_restore(&self, _restore: &ConntrackRestore) -> Result<(), String> {
             Err("unused".into())
         }
         fn route_add(&self, _route: &RouteSpec) -> Result<(), String> {

@@ -192,9 +192,71 @@ impl NptV6Rule {
     }
 }
 
+/// Which translation a reverse entry undoes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NatReverseKind {
+    /// A destination or redirect translation: the reply's source is put back
+    /// to the address and port the client sent to.
+    Dnat,
+    /// A source translation: the reply's destination is put back to the
+    /// original source.
+    Snat,
+}
+
+/// One live translated flow, as the datapath records it to translate the
+/// answers back.
+///
+/// The key is the reply's tuple as it reaches the node, the value what one of
+/// its two addresses is restored to. A node that takes over a peer's traffic
+/// needs these records to answer flows the peer translated: the forward leg
+/// re-translates identically from the rules, the reply leg finds nothing to
+/// undo without them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NatReverseEntry {
+    pub kind: NatReverseKind,
+    pub protocol: u8,
+    pub reply_src: IpAddr,
+    pub reply_dst: IpAddr,
+    pub reply_src_port: u16,
+    pub reply_dst_port: u16,
+    pub original_addr: IpAddr,
+    pub original_port: u16,
+}
+
+impl NatReverseEntry {
+    /// Whether the three addresses belong to one family, which is the only
+    /// shape the datapath tables can hold.
+    #[must_use]
+    pub fn is_single_family(&self) -> bool {
+        let v4 = self.reply_src.is_ipv4();
+        self.reply_dst.is_ipv4() == v4 && self.original_addr.is_ipv4() == v4
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reverse_entry_mixing_families_is_refused() {
+        let entry = NatReverseEntry {
+            kind: NatReverseKind::Snat,
+            protocol: 6,
+            reply_src: "198.51.100.7".parse().unwrap(),
+            reply_dst: "203.0.113.10".parse().unwrap(),
+            reply_src_port: 443,
+            reply_dst_port: 40_123,
+            original_addr: "10.0.0.5".parse().unwrap(),
+            original_port: 51_000,
+        };
+        assert!(entry.is_single_family());
+        let mixed = NatReverseEntry {
+            original_addr: "fd00::5".parse().unwrap(),
+            ..entry
+        };
+        assert!(!mixed.is_single_family());
+    }
 
     fn make_snat_rule(id: &str) -> NatRule {
         NatRule {

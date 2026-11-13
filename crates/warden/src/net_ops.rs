@@ -15,7 +15,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use ebpfsentinel_warden_proto::{ConntrackTuple, RouteSpec};
+use ebpfsentinel_warden_proto::{ConntrackRestore, ConntrackTuple, RouteSpec};
 
 // ── interface name / ifindex / MAC ────────────────────────────────────────
 
@@ -178,6 +178,17 @@ pub fn conntrack_delete(tuple: &ConntrackTuple) -> Result<(), String> {
     let args = conntrack_delete_args(tuple)
         .ok_or_else(|| "conntrack delete needs a targetable protocol + tuple".to_owned())?;
     // `conntrack -D` exits non-zero when nothing matched; that is not an error.
+    run_allow_nonzero("conntrack", &args)
+}
+
+/// Write one established TCP flow with `conntrack -I`.
+///
+/// An entry the kernel already holds exits non-zero with "File exists", which
+/// leaves the flow tracked and is not an error.
+pub fn conntrack_restore(restore: &ConntrackRestore) -> Result<(), String> {
+    let args = restore
+        .args()
+        .ok_or_else(|| "conntrack restore needs a fully named TCP flow".to_owned())?;
     run_allow_nonzero("conntrack", &args)
 }
 

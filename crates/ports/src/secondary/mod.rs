@@ -10,6 +10,7 @@ pub mod bridge_network_port;
 pub mod clusterip_map_port;
 pub mod conntrack_kill_port;
 pub mod conntrack_map_port;
+pub mod conntrack_restore_port;
 pub mod container_resolver_port;
 pub mod datapath_trace_port;
 pub mod default_route_port;

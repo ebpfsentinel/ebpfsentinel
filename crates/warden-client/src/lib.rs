@@ -29,12 +29,12 @@ use ebpfsentinel_warden_proto::{Command, PROTOCOL_VERSION, Response, read_frame,
 // Re-exported under their real names so callers of the typed control methods can
 // build request values without taking a direct dependency on the protocol crate.
 pub use ebpfsentinel_warden_proto::{
-    BindProbe, ConntrackTuple, DlpTarget, ExecutableIdentity, FileRoot, FimCanary, FimEvent,
-    FimFacts, FimFile, FimFileType, FimMark, FimReading, FimXattr, GoExecutable, GoExecutableScan,
-    HeldBpfObjects, HiddenProcessReading, ListedPort, MappedFile, MappingScan,
-    NamespacePortReading, NetworkProgram, OPENER_READINGS_MAX, OpenIntent, OpenerReading,
-    PacketSocket, PidObservation, ProcessFactsReading, ProcessMappings, ProcessStamp,
-    ROOTED_CHUNK_MAX, RootedFile, RootedRead, RouteSpec, TaskIdentity,
+    BindProbe, ConntrackRestore, ConntrackTuple, DlpTarget, ExecutableIdentity, FileRoot,
+    FimCanary, FimEvent, FimFacts, FimFile, FimFileType, FimMark, FimReading, FimXattr,
+    GoExecutable, GoExecutableScan, HeldBpfObjects, HiddenProcessReading, ListedPort, MappedFile,
+    MappingScan, NamespacePortReading, NetworkProgram, OPENER_READINGS_MAX, OpenIntent,
+    OpenerReading, PacketSocket, PidObservation, ProcessFactsReading, ProcessMappings,
+    ProcessStamp, ROOTED_CHUNK_MAX, RootedFile, RootedRead, RouteSpec, TaskIdentity,
 };
 
 /// How long one warden call may take before the client gives up on it.
@@ -68,6 +68,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::ConntrackDump => "ConntrackDump",
         Command::ConntrackDelete { .. } => "ConntrackDelete",
         Command::ConntrackFlush => "ConntrackFlush",
+        Command::ConntrackRestore { .. } => "ConntrackRestore",
         Command::RouteAdd { .. } => "RouteAdd",
         Command::RouteDel { .. } => "RouteDel",
         Command::ArpAnnounce { .. } => "ArpAnnounce",
@@ -489,6 +490,11 @@ impl WardenClient {
         self.expect_ok(&Command::ConntrackFlush, "ConntrackFlush")
     }
 
+    /// Write one established TCP flow into the conntrack table.
+    pub fn conntrack_restore(&mut self, restore: ConntrackRestore) -> io::Result<()> {
+        self.expect_ok(&Command::ConntrackRestore { restore }, "ConntrackRestore")
+    }
+
     /// Add (idempotent `replace`) a route - multi-WAN gateway programming.
     pub fn route_add(&mut self, route: RouteSpec) -> io::Result<()> {
         self.expect_ok(&Command::RouteAdd { route }, "RouteAdd")
@@ -907,6 +913,11 @@ impl ReconnectingClient {
     /// Flush the whole conntrack table.
     pub fn conntrack_flush(&mut self) -> io::Result<()> {
         self.with_retry(WardenClient::conntrack_flush)
+    }
+
+    /// Write one established TCP flow into the conntrack table.
+    pub fn conntrack_restore(&mut self, restore: &ConntrackRestore) -> io::Result<()> {
+        self.with_retry(|c| c.conntrack_restore(restore.clone()))
     }
 
     /// Add (idempotent `replace`) a route.

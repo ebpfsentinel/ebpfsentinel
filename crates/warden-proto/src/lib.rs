@@ -45,6 +45,90 @@ pub struct ConntrackTuple {
     pub dst_port: u16,
 }
 
+/// An established TCP flow to write into the kernel conntrack table, as a node
+/// taking over a failed peer's traffic restores it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConntrackRestore {
+    /// The original direction. Only TCP is restored: it is the one protocol
+    /// whose mid-stream pickup the agent turns off.
+    pub flow: ConntrackTuple,
+    /// The reply direction where it differs from the inverse of `flow`, which
+    /// is a flow netfilter saw translated. Its `proto` is ignored.
+    pub reply: Option<ConntrackTuple>,
+}
+
+/// Seconds a restored entry lives before its next packet refreshes it to the
+/// kernel's established timeout. Short on purpose: an entry for a flow that
+/// closed while the peer failed goes on its own.
+pub const CONNTRACK_RESTORE_TIMEOUT_SECS: u32 = 120;
+
+impl ConntrackRestore {
+    /// The `conntrack -I` argument vector both ends run, or `None` for anything
+    /// but a fully named TCP flow. Every address must parse, so a compromised
+    /// caller cannot slip an option through a field.
+    #[must_use]
+    pub fn args(&self) -> Option<Vec<String>> {
+        fn named(t: &ConntrackTuple) -> bool {
+            t.src_ip.parse::<std::net::IpAddr>().is_ok()
+                && t.dst_ip.parse::<std::net::IpAddr>().is_ok()
+                && t.src_port != 0
+                && t.dst_port != 0
+        }
+        if self.flow.proto != 6 || !named(&self.flow) {
+            return None;
+        }
+        let f = &self.flow;
+        let mut args: Vec<String> = [
+            "-I",
+            "-p",
+            "tcp",
+            "-s",
+            &f.src_ip,
+            "-d",
+            &f.dst_ip,
+            "--sport",
+            &f.src_port.to_string(),
+            "--dport",
+            &f.dst_port.to_string(),
+        ]
+        .iter()
+        .map(|a| (*a).to_owned())
+        .collect();
+        if let Some(r) = &self.reply {
+            if !named(r) {
+                return None;
+            }
+            args.extend(
+                [
+                    "--reply-src",
+                    &r.src_ip,
+                    "--reply-dst",
+                    &r.dst_ip,
+                    "--reply-port-src",
+                    &r.src_port.to_string(),
+                    "--reply-port-dst",
+                    &r.dst_port.to_string(),
+                ]
+                .iter()
+                .map(|a| (*a).to_owned()),
+            );
+        }
+        args.extend(
+            [
+                "--state",
+                "ESTABLISHED",
+                "--status",
+                "SEEN_REPLY,ASSURED",
+                "--timeout",
+                &CONNTRACK_RESTORE_TIMEOUT_SECS.to_string(),
+            ]
+            .iter()
+            .map(|a| (*a).to_owned()),
+        );
+        Some(args)
+    }
+}
+
 /// A discovered SSL library to attach the DLP uprobe set to. Produced by the
 /// warden's `/proc` scan (which needs `CAP_SYS_PTRACE` the rootless agent lacks)
 /// so the agent never reads a neighbouring container's `/proc` itself.
@@ -953,6 +1037,12 @@ pub enum Command {
         /// The user whose runtime is connected to; never 0.
         uid: u32,
     },
+    /// Write one established TCP flow into the conntrack table (a
+    /// `CAP_NET_ADMIN` netlink operation).
+    ConntrackRestore {
+        /// The flow to restore.
+        restore: ConntrackRestore,
+    },
 }
 
 /// The most servers one [`Command::ReadShareWriters`] reads.
@@ -1188,14 +1278,66 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BindProbe, Command, ConntrackTuple, DlpTarget, ExecutableIdentity, FileRoot, GoExecutable,
-        GoExecutableScan, HiddenProcessReading, ListedPort, MAX_FRAME_LEN, MappedFile, MappingScan,
-        NamespacePortReading, NetworkProgram, OpenIntent, OpenerReading, PacketSocket,
-        PidObservation, ProcessFactsReading, ProcessMappings, ProcessStamp, ROOTED_CHUNK_MAX,
-        Response, RootedFile, RootedRead, RouteSpec, TaskIdentity, read_frame,
+        BindProbe, Command, ConntrackRestore, ConntrackTuple, DlpTarget, ExecutableIdentity,
+        FileRoot, GoExecutable, GoExecutableScan, HiddenProcessReading, ListedPort, MAX_FRAME_LEN,
+        MappedFile, MappingScan, NamespacePortReading, NetworkProgram, OpenIntent, OpenerReading,
+        PacketSocket, PidObservation, ProcessFactsReading, ProcessMappings, ProcessStamp,
+        ROOTED_CHUNK_MAX, Response, RootedFile, RootedRead, RouteSpec, TaskIdentity, read_frame,
         valid_dpkg_list_name, write_frame,
     };
     use std::io::Cursor;
+
+    fn tcp(src: &str, dst: &str, sp: u16, dp: u16) -> ConntrackTuple {
+        ConntrackTuple {
+            proto: 6,
+            src_ip: src.into(),
+            dst_ip: dst.into(),
+            src_port: sp,
+            dst_port: dp,
+        }
+    }
+
+    #[test]
+    fn a_restored_flow_is_inserted_established_with_its_reply_tuple() {
+        let restore = ConntrackRestore {
+            flow: tcp("10.0.0.5", "198.51.100.7", 51_000, 443),
+            reply: Some(tcp("198.51.100.7", "203.0.113.10", 443, 40_123)),
+        };
+        let args = restore.args().expect("a named TCP flow is restorable");
+        assert_eq!(
+            args.join(" "),
+            "-I -p tcp -s 10.0.0.5 -d 198.51.100.7 --sport 51000 --dport 443 \
+             --reply-src 198.51.100.7 --reply-dst 203.0.113.10 --reply-port-src 443 \
+             --reply-port-dst 40123 --state ESTABLISHED --status SEEN_REPLY,ASSURED --timeout 120"
+        );
+    }
+
+    #[test]
+    fn only_a_fully_named_tcp_flow_is_restored() {
+        let udp = ConntrackRestore {
+            flow: ConntrackTuple {
+                proto: 17,
+                ..tcp("10.0.0.5", "10.0.0.6", 5353, 53)
+            },
+            reply: None,
+        };
+        assert!(udp.args().is_none());
+        let option = ConntrackRestore {
+            flow: tcp("--flush", "10.0.0.6", 1, 2),
+            reply: None,
+        };
+        assert!(option.args().is_none());
+        let no_port = ConntrackRestore {
+            flow: tcp("10.0.0.5", "10.0.0.6", 0, 443),
+            reply: None,
+        };
+        assert!(no_port.args().is_none());
+        let bad_reply = ConntrackRestore {
+            flow: tcp("10.0.0.5", "10.0.0.6", 1, 2),
+            reply: Some(tcp("x", "10.0.0.5", 2, 1)),
+        };
+        assert!(bad_reply.args().is_none());
+    }
 
     fn all_commands() -> Vec<Command> {
         let tuple = ConntrackTuple {
@@ -1219,6 +1361,12 @@ mod tests {
                 tuple: tuple.clone(),
             },
             Command::ConntrackFlush,
+            Command::ConntrackRestore {
+                restore: ConntrackRestore {
+                    flow: tuple.clone(),
+                    reply: Some(tuple.clone()),
+                },
+            },
             Command::RouteAdd {
                 route: route.clone(),
             },

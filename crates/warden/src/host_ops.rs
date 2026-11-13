@@ -17,7 +17,7 @@
 use std::fs;
 use std::io;
 
-use ebpfsentinel_warden_proto::{ConntrackTuple, RouteSpec};
+use ebpfsentinel_warden_proto::{ConntrackRestore, ConntrackTuple, RouteSpec};
 
 use crate::net_ops;
 
@@ -35,6 +35,8 @@ pub trait HostOps: Send + Sync {
     fn conntrack_delete(&self, tuple: &ConntrackTuple) -> Result<(), String>;
     /// Flush the whole conntrack table.
     fn conntrack_flush(&self) -> Result<(), String>;
+    /// Write one established TCP flow into the conntrack table.
+    fn conntrack_restore(&self, restore: &ConntrackRestore) -> Result<(), String>;
     /// Add (idempotent `replace`) a route - multi-WAN gateway programming.
     fn route_add(&self, route: &RouteSpec) -> Result<(), String>;
     /// Delete a route.
@@ -68,6 +70,9 @@ impl HostOps for LocalHostOps {
     }
     fn conntrack_flush(&self) -> Result<(), String> {
         net_ops::conntrack_flush()
+    }
+    fn conntrack_restore(&self, restore: &ConntrackRestore) -> Result<(), String> {
+        net_ops::conntrack_restore(restore)
     }
     fn route_add(&self, route: &RouteSpec) -> Result<(), String> {
         net_ops::route(true, route)

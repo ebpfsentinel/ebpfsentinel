@@ -996,6 +996,12 @@ pub struct EbpfLoadResult {
     /// use this to enable/disable forensic packet mirroring at runtime without
     /// reloading the eBPF program.
     pub ids_mirror_mgr: Option<IdsMirrorMapManager>,
+    /// The reverse translation tables of `tc-nat-*`, present when NAT loaded.
+    ///
+    /// A cluster member reads them to hand its translated flows to a peer,
+    /// and writes a peer's into them when it takes that peer's traffic over,
+    /// so the answers of a flow translated elsewhere are translated back here.
+    pub nat_reverse: Option<adapters::ebpf::NatReverseMapManager>,
     /// The guard on this generation's own maps and links, `None` where the
     /// BPF LSM is not active. Declared last so it is dropped after every
     /// other field: until then no other task is handed a descriptor to the
@@ -1599,10 +1605,18 @@ pub async fn load_ebpf_programs(
     program_status.insert("tc_conntrack".to_string(), ct_ok);
 
     // ── TC NAT ──────────────────────────────────────────────────
+    let mut nat_reverse = None;
     let nat_ok = if config.nat.enabled {
         match startup::try_load_tc_nat(&ebpf_dir, config) {
             Ok((mut ingress_loader, mut egress_loader, nat_mgr, nat_rdrs)) => {
                 metrics_readers.extend(nat_rdrs);
+                match adapters::ebpf::NatReverseMapManager::new(egress_loader.ebpf_mut()) {
+                    Ok(mgr) => nat_reverse = Some(mgr),
+                    Err(e) => warn!(
+                        "NAT reverse tables unreachable; translated flows cannot be \
+                         handed to another node: {e}"
+                    ),
+                }
                 services
                     .nat_svc
                     .write()
@@ -1894,6 +1908,7 @@ pub async fn load_ebpf_programs(
         tenant_subnet_mgr,
         tenant_cgroup_mgr,
         ids_mirror_mgr,
+        nat_reverse,
         bpf_guard,
     })
 }
