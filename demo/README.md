@@ -29,9 +29,14 @@ from the same release.
 - Linux 6.12 or later with BTF (`/sys/kernel/btf/vmlinux`). Ubuntu 26.04, Ubuntu 24.04
   with its HWE kernel, Debian 13 and Fedora 41 all qualify.
 - Docker with the compose plugin.
-- On Ubuntu 24.04 and later, user namespaces allowed for the session:
-  `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`. The
-  script checks and says so rather than changing it.
+- On Ubuntu 24.04 and later (`kernel.apparmor_restrict_unprivileged_userns=1`),
+  the agent's AppArmor profile loaded, from this directory:
+  `sudo apparmor_parser -r "$PWD/apparmor.d/ebpfsentinel-agent"`. It grants
+  `userns` to `/usr/local/bin/ebpfsentinel-agent`, the path the agent image
+  runs, and leaves the restriction in force for everything else. Only where
+  `apparmor_parser` is unavailable, lift the restriction for the session
+  instead: `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
+  The script checks for either and says so rather than changing anything.
 - For the GitOps lab, `git` and `curl`. kind, kubectl, helm and the Argo CD
   manifest are fetched into `gitops/.run/` at pinned versions and checked
   against their SHA-256; `down` deletes them.
