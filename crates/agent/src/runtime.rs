@@ -3032,3 +3032,179 @@ mod tests {
         assert!(services.process_signal_svc.is_none());
     }
 }
+
+/// Flow export off the conntrack readings, when `flow_export.enabled`.
+///
+/// The exporter reads the same broadcast the SSE stream reads, so the flow a
+/// SOC sees in IPFIX and the flow an operator watches on the events route are
+/// the same reading rather than two pollers of one table. A host whose
+/// conntrack table cannot be read has no flow source at all, and says so
+/// rather than exporting nothing in silence. The handle answers the export
+/// status route; `None` when nothing is exported.
+///
+/// # Errors
+///
+/// Returns an error when a syslog or CEF sink that was asked for cannot be
+/// built, naming the path: a sink silently not built is how an estate
+/// discovers at audit time that nothing was exported.
+pub fn start_flow_export(
+    config: &AgentConfig,
+    workloads: &application::workload_resolver::WorkloadResolver,
+    metrics: &Arc<AgentMetrics>,
+    events: Option<&tokio::sync::broadcast::Sender<domain::conntrack::entity::ConntrackEvent>>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> anyhow::Result<Option<application::flow_export_service::FlowExportHandle>> {
+    if !config.flow_export.enabled {
+        return Ok(None);
+    }
+    let mut sinks: Vec<Arc<dyn ports::secondary::flow_sink_port::FlowSink>> =
+        adapters::flow::ipfix_sink::IpfixSink::from_config(&config.flow_export.ipfix)
+            .into_iter()
+            .map(|sink| sink as Arc<dyn ports::secondary::flow_sink_port::FlowSink>)
+            .collect();
+    // The OTLP sink carries no endpoint of its own: it exports to the
+    // collector the alerting section names, so an estate that configured
+    // one collector has one place where its address is written.
+    if let Some(sink) = adapters::flow::otlp_sink::OtlpFlowSink::from_config(
+        &config.flow_export,
+        config.alerting.otlp.as_ref(),
+    ) {
+        sinks.push(sink as Arc<dyn ports::secondary::flow_sink_port::FlowSink>);
+    }
+    // Syslog and CEF share one adapter, so the host name in the header
+    // and the version in the CEF one are read once here rather than by
+    // each sink. A certificate file that cannot be read is a startup
+    // failure naming the path: a sink that was asked for and silently
+    // not built is how an estate discovers at audit time that nothing
+    // was exported.
+    let node_name = crate::http::agent_handler::hostname();
+    for (section, format) in [
+        (
+            &config.flow_export.syslog,
+            adapters::flow::text_sink::TextFormat::Syslog,
+        ),
+        (
+            &config.flow_export.cef,
+            adapters::flow::text_sink::TextFormat::Cef,
+        ),
+    ] {
+        match adapters::flow::text_sink::TextSink::from_config(
+            section,
+            format,
+            &node_name,
+            env!("CARGO_PKG_VERSION"),
+            config.flow_export.sampling,
+            config.agent.tls.pq_mode,
+        ) {
+            Ok(built) => sinks.extend(
+                built
+                    .into_iter()
+                    .map(|sink| sink as Arc<dyn ports::secondary::flow_sink_port::FlowSink>),
+            ),
+            Err(error) => {
+                anyhow::bail!("flow export sink could not be built: {error}");
+            }
+        }
+    }
+    sinks.extend(
+        adapters::flow::jsonl_sink::JsonLinesSink::from_config(
+            &config.flow_export.json_lines,
+            config.flow_export.sampling,
+        )
+        .into_iter()
+        .map(|sink| sink as Arc<dyn ports::secondary::flow_sink_port::FlowSink>),
+    );
+    match events {
+        Some(tx) if !sinks.is_empty() => {
+            let settings = application::flow_export_service::FlowExportSettings {
+                limits: domain::flow::entity::FlowTableLimits {
+                    capacity: config.flow_export.table_capacity,
+                    active_timeout_ms: config.flow_export.active_timeout_secs.saturating_mul(1_000),
+                    idle_timeout_ms: config.flow_export.idle_timeout_secs.saturating_mul(1_000),
+                    sampling: config.flow_export.sampling,
+                },
+                queue_depth: config.flow_export.queue_depth,
+                batch_size: config.flow_export.batch_size,
+                tick_interval: std::time::Duration::from_secs(
+                    config.flow_export.tick_interval_secs,
+                ),
+            };
+            Ok(application::flow_export_service::spawn_flow_export(
+                settings,
+                workloads.clone(),
+                sinks,
+                Arc::clone(metrics) as Arc<dyn MetricsPort>,
+                tx.subscribe(),
+                cancel.clone(),
+            ))
+        }
+        Some(_) => {
+            warn!("flow export enabled with no sink configured: nothing is exported");
+            Ok(None)
+        }
+        None => {
+            warn!(
+                "flow export enabled but this host's conntrack table is unreadable: no flow source"
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Writes this host pushes to file shares, when `share_writes.enabled`, read
+/// off a flow collector of its own: the export's sampling would make a volume
+/// here undercount.
+pub fn start_share_writes(
+    config: &AgentConfig,
+    workloads: &application::workload_resolver::WorkloadResolver,
+    metrics: &Arc<AgentMetrics>,
+    events: Option<&tokio::sync::broadcast::Sender<domain::conntrack::entity::ConntrackEvent>>,
+    alerts: &tokio::sync::mpsc::Sender<application::alert_event::AlertEvent>,
+    cancel: &tokio_util::sync::CancellationToken,
+) {
+    if !config.share_writes.enabled {
+        return;
+    }
+    if let Some(tx) = events {
+        let reading = &config.share_writes;
+        let service = Arc::new(application::share_writes_service::ShareWritesService::new(
+            domain::share_writes::ShareWritesSettings {
+                learning_ns: reading.learning_secs.saturating_mul(1_000_000_000),
+                window_ns: reading.window_secs.saturating_mul(1_000_000_000),
+                min_new_peers: reading.min_new_peers,
+                min_bytes_per_peer: reading.min_bytes_per_peer,
+            },
+            alerts.clone(),
+        ));
+        let settings = application::flow_export_service::FlowExportSettings {
+            limits: domain::flow::entity::FlowTableLimits {
+                capacity: config.flow_export.table_capacity,
+                active_timeout_ms: config.flow_export.active_timeout_secs.saturating_mul(1_000),
+                idle_timeout_ms: config.flow_export.idle_timeout_secs.saturating_mul(1_000),
+                sampling: 1,
+            },
+            tick_interval: std::time::Duration::from_secs(config.flow_export.tick_interval_secs),
+            ..application::flow_export_service::FlowExportSettings::default()
+        };
+        info!(
+            learning_secs = reading.learning_secs,
+            min_new_peers = reading.min_new_peers,
+            "writes to file shares followed"
+        );
+        // The handle is not kept: the tasks run until cancellation
+        // and this collector has no sink an operator configured.
+        let _ = application::flow_export_service::spawn_flow_export(
+            settings,
+            workloads.clone(),
+            vec![service as Arc<dyn ports::secondary::flow_sink_port::FlowSink>],
+            Arc::clone(metrics) as Arc<dyn MetricsPort>,
+            tx.subscribe(),
+            cancel.clone(),
+        );
+    } else {
+        warn!(
+            "writes to file shares asked for but this host's conntrack table is unreadable: \
+             nothing is followed"
+        );
+    }
+}
