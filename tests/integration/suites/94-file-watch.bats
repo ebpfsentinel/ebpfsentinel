@@ -12,6 +12,9 @@
 #   * A file changed outside every watched path raises nothing.
 #   * Another process changing the agent's configuration raises
 #     agent-configuration-changed naming it.
+#   * A rename under the watched directory matches a host rule on its
+#     previous name, and the alert carries the process that moved the file
+#     and the shell above it.
 #
 # Requires: root, kernel >= 6.12, jq.
 
@@ -38,6 +41,7 @@ setup_file() {
     echo "first" > "${DATA_DIR}/watched/settings.conf"
     echo "first" > "${DATA_DIR}/watched/mode.conf"
     echo "first" > "${DATA_DIR}/elsewhere/notes.txt"
+    echo "first" > "${DATA_DIR}/watched/report.txt"
 
     stop_ebpf_agent 2>/dev/null || true
     destroy_test_netns 2>/dev/null || true
@@ -45,6 +49,19 @@ setup_file() {
     PREPARED_CONFIG="$(prepare_ebpf_config "${FIXTURE_DIR}/config-ebpf-file-watch.yaml" \
         "${DATA_DIR}/agent.yaml")"
     export PREPARED_CONFIG
+    cat >> "$PREPARED_CONFIG" <<EOF
+
+host_rules:
+  rules:
+    - id: fw-renamed-report
+      description: the suite's report moved to another name
+      severity: high
+      when:
+        file.renames:
+          previous_path: [${DATA_DIR}/watched/report.txt]
+      then: [alert]
+      mode: enforce
+EOF
     start_ebpf_agent "$PREPARED_CONFIG"
     wait_for_ebpf_loaded 30 || {
         stop_ebpf_agent 2>/dev/null || true
@@ -126,4 +143,17 @@ _dump() {
     run _alert_for agent-configuration-changed "$PREPARED_CONFIG"
     [ "$status" -eq 0 ] || { _dump; false; }
     assert_contains "$(echo "$output" | jq -r '.message')" "was changed by process ${pid}"
+}
+
+@test "a rename matches its previous name and names the mover and the shell above it" {
+    local shell
+    shell="$(_writer "mv ${DATA_DIR}/watched/report.txt ${DATA_DIR}/watched/report.txt.locked")"
+    run wait_for_alert '[.[] | select(.rule_id == "fw-renamed-report")] | first' 20 1
+    [ "$status" -eq 0 ] || { _dump; false; }
+    echo "$output" | jq -c '{rule_id, message, workload}'
+    local mover
+    mover="$(echo "$output" | jq -r '.workload.pid // empty')"
+    [ -n "$mover" ]
+    [ "$mover" != "$shell" ]
+    [ "$(echo "$output" | jq -r '.workload.ancestry.ancestors[0].pid // empty')" = "$shell" ]
 }

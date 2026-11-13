@@ -13,9 +13,15 @@
 #     graph's range is refused rather than clamped.
 #   * Datagrams sent to a port nothing listens on are counted by the kernel
 #     drop counter as NO_SOCKET on the interface they arrived on.
+#   * The same requests are counted per service, side and outcome, with
+#     their durations, on the metrics endpoint.
+#   * Plain HTTP spoken to 8443, a port that promises TLS, raises one
+#     l7-port-mismatch alert for the connection and is counted as a mismatch.
 #   * A listener bound after the agent started is reported with the
 #     executable that bound it; one the firewall lets through is reachable by
 #     the default policy, and one a deny rule names is closed by that rule.
+#   * A reachable listener nobody connected to reads exposed_unused, and
+#     exposed_used once a connection was accepted on it.
 #
 # Requires: root, kernel >= 6.12, jq, python3, curl, nft.
 
@@ -26,6 +32,7 @@ GRAPH_PORT=8880
 FLOW_PORT=8881
 OPEN_PORT=8882
 CLOSED_PORT=8883
+PROMISE_PORT=8443
 DEAD_PORT=8889
 
 setup_file() {
@@ -54,6 +61,9 @@ setup_file() {
 
     PREPARED_CONFIG="$(prepare_ebpf_config "${FIXTURE_DIR}/config-ebpf-network-readings.yaml")"
     export PREPARED_CONFIG
+    # 8443 is inspected too, so what is spoken on it is judged.
+    sed -i "s/^  ports: \[${GRAPH_PORT}\]$/  ports: [${GRAPH_PORT}, ${PROMISE_PORT}]/" "$PREPARED_CONFIG"
+    grep -q "^  ports: \[${GRAPH_PORT}, ${PROMISE_PORT}\]$" "$PREPARED_CONFIG"
 
     start_ebpf_agent "$PREPARED_CONFIG"
     wait_for_ebpf_loaded 30 || {
@@ -73,12 +83,13 @@ setup_file() {
     _serve ns "0.0.0.0" "$FLOW_PORT" flow
     _serve host "$EBPF_HOST_IP" "$OPEN_PORT" open
     _serve host "0.0.0.0" "$CLOSED_PORT" closed
+    _serve host "$EBPF_HOST_IP" "$PROMISE_PORT" promise
     sleep 1
 }
 
 teardown_file() {
     local f
-    for f in graph flow open closed; do
+    for f in graph flow open closed promise; do
         [ -f "${DATA_DIR}/${f}.pid" ] && kill "$(cat "${DATA_DIR}/${f}.pid")" 2>/dev/null
     done
     nft delete table inet ebpfsentinel_readings 2>/dev/null || true
@@ -157,6 +168,47 @@ _serve() {
     [ "$HTTP_STATUS" = "400" ]
 }
 
+@test "the service's requests are counted with their outcome and duration on the metrics endpoint" {
+    ip netns exec "$EBPF_TEST_NS" curl -s -o /dev/null --max-time 5 \
+        "http://${EBPF_HOST_IP}:${GRAPH_PORT}/"
+    local i body requests="" buckets=""
+    for i in $(seq 1 20); do
+        body="$(curl -sf --max-time "$HTTP_TIMEOUT" "${BASE_URL}/metrics")"
+        requests="$(echo "$body" | grep '^ebpfsentinel_l7_requests_total{' | grep 'protocol="http"' | head -1)"
+        buckets="$(echo "$body" | grep '^ebpfsentinel_l7_request_duration_seconds_count{' | head -1)"
+        [ -n "$requests" ] && [ -n "$buckets" ] && break
+        sleep 0.5
+    done
+    [ -n "$requests" ] && [ -n "$buckets" ] || {
+        echo "# no RED series: $(echo "$body" | grep '^ebpfsentinel_l7_req')" >&3
+        false
+    }
+    assert_contains "$requests" 'service="'
+    assert_contains "$requests" 'role="'
+    assert_contains "$requests" 'outcome="'
+    [ "$(echo "$requests" | awk '{print $2}' | cut -d. -f1)" -ge 1 ]
+    [ "$(echo "$buckets" | awk '{print $2}' | cut -d. -f1)" -ge 1 ]
+}
+
+@test "plain HTTP on a port that promises TLS raises one mismatch for the connection" {
+    ip netns exec "$EBPF_TEST_NS" curl -s -o /dev/null --max-time 5 \
+        "http://${EBPF_HOST_IP}:${PROMISE_PORT}/"
+    run wait_for_alert '[.[] | select(.rule_id == "l7-port-mismatch")] | first' 20 1
+    [ "$status" -eq 0 ] || {
+        echo "# no l7-port-mismatch alert" >&3
+        false
+    }
+    assert_contains "$(echo "$output" | jq -r '.message')" "on port ${PROMISE_PORT}, which promises tls"
+    [ "$(api_get /api/v1/alerts | jq '[(.alerts // .)[] | select(.rule_id == "l7-port-mismatch")] | length')" = "1" ]
+    local value
+    value="$(wait_for_metric ebpfsentinel_l7_port_promise_total 1 20 \
+        "{port=\"${PROMISE_PORT}\",verdict=\"mismatch\"}")" || {
+        echo "# $(curl -sf "${BASE_URL}/metrics" | grep l7_port_promise)" >&3
+        false
+    }
+    [ "${value%%.*}" -eq 1 ]
+}
+
 @test "datagrams to a port nothing listens on are counted as NO_SOCKET on their interface" {
     local body
     body="$(api_get /api/v1/ebpf/drop-reasons)"
@@ -222,4 +274,33 @@ PY
     [ "$(echo "$closed" | jq -r '.decided_by')" = "rule" ]
     assert_contains "$(echo "$closed" | jq -r '.rule')" "fw-readings-deny-${CLOSED_PORT}"
     [ "$(echo "$closed" | jq -r '.class')" = "closed_by_policy" ]
+}
+
+@test "a reachable listener reads exposed_unused until a connection is accepted on it" {
+    _open_class() {
+        api_get /api/v1/exposure/listeners | jq -c --argjson p "$OPEN_PORT" \
+            '[.listeners[] | select(.port == $p and .protocol == "tcp")] | first // empty'
+    }
+    local open
+    open="$(_open_class)"
+    [ "$(echo "$open" | jq -r '.class')" = "exposed_unused" ] || {
+        echo "# before any connection: ${open}" >&3
+        false
+    }
+    [ "$(echo "$open" | jq -r '.accepted')" = "0" ]
+
+    ip netns exec "$EBPF_TEST_NS" curl -s -o /dev/null --max-time 5 \
+        "http://${EBPF_HOST_IP}:${OPEN_PORT}/"
+    local i
+    for i in $(seq 1 20); do
+        open="$(_open_class)"
+        [ "$(echo "$open" | jq -r '.class')" = "exposed_used" ] && break
+        sleep 0.5
+    done
+    [ "$(echo "$open" | jq -r '.class')" = "exposed_used" ] || {
+        echo "# after one connection: ${open}" >&3
+        false
+    }
+    [ "$(echo "$open" | jq -r '.accepted')" -ge 1 ]
+    [ "$(echo "$open" | jq -r '.last_accepted_boot_ns')" != "null" ]
 }

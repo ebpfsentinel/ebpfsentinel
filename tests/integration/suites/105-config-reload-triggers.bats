@@ -9,6 +9,9 @@
 #   * A rewrite in place that keeps the inode is seen the same way.
 #   * SIGHUP sent to the pid the lane started reloads the configuration,
 #     counted as a reload attempt, and the agent survives it.
+#   * The status names the digest of the document last loaded, the same as
+#     the file's, and counts a policy write accepted through the API with its
+#     method and path; a refused write and a read count nothing.
 #
 # Requires: root, kernel >= 6.12, jq.
 
@@ -166,4 +169,36 @@ _reload_attempts() {
     _load_http_status
     [ "$HTTP_STATUS" = "200" ]
     [ "$(_rule_port fw-reload-deny-4444)" = "4646" ]
+}
+
+@test "the status names the document loaded and counts the writes the API accepted" {
+    # The last reload above loaded the file as it stands.
+    local status digest
+    status="$(api_get /api/v1/agent/status)"
+    echo "$status" | jq -c '.config'
+    digest="$(sha256sum "$PREPARED_CONFIG" | awk '{print $1}')"
+    [ "$(echo "$status" | jq -r '.config.document_sha256')" = "$digest" ]
+    [ "$(echo "$status" | jq -r '.config.loaded_at')" -ge $(( $(date +%s) - 600 )) ]
+    local writes
+    writes="$(echo "$status" | jq -r '.config.runtime_writes')"
+
+    # A refused write changes nothing and is not counted.
+    api_post /api/v1/firewall/rules '{"id":"fw-provenance-bad"}' >/dev/null
+    _load_http_status
+    [ "$HTTP_STATUS" -ge 400 ]
+    api_get /api/v1/firewall/rules >/dev/null
+    [ "$(api_get /api/v1/agent/status | jq -r '.config.runtime_writes')" = "$writes" ]
+
+    api_post /api/v1/firewall/rules \
+        '{"id":"fw-provenance-7777","priority":30,"action":"deny","protocol":"tcp","dst_port":7777,"scope":"global","enabled":true}' >/dev/null
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+    status="$(api_get /api/v1/agent/status)"
+    echo "$status" | jq -c '.config'
+    [ "$(echo "$status" | jq -r '.config.runtime_writes')" = "$((writes + 1))" ]
+    [ "$(echo "$status" | jq -r '.config.last_runtime_write.method')" = "POST" ]
+    [ "$(echo "$status" | jq -r '.config.last_runtime_write.path')" = "/api/v1/firewall/rules" ]
+    [ "$(echo "$status" | jq -r '.config.last_runtime_write.at')" -ge $(( $(date +%s) - 60 )) ]
+    # The document on disk is still the one loaded: the write is told apart.
+    [ "$(echo "$status" | jq -r '.config.document_sha256')" = "$digest" ]
 }

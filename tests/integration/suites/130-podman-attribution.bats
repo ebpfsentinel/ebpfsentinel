@@ -10,6 +10,9 @@
 #   * A rootless container, run by a user whose `podman.socket` listens under
 #     /run/user/<uid>, is named the same way, and the agent reports that
 #     user's runtime as reachable.
+#   * An IDS rule scoped to one container by name fires on that container's
+#     packets and not on a second container sending the same, both on the
+#     bridge network, each behind its own link.
 #
 # Both containers share the node's network, so the probe leaves through the
 # inspected veth on egress where the sending socket's cgroup is readable.
@@ -22,6 +25,7 @@ load '../lib/helpers'
 load '../lib/ebpf_helpers'
 
 PROBE_PORT=65501
+SCOPED_PORT=65502
 PROBE_IMAGE="docker.io/library/busybox:1.36"
 
 setup_file() {
@@ -47,6 +51,25 @@ setup_file() {
 
     PREPARED_CONFIG="$(prepare_ebpf_config "${FIXTURE_DIR}/config-ebpf-runtimes.yaml")"
     export PREPARED_CONFIG
+    export SCOPED_NAME="probe-scoped-$$"
+    python3 - "${PREPARED_CONFIG}" "${SCOPED_NAME}" "${SCOPED_PORT}" <<'PY'
+import sys
+path, name, port = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(path).read()
+anchor = "  rules:\n"
+assert text.count(anchor) == 1
+rule = f"""  rules:
+    - id: ids-scoped-container
+      description: "One container by name, on its own link"
+      severity: high
+      protocol: tcp
+      dst_port: {port}
+      workload:
+        container: {name}
+      enabled: true
+"""
+open(path, "w").write(text.replace(anchor, rule))
+PY
     start_ebpf_agent "${PREPARED_CONFIG}"
     wait_for_ebpf_loaded 30 || {
         tail -20 "${AGENT_LOG_FILE}" >&2
@@ -56,10 +79,15 @@ setup_file() {
     ip netns exec "${EBPF_TEST_NS}" sh -c \
         "while true; do nc -l -p ${PROBE_PORT} -w 2 >/dev/null 2>&1 || sleep 0.2; done" &
     export PROBE_LISTENER_PID=$!
+    # The bridge containers dial their gateway, which is this host.
+    sh -c "while true; do nc -l -p ${SCOPED_PORT} -w 2 >/dev/null 2>&1 || sleep 0.2; done" &
+    export SCOPED_LISTENER_PID=$!
 }
 
 teardown_file() {
-    podman rm -f "probe-rootful-$$" >/dev/null 2>&1 || true
+    podman rm -f "probe-rootful-$$" "${SCOPED_NAME:-probe-scoped-$$}" "probe-unscoped-$$" >/dev/null 2>&1 || true
+    [ -n "${SCOPED_LISTENER_PID:-}" ] && kill "${SCOPED_LISTENER_PID}" 2>/dev/null
+    pkill -f "nc -l -p ${SCOPED_PORT}" 2>/dev/null || true
     if [ -n "${ROOTLESS_USER:-}" ]; then
         _rootless podman rm -f "probe-rootless-$$" >/dev/null 2>&1 || true
     fi
@@ -150,4 +178,32 @@ _runtime_reach() {
     }
     [ "$(jq -r .name <<<"${ctr}")" = "${name}" ]
     [[ "$(jq -r .image <<<"${ctr}")" == *busybox* ]]
+}
+
+# The same probes, from a container on the bridge network to its gateway,
+# after long enough for the agent to attach to its link and name it.
+_scoped_script() {
+    printf 'sleep 5; gw=$(ip route | awk "/default/ {print \\$3}"); for i in 1 2 3 4 5; do (echo probe; sleep 0.1) | nc -w 1 "$gw" %s >/dev/null 2>&1 || true; done' \
+        "${SCOPED_PORT}"
+}
+
+@test "an IDS rule scoped to one container fires on it and not on its neighbour" {
+    [ -S /run/podman/podman.sock ] || soft_skip "the rootful podman.socket is not listening"
+    local scoped unscoped
+    scoped="$(podman run -d --name "${SCOPED_NAME}" "${PROBE_IMAGE}" sh -c "$(_scoped_script)")"
+    unscoped="$(podman run -d --name "probe-unscoped-$$" "${PROBE_IMAGE}" sh -c "$(_scoped_script)")"
+    podman wait "${SCOPED_NAME}" "probe-unscoped-$$" >/dev/null
+
+    run wait_for_alert 'first(.[] | select(.rule_id == "ids-scoped-container") | .container)' 20 1
+    [ "$status" -eq 0 ] || {
+        echo "# the scoped rule never fired" >&3
+        api_get /api/v1/alerts | jq -c '[.alerts[] | {rule_id, container: .container.name}] | .[0:10]' >&3
+        false
+    }
+    [ "$(jq -r .id <<<"${output}")" = "${scoped}" ]
+    sleep 2
+    # Every alert of the rule names the scoped container, none its neighbour.
+    [ "$(api_get /api/v1/alerts | jq --arg id "${scoped}" \
+        '[.alerts[] | select(.rule_id == "ids-scoped-container") | select(.container.id? != $id)] | length')" -eq 0 ]
+    [ -n "${unscoped}" ]
 }

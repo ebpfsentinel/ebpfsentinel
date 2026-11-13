@@ -12,11 +12,14 @@
 #     interface it was attached to, and none of the agent's own programs is.
 #   * Where the kernel runs the BPF LSM, the guard reports itself protected
 #     and a detach of the agent's XDP link from another process is refused,
-#     the link staying where it was.
+#     the link staying where it was; so is opening one of the agent's maps
+#     for writing.
 #   * With `bpf` masked out of the security modules, the guard reports the
 #     node unprotected with a reason, the same detach succeeds, and the
-#     inventory raises network-path-link-detached for it. The module list is
-#     shown through a bind mount in a private mount namespace, as in 86.
+#     inventory raises network-path-link-detached for it; a program put in
+#     the agent's place at once raises network-path-program-replaced naming
+#     it. The module list is shown through a bind mount in a private mount
+#     namespace, as in 86.
 #
 # Requires: root, kernel >= 6.12, jq, python3, bpftool, unshare.
 
@@ -221,6 +224,16 @@ _agent_xdp_link() {
     run bpftool link detach id "$link"
     [ "$status" -ne 0 ]
     [ "$(_agent_xdp_link)" = "$link" ]
+
+    # A map the firewall reads, opened for writing by another process.
+    local map
+    map="$(bpftool -j prog show 2>/dev/null \
+        | jq -r '[.[] | select(.name == "xdp_firewall") | .map_ids[]?] | first // empty')"
+    [ -n "$map" ]
+    run bpftool map update id "$map" key 0 0 0 0 value 0 0 0 0
+    echo "# ${output}" >&3
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Operation not permitted"* ]]
 }
 
 @test "with bpf masked out of the modules, the node is unprotected and a detach alerts" {
@@ -250,4 +263,35 @@ _agent_xdp_link() {
 
     run wait_for_alert '.[] | select(.rule_id == "network-path-link-detached") | .rule_id' 20 1
     [ "$status" -eq 0 ]
+}
+
+@test "with bpf masked out, a program put in the agent's place is reported as replacing it" {
+    [ -r /sys/kernel/security/lsm ] || env_skip "securityfs is not mounted on this host"
+    local obj="${EBPF_PROGRAM_DIR:-${PROJECT_ROOT}/target/bpfel-unknown-none/release}/xdp-pass"
+    [ -f "$obj" ] || soft_skip "no xdp-pass object at $obj"
+    local fake="${DATA_DIR}/lsm"
+    tr ',' '\n' </sys/kernel/security/lsm | grep -vx 'bpf' | paste -sd, - | tr -d '\n' >"$fake"
+    EBPF_AGENT_LSM_FILE="$fake" start_ebpf_agent "$PREPARED_CONFIG"
+    wait_for_ebpf_loaded 30 || {
+        tail -20 "$AGENT_LOG_FILE" >&2
+        return 1
+    }
+    _wait_inventory_primed
+
+    local link
+    link="$(_agent_xdp_link)"
+    [ -n "$link" ]
+    # Both inside one reading of the inventory: the agent's program goes and
+    # another takes the hook it held.
+    bpftool link detach id "$link"
+    ip link set dev "$EBPF_VETH_HOST" xdp obj "$obj" sec xdp
+
+    run wait_for_alert '[.[] | select(.rule_id == "network-path-program-replaced")] | first' 20 1
+    ip link set dev "$EBPF_VETH_HOST" xdp off 2>/dev/null || true
+    [ "$status" -eq 0 ] || {
+        api_get /api/v1/alerts | jq -c '[(.alerts // .)[] | select(.rule_id | startswith("network-path"))]' >&3
+        false
+    }
+    echo "$output" | jq -c '{rule_id, message}'
+    assert_contains "$(echo "$output" | jq -r '.message')" "$EBPF_VETH_HOST"
 }

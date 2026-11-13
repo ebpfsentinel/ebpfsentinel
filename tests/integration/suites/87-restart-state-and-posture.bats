@@ -19,6 +19,10 @@
 #     and none of them under techniques, when the IDS is disabled.
 #   * A packet trace names the deny rule a crafted packet meets and stops on
 #     it, and lets a packet the rule does not name through.
+#   * The same holds for an IPv6 packet, and a source named as a pod is
+#     refused on a node with no pod inventory.
+#   * A network policy replay is refused, with its reason, by the route and
+#     the command on a node that reads no network policy.
 #   * The learning and trace commands print what the routes answer.
 #   * The DLP scope route answers with the node-wide mode the fixture leaves
 #     in place.
@@ -254,6 +258,38 @@ _session() {
     esac
 }
 
+@test "an IPv6 trace stops on the same deny rule, and an IPv6 port it does not name passes" {
+    _ensure_running
+
+    local body
+    body="$(api_post /api/v1/trace '{"src_ip":"fd00:200::2","dst_ip":"fd00:200::1","src_port":40000,"dst_port":9999,"protocol":"tcp"}')"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || {
+        echo "# trace answered ${HTTP_STATUS}: ${body}" >&3
+        false
+    }
+    [ "$(echo "$body" | jq '[.stages[] | select(.rule == "fw-restart-deny-9999")] | length')" -gt 0 ] || {
+        echo "# ${body}" >&3
+        false
+    }
+    case "$(echo "$body" | jq -r '.verdict')" in
+        drop | reject) ;;
+        *) echo "# deny rule did not stop the IPv6 packet: ${body}" >&3; false ;;
+    esac
+
+    body="$(api_post /api/v1/trace '{"src_ip":"fd00:200::2","dst_ip":"fd00:200::1","src_port":40000,"dst_port":8443,"protocol":"tcp"}')"
+    [ "$(echo "$body" | jq '[.stages[] | select(.rule == "fw-restart-deny-9999")] | length')" = "0" ]
+    case "$(echo "$body" | jq -r '.verdict')" in
+        drop | reject) echo "# an unnamed IPv6 port was stopped: ${body}" >&3; false ;;
+        *) ;;
+    esac
+
+    # A source named as a pod needs a pod inventory, which this node has not.
+    api_post /api/v1/trace "{\"workload\":\"default/nobody\",\"dst_ip\":\"${EBPF_HOST_IP}\",\"dst_port\":9999,\"protocol\":\"tcp\"}" >/dev/null
+    _load_http_status
+    [ "$HTTP_STATUS" -ge 400 ] && [ "$HTTP_STATUS" -lt 500 ]
+}
+
 @test "the DLP scope route answers with the node-wide mode" {
     _ensure_running
 
@@ -279,6 +315,33 @@ _session() {
         false
     }
     assert_contains "$body" "pod inventory"
+}
+
+@test "a network policy replay is refused with a reason on a node not reading network policy" {
+    _ensure_running
+
+    local body manifests
+    manifests="$(jq -Rs '{manifests: .}' <<'YAML'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: deny-all, namespace: default}
+spec: {podSelector: {}, policyTypes: [Ingress]}
+YAML
+)"
+    body="$(api_post /api/v1/netpol/replay "$manifests")"
+    _load_http_status
+    [ "$HTTP_STATUS" = "404" ] || {
+        echo "# replay answered ${HTTP_STATUS} with network policy off: ${body}" >&3
+        false
+    }
+    assert_contains "$body" "SERVICE_NOT_AVAILABLE"
+    assert_contains "$body" "network policy is not read on this node"
+
+    # The command says the same and exits non-zero.
+    printf '%s\n' "$(echo "$manifests" | jq -r .manifests)" > "${DATA_DIR}/netpol.yaml"
+    run "$AGENT_BIN" netpol --port "$AGENT_HTTP_PORT" replay "${DATA_DIR}/netpol.yaml"
+    [ "$status" -ne 0 ]
+    assert_contains "$output" "network policy is not read on this node"
 }
 
 @test "the learning and trace commands read what the routes answer" {
