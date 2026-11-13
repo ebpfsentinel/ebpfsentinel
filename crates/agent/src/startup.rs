@@ -1195,40 +1195,7 @@ pub async fn run(
         application::packet_pipeline::HANDSHAKE_LOG_CAPACITY,
     ));
 
-    // ── JA4 fingerprint cache (optionally redb-backed) ──────
-    let fingerprint_cache_ttl = std::time::Duration::from_mins(5);
-    let fingerprint_cache_max = 10_000;
-    let ja4_cache = if let Some(ref path) = config.l7.fingerprints.persistence_path {
-        match adapters::storage::fingerprint_store_redb::RedbFingerprintStore::open(
-            std::path::Path::new(path),
-        ) {
-            Ok(store) => {
-                let ja4: Arc<dyn domain::l7::ja4::Ja4Persist> = Arc::new(store);
-                info!(path = %path, "JA4 fingerprint persistence enabled");
-                Arc::new(domain::l7::ja4::FingerprintCache::with_persist(
-                    fingerprint_cache_max,
-                    fingerprint_cache_ttl,
-                    ja4,
-                ))
-            }
-            Err(e) => {
-                tracing::warn!(
-                    path = %path,
-                    error = %e,
-                    "failed to open fingerprint persistence store, falling back to an in-memory cache"
-                );
-                Arc::new(domain::l7::ja4::FingerprintCache::new(
-                    fingerprint_cache_max,
-                    fingerprint_cache_ttl,
-                ))
-            }
-        }
-    } else {
-        Arc::new(domain::l7::ja4::FingerprintCache::new(
-            fingerprint_cache_max,
-            fingerprint_cache_ttl,
-        ))
-    };
+    let ja4_cache = crate::runtime::build_fingerprint_cache(&config);
 
     let mut app_state = AppState::new(
         Arc::clone(&metrics),
@@ -4466,57 +4433,7 @@ pub async fn run(
         application::exposure_service::ExposureService::new(workloads.clone()),
     ));
 
-    // ── 10g. Build L7 stream reassembler (optional) ─────────────────
-    let stream_reassembler: Option<Arc<domain::l7::reassembler::StreamReassembler>> =
-        if config.l7.reassembly.enabled {
-            let reassembler = Arc::new(domain::l7::reassembler::StreamReassembler::new(
-                config.l7.reassembly.to_domain(),
-            ));
-            info!(
-                max_flows = config.l7.reassembly.max_flows,
-                max_buffer_per_flow = config.l7.reassembly.max_buffer_per_flow,
-                idle_timeout_secs = config.l7.reassembly.idle_timeout_secs,
-                sweep_interval_secs = config.l7.reassembly.sweep_interval_secs,
-                "L7 stream reassembler enabled"
-            );
-            Some(reassembler)
-        } else {
-            None
-        };
-    let dispatcher = if let Some(ref reassembler) = stream_reassembler {
-        dispatcher.with_stream_reassembler(Arc::clone(reassembler))
-    } else {
-        dispatcher
-    };
-
-    // Periodic sweep task: flush flows that went idle past the
-    // configured timeout so their partial buffers can still be parsed.
-    if stream_reassembler.is_some() {
-        let sweep_dispatcher = dispatcher.clone();
-        let sweep_interval = Duration::from_secs(config.l7.reassembly.sweep_interval_secs.max(1));
-        let sweep_cancel = cancel_token.clone();
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(sweep_interval);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tokio::select! {
-                    () = sweep_cancel.cancelled() => break,
-                    _ = ticker.tick() => {
-                        // An L7 event's kernel stamp is moved onto the wall
-                        // clock when it is drained, so the idle timeout is
-                        // measured on that clock too.
-                        let now_ns = adapters::ebpf::ringbuf_observer::boottime_to_epoch_ns(
-                            adapters::ebpf::ringbuf_observer::boottime_now_ns(),
-                        );
-                        let count = sweep_dispatcher.flush_reassembled(now_ns);
-                        if count > 0 {
-                            tracing::debug!(count, "l7 reassembler flushed + parsed idle flows");
-                        }
-                    }
-                }
-            }
-        });
-    }
+    let dispatcher = crate::runtime::with_stream_reassembly(&config, dispatcher, &cancel_token);
 
     let dispatcher_cancel = cancel_token.clone();
     let event_workers = config.agent.event_workers;

@@ -2978,61 +2978,6 @@ pub fn start_domain_reputation(
     Some(rep_svc)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn services_in(dir: &std::path::Path) -> (AgentConfig, ServiceHandles) {
-        let path = dir.join("agent.yaml");
-        std::fs::write(&path, "agent:\n  interfaces: [lo]\n").unwrap();
-        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
-            .unwrap();
-        let mut config = AgentConfig::load(&path).unwrap();
-        config.audit.storage_path = dir.join("audit.redb").display().to_string();
-        let services = build_services(&config).unwrap();
-        (config, services)
-    }
-
-    #[tokio::test]
-    async fn the_kill_stays_absent_where_the_configuration_turns_it_off() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut config, mut services) = services_in(dir.path());
-        config.response.kill_process.enabled = false;
-        assert!(
-            arm_process_kill(
-                &config,
-                &mut services,
-                &tokio_util::sync::CancellationToken::new()
-            )
-            .await
-            .is_none()
-        );
-        assert!(services.process_signal_svc.is_none());
-    }
-
-    #[tokio::test]
-    async fn the_kill_stays_absent_where_its_object_does_not_load() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut config, mut services) = services_in(dir.path());
-        config.response.kill_process.enabled = true;
-        // An object directory holding nothing: the load is refused, and the
-        // handles keep refusing a rule that asks to stop a process.
-        let objects = dir.path().join("objects");
-        std::fs::create_dir(&objects).unwrap();
-        config.agent.ebpf_program_dir = Some(objects.display().to_string());
-        assert!(
-            arm_process_kill(
-                &config,
-                &mut services,
-                &tokio_util::sync::CancellationToken::new()
-            )
-            .await
-            .is_none()
-        );
-        assert!(services.process_signal_svc.is_none());
-    }
-}
-
 /// Flow export off the conntrack readings, when `flow_export.enabled`.
 ///
 /// The exporter reads the same broadcast the SSE stream reads, so the flow a
@@ -3206,5 +3151,163 @@ pub fn start_share_writes(
             "writes to file shares asked for but this host's conntrack table is unreadable: \
              nothing is followed"
         );
+    }
+}
+
+/// The JA4 fingerprint cache the dispatcher fills and the fingerprint routes
+/// read, persisted to redb when `l7.fingerprints.persistence_path` names a
+/// file, in memory otherwise or when that file cannot be opened.
+#[must_use]
+pub fn build_fingerprint_cache(config: &AgentConfig) -> Arc<domain::l7::ja4::FingerprintCache> {
+    let fingerprint_cache_ttl = std::time::Duration::from_mins(5);
+    let fingerprint_cache_max = 10_000;
+    if let Some(ref path) = config.l7.fingerprints.persistence_path {
+        match adapters::storage::fingerprint_store_redb::RedbFingerprintStore::open(
+            std::path::Path::new(path),
+        ) {
+            Ok(store) => {
+                let ja4: Arc<dyn domain::l7::ja4::Ja4Persist> = Arc::new(store);
+                info!(path = %path, "JA4 fingerprint persistence enabled");
+                Arc::new(domain::l7::ja4::FingerprintCache::with_persist(
+                    fingerprint_cache_max,
+                    fingerprint_cache_ttl,
+                    ja4,
+                ))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %path,
+                    error = %e,
+                    "failed to open fingerprint persistence store, falling back to an in-memory cache"
+                );
+                Arc::new(domain::l7::ja4::FingerprintCache::new(
+                    fingerprint_cache_max,
+                    fingerprint_cache_ttl,
+                ))
+            }
+        }
+    } else {
+        Arc::new(domain::l7::ja4::FingerprintCache::new(
+            fingerprint_cache_max,
+            fingerprint_cache_ttl,
+        ))
+    }
+}
+
+/// The dispatcher with the L7 stream reassembler, when
+/// `l7.reassembly.enabled`, and the task flushing the flows gone idle so their
+/// partial buffers are still parsed, until `cancel`.
+#[must_use]
+pub fn with_stream_reassembly(
+    config: &AgentConfig,
+    dispatcher: application::packet_pipeline::EventDispatcher,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> application::packet_pipeline::EventDispatcher {
+    let stream_reassembler: Option<Arc<domain::l7::reassembler::StreamReassembler>> =
+        if config.l7.reassembly.enabled {
+            let reassembler = Arc::new(domain::l7::reassembler::StreamReassembler::new(
+                config.l7.reassembly.to_domain(),
+            ));
+            info!(
+                max_flows = config.l7.reassembly.max_flows,
+                max_buffer_per_flow = config.l7.reassembly.max_buffer_per_flow,
+                idle_timeout_secs = config.l7.reassembly.idle_timeout_secs,
+                sweep_interval_secs = config.l7.reassembly.sweep_interval_secs,
+                "L7 stream reassembler enabled"
+            );
+            Some(reassembler)
+        } else {
+            None
+        };
+    let dispatcher = if let Some(ref reassembler) = stream_reassembler {
+        dispatcher.with_stream_reassembler(Arc::clone(reassembler))
+    } else {
+        dispatcher
+    };
+
+    // Periodic sweep task: flush flows that went idle past the
+    // configured timeout so their partial buffers can still be parsed.
+    if stream_reassembler.is_some() {
+        let sweep_dispatcher = dispatcher.clone();
+        let sweep_interval =
+            std::time::Duration::from_secs(config.l7.reassembly.sweep_interval_secs.max(1));
+        let sweep_cancel = cancel.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(sweep_interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    () = sweep_cancel.cancelled() => break,
+                    _ = ticker.tick() => {
+                        // An L7 event's kernel stamp is moved onto the wall
+                        // clock when it is drained, so the idle timeout is
+                        // measured on that clock too.
+                        let now_ns = adapters::ebpf::ringbuf_observer::boottime_to_epoch_ns(
+                            adapters::ebpf::ringbuf_observer::boottime_now_ns(),
+                        );
+                        let count = sweep_dispatcher.flush_reassembled(now_ns);
+                        if count > 0 {
+                            tracing::debug!(count, "l7 reassembler flushed + parsed idle flows");
+                        }
+                    }
+                }
+            }
+        });
+    }
+    dispatcher
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn services_in(dir: &std::path::Path) -> (AgentConfig, ServiceHandles) {
+        let path = dir.join("agent.yaml");
+        std::fs::write(&path, "agent:\n  interfaces: [lo]\n").unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+        let mut config = AgentConfig::load(&path).unwrap();
+        config.audit.storage_path = dir.join("audit.redb").display().to_string();
+        let services = build_services(&config).unwrap();
+        (config, services)
+    }
+
+    #[tokio::test]
+    async fn the_kill_stays_absent_where_the_configuration_turns_it_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut config, mut services) = services_in(dir.path());
+        config.response.kill_process.enabled = false;
+        assert!(
+            arm_process_kill(
+                &config,
+                &mut services,
+                &tokio_util::sync::CancellationToken::new()
+            )
+            .await
+            .is_none()
+        );
+        assert!(services.process_signal_svc.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_kill_stays_absent_where_its_object_does_not_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut config, mut services) = services_in(dir.path());
+        config.response.kill_process.enabled = true;
+        // An object directory holding nothing: the load is refused, and the
+        // handles keep refusing a rule that asks to stop a process.
+        let objects = dir.path().join("objects");
+        std::fs::create_dir(&objects).unwrap();
+        config.agent.ebpf_program_dir = Some(objects.display().to_string());
+        assert!(
+            arm_process_kill(
+                &config,
+                &mut services,
+                &tokio_util::sync::CancellationToken::new()
+            )
+            .await
+            .is_none()
+        );
+        assert!(services.process_signal_svc.is_none());
     }
 }
