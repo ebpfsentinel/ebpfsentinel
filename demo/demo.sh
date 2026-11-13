@@ -50,13 +50,34 @@ preflight() {
   [ -r /sys/kernel/btf/vmlinux ] || fail "this kernel exposes no BTF at /sys/kernel/btf/vmlinux."
 
   # Ubuntu 24.04 and later gate unprivileged user namespaces behind AppArmor.
-  # The agent runs as uid 65534 and unshares one, so it cannot start while
-  # this is 1. Said rather than changed: it is a host setting, not the demo's.
-  local userns=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
-  if [ -r "$userns" ] && [ "$(cat "$userns")" = "1" ]; then
-    fail "kernel.apparmor_restrict_unprivileged_userns is 1, so the agent cannot create its user namespace.
-      Allow it for the session:  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+  # The agent runs as uid 65534 and unshares one, so it cannot start unless
+  # its profile is loaded or the restriction is off. Said rather than changed:
+  # both are host settings, not the demo's.
+  if ! userns_allowed; then
+    fail "kernel.apparmor_restrict_unprivileged_userns is 1 and the agent's AppArmor profile is not loaded,
+      so the agent cannot create its user namespace. Load the profile, which grants the namespace to
+      /usr/local/bin/ebpfsentinel-agent alone and leaves the restriction in force for everything else:
+        sudo apparmor_parser -r ${PWD}/apparmor.d/ebpfsentinel-agent
+      Only where apparmor_parser is unavailable, lift the restriction host-wide for the session:
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
   fi
+}
+
+# Ubuntu 24.04 and later set kernel.apparmor_restrict_unprivileged_userns=1,
+# which refuses a user namespace to a process holding no capability unless an
+# AppArmor profile grants it `userns`. The agent is such a process; the warden
+# holds CAP_SYS_ADMIN and is not concerned. apparmor.d/ebpfsentinel-agent in
+# this lab is that profile, attached by path to /usr/local/bin/ebpfsentinel-agent.
+# The agent container runs with apparmor=unconfined, so its exec of that binary,
+# the path the image installs it at, attaches the host's profile by name. A host
+# without the sysctl, or with it at 0, needs nothing. The two paths are
+# arguments only so the decision can be exercised without a host to match.
+userns_allowed() {
+  local restrict="${1:-/proc/sys/kernel/apparmor_restrict_unprivileged_userns}"
+  local profiles="${2:-/sys/kernel/security/apparmor/profiles}"
+  [ -r "$restrict" ] || return 0
+  [ "$(cat "$restrict")" = "1" ] || return 0
+  [ -r "$profiles" ] && grep -q '^ebpfsentinel-agent (' "$profiles"
 }
 
 local_preflight() {
