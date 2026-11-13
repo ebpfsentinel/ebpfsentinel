@@ -212,10 +212,14 @@ services:
         tmpfs:
           mode: 0o1777
 
+    # The reservation covers the agent's steady use with the benchmark
+    # configuration's features, about 240 MiB; the limit keeps about 60% over
+    # the peak while it loads its programs with every feature on, about
+    # 315 MiB (see Memory in the README). The Helm chart sets the same.
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 512M
           cpus: "2"
         reservations:
           memory: 256M
