@@ -77,6 +77,7 @@ services:
       - BPF # create the DLP uprobe BPF_LINK_CREATE
       - PERFMON # uprobe attach (perf/tracing)
       - DAC_READ_SEARCH # name the directory a watched file changed in
+      - NET_BIND_SERVICE # port 53 for the DNS allow-list resolver, handed to the agent
     security_opt:
       - apparmor=unconfined # delegation does fsconfig/move_mount
       - seccomp=unconfined # mount/bpf/netlink syscalls

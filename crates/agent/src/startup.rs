@@ -9262,7 +9262,15 @@ fn open_local_file_watch(
     (watch, marks)
 }
 
-pub(crate) async fn spawn_dns_allowlist_resolver(
+/// Bind the DNS allow-list resolver on `dns.allowlist.listen` and answer
+/// from it until `cancel`. The enterprise binary calls it too.
+///
+/// # Errors
+///
+/// A missing listen address, a list that does not parse, or a bind that
+/// fails: the agent does not start without the resolver its containers
+/// were pointed at.
+pub async fn spawn_dns_allowlist_resolver(
     config: &AgentConfig,
     metrics: &Arc<AgentMetrics>,
     alert_tx: &tokio::sync::mpsc::Sender<application::alert_event::AlertEvent>,
