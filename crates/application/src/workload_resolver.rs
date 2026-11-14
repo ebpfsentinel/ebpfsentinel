@@ -148,6 +148,21 @@ impl WorkloadResolver {
         Some(self.with_peer(self.enrich(owner), flow))
     }
 
+    /// Every connection the flow index holds as opened on this node, with
+    /// the workload that opened it, empty when no socket table is installed.
+    /// Only connections opened at most `within_ns` ago are returned.
+    #[must_use]
+    pub fn originated_flows(&self, within_ns: u64) -> Vec<(FlowEndpoints, Workload)> {
+        let Some(sockets) = self.sockets.load_full() else {
+            return Vec::new();
+        };
+        sockets
+            .originated_flows(within_ns)
+            .into_iter()
+            .map(|(flow, owner)| (flow, self.with_peer(self.enrich(owner), &flow)))
+            .collect()
+    }
+
     /// The workload behind a pid the caller already knows, which is how a DLP
     /// write arrives: the uprobe fires in the writing thread.
     #[must_use]
@@ -253,6 +268,11 @@ impl WorkloadResolver {
             // The chain is read only for a process the table holds: a pid it
             // never saw has no parent recorded to start the walk from.
             workload = workload.with_lineage(&processes.lineage(owner.pid));
+        }
+        if workload.container.is_none()
+            && let Some(cgroup) = workload.cgroup
+        {
+            workload.container = processes.container_of_cgroup(cgroup);
         }
         with_unit(workload, processes)
     }

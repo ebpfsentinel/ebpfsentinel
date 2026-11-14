@@ -1061,6 +1061,18 @@ pub enum Command {
     /// answered by [`Response::NamespaceIds`]. Read-only: a rootless agent
     /// cannot open another user's namespace to ask, so the warden asks for it.
     NamespaceIds,
+    /// Bind the socket the DNS allow-list resolver serves on and hand it over
+    /// in an `SCM_RIGHTS` cmsg after [`Response::FdReady`]: a UDP socket, or a
+    /// listening TCP socket when `stream`. Port 53 sits below the unprivileged
+    /// range and the rootless agent holds no `CAP_NET_BIND_SERVICE` on the
+    /// host. Only port 53 on an address that is neither loopback nor
+    /// unspecified is bound, so the warden lends no other privileged port.
+    ResolverSocket {
+        /// The address the containers are pointed at.
+        listen: std::net::SocketAddr,
+        /// A TCP listener rather than a UDP socket.
+        stream: bool,
+    },
 }
 
 /// The most servers one [`Command::ReadShareWriters`] reads.
@@ -1360,6 +1372,8 @@ mod tests {
         assert!(bad_reply.args().is_none());
     }
 
+    // One literal per variant, so the list grows with the protocol.
+    #[expect(clippy::too_many_lines)]
     fn all_commands() -> Vec<Command> {
         let tuple = ConntrackTuple {
             proto: 6,
@@ -1460,6 +1474,10 @@ mod tests {
                 servers: vec![std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2))],
             },
             Command::ConnectPodman { uid: 1000 },
+            Command::ResolverSocket {
+                listen: "172.17.0.1:53".parse().unwrap(),
+                stream: true,
+            },
         ]
     }
 

@@ -18,8 +18,9 @@ use aya::maps::{HashMap as AyaHashMap, MapData, PerCpuHashMap, PerCpuValues};
 use domain::exposure::entity::{AcceptedConnections, BoundSocket, ListenerProtocol};
 use domain::workload::entity::WorkloadSource;
 use ebpf_common::attribution::{
-    ATTRIBUTION_FAMILY_IPV4, ATTRIBUTION_FAMILY_IPV6, ATTRIBUTION_IDENTITY_TTL_NS, FlowIdentityKey,
-    LISTENER_STATE_LISTEN, ListenerAcceptKey, ListenerAccepts, ListeningSocket, SocketIdentity,
+    ATTRIBUTION_FAMILY_IPV4, ATTRIBUTION_FAMILY_IPV6, ATTRIBUTION_HOOK_POST_BIND,
+    ATTRIBUTION_IDENTITY_TTL_NS, FlowIdentityKey, LISTENER_STATE_LISTEN, ListenerAcceptKey,
+    ListenerAccepts, ListeningSocket, SocketIdentity,
 };
 use ports::secondary::socket_identity_port::{FlowEndpoints, SocketIdentityReader, SocketOwner};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -215,7 +216,44 @@ impl SocketIdentityReader for EbpfSocketIdentityReader {
             .filter_map(|(key, per_cpu)| accepted(&key, &per_cpu))
             .collect()
     }
+
+    fn originated_flows(&self, within_ns: u64) -> Vec<(FlowEndpoints, SocketOwner)> {
+        let now = boottime_now_ns();
+        self.flows
+            .iter()
+            .filter_map(Result::ok)
+            .filter_map(|(key, identity)| {
+                let identity = Self::fresh(identity, now)?;
+                (now - identity.at_ns <= within_ns).then_some(())?;
+                originated(&key, identity)
+            })
+            .collect()
+    }
 }
+
+/// One entry of the flow index as a connection this node opened, or `None`
+/// for an entry naming no process, of no known family, or written for a
+/// socket bound to receive datagrams, whose sends are replies.
+#[must_use]
+pub fn originated(
+    key: &FlowIdentityKey,
+    identity: SocketIdentity,
+) -> Option<(FlowEndpoints, SocketOwner)> {
+    if key.protocol == UDP && identity.hook == ATTRIBUTION_HOOK_POST_BIND {
+        return None;
+    }
+    let flow = FlowEndpoints {
+        local_addr: address_of(key.family, &key.local_addr)?,
+        remote_addr: address_of(key.family, &key.remote_addr)?,
+        local_port: key.local_port,
+        remote_port: key.remote_port,
+        protocol: key.protocol,
+    };
+    Some((flow, owner_of(identity, WorkloadSource::Flow)?))
+}
+
+/// The IP protocol number of UDP.
+const UDP: u8 = 17;
 
 /// One address and port's count, summed over the CPUs that took the
 /// handshakes, or `None` for a key of no known family.
@@ -302,6 +340,76 @@ mod tests {
             state,
             _pad: [0; 5],
         }
+    }
+
+    fn opener(hook: u8) -> SocketIdentity {
+        SocketIdentity {
+            at_ns: 9,
+            cgroup_id: 77,
+            pid: 101,
+            tgid: 100,
+            uid: 33,
+            hook,
+            family: ATTRIBUTION_FAMILY_IPV4,
+            ..SocketIdentity::default()
+        }
+    }
+
+    #[test]
+    fn an_index_entry_reads_back_as_the_connection_its_key_was_built_from() {
+        let key = flow_key(&flow()).unwrap();
+        let (read, owner) = originated(
+            &key,
+            opener(ebpf_common::attribution::ATTRIBUTION_HOOK_CONNECT),
+        )
+        .unwrap();
+        assert_eq!(read, flow());
+        assert_eq!(owner.tgid, 100);
+        assert_eq!(owner.cgroup_id, 77);
+        assert_eq!(owner.source, WorkloadSource::Flow);
+
+        let v6 = FlowEndpoints {
+            local_addr: "2001:db8::7".parse().unwrap(),
+            remote_addr: "2001:db8::9".parse().unwrap(),
+            ..flow()
+        };
+        let (read, _) = originated(
+            &flow_key(&v6).unwrap(),
+            opener(ebpf_common::attribution::ATTRIBUTION_HOOK_CONNECT),
+        )
+        .unwrap();
+        assert_eq!(read, v6);
+    }
+
+    #[test]
+    fn a_datagram_socket_bound_to_receive_opened_nothing() {
+        let answer = FlowEndpoints {
+            protocol: UDP,
+            ..flow()
+        };
+        let key = flow_key(&answer).unwrap();
+        assert!(originated(&key, opener(ATTRIBUTION_HOOK_POST_BIND)).is_none());
+        assert!(
+            originated(
+                &key,
+                opener(ebpf_common::attribution::ATTRIBUTION_HOOK_SENDMSG)
+            )
+            .is_some()
+        );
+        // A stream bound first and connected after is still a client.
+        assert!(
+            originated(
+                &flow_key(&flow()).unwrap(),
+                opener(ATTRIBUTION_HOOK_POST_BIND)
+            )
+            .is_some()
+        );
+        // An entry naming no process names nothing.
+        let nobody = SocketIdentity {
+            tgid: 0,
+            ..opener(ebpf_common::attribution::ATTRIBUTION_HOOK_CONNECT)
+        };
+        assert!(originated(&flow_key(&flow()).unwrap(), nobody).is_none());
     }
 
     #[test]

@@ -13,4 +13,5 @@ pub mod package_inventory;
 pub mod packet_sockets;
 pub mod pcap;
 pub mod pod_tc;
+pub mod resolver_socket;
 pub mod uprobe;

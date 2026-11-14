@@ -2750,17 +2750,12 @@ pub async fn run(
         // cgroup, so turning it on loads the object on its own as well.
         let netpol_mode = config.container.kubernetes.network_policy.mode;
         let netpol_on = netpol_mode != infrastructure::config::NetworkPolicyMode::Off;
-        // A container's labels are policy too, so reading them loads the
-        // object even while the file carries no workload rule.
-        let label_policy = config.container.docker.label_policy;
-        if workload_policy.is_empty()
-            && !config.response.quarantine.enabled
-            && !netpol_on
-            && !label_policy
-        {
+        // So do a container's labels and a learning window: the whole list is
+        // `workload_firewall_idle`.
+        if workload_firewall_idle(&config, &workload_policy) {
             metrics.clear_ebpf_program_status("cgroup_workload_firewall");
             adapters::ebpf::workload_firewall_attach::publish_status(
-                adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus::default(),
+                workload_firewall_idle_status(),
             );
             adapters::ebpf::quarantine_map_manager::publish_status(
                 adapters::ebpf::QuarantineStatus {
@@ -2882,7 +2877,7 @@ pub async fn run(
                 if netpol_mode == infrastructure::config::NetworkPolicyMode::Enforce {
                     return Err(anyhow::anyhow!(network_policy_unavailable(&reason)));
                 }
-                if label_policy {
+                if config.container.docker.label_policy {
                     // A label may say enforce on any container started later,
                     // and nothing at that point could refuse it.
                     return Err(anyhow::anyhow!(
@@ -6386,6 +6381,44 @@ pub fn arm_quarantine(
 /// It is loaded off the rules rather than off a configuration key, because a
 /// workload rule is already the switch: a file with none loads nothing, and a
 /// file with one means it.
+/// Whether nothing needs the workload firewall's object, which is then left
+/// unloaded.
+///
+/// The hooks attach at start only, so the object is loaded for everything
+/// that may put a rule in force later as well as for the rules the file
+/// already carries: a quarantine, `NetworkPolicy` and a container's labels
+/// are policy without a line in the rule list, and on a node whose Docker
+/// bridges are read a learning window ends in a bridge's segmentation,
+/// written into this file and reloaded. Learning alone is on by default and
+/// does not load it: a host that only learns gets the restart named in the
+/// status when it loads its first workload rule.
+pub fn workload_firewall_idle(
+    config: &AgentConfig,
+    policy: &domain::firewall::workload::WorkloadPolicy,
+) -> bool {
+    policy.is_empty()
+        && !config.response.quarantine.enabled
+        && config.container.kubernetes.network_policy.mode
+            == infrastructure::config::NetworkPolicyMode::Off
+        && !config.container.docker.label_policy
+        && !(config.learning.enabled && config.container.docker.enabled)
+}
+
+/// The status an agent that left the object unloaded reports, saying why a
+/// rule reloaded since start is refused rather than letting the hooks look
+/// broken.
+pub fn workload_firewall_idle_status()
+-> adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus {
+    adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus {
+        reason: Some(
+            "the configuration carried no workload rule at start and the hooks attach at \
+             start only: restart the agent for a rule added since"
+                .to_string(),
+        ),
+        ..adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus::default()
+    }
+}
+
 pub fn try_load_cgroup_workload_firewall(
     ebpf_dir: &str,
     config: &AgentConfig,
@@ -8372,12 +8405,16 @@ fn resolve_sock_offsets() -> anyhow::Result<ebpf_common::dlp::SockOffsets> {
 /// hardening), and it is the only source the connection list reads. It is
 /// wired whenever conntrack is enabled, before the settings are reloaded, so
 /// the settings sync actually reaches the kernel: those writes are no-ops
-/// until the port is present. On kernels without
+/// until the port is present. It is wired too when only learning mode is on,
+/// because a learning window reads nothing else: without it every window
+/// closes empty, indistinguishable from a node that opened no connection.
+/// Wiring it writes nothing, the sysctls follow a settings reload, which
+/// still runs only for an enabled conntrack. On kernels without
 /// `CONFIG_NF_CONNTRACK_PROCFS` the sysctl knobs still exist but
 /// `/proc/net/nf_conntrack` does not, and the port falls back to dumping
 /// through conntrack-tools, or through the warden in a rootless deployment.
 pub(crate) fn wire_kernel_conntrack(ct_svc: &mut ConnTrackAppService, config: &AgentConfig) {
-    if config.conntrack.enabled {
+    if config.conntrack.enabled || config.learning.enabled {
         ct_svc.set_netfilter_port(Box::new(
             adapters::netfilter::conntrack::ProcNetfilterConntrackPort::new(),
         ));
@@ -9120,6 +9157,29 @@ mod tests {
         let yaml = "agent:\n  interfaces: [eth0]\n  http_port: 9443\n  grpc_port: 9444\nfirewall:\n  anti_lockout:\n    ports: [22, 9443]\n";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         assert_eq!(firewall_anti_lockout(&config).ports, [22, 9443, 9444]);
+    }
+
+    #[test]
+    fn an_agent_learning_docker_bridges_loads_the_hooks_their_segmentation_needs() {
+        let policy = domain::firewall::workload::WorkloadPolicy::from_rules(&[]).unwrap();
+        let quiet = AgentConfig::from_yaml("agent:\n  interfaces: [eth0]\n").unwrap();
+        assert!(workload_firewall_idle(&quiet, &policy));
+        let bridges = AgentConfig::from_yaml(
+            "agent:\n  interfaces: [eth0]\ncontainer:\n  docker:\n    enabled: true\n",
+        )
+        .unwrap();
+        assert!(!workload_firewall_idle(&bridges, &policy));
+        let not_learning = AgentConfig::from_yaml(
+            "agent:\n  interfaces: [eth0]\nlearning:\n  enabled: false\n\
+             container:\n  docker:\n    enabled: true\n",
+        )
+        .unwrap();
+        assert!(workload_firewall_idle(&not_learning, &policy));
+        assert!(
+            workload_firewall_idle_status()
+                .reason
+                .is_some_and(|r| r.contains("restart"))
+        );
     }
 
     #[test]

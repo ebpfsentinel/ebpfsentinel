@@ -101,6 +101,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::ReadServedPeer { .. } => "ReadServedPeer",
         Command::ReadShareWriters { .. } => "ReadShareWriters",
         Command::ConnectPodman { .. } => "ConnectPodman",
+        Command::ResolverSocket { .. } => "ResolverSocket",
     }
 }
 
@@ -318,6 +319,29 @@ impl WardenClient {
                 )
             }
             other => Err(unexpected("ConnectPodman", &other)),
+        }
+    }
+
+    /// Ask the warden to bind the DNS allow-list resolver's socket on
+    /// `listen`, UDP or a TCP listener when `stream`, and receive it over
+    /// `SCM_RIGHTS`.
+    #[cfg(feature = "fd-pass")]
+    pub fn resolver_socket(
+        &mut self,
+        listen: std::net::SocketAddr,
+        stream: bool,
+    ) -> io::Result<std::os::fd::OwnedFd> {
+        self.send(&Command::ResolverSocket { listen, stream })?;
+        match self.recv("ResolverSocket")? {
+            Response::FdReady => {
+                let result = fd_pass::recv_one_fd(&self.stream);
+                self.classify(
+                    "ResolverSocket",
+                    "waiting for the resolver socket from",
+                    result,
+                )
+            }
+            other => Err(unexpected("ResolverSocket", &other)),
         }
     }
 

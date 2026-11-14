@@ -529,6 +529,16 @@ impl ProcessTableService {
         self.containers.as_ref()?.unit(pid, cgroup_id)
     }
 
+    /// The container a cgroup belongs to, read off the cgroup alone. A
+    /// connection outlives the task that opened it often enough, a probe or
+    /// a one-shot client in a container, and the cgroup the kernel recorded
+    /// at `connect()` still names the container once the pid is gone.
+    #[must_use]
+    pub fn container_of_cgroup(&self, cgroup_id: u64) -> Option<String> {
+        let (info, _) = self.containers.as_ref()?.resolve_by_id(cgroup_id);
+        info.container_id().map(ToOwned::to_owned)
+    }
+
     /// The container an exec happened in, with runtime metadata where an
     /// enricher could add some. A host process resolves to nothing rather
     /// than to a `ContainerContext` saying "host", because the field is what
@@ -1276,6 +1286,27 @@ mod tests {
                 ContainerCgroups.read_cgroup(pid)
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_cgroup_a_container_task_ran_in_still_names_the_container() {
+        let resolver = Arc::new(ContainerResolverEngine::new(Arc::new(ContainerCgroups), 16));
+        let service = ProcessTableService::new(16, false).with_containers(resolver);
+        let mut probe = exec(10, 1);
+        probe.cgroup_id = 500;
+        service.apply(probe).await;
+        assert_eq!(
+            service.container_of_cgroup(500).as_deref(),
+            Some("3f2a1b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708")
+        );
+        // A cgroup no task was seen in, with nothing to read it by, names
+        // nothing rather than guessing.
+        assert!(service.container_of_cgroup(501).is_none());
+        assert!(
+            ProcessTableService::new(16, false)
+                .container_of_cgroup(500)
+                .is_none()
+        );
     }
 
     #[tokio::test]

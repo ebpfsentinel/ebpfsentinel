@@ -83,4 +83,19 @@ pub trait SocketIdentityReader: Send + Sync {
     fn accepted_connections(&self) -> Vec<AcceptedConnections> {
         Vec::new()
     }
+
+    /// Every connection a task on this node opened that the flow index still
+    /// holds, oriented from the end that opened it, with that task.
+    ///
+    /// This is what the node reached whatever namespace the socket lived in:
+    /// a connection between two containers on one bridge never crosses the
+    /// host's own connection table unless the bridge hands its frames to
+    /// netfilter, but its `connect()` ran under the hooks all the same. A
+    /// socket bound to receive datagrams is left out, since what it sends
+    /// are answers. Only connections opened at most `within_ns` ago are
+    /// returned, so a caller asking what happened since a moment is not
+    /// handed what came before it. Empty from a reader with no such table.
+    fn originated_flows(&self, _within_ns: u64) -> Vec<(FlowEndpoints, SocketOwner)> {
+        Vec::new()
+    }
 }

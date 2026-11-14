@@ -62,6 +62,7 @@ pub mod packet_sockets;
 pub mod pcap_slots;
 pub mod podman_connect;
 pub mod process_maps;
+pub mod resolver_socket;
 pub mod rooted_read;
 pub mod served_peer;
 pub mod server;

@@ -437,6 +437,9 @@ SYSCTL
           docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-buildx-plugin
         usermod -aG docker vagrant
       fi
+      # The image the bridge suites import is a static busybox from the
+      # host, so no registry is pulled from.
+      apt-get install -y --no-install-recommends busybox-static
     SHELL
 
     # ----------------------------------------------------------

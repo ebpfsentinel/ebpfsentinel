@@ -27,7 +27,8 @@ use crate::write_refusal;
 use crate::{
     bpf_inventory, cgroup_ops, delegate_over_fd, dlp_scan, exe_read, facts_read, go_executables,
     hidden_ports, hidden_processes, namespace_ids, net_ops, netns_tcx_ops, packet_sockets,
-    podman_connect, process_maps, recv_fd, rooted_read, send_msg_fds, served_peer, uprobe_ops,
+    podman_connect, process_maps, recv_fd, resolver_socket, rooted_read, send_msg_fds, served_peer,
+    uprobe_ops,
 };
 
 /// How long a connection may hold a thread without saying `Hello`.
@@ -418,6 +419,17 @@ fn handle_conn_with_timeouts(
                     }
                     Err(message) => {
                         eprintln!("[warden] podman connect for uid {uid} refused: {message}");
+                        serve_passed_fd(&mut writer, Err(message))
+                    }
+                }
+            }
+            // `ResolverSocket` answers out-of-band: the bound socket, after
+            // an `FdReady`.
+            Command::ResolverSocket { listen, stream } => {
+                match resolver_socket::bind(*listen, *stream) {
+                    Ok(socket) => serve_passed_fd(&mut writer, Ok(socket.as_raw_fd())),
+                    Err(message) => {
+                        eprintln!("[warden] resolver socket on {listen} refused: {message}");
                         serve_passed_fd(&mut writer, Err(message))
                     }
                 }

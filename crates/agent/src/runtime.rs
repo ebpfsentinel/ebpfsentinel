@@ -2251,17 +2251,14 @@ pub async fn start_workload_firewall(
 ) -> anyhow::Result<Option<WorkloadFirewall>> {
     let policy = domain::firewall::workload::WorkloadPolicy::from_rules(&config.firewall_rules()?)?
         .with_dns(config.workload_dns()?)?;
-    // A quarantine and `NetworkPolicy` ride on the same object, so turning
-    // either on loads the object even while the file carries no workload
-    // rule.
     let netpol_mode = config.container.kubernetes.network_policy.mode;
     let netpol_on = netpol_mode != infrastructure::config::NetworkPolicyMode::Off;
-    if policy.is_empty() && !config.response.quarantine.enabled && !netpol_on {
+    if startup::workload_firewall_idle(config, &policy) {
         services
             .metrics
             .clear_ebpf_program_status("cgroup_workload_firewall");
         adapters::ebpf::workload_firewall_attach::publish_status(
-            adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus::default(),
+            startup::workload_firewall_idle_status(),
         );
         return Ok(None);
     }

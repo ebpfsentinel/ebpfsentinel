@@ -7,6 +7,13 @@
 //! table, so the sampler reads that table on an interval and folds what it
 //! finds into the open window.
 //!
+//! The connection table is the host's own, and a connection between two
+//! containers on one bridge is switched inside the bridge without ever
+//! reaching it, unless the bridge hands its frames to netfilter. So each
+//! sample also lists the attribution hooks' flow index, which every
+//! `connect()` on the node writes whatever namespace the socket lives in,
+//! and folds what the table did not already carry.
+//!
 //! The cost of reading a table rather than a stream is stated rather than
 //! hidden: a flow that opens and closes between two samples is never seen,
 //! and a flow that lives across ten samples is folded ten times. The first
@@ -158,6 +165,58 @@ impl LearningCollector {
         flows
     }
 
+    /// The connections the flow index holds as opened on this node that the
+    /// rows read did not already carry, each with the workload that opened
+    /// it.
+    ///
+    /// The index keeps a connection for a while after it was opened, so one
+    /// opened before the window is left out: the window learns what ran
+    /// while it was open, not what ran just before.
+    fn originated_beside(&self, connections: &[Connection], now_ns: u64) -> Vec<ObservedFlow> {
+        let Some(window) = self.learning.active_session() else {
+            return Vec::new();
+        };
+        let open_for = now_ns.saturating_sub(window.started_at_ns);
+        let read: std::collections::HashSet<(String, u16, String, u16, u8)> = connections
+            .iter()
+            .map(|c| {
+                (
+                    c.src_ip.clone(),
+                    c.src_port,
+                    c.dst_ip.clone(),
+                    c.dst_port,
+                    c.protocol,
+                )
+            })
+            .collect();
+        self.workloads
+            .originated_flows(open_for)
+            .into_iter()
+            .filter(|(flow, _)| {
+                !read.contains(&(
+                    flow.local_addr.to_string(),
+                    flow.local_port,
+                    flow.remote_addr.to_string(),
+                    flow.remote_port,
+                    flow.protocol,
+                ))
+            })
+            .filter_map(|(flow, workload)| {
+                let protocol = Protocol::from_u8(flow.protocol);
+                if !matches!(protocol, Protocol::Tcp | Protocol::Udp) {
+                    return None;
+                }
+                Some(ObservedFlow {
+                    workload: self.observed_workload(workload.pid, &workload),
+                    source: flow.local_addr,
+                    destination: flow.remote_addr,
+                    port: flow.remote_port,
+                    protocol,
+                })
+            })
+            .collect()
+    }
+
     /// Read the table once and fold it, returning the destinations the
     /// window had not seen before.
     pub async fn sample(&self, now_ns: u64) -> usize {
@@ -174,23 +233,26 @@ impl LearningCollector {
         let read =
             tokio::task::spawn_blocking(move || conntrack.blocking_read().get_connections(rows))
                 .await;
-        let connections = match read {
-            Ok(Ok(connections)) => connections,
+        let (connections, read) = match read {
+            Ok(Ok(connections)) => (connections, true),
             Ok(Err(err)) => {
                 warn!(error = %err, "learning sample could not read the connection table");
-                // The agent is up even though this sample is empty, and the
-                // window must not come back looking like one the agent slept
-                // through.
-                self.learning.touch(now_ns);
-                return 0;
+                (Vec::new(), false)
             }
             Err(err) => {
                 warn!(error = %err, "learning sample did not run");
-                self.learning.touch(now_ns);
-                return 0;
+                (Vec::new(), false)
             }
         };
-        let flows = self.flows_of(&connections);
+        let mut flows = self.flows_of(&connections);
+        flows.extend(self.originated_beside(&connections, now_ns));
+        if !read && flows.is_empty() {
+            // The agent is up even though this sample is empty, and the
+            // window must not come back looking like one the agent slept
+            // through.
+            self.learning.touch(now_ns);
+            return 0;
+        }
         let new_edges = self.learning.observe(&flows, now_ns);
         debug!(
             rows = connections.len(),
@@ -378,6 +440,87 @@ mod tests {
             .expect("the window is open");
         assert!(progress.continuous);
         assert_eq!(progress.edges, 0);
+    }
+
+    /// A flow index holding one connection opened on this node, which the
+    /// host's connection table never saw.
+    /// A reader whose index holds one connection, opened this long ago.
+    struct Indexed(OneSocket, u64);
+
+    impl SocketIdentityReader for Indexed {
+        fn by_cookie(&self, cookie: u64) -> Option<SocketOwner> {
+            self.0.by_cookie(cookie)
+        }
+
+        fn by_flow(&self, flow: &FlowEndpoints) -> Option<SocketOwner> {
+            self.0.by_flow(flow)
+        }
+
+        fn by_originated_flow(&self, flow: &FlowEndpoints) -> Option<SocketOwner> {
+            self.0.by_originated_flow(flow)
+        }
+
+        fn originated_flows(&self, within_ns: u64) -> Vec<(FlowEndpoints, SocketOwner)> {
+            if self.1 > within_ns {
+                return Vec::new();
+            }
+            vec![(self.0.endpoints, self.0.owner)]
+        }
+    }
+
+    fn indexed_collector(opened_ago_ns: u64) -> LearningCollector {
+        let learning = Arc::new(LearningAppService::new(64, Arc::new(NoopMetrics)));
+        learning
+            .start(LearningScope::Node, 600, 1_000 * SEC)
+            .expect("the window opens");
+        let conntrack = Arc::new(RwLock::new(ConnTrackAppService::new(Arc::new(NoopMetrics))));
+        let workloads = WorkloadResolver::new().with_sockets(Box::new(Indexed(
+            OneSocket {
+                endpoints: egress(),
+                owner: owner(),
+            },
+            opened_ago_ns,
+        )));
+        LearningCollector::new(learning, conntrack, workloads)
+    }
+
+    #[tokio::test]
+    async fn a_connection_the_host_table_never_saw_is_learned_from_the_flow_index() {
+        let collector = indexed_collector(30 * SEC);
+        // The test reader names a pid no process table describes, so the
+        // flow is folded as seen and unattributed: what matters is that it
+        // reached the window at all.
+        collector.sample(1_100 * SEC).await;
+        let progress = collector
+            .learning
+            .progress(None, 1_100 * SEC)
+            .expect("the window is open");
+        assert_eq!(progress.observations, 1);
+        let flows = collector.originated_beside(&[], 1_100 * SEC);
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0].port, 443);
+        assert_eq!(flows[0].source, egress().local_addr);
+        assert_eq!(flows[0].destination, egress().remote_addr);
+    }
+
+    #[test]
+    fn a_connection_both_tables_hold_is_folded_once() {
+        let collector = indexed_collector(30 * SEC);
+        let rows = [connection("10.0.0.7", 45_112, "203.0.113.9", 443, 6)];
+        assert_eq!(collector.flows_of(&rows).len(), 1);
+        assert!(collector.originated_beside(&rows, 1_100 * SEC).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_connection_opened_before_the_window_is_not_learned() {
+        // The window opened 100 s ago; the connection was opened 150 s ago.
+        let collector = indexed_collector(150 * SEC);
+        collector.sample(1_100 * SEC).await;
+        let progress = collector
+            .learning
+            .progress(None, 1_100 * SEC)
+            .expect("the window is open");
+        assert_eq!(progress.observations, 0);
     }
 
     #[tokio::test]

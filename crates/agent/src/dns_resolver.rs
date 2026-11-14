@@ -28,13 +28,28 @@ const TCP_IDLE: Duration = Duration::from_secs(10);
 /// Largest query read over UDP.
 const UDP_QUERY_MAX: usize = 4096;
 
+/// Where the warden listens when this agent runs rootless.
+const WARDEN_SOCK_ENV: &str = "EBPFSENTINEL_WARDEN_SOCK";
+
 /// Bind both sockets, so a port already taken or a missing capability stops
-/// the agent at startup rather than leaving containers with no resolver.
+/// the agent at startup rather than leaving containers with no resolver. A
+/// rootless agent holds no `CAP_NET_BIND_SERVICE` on the host and asks the
+/// warden for both.
 ///
 /// # Errors
 ///
 /// Returns the bind failure, naming the address.
 pub async fn bind(listen: SocketAddr) -> anyhow::Result<(UdpSocket, TcpListener)> {
+    if let Some(sock) = std::env::var_os(WARDEN_SOCK_ENV) {
+        let (udp, tcp) = tokio::task::spawn_blocking(move || {
+            adapters::warden::resolver_socket::bind(std::path::Path::new(&sock), listen)
+        })
+        .await?
+        .with_context(|| format!("DNS allow-list resolver: the warden could not bind {listen}"))?;
+        udp.set_nonblocking(true)?;
+        tcp.set_nonblocking(true)?;
+        return Ok((UdpSocket::from_std(udp)?, TcpListener::from_std(tcp)?));
+    }
     let hint = "binding port 53 needs CAP_NET_BIND_SERVICE, and the address must be one the \
                 host holds, such as the bridge gateway";
     let udp = UdpSocket::bind(listen)

@@ -94,6 +94,7 @@ env:
   - "suite 106 listens on the agent's own loopback (local lane only)"
   - "suite 135 starts its processes on the agent's host (local lane only)"
   - "suite 136 dials from the agent's host (local lane only)"
+  - "suite 138 runs its containers beside the agent (local lane only)"
   - "suite 137 creates its links on the agent's host (local lane only)"
   - "suite 107 needs a second machine at the far end (2VM lane only)"
   - "suite 108 needs the client on a second machine (2VM lane only)"
