@@ -41,15 +41,19 @@ agent:
   # the file on disk is what decides what this agent does.
   # config_writes: refused
 
-  # Rate limit for the mutating (POST/DELETE/PATCH/PUT) control-plane API,
-  # per client IP (GCRA token bucket). Read endpoints keep a separate, looser
-  # limit. Defaults shown: 60-request burst refilling at 1/s (= 60/min). Raise
-  # these if you drive bulk reconfiguration through the API. Loopback clients
-  # are exempt by default, so same-host tooling and bulk loads are never
-  # throttled; set exempt_loopback: false to rate-limit local clients too.
+  # Rate limits for the mutating (POST/DELETE/PATCH/PUT) control-plane API,
+  # per client IP (GCRA token bucket), and a separate, looser one for reads.
+  # Defaults shown: writes get a 60-request burst refilling at 1/s (= 60/min),
+  # reads 200/min with a burst of 200. Raise the write pair if you drive bulk
+  # reconfiguration through the API, the read pair if many callers share one
+  # address (host networking, NAT, an API server proxy). Loopback clients
+  # are exempt from the write limit by default, so same-host tooling and
+  # bulk loads are never throttled; exempt_loopback: false limits them too.
   # api_rate_limit:
   #   write_per_second: 1
   #   write_burst: 60
+  #   read_per_minute: 200
+  #   read_burst: 200
   #   exempt_loopback: true
 
   # XDP attachment mode: auto, native, generic, or offloaded.

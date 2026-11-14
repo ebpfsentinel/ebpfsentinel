@@ -2276,12 +2276,15 @@ pub enum ConfigWrites {
     Allowed,
 }
 
-/// Rate limit applied to the mutating (POST/DELETE/PATCH/PUT) control-plane
-/// HTTP endpoints, per client IP, via a GCRA token bucket. Read endpoints keep
-/// a separate, looser fixed limit. Tunable so operators who drive bulk
-/// reconfiguration through the API can raise the ceiling, and so the limit can
-/// be exercised in tests; loopback can be exempted so local tooling and
-/// same-host bulk loads are never throttled.
+/// Rate limits on the control-plane HTTP endpoints, per client IP, each a
+/// GCRA token bucket: one for the mutating (POST/DELETE/PATCH/PUT) routes and
+/// a looser one for the reads. Tunable so operators who drive bulk
+/// reconfiguration through the API can raise the write ceiling, so a
+/// deployment where many callers reach the agent from one address (a node
+/// address under host networking, a NAT gateway, an API server proxy) can
+/// raise the read ceiling, and so the limits can be exercised in tests;
+/// loopback can be exempted so local tooling and same-host bulk loads are
+/// never throttled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ApiRateLimitConfig {
@@ -2291,6 +2294,13 @@ pub struct ApiRateLimitConfig {
 
     /// Burst capacity of the write-API bucket, in requests per IP. Default 60.
     pub write_burst: u32,
+
+    /// Sustained refill rate for the read-API bucket, in requests per minute
+    /// per IP. Default 200.
+    pub read_per_minute: u32,
+
+    /// Burst capacity of the read-API bucket, in requests per IP. Default 200.
+    pub read_burst: u32,
 
     /// Exempt loopback clients (`127.0.0.0/8`, `::1`) from the write-API limit.
     /// Default `true`: local CLI tooling and same-host bulk reconfiguration are
@@ -2303,6 +2313,8 @@ impl Default for ApiRateLimitConfig {
         Self {
             write_per_second: 1,
             write_burst: 60,
+            read_per_minute: 200,
+            read_burst: 200,
             exempt_loopback: true,
         }
     }
@@ -2321,6 +2333,24 @@ impl ApiRateLimitConfig {
         if self.write_burst == 0 {
             return Err(ConfigError::Validation {
                 field: "agent.api_rate_limit.write_burst".to_string(),
+                message: "must be at least 1".to_string(),
+            });
+        }
+        if self.read_per_minute == 0 {
+            return Err(ConfigError::Validation {
+                field: "agent.api_rate_limit.read_per_minute".to_string(),
+                message: "must be at least 1".to_string(),
+            });
+        }
+        if self.read_per_minute > 60_000 {
+            return Err(ConfigError::Validation {
+                field: "agent.api_rate_limit.read_per_minute".to_string(),
+                message: "must be at most 60000 (one request a millisecond)".to_string(),
+            });
+        }
+        if self.read_burst == 0 {
+            return Err(ConfigError::Validation {
+                field: "agent.api_rate_limit.read_burst".to_string(),
                 message: "must be at least 1".to_string(),
             });
         }
@@ -5164,16 +5194,20 @@ nat:
         let rl = config.agent.api_rate_limit;
         assert_eq!(rl.write_per_second, 1);
         assert_eq!(rl.write_burst, 60);
+        assert_eq!(rl.read_per_minute, 200);
+        assert_eq!(rl.read_burst, 200);
         assert!(rl.exempt_loopback);
     }
 
     #[test]
     fn api_rate_limit_parses_overrides() {
-        let yaml = "agent:\n  interfaces: [eth0]\n  api_rate_limit:\n    write_per_second: 50\n    write_burst: 500\n    exempt_loopback: false\n";
+        let yaml = "agent:\n  interfaces: [eth0]\n  api_rate_limit:\n    write_per_second: 50\n    write_burst: 500\n    read_per_minute: 1200\n    read_burst: 600\n    exempt_loopback: false\n";
         let config = AgentConfig::from_yaml(yaml).unwrap();
         let rl = config.agent.api_rate_limit;
         assert_eq!(rl.write_per_second, 50);
         assert_eq!(rl.write_burst, 500);
+        assert_eq!(rl.read_per_minute, 1200);
+        assert_eq!(rl.read_burst, 600);
         assert!(!rl.exempt_loopback);
         config.validate().unwrap();
     }
@@ -5184,6 +5218,14 @@ nat:
         let err = AgentConfig::from_yaml(yaml).unwrap_err();
         assert!(matches!(err, ConfigError::Validation { ref field, .. }
             if field == "agent.api_rate_limit.write_per_second"));
+    }
+
+    #[test]
+    fn api_rate_limit_rejects_a_read_rate_finer_than_a_millisecond() {
+        let yaml = "agent:\n  interfaces: [eth0]\n  api_rate_limit:\n    read_per_minute: 60001\n";
+        let err = AgentConfig::from_yaml(yaml).unwrap_err();
+        assert!(matches!(err, ConfigError::Validation { ref field, .. }
+            if field == "agent.api_rate_limit.read_per_minute"));
     }
 
     #[test]

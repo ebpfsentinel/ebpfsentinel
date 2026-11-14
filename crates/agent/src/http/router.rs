@@ -43,12 +43,6 @@ const MAX_BODY_SIZE: usize = 64 * 1024;
 // which is a middleware over a bare `governor::RateLimiter`. Consolidating onto
 // one crate would mean re-implementing one of those two shapes for no gain.
 
-/// Rate limit for read endpoints: 200 requests a minute per IP sustained,
-/// with a 200-request burst.
-/// Prevents enumeration and resource exhaustion on list queries.
-const READ_RATE_LIMIT_PER_MINUTE: u64 = 200;
-const READ_RATE_LIMIT_BURST: u32 = 200;
-
 /// Auth-specific rate limit: 600 requests a minute per IP sustained, which is
 /// the documented 10 a second, with a 30-request burst.
 /// Applied as an extra layer when auth is enabled to mitigate brute-force attacks.
@@ -257,13 +251,14 @@ pub fn build_router(
     // Write routes: configurable per-IP GCRA token bucket (default 60 burst,
     // refill 1/s = 60 req/min), with optional loopback exemption so same-host
     // tooling and bulk reconfiguration are not throttled. See `write_rate_limit`.
-    // Read routes: lighter fixed limit (200 req/min per IP) to prevent
-    // enumeration and brute-force on auth-protected endpoints.
     let write_limiter = Arc::new(build_write_rate_limiter(rate_limit));
     let exempt_loopback = rate_limit.exempt_loopback;
+    // Read routes: 200 requests a minute per IP with a 200-request burst by
+    // default, raised in `agent.api_rate_limit` where many callers share one
+    // address. Prevents enumeration and resource exhaustion on list queries.
     let read_governor = Arc::new(build_governor(
-        READ_RATE_LIMIT_PER_MINUTE,
-        READ_RATE_LIMIT_BURST,
+        u64::from(rate_limit.read_per_minute.max(1)),
+        rate_limit.read_burst.max(1),
     ));
 
     let api_routes = {
@@ -810,6 +805,7 @@ mod tests {
             write_per_second: 1,
             write_burst: 3,
             exempt_loopback: true,
+            ..ApiRateLimitConfig::default()
         };
         let router = build_router(limiter_test_state(), false, false, cfg);
         let peer: SocketAddr = "203.0.113.5:40000".parse().unwrap();
@@ -833,6 +829,7 @@ mod tests {
             write_per_second: 1,
             write_burst: 3,
             exempt_loopback: true,
+            ..ApiRateLimitConfig::default()
         };
         let router = build_router(limiter_test_state(), false, false, cfg);
         let peer: SocketAddr = "127.0.0.1:40000".parse().unwrap();
@@ -852,6 +849,7 @@ mod tests {
             write_per_second: 1,
             write_burst: 3,
             exempt_loopback: false,
+            ..ApiRateLimitConfig::default()
         };
         let router = build_router(limiter_test_state(), false, false, cfg);
         let peer: SocketAddr = "127.0.0.1:40000".parse().unwrap();
@@ -929,12 +927,48 @@ mod tests {
 
     #[tokio::test]
     async fn read_limit_admits_its_documented_burst_and_rate() {
+        let defaults = ApiRateLimitConfig::default();
         assert_burst_then_replenish(
-            READ_RATE_LIMIT_PER_MINUTE,
-            READ_RATE_LIMIT_BURST,
+            u64::from(defaults.read_per_minute),
+            defaults.read_burst,
             "203.0.113.11:40000",
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn the_read_limit_is_the_one_the_configuration_sets() {
+        use tower::ServiceExt;
+
+        let cfg = ApiRateLimitConfig {
+            read_per_minute: 1,
+            read_burst: 3,
+            ..ApiRateLimitConfig::default()
+        };
+        let router = build_router(limiter_test_state(), false, false, cfg);
+        let peer: SocketAddr = "198.51.100.201:40000".parse().unwrap();
+
+        let mut statuses = Vec::new();
+        for _ in 0..4 {
+            let req = Request::builder()
+                .method("GET")
+                .uri("/api/v1/agent/status")
+                .extension(ConnectInfo(peer))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            statuses.push(router.clone().oneshot(req).await.unwrap().status());
+        }
+        assert!(
+            statuses[..3]
+                .iter()
+                .all(|s| *s != StatusCode::TOO_MANY_REQUESTS),
+            "the configured burst of three must be admitted ({statuses:?})"
+        );
+        assert_eq!(
+            statuses[3],
+            StatusCode::TOO_MANY_REQUESTS,
+            "the read past the configured burst must be refused"
+        );
     }
 
     #[tokio::test]
@@ -971,7 +1005,7 @@ mod tests {
     #[test]
     fn documented_rates_convert_to_the_periods_the_crate_wants() {
         assert_eq!(
-            replenish_period_ms(READ_RATE_LIMIT_PER_MINUTE),
+            replenish_period_ms(u64::from(ApiRateLimitConfig::default().read_per_minute)),
             300,
             "200 read requests a minute is one cell every 300 ms"
         );
@@ -1263,6 +1297,7 @@ mod tests {
             write_per_second: 1,
             write_burst: 1,
             exempt_loopback: false,
+            ..ApiRateLimitConfig::default()
         };
         let router = build_router(limiter_test_state(), false, false, cfg);
 
@@ -1305,6 +1340,7 @@ mod tests {
             write_per_second: 1,
             write_burst: 1,
             exempt_loopback: false,
+            ..ApiRateLimitConfig::default()
         };
         let router = build_router(limiter_test_state(), false, false, cfg);
         let peer: SocketAddr = "198.51.100.200:40000".parse().unwrap();
