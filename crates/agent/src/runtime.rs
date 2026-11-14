@@ -2904,16 +2904,15 @@ pub fn start_learning(
     );
     // A window that cannot be written down is a window that does not
     // survive a restart, which the progress report states as a gap.
-    if !config.learning.storage_path.is_empty() {
-        let path = Path::new(&config.learning.storage_path);
-        match adapters::storage::redb_learning_store::RedbLearningStore::open(path) {
+    if let Some(path) = config.learning.store_path(&config.audit.storage_path) {
+        match adapters::storage::redb_learning_store::RedbLearningStore::open(&path) {
             Ok(store) => {
                 svc = svc.with_store(Arc::new(store)
                     as Arc<dyn ports::secondary::learning_store_port::LearningStorePort>);
             }
             Err(e) => warn!(
                 error = %e,
-                path = %config.learning.storage_path,
+                path = %path.display(),
                 "learning store unavailable, a window will not survive a restart"
             ),
         }

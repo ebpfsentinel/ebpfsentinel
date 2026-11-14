@@ -251,13 +251,13 @@ host_rules:
 # the routes and the sampler exist. max_edges is the ceiling a window holds;
 # past it the window refuses destinations and says so rather than quietly
 # forgetting the oldest, because a policy written from a truncated reading
-# would refuse traffic the node really sends. storage_path empty keeps the
-# windows in memory only, which costs them a restart.
+# would refuse traffic the node really sends. storage_path left out writes
+# the windows beside audit.storage_path; empty keeps them in memory only,
+# which costs them a restart.
 learning:
   enabled: true
   max_edges: 8192
   sample_interval_secs: 10
-  storage_path: data/learning.redb
 
 # Flow export. Off by default, and off here means no record is built at all:
 # a node exporting nowhere should not pay for a flow table. The source is the

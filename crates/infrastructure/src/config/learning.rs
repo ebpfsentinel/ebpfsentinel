@@ -24,10 +24,6 @@ fn default_max_edges() -> usize {
     LEARNING_DEFAULT_MAX_EDGES
 }
 
-fn default_storage_path() -> String {
-    "data/learning.redb".to_string()
-}
-
 /// Learning mode: what this node reached, for the window an operator asked
 /// for, written down as a policy they can read before it is one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,11 +50,30 @@ pub struct LearningConfig {
     #[serde(default = "default_sample_interval_secs")]
     pub sample_interval_secs: u64,
 
-    /// Where an open window is written down so it survives a restart. An
+    /// Where an open window is written down so it survives a restart. Left
+    /// out, the window is written beside the audit store, in the directory
+    /// a deployment already made writable for the agent's other stores. An
     /// empty string keeps the window in memory only, which costs a redeploy
     /// the whole window rather than a hole in it.
-    #[serde(default = "default_storage_path")]
-    pub storage_path: String,
+    #[serde(default)]
+    pub storage_path: Option<String>,
+}
+
+/// The file name a window is written to when the configuration names none.
+const STORE_FILE_NAME: &str = "learning.redb";
+
+impl LearningConfig {
+    /// The file the windows are written to, or `None` when they are kept in
+    /// memory only. With no `storage_path` written, the file sits beside
+    /// `audit_storage_path`, the way the alert and rule-change stores do.
+    #[must_use]
+    pub fn store_path(&self, audit_storage_path: &str) -> Option<std::path::PathBuf> {
+        match self.storage_path.as_deref() {
+            Some("") => None,
+            Some(path) => Some(std::path::PathBuf::from(path)),
+            None => Some(std::path::Path::new(audit_storage_path).with_file_name(STORE_FILE_NAME)),
+        }
+    }
 }
 
 impl Default for LearningConfig {
@@ -67,7 +82,7 @@ impl Default for LearningConfig {
             enabled: true,
             max_edges: default_max_edges(),
             sample_interval_secs: default_sample_interval_secs(),
-            storage_path: default_storage_path(),
+            storage_path: None,
         }
     }
 }
@@ -207,7 +222,7 @@ mod tests {
         assert!(cfg.enabled);
         assert_eq!(cfg.max_edges, LEARNING_DEFAULT_MAX_EDGES);
         assert_eq!(cfg.sample_interval_secs, 10);
-        assert_eq!(cfg.storage_path, "data/learning.redb");
+        assert_eq!(cfg.storage_path, None);
         cfg.validate().expect("the default validates");
     }
 
@@ -216,13 +231,38 @@ mod tests {
         let cfg: LearningConfig = serde_norway::from_str("enabled: false\n").unwrap();
         assert!(!cfg.enabled);
         assert_eq!(cfg.max_edges, LEARNING_DEFAULT_MAX_EDGES);
-        assert_eq!(cfg.storage_path, "data/learning.redb");
+        assert_eq!(cfg.storage_path, None);
+    }
+
+    #[test]
+    fn a_window_with_no_path_of_its_own_is_written_beside_the_audit_store() {
+        let cfg = LearningConfig::default();
+        assert_eq!(
+            cfg.store_path("/var/lib/ebpfsentinel/audit.redb"),
+            Some(std::path::PathBuf::from(
+                "/var/lib/ebpfsentinel/learning.redb"
+            ))
+        );
+        assert_eq!(
+            cfg.store_path("data/audit.redb"),
+            Some(std::path::PathBuf::from("data/learning.redb"))
+        );
+    }
+
+    #[test]
+    fn a_path_written_down_is_the_one_used() {
+        let cfg: LearningConfig =
+            serde_norway::from_str("storage_path: /srv/windows.redb\n").unwrap();
+        assert_eq!(
+            cfg.store_path("/var/lib/ebpfsentinel/audit.redb"),
+            Some(std::path::PathBuf::from("/srv/windows.redb"))
+        );
     }
 
     #[test]
     fn a_window_in_memory_only_is_written_as_an_empty_path() {
         let cfg: LearningConfig = serde_norway::from_str("storage_path: \"\"\n").unwrap();
-        assert!(cfg.storage_path.is_empty());
+        assert_eq!(cfg.store_path("/var/lib/ebpfsentinel/audit.redb"), None);
         cfg.validate().expect("no store is a choice, not an error");
     }
 
