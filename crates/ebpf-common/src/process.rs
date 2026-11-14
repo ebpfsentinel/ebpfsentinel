@@ -56,8 +56,21 @@ pub const PROCESS_METRIC_THREAD_FORK: u32 = 5;
 /// the child could not be read. Nonzero means lineage on this node is
 /// partial, which is what the counter is for.
 pub const PROCESS_METRIC_UNRESOLVED: u32 = 6;
+/// Metric index: records not sent because the task has no number in the pid
+/// namespace the agent reads `/proc` in, so no pid the table could act on.
+/// Only a node whose agent reads a namespace other than the initial one, a
+/// container node, counts here: the tasks of the machine around it.
+pub const PROCESS_METRIC_OUTSIDE_NAMESPACE: u32 = 7;
 /// Total number of process metric slots (one past the last index).
-pub const PROCESS_METRIC_COUNT: u32 = 7;
+pub const PROCESS_METRIC_COUNT: u32 = 8;
+
+/// Deepest pid namespace nesting the kernel allows (`MAX_PID_NS_LEVEL`), so
+/// one more than the highest level a `struct pid` holds a number at.
+pub const PROCESS_PID_NS_LEVELS: u32 = 33;
+
+/// Size of `struct upid`, one entry of `struct pid.numbers`: an `int` and a
+/// pointer, which userspace confirms from BTF before it writes the layout.
+pub const PROCESS_UPID_SIZE: u32 = 16;
 
 /// Length of the `comm` field, as the kernel defines `TASK_COMM_LEN`.
 pub const PROCESS_COMM_LEN: usize = 16;
@@ -88,6 +101,21 @@ pub struct ProcessLayout {
     /// Nonzero once userspace wrote the layout. Zero is what an unwritten
     /// array slot holds, and the programs then read no parent at all.
     pub valid: u32,
+    /// Nonzero once the five offsets below were read, which numbering a task
+    /// other than the caller in the agent's pid namespace needs: the child
+    /// of a fork and the parent of every record.
+    pub ns_valid: u32,
+    /// Byte offset of `task_struct.thread_pid`.
+    pub task_thread_pid: u32,
+    /// Byte offset of `pid.level`.
+    pub pid_level: u32,
+    /// Byte offset of `pid.numbers`.
+    pub pid_numbers: u32,
+    /// Byte offset of `upid.ns`.
+    pub upid_ns: u32,
+    /// Byte offset of `ns_common.inum` from the start of `pid_namespace`,
+    /// the `ns` member's offset and the inode's within it added together.
+    pub pid_namespace_inum: u32,
     pub _pad: u32,
 }
 
@@ -159,9 +187,11 @@ mod tests {
     }
 
     #[test]
-    fn the_layout_is_six_words() {
-        assert_eq!(mem::size_of::<ProcessLayout>(), 24);
+    fn the_layout_is_twelve_words() {
+        assert_eq!(mem::size_of::<ProcessLayout>(), 48);
         assert_eq!(mem::offset_of!(ProcessLayout, valid), 16);
+        assert_eq!(mem::offset_of!(ProcessLayout, ns_valid), 20);
+        assert_eq!(mem::offset_of!(ProcessLayout, pid_namespace_inum), 40);
         // An unwritten slot reads as no layout.
         assert_eq!(ProcessLayout::default().valid, 0);
     }
@@ -179,6 +209,6 @@ mod tests {
 
     #[test]
     fn the_metric_count_is_one_past_the_last_slot() {
-        assert_eq!(PROCESS_METRIC_COUNT, PROCESS_METRIC_UNRESOLVED + 1);
+        assert_eq!(PROCESS_METRIC_COUNT, PROCESS_METRIC_OUTSIDE_NAMESPACE + 1);
     }
 }

@@ -57,14 +57,80 @@ pub fn resolve_layout() -> Result<ProcessLayout, String> {
             .flatten()
             .ok_or_else(|| format!("the kernel BTF has no `task_struct.{}`", MEMBERS[i]))
     };
-    Ok(ProcessLayout {
+    let mut layout = ProcessLayout {
         task_real_parent: at(0)?,
         task_group_leader: at(1)?,
         task_tgid: at(2)?,
         task_start_boottime: at(3)?,
         valid: 1,
-        _pad: 0,
-    })
+        ..ProcessLayout::default()
+    };
+    match resolve_namespace_offsets() {
+        Ok(ns) => {
+            layout.task_thread_pid = ns[0];
+            layout.pid_level = ns[1];
+            layout.pid_numbers = ns[2];
+            layout.upid_ns = ns[3];
+            layout.pid_namespace_inum = ns[4];
+            layout.ns_valid = 1;
+        }
+        Err(reason) => warn!(
+            reason,
+            "a fork's child and a record's parent keep the kernel's numbers: \
+             right on a host, wrong wherever the procfs is a pid namespace of its own"
+        ),
+    }
+    Ok(layout)
+}
+
+/// The offsets numbering another task in a pid namespace: `task_struct.thread_pid`,
+/// `pid.level`, `pid.numbers`, `upid.ns`, and `ns_common.inum` counted from the
+/// start of `pid_namespace`.
+///
+/// The program steps through `pid.numbers` sixteen bytes at a time and reads
+/// the number at the start of each entry, so a kernel whose `struct upid` is
+/// laid out otherwise gets no offsets rather than a walk reading the wrong
+/// field.
+pub(crate) fn resolve_namespace_offsets() -> Result<[u32; 5], String> {
+    let one = |owner: &str, member: &str| -> Result<u32, String> {
+        kfunc::vmlinux_struct_member_offsets(owner, &[member])
+            .map_err(|e| format!("the kernel BTF does not describe `{owner}`: {e}"))?
+            .first()
+            .copied()
+            .flatten()
+            .ok_or_else(|| format!("the kernel BTF has no `{owner}.{member}`"))
+    };
+    let thread_pid = one("task_struct", "thread_pid")?;
+    let level = one("pid", "level")?;
+    let numbers = one("pid", "numbers")?;
+    let nr = one("upid", "nr")?;
+    let ns = one("upid", "ns")?;
+    if nr != 0 || ns != 8 {
+        return Err(format!(
+            "`struct upid` is laid out as nr at {nr} and ns at {ns}, not the int and pointer the walk steps over"
+        ));
+    }
+    let ns_common = one("pid_namespace", "ns")?;
+    let inum = one("ns_common", "inum")?;
+    Ok([thread_pid, level, numbers, ns, ns_common + inum])
+}
+
+/// The offsets a program walks the calling task's `struct pid` through:
+/// `task_struct.group_leader`, then the five [`resolve_namespace_offsets`]
+/// returns.
+///
+/// # Errors
+///
+/// Returns the member the kernel's BTF does not describe, in one sentence.
+pub(crate) fn resolve_walk_offsets() -> Result<[u32; 6], String> {
+    let group_leader = kfunc::vmlinux_struct_member_offsets("task_struct", &["group_leader"])
+        .map_err(|e| format!("the kernel BTF does not describe `task_struct`: {e}"))?
+        .first()
+        .copied()
+        .flatten()
+        .ok_or("the kernel BTF has no `task_struct.group_leader`")?;
+    let [thread_pid, level, numbers, upid_ns, inum] = resolve_namespace_offsets()?;
+    Ok([group_leader, thread_pid, level, numbers, upid_ns, inum])
 }
 
 /// Write `layout` into the object's `PROCESS_LAYOUT` before anything attaches.

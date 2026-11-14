@@ -24,6 +24,8 @@ use ebpf_common::write_refusal::{
 };
 use ebpf_helpers::increment_metric;
 
+ebpf_helpers::pidns_view!();
+
 /// The decision's parameters and the field offsets, written by userspace once
 /// it has read them off the running kernel's BTF.
 #[btf_map]
@@ -121,7 +123,7 @@ fn config() -> Option<WriteRefusalConfig> {
 /// to let the write through, the refusal otherwise.
 #[inline(always)]
 fn decide(config: &WriteRefusalConfig, path: *const u8, hook: u8) -> i32 {
-    let pid_tgid = bpf_get_current_pid_tgid();
+    let pid_tgid = current_pid_tgid();
     let tgid = (pid_tgid >> 32) as u32;
     if tgid == config.agent_tgid {
         return 0;
@@ -174,7 +176,10 @@ fn decide(config: &WriteRefusalConfig, path: *const u8, hook: u8) -> i32 {
     let writer = if config.count_by == WRITE_REFUSAL_BY_CGROUP {
         cgroup_id
     } else {
-        u64::from(tgid)
+        // Counted under the kernel's own number: a task the agent's pid
+        // namespace cannot see is reported as pid 0, and every such writer
+        // would otherwise share one count.
+        bpf_get_current_pid_tgid() >> 32
     };
     let now_ns = unsafe { bpf_ktime_get_boot_ns() };
     let key = write_refusal_count_key(writer, regime);

@@ -20,6 +20,7 @@ pub mod ipv6;
 pub mod loadbalancer;
 pub mod nat;
 pub mod netpol;
+pub mod pidns;
 pub mod process;
 pub mod qos;
 pub mod quarantine;

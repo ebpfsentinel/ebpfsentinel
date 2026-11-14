@@ -10,10 +10,11 @@
 #![no_main]
 
 use aya_ebpf::{
-    btf_maps::LruPerCpuHashMap, helpers::bpf_get_current_pid_tgid, macros::btf_map, macros::uprobe,
-    programs::ProbeContext,
+    btf_maps::LruPerCpuHashMap, macros::btf_map, macros::uprobe, programs::ProbeContext,
 };
 use ebpf_common::crypto::CRYPTO_CALLS_MAX_TASKS;
+
+ebpf_helpers::pidns_view!();
 
 /// `BPF_NOEXIST`: insert only when the key is absent.
 const BPF_NOEXIST: u64 = 1;
@@ -24,7 +25,12 @@ static CRYPTO_CALLS: LruPerCpuHashMap<u32, u64, CRYPTO_CALLS_MAX_TASKS> = LruPer
 
 #[uprobe]
 pub fn crypto_call(_ctx: ProbeContext) -> u32 {
-    let tgid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    let tgid = (current_pid_tgid() >> 32) as u32;
+    if tgid == 0 {
+        // A task the agent's pid namespace cannot see, so no process to
+        // credit the call to.
+        return 0;
+    }
     if let Some(calls) = CRYPTO_CALLS.get_ptr_mut(&tgid) {
         // Per-CPU slot: no other CPU writes it.
         unsafe { *calls = (*calls).wrapping_add(1) };

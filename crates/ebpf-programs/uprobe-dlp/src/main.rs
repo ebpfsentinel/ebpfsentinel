@@ -24,6 +24,8 @@ use ebpf_common::dlp::{
 use ebpf_helpers::increment_metric;
 use ebpf_helpers::ringbuf::{avail_data, submit_flags};
 
+ebpf_helpers::pidns_view!();
+
 // ── Maps ────────────────────────────────────────────────────────────
 
 /// Kernel->userspace DLP event ring buffer, 4 MiB: about 1,000 full events
@@ -646,7 +648,10 @@ fn record_task_socket(socket: &DlpSocket) {
         socket,
         at_ns: unsafe { bpf_ktime_get_boot_ns() },
     };
-    let _ = DLP_TASK_SOCKET.insert(&bpf_get_current_pid_tgid(), &entry, 0);
+    let pid_tgid = current_pid_tgid();
+    if pid_tgid != 0 {
+        let _ = DLP_TASK_SOCKET.insert(&pid_tgid, &entry, 0);
+    }
 }
 
 /// The socket this task was last seen on, if it is recent enough to be about
@@ -667,7 +672,10 @@ fn record_task_socket(socket: &DlpSocket) {
 /// be given the other's patience.
 #[inline(always)]
 fn task_socket() -> DlpSocket {
-    let pid_tgid = bpf_get_current_pid_tgid();
+    let pid_tgid = current_pid_tgid();
+    if pid_tgid == 0 {
+        return DlpSocket::default();
+    }
     let Some(entry_ptr) = DLP_TASK_SOCKET.get_ptr(&pid_tgid) else {
         return DlpSocket::default();
     };
@@ -943,7 +951,7 @@ fn emit_dlp_event(user_buf: *const u8, data_len: u32, direction: u8, flow: DlpSo
 fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8, flow: DlpSocket) {
     if let Some(mut entry) = EVENTS.reserve_untyped::<DlpEventSmall>(0) {
         let ptr = entry.as_mut_ptr();
-        let pid_tgid = bpf_get_current_pid_tgid();
+        let pid_tgid = current_pid_tgid();
         unsafe {
             (*ptr).pid = pid_tgid as u32;
             (*ptr).tgid = (pid_tgid >> 32) as u32;
@@ -995,7 +1003,7 @@ fn emit_dlp_small(user_buf: *const u8, data_len: u32, direction: u8, flow: DlpSo
 fn emit_dlp_full(user_buf: *const u8, data_len: u32, direction: u8, flow: DlpSocket) {
     if let Some(mut entry) = EVENTS.reserve_untyped::<DlpEvent>(0) {
         let ptr = entry.as_mut_ptr();
-        let pid_tgid = bpf_get_current_pid_tgid();
+        let pid_tgid = current_pid_tgid();
         unsafe {
             (*ptr).pid = pid_tgid as u32;
             (*ptr).tgid = (pid_tgid >> 32) as u32;

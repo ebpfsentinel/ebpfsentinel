@@ -6247,6 +6247,11 @@ pub fn try_load_cgroup_attribution(
         DLP_PIN_PATH,
         &[adapters::ebpf::ATTRIBUTION_JOIN_HOOK],
     )?;
+    adapters::ebpf::pidns::publish_or_warn(
+        loader.ebpf_mut(),
+        &host_proc_root(),
+        "cgroup-attribution",
+    );
     let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "ATTRIBUTION_METRICS").ok();
     // The two tables leave the loader the way the counters do: the kernel
     // maps stay linked into the programs, so taking the userspace handles out
@@ -6463,6 +6468,11 @@ pub fn try_load_cgroup_workload_firewall(
     let program_bytes = read_ebpf_program(ebpf_dir, "cgroup-workload-firewall")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    adapters::ebpf::pidns::publish_or_warn(
+        loader.ebpf_mut(),
+        &host_proc_root(),
+        "cgroup-workload-firewall",
+    );
     let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "WORKLOAD_METRICS").ok();
     // Taken before anything attaches: a hook deciding a syscall against a
     // table userspace never got hold of would refuse on an empty policy.
@@ -6851,6 +6861,11 @@ pub fn try_load_process_tracing(
     let program_bytes = read_ebpf_program(ebpf_dir, "tracepoint-process")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    adapters::ebpf::pidns::publish_or_warn(
+        loader.ebpf_mut(),
+        &host_proc_root(),
+        "tracepoint-process",
+    );
     let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "PROCESS_METRICS").ok();
     let reader = adapters::ebpf::ProcessEventReader::new(loader.ebpf_mut())?;
 
@@ -7022,6 +7037,11 @@ pub fn try_load_signal(
     let program_bytes = read_ebpf_program(ebpf_dir, "tracepoint-signal")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    adapters::ebpf::pidns::publish_or_warn(
+        loader.ebpf_mut(),
+        &host_proc_root(),
+        "tracepoint-signal",
+    );
     // The manager reads the counters' descriptor before the metrics loop
     // takes the map: the program that signals at once counts in it too.
     let maps = adapters::ebpf::SignalMapManager::new(loader.ebpf_mut())?;
@@ -7248,6 +7268,7 @@ pub fn try_load_crypto_calls(
     let program_bytes = read_ebpf_program(ebpf_dir, "uprobe-crypto")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
+    adapters::ebpf::pidns::publish_or_warn(loader.ebpf_mut(), &host_proc_root(), "uprobe-crypto");
     let counter = adapters::ebpf::crypto_attach::CryptoCallCounter::new(loader.ebpf_mut())?;
     let mut attacher = adapters::ebpf::crypto_attach::CryptoAttacher::new(proc_root, &loader)?;
     if let Some(sock) = warden_sock_from_env() {
@@ -7431,6 +7452,11 @@ pub fn start_exec_network(
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)
             .map_err(|e| format!("the kernel refused the object: {e}"))?;
+    adapters::ebpf::pidns::publish_or_warn(
+        loader.ebpf_mut(),
+        &host_proc_root(),
+        "lsm-exec-network",
+    );
     let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "EXEC_NET_METRICS").ok();
     let mut maps = adapters::ebpf::exec_network::ExecNetworkMaps::new(loader.ebpf_mut())
         .map_err(|e| e.to_string())?;
@@ -7889,6 +7915,11 @@ pub fn start_write_refusal(
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)
             .map_err(|e| format!("the kernel refused the object: {e}"))?;
+    adapters::ebpf::pidns::publish_or_warn(
+        loader.ebpf_mut(),
+        &host_proc_root(),
+        "lsm-write-refusal",
+    );
     let metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "WRITE_REFUSAL_METRICS").ok();
     let mut maps = wr::WriteRefusalMaps::new(loader.ebpf_mut()).map_err(|e| e.to_string())?;
     let reader = wr::WriteRefusalEventReader::new(loader.ebpf_mut(), maps.watched())
@@ -8166,6 +8197,7 @@ pub fn try_load_uprobe_dlp(
 )> {
     let program_bytes = read_ebpf_program(ebpf_dir, "uprobe-dlp")?;
     let mut loader = EbpfLoader::load_with_pin_path(&program_bytes, pin_path)?;
+    adapters::ebpf::pidns::publish_or_warn(loader.ebpf_mut(), &host_proc_root(), "uprobe-dlp");
 
     // The cgroup scope goes in before anything attaches. A probe armed first
     // and scoped afterwards reads every container on the node for the width of

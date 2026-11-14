@@ -24,9 +24,8 @@ use ebpf_common::{
         QOS_SCOPE_SHAPES_EMPTY, QOS_SCOPE_STRIDE, QOS_SHAPE_CATCHALL, QOS_SHAPE_DPORT,
         QOS_SHAPE_DSCP, QOS_SHAPE_FULL, QOS_SHAPE_HOSTS, QOS_SHAPE_HOSTS_DPORT, QOS_SHAPE_NO_DSCP,
         QOS_SHAPE_PORTS, QOS_SHAPE_PROTO, QOS_SHAPE_SPORT, QosCgroupCounters, QosCgroupShape,
-        QosClassifierKey, QosClassifierValue, QosFlowState, QosPipeConfig, QosPipeState,
-        QosCharge, QosQueueConfig, QosQueueState, VLAN_ANY, qos_charge, qos_direction_matches,
-        qos_spacing_ns,
+        QosCharge, QosClassifierKey, QosClassifierValue, QosFlowState, QosPipeConfig, QosPipeState,
+        QosQueueConfig, QosQueueState, VLAN_ANY, qos_charge, qos_direction_matches, qos_spacing_ns,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };

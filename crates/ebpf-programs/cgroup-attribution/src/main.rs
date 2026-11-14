@@ -33,8 +33,7 @@
 use aya_ebpf::{
     btf_maps::{LruHashMap, LruPerCpuHashMap, PerCpuArray},
     helpers::{
-        bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_get_current_uid_gid,
-        bpf_ktime_get_boot_ns, generated,
+        bpf_get_current_cgroup_id, bpf_get_current_uid_gid, bpf_ktime_get_boot_ns, generated,
     },
     macros::{btf_map, cgroup_skb, cgroup_sock, cgroup_sock_addr, sock_ops},
     programs::{SkBuffContext, SockAddrContext, SockContext, SockOpsContext},
@@ -55,6 +54,8 @@ use ebpf_common::dlp::{
 };
 use ebpf_helpers::increment_metric;
 use ebpf_helpers::raw_skb;
+
+ebpf_helpers::pidns_view!();
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -434,6 +435,11 @@ fn join_socket(ctx: &SockOpsContext) {
         return;
     };
     let entry = DlpTaskSocket { socket, at_ns: now };
+    // A task the agent's pid namespace cannot see has no number there, and
+    // the key every such task would share is a key for none of them.
+    if identity.tgid == 0 {
+        return;
+    }
     let pid_tgid = (u64::from(identity.tgid) << 32) | u64::from(identity.pid);
     if DLP_TASK_SOCKET.insert(&pid_tgid, &entry, 0).is_err() {
         increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_INSERT_FAILED);
@@ -589,7 +595,7 @@ fn insert(
         increment_metric!(ATTRIBUTION_METRICS, ATTRIBUTION_METRIC_NO_COOKIE);
         return None;
     }
-    let pid_tgid = bpf_get_current_pid_tgid();
+    let pid_tgid = current_pid_tgid();
     let uid_gid = bpf_get_current_uid_gid();
     let identity = SocketIdentity {
         at_ns: unsafe { bpf_ktime_get_boot_ns() },

@@ -30,7 +30,7 @@
 use aya_ebpf::helpers::generated::bpf_send_signal;
 use aya_ebpf::{
     btf_maps::{Array, HashMap, PerCpuArray, RingBuf},
-    helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_boot_ns},
+    helpers::bpf_ktime_get_boot_ns,
     macros::{btf_map, raw_tracepoint},
     programs::RawTracePointContext,
 };
@@ -42,6 +42,8 @@ use ebpf_common::signal::{
     SIGNAL_OUTCOME_SENT, SignalEvent, SignalTarget,
 };
 use ebpf_helpers::increment_metric;
+
+ebpf_helpers::pidns_view!();
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -93,7 +95,7 @@ pub fn signal_on_syscall_entry(_ctx: RawTracePointContext) -> i32 {
         return 0;
     }
 
-    let tgid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    let tgid = (current_pid_tgid() >> 32) as u32;
     let Some(target) = (unsafe { SIGNAL_TARGETS.get(&tgid) }).copied() else {
         return 0;
     };

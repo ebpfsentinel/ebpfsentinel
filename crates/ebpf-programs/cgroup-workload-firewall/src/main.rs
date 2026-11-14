@@ -58,9 +58,8 @@
 use aya_ebpf::{
     btf_maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
     helpers::{
-        bpf_get_current_cgroup_id, bpf_get_current_pid_tgid, bpf_get_current_task,
-        bpf_get_current_uid_gid, bpf_ktime_get_boot_ns, bpf_probe_read_kernel, bpf_skb_cgroup_id,
-        bpf_skb_load_bytes,
+        bpf_get_current_cgroup_id, bpf_get_current_task, bpf_get_current_uid_gid,
+        bpf_ktime_get_boot_ns, bpf_probe_read_kernel, bpf_skb_cgroup_id, bpf_skb_load_bytes,
     },
     macros::{btf_map, cgroup_skb, cgroup_sock_addr},
     programs::{SkBuffContext, SockAddrContext},
@@ -97,6 +96,8 @@ use ebpf_common::workload_policy::{
 };
 use ebpf_helpers::raw_skb;
 use ebpf_helpers::{increment_metric, opaque_usize};
+
+ebpf_helpers::pidns_view!();
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -563,7 +564,7 @@ fn record_quarantine(cgroup: u64, hook: u8, outcome: u32) {
     entry.write(QuarantineEvent {
         at_ns: unsafe { bpf_ktime_get_boot_ns() },
         cgroup_id: cgroup,
-        tgid: (bpf_get_current_pid_tgid() >> 32) as u32,
+        tgid: (current_pid_tgid() >> 32) as u32,
         hook: u32::from(hook),
         outcome,
         _pad: 0,
@@ -634,7 +635,7 @@ fn decide<const V6: bool>(ctx: &SockAddrContext, hook: u8) -> i32 {
         );
         increment_metric!(WORKLOAD_RULE_DENIALS, index as u32);
         let task = Task {
-            tgid: (bpf_get_current_pid_tgid() >> 32) as u32,
+            tgid: (current_pid_tgid() >> 32) as u32,
             uid: bpf_get_current_uid_gid() as u32,
         };
         report(index, &operation, enforced, &task);
@@ -699,7 +700,7 @@ struct Task {
 /// time sits in the task map alone and is never half-satisfied by a cgroup.
 fn selectors() -> u64 {
     let cgroup = unsafe { bpf_get_current_cgroup_id() };
-    let tgid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    let tgid = (current_pid_tgid() >> 32) as u32;
 
     let by_cgroup = unsafe { WORKLOAD_CGROUP_SELECTORS.get(&cgroup) }.copied();
     let by_task = unsafe { WORKLOAD_TASK_SELECTORS.get(&tgid) }.copied();

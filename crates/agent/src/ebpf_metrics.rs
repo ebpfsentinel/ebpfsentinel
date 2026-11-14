@@ -235,6 +235,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (4, "fork"),
             (5, "thread_fork"),
             (6, "lineage_unresolved"),
+            (7, "outside_namespace"),
         ],
         // What became of each arming: the signal went out, the kernel's own
         // protected set refused it, the window closed before the target made

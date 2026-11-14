@@ -339,6 +339,41 @@ fn test_run(
     Ok(attr)
 }
 
+/// Run a `BPF_PROG_TYPE_SYSCALL` program once on `ctx` and leave in `ctx`
+/// what the program wrote there: the kernel copies the context back over the
+/// buffer it read it from, which is how such a program answers in more than
+/// one number.
+///
+/// # Errors
+///
+/// [`TestRunError::Syscall`] for anything the kernel reported.
+pub fn run_syscall_in_place(prog_fd: BorrowedFd<'_>, ctx: &mut [u8]) -> Result<u32, TestRunError> {
+    let mut attr = TestRunAttr {
+        prog_fd: as_u32(prog_fd),
+        ctx_size_in: len_u32(ctx.len()),
+        ctx_in: ctx.as_mut_ptr() as u64,
+        ..TestRunAttr::default()
+    };
+    // SAFETY: `ctx_in` names a buffer this function borrows mutably for the
+    // call, of the length written beside it, which the kernel both reads and
+    // writes back; every other pointer is null.
+    let ret = unsafe {
+        bpf(
+            BPF_PROG_TEST_RUN,
+            std::ptr::from_mut(&mut attr).cast(),
+            size_of::<TestRunAttr>(),
+        )
+    };
+    if ret < 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(TestRunError::Syscall {
+            errno: err.raw_os_error().unwrap_or(0),
+            message: err.to_string(),
+        });
+    }
+    Ok(attr.retval)
+}
+
 /// Run a program that takes no packet, `BPF_PROG_TYPE_SYSCALL`, once with
 /// `ctx` as its argument, and return what it returned.
 ///

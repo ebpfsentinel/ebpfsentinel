@@ -36,6 +36,8 @@ use ebpf_common::exec_network::{
 };
 use ebpf_helpers::increment_metric;
 
+ebpf_helpers::pidns_view!();
+
 /// The mode and the field offsets, written by userspace once it has read them
 /// off the running kernel's BTF.
 #[btf_map]
@@ -205,9 +207,12 @@ fn read_value<T: Default>(base: *const u8, offset: u32) -> Option<T> {
 /// loss when the ring is full.
 #[inline(always)]
 fn report(key: ExecNetKey, hook: u8, family: u16, refused: bool) {
-    let tgid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    let tgid = (current_pid_tgid() >> 32) as u32;
     let now_ns = unsafe { bpf_ktime_get_boot_ns() };
-    let slot = (u64::from(tgid) << 8) | u64::from(hook);
+    // Paced under the kernel's own number: every task the agent's pid
+    // namespace cannot see is reported as pid 0, and sharing one slot would
+    // let the first of them silence the rest.
+    let slot = ((bpf_get_current_pid_tgid() >> 32) << 8) | u64::from(hook);
     if let Some(last) = unsafe { EXEC_NET_REPORTED.get(&slot) }
         && now_ns.saturating_sub(*last) < EXEC_NET_REPORT_INTERVAL_NS
     {

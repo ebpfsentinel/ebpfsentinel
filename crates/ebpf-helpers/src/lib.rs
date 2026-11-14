@@ -26,6 +26,7 @@ pub mod event;
 pub mod kfuncs;
 pub mod metrics;
 pub mod net;
+pub mod pidns;
 pub mod pktmeta;
 pub mod ringbuf;
 pub mod tc;

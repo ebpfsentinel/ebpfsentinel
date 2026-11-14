@@ -38,10 +38,13 @@ use aya_ebpf::{
 use ebpf_common::process::{
     PROCESS_EVENT_EXEC, PROCESS_EVENT_EXIT, PROCESS_EVENT_FORK, PROCESS_EVENTS_RINGBUF_BYTES,
     PROCESS_METRIC_COUNT, PROCESS_METRIC_DROPPED, PROCESS_METRIC_EXEC, PROCESS_METRIC_EXIT,
-    PROCESS_METRIC_FORK, PROCESS_METRIC_THREAD_EXIT, PROCESS_METRIC_THREAD_FORK,
-    PROCESS_METRIC_UNRESOLVED, ProcessEvent, ProcessLayout,
+    PROCESS_METRIC_FORK, PROCESS_METRIC_OUTSIDE_NAMESPACE, PROCESS_METRIC_THREAD_EXIT,
+    PROCESS_METRIC_THREAD_FORK, PROCESS_METRIC_UNRESOLVED, PROCESS_PID_NS_LEVELS,
+    PROCESS_UPID_SIZE, ProcessEvent, ProcessLayout,
 };
 use ebpf_helpers::increment_metric;
+
+ebpf_helpers::pidns_view!();
 
 // ── Maps ────────────────────────────────────────────────────────────
 
@@ -56,7 +59,7 @@ static PROCESS_EVENTS: RingBuf<ProcessEvent, { PROCESS_EVENTS_RINGBUF_BYTES as u
     RingBuf::new();
 
 /// Per-CPU process counters. Index: 0=exec, 1=exit, 2=dropped, 3=thread_exit,
-/// 4=fork, 5=thread_fork, 6=unresolved.
+/// 4=fork, 5=thread_fork, 6=unresolved, 7=outside_namespace.
 #[btf_map]
 static PROCESS_METRICS: PerCpuArray<u64, { PROCESS_METRIC_COUNT as usize }> = PerCpuArray::new();
 
@@ -74,8 +77,12 @@ static PROCESS_LAYOUT: Array<ProcessLayout, 1> = Array::new();
 /// answer with the new path rather than the shell that called it.
 #[raw_tracepoint(tracepoint = "sched_process_exec")]
 pub fn process_exec(_ctx: RawTracePointContext) -> i32 {
+    let pid_tgid = current_pid_tgid();
+    if pid_tgid == 0 {
+        increment_metric!(PROCESS_METRICS, PROCESS_METRIC_OUTSIDE_NAMESPACE);
+        return 0;
+    }
     let task = unsafe { bpf_get_current_task() };
-    let pid_tgid = bpf_get_current_pid_tgid();
     let mut event = current_event(PROCESS_EVENT_EXEC, pid_tgid as u32, (pid_tgid >> 32) as u32);
     if !with_lineage(&mut event, task) {
         increment_metric!(PROCESS_METRICS, PROCESS_METRIC_UNRESOLVED);
@@ -109,6 +116,22 @@ pub fn process_fork(ctx: RawTracePointContext) -> i32 {
         increment_metric!(PROCESS_METRICS, PROCESS_METRIC_THREAD_FORK);
         return 0;
     }
+    // Both numbers above are the kernel's own, which is all the thread test
+    // needs. The record carries the child's number where userspace reads it.
+    let child_tgid = match viewed() {
+        None => child_tgid,
+        Some(ino) => match ns_tgid(child, &layout, ino) {
+            (tgid, NS_FOUND) => tgid,
+            (_, NS_OUTSIDE) => {
+                increment_metric!(PROCESS_METRICS, PROCESS_METRIC_OUTSIDE_NAMESPACE);
+                return 0;
+            }
+            _ => {
+                increment_metric!(PROCESS_METRICS, PROCESS_METRIC_UNRESOLVED);
+                return 0;
+            }
+        },
+    };
     // The child is a fresh thread group leader, so its own start is the
     // process's. Uid, gid, cgroup and comm are the parent's, which is what
     // the child inherited a moment ago.
@@ -131,7 +154,11 @@ pub fn process_fork(ctx: RawTracePointContext) -> i32 {
 /// which the table already holds.
 #[raw_tracepoint(tracepoint = "sched_process_exit")]
 pub fn process_exit(_ctx: RawTracePointContext) -> i32 {
-    let pid_tgid = bpf_get_current_pid_tgid();
+    let pid_tgid = current_pid_tgid();
+    if pid_tgid == 0 {
+        increment_metric!(PROCESS_METRICS, PROCESS_METRIC_OUTSIDE_NAMESPACE);
+        return 0;
+    }
     let pid = pid_tgid as u32;
     let tgid = (pid_tgid >> 32) as u32;
     if pid != tgid {
@@ -185,7 +212,17 @@ fn with_lineage(event: &mut ProcessEvent, task: u64) -> bool {
     if !read_parent || parent == 0 {
         return false;
     }
-    let (parent_tgid, read_parent_tgid) = read::<u32>(parent, layout.task_tgid);
+    let (parent_tgid, read_parent_tgid) = match viewed() {
+        None => read::<u32>(parent, layout.task_tgid),
+        // A parent the agent's namespace cannot see, the runtime that started
+        // a container's first task, is a parent the table has no number for:
+        // the record says none rather than one from another namespace.
+        Some(ino) => match ns_tgid(parent, &layout, ino) {
+            (tgid, NS_FOUND) => (tgid, true),
+            (_, NS_OUTSIDE) => (0, true),
+            _ => (0, false),
+        },
+    };
     let (parent_start, read_parent_start) = start_of(parent, &layout);
     event.parent_tgid = parent_tgid;
     event.parent_start_ns = parent_start;
@@ -202,6 +239,71 @@ fn start_of(task: u64, layout: &ProcessLayout) -> (u64, bool) {
         return (0, false);
     }
     read::<u64>(leader, layout.task_start_boottime)
+}
+
+/// `ns_tgid` found the task's number in the namespace.
+const NS_FOUND: u8 = 0;
+/// The task has no number there: the namespace cannot see it.
+const NS_OUTSIDE: u8 = 1;
+/// A read failed or the offsets were never written, so nothing is known.
+const NS_UNREAD: u8 = 2;
+
+/// The inode of the pid namespace userspace reads `/proc` in, when it wrote
+/// one other than the initial namespace.
+#[inline(always)]
+fn viewed() -> Option<u64> {
+    PIDNS_VIEW.get(0).filter(|v| v.valid != 0).map(|v| v.ino)
+}
+
+/// The tgid of `task` in the pid namespace whose inode is `ino`, and whether
+/// it was found there, the namespace cannot see the task, or a read failed.
+///
+/// `bpf_get_ns_current_pid_tgid` answers this for the calling task alone. A
+/// fork's child and a record's parent are other tasks, so their number is
+/// read where the kernel keeps it: the `struct pid` of the thread group
+/// leader holds one `upid` per namespace level from the initial one down,
+/// and the entry whose namespace is the agent's carries the number `/proc`
+/// shows there.
+#[inline(always)]
+fn ns_tgid(task: u64, layout: &ProcessLayout, ino: u64) -> (u32, u8) {
+    if layout.ns_valid == 0 {
+        return (0, NS_UNREAD);
+    }
+    let (leader, read_leader) = read::<u64>(task, layout.task_group_leader);
+    if !read_leader || leader == 0 {
+        return (0, NS_UNREAD);
+    }
+    let (pid, read_pid) = read::<u64>(leader, layout.task_thread_pid);
+    if !read_pid || pid == 0 {
+        return (0, NS_UNREAD);
+    }
+    let (level, read_level) = read::<u32>(pid, layout.pid_level);
+    if !read_level {
+        return (0, NS_UNREAD);
+    }
+    let mut at = 0u32;
+    while at < PROCESS_PID_NS_LEVELS && at <= level {
+        let upid =
+            pid + u64::from(layout.pid_numbers) + u64::from(at) * u64::from(PROCESS_UPID_SIZE);
+        let (ns, read_ns) = read::<u64>(upid, layout.upid_ns);
+        if !read_ns || ns == 0 {
+            return (0, NS_UNREAD);
+        }
+        let (inum, read_inum) = read::<u32>(ns, layout.pid_namespace_inum);
+        if !read_inum {
+            return (0, NS_UNREAD);
+        }
+        if u64::from(inum) == ino {
+            let (nr, read_nr) = read::<u32>(upid, 0);
+            return if read_nr && nr != 0 {
+                (nr, NS_FOUND)
+            } else {
+                (0, NS_UNREAD)
+            };
+        }
+        at += 1;
+    }
+    (0, NS_OUTSIDE)
 }
 
 /// The layout userspace wrote, or nothing when it never did.

@@ -51,6 +51,7 @@ pub mod nat_map_manager;
 pub mod nat_reverse_manager;
 pub mod netkit;
 pub mod netpol_map_manager;
+pub mod pidns;
 pub mod process_attach;
 pub mod process_event_reader;
 pub mod prog_test_run;
