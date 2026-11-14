@@ -6,7 +6,7 @@
 //! (default 2 s) - acceptable for admin observability.
 //!
 //! The snapshot comes from whichever source the port resolves: the proc file
-//! where the kernel exposes it, a conntrack-tools dump where it does not.
+//! where the kernel exposes it, a ctnetlink dump where it does not.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -63,70 +63,19 @@ pub struct ConntrackRestore {
 pub const CONNTRACK_RESTORE_TIMEOUT_SECS: u32 = 120;
 
 impl ConntrackRestore {
-    /// The `conntrack -I` argument vector an agent holding the capability runs
-    /// itself, or `None` for anything but a fully named TCP flow, which the
-    /// warden refuses the same way before writing over netlink. Every address must parse, so a compromised
-    /// caller cannot slip an option through a field.
+    /// Whether this names one TCP flow fully: both addresses parse, no port is
+    /// zero, and the reply direction, where given, is named the same way. The
+    /// agent and the warden both refuse anything else before writing over
+    /// netlink, so a compromised caller cannot widen an insert through a field.
     #[must_use]
-    pub fn args(&self) -> Option<Vec<String>> {
+    pub fn is_restorable(&self) -> bool {
         fn named(t: &ConntrackTuple) -> bool {
             t.src_ip.parse::<std::net::IpAddr>().is_ok()
                 && t.dst_ip.parse::<std::net::IpAddr>().is_ok()
                 && t.src_port != 0
                 && t.dst_port != 0
         }
-        if self.flow.proto != 6 || !named(&self.flow) {
-            return None;
-        }
-        let f = &self.flow;
-        let mut args: Vec<String> = [
-            "-I",
-            "-p",
-            "tcp",
-            "-s",
-            &f.src_ip,
-            "-d",
-            &f.dst_ip,
-            "--sport",
-            &f.src_port.to_string(),
-            "--dport",
-            &f.dst_port.to_string(),
-        ]
-        .iter()
-        .map(|a| (*a).to_owned())
-        .collect();
-        if let Some(r) = &self.reply {
-            if !named(r) {
-                return None;
-            }
-            args.extend(
-                [
-                    "--reply-src",
-                    &r.src_ip,
-                    "--reply-dst",
-                    &r.dst_ip,
-                    "--reply-port-src",
-                    &r.src_port.to_string(),
-                    "--reply-port-dst",
-                    &r.dst_port.to_string(),
-                ]
-                .iter()
-                .map(|a| (*a).to_owned()),
-            );
-        }
-        args.extend(
-            [
-                "--state",
-                "ESTABLISHED",
-                "--status",
-                "SEEN_REPLY,ASSURED",
-                "--timeout",
-                &CONNTRACK_RESTORE_TIMEOUT_SECS.to_string(),
-            ]
-            .iter()
-            .map(|a| (*a).to_owned()),
-        );
-        Some(args)
+        self.flow.proto == 6 && named(&self.flow) && self.reply.as_ref().is_none_or(named)
     }
 }
 
@@ -1369,18 +1318,12 @@ mod tests {
     }
 
     #[test]
-    fn a_restored_flow_is_inserted_established_with_its_reply_tuple() {
+    fn a_named_tcp_flow_with_its_reply_tuple_is_restorable() {
         let restore = ConntrackRestore {
             flow: tcp("10.0.0.5", "198.51.100.7", 51_000, 443),
             reply: Some(tcp("198.51.100.7", "203.0.113.10", 443, 40_123)),
         };
-        let args = restore.args().expect("a named TCP flow is restorable");
-        assert_eq!(
-            args.join(" "),
-            "-I -p tcp -s 10.0.0.5 -d 198.51.100.7 --sport 51000 --dport 443 \
-             --reply-src 198.51.100.7 --reply-dst 203.0.113.10 --reply-port-src 443 \
-             --reply-port-dst 40123 --state ESTABLISHED --status SEEN_REPLY,ASSURED --timeout 120"
-        );
+        assert!(restore.is_restorable());
     }
 
     #[test]
@@ -1392,22 +1335,22 @@ mod tests {
             },
             reply: None,
         };
-        assert!(udp.args().is_none());
+        assert!(!udp.is_restorable());
         let option = ConntrackRestore {
             flow: tcp("--flush", "10.0.0.6", 1, 2),
             reply: None,
         };
-        assert!(option.args().is_none());
+        assert!(!option.is_restorable());
         let no_port = ConntrackRestore {
             flow: tcp("10.0.0.5", "10.0.0.6", 0, 443),
             reply: None,
         };
-        assert!(no_port.args().is_none());
+        assert!(!no_port.is_restorable());
         let bad_reply = ConntrackRestore {
             flow: tcp("10.0.0.5", "10.0.0.6", 1, 2),
             reply: Some(tcp("x", "10.0.0.5", 2, 1)),
         };
-        assert!(bad_reply.args().is_none());
+        assert!(!bad_reply.is_restorable());
     }
 
     // One literal per variant, so the list grows with the protocol.

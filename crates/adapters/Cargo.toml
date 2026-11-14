@@ -11,6 +11,9 @@ ports = { workspace = true }
 infrastructure = { workspace = true }
 ebpf-common = { workspace = true, features = ["userspace"] }
 ebpfsentinel-warden-client = { workspace = true, features = ["fd-pass"] }
+# The ctnetlink code the warden runs, run in-process by an agent holding the
+# capability itself, so no conntrack binary is needed on the host.
+ebpfsentinel-warden = { workspace = true }
 
 anyhow = { workspace = true }
 arc-swap = { workspace = true }

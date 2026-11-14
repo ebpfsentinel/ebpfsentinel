@@ -220,9 +220,22 @@ impl WorkloadFirewallAttacher {
 
     /// Attach every hook of `loader` to `cgroup`, publishing what happened.
     pub fn attach_all(&mut self, loader: &EbpfLoader, cgroup: &str) -> WorkloadFirewallStatus {
+        self.attach_programs(|program| loader.program_fd(program), cgroup)
+    }
+
+    /// Attach every hook whose program `program_fd` names to `cgroup`,
+    /// publishing what happened.
+    fn attach_programs(
+        &mut self,
+        program_fd: impl Fn(&str) -> Option<RawFd>,
+        cgroup: &str,
+    ) -> WorkloadFirewallStatus {
         let mut hooks = Vec::with_capacity(WORKLOAD_HOOKS.len());
         for (program, attach_type) in WORKLOAD_HOOKS {
-            match self.attach_one(loader, cgroup, program, *attach_type) {
+            let attached = program_fd(program)
+                .ok_or_else(|| format!("program `{program}` is not in the loaded object"))
+                .and_then(|fd| self.attach_one(fd, cgroup, program, *attach_type));
+            match attached {
                 Ok(link) => {
                     self.links.push(link);
                     hooks.push((*program).to_string());
@@ -269,14 +282,11 @@ impl WorkloadFirewallAttacher {
     /// Attach one program, through the warden where there is one.
     fn attach_one(
         &self,
-        loader: &EbpfLoader,
+        prog_fd: RawFd,
         cgroup: &str,
         program: &str,
         attach_type: u32,
     ) -> Result<OwnedFd, String> {
-        let prog_fd: RawFd = loader
-            .program_fd(program)
-            .ok_or_else(|| format!("program `{program}` is not in the loaded object"))?;
         match &self.warden {
             Some(client) => {
                 crate::warden::attribution::attach_via_warden(client, prog_fd, cgroup, attach_type)
@@ -302,6 +312,110 @@ impl WorkloadFirewallAttacher {
         info!("workload firewall detached");
         publish_status(WorkloadFirewallStatus::default());
     }
+}
+
+/// A loaded object whose hooks wait for the first rule that needs them.
+///
+/// The programs are held by descriptor rather than through the loader, so
+/// the reload path reaches them without the loader, which start-up keeps
+/// beside the other programs.
+struct Deferred {
+    programs: Vec<(&'static str, OwnedFd)>,
+    attacher: WorkloadFirewallAttacher,
+    cgroup: String,
+}
+
+/// The one deferred attach the whole process holds, kept after it attached
+/// so the links it holds stay alive.
+static DEFERRED: OnceLock<Mutex<Option<Deferred>>> = OnceLock::new();
+
+fn deferred_cell() -> &'static Mutex<Option<Deferred>> {
+    DEFERRED.get_or_init(|| Mutex::new(None))
+}
+
+/// Keep `loader`'s hooks ready to attach to `cgroup` through `attacher` once
+/// a reload brings the first rule they decide, and say so on the status
+/// route.
+///
+/// A configuration with no workload rule loads the object so that a rule
+/// added later is enforced without a restart, and attaches nothing, so a
+/// host with no rule runs no program on its sockets.
+///
+/// # Errors
+///
+/// Returns the reason when a hook's program is missing from the object or
+/// its descriptor cannot be duplicated; nothing is kept then, and a rule
+/// reloaded later is refused as on a host whose kernel refused the attach.
+pub fn defer_attach(
+    attacher: WorkloadFirewallAttacher,
+    loader: &EbpfLoader,
+    cgroup: &str,
+) -> Result<(), String> {
+    let programs = WORKLOAD_HOOKS
+        .iter()
+        .map(|(program, _)| {
+            loader
+                .program_fd_owned(program)
+                .map(|fd| (*program, fd))
+                .ok_or_else(|| format!("program `{program}` is not in the loaded object"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let brokered = attacher.warden_sock.is_some();
+    *deferred_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Deferred {
+        programs,
+        attacher,
+        cgroup: cgroup.to_owned(),
+    });
+    publish_status(WorkloadFirewallStatus {
+        attached: false,
+        cgroup: cgroup.to_owned(),
+        hooks: Vec::new(),
+        reason: Some(DEFERRED_REASON.to_string()),
+        brokered,
+    });
+    Ok(())
+}
+
+/// Why a loaded workload firewall is not attached yet.
+pub const DEFERRED_REASON: &str = "the configuration carries no workload rule yet: the object is \
+     loaded and the hooks attach with the first rule a reload brings";
+
+/// Whether a loaded object waits for its hooks to be attached.
+#[must_use]
+pub fn attach_pending() -> bool {
+    deferred_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|deferred| deferred.attacher.attached() == 0)
+}
+
+/// Attach the hooks [`defer_attach`] kept, publishing what happened.
+///
+/// `None` when nothing waits: no object was kept, or its hooks are already
+/// attached. A refused attach leaves the object kept, so a later reload
+/// tries again.
+pub fn attach_deferred() -> Option<WorkloadFirewallStatus> {
+    let mut held = deferred_cell()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let deferred = held.as_mut()?;
+    if deferred.attacher.attached() > 0 {
+        return None;
+    }
+    let programs = &deferred.programs;
+    let cgroup = deferred.cgroup.clone();
+    Some(deferred.attacher.attach_programs(
+        |program| {
+            programs
+                .iter()
+                .find(|(name, _)| *name == program)
+                .map(|(_, fd)| std::os::fd::AsRawFd::as_raw_fd(fd))
+        },
+        &cgroup,
+    ))
 }
 
 #[cfg(test)]
@@ -377,6 +491,12 @@ mod tests {
         let said = rule.not_covered.join(" ");
         assert!(said.contains("DNS over HTTPS"));
         assert!(said.contains("proxy"));
+    }
+
+    #[test]
+    fn nothing_waits_to_attach_until_an_object_is_kept() {
+        assert!(!attach_pending());
+        assert!(attach_deferred().is_none());
     }
 
     #[test]

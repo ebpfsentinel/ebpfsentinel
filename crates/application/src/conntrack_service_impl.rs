@@ -31,13 +31,13 @@ fn flow_of(connection: &Connection) -> Option<FlowEndpoints> {
 ///
 /// Reads and writes are served by different ports, deliberately. The
 /// `netfilter_port` is the only source of connections, and is coherent with
-/// `conntrack -L` and any firewall tooling on the host; the BPF `map_port`
+/// the `conntrack` tool and any firewall tooling on the host; the BPF `map_port`
 /// carries the shadow-table config sync and the write path (add, remove,
 /// flush) and holds no connections to read back.
 pub struct ConnTrackAppService {
     settings: ConnTrackSettings,
     map_port: Option<Box<dyn ConnTrackMapPort + Send>>,
-    /// Kernel netfilter reader, from the proc file or a conntrack-tools dump.
+    /// Kernel netfilter reader, from the proc file or a ctnetlink dump.
     /// Sole source for `get_connections` and `connection_count`.
     netfilter_port: Option<Box<dyn ConnTrackMapPort + Send>>,
     metrics: Arc<dyn MetricsPort>,
@@ -153,7 +153,7 @@ impl ConnTrackAppService {
     }
 
     /// Flush all connections. Flushes both kernel netfilter (via
-    /// `conntrack -F`) and BPF shadow when both ports are present.
+    /// a ctnetlink flush) and BPF shadow when both ports are present.
     pub fn flush_all(&mut self) -> Result<u64, DomainError> {
         // Prefer netfilter flush (kernel ground truth).
         let count = if let Some(ref mut nf) = self.netfilter_port {

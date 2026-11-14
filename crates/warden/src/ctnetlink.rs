@@ -395,28 +395,29 @@ fn delete_message(entry: &Entry) -> Vec<u8> {
     msg.finish()
 }
 
-/// Deletes every connection whose original direction `tuple` names. Nothing
-/// matching is not an error.
-pub fn delete(tuple: &ConntrackTuple) -> Result<(), String> {
+/// Deletes every connection whose original direction `tuple` names, and
+/// answers how many the kernel removed. Nothing matching is not an error.
+pub fn delete(tuple: &ConntrackTuple) -> Result<u64, String> {
     let filter = Filter::of(tuple)?;
     let doomed: Vec<Entry> = entries()?
         .into_iter()
         .filter(|e| filter.matches(e))
         .collect();
     if doomed.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     let sock = Socket::open(libc::NETLINK_NETFILTER)
         .map_err(|e| format!("open the conntrack netlink socket: {e}"))?;
+    let mut deleted = 0;
     for entry in &doomed {
         match sock.exchange(&delete_message(entry)) {
             // Gone between the dump and the delete: what was asked for holds.
             Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {}
             Err(e) => return Err(format!("delete a conntrack entry: {e}")),
-            Ok(_) => {}
+            Ok(_) => deleted += 1,
         }
     }
-    Ok(())
+    Ok(deleted)
 }
 
 /// Empties the table, every family.
@@ -462,9 +463,9 @@ fn write_tuple(msg: &mut Message, kind: u16, src: IpAddr, dst: IpAddr, sport: u1
 
 /// The request writing one established TCP flow.
 fn restore_message(restore: &ConntrackRestore) -> Result<Vec<u8>, String> {
-    restore
-        .args()
-        .ok_or_else(|| "conntrack restore needs a fully named TCP flow".to_owned())?;
+    if !restore.is_restorable() {
+        return Err("conntrack restore needs a fully named TCP flow".to_owned());
+    }
     let parse = |s: &str| -> Result<IpAddr, String> {
         s.parse()
             .map_err(|_| format!("invalid conntrack address '{s}'"))
@@ -498,15 +499,16 @@ fn restore_message(restore: &ConntrackRestore) -> Result<Vec<u8>, String> {
     Ok(msg.finish())
 }
 
-/// Writes one established TCP flow. An entry the kernel already holds leaves
-/// the flow tracked and is not an error.
-pub fn restore(restore: &ConntrackRestore) -> Result<(), String> {
+/// Writes one established TCP flow, answering `true` when the entry is new.
+/// An entry the kernel already holds leaves the flow tracked and is not an
+/// error: it answers `false`.
+pub fn restore(restore: &ConntrackRestore) -> Result<bool, String> {
     let request = restore_message(restore)?;
     let sock = Socket::open(libc::NETLINK_NETFILTER)
         .map_err(|e| format!("open the conntrack netlink socket: {e}"))?;
     match sock.exchange(&request) {
-        Ok(_) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(libc::EEXIST) => Ok(()),
+        Ok(_) => Ok(true),
+        Err(e) if e.raw_os_error() == Some(libc::EEXIST) => Ok(false),
         Err(e) => Err(format!("write the conntrack entry: {e}")),
     }
 }

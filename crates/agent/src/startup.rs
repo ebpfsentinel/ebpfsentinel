@@ -830,8 +830,8 @@ pub async fn run(
         // the stream going missing is a host capability gap, and an operator
         // reading the boot log should not have to probe an endpoint to find it.
         warn!(
-            "conntrack table unreadable (no /proc/net/nf_conntrack and no \
-             usable conntrack-tools): event stream disabled"
+            "conntrack table unreadable (no /proc/net/nf_conntrack and \
+             ctnetlink refused the dump): event stream disabled"
         );
         None
     };
@@ -2752,24 +2752,25 @@ pub async fn run(
         let netpol_on = netpol_mode != infrastructure::config::NetworkPolicyMode::Off;
         // So do a container's labels and a learning window: the whole list is
         // `workload_firewall_idle`.
-        if workload_firewall_idle(&config, &workload_policy) {
-            metrics.clear_ebpf_program_status("cgroup_workload_firewall");
-            adapters::ebpf::workload_firewall_attach::publish_status(
-                workload_firewall_idle_status(),
-            );
+        // When it is idle the object is loaded all the same and its hooks are
+        // kept for the first rule a reload brings, so that rule is enforced
+        // without a restart.
+        let idle = workload_firewall_idle(&config, &workload_policy);
+        if idle {
             adapters::ebpf::quarantine_map_manager::publish_status(
                 adapters::ebpf::QuarantineStatus {
                     reason: Some("quarantining a workload is off in the configuration".to_string()),
                     ..adapters::ebpf::QuarantineStatus::default()
                 },
             );
-        } else {
-            let outcome = try_load_cgroup_workload_firewall(&ebpf_dir, &config);
+        }
+        {
+            let outcome = try_load_cgroup_workload_firewall(&ebpf_dir, &config, !idle);
             let refused = match outcome {
                 Ok((mut loader, metrics_rdr, manager, reader, attacher, status))
-                    if status.attached =>
+                    if status.attached || idle =>
                 {
-                    workload_firewall_attacher = Some(attacher);
+                    workload_firewall_attacher = attacher;
                     if let Some(rdr) = metrics_rdr {
                         metrics_readers.push(rdr);
                     }
@@ -2830,11 +2831,18 @@ pub async fn run(
                     workload_policy_service = Some(service);
                     managed.push(("cgroup_workload_firewall", loader, workload_cancel.clone()));
                     metrics.set_ebpf_program_status("cgroup_workload_firewall", true);
-                    info!(
-                        rules = workload_policy.rules().len(),
-                        enforcing = workload_policy.enforces(),
-                        "eBPF cgroup-workload-firewall active"
-                    );
+                    if idle {
+                        info!(
+                            "eBPF cgroup-workload-firewall loaded, its hooks attach with the \
+                             first workload rule a reload brings"
+                        );
+                    } else {
+                        info!(
+                            rules = workload_policy.rules().len(),
+                            enforcing = workload_policy.enforces(),
+                            "eBPF cgroup-workload-firewall active"
+                        );
+                    }
                     None
                 }
                 Ok((_, _, _, _, _, status)) => Some(
@@ -2844,7 +2852,16 @@ pub async fn run(
                 ),
                 Err(e) => Some(e.to_string()),
             };
-            if let Some(reason) = refused {
+            if let Some(reason) = refused.as_deref().filter(|_| idle) {
+                // Nothing in force needed the hooks, so nothing is refused:
+                // only a rule added later is, until a restart, and the status
+                // says so.
+                metrics.clear_ebpf_program_status("cgroup_workload_firewall");
+                adapters::ebpf::workload_firewall_attach::publish_status(
+                    workload_firewall_idle_status(reason),
+                );
+                info!("workload firewall not loaded, no workload rule needs it: {reason}");
+            } else if let Some(reason) = refused {
                 metrics.set_ebpf_program_status("cgroup_workload_firewall", false);
                 adapters::ebpf::workload_firewall_attach::publish_status(
                     adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus {
@@ -3693,9 +3710,10 @@ pub async fn run(
     }
 
     // The workload policy goes through the same reload path as every other
-    // rule set, and only where the hooks are there to carry it out: a reload
-    // on a host that refused the attach has nothing to write to, and the
-    // reload path refuses a file that would need it.
+    // rule set, and only where the object loaded: its hooks are attached, or
+    // kept for the first rule a reload brings. A reload on a host that
+    // refused the object has nothing to write to, and the reload path
+    // refuses a file that would need it.
     if let Some(ref workload) = workload_policy_service {
         reload_service.set_workload_service(Arc::clone(workload));
     }
@@ -6369,29 +6387,16 @@ pub fn arm_quarantine(
     (Some(svc), metrics)
 }
 
-/// Load the workload firewall and attach its eight cgroup hooks.
+/// Whether nothing needs the workload firewall's hooks attached at start.
 ///
-/// Returns the loader, the counters, the map manager the policy is written
-/// through, the reader draining the refusals, the attacher holding the links,
-/// and what can be said about the result. A kernel that refuses the attach comes back as a status carrying
-/// the reason rather than as an error, because whether that is survivable is
-/// the policy's business and not this function's: a policy that only observes
-/// runs on, and one that refuses stops the agent at the caller.
-///
-/// It is loaded off the rules rather than off a configuration key, because a
-/// workload rule is already the switch: a file with none loads nothing, and a
-/// file with one means it.
-/// Whether nothing needs the workload firewall's object, which is then left
-/// unloaded.
-///
-/// The hooks attach at start only, so the object is loaded for everything
-/// that may put a rule in force later as well as for the rules the file
-/// already carries: a quarantine, `NetworkPolicy` and a container's labels
-/// are policy without a line in the rule list, and on a node whose Docker
-/// bridges are read a learning window ends in a bridge's segmentation,
-/// written into this file and reloaded. Learning alone is on by default and
-/// does not load it: a host that only learns gets the restart named in the
-/// status when it loads its first workload rule.
+/// The object is loaded either way. When nothing needs it the hooks are kept
+/// unattached, and the first workload rule a reload brings attaches them, so
+/// a rule added to a running agent is enforced without a restart and a host
+/// with no rule runs no program on its sockets. A quarantine,
+/// `NetworkPolicy` and a container's labels are policy without a line in the
+/// rule list and attach at start, and so does a learning window on a node
+/// whose Docker bridges are read, since it ends in a bridge's segmentation
+/// written into this file.
 pub fn workload_firewall_idle(
     config: &AgentConfig,
     policy: &domain::firewall::workload::WorkloadPolicy,
@@ -6404,32 +6409,57 @@ pub fn workload_firewall_idle(
         && !(config.learning.enabled && config.container.docker.enabled)
 }
 
-/// The status an agent that left the object unloaded reports, saying why a
+/// The status an agent whose idle object did not load reports, saying why a
 /// rule reloaded since start is refused rather than letting the hooks look
 /// broken.
-pub fn workload_firewall_idle_status()
--> adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus {
+pub fn workload_firewall_idle_status(
+    reason: &str,
+) -> adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus {
     adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus {
-        reason: Some(
-            "the configuration carried no workload rule at start and the hooks attach at \
-             start only: restart the agent for a rule added since"
-                .to_string(),
-        ),
+        reason: Some(format!(
+            "the configuration carried no workload rule at start and the object the hooks \
+             attach from did not load, so a rule added since needs a restart: {reason}"
+        )),
         ..adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus::default()
     }
 }
 
-pub fn try_load_cgroup_workload_firewall(
-    ebpf_dir: &str,
-    config: &AgentConfig,
-) -> anyhow::Result<(
+/// What [`try_load_cgroup_workload_firewall`] hands back: the loader, the
+/// counters, the map manager, the refusal reader, the attacher and the
+/// status.
+pub type LoadedWorkloadFirewall = (
     EbpfLoader,
     Option<MetricsReader>,
     adapters::ebpf::workload_policy_map_manager::WorkloadPolicyMapManager,
     adapters::ebpf::WorkloadEventReader,
-    adapters::ebpf::workload_firewall_attach::WorkloadFirewallAttacher,
+    Option<adapters::ebpf::workload_firewall_attach::WorkloadFirewallAttacher>,
     adapters::ebpf::workload_firewall_attach::WorkloadFirewallStatus,
-)> {
+);
+
+/// Load the workload firewall and attach its eight cgroup hooks.
+///
+/// Returns the loader, the counters, the map manager the policy is written
+/// through, the reader draining the refusals, the attacher holding the links,
+/// and what can be said about the result. A kernel that refuses the attach
+/// comes back as a status carrying the reason rather than as an error,
+/// because whether that is survivable is the policy's business and not this
+/// function's: a policy that only observes runs on, and one that refuses
+/// stops the agent at the caller.
+///
+/// With `attach` false the hooks are kept for the first rule a reload brings
+/// rather than attached, and the attacher stays with them, so `None` comes
+/// back in its place.
+///
+/// # Errors
+///
+/// Returns an error when the object cannot be read or loaded, when one of
+/// its maps is missing, or, with `attach` false, when its hooks cannot be
+/// kept for later.
+pub fn try_load_cgroup_workload_firewall(
+    ebpf_dir: &str,
+    config: &AgentConfig,
+    attach: bool,
+) -> anyhow::Result<LoadedWorkloadFirewall> {
     let program_bytes = read_ebpf_program(ebpf_dir, "cgroup-workload-firewall")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
@@ -6447,8 +6477,18 @@ pub fn try_load_cgroup_workload_firewall(
     if let Some(sock) = warden_sock_from_env() {
         attacher = attacher.with_warden_socket(sock);
     }
+    if !attach {
+        adapters::ebpf::workload_firewall_attach::defer_attach(
+            attacher,
+            &loader,
+            &config.attribution.cgroup_root,
+        )
+        .map_err(anyhow::Error::msg)?;
+        let status = adapters::ebpf::workload_firewall_attach::status();
+        return Ok((loader, metrics_rdr, manager, reader, None, status));
+    }
     let status = attacher.attach_all(&loader, &config.attribution.cgroup_root);
-    Ok((loader, metrics_rdr, manager, reader, attacher, status))
+    Ok((loader, metrics_rdr, manager, reader, Some(attacher), status))
 }
 
 /// The connection redirect, loaded, configured and attached.
@@ -8401,7 +8441,7 @@ fn resolve_sock_offsets() -> anyhow::Result<ebpf_common::dlp::SockOffsets> {
 /// Hand the conntrack service the kernel's own table.
 ///
 /// The netfilter port owns both the authoritative read view (coherent with
-/// `conntrack -L`) and the kernel sysctl writes (timeouts and the `tcp_loose`
+/// the `conntrack` tool) and the kernel sysctl writes (timeouts and the `tcp_loose`
 /// hardening), and it is the only source the connection list reads. It is
 /// wired whenever conntrack is enabled, before the settings are reloaded, so
 /// the settings sync actually reaches the kernel: those writes are no-ops
@@ -8412,7 +8452,7 @@ fn resolve_sock_offsets() -> anyhow::Result<ebpf_common::dlp::SockOffsets> {
 /// still runs only for an enabled conntrack. On kernels without
 /// `CONFIG_NF_CONNTRACK_PROCFS` the sysctl knobs still exist but
 /// `/proc/net/nf_conntrack` does not, and the port falls back to dumping
-/// through conntrack-tools, or through the warden in a rootless deployment.
+/// over ctnetlink, or through the warden in a rootless deployment.
 pub(crate) fn wire_kernel_conntrack(ct_svc: &mut ConnTrackAppService, config: &AgentConfig) {
     if config.conntrack.enabled || config.learning.enabled {
         ct_svc.set_netfilter_port(Box::new(
@@ -9176,9 +9216,9 @@ mod tests {
         .unwrap();
         assert!(workload_firewall_idle(&not_learning, &policy));
         assert!(
-            workload_firewall_idle_status()
+            workload_firewall_idle_status("no object")
                 .reason
-                .is_some_and(|r| r.contains("restart"))
+                .is_some_and(|r| r.contains("restart") && r.contains("no object"))
         );
     }
 

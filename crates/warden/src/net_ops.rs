@@ -134,12 +134,12 @@ fn resolve_mac(iface: &str) -> Result<[u8; 6], String> {
 
 /// Delete the flows `tuple` names, over ctnetlink.
 pub fn conntrack_delete(tuple: &ConntrackTuple) -> Result<(), String> {
-    ctnetlink::delete(tuple)
+    ctnetlink::delete(tuple).map(|_| ())
 }
 
 /// Write one established TCP flow, over ctnetlink.
 pub fn conntrack_restore(restore: &ConntrackRestore) -> Result<(), String> {
-    ctnetlink::restore(restore)
+    ctnetlink::restore(restore).map(|_| ())
 }
 
 /// Flush the whole conntrack table, over ctnetlink.

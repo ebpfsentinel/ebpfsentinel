@@ -450,10 +450,12 @@ pub async fn apply_config_file_prepared(
     // is not about the file being malformed.
     //
     // A rule that refuses is only worth anything where the cgroup hooks
-    // attached, and whether they did was settled at start-up: a file adding
-    // one on a host that refused them would leave the operator reading a
-    // deny rule the kernel never sees. Rejecting the file keeps the rules in
-    // force and says why, which is the same answer start-up gives.
+    // attached: a file adding one on a host that refused them would leave the
+    // operator reading a deny rule the kernel never sees. Rejecting the file
+    // keeps the rules in force and says why, which is the same answer
+    // start-up gives. An agent that started with no rule loaded the object
+    // and kept its hooks, and they are attached below, once nothing else in
+    // the file can reject it.
     let workload_policy = match domain::firewall::workload::WorkloadPolicy::from_rules(&rules) {
         Ok(policy) => policy,
         Err(e) => {
@@ -481,7 +483,10 @@ pub async fn apply_config_file_prepared(
             return None;
         }
     };
-    if workload_policy.enforces() && !adapters::ebpf::workload_firewall_attach::status().attached {
+    if workload_policy.enforces()
+        && !adapters::ebpf::workload_firewall_attach::status().attached
+        && !adapters::ebpf::workload_firewall_attach::attach_pending()
+    {
         let reason = adapters::ebpf::workload_firewall_attach::status()
             .reason
             .unwrap_or_else(|| "the hooks are not attached on this host".to_string());
@@ -703,6 +708,31 @@ pub async fn apply_config_file_prepared(
             return None;
         }
     };
+
+    // The first workload rule since start attaches the hooks kept for it.
+    // Before the rules go in, while the tables still hold the empty policy
+    // the agent started with, so nothing is refused that no rule explains;
+    // and a refused attach rejects a file whose rule refuses, as start-up
+    // does.
+    if !workload_policy.is_empty()
+        && let Some(status) = adapters::ebpf::workload_firewall_attach::attach_deferred()
+        && !status.attached
+    {
+        let reason = status
+            .reason
+            .unwrap_or_else(|| "the kernel refused the attach".to_string());
+        if workload_policy.enforces() {
+            tracing::warn!(
+                "config reload rejected: {}",
+                adapters::ebpf::workload_firewall_attach::enforcement_unavailable(&reason)
+            );
+            return None;
+        }
+        tracing::warn!(
+            "workload firewall hooks did not attach, the rules that observe observe nothing: \
+             {reason}"
+        );
+    }
 
     // Apply firewall reload. The interface bits go first: they are what an
     // interface-scoped rule in the new set is narrowed with.

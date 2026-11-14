@@ -221,11 +221,11 @@ pub async fn flush_connections(
             status = 404,
             description = "Conntrack event stream not enabled, which is what a \
                 host answers when the poller has no table to read: neither \
-                `/proc/net/nf_conntrack` nor a `conntrack -L` this agent is \
-                allowed to run. A kernel built without \
-                `CONFIG_NF_CONNTRACK_PROCFS` still streams where \
-                conntrack-tools answer, so the missing proc file is not on its \
-                own the reason",
+                `/proc/net/nf_conntrack` nor a ctnetlink dump this agent is \
+                allowed to make. A kernel built without \
+                `CONFIG_NF_CONNTRACK_PROCFS` still streams where ctnetlink \
+                answers, so the missing proc file is not on its own the \
+                reason",
             body = ErrorBody,
         ),
     ),

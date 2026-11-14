@@ -46,7 +46,7 @@ impl ConnTrackMapPort for ConnTrackMapManager {
 
     fn flush_all(&mut self) -> Result<u64, DomainError> {
         // Shadow tables deleted - flush via ProcNetfilterConntrackPort
-        // (conntrack -F).
+        // (ctnetlink flush).
         Ok(0)
     }
 

@@ -78,7 +78,7 @@ The agent's memory limit defaults to `512Mi` and its request to `256Mi`. Once ru
 |---------|-----------|-------|
 | Firewall, IDS, DDoS, Rate Limiting | Full | Attached to host NIC - sees all node traffic |
 | DLP | Full | Covers every process on the node without the host pid namespace: the warden and the agent read the node's procfs through the read-only `/host/proc` mount, and the uprobe link is created against a path and an offset rather than a pid |
-| Multi-WAN Routing | Full | `hostNetwork` shares the routing table; route application (`ip rule`/`ip route`) is brokered to the `warden`, which holds `CAP_NET_ADMIN` in the init network namespace. Same path as `conntrack -D` flow-kill and gratuitous ARP |
+| Multi-WAN Routing | Full | `hostNetwork` shares the routing table; route application (`ip rule`/`ip route`) is brokered to the `warden`, which holds `CAP_NET_ADMIN` in the init network namespace. Same path as the ctnetlink flow-kill and gratuitous ARP |
 | Sidecar mode | Not recommended | XDP works on veth (generic mode) but only sees the pod's own traffic - no host or cross-pod visibility |
 
 **DLP covers the whole node out of the box**, with `daemonset.hostPID` off. The

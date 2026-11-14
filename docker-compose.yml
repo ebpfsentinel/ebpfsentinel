@@ -71,7 +71,7 @@ services:
     cap_drop: [ALL]
     cap_add:
       - SYS_ADMIN # bpffs delegation (FSCONFIG_CMD_CREATE), module BTF fds
-      - NET_ADMIN # conntrack -D teardown, route programming
+      - NET_ADMIN # conntrack teardown over ctnetlink, route programming
       - NET_RAW # AF_PACKET pcap sockets + gratuitous ARP
       - SYS_PTRACE # read a neighbour container's /proc/<pid>/root (DLP)
       - BPF # create the DLP uprobe BPF_LINK_CREATE

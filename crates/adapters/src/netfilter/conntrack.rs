@@ -15,11 +15,12 @@
 //! by the unmapped host root, so a direct open returns `EACCES`; the agent instead
 //! proxies every conntrack operation (table read, flush, targeted delete) to the
 //! warden over its typed protocol, selected by `EBPFSENTINEL_WARDEN_SOCK`. The
-//! warden in turn runs the host-netns ops (`conntrack -F`, netlink delete, the
-//! `0440 root` proc read) through its resident netns-helper, which holds the
+//! warden in turn runs the host-netns ops (ctnetlink flush, delete and insert,
+//! the `0440 root` proc read) through its resident netns-helper, which holds the
 //! `CAP_NET_ADMIN` the user-namespace agent lacks over the host netns. When no
 //! warden socket is set (single-container root, or bare metal) the reader opens
-//! `/proc` directly.
+//! `/proc` directly and every change goes over ctnetlink from this process, with
+//! the same code the warden runs: no `conntrack` binary is needed on the host.
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,7 @@ use std::sync::Mutex;
 
 use domain::common::error::DomainError;
 use domain::conntrack::entity::{ConnTrackSettings, Connection, ConnectionState, ReplyTuple};
+use ebpfsentinel_warden::ctnetlink;
 use ebpfsentinel_warden_client::{ConntrackRestore, ConntrackTuple, ReconnectingClient};
 use ports::secondary::conntrack_kill_port::{ConnTrackFlow, ConnTrackKillPort};
 use ports::secondary::conntrack_map_port::ConnTrackMapPort;
@@ -40,15 +42,15 @@ const DEFAULT_NF_CONNTRACK_COUNT_PATH: &str = "/proc/sys/net/netfilter/nf_conntr
 /// Env var set for the rootless agent with the warden control-plane socket. When
 /// present, every conntrack operation (table read, flush, targeted delete) is
 /// proxied to the warden over its typed protocol instead of touching `/proc` or
-/// the `conntrack` CLI directly - the rootless agent holds none of the required
+/// ctnetlink directly - the rootless agent holds none of the required
 /// privileges.
 const WARDEN_SOCK_ENV: &str = "EBPFSENTINEL_WARDEN_SOCK";
 
 /// Reads the kernel netfilter conntrack table via `/proc/net/nf_conntrack`.
 ///
-/// This is the same data `conntrack -L` displays - the kernel's
+/// This is the same data a ctnetlink dump returns - the kernel's
 /// authoritative view, not the BPF shadow copy. Userspace REST endpoints
-/// backed by this port are guaranteed coherent with the `conntrack` CLI
+/// backed by this port are guaranteed coherent with the `conntrack` tool
 /// and any firewall or NAT tooling that inspects the kernel CT table.
 pub struct ProcNetfilterConntrackPort {
     /// Path to the proc conntrack file (injectable for tests).
@@ -87,32 +89,20 @@ impl ProcNetfilterConntrackPort {
         }
     }
 
-    /// Dump the conntrack table through `conntrack -L` when the proc file is
+    /// Dump the conntrack table over ctnetlink when the proc file is
     /// unreadable.
     ///
-    /// Carries the original open error into every failure message: "conntrack
-    /// is unreadable" and "conntrack-tools is missing" call for different
-    /// operator actions, and reporting only the second would hide a proc file
-    /// that exists but is being refused.
-    fn dump_via_conntrack_cli(&self, proc_err: &std::io::Error) -> Result<Vec<u8>, DomainError> {
+    /// Carries the original open error into every failure message: "the proc
+    /// file is refused" and "ctnetlink is refused" call for different operator
+    /// actions, and reporting only the second would hide a proc file that
+    /// exists but is being refused.
+    fn dump_via_ctnetlink(&self, proc_err: &std::io::Error) -> Result<Vec<u8>, DomainError> {
         let path = self.nf_conntrack_path.display();
-        let output = std::process::Command::new("conntrack")
-            .args(["-L"])
-            .output()
-            .map_err(|e| {
-                DomainError::EngineError(format!(
-                    "failed to open {path}: {proc_err}; `conntrack -L` fallback \
-                     failed: {e} (conntrack-tools installed?)"
-                ))
-            })?;
-        if !output.status.success() {
-            return Err(DomainError::EngineError(format!(
-                "failed to open {path}: {proc_err}; `conntrack -L` exited with \
-                 status {}",
-                output.status
-            )));
-        }
-        Ok(output.stdout)
+        ctnetlink::dump().map_err(|e| {
+            DomainError::EngineError(format!(
+                "failed to open {path}: {proc_err}; ctnetlink fallback failed: {e}"
+            ))
+        })
     }
 }
 
@@ -153,20 +143,14 @@ impl ConnTrackKillPort for ProcNetfilterConntrackPort {
             );
             return Ok(0);
         }
-        let dport = dst_port.to_string();
-        let output = std::process::Command::new("conntrack")
-            .args(["-D", "-p", proto, "--dport", &dport])
-            .output()
-            .map_err(|e| {
-                DomainError::EngineError(format!(
-                    "failed to run `conntrack -D`: {e} (conntrack-tools installed?)"
-                ))
-            })?;
-        // `conntrack -D` summarises the result on stderr as
-        // "... N flow entries have been deleted." and exits non-zero when
-        // nothing matched - that is not an error here, so parse the count
-        // from the output regardless of exit status.
-        let deleted = parse_deleted_count(&String::from_utf8_lossy(&output.stderr));
+        let deleted = ctnetlink::delete(&ConntrackTuple {
+            proto: protocol,
+            src_ip: String::new(),
+            dst_ip: String::new(),
+            src_port: 0,
+            dst_port,
+        })
+        .map_err(|e| DomainError::EngineError(format!("conntrack delete failed: {e}")))?;
         debug!(
             protocol = proto,
             dst_port, deleted, "conntrack entries deleted to enforce firewall deny rule"
@@ -211,32 +195,16 @@ impl ConnTrackKillPort for ProcNetfilterConntrackPort {
             );
             return Ok(1);
         }
-        let src_port = flow.src_port.to_string();
-        let dst_port = flow.dst_port.to_string();
-        let output = std::process::Command::new("conntrack")
-            .args([
-                "-D",
-                "-p",
-                proto,
-                "-s",
-                &flow.src_ip,
-                "-d",
-                &flow.dst_ip,
-                "--sport",
-                &src_port,
-                "--dport",
-                &dst_port,
-            ])
-            .output()
-            .map_err(|e| {
-                DomainError::EngineError(format!(
-                    "failed to run `conntrack -D`: {e} (conntrack-tools installed?)"
-                ))
-            })?;
-        // A flow that closed between the table read and the delete exits
-        // non-zero with nothing deleted, which is the ordinary case and not an
-        // error: the count is parsed from the output regardless.
-        let deleted = parse_deleted_count(&String::from_utf8_lossy(&output.stderr));
+        // A flow that closed between the table read and the delete deletes
+        // nothing, which is the ordinary case and not an error.
+        let deleted = ctnetlink::delete(&ConntrackTuple {
+            proto: flow.protocol,
+            src_ip: flow.src_ip.clone(),
+            dst_ip: flow.dst_ip.clone(),
+            src_port: flow.src_port,
+            dst_port: flow.dst_port,
+        })
+        .map_err(|e| DomainError::EngineError(format!("conntrack delete failed: {e}")))?;
         debug!(
             protocol = proto,
             src = %flow.src_ip,
@@ -266,11 +234,11 @@ impl ConnTrackRestorePort for ProcNetfilterConntrackPort {
                 dst_port: r.dst_port,
             }),
         };
-        let Some(args) = restore.args() else {
+        if !restore.is_restorable() {
             return Err(DomainError::EngineError(
                 "only a fully named TCP flow is restored".into(),
             ));
-        };
+        }
         // Rootless agent: the insert is a CAP_NET_ADMIN netlink operation the
         // warden runs. It answers success or failure only, and an entry it
         // already held is a success there too.
@@ -284,29 +252,13 @@ impl ConnTrackRestorePort for ProcNetfilterConntrackPort {
                 })?;
             return Ok(true);
         }
-        let output = std::process::Command::new("conntrack")
-            .args(&args)
-            .output()
-            .map_err(|e| {
-                DomainError::EngineError(format!(
-                    "failed to run `conntrack -I`: {e} (conntrack-tools installed?)"
-                ))
-            })?;
-        if output.status.success() {
-            return Ok(true);
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("File exists") {
-            return Ok(false);
-        }
-        Err(DomainError::EngineError(format!(
-            "`conntrack -I` refused the flow: {}",
-            stderr.trim()
-        )))
+        ctnetlink::restore(&restore).map_err(|e| {
+            DomainError::EngineError(format!("conntrack restore refused the flow: {e}"))
+        })
     }
 }
 
-/// The `conntrack` tool's name for a protocol number, where it has one.
+/// The name conntrack gives a protocol number, where it has one.
 ///
 /// `None` is a protocol with no port pair to narrow a delete with, and every
 /// caller treats that as a refusal rather than as a wildcard.
@@ -318,16 +270,6 @@ fn proto_name(protocol: u8) -> Option<&'static str> {
         132 => Some("sctp"),
         _ => None,
     }
-}
-
-/// Parse the "N flow entries have been deleted." summary emitted by
-/// `conntrack -D` on stderr. Returns the first standalone numeric token,
-/// which is the deleted-entry count (the tool version like `v1.4.6` is not
-/// a bare integer, so it is skipped).
-fn parse_deleted_count(text: &str) -> u64 {
-    text.split_whitespace()
-        .find_map(|tok| tok.parse::<u64>().ok())
-        .unwrap_or(0)
 }
 
 impl ConnTrackMapPort for ProcNetfilterConntrackPort {
@@ -349,13 +291,11 @@ impl ConnTrackMapPort for ProcNetfilterConntrackPort {
                 // A kernel built without CONFIG_NF_CONNTRACK_PROCFS has no proc
                 // file while conntrack itself is entirely live, and dropping
                 // that deprecated interface is the direction distributions are
-                // moving. Fall back to the same conntrack-tools binary this
-                // port already drives for -D and -F: its dump differs from the
-                // proc file only by the two leading address-family fields,
-                // which the parser detects rather than assumes.
-                Err(proc_err) => Box::new(std::io::Cursor::new(
-                    self.dump_via_conntrack_cli(&proc_err)?,
-                )),
+                // moving. Fall back to a ctnetlink dump, rendered in the proc
+                // file's own text.
+                Err(proc_err) => {
+                    Box::new(std::io::Cursor::new(self.dump_via_ctnetlink(&proc_err)?))
+                }
             }
         };
         let mut conns = Vec::new();
@@ -394,21 +334,8 @@ impl ConnTrackMapPort for ProcNetfilterConntrackPort {
                 })?;
             return Ok(count);
         }
-        let status = std::process::Command::new("conntrack")
-            .args(["-F"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_err(|e| {
-                DomainError::EngineError(format!(
-                    "failed to run `conntrack -F`: {e} (conntrack-tools installed?)"
-                ))
-            })?;
-        if !status.success() {
-            return Err(DomainError::EngineError(format!(
-                "`conntrack -F` exited with status {status}"
-            )));
-        }
+        ctnetlink::flush()
+            .map_err(|e| DomainError::EngineError(format!("conntrack flush failed: {e}")))?;
         Ok(count)
     }
 
@@ -492,21 +419,18 @@ fn write_sysctl(key: &str, value: u64) {
 /// ipv4     2 udp      17 29 src=10.0.0.1 dst=8.8.8.8 sport=53422 dport=53 src=8.8.8.8 dst=10.0.0.1 sport=53 dport=53422 [ASSURED] mark=0 use=2
 /// ```
 ///
-/// `conntrack -L` emits the same line without the leading address family and
-/// its number, so the head is located rather than assumed and one parser
-/// serves both sources:
-/// ```text
-/// tcp      6 299 ESTABLISHED src=1.2.3.4 dst=5.6.7.8 sport=12345 dport=443 ...
-/// ```
+/// A ctnetlink dump is rendered in this same text, so one parser serves both.
 fn parse_nf_conntrack_line(line: &str) -> Option<Connection> {
     let tokens: Vec<&str> = line.split_whitespace().collect();
-    // The proc file prefixes every line with "ipv4 2" / "ipv6 10"; the CLI
-    // dump starts straight at the protocol name.
-    let base = usize::from(matches!(tokens.first().copied(), Some("ipv4" | "ipv6"))) * 2;
+    // Every line opens with its address family and number, "ipv4 2" or
+    // "ipv6 10".
+    if !matches!(tokens.first().copied(), Some("ipv4" | "ipv6")) {
+        return None;
+    }
+    let base = 2;
     // Minimum past the head: proto_name + proto_num + timeout + state + a
-    // full tuple. Kept identical to the pre-fallback proc threshold rather
-    // than relaxed to the shortest CLI line that could exist, since conntrack
-    // always prints both tuples plus mark/use and a shorter line is malformed.
+    // full tuple; conntrack always prints both tuples plus mark/use, so a
+    // shorter line is malformed.
     if tokens.len() < base + 8 {
         return None;
     }
@@ -633,18 +557,18 @@ pub fn is_proc_conntrack_available() -> bool {
 }
 
 /// Check whether the conntrack table can be read at all: through the warden
-/// when the agent is brokered, otherwise from the proc file or conntrack-tools.
+/// when the agent is brokered, otherwise from the proc file or ctnetlink.
 ///
 /// Used at startup to decide whether the event stream is wired. Gating that on
 /// the proc file alone silently retired the whole feature on any kernel built
 /// without `CONFIG_NF_CONNTRACK_PROCFS` - a deprecated interface distributions
-/// are dropping - even though conntrack itself was live and `conntrack -L`
-/// could dump it.
+/// are dropping - even though conntrack itself was live and ctnetlink could
+/// dump it.
 #[must_use]
 pub fn is_conntrack_readable() -> bool {
     // The rootless agent reads the table through the warden, which holds the
     // capability the agent's own user namespace does not: neither the proc file
-    // nor a local `conntrack -L` says anything about that route.
+    // nor a local ctnetlink dump says anything about that route.
     if let Some(warden) = ProcNetfilterConntrackPort::new().warden {
         return warden
             .lock()
@@ -653,15 +577,9 @@ pub fn is_conntrack_readable() -> bool {
     if is_proc_conntrack_available() {
         return true;
     }
-    // Probing the binary rather than merely locating it: conntrack-tools can be
-    // installed and still fail here, because a dump needs CAP_NET_ADMIN and the
-    // rootless agent does not hold it.
-    std::process::Command::new("conntrack")
-        .args(["-L"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    // A dump needs CAP_NET_ADMIN over this network namespace, so it is tried
+    // rather than assumed.
+    ctnetlink::dump().is_ok()
 }
 
 #[cfg(test)]
@@ -697,19 +615,6 @@ mod tests {
             })
             .expect("refusing a protocol is not an error");
         assert_eq!(deleted, 0);
-    }
-
-    #[test]
-    fn parse_deleted_count_extracts_number() {
-        let summary = "conntrack v1.4.6 (conntrack-tools): 2 flow entries have been deleted.";
-        assert_eq!(parse_deleted_count(summary), 2);
-    }
-
-    #[test]
-    fn parse_deleted_count_zero_when_none() {
-        let summary = "conntrack v1.4.6 (conntrack-tools): 0 flow entries have been deleted.";
-        assert_eq!(parse_deleted_count(summary), 0);
-        assert_eq!(parse_deleted_count(""), 0);
     }
 
     #[test]
@@ -798,44 +703,13 @@ mod tests {
         assert!(parse_nf_conntrack_line("").is_none());
         assert!(parse_nf_conntrack_line("short").is_none());
         assert!(parse_nf_conntrack_line("ipv4 2 tcp 6 100 ESTABLISHED").is_none());
-        // The CLI layout is one field shorter at the head, so a truncated CLI
-        // line must not read as a complete proc line shifted by two.
+        // A line without its address family is not one this table writes.
         assert!(parse_nf_conntrack_line("tcp 6 100 ESTABLISHED").is_none());
     }
 
-    /// The CLI dump omits the leading address family, and the whole
-    /// procfs-optional fallback rests on both layouts yielding one connection.
     #[test]
-    fn cli_and_proc_layouts_parse_to_the_same_connection() {
-        let tuple = "src=192.168.1.1 dst=10.0.0.1 sport=12345 dport=443 \
-                     src=10.0.0.1 dst=192.168.1.1 sport=443 dport=12345 \
-                     [ASSURED] mark=0 use=2";
-        let from_proc =
-            parse_nf_conntrack_line(&format!("ipv4     2 tcp      6 431999 ESTABLISHED {tuple}"))
-                .unwrap();
-        let from_cli =
-            parse_nf_conntrack_line(&format!("tcp      6 431999 ESTABLISHED {tuple}")).unwrap();
-        assert_eq!(from_proc.src_ip, from_cli.src_ip);
-        assert_eq!(from_proc.dst_ip, from_cli.dst_ip);
-        assert_eq!(from_proc.src_port, from_cli.src_port);
-        assert_eq!(from_proc.dst_port, from_cli.dst_port);
-        assert_eq!(from_proc.protocol, from_cli.protocol);
-        assert_eq!(from_proc.state, from_cli.state);
-    }
-
-    #[test]
-    fn cli_layout_parses_udp_without_a_state_field() {
-        let line = "udp      17 29 src=10.0.0.1 dst=8.8.8.8 sport=53422 dport=53 \
-                    src=8.8.8.8 dst=10.0.0.1 sport=53 dport=53422 mark=0 use=2";
-        let conn = parse_nf_conntrack_line(line).unwrap();
-        assert_eq!(conn.protocol, 17);
-        assert_eq!(conn.src_ip, "10.0.0.1");
-        assert_eq!(conn.dst_port, 53);
-    }
-
-    #[test]
-    fn cli_layout_parses_ipv6_and_counters() {
-        let line = "tcp      6 299 ESTABLISHED src=2001:db8::1 dst=2001:db8::2 \
+    fn proc_layout_parses_ipv6_and_counters() {
+        let line = "ipv6     10 tcp      6 299 ESTABLISHED src=2001:db8::1 dst=2001:db8::2 \
                     sport=443 dport=8080 packets=100 bytes=50000 \
                     src=2001:db8::2 dst=2001:db8::1 sport=8080 dport=443 \
                     packets=200 bytes=150000 [ASSURED] mark=0 use=2";

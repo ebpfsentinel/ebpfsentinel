@@ -2181,7 +2181,8 @@ pub struct WorkloadFirewall {
     /// policy is turned on and the cluster could be read.
     pub netpol_replay: Option<Arc<application::netpol_replay_service::NetpolReplayService>>,
     _loader: EbpfLoader,
-    _attacher: adapters::ebpf::workload_firewall_attach::WorkloadFirewallAttacher,
+    /// The links, or `None` while the hooks wait for a first rule.
+    _attacher: Option<adapters::ebpf::workload_firewall_attach::WorkloadFirewallAttacher>,
 }
 
 /// Read what the package managers say is installed, in the host's root and
@@ -2228,9 +2229,10 @@ pub fn start_package_inventory(
 /// Load the workload firewall off the configuration's workload rules, for a
 /// binary that does not run the agent's own start-up path.
 ///
-/// `None` when the configuration carries no workload rule, arms no
-/// quarantine and turns network policy off, or when the kernel refused the
-/// hooks under a policy that only observes: the reason is published where the
+/// With no workload rule, no quarantine and network policy off, the object is
+/// loaded and its hooks are kept for the first rule a reload brings. `None`
+/// when the object did not load, or when the kernel refused the hooks under
+/// a policy that only observes: the reason is published where the
 /// status route reads it either way. The rules' DNS answers, refusals and
 /// counters are read until `cancel`, the remote tables follow
 /// `services.remote_identities`, and the cluster's `NetworkPolicy` is
@@ -2253,18 +2255,14 @@ pub async fn start_workload_firewall(
         .with_dns(config.workload_dns()?)?;
     let netpol_mode = config.container.kubernetes.network_policy.mode;
     let netpol_on = netpol_mode != infrastructure::config::NetworkPolicyMode::Off;
-    if startup::workload_firewall_idle(config, &policy) {
-        services
-            .metrics
-            .clear_ebpf_program_status("cgroup_workload_firewall");
-        adapters::ebpf::workload_firewall_attach::publish_status(
-            startup::workload_firewall_idle_status(),
-        );
-        return Ok(None);
-    }
+    // Loaded either way: when nothing needs the hooks yet they are kept for
+    // the first rule a reload brings.
+    let idle = startup::workload_firewall_idle(config, &policy);
     let ebpf_dir = startup::resolve_ebpf_program_dir(config);
-    let reason = match startup::try_load_cgroup_workload_firewall(&ebpf_dir, config) {
-        Ok((mut loader, metrics_rdr, manager, reader, attacher, status)) if status.attached => {
+    let reason = match startup::try_load_cgroup_workload_firewall(&ebpf_dir, config, !idle) {
+        Ok((mut loader, metrics_rdr, manager, reader, attacher, status))
+            if status.attached || idle =>
+        {
             let proc_root = startup::resolver_proc_path(
                 &config.container.resolver.proc_path,
                 &startup::host_proc_root(),
@@ -2306,11 +2304,18 @@ pub async fn start_workload_firewall(
             services
                 .metrics
                 .set_ebpf_program_status("cgroup_workload_firewall", true);
-            info!(
-                rules = policy.rules().len(),
-                enforcing = policy.enforces(),
-                "eBPF cgroup-workload-firewall active"
-            );
+            if idle {
+                info!(
+                    "eBPF cgroup-workload-firewall loaded, its hooks attach with the first \
+                     workload rule a reload brings"
+                );
+            } else {
+                info!(
+                    rules = policy.rules().len(),
+                    enforcing = policy.enforces(),
+                    "eBPF cgroup-workload-firewall active"
+                );
+            }
             return Ok(Some(WorkloadFirewall {
                 service,
                 quarantine,
@@ -2324,6 +2329,10 @@ pub async fn start_workload_firewall(
             .unwrap_or_else(|| "the kernel refused the attach".to_string()),
         Err(e) => e.to_string(),
     };
+    if idle {
+        publish_idle_unloaded(services, &reason);
+        return Ok(None);
+    }
     publish_unattached(config, services, &reason);
     if policy.enforces() {
         return Err(anyhow::anyhow!(
@@ -2340,6 +2349,18 @@ pub async fn start_workload_firewall(
     }
     warn!("workload firewall not loaded, the rules that observe observe nothing: {reason}");
     Ok(None)
+}
+
+/// Say on the status routes that the workload firewall object no rule needed
+/// did not load, so a rule added since needs a restart.
+fn publish_idle_unloaded(services: &ServiceHandles, reason: &str) {
+    services
+        .metrics
+        .clear_ebpf_program_status("cgroup_workload_firewall");
+    adapters::ebpf::workload_firewall_attach::publish_status(
+        startup::workload_firewall_idle_status(reason),
+    );
+    info!("workload firewall not loaded, no workload rule needs it: {reason}");
 }
 
 /// Say on the status routes that the workload firewall object did not
@@ -2864,8 +2885,8 @@ pub fn start_conntrack_events(
 ) -> Option<tokio::sync::broadcast::Sender<domain::conntrack::entity::ConntrackEvent>> {
     if !adapters::netfilter::conntrack::is_conntrack_readable() {
         warn!(
-            "conntrack table unreadable (no /proc/net/nf_conntrack and no \
-             usable conntrack-tools): event stream disabled"
+            "conntrack table unreadable (no /proc/net/nf_conntrack and \
+             ctnetlink refused the dump): event stream disabled"
         );
         return None;
     }
