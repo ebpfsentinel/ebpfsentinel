@@ -83,12 +83,11 @@ pub struct LineagePlan {
     pub paths: BTreeMap<String, WorkloadLineageBits>,
 }
 
-/// The lineage half of `selectors`, by bit, a selector's bit being its
-/// position in the list.
+/// The lineage half of `selectors`, each given with the bit it holds.
 #[must_use]
-pub fn lineage_plan(selectors: &[WorkloadSelector]) -> LineagePlan {
+pub fn lineage_plan(selectors: &[(usize, &WorkloadSelector)]) -> LineagePlan {
     let mut plan = LineagePlan::default();
-    for (index, selector) in selectors.iter().enumerate() {
+    for &(index, selector) in selectors {
         let bit = 1u64 << (index & 63);
         let (path, as_parent) = match (&selector.parent, &selector.ancestor) {
             (Some(path), _) => (path, true),
@@ -228,7 +227,10 @@ impl WorkloadPolicyMapManager {
     /// path that does not exist on this node is said once and left out: a
     /// policy shared across a fleet names binaries some nodes do not carry,
     /// and the exec of one installed later is recorded when it happens.
-    fn publish_lineage(&mut self, selectors: &[WorkloadSelector]) -> Result<(), DomainError> {
+    fn publish_lineage(
+        &mut self,
+        selectors: &[(usize, &WorkloadSelector)],
+    ) -> Result<(), DomainError> {
         let plan = lineage_plan(selectors);
         for key in Self::keys(&self.lineage_exes) {
             let _ = self.lineage_exes.remove(&key);
@@ -311,10 +313,10 @@ fn through_link(path: &str) -> Option<String> {
 
 impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
     fn publish_policy(&mut self, policy: &WorkloadPolicy) -> Result<(), DomainError> {
-        let selectors: Vec<_> = policy.selectors().cloned().collect();
+        let selectors = policy.selector_bits();
         let mut written = 0usize;
         for rule in policy.rules().iter().filter(|rule| rule.enabled) {
-            let Some(bit) = selectors.iter().position(|one| one == &rule.selector) else {
+            let Some(bit) = policy.bit_of(&rule.selector) else {
                 continue;
             };
             let entry = entry_for(rule, bit);
@@ -334,7 +336,10 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
                     DomainError::EngineError(format!("WORKLOAD_RULES clear failed: {e}"))
                 })?;
         }
-        self.clear_selectors()?;
+        // The cgroup and task masks are left as they are: a selector this
+        // policy shares with the last one kept its bit, so the masks already
+        // written decide it rightly until the caller writes them again, and
+        // clearing them would let every selected task through meanwhile.
         self.publish_lineage(&selectors)?;
         for key in Self::keys(&self.fqdn) {
             let _ = self.fqdn.remove(&key);
@@ -744,7 +749,7 @@ mod tests {
     fn a_policy_naming_no_lineage_asks_nothing_of_the_walk() {
         let plain = WorkloadSelector::new(Some("/usr/bin/curl".to_string()), None, None, None)
             .expect("valid");
-        assert_eq!(lineage_plan(&[plain]), LineagePlan::default());
+        assert_eq!(lineage_plan(&[(0, &plain)]), LineagePlan::default());
     }
 
     #[test]
@@ -757,7 +762,8 @@ mod tests {
             lineage(None, Some("/usr/sbin/nginx"), None),
             lineage(None, Some("/usr/sbin/sshd"), None),
         ];
-        let plan = lineage_plan(&selectors);
+        let bits: Vec<_> = selectors.iter().enumerate().collect();
+        let plan = lineage_plan(&bits);
         assert_eq!(plan.lineage, 0b1110);
         // Only the selectors naming nothing but a lineage are unconditional:
         // the one also naming curl stays behind its task mask.

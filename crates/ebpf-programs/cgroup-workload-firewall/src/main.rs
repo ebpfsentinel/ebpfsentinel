@@ -56,10 +56,12 @@
 #![no_main]
 
 use aya_ebpf::{
+    bindings::BPF_F_NO_PREALLOC,
     btf_maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
     helpers::{
-        bpf_get_current_cgroup_id, bpf_get_current_task, bpf_get_current_uid_gid,
-        bpf_ktime_get_boot_ns, bpf_probe_read_kernel, bpf_skb_cgroup_id, bpf_skb_load_bytes,
+        bpf_get_current_ancestor_cgroup_id, bpf_get_current_cgroup_id, bpf_get_current_task,
+        bpf_get_current_uid_gid, bpf_ktime_get_boot_ns, bpf_probe_read_kernel, bpf_skb_cgroup_id,
+        bpf_skb_load_bytes,
     },
     macros::{btf_map, cgroup_skb, cgroup_sock_addr},
     programs::{SkBuffContext, SockAddrContext},
@@ -101,6 +103,17 @@ ebpf_helpers::pidns_view!();
 
 // ── Maps ────────────────────────────────────────────────────────────
 
+/// Flags of every plain hash map below: memory taken as entries are written
+/// rather than all of it at load.
+///
+/// Every agent loads this object, and most nodes never hold a workload rule,
+/// a quarantine or a network policy, so a preallocated table is memory spent
+/// on capacity nobody uses. The kernel's allocator for these maps serves the
+/// cgroup hooks they are written and read from; an insert that finds no
+/// memory fails like an insert into a full table, which userspace already
+/// counts. The LRU maps cannot drop preallocation and stay as they are.
+const ON_INSERT: usize = BPF_F_NO_PREALLOC as usize;
+
 /// The policy, in priority order, with no holes.
 ///
 /// Userspace writes the rules from the highest priority down and leaves every
@@ -119,8 +132,12 @@ static WORKLOAD_RULES: Array<WorkloadRuleEntry, { WORKLOAD_POLICY_MAX_RULES }> =
 /// an insert it refuses is visible as a refused insert rather than as a quiet
 /// hole.
 #[btf_map]
-static WORKLOAD_CGROUP_SELECTORS: HashMap<u64, u64, { WORKLOAD_POLICY_MAX_CGROUPS as usize }> =
-    HashMap::new();
+static WORKLOAD_CGROUP_SELECTORS: HashMap<
+    u64,
+    u64,
+    { WORKLOAD_POLICY_MAX_CGROUPS as usize },
+    ON_INSERT,
+> = HashMap::new();
 
 /// Thread group id -> the selectors this task satisfies.
 ///
@@ -141,6 +158,7 @@ static WORKLOAD_LINEAGE_EXES: HashMap<
     WorkloadExeKey,
     WorkloadLineageBits,
     { WORKLOAD_LINEAGE_MAX_EXECUTABLES as usize },
+    ON_INSERT,
 > = HashMap::new();
 
 /// Which selectors carry a lineage condition, and the kernel offsets the
@@ -179,8 +197,12 @@ static WORKLOAD_EVENTS: RingBuf<WorkloadDenialEvent, { WORKLOAD_EVENTS_RINGBUF_B
 /// again. Userspace sizes it, and a refused insert is a quarantine that failed
 /// to arm rather than one that armed and lapsed.
 #[btf_map]
-static QUARANTINE_CGROUPS: HashMap<u64, QuarantineEntry, { QUARANTINE_MAX_CGROUPS as usize }> =
-    HashMap::new();
+static QUARANTINE_CGROUPS: HashMap<
+    u64,
+    QuarantineEntry,
+    { QUARANTINE_MAX_CGROUPS as usize },
+    ON_INSERT,
+> = HashMap::new();
 
 /// What the quarantine did, per CPU.
 #[btf_map]
@@ -208,6 +230,7 @@ static WORKLOAD_FQDN_ALLOWED: HashMap<
     WorkloadFqdnKey,
     u64,
     { WORKLOAD_FQDN_MAX_ALLOWED as usize },
+    ON_INSERT,
 > = HashMap::new();
 
 /// Slot zero non-zero while a loaded rule names a destination by name.
@@ -237,7 +260,8 @@ static NETPOL_RULES: LpmTrie<[u8; NETPOL_KEY_LEN], NetpolEntry, { NETPOL_MAX_ENT
 /// A plain hash map, for the reason the selectors have one: an eviction would
 /// be a pod quietly leaving its policy while it runs.
 #[btf_map]
-static NETPOL_CGROUPS: HashMap<u64, NetpolCgroup, { NETPOL_MAX_CGROUPS as usize }> = HashMap::new();
+static NETPOL_CGROUPS: HashMap<u64, NetpolCgroup, { NETPOL_MAX_CGROUPS as usize }, ON_INSERT> =
+    HashMap::new();
 
 /// (cgroup, peer, peer port, family) -> instant the way back closes.
 ///
@@ -258,18 +282,23 @@ static WORKLOAD_PEER_DESTINATIONS: HashMap<
     WorkloadPeerKey,
     u64,
     { WORKLOAD_PEER_MAX_ADDRS as usize },
+    ON_INSERT,
 > = HashMap::new();
 
 /// Remote address -> the slots decided at the destination whose source half
 /// the workload the list names at it satisfies.
 #[btf_map]
-static WORKLOAD_PEER_SOURCES: HashMap<WorkloadPeerKey, u64, { WORKLOAD_PEER_MAX_ADDRS as usize }> =
-    HashMap::new();
+static WORKLOAD_PEER_SOURCES: HashMap<
+    WorkloadPeerKey,
+    u64,
+    { WORKLOAD_PEER_MAX_ADDRS as usize },
+    ON_INSERT,
+> = HashMap::new();
 
 /// Local cgroup -> the slots decided at the destination whose remote workload
 /// is the one in that cgroup.
 #[btf_map]
-static WORKLOAD_PEER_TARGETS: HashMap<u64, u64, { WORKLOAD_PEER_MAX_TARGETS as usize }> =
+static WORKLOAD_PEER_TARGETS: HashMap<u64, u64, { WORKLOAD_PEER_MAX_TARGETS as usize }, ON_INSERT> =
     HashMap::new();
 
 /// What the policy did, per CPU.
@@ -698,14 +727,44 @@ struct Task {
 /// written to exactly one of them: userspace sets a bit only once the whole
 /// selector matched, so a rule naming a unit and an executable at the same
 /// time sits in the task map alone and is never half-satisfied by a cgroup.
+///
+/// A cgroup with no mask of its own is read through the cgroups above it: a
+/// pod's cgroup is named from the pod as soon as the pod is known, which is
+/// before the cgroup of a container that just started is, and every selector
+/// a pod satisfies its containers satisfy too.
 fn selectors() -> u64 {
     let cgroup = unsafe { bpf_get_current_cgroup_id() };
     let tgid = (current_pid_tgid() >> 32) as u32;
 
-    let by_cgroup = unsafe { WORKLOAD_CGROUP_SELECTORS.get(&cgroup) }.copied();
+    let by_cgroup = match unsafe { WORKLOAD_CGROUP_SELECTORS.get(&cgroup) } {
+        Some(mask) => *mask,
+        None => above(cgroup),
+    };
     let by_task = unsafe { WORKLOAD_TASK_SELECTORS.get(&tgid) }.copied();
 
-    by_cgroup.unwrap_or(0) | by_task.unwrap_or(0)
+    by_cgroup | by_task.unwrap_or(0)
+}
+
+/// Deepest ancestor level read for a cgroup with no mask of its own. A pod's
+/// container sits five or six levels down under either kubelet driver.
+const ANCESTOR_LEVELS: i32 = 16;
+
+/// The masks of the cgroups above `cgroup`, ORed.
+#[inline(always)]
+fn above(cgroup: u64) -> u64 {
+    let mut mask = 0u64;
+    let mut level = 1;
+    while level < ANCESTOR_LEVELS {
+        let ancestor = unsafe { bpf_get_current_ancestor_cgroup_id(level) };
+        if ancestor == 0 || ancestor == cgroup {
+            break;
+        }
+        if let Some(found) = unsafe { WORKLOAD_CGROUP_SELECTORS.get(&ancestor) } {
+            mask |= *found;
+        }
+        level += 1;
+    }
+    mask
 }
 
 /// The selectors that still hold once their lineage condition is checked.

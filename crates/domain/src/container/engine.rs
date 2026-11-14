@@ -37,6 +37,12 @@ pub trait CgroupIdResolver: Send + Sync {
 pub trait CgroupTree: Send + Sync {
     /// Every cgroup found, in no particular order.
     fn cgroups(&self) -> Vec<(u64, String)>;
+
+    /// The id of the live cgroup at `path`, written as [`Self::cgroups`]
+    /// writes it, or `None` where there is none or it cannot be read.
+    fn id_of(&self, _path: &str) -> Option<u64> {
+        None
+    }
 }
 
 /// Default LRU capacity if no configuration override is provided.

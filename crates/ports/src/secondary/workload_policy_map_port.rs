@@ -28,6 +28,10 @@ pub trait WorkloadPolicyMapPort: Send + Sync {
     ///
     /// The tables naming remote workloads by address are emptied with it,
     /// for the same reason: their masks are slots.
+    ///
+    /// The cgroup and task masks are left alone. A policy put in force after
+    /// another holds every selector the two share on the same bit, so those
+    /// masks stay right while the caller writes the rest again.
     fn publish_policy(&mut self, policy: &WorkloadPolicy) -> Result<(), DomainError>;
 
     /// Replace both address tables of the rules naming a remote workload.
@@ -81,9 +85,9 @@ pub trait WorkloadPolicyMapPort: Send + Sync {
 
     /// Forget every recorded cgroup and task.
     ///
-    /// Called when the policy's selectors change, because a bit means a
-    /// different workload after that and every recorded mask is about the
-    /// old numbering.
+    /// Called when a policy naming no workload goes in force, since no mask
+    /// written before it means anything any more and nothing replays over
+    /// an empty policy to write them again.
     fn clear_selectors(&mut self) -> Result<(), DomainError>;
 
     /// Open one address for one cgroup under one rule until `expires_ns`,

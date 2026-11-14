@@ -107,6 +107,15 @@ impl CgroupTree for CgroupfsResolver {
         self.collect(&self.root, 0, &mut found);
         found
     }
+
+    fn id_of(&self, path: &str) -> Option<u64> {
+        let relative = path.trim_start_matches('/');
+        if relative.split('/').any(|part| part == "..") {
+            return None;
+        }
+        let meta = std::fs::metadata(self.root.join(relative)).ok()?;
+        meta.is_dir().then(|| meta.ino())
+    }
 }
 
 /// The id the kernel would report for the root of the unified hierarchy.
@@ -147,6 +156,20 @@ mod tests {
     use tempfile::tempdir;
 
     const HEX64: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    #[test]
+    fn a_path_the_tree_lists_names_the_id_it_lists_it_with() {
+        let dir = tempdir().unwrap();
+        let pod = dir.path().join("kubepods").join("podabc");
+        fs::create_dir_all(&pod).unwrap();
+        let tree = CgroupfsResolver::new(dir.path());
+        assert_eq!(
+            tree.id_of("/kubepods/podabc"),
+            Some(fs::metadata(&pod).unwrap().ino())
+        );
+        assert_eq!(tree.id_of("/kubepods/gone"), None);
+        assert_eq!(tree.id_of("/kubepods/../kubepods"), None);
+    }
 
     #[test]
     fn the_tree_lists_every_cgroup_below_the_root_with_its_id() {

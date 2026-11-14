@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use domain::common::entity::RuleId;
 use domain::common::error::DomainError;
 use domain::container::engine::{CgroupReader, CgroupTree, parse_cgroup_v2};
-use domain::container::entity::{ContainerInfo, ContainerMetadata};
+use domain::container::entity::{ContainerContext, ContainerInfo, ContainerMetadata};
 use domain::firewall::container_labels::{ContainerLabelPolicy, LABEL_PREFIX, ListedContainer};
 use domain::firewall::fqdn::{
     DnsCapture, FqdnGrantKey, FqdnLearner, FqdnLedger, FqdnPatternReport,
@@ -150,42 +150,56 @@ pub fn workload_of_cgroup(path: &str) -> ResolvedWorkload {
 /// gets what the table knows rather than nothing.
 #[must_use]
 pub fn workload_of(entry: &ProcessEntry) -> ResolvedWorkload {
-    let mut resolved = ResolvedWorkload {
+    let around = entry
+        .container
+        .as_ref()
+        .map(workload_of_container)
+        .unwrap_or_default();
+    ResolvedWorkload {
         exe: entry.identity.path().map(ToOwned::to_owned),
         exe_hash: entry.exe_hash,
-        ..ResolvedWorkload::default()
-    };
-    if let Some(context) = entry.container.as_ref() {
-        if let ContainerInfo::Container {
-            container_id,
-            cgroup_path,
-            ..
-        } = &context.info
-        {
-            resolved.container_id = Some(container_id.clone());
-            resolved.cgroup = Some(cgroup_path.clone());
-        }
-        resolved.container_name = context.metadata.as_ref().and_then(|metadata| {
-            match metadata {
-                ContainerMetadata::Docker(docker) => Some(docker.name.clone()),
-                ContainerMetadata::Kubernetes(pod) => Some(pod.container_name.clone()),
-                // A runtime this build does not name yet gives no name,
-                // and a selector naming one does not match it. Inventing
-                // a name here is how a rule starts matching a container
-                // nobody meant.
-                _ => None,
-            }
-        });
-        if let Some(ContainerMetadata::Kubernetes(pod)) = context.metadata.as_ref() {
-            resolved.pod_labels = Some(pod.labels.iter().cloned().collect());
-            // Every namespace carries `kubernetes.io/metadata.name`, so no
-            // labels at all means the watcher has not seen it yet, and a
-            // namespace selector waits rather than deciding on nothing.
-            resolved.namespace_labels = (!pod.namespace_labels.is_empty())
-                .then(|| pod.namespace_labels.iter().cloned().collect());
-            resolved.service_account =
-                (!pod.service_account.is_empty()).then(|| pod.service_account.clone());
-        }
+        ..around
+    }
+}
+
+/// What a container's context says about the workload it holds, with no
+/// task of it in view: the cgroup path, the id, and what the runtime's
+/// enricher read.
+#[must_use]
+pub fn workload_of_container(context: &ContainerContext) -> ResolvedWorkload {
+    let mut resolved = ResolvedWorkload::default();
+    if let ContainerInfo::Container {
+        container_id,
+        cgroup_path,
+        ..
+    } = &context.info
+    {
+        resolved.container_id = Some(container_id.clone());
+        resolved.cgroup = Some(cgroup_path.clone());
+    }
+    resolved.container_name = context
+        .metadata
+        .as_ref()
+        .and_then(|metadata| match metadata {
+            ContainerMetadata::Docker(docker) => Some(docker.name.clone()),
+            ContainerMetadata::Kubernetes(pod) => Some(pod.container_name.clone()),
+            // A runtime this build does not name yet gives no name, and a
+            // selector naming one does not match it. Inventing a name here
+            // is how a rule starts matching a container nobody meant.
+            _ => None,
+        })
+        // A pod found by its uid before its status listed the container
+        // knows the pod and not which of its containers this is.
+        .filter(|name| !name.is_empty());
+    if let Some(ContainerMetadata::Kubernetes(pod)) = context.metadata.as_ref() {
+        resolved.pod_labels = Some(pod.labels.iter().cloned().collect());
+        // Every namespace carries `kubernetes.io/metadata.name`, so no
+        // labels at all means the watcher has not seen it yet, and a
+        // namespace selector waits rather than deciding on nothing.
+        resolved.namespace_labels = (!pod.namespace_labels.is_empty())
+            .then(|| pod.namespace_labels.iter().cloned().collect());
+        resolved.service_account =
+            (!pod.service_account.is_empty()).then(|| pod.service_account.clone());
     }
     resolved.unit = resolved
         .cgroup
@@ -193,6 +207,36 @@ pub fn workload_of(entry: &ProcessEntry) -> ResolvedWorkload {
         .and_then(unit_of)
         .map(ToOwned::to_owned);
     resolved
+}
+
+/// The pod a Kubernetes container runs in, as the cgroup above the
+/// container's and what is true of every container in it: the pod's labels,
+/// its namespace's and its service account.
+///
+/// The kubelet creates that cgroup before any container of the pod starts,
+/// so it can be named while a container's own cgroup is still unknown, and
+/// the kernel reads it when a task's own cgroup carries no mask.
+#[must_use]
+pub fn pod_workload_of(context: &ContainerContext) -> Option<ResolvedWorkload> {
+    let Some(ContainerMetadata::Kubernetes(pod)) = context.metadata.as_ref() else {
+        return None;
+    };
+    let ContainerInfo::Container { cgroup_path, .. } = &context.info else {
+        return None;
+    };
+    let parent = cgroup_path.trim_end_matches('/').rsplit_once('/')?.0;
+    if parent.is_empty() {
+        return None;
+    }
+    Some(ResolvedWorkload {
+        unit: unit_of(parent).map(ToOwned::to_owned),
+        cgroup: Some(parent.to_owned()),
+        pod_labels: Some(pod.labels.iter().cloned().collect()),
+        namespace_labels: (!pod.namespace_labels.is_empty())
+            .then(|| pod.namespace_labels.iter().cloned().collect()),
+        service_account: (!pod.service_account.is_empty()).then(|| pod.service_account.clone()),
+        ..ResolvedWorkload::default()
+    })
 }
 
 /// The two masks one task produces.
@@ -368,6 +412,10 @@ pub struct WorkloadPolicyService {
     maps: Option<Mutex<Box<dyn WorkloadPolicyMapPort>>>,
     /// The cgroup mask each cgroup was last written, by cgroup id.
     cgroup_masks: Mutex<HashMap<u64, u64>>,
+    /// What the container resolver said of each live container cgroup, by
+    /// cgroup id, so a reload names a container no task of which forked or
+    /// exec'd since the agent started by more than its path.
+    cgroup_contexts: Mutex<HashMap<u64, ContainerContext>>,
     /// Taken before the policy and the maps, by every path that touches a
     /// grant, so a reload and an answer never interleave.
     fqdn: Mutex<FqdnState>,
@@ -400,6 +448,7 @@ impl WorkloadPolicyService {
             labelled: Mutex::new(BTreeMap::new()),
             maps: None,
             cgroup_masks: Mutex::new(HashMap::new()),
+            cgroup_contexts: Mutex::new(HashMap::new()),
             fqdn: Mutex::new(fqdn),
             cgroups: None,
             tree: None,
@@ -472,10 +521,10 @@ impl WorkloadPolicyService {
 
     /// Put `policy` in force and write it to the kernel.
     ///
-    /// Every recorded selector mask is dropped by the write, because a bit
-    /// index is a position in this policy's own list of selectors and means
-    /// something else in the next one. The caller replays the process table
-    /// through [`Self::record_exec`] afterwards.
+    /// A selector the policy in force already names keeps its bit, so the
+    /// masks written under the last policy keep deciding it while the
+    /// process table is replayed and the live cgroups named again. A cgroup
+    /// the new policy names nowhere is cleared once that is done.
     ///
     /// # Errors
     ///
@@ -517,20 +566,48 @@ impl WorkloadPolicyService {
             .fqdn
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (policy, renumbered) = {
+            let current = self
+                .policy
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let policy = policy.keeping_bits_of(&current);
+            // A bit given up by one selector and taken by another in the
+            // same reload would let a mask written under the last policy
+            // name a workload the new selector does not: those masks go, and
+            // the replay below writes the right ones.
+            let held: HashMap<usize, &domain::firewall::workload::WorkloadSelector> =
+                current.selector_bits().into_iter().collect();
+            let renumbered = policy
+                .selector_bits()
+                .into_iter()
+                .any(|(bit, selector)| held.get(&bit).is_some_and(|old| *old != selector));
+            (policy, renumbered)
+        };
         if let Some(maps) = &self.maps {
-            maps.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .publish_policy(&policy)?;
+            let mut maps = maps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            maps.publish_policy(&policy)?;
+            if renumbered || policy.is_empty() {
+                maps.clear_selectors()?;
+            }
         }
-        // The publish dropped every grant and every mask in the kernel, so
-        // what mirrors them here goes too, and the learner starts over under
-        // the resolvers this policy trusts.
+        // The publish dropped every grant in the kernel, so what mirrors
+        // them here goes too, and the learner starts over under the
+        // resolvers this policy trusts. The cgroup masks are kept until the
+        // replay below has written the ones this policy names.
         fqdn.ledger.clear();
         fqdn.learner = FqdnLearner::new(policy.dns().clone());
-        self.cgroup_masks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+        let previous_cgroups: Vec<u64> = {
+            let mut known = self
+                .cgroup_masks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let ids = known.keys().copied().collect();
+            known.clear();
+            ids
+        };
         {
             // The publish emptied the remote tables, whose masks are slots:
             // the next sync writes them again whatever list it is handed.
@@ -555,14 +632,42 @@ impl WorkloadPolicyService {
         // it once per task.
         self.replay();
         self.seed_cgroups();
+        self.clear_stale_cgroups(&previous_cgroups);
         Ok(())
+    }
+
+    /// Clear each cgroup the last policy named and this one did not write,
+    /// whose mask would otherwise keep bits no selector holds any more.
+    fn clear_stale_cgroups(&self, previous: &[u64]) {
+        let Some(maps) = &self.maps else {
+            return;
+        };
+        let stale: Vec<u64> = {
+            let known = self
+                .cgroup_masks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            previous
+                .iter()
+                .copied()
+                .filter(|id| !known.contains_key(id))
+                .collect()
+        };
+        let mut maps = maps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for cgroup_id in &stale {
+            if let Err(err) = maps.set_cgroup_selectors(*cgroup_id, 0) {
+                warn!(cgroup_id, error = %err, "a cgroup's workload selectors were not cleared");
+            }
+        }
     }
 
     /// Resolve every task the table holds under the policy in force.
     ///
-    /// A reload renumbers the bits and drops what the last policy recorded,
-    /// so without this the processes already running would be nameless until
-    /// each of them next execs, which for a long-lived daemon is never.
+    /// A selector new to the policy has no mask anywhere yet, so without
+    /// this the processes already running would not carry it until each of
+    /// them next execs, which for a long-lived daemon is never.
     fn replay(&self) {
         let Some(processes) = self.processes.get().and_then(Weak::upgrade) else {
             return;
@@ -577,7 +682,8 @@ impl WorkloadPolicyService {
         );
     }
 
-    /// Name every live cgroup the replay left without a mask, from what its
+    /// Name every live cgroup the replay left without a mask, from what the
+    /// container resolver last said of it or, failing that, from what its
     /// path alone says: the path itself, the unit and the container id.
     ///
     /// A cgroup a task already named is left as that task wrote it, because
@@ -585,19 +691,30 @@ impl WorkloadPolicyService {
     /// and the path alone can only say less. What this writes is the floor a
     /// cgroup is named at until something in it forks or execs.
     fn seed_cgroups(&self) {
-        let (Some(tree), Some(maps)) = (&self.tree, &self.maps) else {
+        let Some(tree) = &self.tree else {
             return;
         };
-        if self
-            .policy
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty()
+        if self.maps.is_none()
+            || self
+                .policy
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
         {
             return;
         }
+        let live = tree.cgroups();
+        let contexts = {
+            let mut contexts = self
+                .cgroup_contexts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let ids: std::collections::HashSet<u64> = live.iter().map(|(id, _)| *id).collect();
+            contexts.retain(|id, _| ids.contains(id));
+            contexts.clone()
+        };
         let mut seeded = 0usize;
-        for (cgroup_id, path) in tree.cgroups() {
+        for (cgroup_id, path) in live {
             if cgroup_id == 0
                 || self
                     .cgroup_masks
@@ -607,35 +724,158 @@ impl WorkloadPolicyService {
             {
                 continue;
             }
-            let resolved = workload_of_cgroup(&path);
-            let masks = self.masks_for(&resolved.facts());
-            let peers = self.peer_targets(&resolved);
-            if masks.cgroup == 0 && peers == 0 {
-                continue;
-            }
-            let mut maps = maps
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if masks.cgroup != 0 {
-                if let Err(err) = maps.set_cgroup_selectors(cgroup_id, masks.cgroup) {
-                    warn!(cgroup = path, error = %err, "a cgroup's workload selectors were not written");
-                    continue;
+            let resolved = match contexts.get(&cgroup_id) {
+                Some(context) => {
+                    self.name_pod(context);
+                    workload_of_container(context)
                 }
-                self.cgroup_masks
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(cgroup_id, masks.cgroup);
+                None => workload_of_cgroup(&path),
+            };
+            if self.write_cgroup(cgroup_id, &resolved) {
+                seeded += 1;
             }
-            if peers != 0
-                && let Err(err) = maps.set_peer_targets(cgroup_id, peers)
-            {
-                warn!(cgroup = path, error = %err, "a cgroup's remote workload rules were not written");
-            }
-            seeded += 1;
         }
         debug!(
             cgroups = seeded,
             "live cgroups named by the workload policy"
+        );
+    }
+
+    /// Write the cgroup half of what `resolved` matches, and the remote
+    /// rules it is the destination of, under `cgroup_id`. True when anything
+    /// was written.
+    fn write_cgroup(&self, cgroup_id: u64, resolved: &ResolvedWorkload) -> bool {
+        let Some(maps) = &self.maps else {
+            return false;
+        };
+        let masks = self.masks_for(&resolved.facts());
+        let peers = self.peer_targets(resolved);
+        let path = resolved.cgroup.as_deref().unwrap_or_default();
+        if masks.cgroup == 0 && peers == 0 {
+            // A cgroup named before and matching nothing now, a pod whose
+            // label was taken off, loses its mask here rather than at its
+            // next exec.
+            let was_named = self
+                .cgroup_masks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&cgroup_id)
+                .is_some();
+            if was_named {
+                let mut maps = maps
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Err(err) = maps.set_cgroup_selectors(cgroup_id, 0) {
+                    warn!(cgroup = path, error = %err, "a cgroup's workload selectors were not cleared");
+                }
+                if let Err(err) = maps.set_peer_targets(cgroup_id, 0) {
+                    warn!(cgroup = path, error = %err, "a cgroup's remote workload rules were not cleared");
+                }
+            }
+            return was_named;
+        }
+        let mut maps = maps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Err(err) = maps.set_cgroup_selectors(cgroup_id, masks.cgroup) {
+            warn!(cgroup = path, error = %err, "a cgroup's workload selectors were not written");
+            return false;
+        }
+        {
+            let mut known = self
+                .cgroup_masks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if masks.cgroup == 0 {
+                known.remove(&cgroup_id);
+            } else {
+                known.insert(cgroup_id, masks.cgroup);
+            }
+        }
+        if let Err(err) = maps.set_peer_targets(cgroup_id, peers) {
+            warn!(cgroup = path, error = %err, "a cgroup's remote workload rules were not written");
+        }
+        true
+    }
+
+    /// Name the cgroup of the pod `context` runs in from what is true of
+    /// the whole pod, so a container whose own cgroup no exec has named yet
+    /// is decided by its pod's labels from its first call.
+    fn name_pod(&self, context: &ContainerContext) {
+        let (Some(tree), Some(maps)) = (&self.tree, &self.maps) else {
+            return;
+        };
+        let Some(pod) = pod_workload_of(context) else {
+            return;
+        };
+        let Some(cgroup_id) = pod.cgroup.as_deref().and_then(|path| tree.id_of(path)) else {
+            return;
+        };
+        let mask = self.masks_for(&pod.facts()).cgroup;
+        {
+            let mut known = self
+                .cgroup_masks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if mask == 0 {
+                known.remove(&cgroup_id);
+            } else {
+                known.insert(cgroup_id, mask);
+            }
+        }
+        if let Err(err) = maps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_cgroup_selectors(cgroup_id, mask)
+        {
+            warn!(cgroup_id, error = %err, "a pod's workload selectors were not written");
+        }
+    }
+
+    /// The live cgroups of the node, as the tree lists them, empty where
+    /// the service holds no tree.
+    #[must_use]
+    pub fn live_cgroups(&self) -> Vec<(u64, String)> {
+        self.tree
+            .as_ref()
+            .map(|tree| tree.cgroups())
+            .unwrap_or_default()
+    }
+
+    /// Name each container cgroup in `named` from what the container
+    /// resolver said of it, and its pod's cgroup from the pod, under the
+    /// policy in force.
+    ///
+    /// A process that started before the agent forks or execs maybe never,
+    /// and its cgroup would be named by its path alone, which carries no
+    /// label. What is handed here is kept and used again at every reload;
+    /// a cgroup absent from the next call is forgotten.
+    pub fn name_cgroups(&self, named: Vec<(u64, ContainerContext)>) {
+        let named: HashMap<u64, ContainerContext> = named.into_iter().collect();
+        let held = named.clone();
+        *self
+            .cgroup_contexts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = held;
+        if self.maps.is_none()
+            || self
+                .policy
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        {
+            return;
+        }
+        let mut written = 0usize;
+        for (cgroup_id, context) in &named {
+            self.name_pod(context);
+            if self.write_cgroup(*cgroup_id, &workload_of_container(context)) {
+                written += 1;
+            }
+        }
+        debug!(
+            cgroups = written,
+            "container cgroups named from their metadata"
         );
     }
 
@@ -674,7 +914,7 @@ impl WorkloadPolicyService {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut masks = SelectorMasks::default();
-        for (bit, selector) in policy.selectors().enumerate() {
+        for (bit, selector) in policy.selector_bits() {
             // The lineage half of a selector is the kernel's to check, at the
             // call and against the live parent chain, so it is left out here.
             // A selector naming nothing else is satisfied by every task but
@@ -757,6 +997,10 @@ impl WorkloadPolicyService {
                 error = %err,
                 "an executable a lineage rule names was not recorded"
             );
+        }
+        drop(maps);
+        if let Some(context) = entry.container.as_ref() {
+            self.name_pod(context);
         }
         if !masks.is_empty() {
             debug!(
@@ -1004,7 +1248,6 @@ impl WorkloadPolicyService {
             .policy
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let selectors: Vec<_> = policy.selectors().collect();
         let mut maps = maps
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1018,7 +1261,7 @@ impl WorkloadPolicyService {
             {
                 continue;
             }
-            let Some(bit) = selectors.iter().position(|one| *one == &rule.selector) else {
+            let Some(bit) = policy.bit_of(&rule.selector) else {
                 continue;
             };
             if mask & (1u64 << (bit & 63)) == 0 {
@@ -1323,8 +1566,6 @@ mod tests {
         fn publish_policy(&mut self, _policy: &WorkloadPolicy) -> Result<(), DomainError> {
             let mut held = self.0.lock().unwrap();
             held.published += 1;
-            held.cgroups.clear();
-            held.tasks.clear();
             held.grants.clear();
             held.peer_destinations.clear();
             held.peer_sources.clear();
@@ -1529,6 +1770,10 @@ mod tests {
         fn cgroups(&self) -> Vec<(u64, String)> {
             self.0.clone()
         }
+
+        fn id_of(&self, path: &str) -> Option<u64> {
+            self.0.iter().find(|(_, p)| p == path).map(|(id, _)| *id)
+        }
     }
 
     #[test]
@@ -1717,17 +1962,73 @@ mod tests {
     }
 
     #[test]
-    fn putting_a_policy_in_force_drops_every_mask_recorded_under_the_last_one() {
+    fn a_reload_keeps_the_bit_of_every_selector_it_keeps() {
+        let maps = SharedMaps::default();
+        let service = service(
+            vec![
+                exe_rule("one", "/usr/bin/curl"),
+                unit_rule("two", "nginx.service"),
+            ],
+            maps.clone(),
+        );
+        service.record_exec(&entry(3, "/usr/bin/curl"));
+        let curl = exe_rule("one", "/usr/bin/curl").selector;
+        let before = service.policy().bit_of(&curl);
+
+        service
+            .apply(
+                WorkloadPolicy::new(vec![
+                    exe_rule("three", "/usr/bin/wget"),
+                    unit_rule("two", "nginx.service"),
+                    exe_rule("one", "/usr/bin/curl"),
+                ])
+                .unwrap(),
+            )
+            .expect("the port accepts it");
+
+        // Nothing replayed the task: the mask written under the last policy
+        // still means curl under this one.
+        assert_eq!(service.policy().bit_of(&curl), before);
+        let held = maps.0.lock().unwrap();
+        assert_eq!(held.published, 1);
+        assert_eq!(held.tasks.get(&3), Some(&(1u64 << before.unwrap())));
+    }
+
+    #[test]
+    fn a_cgroup_the_new_policy_no_longer_names_is_cleared() {
+        let maps = SharedMaps::default();
+        let service =
+            service(vec![unit_rule("one", "nginx.service")], maps.clone()).with_cgroup_tree(
+                Arc::new(Tree(vec![(7, "/system.slice/nginx.service".to_string())])),
+            );
+        service.apply(service.policy()).unwrap();
+        assert!(
+            maps.0
+                .lock()
+                .unwrap()
+                .cgroups
+                .get(&7)
+                .is_some_and(|m| *m != 0)
+        );
+
+        service
+            .apply(WorkloadPolicy::new(vec![unit_rule("two", "cron.service")]).unwrap())
+            .expect("the port accepts it");
+
+        assert_eq!(maps.0.lock().unwrap().cgroups.get(&7), Some(&0));
+    }
+
+    #[test]
+    fn an_empty_policy_forgets_every_mask() {
         let maps = SharedMaps::default();
         let service = service(vec![exe_rule("one", "/usr/bin/curl")], maps.clone());
         service.record_exec(&entry(3, "/usr/bin/curl"));
 
         service
-            .apply(WorkloadPolicy::new(vec![unit_rule("two", "nginx.service")]).unwrap())
+            .apply(WorkloadPolicy::new(Vec::new()).unwrap())
             .expect("the port accepts it");
 
         let held = maps.0.lock().unwrap();
-        assert_eq!(held.published, 1);
         assert!(held.tasks.is_empty());
         assert!(held.cgroups.is_empty());
     }
@@ -1856,6 +2157,78 @@ mod tests {
         // A host process is in no pod, so neither rule names it.
         service.record_exec(&entry(42, "/app/api"));
         assert_eq!(maps.0.lock().unwrap().cgroups.get(&4242), Some(&0));
+    }
+
+    fn pod_rule() -> WorkloadRule {
+        rule(
+            "pods",
+            WorkloadSelector::with_kubernetes(
+                None,
+                None,
+                None,
+                None,
+                KubernetesMatchers {
+                    pods: Some(labels("api")),
+                    ..KubernetesMatchers::default()
+                },
+            )
+            .expect("valid"),
+        )
+    }
+
+    #[test]
+    fn a_pod_s_own_cgroup_is_named_from_the_pod_for_the_kernel_to_fall_back_on() {
+        let maps = SharedMaps::default();
+        let service = service(vec![pod_rule()], maps.clone())
+            .with_cgroup_tree(Arc::new(Tree(vec![(30, "/kubepods.slice".to_string())])));
+
+        service.record_exec(&pod_entry(41, Vec::new()));
+
+        let held = maps.0.lock().unwrap();
+        assert_eq!(held.cgroups.get(&4242), Some(&0b1));
+        assert_eq!(held.cgroups.get(&30), Some(&0b1));
+    }
+
+    #[test]
+    fn a_container_no_task_of_which_was_seen_is_named_from_its_metadata() {
+        let maps = SharedMaps::default();
+        let context = pod_entry(41, Vec::new()).container.unwrap();
+        let service =
+            service(vec![pod_rule()], maps.clone()).with_cgroup_tree(Arc::new(Tree(vec![
+                (30, "/kubepods.slice".to_string()),
+                (
+                    31,
+                    "/kubepods.slice/cri-containerd-fedcba9876543210.scope".to_string(),
+                ),
+            ])));
+
+        service.name_cgroups(vec![(31, context)]);
+        {
+            let held = maps.0.lock().unwrap();
+            assert_eq!(held.cgroups.get(&31), Some(&0b1));
+            assert_eq!(held.cgroups.get(&30), Some(&0b1));
+        }
+
+        // A reload names it the same way, from what it was told, rather
+        // than from a path that carries no label.
+        maps.0.lock().unwrap().cgroups.clear();
+        service.apply(service.policy()).unwrap();
+        assert_eq!(maps.0.lock().unwrap().cgroups.get(&31), Some(&0b1));
+    }
+
+    #[test]
+    fn a_pod_found_by_its_uid_names_no_container() {
+        let mut context = pod_entry(41, Vec::new()).container.unwrap();
+        if let Some(ContainerMetadata::Kubernetes(pod)) = context.metadata.as_mut() {
+            pod.container_name = String::new();
+        }
+        let resolved = workload_of_container(&context);
+        assert_eq!(resolved.container_name, None);
+        assert!(resolved.pod_labels.is_some());
+        assert_eq!(
+            pod_workload_of(&context).and_then(|pod| pod.cgroup),
+            Some("/kubepods.slice".to_string())
+        );
     }
 
     fn labels(app: &str) -> LabelSelector {

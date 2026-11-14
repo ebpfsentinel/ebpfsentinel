@@ -28,7 +28,8 @@ use std::sync::OnceLock;
 use aya_obj::generated::bpf_map_type;
 use ebpf_common::conntrack::CT_SRC_COUNTER_MAX;
 use ebpf_common::nat::{MAX_HAIRPIN_CT, MAX_NAT_REVERSE_ENTRIES};
-use infrastructure::config::AgentConfig;
+use ebpf_common::netpol::NETPOL_MAX_REPLIES;
+use infrastructure::config::{AgentConfig, NetworkPolicyMode};
 
 /// The maps the plan sizes, with the configuration field each one follows.
 ///
@@ -60,6 +61,7 @@ pub const SIZED_MAPS: &[(&str, &str)] = &[
     ("LB_MAGLEV", "loadbalancer.max_maglev_services"),
     ("LB_BACKENDS", "loadbalancer.max_backends"),
     ("LB_BACKEND_MAC", "loadbalancer.max_backends"),
+    ("NETPOL_REPLIES", "container.kubernetes.network_policy.mode"),
 ];
 
 /// What a table belonging to a feature the configuration switches off is
@@ -145,6 +147,16 @@ impl MapSizing {
         } else {
             IDLE_TABLE_ENTRIES
         };
+        // The datagram replies an ingress-isolated pod is owed are written by
+        // the network policy hooks alone. The table is an LRU, which the
+        // kernel cannot create without allocating every slot, so a node that
+        // enforces no policy would otherwise lock all of them for nothing.
+        let netpol_replies =
+            if config.container.kubernetes.network_policy.mode == NetworkPolicyMode::Off {
+                IDLE_TABLE_ENTRIES
+            } else {
+                NETPOL_MAX_REPLIES
+            };
         let maglev = config.loadbalancer.maglev_capacity();
         let lb_backends = config.loadbalancer.backend_capacity();
         let entries = SIZED_MAPS
@@ -162,6 +174,7 @@ impl MapSizing {
                     "attribution.max_sockets" => sockets,
                     "loadbalancer.max_maglev_services" => maglev,
                     "loadbalancer.max_backends" => lb_backends,
+                    "container.kubernetes.network_policy.mode" => netpol_replies,
                     other => unreachable!("unmapped sizing field {other}"),
                 };
                 (*name, kernel_capacity(n))
@@ -298,6 +311,17 @@ mod tests {
         assert_eq!(p.get("NAT_DNAT_REVERSE"), Some(IDLE_TABLE_ENTRIES));
         assert_eq!(p.get("NAT_SNAT_REVERSE_V6"), Some(IDLE_TABLE_ENTRIES));
         assert_eq!(p.get("REJECT_RATELIMIT"), Some(IDLE_TABLE_ENTRIES));
+        assert_eq!(p.get("NETPOL_REPLIES"), Some(IDLE_TABLE_ENTRIES));
+    }
+
+    #[test]
+    fn enforcing_network_policy_brings_the_reply_table_back() {
+        let mut config = default_config();
+        config.container.kubernetes.network_policy.mode = NetworkPolicyMode::Enforce;
+        assert_eq!(
+            MapSizing::from_config(&config).get("NETPOL_REPLIES"),
+            Some(NETPOL_MAX_REPLIES)
+        );
     }
 
     #[test]

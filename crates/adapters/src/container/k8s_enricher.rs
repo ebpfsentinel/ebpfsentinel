@@ -210,6 +210,11 @@ impl PodCache {
         let uid = self.reverse_index.read().await.get(container_id).cloned()?;
         self.pods.read().await.get(&uid).cloned()
     }
+
+    /// Look up a pod by its uid.
+    pub async fn by_uid(&self, uid: &str) -> Option<Arc<PodInfo>> {
+        self.pods.read().await.get(uid).cloned()
+    }
 }
 
 /// The watcher is fenced to this node, so every pod the cache holds is one
@@ -410,6 +415,7 @@ impl MetadataEnricher for KubernetesEnricher {
         let ContainerInfo::Container {
             container_id,
             runtime,
+            cgroup_path,
             ..
         } = info
         else {
@@ -419,7 +425,18 @@ impl MetadataEnricher for KubernetesEnricher {
             return Ok(None);
         }
         self.metrics.lookups_total.fetch_add(1, Ordering::Relaxed);
-        let Some(pod) = self.cache.get(container_id).await else {
+        // A container's id reaches the pod's status only once the container
+        // runs, so the first process in it would be nobody's. The kubelet
+        // names the pod's cgroup after the pod's uid before any container
+        // starts, which is the answer the status has not given yet.
+        let pod = match self.cache.get(container_id).await {
+            Some(pod) => Some(pod),
+            None => match pod_uid_of_path(cgroup_path) {
+                Some(uid) => self.cache.by_uid(&uid).await,
+                None => None,
+            },
+        };
+        let Some(pod) = pod else {
             self.metrics.misses_total.fetch_add(1, Ordering::Relaxed);
             return Ok(None);
         };
@@ -431,6 +448,12 @@ impl MetadataEnricher for KubernetesEnricher {
         let metadata = pod.to_metadata(container_id, namespace_labels.as_ref());
         Ok(Some(ContainerMetadata::Kubernetes(metadata)))
     }
+}
+
+/// The uid of the pod a cgroup path runs under, from the innermost
+/// directory named after one.
+fn pod_uid_of_path(path: &str) -> Option<String> {
+    path.rsplit('/').find_map(super::pod_cgroups::pod_uid)
 }
 
 /// Build a [`kube::Client`] from the in-cluster config. Returns `None` when
@@ -741,6 +764,29 @@ mod tests {
             pid: 1,
         };
         assert!(e.enrich(&info).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_container_the_status_does_not_list_yet_is_found_by_its_pod_s_uid() {
+        let cache = Arc::new(PodCache::new());
+        let uid = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
+        let p = pod(uid, "app", "prod", "node-a", &[]);
+        cache.upsert(pod_info_from(&p).unwrap()).await;
+        let e = KubernetesEnricher::with_cache(Arc::clone(&cache));
+        let info = ContainerInfo::Container {
+            container_id: "abc".into(),
+            runtime: ContainerRuntime::Containerd,
+            cgroup_path: format!(
+                "/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod{}.slice/cri-containerd-abc.scope",
+                uid.replace('-', "_")
+            ),
+            pid: 1,
+        };
+        let Some(ContainerMetadata::Kubernetes(k)) = e.enrich(&info).await.unwrap() else {
+            panic!("expected kubernetes metadata");
+        };
+        assert_eq!(k.pod_name, "app");
+        assert_eq!(k.container_name, "");
     }
 
     #[tokio::test]

@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use ebpf_common::workload_policy::{
     WORKLOAD_HOOK_BIND, WORKLOAD_HOOK_CONNECT, WORKLOAD_HOOK_INGRESS, WORKLOAD_HOOK_SENDMSG,
-    WORKLOAD_POLICY_MAX_RULES,
+    WORKLOAD_POLICY_MAX_RULES, WORKLOAD_POLICY_MAX_SELECTORS,
 };
 
 use crate::common::entity::{Protocol, RuleId};
@@ -1141,6 +1141,9 @@ fn describe_v6(addr: &[u8; 16]) -> String {
 pub struct WorkloadPolicy {
     rules: Vec<WorkloadRule>,
     dns: WorkloadDnsSettings,
+    /// Which bit of the kernel's mask each selector holds, once a policy was
+    /// put in force after another one. Empty means first-seen order.
+    bits: Vec<Option<WorkloadSelector>>,
 }
 
 impl WorkloadPolicy {
@@ -1208,6 +1211,7 @@ impl WorkloadPolicy {
         Ok(Self {
             rules,
             dns: WorkloadDnsSettings::default(),
+            bits: Vec::new(),
         })
     }
 
@@ -1276,6 +1280,82 @@ impl WorkloadPolicy {
                 seen.push(&rule.selector);
                 Some(&rule.selector)
             })
+    }
+
+    /// Every selector with the bit of the kernel's mask it holds, in bit
+    /// order.
+    ///
+    /// The bits are the positions in [`Self::selectors`] unless the policy
+    /// was told which bits the policy before it used, in which case a
+    /// selector both name keeps its bit.
+    #[must_use]
+    pub fn selector_bits(&self) -> Vec<(usize, &WorkloadSelector)> {
+        if self.bits.is_empty() {
+            return self.selectors().enumerate().collect();
+        }
+        self.bits
+            .iter()
+            .enumerate()
+            .filter_map(|(bit, held)| held.as_ref().map(|selector| (bit, selector)))
+            .collect()
+    }
+
+    /// The bit `selector` holds, `None` for a selector no enabled rule names.
+    #[must_use]
+    pub fn bit_of(&self, selector: &WorkloadSelector) -> Option<usize> {
+        self.selector_bits()
+            .into_iter()
+            .find(|(_, held)| *held == selector)
+            .map(|(bit, _)| bit)
+    }
+
+    /// This policy, with every selector `previous` also names on the bit it
+    /// had there.
+    ///
+    /// The kernel decides on masks written per cgroup and per task, and a
+    /// reload cannot rewrite them all in the instant it writes the rules. A
+    /// selector that keeps its bit is decided rightly by the masks already
+    /// written throughout, and only a selector new to this policy waits for
+    /// its masks. A new selector takes a bit `previous` left unused before
+    /// one it just gave up, because a bit given up is still set in masks
+    /// written for the old meaning until they are written again.
+    #[must_use]
+    pub fn keeping_bits_of(mut self, previous: &Self) -> Self {
+        let width = WORKLOAD_POLICY_MAX_SELECTORS;
+        let mut bits: Vec<Option<WorkloadSelector>> = vec![None; width];
+        let old = previous.selector_bits();
+        let mut fresh = Vec::new();
+        for selector in self.selectors() {
+            match old.iter().find(|(_, held)| *held == selector) {
+                Some((bit, _)) if *bit < width => bits[*bit] = Some(selector.clone()),
+                _ => fresh.push(selector.clone()),
+            }
+        }
+        let given_up: Vec<usize> = old
+            .iter()
+            .map(|(bit, _)| *bit)
+            .filter(|bit| *bit < width && bits[*bit].is_none())
+            .collect();
+        let mut free = (0..width)
+            .filter(|bit| bits[*bit].is_none() && !given_up.contains(bit))
+            .chain(given_up.iter().copied())
+            .collect::<Vec<_>>()
+            .into_iter();
+        for selector in fresh {
+            // Never short: a policy holds at most as many selectors as the
+            // mask has bits, which `new` bounds through the rule count.
+            if let Some(bit) = free.next() {
+                bits[bit] = Some(selector);
+            }
+        }
+        while bits.last().is_some_and(Option::is_none) {
+            bits.pop();
+        }
+        if bits.is_empty() {
+            bits.push(None);
+        }
+        self.bits = bits;
+        self
     }
 
     /// Whether any enabled rule would have the kernel refuse a syscall.
@@ -1460,7 +1540,6 @@ fn container_matches(matcher: &str, facts: &WorkloadFacts<'_>) -> bool {
 mod tests {
     use super::*;
     use crate::firewall::entity::{ConnState, Scope};
-    use ebpf_common::workload_policy::WORKLOAD_POLICY_MAX_SELECTORS;
 
     fn selector(exe: &str) -> WorkloadSelector {
         WorkloadSelector::new(Some(exe.to_string()), None, None, None).expect("a valid selector")
@@ -2098,6 +2177,65 @@ mod tests {
         let policy = WorkloadPolicy::from_rules(&[first, second, third]).expect("a valid policy");
 
         assert_eq!(policy.selectors().count(), 2);
+    }
+
+    fn exe_policy(exes: &[&str]) -> WorkloadPolicy {
+        let rules: Vec<FirewallRule> = exes
+            .iter()
+            .enumerate()
+            .map(|(index, exe)| {
+                let mut rule = rule(&format!("rule-{index}"), 10, FirewallAction::Deny);
+                rule.priority = u32::try_from(index).expect("a small index");
+                rule.workload = Some(WorkloadMatch::observing(selector(exe)));
+                rule
+            })
+            .collect();
+        WorkloadPolicy::from_rules(&rules).expect("a valid policy")
+    }
+
+    #[test]
+    fn a_selector_kept_across_a_reload_keeps_its_bit() {
+        let before = exe_policy(&["/usr/bin/a", "/usr/bin/b", "/usr/bin/c"]);
+        let after = exe_policy(&["/usr/bin/c", "/usr/bin/a"]).keeping_bits_of(&before);
+
+        assert_eq!(after.bit_of(&selector("/usr/bin/a")), Some(0));
+        assert_eq!(after.bit_of(&selector("/usr/bin/c")), Some(2));
+        assert_eq!(after.bit_of(&selector("/usr/bin/b")), None);
+    }
+
+    #[test]
+    fn a_new_selector_takes_a_bit_nobody_held_before_one_just_given_up() {
+        let before = exe_policy(&["/usr/bin/a", "/usr/bin/b"]);
+        let after = exe_policy(&["/usr/bin/a", "/usr/bin/d"]).keeping_bits_of(&before);
+
+        // Bit 1 still means `b` in every mask written before the reload.
+        assert_eq!(after.bit_of(&selector("/usr/bin/d")), Some(2));
+        let bits: Vec<usize> = after.selector_bits().iter().map(|(bit, _)| *bit).collect();
+        assert_eq!(bits, vec![0, 2]);
+    }
+
+    #[test]
+    fn a_full_mask_reuses_a_bit_given_up_rather_than_dropping_a_selector() {
+        let exes: Vec<String> = (0..WORKLOAD_POLICY_MAX_RULES)
+            .map(|index| format!("/usr/bin/app-{index}"))
+            .collect();
+        let names: Vec<&str> = exes.iter().map(String::as_str).collect();
+        let before = exe_policy(&names);
+        let mut swapped = names.clone();
+        swapped[5] = "/usr/bin/new";
+        let after = exe_policy(&swapped).keeping_bits_of(&before);
+
+        assert_eq!(after.bit_of(&selector("/usr/bin/new")), Some(5));
+        assert_eq!(after.selector_bits().len(), WORKLOAD_POLICY_MAX_RULES);
+    }
+
+    #[test]
+    fn without_a_previous_policy_the_bits_are_the_first_seen_order() {
+        let policy = exe_policy(&["/usr/bin/a", "/usr/bin/b"]);
+
+        assert_eq!(policy.bit_of(&selector("/usr/bin/b")), Some(1));
+        let emptied = WorkloadPolicy::default().keeping_bits_of(&policy);
+        assert!(emptied.selector_bits().is_empty());
     }
 
     #[test]

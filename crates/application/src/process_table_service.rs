@@ -18,8 +18,8 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use domain::container::engine::{ContainerResolverEngine, ResolveOutcome};
-use domain::container::entity::ContainerContext;
+use domain::container::engine::{ContainerResolverEngine, ResolveOutcome, parse_cgroup_v2};
+use domain::container::entity::{ContainerContext, ContainerInfo};
 use domain::process::engine::{Lineage, ProcessTable, PurgeOutcome};
 use domain::process::entity::{
     ProcessEntry, ProcessEventKind, ProcessIdentity, ProcessLifecycleEvent, ProcessTableStats,
@@ -556,10 +556,15 @@ impl ProcessTableService {
         if info.is_host() {
             return None;
         }
+        Some(self.enrich(info).await)
+    }
+
+    /// `info` with the metadata of the first enricher that knows it.
+    async fn enrich(&self, info: ContainerInfo) -> ContainerContext {
         for enricher in &self.metadata_enrichers {
             match enricher.enrich(&info).await {
                 Ok(Some(metadata)) => {
-                    return Some(ContainerContext::with_metadata(info, metadata));
+                    return ContainerContext::with_metadata(info, metadata);
                 }
                 Ok(None) => {}
                 Err(err) => {
@@ -571,7 +576,33 @@ impl ProcessTableService {
                 }
             }
         }
-        Some(ContainerContext::new(info))
+        ContainerContext::new(info)
+    }
+
+    /// Tell the workload policy what every live container cgroup is, from
+    /// its path and what the enrichers know of it, whether or not a task of
+    /// it was ever seen. Returns how many were named.
+    ///
+    /// A container started before the agent, whose processes neither fork
+    /// nor exec, is otherwise known by its path alone, and a rule naming its
+    /// pod's labels would not reach it.
+    pub async fn name_live_cgroups(&self) -> usize {
+        let Some(workload) = &self.workload else {
+            return 0;
+        };
+        let mut named = Vec::new();
+        for (cgroup_id, path) in workload.live_cgroups() {
+            let Some(info) = parse_cgroup_v2(&format!("0::{path}"), 0) else {
+                continue;
+            };
+            if cgroup_id == 0 || info.is_host() {
+                continue;
+            }
+            named.push((cgroup_id, self.enrich(info).await));
+        }
+        let count = named.len();
+        workload.name_cgroups(named);
+        count
     }
 
     /// Every live process, newest exec first.
@@ -623,6 +654,7 @@ impl ProcessTableService {
         // interleaved with an exec or an exit of the entry it is rewriting.
         let mut changes = self.metadata_changes.clone();
         let mut settle: Option<Instant> = None;
+        self.name_live_cgroups().await;
         loop {
             tokio::select! {
                 () = cancel.cancelled() => break,
@@ -640,7 +672,8 @@ impl ProcessTableService {
                 () = settled(settle) => {
                     settle = None;
                     let changed = self.refresh_containers().await;
-                    debug!(changed, "process table resolved the running containers again");
+                    let named = self.name_live_cgroups().await;
+                    debug!(changed, named, "process table resolved the running containers again");
                 }
             }
         }
@@ -1596,6 +1629,8 @@ mod tests {
             .apply(policy("/usr/bin/curl"))
             .expect("the port accepts it");
 
-        assert_eq!(masks.0.lock().unwrap().as_slice(), [(77, 1)]);
+        let curl = policy("/usr/bin/curl").rules()[0].selector.clone();
+        let bit = workload.policy().bit_of(&curl).expect("curl holds a bit");
+        assert_eq!(masks.0.lock().unwrap().as_slice(), [(77, 1u64 << bit)]);
     }
 }
