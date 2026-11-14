@@ -339,19 +339,26 @@ teardown_file() {
     }
 
     # A weight of zero would be owed nothing: refused, not stored.
+    # The delete below writes its own status, so the answer is kept first.
     api_post /api/v1/qos/queues \
         '{"id":"bind-q0","pipe_id":"pipe-test-10m","weight":0}' >/dev/null
     _load_http_status
+    local refused="$HTTP_STATUS"
     api_delete /api/v1/qos/queues/bind-q0 >/dev/null 2>&1 || true
-    [ "$HTTP_STATUS" = "400" ]
+    [ "$refused" = "400" ] || {
+        echo "a queue weighted zero answered ${refused}" >&2
+        return 1
+    }
 }
 
 # ── Weighted share of a saturated pipe ───────────────────────────
 
 # _udp_received_bps <server_log>
-# Bits per second the iperf3 server on that log received.
+# Bits per second the iperf3 server on that log received. A UDP server
+# reports what arrived under `sum_received`; its `sum` reads zero.
 _udp_received_bps() {
-    jq -r '.end.sum.bits_per_second // empty' "$1" 2>/dev/null | cut -d. -f1
+    jq -r '.end.sum_received.bits_per_second // .end.sum.bits_per_second // empty' \
+        "$1" 2>/dev/null | cut -d. -f1
 }
 
 @test "QoS queues weighted three to one split a saturated pipe three to one" {
@@ -389,7 +396,11 @@ _udp_received_bps() {
         echo "an iperf3 server reported nothing: heavy='${heavy}' light='${light}'" >&2
         return 1
     }
-    [ "$light" -gt 0 ] || { echo "the light queue was starved" >&2; return 1; }
+    [ "$light" -gt 0 ] || {
+        echo "the light queue was starved: heavy ${heavy} bps, light ${light} bps" >&2
+        curl -sf --max-time "$HTTP_TIMEOUT" "${BASE_URL}/metrics" | grep -i qos >&2 || true
+        return 1
+    }
 
     local total=$((heavy + light))
     local heavy_pct=$((heavy * 100 / total))
