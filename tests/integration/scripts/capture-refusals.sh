@@ -114,7 +114,7 @@ until_true 60 enforcing || die "the write refusal never reported itself in force
 
 "$CAPTURE" begin refused-write host || die "could not begin refused-write"
 "$CAPTURE" step refused-write host -- \
-    sh -c "for n in \$(seq 1 12); do echo payload >${WATCHED}/doc\$n.txt && echo doc\$n.txt written; done"
+    sh -c "for n in \$(seq 1 12); do if (echo payload >${WATCHED}/doc\$n.txt) 2>/dev/null; then echo doc\$n.txt written; else echo doc\$n.txt refused; fi; done"
 wait_for_alert '.[] | select(.rule_id == "write-refusal") | .id' 30 1 >/dev/null ||
     die "no write-refusal alert"
 "$CAPTURE" step refused-write host -- \
