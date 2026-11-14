@@ -1,12 +1,12 @@
 use crate::ebpf::feature_gates::{self, Feature};
 use crate::ebpf::map_store::MapStore;
-use aya::maps::{Array, HashMap, MapData};
+use aya::maps::{Array, HashMap, MapData, PerCpuHashMap};
 use domain::common::error::DomainError;
 use domain::qos::entity::{QosClassifier, QosDirection, QosPipe, QosQueue};
 use ebpf_common::qos::{
     QOS_DIR_BOTH, QOS_DIR_EGRESS, QOS_DIR_INGRESS, QOS_SCOPE_STRIDE, QOS_SHAPE_NO_DSCP,
-    QOS_SHAPES_ALL_EMPTY, QosClassifierKey, QosClassifierValue, QosPipeConfig, QosQueueConfig,
-    VLAN_ANY, qos_shape_of,
+    QOS_SHAPES_ALL_EMPTY, QosClassifierKey, QosClassifierValue, QosFlowState, QosPipeConfig,
+    QosPipeState, QosQueueConfig, QosQueueState, VLAN_ANY, qos_shape_of,
 };
 use ports::secondary::qos_map_port::QosMapPort;
 use tracing::info;
@@ -25,6 +25,64 @@ pub struct QosMapManager {
     /// where the map is absent publishes nothing, the program reads zero and
     /// its ladder walks every step, which is what it did before this existed.
     empty_shapes: Option<Array<MapData, u32>>,
+    /// What the shaper has drawn from each pipe, each queue and each flow.
+    ///
+    /// Indexed by position in the configuration, so after a reload a slot
+    /// names another pipe, queue or flow assignment than the one whose
+    /// credit, debt or departure time it still holds. Optional for the same
+    /// reason as the shape mask: a build without them keeps the old state.
+    state: Option<ShaperState>,
+}
+
+/// The shaper's running state, reset whenever the configuration is.
+struct ShaperState {
+    pipes: Array<MapData, QosPipeState>,
+    queues: Array<MapData, QosQueueState>,
+    flows: Option<PerCpuHashMap<MapData, u32, QosFlowState>>,
+}
+
+impl ShaperState {
+    fn take(ebpf: &mut dyn MapStore) -> Option<Self> {
+        let pipes = Array::try_from(ebpf.take_map("QOS_PIPE_STATE")?).ok()?;
+        let queues = Array::try_from(ebpf.take_map("QOS_QUEUE_STATE")?).ok()?;
+        let flows = ebpf
+            .take_map("QOS_FLOW_STATE")
+            .and_then(|map| PerCpuHashMap::try_from(map).ok());
+        Some(Self {
+            pipes,
+            queues,
+            flows,
+        })
+    }
+
+    /// Start every bucket over, as a pipe never used: a zero refill time
+    /// turns the first packet's elapsed time into a full bucket, so a reload
+    /// neither inherits another pipe's debt nor hands out its saved credit.
+    /// Pacing restarts from now rather than from a departure time a former
+    /// delay pushed out.
+    fn reset(&mut self) {
+        let pipe = QosPipeState {
+            tokens: 0,
+            last_refill_ns: 0,
+        };
+        for i in 0..ebpf_common::qos::MAX_QOS_PIPES {
+            let _ = self.pipes.set(i, &pipe, 0);
+        }
+        let queue = QosQueueState {
+            tokens: 0,
+            last_refill_ns: 0,
+        };
+        for i in 0..ebpf_common::qos::MAX_QOS_QUEUES {
+            let _ = self.queues.set(i, &queue, 0);
+        }
+        if let Some(flows) = self.flows.as_mut() {
+            let keys: Vec<u32> = flows.keys().filter_map(Result::ok).collect();
+            for key in &keys {
+                let _ = flows.remove(key);
+            }
+        }
+        info!("QoS shaper state reset");
+    }
 }
 
 impl QosMapManager {
@@ -55,6 +113,7 @@ impl QosMapManager {
         if empty_shapes.is_some() {
             info!("QOS_EMPTY_SHAPES map acquired");
         }
+        let state = ShaperState::take(ebpf);
 
         // The map is pinned, so it survives a restart: the answer has to be
         // counted rather than assumed. An empty set closes the shaper's whole
@@ -69,6 +128,7 @@ impl QosMapManager {
             queue_config,
             classifiers,
             empty_shapes,
+            state,
         };
         manager.publish_shapes(mask);
 
@@ -290,6 +350,13 @@ impl QosMapManager {
         Ok(())
     }
 
+    /// Forget what the shaper drew under the configuration being replaced.
+    fn reset_state(&mut self) {
+        if let Some(state) = self.state.as_mut() {
+            state.reset();
+        }
+    }
+
     /// Return the number of classifier entries in the map.
     pub fn classifier_count_raw(&self) -> usize {
         self.classifiers.keys().filter_map(Result::ok).count()
@@ -303,6 +370,9 @@ impl QosMapPort for QosMapManager {
         queues: &[QosQueue],
         classifiers: &[QosClassifier],
     ) -> Result<(), DomainError> {
+        // A cleared table holds nothing to shape, so the state is reset here,
+        // once, before the new configuration can draw on it.
+        self.reset_state();
         self.load_pipes_inner(pipes)
             .map_err(|e| DomainError::EngineError(format!("qos pipe map load failed: {e}")))?;
         self.load_queues_inner(queues, pipes)
