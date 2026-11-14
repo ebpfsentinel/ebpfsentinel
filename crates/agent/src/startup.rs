@@ -4188,6 +4188,7 @@ pub async fn run(
             adapters::warden::hidden_processes::WardenHiddenProcessReader::new(
                 ebpfsentinel_warden::hidden_processes::scan,
                 coverage_proc.clone(),
+                config.hidden_checks.processes.pids_per_second,
             ),
         );
         let sweep = application::hidden_process_service::HiddenProcessWatcher::new(

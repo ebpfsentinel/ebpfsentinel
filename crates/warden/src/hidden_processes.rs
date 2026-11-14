@@ -16,15 +16,13 @@ use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use ebpfsentinel_warden_proto::{HiddenProcessReading, PidObservation};
+use ebpfsentinel_warden_proto::{
+    HIDDEN_PROCESSES_PID_SPACE_MAX as PID_MAX_LIMIT, HIDDEN_PROCESSES_RATE_MAX as MAX_RATE,
+    HIDDEN_PROCESSES_RATE_MIN as MIN_RATE, HiddenProcessReading, PidObservation,
+};
 
-/// The kernel's ceiling on `pid_max`.
-const PID_MAX_LIMIT: u32 = 4_194_304;
 /// Pids signalled between two pauses.
 const SLICE: u32 = 8_192;
-/// The pace a caller may ask for, in pids per second.
-pub const MIN_RATE: u32 = 10_000;
-pub const MAX_RATE: u32 = 10_000_000;
 
 /// Every numeric entry of `proc_root`: the thread groups it lists.
 fn list_groups(proc_root: &Path) -> io::Result<HashSet<u32>> {

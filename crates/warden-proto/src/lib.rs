@@ -479,6 +479,24 @@ pub struct HiddenProcessReading {
     pub second: Vec<PidObservation>,
 }
 
+/// The kernel's ceiling on `pid_max`, the largest pid space a sweep covers.
+pub const HIDDEN_PROCESSES_PID_SPACE_MAX: u32 = 4_194_304;
+/// The slowest pace a sweep may be asked for, in pids per second.
+pub const HIDDEN_PROCESSES_RATE_MIN: u32 = 10_000;
+/// The fastest pace a sweep may be asked for, in pids per second.
+pub const HIDDEN_PROCESSES_RATE_MAX: u32 = 10_000_000;
+
+/// How long a caller waits for a sweep asked at `rate`: the largest pid
+/// space at that pace, with a minute for the listings and the observations
+/// around it. A sweep is paced on purpose, so the timeout every other call
+/// gets would abandon it on any host whose `pid_max` is the 64-bit default.
+#[must_use]
+pub fn hidden_processes_call_timeout(rate: u32) -> std::time::Duration {
+    let rate = rate.clamp(HIDDEN_PROCESSES_RATE_MIN, HIDDEN_PROCESSES_RATE_MAX);
+    let paced = HIDDEN_PROCESSES_PID_SPACE_MAX.div_ceil(rate);
+    std::time::Duration::from_secs(u64::from(paced) + 60)
+}
+
 /// One network namespace, the id it carries and a process inside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceIdReading {
@@ -1319,6 +1337,26 @@ mod tests {
         RouteSpec, TaskIdentity, read_frame, valid_dpkg_list_name, write_frame,
     };
     use std::io::Cursor;
+
+    #[test]
+    fn a_sweep_call_outlasts_the_sweep_it_asks_for() {
+        use super::{
+            HIDDEN_PROCESSES_PID_SPACE_MAX, HIDDEN_PROCESSES_RATE_MIN,
+            hidden_processes_call_timeout,
+        };
+        // The default pace over the 64-bit default pid_max takes 42 seconds.
+        let default = hidden_processes_call_timeout(100_000);
+        assert!(default.as_secs() > u64::from(HIDDEN_PROCESSES_PID_SPACE_MAX / 100_000));
+        // A pace below the floor is swept at the floor, so it waits as long.
+        assert_eq!(
+            hidden_processes_call_timeout(1),
+            hidden_processes_call_timeout(HIDDEN_PROCESSES_RATE_MIN)
+        );
+        assert!(
+            hidden_processes_call_timeout(HIDDEN_PROCESSES_RATE_MIN).as_secs()
+                >= u64::from(HIDDEN_PROCESSES_PID_SPACE_MAX / HIDDEN_PROCESSES_RATE_MIN)
+        );
+    }
 
     fn tcp(src: &str, dst: &str, sp: u16, dp: u16) -> ConntrackTuple {
         ConntrackTuple {

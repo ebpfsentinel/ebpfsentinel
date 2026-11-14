@@ -5,6 +5,7 @@ use domain::common::error::DomainError;
 use domain::hidden::{PidObservation, ProcessReading};
 use ebpfsentinel_warden_client::{
     HiddenProcessReading, PidObservation as WirePidObservation, ReconnectingClient,
+    hidden_processes_call_timeout,
 };
 use ports::secondary::hidden_process_port::HiddenProcessReader;
 
@@ -33,13 +34,17 @@ pub struct WardenHiddenProcessReader {
 
 impl WardenHiddenProcessReader {
     /// The warden when the environment names one, else `sweep` over
-    /// `proc_root`.
-    pub fn new(sweep: LocalSweep, proc_root: impl Into<PathBuf>) -> Self {
+    /// `proc_root`. `rate` is the pace the sweeps will be asked at, which
+    /// sets how long a call to the warden may take.
+    pub fn new(sweep: LocalSweep, proc_root: impl Into<PathBuf>, rate: u32) -> Self {
         let warden = std::env::var_os(WARDEN_SOCK_ENV)
             .map(PathBuf::from)
             .filter(|p| !p.as_os_str().is_empty());
         let source = match warden {
-            Some(sock) => Source::Warden(Mutex::new(ReconnectingClient::new(sock))),
+            Some(sock) => Source::Warden(Mutex::new(ReconnectingClient::with_timeout(
+                sock,
+                hidden_processes_call_timeout(rate),
+            ))),
             None => Source::Local {
                 sweep,
                 proc_root: proc_root.into(),

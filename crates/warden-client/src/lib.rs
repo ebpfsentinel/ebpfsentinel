@@ -35,6 +35,7 @@ pub use ebpfsentinel_warden_proto::{
     MappingScan, NamespaceIdReading, NamespacePortReading, NetworkProgram, OPENER_READINGS_MAX,
     OpenIntent, OpenerReading, PacketSocket, PidObservation, ProcessFactsReading, ProcessMappings,
     ProcessStamp, ROOTED_CHUNK_MAX, RootedFile, RootedRead, RouteSpec, TaskIdentity,
+    hidden_processes_call_timeout,
 };
 
 /// How long one warden call may take before the client gives up on it.
