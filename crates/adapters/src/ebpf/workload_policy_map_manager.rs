@@ -66,8 +66,9 @@ pub struct WorkloadPolicyMapManager {
     /// The offsets the walk reads, or why the running kernel's BTF did not
     /// give them.
     offsets: Result<WorkloadLineageConfig, String>,
-    /// The paths the policy in force names as a parent or an ancestor, with
-    /// the selectors each satisfies, so an exec can be checked against them.
+    /// The paths the policy in force names as an executable, a parent or an
+    /// ancestor, with the selectors each satisfies, so an exec can be checked
+    /// against them.
     lineage_paths: BTreeMap<String, WorkloadLineageBits>,
 }
 
@@ -78,17 +79,26 @@ pub struct LineagePlan {
     pub lineage: u64,
     /// Bits of those naming nothing else.
     pub unconditional: u64,
-    /// Each named path, with the selectors it satisfies as a parent and as
-    /// an ancestor.
+    /// Bits of the selectors the kernel decides from the executable the
+    /// calling task runs.
+    pub own: u64,
+    /// Each named path, with the selectors it satisfies as the task's own
+    /// executable, as a parent and as an ancestor.
     pub paths: BTreeMap<String, WorkloadLineageBits>,
 }
 
-/// The lineage half of `selectors`, each given with the bit it holds.
+/// What the kernel reads of `selectors` at the call: the executable the
+/// calling task runs and its lineage, each selector given with the bit it
+/// holds.
 #[must_use]
 pub fn lineage_plan(selectors: &[(usize, &WorkloadSelector)]) -> LineagePlan {
     let mut plan = LineagePlan::default();
     for &(index, selector) in selectors {
         let bit = 1u64 << (index & 63);
+        if let (true, Some(exe)) = (selector.exe_only(), &selector.exe) {
+            plan.own |= bit;
+            plan.paths.entry(exe.clone()).or_default().own |= bit;
+        }
         let (path, as_parent) = match (&selector.parent, &selector.ancestor) {
             (Some(path), _) => (path, true),
             (None, Some(path)) => (path, false),
@@ -246,6 +256,7 @@ impl WorkloadPolicyMapManager {
             match exec_network::key_of(path) {
                 Ok(key) => {
                     let held = keys.entry((key.ino, key.dev)).or_default();
+                    held.own |= bits.own;
                     held.parent |= bits.parent;
                     held.ancestor |= bits.ancestor;
                 }
@@ -265,30 +276,36 @@ impl WorkloadPolicyMapManager {
         if !missing.is_empty() {
             warn!(
                 paths = %missing.join(","),
-                "workload rules name a parent or an ancestor not installed on this node: \
-                 no task is under it until it is executed"
+                "workload rules name an executable not installed on this node: no task \
+                 runs it or is under it until it is executed"
             );
         }
         if !links.is_empty() {
             warn!(
                 paths = %links.join(","),
-                "workload rules name a parent or an ancestor through a link: a process is \
-                 known by the file it runs, so those rules match no task until they name it"
+                "workload rules name an executable through a link: a process is known by \
+                 the file it runs, so those rules match no task until they name it"
             );
         }
         let mut config = WorkloadLineageConfig::default();
-        if plan.lineage != 0 {
+        if plan.lineage != 0 || plan.own != 0 {
             match &self.offsets {
                 Ok(offsets) => config = *offsets,
-                Err(reason) => warn!(
+                Err(reason) if plan.lineage != 0 => warn!(
                     reason,
                     "workload rules name a parent or an ancestor and the kernel's BTF does \
                      not describe the parent chain: those rules match no task"
+                ),
+                Err(reason) => warn!(
+                    reason,
+                    "the kernel's BTF does not describe a task's executable: rules naming \
+                     one are decided once userspace has read the exec"
                 ),
             }
         }
         config.lineage = plan.lineage;
         config.unconditional = plan.unconditional;
+        config.own = plan.own;
         self.lineage_config.set(0, &config, 0).map_err(|e| {
             DomainError::EngineError(format!("WORKLOAD_LINEAGE_CONFIG write failed: {e}"))
         })?;
@@ -498,6 +515,7 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
         let key = exe_key(exec_network::key_from_stat(dev, inode));
         let held = self.lineage_exes.get(&key, 0).unwrap_or_default();
         let merged = WorkloadLineageBits {
+            own: held.own | bits.own,
             parent: held.parent | bits.parent,
             ancestor: held.ancestor | bits.ancestor,
         };
@@ -507,6 +525,10 @@ impl WorkloadPolicyMapPort for WorkloadPolicyMapManager {
         self.lineage_exes.insert(&key, &merged, 0).map_err(|e| {
             DomainError::EngineError(format!("WORKLOAD_LINEAGE_EXES insert failed: {e}"))
         })
+    }
+
+    fn names_executable(&self, path: &str) -> bool {
+        self.lineage_paths.contains_key(path)
     }
 }
 
@@ -746,10 +768,10 @@ mod tests {
     }
 
     #[test]
-    fn a_policy_naming_no_lineage_asks_nothing_of_the_walk() {
-        let plain = WorkloadSelector::new(Some("/usr/bin/curl".to_string()), None, None, None)
+    fn a_policy_naming_no_executable_asks_nothing_of_the_kernel() {
+        let unit = WorkloadSelector::new(None, Some("nginx.service".to_string()), None, None)
             .expect("valid");
-        assert_eq!(lineage_plan(&[(0, &plain)]), LineagePlan::default());
+        assert_eq!(lineage_plan(&[(0, &unit)]), LineagePlan::default());
     }
 
     #[test]
@@ -768,9 +790,20 @@ mod tests {
         // Only the selectors naming nothing but a lineage are unconditional:
         // the one also naming curl stays behind its task mask.
         assert_eq!(plan.unconditional, 0b1100);
+        // Both selectors naming curl and nothing the kernel cannot read are
+        // decided from the file the task runs.
+        assert_eq!(plan.own, 0b0011);
+        assert_eq!(
+            plan.paths.get("/usr/bin/curl"),
+            Some(&WorkloadLineageBits {
+                own: 0b0011,
+                ..WorkloadLineageBits::default()
+            })
+        );
         assert_eq!(
             plan.paths.get("/usr/sbin/nginx"),
             Some(&WorkloadLineageBits {
+                own: 0,
                 parent: 0b0010,
                 ancestor: 0b0100
             })
@@ -778,6 +811,7 @@ mod tests {
         assert_eq!(
             plan.paths.get("/usr/sbin/sshd"),
             Some(&WorkloadLineageBits {
+                own: 0,
                 parent: 0,
                 ancestor: 0b1000
             })

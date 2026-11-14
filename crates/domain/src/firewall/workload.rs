@@ -486,6 +486,21 @@ impl WorkloadSelector {
             && !self.names_kubernetes()
     }
 
+    /// Whether the executable path is the only thing this selector names
+    /// beside a lineage, so the kernel can decide it from the file the
+    /// calling task runs, at the call, without waiting for userspace to read
+    /// the exec. A digest is not: the kernel does not read a whole file.
+    #[must_use]
+    pub fn exe_only(&self) -> bool {
+        self.exe.is_some()
+            && self.exe_hash.is_none()
+            && self.unit.is_none()
+            && self.cgroup.is_none()
+            && self.container.is_none()
+            && self.guest.is_none()
+            && !self.names_kubernetes()
+    }
+
     /// The matchers that are set, as field name and value.
     pub fn matchers(&self) -> impl Iterator<Item = (&'static str, &str)> {
         [
@@ -1549,6 +1564,26 @@ mod tests {
 
     fn digest(written: &str) -> ExeHash {
         ExeHash::parse(written).expect("a digest")
+    }
+
+    #[test]
+    fn only_a_bare_path_is_decided_from_the_running_file() {
+        let path = |exe: &str| WorkloadSelector {
+            exe: Some(exe.to_string()),
+            ..WorkloadSelector::default()
+        };
+        assert!(path("/usr/bin/curl").exe_only());
+        let under = WorkloadSelector {
+            parent: Some("/usr/sbin/nginx".to_string()),
+            ..path("/usr/bin/curl")
+        };
+        assert!(under.exe_only());
+        let in_unit = WorkloadSelector {
+            unit: Some("nginx.service".to_string()),
+            ..path("/usr/bin/curl")
+        };
+        assert!(!in_unit.exe_only());
+        assert!(!WorkloadSelector::default().exe_only());
     }
 
     #[test]

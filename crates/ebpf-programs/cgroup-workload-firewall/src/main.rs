@@ -22,6 +22,12 @@
 //! is per task, everything else is per cgroup, and a selector mixing the two
 //! is only ever written where the whole of it matched.
 //!
+//! One fact is also read here, at the call: the inode and device of the file
+//! the calling task runs, looked up in the table of executables the policy
+//! names. A selector naming a path and nothing userspace has to read is
+//! decided from it, so a process that execs and connects at once is not
+//! decided before userspace has read its exec. It is still integers.
+//!
 //! Default is observe. A rule in observe mode counts what it would have
 //! refused and lets the syscall through, which is what makes a policy
 //! something an operator can measure before turning it on.
@@ -615,7 +621,7 @@ fn decide<const V6: bool>(ctx: &SockAddrContext, hook: u8) -> i32 {
     }
     increment_metric!(WORKLOAD_METRICS, hook_metric(hook));
 
-    let resolved = selectors();
+    let resolved = selectors() | running();
     let mask = with_lineage(resolved);
     if resolved == 0 && mask == 0 {
         // A task userspace has not placed in any selector yet. Counting it is
@@ -745,6 +751,27 @@ fn selectors() -> u64 {
     by_cgroup | by_task.unwrap_or(0)
 }
 
+/// The selectors the executable the calling task runs satisfies on its own.
+///
+/// Read at the call rather than from the task table, so a task that execs
+/// and connects at once is decided by the file it runs before userspace has
+/// read the exec. A task that ran the file and execed another holds the bit
+/// only through the table, until userspace clears it.
+#[inline(always)]
+fn running() -> u64 {
+    let Some(config) = WORKLOAD_LINEAGE_CONFIG.get(0) else {
+        return 0;
+    };
+    if config.own == 0 || config.valid == 0 {
+        return 0;
+    }
+    let task = unsafe { bpf_get_current_task() };
+    match executable_bits(task, config) {
+        Some(bits) => bits.own & config.own,
+        None => 0,
+    }
+}
+
 /// Deepest ancestor level read for a cgroup with no mask of its own. A pod's
 /// container sits five or six levels down under either kubelet driver.
 const ANCESTOR_LEVELS: i32 = 16;
@@ -828,7 +855,7 @@ fn ancestry(gated: u64, config: &WorkloadLineageConfig) -> u64 {
     satisfied
 }
 
-/// What a lineage rule says about the executable `task` runs, if it names it.
+/// What the rules say about the executable `task` runs, if one names it.
 /// A kernel thread has no address space and runs nothing a rule can name.
 #[inline(always)]
 fn executable_bits(task: u64, config: &WorkloadLineageConfig) -> Option<WorkloadLineageBits> {

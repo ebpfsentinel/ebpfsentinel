@@ -55,6 +55,10 @@ pub struct PodInfo {
     pub container_ids: Vec<String>,
     /// Map of container id → container name (within this pod).
     pub container_names: BTreeMap<String, String>,
+    /// The pod's one container, where its spec declares one and no init or
+    /// ephemeral container beside it, so a container the status does not
+    /// list yet can only be that one.
+    pub sole_container: Option<String>,
     /// The pod shares the node's network namespace.
     pub host_network: bool,
 }
@@ -71,6 +75,7 @@ impl PodInfo {
             container_name: self
                 .container_names
                 .get(container_id)
+                .or(self.sole_container.as_ref())
                 .cloned()
                 .unwrap_or_default(),
             labels: self
@@ -263,6 +268,15 @@ pub fn pod_info_from(pod: &Pod) -> Option<PodInfo> {
         .unwrap_or_default();
     let node_name = spec.and_then(|s| s.node_name.clone()).unwrap_or_default();
     let host_network = spec.and_then(|s| s.host_network).unwrap_or(false);
+    let sole_container = spec.and_then(|s| match s.containers.as_slice() {
+        [only]
+            if s.init_containers.as_ref().is_none_or(Vec::is_empty)
+                && s.ephemeral_containers.as_ref().is_none_or(Vec::is_empty) =>
+        {
+            Some(only.name.clone())
+        }
+        _ => None,
+    });
 
     let owner = metadata
         .owner_references
@@ -303,6 +317,7 @@ pub fn pod_info_from(pod: &Pod) -> Option<PodInfo> {
         node_name,
         container_ids,
         container_names,
+        sole_container,
         host_network,
     })
 }
@@ -569,7 +584,7 @@ pub fn spawn_namespace_watcher(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_openapi::api::core::v1::{ContainerStatus, Pod, PodSpec, PodStatus};
+    use k8s_openapi::api::core::v1::{Container, ContainerStatus, Pod, PodSpec, PodStatus};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 
     fn pod(uid: &str, name: &str, namespace: &str, node: &str, containers: &[(&str, &str)]) -> Pod {
@@ -786,6 +801,45 @@ mod tests {
             panic!("expected kubernetes metadata");
         };
         assert_eq!(k.pod_name, "app");
+        // The spec declares no container, so none can be named.
+        assert_eq!(k.container_name, "");
+    }
+
+    #[tokio::test]
+    async fn a_pod_s_only_container_is_named_before_the_status_lists_it() {
+        let cache = Arc::new(PodCache::new());
+        let uid = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
+        let mut p = pod(uid, "app", "prod", "node-a", &[]);
+        let spec = p.spec.as_mut().expect("spec");
+        spec.containers = vec![Container {
+            name: "web".into(),
+            ..Default::default()
+        }];
+        cache.upsert(pod_info_from(&p).unwrap()).await;
+        let e = KubernetesEnricher::with_cache(Arc::clone(&cache));
+        let info = ContainerInfo::Container {
+            container_id: "abc".into(),
+            runtime: ContainerRuntime::Containerd,
+            cgroup_path: format!(
+                "/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod{}.slice/cri-containerd-abc.scope",
+                uid.replace('-', "_")
+            ),
+            pid: 1,
+        };
+        let Some(ContainerMetadata::Kubernetes(k)) = e.enrich(&info).await.unwrap() else {
+            panic!("expected kubernetes metadata");
+        };
+        assert_eq!(k.container_name, "web");
+
+        // An init container beside it could be the one starting.
+        p.spec.as_mut().expect("spec").init_containers = Some(vec![Container {
+            name: "setup".into(),
+            ..Default::default()
+        }]);
+        cache.upsert(pod_info_from(&p).unwrap()).await;
+        let Some(ContainerMetadata::Kubernetes(k)) = e.enrich(&info).await.unwrap() else {
+            panic!("expected kubernetes metadata");
+        };
         assert_eq!(k.container_name, "");
     }
 

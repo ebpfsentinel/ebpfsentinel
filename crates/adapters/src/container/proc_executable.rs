@@ -1,4 +1,6 @@
+use std::fs::File;
 use std::io::ErrorKind;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -116,6 +118,59 @@ impl ProcessExecutableReader for ProcExecutableResolver {
             source: DlpIdentitySource::ProcessAtAlertTime,
         })
     }
+
+    fn kernel_identity(&self, pid: u32, dev: u64, inode: u64) -> Option<(u64, u64)> {
+        let pid_dir = self.proc_root.join(pid.to_string());
+        let file = match File::open(pid_dir.join("exe")) {
+            Ok(file) => file,
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                let warden = self.warden.as_ref()?;
+                let fd = warden
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .open_executable(pid)
+                    .ok()?;
+                File::from(fd)
+            }
+            Err(_) => return None,
+        };
+        let meta = file.metadata().ok()?;
+        if (meta.dev(), meta.ino()) != (dev, inode) {
+            return None;
+        }
+        let fdinfo =
+            std::fs::read_to_string(format!("/proc/self/fdinfo/{}", file.as_raw_fd())).ok()?;
+        let (mount, ino) = mount_and_inode(&fdinfo)?;
+        let mountinfo = std::fs::read_to_string(pid_dir.join("mountinfo")).ok()?;
+        let kernel = (mount_device(&mountinfo, mount)?, ino);
+        (kernel != (dev, inode)).then_some(kernel)
+    }
+}
+
+/// The mount id and inode number an open file's `fdinfo` states: the inode
+/// the file was opened on, which for an overlay is the overlay's own, not the
+/// layer's a stat reports.
+fn mount_and_inode(fdinfo: &str) -> Option<(u64, u64)> {
+    let field = |name: &str| {
+        fdinfo
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|value| value.trim().parse::<u64>().ok())
+    };
+    Some((field("mnt_id:")?, field("ino:")?))
+}
+
+/// The device of the superblock behind mount `mount`, from a `mountinfo`
+/// listing, in the encoding a stat answers `st_dev` in.
+fn mount_device(mountinfo: &str, mount: u64) -> Option<u64> {
+    mountinfo.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        if fields.next()?.parse::<u64>().ok()? != mount {
+            return None;
+        }
+        let (major, minor) = fields.nth(1)?.split_once(':')?;
+        Some(libc::makedev(major.parse().ok()?, minor.parse().ok()?))
+    })
 }
 
 #[cfg(test)]
@@ -252,6 +307,59 @@ mod tests {
         if !privileged {
             assert_eq!(served, 1);
         }
+    }
+
+    #[test]
+    fn the_kernel_s_identity_is_the_mount_s_device_and_the_opened_inode() {
+        let fdinfo = "pos:\t0\nflags:\t0100000\nmnt_id:\t1312\nino:\t1051490\n";
+        assert_eq!(mount_and_inode(fdinfo), Some((1312, 1_051_490)));
+        assert_eq!(mount_and_inode("pos:\t0\n"), None);
+
+        let mountinfo = "\
+22 1 0:21 / /proc rw - proc proc rw
+1312 1290 0:432 / / rw,relatime - overlay overlay rw,lowerdir=/a:/b
+";
+        assert_eq!(mount_device(mountinfo, 1312), Some(libc::makedev(0, 432)));
+        assert_eq!(mount_device(mountinfo, 99), None);
+    }
+
+    #[test]
+    fn a_file_whose_stat_differs_from_the_mount_is_named_as_the_kernel_reads_it() {
+        let (dir, root) = fake_proc(4245, "");
+        let binary = dir.path().join("binary");
+        let meta = fs::metadata(&binary).unwrap();
+        let file = File::open(&binary).unwrap();
+        let fdinfo = fs::read_to_string(format!("/proc/self/fdinfo/{}", file.as_raw_fd())).unwrap();
+        let (mount, ino) = mount_and_inode(&fdinfo).unwrap();
+        assert_eq!(ino, meta.ino());
+        let pid_dir = root.join("4245");
+        fs::write(
+            pid_dir.join("mountinfo"),
+            format!("{mount} 1 7:9 / / rw - overlay overlay rw\n"),
+        )
+        .unwrap();
+        let resolver = ProcExecutableResolver::new(&root);
+        assert_eq!(
+            resolver.kernel_identity(4245, meta.dev(), meta.ino()),
+            Some((libc::makedev(7, 9), meta.ino()))
+        );
+        // Another file stands behind the link than the one stated.
+        assert_eq!(
+            resolver.kernel_identity(4245, meta.dev(), meta.ino() + 1),
+            None
+        );
+
+        // Where the mount is the device the stat answered, nothing is added.
+        fs::write(
+            pid_dir.join("mountinfo"),
+            format!(
+                "{mount} 1 {}:{} / / rw - ext4 /dev/x rw\n",
+                libc::major(meta.dev()),
+                libc::minor(meta.dev())
+            ),
+        )
+        .unwrap();
+        assert_eq!(resolver.kernel_identity(4245, meta.dev(), meta.ino()), None);
     }
 
     #[test]

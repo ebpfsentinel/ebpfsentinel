@@ -217,10 +217,11 @@ pub const WORKLOAD_PEER_MAX_TARGETS: u32 = WORKLOAD_POLICY_MAX_CGROUPS;
 /// counted under `WORKLOAD_METRIC_LINEAGE_TRUNCATED`.
 pub const WORKLOAD_LINEAGE_MAX_DEPTH: u32 = 16;
 
-/// Capacity of `WORKLOAD_LINEAGE_EXES`, the executables lineage rules name.
+/// Capacity of `WORKLOAD_LINEAGE_EXES`, the executables rules name as a
+/// task's own, its parent or an ancestor.
 ///
-/// One selector names one path, so a full policy names at most sixty-four
-/// files; the rest is room for the inode an upgraded binary leaves behind,
+/// One selector names at most two paths, so a full policy names at most a
+/// hundred and twenty-eight files; the rest is room for the inode an upgraded binary leaves behind,
 /// which a running parent still carries until it restarts.
 pub const WORKLOAD_LINEAGE_MAX_EXECUTABLES: u32 = 256;
 
@@ -237,10 +238,14 @@ pub struct WorkloadExeKey {
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for WorkloadExeKey {}
 
-/// Which selectors an executable satisfies when it is found above a task.
+/// Which selectors an executable satisfies, run by the task itself or found
+/// above it.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WorkloadLineageBits {
+    /// Selectors whose `exe` is this executable and that name nothing the
+    /// kernel cannot read: they hold when the calling task runs it.
+    pub own: u64,
     /// Selectors whose `parent` is this executable: they hold when it is
     /// the task's direct parent.
     pub parent: u64,
@@ -269,6 +274,10 @@ pub struct WorkloadLineageConfig {
     /// Selectors naming a lineage and nothing else, which every task on the
     /// node satisfies but for the walk.
     pub unconditional: u64,
+    /// Selectors decided by the executable the calling task runs, read in
+    /// the kernel at the call, so a task that execs and connects at once is
+    /// not decided before userspace has read its exec.
+    pub own: u64,
     /// `task_struct.real_parent`
     pub task_real_parent: u32,
     /// `task_struct.mm`
@@ -515,8 +524,8 @@ mod tests {
     #[test]
     fn the_lineage_types_are_the_size_both_sides_compiled_against() {
         assert_eq!(mem::size_of::<WorkloadExeKey>(), 16);
-        assert_eq!(mem::size_of::<WorkloadLineageBits>(), 16);
-        assert_eq!(mem::size_of::<WorkloadLineageConfig>(), 48);
+        assert_eq!(mem::size_of::<WorkloadLineageBits>(), 24);
+        assert_eq!(mem::size_of::<WorkloadLineageConfig>(), 56);
     }
 
     #[test]

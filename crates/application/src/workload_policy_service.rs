@@ -52,6 +52,7 @@ use domain::process::digest::ExeHash;
 use domain::process::engine::Lineage;
 use domain::process::entity::{ProcessEntry, ProcessIdentity};
 use ebpf_common::workload_policy::WORKLOAD_POLICY_MAX_RULES;
+use ports::secondary::process_executable_port::ProcessExecutableReader;
 use ports::secondary::workload_policy_map_port::WorkloadPolicyMapPort;
 use tracing::{debug, info, warn};
 
@@ -429,6 +430,9 @@ pub struct WorkloadPolicyService {
     /// of an exec, and this is what a new policy has to be replayed over.
     /// An `Arc` both ways would be a cycle neither end ever drops.
     processes: OnceLock<Weak<crate::process_table_service::ProcessTableService>>,
+    /// Reads the identity the kernel holds for a file a rule names, where a
+    /// stat answers another one.
+    executables: Option<Arc<dyn ProcessExecutableReader>>,
 }
 
 impl WorkloadPolicyService {
@@ -454,6 +458,7 @@ impl WorkloadPolicyService {
             tree: None,
             peers: Mutex::new(PeerState::default()),
             processes: OnceLock::new(),
+            executables: None,
         }
     }
 
@@ -461,6 +466,15 @@ impl WorkloadPolicyService {
     #[must_use]
     pub fn with_maps(mut self, maps: Box<dyn WorkloadPolicyMapPort>) -> Self {
         self.maps = Some(Mutex::new(maps));
+        self
+    }
+
+    /// Read through `reader` the file identity the kernel holds for an
+    /// executable a rule names, where it differs from the stat the process
+    /// table recorded.
+    #[must_use]
+    pub fn with_executables(mut self, reader: Arc<dyn ProcessExecutableReader>) -> Self {
+        self.executables = Some(reader);
         self
     }
 
@@ -989,14 +1003,22 @@ impl WorkloadPolicyService {
             warn!(pid = entry.pid, error = %err, "a cgroup's remote workload rules were not written");
         }
         if let ProcessIdentity::Path { path, dev, inode } = &entry.identity
-            && let Err(err) = maps.note_lineage_executable(path, *dev, *inode)
+            && maps.names_executable(path)
         {
-            warn!(
-                pid = entry.pid,
-                path,
-                error = %err,
-                "an executable a lineage rule names was not recorded"
-            );
+            let kernel = self
+                .executables
+                .as_ref()
+                .and_then(|reader| reader.kernel_identity(entry.pid, *dev, *inode));
+            for (dev, inode) in std::iter::once((*dev, *inode)).chain(kernel) {
+                if let Err(err) = maps.note_lineage_executable(path, dev, inode) {
+                    warn!(
+                        pid = entry.pid,
+                        path,
+                        error = %err,
+                        "an executable a lineage rule names was not recorded"
+                    );
+                }
+            }
         }
         drop(maps);
         if let Some(context) = entry.container.as_ref() {
@@ -1640,6 +1662,10 @@ mod tests {
                 .push((path.to_string(), dev, inode));
             Ok(())
         }
+
+        fn names_executable(&self, _path: &str) -> bool {
+            true
+        }
     }
 
     struct StaticCgroup(String);
@@ -1876,6 +1902,41 @@ mod tests {
         assert_eq!(
             maps.0.lock().unwrap().executables,
             vec![("/usr/sbin/nginx".to_string(), 1, 2)]
+        );
+    }
+
+    /// Answers for pid 31 the identity an overlay's superblock gives the file.
+    struct OverlayIdentity;
+
+    impl ProcessExecutableReader for OverlayIdentity {
+        fn read_executable(&self, _pid: u32) -> Option<domain::dlp::entity::DlpExecutable> {
+            None
+        }
+
+        fn kernel_identity(&self, pid: u32, dev: u64, inode: u64) -> Option<(u64, u64)> {
+            (pid == 31 && (dev, inode) == (1, 2)).then_some((432, 2))
+        }
+    }
+
+    #[test]
+    fn a_file_the_kernel_knows_by_another_device_is_offered_under_both() {
+        let maps = SharedMaps::default();
+        let service = service(
+            vec![lineage_rule("alone", None, "/usr/sbin/nginx")],
+            maps.clone(),
+        )
+        .with_executables(Arc::new(OverlayIdentity));
+
+        service.record_exec(&entry(31, "/usr/sbin/nginx"));
+        service.record_exec(&entry(32, "/usr/sbin/nginx"));
+
+        assert_eq!(
+            maps.0.lock().unwrap().executables,
+            vec![
+                ("/usr/sbin/nginx".to_string(), 1, 2),
+                ("/usr/sbin/nginx".to_string(), 432, 2),
+                ("/usr/sbin/nginx".to_string(), 1, 2),
+            ]
         );
     }
 

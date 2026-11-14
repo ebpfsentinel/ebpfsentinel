@@ -2782,6 +2782,9 @@ pub async fn run(
                         .with_cgroups(Arc::new(adapters::container::ProcContainerResolver::new(
                             &coverage_proc,
                         )))
+                        .with_executables(Arc::new(
+                            adapters::container::ProcExecutableResolver::new(&coverage_proc),
+                        ))
                         .with_cgroup_tree(Arc::new(
                             adapters::container::CgroupfsResolver::new(
                                 &config.container.resolver.cgroup_root,

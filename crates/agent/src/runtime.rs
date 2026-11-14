@@ -2272,6 +2272,9 @@ pub async fn start_workload_firewall(
                     .with_maps(Box::new(manager))
                     .with_cgroups(Arc::new(adapters::container::ProcContainerResolver::new(
                         &proc_root,
+                    )))
+                    .with_executables(Arc::new(adapters::container::ProcExecutableResolver::new(
+                        &proc_root,
                     ))),
             );
             // The rules go in before the table starts naming tasks, so no

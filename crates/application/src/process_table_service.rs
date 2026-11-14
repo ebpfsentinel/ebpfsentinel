@@ -1030,6 +1030,10 @@ mod tests {
             Ok(())
         }
 
+        fn names_executable(&self, _path: &str) -> bool {
+            false
+        }
+
         fn replace_peer_addresses(
             &mut self,
             _destinations: &[(std::net::IpAddr, u64)],

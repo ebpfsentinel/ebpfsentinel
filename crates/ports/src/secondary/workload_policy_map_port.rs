@@ -108,7 +108,7 @@ pub trait WorkloadPolicyMapPort: Send + Sync {
     /// address space maps, and the publish resolved each named path once. An
     /// upgrade replaces the file under the path and a parent started after
     /// it runs an inode the publish never saw, so every exec of a path a
-    /// lineage rule names offers its inode here. A path no rule names, or an
+    /// rule names, as an executable or a lineage, offers its inode here. A path no rule names, or an
     /// inode already known, changes nothing; an old inode is kept, since the
     /// parents started before the upgrade still run it.
     ///
@@ -123,6 +123,10 @@ pub trait WorkloadPolicyMapPort: Send + Sync {
         dev: u64,
         inode: u64,
     ) -> Result<(), DomainError>;
+
+    /// Whether a rule names `path`, as an executable or a lineage, so the
+    /// caller reads a file's identity again only for a path that matters.
+    fn names_executable(&self, path: &str) -> bool;
 }
 
 #[cfg(test)]
