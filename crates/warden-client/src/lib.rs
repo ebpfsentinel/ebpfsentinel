@@ -32,8 +32,8 @@ pub use ebpfsentinel_warden_proto::{
     BindProbe, ConntrackRestore, ConntrackTuple, DlpTarget, ExecutableIdentity, FileRoot,
     FimCanary, FimEvent, FimFacts, FimFile, FimFileType, FimMark, FimReading, FimXattr,
     GoExecutable, GoExecutableScan, HeldBpfObjects, HiddenProcessReading, ListedPort, MappedFile,
-    MappingScan, NamespacePortReading, NetworkProgram, OPENER_READINGS_MAX, OpenIntent,
-    OpenerReading, PacketSocket, PidObservation, ProcessFactsReading, ProcessMappings,
+    MappingScan, NamespaceIdReading, NamespacePortReading, NetworkProgram, OPENER_READINGS_MAX,
+    OpenIntent, OpenerReading, PacketSocket, PidObservation, ProcessFactsReading, ProcessMappings,
     ProcessStamp, ROOTED_CHUNK_MAX, RootedFile, RootedRead, RouteSpec, TaskIdentity,
 };
 
@@ -89,6 +89,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::FimCanaries { .. } => "FimCanaries",
         Command::HiddenPorts { .. } => "HiddenPorts",
         Command::HiddenProcesses { .. } => "HiddenProcesses",
+        Command::NamespaceIds => "NamespaceIds",
         Command::FileRoots => "FileRoots",
         Command::ReadRootedFile { .. } => "ReadRootedFile",
         Command::GoExecutables => "GoExecutables",
@@ -345,6 +346,14 @@ impl WardenClient {
         })? {
             Response::HiddenPorts { namespaces } => Ok(namespaces),
             other => Err(unexpected("HiddenPorts", &other)),
+        }
+    }
+
+    /// Name every network namespace's id and a process inside it.
+    pub fn namespace_ids(&mut self) -> io::Result<Vec<NamespaceIdReading>> {
+        match self.call(&Command::NamespaceIds)? {
+            Response::NamespaceIds { namespaces } => Ok(namespaces),
+            other => Err(unexpected("NamespaceIds", &other)),
         }
     }
 
@@ -851,6 +860,12 @@ impl ReconnectingClient {
     /// bounced.
     pub fn hidden_ports(&mut self, ports: &[u16]) -> io::Result<Vec<NamespacePortReading>> {
         self.with_retry(|c| c.hidden_ports(ports))
+    }
+
+    /// Name every network namespace's id through the warden, reconnecting if
+    /// it bounced.
+    pub fn namespace_ids(&mut self) -> io::Result<Vec<NamespaceIdReading>> {
+        self.with_retry(WardenClient::namespace_ids)
     }
 
     /// Sweep for hidden processes through the warden, reconnecting if it

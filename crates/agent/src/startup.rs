@@ -3463,6 +3463,12 @@ pub async fn run(
             "cgroup-clusterip".to_string(),
             adapters::ebpf::clusterip::status().attached,
         );
+        // Readiness asks whether this agent runs anything in the kernel, and
+        // an agent configured without the firewall (one kept inside selected
+        // pods, or one that only detects) runs other programs and is ready.
+        if status.values().any(|loaded| *loaded) {
+            ebpf_loaded.store(true, Ordering::Relaxed);
+        }
     }
 
     // ── Anonymous usage telemetry ───────────────────────────────

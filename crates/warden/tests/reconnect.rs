@@ -20,13 +20,17 @@ fn current_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
-/// Poll a conntrack dump until it succeeds (the warden is up + reachable) or the
-/// deadline passes.
+/// Poll a conntrack dump until the warden answers it (it is up + reachable) or
+/// the deadline passes. A refusal the warden sends back is an answer: a dump
+/// needs `CAP_NET_ADMIN` where the kernel has no proc file, and a test run
+/// holds none.
 fn dump_until_ok(client: &mut ReconnectingClient, within: Duration) -> bool {
     let deadline = Instant::now() + within;
     while Instant::now() < deadline {
-        if client.conntrack_dump().is_ok() {
-            return true;
+        match client.conntrack_dump() {
+            Ok(_) => return true,
+            Err(e) if e.kind() == std::io::ErrorKind::Other => return true,
+            Err(_) => {}
         }
         std::thread::sleep(Duration::from_millis(10));
     }

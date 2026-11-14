@@ -1854,6 +1854,11 @@ pub async fn load_ebpf_programs(
         program_count = ebpf_state.loaders.len(),
         "eBPF programs loaded via load_ebpf_programs()"
     );
+    // Ready on any program, not only on the firewall: an agent configured
+    // without it still runs the others in the kernel.
+    if program_status.values().any(|loaded| *loaded) {
+        services.ebpf_loaded.store(true, Ordering::Relaxed);
+    }
 
     // ── Guard ──────────────────────────────────────────────────
     // Loaded last, so that its first reading of the agent's descriptors

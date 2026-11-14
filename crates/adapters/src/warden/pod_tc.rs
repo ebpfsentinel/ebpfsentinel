@@ -44,6 +44,14 @@ pub trait PodLinkAttach: Send {
         egress: bool,
         prog_fd: RawFd,
     ) -> io::Result<OwnedFd>;
+
+    /// The network namespace of each process the attacher may not stat
+    /// itself, by pid. A rootless agent is refused another task's
+    /// `ns/net`, so the one who can open it names it; the default names
+    /// nothing.
+    fn namespaces(&mut self) -> HashMap<u32, u64> {
+        HashMap::new()
+    }
 }
 
 /// The warden, over the one connection this attacher keeps.
@@ -69,6 +77,16 @@ impl PodLinkAttach for WardenPodLinks {
         prog_fd: RawFd,
     ) -> io::Result<OwnedFd> {
         self.client.attach_tcx_in_netns(pid, iface, egress, prog_fd)
+    }
+
+    fn namespaces(&mut self) -> HashMap<u32, u64> {
+        match self.client.namespace_ids() {
+            Ok(readings) => readings.into_iter().map(|r| (r.pid, r.netns)).collect(),
+            Err(error) => {
+                debug!(%error, "pod profile: the warden could not name the namespaces");
+                HashMap::new()
+            }
+        }
     }
 }
 
@@ -153,14 +171,15 @@ impl<A: PodLinkAttach> PodTcAttacher<A> {
             .map(|pod| (pod.uid.as_str(), pod))
             .collect();
         let processes = pod_processes(&self.proc_root);
+        let mut namespaces = Namespaces::new(self.proc_root.clone());
 
         let mut released = Vec::new();
         self.held.retain(|uid, links| {
             let keep = wanted.contains_key(uid.as_str())
                 && processes
                     .get(uid)
-                    .and_then(|pid| netns_inode(&self.proc_root, *pid))
-                    .is_some_and(|netns| netns == links.netns);
+                    .and_then(|pids| namespaces.of(&mut self.attach, pids))
+                    .is_some_and(|(_, netns)| netns == links.netns);
             if !keep {
                 released.push(uid.clone());
             }
@@ -172,11 +191,12 @@ impl<A: PodLinkAttach> PodTcAttacher<A> {
             if self.held.contains_key(uid) {
                 continue;
             }
-            let Some(&pid) = processes.get(uid) else {
+            let Some(pids) = processes.get(uid) else {
                 debug!(pod = %pod.name, namespace = %pod.namespace, "pod profile: no running process in the pod yet");
                 continue;
             };
-            let Some(netns) = netns_inode(&self.proc_root, pid) else {
+            let Some((pid, netns)) = namespaces.of(&mut self.attach, pids) else {
+                debug!(pod = %pod.name, namespace = %pod.namespace, "pod profile: the pod's network namespace could not be read");
                 continue;
             };
             let interfaces = interfaces_of(&self.proc_root, pid);
@@ -298,8 +318,38 @@ pub async fn run<A: PodLinkAttach + 'static>(
     }
 }
 
-/// One process per pod uid, read from the cgroup each process sits in.
-fn pod_processes(proc_root: &Path) -> HashMap<String, u32> {
+/// Where the namespace of a pod's processes is read: the procfs first, then,
+/// once per pass and only if the procfs refused one, whoever attaches.
+struct Namespaces {
+    proc_root: PathBuf,
+    brokered: Option<HashMap<u32, u64>>,
+}
+
+impl Namespaces {
+    fn new(proc_root: PathBuf) -> Self {
+        Self {
+            proc_root,
+            brokered: None,
+        }
+    }
+
+    /// The first of `pids` whose namespace reads, with that namespace.
+    fn of<A: PodLinkAttach>(&mut self, attach: &mut A, pids: &[u32]) -> Option<(u32, u64)> {
+        if let Some(found) = pids
+            .iter()
+            .find_map(|&pid| netns_inode(&self.proc_root, pid).map(|ns| (pid, ns)))
+        {
+            return Some(found);
+        }
+        let brokered = self.brokered.get_or_insert_with(|| attach.namespaces());
+        pids.iter()
+            .find_map(|pid| brokered.get(pid).map(|ns| (*pid, *ns)))
+    }
+}
+
+/// Every process of each pod uid, in pid order, read from the cgroup each
+/// process sits in.
+fn pod_processes(proc_root: &Path) -> HashMap<String, Vec<u32>> {
     let mut found = HashMap::new();
     let Ok(entries) = std::fs::read_dir(proc_root) else {
         return found;
@@ -316,8 +366,11 @@ fn pod_processes(proc_root: &Path) -> HashMap<String, u32> {
             continue;
         };
         if let Some(uid) = pod_uid_of(&cgroup) {
-            found.entry(uid).or_insert(pid);
+            found.entry(uid).or_insert_with(Vec::new).push(pid);
         }
+    }
+    for pids in found.values_mut() {
+        pids.sort_unstable();
     }
     found
 }
@@ -390,6 +443,7 @@ mod tests {
     struct Recorder {
         calls: Arc<Mutex<Vec<Call>>>,
         refuse_iface: Option<String>,
+        brokered: HashMap<u32, u64>,
     }
 
     impl PodLinkAttach for Recorder {
@@ -408,6 +462,10 @@ mod tests {
                 .unwrap()
                 .push((pid, iface.to_string(), egress, prog_fd));
             Ok(std::fs::File::open("/dev/null").unwrap().into())
+        }
+
+        fn namespaces(&mut self) -> HashMap<u32, u64> {
+            self.brokered.clone()
         }
     }
 
@@ -525,6 +583,29 @@ mod tests {
         let gone = attacher.reconcile(&[]);
         assert_eq!(gone.released, 1);
         assert_eq!(attacher.pod_count(), 0);
+    }
+
+    #[test]
+    fn a_namespace_the_procfs_refuses_is_named_by_the_broker() {
+        let dir = tempfile::tempdir().unwrap();
+        procfs(dir.path(), &[(4242, UID, "a")]);
+        // A rootless agent may not stat another task's namespace file.
+        std::fs::remove_file(dir.path().join("4242").join("ns").join("net")).unwrap();
+        let recorder = Recorder {
+            brokered: HashMap::from([(4242, 77)]),
+            ..Recorder::default()
+        };
+        let calls = Arc::clone(&recorder.calls);
+        let mut attacher =
+            PodTcAttacher::new(recorder, programs(), selector(), dir.path().to_path_buf());
+        let cart = pod(UID, "shop", &[("app", "cart")]);
+        assert_eq!(attacher.reconcile(std::slice::from_ref(&cart)).attached, 1);
+        assert!(calls.lock().unwrap().iter().all(|call| call.0 == 4242));
+        // Held while the broker keeps naming the same namespace.
+        assert_eq!(
+            attacher.reconcile(std::slice::from_ref(&cart)),
+            Reconciled::default()
+        );
     }
 
     #[test]

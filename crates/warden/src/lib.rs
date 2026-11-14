@@ -44,6 +44,7 @@ use std::ptr;
 
 pub mod bpf_inventory;
 pub mod cgroup_ops;
+pub mod ctnetlink;
 pub mod dlp_scan;
 pub mod exe_read;
 pub mod facts_read;
@@ -53,7 +54,9 @@ pub mod go_executables;
 pub mod hidden_ports;
 pub mod hidden_processes;
 pub mod host_ops;
+pub mod namespace_ids;
 pub mod net_ops;
+pub mod netlink;
 pub mod netns_tcx_ops;
 pub mod packet_sockets;
 pub mod pcap_slots;

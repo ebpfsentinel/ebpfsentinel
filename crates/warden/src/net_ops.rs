@@ -1,21 +1,24 @@
 //! Privileged host-network operations the warden performs for the rootless agent.
 //!
-//! Conntrack teardown (`conntrack -D`/`-F`), multi-WAN route programming
-//! (`ip route`), gratuitous ARP on VIP takeover, and opening an `AF_PACKET`
-//! capture socket all need `CAP_NET_ADMIN`/`CAP_NET_RAW` over the host network
-//! namespace - capabilities the BPF token can never grant. They therefore live
-//! here in the warden, which holds them, rather than in the agent.
+//! Conntrack teardown and restore, multi-WAN route programming, gratuitous ARP
+//! on VIP takeover, and opening an `AF_PACKET` capture socket all need
+//! `CAP_NET_ADMIN`/`CAP_NET_RAW` over the host network namespace - capabilities
+//! the BPF token can never grant. They therefore live here in the warden, which
+//! holds them, rather than in the agent.
 //!
-//! The command-building cores (`conntrack_delete_args`, `route_args`,
-//! `build_garp_frame`) are pure and unit-tested; the exec / raw-socket wrappers
-//! around them are exercised on their error paths (a bogus interface fails
+//! Conntrack and routes are spoken to over netlink, since the warden image
+//! carries no `conntrack` and no `ip`. The message builders and
+//! `build_garp_frame` are pure and unit-tested; the socket wrappers around them
+//! are exercised on their error paths (a bogus interface fails
 //! deterministically) and on the happy path in the VM lane.
 
+use std::net::IpAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::process::Command;
-use std::time::{Duration, Instant};
 
 use ebpfsentinel_warden_proto::{ConntrackRestore, ConntrackTuple, RouteSpec};
+
+use crate::ctnetlink;
+use crate::netlink::{self, Message, NLM_F_ACK, NLM_F_CREATE, NLM_F_REPLACE, NLM_F_REQUEST};
 
 // ── interface name / ifindex / MAC ────────────────────────────────────────
 
@@ -127,123 +130,133 @@ fn resolve_mac(iface: &str) -> Result<[u8; 6], String> {
     Ok(mac)
 }
 
-// ── conntrack teardown ────────────────────────────────────────────────────
+// ── conntrack ─────────────────────────────────────────────────────────────
 
-/// Map an IP protocol number to the `conntrack -p` name, if it is one the tool
-/// can target precisely.
-fn conntrack_proto(proto: u8) -> Option<&'static str> {
-    match proto {
-        6 => Some("tcp"),
-        17 => Some("udp"),
-        1 => Some("icmp"),
-        132 => Some("sctp"),
-        _ => None,
-    }
-}
-
-/// Build the `conntrack -D` argument vector that targets exactly the flow in
-/// `tuple`. Returns `None` for an untargetable request (unknown protocol, or no
-/// address/port narrowing at all) so the warden refuses rather than risk a
-/// table-wide delete.
-#[must_use]
-pub fn conntrack_delete_args(tuple: &ConntrackTuple) -> Option<Vec<String>> {
-    let proto = conntrack_proto(tuple.proto)?;
-    let mut args = vec!["-D".to_owned(), "-p".to_owned(), proto.to_owned()];
-    let mut narrowed = false;
-    if !tuple.src_ip.is_empty() {
-        args.push("-s".to_owned());
-        args.push(tuple.src_ip.clone());
-        narrowed = true;
-    }
-    if !tuple.dst_ip.is_empty() {
-        args.push("-d".to_owned());
-        args.push(tuple.dst_ip.clone());
-        narrowed = true;
-    }
-    if tuple.src_port != 0 {
-        args.push("--sport".to_owned());
-        args.push(tuple.src_port.to_string());
-        narrowed = true;
-    }
-    if tuple.dst_port != 0 {
-        args.push("--dport".to_owned());
-        args.push(tuple.dst_port.to_string());
-        narrowed = true;
-    }
-    narrowed.then_some(args)
-}
-
-/// Delete the flow described by `tuple` with `conntrack -D`.
+/// Delete the flows `tuple` names, over ctnetlink.
 pub fn conntrack_delete(tuple: &ConntrackTuple) -> Result<(), String> {
-    let args = conntrack_delete_args(tuple)
-        .ok_or_else(|| "conntrack delete needs a targetable protocol + tuple".to_owned())?;
-    // `conntrack -D` exits non-zero when nothing matched; that is not an error.
-    run_allow_nonzero("conntrack", &args)
+    ctnetlink::delete(tuple)
 }
 
-/// Write one established TCP flow with `conntrack -I`.
-///
-/// An entry the kernel already holds exits non-zero with "File exists", which
-/// leaves the flow tracked and is not an error.
+/// Write one established TCP flow, over ctnetlink.
 pub fn conntrack_restore(restore: &ConntrackRestore) -> Result<(), String> {
-    let args = restore
-        .args()
-        .ok_or_else(|| "conntrack restore needs a fully named TCP flow".to_owned())?;
-    run_allow_nonzero("conntrack", &args)
+    ctnetlink::restore(restore)
 }
 
-/// Flush the whole conntrack table with `conntrack -F`.
+/// Flush the whole conntrack table, over ctnetlink.
 pub fn conntrack_flush() -> Result<(), String> {
-    run("conntrack", &["-F".to_owned()])
+    ctnetlink::flush()
 }
 
 // ── multi-WAN routes ──────────────────────────────────────────────────────
 
-/// Build the `ip route` argument vector. `add` uses `replace` (idempotent);
-/// otherwise `del`.
-#[must_use]
-pub fn route_args(add: bool, route: &RouteSpec) -> Vec<String> {
-    let verb = if add { "replace" } else { "del" };
-    vec![
-        "route".to_owned(),
-        verb.to_owned(),
-        route.dst_cidr.clone(),
-        "via".to_owned(),
-        route.gateway.clone(),
-        "dev".to_owned(),
-        route.iface.clone(),
-        "table".to_owned(),
-        route.table.to_string(),
-    ]
+const RTM_NEWROUTE: u16 = 24;
+const RTM_DELROUTE: u16 = 25;
+const RTA_DST: u16 = 1;
+const RTA_OIF: u16 = 4;
+const RTA_GATEWAY: u16 = 5;
+const RTA_TABLE: u16 = 15;
+const RTPROT_BOOT: u8 = 3;
+const RT_SCOPE_UNIVERSE: u8 = 0;
+const RT_SCOPE_NOWHERE: u8 = 255;
+const RTN_UNICAST: u8 = 1;
+
+/// Accept a route destination: the literal `default`, a bare host address
+/// (v4/v6), or an `addr/prefix` CIDR with a prefix in range for the address
+/// family.
+fn valid_route_dst(dst: &str) -> bool {
+    parse_route_dst(dst).is_some()
 }
 
-/// Accept a route destination `ip` understands: the literal `default`, a bare
-/// host address (v4/v6), or an `addr/prefix` CIDR with a prefix in range for the
-/// address family. Defence in depth: the exec path passes argv (no shell), but a
-/// parsed destination keeps a compromised agent from steering `ip route` with a
-/// surprising token.
-fn valid_route_dst(dst: &str) -> bool {
-    use std::net::IpAddr;
+/// The destination as (address, prefix length); `None` for `default`'s
+/// address, which names no address at all.
+fn parse_route_dst(dst: &str) -> Option<(Option<IpAddr>, u8)> {
     if dst == "default" {
-        return true;
+        return Some((None, 0));
     }
     let (addr, prefix) = match dst.split_once('/') {
         Some((a, p)) => (a, Some(p)),
         None => (dst, None),
     };
-    let Ok(ip) = addr.parse::<IpAddr>() else {
-        return false;
+    let ip = addr.parse::<IpAddr>().ok()?;
+    let max = if ip.is_ipv4() { 32 } else { 128 };
+    let len = match prefix {
+        None => max,
+        Some(p) => p.parse::<u8>().ok().filter(|n| *n <= max)?,
     };
-    match prefix {
-        None => true,
-        Some(p) => {
-            let max = if ip.is_ipv4() { 32 } else { 128 };
-            p.parse::<u8>().is_ok_and(|n| n <= max)
-        }
+    Some((Some(ip), len))
+}
+
+fn octets(ip: IpAddr) -> Vec<u8> {
+    match ip {
+        IpAddr::V4(v4) => v4.octets().to_vec(),
+        IpAddr::V6(v6) => v6.octets().to_vec(),
     }
 }
 
-/// Add (`replace`) or delete a route via `ip route`.
+/// The rtnetlink request adding (replacing) or deleting `spec` through the
+/// interface numbered `ifindex`.
+fn route_message(add: bool, spec: &RouteSpec, ifindex: u32) -> Result<Vec<u8>, String> {
+    let (dst, prefix) = parse_route_dst(&spec.dst_cidr)
+        .ok_or_else(|| format!("invalid route destination '{}'", spec.dst_cidr))?;
+    let gateway = spec
+        .gateway
+        .parse::<IpAddr>()
+        .map_err(|_| format!("invalid route gateway '{}'", spec.gateway))?;
+    if dst.is_some_and(|d| d.is_ipv4() != gateway.is_ipv4()) {
+        return Err(format!(
+            "route destination '{}' and gateway '{}' are of different families",
+            spec.dst_cidr, spec.gateway
+        ));
+    }
+    let family = if gateway.is_ipv4() {
+        libc::AF_INET
+    } else {
+        libc::AF_INET6
+    };
+    let family = u8::try_from(family).unwrap_or(2);
+    // A table past 255 is named only by its attribute.
+    let header_table = u8::try_from(spec.table).unwrap_or(0);
+    let (kind, flags, protocol, scope, route_type) = if add {
+        (
+            RTM_NEWROUTE,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
+            RTPROT_BOOT,
+            RT_SCOPE_UNIVERSE,
+            RTN_UNICAST,
+        )
+    } else {
+        (
+            RTM_DELROUTE,
+            NLM_F_REQUEST | NLM_F_ACK,
+            0,
+            RT_SCOPE_NOWHERE,
+            0,
+        )
+    };
+    // struct rtmsg: family, dst_len, src_len, tos, table, protocol, scope,
+    // type, flags.
+    let mut rtmsg = [0u8; 12];
+    rtmsg[..8].copy_from_slice(&[
+        family,
+        prefix,
+        0,
+        0,
+        header_table,
+        protocol,
+        scope,
+        route_type,
+    ]);
+    let mut msg = Message::new(kind, flags, &rtmsg);
+    if let Some(dst) = dst {
+        msg.attr(RTA_DST, &octets(dst));
+    }
+    msg.attr(RTA_GATEWAY, &octets(gateway))
+        .attr(RTA_OIF, &ifindex.to_ne_bytes())
+        .attr(RTA_TABLE, &spec.table.to_ne_bytes());
+    Ok(msg.finish())
+}
+
+/// Add (replacing) or delete a route, over rtnetlink.
 pub fn route(add: bool, route_spec: &RouteSpec) -> Result<(), String> {
     name_to_cbuf(&route_spec.iface)?; // reject a malformed interface name early
     if !valid_route_dst(&route_spec.dst_cidr) {
@@ -252,11 +265,23 @@ pub fn route(add: bool, route_spec: &RouteSpec) -> Result<(), String> {
             route_spec.dst_cidr
         ));
     }
-    route_spec
-        .gateway
-        .parse::<std::net::IpAddr>()
-        .map_err(|_| format!("invalid route gateway '{}'", route_spec.gateway))?;
-    run("ip", &route_args(add, route_spec))
+    let ifindex = resolve_ifindex(&route_spec.iface)?;
+    let request = route_message(add, route_spec, ifindex)?;
+    let sock = netlink::Socket::open(libc::NETLINK_ROUTE)
+        .map_err(|e| format!("open the route netlink socket: {e}"))?;
+    match sock.exchange(&request) {
+        Ok(_) => Ok(()),
+        // Already gone: what a delete asks for holds.
+        Err(e) if !add && e.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+        Err(e) => Err(format!(
+            "{} route {} via {} dev {} table {}: {e}",
+            if add { "replace" } else { "delete" },
+            route_spec.dst_cidr,
+            route_spec.gateway,
+            route_spec.iface,
+            route_spec.table
+        )),
+    }
 }
 
 // ── gratuitous ARP ────────────────────────────────────────────────────────
@@ -409,215 +434,70 @@ pub fn open_pcap_fd(iface: &str) -> Result<OwnedFd, String> {
     Ok(sock)
 }
 
-// ── exec helpers ──────────────────────────────────────────────────────────
-
-/// How long a helper process (`ip`, `conntrack`) may run before the warden
-/// kills it and answers with an error.
-///
-/// Both of these finish in milliseconds when the kernel answers. When it does
-/// not - a netlink socket that never replies, a table lock held by something
-/// else - `status()` waits forever, and because the warden serves one
-/// connection per thread the agent's call waits with it: the caller's own
-/// timeout fires, the agent reconnects, and this thread stays parked on a child
-/// nobody is waiting for any more. Killing the child is what keeps the two ends
-/// agreeing about what is still running.
-const CHILD_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How often the wait loop looks at the child. A control-plane call is rare and
-/// the work is milliseconds, so this costs nothing and keeps the latency added
-/// by the poll below one tick of anything that measures it.
-const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
-
-/// Spawn `cmd args` and wait for it, killing it once `timeout` has passed.
-fn run_bounded(
-    cmd: &str,
-    args: &[String],
-    timeout: Duration,
-) -> Result<std::process::ExitStatus, String> {
-    let mut child = Command::new(cmd)
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| {
-            format!("failed to run `{cmd}`: {e} (is it installed in the warden image?)")
-        })?;
-
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
-            Ok(None) => {}
-            Err(e) => return Err(format!("failed to wait for `{cmd}`: {e}")),
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            // Reap it, or the warden accumulates zombies for as long as it runs.
-            let _ = child.wait();
-            return Err(format!(
-                "`{cmd}` did not finish within {timeout:?} and was killed"
-            ));
-        }
-        std::thread::sleep(CHILD_POLL_INTERVAL);
-    }
-}
-
-/// Dump the conntrack table with `conntrack -L`, bounded by [`CHILD_TIMEOUT`].
-///
-/// The fallback for a kernel built without `CONFIG_NF_CONNTRACK_PROCFS`, where
-/// the table is live and only the proc file is missing. `None` when
-/// conntrack-tools is not installed, so the caller can tell an absent tool from
-/// a dump that failed. The output differs from the proc file only by its two
-/// leading address-family fields, which the agent's parser detects.
-pub fn conntrack_list() -> Result<Option<Vec<u8>>, String> {
-    use std::io::Read as _;
-    let mut child = match Command::new("conntrack")
-        .arg("-L")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("failed to run `conntrack -L`: {e}")),
-    };
-    // Drained on its own thread: a table larger than the pipe buffer would
-    // otherwise block the child on a write nobody reads, and the wait below
-    // would read that as a hang.
-    let reader = child.stdout.take().map(|mut out| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            out.read_to_end(&mut bytes).map(|_| bytes)
-        })
-    });
-    let deadline = Instant::now() + CHILD_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {}
-            Err(e) => return Err(format!("failed to wait for `conntrack -L`: {e}")),
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!(
-                "`conntrack -L` did not finish within {CHILD_TIMEOUT:?} and was killed"
-            ));
-        }
-        std::thread::sleep(CHILD_POLL_INTERVAL);
-    };
-    if !status.success() {
-        return Err(format!("`conntrack -L` exited with {status}"));
-    }
-    match reader.map(std::thread::JoinHandle::join) {
-        Some(Ok(Ok(bytes))) => Ok(Some(bytes)),
-        Some(Ok(Err(e))) => Err(format!("read `conntrack -L` output: {e}")),
-        Some(Err(_)) => Err("the `conntrack -L` reader thread panicked".to_owned()),
-        None => Ok(Some(Vec::new())),
-    }
-}
-
-/// Run `cmd args`, requiring success, bounded by [`CHILD_TIMEOUT`].
-fn run(cmd: &str, args: &[String]) -> Result<(), String> {
-    let status = run_bounded(cmd, args, CHILD_TIMEOUT)?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("`{cmd}` exited with {status}"))
-    }
-}
-
-/// Run `cmd args`, treating a non-zero exit as success (used for `conntrack -D`,
-/// which exits non-zero when no flow matched - not an error here). A child that
-/// hangs is still an error: it is the wait that matters, not the exit code.
-fn run_allow_nonzero(cmd: &str, args: &[String]) -> Result<(), String> {
-    run_bounded(cmd, args, CHILD_TIMEOUT).map(|_| ())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        CHILD_TIMEOUT, build_garp_frame, conntrack_delete_args, name_to_cbuf, route_args,
-        run_bounded, valid_route_dst,
+        RTA_DST, RTA_GATEWAY, RTA_OIF, RTA_TABLE, build_garp_frame, name_to_cbuf, netlink,
+        route_message, valid_route_dst,
     };
-    use ebpfsentinel_warden_proto::{ConntrackTuple, RouteSpec};
-
-    fn tuple(proto: u8, src: &str, dst: &str, sp: u16, dp: u16) -> ConntrackTuple {
-        ConntrackTuple {
-            proto,
-            src_ip: src.to_owned(),
-            dst_ip: dst.to_owned(),
-            src_port: sp,
-            dst_port: dp,
-        }
-    }
+    use ebpfsentinel_warden_proto::RouteSpec;
 
     #[test]
-    fn a_child_that_finishes_is_waited_for_normally() {
-        let status = run_bounded("true", &[], CHILD_TIMEOUT).expect("`true` runs");
-        assert!(status.success());
-    }
-
-    #[test]
-    fn a_child_that_never_finishes_is_killed_and_named() {
-        let err = run_bounded(
-            "sleep",
-            &["30".to_owned()],
-            std::time::Duration::from_millis(100),
-        )
-        .expect_err("a child past its deadline is an error, not a wait");
-        assert!(
-            err.contains("sleep") && err.contains("did not finish"),
-            "the error must name the command that hung, got: {err}"
-        );
-    }
-
-    #[test]
-    fn conntrack_args_target_the_tuple() {
-        let args = conntrack_delete_args(&tuple(6, "", "", 0, 443)).unwrap();
-        assert_eq!(args, ["-D", "-p", "tcp", "--dport", "443"]);
-
-        let args = conntrack_delete_args(&tuple(17, "10.0.0.1", "8.8.8.8", 5353, 53)).unwrap();
-        assert_eq!(
-            args,
-            [
-                "-D", "-p", "udp", "-s", "10.0.0.1", "-d", "8.8.8.8", "--sport", "5353", "--dport",
-                "53"
-            ]
-        );
-    }
-
-    #[test]
-    fn conntrack_refuses_untargetable() {
-        // Unknown protocol.
-        assert!(conntrack_delete_args(&tuple(200, "1.2.3.4", "", 0, 0)).is_none());
-        // Known protocol but no narrowing at all → would be a table-wide delete.
-        assert!(conntrack_delete_args(&tuple(6, "", "", 0, 0)).is_none());
-    }
-
-    #[test]
-    fn route_args_build_ip_command() {
+    fn a_route_names_its_table_gateway_and_interface() {
         let spec = RouteSpec {
-            dst_cidr: "0.0.0.0/0".to_owned(),
+            dst_cidr: "203.0.113.0/24".to_owned(),
+            gateway: "10.0.0.254".to_owned(),
+            iface: "enp0s2".to_owned(),
+            table: 300,
+        };
+        let msg = route_message(true, &spec, 7).unwrap();
+        let rtmsg = &msg[netlink::NLMSG_HDRLEN..netlink::NLMSG_HDRLEN + 12];
+        assert_eq!(rtmsg[0], 2); // AF_INET
+        assert_eq!(rtmsg[1], 24); // prefix length
+        assert_eq!(rtmsg[4], 0); // table past 255 named by attribute only
+        let attrs = &msg[netlink::NLMSG_HDRLEN + 12..];
+        assert_eq!(
+            netlink::attribute(attrs, RTA_DST),
+            Some(&[203, 0, 113, 0][..])
+        );
+        assert_eq!(
+            netlink::attribute(attrs, RTA_GATEWAY),
+            Some(&[10, 0, 0, 254][..])
+        );
+        assert_eq!(
+            netlink::attribute(attrs, RTA_OIF),
+            Some(&7u32.to_ne_bytes()[..])
+        );
+        assert_eq!(
+            netlink::attribute(attrs, RTA_TABLE),
+            Some(&300u32.to_ne_bytes()[..])
+        );
+    }
+
+    #[test]
+    fn a_default_route_names_no_destination() {
+        let spec = RouteSpec {
+            dst_cidr: "default".to_owned(),
             gateway: "10.0.0.254".to_owned(),
             iface: "enp0s2".to_owned(),
             table: 100,
         };
-        assert_eq!(
-            route_args(true, &spec),
-            [
-                "route",
-                "replace",
-                "0.0.0.0/0",
-                "via",
-                "10.0.0.254",
-                "dev",
-                "enp0s2",
-                "table",
-                "100"
-            ]
-        );
-        assert_eq!(route_args(false, &spec)[1], "del");
+        let msg = route_message(false, &spec, 7).unwrap();
+        assert_eq!(msg[netlink::NLMSG_HDRLEN + 1], 0);
+        assert_eq!(msg[netlink::NLMSG_HDRLEN + 4], 100);
+        let attrs = &msg[netlink::NLMSG_HDRLEN + 12..];
+        assert!(netlink::attribute(attrs, RTA_DST).is_none());
+    }
+
+    #[test]
+    fn a_route_mixing_families_is_refused() {
+        let spec = RouteSpec {
+            dst_cidr: "2001:db8::/32".to_owned(),
+            gateway: "10.0.0.254".to_owned(),
+            iface: "enp0s2".to_owned(),
+            table: 100,
+        };
+        assert!(route_message(true, &spec, 7).is_err());
     }
 
     #[test]

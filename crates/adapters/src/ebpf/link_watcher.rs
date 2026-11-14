@@ -1019,19 +1019,64 @@ pub fn network_namespaces(proc_root: &Path) -> Vec<(u32, u64)> {
 /// namespace and kept while the namespace lives. A namespace that has no id
 /// yet is asked again next time: the kernel assigns one when a link's peer is
 /// first reported in it.
+///
+/// Opening another process's namespace takes the ptrace right over it, which
+/// a rootless agent does not hold: where `EBPFSENTINEL_WARDEN_SOCK` names a
+/// warden, the warden asks for every namespace and the agent reads the cgroup
+/// of the process it names, which needs no right.
 pub struct OwnerResolver {
     proc_root: PathBuf,
     nsid_by_inode: HashMap<u64, i32>,
+    warden: Option<ebpfsentinel_warden_client::ReconnectingClient>,
 }
 
 impl OwnerResolver {
     /// A resolver reading `proc_root`.
     #[must_use]
     pub fn new(proc_root: PathBuf) -> Self {
+        let warden = std::env::var_os("EBPFSENTINEL_WARDEN_SOCK")
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(ebpfsentinel_warden_client::ReconnectingClient::new);
         Self {
             proc_root,
             nsid_by_inode: HashMap::new(),
+            warden,
         }
+    }
+
+    /// The owner of `pid`, which sits in namespace `ns_inode`.
+    fn owner(&self, pid: u32, ns_inode: u64) -> LinkOwner {
+        let container =
+            std::fs::read_to_string(self.proc_root.join(pid.to_string()).join("cgroup"))
+                .ok()
+                .and_then(|raw| parse_cgroup_payload(&raw, pid));
+        LinkOwner {
+            pid,
+            ns_inode,
+            container,
+        }
+    }
+
+    /// The owners of the wanted ids, as the warden names the namespaces.
+    fn resolve_through_warden(&mut self, wanted: &HashSet<i32>) -> Option<HashMap<i32, LinkOwner>> {
+        let readings = match self.warden.as_mut()?.namespace_ids() {
+            Ok(readings) => readings,
+            Err(error) => {
+                debug!(%error, "hot-plug: the warden could not name the namespace ids");
+                return Some(HashMap::new());
+            }
+        };
+        let mut found = HashMap::new();
+        for reading in readings {
+            if let Some(nsid) = reading.nsid
+                && wanted.contains(&nsid)
+                && !found.contains_key(&nsid)
+            {
+                found.insert(nsid, self.owner(reading.pid, reading.netns));
+            }
+        }
+        Some(found)
     }
 
     /// The owner of every namespace id in `wanted` that a process in the
@@ -1039,6 +1084,9 @@ impl OwnerResolver {
     pub fn resolve(&mut self, wanted: &HashSet<i32>) -> HashMap<i32, LinkOwner> {
         let mut found = HashMap::new();
         if wanted.is_empty() {
+            return found;
+        }
+        if let Some(found) = self.resolve_through_warden(wanted) {
             return found;
         }
         let sock = match NetlinkSocket::open(0, false) {
@@ -1066,18 +1114,7 @@ impl OwnerResolver {
                 && wanted.contains(&nsid)
                 && !found.contains_key(&nsid)
             {
-                let container =
-                    std::fs::read_to_string(self.proc_root.join(pid.to_string()).join("cgroup"))
-                        .ok()
-                        .and_then(|raw| parse_cgroup_payload(&raw, pid));
-                found.insert(
-                    nsid,
-                    LinkOwner {
-                        pid,
-                        ns_inode: ino,
-                        container,
-                    },
-                );
+                found.insert(nsid, self.owner(pid, ino));
             }
         }
         found

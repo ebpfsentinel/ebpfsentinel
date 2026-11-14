@@ -26,8 +26,8 @@ use crate::pcap_slots::{PcapSlot, PcapSlots};
 use crate::write_refusal;
 use crate::{
     bpf_inventory, cgroup_ops, delegate_over_fd, dlp_scan, exe_read, facts_read, go_executables,
-    hidden_ports, hidden_processes, net_ops, netns_tcx_ops, packet_sockets, podman_connect,
-    process_maps, recv_fd, rooted_read, send_msg_fds, served_peer, uprobe_ops,
+    hidden_ports, hidden_processes, namespace_ids, net_ops, netns_tcx_ops, packet_sockets,
+    podman_connect, process_maps, recv_fd, rooted_read, send_msg_fds, served_peer, uprobe_ops,
 };
 
 /// How long a connection may hold a thread without saying `Hello`.
@@ -734,6 +734,9 @@ fn dispatch(cmd: &Command, host: &dyn HostOps, proc_root: &Path) -> Response {
         },
         Command::HiddenPorts { ports } => Response::HiddenPorts {
             namespaces: hidden_ports::scan(proc_root, ports),
+        },
+        Command::NamespaceIds => Response::NamespaceIds {
+            namespaces: namespace_ids::scan(proc_root),
         },
         Command::HiddenProcesses { rate } => Response::HiddenProcesses {
             reading: hidden_processes::scan(proc_root, *rate),

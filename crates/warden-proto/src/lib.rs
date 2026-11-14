@@ -63,8 +63,9 @@ pub struct ConntrackRestore {
 pub const CONNTRACK_RESTORE_TIMEOUT_SECS: u32 = 120;
 
 impl ConntrackRestore {
-    /// The `conntrack -I` argument vector both ends run, or `None` for anything
-    /// but a fully named TCP flow. Every address must parse, so a compromised
+    /// The `conntrack -I` argument vector an agent holding the capability runs
+    /// itself, or `None` for anything but a fully named TCP flow, which the
+    /// warden refuses the same way before writing over netlink. Every address must parse, so a compromised
     /// caller cannot slip an option through a field.
     #[must_use]
     pub fn args(&self) -> Option<Vec<String>> {
@@ -476,6 +477,18 @@ pub struct HiddenProcessReading {
     pub relisted: Vec<u32>,
     /// Of those, the pids that answered the second signal, observed again.
     pub second: Vec<PidObservation>,
+}
+
+/// One network namespace, the id it carries and a process inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceIdReading {
+    /// The namespace's inode.
+    pub netns: u64,
+    /// The id it carries as seen from the warden's namespace, `None` when the
+    /// kernel has given it none yet.
+    pub nsid: Option<i32>,
+    /// The lowest pid sitting in it.
+    pub pid: u32,
 }
 
 /// What the hidden port probe read inside one network namespace.
@@ -1043,6 +1056,11 @@ pub enum Command {
         /// The flow to restore.
         restore: ConntrackRestore,
     },
+    /// Name, for every network namespace `/proc` shows, the id it carries as
+    /// seen from the warden's own namespace and one process sitting in it,
+    /// answered by [`Response::NamespaceIds`]. Read-only: a rootless agent
+    /// cannot open another user's namespace to ask, so the warden asks for it.
+    NamespaceIds,
 }
 
 /// The most servers one [`Command::ReadShareWriters`] reads.
@@ -1224,6 +1242,9 @@ pub enum Response {
     },
     /// The two readings, answering [`Command::HiddenProcesses`].
     HiddenProcesses { reading: HiddenProcessReading },
+    /// One entry per network namespace found, answering
+    /// [`Command::NamespaceIds`].
+    NamespaceIds { namespaces: Vec<NamespaceIdReading> },
     /// The roots found, answering [`Command::FileRoots`].
     FileRoots { roots: Vec<FileRoot> },
     /// What was read, answering [`Command::ReadRootedFile`].
@@ -1280,10 +1301,10 @@ mod tests {
     use super::{
         BindProbe, Command, ConntrackRestore, ConntrackTuple, DlpTarget, ExecutableIdentity,
         FileRoot, GoExecutable, GoExecutableScan, HiddenProcessReading, ListedPort, MAX_FRAME_LEN,
-        MappedFile, MappingScan, NamespacePortReading, NetworkProgram, OpenIntent, OpenerReading,
-        PacketSocket, PidObservation, ProcessFactsReading, ProcessMappings, ProcessStamp,
-        ROOTED_CHUNK_MAX, Response, RootedFile, RootedRead, RouteSpec, TaskIdentity, read_frame,
-        valid_dpkg_list_name, write_frame,
+        MappedFile, MappingScan, NamespaceIdReading, NamespacePortReading, NetworkProgram,
+        OpenIntent, OpenerReading, PacketSocket, PidObservation, ProcessFactsReading,
+        ProcessMappings, ProcessStamp, ROOTED_CHUNK_MAX, Response, RootedFile, RootedRead,
+        RouteSpec, TaskIdentity, read_frame, valid_dpkg_list_name, write_frame,
     };
     use std::io::Cursor;
 
@@ -1410,6 +1431,7 @@ mod tests {
                 ports: vec![22, 31_337],
             },
             Command::HiddenProcesses { rate: 1_000_000 },
+            Command::NamespaceIds,
             Command::FileRoots,
             Command::ReadRootedFile {
                 pid: 4242,
@@ -1528,6 +1550,20 @@ mod tests {
     /// The answers of the two hidden checks.
     fn hidden_responses() -> Vec<Response> {
         vec![
+            Response::NamespaceIds {
+                namespaces: vec![
+                    NamespaceIdReading {
+                        netns: 4_026_532_301,
+                        nsid: Some(3),
+                        pid: 4242,
+                    },
+                    NamespaceIdReading {
+                        netns: 4_026_531_840,
+                        nsid: None,
+                        pid: 1,
+                    },
+                ],
+            },
             Response::HiddenPorts {
                 namespaces: vec![
                     NamespacePortReading {

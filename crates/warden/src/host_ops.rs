@@ -1,7 +1,7 @@
 //! Host-network operations the warden performs that need authority over the
 //! **init** network namespace - conntrack teardown, route programming, gratuitous
 //! ARP - plus the conntrack-table read of the `0440 root` proc file, or of
-//! `conntrack -L` on a kernel that has none.
+//! a ctnetlink dump on a kernel that has none.
 //!
 //! A conntrack/route/ARP op is netlink (or an `AF_PACKET` send), and the kernel
 //! re-checks `CAP_NET_ADMIN`/`CAP_NET_RAW` against the init netns on **every**
@@ -56,12 +56,10 @@ impl HostOps for LocalHostOps {
         match fs::read(NF_CONNTRACK_PROC) {
             Ok(table) => Ok(table),
             // An absent proc file is either a kernel built without
-            // CONFIG_NF_CONNTRACK_PROCFS, where the table is live and
-            // conntrack-tools reads it, or conntrack not loaded at all, which is
-            // an empty table rather than an error.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                Ok(net_ops::conntrack_list()?.unwrap_or_default())
-            }
+            // CONFIG_NF_CONNTRACK_PROCFS, where the table is live and only
+            // ctnetlink reads it, or conntrack not loaded at all, which the
+            // dump answers with an empty table.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => crate::ctnetlink::dump(),
             Err(e) => Err(format!("read {NF_CONNTRACK_PROC}: {e}")),
         }
     }

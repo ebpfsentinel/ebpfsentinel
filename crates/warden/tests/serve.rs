@@ -84,11 +84,19 @@ fn handshake_then_conntrack() {
         }
     );
 
-    // ConntrackDump is wired: a Conntrack reply (table may be empty when the proc
-    // file is unreadable as a test user) - never an error.
+    // ConntrackDump is wired: the table, or, on a kernel without the proc file,
+    // the refusal of a dump a test user holds no `CAP_NET_ADMIN` for, named as
+    // such rather than passed off as an empty table.
     write_frame(&mut s, &Command::ConntrackDump).unwrap();
     let resp: Response = read_frame(&mut s).unwrap();
-    assert!(matches!(resp, Response::Conntrack { .. }), "got {resp:?}");
+    assert!(
+        match &resp {
+            Response::Conntrack { .. } => true,
+            Response::Error { message } => message.contains("conntrack"),
+            _ => false,
+        },
+        "got {resp:?}"
+    );
 
     drop(guard);
 }
