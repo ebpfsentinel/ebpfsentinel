@@ -542,9 +542,22 @@ SYSCTL
       set -euxo pipefail
 
       if ! command -v rustc &>/dev/null; then
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
       fi
       source "$HOME/.cargo/env"
+
+      # The tree asks for `stable`, which is whatever stable was on the day
+      # the machine was provisioned: a box made a week after the workstation
+      # builds with a newer compiler, meets lints the workstation has not seen
+      # and rebuilds every crate the first time the two disagree. The machine
+      # builds with the workspace's `rust-version` instead, the compiler the
+      # tree promises to build on, through a directory override that outranks
+      # the toolchain file. The eBPF objects keep their dated nightly, which
+      # the xtask names on the command line and which outranks the override.
+      msrv="$(awk -F'"' '/^rust-version/ {print $2; exit}' /home/vagrant/ebpfsentinel/Cargo.toml)"
+      test -n "$msrv"
+      rustup toolchain install "$msrv" --profile minimal --component rustfmt --component clippy --component rust-src
+      rustup override set "$msrv" --path /home/vagrant/ebpfsentinel
 
       # Same LLVM, same linker version and same dated nightly as the
       # install-bpf-linker action, for the reasons written there: the box
