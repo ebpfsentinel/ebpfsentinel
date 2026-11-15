@@ -3,15 +3,15 @@ name = "infrastructure"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 
 [dependencies]
 domain = { workspace = true }
 ebpf-common = { workspace = true }
-axum = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_norway = { workspace = true }
@@ -19,7 +19,6 @@ regex = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-anyhow = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]

@@ -110,12 +110,10 @@ pub fn scan(proc_root: &Path) -> GoExecutableScan {
             continue;
         }
         carried += size;
-        let path = std::fs::read_link(&link)
-            .map(|t| {
-                let t = t.to_string_lossy();
-                t.strip_suffix(DELETED_SUFFIX).unwrap_or(&t).to_owned()
-            })
-            .unwrap_or_default();
+        let path = std::fs::read_link(&link).map_or_default(|t| {
+            let t = t.to_string_lossy();
+            t.strip_suffix(DELETED_SUFFIX).unwrap_or(&t).to_owned()
+        });
         let root = std::fs::metadata(dir.join("root"))
             .ok()
             .map(|m| (m.dev(), m.ino()));

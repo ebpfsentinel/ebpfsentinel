@@ -120,8 +120,7 @@ pub async fn list_ips_rules(State(state): State<Arc<AppState>>) -> Json<Vec<IpsR
     let shadows = state
         .ids_service
         .as_ref()
-        .map(|ids| ids.load().slot_shadows())
-        .unwrap_or_default();
+        .map_or_default(|ids| ids.load().slot_shadows());
     let rules: Vec<IpsRuleResponse> = svc
         .list_rules()
         .iter()

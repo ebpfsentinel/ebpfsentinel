@@ -206,8 +206,7 @@ impl CryptoAttacher {
             let base = path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(str::to_owned)
-                .unwrap_or_default();
+                .map_or_default(str::to_owned);
             let Some(symbols) = entry_points_of(&base) else {
                 continue;
             };

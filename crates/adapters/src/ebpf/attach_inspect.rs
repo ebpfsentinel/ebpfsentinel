@@ -254,7 +254,7 @@ pub fn clear_block(program: &str, interface: &str) {
 /// Every attach currently blocked.
 #[must_use]
 pub fn blocked_attaches() -> Vec<AttachBlock> {
-    blocks().lock().map(|g| g.clone()).unwrap_or_default()
+    blocks().lock().map_or_default(|g| g.clone())
 }
 
 /// Drop every recorded block. Used when the whole eBPF state is torn down, so
@@ -726,12 +726,10 @@ fn parse_qdisc_dump(
                     let attrs = msg
                         .get(nla_align(tcm + size_of::<TcMsg>())..)
                         .unwrap_or_default();
-                    let kind = find_attr(attrs, TCA_KIND)
-                        .map(|raw| {
-                            let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
-                            String::from_utf8_lossy(&raw[..end]).into_owned()
-                        })
-                        .unwrap_or_default();
+                    let kind = find_attr(attrs, TCA_KIND).map_or_default(|raw| {
+                        let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+                        String::from_utf8_lossy(&raw[..end]).into_owned()
+                    });
                     out.push(QdiscEntry {
                         handle,
                         parent,

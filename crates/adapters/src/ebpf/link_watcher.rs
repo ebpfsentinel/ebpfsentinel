@@ -896,8 +896,7 @@ impl LinkHotPlugRegistry {
         let targets: Vec<(Attach, Option<LinkOwner>)> = self
             .targets
             .lock()
-            .map(|t| t.values().cloned().collect())
-            .unwrap_or_default();
+            .map_or_default(|t| t.values().cloned().collect());
         for (target, owner) in targets {
             let ifindex = target.link.ifindex;
             let claim = owner_pod_uid(owner.as_ref()).and_then(|uid| current.get(&uid));

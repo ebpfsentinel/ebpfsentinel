@@ -288,8 +288,7 @@ impl AlertPipeline {
         self.attribute(alert);
         self.enricher
             .as_ref()
-            .map(|enricher| enricher.enrich_alert(alert))
-            .unwrap_or_default()
+            .map_or_default(|enricher| enricher.enrich_alert(alert))
     }
 
     /// Name the workload behind the alert's flow, for every family at once.

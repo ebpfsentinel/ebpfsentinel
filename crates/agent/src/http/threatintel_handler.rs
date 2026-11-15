@@ -215,7 +215,7 @@ pub async fn refresh_feeds(
     if let Some(Extension(ref claims)) = claims {
         require_write_access(claims)?;
     }
-    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let req = body.map_or_default(|Json(b)| b);
     let trigger =
         state
             .feed_refresh_trigger

@@ -473,8 +473,7 @@ impl Decider {
             name: file
                 .path
                 .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+                .map_or_default(|n| n.to_string_lossy().into_owned()),
             directory: Some(watched.configured.clone()),
             count,
             hook: WriteRefusalHook::Open,

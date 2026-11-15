@@ -1007,10 +1007,7 @@ impl FileWatcher {
             }
         };
         self.feed(fact, pending, rooted, kept.as_ref());
-        let drift = kept
-            .as_ref()
-            .map(|old| old.drift(&fact.reading))
-            .unwrap_or_default();
+        let drift = kept.as_ref().map_or_default(|old| old.drift(&fact.reading));
         if kept.is_some() {
             self.guard(path, &pending.kinds, &drift, pid);
         }

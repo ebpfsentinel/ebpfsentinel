@@ -350,8 +350,7 @@ fn parse_list_response(raw: &[u8]) -> Result<Vec<ListedContainer>, ContainerErro
             name: container
                 .names
                 .first()
-                .map(|name| name.trim_start_matches('/').to_string())
-                .unwrap_or_default(),
+                .map_or_default(|name| name.trim_start_matches('/').to_string()),
             labels: container.labels.unwrap_or_default().into_iter().collect(),
         })
         .collect())

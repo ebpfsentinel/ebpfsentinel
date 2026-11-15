@@ -1162,8 +1162,7 @@ pub async fn stream_alerts(
     let replay = state
         .alert_replay_buffer
         .as_ref()
-        .map(|buf| buf.snapshot_after(resume_from.as_deref()))
-        .unwrap_or_default();
+        .map_or_default(|buf| buf.snapshot_after(resume_from.as_deref()));
     let rx = tx.subscribe();
 
     // An alert is pushed to the replay buffer *before* it is broadcast, so

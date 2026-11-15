@@ -21,3 +21,6 @@ utoipa = { workspace = true }
 # feature pulls k8s-openapi as a library dep, and any binary crate at the top
 # of the dep graph must select a version.
 k8s-openapi = { workspace = true, features = ["v1_32"] }
+
+# A build tool run on the developer's machine: compiler defaults.
+[lints]

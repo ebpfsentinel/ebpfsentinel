@@ -3610,8 +3610,7 @@ fn intents_fired(alerts: &[&AlertResponse], rules: &[HostRuleEntry]) -> Vec<Inte
         let intents = rules
             .iter()
             .find(|r| r.id == alert.rule_id)
-            .map(|r| r.intents.iter().map(|i| i.name.clone()).collect())
-            .unwrap_or_default();
+            .map_or_default(|r| r.intents.iter().map(|i| i.name.clone()).collect());
         fired.push(IntentsFired {
             rule: alert.rule_id.clone(),
             alerts: 1,
@@ -3634,29 +3633,25 @@ fn same_process(entry: &ProcessEntryResponse, start_ns: Option<u64>) -> bool {
 /// The lineage of `process`, oldest ancestor first and the process last.
 /// `live` holds the table's current entry for each ancestor that answered.
 fn lineage(process: &ProcessEntryResponse, live: &[ProcessEntryResponse]) -> Vec<LineageStep> {
-    let mut steps: Vec<LineageStep> = process
-        .ancestry
-        .as_ref()
-        .map(|a| {
-            a.ancestors
-                .iter()
-                .rev()
-                .map(|ancestor| LineageStep {
-                    pid: ancestor.pid,
-                    executable: ancestor
-                        .identity
-                        .path
-                        .clone()
-                        .unwrap_or_else(|| format!("[{}]", ancestor.comm)),
-                    command_line: live
-                        .iter()
-                        .find(|e| e.pid == ancestor.pid && same_process(e, ancestor.start_ns))
-                        .and_then(|e| e.command_line.clone()),
-                    exited: ancestor.exited_at_ns.is_some(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut steps: Vec<LineageStep> = process.ancestry.as_ref().map_or_default(|a| {
+        a.ancestors
+            .iter()
+            .rev()
+            .map(|ancestor| LineageStep {
+                pid: ancestor.pid,
+                executable: ancestor
+                    .identity
+                    .path
+                    .clone()
+                    .unwrap_or_else(|| format!("[{}]", ancestor.comm)),
+                command_line: live
+                    .iter()
+                    .find(|e| e.pid == ancestor.pid && same_process(e, ancestor.start_ns))
+                    .and_then(|e| e.command_line.clone()),
+                exited: ancestor.exited_at_ns.is_some(),
+            })
+            .collect()
+    });
     steps.push(LineageStep {
         pid: process.pid,
         executable: process.executable(),
@@ -3680,17 +3675,13 @@ pub async fn cmd_investigate_process(
         .await
         .with_context(|| format!("process {pid} is not in this agent's process table"))?;
 
-    let live_pids: Vec<u32> = process
-        .ancestry
-        .as_ref()
-        .map(|a| {
-            a.ancestors
-                .iter()
-                .filter(|x| x.exited_at_ns.is_none())
-                .map(|x| x.pid)
-                .collect()
-        })
-        .unwrap_or_default();
+    let live_pids: Vec<u32> = process.ancestry.as_ref().map_or_default(|a| {
+        a.ancestors
+            .iter()
+            .filter(|x| x.exited_at_ns.is_none())
+            .map(|x| x.pid)
+            .collect()
+    });
     let mut live = Vec::with_capacity(live_pids.len());
     for ancestor in live_pids {
         if let Ok(entry) = client.get_process(ancestor).await {
@@ -3710,8 +3701,8 @@ pub async fn cmd_investigate_process(
         ),
         client.host_rules(),
     );
-    let alerts = alerts_res.map(|r| r.alerts).unwrap_or_default();
-    let rules = rules_res.map(|r| r.rules).unwrap_or_default();
+    let alerts = alerts_res.map_or_default(|r| r.alerts);
+    let rules = rules_res.map_or_default(|r| r.rules);
     let raised = alerts_of_process(&alerts, pid);
     let fired = intents_fired(&raised, &rules);
     let steps = lineage(&process, &live);
@@ -3857,18 +3848,14 @@ pub async fn cmd_investigate(
     };
 
     // Filter alerts where target is source or destination
-    let matched_alerts: Vec<_> = alerts_res
-        .as_ref()
-        .ok()
-        .map(|a| {
-            a.alerts
-                .iter()
-                .filter(|a| {
-                    a.src_addr.as_slice() == target_addr || a.dst_addr.as_slice() == target_addr
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let matched_alerts: Vec<_> = alerts_res.as_ref().ok().map_or_default(|a| {
+        a.alerts
+            .iter()
+            .filter(|a| {
+                a.src_addr.as_slice() == target_addr || a.dst_addr.as_slice() == target_addr
+            })
+            .collect::<Vec<_>>()
+    });
 
     // Filter connections by IP
     let conns = conns_res.ok().unwrap_or_default();
@@ -7406,8 +7393,7 @@ pub async fn cmd_host_rules_intents(client: &ApiClient, output: OutputFormat) ->
         resp.intents.len(),
         resp.kernel
             .as_deref()
-            .map(|k| format!(", kernel {k}"))
-            .unwrap_or_default()
+            .map_or_default(|k| format!(", kernel {k}"))
     );
     for intent in resp.intents.iter().filter(|i| i.reason.is_some()) {
         if let Some(reason) = &intent.reason {

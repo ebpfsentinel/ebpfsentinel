@@ -77,7 +77,7 @@ impl ReputationEnforcementService {
 
     fn block_domain(&self, domain: &str, score: f64) {
         let entry = self.dns_cache.lookup_domain(domain);
-        let ips = entry.map(|e| e.ips).unwrap_or_default();
+        let ips = entry.map_or_default(|e| e.ips);
 
         if ips.is_empty() {
             tracing::debug!(
@@ -151,7 +151,7 @@ impl ReputationEnforcementService {
         drop(blocked);
 
         let entry = self.dns_cache.lookup_domain(domain);
-        let ips = entry.map(|e| e.ips).unwrap_or_default();
+        let ips = entry.map_or_default(|e| e.ips);
 
         for ip in &ips {
             if let Err(e) = self.ips_port.remove_from_blacklist(ip) {

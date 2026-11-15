@@ -189,8 +189,7 @@ pub fn anchors(interface: &str, egress: bool) -> Vec<u32> {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get(&(interface.to_owned(), egress))
-        .map(|ids| ids.iter().rev().copied().collect())
-        .unwrap_or_default()
+        .map_or_default(|ids| ids.iter().rev().copied().collect())
 }
 
 fn record_placed(hook: Hook<'_>, id: u32) {

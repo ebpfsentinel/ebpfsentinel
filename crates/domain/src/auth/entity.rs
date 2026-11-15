@@ -71,7 +71,7 @@ impl JwtClaims {
         if let Some(ref roles) = self.roles {
             return roles.clone();
         }
-        self.role.clone().map(|r| vec![r]).unwrap_or_default()
+        self.role.clone().map_or_default(|r| vec![r])
     }
 
     /// Optional tenant identifier minted by the dashboard.

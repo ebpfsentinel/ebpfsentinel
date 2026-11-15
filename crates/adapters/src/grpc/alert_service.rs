@@ -70,7 +70,7 @@ fn workload_block(alert: &Alert) -> Option<proto::Workload> {
         pid: w.pid,
         source: w.source.as_str().to_string(),
         exe: w.exe.clone().unwrap_or_default(),
-        exe_hash: w.exe_hash.map(|h| h.to_string()).unwrap_or_default(),
+        exe_hash: w.exe_hash.map_or_default(|h| h.to_string()),
         command_line: w.command_line.clone().unwrap_or_default(),
         uid: w.uid.unwrap_or(0),
         cgroup: w.cgroup.unwrap_or(0),
@@ -80,21 +80,19 @@ fn workload_block(alert: &Alert) -> Option<proto::Workload> {
         namespace: w.namespace.clone().unwrap_or_default(),
         service_account: w.service_account.clone().unwrap_or_default(),
         unit: w.unit.clone().unwrap_or_default(),
-        ancestors: ancestry
-            .map(|a| {
-                a.ancestors
-                    .iter()
-                    .map(|a| proto::WorkloadAncestor {
-                        pid: a.pid,
-                        exe: a.exe.clone().unwrap_or_default(),
-                        name: a.name.clone(),
-                        uid: a.uid,
-                        start_ns: a.start_ns.unwrap_or(0),
-                        exited: a.exited,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        ancestors: ancestry.map_or_default(|a| {
+            a.ancestors
+                .iter()
+                .map(|a| proto::WorkloadAncestor {
+                    pid: a.pid,
+                    exe: a.exe.clone().unwrap_or_default(),
+                    name: a.name.clone(),
+                    uid: a.uid,
+                    start_ns: a.start_ns.unwrap_or(0),
+                    exited: a.exited,
+                })
+                .collect()
+        }),
         ancestry_truncated: ancestry.is_some_and(|a| a.truncated),
         ancestry_incomplete: ancestry.is_some_and(|a| a.incomplete),
         peer: w.peer.as_ref().map(|p| proto::PeerWorkload {

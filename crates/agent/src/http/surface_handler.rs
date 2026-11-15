@@ -111,9 +111,7 @@ pub fn listening_response(
 
 fn listening(listener: &Listener, report: Option<&PackageInventoryReport>) -> ListeningBody {
     let w = &listener.workload;
-    let found = report
-        .map(|r| behind(&r.sweep.loaded, w.pid))
-        .unwrap_or_default();
+    let found = report.map_or_default(|r| behind(&r.sweep.loaded, w.pid));
     ListeningBody {
         address: listener.address.to_string(),
         port: listener.port,
@@ -244,7 +242,7 @@ pub fn surface_response(
 ) -> SurfaceResponse {
     let listening = listening_response(listeners, report);
     let sweep = report.map(|r| &r.sweep);
-    let counts = sweep.map(mapped_counts).unwrap_or_default();
+    let counts = sweep.map_or_default(mapped_counts);
     let mut listens = ListensBody {
         sockets: count(listening.listeners.len()),
         took_traffic: 0,

@@ -191,8 +191,7 @@ pub async fn service_graph(
     let round_trips = state
         .tcp_health
         .load_full()
-        .map(|tcp| tcp.round_trips(boot_now, minutes))
-        .unwrap_or_default();
+        .map_or_default(|tcp| tcp.round_trips(boot_now, minutes));
     let graph = meter.graph(boottime_to_epoch_ns(boot_now), minutes);
     Ok(Json(response(graph, &round_trips)))
 }

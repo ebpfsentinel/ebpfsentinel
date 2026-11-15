@@ -180,8 +180,7 @@ pub fn is_frozen(name: &str) -> bool {
 pub fn frozen_maps() -> Vec<&'static str> {
     registry()
         .lock()
-        .map(|names| names.iter().copied().collect())
-        .unwrap_or_default()
+        .map_or_default(|names| names.iter().copied().collect())
 }
 
 /// How many freezes the kernel refused.

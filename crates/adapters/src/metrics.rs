@@ -3608,8 +3608,7 @@ mod tests {
             let methods = writers
                 .iter()
                 .find(|(f, _)| f == field)
-                .map(|(_, m)| m.as_slice())
-                .unwrap_or_default();
+                .map_or_default(|(_, m)| m.as_slice());
             assert!(
                 !methods.is_empty(),
                 "{name} is registered but no method in this file writes {field}"

@@ -13,3 +13,7 @@ userspace = ["aya"]
 
 [dependencies]
 aya = { workspace = true, optional = true }
+
+# The kernel programs share these types, whose layout the workspace lints
+# would have renamed; this crate keeps the compiler defaults.
+[lints]

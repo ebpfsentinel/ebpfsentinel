@@ -195,7 +195,7 @@ pub fn apply_event(cache: &DockerCache, event: &ContainerEvent) {
             // Only an inspect knows when the container was created. An empty
             // value is what tells the enricher this entry came off the stream
             // and is worth completing once.
-            created_at: previous.map(|md| md.created_at).unwrap_or_default(),
+            created_at: previous.map_or_default(|md| md.created_at),
             status: status.to_string(),
         },
     );

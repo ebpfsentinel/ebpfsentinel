@@ -198,7 +198,7 @@ mod tests {
             &'a self,
             _config: &'a FeedConfig,
         ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, DomainError>> + Send + 'a>> {
-            let body = self.0.lock().map(|b| b.clone()).unwrap_or_default();
+            let body = self.0.lock().map_or_default(|b| b.clone());
             Box::pin(async move { Ok(body) })
         }
     }

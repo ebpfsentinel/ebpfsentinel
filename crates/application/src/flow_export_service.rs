@@ -360,10 +360,7 @@ impl FlowExportHandle {
     /// What the flow table has observed, sampled out, exported and evicted.
     #[must_use]
     pub fn table_stats(&self) -> FlowTableStats {
-        self.published
-            .lock()
-            .map(|published| *published)
-            .unwrap_or_default()
+        self.published.lock().map_or_default(|published| *published)
     }
 
     /// Records built and never handed to a sink because the queue was full.

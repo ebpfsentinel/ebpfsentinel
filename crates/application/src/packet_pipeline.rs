@@ -797,13 +797,10 @@ impl EventDispatcher {
         // Reverse DNS lookup only when a domain-aware rule is loaded; otherwise
         // skip the cache RwLock read + Vec<String> allocation on the hot path.
         let dst_domains = if svc.has_domain_rules() {
-            self.dns_cache
-                .as_ref()
-                .map(|cache| {
-                    let dst_ip = addr_to_ip(event.dst_addr, event.is_ipv6());
-                    cache.lookup_ip(&dst_ip)
-                })
-                .unwrap_or_default()
+            self.dns_cache.as_ref().map_or_default(|cache| {
+                let dst_ip = addr_to_ip(event.dst_addr, event.is_ipv6());
+                cache.lookup_ip(&dst_ip)
+            })
         } else {
             Vec::new()
         };

@@ -154,8 +154,7 @@ pub fn workload_of(entry: &ProcessEntry) -> ResolvedWorkload {
     let around = entry
         .container
         .as_ref()
-        .map(workload_of_container)
-        .unwrap_or_default();
+        .map_or_default(workload_of_container);
     ResolvedWorkload {
         exe: entry.identity.path().map(ToOwned::to_owned),
         exe_hash: entry.exe_hash,
@@ -906,10 +905,7 @@ impl WorkloadPolicyService {
     /// the service holds no tree.
     #[must_use]
     pub fn live_cgroups(&self) -> Vec<(u64, String)> {
-        self.tree
-            .as_ref()
-            .map(|tree| tree.cgroups())
-            .unwrap_or_default()
+        self.tree.as_ref().map_or_default(|tree| tree.cgroups())
     }
 
     /// Name each container cgroup in `named` from what the container

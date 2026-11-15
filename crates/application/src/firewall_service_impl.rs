@@ -853,8 +853,7 @@ impl FirewallAppService {
         let mut rules = self
             .deny_all
             .as_ref()
-            .map(|s| s.peer_rules.clone())
-            .unwrap_or_default();
+            .map_or_default(|s| s.peer_rules.clone());
         rules.extend(Self::deny_all_rules());
         rules
     }

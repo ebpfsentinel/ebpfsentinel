@@ -353,9 +353,7 @@ pub fn resolve_node_name() -> String {
     {
         return name;
     }
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+    std::fs::read_to_string("/proc/sys/kernel/hostname").map_or_default(|s| s.trim().to_string())
 }
 
 /// Metrics counters maintained by the enricher.
