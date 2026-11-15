@@ -42,8 +42,12 @@ setup_file() {
     sleep 1
 
     export PREPARED_CONFIG="/tmp/ebpfsentinel-jwks-config-$$.yaml"
-    sed "s|__DATA_DIR__|${DATA_DIR}|g" \
-        "${FIXTURE_DIR}/config-minimal.yaml" > "$PREPARED_CONFIG"
+    # The minimal fixture turns authentication off in its own top-level `auth`
+    # block; this suite replaces that block rather than adding a second one,
+    # which the parser refuses as a duplicate key.
+    sed "s|__DATA_DIR__|${DATA_DIR}|g" "${FIXTURE_DIR}/config-minimal.yaml" \
+        | awk '/^auth:/ { skip = 1; next } skip && /^[^ #]/ { skip = 0 } !skip' \
+        > "$PREPARED_CONFIG"
     cat <<EOF >> "$PREPARED_CONFIG"
 auth:
   enabled: true
