@@ -195,7 +195,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `cgroup-clusterip` | ebpfsentinel-operator/coexistence/03 | none | 6.12 | manual | Resolves the Service cluster addresses of opted-in pods at connect4/connect6 and answers with the cluster address at getpeername and recvmsg. Asserted beside Cilium and Calico by the operator's coexistence suite 03-clusterip.bats on kind, which reads the translated counter for the labelled pod and none for its bystander; no lane here provisions a cluster with Services |
 | `cgroup-connect-redirect` | ebpfsentinel-enterprise/27 | none | 6.12 | manual | Steers the TCP connections of selected cgroups to a local listener at connect4/connect6. The listener and the selection are the enterprise TLS interception's, so the suite lives in that repository: ebpfsentinel-enterprise/tests/integration/suites/27-enterprise-tls-redirect.bats asserts a process in the selected cgroup is answered by the agent's listener while one outside it reaches the server |
 | `cgroup-workload-firewall` | 67, 70, 92, 98 | 2vm | 6.12 | nightly | Workload rules decided at connect/sendmsg/bind; suite 70 refuses a connect by the executable of the direct parent and of any ancestor, read from the live chain of parents |
-| `lsm-bpf-guard` | 88 | none | 6.12 | nightly | No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks; 88 has a detach of the agent's link refused with the BPF LSM active, which the agent VM's boot line now sets |
+| `lsm-bpf-guard` | 88 | none | 6.12 | nightly | No task but the agent and its warden opens the agent's maps for writing or its links at all, at the bpf and bpf_map hooks; 88 has a detach of the agent's link and a write to one of its maps refused with the BPF LSM active, which the agent VM's boot line now sets |
 | `lsm-exec-network` | 91 | none | 6.12 | nightly | Only the executables in the set reach the network, at socket_create and socket_connect: observe reports by pid and inode, enforce refuses with a permission error, the agent's own sockets and the listed binary pass. Needs the BPF LSM active at boot (lsm=bpf), which the agent VM's boot line sets |
 | `lsm-write-refusal` | 83 | none | 6.12 | nightly | A writer's write-opens and truncations under a watched directory refused past a count inside a window, nothing refused once the agent is gone, and in shadow nothing refused or raised while the reading counts it by workload. Needs the BPF LSM active at boot (lsm=bpf); the suite skips where it is not |
 | `tc-conntrack` | 18, 24, 47, 67 | 3vm | 6.12 | pr | Connection tracking; kernel-CT kill via kill_flow_via_xdp_ct/skb_ct asserted in 47 |
@@ -241,18 +241,18 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `flows` | 04, 18 | 2vm | 6.12 | pr | Aggregated connection map |
 | `geoip` | 30 | 2vm | 6.12 | pr | GeoIP status and address lookup against the fixture database in 30 |
 | `health` | 02 | none | n/a | pr | /healthz + /readyz |
-| `hostrules` | 78 | none | 6.12 | nightly | Host rules through /api/v1/host-rules and /api/v1/host-rules/intents: a written rule loads in shadow beside the shipped ones, its shadow count rises per workload with no alert, promotion to enforce kills the process and alerts, and an intention the host does not feed carries the same reason everywhere it is named |
+| `hostrules` | 78, 135 | none | 6.12 | nightly | Host rules through /api/v1/host-rules and /api/v1/host-rules/intents: a written rule loads in shadow beside the shipped ones, its shadow count rises per workload with no alert, promotion to enforce kills the process and alerts, and an intention the host does not feed carries the same reason everywhere it is named |
 | `identity` | 35 | none | n/a | pr | Operator-managed flag, hostname, version |
 | `ids` | 12, 16, 33, 55, 59 | 2vm | 6.12 | pr | IDS status and rule list; the rules are asserted over IPv6 in 55 and under a real SSH brute force in 59 |
 | `investigate` | 04 | none | n/a | pr | IP correlation across alerts/CT/DNS/blacklist |
-| `ips` | 13, 16, 38, 39 | 2vm | 6.12 | pr | Intrusion prevention + auto-blacklist; MHDDoS flood matrix in 38; slowhttptest in 39 |
+| `ips` | 13, 16, 38, 39, 136 | 2vm | 6.12 | pr | Intrusion prevention + auto-blacklist; MHDDoS flood matrix in 38; slowhttptest in 39; a block rule with kill_process stops the local process behind the flow and one without it leaves it running in 136 |
 | `l7` | 16, 29, 38, 39 | 2vm | 6.12 | pr | L7 firewall rules (HTTP/SMTP/FTP/SMB inspection); MHDDoS flood matrix in 38; slow-request timeout in 39 |
 | `lb` | 16, 20, 37 | 2vm | 6.12 | pr | Load balancer services + VIPs |
 | `learning` | 87 | none | 6.12 | nightly | Learning window list and status, read back in 87 after the window came back from a restart |
 | `metrics` | 02 | none | n/a | pr | Prometheus metrics |
 | `mitre` | 16, 51, 87 | 2vm | 6.12 | nightly | MITRE coverage matrix; suite 87 asserts a disabled IDS is listed under switched_off and not as coverage; suite 16 asserts GET /api/v1/mitre/coverage (technique/tactic consistency), suite 51 enforces that every alert-producing suite carries a MITRE assertion |
 | `nat` | 16, 21, 50 | 2vm | 6.12 | pr | NAT + NPTv6; NPTv6 prefix translation covered by suite 50 |
-| `netpol` | No suite yet (kernel-network) | k8s | 6.12 | manual | NetworkPolicy compiled for the pods of one node. No suite here: the operator's coexistence suite 04-networkpolicy-enforce.bats applies a policy to an agent in enforce mode on kind and asserts the open path stays open, and no lane here runs a cluster whose pods the agent inventories, so reading the compiled rules back belongs beside it |
+| `netpol` | 87 | none | 6.12 | nightly | NetworkPolicy compiled for the pods of one node. 87 has the replay route and the netpol replay command refuse, with the reason, on a node that reads no network policy. The replay against a cluster's pods, and the refusal of a flow a policy denies, need a node reading a cluster: the operator's coexistence suite 04-networkpolicy-enforce.bats asserts both on kind |
 | `processes` | 93 | none | 6.12 | nightly | What a pid is, from its exec to its exit. The REST route it reads is asserted in 67; show and list are driven in 93 on the shell a detection named |
 | `qos` | 16, 28 | 2vm | 6.12 | pr | QoS / traffic shaping |
 | `ratelimit` | 04, 14, 16, 38 | 2vm | 6.12 | pr | Rate limit policies; MHDDoS flood matrix in 38 |
@@ -280,7 +280,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `capture` | 49, 62 | 2vm | 6.12 | nightly | Pcap export lifecycle (Running → Completed) + on-disk pcap validity asserted in 49; broker-provided AF_PACKET sockets (PcapOpen fd hand-off) asserted in 62 |
 | `clusterip` | ebpfsentinel-operator/coexistence/03 | none | 6.12 | manual | The plan deciding which Services an opted-in workload resolves at connect and which stay with kube-proxy. Exercised by the operator's coexistence suite 03-clusterip.bats on kind, where an opted-in pod's connection is translated and a bystander's stays with kube-proxy; the plan is built from the cluster's Services and EndpointSlices, which no lane here serves |
 | `conntrack` | 16, 18, 24, 47, 62, 66 | 3vm | 6.12 | pr | Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; what the kernel confirmed it tore down against what the agent decided, on both sides of the tc hook order, in 66; GET /api/v1/conntrack/events SSE stream asserted in 16 (skipped when /proc/net/nf_conntrack is absent); brokered teardown from the user-namespace agent asserted in 62 |
-| `container` | 54, 130, 131 | 2vm | 6.12 | nightly | cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 54; a Podman container named by id, name and image, rootful and rootless through its user's own socket, with each runtime reported reachable, in 130; a container containerd and CRI-O start through the CRI attributed to its id, its runtime and its scope in 131, both on the vagrant-runtimes lane. The agent itself running as a Podman container has no suite: no agent image is published to pull, and building one is a full Rust build per run. Per-tenant cgroup filtering is enterprise-only and is tested in the enterprise repo |
+| `container` | 54, 130, 131, 137 | 2vm | 6.12 | nightly | cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 54; a Podman container named by id, name and image, rootful and rootless through its user's own socket, with each runtime reported reachable, in 130; a container containerd and CRI-O start through the CRI attributed to its id, its runtime and its scope in 131, both on the vagrant-runtimes lane; a veth created after start-up, its peer in a namespace of its own, carries the agent's TC programs within seconds and the window before the attach is counted under its kind, in 137. The agent itself running as a Podman container has no suite: no agent image is published to pull, and building one is a full Rust build per run. Per-tenant cgroup filtering is enterprise-only and is tested in the enterprise repo |
 | `coverage` | No suite yet (restart-state) | k8s | 6.12 | manual | What the node agent sees of each pod and why it misses what it misses. 87 asserts the refusal on a node without a pod inventory; the per-pod report needs an agent watching a cluster's pods, which only the operator's kind lanes run, and none of their suites reads it yet |
 | `ddos` | 15, 22, 38, 39, 40 | 2vm | 6.12 | pr | DDoS detection + policy; MHDDoS flood matrix in 38; service-exhaustion in 39; amplification in 40 |
 | `dlp` | 16, 27, 60, 62, perf/06 | 2vm | 6.12 | pr | Data loss prevention; suite 27 covers pattern match + uprobe attach, suite 60 the per-container attach path, suite 62 the brokered DlpScan + AttachUprobe half. TLS-MITM proxy is enterprise-only; wire-level malicious-MITM + decrypted-payload assertions remain 3-VM deferrals (need mitmproxy + injected-CA topology). uprobe SSL-inspection goodput cost benched in perf/06 |
@@ -292,9 +292,9 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `flow` | 90 | none | 6.12 | nightly | Flow records and their IPFIX, OTLP, JSON and SIEM encodings; 90 exports a connection to the JSON lines sink and reads it back with the export status, and no suite decodes IPFIX, OTLP or the SIEM encodings at a collector |
 | `guest` | 73, 74, 75 | none | 6.12 | nightly | The virtual machines whose traffic crosses this host: a tap device in 73, a policy decided on a guest in 74, a libvirt domain in 75 |
 | `hidden` | 79 | none | 6.12 | nightly | Hidden ports and hidden processes on a busy host: listeners in two network namespaces, SO_REUSEPORT, TIME_WAIT, a many-threaded process and process churn, and neither sweep reports anything twice in a row; the process sweep stays inside its time and CPU budget. The positive case is unit-tested at the port boundary, since a real one needs a rootkit |
-| `hostrule` | 78 | none | 6.12 | nightly | Intent catalogue, typed matchers, shadow book and promotion, decided on process start and exit fed by tracepoint-process; the rule and event grammar is also fuzzed by fuzz_host_rule |
+| `hostrule` | 78, 135 | none | 6.12 | nightly | Intent catalogue, typed matchers, shadow book and promotion, decided on process start and exit fed by tracepoint-process; the rule and event grammar is also fuzzed by fuzz_host_rule |
 | `identity` | 107 | 2vm | 6.12 | nightly | This node's addresses as names another node can read, and the peer's names on a flow. 107 opens a TCP connection and sends UDP datagrams from a named program on the agent's machine to the attacker VM, reads both back off /api/v1/conntrack/connections with that program's pid and executable while the far end records the agent's address, and asserts no flow carries a peer, since no list of remote identities was handed to this agent. The two-end reading, a peer named from the list another agent publishes, needs the routes that publish and take that list, which are the enterprise agent's, so it is asserted beside them |
-| `ids` | 12, 25, 38, 39, 55, 59, 66 | 2vm | 6.12 | pr | Intrusion detection engine; the block branch's two counters - the attempt and the kernel's own confirmation of the conntrack tear-down - asserted against each other in 66; behavioural signatures stressed in 38; slow-attack signatures in 39; IPv6-scoped signature surface asserted in 55 (wire-level v6 IDS alert via tc-ids deferred - needs dual-stack 2-VM topology); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 59 (real hydra/ncrack credential bursts deferred - same dataplane contract is driven by the SYN-burst path) |
+| `ids` | 12, 25, 38, 39, 55, 59, 66, 130 | 2vm | 6.12 | pr | Intrusion detection engine; a rule scoped to one container by name fires on that container behind its own bridge link and not on a neighbour sending the same, in 130 on the vagrant-runtimes lane; the block branch's two counters - the attempt and the kernel's own confirmation of the conntrack tear-down - asserted against each other in 66; behavioural signatures stressed in 38; slow-attack signatures in 39; IPv6-scoped signature surface asserted in 55 (wire-level v6 IDS alert via tc-ids deferred - needs dual-stack 2-VM topology); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 59 (real hydra/ncrack credential bursts deferred - same dataplane contract is driven by the SYN-burst path) |
 | `inventory` | 80 | none | 6.12 | nightly | The host's dpkg database agrees with dpkg-query, a chroot's Alpine database is read under kind other, and a link climbing out of a root finds nothing. rpm's sqlite reader and every parser are unit-tested against databases taken from real images |
 | `ips` | 13, 16, 38, 39, 55, 59, perf/03 | 2vm | 6.12 | pr | Auto-blacklist + whitelist; MHDDoS flood matrix in 38; slowhttptest in 39; IPv6 blacklist-write surface asserted in 55; SSH brute-force auto-block under threshold count + auto-blacklist capture asserted in 59; in-kernel blacklist-injection control-plane latency (100/1K) benched in perf/03 |
 | `l2` | 37, 44, 62 | 2vm | 6.12 | nightly | L2 binding + self-whitelist; DSR end-to-end covered by suite 44; gratuitous ARP brokered through the warden (ArpAnnounce) asserted in 62 |
@@ -303,7 +303,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `loadbalancer` | 16, 20, 37, 44 | 2vm | 6.12 | pr | Maglev + DSR; 3-VM end-to-end coverage via suite 44 |
 | `nat` | 16, 21, 50, perf/03, perf/06 | 2vm | 6.12 | pr | SNAT/DNAT/NPTv6; NPTv6 rule CRUD + tc-nat-egress config surface asserted in 50; NPTv6 control-plane add latency in perf/03; SNAT/DNAT datapath throughput overhead in perf/06 |
 | `netpol` | ebpfsentinel-operator/coexistence/04 | k8s | 6.12 | manual | Kubernetes NetworkPolicy compiled for the pods of one node. Applied in enforce mode by the operator's coexistence suite 04-networkpolicy-enforce.bats on kind; the compilation needs the node's pod inventory, which no lane here provides |
-| `network_program` | 88 | none | 6.12 | nightly | Programs other than the agent's on the node's network path; 88 attaches an XDP program from outside the agent and reads it back as foreign, and detaches the agent's own link without the guard and reads the alert |
+| `network_program` | 88 | none | 6.12 | nightly | Programs other than the agent's on the node's network path; 88 attaches an XDP program from outside the agent and reads it back as foreign, detaches the agent's own link without the guard and reads the alert, and puts another program in its place and reads that it replaced the agent's |
 | `process` | 67, 70, 93 | none | 6.12 | nightly | The process table: a pid from exec to exit with its chain of ancestors; read through REST in 67, the chain decides workload rules in 70, the reverse shell, fileless and server-descendant detections and their process kill in 93 |
 | `qos` | 16, 28 | 2vm | 6.12 | pr | Traffic shaping policies |
 | `ransom` | 81, 82, 83, 84, 96, 101, 104, 108 | none | 6.12 | nightly | Mass encryption recognised by signals that agree: the shadow verdict in 81, the stop in 82, the write refusal with the BPF LSM in 83 and through fanotify in 84, and in 96 a partial encryption raised on the header while the sampled entropy stays flat, and one past the sampled window that nothing reads; a share encrypted by a client on another address in 101 and from a second machine in 108, the writer named by its address through smbd rather than smbd named as the run; and in 104 the encryption call counter, including a self-made rewrite reaching the verdict on a snapshot destroyed just before it |
@@ -343,8 +343,8 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | Path | Suites |
 |---|---|
 | `/api/v1/agent/identity` | 35, 36 |
-| `/api/v1/agent/status` | 02, 08, 130, 30 |
-| `/api/v1/alerts` | 04, 102, 12, 13, 130, 131, 14, 25, 27, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 52, 53, 54, 55, 56, 59, 60, 61, 71, 79, 83, 84, 91, 92, 93, 94, 95, 96, 97 |
+| `/api/v1/agent/status` | 02, 08, 105, 130, 30 |
+| `/api/v1/alerts` | 04, 102, 12, 13, 130, 131, 135, 14, 25, 27, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 52, 53, 54, 55, 56, 59, 60, 61, 71, 79, 83, 84, 88, 90, 91, 92, 93, 94, 95, 96, 97 |
 | `/api/v1/alerts/stream` | 25, 34 |
 | `/api/v1/alerts/triage` | 25 |
 | `/api/v1/alerts/{id}` | 25, 34 |
@@ -399,11 +399,11 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/firewall/workload/fqdn` | 92 |
 | `/api/v1/firewall/workload/labels` | 92, 98 |
 | `/api/v1/firewall/workload/reach` | 70 |
-| `/api/v1/firewall/workload/rules` | 70, 72, 92, 95, 98 |
+| `/api/v1/firewall/workload/rules` | 138, 70, 72, 92, 95, 98 |
 | `/api/v1/flows/export` | 90 |
 | `/api/v1/geoip/lookup` | 30 |
 | `/api/v1/geoip/status` | 30 |
-| `/api/v1/host-rules` | 78 |
+| `/api/v1/host-rules` | 135, 78 |
 | `/api/v1/host-rules/intents` | 78 |
 | `/api/v1/host-rules/mass-encryption` | 100, 101, 104, 108, 81, 82, 96 |
 | `/api/v1/host-rules/write-refusal` | 83, 84 |
@@ -413,7 +413,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/ips/blacklist` | 04, 13, 38, 39, 55, 59 |
 | `/api/v1/ips/blacklist/{ip}` | 38, 39, 55 |
 | `/api/v1/ips/domain-blocks` | 13, 16 |
-| `/api/v1/ips/rules` | 04, 13, 59 |
+| `/api/v1/ips/rules` | 04, 13, 136, 59 |
 | `/api/v1/ips/rules/{id}` | 13 |
 | `/api/v1/lb/services` | 16, 20 |
 | `/api/v1/lb/services/{id}` | 16, 20 |
@@ -421,18 +421,18 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/lb/vips` | 37 |
 | `/api/v1/lb/vips/bgp` | 37 |
 | `/api/v1/lb/vips/grant` | 37 |
-| `/api/v1/learning/sessions` | 87 |
-| `/api/v1/learning/sessions/{id}` | 87 |
+| `/api/v1/learning/sessions` | 138, 87 |
+| `/api/v1/learning/sessions/{id}` | 138, 87 |
 | `/api/v1/learning/sessions/{id}/edges` | 87 |
 | `/api/v1/learning/sessions/{id}/policy` | 87 |
-| `/api/v1/learning/sessions/{id}/segmentation` | 87 |
-| `/api/v1/learning/sessions/{id}/stop` | 87 |
+| `/api/v1/learning/sessions/{id}/segmentation` | 138, 87 |
+| `/api/v1/learning/sessions/{id}/stop` | 138, 87 |
 | `/api/v1/mitre/coverage` | 16, 87 |
 | `/api/v1/nat/nptv6` | 21, 50 |
 | `/api/v1/nat/nptv6/{id}` | 21, 50 |
 | `/api/v1/nat/rules` | 16, 21 |
 | `/api/v1/nat/status` | 16, 21 |
-| `/api/v1/netpol/replay` | No suite yet (kernel-network) |
+| `/api/v1/netpol/replay` | 87 |
 | `/api/v1/processes` | 67 |
 | `/api/v1/processes/{pid}` | 72 |
 | `/api/v1/qos/classifiers` | 28 |
@@ -471,8 +471,8 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/zones/policies/{id}` | 31 |
 | `/api/v1/zones/status` | 31 |
 | `/api/v1/zones/{id}` | 31 |
-| `/healthz` | 01, 02, 06, 07, 08, 09, 105, 11, 132, 17, 23, 26, 27, 38, 43, 52, 55, 56, 58, 60, 68, 91, 99 |
-| `/metrics` | 02, 06, 10, 105, 11, 12, 14, 17, 18, 19, 20, 21, 22, 23, 24, 27, 28, 29, 30, 31, 32, 33, 34, 38, 40, 52, 53, 54, 61, 62, 64, 65, 66, 67, 71 |
+| `/healthz` | 01, 02, 06, 07, 08, 09, 105, 11, 132, 137, 17, 23, 26, 27, 38, 43, 52, 55, 56, 58, 60, 68, 91, 99 |
+| `/metrics` | 02, 06, 10, 105, 11, 12, 138, 14, 17, 18, 19, 20, 21, 22, 23, 24, 27, 28, 29, 30, 31, 32, 33, 34, 38, 40, 52, 53, 54, 61, 62, 64, 65, 66, 67, 71, 90 |
 | `/readyz` | 01, 02, 06, 07, 132, 23, 55, 56 |
 
 <!-- coverage:end -->

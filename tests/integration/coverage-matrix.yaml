@@ -240,6 +240,7 @@ suite_profiles:
   "135": nightly
   "136": nightly
   "137": nightly
+  "138": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly

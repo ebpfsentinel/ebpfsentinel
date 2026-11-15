@@ -63,13 +63,31 @@ teardown_file() {
     assert_json_field "$body" '.enabled' 'true'
 }
 
+# The listing, the flush and the event stream all read the kernel table, so
+# they answer only where the agent's host can read it by one of its sources:
+# the proc file, or a `conntrack -L` that succeeds. The question is put with
+# the agent's own privileges: the userspace lane starts it as an unprivileged
+# user on a host where `sudo` reads the table, and that agent answers with an
+# error, which is not the endpoint being broken.
+_conntrack_table_readable() {
+    local run=_agent_ssh_sudo uid
+    uid="$(_agent_ssh ps -o uid= -C ebpfsentinel-agent 2>/dev/null | head -n1 | tr -d ' ')"
+    [ -n "$uid" ] && [ "$uid" != "0" ] && run=_agent_ssh
+    "$run" test -r /proc/net/nf_conntrack ||
+        "$run" conntrack -L >/dev/null 2>&1
+}
+
 @test "Conntrack: GET connections returns 200" {
+    _conntrack_table_readable ||
+        env_skip "kernel conntrack table unreadable by either source - nothing to list"
     local body
     body="$(api_get /api/v1/conntrack/connections)"
     assert_http_status "200" "$HTTP_STATUS"
 }
 
 @test "Conntrack: POST flush returns 200" {
+    _conntrack_table_readable ||
+        env_skip "kernel conntrack table unreadable by either source - nothing to flush"
     local body
     body="$(api_post /api/v1/conntrack/flush '{}')"
     assert_http_status "200" "$HTTP_STATUS"
@@ -84,10 +102,8 @@ teardown_file() {
     # kernel these VMs run - so this test skipped on a host where the feature
     # was live. The question is put to the agent's own host, which is a machine
     # of its own on the two- and three-machine lanes.
-    if ! _agent_ssh_sudo test -r /proc/net/nf_conntrack &&
-        ! _agent_ssh_sudo conntrack -L >/dev/null 2>&1; then
+    _conntrack_table_readable ||
         env_skip "kernel conntrack table unreadable by either source - event stream not wired"
-    fi
 
     local headers
     headers="$(curl -sI -H 'Accept: text/event-stream' \

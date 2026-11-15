@@ -278,8 +278,10 @@ jobs:
       - name: Build Docker image
         run: docker build -f Dockerfile.agent -t ebpfsentinel:integration-test .
 
+      # The local lane of this suite drives traffic from a network namespace
+      # it creates, which takes root.
       - name: Suite 09 - Docker Deployment
-        run: bats --timing tests/integration/suites/09-docker.bats
+        run: sudo -E bats --timing tests/integration/suites/09-docker.bats
 
   # ── PR eBPF (privileged, loads the datapath) ─────────────────────
   #
@@ -335,6 +337,10 @@ jobs:
             || sudo apt-get install -y "linux-tools-$(uname -r)" 2>/dev/null \
             || sudo apt-get install -y linux-tools-common linux-tools-generic 2>/dev/null \
             || echo "::warning::bpftool not available - eBPF tests will be skipped"
+          # The conntrack, FOU and xfrm-interface kfuncs are registered by
+          # modules a hosted runner does not load by itself, and a program
+          # calling one is refused without its module, as on the test VMs.
+          sudo modprobe -a nf_conntrack fou fou6 xfrm_interface
 
       # Strict skips here and nowhere else in this workflow: this is the only
       # lane that loads the programs into a kernel, so a test that excuses
