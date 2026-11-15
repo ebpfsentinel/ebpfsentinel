@@ -209,6 +209,12 @@ teardown_file() {
         attempts=$((attempts + 1))
     done
 
+    # A container that never turns healthy says why in its own log, which is
+    # the only place the reason is written.
+    if [ "$health" != "healthy" ]; then
+        echo "# container health: ${health}" >&3
+        _docker_cmd logs --tail 40 "$CONTAINER_NAME" 2>&1 | sed 's/^/#   /' >&3 || true
+    fi
     [ "$health" = "healthy" ]
 }
 
