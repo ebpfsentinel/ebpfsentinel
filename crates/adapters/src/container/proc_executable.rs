@@ -119,6 +119,16 @@ impl ProcessExecutableReader for ProcExecutableResolver {
         })
     }
 
+    fn running(&self) -> Vec<u32> {
+        let Ok(entries) = std::fs::read_dir(&self.proc_root) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+            .collect()
+    }
+
     fn kernel_identity(&self, pid: u32, dev: u64, inode: u64) -> Option<(u64, u64)> {
         let pid_dir = self.proc_root.join(pid.to_string());
         let file = match File::open(pid_dir.join("exe")) {
@@ -220,6 +230,20 @@ mod tests {
         let dir = tempdir().unwrap();
         let resolver = ProcExecutableResolver::new(dir.path());
         assert!(resolver.read_executable(999_999).is_none());
+    }
+
+    #[test]
+    fn every_numeric_entry_is_a_running_pid() {
+        let (dir, _) = fake_proc(42, "/usr/bin/curl");
+        let proc_root = dir.path().join("proc");
+        fs::create_dir(proc_root.join("7")).unwrap();
+        fs::create_dir(proc_root.join("self")).unwrap();
+        let resolver = ProcExecutableResolver::new(proc_root);
+
+        let mut pids = resolver.running();
+        pids.sort_unstable();
+
+        assert_eq!(pids, vec![7, 42]);
     }
 
     #[test]

@@ -30,7 +30,7 @@
 //! is remembered from the exec that wrote it, because an answer arrives with
 //! a cgroup id and nothing else.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
@@ -645,6 +645,7 @@ impl WorkloadPolicyService {
         // After the lock on the maps is released, because the replay takes
         // it once per task.
         self.replay();
+        self.seed_executables();
         self.seed_cgroups();
         self.clear_stale_cgroups(&previous_cgroups);
         Ok(())
@@ -694,6 +695,61 @@ impl WorkloadPolicyService {
             tasks = entries.len(),
             "workload policy replayed over the process table"
         );
+    }
+
+    /// Record the file of every running task whose executable a rule
+    /// names, whether or not the table holds the task.
+    ///
+    /// The kernel decides a selector naming an executable from the file the
+    /// calling task runs, keyed as the kernel holds it, and under overlayfs
+    /// that key is one per container. The table holds only the tasks seen to
+    /// fork or exec since the agent started, so after a restart a container
+    /// whose processes all predate it would have no key until one of them
+    /// next execs, and that exec's first connection would be decided before
+    /// the key is written. Reading every running task closes that for each
+    /// container where some process already runs the named file.
+    fn seed_executables(&self) {
+        let (Some(maps), Some(reader)) = (&self.maps, &self.executables) else {
+            return;
+        };
+        if !self
+            .policy
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .selector_bits()
+            .into_iter()
+            .any(|(_, selector)| selector.names_executable() || selector.names_lineage())
+        {
+            return;
+        }
+        let mut seen = HashSet::new();
+        for pid in reader.running() {
+            let Some(executable) = reader.read_executable(pid) else {
+                continue;
+            };
+            let stat = (executable.dev, executable.inode);
+            let mut maps = maps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !maps.names_executable(&executable.path) {
+                continue;
+            }
+            let kernel = reader.kernel_identity(pid, stat.0, stat.1);
+            for (dev, inode) in std::iter::once(stat).chain(kernel) {
+                // Every task of a container runs the same file: one write.
+                if !seen.insert((dev, inode)) {
+                    continue;
+                }
+                if let Err(err) = maps.note_lineage_executable(&executable.path, dev, inode) {
+                    warn!(
+                        pid,
+                        path = executable.path,
+                        error = %err,
+                        "an executable a lineage rule names was not recorded"
+                    );
+                }
+            }
+        }
     }
 
     /// Name every live cgroup the replay left without a mask, from what the
@@ -1936,6 +1992,49 @@ mod tests {
                 ("/usr/sbin/nginx".to_string(), 1, 2),
                 ("/usr/sbin/nginx".to_string(), 432, 2),
                 ("/usr/sbin/nginx".to_string(), 1, 2),
+            ]
+        );
+    }
+
+    /// A host where pids 50 and 51 already run the named file in one
+    /// container and pid 52 is gone before it is read, none of them in the
+    /// table.
+    struct Running;
+
+    impl ProcessExecutableReader for Running {
+        fn read_executable(&self, pid: u32) -> Option<domain::dlp::entity::DlpExecutable> {
+            (pid != 52).then(|| domain::dlp::entity::DlpExecutable {
+                path: "/usr/sbin/nginx".to_string(),
+                dev: 1,
+                inode: 2,
+                source: domain::dlp::entity::DlpIdentitySource::ProcessAtAlertTime,
+            })
+        }
+
+        fn kernel_identity(&self, _pid: u32, _dev: u64, _inode: u64) -> Option<(u64, u64)> {
+            Some((432, 2))
+        }
+
+        fn running(&self) -> Vec<u32> {
+            vec![50, 51, 52]
+        }
+    }
+
+    #[test]
+    fn a_task_running_before_the_agent_gives_its_file_to_the_policy() {
+        let maps = SharedMaps::default();
+        let rules = vec![lineage_rule("alone", None, "/usr/sbin/nginx")];
+        let service = service(Vec::new(), maps.clone()).with_executables(Arc::new(Running));
+
+        service
+            .apply(WorkloadPolicy::new(rules).expect("inside the ceiling"))
+            .expect("published");
+
+        assert_eq!(
+            maps.0.lock().unwrap().executables,
+            vec![
+                ("/usr/sbin/nginx".to_string(), 1, 2),
+                ("/usr/sbin/nginx".to_string(), 432, 2),
             ]
         );
     }

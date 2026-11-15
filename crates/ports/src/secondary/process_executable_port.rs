@@ -26,4 +26,13 @@ pub trait ProcessExecutableReader: Send + Sync {
         let _ = (pid, dev, inode);
         None
     }
+
+    /// Every pid running on the host, where the reader can list them.
+    ///
+    /// A process the agent never saw exec - one already running when it
+    /// started - is known only from here. Empty where the host cannot be
+    /// listed.
+    fn running(&self) -> Vec<u32> {
+        Vec::new()
+    }
 }
