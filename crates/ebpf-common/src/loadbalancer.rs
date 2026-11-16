@@ -258,6 +258,52 @@ impl BackendMac {
 /// Maximum entries in the `LB_BACKEND_MAC` map (one per backend, V2).
 pub const MAX_LB_BACKEND_MAC: u32 = MAX_LB_BACKENDS_TOTAL;
 
+// ── Flow table ─────────────────────────────────────────────────
+
+/// Entries the `LB_FLOWS` table is declared with: one per connection in
+/// flight through the load balancer. The agent resizes it at load from
+/// `loadbalancer.max_flows`.
+pub const LB_DEFAULT_FLOWS: u32 = 65_536;
+
+/// A flow counts against its backend's connections: a TCP connection not
+/// yet seen closing.
+pub const LB_FLOW_COUNTED: u64 = 1;
+/// A flow that does not count: a TCP connection seen closing (FIN or RST),
+/// whose last packets still reach the same backend, or a UDP flow, which
+/// has no close to count down on.
+pub const LB_FLOW_UNCOUNTED: u64 = 0;
+
+/// Key of the `LB_FLOWS` table: the connection as the client sent it, before
+/// any rewrite. Addresses in the wire's byte order, ports in host order.
+///
+/// Size: 40 bytes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LbFlowKey {
+    pub src_addr: [u32; 4],
+    pub dst_addr: [u32; 4],
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub protocol: u8,
+    pub family: u8,
+    pub _pad: [u8; 2],
+}
+
+/// Value of the `LB_FLOWS` table: the backend the flow's first packet was
+/// balanced to, and whether the flow counts against that backend.
+///
+/// Size: 16 bytes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LbFlow {
+    pub backend_id: u32,
+    pub _pad: u32,
+    /// `LB_FLOW_COUNTED` or `LB_FLOW_UNCOUNTED`, swapped atomically so a
+    /// flow closing on two CPUs at once is uncounted once. A full word,
+    /// because the exchange instruction the program has is 64-bit.
+    pub state: u64,
+}
+
 // ── Metrics ────────────────────────────────────────────────────
 
 /// Metric index constants for `LB_METRICS` `PerCpuArray`.
@@ -286,6 +332,10 @@ unsafe impl aya::Pod for LbServiceConfigV2 {}
 unsafe impl aya::Pod for MaglevLookup {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for BackendMac {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for LbFlowKey {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for LbFlow {}
 
 #[cfg(test)]
 mod tests {
@@ -403,6 +453,13 @@ mod tests {
         let bm = BackendMac::new([1, 2, 3, 4, 5, 6]);
         assert_eq!(bm.mac, [1, 2, 3, 4, 5, 6]);
         assert_eq!(bm._pad, [0, 0]);
+    }
+
+    #[test]
+    fn flow_table_layout() {
+        assert_eq!(mem::size_of::<LbFlowKey>(), 40);
+        assert_eq!(mem::size_of::<LbFlow>(), 16);
+        assert_ne!(LB_FLOW_COUNTED, LB_FLOW_UNCOUNTED);
     }
 
     #[test]

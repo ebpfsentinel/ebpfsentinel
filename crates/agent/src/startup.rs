@@ -526,6 +526,10 @@ fn warden_pcap_pool(
     adapters::warden::pcap::pool_from_warden(&sock, iface, 2)
 }
 
+/// How often each load balancer backend's open-connection count is rebuilt
+/// from the kernel's flow table.
+const LB_CONNECTION_RECOUNT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Run the agent startup sequence and block until shutdown.
 ///
 /// `log_level_override` and `log_format_override` take precedence over config file values.
@@ -1479,6 +1483,20 @@ pub async fn run(
             domain::routing::entity::HealthCheck,
             Vec<LbBackendProbe>,
         );
+
+        // Least-connections reads per-backend counts the data plane moves as
+        // connections open and close. A connection the flow table forgot
+        // before it closed would count forever; recounting from the table
+        // puts each backend back to what it holds.
+        let recount_lb = Arc::clone(&lb_svc);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(LB_CONNECTION_RECOUNT);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                recount_lb.write().await.recount_connections();
+            }
+        });
 
         let probe_specs: Vec<LbProbeSpec> = {
             let svc = lb_svc.read().await;

@@ -2,7 +2,8 @@ use crate::ebpf::map_store::MapStore;
 use aya::maps::{DevMap, HashMap, IterableMap, MapData};
 use domain::common::error::DomainError;
 use ebpf_common::loadbalancer::{
-    BackendMac, LbBackendEntry, LbServiceConfigV2, LbServiceKey, MAGLEV_RING_SIZE, MaglevLookup,
+    BackendMac, LB_FLOW_COUNTED, LbBackendEntry, LbFlow, LbFlowKey, LbServiceConfigV2,
+    LbServiceKey, MAGLEV_RING_SIZE, MaglevLookup,
 };
 use ports::secondary::loadbalancer_map_port::{LbMapCapacity, LoadBalancerMapPort};
 use tracing::{debug, info, warn};
@@ -10,8 +11,9 @@ use tracing::{debug, info, warn};
 /// Manages the load balancer eBPF maps: `LB_SERVICES` and `LB_BACKENDS`.
 ///
 /// Provides typed wrappers for inserting, updating, and removing service
-/// and backend entries. The `LB_RR_STATE` and `LB_METRICS` maps are managed
-/// by the kernel program; userspace only pushes config.
+/// and backend entries. The `LB_RR_STATE`, `LB_FLOWS` and `LB_METRICS` maps
+/// are written by the kernel program; userspace pushes config and recounts
+/// each backend's open connections from `LB_FLOWS`.
 pub struct LbMapManager {
     services_map: HashMap<MapData, LbServiceKey, LbServiceConfigV2>,
     backends_map: HashMap<MapData, u32, LbBackendEntry>,
@@ -25,6 +27,10 @@ pub struct LbMapManager {
     /// `LB_BACKEND_MAC`: resolved backend MACs for L2 DSR forwarding.
     /// Optional - only present in the `xdp-loadbalancer` program.
     backend_mac_map: Option<HashMap<MapData, u32, BackendMac>>,
+    /// `LB_FLOWS`: the backend each connection in flight was balanced to.
+    flows_map: Option<HashMap<MapData, LbFlowKey, LbFlow>>,
+    /// `LB_BACKEND_CONNS`: open connections per backend, for least-conn.
+    conns_map: Option<HashMap<MapData, u32, i64>>,
     /// What `LB_MAGLEV` and `LB_BACKENDS` were created to hold.
     capacity: LbMapCapacity,
 }
@@ -79,6 +85,14 @@ impl LbMapManager {
             info!("LB_BACKEND_MAC acquired for L2 DSR forwarding");
         }
 
+        // The flow table and the connection counts are the xdp-loadbalancer's.
+        let flows_map = ebpf
+            .take_map("LB_FLOWS")
+            .and_then(|m| HashMap::try_from(m).ok());
+        let conns_map = ebpf
+            .take_map("LB_BACKEND_CONNS")
+            .and_then(|m| HashMap::try_from(m).ok());
+
         let capacity = LbMapCapacity {
             maglev_services: maglev_map.as_ref().and_then(created_capacity),
             backends: created_capacity(&backends_map),
@@ -94,6 +108,8 @@ impl LbMapManager {
             devmap,
             maglev_map,
             backend_mac_map,
+            flows_map,
+            conns_map,
             capacity,
         })
     }
@@ -182,6 +198,17 @@ impl LbMapManager {
             .insert(&backend_id, entry, 0)
             .map_err(|e| anyhow::anyhow!("LB_BACKENDS insert failed: {e}"))?;
 
+        // The program counts only into an entry that exists. One already
+        // there keeps its count: a backend re-synced in place still carries
+        // the connections it holds.
+        if let Some(ref mut conns) = self.conns_map
+            && conns.get(&backend_id, 0).is_err()
+        {
+            conns
+                .insert(&backend_id, &0_i64, 0)
+                .map_err(|e| anyhow::anyhow!("LB_BACKEND_CONNS insert failed: {e}"))?;
+        }
+
         // Populate DevMap for XDP redirect. Resolve ifindex from the backend IP.
         // If resolution fails, the eBPF program falls back to MAC swap + XDP_TX.
         if let Some(ref mut dm) = self.devmap {
@@ -234,6 +261,9 @@ impl LbMapManager {
         }
         // Clean up L2 DSR MAC entry
         self.remove_backend_mac(backend_id)?;
+        if let Some(ref mut conns) = self.conns_map {
+            let _ = conns.remove(&backend_id);
+        }
         Ok(())
     }
 
@@ -279,6 +309,16 @@ impl LbMapManager {
             }
         }
 
+        // The flow table is left alone: a reload keeps every connection in
+        // flight on its backend. The counts are rebuilt from it.
+        if let Some(ref mut map) = self.conns_map {
+            let keys: Vec<u32> = map.keys().filter_map(Result::ok).collect();
+            for key in &keys {
+                map.remove(key)
+                    .map_err(|e| anyhow::anyhow!("LB_BACKEND_CONNS clear failed: {e}"))?;
+            }
+        }
+
         if let Some(ref mut map) = self.backend_mac_map {
             let mac_keys: Vec<u32> = map.keys().filter_map(Result::ok).collect();
             for key in &mac_keys {
@@ -287,6 +327,28 @@ impl LbMapManager {
             }
         }
 
+        Ok(())
+    }
+
+    /// Set every backend's open-connection count to the counted flows
+    /// `LB_FLOWS` holds for it.
+    ///
+    /// The program moves the counts as connections open and close; a flow
+    /// the kernel evicted before it was seen closing, or a count a reload
+    /// reset, is only put right here. A flow opening or closing between the
+    /// read and the write is off by one until the next recount.
+    pub fn recount_connections(&mut self) -> Result<(), anyhow::Error> {
+        let (Some(flows), Some(conns)) = (self.flows_map.as_ref(), self.conns_map.as_mut()) else {
+            return Ok(());
+        };
+        let open = tally_open(flows.iter().filter_map(Result::ok).map(|(_, f)| f));
+        let backends: Vec<u32> = conns.keys().filter_map(Result::ok).collect();
+        for id in backends {
+            let n = open.get(&id).copied().unwrap_or(0);
+            conns
+                .insert(&id, &n, 0)
+                .map_err(|e| anyhow::anyhow!("LB_BACKEND_CONNS recount failed: {e}"))?;
+        }
         Ok(())
     }
 
@@ -355,9 +417,23 @@ impl LoadBalancerMapPort for LbMapManager {
         Ok(self.service_count())
     }
 
+    fn recount_connections(&mut self) -> Result<(), DomainError> {
+        self.recount_connections()
+            .map_err(|e| DomainError::EngineError(format!("lb connection recount failed: {e}")))
+    }
+
     fn capacity(&self) -> LbMapCapacity {
         self.capacity
     }
+}
+
+/// Counted flows per backend.
+fn tally_open(flows: impl Iterator<Item = LbFlow>) -> std::collections::HashMap<u32, i64> {
+    let mut open = std::collections::HashMap::new();
+    for flow in flows.filter(|f| f.state == LB_FLOW_COUNTED) {
+        *open.entry(flow.backend_id).or_insert(0) += 1;
+    }
+    open
 }
 
 /// Resolve the link-layer (MAC) address for a backend IP via the kernel
@@ -457,4 +533,35 @@ fn resolve_ifindex_for_ip(addr_v4: u32, is_ipv6: bool) -> Option<u32> {
     // Resolve interface name to ifindex
     let ifindex_str = std::fs::read_to_string(format!("/sys/class/net/{dev_name}/ifindex")).ok()?;
     ifindex_str.trim().parse::<u32>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ebpf_common::loadbalancer::LB_FLOW_UNCOUNTED;
+
+    fn flow(backend_id: u32, state: u64) -> LbFlow {
+        LbFlow {
+            backend_id,
+            _pad: 0,
+            state,
+        }
+    }
+
+    #[test]
+    fn only_counted_flows_are_tallied_per_backend() {
+        let open = tally_open(
+            [
+                flow(7, LB_FLOW_COUNTED),
+                flow(7, LB_FLOW_COUNTED),
+                flow(7, LB_FLOW_UNCOUNTED),
+                flow(9, LB_FLOW_COUNTED),
+                flow(11, LB_FLOW_UNCOUNTED),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(open.get(&7), Some(&2));
+        assert_eq!(open.get(&9), Some(&1));
+        assert_eq!(open.get(&11), None);
+    }
 }

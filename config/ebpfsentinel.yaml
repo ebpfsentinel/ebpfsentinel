@@ -404,6 +404,10 @@ loadbalancer:
   # service that does not fit is refused with the key to raise.
   # max_maglev_services: 8
   # max_backends: 1024
+  # Connections followed at once, so each stays on the backend it started
+  # on and least_conn counts it; the same number of DNAT replies are
+  # translated back to the service address. Least recently used drops first.
+  # max_flows: 65536
 
 # GeoIP is disabled by default: leave the whole block commented out.
 # Unlike other sections it has no standalone on/off - enabling it requires a

@@ -61,6 +61,10 @@ pub trait LoadBalancerMapPort: Send + Sync {
     /// Return the number of service entries currently in the map.
     fn service_count(&self) -> Result<usize, DomainError>;
 
+    /// Set each backend's open-connection count, which least-connections
+    /// reads, to the connections the flow table holds open on it.
+    fn recount_connections(&mut self) -> Result<(), DomainError>;
+
     /// The capacity the kernel tables were created with.
     fn capacity(&self) -> LbMapCapacity;
 }

@@ -126,13 +126,17 @@ impl LbAppService {
         self.engine
             .update_backend_health(service_id, backend_id, healthy, threshold)?;
 
-        // Sync just the health flag in the eBPF map if available
+        // Sync just the health flag in the eBPF map if available. The
+        // kernel's backend ID is the service's first ID plus the backend's
+        // place in it, the numbering `sync_ebpf_maps` writes.
+        let start = self.backend_start_id(service_id);
         if let Some(ref mut port) = self.map_port
+            && let Some(start) = start
             && let Some(states) = self.engine.backend_states(service_id)
             && let Some(pos) = states.iter().position(|s| s.backend.id == backend_id)
         {
             #[allow(clippy::cast_possible_truncation)]
-            let ebpf_id = pos as u32;
+            let ebpf_id = start + pos as u32;
             if let Err(e) = port.update_backend_health(ebpf_id, healthy) {
                 tracing::warn!(
                     service = service_id,
@@ -145,6 +149,32 @@ impl LbAppService {
         self.publish_backend_health();
 
         Ok(())
+    }
+
+    /// The first kernel backend ID of an enabled service: its place among
+    /// the enabled services times the per-service window, as
+    /// `sync_ebpf_maps` assigns them.
+    fn backend_start_id(&self, service_id: &str) -> Option<u32> {
+        let slot = self
+            .engine
+            .services()
+            .iter()
+            .filter(|s| s.enabled)
+            .position(|s| s.id.0 == service_id)?;
+        u32::try_from(slot)
+            .ok()
+            .map(|slot| slot.saturating_mul(LB_MAX_BACKENDS_V2))
+    }
+
+    /// Set each backend's open-connection count to the connections the
+    /// kernel's flow table holds open on it. Run on a timer, it repairs the
+    /// counts a flow evicted before it closed left behind.
+    pub fn recount_connections(&mut self) {
+        if let Some(ref mut port) = self.map_port
+            && let Err(e) = port.recount_connections()
+        {
+            tracing::debug!("load balancer connection recount skipped: {e}");
+        }
     }
 
     /// Refuse a service set the kernel tables cannot hold.
@@ -284,6 +314,12 @@ impl LbAppService {
                 }
             }
         }
+
+        // The counts were cleared with the rest; the connections in flight
+        // were not.
+        if let Err(e) = port.recount_connections() {
+            tracing::warn!("failed to recount load balancer connections: {e}");
+        }
     }
 
     fn update_metrics(&mut self) {
@@ -410,6 +446,7 @@ mod tests {
         LbAlgorithm, LbBackend, LbForwardingMode, LbProtocol, LbService,
     };
     use ports::test_utils::NoopMetrics;
+    use std::collections::HashMap;
     use std::net::Ipv4Addr;
 
     fn make_service() -> LbAppService {
@@ -722,6 +759,8 @@ mod tests {
     struct SizedPort {
         capacity: LbMapCapacity,
         rings: Arc<std::sync::atomic::AtomicUsize>,
+        health: Arc<std::sync::Mutex<Vec<(u32, bool)>>>,
+        ports: Arc<std::sync::Mutex<HashMap<u32, u16>>>,
     }
 
     impl LoadBalancerMapPort for SizedPort {
@@ -735,13 +774,21 @@ mod tests {
         fn remove_service(&mut self, _: &LbServiceKey) -> Result<(), DomainError> {
             Ok(())
         }
-        fn sync_backend(&mut self, _: u32, _: &LbBackendEntry) -> Result<(), DomainError> {
+        fn sync_backend(&mut self, id: u32, entry: &LbBackendEntry) -> Result<(), DomainError> {
+            self.ports
+                .lock()
+                .expect("the recording lock is never poisoned")
+                .insert(id, entry.port);
             Ok(())
         }
         fn remove_backend(&mut self, _: u32) -> Result<(), DomainError> {
             Ok(())
         }
-        fn update_backend_health(&mut self, _: u32, _: bool) -> Result<(), DomainError> {
+        fn update_backend_health(&mut self, id: u32, healthy: bool) -> Result<(), DomainError> {
+            self.health
+                .lock()
+                .expect("the recording lock is never poisoned")
+                .push((id, healthy));
             Ok(())
         }
         fn sync_maglev_table(&mut self, _: u32, _: &[u16]) -> Result<(), DomainError> {
@@ -765,6 +812,9 @@ mod tests {
         fn service_count(&self) -> Result<usize, DomainError> {
             Ok(0)
         }
+        fn recount_connections(&mut self) -> Result<(), DomainError> {
+            Ok(())
+        }
         fn capacity(&self) -> LbMapCapacity {
             self.capacity
         }
@@ -782,8 +832,52 @@ mod tests {
                 backends,
             },
             rings: Arc::clone(&rings),
+            health: Arc::default(),
+            ports: Arc::default(),
         }));
         (svc, rings)
+    }
+
+    #[test]
+    fn a_health_change_reaches_the_backend_of_its_own_service() {
+        let health = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ports = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(SizedPort {
+            capacity: LbMapCapacity {
+                maglev_services: None,
+                backends: None,
+            },
+            rings: Arc::default(),
+            health: Arc::clone(&health),
+            ports: Arc::clone(&ports),
+        }));
+        let mut services = Vec::new();
+        for (i, id) in ["a", "b", "c"].into_iter().enumerate() {
+            let base = 8000 + 100 * u16::try_from(i).expect("three services");
+            let mut s = make_lb_service(id, 80 + base);
+            s.backends = vec![make_backend("x", base), make_backend("y", base + 1)];
+            services.push(s);
+        }
+        svc.reload_services(services).expect("three services");
+        for (service, port) in [("a", 8001), ("b", 8101), ("c", 8201)] {
+            svc.update_backend_health(service, "y", false, 1)
+                .expect("the backend is known");
+            let (id, healthy) = *health
+                .lock()
+                .expect("the recording lock is never poisoned")
+                .last()
+                .expect("the change reached the kernel");
+            assert!(!healthy);
+            assert_eq!(
+                ports
+                    .lock()
+                    .expect("the recording lock is never poisoned")
+                    .get(&id),
+                Some(&port),
+                "service {service} marked another service's backend down"
+            );
+        }
     }
 
     fn maglev(id: &str, port: u16) -> LbService {

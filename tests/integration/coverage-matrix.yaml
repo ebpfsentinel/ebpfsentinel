@@ -241,6 +241,7 @@ suite_profiles:
   "136": nightly
   "137": nightly
   "138": nightly
+  "139": nightly
   "71": nightly
   "perf/01": nightly
   "perf/02": nightly
@@ -288,11 +289,11 @@ coverage:
 
   - kind: ebpf_program
     feature: xdp-loadbalancer
-    suites: ["20", "44", "67"]
+    suites: ["20", "44", "67", "139"]
     topology: 2vm
     kernel_min: "6.12"
     profile: pr
-    notes: "L4 LB + Maglev; suite 44 (3-VM) covers L2 DSR end-to-end and Maglev disruption bound"
+    notes: "L4 LB + Maglev; suite 44 (3-VM) covers L2 DSR end-to-end and Maglev disruption bound; suite 139 (3-VM) covers DNAT round trips, weights and least_conn"
 
   - kind: ebpf_program
     feature: xdp-vip-announcer
@@ -1420,6 +1421,15 @@ attack_suites:
     profile: nightly
     surfaces: ["xdp-ratelimit", "xdp-ratelimit-syncookie", "ddos"]
     notes: "SYN flood: nstat TcpExtSyncookiesSent and agent syncookie_sent metric grow, legit ncat completes 3-way via cookie, spoofed-source flood leaves TcpExtSyncookiesRecv flat"
+
+  - suite: "139"
+    name: lb-dnat-connections
+    topology: 3vm
+    lanes: ["3vm"]
+    kernel_min: "6.12"
+    profile: nightly
+    surfaces: ["xdp-loadbalancer", "loadbalancer"]
+    notes: "DNAT end-to-end: every TCP connection through three round-robin backends completes with the reply translated back to the VIP; a 3:1:1 weighted service spreads 100 connections in that proportion; least_conn keeps new connections off backends holding open ones"
 
   - suite: "44"
     name: lb-dsr-maglev

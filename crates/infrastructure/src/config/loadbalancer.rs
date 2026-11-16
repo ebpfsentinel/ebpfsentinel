@@ -56,6 +56,13 @@ pub struct LoadBalancerConfig {
     /// [`LB_MIN_BACKEND_CAPACITY`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_backends: Option<u32>,
+
+    /// Connections in flight the kernel tracks at once, each held on the
+    /// backend its first packet was balanced to. Unset, it is
+    /// [`LB_DEFAULT_FLOW_CAPACITY`]. Past it the least recently used flow is
+    /// forgotten and its next packet balanced afresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_flows: Option<u32>,
 }
 
 /// Most Maglev tables the data plane declares room for.
@@ -66,6 +73,10 @@ pub const LB_MAX_BACKEND_CAPACITY: u32 = ebpf_common::loadbalancer::MAX_LB_BACKE
 /// service at its full backend count, so a service added through the API
 /// fits without a restart.
 pub const LB_MIN_BACKEND_CAPACITY: u32 = ebpf_common::loadbalancer::LB_MAX_BACKENDS_V2;
+/// Connections tracked when `max_flows` is unset.
+pub const LB_DEFAULT_FLOW_CAPACITY: u32 = ebpf_common::loadbalancer::LB_DEFAULT_FLOWS;
+/// Most connections `max_flows` may ask the kernel to track.
+pub const LB_MAX_FLOW_CAPACITY: u32 = 1 << 24;
 
 impl LoadBalancerConfig {
     /// The Maglev lookup tables the kernel creates room for.
@@ -111,7 +122,21 @@ impl LoadBalancerConfig {
             .clamp(LB_MIN_BACKEND_CAPACITY, LB_MAX_BACKEND_CAPACITY)
     }
 
-    /// Bounds on the two explicit capacities, and room in each for what the
+    /// The flows `LB_FLOWS` is created to hold.
+    ///
+    /// The table is an LRU, which the kernel allocates whole at creation, so
+    /// a load balancer that is off gets one slot.
+    #[must_use]
+    pub fn flow_capacity(&self) -> u32 {
+        if !self.enabled {
+            return 1;
+        }
+        self.max_flows
+            .unwrap_or(LB_DEFAULT_FLOW_CAPACITY)
+            .clamp(1, LB_MAX_FLOW_CAPACITY)
+    }
+
+    /// Bounds on the explicit capacities, and room in each for what the
     /// file itself lists.
     pub(super) fn validate_capacity(&self) -> Result<(), ConfigError> {
         let maglev = self
@@ -154,6 +179,14 @@ impl LoadBalancerConfig {
                     message: format!("{n} is fewer than the {listed} backends listed"),
                 });
             }
+        }
+        if let Some(n) = self.max_flows
+            && !(1..=LB_MAX_FLOW_CAPACITY).contains(&n)
+        {
+            return Err(ConfigError::Validation {
+                field: "loadbalancer.max_flows".to_string(),
+                message: format!("must be between 1 and {LB_MAX_FLOW_CAPACITY}, got {n}"),
+            });
         }
         Ok(())
     }

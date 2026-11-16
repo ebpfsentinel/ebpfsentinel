@@ -61,6 +61,9 @@ pub const SIZED_MAPS: &[(&str, &str)] = &[
     ("LB_MAGLEV", "loadbalancer.max_maglev_services"),
     ("LB_BACKENDS", "loadbalancer.max_backends"),
     ("LB_BACKEND_MAC", "loadbalancer.max_backends"),
+    ("LB_BACKEND_CONNS", "loadbalancer.max_backends"),
+    ("LB_FLOWS", "loadbalancer.max_flows"),
+    ("LB_REVERSE", "loadbalancer.max_flows"),
     ("NETPOL_REPLIES", "container.kubernetes.network_policy.mode"),
 ];
 
@@ -159,6 +162,7 @@ impl MapSizing {
             };
         let maglev = config.loadbalancer.maglev_capacity();
         let lb_backends = config.loadbalancer.backend_capacity();
+        let lb_flows = config.loadbalancer.flow_capacity();
         let entries = SIZED_MAPS
             .iter()
             .map(|(name, field)| {
@@ -174,6 +178,7 @@ impl MapSizing {
                     "attribution.max_sockets" => sockets,
                     "loadbalancer.max_maglev_services" => maglev,
                     "loadbalancer.max_backends" => lb_backends,
+                    "loadbalancer.max_flows" => lb_flows,
                     "container.kubernetes.network_policy.mode" => netpol_replies,
                     other => unreachable!("unmapped sizing field {other}"),
                 };
@@ -428,6 +433,21 @@ mod tests {
         assert_eq!(p.get("LB_MAGLEV"), Some(1));
         assert_eq!(p.get("LB_BACKENDS"), Some(1));
         assert_eq!(p.get("LB_BACKEND_MAC"), Some(1));
+        assert_eq!(p.get("LB_BACKEND_CONNS"), Some(1));
+        assert_eq!(p.get("LB_FLOWS"), Some(1));
+        assert_eq!(p.get("LB_REVERSE"), Some(1));
+    }
+
+    #[test]
+    fn the_flow_table_follows_max_flows() {
+        let p = load_balancer("  enabled: true\n");
+        assert_eq!(
+            p.get("LB_FLOWS"),
+            Some(infrastructure::config::LB_DEFAULT_FLOW_CAPACITY)
+        );
+        let p = load_balancer("  enabled: true\n  max_flows: 1000000\n");
+        assert_eq!(p.get("LB_FLOWS"), Some(1_000_000));
+        assert_eq!(p.get("LB_REVERSE"), Some(1_000_000));
     }
 
     #[test]

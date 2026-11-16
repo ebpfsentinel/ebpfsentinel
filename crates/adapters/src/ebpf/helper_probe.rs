@@ -286,8 +286,10 @@ pub const REQUIREMENTS: &[ObjectRequirements] = &[
         &[
             BPF_FUNC_check_mtu,
             BPF_FUNC_fib_lookup,
+            BPF_FUNC_get_prandom_u32,
             BPF_FUNC_get_smp_processor_id,
             BPF_FUNC_ktime_get_boot_ns,
+            BPF_FUNC_loop,
             BPF_FUNC_redirect,
             BPF_FUNC_redirect_map,
         ],

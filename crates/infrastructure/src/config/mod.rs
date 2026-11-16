@@ -93,8 +93,8 @@ pub use kernel_drops::KernelDropsConfig;
 pub use l7::{L7Config, L7RuleConfig};
 pub use learning::LearningConfig;
 pub use loadbalancer::{
-    AnnounceConfig, LB_MIN_BACKEND_CAPACITY, LbBackendConfig, LbServiceConfig as LbServiceCfg,
-    LoadBalancerConfig, VipConfig,
+    AnnounceConfig, LB_DEFAULT_FLOW_CAPACITY, LB_MAX_FLOW_CAPACITY, LB_MIN_BACKEND_CAPACITY,
+    LbBackendConfig, LbServiceConfig as LbServiceCfg, LoadBalancerConfig, VipConfig,
 };
 pub use management::ManagementConfig;
 pub use nat::{HairpinNatConfig, NatConfig, NatRuleConfig, NptV6RuleConfig};
