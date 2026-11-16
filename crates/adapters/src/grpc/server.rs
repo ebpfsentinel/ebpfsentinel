@@ -50,7 +50,7 @@ const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 /// to be installed as the process default - which, for an agent that also
 /// dials classical servers, is deliberately the permissive one.
 fn grpc_server_config(tls: &GrpcTlsConfig) -> anyhow::Result<Arc<ServerConfig>> {
-    let provider = crate::tls::build_crypto_provider(tls.pq_mode);
+    let provider = crate::tls::build_crypto_provider(crate::tls::LINK_GRPC, tls.pq_mode);
 
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&tls.cert_pem)
         .collect::<Result<_, _>>()

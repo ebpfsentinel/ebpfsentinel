@@ -25,7 +25,7 @@ pub fn load_rustls_config(
     pq_mode: PqMode,
     allow_tls12: bool,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-    let provider = build_crypto_provider(pq_mode);
+    let provider = build_crypto_provider(adapters::tls::LINK_API, pq_mode);
 
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert_path)
         .map_err(|e| anyhow::anyhow!("failed to read TLS cert at '{}': {e}", cert_path.display()))?

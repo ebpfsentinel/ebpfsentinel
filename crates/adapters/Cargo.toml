@@ -79,6 +79,7 @@ tracing-subscriber = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 base64 = { workspace = true }
 criterion = { workspace = true }
+rcgen = { workspace = true }
 k8s-openapi = { workspace = true, features = ["v1_32"] }
 
 [[bench]]

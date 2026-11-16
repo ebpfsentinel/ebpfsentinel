@@ -18,6 +18,45 @@ use std::sync::atomic::AtomicU64;
 
 // ── Label types ─────────────────────────────────────────────────────
 
+/// Labels for the handshakes each TLS link completed: the link the provider
+/// was built for and the group the handshake completed on.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct TlsHandshakeLabels {
+    pub link: String,
+    pub group: String,
+}
+
+/// The handshake ledger of [`crate::tls`], read at scrape time.
+///
+/// The ledger is process-wide because the providers that write it are built
+/// in places that hold no metrics handle - a SIEM exporter, a reqwest client,
+/// the process default - so the registry reads it rather than being told.
+#[derive(Debug, Default)]
+pub struct TlsHandshakes;
+
+impl TypedMetric for TlsHandshakes {
+    const TYPE: MetricType = MetricType::Counter;
+}
+
+impl EncodeMetric for TlsHandshakes {
+    fn encode(&self, mut encoder: MetricEncoder) -> Result<(), std::fmt::Error> {
+        for handshake in crate::tls::handshake_counts() {
+            let labels = TlsHandshakeLabels {
+                link: handshake.link.to_owned(),
+                group: crate::tls::group_name(handshake.group),
+            };
+            encoder
+                .encode_family(&labels)?
+                .encode_counter::<NoLabelSet, _, u64>(&handshake.count, None)?;
+        }
+        Ok(())
+    }
+
+    fn metric_type(&self) -> MetricType {
+        Self::TYPE
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct PacketLabels {
     pub interface: String,
@@ -1380,6 +1419,12 @@ impl AgentMetrics {
             "bpf_token_used",
             "eBPF loaded via BPF token (1=token-loaded, 0=API-only/no eBPF)",
             bpf_token_used.clone(),
+        );
+
+        registry.register(
+            "tls_handshakes",
+            "TLS handshakes completed, by link and by the key-exchange group negotiated",
+            TlsHandshakes,
         );
 
         let kernel_capability_active = Family::<CapabilityLabels, Gauge>::default();
@@ -2967,6 +3012,22 @@ mod tests {
         assert!(encoded.contains("le=\"0.005\""));
     }
 
+    #[test]
+    fn tls_handshakes_are_exported_by_link_and_group() {
+        let metrics = AgentMetrics::new();
+        crate::tls::record(
+            "metrics-test-link",
+            tokio_rustls::rustls::NamedGroup::X25519MLKEM768,
+        );
+        let encoded = metrics.encode();
+        assert!(
+            encoded.contains(
+                "ebpfsentinel_tls_handshakes_total{link=\"metrics-test-link\",group=\"X25519MLKEM768\"} 1"
+            ),
+            "{encoded}"
+        );
+    }
+
     /// Every metric this registry holds, as the name it is registered under
     /// and the metric type it encodes as.
     ///
@@ -2995,6 +3056,7 @@ mod tests {
         ("auto_responses", "counter"),
         ("bpf_token_used", "gauge"),
         ("kernel_capability_active", "gauge"),
+        ("tls_handshakes", "counter"),
         ("cgroup_shaping_achieved_bps", "gauge"),
         ("cgroup_shaping_bytes", "counter"),
         ("cgroup_shaping_dropped_horizon", "counter"),
@@ -3603,8 +3665,13 @@ mod tests {
             })
             .collect();
 
+        // Families read at scrape time from a ledger kept outside this file
+        // rather than written through a method: the ledger's own tests are
+        // what prove something writes it.
+        const READ_AT_SCRAPE: &[&str] = &["tls_handshakes"];
+
         let mut unreached: Vec<&str> = Vec::new();
-        for (name, field) in &fields {
+        for (name, field) in fields.iter().filter(|(n, _)| !READ_AT_SCRAPE.contains(n)) {
             let methods = writers
                 .iter()
                 .find(|(f, _)| f == field)

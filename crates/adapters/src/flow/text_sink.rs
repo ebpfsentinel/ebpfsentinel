@@ -411,12 +411,15 @@ fn client_config(authority: &Path, pq_mode: PqMode) -> Result<ClientConfig, Doma
     // collector that does not falls back to a classical group, because
     // `require` is a statement about who may reach this agent rather than
     // about who this agent may reach.
-    ClientConfig::builder_with_provider(crate::tls::client_provider(pq_mode))
-        .with_safe_default_protocol_versions()
-        .map_err(|error| {
-            DomainError::EngineError(format!("failed to build the TLS client policy: {error}"))
-        })
-        .map(|builder| builder.with_root_certificates(roots).with_no_client_auth())
+    ClientConfig::builder_with_provider(crate::tls::client_provider(
+        crate::tls::LINK_FLOW_EXPORT,
+        pq_mode,
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|error| {
+        DomainError::EngineError(format!("failed to build the TLS client policy: {error}"))
+    })
+    .map(|builder| builder.with_root_certificates(roots).with_no_client_auth())
 }
 
 impl FlowSink for TextSink {
