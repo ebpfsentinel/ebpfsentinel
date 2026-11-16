@@ -2,6 +2,7 @@
 
 pub mod auth_bootstrap;
 pub mod brokered;
+pub mod ddos_guards;
 pub mod dns_resolver;
 pub mod ebpf_lifecycle;
 pub mod ebpf_metrics;

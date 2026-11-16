@@ -56,17 +56,33 @@ pub struct GeoIpConfig {
 
     pub source: GeoIpSource,
 
-    /// Auto-refresh interval in hours (for `maxmind_account` and `url` modes).
+    /// How often `maxmind_account` and `url` download the databases again,
+    /// in hours (at least 1). The first download happens at start-up.
     #[serde(default = "default_refresh_hours")]
     pub refresh_interval_hours: u64,
 
-    /// Directory to store downloaded databases.
+    /// Directory the `maxmind_account` and `url` modes download into; what a
+    /// previous run left there is served when a download fails.
     #[serde(default = "default_db_dir")]
     pub database_dir: String,
 }
 
 impl GeoIpConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if !matches!(self.source, GeoIpSource::File { .. }) {
+            if self.database_dir.is_empty() {
+                return Err(ConfigError::Validation {
+                    field: "geoip.database_dir".to_string(),
+                    message: "a downloaded database needs a directory to be written to".to_string(),
+                });
+            }
+            if self.refresh_interval_hours == 0 {
+                return Err(ConfigError::Validation {
+                    field: "geoip.refresh_interval_hours".to_string(),
+                    message: "must be at least 1".to_string(),
+                });
+            }
+        }
         match &self.source {
             GeoIpSource::MaxMindAccount {
                 account_id,
@@ -219,5 +235,27 @@ source:
         assert_eq!(default_refresh_hours(), 24);
         assert_eq!(default_db_dir(), "/var/lib/ebpfsentinel/geoip");
         assert_eq!(default_editions().len(), 2);
+    }
+
+    #[test]
+    fn a_download_mode_needs_a_directory_and_a_period() {
+        let source = GeoIpSource::Url {
+            city_url: "https://mirror.example/city.mmdb".to_string(),
+            asn_url: None,
+        };
+        let no_dir = GeoIpConfig {
+            enabled: true,
+            source: source.clone(),
+            refresh_interval_hours: 24,
+            database_dir: String::new(),
+        };
+        assert!(no_dir.validate().is_err());
+        let no_period = GeoIpConfig {
+            enabled: true,
+            source,
+            refresh_interval_hours: 0,
+            database_dir: "/tmp".to_string(),
+        };
+        assert!(no_period.validate().is_err());
     }
 }

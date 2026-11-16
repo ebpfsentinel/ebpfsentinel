@@ -83,6 +83,22 @@ pub struct NatRule {
 }
 
 impl NatRule {
+    /// Whether the rule translates IPv6: an address it writes, or a range it
+    /// matches, is IPv6.
+    pub fn is_v6(&self) -> bool {
+        let writes_v6 = match &self.nat_type {
+            NatType::Snat { addr, .. } | NatType::Dnat { addr, .. } => addr.is_ipv6(),
+            NatType::OneToOne {
+                external, internal, ..
+            } => external.is_ipv6() || internal.is_ipv6(),
+            NatType::PortForward { int_addr, .. } => int_addr.is_ipv6(),
+            NatType::Masquerade { .. } | NatType::Redirect { .. } => false,
+        };
+        writes_v6
+            || self.match_src.as_deref().is_some_and(|c| c.contains(':'))
+            || self.match_dst.as_deref().is_some_and(|c| c.contains(':'))
+    }
+
     pub fn validate(&self) -> Result<(), NatError> {
         self.id.validate().map_err(|reason| NatError::InvalidRule {
             reason: reason.to_string(),
@@ -145,6 +161,14 @@ impl NatRule {
             return Err(NatError::InvalidPortRange {
                 start: range.start,
                 end: range.end,
+            });
+        }
+
+        // The kernel steers and encapsulates IPv4 translations only; an IPv6
+        // rule naming a tunnel would translate without it.
+        if (self.xfrm_if_id != 0 || self.fou_dport != 0) && self.is_v6() {
+            return Err(NatError::InvalidRule {
+                reason: "IPsec steering and FOU/GUE apply to IPv4 rules only".to_string(),
             });
         }
 
@@ -513,6 +537,40 @@ mod tests {
         let mut rule = make_nptv6_rule("nptv6-1");
         rule.prefix_len = 0;
         assert!(rule.validate().is_err());
+    }
+
+    #[test]
+    fn an_ipv6_rule_naming_a_tunnel_is_refused() {
+        let mut rule = NatRule {
+            id: RuleId("snat-v6".to_string()),
+            priority: 10,
+            nat_type: NatType::Snat {
+                addr: "2001:db8::1".parse().unwrap(),
+                port_range: None,
+            },
+            match_src: None,
+            match_dst: None,
+            match_dst_port: None,
+            match_protocol: None,
+            match_src_alias: None,
+            match_dst_alias: None,
+            enabled: true,
+            group_mask: 0,
+            tenant_id: 0,
+            xfrm_if_id: 0,
+            xfrm_link: 0,
+            fou_sport: 0,
+            fou_dport: 0,
+            fou_type: 0,
+        };
+        assert!(rule.validate().is_ok());
+        rule.xfrm_if_id = 3;
+        assert!(rule.validate().is_err());
+        rule.nat_type = NatType::Snat {
+            addr: "192.0.2.1".parse().unwrap(),
+            port_range: None,
+        };
+        assert!(rule.validate().is_ok());
     }
 
     #[test]

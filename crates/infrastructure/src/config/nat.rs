@@ -289,6 +289,50 @@ pub struct NatRuleConfig {
     /// overlapping private ranges behind separate translations.
     #[serde(default)]
     pub tenant_id: u32,
+
+    /// Steer what this source translation sends through an `IPsec` `xfrmi`
+    /// device; on a destination translation, match only what arrived
+    /// through it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipsec: Option<NatIpsecConfig>,
+
+    /// Wrap what this source translation sends in a FOU or GUE header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fou: Option<NatFouConfig>,
+}
+
+/// The `xfrmi` device a NAT rule steers through or matches on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NatIpsecConfig {
+    /// The `if_id` the `xfrmi` device was created with; not 0.
+    pub if_id: u32,
+    /// The underlying link index, 0 for none.
+    #[serde(default)]
+    pub link: i32,
+}
+
+/// The FOU or GUE header a source translation adds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NatFouConfig {
+    /// UDP destination port of the tunnel; not 0.
+    pub dport: u16,
+    /// UDP source port, 0 to let the kernel pick one per flow.
+    #[serde(default)]
+    pub sport: u16,
+    /// `fou` (the default) or `gue`.
+    #[serde(default)]
+    pub encapsulation: FouEncapsulation,
+}
+
+/// Which header [`NatFouConfig`] adds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FouEncapsulation {
+    #[default]
+    Fou,
+    Gue,
 }
 
 fn default_priority() -> u32 {
@@ -704,6 +748,19 @@ impl NatRuleConfig {
             .map(PortRangeConfig::to_domain)
             .transpose()?;
 
+        if self.ipsec.as_ref().is_some_and(|i| i.if_id == 0) {
+            return Err(ConfigError::Validation {
+                field: "nat.rules.ipsec.if_id".to_string(),
+                message: "0 names no xfrmi device".to_string(),
+            });
+        }
+        if self.fou.as_ref().is_some_and(|f| f.dport == 0) {
+            return Err(ConfigError::Validation {
+                field: "nat.rules.fou.dport".to_string(),
+                message: "a tunnel needs a destination port".to_string(),
+            });
+        }
+
         Ok(NatRule {
             id: RuleId(self.id.clone()),
             priority: self.priority,
@@ -722,11 +779,15 @@ impl NatRuleConfig {
                 },
             )?,
             tenant_id: self.tenant_id,
-            xfrm_if_id: 0,
-            xfrm_link: 0,
-            fou_sport: 0,
-            fou_dport: 0,
-            fou_type: 0,
+            xfrm_if_id: self.ipsec.as_ref().map_or(0, |i| i.if_id),
+            xfrm_link: self.ipsec.as_ref().map_or(0, |i| i.link),
+            // The kernel reads both ports in network byte order.
+            fou_sport: self.fou.as_ref().map_or(0, |f| f.sport.to_be()),
+            fou_dport: self.fou.as_ref().map_or(0, |f| f.dport.to_be()),
+            fou_type: self
+                .fou
+                .as_ref()
+                .map_or(0, |f| u8::from(f.encapsulation == FouEncapsulation::Gue)),
         })
     }
 }
@@ -783,6 +844,8 @@ mod tests {
             match_dst_alias: None,
             interfaces: Vec::new(),
             tenant_id: 0,
+            ipsec: None,
+            fou: None,
         }
     }
 
@@ -835,6 +898,8 @@ mod tests {
             match_dst_alias: None,
             interfaces: Vec::new(),
             tenant_id: 0,
+            ipsec: None,
+            fou: None,
         };
         assert!(cfg.validate(0, "nat.dnat_rules").is_ok());
     }
@@ -862,6 +927,8 @@ mod tests {
             match_dst_alias: None,
             interfaces: Vec::new(),
             tenant_id: 0,
+            ipsec: None,
+            fou: None,
         };
         assert!(cfg.validate(0, "nat.snat_rules").is_err());
     }
@@ -975,6 +1042,35 @@ mod tests {
     }
 
     #[test]
+    fn a_tunnel_reaches_the_rule_in_the_order_the_kernel_reads() {
+        let mut cfg = snat_config();
+        cfg.ipsec = Some(NatIpsecConfig { if_id: 7, link: 2 });
+        cfg.fou = Some(NatFouConfig {
+            dport: 5555,
+            sport: 0,
+            encapsulation: FouEncapsulation::Gue,
+        });
+        let rule = cfg.to_domain_rule(&HashMap::new()).unwrap();
+        assert_eq!((rule.xfrm_if_id, rule.xfrm_link), (7, 2));
+        assert_eq!(rule.fou_dport, 5555u16.to_be());
+        assert_eq!(rule.fou_type, 1);
+    }
+
+    #[test]
+    fn a_tunnel_without_its_identifier_is_refused() {
+        let mut cfg = snat_config();
+        cfg.ipsec = Some(NatIpsecConfig { if_id: 0, link: 0 });
+        assert!(cfg.to_domain_rule(&HashMap::new()).is_err());
+        let mut cfg = snat_config();
+        cfg.fou = Some(NatFouConfig {
+            dport: 0,
+            sport: 0,
+            encapsulation: FouEncapsulation::Fou,
+        });
+        assert!(cfg.to_domain_rule(&HashMap::new()).is_err());
+    }
+
+    #[test]
     fn to_domain_rule_without_a_tenant_is_global() {
         let cfg = snat_config();
         assert_eq!(cfg.tenant_id, 0);
@@ -1004,6 +1100,8 @@ mod tests {
             match_dst_alias: None,
             interfaces: Vec::new(),
             tenant_id: 0,
+            ipsec: None,
+            fou: None,
         };
         let rule = cfg.to_domain_rule(&HashMap::new()).unwrap();
         assert!(matches!(

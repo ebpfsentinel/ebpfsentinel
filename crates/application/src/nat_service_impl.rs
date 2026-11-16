@@ -182,13 +182,13 @@ impl NatAppService {
 
         let v4_entries: Vec<ebpf_common::nat::NatRuleEntry> = enabled_rules
             .iter()
-            .filter(|r| !is_v6_rule(r))
+            .filter(|r| !r.is_v6())
             .map(|r| nat_rule_to_ebpf_entry(r))
             .collect();
 
         let v6_entries: Vec<ebpf_common::nat::NatRuleEntryV6> = enabled_rules
             .iter()
-            .filter(|r| is_v6_rule(r))
+            .filter(|r| r.is_v6())
             .map(|r| nat_rule_to_ebpf_entry_v6(r))
             .collect();
 
@@ -209,13 +209,13 @@ impl NatAppService {
 
         let v4_entries: Vec<ebpf_common::nat::NatRuleEntry> = enabled_rules
             .iter()
-            .filter(|r| !is_v6_rule(r))
+            .filter(|r| !r.is_v6())
             .map(|r| nat_rule_to_ebpf_entry(r))
             .collect();
 
         let v6_entries: Vec<ebpf_common::nat::NatRuleEntryV6> = enabled_rules
             .iter()
-            .filter(|r| is_v6_rule(r))
+            .filter(|r| r.is_v6())
             .map(|r| nat_rule_to_ebpf_entry_v6(r))
             .collect();
 
@@ -261,9 +261,9 @@ impl NatAppService {
 fn nat_rule_to_ebpf_entry(rule: &NatRule) -> ebpf_common::nat::NatRuleEntry {
     use domain::nat::entity::NatType;
     use ebpf_common::nat::{
-        NAT_MATCH_DST_IP, NAT_MATCH_DST_PORT, NAT_MATCH_PROTO, NAT_MATCH_SRC_IP, NAT_TYPE_DNAT,
-        NAT_TYPE_MASQUERADE, NAT_TYPE_NONE, NAT_TYPE_ONETOONE, NAT_TYPE_REDIRECT, NAT_TYPE_SNAT,
-        NatRuleEntry,
+        NAT_MATCH_DST_IP, NAT_MATCH_DST_PORT, NAT_MATCH_PROTO, NAT_MATCH_SRC_IP, NAT_MATCH_XFRM,
+        NAT_TYPE_DNAT, NAT_TYPE_MASQUERADE, NAT_TYPE_NONE, NAT_TYPE_ONETOONE, NAT_TYPE_REDIRECT,
+        NAT_TYPE_SNAT, NatRuleEntry,
     };
     use std::net::IpAddr;
 
@@ -398,6 +398,11 @@ fn nat_rule_to_ebpf_entry(rule: &NatRule) -> ebpf_common::nat::NatRuleEntry {
     entry.group_mask = rule.group_mask;
     entry.tenant_id = rule.tenant_id;
     entry.xfrm_if_id = rule.xfrm_if_id;
+    if rule.xfrm_if_id != 0 {
+        // Read by the destination-translation scan only: there it limits the
+        // rule to packets that arrived through this xfrmi device.
+        entry.match_flags |= NAT_MATCH_XFRM;
+    }
     entry.xfrm_link = rule.xfrm_link;
     entry.fou_sport = rule.fou_sport;
     entry.fou_dport = rule.fou_dport;
@@ -423,48 +428,6 @@ fn parse_cidr_to_ip_mask(cidr: &str) -> Option<(u32, u32)> {
         !0u32 << (32 - prefix_len)
     };
     Some((u32::from(ip), mask))
-}
-
-/// Determine if a NAT rule targets IPv6 addresses.
-fn is_v6_rule(rule: &NatRule) -> bool {
-    use domain::nat::entity::NatType;
-    use std::net::IpAddr;
-
-    // Check NAT type addresses
-    match &rule.nat_type {
-        NatType::Snat { addr, .. } | NatType::Dnat { addr, .. } => {
-            if matches!(addr, IpAddr::V6(_)) {
-                return true;
-            }
-        }
-        NatType::OneToOne {
-            external, internal, ..
-        } => {
-            if matches!(external, IpAddr::V6(_)) || matches!(internal, IpAddr::V6(_)) {
-                return true;
-            }
-        }
-        NatType::PortForward { int_addr, .. } => {
-            if matches!(int_addr, IpAddr::V6(_)) {
-                return true;
-            }
-        }
-        NatType::Masquerade { .. } | NatType::Redirect { .. } => {}
-    }
-
-    // Check match CIDRs for IPv6 (contains ':')
-    if let Some(ref src) = rule.match_src
-        && src.contains(':')
-    {
-        return true;
-    }
-    if let Some(ref dst) = rule.match_dst
-        && dst.contains(':')
-    {
-        return true;
-    }
-
-    false
 }
 
 /// Convert a domain `NatRule` to an eBPF `NatRuleEntryV6`.
@@ -870,7 +833,7 @@ mod tests {
         };
         rule.match_src = None;
         rule.match_dst = Some("2001:db8::/32".to_string());
-        assert!(is_v6_rule(&rule));
+        assert!(rule.is_v6());
     }
 
     #[test]

@@ -108,7 +108,8 @@ pub fn bootstrap_with_kernel(
     policy: &BpfTokenPolicy,
     kernel: KernelFeatures,
 ) -> Result<BpfLoadingHandle, BootstrapError> {
-    if !kernel.bpf_token {
+    // The floor (6.12) is above the kernel that brought BPF tokens (6.9).
+    if !kernel.meets_minimum() {
         return Err(BootstrapError::KernelTooOld {
             major: kernel.major,
             minor: kernel.minor,
@@ -137,17 +138,7 @@ mod tests {
     use super::*;
 
     fn features(major: u32, minor: u32) -> KernelFeatures {
-        KernelFeatures {
-            major,
-            minor,
-            btf_available: true,
-            bpf_token: major > 6 || (major == 6 && minor >= 9),
-            arena_map: major > 6 || (major == 6 && minor >= 9),
-            cgroup1_kfunc: major > 6 || (major == 6 && minor >= 8),
-            xdp_vlan_metadata: major > 6 || (major == 6 && minor >= 8),
-            xdp_xfrm_state: major > 6 || (major == 6 && minor >= 8),
-            css_task_iter: major > 6 || (major == 6 && minor >= 7),
-        }
+        KernelFeatures { major, minor }
     }
 
     #[test]
@@ -163,7 +154,7 @@ mod tests {
         // There is no capability fallback: the bootstrap must surface the
         // error instead of silently degrading.
         let policy = BpfTokenPolicy::new("/nonexistent");
-        let err = bootstrap_with_kernel(&policy, features(6, 9)).unwrap_err();
+        let err = bootstrap_with_kernel(&policy, features(6, 12)).unwrap_err();
         assert!(matches!(err, BootstrapError::TokenCreate { .. }));
     }
 }

@@ -137,16 +137,4 @@ impl EbpfMapWritePort for EbpfMapWriteAdapter {
 
         Ok(())
     }
-
-    fn inject_firewall_drop(&self, ip: IpAddr) -> Result<(), DomainError> {
-        // Firewall uses Array-based maps with atomic bulk-load protocol.
-        // Dynamic single-IP injection is not architecturally supported.
-        warn!(ip = %ip, "inject_firewall_drop is a no-op: firewall uses Array maps");
-        Ok(())
-    }
-
-    fn remove_firewall_drop(&self, ip: IpAddr) -> Result<(), DomainError> {
-        warn!(ip = %ip, "remove_firewall_drop is a no-op: firewall uses Array maps");
-        Ok(())
-    }
 }

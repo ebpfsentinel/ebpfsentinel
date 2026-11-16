@@ -12,6 +12,11 @@ use ebpf_common::firewall::{FirewallLpmEntryV4, FirewallLpmEntryV6};
 /// - `"alias"` - `GeoIP` country-block aliases
 /// - `"ddos:<CC>"` - `DDoS` auto-block for a specific country
 /// - `"ips"` - IPS blacklist host routes and /24 subnet blocks
+/// - `"dns"` - addresses a blocklisted domain resolved to, with
+///   `inject_target: firewall`
+///
+/// A prefix two sources both hold stays in the trie until the last one
+/// lets it go.
 pub trait LpmCoordinatorPort: Send + Sync {
     /// Replace all entries for `source` with new ones.
     ///

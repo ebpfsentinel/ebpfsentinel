@@ -28,25 +28,15 @@ use super::capabilities::KernelVersion;
 pub const MIN_KERNEL_MAJOR: u32 = 6;
 pub const MIN_KERNEL_MINOR: u32 = 12;
 
-/// Snapshot of kernel capabilities relevant to the eBPF loader.
+/// The running kernel's version, as the floor check reads it.
+///
+/// A capability is never derived from this number: the floor guarantees a
+/// helper or kfunc exists, not that it loads, so each one is probed on its own
+/// (`helper_probe`, `KfuncSupport`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct KernelFeatures {
     pub major: u32,
     pub minor: u32,
-    pub btf_available: bool,
-    /// `BPF_TOKEN_CREATE` + `BPF_F_TOKEN_FD` - kernel 6.9.
-    pub bpf_token: bool,
-    /// `BPF_MAP_TYPE_ARENA` - kernel 6.9.
-    pub arena_map: bool,
-    /// `bpf_task_get_cgroup1` kfunc - kernel 6.8.
-    pub cgroup1_kfunc: bool,
-    /// `bpf_xdp_metadata_rx_vlan_tag` kfunc - kernel 6.8.
-    pub xdp_vlan_metadata: bool,
-    /// `bpf_xdp_get_xfrm_state` kfunc - kernel 6.8.
-    pub xdp_xfrm_state: bool,
-    /// `bpf_iter_css_task` kfunc - kernel 6.7.
-    pub css_task_iter: bool,
 }
 
 impl KernelFeatures {
@@ -289,30 +279,23 @@ fn to_the_floor(release: &str) -> &'static str {
 /// [`KernelProbeError::ParseVersion`] on IO / parse failures and
 /// [`KernelProbeError::BelowMinimum`] when the live kernel is below 6.12.
 pub fn probe() -> Result<KernelFeatures, KernelProbeError> {
-    probe_from(
-        Path::new("/proc/sys/kernel/osrelease"),
-        Path::new("/sys/kernel/btf/vmlinux"),
-    )
+    probe_from(Path::new("/proc/sys/kernel/osrelease"))
 }
 
-/// Probe from explicit `osrelease` + BTF paths. Exposed so callers
+/// Probe from an explicit `osrelease` path. Exposed so callers
 /// (e.g. the agent's startup gate) and tests can inject synthetic
-/// `/proc` + `/sys` paths instead of the live defaults [`probe`] uses.
+/// `/proc` path instead of the live defaults [`probe`] uses.
 ///
 /// # Errors
 /// Same as [`probe`]: IO/parse failures and
 /// [`KernelProbeError::BelowMinimum`] when the kernel is below 6.12.
-pub fn probe_from(
-    osrelease_path: &Path,
-    btf_path: &Path,
-) -> Result<KernelFeatures, KernelProbeError> {
+pub fn probe_from(osrelease_path: &Path) -> Result<KernelFeatures, KernelProbeError> {
     let contents = fs::read_to_string(osrelease_path)
         .map_err(|e| KernelProbeError::ReadOsRelease(e.to_string()))?;
     let release = contents.trim();
     let (major, minor) = parse_version(release)?;
 
-    let btf_available = btf_path.exists();
-    let features = derive_features(major, minor, btf_available);
+    let features = KernelFeatures { major, minor };
 
     if !features.meets_minimum() {
         return Err(KernelProbeError::BelowMinimum {
@@ -343,21 +326,6 @@ pub(crate) fn parse_version(raw: &str) -> Result<(u32, u32), KernelProbeError> {
     Ok((major, minor))
 }
 
-fn derive_features(major: u32, minor: u32, btf_available: bool) -> KernelFeatures {
-    let ge = |maj: u32, min: u32| major > maj || (major == maj && minor >= min);
-    KernelFeatures {
-        major,
-        minor,
-        btf_available,
-        bpf_token: ge(6, 9),
-        arena_map: ge(6, 9),
-        cgroup1_kfunc: ge(6, 8),
-        xdp_vlan_metadata: ge(6, 8),
-        xdp_xfrm_state: ge(6, 8),
-        css_task_iter: ge(6, 7),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,50 +346,13 @@ mod tests {
     }
 
     #[test]
-    fn derive_612_enables_all() {
-        let f = derive_features(6, 12, true);
-        assert!(f.bpf_token);
-        assert!(f.arena_map);
-        assert!(f.cgroup1_kfunc);
-        assert!(f.xdp_vlan_metadata);
-        assert!(f.xdp_xfrm_state);
-        assert!(f.css_task_iter);
-        assert!(f.meets_minimum());
-    }
-
-    #[test]
-    fn derive_69_has_every_feature_and_misses_the_floor() {
-        let f = derive_features(6, 9, true);
-        assert!(f.bpf_token);
-        assert!(f.arena_map);
-        assert!(!f.meets_minimum());
-    }
-
-    #[test]
-    fn derive_68_lacks_token_and_arena() {
-        let f = derive_features(6, 8, true);
-        assert!(!f.bpf_token);
-        assert!(!f.arena_map);
-        assert!(f.cgroup1_kfunc);
-        assert!(!f.meets_minimum());
-    }
-
-    #[test]
-    fn derive_67_only_css_iter() {
-        let f = derive_features(6, 7, true);
-        assert!(!f.cgroup1_kfunc);
-        assert!(!f.bpf_token);
-        assert!(f.css_task_iter);
-        assert!(!f.meets_minimum());
-    }
-
-    #[test]
     fn meets_minimum_boundary() {
-        assert!(derive_features(6, 12, true).meets_minimum());
-        assert!(!derive_features(6, 11, true).meets_minimum());
-        assert!(!derive_features(6, 9, true).meets_minimum());
-        assert!(derive_features(6, 17, true).meets_minimum());
-        assert!(derive_features(7, 0, true).meets_minimum());
+        let at = |major, minor| KernelFeatures { major, minor }.meets_minimum();
+        assert!(at(6, 12));
+        assert!(!at(6, 11));
+        assert!(!at(6, 9));
+        assert!(at(6, 17));
+        assert!(at(7, 0));
     }
 
     #[test]
@@ -429,11 +360,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let osrel = tmp.path().join("osrelease");
         std::fs::write(&osrel, "6.12.0-test\n").unwrap();
-        let btf = tmp.path().join("vmlinux");
-        std::fs::write(&btf, "stub").unwrap();
-        let f = probe_from(&osrel, &btf).unwrap();
-        assert!(f.bpf_token);
-        assert!(f.btf_available);
+        let f = probe_from(&osrel).unwrap();
+        assert_eq!((f.major, f.minor), (6, 12));
     }
 
     #[test]
@@ -441,7 +369,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let osrel = tmp.path().join("osrelease");
         std::fs::write(&osrel, "6.11.0-29-generic\n").unwrap();
-        let err = probe_from(&osrel, Path::new("/nonexistent")).unwrap_err();
+        let err = probe_from(&osrel).unwrap_err();
         let KernelProbeError::BelowMinimum {
             found,
             required,
@@ -582,30 +510,5 @@ mod tests {
         assert!(hint.contains("linux-generic-hwe-24.04"), "{hint}");
         assert!(!hint.contains("built without it"), "{hint}");
         assert!(!hint.contains("enablement stack"), "{hint}");
-    }
-
-    /// A kfunc newer than the 6.9 set is never inferred from the version:
-    /// the snapshot carries no field that the floor alone would switch on.
-    #[test]
-    fn the_floor_switches_on_nothing_beyond_the_69_set() {
-        let at_floor = derive_features(6, 12, true);
-        let at_69 = derive_features(6, 9, true);
-        assert_eq!(
-            KernelFeatures {
-                major: 6,
-                minor: 9,
-                ..at_floor
-            },
-            at_69
-        );
-    }
-
-    #[test]
-    fn probe_from_reports_missing_btf() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let osrel = tmp.path().join("osrelease");
-        std::fs::write(&osrel, "6.12.0\n").unwrap();
-        let f = probe_from(&osrel, Path::new("/nonexistent-btf")).unwrap();
-        assert!(!f.btf_available);
     }
 }

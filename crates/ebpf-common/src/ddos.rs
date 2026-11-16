@@ -140,7 +140,7 @@ pub struct AmpProtectConfig {
 /// Connection tracking configuration.
 /// Written by userspace, read by eBPF.
 ///
-/// Size: 32 bytes.
+/// Size: 20 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DdosConnTrackConfig {
@@ -155,9 +155,6 @@ pub struct DdosConnTrackConfig {
     pub fin_threshold: u32,
     /// Max ACK packets (to non-existent connections) per source per second.
     pub ack_threshold: u32,
-    pub _pad2: [u8; 4],
-    /// Timeout for connection entries in nanoseconds.
-    pub timeout_ns: u64,
 }
 
 /// Connection tracking 4-tuple key (IPv4).
@@ -345,12 +342,12 @@ mod tests {
 
     #[test]
     fn ddos_conntrack_config_size() {
-        assert_eq!(mem::size_of::<DdosConnTrackConfig>(), 32);
+        assert_eq!(mem::size_of::<DdosConnTrackConfig>(), 20);
     }
 
     #[test]
     fn ddos_conntrack_config_alignment() {
-        assert_eq!(mem::align_of::<DdosConnTrackConfig>(), 8);
+        assert_eq!(mem::align_of::<DdosConnTrackConfig>(), 4);
     }
 
     #[test]
@@ -360,7 +357,6 @@ mod tests {
         assert_eq!(mem::offset_of!(DdosConnTrackConfig, rst_threshold), 8);
         assert_eq!(mem::offset_of!(DdosConnTrackConfig, fin_threshold), 12);
         assert_eq!(mem::offset_of!(DdosConnTrackConfig, ack_threshold), 16);
-        assert_eq!(mem::offset_of!(DdosConnTrackConfig, timeout_ns), 24);
     }
 
     #[test]

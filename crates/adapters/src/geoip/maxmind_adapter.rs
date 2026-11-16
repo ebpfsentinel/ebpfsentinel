@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
+
+use arc_swap::ArcSwapOption;
 
 use domain::alias::entity::GeoIpInfo;
 use domain::firewall::entity::IpNetwork;
@@ -12,44 +15,128 @@ use tracing::{info, warn};
 
 /// `GeoIP` adapter backed by `MaxMind` `.mmdb` database files.
 ///
-/// Supports separate City and ASN databases. Lookups are in-memory
-/// and lock-free (the `Reader` uses `mmap` or `Vec<u8>` internally).
+/// Supports separate City and ASN databases. Lookups are in-memory and
+/// lock-free; a refresh swaps a whole reader in, so a lookup sees either the
+/// database before it or the one after, never half of each.
 pub struct MaxMindGeoIpAdapter {
-    city_reader: Option<Reader<Vec<u8>>>,
-    asn_reader: Option<Reader<Vec<u8>>>,
+    city_reader: ArcSwapOption<Reader<Vec<u8>>>,
+    asn_reader: ArcSwapOption<Reader<Vec<u8>>>,
     metrics: Option<Arc<dyn MetricsPort>>,
 }
 
-impl MaxMindGeoIpAdapter {
-    /// Load from local .mmdb files.
-    pub fn from_files(city_path: &Path, asn_path: Option<&Path>) -> anyhow::Result<Self> {
-        let city_reader = if city_path.exists() {
-            let reader = Reader::open_readfile(city_path)?;
-            info!(path = %city_path.display(), "GeoIP City database loaded");
-            Some(reader)
-        } else {
-            warn!(path = %city_path.display(), "GeoIP City database file not found");
-            None
-        };
+/// Where a download put the databases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeoIpPaths {
+    pub city: PathBuf,
+    pub asn: Option<PathBuf>,
+}
 
-        let asn_reader = if let Some(path) = asn_path {
-            if path.exists() {
-                let reader = Reader::open_readfile(path)?;
-                info!(path = %path.display(), "GeoIP ASN database loaded");
-                Some(reader)
-            } else {
-                warn!(path = %path.display(), "GeoIP ASN database file not found");
-                None
+/// Where the databases come from when the agent fetches them itself.
+#[derive(Debug, Clone)]
+pub enum GeoIpDownload {
+    /// The `MaxMind` download service, one archive per edition.
+    MaxMindAccount {
+        account_id: String,
+        license_key: String,
+        edition_ids: Vec<String>,
+    },
+    /// A mirror the operator runs.
+    Urls {
+        city_url: String,
+        asn_url: Option<String>,
+    },
+}
+
+impl GeoIpDownload {
+    /// The files this source writes into `db_dir`, whether or not they exist
+    /// yet: what a previous run left there is served until the next download.
+    #[must_use]
+    pub fn paths(&self, db_dir: &Path) -> GeoIpPaths {
+        match self {
+            Self::MaxMindAccount { edition_ids, .. } => {
+                let file = |e: &String| db_dir.join(format!("{e}.mmdb"));
+                GeoIpPaths {
+                    city: edition_ids
+                        .iter()
+                        .find(|e| e.contains("City") || e.contains("Country"))
+                        .map_or_else(|| db_dir.join("city.mmdb"), file),
+                    asn: edition_ids.iter().find(|e| e.contains("ASN")).map(file),
+                }
             }
-        } else {
-            None
-        };
+            Self::Urls { asn_url, .. } => GeoIpPaths {
+                city: db_dir.join("city.mmdb"),
+                asn: asn_url.as_ref().map(|_| db_dir.join("asn.mmdb")),
+            },
+        }
+    }
 
-        Ok(Self {
-            city_reader,
-            asn_reader,
+    /// Download every database into `db_dir`.
+    ///
+    /// A file is replaced only by one that opens as a database, written
+    /// beside it and renamed over it, so a failed or truncated download
+    /// leaves the previous file in place.
+    ///
+    /// # Errors
+    ///
+    /// The first database that could not be fetched or did not open.
+    pub async fn fetch(&self, db_dir: &Path) -> anyhow::Result<GeoIpPaths> {
+        tokio::fs::create_dir_all(db_dir).await?;
+        let client = reqwest::Client::builder()
+            .timeout(DOWNLOAD_TIMEOUT)
+            .build()?;
+        let paths = self.paths(db_dir);
+        match self {
+            Self::MaxMindAccount {
+                account_id,
+                license_key,
+                edition_ids,
+            } => {
+                for edition in edition_ids {
+                    let url = format!(
+                        "https://download.maxmind.com/geoip/databases/{edition}/download?suffix=tar.gz"
+                    );
+                    info!(edition, "downloading MaxMind database");
+                    let request = client.get(&url).basic_auth(account_id, Some(license_key));
+                    fetch_into(request, &db_dir.join(format!("{edition}.mmdb"))).await?;
+                }
+            }
+            Self::Urls { city_url, asn_url } => {
+                fetch_into(client.get(city_url), &paths.city).await?;
+                if let (Some(url), Some(path)) = (asn_url, &paths.asn) {
+                    fetch_into(client.get(url), path).await?;
+                }
+            }
+        }
+        Ok(paths)
+    }
+}
+
+/// How long one database download may take.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
+impl MaxMindGeoIpAdapter {
+    /// Load from local .mmdb files. A file that does not exist leaves its
+    /// database empty; one that exists and does not open is an error.
+    ///
+    /// # Errors
+    ///
+    /// A file that exists and is not a database.
+    pub fn from_files(city_path: &Path, asn_path: Option<&Path>) -> anyhow::Result<Self> {
+        let adapter = Self {
+            city_reader: ArcSwapOption::empty(),
+            asn_reader: ArcSwapOption::empty(),
             metrics: None,
-        })
+        };
+        if !city_path.exists() {
+            warn!(path = %city_path.display(), "GeoIP City database file not found");
+        }
+        if let Some(path) = asn_path
+            && !path.exists()
+        {
+            warn!(path = %path.display(), "GeoIP ASN database file not found");
+        }
+        adapter.reload(city_path, asn_path)?;
+        Ok(adapter)
     }
 
     /// Attach a metrics sink so each lookup records a hit/miss counter.
@@ -59,92 +146,25 @@ impl MaxMindGeoIpAdapter {
         self
     }
 
-    /// Download from `MaxMind` API, then load.
-    pub async fn from_maxmind_account(
-        account_id: &str,
-        license_key: &str,
-        edition_ids: &[String],
-        db_dir: &Path,
-    ) -> anyhow::Result<Self> {
-        std::fs::create_dir_all(db_dir)?;
-
-        let client = reqwest::Client::new();
-        let mut city_path = None;
-        let mut asn_path = None;
-
-        for edition in edition_ids {
-            let url = format!(
-                "https://download.maxmind.com/geoip/databases/{edition}/download?suffix=tar.gz"
-            );
-            let dest = db_dir.join(format!("{edition}.mmdb"));
-
-            info!(edition, url = %url, "downloading MaxMind database");
-
-            let response = client
-                .get(&url)
-                .basic_auth(account_id, Some(license_key))
-                .send()
-                .await?;
-
-            if !response.status().is_success() {
-                anyhow::bail!(
-                    "MaxMind download failed for {edition}: HTTP {}",
-                    response.status()
-                );
-            }
-
-            let bytes = response.bytes().await?;
-
-            // Try to extract .mmdb from tar.gz, or write directly if it's already mmdb
-            let mmdb_bytes = extract_mmdb_from_targz(&bytes).unwrap_or_else(|| bytes.to_vec());
-            std::fs::write(&dest, &mmdb_bytes)?;
-            info!(edition, path = %dest.display(), "MaxMind database saved");
-
-            if edition.contains("City") {
-                city_path = Some(dest);
-            } else if edition.contains("ASN") {
-                asn_path = Some(dest);
-            }
-        }
-
-        let city = city_path.as_deref().unwrap_or(Path::new(""));
-        Self::from_files(city, asn_path.as_deref())
-    }
-
-    /// Download from arbitrary URLs, then load.
-    pub async fn from_urls(
-        city_url: &str,
-        asn_url: Option<&str>,
-        db_dir: &Path,
-    ) -> anyhow::Result<Self> {
-        std::fs::create_dir_all(db_dir)?;
-        let client = reqwest::Client::new();
-
-        let city_path = db_dir.join("city.mmdb");
-        download_mmdb(&client, city_url, &city_path).await?;
-
-        let asn_path = if let Some(url) = asn_url {
-            let path = db_dir.join("asn.mmdb");
-            download_mmdb(&client, url, &path).await?;
-            Some(path)
-        } else {
-            None
+    /// Reopen the databases from disk, after a download replaced them. A
+    /// file that is absent keeps the database already open.
+    ///
+    /// # Errors
+    ///
+    /// A file that exists and is not a database; nothing is swapped then.
+    pub fn reload(&self, city_path: &Path, asn_path: Option<&Path>) -> anyhow::Result<()> {
+        let city = open_if_present(city_path)?;
+        let asn = match asn_path {
+            Some(path) => open_if_present(path)?,
+            None => None,
         };
-
-        Self::from_files(&city_path, asn_path.as_deref())
-    }
-
-    /// Reload databases from disk (called after refresh download).
-    pub fn reload(&mut self, city_path: &Path, asn_path: Option<&Path>) -> anyhow::Result<()> {
-        if city_path.exists() {
-            self.city_reader = Some(Reader::open_readfile(city_path)?);
-            info!(path = %city_path.display(), "GeoIP City database reloaded");
+        if let Some(reader) = city {
+            self.city_reader.store(Some(Arc::new(reader)));
+            info!(path = %city_path.display(), "GeoIP City database loaded");
         }
-        if let Some(path) = asn_path
-            && path.exists()
-        {
-            self.asn_reader = Some(Reader::open_readfile(path)?);
-            info!(path = %path.display(), "GeoIP ASN database reloaded");
+        if let (Some(reader), Some(path)) = (asn, asn_path) {
+            self.asn_reader.store(Some(Arc::new(reader)));
+            info!(path = %path.display(), "GeoIP ASN database loaded");
         }
         Ok(())
     }
@@ -155,7 +175,7 @@ impl MaxMindGeoIpAdapter {
     /// country ISO code matches one of the provided codes. The returned
     /// `IpNetwork` values can be converted to LPM Trie entries for eBPF maps.
     pub fn networks_by_country(&self, country_codes: &[String]) -> Vec<IpNetwork> {
-        let Some(ref reader) = self.city_reader else {
+        let Some(reader) = self.city_reader.load_full() else {
             return Vec::new();
         };
         let codes: HashSet<&str> = country_codes.iter().map(String::as_str).collect();
@@ -213,7 +233,7 @@ impl MaxMindGeoIpAdapter {
 
     /// Extract all CIDR networks from the ASN database for the given AS numbers.
     pub fn networks_by_asn(&self, asn_numbers: &[u32]) -> Vec<IpNetwork> {
-        let Some(ref reader) = self.asn_reader else {
+        let Some(reader) = self.asn_reader.load_full() else {
             return Vec::new();
         };
         let asns: HashSet<u32> = asn_numbers.iter().copied().collect();
@@ -274,7 +294,7 @@ impl GeoIpPort for MaxMindGeoIpAdapter {
         let mut found = false;
 
         // City lookup
-        if let Some(ref reader) = self.city_reader
+        if let Some(reader) = self.city_reader.load().as_deref()
             && let Ok(result) = reader.lookup(*ip)
             && let Ok(Some(city)) = result.decode::<maxminddb::geoip2::City>()
         {
@@ -295,7 +315,7 @@ impl GeoIpPort for MaxMindGeoIpAdapter {
         }
 
         // ASN lookup
-        if let Some(ref reader) = self.asn_reader
+        if let Some(reader) = self.asn_reader.load().as_deref()
             && let Ok(result) = reader.lookup(*ip)
             && let Ok(Some(asn)) = result.decode::<maxminddb::geoip2::Asn>()
         {
@@ -312,21 +332,39 @@ impl GeoIpPort for MaxMindGeoIpAdapter {
     }
 
     fn is_ready(&self) -> bool {
-        self.city_reader.is_some()
+        self.city_reader.load().is_some()
     }
 }
 
-async fn download_mmdb(client: &reqwest::Client, url: &str, dest: &Path) -> anyhow::Result<()> {
-    info!(url, path = %dest.display(), "downloading GeoIP database");
-
-    let response = client.get(url).send().await?;
-    if !response.status().is_success() {
-        anyhow::bail!("GeoIP download failed: HTTP {}", response.status());
+fn open_if_present(path: &Path) -> anyhow::Result<Option<Reader<Vec<u8>>>> {
+    if !path.exists() {
+        return Ok(None);
     }
+    Reader::open_readfile(path)
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("{} is not a GeoIP database: {e}", path.display()))
+}
 
+async fn fetch_into(request: reqwest::RequestBuilder, dest: &Path) -> anyhow::Result<()> {
+    let response = request.send().await?;
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "GeoIP download for {} failed: HTTP {}",
+            dest.display(),
+            response.status()
+        );
+    }
     let bytes = response.bytes().await?;
-    let mmdb_bytes = extract_mmdb_from_targz(&bytes).unwrap_or_else(|| bytes.to_vec());
-    std::fs::write(dest, &mmdb_bytes)?;
+    let mmdb = extract_mmdb_from_targz(&bytes).unwrap_or_else(|| bytes.to_vec());
+    Reader::from_source(mmdb.as_slice()).map_err(|e| {
+        anyhow::anyhow!(
+            "download for {} is not a GeoIP database: {e}",
+            dest.display()
+        )
+    })?;
+    let partial = dest.with_extension("mmdb.partial");
+    tokio::fs::write(&partial, &mmdb).await?;
+    tokio::fs::rename(&partial, dest).await?;
     info!(path = %dest.display(), "GeoIP database saved");
     Ok(())
 }
@@ -365,8 +403,8 @@ mod tests {
     #[test]
     fn empty_adapter_is_not_ready() {
         let adapter = MaxMindGeoIpAdapter {
-            city_reader: None,
-            asn_reader: None,
+            city_reader: ArcSwapOption::empty(),
+            asn_reader: ArcSwapOption::empty(),
             metrics: None,
         };
         assert!(!adapter.is_ready());
@@ -389,5 +427,71 @@ mod tests {
     fn extract_mmdb_from_non_gzip() {
         let data = b"not a gzip file";
         assert!(extract_mmdb_from_targz(data).is_none());
+    }
+
+    fn fixture(name: &str) -> Vec<u8> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures")
+            .join(name);
+        std::fs::read(path).expect("fixture database")
+    }
+
+    /// Answer every request on a local port with `body`, once per connection.
+    async fn serve(body: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let _ = sock.read(&mut buf).await;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(&body).await;
+                });
+            }
+        });
+        format!("http://{addr}/db")
+    }
+
+    #[tokio::test]
+    async fn a_url_source_downloads_and_a_refresh_swaps_the_database_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let download = GeoIpDownload::Urls {
+            city_url: serve(fixture("GeoLite2-City.mmdb")).await,
+            asn_url: Some(serve(fixture("GeoLite2-ASN.mmdb")).await),
+        };
+        let paths = download.fetch(dir.path()).await.unwrap();
+        assert_eq!(paths, download.paths(dir.path()));
+        assert!(paths.city.exists());
+
+        let adapter =
+            MaxMindGeoIpAdapter::from_files(Path::new("/nonexistent/city.mmdb"), None).unwrap();
+        assert!(!adapter.is_ready());
+        adapter.reload(&paths.city, paths.asn.as_deref()).unwrap();
+        assert!(adapter.is_ready());
+    }
+
+    #[tokio::test]
+    async fn a_download_that_is_not_a_database_leaves_the_previous_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = GeoIpDownload::Urls {
+            city_url: serve(fixture("GeoLite2-City.mmdb")).await,
+            asn_url: None,
+        };
+        let paths = good.fetch(dir.path()).await.unwrap();
+        let before = std::fs::read(&paths.city).unwrap();
+
+        let bad = GeoIpDownload::Urls {
+            city_url: serve(b"<html>maintenance</html>".to_vec()).await,
+            asn_url: None,
+        };
+        assert!(bad.fetch(dir.path()).await.is_err());
+        assert_eq!(std::fs::read(&paths.city).unwrap(), before);
     }
 }

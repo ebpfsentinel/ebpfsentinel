@@ -10,7 +10,7 @@
 //! Map names (created by the `xdp-vip-announcer` program):
 //! - `VIP_SET`     - `HashMap<u32 vip_be, VipEntry>`
 //! - `IFACE_MAC`   - `HashMap<u32 ifindex, IfaceMac>`
-//! - `VIP_METRICS` - `PerCpuArray<u64>` ([`VIP_METRIC_COUNT`] slots)
+//! - `VIP_ARP_REPLIES` - per-CPU forged-reply counter keyed like `VIP_SET`
 
 /// Maximum number of VIPs the announcer can own.
 pub const MAX_VIPS: u32 = 256;
@@ -30,12 +30,6 @@ pub const ARP_OP_REPLY: u16 = 2;
 pub const ARP_HW_ETHERNET: u16 = 1;
 /// Length of an Ethernet/IPv4 ARP header in bytes.
 pub const ARP_HDR_LEN: usize = 28;
-
-/// Per-CPU metric indices for the `VIP_METRICS` map.
-pub const VIP_METRIC_ARP_SEEN: u32 = 0;
-pub const VIP_METRIC_ARP_REPLIES: u32 = 1;
-/// Number of `VIP_METRICS` slots.
-pub const VIP_METRIC_COUNT: u32 = 2;
 
 /// Value stored in `VIP_SET`. Presence of the key is what matters; the
 /// struct carries a small flags byte for forward compatibility and to
@@ -149,6 +143,5 @@ mod tests {
         assert_eq!(ARP_OP_REQUEST, 1);
         assert_eq!(ARP_OP_REPLY, 2);
         assert_eq!(ARP_HDR_LEN, 28);
-        assert_eq!(VIP_METRIC_COUNT, 2);
     }
 }

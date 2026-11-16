@@ -17,17 +17,17 @@
 
 use aya_ebpf::{
     bindings::xdp_action,
-    btf_maps::{HashMap, PerCpuArray, PerCpuHashMap},
+    btf_maps::{HashMap, PerCpuHashMap},
     macros::{btf_map, xdp},
     programs::XdpContext,
 };
 use ebpf_common::vip::{
     ARP_HW_ETHERNET, ARP_OP_REPLY, ARP_OP_REQUEST, IfaceMac, MAX_IFACE_MAC, MAX_SELF_BINDINGS,
-    MAX_VIPS, SelfBinding, VIP_METRIC_ARP_REPLIES, VIP_METRIC_ARP_SEEN, VIP_METRIC_COUNT, VipEntry,
+    MAX_VIPS, SelfBinding, VipEntry,
 };
 use ebpf_helpers::net::{ETH_P_8021AD, ETH_P_8021Q, ETH_P_ARP, ETH_P_IP, VLAN_HDR_LEN, VlanHdr};
 use ebpf_helpers::xdp::ptr_at_mut;
-use ebpf_helpers::{copy_4b_asm, copy_mac_asm, increment_metric};
+use ebpf_helpers::{copy_4b_asm, copy_mac_asm};
 use network_types::eth::EthHdr;
 
 /// Ethernet/IPv4 ARP header (28 bytes).
@@ -62,10 +62,6 @@ static IFACE_MAC: HashMap<u32, IfaceMac, { MAX_IFACE_MAC as usize }> = HashMap::
 #[btf_map]
 static SELF_OWNED_BINDINGS: HashMap<u32, SelfBinding, { MAX_SELF_BINDINGS as usize }> =
     HashMap::new();
-
-/// Aggregate per-CPU counters (ARP frames seen / replies forged).
-#[btf_map]
-static VIP_METRICS: PerCpuArray<u64, { VIP_METRIC_COUNT as usize }> = PerCpuArray::new();
 
 /// Per-VIP ARP reply counter for the Prometheus `{vip}` label. Same key
 /// space as [`VIP_SET`].
@@ -103,8 +99,6 @@ fn try_announce(ctx: &XdpContext) -> Result<u32, ()> {
     if ether_type != ETH_P_ARP {
         return Ok(xdp_action::XDP_PASS);
     }
-
-    increment_metric!(VIP_METRICS, VIP_METRIC_ARP_SEEN);
 
     let arp: *mut ArpHdr = unsafe { ptr_at_mut(ctx, arp_off)? };
     // Validate Ethernet/IPv4 ARP request.
@@ -172,7 +166,6 @@ fn try_announce(ctx: &XdpContext) -> Result<u32, ()> {
         copy_4b_asm!(arp_p.add(24), req_spa.as_ptr());
     }
 
-    increment_metric!(VIP_METRICS, VIP_METRIC_ARP_REPLIES);
     match VIP_ARP_REPLIES.get_ptr_mut(&vip_key) {
         Some(c) => unsafe { *c += 1 },
         None => {

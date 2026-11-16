@@ -22,15 +22,6 @@ pub trait QosMapPort: Send + Sync {
 
     /// Remove all pipe, queue, and classifier entries from the maps.
     fn clear_all(&mut self) -> Result<(), DomainError>;
-
-    /// Return the number of pipe entries currently in the map.
-    fn pipe_count(&self) -> Result<usize, DomainError>;
-
-    /// Return the number of queue entries currently in the map.
-    fn queue_count(&self) -> Result<usize, DomainError>;
-
-    /// Return the number of classifier entries currently in the map.
-    fn classifier_count(&self) -> Result<usize, DomainError>;
 }
 
 #[cfg(test)]
@@ -39,10 +30,8 @@ mod tests {
 
     #[test]
     fn qos_map_port_is_object_safe() {
-        fn _check(port: &dyn QosMapPort) {
-            let _ = port.pipe_count();
-            let _ = port.queue_count();
-            let _ = port.classifier_count();
+        fn _check(port: &mut dyn QosMapPort) {
+            let _ = port.clear_all();
         }
     }
 }

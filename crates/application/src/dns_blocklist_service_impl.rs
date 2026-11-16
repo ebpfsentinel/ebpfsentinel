@@ -7,14 +7,19 @@ use domain::dns::entity::{
     BlocklistAction, DnsAlert, DnsAlertReason, DomainBlocklistConfig, DomainBlocklistStats,
     InjectTarget, ReputationFactor,
 };
+use ebpf_common::firewall::{ACTION_DROP, FirewallLpmEntryV4, FirewallLpmEntryV6};
 use ports::secondary::domain_reputation_port::DomainReputationPort;
 use ports::secondary::ebpf_map_write_port::{EbpfMapWritePort, IocMetadata};
 use ports::secondary::geoip_port::GeoIpPort;
 use ports::secondary::ips_blacklist_port::IpsBlacklistPort;
+use ports::secondary::lpm_coordinator_port::LpmCoordinatorPort;
 use ports::secondary::metrics_port::MetricsPort;
 use tokio::sync::mpsc;
 
 use crate::alert_event::AlertEvent;
+
+/// The tag the firewall's prefix tries know this blocklist's entries by.
+const FIREWALL_SOURCE: &str = "dns";
 
 /// What applying one downloaded feed changed in the blocklist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +39,7 @@ pub struct FeedApplyOutcome {
 pub struct DnsBlocklistAppService {
     engine: RwLock<DomainBlocklistEngine>,
     map_writer: RwLock<Option<Arc<dyn EbpfMapWritePort>>>,
+    lpm: RwLock<Option<Arc<dyn LpmCoordinatorPort>>>,
     ips_port: Option<Arc<dyn IpsBlacklistPort>>,
     geoip: RwLock<Option<Arc<dyn GeoIpPort>>>,
     reputation_port: RwLock<Option<Arc<dyn DomainReputationPort>>>,
@@ -53,6 +59,7 @@ impl DnsBlocklistAppService {
             cleanup_interval: Duration::from_secs(config.grace_period_secs.min(60)),
             engine: RwLock::new(DomainBlocklistEngine::new(config)),
             map_writer: RwLock::new(map_writer),
+            lpm: RwLock::new(None),
             ips_port: None,
             geoip: RwLock::new(None),
             reputation_port: RwLock::new(None),
@@ -71,6 +78,63 @@ impl DnsBlocklistAppService {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *w = Some(writer);
+    }
+
+    /// Hand over the firewall's prefix tries for `inject_target: firewall`.
+    ///
+    /// The tries may be new (a firewall loaded after start-up or reloaded),
+    /// so every address the blocklist currently holds is written at once.
+    pub fn set_lpm_coordinator(&self, coordinator: Arc<dyn LpmCoordinatorPort>) {
+        *self
+            .lpm
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(coordinator);
+        self.sync_firewall();
+    }
+
+    /// Put the firewall's `dns` prefixes in line with what the blocklist
+    /// holds: every address dropped both as a source and as a destination,
+    /// so the node neither reaches it nor answers it. Nothing at all when
+    /// the blocklist targets another surface.
+    fn sync_firewall(&self) {
+        let guard = self
+            .lpm
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(lpm) = guard.as_ref() else {
+            return;
+        };
+        let (target, ips) = {
+            let engine = self
+                .engine
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (engine.inject_target(), engine.injected_ips())
+        };
+        let result = if target == InjectTarget::Firewall {
+            let mut v4 = Vec::new();
+            let mut v6 = Vec::new();
+            for ip in ips {
+                match ip {
+                    std::net::IpAddr::V4(a) => v4.push(FirewallLpmEntryV4 {
+                        prefix_len: 32,
+                        addr: a.octets(),
+                        action: ACTION_DROP,
+                    }),
+                    std::net::IpAddr::V6(a) => v6.push(FirewallLpmEntryV6 {
+                        prefix_len: 128,
+                        addr: a.octets(),
+                        action: ACTION_DROP,
+                    }),
+                }
+            }
+            lpm.replace_source_entries(FIREWALL_SOURCE, &v4, &v4, &v6, &v6)
+        } else {
+            lpm.remove_all_for_source(FIREWALL_SOURCE)
+        };
+        if let Err(e) = result {
+            tracing::warn!("DNS blocklist: firewall prefixes not updated: {e}");
+        }
     }
 
     /// Set the IPS blacklist port for `inject_target: ips` injection.
@@ -173,7 +237,11 @@ impl DnsBlocklistAppService {
         ttl_secs: u32,
         delta: &InjectionDelta,
     ) {
-        if inject_target == InjectTarget::Ips {
+        if inject_target == InjectTarget::Firewall {
+            if !delta.to_inject.is_empty() || !delta.to_remove.is_empty() {
+                self.sync_firewall();
+            }
+        } else if inject_target == InjectTarget::Ips {
             // Route to IPS blacklist
             if let Some(ref ips) = self.ips_port {
                 let grace = {
@@ -224,11 +292,8 @@ impl DnsBlocklistAppService {
             for ip in &delta.to_inject {
                 let result = match inject_target {
                     InjectTarget::ThreatIntel => writer.inject_threatintel_ip(*ip, &metadata),
-                    InjectTarget::Firewall => writer.inject_firewall_drop(*ip),
-                    // `Ips` is routed through the IPS-port branch above, so this
-                    // map-writer branch only runs for ThreatIntel/Firewall. Stay a
-                    // no-op rather than panicking on the DNS path if that ever changes.
-                    InjectTarget::Ips => Ok(()),
+                    // `Ips` and `Firewall` are routed by the branches above.
+                    InjectTarget::Ips | InjectTarget::Firewall => Ok(()),
                 };
                 if let Err(e) = result {
                     tracing::warn!(
@@ -242,11 +307,8 @@ impl DnsBlocklistAppService {
             for ip in &delta.to_remove {
                 let result = match inject_target {
                     InjectTarget::ThreatIntel => writer.remove_threatintel_ip(*ip),
-                    InjectTarget::Firewall => writer.remove_firewall_drop(*ip),
-                    // `Ips` is routed through the IPS-port branch above, so this
-                    // map-writer branch only runs for ThreatIntel/Firewall. Stay a
-                    // no-op rather than panicking on the DNS path if that ever changes.
-                    InjectTarget::Ips => Ok(()),
+                    // `Ips` and `Firewall` are routed by the branches above.
+                    InjectTarget::Ips | InjectTarget::Firewall => Ok(()),
                 };
                 if let Err(e) = result {
                     tracing::warn!(
@@ -356,7 +418,9 @@ impl DnsBlocklistAppService {
         drop(engine);
 
         if !expired.is_empty() {
-            if inject_target == InjectTarget::Ips {
+            if inject_target == InjectTarget::Firewall {
+                self.sync_firewall();
+            } else if inject_target == InjectTarget::Ips {
                 if let Some(ref ips) = self.ips_port {
                     for ip in &expired {
                         if let Err(e) = ips.remove_from_blacklist(ip) {
@@ -372,11 +436,8 @@ impl DnsBlocklistAppService {
                 for ip in &expired {
                     let result = match inject_target {
                         InjectTarget::ThreatIntel => writer.remove_threatintel_ip(*ip),
-                        InjectTarget::Firewall => writer.remove_firewall_drop(*ip),
-                        // `Ips` is routed through the IPS-port branch above, so this
-                        // map-writer branch only runs for ThreatIntel/Firewall. Stay a
-                        // no-op rather than panicking on the DNS path if that ever changes.
-                        InjectTarget::Ips => Ok(()),
+                        // `Ips` and `Firewall` are routed by the branches above.
+                        InjectTarget::Ips | InjectTarget::Firewall => Ok(()),
                     };
                     if let Err(e) = result {
                         tracing::warn!(ip = %ip, "failed to remove expired IP from eBPF map: {e}");
@@ -405,6 +466,9 @@ impl DnsBlocklistAppService {
         let injected_count = engine.injected_ip_count();
         drop(engine);
 
+        // Whether the target stayed or moved, the firewall holds what the
+        // reloaded blocklist says, and nothing when it no longer targets it.
+        self.sync_firewall();
         if inject_target == InjectTarget::Ips {
             if let Some(ref ips) = self.ips_port {
                 for ip in &removed {
@@ -421,11 +485,8 @@ impl DnsBlocklistAppService {
             for ip in &removed {
                 let result = match inject_target {
                     InjectTarget::ThreatIntel => writer.remove_threatintel_ip(*ip),
-                    InjectTarget::Firewall => writer.remove_firewall_drop(*ip),
-                    // `Ips` is routed through the IPS-port branch above, so this
-                    // map-writer branch only runs for ThreatIntel/Firewall. Stay a
-                    // no-op rather than panicking on the DNS path if that ever changes.
-                    InjectTarget::Ips => Ok(()),
+                    // `Ips` and `Firewall` are routed by the branches above.
+                    InjectTarget::Ips | InjectTarget::Firewall => Ok(()),
                 };
                 if let Err(e) = result {
                     tracing::warn!(ip = %ip, "failed to remove IP after blocklist reload: {e}");
@@ -567,22 +628,6 @@ mod tests {
         }
 
         fn remove_threatintel_ip(
-            &self,
-            ip: IpAddr,
-        ) -> Result<(), domain::common::error::DomainError> {
-            self.removed.lock().unwrap().push(ip);
-            Ok(())
-        }
-
-        fn inject_firewall_drop(
-            &self,
-            ip: IpAddr,
-        ) -> Result<(), domain::common::error::DomainError> {
-            self.injected.lock().unwrap().push(ip);
-            Ok(())
-        }
-
-        fn remove_firewall_drop(
             &self,
             ip: IpAddr,
         ) -> Result<(), domain::common::error::DomainError> {
@@ -889,5 +934,107 @@ mod tests {
 
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
         svc.on_dns_response("bad.com", &[ip], 300, 0); // should not panic
+    }
+
+    /// Records what the `dns` source holds in the firewall tries.
+    #[derive(Default)]
+    struct RecordingLpm {
+        dst_v4: Mutex<Vec<[u8; 4]>>,
+        src_v4: Mutex<Vec<[u8; 4]>>,
+    }
+
+    impl LpmCoordinatorPort for RecordingLpm {
+        fn replace_source_entries(
+            &self,
+            source: &str,
+            src_v4: &[FirewallLpmEntryV4],
+            dst_v4: &[FirewallLpmEntryV4],
+            _src_v6: &[FirewallLpmEntryV6],
+            _dst_v6: &[FirewallLpmEntryV6],
+        ) -> Result<(), domain::common::error::DomainError> {
+            assert_eq!(source, "dns");
+            assert!(
+                dst_v4
+                    .iter()
+                    .all(|e| e.action == ACTION_DROP && e.prefix_len == 32)
+            );
+            *self.src_v4.lock().unwrap() = src_v4.iter().map(|e| e.addr).collect();
+            *self.dst_v4.lock().unwrap() = dst_v4.iter().map(|e| e.addr).collect();
+            Ok(())
+        }
+
+        fn insert_entries(
+            &self,
+            _source: &str,
+            _src_v4: &[FirewallLpmEntryV4],
+            _src_v6: &[FirewallLpmEntryV6],
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+
+        fn remove_entries(
+            &self,
+            _source: &str,
+            _src_v4: &[FirewallLpmEntryV4],
+            _src_v6: &[FirewallLpmEntryV6],
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+
+        fn remove_all_for_source(
+            &self,
+            source: &str,
+        ) -> Result<(), domain::common::error::DomainError> {
+            assert_eq!(source, "dns");
+            self.src_v4.lock().unwrap().clear();
+            self.dst_v4.lock().unwrap().clear();
+            Ok(())
+        }
+    }
+
+    fn test_config_firewall(patterns: Vec<&str>) -> DomainBlocklistConfig {
+        DomainBlocklistConfig {
+            inject_target: InjectTarget::Firewall,
+            ..test_config(patterns)
+        }
+    }
+
+    #[test]
+    fn a_firewall_target_drops_the_resolved_address_both_ways() {
+        let lpm = Arc::new(RecordingLpm::default());
+        let svc = DnsBlocklistAppService::new(
+            test_config_firewall(vec!["bad.com", "worse.com"]),
+            None,
+            Arc::new(NoopMetrics),
+        );
+        // Resolved before the firewall was there: written when it arrives.
+        svc.on_dns_response("bad.com", &["1.2.3.4".parse().unwrap()], 300, 0);
+        svc.set_lpm_coordinator(Arc::clone(&lpm) as Arc<dyn LpmCoordinatorPort>);
+        assert_eq!(*lpm.dst_v4.lock().unwrap(), vec![[1, 2, 3, 4]]);
+        assert_eq!(*lpm.src_v4.lock().unwrap(), vec![[1, 2, 3, 4]]);
+
+        svc.on_dns_response("worse.com", &["5.6.7.8".parse().unwrap()], 300, 1);
+        let mut held = lpm.dst_v4.lock().unwrap().clone();
+        held.sort_unstable();
+        assert_eq!(held, vec![[1, 2, 3, 4], [5, 6, 7, 8]]);
+
+        // A reload that unblocks both domains lifts every address.
+        svc.reload(test_config_firewall(vec!["other.com"]));
+        assert!(lpm.dst_v4.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn moving_off_the_firewall_target_lifts_its_entries() {
+        let lpm = Arc::new(RecordingLpm::default());
+        let svc = DnsBlocklistAppService::new(
+            test_config_firewall(vec!["bad.com"]),
+            None,
+            Arc::new(NoopMetrics),
+        );
+        svc.set_lpm_coordinator(Arc::clone(&lpm) as Arc<dyn LpmCoordinatorPort>);
+        svc.on_dns_response("bad.com", &["1.2.3.4".parse().unwrap()], 300, 0);
+        assert_eq!(lpm.dst_v4.lock().unwrap().len(), 1);
+        svc.reload(test_config(vec!["bad.com"]));
+        assert!(lpm.dst_v4.lock().unwrap().is_empty());
     }
 }

@@ -1067,8 +1067,8 @@ pub fn trace_plan(
 /// services still hold managers over the previous generation's. A fresh
 /// coordinator is correct for the same reason: the tries it tracks start
 /// empty, and each service puts back what it kept - the IPS its blacklist,
-/// the anti-DDoS service its country blocks, the alias service its external
-/// sets - before the resolved aliases are handed to the firewall.
+/// the anti-DDoS service its country blocks, the DNS blocklist the addresses
+/// it drops, the alias service its external sets - before the resolved aliases are handed to the firewall.
 async fn wire_firewall_consumers(services: &ServiceHandles, loader: &mut EbpfLoader) {
     match adapters::ebpf::LpmCoordinator::new(loader.ebpf_mut()) {
         Ok(coordinator) => {
@@ -1084,8 +1084,11 @@ async fn wire_firewall_consumers(services: &ServiceHandles, loader: &mut EbpfLoa
             ddos.reinstall_country_blocks();
             services.ddos_svc.store(Arc::new(ddos));
             let mut ips = (**services.ips_svc.load()).clone();
-            ips.set_lpm_coordinator(coordinator);
+            ips.set_lpm_coordinator(Arc::clone(&coordinator));
             services.ips_svc.store(Arc::new(ips));
+            if let Some(ref blocklist) = services.dns_blocklist_svc {
+                blocklist.set_lpm_coordinator(coordinator);
+            }
         }
         Err(e) => warn!("LPM coordinator maps not available (non-fatal): {e}"),
     }
@@ -1245,7 +1248,8 @@ pub async fn load_ebpf_programs(
     // ── XDP Rate Limiter ────────────────────────────────────────
     let rl_ok = if config.ratelimit.enabled {
         match startup::try_load_xdp_ratelimit(&ebpf_dir, config, fw_ok) {
-            Ok((mut rl_loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs, reader)) => {
+            Ok((mut rl_loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs, reader, guards)) => {
+                ebpf_map_holder.ddos_guards = Some(guards);
                 let event_tx_clone = event_tx.clone();
                 let rb_obs = RingBufObserver::new(
                     "xdp-ratelimit",
@@ -1329,7 +1333,7 @@ pub async fn load_ebpf_programs(
     // ── TC IDS ──────────────────────────────────────────────────
     let ids_ok = if config.ids.enabled {
         match startup::try_load_tc_ids(&ebpf_dir, config) {
-            Ok((mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr, reader)) => {
+            Ok((mut loader, ids_mgr_opt, l7_mgr_opt, ids_rdr, reader)) => {
                 let event_tx_clone = event_tx.clone();
                 let rb_obs = RingBufObserver::new(
                     "tc-ids",
@@ -1347,9 +1351,6 @@ pub async fn load_ebpf_programs(
                 }
                 if let Some(l7_mgr) = l7_mgr_opt {
                     ebpf_map_holder.l7_ports = Some(l7_mgr);
-                }
-                if let Some(cfg_mgr) = cfg_mgr_opt {
-                    ebpf_map_holder.config_flags.push(("tc_ids", cfg_mgr));
                 }
                 if let Some(rdr) = ids_rdr {
                     metrics_readers.push(rdr);
@@ -1652,7 +1653,8 @@ pub async fn load_ebpf_programs(
     // ── TC Scrub ────────────────────────────────────────────────
     let scrub_ok = if config.firewall.scrub.enabled {
         match startup::try_load_tc_scrub(&ebpf_dir, config) {
-            Ok((mut loader, scrub_rdr)) => {
+            Ok((mut loader, scrub_rdr, scrub_mgr)) => {
+                ebpf_map_holder.scrub = scrub_mgr;
                 if let Some(rdr) = scrub_rdr {
                     metrics_readers.push(rdr);
                 }

@@ -1,9 +1,10 @@
 use std::os::fd::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::ddos_guards::DdosGuards;
 use crate::http::agent_handler::{ContainerCoverage, EnricherState};
 use crate::http::tls::load_rustls_config;
 use crate::http::{AppState, run_http_server, run_metrics_server};
@@ -12,9 +13,8 @@ use adapters::alert::log_sender::LogAlertSender;
 use adapters::alert::webhook_sender::WebhookAlertSender;
 use adapters::audit::log_audit_sink::LogAuditSink;
 use adapters::ebpf::{
-    AmpProtectConfigManager, ConfigFlagsManager, ConnTrackMapManager, DdosConnTrackConfigManager,
-    DdosSynConfigManager, DlpEventReader, DnsEventReader, EbpfLoader, EbpfMapWriteAdapter,
-    EventReader, FirewallMapManager, IcmpConfigManager, IdsMapManager, InterfaceGroupsManager,
+    ConfigFlagsManager, ConnTrackMapManager, DlpEventReader, DnsEventReader, EbpfLoader,
+    EbpfMapWriteAdapter, EventReader, FirewallMapManager, IdsMapManager, InterfaceGroupsManager,
     IpSetMapManager, L7PortsManager, LpmCoordinator, MetricsReader, NatMapManager, QosMapManager,
     RateLimitLpmManager, RateLimitMapManager, RingBufObserver, ScrubConfigManager,
     ThreatIntelMapManager, ZoneMapManager,
@@ -902,12 +902,21 @@ pub async fn run(
     let geoip_adapter: Option<Arc<adapters::geoip::MaxMindGeoIpAdapter>> =
         if let Some(ref geoip_cfg) = config.geoip {
             if geoip_cfg.enabled {
-                match build_geoip_adapter(geoip_cfg) {
-                    Ok(adapter) => {
+                match build_geoip_adapter(geoip_cfg).await {
+                    Ok((adapter, download)) => {
                         info!("GeoIP adapter initialized");
-                        Some(Arc::new(
+                        let adapter = Arc::new(
                             adapter.with_metrics(Arc::clone(&metrics) as Arc<dyn MetricsPort>),
-                        ))
+                        );
+                        if let Some(download) = download {
+                            spawn_geoip_refresh(
+                                Arc::clone(&adapter),
+                                download,
+                                PathBuf::from(&geoip_cfg.database_dir),
+                                geoip_cfg.refresh_interval_hours,
+                            );
+                        }
+                        Some(adapter)
                     }
                     Err(e) => {
                         warn!("GeoIP adapter initialization failed (degraded mode): {e}");
@@ -2217,7 +2226,8 @@ pub async fn run(
         // 10b. XDP Rate Limiter
         rl_ok = if config.ratelimit.enabled {
             match try_load_xdp_ratelimit(&ebpf_dir, &config, fw_ok) {
-                Ok((mut rl_loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs, reader)) => {
+                Ok((mut rl_loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs, reader, guards)) => {
+                    ebpf_map_holder.ddos_guards = Some(guards);
                     let event_tx_clone = event_tx.clone();
                     let rb_obs = RingBufObserver::new(
                         "xdp-ratelimit",
@@ -2397,8 +2407,11 @@ pub async fn run(
                         svc.set_lpm_coordinator(Arc::clone(&coordinator));
                         ips_svc.store(Arc::new(svc));
                     }
+                    if let Some(ref blocklist) = dns_blocklist_ref {
+                        blocklist.set_lpm_coordinator(Arc::clone(&coordinator));
+                    }
                     fw_lpm_coordinator = Some(coordinator);
-                    info!("LPM coordinator wired to alias, DDoS, IPS services");
+                    info!("LPM coordinator wired to alias, DDoS, IPS, DNS blocklist services");
                 }
                 Err(e) => {
                     warn!("LPM coordinator maps not available (non-fatal): {e}");
@@ -2521,7 +2534,7 @@ pub async fn run(
         // flag, so the program must load whenever IDS *or* L7 is enabled.
         ids_ok = if config.ids.enabled || config.l7.enabled {
             match try_load_tc_ids(&ebpf_dir, &config) {
-                Ok((mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr, reader)) => {
+                Ok((mut loader, ids_mgr_opt, l7_mgr_opt, ids_rdr, reader)) => {
                     let event_tx_clone = event_tx.clone();
                     let rb_obs = RingBufObserver::new(
                         "tc-ids",
@@ -2541,9 +2554,6 @@ pub async fn run(
                     }
                     if let Some(l7_mgr) = l7_mgr_opt {
                         ebpf_map_holder.l7_ports = Some(l7_mgr);
-                    }
-                    if let Some(cfg_mgr) = cfg_mgr_opt {
-                        ebpf_map_holder.config_flags.push(("tc_ids", cfg_mgr));
                     }
                     if let Some(rdr) = ids_rdr {
                         metrics_readers.push(rdr);
@@ -3240,7 +3250,8 @@ pub async fn run(
         // 10i. TC Scrub
         scrub_ok = if config.firewall.scrub.enabled {
             match try_load_tc_scrub(&ebpf_dir, &config) {
-                Ok((loader, scrub_rdr)) => {
+                Ok((loader, scrub_rdr, scrub_mgr)) => {
+                    ebpf_map_holder.scrub = scrub_mgr;
                     if let Some(rdr) = scrub_rdr {
                         metrics_readers.push(rdr);
                     }
@@ -3672,6 +3683,8 @@ pub async fn run(
         // Move map holder fields into the manager
         mgr.config_flags = ebpf_map_holder.config_flags;
         mgr.l7_ports = ebpf_map_holder.l7_ports;
+        mgr.ddos_guards = ebpf_map_holder.ddos_guards;
+        mgr.scrub = ebpf_map_holder.scrub;
         if let Some(ig) = ebpf_map_holder.iface_groups {
             mgr.iface_groups = ig;
         }
@@ -5198,18 +5211,14 @@ fn check_kernel_version_from(path: &std::path::Path) -> anyhow::Result<()> {
     use adapters::ebpf::{MIN_KERNEL_MAJOR, MIN_KERNEL_MINOR, probe_kernel_features_from};
 
     // The version floor + parsing live in `adapters::ebpf::kernel_probe`,
-    // the single source of truth. BTF presence is irrelevant to the gate,
-    // so a missing `/sys/kernel/btf/vmlinux` is non-fatal here - only the
-    // version comparison decides pass/fail.
-    probe_kernel_features_from(path, std::path::Path::new("/sys/kernel/btf/vmlinux")).map_err(
-        |e| {
-            anyhow::anyhow!(
-                "eBPFsentinel refuses to start: {e} The agent needs Linux \
-                 {MIN_KERNEL_MAJOR}.{MIN_KERNEL_MINOR} or later and has no degraded mode below \
-                 it; restart it once the host runs the new kernel."
-            )
-        },
-    )?;
+    // the single source of truth.
+    probe_kernel_features_from(path).map_err(|e| {
+        anyhow::anyhow!(
+            "eBPFsentinel refuses to start: {e} The agent needs Linux \
+             {MIN_KERNEL_MAJOR}.{MIN_KERNEL_MINOR} or later and has no degraded mode below \
+             it; restart it once the host runs the new kernel."
+        )
+    })?;
     Ok(())
 }
 
@@ -5846,13 +5855,15 @@ pub fn try_load_xdp_firewall_reject(
     Ok(reject_loader)
 }
 
-/// Load result for xdp-ratelimit: loader, map manager, LPM manager, metrics readers, event reader.
+/// Load result for xdp-ratelimit: loader, map manager, LPM manager, metrics
+/// readers, event reader, anti-DDoS guard maps.
 pub type XdpRatelimitResult = (
     EbpfLoader,
     Option<RateLimitMapManager>,
     Option<RateLimitLpmManager>,
     Vec<MetricsReader>,
     EventReader,
+    DdosGuards,
 );
 
 /// Load the xdp-ratelimit-syncookie program and wire it as a tail-call target.
@@ -5875,110 +5886,6 @@ pub fn try_load_xdp_ratelimit_syncookie(
     let sc_fd = sc_loader.program_raw_fd("xdp_ratelimit_syncookie")?;
     rl_loader.set_tail_call_raw("RL_PROG_ARRAY", 0, sc_fd)?;
     Ok(sc_loader)
-}
-
-/// Populate the xdp-ratelimit `DDoS` config Array maps from `config`.
-///
-/// `check_syn_flood` / `process_icmp` / `process_conntrack` each read a
-/// single-entry Array map and bail when `enabled == 0`. The maps default
-/// to zeroed, so these writes are what actually arm the protections.
-/// All writes are best-effort (non-fatal): a missing map or write error
-/// just leaves that protection disabled.
-fn arm_ddos_ebpf_configs(loader: &mut EbpfLoader, config: &AgentConfig) {
-    if !config.ddos.enabled {
-        return;
-    }
-
-    if config.ddos.syn_protection.enabled {
-        match DdosSynConfigManager::new(loader.ebpf_mut()) {
-            Ok(mut mgr) => {
-                let syn_cfg = ebpf_common::ddos::DdosSynConfig {
-                    enabled: 1,
-                    threshold_mode: u8::from(config.ddos.syn_protection.threshold_mode),
-                    _pad: [0; 6],
-                    threshold_pps: config.ddos.syn_protection.threshold_pps,
-                };
-                if let Err(e) = mgr.set_config(&syn_cfg) {
-                    warn!("DDOS_SYN_CONFIG write failed (syncookie disabled): {e}");
-                }
-            }
-            Err(e) => warn!("DDOS_SYN_CONFIG map not available (non-fatal): {e}"),
-        }
-
-        // The XDP syncookie path issues kernel cookies via
-        // `bpf_tcp_raw_gen_syncookie`; the kernel only completes a legitimate
-        // client's handshake from the passed cookie-ACK when it always
-        // validates syncookies (mode 2 - mode 1 engages only on SYN-backlog
-        // overflow, which never happens because XDP absorbs the flood SYNs).
-        // In the default token deployment the privileged launcher already set
-        // this before the user-namespace unshare; this best-effort write only
-        // succeeds in the CAP_NET_ADMIN fallback, so a failure here is expected.
-        match std::fs::write("/proc/sys/net/ipv4/tcp_syncookies", "2\n") {
-            Ok(()) => info!("net.ipv4.tcp_syncookies=2 set for SYN-cookie handshake completion"),
-            Err(e) => {
-                debug!("tcp_syncookies sysctl not writable here (set by the launcher): {e}");
-            }
-        }
-    }
-
-    if config.ddos.icmp_protection.enabled {
-        match IcmpConfigManager::new(loader.ebpf_mut()) {
-            Ok(mut mgr) => {
-                let icmp_cfg = ebpf_common::ddos::IcmpConfig {
-                    enabled: 1,
-                    _pad: 0,
-                    max_payload_size: config.ddos.icmp_protection.max_payload_size,
-                    max_pps: config.ddos.icmp_protection.max_pps,
-                };
-                if let Err(e) = mgr.set_config(&icmp_cfg) {
-                    warn!("ICMP_CONFIG write failed (ICMP protection disabled): {e}");
-                }
-            }
-            Err(e) => warn!("ICMP_CONFIG map not available (non-fatal): {e}"),
-        }
-    }
-
-    if config.ddos.connection_tracking.enabled {
-        match DdosConnTrackConfigManager::new(loader.ebpf_mut()) {
-            Ok(mut mgr) => {
-                let ct = &config.ddos.connection_tracking;
-                let ct_cfg = ebpf_common::ddos::DdosConnTrackConfig {
-                    enabled: 1,
-                    _pad: [0; 3],
-                    half_open_threshold: ct.half_open_threshold,
-                    rst_threshold: ct.rst_threshold,
-                    fin_threshold: ct.fin_threshold,
-                    ack_threshold: ct.ack_threshold,
-                    _pad2: [0; 4],
-                    // 60s entry timeout (the eBPF path does not yet expire on
-                    // this value; kept sane for when it does).
-                    timeout_ns: 60_000_000_000,
-                };
-                if let Err(e) = mgr.set_config(&ct_cfg) {
-                    warn!("CONNTRACK_CONFIG write failed (CT flood protection disabled): {e}");
-                }
-            }
-            Err(e) => warn!("CONNTRACK_CONFIG map not available (non-fatal): {e}"),
-        }
-    }
-
-    if config.ddos.amplification_protection.enabled
-        && !config.ddos.amplification_protection.ports.is_empty()
-    {
-        // IANA protocol number for UDP; the eBPF amp path is UDP-only, which
-        // is why the configuration refuses any other protocol on these ports.
-        const PROTO_UDP: u8 = 17;
-        match AmpProtectConfigManager::new(loader.ebpf_mut()) {
-            Ok(mut mgr) => {
-                for p in &config.ddos.amplification_protection.ports {
-                    if let Err(e) = mgr.set_port(p.port, PROTO_UDP, p.max_pps) {
-                        warn!(port = p.port, "AMP_PROTECT_CONFIG write failed: {e}");
-                    }
-                }
-            }
-            Err(e) => warn!("AMP_PROTECT_CONFIG map not available (non-fatal): {e}"),
-        }
-    }
 }
 
 pub fn try_load_xdp_ratelimit(
@@ -6050,10 +5957,12 @@ pub fn try_load_xdp_ratelimit(
     // `bpf_tcp_raw_*_syncookie` helpers, so there is no userspace secret to
     // seed - the kernel keeps its own cookie key.
 
-    // Arm the xdp-ratelimit DDoS protections gated by zeroed config maps
-    // (SYN cookie, ICMP flood, conntrack flood). Without these writes the
-    // eBPF reads `enabled == 0` and each protection is a silent no-op.
-    arm_ddos_ebpf_configs(&mut loader, config);
+    // Arm the xdp-ratelimit DDoS protections gated by zeroed config maps.
+    // Without these writes the eBPF reads `enabled == 0` and each
+    // protection is a silent no-op; the guards are kept so a reload can
+    // rewrite them.
+    let mut guards = DdosGuards::take(&mut loader);
+    guards.write(config);
 
     let mut rdrs = Vec::new();
     if let Ok(r) = MetricsReader::new(loader.ebpf_mut(), "RATELIMIT_METRICS") {
@@ -6065,15 +5974,14 @@ pub fn try_load_xdp_ratelimit(
 
     let reader = EventReader::new(loader.ebpf_mut())?;
 
-    Ok((loader, rl_mgr_opt, rl_lpm_opt, rdrs, reader))
+    Ok((loader, rl_mgr_opt, rl_lpm_opt, rdrs, reader, guards))
 }
 
-/// IDS program load result: loader, IDS map manager, L7 ports manager, config flags manager, metrics reader, event reader.
+/// IDS program load result: loader, IDS map manager, L7 ports manager, metrics reader, event reader.
 pub type TcIdsResult = (
     EbpfLoader,
     Option<IdsMapManager>,
     Option<L7PortsManager>,
-    Option<ConfigFlagsManager>,
     Option<MetricsReader>,
     EventReader,
 );
@@ -6127,32 +6035,11 @@ pub fn try_load_tc_ids(ebpf_dir: &str, config: &AgentConfig) -> anyhow::Result<T
             None
         }
     };
-    let cfg_mgr_opt = match ConfigFlagsManager::new(loader.ebpf_mut()) {
-        Ok(mut cfg_mgr) => {
-            let flags = build_config_flags(config);
-            if let Err(e) = cfg_mgr.set_flags(&flags) {
-                warn!("failed to set CONFIG_FLAGS: {e}");
-            }
-            Some(cfg_mgr)
-        }
-        Err(e) => {
-            warn!("CONFIG_FLAGS map not available in tc-ids: {e}");
-            None
-        }
-    };
-
     let ids_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "IDS_METRICS").ok();
 
     let reader = EventReader::new(loader.ebpf_mut())?;
 
-    Ok((
-        loader,
-        ids_mgr_opt,
-        l7_mgr_opt,
-        cfg_mgr_opt,
-        ids_metrics_rdr,
-        reader,
-    ))
+    Ok((loader, ids_mgr_opt, l7_mgr_opt, ids_metrics_rdr, reader))
 }
 
 /// Load the TC threat intel program: attach TC ingress, set up maps, create event reader.
@@ -8837,11 +8724,16 @@ pub fn try_load_tc_nat(
     Ok((ingress_loader, egress_loader, nat_mgr, rdrs))
 }
 
-/// Load the TC scrub program: attach TC ingress, write scrub config to eBPF map.
+/// Load the TC scrub program: attach TC ingress, write scrub config to eBPF
+/// map. The config manager is returned so a reload can rewrite it.
 pub fn try_load_tc_scrub(
     ebpf_dir: &str,
     config: &AgentConfig,
-) -> anyhow::Result<(EbpfLoader, Option<MetricsReader>)> {
+) -> anyhow::Result<(
+    EbpfLoader,
+    Option<MetricsReader>,
+    Option<ScrubConfigManager>,
+)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tc-scrub")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
@@ -8851,16 +8743,22 @@ pub fn try_load_tc_scrub(
     }
 
     // Write scrub config to the SCRUB_CONFIG eBPF Array map
-    if let Ok(mut scrub_mgr) = ScrubConfigManager::new(loader.ebpf_mut()) {
-        let flags = build_scrub_flags(config);
-        if let Err(e) = scrub_mgr.set_flags(&flags) {
-            warn!("failed to set SCRUB_CONFIG: {e}");
+    let scrub_mgr = match ScrubConfigManager::new(loader.ebpf_mut()) {
+        Ok(mut scrub_mgr) => {
+            if let Err(e) = scrub_mgr.set_flags(&build_scrub_flags(config)) {
+                warn!("failed to set SCRUB_CONFIG: {e}");
+            }
+            Some(scrub_mgr)
         }
-    }
+        Err(e) => {
+            warn!("SCRUB_CONFIG map not available: {e}");
+            None
+        }
+    };
 
     let scrub_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "SCRUB_METRICS").ok();
 
-    Ok((loader, scrub_metrics_rdr))
+    Ok((loader, scrub_metrics_rdr, scrub_mgr))
 }
 
 /// Load the TC `QoS` program: attach TC, acquire the `QoS` maps, and create
@@ -8923,31 +8821,87 @@ pub fn build_scrub_flags(config: &AgentConfig) -> ebpf_common::scrub::ScrubFlags
 
 /// Build a `GeoIP` adapter from the config's source mode.
 ///
-/// Only handles the `File` mode synchronously. `Url` and `MaxMindAccount`
-/// modes require async downloads and are not supported at startup (they
-/// will log a warning and return an error).
-pub fn build_geoip_adapter(
+/// `file` opens the files named. `url` and `maxmind_account` download into
+/// `database_dir` before the first lookup; when that download fails, what a
+/// previous run left in `database_dir` is served and the failure is logged,
+/// and the source is returned so the caller keeps refreshing it.
+///
+/// # Errors
+///
+/// A file that exists and is not a database.
+pub async fn build_geoip_adapter(
     cfg: &infrastructure::config::GeoIpConfig,
-) -> anyhow::Result<adapters::geoip::MaxMindGeoIpAdapter> {
-    match &cfg.source {
-        infrastructure::config::GeoIpSource::File {
+) -> anyhow::Result<(
+    adapters::geoip::MaxMindGeoIpAdapter,
+    Option<adapters::geoip::GeoIpDownload>,
+)> {
+    use adapters::geoip::{GeoIpDownload, MaxMindGeoIpAdapter};
+    use infrastructure::config::GeoIpSource;
+
+    let download = match &cfg.source {
+        GeoIpSource::File {
             city_path,
             asn_path,
-        } => adapters::geoip::MaxMindGeoIpAdapter::from_files(
-            Path::new(city_path),
-            asn_path.as_deref().map(Path::new),
-        ),
-        infrastructure::config::GeoIpSource::Url { .. } => {
-            anyhow::bail!(
-                "GeoIP URL mode requires async download - use `file` mode or pre-download databases"
-            );
+        } => {
+            let adapter = MaxMindGeoIpAdapter::from_files(
+                Path::new(city_path),
+                asn_path.as_deref().map(Path::new),
+            )?;
+            return Ok((adapter, None));
         }
-        infrastructure::config::GeoIpSource::MaxMindAccount { .. } => {
-            anyhow::bail!(
-                "GeoIP MaxMind account mode requires async download - use `file` mode or pre-download databases"
+        GeoIpSource::Url { city_url, asn_url } => GeoIpDownload::Urls {
+            city_url: city_url.clone(),
+            asn_url: asn_url.clone(),
+        },
+        GeoIpSource::MaxMindAccount {
+            account_id,
+            license_key,
+            edition_ids,
+        } => GeoIpDownload::MaxMindAccount {
+            account_id: account_id.clone(),
+            license_key: license_key.clone(),
+            edition_ids: edition_ids.clone(),
+        },
+    };
+    let dir = Path::new(&cfg.database_dir);
+    let paths = match download.fetch(dir).await {
+        Ok(paths) => paths,
+        Err(e) => {
+            warn!(
+                dir = %dir.display(),
+                "GeoIP download failed, serving what the directory holds: {e}"
             );
+            download.paths(dir)
         }
-    }
+    };
+    let adapter = MaxMindGeoIpAdapter::from_files(&paths.city, paths.asn.as_deref())?;
+    Ok((adapter, Some(download)))
+}
+
+/// Download the databases again every `hours` and swap them in.
+pub fn spawn_geoip_refresh(
+    adapter: Arc<adapters::geoip::MaxMindGeoIpAdapter>,
+    download: adapters::geoip::GeoIpDownload,
+    dir: PathBuf,
+    hours: u64,
+) {
+    let period = std::time::Duration::from_secs(hours.max(1).saturating_mul(3600));
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(period);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            match download.fetch(&dir).await {
+                Ok(paths) => {
+                    if let Err(e) = adapter.reload(&paths.city, paths.asn.as_deref()) {
+                        warn!("GeoIP refresh downloaded a database that does not open: {e}");
+                    }
+                }
+                Err(e) => warn!("GeoIP refresh failed, keeping the databases loaded: {e}"),
+            }
+        }
+    });
 }
 
 /// Load the XDP load balancer program.

@@ -25,12 +25,6 @@ pub trait EbpfMapWritePort: Send + Sync {
 
     /// Remove an IP from the threat intelligence IOC map.
     fn remove_threatintel_ip(&self, ip: IpAddr) -> Result<(), DomainError>;
-
-    /// Insert an IP as a firewall drop rule.
-    fn inject_firewall_drop(&self, ip: IpAddr) -> Result<(), DomainError>;
-
-    /// Remove an IP from the firewall drop rules.
-    fn remove_firewall_drop(&self, ip: IpAddr) -> Result<(), DomainError>;
 }
 
 #[cfg(test)]
@@ -41,14 +35,12 @@ mod tests {
 
     struct InMemoryMapWrite {
         threatintel: Mutex<HashSet<IpAddr>>,
-        firewall: Mutex<HashSet<IpAddr>>,
     }
 
     impl InMemoryMapWrite {
         fn new() -> Self {
             Self {
                 threatintel: Mutex::new(HashSet::new()),
-                firewall: Mutex::new(HashSet::new()),
             }
         }
     }
@@ -65,16 +57,6 @@ mod tests {
 
         fn remove_threatintel_ip(&self, ip: IpAddr) -> Result<(), DomainError> {
             self.threatintel.lock().unwrap().remove(&ip);
-            Ok(())
-        }
-
-        fn inject_firewall_drop(&self, ip: IpAddr) -> Result<(), DomainError> {
-            self.firewall.lock().unwrap().insert(ip);
-            Ok(())
-        }
-
-        fn remove_firewall_drop(&self, ip: IpAddr) -> Result<(), DomainError> {
-            self.firewall.lock().unwrap().remove(&ip);
             Ok(())
         }
     }
@@ -99,18 +81,6 @@ mod tests {
 
         mock.remove_threatintel_ip(ip).unwrap();
         assert!(!mock.threatintel.lock().unwrap().contains(&ip));
-    }
-
-    #[test]
-    fn inject_and_remove_firewall() {
-        let mock = InMemoryMapWrite::new();
-        let ip = "192.168.1.1".parse::<IpAddr>().unwrap();
-
-        mock.inject_firewall_drop(ip).unwrap();
-        assert!(mock.firewall.lock().unwrap().contains(&ip));
-
-        mock.remove_firewall_drop(ip).unwrap();
-        assert!(!mock.firewall.lock().unwrap().contains(&ip));
     }
 
     #[test]

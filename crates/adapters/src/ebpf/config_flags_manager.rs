@@ -213,29 +213,60 @@ impl AmpProtectConfigManager {
         Ok(Self { config_map })
     }
 
-    /// Enable amplification protection for one source port (host-order)
-    /// over the given IP protocol, capped at `max_pps` per source IP.
-    pub fn set_port(&mut self, port: u16, protocol: u8, max_pps: u32) -> Result<(), anyhow::Error> {
-        let key = AmpProtectKey {
-            port,
-            protocol,
-            _pad: 0,
-        };
-        let cfg = AmpProtectConfig {
-            enabled: 1,
-            _pad: [0; 3],
-            max_pps,
-        };
-        // Open the probe before the insert, so a port is never armed behind a
-        // gate still saying nothing is.
-        crate::ebpf::feature_gates::publish(
-            crate::ebpf::feature_gates::Feature::AmpProtectPorts,
-            false,
-        );
-        self.config_map
-            .insert(&key, &cfg, 0)
-            .map_err(|e| anyhow::anyhow!("AMP_PROTECT_CONFIG insert failed: {e}"))?;
-        info!(port, protocol, max_pps, "AMP_PROTECT_CONFIG port armed");
+    /// Make the armed ports exactly `ports`: each `(source port, IP
+    /// protocol, max_pps)` capped per source address, every other port
+    /// released.
+    ///
+    /// # Errors
+    ///
+    /// The first insert or delete the kernel refused; the ports written
+    /// before it stay written.
+    pub fn set_ports(&mut self, ports: &[(u16, u8, u32)]) -> Result<(), anyhow::Error> {
+        let wanted: Vec<AmpProtectKey> = ports
+            .iter()
+            .map(|&(port, protocol, _)| AmpProtectKey {
+                port,
+                protocol,
+                _pad: 0,
+            })
+            .collect();
+        // Open the probe before the inserts, so a port is never armed behind
+        // a gate still saying nothing is.
+        if !ports.is_empty() {
+            crate::ebpf::feature_gates::publish(
+                crate::ebpf::feature_gates::Feature::AmpProtectPorts,
+                false,
+            );
+        }
+        for (key, &(port, protocol, max_pps)) in wanted.iter().zip(ports) {
+            let cfg = AmpProtectConfig {
+                enabled: 1,
+                _pad: [0; 3],
+                max_pps,
+            };
+            self.config_map
+                .insert(key, &cfg, 0)
+                .map_err(|e| anyhow::anyhow!("AMP_PROTECT_CONFIG insert failed: {e}"))?;
+            info!(port, protocol, max_pps, "AMP_PROTECT_CONFIG port armed");
+        }
+        let stale: Vec<AmpProtectKey> = self
+            .config_map
+            .keys()
+            .filter_map(Result::ok)
+            .filter(|k| !wanted.contains(k))
+            .collect();
+        for key in &stale {
+            self.config_map
+                .remove(key)
+                .map_err(|e| anyhow::anyhow!("AMP_PROTECT_CONFIG remove failed: {e}"))?;
+            info!(port = key.port, "AMP_PROTECT_CONFIG port released");
+        }
+        if ports.is_empty() {
+            crate::ebpf::feature_gates::publish(
+                crate::ebpf::feature_gates::Feature::AmpProtectPorts,
+                true,
+            );
+        }
         Ok(())
     }
 }

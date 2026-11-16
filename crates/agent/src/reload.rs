@@ -11,8 +11,11 @@ use notify::Watcher as _;
 use tokio::sync::{Mutex, Notify, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use adapters::ebpf::{ConfigFlagsManager, InterfaceGroupsManager, L7PortsManager};
+use adapters::ebpf::{
+    ConfigFlagsManager, InterfaceGroupsManager, L7PortsManager, ScrubConfigManager,
+};
 
+use crate::ddos_guards::DdosGuards;
 use crate::ebpf_lifecycle::{EbpfProgramManager, program_config_map};
 
 /// Typed handle so the reload task knows which auth provider variant to refresh.
@@ -30,6 +33,10 @@ pub struct EbpfMapHolder {
     /// `CONFIG_FLAGS` managers, each with the program whose map it holds.
     pub config_flags: Vec<(&'static str, ConfigFlagsManager)>,
     pub iface_groups: Option<InterfaceGroupsManager>,
+    /// The xdp-ratelimit anti-DDoS guard maps.
+    pub ddos_guards: Option<DdosGuards>,
+    /// The tc-scrub `SCRUB_CONFIG` map.
+    pub scrub: Option<ScrubConfigManager>,
 }
 
 impl Default for EbpfMapHolder {
@@ -44,6 +51,8 @@ impl EbpfMapHolder {
             l7_ports: None,
             config_flags: Vec::new(),
             iface_groups: None,
+            ddos_guards: None,
+            scrub: None,
         }
     }
 }
@@ -301,6 +310,10 @@ async fn perform_reload(
             Some(&mut mgr.iface_groups),
             &config,
         );
+        if let Some(guards) = mgr.ddos_guards.as_mut() {
+            guards.write(&config);
+        }
+        sync_scrub(mgr.scrub.as_mut(), &config);
     }
 
     // eBPF program lifecycle - load/unload programs based on enabled flags
@@ -348,6 +361,15 @@ async fn perform_reload(
 /// `CONFIG_FLAGS`, and the interface group membership.
 ///
 /// A manager that is absent is a program that is not loaded, and is skipped.
+/// Rewrite the tc-scrub parameters from `config`, when tc-scrub is loaded.
+pub fn sync_scrub(scrub: Option<&mut ScrubConfigManager>, config: &AgentConfig) {
+    if let Some(scrub) = scrub
+        && let Err(e) = scrub.set_flags(&crate::startup::build_scrub_flags(config))
+    {
+        tracing::warn!(error = %e, "SCRUB_CONFIG re-sync failed");
+    }
+}
+
 pub fn sync_kernel_maps(
     l7_ports: Option<&mut L7PortsManager>,
     config_flags: &mut [(&'static str, ConfigFlagsManager)],

@@ -356,11 +356,6 @@ impl QosMapManager {
             state.reset();
         }
     }
-
-    /// Return the number of classifier entries in the map.
-    pub fn classifier_count_raw(&self) -> usize {
-        self.classifiers.keys().filter_map(Result::ok).count()
-    }
 }
 
 impl QosMapPort for QosMapManager {
@@ -388,20 +383,6 @@ impl QosMapPort for QosMapManager {
             DomainError::EngineError(format!("qos classifier map clear failed: {e}"))
         })?;
         Ok(())
-    }
-
-    fn pipe_count(&self) -> Result<usize, DomainError> {
-        // Array maps have a fixed size; we cannot know how many are "active"
-        // without scanning. Return the max for now.
-        Ok(ebpf_common::qos::MAX_QOS_PIPES as usize)
-    }
-
-    fn queue_count(&self) -> Result<usize, DomainError> {
-        Ok(ebpf_common::qos::MAX_QOS_QUEUES as usize)
-    }
-
-    fn classifier_count(&self) -> Result<usize, DomainError> {
-        Ok(self.classifier_count_raw())
     }
 }
 

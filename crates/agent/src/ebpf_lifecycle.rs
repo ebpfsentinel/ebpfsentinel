@@ -6,8 +6,8 @@ use std::time::Duration;
 use adapters::ebpf::datapath_trace::{TracePlan, TracedProgram};
 use adapters::ebpf::{
     ConfigFlagsManager, EbpfLoader, InterfaceGroupsManager, L7PortsManager, MetricsReader,
-    RingBufObserver, TenantCgroupMapManager, TenantIfindexMapManager, TenantSubnetMapManager,
-    TenantVlanMapManager,
+    RingBufObserver, ScrubConfigManager, TenantCgroupMapManager, TenantIfindexMapManager,
+    TenantSubnetMapManager, TenantVlanMapManager,
 };
 use application::packet_pipeline::AgentEvent;
 use domain::trace::{TraceDirection, TraceHook};
@@ -19,6 +19,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::ddos_guards::DdosGuards;
 use crate::runtime::ServiceHandles;
 use crate::startup;
 
@@ -40,10 +41,14 @@ pub struct EbpfProgramManager {
     services: Arc<ServiceHandles>,
     ebpf_dir: String,
     /// Config flags managers, each with the program whose map it holds
-    /// (tc-ids, tc-threatintel), so unloading a program releases its own.
+    /// (tc-threatintel), so unloading a program releases its own.
     pub config_flags: Vec<(&'static str, ConfigFlagsManager)>,
     /// L7 ports manager (from tc-ids).
     pub l7_ports: Option<L7PortsManager>,
+    /// The anti-DDoS guard maps of the loaded xdp-ratelimit.
+    pub ddos_guards: Option<DdosGuards>,
+    /// The `SCRUB_CONFIG` map of the loaded tc-scrub.
+    pub scrub: Option<ScrubConfigManager>,
     /// Cross-program interface groups manager.
     pub iface_groups: InterfaceGroupsManager,
     /// Cross-program tenant VLAN map manager.
@@ -127,6 +132,8 @@ impl EbpfProgramManager {
             services,
             ebpf_dir,
             config_flags: Vec::new(),
+            ddos_guards: None,
+            scrub: None,
             l7_ports: None,
             iface_groups: InterfaceGroupsManager::new(),
             tenant_vlan: TenantVlanMapManager::new(),
@@ -315,13 +322,9 @@ impl EbpfProgramManager {
             "cgroup_attribution" => self.enable_cgroup_attribution(config).await,
             "tracepoint_process" => self.enable_process_tracing(config).await,
             "cgroup_clusterip" => self.enable_cgroup_clusterip(config).await,
-            _ => {
-                warn!(
-                    program = name,
-                    "enable_program not implemented for this program"
-                );
-                Ok(())
-            }
+            // Every name `program_config_map` lists has an arm above; a name
+            // added there without one is refused here, never reported loaded.
+            _ => anyhow::bail!("no hot-load path for program '{name}'"),
         }
     }
 
@@ -339,6 +342,11 @@ impl EbpfProgramManager {
         }
         self.drop_metrics_readers(name).await;
         self.config_flags.retain(|(program, _)| *program != name);
+        match name {
+            "xdp_ratelimit" => self.ddos_guards = None,
+            "tc_scrub" => self.scrub = None,
+            _ => {}
+        }
 
         // Clear map ports from services
         match name {
@@ -436,7 +444,7 @@ impl EbpfProgramManager {
     // ── Per-program enable implementations ─────────────────────────
 
     async fn enable_tc_ids(&mut self, config: &AgentConfig) -> anyhow::Result<()> {
-        let (mut loader, ids_mgr_opt, l7_mgr_opt, cfg_mgr_opt, ids_rdr, reader) =
+        let (mut loader, ids_mgr_opt, l7_mgr_opt, ids_rdr, reader) =
             startup::try_load_tc_ids(&self.ebpf_dir, config)?;
 
         let cancel = CancellationToken::new();
@@ -457,9 +465,6 @@ impl EbpfProgramManager {
         }
         if let Some(l7_mgr) = l7_mgr_opt {
             self.l7_ports = Some(l7_mgr);
-        }
-        if let Some(cfg_mgr) = cfg_mgr_opt {
-            self.set_config_flags("tc_ids", cfg_mgr);
         }
         if let Some(rdr) = ids_rdr {
             self.metrics_readers.write().await.push(rdr);
@@ -659,7 +664,9 @@ impl EbpfProgramManager {
     }
 
     async fn enable_tc_scrub(&mut self, config: &AgentConfig) -> anyhow::Result<()> {
-        let (mut loader, scrub_rdr) = startup::try_load_tc_scrub(&self.ebpf_dir, config)?;
+        let (mut loader, scrub_rdr, scrub_mgr) =
+            startup::try_load_tc_scrub(&self.ebpf_dir, config)?;
+        self.scrub = scrub_mgr;
 
         if let Some(rdr) = scrub_rdr {
             self.metrics_readers.write().await.push(rdr);
@@ -1041,6 +1048,9 @@ impl EbpfProgramManager {
                         svc.set_lpm_coordinator(Arc::clone(&coordinator));
                         self.services.ips_svc.store(Arc::new(svc));
                     }
+                    if let Some(ref blocklist) = self.services.dns_blocklist_svc {
+                        blocklist.set_lpm_coordinator(Arc::clone(&coordinator));
+                    }
                     self.lpm_coordinator = Some(coordinator);
                 }
                 Err(e) => warn!("LPM coordinator maps not available (non-fatal): {e}"),
@@ -1225,8 +1235,9 @@ impl EbpfProgramManager {
             }
             "xdp_ratelimit" => {
                 let fw_active = self.is_loaded("xdp_firewall");
-                let (mut loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs, reader) =
+                let (mut loader, rl_mgr_opt, rl_lpm_opt, rl_rdrs, reader, guards) =
                     startup::try_load_xdp_ratelimit(&self.ebpf_dir, config, fw_active)?;
+                self.ddos_guards = Some(guards);
 
                 let cancel = CancellationToken::new();
                 let tx = self.event_tx.clone();

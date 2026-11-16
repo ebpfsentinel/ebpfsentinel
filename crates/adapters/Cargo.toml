@@ -48,6 +48,7 @@ reqwest = { workspace = true }
 lettre = { workspace = true }
 sha2 = { workspace = true }
 maxminddb = { workspace = true }
+arc-swap = { workspace = true }
 ipnetwork = "0.21"
 lru = { workspace = true }
 flate2 = { workspace = true }

@@ -19,7 +19,6 @@ enum Direction {
 
 /// A tracked LPM entry with its provenance metadata.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 enum TrackedEntry {
     V4 {
         prefix_len: u32,
@@ -99,6 +98,61 @@ impl LpmCoordinator {
     }
 }
 
+impl TrackedEntry {
+    fn v4(entry: &FirewallLpmEntryV4, direction: Direction) -> Self {
+        Self::V4 {
+            prefix_len: entry.prefix_len,
+            addr: entry.addr,
+            action: entry.action,
+            direction,
+        }
+    }
+
+    fn v6(entry: &FirewallLpmEntryV6, direction: Direction) -> Self {
+        Self::V6 {
+            prefix_len: entry.prefix_len,
+            addr: entry.addr,
+            action: entry.action,
+            direction,
+        }
+    }
+
+    /// Whether both name the same key of the same trie, whatever the verdict.
+    fn same_slot(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::V4 {
+                    prefix_len: p1,
+                    addr: a1,
+                    direction: d1,
+                    ..
+                },
+                Self::V4 {
+                    prefix_len: p2,
+                    addr: a2,
+                    direction: d2,
+                    ..
+                },
+            ) => p1 == p2 && a1 == a2 && d1 == d2,
+            (
+                Self::V6 {
+                    prefix_len: p1,
+                    addr: a1,
+                    direction: d1,
+                    ..
+                },
+                Self::V6 {
+                    prefix_len: p2,
+                    addr: a2,
+                    direction: d2,
+                    ..
+                },
+            ) => p1 == p2 && a1 == a2 && d1 == d2,
+            _ => false,
+        }
+    }
+}
+
 impl LpmCoordinatorPort for LpmCoordinator {
     fn replace_source_entries(
         &self,
@@ -115,51 +169,38 @@ impl LpmCoordinatorPort for LpmCoordinator {
 
         open_lookups();
 
-        // Remove old entries for this source
-        remove_source_entries_inner(&mut inner, source);
-
-        // Insert new entries
-        let mut tracked = Vec::new();
-
-        for entry in src_v4 {
-            insert_v4(&mut inner.lpm_src_v4, entry, "LPM src V4")?;
-            tracked.push(TrackedEntry::V4 {
-                prefix_len: entry.prefix_len,
-                addr: entry.addr,
-                action: entry.action,
-                direction: Direction::Src,
-            });
+        // The new entries go in before the old ones come out, so a prefix
+        // present in both is never absent from the trie in between.
+        let tracked: Vec<TrackedEntry> = src_v4
+            .iter()
+            .map(|e| TrackedEntry::v4(e, Direction::Src))
+            .chain(dst_v4.iter().map(|e| TrackedEntry::v4(e, Direction::Dst)))
+            .chain(src_v6.iter().map(|e| TrackedEntry::v6(e, Direction::Src)))
+            .chain(dst_v6.iter().map(|e| TrackedEntry::v6(e, Direction::Dst)))
+            .collect();
+        let mut first_error = None;
+        for entry in &tracked {
+            if let Err(e) = write(&mut inner, entry) {
+                first_error.get_or_insert(e);
+            }
         }
-        for entry in dst_v4 {
-            insert_v4(&mut inner.lpm_dst_v4, entry, "LPM dst V4")?;
-            tracked.push(TrackedEntry::V4 {
-                prefix_len: entry.prefix_len,
-                addr: entry.addr,
-                action: entry.action,
-                direction: Direction::Dst,
-            });
+        let old = inner
+            .entries_by_source
+            .insert(source.to_string(), tracked)
+            .unwrap_or_default();
+        for entry in old {
+            let kept = inner
+                .entries_by_source
+                .get(source)
+                .is_some_and(|new| new.iter().any(|n| n.same_slot(&entry)));
+            if !kept {
+                release(&mut inner, &entry);
+            }
         }
-        for entry in src_v6 {
-            insert_v6(&mut inner.lpm_src_v6, entry, "LPM src V6")?;
-            tracked.push(TrackedEntry::V6 {
-                prefix_len: entry.prefix_len,
-                addr: entry.addr,
-                action: entry.action,
-                direction: Direction::Src,
-            });
-        }
-        for entry in dst_v6 {
-            insert_v6(&mut inner.lpm_dst_v6, entry, "LPM dst V6")?;
-            tracked.push(TrackedEntry::V6 {
-                prefix_len: entry.prefix_len,
-                addr: entry.addr,
-                action: entry.action,
-                direction: Direction::Dst,
-            });
-        }
-
-        inner.entries_by_source.insert(source.to_string(), tracked);
         republish(&inner);
+        if let Some(e) = first_error {
+            return Err(e);
+        }
 
         info!(
             source,
@@ -236,21 +277,21 @@ impl LpmCoordinatorPort for LpmCoordinator {
             .lock()
             .map_err(|e| DomainError::EngineError(format!("LPM coordinator lock poisoned: {e}")))?;
 
-        for entry in src_v4 {
-            let key = Key::new(entry.prefix_len, entry.addr);
-            let _ = inner.lpm_src_v4.remove(&key);
-        }
-        for entry in src_v6 {
-            let key = Key::new(entry.prefix_len, entry.addr);
-            let _ = inner.lpm_src_v6.remove(&key);
-        }
-
-        // Remove from tracking
+        // Out of this source's books first, so a prefix another source still
+        // holds is written back with that source's verdict.
         if let Some(tracked) = inner.entries_by_source.get_mut(source) {
             tracked.retain(|t| {
                 !matches_any_v4(t, src_v4, Direction::Src)
                     && !matches_any_v6(t, src_v6, Direction::Src)
             });
+        }
+        let gone: Vec<TrackedEntry> = src_v4
+            .iter()
+            .map(|e| TrackedEntry::v4(e, Direction::Src))
+            .chain(src_v6.iter().map(|e| TrackedEntry::v6(e, Direction::Src)))
+            .collect();
+        for entry in &gone {
+            release(&mut inner, entry);
         }
 
         republish(&inner);
@@ -309,33 +350,91 @@ fn republish(inner: &Inner) {
 fn remove_source_entries_inner(inner: &mut Inner, source: &str) {
     if let Some(entries) = inner.entries_by_source.remove(source) {
         for entry in &entries {
-            match entry {
-                TrackedEntry::V4 {
-                    prefix_len,
-                    addr,
-                    direction,
-                    ..
-                } => {
-                    let key = Key::new(*prefix_len, *addr);
-                    let map = match direction {
-                        Direction::Src => &mut inner.lpm_src_v4,
-                        Direction::Dst => &mut inner.lpm_dst_v4,
-                    };
-                    let _ = map.remove(&key);
-                }
-                TrackedEntry::V6 {
-                    prefix_len,
-                    addr,
-                    direction,
-                    ..
-                } => {
-                    let key = Key::new(*prefix_len, *addr);
-                    let map = match direction {
-                        Direction::Src => &mut inner.lpm_src_v6,
-                        Direction::Dst => &mut inner.lpm_dst_v6,
-                    };
-                    let _ = map.remove(&key);
-                }
+            release(inner, entry);
+        }
+    }
+}
+
+/// Take a prefix no longer held by the source that let it go out of its
+/// trie, unless another source still holds the same prefix in the same
+/// direction: that source's verdict is written back instead, so one source
+/// letting go never lifts another's block.
+fn release(inner: &mut Inner, entry: &TrackedEntry) {
+    let holder = inner
+        .entries_by_source
+        .values()
+        .flatten()
+        .find(|t| t.same_slot(entry))
+        .cloned();
+    if let Some(holder) = holder {
+        if let Err(e) = write(inner, &holder) {
+            tracing::warn!("LPM coordinator could not restore a shared prefix: {e}");
+        }
+        return;
+    }
+    match entry {
+        TrackedEntry::V4 {
+            prefix_len,
+            addr,
+            direction,
+            ..
+        } => {
+            let key = Key::new(*prefix_len, *addr);
+            let map = match direction {
+                Direction::Src => &mut inner.lpm_src_v4,
+                Direction::Dst => &mut inner.lpm_dst_v4,
+            };
+            let _ = map.remove(&key);
+        }
+        TrackedEntry::V6 {
+            prefix_len,
+            addr,
+            direction,
+            ..
+        } => {
+            let key = Key::new(*prefix_len, *addr);
+            let map = match direction {
+                Direction::Src => &mut inner.lpm_src_v6,
+                Direction::Dst => &mut inner.lpm_dst_v6,
+            };
+            let _ = map.remove(&key);
+        }
+    }
+}
+
+/// Put one tracked entry in its trie.
+fn write(inner: &mut Inner, entry: &TrackedEntry) -> Result<(), DomainError> {
+    match *entry {
+        TrackedEntry::V4 {
+            prefix_len,
+            addr,
+            action,
+            direction,
+        } => {
+            let e = FirewallLpmEntryV4 {
+                prefix_len,
+                addr,
+                action,
+            };
+            match direction {
+                Direction::Src => insert_v4(&mut inner.lpm_src_v4, &e, "LPM src V4"),
+                Direction::Dst => insert_v4(&mut inner.lpm_dst_v4, &e, "LPM dst V4"),
+            }
+        }
+        TrackedEntry::V6 {
+            prefix_len,
+            addr,
+            action,
+            direction,
+        } => {
+            let e = FirewallLpmEntryV6 {
+                prefix_len,
+                addr,
+                action,
+            };
+            match direction {
+                Direction::Src => insert_v6(&mut inner.lpm_src_v6, &e, "LPM src V6"),
+                Direction::Dst => insert_v6(&mut inner.lpm_dst_v6, &e, "LPM dst V6"),
             }
         }
     }

@@ -181,6 +181,11 @@ impl DomainBlocklistEngine {
     }
 
     /// Number of IPs currently injected.
+    /// Every address currently held in front of the data plane.
+    pub fn injected_ips(&self) -> Vec<IpAddr> {
+        self.injected_ips.keys().copied().collect()
+    }
+
     pub fn injected_ip_count(&self) -> usize {
         self.injected_ips.len()
     }
