@@ -304,6 +304,51 @@ pub(crate) fn fsid_of(fd: RawFd) -> io::Result<[u8; FSID_LEN]> {
     Ok(unsafe { std::mem::transmute::<libc::fsid_t, [u8; FSID_LEN]>(st.f_fsid) })
 }
 
+/// The directories that hold the system's own files rather than its data:
+/// procfs and sysfs, devices, runtime state, boot, configuration, programs and
+/// libraries, package state. A canary is bait for whoever goes looking for
+/// data; planted in one of these it would be a root-owned file the warden
+/// wrote where the system reads its configuration or its code, or a path into
+/// another process's root.
+pub const SYSTEM_ROOTS: &[&str] = &[
+    "/proc",
+    "/sys",
+    "/dev",
+    "/run",
+    "/boot",
+    "/etc",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
+    "/var/lib",
+    "/var/run",
+    "/var/cache",
+    "/nix",
+    "/snap",
+];
+
+/// The system root `path` lies under, if any. `/` itself is one too: a
+/// canary is planted in a directory, never beside the top-level ones.
+fn system_root(path: &Path) -> Option<&'static str> {
+    if path.parent().is_none_or(|p| p == Path::new("/")) {
+        return Some("/");
+    }
+    SYSTEM_ROOTS
+        .iter()
+        .copied()
+        .find(|root| path.starts_with(root))
+}
+
+fn system_root_refusal(root: &str) -> String {
+    format!(
+        "{root} holds the system's own files, not data: a canary is planted only where data lives"
+    )
+}
+
 /// Why a canary was not planted, in the words an operator acts on.
 fn canary_refusal(err: &io::Error) -> String {
     match err.raw_os_error() {
@@ -546,26 +591,42 @@ impl FimWatch {
         if !path.is_absolute() {
             return Err("not an absolute path".to_owned());
         }
+        if let Some(root) = system_root(path) {
+            return Err(system_root_refusal(root));
+        }
+        let name = path
+            .file_name()
+            .ok_or_else(|| "the path names no file".to_owned())?;
         let parent = path
             .parent()
-            .filter(|p| p.file_name().is_some() || p == &Path::new("/"))
             .ok_or_else(|| "the path names no file".to_owned())?;
         let dir =
             open_path(parent, libc::O_PATH | libc::O_DIRECTORY).map_err(|e| canary_refusal(&e))?;
+        // The directory as the kernel resolved it, links and all: a link from
+        // a data directory into a system one plants nothing there.
+        let held_dir = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));
+        let real = std::fs::read_link(&held_dir).map_err(|e| e.to_string())?;
+        if let Some(root) = system_root(&real) {
+            return Err(system_root_refusal(root));
+        }
         let fsid = fsid_of(dir.as_raw_fd()).map_err(|e| e.to_string())?;
         if !self.covers(fsid) {
             return Err("the directory is on a filesystem this watch did not mark".to_owned());
         }
+        // Created and marked through the open directory, so the directory
+        // checked is the directory written to whatever is renamed meanwhile.
+        let held = held_dir.join(name);
         // Held before the file exists, so its creation, read on this same
         // group, is already known as the warden's own.
-        let fresh = self.canaries.insert(path.to_path_buf());
-        if let Err(reason) = place_canary(path) {
+        let key = real.join(name);
+        let fresh = self.canaries.insert(key.clone());
+        if let Err(reason) = place_canary(&held) {
             if fresh {
-                self.canaries.remove(path);
+                self.canaries.remove(&key);
             }
             return Err(reason);
         }
-        let c = CString::new(path.as_os_str().as_bytes())
+        let c = CString::new(held.as_os_str().as_bytes())
             .map_err(|_| "the path holds a NUL byte".to_owned())?;
         // SAFETY: the group is open and `c` is a NUL-terminated path that
         // outlives the call.
@@ -934,6 +995,27 @@ mod tests {
         buf[0..4].copy_from_slice(&8u32.to_ne_bytes());
         assert_eq!(parse_events(&buf), Parsed::default());
         assert_eq!(parse_events(&[]), Parsed::default());
+    }
+
+    #[test]
+    fn a_canary_is_refused_where_the_system_keeps_its_own_files() {
+        for path in [
+            "/etc/shadow.bak",
+            "/proc/1/root/etc/x",
+            "/usr/lib/x.so",
+            "/var/lib/kubelet/x",
+            "/top-level",
+        ] {
+            assert!(system_root(Path::new(path)).is_some(), "{path}");
+        }
+        for path in [
+            "/home/a/.aws/credentials",
+            "/srv/share/payroll.xlsx",
+            "/tmp/x",
+            "/etcetera/x",
+        ] {
+            assert_eq!(system_root(Path::new(path)), None, "{path}");
+        }
     }
 
     #[test]

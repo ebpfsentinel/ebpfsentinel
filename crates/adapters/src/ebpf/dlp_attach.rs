@@ -1694,6 +1694,20 @@ mod tests {
         assert!(err.to_string().contains("was replaced"));
     }
 
+    #[test]
+    fn the_warden_admits_every_symbol_probed() {
+        let probed = SSL_UPROBES
+            .iter()
+            .map(|(_, symbol, _)| *symbol)
+            .chain([GO_WRITE, GO_READ]);
+        for symbol in probed {
+            assert!(
+                ebpfsentinel_warden::uprobe_admission::PROBED_FUNCTIONS.contains(&symbol),
+                "{symbol} would be refused by the warden"
+            );
+        }
+    }
+
     const GO_WRITE: &str = "crypto/tls.(*Conn).Write";
     const GO_READ: &str = "crypto/tls.(*Conn).Read";
 

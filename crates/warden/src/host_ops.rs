@@ -37,10 +37,8 @@ pub trait HostOps: Send + Sync {
     fn conntrack_flush(&self) -> Result<(), String>;
     /// Write one established TCP flow into the conntrack table.
     fn conntrack_restore(&self, restore: &ConntrackRestore) -> Result<(), String>;
-    /// Add (idempotent `replace`) a route - multi-WAN gateway programming.
+    /// Replace the main table's default route - multi-WAN gateway programming.
     fn route_add(&self, route: &RouteSpec) -> Result<(), String>;
-    /// Delete a route.
-    fn route_del(&self, route: &RouteSpec) -> Result<(), String>;
     /// Broadcast a gratuitous ARP for `ip` on `iface` (VIP takeover).
     fn arp_announce(&self, iface: &str, ip: &str) -> Result<(), String>;
     /// The program ids on `iface`'s TCX ingress or egress hook, in run order.
@@ -73,10 +71,7 @@ impl HostOps for LocalHostOps {
         net_ops::conntrack_restore(restore)
     }
     fn route_add(&self, route: &RouteSpec) -> Result<(), String> {
-        net_ops::route(true, route)
-    }
-    fn route_del(&self, route: &RouteSpec) -> Result<(), String> {
-        net_ops::route(false, route)
+        net_ops::replace_default_route(route)
     }
     fn arp_announce(&self, iface: &str, ip: &str) -> Result<(), String> {
         net_ops::arp_announce(iface, ip)

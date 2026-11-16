@@ -360,6 +360,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_warden_admits_every_entry_point_probed() {
+        for (_, symbols) in CRYPTO_ENTRY_POINTS {
+            for symbol in *symbols {
+                assert!(
+                    ebpfsentinel_warden::uprobe_admission::PROBED_FUNCTIONS.contains(symbol),
+                    "{symbol} would be refused by the warden"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_library_is_read_for_the_symbols_its_name_carries() {
         assert_eq!(
             entry_points_of("libcrypto.so.3"),

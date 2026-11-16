@@ -150,21 +150,41 @@ pub fn conntrack_flush() -> Result<(), String> {
 // ── multi-WAN routes ──────────────────────────────────────────────────────
 
 const RTM_NEWROUTE: u16 = 24;
-const RTM_DELROUTE: u16 = 25;
 const RTA_DST: u16 = 1;
 const RTA_OIF: u16 = 4;
 const RTA_GATEWAY: u16 = 5;
 const RTA_TABLE: u16 = 15;
 const RTPROT_BOOT: u8 = 3;
 const RT_SCOPE_UNIVERSE: u8 = 0;
-const RT_SCOPE_NOWHERE: u8 = 255;
+/// `RT_TABLE_MAIN`: the table the kernel consults for unpolicied traffic.
+pub const RT_TABLE_MAIN: u32 = 254;
 const RTN_UNICAST: u8 = 1;
 
-/// Accept a route destination: the literal `default`, a bare host address
-/// (v4/v6), or an `addr/prefix` CIDR with a prefix in range for the address
-/// family.
-fn valid_route_dst(dst: &str) -> bool {
-    parse_route_dst(dst).is_some()
+/// Hold a route to what the agent programs: the default route of the main
+/// table, `default`, `0.0.0.0/0` or `::/0`, through the gateway multi-WAN
+/// elected. Any narrower destination would let the agent steer one network's
+/// traffic past the others, and any other table would let it build a policy
+/// path the host's own rules never named.
+///
+/// # Errors
+///
+/// Says which half of the route the warden does not program.
+pub fn admit_route(spec: &RouteSpec) -> Result<(), String> {
+    let (_, prefix) = parse_route_dst(&spec.dst_cidr)
+        .ok_or_else(|| format!("invalid route destination '{}'", spec.dst_cidr))?;
+    if prefix != 0 {
+        return Err(format!(
+            "route destination '{}' is not the default route, the only one the warden programs",
+            spec.dst_cidr
+        ));
+    }
+    if spec.table != RT_TABLE_MAIN {
+        return Err(format!(
+            "route table {} is not the main table, the only one the warden programs",
+            spec.table
+        ));
+    }
+    Ok(())
 }
 
 /// The destination as (address, prefix length); `None` for `default`'s
@@ -193,9 +213,9 @@ fn octets(ip: IpAddr) -> Vec<u8> {
     }
 }
 
-/// The rtnetlink request adding (replacing) or deleting `spec` through the
-/// interface numbered `ifindex`.
-fn route_message(add: bool, spec: &RouteSpec, ifindex: u32) -> Result<Vec<u8>, String> {
+/// The rtnetlink request adding (replacing) `spec` through the interface
+/// numbered `ifindex`.
+fn route_message(spec: &RouteSpec, ifindex: u32) -> Result<Vec<u8>, String> {
     let (dst, prefix) = parse_route_dst(&spec.dst_cidr)
         .ok_or_else(|| format!("invalid route destination '{}'", spec.dst_cidr))?;
     let gateway = spec
@@ -216,23 +236,6 @@ fn route_message(add: bool, spec: &RouteSpec, ifindex: u32) -> Result<Vec<u8>, S
     let family = u8::try_from(family).unwrap_or(2);
     // A table past 255 is named only by its attribute.
     let header_table = u8::try_from(spec.table).unwrap_or(0);
-    let (kind, flags, protocol, scope, route_type) = if add {
-        (
-            RTM_NEWROUTE,
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
-            RTPROT_BOOT,
-            RT_SCOPE_UNIVERSE,
-            RTN_UNICAST,
-        )
-    } else {
-        (
-            RTM_DELROUTE,
-            NLM_F_REQUEST | NLM_F_ACK,
-            0,
-            RT_SCOPE_NOWHERE,
-            0,
-        )
-    };
     // struct rtmsg: family, dst_len, src_len, tos, table, protocol, scope,
     // type, flags.
     let mut rtmsg = [0u8; 12];
@@ -242,11 +245,15 @@ fn route_message(add: bool, spec: &RouteSpec, ifindex: u32) -> Result<Vec<u8>, S
         0,
         0,
         header_table,
-        protocol,
-        scope,
-        route_type,
+        RTPROT_BOOT,
+        RT_SCOPE_UNIVERSE,
+        RTN_UNICAST,
     ]);
-    let mut msg = Message::new(kind, flags, &rtmsg);
+    let mut msg = Message::new(
+        RTM_NEWROUTE,
+        NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
+        &rtmsg,
+    );
     if let Some(dst) = dst {
         msg.attr(RTA_DST, &octets(dst));
     }
@@ -256,32 +263,21 @@ fn route_message(add: bool, spec: &RouteSpec, ifindex: u32) -> Result<Vec<u8>, S
     Ok(msg.finish())
 }
 
-/// Add (replacing) or delete a route, over rtnetlink.
-pub fn route(add: bool, route_spec: &RouteSpec) -> Result<(), String> {
+/// Replace the default route of the main table, over rtnetlink, once
+/// [`admit_route`] holds.
+pub fn replace_default_route(route_spec: &RouteSpec) -> Result<(), String> {
     name_to_cbuf(&route_spec.iface)?; // reject a malformed interface name early
-    if !valid_route_dst(&route_spec.dst_cidr) {
-        return Err(format!(
-            "invalid route destination '{}'",
-            route_spec.dst_cidr
-        ));
-    }
+    admit_route(route_spec)?;
     let ifindex = resolve_ifindex(&route_spec.iface)?;
-    let request = route_message(add, route_spec, ifindex)?;
+    let request = route_message(route_spec, ifindex)?;
     let sock = netlink::Socket::open(libc::NETLINK_ROUTE)
         .map_err(|e| format!("open the route netlink socket: {e}"))?;
-    match sock.exchange(&request) {
-        Ok(_) => Ok(()),
-        // Already gone: what a delete asks for holds.
-        Err(e) if !add && e.raw_os_error() == Some(libc::ESRCH) => Ok(()),
-        Err(e) => Err(format!(
-            "{} route {} via {} dev {} table {}: {e}",
-            if add { "replace" } else { "delete" },
-            route_spec.dst_cidr,
-            route_spec.gateway,
-            route_spec.iface,
-            route_spec.table
-        )),
-    }
+    sock.exchange(&request).map(|_| ()).map_err(|e| {
+        format!(
+            "replace route {} via {} dev {} table {}: {e}",
+            route_spec.dst_cidr, route_spec.gateway, route_spec.iface, route_spec.table
+        )
+    })
 }
 
 // ── gratuitous ARP ────────────────────────────────────────────────────────
@@ -437,8 +433,8 @@ pub fn open_pcap_fd(iface: &str) -> Result<OwnedFd, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        RTA_DST, RTA_GATEWAY, RTA_OIF, RTA_TABLE, build_garp_frame, name_to_cbuf, netlink,
-        route_message, valid_route_dst,
+        RT_TABLE_MAIN, RTA_DST, RTA_GATEWAY, RTA_OIF, RTA_TABLE, admit_route, build_garp_frame,
+        name_to_cbuf, netlink, route_message,
     };
     use ebpfsentinel_warden_proto::RouteSpec;
 
@@ -450,7 +446,7 @@ mod tests {
             iface: "enp0s2".to_owned(),
             table: 300,
         };
-        let msg = route_message(true, &spec, 7).unwrap();
+        let msg = route_message(&spec, 7).unwrap();
         let rtmsg = &msg[netlink::NLMSG_HDRLEN..netlink::NLMSG_HDRLEN + 12];
         assert_eq!(rtmsg[0], 2); // AF_INET
         assert_eq!(rtmsg[1], 24); // prefix length
@@ -482,7 +478,7 @@ mod tests {
             iface: "enp0s2".to_owned(),
             table: 100,
         };
-        let msg = route_message(false, &spec, 7).unwrap();
+        let msg = route_message(&spec, 7).unwrap();
         assert_eq!(msg[netlink::NLMSG_HDRLEN + 1], 0);
         assert_eq!(msg[netlink::NLMSG_HDRLEN + 4], 100);
         let attrs = &msg[netlink::NLMSG_HDRLEN + 12..];
@@ -497,7 +493,7 @@ mod tests {
             iface: "enp0s2".to_owned(),
             table: 100,
         };
-        assert!(route_message(true, &spec, 7).is_err());
+        assert!(route_message(&spec, 7).is_err());
     }
 
     #[test]
@@ -513,17 +509,28 @@ mod tests {
     }
 
     #[test]
-    fn route_dst_validation() {
-        assert!(valid_route_dst("default"));
-        assert!(valid_route_dst("0.0.0.0/0"));
-        assert!(valid_route_dst("10.0.0.1"));
-        assert!(valid_route_dst("203.0.113.0/24"));
-        assert!(valid_route_dst("2001:db8::/32"));
-        assert!(!valid_route_dst("")); // empty
-        assert!(!valid_route_dst("10.0.0.0/33")); // v4 prefix out of range
-        assert!(!valid_route_dst("2001:db8::/129")); // v6 prefix out of range
-        assert!(!valid_route_dst("10.0.0.1 onlink")); // smuggled token
-        assert!(!valid_route_dst("notanip"));
+    fn only_the_main_default_route_is_programmed() {
+        let route = |dst: &str, table: u32| RouteSpec {
+            dst_cidr: dst.to_owned(),
+            gateway: "10.0.0.254".to_owned(),
+            iface: "enp0s2".to_owned(),
+            table,
+        };
+        for dst in ["default", "0.0.0.0/0", "::/0"] {
+            assert!(admit_route(&route(dst, RT_TABLE_MAIN)).is_ok(), "{dst}");
+        }
+        for dst in [
+            "10.0.0.0/8",
+            "203.0.113.0/24",
+            "10.0.0.1",
+            "",
+            "notanip",
+            "0.0.0.0/33",
+        ] {
+            assert!(admit_route(&route(dst, RT_TABLE_MAIN)).is_err(), "{dst}");
+        }
+        let other = admit_route(&route("default", 100)).expect_err("table 100");
+        assert!(other.contains("main table"), "{other}");
     }
 
     #[test]

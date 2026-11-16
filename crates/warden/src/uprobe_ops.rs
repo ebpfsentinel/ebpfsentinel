@@ -10,7 +10,9 @@
 
 use std::ffi::CString;
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, RawFd};
+
+use crate::uprobe_admission;
 
 /// `BPF_LINK_CREATE` from `enum bpf_cmd`.
 const BPF_LINK_CREATE: libc::c_int = 28;
@@ -44,6 +46,10 @@ struct UprobeMultiLinkAttr {
 /// Create a `uprobe_multi` BPF link binding `prog_fd` to `offset` within the ELF
 /// at `path` (system-wide, `pid = 0`). `is_ret` selects a uretprobe. Returns the
 /// link fd on success. The caller owns the returned fd (closing it detaches).
+///
+/// The file is opened once, held to [`uprobe_admission::admit`], and handed to
+/// the kernel as `/proc/self/fd/<n>`, so the file admitted is the file probed:
+/// a rename under `path` between the two lands on nothing.
 pub fn attach_uprobe_link(
     prog_fd: RawFd,
     path: &str,
@@ -53,7 +59,10 @@ pub fn attach_uprobe_link(
     if !path.starts_with('/') {
         return Err(format!("uprobe target path is not absolute: {path:?}"));
     }
-    let path_c = CString::new(path).map_err(|e| format!("uprobe path has NUL: {e}"))?;
+    let target = std::fs::File::open(path).map_err(|e| format!("uprobe target {path:?}: {e}"))?;
+    uprobe_admission::admit(&target, offset).map_err(|e| format!("{path:?}: {e}"))?;
+    let held = format!("/proc/self/fd/{}", target.as_raw_fd());
+    let path_c = CString::new(held).map_err(|e| format!("uprobe path has NUL: {e}"))?;
     // A single-element offsets array, `cnt = 1`. Kept alive across the syscall.
     let offsets = [offset];
 

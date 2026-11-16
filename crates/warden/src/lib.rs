@@ -67,6 +67,7 @@ pub mod rooted_read;
 pub mod served_peer;
 pub mod server;
 pub mod tcx_ops;
+pub mod uprobe_admission;
 pub mod uprobe_ops;
 pub mod userns_bootstrap;
 pub mod write_refusal;
@@ -419,12 +420,15 @@ fn mkdirs(path: &str) {
     let _ = std::fs::create_dir_all(path);
 }
 
-fn fsconfig_string(fs: RawFd, key: &str, value: &str) {
-    let k = CString::new(key).expect("every fsconfig key is a literal without NUL");
-    let v = CString::new(value).expect("every fsconfig value is a literal without NUL");
+/// Set one string option on a filesystem context; `false` when the kernel
+/// refuses it.
+fn fsconfig_string(fs: RawFd, key: &str, value: &str) -> bool {
+    let (Ok(k), Ok(v)) = (CString::new(key), CString::new(value)) else {
+        return false;
+    };
     // SAFETY: `k` and `v` are NUL-terminated and outlive the call; `fsconfig` reads them and
     // writes nothing back.
-    unsafe {
+    let rc = unsafe {
         libc::syscall(
             libc::SYS_fsconfig,
             fs,
@@ -432,19 +436,106 @@ fn fsconfig_string(fs: RawFd, key: &str, value: &str) {
             k.as_ptr(),
             v.as_ptr(),
             0,
-        );
+        )
+    };
+    if rc != 0 {
+        perror(&format!("fsconfig {key}={value}"));
+        return false;
     }
+    true
 }
 
-/// Apply `delegate_*=any` + `FSCONFIG_CMD_CREATE` to a bpffs `fs_fd` whose
-/// superblock is owned by a (descendant) user namespace. Requires `CAP_SYS_ADMIN`
-/// in `init_user_ns` - done by the all-in-one parent or the bare-metal `warden
-/// serve`. Returns `true` on success.
+/// The program types the agent loads, named as the kernel's
+/// `enum bpf_prog_type` spells them without `BPF_PROG_TYPE_`.
+///
+/// A token carries no more than these: a compromised agent gets no `tracing`,
+/// `perf_event` or `struct_ops` program out of the delegated bpffs.
+pub const DELEGATED_PROGS: &[&str] = &[
+    "xdp",
+    "sched_cls",
+    "kprobe",
+    "cgroup_skb",
+    "cgroup_sock",
+    "cgroup_sock_addr",
+    "sock_ops",
+    "raw_tracepoint",
+    "lsm",
+    "syscall",
+];
+
+/// The attach types the agent's programs load with, named as the kernel's
+/// `enum bpf_attach_type` spells them without `BPF_`.
+///
+/// The kernel checks the pair at `BPF_PROG_LOAD`, and a program loaded with
+/// no attach type carries `0`, which is `cgroup_inet_ingress`: that entry is
+/// what lets XDP, TC, raw tracepoint, `sock_ops` and syscall programs load.
+pub const DELEGATED_ATTACHS: &[&str] = &[
+    "cgroup_inet_ingress",
+    "cgroup_inet_egress",
+    "cgroup_inet_sock_release",
+    "cgroup_inet4_bind",
+    "cgroup_inet6_bind",
+    "cgroup_inet4_post_bind",
+    "cgroup_inet6_post_bind",
+    "cgroup_inet4_connect",
+    "cgroup_inet6_connect",
+    "cgroup_udp4_sendmsg",
+    "cgroup_udp6_sendmsg",
+    "cgroup_udp4_recvmsg",
+    "cgroup_udp6_recvmsg",
+    "cgroup_inet4_getpeername",
+    "cgroup_inet6_getpeername",
+    "cgroup_sock_ops",
+    "xdp",
+    "tcx_ingress",
+    "tcx_egress",
+    "trace_uprobe_multi",
+    "trace_kprobe_multi",
+    "trace_kprobe_session",
+    "lsm_mac",
+];
+
+/// The longest string `fsconfig` takes: the kernel copies the value with
+/// `strndup_user(value, 256)` and refuses a longer one with `EINVAL`.
+const FSCONFIG_VALUE_MAX: usize = 255;
+
+/// `names` joined with `:` into as few values as fit [`FSCONFIG_VALUE_MAX`].
+/// The kernel ORs a `delegate_*` option given more than once, so splitting a
+/// list delegates exactly what the whole list would.
+fn name_lists(names: &[&str]) -> impl Iterator<Item = String> {
+    let mut lists: Vec<String> = Vec::new();
+    for name in names {
+        match lists.last_mut() {
+            Some(list) if list.len() + 1 + name.len() <= FSCONFIG_VALUE_MAX => {
+                list.push(':');
+                list.push_str(name);
+            }
+            _ => lists.push((*name).to_owned()),
+        }
+    }
+    lists.into_iter()
+}
+
+/// Apply the delegation options + `FSCONFIG_CMD_CREATE` to a bpffs `fs_fd`
+/// whose superblock is owned by a (descendant) user namespace. Commands and map
+/// types are delegated whole; program and attach types only as far as
+/// [`DELEGATED_PROGS`] and [`DELEGATED_ATTACHS`] go. Requires `CAP_SYS_ADMIN` in
+/// `init_user_ns` - done by the all-in-one parent or the bare-metal `warden
+/// serve`. Returns `true` on success; an option the kernel refuses fails the
+/// whole delegation rather than leaving a token narrower than the agent needs.
 pub fn delegate_over_fd(fs: RawFd) -> bool {
-    fsconfig_string(fs, "delegate_cmds", "any");
-    fsconfig_string(fs, "delegate_maps", "any");
-    fsconfig_string(fs, "delegate_progs", "any");
-    fsconfig_string(fs, "delegate_attachs", "any");
+    let mut options = vec![
+        ("delegate_cmds", "any".to_owned()),
+        ("delegate_maps", "any".to_owned()),
+    ];
+    options.extend(name_lists(DELEGATED_PROGS).map(|v| ("delegate_progs", v)));
+    options.extend(name_lists(DELEGATED_ATTACHS).map(|v| ("delegate_attachs", v)));
+    if !options
+        .iter()
+        .all(|(key, value)| fsconfig_string(fs, key, value))
+    {
+        return false;
+    }
     // SAFETY: `FSCONFIG_CMD_CREATE` takes null key and value; no memory is passed.
     let rc = unsafe {
         libc::syscall(
@@ -776,4 +867,20 @@ pub fn install_seccomp_profile(
     }
     std::fs::File::open(dir)?.sync_all()?;
     Ok(ProfileInstall::Written)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_delegated_name_reaches_the_kernel_in_values_it_accepts() {
+        for names in [DELEGATED_PROGS, DELEGATED_ATTACHS] {
+            let lists: Vec<String> = name_lists(names).collect();
+            assert!(lists.iter().all(|l| l.len() <= FSCONFIG_VALUE_MAX));
+            let rejoined: Vec<&str> = lists.iter().flat_map(|l| l.split(':')).collect();
+            assert_eq!(rejoined, names);
+        }
+        assert!(DELEGATED_ATTACHS.join(":").len() > FSCONFIG_VALUE_MAX);
+    }
 }

@@ -26,10 +26,9 @@
 # behaviour of each feature; here the claim is narrower - the broker served
 # the privileged half.
 #
-# `RouteAdd` / `RouteDel` are deliberately absent: the proto, the client and
-# the warden implement them, but no OSS agent code issues them (multi-WAN
-# tracks gateway health and selection without programming kernel routes), so
-# there is nothing to drive end-to-end.
+# `RouteAdd` is absent: it replaces the host's default route, which multi-WAN
+# failover issues and which this suite will not do to the VM it runs on; the
+# warden's refusal of any other route is held by its own unit tests.
 #
 # Requires: root, kernel >= 6.12, local eBPF build + warden binary, python3,
 # setpriv, ncat, jq. VM-only (Vagrant agent).

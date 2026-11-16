@@ -36,6 +36,8 @@ env:
   - "${tool} not installed"
   - "${tool} not installed on agent VM"
   - "kernel conntrack table unreadable by either source - event stream not wired"
+  - "kernel conntrack table unreadable by either source - nothing to list"
+  - "kernel conntrack table unreadable by either source - nothing to flush"
   - "Agent binary not found:"
   - "kernel.apparmor_restrict_unprivileged_userns=1 on this host refuses the user namespace before seccomp is consulted"
   - "Docker agent not healthy"

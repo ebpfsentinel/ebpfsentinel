@@ -577,7 +577,8 @@ fn serve_delegate(writer: &mut UnixStream, btf: &[(String, RawFd)], pcap: &[RawF
         return write_frame(
             writer,
             &Response::Error {
-                message: "bpffs delegation (FSCONFIG_CMD_CREATE) failed".into(),
+                message: "bpffs delegation refused by the kernel; the warden log names the option"
+                    .into(),
             },
         )
         .is_ok();
@@ -717,7 +718,6 @@ fn dispatch(cmd: &Command, host: &dyn HostOps, proc_root: &Path) -> Response {
         }
         Command::ConntrackFlush => result_to_response(host.conntrack_flush()),
         Command::RouteAdd { route } => result_to_response(host.route_add(route)),
-        Command::RouteDel { route } => result_to_response(host.route_del(route)),
         Command::ArpAnnounce { iface, ip } => result_to_response(host.arp_announce(iface, ip)),
         Command::TcxChain { iface, egress } => match host.tcx_chain(iface, *egress) {
             Ok(prog_ids) => Response::TcxChain { prog_ids },
@@ -832,9 +832,6 @@ mod tests {
             Err("unused".into())
         }
         fn route_add(&self, _route: &RouteSpec) -> Result<(), String> {
-            Err("unused".into())
-        }
-        fn route_del(&self, _route: &RouteSpec) -> Result<(), String> {
             Err("unused".into())
         }
         fn arp_announce(&self, _iface: &str, _ip: &str) -> Result<(), String> {

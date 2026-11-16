@@ -74,15 +74,18 @@ fn host_network_ops_error_cleanly_and_keep_the_stream_in_sync() {
         "pcap open on a missing interface must error"
     );
 
-    // Route deletion against a bogus spec returns a typed result (either `ip`
-    // fails or is absent) - never a desync. We only require it to round-trip.
+    // A route the warden does not program is refused with a typed error, never
+    // a desync: only the main table's default route is accepted.
     let route = RouteSpec {
         dst_cidr: "203.0.113.0/24".to_owned(),
         gateway: "192.0.2.254".to_owned(),
         iface: NO_SUCH_IFACE.to_owned(),
         table: 200,
     };
-    let _ = client.route_del(route);
+    assert!(
+        client.route_add(route).is_err(),
+        "a narrower route in another table must be refused"
+    );
 
     // Conntrack flush likewise round-trips (Ok when privileged + tooled, Err
     // otherwise); we only require the stream to survive it.

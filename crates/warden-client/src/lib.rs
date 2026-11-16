@@ -71,7 +71,6 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::ConntrackFlush => "ConntrackFlush",
         Command::ConntrackRestore { .. } => "ConntrackRestore",
         Command::RouteAdd { .. } => "RouteAdd",
-        Command::RouteDel { .. } => "RouteDel",
         Command::ArpAnnounce { .. } => "ArpAnnounce",
         Command::PcapOpen { .. } => "PcapOpen",
         Command::AttachUprobe { .. } => "AttachUprobe",
@@ -529,14 +528,9 @@ impl WardenClient {
         self.expect_ok(&Command::ConntrackRestore { restore }, "ConntrackRestore")
     }
 
-    /// Add (idempotent `replace`) a route - multi-WAN gateway programming.
+    /// Replace the main table's default route - multi-WAN gateway failover.
     pub fn route_add(&mut self, route: RouteSpec) -> io::Result<()> {
         self.expect_ok(&Command::RouteAdd { route }, "RouteAdd")
-    }
-
-    /// Delete a route.
-    pub fn route_del(&mut self, route: RouteSpec) -> io::Result<()> {
-        self.expect_ok(&Command::RouteDel { route }, "RouteDel")
     }
 
     /// Broadcast a gratuitous ARP for `ip` on `iface` (VIP takeover).
@@ -960,14 +954,9 @@ impl ReconnectingClient {
         self.with_retry(|c| c.conntrack_restore(restore.clone()))
     }
 
-    /// Add (idempotent `replace`) a route.
+    /// Replace the main table's default route.
     pub fn route_add(&mut self, route: &RouteSpec) -> io::Result<()> {
         self.with_retry(|c| c.route_add(route.clone()))
-    }
-
-    /// Delete a route.
-    pub fn route_del(&mut self, route: &RouteSpec) -> io::Result<()> {
-        self.with_retry(|c| c.route_del(route.clone()))
     }
 
     /// Broadcast a gratuitous ARP for `ip` on `iface`.

@@ -23,7 +23,7 @@ use std::io::{self, Read, Write};
 /// Protocol version negotiated by the [`Command::Hello`] handshake. Bump on any
 /// wire-breaking change so a mismatched agent/warden image pair refuses to talk
 /// rather than misinterpreting each other's frames.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Largest frame payload accepted from a peer. A conntrack dump is the largest
 /// legitimate message and stays far below this; the bound just stops a hostile or
@@ -730,14 +730,10 @@ pub enum Command {
     },
     /// Flush the whole conntrack table.
     ConntrackFlush,
-    /// Add a route (multi-WAN gateway selection / failover).
+    /// Replace the main table's default route (multi-WAN gateway failover).
+    /// Any other destination or table is refused by the warden.
     RouteAdd {
-        /// The route to add.
-        route: RouteSpec,
-    },
-    /// Delete a route.
-    RouteDel {
-        /// The route to delete.
+        /// The route to install.
         route: RouteSpec,
     },
     /// Emit a gratuitous ARP for `ip` on `iface` (VIP takeover).
@@ -1383,10 +1379,7 @@ mod tests {
                     reply: Some(tuple.clone()),
                 },
             },
-            Command::RouteAdd {
-                route: route.clone(),
-            },
-            Command::RouteDel { route },
+            Command::RouteAdd { route },
             Command::ArpAnnounce {
                 iface: "enp0s2".into(),
                 ip: "10.0.0.9".into(),
@@ -1798,12 +1791,18 @@ mod tests {
     }
 
     /// A variant appended at the end keeps every earlier tag where it was, so
-    /// a warden from before it still decodes everything it already served.
+    /// a warden from before it still decodes everything it already served. A
+    /// variant removed moves the tags after it, which is what bumping
+    /// [`PROTOCOL_VERSION`] is for: the two sides then part at `Hello`, whose
+    /// tag never moves, instead of misreading each other.
     #[test]
     fn appended_variants_keep_the_earlier_tags() {
         let mut buf = Vec::new();
+        write_frame(&mut buf, &Command::Hello { version: 0 }).unwrap();
+        assert_eq!(buf[4], 0);
+        buf.clear();
         write_frame(&mut buf, &Command::DlpScan).unwrap();
-        assert_eq!(buf[4], 11);
+        assert_eq!(buf[4], 10);
         buf.clear();
         write_frame(
             &mut buf,
