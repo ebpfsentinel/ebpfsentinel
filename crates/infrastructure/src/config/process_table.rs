@@ -25,6 +25,7 @@ const MIN_CAPACITY: usize = 256;
 const MAX_CAPACITY: usize = 262_144;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessTableConfig {
     /// Attach the exec and exit tracepoints and keep the table. On by
     /// default: an alert naming a pid and no program is half an answer.
@@ -94,6 +95,7 @@ fn default_servers() -> Vec<String> {
 /// an ordinary node and each is worth an operator's look, while killing a
 /// process on a list somebody else wrote is the operator's decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessDetectionConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -143,6 +145,7 @@ impl Default for ProcessDetectionConfig {
 
 /// One switch per detection, each on by default.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessDetectionKinds {
     /// A shell or interpreter talking to the network, through its own
     /// standard streams or from under a server.

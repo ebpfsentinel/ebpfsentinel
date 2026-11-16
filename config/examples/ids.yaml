@@ -48,11 +48,8 @@ ids:
   # mode:
   #   "none"   - process every event (default)
   #   "random" - randomly sample events at the given rate
-  #              When kernel_sampling is true, uses bpf_get_prandom_u32 in the
-  #              eBPF program itself - sampled-out packets never reach userspace.
   #   "hash"   - deterministic hash-based sampling (consistent per-flow)
   # rate: 0.0 - 1.0 (required for random/hash modes)
-  # kernel_sampling: true/false - push sampling into eBPF (default: true for random)
   # mode:
   #   "none"          - process every event (default)
   #   "random"        - randomly sample events at the given rate
@@ -61,7 +58,6 @@ ids:
   sampling:
     mode: country_based
     rate: 0.5              # Fallback rate for random/hash modes
-    kernel_sampling: true  # bpf_get_prandom_u32 - zero userspace overhead
     high_risk_countries: [RU, CN, KP, IR]  # Full inspection (100%) for these countries
     high_risk_rate: 1.0    # Sample rate for high-risk countries (1.0 = all events)
     default_rate: 0.1      # Sample rate for all other countries (10%)

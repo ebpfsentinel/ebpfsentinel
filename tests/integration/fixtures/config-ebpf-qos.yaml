@@ -46,7 +46,6 @@ qos:
       delay: 0
       loss: 0.0
       burst: "64kb"
-      priority: 1
       # The load generator sits in the test namespace, so its bulk transfer
       # reaches the inspected interface on ingress. An egress-only pipe would
       # let that traffic through unshaped and the throughput assertions would

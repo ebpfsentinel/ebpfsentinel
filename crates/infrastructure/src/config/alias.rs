@@ -20,6 +20,7 @@ pub(super) const MAX_ALIASES: usize = 1000;
 ///   values: ["192.168.0.0/16", "10.0.0.0/8"]
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AliasConfig {
     #[serde(rename = "type")]
     pub alias_type: String,

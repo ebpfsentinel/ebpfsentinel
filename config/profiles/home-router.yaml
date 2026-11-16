@@ -30,7 +30,7 @@ zones:
     - id: lan
       interfaces: [eth1]
       default_policy: allow
-  zone_pairs:
+  policies:
     # Out of the house, yes. Into it, only as the answer to something that
     # left - which is the established rule in the firewall below.
     - from: lan
@@ -57,7 +57,7 @@ firewall:
     - id: allow-lan-out
       priority: 10
       action: allow
-      src_cidr: "192.168.1.0/24"
+      src_ip: "192.168.1.0/24"
       state: [new]
       scope:
         interface: eth1

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::common::{ConfigError, default_mode, default_true, parse_domain_mode};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThreatIntelConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -44,6 +45,7 @@ pub struct ThreatIntelConfig {
 /// each banned address as an indicator, the way any other feed is loaded.
 /// Writing is the machine half, off unless `report.enabled` is set too.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CrowdsecConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -76,6 +78,7 @@ pub struct CrowdsecConfig {
 
 /// Writing the agent's blocks back to the local API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CrowdsecReportConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -310,6 +313,7 @@ impl Default for ThreatIntelConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThreatIntelFeedConfig {
     pub id: String,
     pub name: String,

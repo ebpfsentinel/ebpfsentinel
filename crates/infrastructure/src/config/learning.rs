@@ -27,6 +27,7 @@ fn default_max_edges() -> usize {
 /// Learning mode: what this node reached, for the window an operator asked
 /// for, written down as a policy they can read before it is one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LearningConfig {
     /// Allow a window to be opened on this node.
     ///

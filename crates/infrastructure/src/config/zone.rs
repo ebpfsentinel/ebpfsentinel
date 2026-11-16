@@ -9,6 +9,7 @@ pub(super) use domain::zone::entity::MAX_ZONES;
 
 /// Top-level zone section config.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ZoneSectionConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -100,6 +101,7 @@ impl ZoneSectionConfig {
 
 /// YAML representation of a security zone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ZoneEntryConfig {
     pub id: String,
     pub interfaces: Vec<String>,
@@ -156,6 +158,7 @@ impl ZoneEntryConfig {
 
 /// YAML representation of a zone pair policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ZonePairConfig {
     pub from: String,
     pub to: String,

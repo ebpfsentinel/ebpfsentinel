@@ -12,6 +12,7 @@ const MAX_BLOCKLIST_DOMAINS: usize = 50_000;
 const MAX_BLOCKLIST_FEEDS: usize = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DnsConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -41,6 +42,7 @@ const MAX_ALLOWLIST_UPSTREAMS: usize = 8;
 /// The agent's own resolver and the names each container may resolve
 /// through it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DnsAllowListConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -60,6 +62,7 @@ pub struct DnsAllowListConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DnsAllowListContainerConfig {
     /// Container name, or full id.
     pub container: String,
@@ -145,6 +148,7 @@ impl Default for DnsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReputationSectionConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -315,6 +319,7 @@ impl DnsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DnsBlocklistSectionConfig {
     #[serde(default)]
     pub domains: Vec<String>,
@@ -404,6 +409,7 @@ impl DnsBlocklistSectionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DnsBlocklistFeedConfig {
     pub name: String,
     pub url: String,
@@ -473,6 +479,7 @@ fn default_feed_refresh_interval() -> u64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DnsCacheConfig {
     #[serde(default = "default_dns_max_entries")]
     pub max_entries: usize,

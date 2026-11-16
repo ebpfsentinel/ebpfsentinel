@@ -13,6 +13,7 @@ use super::common::{
 use super::ids::{SamplingConfig, ThresholdRuleConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IpsConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -88,6 +89,7 @@ impl IpsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IpsRuleConfig {
     pub id: String,
 

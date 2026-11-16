@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthConfig {
     /// Whether the control API establishes a principal before it answers.
     ///
@@ -48,6 +49,7 @@ pub struct AuthConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApiKeyConfig {
     /// Human-readable name for the key (e.g. "admin-key", "monitoring").
     pub name: String,
@@ -95,6 +97,7 @@ fn default_api_key_role() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OidcConfig {
     /// URL to fetch the JWKS key set from (e.g. K8s OIDC discovery endpoint).
     pub jwks_url: String,
@@ -126,6 +129,7 @@ pub enum JwtAlgorithm {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JwtConfig {
     /// Signing algorithm. `RS256` keeps the existing static-PEM path;
     /// `EdDSA` enables the dashboard's rotating-key JWKS path.

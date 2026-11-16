@@ -34,6 +34,7 @@ const MIN_MAX_SOCKETS: u32 = 1_024;
 const MAX_MAX_SOCKETS: u32 = 1_048_576;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AttributionConfig {
     /// Attach the socket hooks. On by default: the whole point of the agent
     /// is to say what is happening on the node, and an alert naming only an

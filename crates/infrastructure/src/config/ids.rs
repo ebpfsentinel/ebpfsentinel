@@ -23,6 +23,7 @@ const MAX_COUNTRY_CODES: usize = 250;
 
 /// Event sampling configuration for IDS/IPS.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SamplingConfig {
     /// Sampling mode: "none", "random", "hash", "`country_based`".
     #[serde(default = "default_sampling_mode")]
@@ -121,6 +122,7 @@ impl SamplingConfig {
 
 /// Per-rule threshold/rate detection configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThresholdRuleConfig {
     /// Threshold type: "limit", "threshold", "both".
     #[serde(rename = "type")]
@@ -222,6 +224,7 @@ impl ThresholdRuleConfig {
 // ── IDS config ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IdsConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -403,6 +406,7 @@ fn read_ruleset(idx: usize, path: &Path) -> Result<String, ConfigError> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IdsRuleConfig {
     pub id: String,
 

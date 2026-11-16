@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::common::{ConfigError, default_true, parse_severity};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AlertingConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -70,6 +71,7 @@ impl OtlpProtocol {
 
 /// OTLP export configuration for alert delivery via OpenTelemetry Protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OtlpExportConfig {
     /// OTLP collector endpoint (e.g. `http://otel-collector:4317`).
     pub endpoint: String,
@@ -177,6 +179,7 @@ fn default_otlp_timeout_ms() -> u64 {
 
 /// SMTP server configuration for email alert delivery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SmtpConfig {
     pub host: String,
     #[serde(default = "default_smtp_port")]
@@ -230,6 +233,7 @@ impl Default for AlertingConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AlertRouteConfig {
     pub name: String,
     pub destination: String,

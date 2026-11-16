@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::common::default_true;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuditConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,

@@ -10,6 +10,7 @@ use super::common::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DlpConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -52,6 +53,7 @@ impl Default for DlpConfig {
 /// outside it. An empty selector list leaves that same `mode` in charge, with
 /// the configured `cgroups` as the whole of the scope.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DlpScopeConfig {
     #[serde(default = "default_scope_mode")]
     pub mode: String,
@@ -217,6 +219,7 @@ impl DlpScopeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DlpPatternConfig {
     pub id: String,
     pub name: String,

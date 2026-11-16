@@ -32,6 +32,7 @@ fn accepted(names: &[&str]) -> String {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LoadBalancerConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -170,6 +171,7 @@ pub(super) const MAX_VIPS: usize = 256;
 /// falls silent again when that grant lapses unrenewed. The Kubernetes
 /// operator is that elector. `disabled` (default) turns the announcer off.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnnounceConfig {
     /// `disabled` (default), `primary`, `standby`, or `elected`.
     #[serde(default = "default_announce_role")]
@@ -194,6 +196,7 @@ pub struct AnnounceConfig {
 /// loads it over the control socket at `socket`. Every node keeps its
 /// sessions up; only the speaker exports a route for each VIP.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BgpAnnounceConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -232,6 +235,7 @@ impl Default for BgpAnnounceConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BgpPeerConfig {
     /// Lowercase letters, digits and underscores; the `{peer}` metric label.
     pub name: String,
@@ -332,6 +336,7 @@ impl BgpAnnounceConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VipConfig {
     /// Stable label used as the Prometheus `{vip}` dimension.
     pub name: String,
@@ -436,6 +441,7 @@ impl AnnounceConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LbServiceConfig {
     pub id: String,
     pub name: String,
@@ -471,6 +477,7 @@ pub struct LbServiceConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LbBackendConfig {
     pub id: String,
     pub addr: String,
@@ -496,6 +503,7 @@ pub struct LbBackendConfig {
 /// fails `unhealthy_threshold` probes in a row stops receiving traffic
 /// until it passes `healthy_threshold` in a row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LbHealthCheckConfig {
     /// Protocol: see [`LB_HC_PROTOCOL_NAMES`].
     #[serde(default = "default_hc_protocol")]

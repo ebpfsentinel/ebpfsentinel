@@ -9,6 +9,7 @@ use super::common::{ConfigError, default_true, parse_action, parse_cidr};
 use super::firewall::PortRangeConfig;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct L7Config {
     #[serde(default)]
     pub enabled: bool,
@@ -36,6 +37,7 @@ pub struct L7Config {
 /// Port-promise checking: the first payload of each connection on a listed
 /// port is compared with the protocols that port promises.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PortMismatchConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -89,6 +91,7 @@ impl PortMismatchConfig {
 
 /// JA4 fingerprint cache persistence configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FingerprintsConfig {
     /// Optional filesystem path for the redb store. When set, the JA4
     /// cache mirrors its entries to this database so the agent can
@@ -99,6 +102,7 @@ pub struct FingerprintsConfig {
 
 /// Userspace L7 stream reassembly configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReassemblyConfig {
     /// Enables per-flow reassembly. When `false`, each `PacketEvent`
     /// payload is parsed independently (legacy behaviour).
@@ -194,6 +198,7 @@ fn default_reassembly_sweep_interval_secs() -> u64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct L7RuleConfig {
     pub id: String,
     pub priority: u32,

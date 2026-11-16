@@ -57,6 +57,7 @@ fn default_incus_socket() -> String {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContainerConfig {
     #[serde(default)]
     pub resolver: ResolverConfig,
@@ -78,6 +79,7 @@ pub struct ContainerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolverConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -107,6 +109,7 @@ impl Default for ResolverConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DockerEnricherConfig {
     /// Enables the Docker Engine API enricher. Disabled by default because
     /// it requires mounting `/var/run/docker.sock` into the agent.
@@ -148,6 +151,7 @@ impl Default for DockerEnricherConfig {
 
 /// Podman containers, named through the socket of whoever started them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PodmanEnricherConfig {
     /// Off by default, like Docker: it needs the runtime's socket mounted
     /// into the agent.
@@ -196,6 +200,7 @@ impl Default for PodmanEnricherConfig {
 /// LXC containers - Proxmox CTs, Incus instances and plain LXC - named from
 /// their cgroup, and labelled from whichever source the node keeps.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LxcEnricherConfig {
     /// On by default: the name is in the cgroup path and costs no socket,
     /// and each source below is read only where it exists.
@@ -259,6 +264,7 @@ impl LxcEnricherConfig {
 /// or macvtap device the link watcher finds. Each source is read only where
 /// it exists, and when asked: nothing is cached, so there is nothing to size.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GuestNamingConfig {
     /// Where Proxmox keeps one `<vmid>.conf` per virtual machine, giving its
     /// name and tags. Empty to never read it.
@@ -282,6 +288,7 @@ impl Default for GuestNamingConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KubernetesEnricherConfig {
     /// Enables the Kubernetes pod metadata enricher.
     #[serde(default)]
@@ -388,6 +395,7 @@ pub enum NetworkPolicyMode {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkPolicyConfig {
     #[serde(default)]
     pub mode: NetworkPolicyMode,

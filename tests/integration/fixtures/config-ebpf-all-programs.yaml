@@ -131,7 +131,6 @@ qos:
       delay: 0
       loss: 0.0
       burst: "256kb"
-      priority: 1
       direction: both
       enabled: true
   queues:

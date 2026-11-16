@@ -50,6 +50,7 @@ fn match_cidr_family(value: &str) -> Option<bool> {
 
 /// Full NAT configuration section.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NatConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -75,6 +76,7 @@ pub struct NatConfig {
 /// The firewall applies DNAT + SNAT so return traffic routes back through
 /// tc-nat-ingress instead of being routed directly (asymmetric routing).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HairpinNatConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -207,6 +209,7 @@ impl HairpinNatConfig {
 
 /// YAML representation of a single NAT rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NatRuleConfig {
     pub id: String,
 
@@ -294,6 +297,7 @@ fn default_priority() -> u32 {
 
 /// YAML representation of an `NPTv6` (RFC 6296) prefix translation rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NptV6RuleConfig {
     pub id: String,
 

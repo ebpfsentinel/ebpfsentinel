@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::common::{ConfigError, default_true, parse_cidr};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RateLimitSectionConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -121,6 +122,7 @@ impl RateLimitSectionConfig {
 
 /// YAML configuration for a country-tier rate limit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CountryTierConfigYaml {
     /// Tier ID (1-15).
     pub tier_id: u8,
@@ -219,6 +221,7 @@ impl CountryTierConfigYaml {
 /// `country_tiers`, which resolves country codes to CIDRs and matches them
 /// with an LPM trie.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RateLimitRuleConfig {
     pub id: String,
 

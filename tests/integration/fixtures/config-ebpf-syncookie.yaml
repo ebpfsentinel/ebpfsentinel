@@ -42,8 +42,6 @@ ratelimit:
       src_ip: "__NS_IP__"
       algorithm: token_bucket
       action: pass
-      protocol: tcp
-      dst_port: 11443
       enabled: true
 
 threatintel:

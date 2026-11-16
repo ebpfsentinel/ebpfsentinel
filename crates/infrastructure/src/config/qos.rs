@@ -43,6 +43,7 @@ fn default_horizon_ms() -> u32 {
 // ── Section config ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QosSectionConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -106,6 +107,7 @@ impl QosCgroupShapingConfig {
 // ── Pipe config ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QosPipeConfig {
     pub id: String,
 
@@ -147,6 +149,7 @@ pub struct QosPipeConfig {
 // ── Queue config ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QosQueueConfig {
     pub id: String,
 
@@ -166,6 +169,7 @@ pub struct QosQueueConfig {
 // ── Classifier config ───────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QosClassifierConfig {
     pub id: String,
 
@@ -196,6 +200,7 @@ pub struct QosClassifierConfig {
 // ── Match config ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct QosMatchConfig {
     /// Source host, as a bare address or a `/32`. Shorter prefixes and IPv6
     /// are refused: the classifier map matches one exact address.
@@ -856,7 +861,6 @@ bandwidth: 100mbps
 delay: 10
 loss: 0.5
 burst: 64kb
-priority: 0
 direction: egress
 ",
         )
@@ -1136,7 +1140,6 @@ bandwidth: 1gbps
 delay: 20
 loss: 1.5
 burst: 1mb
-priority: 5
 direction: both
 ",
         )

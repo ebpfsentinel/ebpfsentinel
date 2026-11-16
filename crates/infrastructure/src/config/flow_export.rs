@@ -134,6 +134,7 @@ impl FlowTransport {
 
 /// One collector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowTargetConfig {
     /// `host:port`. A name is resolved at connection time rather than at
     /// startup, so a collector that moves does not need the agent restarted.
@@ -211,6 +212,7 @@ pub(super) fn validate_address(address: &str, field: &str) -> Result<(), ConfigE
 
 /// IPFIX, over UDP or TCP.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IpfixSinkConfig {
     /// Off by default, like every sink.
     #[serde(default)]
@@ -299,6 +301,7 @@ impl IpfixSinkConfig {
 /// the header are the same decisions, and an operator who configured one has
 /// nothing new to learn for the other.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SyslogSinkConfig {
     /// Off by default, like every sink.
     #[serde(default)]
@@ -393,6 +396,7 @@ impl SyslogSinkConfig {
 /// is no longer the file at that path, so `create` and `copytruncate` both
 /// work and no record is written into a rotated-away handle.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JsonLinesSinkConfig {
     /// Off by default, like every sink.
     #[serde(default)]
@@ -439,6 +443,7 @@ impl JsonLinesSinkConfig {
 /// turning that switch on without an `alerting.otlp` block to read is
 /// refused rather than quietly inert.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OtlpFlowSinkConfig {
     /// Send flow records to the collector the alerting section already
     /// names. Off by default.
@@ -448,6 +453,7 @@ pub struct OtlpFlowSinkConfig {
 
 /// The whole section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowExportConfig {
     /// Build flow records at all. Off by default.
     #[serde(default)]

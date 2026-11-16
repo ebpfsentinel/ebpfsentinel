@@ -25,6 +25,7 @@ use super::common::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FirewallConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -338,6 +339,7 @@ impl Default for FirewallConfig {
 // ── Anti-lockout config ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AntiLockoutConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -368,6 +370,7 @@ impl Default for AntiLockoutConfig {
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScrubConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -407,11 +410,13 @@ pub struct ScrubConfig {
 // ── Schedule config ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScheduleConfig {
     pub entries: Vec<ScheduleEntryConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScheduleEntryConfig {
     pub days: Vec<String>,
     pub time: String,
@@ -428,6 +433,7 @@ pub enum DefaultPolicy {
 // ── Firewall rule config (YAML-friendly) ───────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FirewallRuleConfig {
     pub id: String,
 
@@ -1058,6 +1064,7 @@ pub enum ScopeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeMap {
     pub interface: Option<String>,
     pub namespace: Option<String>,

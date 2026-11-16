@@ -49,6 +49,7 @@ fn default_db_dir() -> String {
 
 /// Top-level `GeoIP` configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GeoIpConfig {
     #[serde(default)]
     pub enabled: bool,

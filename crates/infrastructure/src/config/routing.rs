@@ -7,6 +7,7 @@ use super::common::ConfigError;
 
 /// Top-level routing configuration section.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoutingConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -110,6 +111,7 @@ impl RoutingConfig {
 
 /// Configuration for a single multi-WAN gateway.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GatewayConfig {
     /// Unique gateway ID (0-255).
     pub id: u8,
@@ -132,6 +134,7 @@ pub struct GatewayConfig {
 
 /// Health-check probe configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HealthCheckConfig {
     /// Target address to probe (e.g. `"8.8.8.8"`).
     pub target: String,

@@ -6,6 +6,7 @@ use super::common::ConfigError;
 
 /// TCP connection tracking settings (eBPF-side).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConnTrackSectionConfig {
     #[serde(default)]
     pub enabled: bool,

@@ -351,6 +351,7 @@ const GROUP_FLAG_INVERT: u32 = 0x8000_0000;
 
 /// Interface group configuration for multi-interface rule scoping.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InterfaceGroupConfig {
     /// List of interface names in this group.
     pub interfaces: Vec<String>,
@@ -1969,6 +1970,7 @@ pub(super) fn is_tcp_or_any(protocol: &str) -> bool {
 /// alert fires. OSS is limited to 1 policy. Enterprise adds ring buffer
 /// captures, multi-capture, flow timeline, and forensics API.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AutoCaptureConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -2019,6 +2021,7 @@ pub const MAX_AUTO_CAPTURE_DURATION: u64 = 60;
 /// severity-based policies. Limited to 3 policies. Enterprise adds
 /// MITRE tactic matching, SOAR webhooks, cooldowns, and audit trail.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AutoResponseConfig {
     /// Enable auto-response. Default: false.
     #[serde(default)]
@@ -2032,6 +2035,7 @@ pub struct AutoResponseConfig {
 
 /// A single auto-response policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AutoResponsePolicyConfig {
     /// Policy name (for logging).
     pub name: String,
@@ -2139,6 +2143,7 @@ impl From<RiskAcceptance> for bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentInfo {
     /// The node's uplinks under the `node` profile; empty under `pod`, which
     /// attaches inside each selected pod instead.
@@ -2361,6 +2366,7 @@ impl ApiRateLimitConfig {
 /// BPF token delegation configuration. eBPF loading is token-only, so
 /// the sole knob is where the delegated bpffs lives.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BpfTokenConfig {
     /// Filesystem path of the delegated bpffs mount. Used as the
     /// `bpffs_fd` argument of `BPF_TOKEN_CREATE`. Typically
@@ -2383,6 +2389,7 @@ fn default_bpf_token_path() -> String {
 
 /// TLS configuration for HTTP and gRPC servers (NFR9).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TlsConfig {
     /// Enable TLS on HTTP and gRPC listeners.
     #[serde(default)]
