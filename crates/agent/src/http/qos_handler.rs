@@ -1,19 +1,16 @@
 use std::sync::Arc;
 
 use application::qos_cgroup_shaping_service::CgroupShapingReport;
-use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use domain::auth::entity::JwtClaims;
 use domain::qos::entity::{QosClassifier, QosDirection, QosMatchRule, QosPipe, QosQueue};
 use infrastructure::config::group_mask_words;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
-use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 use super::validation::{MAX_ID_LENGTH, validate_string_length};
 
@@ -426,12 +423,8 @@ pub async fn list_qos_pipes(
 )]
 pub async fn create_qos_pipe(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<CreateQosPipeRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     validate_string_length("id", &req.id, MAX_ID_LENGTH)?;
 
     let direction = match req.direction.to_lowercase().as_str() {
@@ -499,12 +492,8 @@ pub async fn create_qos_pipe(
 )]
 pub async fn delete_qos_pipe(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let svc = state.qos_service()?;
     let mut svc = svc.write().await;
     svc.remove_pipe(&id)?;
@@ -559,12 +548,8 @@ pub async fn list_qos_queues(
 )]
 pub async fn create_qos_queue(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<CreateQosQueueRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     validate_string_length("id", &req.id, MAX_ID_LENGTH)?;
     validate_string_length("pipe_id", &req.pipe_id, MAX_ID_LENGTH)?;
 
@@ -606,12 +591,8 @@ pub async fn create_qos_queue(
 )]
 pub async fn delete_qos_queue(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let svc = state.qos_service()?;
     let mut svc = svc.write().await;
     svc.remove_queue(&id)?;
@@ -673,12 +654,8 @@ pub async fn list_qos_classifiers(
 )]
 pub async fn create_qos_classifier(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<CreateQosClassifierRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     validate_string_length("id", &req.id, MAX_ID_LENGTH)?;
     validate_string_length("queue_id", &req.queue_id, MAX_ID_LENGTH)?;
 
@@ -736,12 +713,8 @@ pub async fn create_qos_classifier(
 )]
 pub async fn delete_qos_classifier(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let svc = state.qos_service()?;
     let mut svc = svc.write().await;
     svc.remove_classifier(&id)?;

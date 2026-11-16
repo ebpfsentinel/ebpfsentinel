@@ -1,16 +1,13 @@
 use std::sync::Arc;
 
-use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
-use domain::auth::entity::JwtClaims;
 use ports::secondary::domain_reputation_port::DomainReputationPort;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use super::error::{ApiError, ErrorBody};
-use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 use super::validation::{MAX_PATTERN_LENGTH, validate_string_length};
 
@@ -172,12 +169,8 @@ pub async fn list_domain_reputations(
 )]
 pub async fn add_to_blocklist(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Json(body): Json<BlocklistAddRequest>,
 ) -> Result<Json<BlocklistAddResponse>, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     validate_string_length("domain", &body.domain, MAX_PATTERN_LENGTH)?;
 
     let blocklist = state
@@ -219,12 +212,8 @@ pub async fn add_to_blocklist(
 )]
 pub async fn remove_from_blocklist(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Path(domain): Path<String>,
 ) -> Result<Json<BlocklistRemoveResponse>, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let blocklist = state
         .dns_blocklist_service
         .as_ref()

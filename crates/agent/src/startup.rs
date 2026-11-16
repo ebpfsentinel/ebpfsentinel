@@ -1140,7 +1140,6 @@ pub async fn run(
     let crate::auth_bootstrap::AuthStack {
         handle: auth_handle,
         provider: auth_provider,
-        revocation: revocation_handle,
     } = crate::auth_bootstrap::build_auth_stack(&config.auth).await?;
 
     // Shared config, reload trigger, and eBPF program status for ops endpoints
@@ -1193,11 +1192,7 @@ pub async fn run(
         app_state = app_state.with_alert_triage(triage);
     }
     if let Some(provider) = auth_provider {
-        app_state = app_state.with_auth_provider(
-            provider,
-            revocation_handle,
-            config.auth.metrics_auth_required,
-        );
+        app_state = app_state.with_auth_provider(provider, config.auth.metrics_auth_required);
     }
 
     // Wire capture engine for manual packet capture. The ceiling is the

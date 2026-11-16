@@ -1,3 +1,6 @@
+use axum::extract::{MatchedPath, Request};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use domain::auth::entity::JwtClaims;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
@@ -7,15 +10,142 @@ use domain::firewall::entity::{FirewallRule, IpNetwork, Scope};
 
 use crate::http::error::ApiError;
 
-/// Require at least Operator role (rejects Viewer with 403).
-pub fn require_write_access(claims: &JwtClaims) -> Result<(), ApiError> {
-    if claims.role() == Role::Viewer {
-        return Err(ApiError::Forbidden {
+/// The least a caller must be to perform a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteRole {
+    /// Any role but `viewer`. The handler may narrow it further, the way a
+    /// firewall rule is held to the caller's namespaces.
+    Operator,
+    /// `admin` only: the write changes the whole node.
+    Admin,
+}
+
+/// The role every write route needs, by method and mounted path.
+///
+/// This table is the one place the decision is made: the router asserts that
+/// every route it mounts outside `GET` has exactly one row here and that every
+/// row is mounted, and the documentation's role column is read off it. A
+/// write that changes no namespaced object and acts on the whole node (its
+/// datapath, its configuration, its addresses or its traffic) is `admin`;
+/// what an operator keeps is namespaced firewall rules, alert triage and the
+/// writes that observe or enrich without changing what the node enforces
+/// beyond its own policy lists.
+pub const WRITE_ROLES: &[(&str, &str, WriteRole)] = &[
+    ("POST", "/api/v1/firewall/rules", WriteRole::Operator),
+    ("DELETE", "/api/v1/firewall/rules/{id}", WriteRole::Operator),
+    ("POST", "/api/v1/firewall/l7-rules", WriteRole::Operator),
+    (
+        "DELETE",
+        "/api/v1/firewall/l7-rules/{id}",
+        WriteRole::Operator,
+    ),
+    ("POST", "/api/v1/learning/sessions", WriteRole::Operator),
+    (
+        "POST",
+        "/api/v1/learning/sessions/{id}/stop",
+        WriteRole::Operator,
+    ),
+    ("POST", "/api/v1/netpol/replay", WriteRole::Operator),
+    ("POST", "/api/v1/trace", WriteRole::Operator),
+    ("PATCH", "/api/v1/ips/rules/{id}", WriteRole::Operator),
+    (
+        "POST",
+        "/api/v1/alerts/{id}/false-positive",
+        WriteRole::Operator,
+    ),
+    ("PATCH", "/api/v1/alerts/{id}/triage", WriteRole::Operator),
+    ("POST", "/api/v1/alerts/triage", WriteRole::Operator),
+    (
+        "POST",
+        "/api/v1/threatintel/feeds/refresh",
+        WriteRole::Operator,
+    ),
+    ("PUT", "/api/v1/aliases/{id}/content", WriteRole::Operator),
+    ("DELETE", "/api/v1/dns/cache", WriteRole::Operator),
+    ("POST", "/api/v1/domains/blocklist", WriteRole::Operator),
+    (
+        "DELETE",
+        "/api/v1/domains/blocklist/{domain}",
+        WriteRole::Operator,
+    ),
+    ("POST", "/api/v1/ips/blacklist", WriteRole::Admin),
+    ("DELETE", "/api/v1/ips/blacklist/{ip}", WriteRole::Admin),
+    ("POST", "/api/v1/ratelimit/rules", WriteRole::Admin),
+    ("DELETE", "/api/v1/ratelimit/rules/{id}", WriteRole::Admin),
+    ("POST", "/api/v1/nat/nptv6", WriteRole::Admin),
+    ("DELETE", "/api/v1/nat/nptv6/{id}", WriteRole::Admin),
+    ("POST", "/api/v1/ddos/policies", WriteRole::Admin),
+    ("DELETE", "/api/v1/ddos/policies/{id}", WriteRole::Admin),
+    ("POST", "/api/v1/config/reload", WriteRole::Admin),
+    ("PUT", "/api/v1/config/{section}", WriteRole::Admin),
+    ("POST", "/api/v1/conntrack/flush", WriteRole::Admin),
+    ("POST", "/api/v1/routing/gateways", WriteRole::Admin),
+    ("DELETE", "/api/v1/routing/gateways/{id}", WriteRole::Admin),
+    ("POST", "/api/v1/zones", WriteRole::Admin),
+    ("DELETE", "/api/v1/zones/{id}", WriteRole::Admin),
+    ("POST", "/api/v1/zones/policies", WriteRole::Admin),
+    ("DELETE", "/api/v1/zones/policies/{id}", WriteRole::Admin),
+    ("POST", "/api/v1/lb/services", WriteRole::Admin),
+    ("DELETE", "/api/v1/lb/services/{id}", WriteRole::Admin),
+    ("POST", "/api/v1/lb/vips", WriteRole::Admin),
+    ("POST", "/api/v1/lb/vips/grant", WriteRole::Admin),
+    ("POST", "/api/v1/qos/pipes", WriteRole::Admin),
+    ("DELETE", "/api/v1/qos/pipes/{id}", WriteRole::Admin),
+    ("POST", "/api/v1/qos/queues", WriteRole::Admin),
+    ("DELETE", "/api/v1/qos/queues/{id}", WriteRole::Admin),
+    ("POST", "/api/v1/qos/classifiers", WriteRole::Admin),
+    ("DELETE", "/api/v1/qos/classifiers/{id}", WriteRole::Admin),
+    ("POST", "/api/v1/responses/manual", WriteRole::Admin),
+    ("DELETE", "/api/v1/responses/{id}", WriteRole::Admin),
+    ("POST", "/api/v1/captures/manual", WriteRole::Admin),
+    ("DELETE", "/api/v1/captures/{id}", WriteRole::Admin),
+];
+
+/// The role a write needs. A write missing from [`WRITE_ROLES`] needs
+/// `admin`, so a route mounted without a row fails closed.
+#[must_use]
+pub fn write_role(method: &str, path: &str) -> WriteRole {
+    WRITE_ROLES
+        .iter()
+        .find(|(m, p, _)| *m == method && *p == path)
+        .map_or(WriteRole::Admin, |(_, _, role)| *role)
+}
+
+/// Refuse a caller whose role is below what the write needs.
+pub fn require_write_role(claims: &JwtClaims, needed: WriteRole) -> Result<(), ApiError> {
+    match (claims.role(), needed) {
+        (Role::Viewer, _) => Err(ApiError::Forbidden {
             code: "INSUFFICIENT_ROLE",
             message: "viewer role cannot perform write operations".to_string(),
-        });
+        }),
+        (Role::Operator, WriteRole::Admin) => Err(ApiError::Forbidden {
+            code: "INSUFFICIENT_ROLE",
+            message: "this write changes the whole node and requires the admin role".to_string(),
+        }),
+        _ => Ok(()),
     }
-    Ok(())
+}
+
+/// Hold every write to the role [`WRITE_ROLES`] gives its route.
+///
+/// Reads the verified claims the authentication layer put on the request;
+/// with authentication off there are none and nothing is refused here, which
+/// is what turning authentication off means.
+pub async fn enforce_write_roles(request: Request, next: Next) -> Response {
+    if !request.method().is_safe()
+        && let Some(claims) = request.extensions().get::<JwtClaims>()
+    {
+        let path = request
+            .extensions()
+            .get::<MatchedPath>()
+            .map_or_else(|| request.uri().path(), MatchedPath::as_str);
+        if let Err(refusal) =
+            require_write_role(claims, write_role(request.method().as_str(), path))
+        {
+            return refusal.into_response();
+        }
+    }
+    next.run(request).await
 }
 
 /// Require Admin role OR Operator with matching namespace.
@@ -115,24 +245,51 @@ mod tests {
         }
     }
 
-    // ── require_write_access ─────────────────────────────────────────
+    // ── require_write_role ───────────────────────────────────────────
 
     #[test]
     fn admin_can_write() {
         let claims = make_claims(Some("admin"), None);
-        assert!(require_write_access(&claims).is_ok());
+        assert!(require_write_role(&claims, WriteRole::Operator).is_ok());
+        assert!(require_write_role(&claims, WriteRole::Admin).is_ok());
     }
 
     #[test]
-    fn operator_can_write() {
+    fn operator_can_write_what_an_operator_may() {
         let claims = make_claims(Some("operator"), None);
-        assert!(require_write_access(&claims).is_ok());
+        assert!(require_write_role(&claims, WriteRole::Operator).is_ok());
+    }
+
+    #[test]
+    fn operator_cannot_write_the_whole_node() {
+        let claims = make_claims(Some("operator"), Some(vec!["prod"]));
+        let err = require_write_role(&claims, WriteRole::Admin).unwrap_err();
+        assert!(matches!(
+            err,
+            ApiError::Forbidden {
+                code: "INSUFFICIENT_ROLE",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_write_with_no_row_needs_admin() {
+        assert_eq!(write_role("POST", "/api/v1/nowhere"), WriteRole::Admin);
+        assert_eq!(
+            write_role("PUT", "/api/v1/config/{section}"),
+            WriteRole::Admin
+        );
+        assert_eq!(
+            write_role("PATCH", "/api/v1/alerts/{id}/triage"),
+            WriteRole::Operator
+        );
     }
 
     #[test]
     fn viewer_cannot_write() {
         let claims = make_claims(Some("viewer"), None);
-        let err = require_write_access(&claims).unwrap_err();
+        let err = require_write_role(&claims, WriteRole::Operator).unwrap_err();
         assert!(matches!(
             err,
             ApiError::Forbidden {
@@ -145,7 +302,7 @@ mod tests {
     #[test]
     fn no_role_defaults_to_viewer_rejected() {
         let claims = make_claims(None, None);
-        assert!(require_write_access(&claims).is_err());
+        assert!(require_write_role(&claims, WriteRole::Operator).is_err());
     }
 
     // ── require_namespace_write: Admin ────────────────────────────────

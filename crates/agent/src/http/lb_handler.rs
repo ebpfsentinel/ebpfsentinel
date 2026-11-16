@@ -1,12 +1,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use domain::auth::entity::JwtClaims;
 use domain::loadbalancer::entity::{
     LbAlgorithm, LbBackend, LbForwardingMode, LbProtocol, LbService,
 };
@@ -16,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
-use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 use super::validation::{MAX_ID_LENGTH, MAX_SHORT_STRING_LENGTH, validate_string_length};
 
@@ -348,13 +345,8 @@ pub async fn get_lb_service(
 )]
 pub async fn create_lb_service(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<CreateLbServiceRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
-
     let service = parse_create_request(req)?;
     let rule_id = service.id.0.clone();
     let after_json = serde_json::to_string(&service).ok();
@@ -405,13 +397,8 @@ pub async fn create_lb_service(
 )]
 pub async fn delete_lb_service(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
-
     let lb = state
         .loadbalancer_service
         .as_ref()
@@ -627,12 +614,8 @@ pub async fn get_lb_vip_bgp(
 )]
 pub async fn apply_lb_announce(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<LbVipAnnounceRequest>,
 ) -> Result<Json<LbVipStatusResponse>, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let cfg = parse_vip_announce_request(req)?;
     let after_role = cfg.role.as_str().to_string();
     let after_json = serde_json::to_string(&cfg).ok();
@@ -691,12 +674,8 @@ pub async fn apply_lb_announce(
 )]
 pub async fn grant_lb_vip_speaker(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<LbVipGrantRequest>,
 ) -> Result<Json<LbVipStatusResponse>, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let svc = state
         .vip_announcer_service
         .as_ref()

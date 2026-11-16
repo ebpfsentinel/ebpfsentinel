@@ -20,7 +20,7 @@ type TokenProvider = (Option<AuthProviderHandle>, Option<Arc<dyn AuthProvider>>)
 
 /// Everything the HTTP layer needs to authenticate a request.
 ///
-/// All three fields are `None` when authentication is disabled. Callers must
+/// Both fields are `None` when authentication is disabled. Callers must
 /// read that as "no principal can be established", not as "every caller is
 /// authenticated": a request without a verified principal carries no identity
 /// and no role.
@@ -29,8 +29,6 @@ pub struct AuthStack {
     pub handle: Option<AuthProviderHandle>,
     /// The provider used to validate credentials, `None` when auth is disabled.
     pub provider: Option<Arc<dyn AuthProvider>>,
-    /// Handle for revoking issued tokens, `None` when auth is disabled.
-    pub revocation: Option<adapters::auth::revocation::RevocationHandle>,
 }
 
 impl AuthStack {
@@ -40,7 +38,6 @@ impl AuthStack {
         Self {
             handle: None,
             provider: None,
-            revocation: None,
         }
     }
 }
@@ -83,17 +80,10 @@ pub async fn build_auth_stack(auth: &AuthConfig) -> anyhow::Result<AuthStack> {
         }
     };
 
-    // Wrap the final provider with token revocation support.
-    let revocable = adapters::auth::revocation::RevocableAuthProvider::new(final_provider);
-    let revocation_handle = revocable.revocation_handle();
-    let final_provider = Arc::new(revocable) as Arc<dyn AuthProvider>;
-    info!("token revocation enabled");
-
     let handle = token_handle.unwrap_or(AuthProviderHandle::ApiKeyOnly);
     Ok(AuthStack {
         handle: Some(handle),
         provider: Some(final_provider),
-        revocation: Some(revocation_handle),
     })
 }
 
@@ -108,6 +98,14 @@ async fn build_token_provider(auth: &AuthConfig) -> anyhow::Result<TokenProvider
             OidcAuthProvider::new(jwk_set, oidc.issuer.as_deref(), oidc.audience.as_deref())
                 .map_err(|e| anyhow::anyhow!("failed to initialize OIDC auth provider: {e}"))?;
         info!(jwks_url = %oidc.jwks_url, "OIDC authentication enabled");
+        if oidc.audience.is_none() {
+            // A provider signs tokens for every application it serves. With no
+            // audience pinned, a token minted for any of them is accepted here.
+            warn!(
+                jwks_url = %oidc.jwks_url,
+                "auth.oidc.audience is unset: a token the provider issued for another application is accepted by this agent"
+            );
+        }
         let arc = Arc::new(provider);
         return Ok((
             Some(AuthProviderHandle::Oidc(Arc::clone(&arc))),
@@ -310,7 +308,6 @@ mod tests {
         let stack = build_auth_stack(&auth).await.unwrap();
         assert!(stack.provider.is_none());
         assert!(stack.handle.is_none());
-        assert!(stack.revocation.is_none());
     }
 
     #[tokio::test]

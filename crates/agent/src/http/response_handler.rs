@@ -5,12 +5,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use application::ips_service_impl::IpsAppService;
 use application::ratelimit_service_impl::RateLimitAppService;
 use arc_swap::ArcSwap;
-use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use domain::audit::entity::AuditAction;
-use domain::auth::entity::JwtClaims;
 use domain::common::entity::RuleId;
 use domain::firewall::entity::IpCidr;
 use domain::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm, RateLimitPolicy};
@@ -21,7 +19,6 @@ use tokio::sync::RwLock;
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
-use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 
 // ── Request/Response DTOs ────────────────────────────────────────────
@@ -81,12 +78,8 @@ pub struct ResponseListResponse {
 )]
 pub async fn create_response_action(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<CreateResponseRequest>,
 ) -> Result<(StatusCode, Json<ResponseActionResponse>), ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let action_type =
         ResponseActionType::parse(&req.action).ok_or_else(|| ApiError::BadRequest {
             code: "INVALID_REQUEST",
@@ -254,12 +247,8 @@ pub async fn list_response_actions(
 )]
 pub async fn revoke_response_action(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
 ) -> Result<Json<ResponseActionResponse>, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let response_engine = state
         .response_engine
         .as_ref()

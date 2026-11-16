@@ -22,17 +22,14 @@
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
-use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
-use domain::auth::entity::JwtClaims;
 use infrastructure::config::{AgentConfig, ConfigWrites};
 use serde::Deserialize;
 use serde_norway::Value;
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
-use super::middleware::rbac::require_write_access;
 use super::ops_handler::{ReloadResponse, trigger_and_confirm_reload};
 use super::state::AppState;
 
@@ -164,13 +161,9 @@ fn staging_path(target: &FsPath) -> PathBuf {
 )]
 pub async fn put_config_section(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Path(section): Path<String>,
     Json(body): Json<ConfigSectionWrite>,
 ) -> Result<Json<ReloadResponse>, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     if !valid_section(&section) {
         return Err(ApiError::BadRequest {
             code: "INVALID_SECTION",

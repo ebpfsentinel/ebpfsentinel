@@ -1,11 +1,9 @@
 use std::sync::Arc;
 
-use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use domain::auth::entity::JwtClaims;
 use domain::common::entity::RuleId;
 use domain::ratelimit::entity::{RateLimitAction, RateLimitAlgorithm, RateLimitPolicy};
 use infrastructure::config::group_mask_words;
@@ -13,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
-use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 use super::validation::{
     MAX_ID_LENGTH, MAX_PATTERN_LENGTH, MAX_SHORT_STRING_LENGTH, validate_string_length,
@@ -131,12 +128,8 @@ pub async fn list_ratelimit_rules(
 )]
 pub async fn create_ratelimit_rule(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<CreateRateLimitRuleRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let policy = parse_request(req)?;
     let rule_id = policy.id.0.clone();
     let after_json = serde_json::to_string(&policy).ok();
@@ -180,12 +173,8 @@ pub async fn create_ratelimit_rule(
 )]
 pub async fn delete_ratelimit_rule(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     // Capture before snapshot for audit trail
     let before_json = {
         let svc = state.ratelimit_service.read().await;

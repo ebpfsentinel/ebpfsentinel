@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
-use domain::auth::entity::JwtClaims;
 use domain::routing::entity::{Gateway, GatewayState, HealthCheck};
 use domain::routing::error::RoutingError;
 use serde::{Deserialize, Serialize};
@@ -12,7 +10,6 @@ use utoipa::ToSchema;
 use crate::brokered::brokered;
 
 use super::error::{ApiError, ErrorBody};
-use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────
@@ -189,12 +186,8 @@ pub async fn list_gateways(
 )]
 pub async fn create_gateway(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<CreateGatewayRequest>,
 ) -> Result<(axum::http::StatusCode, Json<GatewayResponse>), ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let routing = state.routing_service.as_ref().ok_or(ApiError::NotFound {
         code: "SERVICE_NOT_AVAILABLE",
         message: "Routing not enabled".to_string(),
@@ -257,12 +250,8 @@ pub async fn create_gateway(
 )]
 pub async fn delete_gateway(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let routing = state.routing_service.as_ref().ok_or(ApiError::NotFound {
         code: "SERVICE_NOT_AVAILABLE",
         message: "Routing not enabled".to_string(),

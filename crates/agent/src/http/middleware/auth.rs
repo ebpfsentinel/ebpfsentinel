@@ -175,7 +175,7 @@ mod tests {
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         );
         if let Some(provider) = auth_provider {
-            state = state.with_auth_provider(provider, None, false);
+            state = state.with_auth_provider(provider, false);
         }
         Arc::new(state)
     }

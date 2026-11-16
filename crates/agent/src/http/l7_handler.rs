@@ -1,11 +1,9 @@
 use std::sync::Arc;
 
-use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use domain::auth::entity::JwtClaims;
 use domain::common::entity::RuleId;
 use domain::firewall::entity::{FirewallAction, IpCidr, IpNetwork, PortRange};
 use domain::l7::domain_matcher::DomainMatcher;
@@ -15,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
-use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 use super::validation::{
     MAX_ID_LENGTH, MAX_PATTERN_LENGTH, MAX_SHORT_STRING_LENGTH, validate_string_length,
@@ -322,12 +319,8 @@ pub async fn list_l7_rules(State(state): State<Arc<AppState>>) -> Json<Vec<L7Rul
 )]
 pub async fn create_l7_rule(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<CreateL7RuleRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let rule = req.into_domain_rule()?;
     let response = L7RuleResponse::from(&rule);
     let rule_id = rule.id.0.clone();
@@ -368,12 +361,8 @@ pub async fn create_l7_rule(
 )]
 pub async fn delete_l7_rule(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     // Capture before snapshot for audit trail
     let before_json = {
         let svc = state.l7_service.load();

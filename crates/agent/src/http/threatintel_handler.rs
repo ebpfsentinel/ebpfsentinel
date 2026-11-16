@@ -1,15 +1,12 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use axum::Extension;
 use axum::Json;
 use axum::extract::State;
-use domain::auth::entity::JwtClaims;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
-use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 
 // ── Response DTOs ───────────────────────────────────────────────────
@@ -209,12 +206,8 @@ pub async fn list_feeds(State(state): State<Arc<AppState>>) -> Json<Vec<FeedResp
 )]
 pub async fn refresh_feeds(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     body: Option<Json<RefreshFeedRequest>>,
 ) -> Result<Json<RefreshResponse>, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let req = body.map_or_default(|Json(b)| b);
     let trigger =
         state
@@ -406,11 +399,11 @@ mod tests {
         let flag = Arc::new(AtomicBool::new(false));
         let state = Arc::new(bare_state().with_feed_refresh_trigger(tx, Arc::clone(&flag)));
 
-        let first = refresh_feeds(State(Arc::clone(&state)), None, None).await;
+        let first = refresh_feeds(State(Arc::clone(&state)), None).await;
         assert!(first.is_ok(), "the first caller starts the cycle");
         assert!(flag.load(Ordering::SeqCst), "the fetch slot is claimed");
 
-        match refresh_feeds(State(Arc::clone(&state)), None, None).await {
+        match refresh_feeds(State(Arc::clone(&state)), None).await {
             Err(ApiError::Conflict { code, .. }) => assert_eq!(code, "REFRESH_IN_PROGRESS"),
             _ => panic!("a second caller must not queue a second fetch"),
         }
@@ -422,19 +415,13 @@ mod tests {
         let flag = Arc::new(AtomicBool::new(false));
         let state = Arc::new(bare_state().with_feed_refresh_trigger(tx, Arc::clone(&flag)));
 
-        assert!(
-            refresh_feeds(State(Arc::clone(&state)), None, None)
-                .await
-                .is_ok()
-        );
+        assert!(refresh_feeds(State(Arc::clone(&state)), None).await.is_ok());
         assert_eq!(rx.try_recv(), Ok(()), "one fetch was asked for");
         // What the feed fetcher's own guard does when the cycle ends.
         flag.store(false, Ordering::SeqCst);
 
         assert!(
-            refresh_feeds(State(Arc::clone(&state)), None, None)
-                .await
-                .is_ok(),
+            refresh_feeds(State(Arc::clone(&state)), None).await.is_ok(),
             "the slot is free again once the cycle has ended"
         );
     }
@@ -446,7 +433,7 @@ mod tests {
         let flag = Arc::new(AtomicBool::new(false));
         let state = Arc::new(bare_state().with_feed_refresh_trigger(tx, Arc::clone(&flag)));
 
-        match refresh_feeds(State(Arc::clone(&state)), None, None).await {
+        match refresh_feeds(State(Arc::clone(&state)), None).await {
             Err(ApiError::ServiceUnavailable { .. }) => {}
             _ => panic!("a dead fetcher must report unavailable"),
         }
@@ -459,7 +446,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_reports_unavailable_without_a_trigger() {
         let state = Arc::new(bare_state());
-        match refresh_feeds(State(Arc::clone(&state)), None, None).await {
+        match refresh_feeds(State(Arc::clone(&state)), None).await {
             Err(ApiError::ServiceUnavailable { .. }) => {}
             _ => panic!("feeds switched off must report unavailable"),
         }

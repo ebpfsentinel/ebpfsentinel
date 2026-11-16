@@ -3,12 +3,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use domain::auth::entity::JwtClaims;
 use infrastructure::config::{group_mask_words, parse_domain_mode};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -17,7 +15,6 @@ use super::error::{ApiError, ErrorBody};
 use super::ids_handler::{
     SlotContentionResponse, format_domain_match_mode, format_protocol, format_severity,
 };
-use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 
 // ── Request / Response DTOs ─────────────────────────────────────────
@@ -163,13 +160,9 @@ pub async fn list_ips_rules(State(state): State<Arc<AppState>>) -> Json<Vec<IpsR
 )]
 pub async fn patch_ips_rule_mode(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
     Json(req): Json<PatchRuleModeRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let new_mode = parse_domain_mode(&req.mode).map_err(|e| ApiError::BadRequest {
         code: "VALIDATION_ERROR",
         message: format!("invalid mode: {e}"),
@@ -318,12 +311,8 @@ pub async fn list_ips_blacklist(
 )]
 pub async fn add_ips_blacklist(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<AddBlacklistRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let ip = IpAddr::from_str(req.ip.trim()).map_err(|_| ApiError::BadRequest {
         code: "VALIDATION_ERROR",
         message: format!("invalid IP address: {}", req.ip),
@@ -384,12 +373,8 @@ pub async fn add_ips_blacklist(
 )]
 pub async fn delete_ips_blacklist(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Path(ip_str): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let ip = IpAddr::from_str(ip_str.trim()).map_err(|_| ApiError::BadRequest {
         code: "VALIDATION_ERROR",
         message: format!("invalid IP address: {ip_str}"),

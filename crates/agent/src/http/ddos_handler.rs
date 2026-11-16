@@ -1,11 +1,9 @@
 use std::sync::Arc;
 
-use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use domain::auth::entity::JwtClaims;
 use domain::common::entity::RuleId;
 use domain::ddos::entity::{
     DdosAttackType, DdosMitigationAction, DdosMitigationStatus, DdosPolicy,
@@ -14,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use super::error::{ApiError, ErrorBody};
-use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 use super::validation::{MAX_ID_LENGTH, MAX_SHORT_STRING_LENGTH, validate_string_length};
 
@@ -282,13 +279,8 @@ pub async fn list_ddos_policies(
 )]
 pub async fn create_ddos_policy(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Json(req): Json<CreateDdosPolicyRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
-
     let policy = parse_create_request(req)?;
     let rule_id = policy.id.0.clone();
     let after_json = serde_json::to_string(&policy).ok();
@@ -336,13 +328,8 @@ pub async fn create_ddos_policy(
 )]
 pub async fn delete_ddos_policy(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
-
     let ddos = state.ddos_service.as_ref().ok_or(ApiError::NotFound {
         code: "SERVICE_NOT_AVAILABLE",
         message: "DDoS protection not enabled".to_string(),

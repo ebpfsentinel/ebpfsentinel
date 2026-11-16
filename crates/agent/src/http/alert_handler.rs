@@ -27,7 +27,6 @@ use ports::secondary::alert_store::AlertTriageStore;
 use ports::secondary::metrics_port::{AlertMetrics, MetricsPort};
 
 use super::error::{ApiError, ErrorBody};
-use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 use super::workload_dto::{WorkloadResponse, workload_response};
 
@@ -781,9 +780,6 @@ pub async fn triage_alert(
     Path(id): Path<String>,
     Json(body): Json<TriageRequest>,
 ) -> Result<Json<TriageResponse>, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let store = triage_store(&state)?;
     let via = principal(claims.as_ref());
     let (answer, detail) = apply_triage(store.as_ref(), id, body, &via)?;
@@ -853,9 +849,6 @@ pub async fn triage_alerts(
     claims: Option<Extension<JwtClaims>>,
     Json(body): Json<BulkTriageRequest>,
 ) -> Result<Json<BulkTriageResponse>, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let store = triage_store(&state)?;
     let via = principal(claims.as_ref());
     let (answer, details) = apply_bulk_triage(store.as_ref(), body, &via)?;
@@ -932,12 +925,8 @@ pub fn apply_bulk_triage(
 )]
 pub async fn mark_false_positive(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
 ) -> Result<Json<FalsePositiveResponse>, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let store = state
         .alert_store
         .as_ref()

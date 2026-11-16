@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
 use application::learning_service::now_ns;
-use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
-use domain::auth::entity::JwtClaims;
 use domain::common::entity::Protocol;
 use domain::firewall::workload::WorkloadSelector;
 use domain::learning::aggregate::{LearningEdge, WorkloadAddresses};
@@ -14,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
-use super::middleware::rbac::require_write_access;
 use super::state::AppState;
 
 /// One of the selectors a scope is written with, in the shape a workload
@@ -342,12 +339,8 @@ fn learning_error(err: &LearningError) -> ApiError {
 )]
 pub async fn start_learning(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Json(request): Json<StartLearningRequest>,
 ) -> Result<Json<LearningSessionResponse>, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let service = learning(&state)?;
     let scope = LearningScope::try_from(request.scope)?;
     let progress = service
@@ -429,12 +422,8 @@ pub async fn get_learning(
 )]
 pub async fn stop_learning(
     State(state): State<Arc<AppState>>,
-    claims: Option<Extension<JwtClaims>>,
     Path(id): Path<String>,
 ) -> Result<Json<LearningSessionResponse>, ApiError> {
-    if let Some(Extension(ref claims)) = claims {
-        require_write_access(claims)?;
-    }
     let service = learning(&state)?;
     let progress = service
         .stop(Some(&id), now_ns())

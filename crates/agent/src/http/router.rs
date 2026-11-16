@@ -108,6 +108,7 @@ use super::learning_handler::{
 };
 use super::metrics_handler::metrics;
 use super::middleware::auth::jwt_auth_middleware;
+use super::middleware::rbac::enforce_write_roles;
 use super::mitre_handler::mitre_coverage;
 use super::nat_handler::{
     create_nptv6_rule, delete_nptv6_rule, list_nat_rules, list_nptv6_rules, nat_status,
@@ -450,6 +451,7 @@ pub fn build_router(
             .route("/api/v1/responses/{id}", delete(revoke_response_action))
             .route("/api/v1/captures/manual", post(start_capture))
             .route("/api/v1/captures/{id}", delete(stop_capture))
+            .layer(middleware::from_fn(enforce_write_roles))
             .layer(middleware::from_fn(record_policy_write))
             .layer(middleware::from_fn(
                 move |req: Request, next: middleware::Next| {
@@ -1195,6 +1197,73 @@ mod tests {
                     route.method, "get",
                     "GET {} belongs in the read block",
                     route.path
+                );
+            }
+        }
+    }
+
+    /// Every write the router mounts has exactly one row in the role table,
+    /// and every row is a write the router mounts, so the table the
+    /// documentation is held to is the router's own.
+    #[test]
+    fn every_write_has_one_role_and_every_role_names_a_write() {
+        use super::super::middleware::rbac::WRITE_ROLES;
+
+        let write_block = write_block_range();
+        let mounted: Vec<(String, String)> = parse_mounted_routes()
+            .into_iter()
+            .filter(|route| write_block.contains(&route.offset))
+            .map(|route| (route.method.to_uppercase(), route.path))
+            .collect();
+        for (method, path) in &mounted {
+            let rows = WRITE_ROLES
+                .iter()
+                .filter(|(m, p, _)| m == method && p == path)
+                .count();
+            assert_eq!(rows, 1, "{method} {path} has {rows} rows in WRITE_ROLES");
+        }
+        for (method, path, _) in WRITE_ROLES {
+            assert!(
+                mounted.iter().any(|(m, p)| m == method && p == path),
+                "WRITE_ROLES names {method} {path}, which the router does not mount"
+            );
+        }
+    }
+
+    /// The table is what the router enforces: an operator is refused every
+    /// write the table gives to `admin` before the handler runs, and reaches
+    /// the handler on every other one; a viewer is refused them all.
+    #[tokio::test]
+    async fn a_write_is_held_to_the_role_its_row_names() {
+        use super::super::middleware::rbac::{WRITE_ROLES, WriteRole};
+        use domain::auth::entity::JwtClaims;
+
+        let router = build_router(
+            Arc::new(base_test_state()),
+            false,
+            false,
+            ApiRateLimitConfig::default(),
+        );
+        for role in ["operator", "viewer"] {
+            let claims = JwtClaims {
+                sub: format!("{role}-key"),
+                exp: u64::MAX,
+                iat: 0,
+                iss: None,
+                aud: None,
+                role: Some(role.to_string()),
+                namespaces: Some(vec!["prod".to_string()]),
+                tenant_id: None,
+                roles: None,
+            };
+            let as_role = router.clone().layer(axum::Extension(claims));
+            for (method, path, needed) in WRITE_ROLES {
+                let status = status_of(&as_role, method, &concrete_path(path), "{}").await;
+                let refused = role == "viewer" || *needed == WriteRole::Admin;
+                assert_eq!(
+                    status == StatusCode::FORBIDDEN,
+                    refused,
+                    "{role} {method} {path} answered {status}"
                 );
             }
         }
