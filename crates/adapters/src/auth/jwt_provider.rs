@@ -2,10 +2,13 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 use base64::Engine as _;
+use domain::auth::cosignature::{self, CosignaturePolicy};
 use domain::auth::entity::JwtClaims;
 use domain::auth::error::AuthError;
 use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation};
 use ports::secondary::auth_provider::AuthProvider;
+
+use super::cosign::{self, MlDsaKey};
 
 /// JWT authentication provider using a static PEM public key.
 ///
@@ -21,6 +24,10 @@ pub struct JwtAuthProvider {
     decoding_key: RwLock<DecodingKey>,
     validation: Validation,
     algorithm: Algorithm,
+    /// The ML-DSA-65 key a token's cosignature is checked against, read from
+    /// `auth.jwt.ml_dsa_public_key_path`.
+    ml_dsa: RwLock<Option<MlDsaKey>>,
+    cosignature: CosignaturePolicy,
 }
 
 impl std::fmt::Debug for JwtAuthProvider {
@@ -151,6 +158,8 @@ impl JwtAuthProvider {
             decoding_key: RwLock::new(decoding_key),
             validation: build_validation(Algorithm::RS256, issuer, audience),
             algorithm: Algorithm::RS256,
+            ml_dsa: RwLock::new(None),
+            cosignature: CosignaturePolicy::Disable,
         })
     }
 
@@ -171,6 +180,8 @@ impl JwtAuthProvider {
             decoding_key: RwLock::new(decoding_key),
             validation: build_validation(Algorithm::EdDSA, issuer, audience),
             algorithm: Algorithm::EdDSA,
+            ml_dsa: RwLock::new(None),
+            cosignature: CosignaturePolicy::Disable,
         })
     }
 
@@ -198,6 +209,25 @@ impl JwtAuthProvider {
             AuthError::KeyLoadFailed("internal auth state corrupted".to_string())
         })?;
         *key = new_key;
+        Ok(())
+    }
+
+    /// Hold tokens to `policy` for their ML-DSA-65 cosignature, checked
+    /// against `key`.
+    #[must_use]
+    pub fn with_cosignature(mut self, policy: CosignaturePolicy, key: Option<MlDsaKey>) -> Self {
+        self.cosignature = policy;
+        self.ml_dsa = RwLock::new(key);
+        self
+    }
+
+    /// Replace the ML-DSA-65 key (config reload), keeping the policy.
+    pub fn rotate_ml_dsa_key(&self, key: MlDsaKey) -> Result<(), AuthError> {
+        let mut slot = self.ml_dsa.write().map_err(|e| {
+            tracing::error!("ML-DSA key RwLock poisoned: {e}");
+            AuthError::KeyLoadFailed("internal auth state corrupted".to_string())
+        })?;
+        *slot = Some(key);
         Ok(())
     }
 
@@ -230,6 +260,14 @@ fn build_validation(
 #[async_trait]
 impl AuthProvider for JwtAuthProvider {
     async fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError> {
+        self.validate_cosigned(token, None).await
+    }
+
+    async fn validate_cosigned(
+        &self,
+        token: &str,
+        cosignature: Option<&str>,
+    ) -> Result<JwtClaims, AuthError> {
         if token.is_empty() {
             return Err(AuthError::TokenMissing);
         }
@@ -248,6 +286,16 @@ impl AuthProvider for JwtAuthProvider {
                     AuthError::TokenInvalid("invalid token".to_string())
                 }
             })?;
+        drop(key);
+
+        let ml_dsa = self.ml_dsa.read().map_err(|e| {
+            tracing::error!("ML-DSA key RwLock poisoned: {e}");
+            AuthError::TokenInvalid("internal auth error".to_string())
+        })?;
+        let found = cosign::inspect(self.cosignature, ml_dsa.as_ref(), token, cosignature);
+        cosignature::admit(self.cosignature, found).inspect_err(|e| {
+            tracing::debug!(error = %e, "token refused for its post-quantum cosignature");
+        })?;
 
         Ok(token_data.claims)
     }
@@ -521,5 +569,45 @@ mod tests {
         let provider = JwtAuthProvider::new(TEST_RSA_PUBLIC_KEY, None, None).unwrap();
         let err = provider.rotate_key(TEST_ED25519_PUBLIC_KEY).unwrap_err();
         assert!(matches!(err, AuthError::KeyLoadFailed(_)), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_static_key_holds_a_token_to_its_ml_dsa_cosignature() {
+        use crate::auth::cosign::test_signer::Signer;
+        let signer = Signer::from_seed(11);
+        let provider = JwtAuthProvider::new(TEST_RSA_PUBLIC_KEY, None, None)
+            .unwrap()
+            .with_cosignature(CosignaturePolicy::Require, Some(signer.public()));
+        let token = sign_token(
+            &TestClaims {
+                sub: "user-1".to_string(),
+                exp: future_exp(),
+                iat: 1_000_000,
+                iss: None,
+                aud: None,
+            },
+            TEST_RSA_PRIVATE_KEY,
+        );
+        assert!(provider.validate_token(&token).await.is_err());
+        let claims = provider
+            .validate_cosigned(&token, Some(&signer.cosign(&token)))
+            .await
+            .unwrap();
+        assert_eq!(claims.sub, "user-1");
+
+        let rotated = Signer::from_seed(12);
+        provider.rotate_ml_dsa_key(rotated.public()).unwrap();
+        assert!(
+            provider
+                .validate_cosigned(&token, Some(&signer.cosign(&token)))
+                .await
+                .is_err()
+        );
+        assert!(
+            provider
+                .validate_cosigned(&token, Some(&rotated.cosign(&token)))
+                .await
+                .is_ok()
+        );
     }
 }

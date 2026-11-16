@@ -384,6 +384,17 @@ auth:
     # jwks_url: ""           # https://dashboard/.well-known/jwks.json
     # jwks_cache_ttl_seconds: 3600
     # jwks_refresh_on_unknown_kid: true
+    # ml_dsa_public_key_path: ""  # base64 ML-DSA-65 public key, static PEM mode only
+
+  # Post-quantum cosignature of the tokens checked through `jwt` (the
+  # dashboard's): an ML-DSA-65 signature of the whole token, sent in the
+  # `X-Ebpfsentinel-Token-Cosignature` header and verified against the key
+  # the JWKS publishes under the token's kid (or `ml_dsa_public_key_path`).
+  #   prefer  - a cosignature present must verify, a token without one passes
+  #   require - a token without a valid cosignature is refused
+  #   disable - the cosignature is not read
+  # Tokens from an identity provider (`oidc`) are never held to it.
+  # pq_tokens: prefer
 
 conntrack:
   enabled: false

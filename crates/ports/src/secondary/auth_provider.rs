@@ -12,7 +12,28 @@ use domain::auth::error::AuthError;
 #[async_trait]
 pub trait AuthProvider: Send + Sync {
     async fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError>;
+
+    /// Validate a token presented with the post-quantum cosignature that may
+    /// travel beside it (`X-Ebpfsentinel-Token-Cosignature`).
+    ///
+    /// A provider whose credentials are not signed tokens, such as static API
+    /// keys, has no second signature to check and keeps this default. A
+    /// provider that verifies signed tokens overrides it and applies
+    /// [`domain::auth::cosignature::admit`].
+    async fn validate_cosigned(
+        &self,
+        token: &str,
+        cosignature: Option<&str>,
+    ) -> Result<JwtClaims, AuthError> {
+        let _ = cosignature;
+        self.validate_token(token).await
+    }
 }
+
+/// The request header carrying the ML-DSA-65 cosignature of a bearer token,
+/// base64url without padding. gRPC carries it as metadata of the same name in
+/// lower case.
+pub const COSIGNATURE_HEADER: &str = "x-ebpfsentinel-token-cosignature";
 
 #[cfg(test)]
 mod tests {

@@ -19,6 +19,18 @@ pub struct AuthConfig {
     #[serde(default)]
     pub jwt: JwtConfig,
 
+    /// What a token verified through `auth.jwt` must carry beside its
+    /// classical signature: the ML-DSA-65 cosignature the dashboard sends in
+    /// `X-Ebpfsentinel-Token-Cosignature`, checked against the key published
+    /// under the token's key id.
+    ///
+    /// `prefer` (default) checks it when present and refuses one that does
+    /// not verify; `require` also refuses a token without one; `disable`
+    /// never reads it. Tokens from an identity provider under `auth.oidc` are
+    /// signed by that provider alone and are not held to this.
+    #[serde(default)]
+    pub pq_tokens: super::PqMode,
+
     /// OIDC provider configuration (JWKS-based token validation).
     #[serde(default)]
     pub oidc: Option<OidcConfig>,
@@ -71,6 +83,7 @@ impl Default for AuthConfig {
         Self {
             enabled: default_auth_enabled(),
             jwt: JwtConfig::default(),
+            pq_tokens: super::PqMode::default(),
             oidc: None,
             api_keys: Vec::new(),
             api_key_salt: None,
@@ -163,6 +176,13 @@ pub struct JwtConfig {
     /// Expected token audience (`aud` claim). Validated when set.
     #[serde(default)]
     pub audience: Option<String>,
+
+    /// The ML-DSA-65 public key cosignatures are checked against when the
+    /// classical key is a static PEM: base64 of the raw 1952-byte key, the
+    /// file the dashboard writes beside its signing key. A JWKS publishes
+    /// this key itself, so it is read only with `public_key_path`.
+    #[serde(default)]
+    pub ml_dsa_public_key_path: Option<String>,
 }
 
 fn default_jwks_cache_ttl_seconds() -> u64 {
@@ -183,6 +203,7 @@ impl Default for JwtConfig {
             jwks_refresh_on_unknown_kid: default_jwks_refresh_on_unknown_kid(),
             issuer: None,
             audience: None,
+            ml_dsa_public_key_path: None,
         }
     }
 }

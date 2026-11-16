@@ -2,11 +2,13 @@ use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use domain::auth::cosignature::{self, CosignaturePolicy};
 use domain::auth::entity::JwtClaims;
 use domain::auth::error::AuthError;
-use jsonwebtoken::{
-    Algorithm, DecodingKey, TokenData, Validation, decode, decode_header, jwk::JwkSet,
-};
+use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet};
+use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, decode, decode_header};
+
+use super::cosign;
 use ports::secondary::auth_provider::AuthProvider;
 
 /// Hook used by the OIDC / JWKS provider to refresh its key set when a
@@ -49,6 +51,10 @@ pub struct OidcAuthProvider {
     /// concurrent requests (prevents a thundering herd of simultaneous
     /// refreshes when many unknown-`kid` requests arrive at once).
     last_refresh: RwLock<Option<Instant>>,
+    /// What a token must carry beside its classical signature. Off for an
+    /// identity provider's tokens, which no ML-DSA key cosigns; set from
+    /// `auth.pq_tokens` for the dashboard's.
+    cosignature: CosignaturePolicy,
 }
 
 /// Default minimum interval between two inline JWKS refreshes.
@@ -121,7 +127,16 @@ impl OidcAuthProvider {
             refresh_on_unknown_kid: true,
             refresh_cooldown: DEFAULT_JWKS_REFRESH_COOLDOWN,
             last_refresh: RwLock::new(None),
+            cosignature: CosignaturePolicy::Disable,
         }
+    }
+
+    /// Hold tokens to `policy` for their ML-DSA-65 cosignature, checked
+    /// against the `AKP` key this JWKS publishes under the token's `kid`.
+    #[must_use]
+    pub fn with_cosignature_policy(mut self, policy: CosignaturePolicy) -> Self {
+        self.cosignature = policy;
+        self
     }
 
     /// Wire an inline JWKS refresher. The provider will call
@@ -194,15 +209,23 @@ impl OidcAuthProvider {
     /// run the verifier. Returns `AuthError::TokenInvalid("kid")` when
     /// the kid is missing from the cache so the outer call site can
     /// decide whether to refresh + retry.
-    fn validate_with_cached(&self, token: &str, kid: &str) -> Result<JwtClaims, AuthError> {
+    fn validate_with_cached(
+        &self,
+        token: &str,
+        kid: &str,
+        cosignature: Option<&str>,
+    ) -> Result<JwtClaims, AuthError> {
         let jwk_set = self.jwk_set.read().map_err(|e| {
             tracing::error!("OIDC JWKS RwLock poisoned on read: {e}");
             AuthError::TokenInvalid("internal auth error".to_string())
         })?;
 
+        // The ML-DSA entry published under the same `kid` is not a key
+        // `jsonwebtoken` can verify with; the classical one is.
         let jwk = jwk_set
             .keys
             .iter()
+            .filter(|k| !matches!(k.algorithm, AlgorithmParameters::Other(_)))
             .find(|k| k.common.key_id.as_deref() == Some(kid))
             .ok_or_else(|| {
                 tracing::debug!(kid, "OIDC no JWK found for kid");
@@ -223,6 +246,15 @@ impl OidcAuthProvider {
                     AuthError::TokenInvalid("invalid token".to_string())
                 }
             })?;
+        let found = cosign::inspect(
+            self.cosignature,
+            cosign::key_for_kid(&jwk_set.keys, kid).as_ref(),
+            token,
+            cosignature,
+        );
+        cosignature::admit(self.cosignature, found).inspect_err(|e| {
+            tracing::debug!(kid, error = %e, "token refused for its post-quantum cosignature");
+        })?;
         Ok(token_data.claims)
     }
 }
@@ -230,6 +262,14 @@ impl OidcAuthProvider {
 #[async_trait]
 impl AuthProvider for OidcAuthProvider {
     async fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError> {
+        self.validate_cosigned(token, None).await
+    }
+
+    async fn validate_cosigned(
+        &self,
+        token: &str,
+        cosignature: Option<&str>,
+    ) -> Result<JwtClaims, AuthError> {
         if token.is_empty() {
             return Err(AuthError::TokenMissing);
         }
@@ -247,7 +287,7 @@ impl AuthProvider for OidcAuthProvider {
             AuthError::TokenInvalid("invalid token".to_string())
         })?;
 
-        match self.validate_with_cached(token, &kid) {
+        match self.validate_with_cached(token, &kid, cosignature) {
             Ok(claims) => Ok(claims),
             Err(AuthError::TokenInvalid(ref msg)) if msg == "kid" => {
                 if !self.refresh_on_unknown_kid {
@@ -275,12 +315,13 @@ impl AuthProvider for OidcAuthProvider {
                     tracing::debug!(kid = %kid, "JWKS still missing kid after refresh");
                     return Err(AuthError::TokenInvalid("invalid token".to_string()));
                 }
-                self.validate_with_cached(token, &kid).map_err(|e| match e {
-                    AuthError::TokenInvalid(msg) if msg == "kid" => {
-                        AuthError::TokenInvalid("invalid token".to_string())
-                    }
-                    other => other,
-                })
+                self.validate_with_cached(token, &kid, cosignature)
+                    .map_err(|e| match e {
+                        AuthError::TokenInvalid(msg) if msg == "kid" => {
+                            AuthError::TokenInvalid("invalid token".to_string())
+                        }
+                        other => other,
+                    })
             }
             Err(other) => Err(other),
         }
@@ -978,5 +1019,91 @@ mod tests {
 
         // Garbage URLs are rejected.
         assert!(!allows_plaintext("not a url"));
+    }
+
+    /// A JWKS with the classical key and, under the same `kid`, the ML-DSA
+    /// key the dashboard publishes beside it.
+    fn cosigned_set(kid: &str, signer: &crate::auth::cosign::test_signer::Signer) -> JwkSet {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let mut set = build_test_jwk_set(kid);
+        let akp: jsonwebtoken::jwk::Jwk = serde_json::from_value(serde_json::json!({
+            "kty": "AKP", "use": "sig", "alg": "ML-DSA-65", "kid": kid,
+            "pub": URL_SAFE_NO_PAD.encode(signer.public_raw()),
+        }))
+        .unwrap();
+        // Ahead of the classical entry, so a lookup taking the first entry
+        // under the kid would trip on it.
+        set.keys.insert(0, akp);
+        set
+    }
+
+    fn admin_token(kid: &str) -> String {
+        sign_token_with_kid(
+            &TestClaims {
+                sub: "dashboard".to_string(),
+                exp: future_exp(),
+                iss: None,
+                aud: None,
+                role: Some("admin".to_string()),
+                namespaces: None,
+            },
+            kid,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_cosigned_token_is_admitted_under_require_and_a_classical_one_is_not() {
+        use crate::auth::cosign::test_signer::Signer;
+        let signer = Signer::from_seed(9);
+        let provider = OidcAuthProvider::new(cosigned_set("k1", &signer), None, None)
+            .unwrap()
+            .with_cosignature_policy(CosignaturePolicy::Require);
+        let token = admin_token("k1");
+
+        let claims = provider
+            .validate_cosigned(&token, Some(&signer.cosign(&token)))
+            .await
+            .expect("the classical and the post-quantum signature both hold");
+        assert_eq!(claims.sub, "dashboard");
+
+        let refused = provider.validate_token(&token).await.unwrap_err();
+        assert!(refused.to_string().contains("auth.pq_tokens: require"));
+
+        let other = admin_token("k1");
+        let swapped = provider
+            .validate_cosigned(&other, Some(&signer.cosign(&format!("{other}x"))))
+            .await
+            .unwrap_err();
+        assert!(swapped.to_string().contains("does not verify"));
+    }
+
+    #[tokio::test]
+    async fn prefer_admits_a_classical_token_and_refuses_a_forged_cosignature() {
+        use crate::auth::cosign::test_signer::Signer;
+        let signer = Signer::from_seed(4);
+        let provider = OidcAuthProvider::new(cosigned_set("k1", &signer), None, None)
+            .unwrap()
+            .with_cosignature_policy(CosignaturePolicy::Prefer);
+        let token = admin_token("k1");
+        assert!(provider.validate_token(&token).await.is_ok());
+        let forged = Signer::from_seed(5).cosign(&token);
+        assert!(
+            provider
+                .validate_cosigned(&token, Some(&forged))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_identity_provider_token_is_not_held_to_a_cosignature() {
+        let provider = OidcAuthProvider::new(build_test_jwk_set("k1"), None, None).unwrap();
+        let token = admin_token("k1");
+        assert!(
+            provider
+                .validate_cosigned(&token, Some("anything"))
+                .await
+                .is_ok()
+        );
     }
 }

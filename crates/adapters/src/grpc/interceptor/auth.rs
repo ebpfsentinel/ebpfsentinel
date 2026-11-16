@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use axum::http::{HeaderMap, Request, Response, header};
-use ports::secondary::auth_provider::AuthProvider;
+use ports::secondary::auth_provider::{AuthProvider, COSIGNATURE_HEADER};
 use tonic::Status;
 use tonic::body::Body;
 use tonic::server::NamedService;
@@ -78,6 +78,11 @@ where
         let mut inner = std::mem::replace(&mut self.inner, clone);
 
         let token = extract_token(req.headers());
+        let cosignature = req
+            .headers()
+            .get(COSIGNATURE_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
 
         Box::pin(async move {
             let Some(token) = token else {
@@ -86,7 +91,10 @@ where
                 )
                 .into_http());
             };
-            match provider.validate_token(&token).await {
+            match provider
+                .validate_cosigned(&token, cosignature.as_deref())
+                .await
+            {
                 Ok(_) => inner.call(req).await,
                 Err(e) => Ok(Status::unauthenticated(e.to_string()).into_http()),
             }
@@ -193,6 +201,40 @@ mod tests {
             .unwrap();
         let _ = svc.oneshot(req).await.unwrap();
         assert!(called.load(Ordering::SeqCst), "inner must be called");
+    }
+
+    /// Admits a token only with the cosignature `pq` beside it.
+    struct CosignedOnly;
+    #[async_trait]
+    impl AuthProvider for CosignedOnly {
+        async fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError> {
+            self.validate_cosigned(token, None).await
+        }
+        async fn validate_cosigned(
+            &self,
+            token: &str,
+            cosignature: Option<&str>,
+        ) -> Result<JwtClaims, AuthError> {
+            if cosignature == Some("pq") {
+                AlwaysOkProvider.validate_token(token).await
+            } else {
+                Err(AuthError::TokenInvalid("no cosignature".to_string()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_cosignature_metadata_reaches_the_provider() {
+        for (metadata, reaches) in [(Some("pq"), true), (Some("x"), false), (None, false)] {
+            let called = Arc::new(AtomicBool::new(false));
+            let svc = wrap(Arc::new(CosignedOnly), Arc::clone(&called));
+            let mut req = Request::builder().header("authorization", "Bearer h.p.s");
+            if let Some(value) = metadata {
+                req = req.header("x-ebpfsentinel-token-cosignature", value);
+            }
+            let _ = svc.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(called.load(Ordering::SeqCst), reaches, "{metadata:?}");
+        }
     }
 
     #[tokio::test]

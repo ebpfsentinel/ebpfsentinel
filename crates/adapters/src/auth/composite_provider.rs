@@ -31,8 +31,16 @@ impl CompositeAuthProvider {
 #[async_trait]
 impl AuthProvider for CompositeAuthProvider {
     async fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError> {
+        self.validate_cosigned(token, None).await
+    }
+
+    async fn validate_cosigned(
+        &self,
+        token: &str,
+        cosignature: Option<&str>,
+    ) -> Result<JwtClaims, AuthError> {
         for provider in &self.providers {
-            if let Ok(claims) = provider.validate_token(token).await {
+            if let Ok(claims) = provider.validate_cosigned(token, cosignature).await {
                 return Ok(claims);
             }
         }

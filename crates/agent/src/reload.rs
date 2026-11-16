@@ -1029,6 +1029,18 @@ pub async fn apply_config_file_prepared(
         match handle {
             AuthProviderHandle::Jwt(provider) => {
                 if config.auth.enabled && !config.auth.jwt.public_key_path.is_empty() {
+                    match crate::auth_bootstrap::static_ml_dsa_key(&config.auth) {
+                        Ok(Some(key)) => {
+                            if let Err(e) = provider.rotate_ml_dsa_key(key) {
+                                tracing::warn!(error = %e, "ML-DSA-65 key rotation failed, keeping current key");
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "ML-DSA-65 key rotation failed, keeping current key"
+                        ),
+                    }
                     match std::fs::read(&config.auth.jwt.public_key_path) {
                         Ok(pem_bytes) => match provider.rotate_key(&pem_bytes) {
                             Ok(()) => {

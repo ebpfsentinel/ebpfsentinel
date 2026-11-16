@@ -159,6 +159,7 @@ anyhow = "1"
 # Testing & Benchmarking
 tempfile = "3"
 base64 = "0.23"
+ml-dsa = { version = "=0.1.1", default-features = false }
 criterion = { version = "0.8", features = ["html_reports"] }
 # Throwaway certificates for the tests that complete a real TLS handshake and
 # read the group it negotiated. aws-lc-rs only, so no second provider enters.

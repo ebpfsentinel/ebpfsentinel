@@ -7,9 +7,11 @@
 use std::sync::Arc;
 
 use adapters::auth::bootstrap_key::{BOOTSTRAP_KEY_NAME, BootstrapKeyFile, KeyOrigin};
+use adapters::auth::cosign::MlDsaKey;
 use adapters::auth::jwt_provider::JwtAuthProvider;
 use adapters::auth::oidc_provider::{self, OidcAuthProvider};
-use infrastructure::config::AuthConfig;
+use domain::auth::cosignature::CosignaturePolicy;
+use infrastructure::config::{AuthConfig, PqMode};
 use ports::secondary::auth_provider::AuthProvider;
 use tracing::{info, warn};
 
@@ -134,8 +136,11 @@ async fn build_token_provider(auth: &AuthConfig) -> anyhow::Result<TokenProvider
                 ),
             }
             .map_err(|e| anyhow::anyhow!("failed to initialize JWT auth provider: {e}"))?;
+            let ml_dsa = static_ml_dsa_key(auth)?;
+            let provider = provider.with_cosignature(cosignature_policy(auth), ml_dsa);
             info!(
                 algorithm = ?auth.jwt.algorithm,
+                pq_tokens = auth.pq_tokens.as_str(),
                 "JWT authentication enabled (static PEM)"
             );
             let arc = Arc::new(provider);
@@ -167,9 +172,12 @@ async fn build_token_provider(auth: &AuthConfig) -> anyhow::Result<TokenProvider
             .map_err(|e| anyhow::anyhow!("failed to initialize JWT JWKS auth provider: {e}"))?;
             let refresher: Arc<dyn oidc_provider::JwksRefresher> =
                 Arc::new(oidc_provider::HttpJwksRefresher::new(url.clone()));
-            let provider = provider.with_refresher(refresher, refresh_on_unknown_kid);
+            let provider = provider
+                .with_refresher(refresher, refresh_on_unknown_kid)
+                .with_cosignature_policy(cosignature_policy(auth));
             info!(
                 algorithm = ?auth.jwt.algorithm,
+                pq_tokens = auth.pq_tokens.as_str(),
                 jwks_url = %url,
                 refresh_on_unknown_kid,
                 "JWT authentication enabled (JWKS)"
@@ -182,6 +190,33 @@ async fn build_token_provider(auth: &AuthConfig) -> anyhow::Result<TokenProvider
         }
         infrastructure::config::JwtKeySource::None => Ok((None, None)),
     }
+}
+
+/// What `auth.pq_tokens` asks of a token verified through `auth.jwt`.
+pub(crate) fn cosignature_policy(auth: &AuthConfig) -> CosignaturePolicy {
+    match auth.pq_tokens {
+        PqMode::Prefer => CosignaturePolicy::Prefer,
+        PqMode::Require => CosignaturePolicy::Require,
+        PqMode::Disable => CosignaturePolicy::Disable,
+    }
+}
+
+/// The ML-DSA-65 key beside a static classical key, from
+/// `auth.jwt.ml_dsa_public_key_path`; `None` when no path is set.
+pub(crate) fn static_ml_dsa_key(auth: &AuthConfig) -> anyhow::Result<Option<MlDsaKey>> {
+    let Some(path) = auth
+        .jwt
+        .ml_dsa_public_key_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+    else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("failed to read ML-DSA-65 public key at '{path}': {e}"))?;
+    MlDsaKey::from_base64(&text)
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("auth.jwt.ml_dsa_public_key_path '{path}': {e}"))
 }
 
 /// Read, or draw once, the key the agent keeps for itself.

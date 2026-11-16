@@ -20,6 +20,7 @@ ebpfsentinel-warden = { workspace = true }
 anyhow = { workspace = true }
 libc = { workspace = true }
 jsonwebtoken = { workspace = true }
+ml-dsa = { workspace = true }
 aya = { workspace = true }
 aya-obj = { workspace = true }
 object = { workspace = true }

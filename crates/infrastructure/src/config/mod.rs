@@ -731,6 +731,11 @@ impl AgentConfig {
         if self.auth.enabled && !self.auth.jwt.public_key_path.is_empty() {
             validate_key_path(&self.auth.jwt.public_key_path, "auth.jwt.public_key_path")?;
         }
+        if self.auth.enabled
+            && let Some(path) = self.auth.jwt.ml_dsa_public_key_path.as_deref()
+        {
+            validate_key_path(path, "auth.jwt.ml_dsa_public_key_path")?;
+        }
 
         // The interface groups a rule names are resolved here rather than in
         // the rule's own validate: only the whole config knows which group
@@ -966,6 +971,34 @@ impl AgentConfig {
                     field: "auth".to_string(),
                     message: "cannot enable both JWT and OIDC auth simultaneously".to_string(),
                 });
+            }
+
+            // `require` refuses every token without a cosignature that
+            // verifies. With no key to verify one against, that is every
+            // token, and with no `auth.jwt` it governs nothing: both are a
+            // configuration that does not say what its author meant.
+            if self.auth.pq_tokens == PqMode::Require {
+                let no_key = matches!(jwt_source, JwtKeySource::Pem { .. })
+                    && self
+                        .auth
+                        .jwt
+                        .ml_dsa_public_key_path
+                        .as_deref()
+                        .is_none_or(str::is_empty);
+                if !has_jwt || no_key {
+                    return Err(ConfigError::Validation {
+                        field: "auth.pq_tokens".to_string(),
+                        message: if has_jwt {
+                            "require with a static `auth.jwt.public_key_path` needs \
+                             `auth.jwt.ml_dsa_public_key_path`, or every token is refused"
+                                .to_string()
+                        } else {
+                            "require applies to tokens verified through `auth.jwt`, \
+                             and none is configured"
+                                .to_string()
+                        },
+                    });
+                }
             }
 
             // A file naming no method is the common case now that
@@ -4482,6 +4515,32 @@ auth:
         let err = AgentConfig::from_yaml(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("both"), "error: {msg}");
+    }
+
+    #[test]
+    fn auth_pq_tokens_require_needs_a_key_to_verify_against() {
+        let base = "agent:\n  interfaces: [eth0]\nauth:\n  enabled: true\n  pq_tokens: require\n";
+        let pem_only = format!("{base}  jwt:\n    public_key_path: /etc/ebpfsentinel/k.pem\n");
+        let msg = AgentConfig::from_yaml(&pem_only).unwrap_err().to_string();
+        assert!(msg.contains("ml_dsa_public_key_path"), "error: {msg}");
+        let pem_and_key =
+            format!("{pem_only}    ml_dsa_public_key_path: /etc/ebpfsentinel/k.mldsa\n");
+        assert!(AgentConfig::from_yaml(&pem_and_key).is_ok());
+        let jwks = format!(
+            "{base}  jwt:\n    algorithm: EdDSA\n    jwks_url: https://dashboard:3000/.well-known/jwks.json\n"
+        );
+        let config = AgentConfig::from_yaml(&jwks).unwrap();
+        assert_eq!(config.auth.pq_tokens, PqMode::Require);
+        let keys_only =
+            format!("{base}  api_keys:\n    - name: a\n      key: sk-a\n      role: admin\n");
+        let msg = AgentConfig::from_yaml(&keys_only).unwrap_err().to_string();
+        assert!(msg.contains("auth.jwt"), "error: {msg}");
+    }
+
+    #[test]
+    fn auth_pq_tokens_defaults_to_prefer() {
+        let config: AuthConfig = serde_norway::from_str("enabled: false\n").unwrap();
+        assert_eq!(config.pq_tokens, PqMode::Prefer);
     }
 
     #[test]

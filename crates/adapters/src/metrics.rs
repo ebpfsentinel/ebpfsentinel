@@ -3485,6 +3485,12 @@ mod tests {
                 capability: "bpf_lsm".into(),
             })
             .set(1);
+        // Read at scrape time from the process-wide handshake ledger, so the
+        // series is on the wire only once some link has completed one.
+        crate::tls::record(
+            "populated-registry",
+            tokio_rustls::rustls::NamedGroup::X25519,
+        );
     }
 
     #[test]

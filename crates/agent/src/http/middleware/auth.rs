@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
+use ports::secondary::auth_provider::COSIGNATURE_HEADER;
 
 use super::super::error::ApiError;
 use super::super::state::AppState;
@@ -12,6 +13,9 @@ use super::super::state::AppState;
 /// Supports two authentication methods (tried in order):
 /// 1. `Authorization: Bearer <token>` - JWT/OIDC tokens
 /// 2. `X-API-Key: <key>` - static API keys
+///
+/// A token's post-quantum cosignature, when sent, rides
+/// `X-Ebpfsentinel-Token-Cosignature` and is handed to the provider with it.
 ///
 /// When no `auth_provider` is configured in state, requests pass through
 /// (backward compatible - auth disabled).
@@ -26,7 +30,11 @@ pub async fn jwt_auth_middleware(
     };
 
     let token = extract_token(&request)?;
-    let claims = auth_provider.validate_token(token).await?;
+    let cosignature = request
+        .headers()
+        .get(COSIGNATURE_HEADER)
+        .and_then(|v| v.to_str().ok());
+    let claims = auth_provider.validate_cosigned(token, cosignature).await?;
     request.extensions_mut().insert(claims);
 
     Ok(next.run(request).await)
@@ -275,6 +283,48 @@ mod tests {
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Admits a token only with the cosignature `pq` beside it.
+    struct CosignedOnly;
+    #[async_trait]
+    impl AuthProvider for CosignedOnly {
+        async fn validate_token(&self, token: &str) -> Result<JwtClaims, AuthError> {
+            self.validate_cosigned(token, None).await
+        }
+        async fn validate_cosigned(
+            &self,
+            token: &str,
+            cosignature: Option<&str>,
+        ) -> Result<JwtClaims, AuthError> {
+            if cosignature == Some("pq") {
+                AlwaysOkProvider.validate_token(token).await
+            } else {
+                Err(AuthError::TokenInvalid("no cosignature".to_string()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_cosignature_header_reaches_the_provider() {
+        for (header, expected) in [
+            (Some("pq"), StatusCode::OK),
+            (Some("other"), StatusCode::UNAUTHORIZED),
+            (None, StatusCode::UNAUTHORIZED),
+        ] {
+            let router = build_test_router(make_test_state(Some(Arc::new(CosignedOnly))));
+            let mut req = HttpRequest::builder()
+                .uri("/protected")
+                .header("Authorization", "Bearer header.payload.signature");
+            if let Some(value) = header {
+                req = req.header("X-Ebpfsentinel-Token-Cosignature", value);
+            }
+            let resp = router
+                .oneshot(req.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), expected, "cosignature {header:?}");
+        }
     }
 
     /// Handler that extracts claims from extensions and returns the subject.
