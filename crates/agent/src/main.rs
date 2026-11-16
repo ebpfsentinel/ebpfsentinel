@@ -768,6 +768,7 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
                     commands::cmd_tls_handshakes(&client, output, limit).await
                 }
                 TlsCommand::Posture => commands::cmd_tls_posture(&client, output).await,
+                TlsCommand::Links => commands::cmd_tls_links(&client, output).await,
             }
         }
 

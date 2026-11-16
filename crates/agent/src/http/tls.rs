@@ -11,7 +11,7 @@ use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::server::TlsStream;
 
-pub use adapters::tls::{build_crypto_provider, install_pq_provider, outbound_mode};
+pub use adapters::tls::{build_crypto_provider, install_pq_provider};
 
 /// Load a rustls [`ServerConfig`] with PQ-hybrid key exchange support.
 ///

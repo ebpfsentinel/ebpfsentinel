@@ -3033,8 +3033,10 @@ pub fn start_domain_reputation(
 ///
 /// Returns an error when a syslog or CEF sink that was asked for cannot be
 /// built, naming the path: a sink silently not built is how an estate
-/// discovers at audit time that nothing was exported.
-pub fn start_flow_export(
+/// discovers at audit time that nothing was exported. Under
+/// `outbound_pq_mode: require`, also when a TLS collector answers but offers
+/// no post-quantum key exchange.
+pub async fn start_flow_export(
     config: &AgentConfig,
     workloads: &application::workload_resolver::WorkloadResolver,
     metrics: &Arc<AgentMetrics>,
@@ -3081,13 +3083,23 @@ pub fn start_flow_export(
             &node_name,
             env!("CARGO_PKG_VERSION"),
             config.flow_export.sampling,
-            config.agent.tls.pq_mode,
+            config.agent.tls.effective_outbound_pq_mode(),
         ) {
-            Ok(built) => sinks.extend(
-                built
-                    .into_iter()
-                    .map(|sink| sink as Arc<dyn ports::secondary::flow_sink_port::FlowSink>),
-            ),
+            Ok(built) => {
+                for sink in &built {
+                    if let Err(error) = sink.check_policy().await {
+                        anyhow::bail!(
+                            "flow export sink {} refused: {error}",
+                            ports::secondary::flow_sink_port::FlowSink::name(sink.as_ref())
+                        );
+                    }
+                }
+                sinks.extend(
+                    built
+                        .into_iter()
+                        .map(|sink| sink as Arc<dyn ports::secondary::flow_sink_port::FlowSink>),
+                );
+            }
             Err(error) => {
                 anyhow::bail!("flow export sink could not be built: {error}");
             }

@@ -93,9 +93,14 @@ agent:
   #   key_path: /etc/ebpfsentinel/tls/tls.key
   #   pq_mode: prefer        # prefer | require | disable (post-quantum hybrid X25519MLKEM768)
   #   allow_tls12: false      # default: TLS 1.3 only. Set true for legacy clients.
+  #   outbound_pq_mode: prefer  # what the agent's own clients dial with
   # The hybrid group is TLS 1.3 only, so allow_tls12 and pq_mode: require are
   # refused together. "require" governs inbound clients; outbound connections
-  # keep the classical fallback so CTI feeds and webhooks stay reachable.
+  # keep the classical fallback so CTI feeds and webhooks stay reachable,
+  # unless outbound_pq_mode: require is written out. Then every link the agent
+  # dials is hybrid only, a TLS flow collector that cannot answer the hybrid
+  # group stops start-up with the reason, and any other peer is refused per
+  # handshake. GET /api/v1/crypto/posture lists each link and its policy.
 
   # gRPC reflection - disabled by default (prevents unauthenticated API schema enumeration).
   # Enable only for development/debugging.

@@ -47,6 +47,8 @@ const BACKOFF_FLOOR: Duration = Duration::from_secs(1);
 /// The longest wait between two attempts, so a collector that comes back is
 /// noticed in the same minute.
 const BACKOFF_CEILING: Duration = Duration::from_secs(60);
+/// How long the startup policy check waits on a collector, per step.
+const POLICY_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long to wait before the next attempt, doubling with each failure.
 fn backoff_for(consecutive_failures: u32) -> Duration {
@@ -98,6 +100,8 @@ pub struct TextOptions {
     pub device_version: String,
     /// The exporter's sampling rate, written only where it is not one.
     pub sampling: u32,
+    /// The key exchange policy a TLS target is dialled with.
+    pub pq_mode: PqMode,
 }
 
 /// The open socket, or nothing.
@@ -227,6 +231,7 @@ impl TextSink {
             hostname: hostname.to_string(),
             device_version: device_version.to_string(),
             sampling,
+            pq_mode,
         };
         Ok(config
             .targets
@@ -292,7 +297,10 @@ impl TextSink {
                     .connect(server_name, stream)
                     .await
                     .map_err(|error| {
-                        DomainError::EngineError(format!("tls handshake failed: {error}"))
+                        DomainError::EngineError(crate::tls::explain_handshake_failure(
+                            self.options.pq_mode,
+                            &error,
+                        ))
                     })?;
                 Connection::Tls(Box::new(stream))
             }
@@ -300,6 +308,60 @@ impl TextSink {
         state.connection = Some(connection);
         info!(sink = %self.name, "flow sink connected");
         Ok(())
+    }
+
+    /// Under `require`, complete one handshake with a TLS target before the
+    /// agent starts, so a collector that cannot answer the hybrid group is
+    /// found now rather than at the first record.
+    ///
+    /// A collector that is not reachable is not an error here: it may come
+    /// up later, and the handshake that refuses it then says why.
+    ///
+    /// # Errors
+    ///
+    /// The collector completed TCP but turned down every group offered.
+    pub async fn check_policy(&self) -> Result<(), DomainError> {
+        if self.transport != FlowTransport::Tls || self.options.pq_mode != PqMode::Require {
+            return Ok(());
+        }
+        let Some(config) = self.tls.clone() else {
+            return Ok(());
+        };
+        let reached = async {
+            let destination = self.resolve().await?;
+            let server_name = ServerName::try_from(host_of(&self.address).to_string())
+                .map_err(|error| DomainError::EngineError(error.to_string()))?;
+            Ok::<_, DomainError>((server_name, tcp_stream(destination).await?))
+        };
+        let (server_name, stream) = match tokio::time::timeout(POLICY_CHECK_TIMEOUT, reached).await
+        {
+            Ok(Ok(reached)) => reached,
+            Ok(Err(error)) => {
+                warn!(sink = %self.name, %error, "flow collector not reached at startup");
+                return Ok(());
+            }
+            Err(_) => {
+                warn!(sink = %self.name, "flow collector did not answer at startup");
+                return Ok(());
+            }
+        };
+        let handshake = TlsConnector::from(config).connect(server_name, stream);
+        match tokio::time::timeout(POLICY_CHECK_TIMEOUT, handshake).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) if crate::tls::refused_for_want_of_a_shared_group(&error) => {
+                Err(DomainError::EngineError(
+                    crate::tls::explain_handshake_failure(self.options.pq_mode, &error),
+                ))
+            }
+            Ok(Err(error)) => {
+                warn!(sink = %self.name, %error, "flow collector handshake failed at startup");
+                Ok(())
+            }
+            Err(_) => {
+                warn!(sink = %self.name, "flow collector handshake timed out at startup");
+                Ok(())
+            }
+        }
     }
 
     /// Count a failure, drop a dead stream, and arm the backoff.
@@ -380,6 +442,9 @@ fn host_of(address: &str) -> &str {
 /// syslog collector is an internal service, so naming its authority is the
 /// configuration, and an agent that would accept any certificate is an agent
 /// whose flow records go to whoever answers the port first.
+///
+/// `pq_mode` is the agent's outbound policy: under `require` the collector
+/// must answer the hybrid group or the handshake is refused.
 fn client_config(authority: &Path, pq_mode: PqMode) -> Result<ClientConfig, DomainError> {
     let certificates: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(authority)
         .map_err(|error| {
@@ -535,6 +600,7 @@ mod tests {
             hostname: "node-1".to_string(),
             device_version: "0.0.0-dev".to_string(),
             sampling: 1,
+            pq_mode: PqMode::Prefer,
         }
     }
 

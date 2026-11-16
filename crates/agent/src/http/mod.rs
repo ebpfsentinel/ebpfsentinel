@@ -6,6 +6,7 @@ pub mod capture_handler;
 pub mod config_handler;
 pub mod conntrack_handler;
 pub mod coverage_handler;
+pub mod crypto_handler;
 pub mod ddos_handler;
 pub mod dlp_handler;
 pub mod dns_handler;

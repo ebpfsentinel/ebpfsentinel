@@ -6479,6 +6479,45 @@ pub async fn cmd_tls_handshakes(
     Ok(())
 }
 
+pub async fn cmd_tls_links(client: &ApiClient, output: OutputFormat) -> Result<()> {
+    let resp = client.crypto_posture().await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!("Outbound policy: {}", resp.outbound_mode);
+    if resp.all_required {
+        println!("Every link requires the post-quantum hybrid group.");
+    }
+    if resp.links.is_empty() {
+        println!("No link has been built yet.");
+        return Ok(());
+    }
+    println!();
+    println!(
+        "{:<16} {:<9} {:<18} {:>10}",
+        "LINK", "POLICY", "LAST GROUP", "HANDSHAKES"
+    );
+    for link in &resp.links {
+        let handshakes: u64 = link.groups.iter().map(|g| g.handshakes).sum();
+        let last = match (&link.last_group, link.last_post_quantum) {
+            (Some(group), true) => format!("{group} (pq)"),
+            (Some(group), false) => group.clone(),
+            (None, _) => "-".to_string(),
+        };
+        println!(
+            "{:<16} {:<9} {:<18} {:>10}",
+            link.link,
+            link.mode.as_deref().unwrap_or("-"),
+            last,
+            handshakes
+        );
+    }
+    Ok(())
+}
+
 pub async fn cmd_tls_posture(client: &ApiClient, output: OutputFormat) -> Result<()> {
     let resp = client.tls_posture().await?;
 

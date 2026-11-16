@@ -11,6 +11,7 @@ use super::capture_handler;
 use super::config_handler;
 use super::conntrack_handler;
 use super::coverage_handler;
+use super::crypto_handler;
 use super::ddos_handler;
 use super::dlp_handler;
 use super::dns_handler;
@@ -132,6 +133,7 @@ use super::zone_handler;
         tls_handler::tls_status,
         tls_handler::tls_handshakes,
         tls_handler::tls_posture,
+        crypto_handler::crypto_posture,
         threatintel_handler::list_feeds,
         threatintel_handler::refresh_feeds,
         // Ops
@@ -352,6 +354,9 @@ use super::zone_handler;
         tls_handler::NegotiatedSuiteBody,
         tls_handler::PostureCountsBody,
         tls_handler::PostureSharesBody,
+        crypto_handler::CryptoPostureResponse,
+        crypto_handler::LinkPostureBody,
+        crypto_handler::LinkGroupCount,
         threatintel_handler::FeedResponse,
         threatintel_handler::RefreshFeedRequest,
         threatintel_handler::RefreshResponse,

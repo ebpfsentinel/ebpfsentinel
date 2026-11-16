@@ -1970,6 +1970,31 @@ pub struct PostureEdgeBody {
 }
 
 #[derive(Deserialize, Serialize)]
+pub struct LinkGroupCountBody {
+    pub group: String,
+    pub post_quantum: bool,
+    pub handshakes: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct LinkPostureBody {
+    pub link: String,
+    pub mode: Option<String>,
+    pub last_group: Option<String>,
+    pub last_post_quantum: bool,
+    pub last_at_unix: Option<u64>,
+    #[serde(default)]
+    pub groups: Vec<LinkGroupCountBody>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct CryptoPostureResponse {
+    pub outbound_mode: String,
+    pub all_required: bool,
+    pub links: Vec<LinkPostureBody>,
+}
+
+#[derive(Deserialize, Serialize)]
 pub struct TlsPostureResponse {
     pub totals: PostureCountsBody,
     pub evicted_edges: u64,
@@ -4552,6 +4577,15 @@ impl ApiClient {
     pub async fn tls_posture(&self) -> anyhow::Result<TlsPostureResponse> {
         let resp = self
             .request(reqwest::Method::GET, "/api/v1/tls/posture")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    pub async fn crypto_posture(&self) -> anyhow::Result<CryptoPostureResponse> {
+        let resp = self
+            .request(reqwest::Method::GET, "/api/v1/crypto/posture")
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

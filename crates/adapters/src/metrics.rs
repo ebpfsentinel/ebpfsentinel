@@ -3580,6 +3580,11 @@ mod tests {
 
     #[test]
     fn every_registered_family_is_written_from_outside_this_file() {
+        // Families read at scrape time from a ledger kept outside this file
+        // rather than written through a method: the ledger's own tests are
+        // what prove something writes it.
+        const READ_AT_SCRAPE: &[&str] = &["tls_handshakes"];
+
         // A family nothing ever writes is silent on the wire, so a dashboard
         // panel or an alert rule naming it stays empty for ever and reads as
         // an estate with nothing happening rather than as a metric nobody
@@ -3664,11 +3669,6 @@ mod tests {
                     .map_or(text.clone(), |(before, _)| before.to_string())
             })
             .collect();
-
-        // Families read at scrape time from a ledger kept outside this file
-        // rather than written through a method: the ledger's own tests are
-        // what prove something writes it.
-        const READ_AT_SCRAPE: &[&str] = &["tls_handshakes"];
 
         let mut unreached: Vec<&str> = Vec::new();
         for (name, field) in fields.iter().filter(|(n, _)| !READ_AT_SCRAPE.contains(n)) {

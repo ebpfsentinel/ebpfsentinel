@@ -67,6 +67,7 @@ use super::conntrack_handler::{
     conntrack_events, conntrack_status, flush_connections, list_connections,
 };
 use super::coverage_handler::get_ebpf_coverage;
+use super::crypto_handler::crypto_posture;
 use super::ddos_handler::{
     create_ddos_policy, ddos_attacks, ddos_history, ddos_status, delete_ddos_policy,
     list_ddos_policies,
@@ -305,6 +306,7 @@ pub fn build_router(
             .route("/api/v1/tls/status", get(tls_status))
             .route("/api/v1/tls/handshakes", get(tls_handshakes))
             .route("/api/v1/tls/posture", get(tls_posture))
+            .route("/api/v1/crypto/posture", get(crypto_posture))
             .route("/api/v1/threatintel/feeds", get(list_feeds))
             .route("/api/v1/alerts", get(list_alerts))
             .route("/api/v1/alerts/stream", get(stream_alerts))

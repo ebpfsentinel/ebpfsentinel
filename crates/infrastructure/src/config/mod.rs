@@ -2417,6 +2417,29 @@ pub struct TlsConfig {
     /// support TLS 1.3. Note: PQ hybrid key exchange requires TLS 1.3.
     #[serde(default)]
     pub allow_tls12: bool,
+
+    /// Key exchange policy of the connections this agent opens: flow and
+    /// SIEM collectors, threat-intel feeds, webhooks, the OIDC provider.
+    ///
+    /// Unset, it follows `pq_mode` except that `require` keeps the classical
+    /// fallback on the way out, because `pq_mode` says who may reach this
+    /// agent, not who this agent may reach. Set to `require`, every outbound
+    /// client offers `X25519MLKEM768` alone, and a peer that cannot answer it
+    /// is refused: at startup where the peer is configured, at the handshake
+    /// otherwise.
+    #[serde(default)]
+    pub outbound_pq_mode: Option<PqMode>,
+}
+
+impl TlsConfig {
+    /// The policy the agent's own clients dial with.
+    #[must_use]
+    pub fn effective_outbound_pq_mode(&self) -> PqMode {
+        self.outbound_pq_mode.unwrap_or(match self.pq_mode {
+            PqMode::Require => PqMode::Prefer,
+            other => other,
+        })
+    }
 }
 
 /// XDP attachment mode for kernel programs.
@@ -2476,6 +2499,18 @@ pub enum PqMode {
     Require,
     /// Classical only - no PQ key exchange offered.
     Disable,
+}
+
+impl PqMode {
+    /// The name the configuration spells it with.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prefer => "prefer",
+            Self::Require => "require",
+            Self::Disable => "disable",
+        }
+    }
 }
 
 fn default_log_level() -> LogLevel {
@@ -4685,6 +4720,42 @@ agent:
                 .unwrap_or_else(|e| panic!("pq_mode {mode} should accept TLS 1.2: {e}"));
             assert!(config.agent.tls.allow_tls12);
         }
+    }
+
+    #[test]
+    fn the_outbound_policy_follows_the_listener_unless_written_out() {
+        let tls = |pq_mode, outbound_pq_mode| TlsConfig {
+            pq_mode,
+            outbound_pq_mode,
+            ..TlsConfig::default()
+        };
+        assert_eq!(
+            tls(PqMode::Prefer, None).effective_outbound_pq_mode(),
+            PqMode::Prefer
+        );
+        assert_eq!(
+            tls(PqMode::Require, None).effective_outbound_pq_mode(),
+            PqMode::Prefer
+        );
+        assert_eq!(
+            tls(PqMode::Disable, None).effective_outbound_pq_mode(),
+            PqMode::Disable
+        );
+        assert_eq!(
+            tls(PqMode::Prefer, Some(PqMode::Require)).effective_outbound_pq_mode(),
+            PqMode::Require
+        );
+
+        let config = AgentConfig::from_yaml(
+            "
+agent:
+  interfaces: [eth0]
+  tls:
+    outbound_pq_mode: require
+",
+        )
+        .expect("outbound_pq_mode parses");
+        assert_eq!(config.agent.tls.outbound_pq_mode, Some(PqMode::Require));
     }
 
     #[test]

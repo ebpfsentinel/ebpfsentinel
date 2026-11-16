@@ -54,3 +54,11 @@ agent:
     # with allow_tls12: true - that pair leaves a TLS 1.2 client no usable key
     # exchange, and it is refused when this file is read.
     pq_mode: prefer
+
+    # What the agent's own clients dial with: feeds, webhooks, identity
+    # providers, OTLP, SMTP, the flow export collector. Left out, it follows
+    # pq_mode with "require" read as "prefer". Written as "require", every one
+    # of those links is hybrid only: a TLS flow collector that only speaks
+    # classical key exchange stops start-up and says so, any other peer is
+    # refused at its handshake with the same reason.
+    # outbound_pq_mode: require

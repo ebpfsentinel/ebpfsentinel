@@ -21,7 +21,10 @@ use tokio_rustls::rustls::crypto::{
     aws_lc_rs,
 };
 use tokio_rustls::rustls::ffdhe_groups::FfdheGroup;
-use tokio_rustls::rustls::{Error, NamedGroup, ProtocolVersion, SupportedProtocolVersion};
+use tokio_rustls::rustls::{
+    AlertDescription, Error, NamedGroup, PeerIncompatible, ProtocolVersion,
+    SupportedProtocolVersion,
+};
 
 /// The link every client built without a provider of its own is counted
 /// under: feeds, webhooks, OIDC discovery and JWKS, cluster calls.
@@ -39,18 +42,17 @@ pub const LINK_FLOW_EXPORT: &str = "flow-export";
 /// that every outbound connection built without an explicit provider - a feed
 /// fetch, a webhook, an OIDC discovery, an mTLS cluster call - offers the
 /// hybrid group too, and is counted under [`LINK_OUTBOUND`].
-pub fn install_pq_provider(pq_mode: PqMode) {
-    let outbound = outbound_mode(pq_mode);
+///
+/// `outbound` is the policy the agent's own clients dial with, as
+/// `TlsConfig::effective_outbound_pq_mode` derives it: `require` here means a
+/// server without hybrid key exchange is refused.
+pub fn install_pq_provider(outbound: PqMode) {
     *INSTALLED_OUTBOUND
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = Some(outbound);
     let provider = build_crypto_provider(LINK_OUTBOUND, outbound);
     let _ = provider.install_default();
-    tracing::info!(
-        ?pq_mode,
-        ?outbound,
-        "PQ CryptoProvider installed for outbound TLS"
-    );
+    tracing::info!(?outbound, "PQ CryptoProvider installed for outbound TLS");
 }
 
 static INSTALLED_OUTBOUND: Mutex<Option<PqMode>> = Mutex::new(None);
@@ -59,32 +61,15 @@ static INSTALLED_OUTBOUND: Mutex<Option<PqMode>> = Mutex::new(None);
 /// where nothing installed one (a unit test that never ran start-up).
 ///
 /// A client that builds its own configuration under a link of its own - a
-/// SIEM exporter, the interception proxy's upstream half - takes this, so it
-/// offers what the process default offers and is still counted apart.
+/// SIEM exporter, a flow collector, the interception proxy's upstream half -
+/// takes this, so it offers what the process default offers and is still
+/// counted apart.
 #[must_use]
 pub fn installed_outbound_mode() -> PqMode {
     INSTALLED_OUTBOUND
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .unwrap_or(PqMode::Prefer)
-}
-
-/// Translate the listener's PQ policy into the one the agent's own clients use.
-///
-/// `pq_mode` states which clients the listener accepts. Outbound connections
-/// are the opposite side of that decision: threat-intel feeds, webhooks, SIEM
-/// endpoints and the OIDC provider are servers this agent dials, and offering
-/// `X25519MLKEM768` alone would make every one of them that lacks hybrid key
-/// exchange unreachable, which today is nearly all of them. `require` therefore
-/// keeps the classical fallback on the way out while still preferring hybrid;
-/// only `disable`, which is a statement about PQ itself rather than about
-/// inbound clients, takes the hybrid group off the wire in both directions.
-#[must_use]
-pub fn outbound_mode(pq_mode: PqMode) -> PqMode {
-    match pq_mode {
-        PqMode::Require => PqMode::Prefer,
-        other => other,
-    }
 }
 
 /// Build a [`CryptoProvider`] with key exchange groups ordered by PQ mode,
@@ -111,15 +96,59 @@ pub fn build_crypto_provider(link: &'static str, pq_mode: PqMode) -> CryptoProvi
         PqMode::Disable => &[aws_lc_rs::kx_group::X25519, aws_lc_rs::kx_group::SECP256R1],
     };
     provider.kx_groups = groups.iter().map(|g| recorded(link, *g)).collect();
+    MODES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(link, pq_mode);
 
     provider
 }
 
-/// The provider the agent's own clients dial with, as an [`Arc`] ready for a
-/// `*_with_provider` builder.
+/// The provider a client of the agent's dials with under `link`, as an
+/// [`Arc`] ready for a `*_with_provider` builder. `outbound` is the client
+/// policy itself, usually [`installed_outbound_mode`].
 #[must_use]
-pub fn client_provider(link: &'static str, pq_mode: PqMode) -> Arc<CryptoProvider> {
-    Arc::new(build_crypto_provider(link, outbound_mode(pq_mode)))
+pub fn client_provider(link: &'static str, outbound: PqMode) -> Arc<CryptoProvider> {
+    Arc::new(build_crypto_provider(link, outbound))
+}
+
+/// Whether a failed handshake is a peer turning down every group offered,
+/// which is what a classical-only server does when this side offered
+/// `X25519MLKEM768` alone.
+///
+/// Reads the rustls error out of the I/O error `tokio-rustls` hands back.
+#[must_use]
+pub fn refused_for_want_of_a_shared_group(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<Error>())
+        .is_some_and(|inner| {
+            matches!(
+                inner,
+                Error::AlertReceived(
+                    AlertDescription::HandshakeFailure
+                        | AlertDescription::IllegalParameter
+                        | AlertDescription::InsufficientSecurity
+                ) | Error::PeerIncompatible(PeerIncompatible::NoKxGroupsInCommon)
+            )
+        })
+}
+
+/// What a handshake failure means to the operator, said in the link's terms.
+///
+/// Under `require` a peer that answered with a refusal is taken to have no
+/// hybrid key exchange, and the message names the setting that refused it;
+/// anything else is the error as rustls put it.
+#[must_use]
+pub fn explain_handshake_failure(mode: PqMode, error: &std::io::Error) -> String {
+    if mode == PqMode::Require && refused_for_want_of_a_shared_group(error) {
+        format!(
+            "the peer offers no post-quantum key exchange and this link requires \
+             X25519MLKEM768 (outbound_pq_mode: require), so it was refused: {error}"
+        )
+    } else {
+        format!("tls handshake failed: {error}")
+    }
 }
 
 /// The name a group is reported under: the IANA name rustls knows it by, or
@@ -195,6 +224,63 @@ pub fn handshake_counts() -> Vec<HandshakeCount> {
         })
         .collect()
 }
+
+/// One link as this process built it and as it has run since.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkPosture {
+    /// The link.
+    pub link: &'static str,
+    /// The policy its provider was built with; `None` for a link that
+    /// counted a handshake without this process recording its policy.
+    pub mode: Option<PqMode>,
+    /// The last handshake it completed.
+    pub last: Option<LastHandshake>,
+    /// Its handshakes by group since the process started.
+    pub handshakes: Vec<(NamedGroup, u64)>,
+}
+
+/// Every link a provider was built for or a handshake completed on, sorted
+/// by name: the agent's own crypto posture.
+#[must_use]
+pub fn link_posture() -> Vec<LinkPosture> {
+    let modes = MODES.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let ledger = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut links: BTreeMap<&'static str, LinkPosture> = modes
+        .into_iter()
+        .map(|(link, mode)| {
+            (
+                link,
+                LinkPosture {
+                    link,
+                    mode: Some(mode),
+                    last: None,
+                    handshakes: Vec::new(),
+                },
+            )
+        })
+        .collect();
+    for (&(link, code), &count) in &ledger.counts {
+        links
+            .entry(link)
+            .or_insert_with(|| LinkPosture {
+                link,
+                mode: None,
+                last: None,
+                handshakes: Vec::new(),
+            })
+            .handshakes
+            .push((NamedGroup::from(code), count));
+    }
+    for (&link, &last) in &ledger.last {
+        if let Some(posture) = links.get_mut(link) {
+            posture.last = Some(last);
+        }
+    }
+    links.into_values().collect()
+}
+
+/// The policy each link's provider was last built with.
+static MODES: Mutex<BTreeMap<&'static str, PqMode>> = Mutex::new(BTreeMap::new());
 
 /// The last handshake a link completed, if it completed one.
 #[must_use]
@@ -363,18 +449,19 @@ mod tests {
     }
 
     #[test]
-    fn disabling_takes_the_hybrid_group_off_both_directions() {
+    fn disabling_takes_the_hybrid_group_off_the_wire() {
         assert_eq!(group_names(PqMode::Disable), vec!["X25519", "SECP256R1"]);
-        assert_eq!(outbound_mode(PqMode::Disable), PqMode::Disable);
     }
 
     #[test]
-    fn a_required_listener_still_dials_a_classical_server() {
-        assert_eq!(outbound_mode(PqMode::Require), PqMode::Prefer);
-        assert_eq!(
-            group_names(outbound_mode(PqMode::Require)),
-            vec!["X25519MLKEM768", "X25519", "SECP256R1"]
-        );
+    fn a_link_reports_the_policy_it_was_built_with() {
+        let _ = build_crypto_provider("test-posture", PqMode::Require);
+        let posture = link_posture();
+        let link = posture
+            .iter()
+            .find(|l| l.link == "test-posture")
+            .expect("the link is listed once its provider exists");
+        assert_eq!(link.mode, Some(PqMode::Require));
     }
 
     /// The hybrid group exists in TLS 1.3 alone, which is what makes

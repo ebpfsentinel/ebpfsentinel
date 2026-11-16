@@ -1761,7 +1761,7 @@ pub async fn run(
     // ── 6b. Load TLS configuration ─────────────────────────────────
     // Install the PQ-aware CryptoProvider for all outbound TLS (reqwest, lettre)
     // even when server-side TLS is disabled.
-    crate::http::tls::install_pq_provider(config.agent.tls.pq_mode);
+    crate::http::tls::install_pq_provider(config.agent.tls.effective_outbound_pq_mode());
 
     let tls_config = if config.agent.tls.enabled {
         let rustls_cfg = load_rustls_config(
@@ -4464,7 +4464,9 @@ pub async fn run(
         &metrics,
         conntrack_event_tx.as_ref(),
         &cancel_token,
-    ) {
+    )
+    .await
+    {
         Ok(Some(handle)) => app_state.flow_export.store(Some(Arc::new(handle))),
         Ok(None) => {}
         Err(error) => anyhow::bail!(error),

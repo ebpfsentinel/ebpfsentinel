@@ -1912,6 +1912,55 @@
         ]
       }
     },
+    "/api/v1/crypto/posture": {
+      "get": {
+        "tags": [
+          "TLS"
+        ],
+        "summary": "`GET /api/v1/crypto/posture` - the key exchange each of the agent's own\nlinks is built to accept and the one it last negotiated.",
+        "operationId": "crypto_posture",
+        "responses": {
+          "200": {
+            "description": "Each link, its key exchange policy and the group it last negotiated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CryptoPostureResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/ddos/attacks": {
       "get": {
         "tags": [
@@ -12150,6 +12199,32 @@
           }
         }
       },
+      "CryptoPostureResponse": {
+        "type": "object",
+        "description": "The agent's own links.",
+        "required": [
+          "outbound_mode",
+          "all_required",
+          "links"
+        ],
+        "properties": {
+          "all_required": {
+            "type": "boolean",
+            "description": "Whether every link with a recorded policy requires the hybrid group."
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinkPostureBody"
+            },
+            "description": "Every link, sorted by name."
+          },
+          "outbound_mode": {
+            "type": "string",
+            "description": "The policy the agent's own clients dial with:\n`agent.tls.outbound_pq_mode`, or what it derives from `pq_mode`."
+          }
+        }
+      },
       "DdosAttackResponse": {
         "type": "object",
         "description": "One flood the detector is tracking, or tracked until it expired.",
@@ -15762,6 +15837,80 @@
           },
           "value": {
             "type": "string"
+          }
+        }
+      },
+      "LinkGroupCount": {
+        "type": "object",
+        "description": "Handshakes one link completed on one group.",
+        "required": [
+          "group",
+          "post_quantum",
+          "handshakes"
+        ],
+        "properties": {
+          "group": {
+            "type": "string",
+            "description": "The group, by its IANA name."
+          },
+          "handshakes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Handshakes completed on it since the process started.",
+            "minimum": 0
+          },
+          "post_quantum": {
+            "type": "boolean",
+            "description": "Whether it carries a post-quantum component."
+          }
+        }
+      },
+      "LinkPostureBody": {
+        "type": "object",
+        "description": "One link.",
+        "required": [
+          "link",
+          "last_post_quantum",
+          "groups"
+        ],
+        "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinkGroupCount"
+            },
+            "description": "Every group it completed a handshake on."
+          },
+          "last_at_unix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When it completed, in seconds since the Unix epoch.",
+            "minimum": 0
+          },
+          "last_group": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The group the last handshake completed on, `null` before the first."
+          },
+          "last_post_quantum": {
+            "type": "boolean",
+            "description": "Whether that group carries a post-quantum component."
+          },
+          "link": {
+            "type": "string",
+            "description": "`api`, `grpc`, `outbound`, `flow-export`, or a link the enterprise\nlayer adds (`ha-peer`, `federation`, `siem-syslog`, ...)."
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`prefer`, `require` or `disable`; `null` when the link counted a\nhandshake but its policy was not recorded."
           }
         }
       },

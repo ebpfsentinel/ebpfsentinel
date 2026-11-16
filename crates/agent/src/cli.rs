@@ -1179,6 +1179,9 @@ pub enum TlsCommand {
     },
     /// Show the cryptographic posture of each edge between workloads
     Posture,
+    /// Show the key exchange policy of each of the agent's own links and
+    /// the group each last negotiated
+    Links,
 }
 
 // ── Exposure ────────────────────────────────────────────────────────────
@@ -3045,6 +3048,18 @@ mod tests {
             cli.command,
             Some(Command::Tls(DomainArgs {
                 command: TlsCommand::Posture,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cli_tls_links() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "tls", "links"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Tls(DomainArgs {
+                command: TlsCommand::Links,
                 ..
             }))
         ));
