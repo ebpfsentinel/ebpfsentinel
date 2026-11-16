@@ -55,15 +55,16 @@ ddos:
     enabled: true
     max_pps: 50
   # Connection tracking carries the TCP-flag guards inside xdp-ratelimit and is
-  # what makes the per-connection counters observable on /metrics. The flood
-  # thresholds are opened wide on purpose: this suite measures the counters, so
-  # a guard dropping the very traffic being counted would hide what it exports.
+  # what makes the per-connection counters observable on /metrics. The RST, FIN
+  # and ACK guards sit at 100 per second per source, far above the suite's
+  # ordinary connections and far below its floods; the half-open guard is
+  # opened wide so the SYN tests count connections rather than drops.
   connection_tracking:
     enabled: true
     half_open_threshold: 1000000
-    rst_threshold: 1000000
-    fin_threshold: 1000000
-    ack_threshold: 1000000
+    rst_threshold: 100
+    fin_threshold: 100
+    ack_threshold: 100
   policies:
     - id: ddos-test-syn
       attack_type: syn_flood

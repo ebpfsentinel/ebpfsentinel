@@ -18,7 +18,7 @@ load '../lib/ebpf_helpers'
 
 setup_file() {
     require_root
-    require_kernel 5 17
+    require_kernel 6 12
     require_tool bpftool
     require_tool ncat
     require_tool jq
@@ -336,7 +336,7 @@ _drive_alert_traffic() {
     }
 }
 
-@test "throttle window limits alert rate" {
+@test "the alerting throttle configured in the file is in force" {
     require_root
 
     local body
@@ -344,10 +344,13 @@ _drive_alert_traffic() {
     _load_http_status
     [ "$HTTP_STATUS" = "200" ]
 
-    # Verify throttle config exists
-    local throttle
-    throttle="$(echo "$body" | jq '.alerting.throttle_window_secs // .alerting.throttle_max // empty' 2>/dev/null)" || true
-    [ -n "$throttle" ] || true  # Config may vary
+    local window max
+    window="$(echo "$body" | jq -r '.alerting.throttle_window_secs' 2>/dev/null)" || window=""
+    max="$(echo "$body" | jq -r '.alerting.throttle_max' 2>/dev/null)" || max=""
+    [ "$window" = "60" ] && [ "$max" = "1000" ] || {
+        echo "alerting throttle in force: window ${window}, max ${max}" >&2
+        return 1
+    }
 }
 
 @test "alert filtering by event_type" {
@@ -378,9 +381,14 @@ _drive_alert_traffic() {
     _load_http_status
     [ "$HTTP_STATUS" = "200" ]
 
-    local count
-    count="$(echo "$body" | jq 'if type == "object" then (.alerts // []) | length else length end' 2>/dev/null)" || count="0"
-    [ "${count:-0}" -ge 0 ]
+    # The suite raised alerts above; the total counts at least the page.
+    local total page
+    total="$(echo "$body" | jq -r '.total' 2>/dev/null)" || total=""
+    page="$(echo "$body" | jq '.alerts | length' 2>/dev/null)" || page=0
+    [ "${page:-0}" -ge 1 ] && [ "${total:-0}" -ge "$page" ] || {
+        echo "alert total ${total} for a page of ${page}" >&2
+        return 1
+    }
 }
 
 # ── MITRE coverage sweep ───────────────────────────────────────────

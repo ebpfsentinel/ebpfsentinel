@@ -215,7 +215,6 @@ masking:
   - "no alerts emitted during reload cycle - duplication check N/A"
   - "no alerts generated - cannot verify GeoIP enrichment"
   - "no alerts generated - traffic may not have matched a country-deny rule"
-  - "no blacklist entries to check TTL on"
   - "no broker socket to probe"
   - "no delivery recorded yet"
   - "no real HTTP load generator (vegeta/k6/wrk) on this host"

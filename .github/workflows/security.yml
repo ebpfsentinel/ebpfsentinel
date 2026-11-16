@@ -150,6 +150,12 @@ jobs:
         run: cargo +nightly fuzz run fuzz_ebpf_map_entries -- -max_len=4096 -max_total_time=30
       - name: Fuzz cluster address plan
         run: cargo +nightly fuzz run fuzz_clusterip_plan -- -max_len=2048 -max_total_time=30
+      - name: Fuzz Go build information reader
+        run: cargo +nightly fuzz run fuzz_go_buildinfo -- -max_len=65536 -max_total_time=30
+      - name: Fuzz DNS over TCP parser
+        run: cargo +nightly fuzz run fuzz_dns_tcp -- -max_len=4096 -max_total_time=30
+      - name: Fuzz Docker events and proc readers
+        run: cargo +nightly fuzz run fuzz_container_events -- -max_len=8192 -max_total_time=30
 
   # ── SBOM generation ──────────────────────────────────────────────
   sbom:

@@ -20,7 +20,7 @@ load '../lib/helpers'
 load '../lib/ebpf_helpers'
 
 setup_file() {
-    require_kernel 5 15
+    require_kernel 6 12
     require_tool curl
     require_tool jq
 

@@ -575,14 +575,15 @@ send_icmp_from_ns() {
     ping -c "$count" -W 1 -i 0.2 "$dst" 2>/dev/null || true
 }
 
-# hping3_flood_from_ns <dst_ip> <dst_port> [count] [interval]
+# hping3_flood_from_ns <dst_ip> <dst_port> [count] [interval] [flags]
 hping3_flood_from_ns() {
     local dst="${1:?usage: hping3_flood_from_ns <dst_ip> <dst_port>}"
     local port="${2:?usage: hping3_flood_from_ns <dst_ip> <dst_port>}"
     local count="${3:-100}"
     local interval="${4:-u1000}"   # microseconds between packets
+    local flags="${5:--S}"         # TCP flags: -S, -R, -F, -A
 
-    sudo hping3 -S -p "$port" -c "$count" -i "$interval" "$dst" 2>/dev/null || true
+    sudo hping3 "$flags" -p "$port" -c "$count" -i "$interval" "$dst" >/dev/null 2>&1 || true
 }
 
 # iperf3_from_ns <dst_ip> [duration_secs] [protocol_flag] [extra_args...]

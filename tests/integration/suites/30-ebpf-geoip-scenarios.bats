@@ -16,7 +16,7 @@ _require_geoip_mmdb() {
 
 setup_file() {
     require_root
-    require_kernel 5 17
+    require_kernel 6 12
     require_tool bpftool
 
     export PROJECT_ROOT

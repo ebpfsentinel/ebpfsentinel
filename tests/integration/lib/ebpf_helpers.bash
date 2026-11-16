@@ -275,15 +275,16 @@ send_icmp_from_ns() {
         ping -c "$count" -W 1 -i 0.2 "$dst" 2>/dev/null || true
 }
 
-# hping3_flood_from_ns <dst_ip> <dst_port> [count] [interval]
+# hping3_flood_from_ns <dst_ip> <dst_port> [count] [interval] [flags]
 hping3_flood_from_ns() {
     local dst="${1:?usage: hping3_flood_from_ns <dst_ip> <dst_port>}"
     local port="${2:?usage: hping3_flood_from_ns <dst_ip> <dst_port>}"
     local count="${3:-100}"
     local interval="${4:-u1000}"   # microseconds between packets
+    local flags="${5:--S}"         # TCP flags: -S, -R, -F, -A
 
     ip netns exec "$EBPF_TEST_NS" \
-        hping3 -S -p "$port" -c "$count" -i "$interval" "$dst" 2>/dev/null || true
+        hping3 "$flags" -p "$port" -c "$count" -i "$interval" "$dst" >/dev/null 2>&1 || true
 }
 
 # iperf3_from_ns <dst_ip> [duration_secs] [protocol_flag] [extra_args...]
@@ -624,6 +625,51 @@ get_metrics_value() {
     else
         echo "$body" | grep "^${metric}" | head -1 | awk '{print $2}'
     fi
+}
+
+# dump_ebpf_counters <MAP> - every packets_total line of one kernel metrics
+# map, for a failure message to show what the datapath did count.
+dump_ebpf_counters() {
+    curl -sf --max-time "$HTTP_TIMEOUT" "${BASE_URL}/metrics" 2>/dev/null \
+        | grep "interface=\"$1\"" || echo "(no ${1} line on /metrics)"
+}
+
+# The agent copies the kernel counters to /metrics on a poll (every 10
+# seconds, the first one a period after start), so a counter read right after
+# start has no line yet and one read right after a flood still holds the value
+# from before it. The two helpers below wait for the poll instead of guessing.
+
+# ebpf_counter <MAP> <action> - one kernel counter, empty while it has no line.
+ebpf_counter() {
+    get_metrics_value ebpfsentinel_packets_total \
+        "{interface=\"$1\",action=\"$2\"}" 2>/dev/null || true
+}
+
+# wait_for_ebpf_counters <MAP> [max_seconds] - wait for the map's first poll,
+# so a test's "before" is the counter rather than a line not written yet.
+wait_for_ebpf_counters() {
+    local map="$1" max="${2:-25}" i
+    for i in $(seq 1 "$max"); do
+        curl -sf --max-time "$HTTP_TIMEOUT" "${BASE_URL}/metrics" 2>/dev/null \
+            | grep -q "interface=\"${map}\"" && return 0
+        sleep 1
+    done
+    echo "no ${map} line on /metrics after ${max}s" >&2
+    return 1
+}
+
+# ebpf_counter_above <MAP> <action> <before> [max_seconds] - wait until the
+# counter passes <before>, print the last value read (0 when it has no line).
+# Waits past one poll period, so a value still at <before> means the datapath
+# did not count.
+ebpf_counter_above() {
+    local map="$1" action="$2" before="$3" max="${4:-25}" i value=""
+    for i in $(seq 1 "$max"); do
+        value="$(ebpf_counter "$map" "$action")"
+        [ -n "$value" ] && [ "$value" -gt "$before" ] && break
+        sleep 1
+    done
+    echo "${value:-0}"
 }
 
 # wait_for_metric <metric_name> [min_value] [max_attempts] [label_filter]

@@ -23,7 +23,7 @@ load '../lib/ebpf_helpers'
 
 setup_file() {
     require_root
-    require_kernel 5 17
+    require_kernel 6 12
     require_tool bpftool
     require_tool ncat
 
@@ -119,16 +119,18 @@ teardown_file() {
     local listener_pid=$!
     sleep 0.3
 
-    local result
-    result="$(echo "HELLO" | ip netns exec "$EBPF_TEST_NS" \
-        timeout 3 ncat -w 2 "$EBPF_HOST_IP" 9989 2>/dev/null)" || true
-    local exit_code=$?
+    local exit_code=0
+    echo "HELLO" | ip netns exec "$EBPF_TEST_NS" \
+        timeout 3 ncat -w 2 "$EBPF_HOST_IP" 9989 >/dev/null 2>&1 || exit_code=$?
 
     kill "$listener_pid" 2>/dev/null || true
     wait "$listener_pid" 2>/dev/null || true
 
     # Connection should succeed (default policy = pass, no deny rule)
-    [ "$exit_code" -eq 0 ] || [ -n "$result" ]
+    [ "$exit_code" -eq 0 ] || {
+        echo "a port outside the deny range was refused (ncat rc ${exit_code})" >&2
+        return 1
+    }
 }
 
 # ── Wildcard rule matching ───────────────────────────────────────
@@ -282,6 +284,34 @@ teardown_file() {
     local vlan
     vlan="$(echo "$rules" | jq '.[] | select(.id == "fw-vlan-100") | .vlan_id' 2>/dev/null)" || true
     [ "${vlan:-0}" -eq 100 ]
+
+    # VLAN 100 over the test link, tag kept in the frame on both sides so the
+    # XDP program reads it rather than the offloaded copy.
+    ip netns exec "$EBPF_TEST_NS" ip link add link "$EBPF_VETH_NS" name vl100 type vlan id 100
+    ip netns exec "$EBPF_TEST_NS" ip addr add 10.201.0.2/24 dev vl100
+    ip netns exec "$EBPF_TEST_NS" ip link set vl100 up
+    ip netns exec "$EBPF_TEST_NS" ethtool -K "$EBPF_VETH_NS" txvlan off >/dev/null 2>&1 || true
+    ip link add link "$EBPF_VETH_HOST" name vl100 type vlan id 100
+    ip addr add 10.201.0.1/24 dev vl100
+    ip link set vl100 up
+    ethtool -K "$EBPF_VETH_HOST" rxvlan off >/dev/null 2>&1 || true
+
+    ncat -l -k -p 5500 -e /bin/cat &>/dev/null 3>&- &
+    local listener=$!
+    sleep 0.3
+
+    local untagged=0 tagged=0
+    echo HI | ip netns exec "$EBPF_TEST_NS" timeout 3 ncat -w 2 "$EBPF_HOST_IP" 5500 >/dev/null 2>&1 || untagged=$?
+    echo HI | ip netns exec "$EBPF_TEST_NS" timeout 3 ncat -w 2 10.201.0.1 5500 >/dev/null 2>&1 || tagged=$?
+
+    kill "$listener" 2>/dev/null || true
+    wait "$listener" 2>/dev/null || true
+    ip netns exec "$EBPF_TEST_NS" ip link del vl100 2>/dev/null || true
+    ip link del vl100 2>/dev/null || true
+    api_delete /api/v1/firewall/rules/fw-vlan-100 >/dev/null 2>&1 || true
+
+    [ "$untagged" -eq 0 ] || { echo "untagged traffic to 5500 was refused (rc ${untagged})" >&2; return 1; }
+    [ "$tagged" -ne 0 ] || { echo "VLAN 100 traffic to 5500 went through a rule denying it" >&2; return 1; }
 }
 
 @test "Firewall negate source rule created" {

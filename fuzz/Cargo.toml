@@ -179,3 +179,18 @@ doc = false
 name = "fuzz_clusterip_plan"
 path = "fuzz_targets/fuzz_clusterip_plan.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_go_buildinfo"
+path = "fuzz_targets/fuzz_go_buildinfo.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_dns_tcp"
+path = "fuzz_targets/fuzz_dns_tcp.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_container_events"
+path = "fuzz_targets/fuzz_container_events.rs"
+doc = false

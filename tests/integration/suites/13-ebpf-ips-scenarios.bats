@@ -7,7 +7,7 @@ load '../lib/ebpf_helpers'
 
 setup_file() {
     require_root
-    require_kernel 5 17
+    require_kernel 6 12
     require_tool bpftool
     require_tool ncat
 
@@ -114,10 +114,8 @@ teardown_file() {
     auto_count="$(echo "$body" | jq '[.[] | select(.auto_generated == true)] | length' 2>/dev/null)" || true
 
     [ "${auto_count:-0}" -ge 1 ] || {
-        # Some implementations use a different field name
-        local has_entries
-        has_entries="$(echo "$body" | jq 'length' 2>/dev/null)" || true
-        [ "${has_entries:-0}" -ge 1 ]
+        echo "no blacklist entry is marked auto_generated: ${body}" >&2
+        return 1
     }
 }
 
@@ -161,17 +159,17 @@ teardown_file() {
     local count
     count="$(echo "$body" | jq 'length' 2>/dev/null)" || true
 
-    if [ "${count:-0}" -ge 1 ]; then
-        # Check for TTL/expiry field
-        local has_ttl
-        has_ttl="$(echo "$body" | jq '[.[] | select(.ttl_secs != null or .expires_at != null or .duration_secs != null)] | length' 2>/dev/null)" || true
-        [ "${has_ttl:-0}" -ge 1 ] || {
-            # At minimum, entries exist (TTL may be tracked server-side)
-            [ "${count}" -ge 1 ]
-        }
-    else
-        soft_skip "no blacklist entries to check TTL on"
-    fi
+    [ "${count:-0}" -ge 1 ] || {
+        echo "the auto-blacklist test left no entry to read a TTL from" >&2
+        return 1
+    }
+    # An automatic entry expires: its remaining time is a positive number.
+    local timed
+    timed="$(echo "$body" | jq '[.[] | select(.auto_generated == true and (.ttl_remaining_secs // 0) > 0)] | length' 2>/dev/null)" || timed=0
+    [ "${timed:-0}" -ge 1 ] || {
+        echo "no automatic entry carries a remaining TTL: ${body}" >&2
+        return 1
+    }
 }
 
 # ── Extended IPS tests ──────────────────────────────────────────
@@ -183,9 +181,11 @@ teardown_file() {
     body="$(api_get /api/v1/ips/domain-blocks)"
     _load_http_status
 
-    # 200 if domain blocking is enabled; 404/503 acceptable if the feature is
-    # not enabled in the test fixture - either way the agent must not crash.
-    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "404" ] || [ "$HTTP_STATUS" = "503" ]
+    [ "$HTTP_STATUS" = "200" ] || {
+        echo "domain blocks answered ${HTTP_STATUS}: ${body}" >&2
+        return 1
+    }
+    [ "$(echo "$body" | jq -r 'type')" = "array" ]
 }
 
 @test "IPS rule mode override via API" {

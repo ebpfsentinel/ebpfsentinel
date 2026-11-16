@@ -34,10 +34,28 @@ dlp:
 ratelimit:
   enabled: false
 
+# Two feeds served by the suite from TEST-NET-3 (the agent refuses a feed URL
+# on a private or loopback address). Both name the test namespace's address,
+# so it is one indicator held once, and blocked.
 threatintel:
   enabled: true
-  mode: alert
-  feeds: []
+  mode: block
+  feeds:
+    - id: ti-plain
+      name: Suite plaintext feed
+      url: "http://203.0.113.21:18889/plain.txt"
+      format: plaintext
+      comment_prefix: "#"
+      refresh_interval_secs: 3600
+    - id: ti-csv
+      name: Suite CSV feed
+      url: "http://203.0.113.21:18889/feed.csv"
+      format: csv
+      skip_header: true
+      separator: ","
+      ip_field: "address"
+      confidence_field: "score"
+      refresh_interval_secs: 3600
 
 l7:
   enabled: false

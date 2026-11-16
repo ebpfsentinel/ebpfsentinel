@@ -286,7 +286,7 @@ _docker_cmd() {
 
 setup_file() {
     require_root
-    require_kernel 5 17
+    require_kernel 6 12
     require_tool curl
     require_tool jq
 

@@ -7,7 +7,7 @@ load '../lib/ebpf_helpers'
 
 setup_file() {
     require_root
-    require_kernel 5 17
+    require_kernel 6 12
     require_tool bpftool
     require_tool ncat
 
@@ -29,6 +29,9 @@ setup_file() {
         destroy_test_netns 2>/dev/null || true
         { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
     }
+    # The first counter poll lands a period after start: wait for it, so
+    # every "before" below is a counter and not a line not written yet.
+    wait_for_ebpf_counters RATELIMIT_METRICS 30 || return 1
 }
 
 teardown_file() {
@@ -39,6 +42,14 @@ teardown_file() {
 }
 
 # ── Tests ──────────────────────────────────────────────────────────
+
+# _rl_counter <action> - an xdp-ratelimit counter, 0 before its first packet.
+_rl_counter() {
+    local value
+    value="$(get_metrics_value ebpfsentinel_packets_total \
+        "{interface=\"RATELIMIT_METRICS\",action=\"$1\"}")" || value=""
+    echo "${value:-0}"
+}
 
 @test "ratelimit rules loaded via API" {
     require_root
@@ -81,29 +92,21 @@ teardown_file() {
     [ -n "$received" ]
 }
 
-@test "SYN flood triggers rate limiting metrics" {
+@test "a SYN flood past the burst is dropped by xdp-ratelimit" {
     require_root
+    require_tool hping3
 
-    # Check if hping3 is available
-    if ! command -v hping3 &>/dev/null; then
-        # Fallback: use rapid ncat connections
-        for i in $(seq 1 200); do
-            send_tcp_from_ns "$EBPF_HOST_IP" 8888 "FLOOD${i}" 1 &
-        done
-        wait
-    else
-        # Use hping3 for proper SYN flood
-        hping3_flood_from_ns "$EBPF_HOST_IP" 8888 500 u100
-    fi
+    local before after
+    before="$(_rl_counter dropped)"
+    # 500 SYNs at about 10 000 per second against 100 per second, burst 200.
+    hping3_flood_from_ns "$EBPF_HOST_IP" 8888 500 u100
+    after="$(ebpf_counter_above RATELIMIT_METRICS dropped "$before")"
 
-    # Wait for metrics to update
-    sleep 5
-
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-
-    # Check for rate-limit related metrics (drops or rate limit counters)
-    echo "$metrics" | grep -qE "ebpfsentinel_packets|ebpfsentinel_events_dropped|ebpfsentinel_rules_loaded"
+    [ "$after" -gt "$before" ] || {
+        echo "xdp-ratelimit dropped nothing (before ${before}, after ${after})" >&2
+        dump_ebpf_counters RATELIMIT_METRICS >&2
+        return 1
+    }
 }
 
 @test "dynamic strict rule enforces new limit" {
@@ -130,20 +133,20 @@ teardown_file() {
     [ "${strict_rule:-0}" -ge 1 ]
 }
 
-@test "ICMP flood triggers rate limiting" {
+@test "an ICMP flood past the burst is dropped by xdp-ratelimit" {
     require_root
+    require_tool hping3
 
-    # Send ICMP flood from namespace
-    send_icmp_from_ns "$EBPF_HOST_IP" 50 10
+    local before after
+    before="$(_rl_counter dropped)"
+    hping3_flood_from_ns "$EBPF_HOST_IP" 0 500 u100 -1
+    after="$(ebpf_counter_above RATELIMIT_METRICS dropped "$before")"
 
-    # Wait for metrics
-    sleep 3
-
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-
-    # Should have packet-related metrics
-    echo "$metrics" | grep -qE "ebpfsentinel_ratelimit|ebpfsentinel_packets"
+    [ "$after" -gt "$before" ] || {
+        echo "xdp-ratelimit dropped no ICMP (before ${before}, after ${after})" >&2
+        dump_ebpf_counters RATELIMIT_METRICS >&2
+        return 1
+    }
 }
 
 # ── Extended ratelimit tests ────────────────────────────────────
@@ -203,32 +206,21 @@ teardown_file() {
     [ "${remaining:-0}" -eq 0 ]
 }
 
-@test "ratelimit SYN flood triggers rate limiting alert" {
+@test "a source under its rate is passed" {
     require_root
+    require_tool hping3
 
-    if ! command -v hping3 &>/dev/null; then
-        # Fallback without hping3: rapid parallel ncat SYN-like connections
-        for i in $(seq 1 300); do
-            ip netns exec "$EBPF_TEST_NS" \
-                timeout 1 ncat -w 1 "$EBPF_HOST_IP" 8888 </dev/null &>/dev/null &
-        done
-        wait
-    else
-        hping3_flood_from_ns "$EBPF_HOST_IP" 8888 600 u50
-    fi
+    local passed_before passed_after
+    passed_before="$(_rl_counter passed)"
+    # Ten SYNs a second for two seconds: under the rate, all passed.
+    hping3_flood_from_ns "$EBPF_HOST_IP" 8888 20 u100000
+    passed_after="$(ebpf_counter_above RATELIMIT_METRICS passed "$passed_before")"
 
-    # Allow the agent time to process events and emit an alert/metric
-    sleep 5
-
-    # Poll for a ratelimit alert (component = ratelimit)
-    local alert
-    alert="$(poll_for_alert ratelimit 10)" || true
-
-    # Either an alert was raised, or rate-limit drop metrics increased - either is valid
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-
-    [ -n "$alert" ] || echo "$metrics" | grep -qE "ebpfsentinel_packets|ebpfsentinel_events_dropped"
+    [ $((passed_after - passed_before)) -ge 20 ] || {
+        echo "a source under its rate was not passed (before ${passed_before}, after ${passed_after})" >&2
+        dump_ebpf_counters RATELIMIT_METRICS >&2
+        return 1
+    }
 }
 
 @test "ratelimit metrics include drop counters" {
@@ -236,35 +228,10 @@ teardown_file() {
 
     local metrics
     metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-
-    [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_packets|ebpfsentinel_rules_loaded"
-}
-
-# ── Extended ratelimit scenario tests ─────────────────────────────
-
-@test "SYN cookie validation accepts legitimate ACKs" {
-    require_root
-
-    # After SYN flood triggers syncookie mode, legitimate connections should still work
-    # First flood to activate syncookie
-    if command -v hping3 &>/dev/null; then
-        hping3_flood_from_ns "$EBPF_HOST_IP" 8888 200 u100 || true
-        sleep 2
-    fi
-
-    # Then try a legitimate connection
-    ncat -l -p 8889 --max-conns 1 -e /bin/echo &>/dev/null &
-    local listener_pid=$!
-    sleep 0.3
-
-    local result
-    result="$(ip netns exec "$EBPF_TEST_NS" \
-        bash -c 'echo LEGIT | timeout 3 ncat -w 2 '"$EBPF_HOST_IP"' 8889' 2>&1)" || true
-    kill "$listener_pid" 2>/dev/null || true
-
-    # Legitimate traffic should still work (syncookie validates the ACK)
-    [ -n "$result" ] || true  # May or may not pass depending on syncookie state
+    echo "$metrics" | grep -q 'ebpfsentinel_packets_total{interface="RATELIMIT_METRICS",action="dropped"}' || {
+        echo "no xdp-ratelimit drop counter on /metrics" >&2
+        return 1
+    }
 }
 
 @test "sliding_window algorithm via API" {
@@ -280,39 +247,4 @@ teardown_file() {
     assert_json_field "$body" '.algorithm' 'sliding_window'
 
     api_delete /api/v1/ratelimit/rules/rl-sliding-001 >/dev/null 2>&1 || true
-}
-
-@test "country tier rate limit rule via API" {
-    require_root
-
-    local tier='{"id":"rl-country-001","country_codes":["CN","RU"],"rate":10,"burst":20,"algorithm":"token_bucket","enabled":true}'
-    local body
-    body="$(api_post /api/v1/ratelimit/tiers "$tier" 2>/dev/null)"
-    _load_http_status
-    # Tiers endpoint may return 200, 201, or 404 if not supported
-    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ] || [ "$HTTP_STATUS" = "404" ]
-}
-
-@test "ICMP flood triggers rate limit metrics" {
-    require_root
-
-    send_icmp_from_ns "$EBPF_HOST_IP" 200 15 >/dev/null 2>&1 || true
-    sleep 3
-
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-    [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_ratelimit|ebpfsentinel_packets" || true
-}
-
-# ── MITRE coverage sweep ───────────────────────────────────────────
-
-@test "alerts emitted by this suite carry a MITRE technique mapping" {
-    local body count
-    body="$(api_get /api/v1/alerts 2>/dev/null)" || body=""
-    count="$(echo "${body}" | jq -r '.alerts | length' 2>/dev/null)" || count=0
-    if [ "${count:-0}" -lt 1 ]; then
-        soft_skip "no alerts emitted by this suite - MITRE assertion not applicable here"
-    fi
-    assert_alert_has_any_mitre_technique 15
 }

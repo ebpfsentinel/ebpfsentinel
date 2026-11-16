@@ -7,7 +7,7 @@ load '../lib/ebpf_helpers'
 
 setup_file() {
     require_root
-    require_kernel 5 17
+    require_kernel 6 12
     require_tool bpftool
     require_tool ncat
 
@@ -29,6 +29,9 @@ setup_file() {
         destroy_test_netns 2>/dev/null || true
         { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
     }
+    # The first counter poll lands a period after start: wait for it, so
+    # every "before" below is a counter and not a line not written yet.
+    wait_for_ebpf_counters IDS_METRICS 30 || return 1
 }
 
 teardown_file() {
@@ -167,8 +170,12 @@ teardown_file() {
     local metrics
     metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
 
-    # Check for IDS-related metrics
-    echo "$metrics" | grep -qE "ebpfsentinel_ids|ebpfsentinel_alerts|ebpfsentinel_packets"
+    # tc-ids exports its own counters, labelled by its map
+    echo "$metrics" | grep -q 'ebpfsentinel_packets_total{interface="IDS_METRICS",action="total_seen"}' || {
+        echo "no tc-ids counter on /metrics" >&2
+        echo "$metrics" | grep packets_total | head -40 >&2
+        return 1
+    }
 }
 
 # ── Extended IDS tests ──────────────────────────────────────────
@@ -210,8 +217,11 @@ teardown_file() {
 
 # ── Extended IDS tests ────────────────────────────────────────────
 
-@test "IDS sampling rate controls alert volume" {
+@test "a burst of connections matching a rule raises IDS alerts" {
     require_root
+
+    local before
+    before="$(api_get /api/v1/alerts | jq '[.alerts[] | select(.component == "ids" and .dst_port == 4444)] | length' 2>/dev/null)" || before=0
 
     # Send 20 connections to trigger pattern
     for i in $(seq 1 20); do
@@ -224,10 +234,13 @@ teardown_file() {
     body="$(api_get /api/v1/alerts)"
     _load_http_status
     [ "$HTTP_STATUS" = "200" ]
-    # With sampling, we should get fewer alerts than connections
     local count
-    count="$(echo "$body" | jq '[.alerts[] | select(.component == "ids")] | length' 2>/dev/null)" || count="0"
-    [ "${count:-0}" -ge 0 ]  # At least some alerts (sampling may reduce)
+    count="$(echo "$body" | jq '[.alerts[] | select(.component == "ids" and .dst_port == 4444)] | length' 2>/dev/null)" || count="0"
+    [ "${count:-0}" -gt "${before:-0}" ] || {
+        echo "20 connections to 4444 raised no IDS alert (before ${before}, after ${count})" >&2
+        dump_ebpf_counters IDS_METRICS >&2
+        return 1
+    }
 }
 
 @test "IDS unmonitored port generates fewer alerts than monitored port" {
@@ -266,13 +279,16 @@ teardown_file() {
 @test "IDS metrics show processed packet count" {
     require_root
 
+    local before after
+    before="$(get_metrics_value ebpfsentinel_packets_total '{interface="IDS_METRICS",action="total_seen"}')" || before=0
     send_tcp_from_ns "$EBPF_HOST_IP" 8888 "TEST_PAYLOAD" 2 >/dev/null 2>&1 || true
-    sleep 2
+    after="$(ebpf_counter_above IDS_METRICS total_seen "${before:-0}")"
 
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-    [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_ids" || true
+    [ "${after:-0}" -gt "${before:-0}" ] || {
+        echo "tc-ids saw no packet of the connection (before ${before}, after ${after})" >&2
+        dump_ebpf_counters IDS_METRICS >&2
+        return 1
+    }
 }
 
 # ── MITRE coverage sweep ───────────────────────────────────────────

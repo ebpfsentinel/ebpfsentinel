@@ -7,7 +7,7 @@ load '../lib/ebpf_helpers'
 
 setup_file() {
     require_root
-    require_kernel 5 17
+    require_kernel 6 12
     require_tool bpftool
 
     export PROJECT_ROOT
@@ -28,6 +28,9 @@ setup_file() {
         destroy_test_netns 2>/dev/null || true
         { echo "eBPF programs not loaded (degraded mode)" >&2; return 1; }
     }
+    # The first counter poll lands a period after start: wait for it, so
+    # every "before" below is a counter and not a line not written yet.
+    wait_for_ebpf_counters DDOS_METRICS 30 || return 1
 }
 
 teardown_file() {
@@ -77,49 +80,34 @@ teardown_file() {
     [ "$count" -ge 2 ]
 }
 
+# _ddos_counter <action> - an xdp-ratelimit DDoS counter, 0 before its first packet.
+_ddos_counter() {
+    local value
+    value="$(get_metrics_value ebpfsentinel_packets_total \
+        "{interface=\"DDOS_METRICS\",action=\"$1\"}")" || value=""
+    echo "${value:-0}"
+}
+
 # ── ICMP flood detection ─────────────────────────────────────────
 
-@test "ICMP flood triggers DDoS detection metrics" {
+@test "an ICMP flood past max_pps is dropped" {
     require_root
+    require_tool hping3
 
-    # Send a burst of ICMP packets (above threshold of 50 pps)
-    send_icmp_from_ns "$EBPF_HOST_IP" 100 15
+    local before after
+    before="$(_ddos_counter icmp_drop)"
+    # 500 echo requests at about 10 000 per second against max_pps 50.
+    hping3_flood_from_ns "$EBPF_HOST_IP" 0 500 u100 -1
+    after="$(ebpf_counter_above DDOS_METRICS icmp_drop "$before")"
 
-    sleep 3
-
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-
-    [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_ddos|ebpfsentinel_packets"
+    [ "$after" -gt "$before" ] || {
+        echo "the ICMP guard dropped nothing (before ${before}, after ${after})" >&2
+        dump_ebpf_counters DDOS_METRICS >&2
+        return 1
+    }
 }
 
 # ── SYN flood detection ──────────────────────────────────────────
-
-@test "TCP SYN flood triggers DDoS metrics" {
-    require_root
-
-    # Send rapid TCP connections
-    for i in $(seq 1 50); do
-        send_tcp_from_ns "$EBPF_HOST_IP" 8888 "SYN${i}" 1 &
-    done
-    wait
-
-    sleep 3
-
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-
-    [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_ddos|ebpfsentinel_packets"
-}
-
-# Labels of the connection-tracking counter the xdp-ratelimit program bumps for
-# every SYN it files in the connection table. It is a per-packet counter mirrored
-# from the kernel map, so a before/after delta proves the flood crossed the
-# datapath and that the slot really reaches /metrics under its own action name,
-# rather than being folded into a positional label or dropped on the floor.
-DDOS_CONN_TRACKED_LABELS='{interface="DDOS_METRICS",action="conn_tracked"}'
 
 @test "SYN flood grows the DDoS connection-tracking action on /metrics" {
     require_root
@@ -163,82 +151,67 @@ DDOS_CONN_TRACKED_LABELS='{interface="DDOS_METRICS",action="conn_tracked"}'
 @test "DDoS metrics counters present" {
     require_root
 
-    local metrics
+    local metrics action
     metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-
-    [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_ddos|ebpfsentinel_scrub|ebpfsentinel_packets"
+    for action in syn_rcv icmp_drop conn_tracked rst_flood_drops fin_flood_drops ack_flood_drops; do
+        echo "$metrics" | grep -q "ebpfsentinel_packets_total{interface=\"DDOS_METRICS\",action=\"${action}\"}" || {
+            echo "no DDoS counter ${action} on /metrics" >&2
+            return 1
+        }
+    done
 }
 
 # ── TCP flag flood detection ──────────────────────────────────────
 
-@test "DDoS RST flood detection" {
+@test "an RST flood past its guard is dropped" {
     require_root
+    require_tool hping3
 
-    # Send RST-flagged packets from test namespace; ignore errors (tool may be absent)
-    ip netns exec "$EBPF_TEST_NS" hping3 -R -p 8080 -c 200 -i u1000 "$EBPF_HOST_IP" 2>/dev/null || true
+    local before after
+    before="$(_ddos_counter rst_flood_drops)"
+    # About 5 000 per second from one source against a guard of 100.
+    hping3_flood_from_ns "$EBPF_HOST_IP" 8888 600 u200 -R
+    after="$(ebpf_counter_above DDOS_METRICS rst_flood_drops "$before")"
 
-    sleep 3
-
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-
-    [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_ddos|ebpfsentinel_packets"
+    [ "$after" -gt "$before" ] || {
+        echo "the RST guard dropped nothing (before ${before}, after ${after})" >&2
+        dump_ebpf_counters DDOS_METRICS >&2
+        return 1
+    }
 }
 
-@test "DDoS FIN flood detection" {
+@test "a FIN flood past its guard is dropped" {
     require_root
+    require_tool hping3
 
-    ip netns exec "$EBPF_TEST_NS" hping3 -F -p 8080 -c 200 -i u1000 "$EBPF_HOST_IP" 2>/dev/null || true
+    local before after
+    before="$(_ddos_counter fin_flood_drops)"
+    # About 5 000 per second from one source against a guard of 100.
+    hping3_flood_from_ns "$EBPF_HOST_IP" 8888 600 u200 -F
+    after="$(ebpf_counter_above DDOS_METRICS fin_flood_drops "$before")"
 
-    sleep 3
-
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-
-    [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_ddos|ebpfsentinel_packets"
+    [ "$after" -gt "$before" ] || {
+        echo "the FIN guard dropped nothing (before ${before}, after ${after})" >&2
+        dump_ebpf_counters DDOS_METRICS >&2
+        return 1
+    }
 }
 
-@test "DDoS ACK flood detection" {
+@test "an ACK flood past its guard is dropped" {
     require_root
+    require_tool hping3
 
-    ip netns exec "$EBPF_TEST_NS" hping3 -A -p 8080 -c 200 -i u1000 "$EBPF_HOST_IP" 2>/dev/null || true
+    local before after
+    before="$(_ddos_counter ack_flood_drops)"
+    # About 5 000 per second from one source against a guard of 100.
+    hping3_flood_from_ns "$EBPF_HOST_IP" 8888 600 u200 -A
+    after="$(ebpf_counter_above DDOS_METRICS ack_flood_drops "$before")"
 
-    sleep 3
-
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-
-    [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_ddos|ebpfsentinel_packets"
-}
-
-@test "DDoS ICMP flood detection" {
-    require_root
-
-    # High-rate ICMP flood via flood ping
-    ip netns exec "$EBPF_TEST_NS" ping -f -c 500 -W 2 "$EBPF_HOST_IP" 2>/dev/null || true
-
-    sleep 3
-
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-
-    [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_ddos|ebpfsentinel_packets"
-}
-
-# ── Attack history ────────────────────────────────────────────────
-
-@test "DDoS attack history accessible" {
-    require_root
-
-    local body
-    body="$(api_get /api/v1/ddos/attacks/history)"
-    _load_http_status
-    [ "$HTTP_STATUS" = "200" ]
+    [ "$after" -gt "$before" ] || {
+        echo "the ACK guard dropped nothing (before ${before}, after ${after})" >&2
+        dump_ebpf_counters DDOS_METRICS >&2
+        return 1
+    }
 }
 
 # ── Policy CRUD ───────────────────────────────────────────────────
@@ -265,75 +238,6 @@ DDOS_CONN_TRACKED_LABELS='{interface="DDOS_METRICS",action="conn_tracked"}'
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "204" ]
 }
 
-# ── Extended DDoS flood & metrics tests ──────────────────────────
-
-@test "ICMP flood triggers detection and metrics" {
-    require_root
-    require_tool hping3
-
-    # Send 500 rapid ICMP packets
-    ip netns exec "$EBPF_TEST_NS" \
-        hping3 --icmp -c 500 -i u100 "$EBPF_HOST_IP" &>/dev/null || true
-
-    sleep 3
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-    echo "$metrics" | grep -qE "ebpfsentinel_ddos.*icmp" || [ -n "$metrics" ]
-}
-
-@test "RST flood detected by conntrack sub-type" {
-    require_root
-    require_tool hping3
-
-    hping3_flood_from_ns "$EBPF_HOST_IP" 8888 300 u200 "-R" || true
-    sleep 3
-
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-    [ -n "$metrics" ]
-}
-
-@test "FIN flood detected" {
-    require_root
-    require_tool hping3
-
-    hping3_flood_from_ns "$EBPF_HOST_IP" 8888 300 u200 "-F" || true
-    sleep 3
-
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-    [ -n "$metrics" ]
-}
-
-@test "ACK flood detected" {
-    require_root
-    require_tool hping3
-
-    hping3_flood_from_ns "$EBPF_HOST_IP" 8888 300 u200 "-A" || true
-    sleep 3
-
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-    [ -n "$metrics" ]
-}
-
-@test "half-open connection limit enforcement" {
-    require_root
-    require_tool ncat
-
-    # Open 50 half-open connections (SYN only, no ACK completion)
-    for i in $(seq 1 50); do
-        ip netns exec "$EBPF_TEST_NS" \
-            timeout 1 ncat -w 1 "$EBPF_HOST_IP" 8888 </dev/null &>/dev/null &
-    done
-    wait
-
-    sleep 3
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-    [ -n "$metrics" ]
-}
-
 @test "DDoS attack history endpoint returns entries" {
     require_root
 
@@ -355,21 +259,11 @@ DDOS_CONN_TRACKED_LABELS='{interface="DDOS_METRICS",action="conn_tracked"}'
     }
 }
 
-@test "DDoS metrics include all flood types" {
-    require_root
-
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-    [ -n "$metrics" ]
-    # At least some DDoS metrics should exist after the flood tests
-    echo "$metrics" | grep -qE "ebpfsentinel_ddos" || true
-}
-
 # ── Real crafted-packet flood tools (nping / t50) ─────────────────
 #
-# The hping3 tests above assert metric *presence*; these two drive the
-# XDP ratelimit/scrub datapath with real flood generators and assert the
-# observed-packet counter actually *grows*, which is a stronger claim.
+# The hping3 tests above assert each guard's own drop counter; these two
+# drive the XDP ratelimit/scrub datapath with other flood generators and
+# assert the observed-packet counter grows.
 
 # _ddos_packet_metric - sum the agent's observed-packet counters
 # (ebpfsentinel_packets_total across every interface/action) so a before/after
