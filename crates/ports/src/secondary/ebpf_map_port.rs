@@ -19,8 +19,9 @@ pub struct ShadowCounts {
 /// Secondary port for array-based eBPF firewall map operations.
 ///
 /// Provides a bulk-load interface to the kernel `FIREWALL_RULES` and
-/// `FIREWALL_RULES_V6` `Array` maps. Rules are loaded atomically by
-/// writing count=0, entries, then count=n.
+/// `FIREWALL_RULES_V6` `Array` maps. A load is all or nothing per family:
+/// the rules are written beside the ones in force and published by one
+/// write, so on an error the previous set is still the one enforced.
 ///
 /// CIDR-only LPM Trie rules (e.g. `GeoIP` blocking) are handled by the
 /// separate `GeoIpLpmPort` trait.

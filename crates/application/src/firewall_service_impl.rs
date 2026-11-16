@@ -379,7 +379,7 @@ impl FirewallAppService {
     pub fn set_alias_bindings(&mut self, bindings: AliasBindings) {
         let count = bindings.len();
         self.alias_bindings = bindings;
-        self.sync_ebpf_maps();
+        self.sync_or_log("alias bindings");
         tracing::debug!(aliases = count, "firewall alias bindings refreshed");
     }
 
@@ -391,7 +391,7 @@ impl FirewallAppService {
             return;
         }
         self.interface_scope = scope;
-        self.sync_ebpf_maps();
+        self.sync_or_log("interface scope");
     }
 
     /// Return the current operating mode.
@@ -430,7 +430,7 @@ impl FirewallAppService {
         self.map_port = Some(port);
         // The arrays are empty when a program is loaded, and this service is
         // the only writer that knows what each rule becomes in the kernel.
-        self.sync_ebpf_maps();
+        self.sync_or_log("program load");
     }
 
     /// Clear the eBPF map port (program unloaded).
@@ -518,8 +518,9 @@ impl FirewallAppService {
         // moved into the engine, so we don't have to look it back up afterwards.
         let kill_snapshot = rule.clone();
         self.interface_scope.check(&rule)?;
+        let previous = self.engine.rules().to_vec();
         self.engine.add_rule(rule)?;
-        self.sync_ebpf_maps();
+        self.sync_or_restore(previous)?;
         // Tear down any already-established flow the new rule now denies.
         self.enforce_flow_kill(&kill_snapshot);
         self.update_metrics();
@@ -554,8 +555,9 @@ impl FirewallAppService {
             );
             return Ok(());
         }
+        let previous = self.engine.rules().to_vec();
         self.engine.remove_rule(id)?;
-        self.sync_ebpf_maps();
+        self.sync_or_restore(previous)?;
         self.update_metrics();
         tracing::info!(
             id = id.0,
@@ -593,6 +595,7 @@ impl FirewallAppService {
             );
             return Ok(());
         }
+        let previous = self.engine.rules().to_vec();
         let rule = self
             .engine
             .rules_mut()
@@ -601,7 +604,7 @@ impl FirewallAppService {
             .ok_or_else(|| FirewallError::RuleNotFound { id: id.to_string() })?;
         enforce_shadow_rule(rule)?;
         let promoted = rule.clone();
-        self.sync_ebpf_maps();
+        self.sync_or_restore(previous)?;
         self.enforce_flow_kill(&promoted);
         tracing::info!(id = id.0, "shadow rule promoted to enforce");
         Ok(())
@@ -662,8 +665,9 @@ impl FirewallAppService {
         let mut all_rules = self.generate_anti_lockout_rules();
         let user_count = rules.len();
         all_rules.extend(rules);
+        let previous = self.engine.rules().to_vec();
         self.engine.reload(all_rules)?;
-        self.sync_ebpf_maps();
+        self.sync_or_restore(previous)?;
         self.update_metrics();
         tracing::info!(
             rules = user_count,
@@ -687,7 +691,7 @@ impl FirewallAppService {
             }
         }
         if changed {
-            self.sync_ebpf_maps();
+            self.sync_or_log("schedule");
             self.update_metrics();
         }
     }
@@ -1210,9 +1214,35 @@ impl FirewallAppService {
     /// A disabled rule is left out, which is what a schedule switching a rule
     /// off relies on. Rules in shadow mode go to arrays of their own that no
     /// verdict reads.
-    fn sync_ebpf_maps(&mut self) {
+    /// Project the rules onto the kernel and, when the kernel refused them,
+    /// put `previous` back in the engine and in the kernel, so what the API
+    /// lists is what the datapath enforces. The refusal is the caller's error.
+    fn sync_or_restore(&mut self, previous: Vec<FirewallRule>) -> Result<(), DomainError> {
+        let Err(e) = self.sync_ebpf_maps() else {
+            return Ok(());
+        };
+        if let Err(restore) = self.engine.reload(previous) {
+            tracing::error!(error = %restore, "the previous firewall rules could not be restored");
+        } else if let Err(resync) = self.sync_ebpf_maps() {
+            tracing::error!(error = %resync, "the previous firewall rules could not be written back");
+        }
+        Err(e)
+    }
+
+    /// Project the rules where nobody waits for the answer: the previous set
+    /// stays enforced in the kernel and the refusal is logged.
+    fn sync_or_log(&mut self, cause: &str) {
+        if let Err(e) = self.sync_ebpf_maps() {
+            tracing::error!(error = %e, cause, "firewall rules not written, the previous set stays enforced");
+        }
+    }
+
+    /// Write the rules into the kernel maps. Each family is swapped whole or
+    /// not at all, so on an error the kernel enforces the family's previous
+    /// set; the trace index is only replaced when both families took.
+    fn sync_ebpf_maps(&mut self) -> Result<(), DomainError> {
         if self.map_port.is_none() {
-            return;
+            return Ok(());
         }
 
         let mut enforce = KernelRules::default();
@@ -1237,9 +1267,10 @@ impl FirewallAppService {
         }
 
         let Some(ref mut map) = self.map_port else {
-            return;
+            return Ok(());
         };
         let mut index = FirewallTraceIndex::default();
+        let mut refused = None;
 
         // Bulk-load V4
         match map.load_v4_rules(&enforce.v4) {
@@ -1250,7 +1281,7 @@ impl FirewallAppService {
                     index.record_v4(id, entry, placement);
                 }
             }
-            Err(e) => tracing::warn!("failed to load V4 rules into eBPF map: {e}"),
+            Err(e) => refused = Some(e),
         }
 
         // Bulk-load V6
@@ -1260,9 +1291,11 @@ impl FirewallAppService {
                     index.record_v6(id, placement);
                 }
             }
-            Err(e) => tracing::warn!("failed to load V6 rules into eBPF map: {e}"),
+            Err(e) => refused = refused.or(Some(e)),
         }
-        self.trace_index = index;
+        if refused.is_none() {
+            self.trace_index = index;
+        }
 
         match map.load_shadow_rules(&shadow.v4, &shadow.v6) {
             Ok(changed) => {
@@ -1284,6 +1317,7 @@ impl FirewallAppService {
                 };
             }
         }
+        refused.map_or(Ok(()), Err)
     }
 
     /// What every rule in shadow mode has counted since the set of shadow
@@ -1363,6 +1397,9 @@ mod tests {
         shadow_v4: Arc<std::sync::Mutex<Vec<ebpf_common::firewall::FirewallRuleEntry>>>,
         shadow_v6: Arc<std::sync::Mutex<Vec<ebpf_common::firewall::FirewallRuleEntryV6>>>,
         shadow_counts: Arc<std::sync::Mutex<ShadowCounts>>,
+        /// Stands in for a kernel refusing an IPv4 write: the load fails and
+        /// the previous set stays, as the map manager leaves it.
+        refuse_v4: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl FirewallArrayMapPort for RecordingMap {
@@ -1370,6 +1407,9 @@ mod tests {
             &mut self,
             rules: &[ebpf_common::firewall::FirewallRuleEntry],
         ) -> Result<Vec<RulePlacement>, DomainError> {
+            if self.refuse_v4.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(DomainError::EngineError("map write refused".into()));
+            }
             *self.v4.lock().unwrap() = rules.to_vec();
             Ok((0..rules.len())
                 .map(|i| RulePlacement::Array(u32::try_from(i).unwrap()))
@@ -1413,6 +1453,30 @@ mod tests {
         fn read_shadow(&self) -> Result<ShadowCounts, DomainError> {
             Ok(self.shadow_counts.lock().unwrap().clone())
         }
+    }
+
+    #[test]
+    fn a_rule_the_kernel_refuses_is_not_listed_as_loaded() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(map.clone()));
+        svc.add_rule(make_rule("kept", 10)).unwrap();
+
+        map.refuse_v4
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(svc.add_rule(make_rule("refused", 20)).is_err());
+        assert!(
+            svc.reload_rules(vec![make_rule("other", 30)]).is_err(),
+            "a refused reload is the caller's error"
+        );
+        let listed: Vec<_> = svc.list_rules().iter().map(|r| r.id.0.as_str()).collect();
+        assert_eq!(listed, ["kept"], "the API lists what the kernel enforces");
+        assert_eq!(map.v4.lock().unwrap().len(), 1);
+
+        map.refuse_v4
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        svc.add_rule(make_rule("refused", 20)).unwrap();
+        assert_eq!(map.v4.lock().unwrap().len(), 2);
     }
 
     fn shadow(id: &str, priority: u32, action: FirewallAction) -> FirewallRule {

@@ -12,6 +12,45 @@ pub const ACTION_REJECT: u8 = 3;
 /// complexity limits.
 pub const MAX_FIREWALL_RULES: u32 = 4096;
 
+/// Each rule array holds two banks of [`MAX_FIREWALL_RULES`] entries. The
+/// datapath reads one, a reload writes the other, and one write of the
+/// generation word moves every reader from the old set to the new one, so no
+/// packet is ever judged against half of each.
+pub const FIREWALL_RULE_BANKS: u32 = 2;
+
+/// Bit of the generation word naming the bank the datapath reads.
+const RULE_BANK_BIT: u32 = 1 << 31;
+
+/// The generation word a reload publishes: the bank to read and how many
+/// array rules it holds, in one `u32` so a reader never pairs the count of
+/// one set with the entries of another.
+#[must_use]
+pub const fn rule_generation(bank: u32, count: u32) -> u32 {
+    if bank & 1 == 1 {
+        RULE_BANK_BIT | (count & !RULE_BANK_BIT)
+    } else {
+        count & !RULE_BANK_BIT
+    }
+}
+
+/// The bank a generation word names, 0 or 1.
+#[must_use]
+pub const fn generation_bank(generation: u32) -> u32 {
+    generation >> 31
+}
+
+/// How many array rules the bank of a generation word holds.
+#[must_use]
+pub const fn generation_count(generation: u32) -> u32 {
+    generation & !RULE_BANK_BIT
+}
+
+/// The first array slot of a bank.
+#[must_use]
+pub const fn bank_base(bank: u32) -> u32 {
+    (bank & 1) * MAX_FIREWALL_RULES
+}
+
 /// Default policy constants for `FIREWALL_DEFAULT_POLICY` map.
 pub const DEFAULT_POLICY_PASS: u8 = 0;
 pub const DEFAULT_POLICY_DROP: u8 = 1;
@@ -173,7 +212,11 @@ pub struct FwHashKey5Tuple {
     pub dst_port: u16,
     /// IP protocol (6=TCP, 17=UDP).
     pub protocol: u8,
-    pub _pad: [u8; 3],
+    /// Bank of the rule set this entry belongs to, as named by the
+    /// generation word: a reload inserts the new bank's keys before it
+    /// publishes them and removes the old bank's after.
+    pub bank: u8,
+    pub _pad: [u8; 2],
 }
 
 /// Key for protocol+destination-port firewall HashMap lookup.
@@ -189,7 +232,8 @@ pub struct FwHashKeyPort {
     pub dst_port: u16,
     /// IP protocol (6=TCP, 17=UDP).
     pub protocol: u8,
-    pub _pad: u8,
+    /// Bank of the rule set this entry belongs to, as for the 5-tuple key.
+    pub bank: u8,
 }
 
 /// Value for fast-path firewall HashMaps.
@@ -791,6 +835,7 @@ mod tests {
         assert_eq!(mem::offset_of!(FwHashKey5Tuple, src_port), 8);
         assert_eq!(mem::offset_of!(FwHashKey5Tuple, dst_port), 10);
         assert_eq!(mem::offset_of!(FwHashKey5Tuple, protocol), 12);
+        assert_eq!(mem::offset_of!(FwHashKey5Tuple, bank), 13);
     }
 
     #[test]
@@ -802,6 +847,30 @@ mod tests {
     fn test_fw_hash_key_port_offsets() {
         assert_eq!(mem::offset_of!(FwHashKeyPort, dst_port), 0);
         assert_eq!(mem::offset_of!(FwHashKeyPort, protocol), 2);
+        assert_eq!(mem::offset_of!(FwHashKeyPort, bank), 3);
+    }
+
+    #[test]
+    fn a_generation_word_carries_its_bank_and_count_apart() {
+        for bank in [0, 1] {
+            for count in [0, 1, MAX_FIREWALL_RULES] {
+                let word = rule_generation(bank, count);
+                assert_eq!(generation_bank(word), bank);
+                assert_eq!(generation_count(word), count);
+            }
+        }
+        // An empty bank 0 is the word a freshly created map holds.
+        assert_eq!(rule_generation(0, 0), 0);
+    }
+
+    #[test]
+    fn the_two_banks_never_share_a_slot() {
+        assert_eq!(bank_base(0), 0);
+        assert_eq!(bank_base(1), MAX_FIREWALL_RULES);
+        assert_eq!(
+            bank_base(1) + MAX_FIREWALL_RULES,
+            FIREWALL_RULE_BANKS * MAX_FIREWALL_RULES
+        );
     }
 
     #[test]

@@ -96,6 +96,24 @@ jobs:
           fi
           sudo -E "$binary" --nocapture --test-threads=1
 
+      # A firewall reload writes the bank the datapath does not read and
+      # flips one word. The test runs a denied packet through the loaded
+      # program after every map write of a reload, and after a write refused
+      # part way, so a reload that opens a rule for one write fails here.
+      - name: Keep a denied packet denied through every step of a reload
+        env:
+          EBPFSENTINEL_EBPF_DIR: ${{ github.workspace }}/target/bpfel-unknown-none/release
+        run: |
+          set -eu
+          binary="$(cargo test -p adapters --lib --no-run --message-format=json |
+            jq -r 'select(.executable != null and .target.name == "adapters" and .profile.test) | .executable' |
+            tail -1)"
+          if [ -z "$binary" ]; then
+            echo "::error::cargo built no adapters unit test binary"
+            exit 1
+          fi
+          sudo -E "$binary" map_manager::tests::in_kernel --nocapture --test-threads=1
+
       # A trace runs a crafted packet through the programs that decide live
       # traffic, so asking must change nothing: every map a program reads is
       # compared before and after a traced packet, and no ring buffer may move.

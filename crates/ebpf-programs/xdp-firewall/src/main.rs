@@ -27,6 +27,7 @@ use ebpf_common::{
     firewall::{
         ACTION_DROP, ACTION_LOG, ACTION_PASS, ACTION_REJECT, CT_MATCH_ESTABLISHED,
         CT_MATCH_INVALID, CT_MATCH_NEW, CT_MATCH_RELATED, DEFAULT_POLICY_DROP, DSCP_MARK_NONE,
+        FIREWALL_RULE_BANKS, bank_base, generation_bank, generation_count,
         FW_EMPTY_HASH_5TUPLE, FW_EMPTY_HASH_PORT, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_LPM_V4,
         FW_EMPTY_LPM_V6, FW_EMPTY_SRC_LIMITS, FW_EMPTY_TENANTS, FW_EMPTY_ZONES, FirewallRuleEntry,
         FirewallRuleEntryV6, FwHashKey5Tuple, FwHashKeyPort, FwHashValue, ICMP_WILDCARD,
@@ -96,20 +97,28 @@ use network_types::{
 
 // ── Maps ────────────────────────────────────────────────────────────
 
-/// IPv4 firewall rules (array, indexed 0..count, priority order).
+/// IPv4 firewall rules: two banks of `MAX_FIREWALL_RULES`, each indexed
+/// 0..count in priority order. The generation word names the bank read.
 #[btf_map]
-static FIREWALL_RULES: Array<FirewallRuleEntry, { MAX_FIREWALL_RULES as usize }> = Array::new();
+static FIREWALL_RULES: Array<
+    FirewallRuleEntry,
+    { (MAX_FIREWALL_RULES * FIREWALL_RULE_BANKS) as usize },
+> = Array::new();
 
-/// Number of active IPv4 rules (single element at index 0).
+/// IPv4 generation word (single element at index 0): the bank the packet
+/// path reads and how many rules it holds, see `rule_generation`. Read once
+/// per packet, so the fast-path keys and the array scan answer from one set.
 #[btf_map]
 static FIREWALL_RULE_COUNT: Array<u32, 1> = Array::new();
 
-/// IPv6 firewall rules (array, indexed 0..count, priority order).
+/// IPv6 firewall rules, banked as the IPv4 ones.
 #[btf_map]
-static FIREWALL_RULES_V6: Array<FirewallRuleEntryV6, { MAX_FIREWALL_RULES as usize }> =
-    Array::new();
+static FIREWALL_RULES_V6: Array<
+    FirewallRuleEntryV6,
+    { (MAX_FIREWALL_RULES * FIREWALL_RULE_BANKS) as usize },
+> = Array::new();
 
-/// Number of active IPv6 rules (single element at index 0).
+/// IPv6 generation word, as `FIREWALL_RULE_COUNT`.
 #[btf_map]
 static FIREWALL_RULE_COUNT_V6: Array<u32, 1> = Array::new();
 
@@ -504,14 +513,16 @@ unsafe fn resolve_tenant_id_v6(ifindex: u32, vlan_id: u16, src_addr: &[u32; 4], 
 // byte behind such a pointer as initialised stack, so the fields are ordered
 // widest first and the tail is an explicit, zeroed `_pad`: no layout gap is
 // left for the compiler to skip writing.
-//   - RuleScanCtx:   56 bytes
-//   - RuleScanCtxV6: 80 bytes
+//   - RuleScanCtx:   60 bytes
+//   - RuleScanCtxV6: 84 bytes
 //   - ShadowScanCtx: 104 bytes (in settle_shadow's frame)
 
 /// Opaque context passed through `bpf_loop` to the IPv4 rule-scan callback.
 #[repr(C)]
 struct RuleScanCtx {
     count: u32,
+    /// First array slot of the bank the generation word named.
+    base: u32,
     src_ip: u32,
     dst_ip: u32,
     /// -1 = no match yet, 0+ = matched rule action.
@@ -549,6 +560,8 @@ struct RuleScanCtx {
 #[repr(C)]
 struct RuleScanCtxV6 {
     count: u32,
+    /// First array slot of the bank the generation word named.
+    base: u32,
     src_addr: [u32; 4],
     dst_addr: [u32; 4],
     /// -1 = no match yet, 0+ = matched rule action.
@@ -584,8 +597,8 @@ struct RuleScanCtxV6 {
 
 // The sizes are the sums of the fields: a struct that grew a gap fails here
 // rather than at load, where the verifier would refuse the uninitialised byte.
-const _: () = assert!(core::mem::size_of::<RuleScanCtx>() == 56);
-const _: () = assert!(core::mem::size_of::<RuleScanCtxV6>() == 80);
+const _: () = assert!(core::mem::size_of::<RuleScanCtx>() == 60);
+const _: () = assert!(core::mem::size_of::<RuleScanCtxV6>() == 84);
 
 // PacketCtx imported from ebpf_common::firewall (shared with xdp-firewall-reject).
 
@@ -818,7 +831,7 @@ unsafe extern "C" fn scan_rule_v4(index: u32, ctx: *mut c_void) -> i64 {
         if index >= lctx.count {
             return 1;
         }
-        if let Some(rule) = FIREWALL_RULES.get(index)
+        if let Some(rule) = FIREWALL_RULES.get(lctx.base + index)
             && rule_matches_v4(rule, lctx)
         {
             lctx.matched_action = rule.action as i32;
@@ -838,7 +851,7 @@ unsafe extern "C" fn scan_rule_v6(index: u32, ctx: *mut c_void) -> i64 {
         if index >= lctx.count {
             return 1;
         }
-        if let Some(rule) = FIREWALL_RULES_V6.get(index)
+        if let Some(rule) = FIREWALL_RULES_V6.get(lctx.base + index)
             && rule_matches_v6(rule, lctx)
         {
             lctx.matched_action = rule.action as i32;
@@ -1403,6 +1416,13 @@ fn process_firewall_v4(
         }
     }
 
+    // One read of the generation word decides which rule set this packet is
+    // judged against, fast-path keys and array alike. A reload writes the
+    // other bank and flips this word last, so a packet never meets half of
+    // the old set and half of the new one.
+    let generation = FIREWALL_RULE_COUNT.get(0).copied().unwrap_or(0);
+    let bank = generation_bank(generation);
+
     // Phase 1b: 5-tuple exact-match HashMap lookup - O(1).
     if !feature_empty(gates, FW_EMPTY_HASH_5TUPLE) {
         let hash_key_5t = FwHashKey5Tuple {
@@ -1411,7 +1431,8 @@ fn process_firewall_v4(
             src_port,
             dst_port,
             protocol: protocol as u8,
-            _pad: [0; 3],
+            bank: bank as u8,
+            _pad: [0; 2],
         };
         if let Some(val) = unsafe { FW_HASH_5TUPLE.get(&hash_key_5t) } {
             return apply_fast_path_action(
@@ -1430,7 +1451,7 @@ fn process_firewall_v4(
         let hash_key_port = FwHashKeyPort {
             dst_port,
             protocol: protocol as u8,
-            _pad: 0,
+            bank: bank as u8,
         };
         if let Some(val) = unsafe { FW_HASH_PORT.get(&hash_key_port) } {
             return apply_fast_path_action(
@@ -1451,11 +1472,8 @@ fn process_firewall_v4(
     // apply_action(DROP) then kills the kernel CT entry via kill_flow_via_xdp_ct.
     // Conntrack state only grants passage in the ABSENCE of a matching rule
     // (handled after the scan), never over one.
-    // Read rule count
-    let count = match FIREWALL_RULE_COUNT.get(0) {
-        Some(&c) => c,
-        None => 0,
-    };
+    let count = generation_count(generation).min(MAX_FIREWALL_RULES);
+    let base = bank_base(bank);
 
     // Scan rules via bpf_loop: the instruction count does not grow with the
     // rule count, so up to 4096 rules load without complexity limits. The
@@ -1489,6 +1507,7 @@ fn process_firewall_v4(
 
         let mut scan_ctx = RuleScanCtx {
             count,
+            base,
             src_ip,
             dst_ip,
             src_port,
@@ -1540,7 +1559,7 @@ fn process_firewall_v4(
         }
         if action == ACTION_PASS || action == ACTION_LOG {
             let mark = FIREWALL_RULES
-                .get(matched_rule_idx as u32)
+                .get(base + matched_rule_idx as u32)
                 .map_or(DSCP_MARK_NONE, |r| r.dscp_mark);
             if mark != DSCP_MARK_NONE {
                 mark_dscp_v4(ctx, l3_offset, mark)?;
@@ -2463,11 +2482,9 @@ fn process_firewall_v6(
     // already-established connection - apply_action(DROP) then kills the kernel
     // CT entry via kill_flow_via_xdp_ct. Conntrack state only grants passage in
     // the ABSENCE of a matching rule (handled after the scan), never over one.
-    // Read V6 rule count
-    let count = match FIREWALL_RULE_COUNT_V6.get(0) {
-        Some(&c) => c,
-        None => 0,
-    };
+    let generation = FIREWALL_RULE_COUNT_V6.get(0).copied().unwrap_or(0);
+    let count = generation_count(generation).min(MAX_FIREWALL_RULES);
+    let base = bank_base(generation_bank(generation));
 
     // Scan V6 rules via bpf_loop (kernel 5.17+).
     // Stack-allocated context (kernel 6.17+ requires bpf_loop callback_ctx
@@ -2498,6 +2515,7 @@ fn process_firewall_v6(
 
         let mut scan_ctx = RuleScanCtxV6 {
             count,
+            base,
             src_addr,
             dst_addr,
             src_port,
@@ -2548,7 +2566,7 @@ fn process_firewall_v6(
         }
         if action == ACTION_PASS || action == ACTION_LOG {
             let mark = FIREWALL_RULES_V6
-                .get(matched_rule_idx as u32)
+                .get(base + matched_rule_idx as u32)
                 .map_or(DSCP_MARK_NONE, |r| r.dscp_mark);
             if mark != DSCP_MARK_NONE {
                 mark_dscp_v6(ctx, l3_offset, mark)?;

@@ -9,24 +9,29 @@ use ebpf_common::firewall::{
     ACTION_PASS, DSCP_MARK_NONE, FirewallRuleEntry, FirewallRuleEntryV6, FwHashKey5Tuple,
     FwHashKeyPort, FwHashValue, MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT, MATCH_PROTO,
     MATCH_SRC_IP, MATCH_SRC_PORT, MAX_FIREWALL_RULES, MAX_SHADOW_RULES, SHADOW_FAMILY_V4,
-    SHADOW_FAMILY_V6, ShadowFlowKey, ShadowRuleStats, ShadowSample, VLAN_ANY,
+    SHADOW_FAMILY_V6, ShadowFlowKey, ShadowRuleStats, ShadowSample, VLAN_ANY, bank_base,
+    generation_bank, rule_generation,
 };
 use ports::secondary::ebpf_map_port::{FirewallArrayMapPort, ShadowCounts};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Manages the array-based eBPF firewall maps.
 ///
 /// Uses 5 maps:
-/// - `FIREWALL_RULES`: `Array<FirewallRuleEntry>` (V4 rules, indexed 0..count)
-/// - `FIREWALL_RULE_COUNT`: `Array<u32>` (single element: number of active V4 rules)
-/// - `FIREWALL_RULES_V6`: `Array<FirewallRuleEntryV6>` (V6 rules)
-/// - `FIREWALL_RULE_COUNT_V6`: `Array<u32>` (number of active V6 rules)
+/// - `FIREWALL_RULES`: `Array<FirewallRuleEntry>` (V4 rules, two banks)
+/// - `FIREWALL_RULE_COUNT`: `Array<u32>` (V4 generation word: bank and count)
+/// - `FIREWALL_RULES_V6`: `Array<FirewallRuleEntryV6>` (V6 rules, two banks)
+/// - `FIREWALL_RULE_COUNT_V6`: `Array<u32>` (V6 generation word)
 /// - `FIREWALL_DEFAULT_POLICY`: `Array<u8>` (single element: default action)
 ///
 /// LPM Trie maps for CIDR-only rules (`GeoIP` blocking) are managed
 /// separately by `GeoIpLpmManager`.
 ///
-/// Atomic reload protocol: write count=0 → write entries → write count=n.
+/// Reload protocol: the datapath reads the bank the generation word names.
+/// A reload writes the other bank in full, fast-path keys included, then
+/// flips the word in one write, then removes the old bank's keys. A write
+/// that fails before the flip leaves the word, and so every rule the
+/// datapath enforces, as it was.
 pub struct FirewallMapManager {
     rules_v4: Array<MapData, FirewallRuleEntry>,
     rule_count_v4: Array<MapData, u32>,
@@ -40,6 +45,12 @@ pub struct FirewallMapManager {
     /// Cached counts for `rule_count()` without map reads.
     cached_v4_count: usize,
     cached_v6_count: usize,
+    /// The bank each family's generation word names, the one being enforced.
+    bank_v4: u32,
+    bank_v6: u32,
+    /// Fast-path entries of the enforced IPv4 bank, five-tuple then port, so
+    /// an abandoned reload can publish the gates of the set still in force.
+    hash_counts_v4: (u32, u32),
     /// Single-entry gate telling the datapath whether the conntrack probe can
     /// still change a verdict. Absent on an object built before the gate.
     ct_gate: Option<Array<MapData, u8>>,
@@ -252,6 +263,11 @@ impl FirewallMapManager {
             info!("FW_HASH_PORT fast-path map acquired");
         }
 
+        // The maps of a fresh load read zero, which is bank 0 holding nothing,
+        // and a reused pinned map names whichever bank it was left on.
+        let bank_v4 = rule_count_v4.get(&0, 0).map_or(0, generation_bank);
+        let bank_v6 = rule_count_v6.get(&0, 0).map_or(0, generation_bank);
+
         info!("firewall array maps acquired (rules + default_policy)");
         Ok(Self {
             rules_v4,
@@ -263,6 +279,9 @@ impl FirewallMapManager {
             hash_port,
             cached_v4_count: 0,
             cached_v6_count: 0,
+            bank_v4,
+            bank_v6,
+            hash_counts_v4: (0, 0),
             ct_gate,
             // Every half starts asserted so the gate is open until a load has
             // actually proved otherwise. A firewall that probes conntrack it
@@ -276,23 +295,39 @@ impl FirewallMapManager {
 }
 
 impl FirewallMapManager {
-    /// Flush fast-path `HashMap` entries before reload.
+    /// Remove every fast-path entry belonging to `bank`.
     ///
-    /// eBPF `HashMap` maps don't have a bulk-clear API, so we drain all existing keys.
-    /// This prevents stale 5-tuple/port rules from persisting across reloads.
-    fn clear_hash_maps(&mut self) {
+    /// eBPF `HashMap` maps have no bulk clear, so the keys are walked. Called
+    /// on the bank about to be written, to drop what an abandoned reload left
+    /// there, and on the bank just retired. Neither is the bank the datapath
+    /// reads, so a key left behind by a failed removal decides nothing.
+    fn drop_hash_bank(&mut self, bank: u8) {
         if let Some(ref mut map) = self.hash_5tuple {
-            let keys: Vec<FwHashKey5Tuple> = map.keys().filter_map(Result::ok).collect();
+            let keys: Vec<FwHashKey5Tuple> = map
+                .keys()
+                .filter_map(Result::ok)
+                .filter(|k| k.bank == bank)
+                .collect();
             for key in &keys {
                 let _ = map.remove(key);
             }
         }
         if let Some(ref mut map) = self.hash_port {
-            let keys: Vec<FwHashKeyPort> = map.keys().filter_map(Result::ok).collect();
+            let keys: Vec<FwHashKeyPort> = map
+                .keys()
+                .filter_map(Result::ok)
+                .filter(|k| k.bank == bank)
+                .collect();
             for key in &keys {
                 let _ = map.remove(key);
             }
         }
+    }
+
+    /// Publish which fast paths the enforced IPv4 bank leaves empty.
+    fn publish_hash_gates(&self) {
+        feature_gates::publish(Feature::Hash5Tuple, self.hash_counts_v4.0 == 0);
+        feature_gates::publish(Feature::HashPort, self.hash_counts_v4.1 == 0);
     }
 
     /// Publish whether the datapath still has to probe conntrack.
@@ -430,21 +465,77 @@ fn route_v4(rules: &[FirewallRuleEntry], five_tuple_map: bool, port_map: bool) -
     routes
 }
 
-impl FirewallArrayMapPort for FirewallMapManager {
-    #[allow(clippy::cast_possible_truncation)] // count ≤ MAX_FIREWALL_RULES (4096)
-    fn load_v4_rules(
+/// Called after each map write of a reload. Production passes one that does
+/// nothing; the in-kernel test passes one that runs a packet through the
+/// program at that point, and one that fails, to stand in for a refused write.
+pub(crate) type ReloadStep<'a> = &'a mut dyn FnMut() -> Result<(), DomainError>;
+
+/// What a bank write left: the placements, the array count, and the
+/// five-tuple and port entry counts.
+type WrittenBank = (Vec<RulePlacement>, usize, (u32, u32));
+
+fn map_err(what: String) -> impl FnOnce(aya::maps::MapError) -> DomainError {
+    move |e| DomainError::EngineError(format!("{what} failed: {e}"))
+}
+
+impl FirewallMapManager {
+    /// Load the IPv4 rules into the bank the datapath does not read, then
+    /// publish that bank. See the type's reload protocol.
+    #[allow(clippy::cast_possible_truncation)] // count ≤ MAX_FIREWALL_RULES (4096), bank ≤ 1
+    pub(crate) fn load_v4_stepwise(
         &mut self,
         rules: &[FirewallRuleEntry],
+        step: ReloadStep<'_>,
     ) -> Result<Vec<RulePlacement>, DomainError> {
-        // Say both fast paths may hold something before touching them, so a
-        // load that fails part way leaves the datapath reading them rather
-        // than skipping entries it has just written.
+        let current = self.bank_v4;
+        let next = 1 - current;
+        // Both fast paths may hold entries of the next bank from here on, so
+        // neither may be skipped until the flip says which bank is read.
         feature_gates::publish(Feature::Hash5Tuple, false);
         feature_gates::publish(Feature::HashPort, false);
+        self.drop_hash_bank(next as u8);
 
-        // Flush fast-path HashMaps before reload to remove stale entries.
-        self.clear_hash_maps();
+        match self.write_v4_bank(rules, next, step) {
+            Ok((placements, count, hash_counts)) => {
+                self.bank_v4 = next;
+                self.hash_counts_v4 = hash_counts;
+                self.drop_hash_bank(current as u8);
+                self.publish_hash_gates();
+                self.cached_v4_count = count + (hash_counts.0 + hash_counts.1) as usize;
+                self.v4_needs_ct = rules
+                    .iter()
+                    .any(|r| rule_reads_ct(r.match_flags, r.max_states));
+                self.sync_ct_gate();
+                info!(
+                    bank = next,
+                    array_count = count,
+                    hash_5tuple = hash_counts.0,
+                    hash_port = hash_counts.1,
+                    "V4 firewall rules loaded (multi-level)"
+                );
+                Ok(placements)
+            }
+            Err(e) => {
+                // The generation word was never flipped: the datapath still
+                // enforces the previous set, whole.
+                self.drop_hash_bank(next as u8);
+                self.publish_hash_gates();
+                warn!(error = %e, bank = current, "V4 reload abandoned, the previous rules stay enforced");
+                Err(e)
+            }
+        }
+    }
 
+    /// Write `rules` into `bank`, fast-path keys and array, and flip the
+    /// generation word to it as the last write. Returns the placements, the
+    /// array count and the fast-path counts.
+    #[allow(clippy::cast_possible_truncation)] // count ≤ MAX_FIREWALL_RULES (4096), bank ≤ 1
+    fn write_v4_bank(
+        &mut self,
+        rules: &[FirewallRuleEntry],
+        bank: u32,
+        step: ReloadStep<'_>,
+    ) -> Result<WrittenBank, DomainError> {
         // Classify rules into fast-path HashMaps vs array fallback; `rules`
         // arrive sorted by ascending priority (lowest number wins).
         let mut array_rules: Vec<FirewallRuleEntry> = Vec::new();
@@ -467,13 +558,13 @@ impl FirewallArrayMapPort for FirewallMapManager {
                             src_port,
                             dst_port,
                             protocol,
-                            _pad: [0; 3],
+                            bank: bank as u8,
+                            _pad: [0; 2],
                         };
-                        placements.push(if map.insert(&key, &val, 0).is_ok() {
-                            RulePlacement::Hash5Tuple
-                        } else {
-                            RulePlacement::NotInstalled
-                        });
+                        map.insert(&key, &val, 0)
+                            .map_err(map_err("insert V4 five-tuple entry".into()))?;
+                        step()?;
+                        placements.push(RulePlacement::Hash5Tuple);
                         hash_5tuple_count += 1;
                     }
                 }
@@ -482,13 +573,12 @@ impl FirewallArrayMapPort for FirewallMapManager {
                         let key = FwHashKeyPort {
                             dst_port,
                             protocol,
-                            _pad: 0,
+                            bank: bank as u8,
                         };
-                        placements.push(if map.insert(&key, &val, 0).is_ok() {
-                            RulePlacement::HashPort
-                        } else {
-                            RulePlacement::NotInstalled
-                        });
+                        map.insert(&key, &val, 0)
+                            .map_err(map_err("insert V4 port entry".into()))?;
+                        step()?;
+                        placements.push(RulePlacement::HashPort);
                         hash_port_count += 1;
                     }
                 }
@@ -504,66 +594,59 @@ impl FirewallArrayMapPort for FirewallMapManager {
             }
         }
 
-        // Load remaining rules into the array
         let count = array_rules.len().min(MAX_FIREWALL_RULES as usize);
-
-        self.rule_count_v4
-            .set(0, &0u32, 0)
-            .map_err(|e| DomainError::EngineError(format!("set V4 count=0 failed: {e}")))?;
-
+        let base = bank_base(bank);
         for (i, rule) in array_rules.iter().take(count).enumerate() {
             self.rules_v4
-                .set(i as u32, rule, 0)
-                .map_err(|e| DomainError::EngineError(format!("set V4 rule[{i}] failed: {e}")))?;
+                .set(base + i as u32, rule, 0)
+                .map_err(map_err(format!("set V4 rule[{i}]")))?;
+            step()?;
         }
-
         self.rule_count_v4
-            .set(0, &(count as u32), 0)
-            .map_err(|e| DomainError::EngineError(format!("set V4 count={count} failed: {e}")))?;
-
-        self.cached_v4_count = count + hash_5tuple_count as usize + hash_port_count as usize;
-        feature_gates::publish(Feature::Hash5Tuple, hash_5tuple_count == 0);
-        feature_gates::publish(Feature::HashPort, hash_port_count == 0);
-        self.v4_needs_ct = rules
-            .iter()
-            .any(|r| rule_reads_ct(r.match_flags, r.max_states));
-        self.sync_ct_gate();
-        info!(
-            array_count = count,
-            hash_5tuple = hash_5tuple_count,
-            hash_port = hash_port_count,
-            "V4 firewall rules loaded (multi-level)"
-        );
-        Ok(placements)
+            .set(0, &rule_generation(bank, count as u32), 0)
+            .map_err(map_err("publish the V4 rules".into()))?;
+        step()?;
+        Ok((placements, count, (hash_5tuple_count, hash_port_count)))
     }
 
+    /// Load the IPv6 rules into the bank the datapath does not read, then
+    /// publish that bank, as `load_v4_stepwise` does.
     #[allow(clippy::cast_possible_truncation)] // count ≤ MAX_FIREWALL_RULES (4096)
-    fn load_v6_rules(
+    pub(crate) fn load_v6_stepwise(
         &mut self,
         rules: &[FirewallRuleEntryV6],
+        step: ReloadStep<'_>,
     ) -> Result<Vec<RulePlacement>, DomainError> {
+        let next = 1 - self.bank_v6;
         let count = rules.len().min(MAX_FIREWALL_RULES as usize);
-
-        self.rule_count_v6
-            .set(0, &0u32, 0)
-            .map_err(|e| DomainError::EngineError(format!("set V6 count=0 failed: {e}")))?;
-
-        for (i, rule) in rules.iter().take(count).enumerate() {
-            self.rules_v6
-                .set(i as u32, rule, 0)
-                .map_err(|e| DomainError::EngineError(format!("set V6 rule[{i}] failed: {e}")))?;
+        let base = bank_base(next);
+        let written = (|| {
+            for (i, rule) in rules.iter().take(count).enumerate() {
+                self.rules_v6
+                    .set(base + i as u32, rule, 0)
+                    .map_err(map_err(format!("set V6 rule[{i}]")))?;
+                step()?;
+            }
+            self.rule_count_v6
+                .set(0, &rule_generation(next, count as u32), 0)
+                .map_err(map_err("publish the V6 rules".into()))?;
+            step()
+        })();
+        if let Err(e) = written {
+            warn!(error = %e, bank = self.bank_v6, "V6 reload abandoned, the previous rules stay enforced");
+            return Err(e);
         }
 
-        self.rule_count_v6
-            .set(0, &(count as u32), 0)
-            .map_err(|e| DomainError::EngineError(format!("set V6 count={count} failed: {e}")))?;
-
+        self.bank_v6 = next;
         self.cached_v6_count = count;
         self.v6_needs_ct = rules
             .iter()
             .any(|r| rule_reads_ct(r.match_flags, r.max_states));
         self.sync_ct_gate();
-        info!(count, "V6 firewall rules loaded into eBPF array");
+        info!(
+            bank = next,
+            count, "V6 firewall rules loaded into eBPF array"
+        );
         Ok((0..rules.len())
             .map(|i| {
                 if i < count {
@@ -573,6 +656,22 @@ impl FirewallArrayMapPort for FirewallMapManager {
                 }
             })
             .collect())
+    }
+}
+
+impl FirewallArrayMapPort for FirewallMapManager {
+    fn load_v4_rules(
+        &mut self,
+        rules: &[FirewallRuleEntry],
+    ) -> Result<Vec<RulePlacement>, DomainError> {
+        self.load_v4_stepwise(rules, &mut || Ok(()))
+    }
+
+    fn load_v6_rules(
+        &mut self,
+        rules: &[FirewallRuleEntryV6],
+    ) -> Result<Vec<RulePlacement>, DomainError> {
+        self.load_v6_stepwise(rules, &mut || Ok(()))
     }
 
     fn set_default_policy(&mut self, policy: u8) -> Result<(), DomainError> {
@@ -779,5 +878,235 @@ mod tests {
             route_v4(&[port_rule(53, 1)], true, false),
             vec![Route::Array]
         );
+    }
+
+    /// The in-kernel half: the firewall object loaded for real, and a packet
+    /// a rule denies pushed through it after every single map write of a
+    /// reload. Needs the built objects and the privilege to load them; without
+    /// either it says so and returns, as the program harness does.
+    mod in_kernel {
+        use super::*;
+        use crate::ebpf::loader::EbpfLoader;
+        use crate::ebpf::prog_test_run::{self, XDP_DROP};
+        use ebpf_common::firewall::ACTION_DROP;
+        use std::os::fd::{AsFd, OwnedFd};
+        use std::path::PathBuf;
+
+        fn object() -> Option<Vec<u8>> {
+            let dir = std::env::var("EBPFSENTINEL_EBPF_DIR").map_or_else(
+                |_| {
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../target/bpfel-unknown-none/release")
+                },
+                PathBuf::from,
+            );
+            let bytes = std::fs::read(dir.join("xdp-firewall")).ok();
+            if bytes.is_none() {
+                eprintln!("skipped: no xdp-firewall object in {}", dir.display());
+            }
+            bytes
+        }
+
+        /// The firewall loaded, its maps handed to a manager, its entry
+        /// program's descriptor, and a pass-by-default policy, so a drop can
+        /// only come from a rule.
+        fn firewall() -> Option<(EbpfLoader, FirewallMapManager, OwnedFd)> {
+            let bytes = object()?;
+            let mut loaded = match EbpfLoader::load_unpinned(&bytes) {
+                Ok(loaded) => loaded,
+                Err(e) => {
+                    eprintln!("skipped: cannot load eBPF objects here: {e}");
+                    return None;
+                }
+            };
+            let mut manager = FirewallMapManager::new(loaded.ebpf_mut()).expect("firewall maps");
+            manager
+                .set_default_policy(ACTION_PASS)
+                .expect("default policy");
+            let fd = loaded
+                .program_fd_owned("xdp_firewall")
+                .expect("xdp_firewall entry program");
+            Some((loaded, manager, fd))
+        }
+
+        /// 10.0.0.1:1024 to 10.0.0.2:80, or `fd00::1` to `fd00::2`.
+        fn syn(v6: bool) -> Vec<u8> {
+            let mut pkt = vec![0x02, 0, 0, 0, 0, 0x01, 0x02, 0, 0, 0, 0, 0x02];
+            if v6 {
+                pkt.extend_from_slice(&[0x86, 0xdd, 0x60, 0, 0, 0, 0x00, 0x14, 0x06, 0x40]);
+                pkt.extend_from_slice(&[0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+                pkt.extend_from_slice(&[0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+            } else {
+                pkt.extend_from_slice(&[0x08, 0x00, 0x45, 0x00, 0x00, 0x28, 0x00, 0x01]);
+                pkt.extend_from_slice(&[0x00, 0x00, 0x40, 0x06, 0x00, 0x00]);
+                pkt.extend_from_slice(&[10, 0, 0, 1, 10, 0, 0, 2]);
+            }
+            pkt.extend_from_slice(&[0x04, 0x00, 0x00, 0x50, 0, 0, 0, 1, 0, 0, 0, 0]);
+            pkt.extend_from_slice(&[0x50, 0x02, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00]);
+            pkt
+        }
+
+        /// Whether the program drops `packet`, or `None` where the kernel
+        /// will not run it here.
+        fn drops(fd: &OwnedFd, packet: &[u8]) -> Option<bool> {
+            match prog_test_run::run(fd.as_fd(), packet, 1) {
+                Ok(outcome) => Some(outcome.retval == XDP_DROP),
+                Err(e) if e.is_unavailable() => {
+                    eprintln!("skipped: {e}");
+                    None
+                }
+                Err(e) => panic!("xdp_firewall could not be run: {e}"),
+            }
+        }
+
+        /// A TCP rule on a destination port range, with `action`.
+        fn ports(start: u16, end: u16, action: u8) -> FirewallRuleEntry {
+            let mut rule = port_rule(start, action);
+            rule.dst_port_end = end;
+            rule
+        }
+
+        fn ports_v6(start: u16, end: u16, action: u8) -> FirewallRuleEntryV6 {
+            FirewallRuleEntryV6 {
+                src_addr: [0; 4],
+                src_mask: [0; 4],
+                dst_addr: [0; 4],
+                dst_mask: [0; 4],
+                src_port_start: 0,
+                src_port_end: 0,
+                dst_port_start: start,
+                dst_port_end: end,
+                protocol: 6,
+                match_flags: MATCH_DST_PORT | MATCH_PROTO,
+                vlan_id: VLAN_ANY,
+                action,
+                ct_state_mask: 0,
+                src_set_id: 0,
+                dst_set_id: 0,
+                tcp_flags_match: 0,
+                tcp_flags_mask: 0,
+                icmp_type: 0,
+                icmp_code: 0,
+                match_flags2: 0,
+                dscp_match: 0,
+                max_states: 0,
+                src_mac: [0; 6],
+                dst_mac: [0; 6],
+                dscp_mark: DSCP_MARK_NONE,
+                _reserved: [0; 3],
+                group_mask: 0,
+                tenant_id: 0,
+            }
+        }
+
+        #[test]
+        fn a_denied_packet_stays_denied_through_every_step_of_a_reload() {
+            let Some((_loaded, mut manager, fd)) = firewall() else {
+                return;
+            };
+            let packet = syn(false);
+            // The deny on port 80 sits on the port fast path in one set and
+            // in the array behind a ranged allow in the other, so a reload
+            // between them moves it from one map to another. Before the
+            // banks, both directions opened port 80 for a moment: the fast
+            // path was flushed before the array was written, and the array
+            // was read with its count at zero while it was rewritten.
+            let on_fast_path = [port_rule(80, ACTION_DROP), ports(8000, 8100, ACTION_DROP)];
+            let in_array = [
+                ports(20, 23, ACTION_PASS),
+                port_rule(80, ACTION_DROP),
+                ports(1, 65535, ACTION_PASS),
+            ];
+            manager.load_v4_rules(&on_fast_path).expect("first load");
+            let Some(dropped) = drops(&fd, &packet) else {
+                return;
+            };
+            assert!(dropped, "the first set must deny port 80");
+
+            for (name, rules) in [
+                ("into the array", &in_array[..]),
+                ("onto the fast path", &on_fast_path[..]),
+                ("into the array again", &in_array[..]),
+            ] {
+                let mut steps = 0usize;
+                manager
+                    .load_v4_stepwise(rules, &mut || {
+                        steps += 1;
+                        assert_eq!(
+                            drops(&fd, &packet),
+                            Some(true),
+                            "port 80 opened at write {steps} of the reload {name}"
+                        );
+                        Ok(())
+                    })
+                    .expect("reload");
+                assert!(steps > 1, "the reload {name} wrote nothing");
+                assert_eq!(drops(&fd, &packet), Some(true), "after the reload {name}");
+            }
+        }
+
+        #[test]
+        fn a_reload_refused_part_way_leaves_the_previous_rules_enforced() {
+            let Some((_loaded, mut manager, fd)) = firewall() else {
+                return;
+            };
+            let packet = syn(false);
+            manager
+                .load_v4_rules(&[ports(70, 90, ACTION_DROP)])
+                .expect("first load");
+            let Some(true) = drops(&fd, &packet) else {
+                return;
+            };
+            // The new set would let port 80 through; the second write is
+            // refused, so it must never take effect.
+            let allow = [ports(1, 65535, ACTION_PASS), ports(70, 90, ACTION_DROP)];
+            let mut steps = 0usize;
+            let refused = manager.load_v4_stepwise(&allow, &mut || {
+                steps += 1;
+                if steps == 2 {
+                    return Err(DomainError::EngineError("refused".into()));
+                }
+                Ok(())
+            });
+            assert!(refused.is_err(), "a refused write is the reload's error");
+            assert_eq!(drops(&fd, &packet), Some(true), "the previous deny holds");
+            // The bank left half written is rewritten whole by the next load.
+            manager
+                .load_v4_rules(&allow)
+                .expect("reload after a refusal");
+            assert_eq!(drops(&fd, &packet), Some(false), "the new set took effect");
+        }
+
+        #[test]
+        fn an_ipv6_reload_keeps_the_deny_through_every_step() {
+            let Some((_loaded, mut manager, fd)) = firewall() else {
+                return;
+            };
+            let packet = syn(true);
+            manager
+                .load_v6_rules(&[ports_v6(80, 80, ACTION_DROP)])
+                .expect("first load");
+            let Some(true) = drops(&fd, &packet) else {
+                return;
+            };
+            let shifted = [
+                ports_v6(20, 23, ACTION_PASS),
+                ports_v6(80, 80, ACTION_DROP),
+                ports_v6(1, 65535, ACTION_PASS),
+            ];
+            let mut steps = 0usize;
+            manager
+                .load_v6_stepwise(&shifted, &mut || {
+                    steps += 1;
+                    assert_eq!(
+                        drops(&fd, &packet),
+                        Some(true),
+                        "port 80 opened at write {steps} of the IPv6 reload"
+                    );
+                    Ok(())
+                })
+                .expect("reload");
+            assert_eq!(drops(&fd, &packet), Some(true));
+        }
     }
 }
