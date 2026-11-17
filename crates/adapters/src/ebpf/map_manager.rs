@@ -422,7 +422,7 @@ fn route_v4(rules: &[FirewallRuleEntry], five_tuple_map: bool, port_map: bool) -
     let mut ports: HashSet<(u16, u8)> = HashSet::new();
     let mut seen_array_rule = false;
     for rule in rules {
-        let flags = rule.match_flags;
+        let flags = routing_flags(rule);
         let fast = !seen_array_rule && !has_extended_match(rule);
         let route = if fast
             && five_tuple_map
@@ -463,6 +463,23 @@ fn route_v4(rules: &[FirewallRuleEntry], five_tuple_map: bool, port_map: bool) -
         routes.push(route);
     }
     routes
+}
+
+/// The match flags a rule is routed by. An address matched under a zero
+/// mask matches every address, which is what a rule naming `0.0.0.0/0` says
+/// (the anti-lockout rules name it so their IPv4 copy is told from the IPv6
+/// one), so it routes as a rule naming no address: otherwise every default
+/// configuration starts with an array rule and demotes each fast-path rule
+/// after it.
+fn routing_flags(rule: &FirewallRuleEntry) -> u8 {
+    let mut flags = rule.match_flags;
+    if rule.src_mask == 0 {
+        flags &= !MATCH_SRC_IP;
+    }
+    if rule.dst_mask == 0 {
+        flags &= !MATCH_DST_IP;
+    }
+    flags
 }
 
 /// Called after each map write of a reload. Production passes one that does
@@ -870,6 +887,19 @@ mod tests {
         ranged.dst_port_end = 90;
         let routes = route_v4(&[ranged, port_rule(85, 2)], true, true);
         assert_eq!(routes, vec![Route::Array, Route::Array]);
+    }
+
+    #[test]
+    fn a_port_rule_naming_any_ipv4_address_stays_on_the_port_map() {
+        // The shape of an anti-lockout rule: every default configuration
+        // starts with one, and the isolation that follows keeps its 5-tuple.
+        let mut any = port_rule(22, 1);
+        any.match_flags |= MATCH_DST_IP;
+        any.dst_ip = 0;
+        any.dst_mask = 0;
+        let routes = route_v4(&[any, fast_path_candidate()], true, true);
+        assert_eq!(routes[0], Route::Port((22, 6)));
+        assert!(matches!(routes[1], Route::FiveTuple(_)));
     }
 
     #[test]
