@@ -1,0 +1,15 @@
+[package]
+name = "ebpfsentinel-cli-parity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Holds a command line to the OpenAPI document of the agent it drives"
+
+[dependencies]
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

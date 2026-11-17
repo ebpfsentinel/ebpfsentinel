@@ -921,6 +921,7 @@ dependencies = [
  "axum",
  "clap",
  "ebpf-common",
+ "ebpfsentinel-cli-parity",
  "ebpfsentinel-domain",
  "ebpfsentinel-warden",
  "ebpfsentinel-warden-client",
@@ -947,6 +948,14 @@ dependencies = [
  "tracing",
  "utoipa",
  "utoipa-swagger-ui",
+]
+
+[[package]]
+name = "ebpfsentinel-cli-parity"
+version = "0.0.0-dev"
+dependencies = [
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4825,6 +4834,7 @@ dependencies = [
  "clap",
  "ebpf-common",
  "ebpfsentinel-agent",
+ "ebpfsentinel-cli-parity",
  "ebpfsentinel-warden",
  "k8s-openapi",
  "libc",

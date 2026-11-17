@@ -1,0 +1,11 @@
+# Operations the agent serves that no command reaches, each with the reason.
+#
+# `cargo xtask cli-parity` reads openapi.json and the routes the command line
+# calls, and fails on an operation that has neither a command nor an entry
+# here. An entry fails too once its route is gone or a command reaches it, so
+# this file only ever lists decisions that still hold.
+#
+# [[exclude]]
+# method = "POST"
+# path = "/api/v1/example/{id}"
+# reason = "what calls it instead, and why a command would be wrong"

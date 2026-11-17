@@ -61,6 +61,7 @@ k8s-openapi = { workspace = true, features = ["v1_32"], optional = true }
 tempfile = { workspace = true }
 ports = { workspace = true, features = ["test-utils"] }
 async-trait = { workspace = true }
+ebpfsentinel-cli-parity = { workspace = true }
 
 [lints]
 workspace = true

@@ -161,6 +161,11 @@ jobs:
             echo "::error file=openapi.json::openapi.json is out of date. Run 'cargo run -p xtask -- emit-openapi' and commit the result."
             exit 1
           fi
+      # Every operation the document describes is reached by a command or
+      # carries a written exclusion; a route added without its command fails
+      # here, on the same document the step above just proved current.
+      - name: Every operation has a command or an exclusion
+        run: cargo run --quiet -p xtask -- cli-parity
 
   # ── Dependency audit (license, advisories, bans) ─────────────────
   deny:

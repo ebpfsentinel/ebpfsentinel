@@ -5189,7 +5189,6 @@ async fn handle_delete(resp: reqwest::Response) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
 
     use super::AlertResponse;
 
@@ -5291,181 +5290,30 @@ mod tests {
         assert_eq!(alert.origin_suffix(), "");
     }
 
-    /// Routes the command tree deliberately does not call, and why. A route
-    /// listed here is a decision somebody wrote down; a route missing from
-    /// both the client and this list is an oversight the test below catches.
-    /// Empty on purpose: the two Server-Sent Events routes that used to sit
-    /// here are consumed by `watch` and `conntrack watch`, so every mounted
-    /// route is now reached from a command.
-    const UNREACHED_ROUTES: &[(&str, &str, &str)] = &[];
-
-    /// Collapse `{id}` and friends so a path with a parameter compares equal
-    /// however the two sides spell the placeholder.
-    fn normalise(path: &str) -> String {
-        let path = path.split('?').next().unwrap_or(path);
-        let mut out = String::with_capacity(path.len());
-        let mut depth = 0usize;
-        for ch in path.chars() {
-            match ch {
-                '{' => {
-                    depth += 1;
-                    if depth == 1 {
-                        out.push_str("{}");
-                    }
-                }
-                '}' => depth = depth.saturating_sub(1),
-                _ if depth == 0 => out.push(ch),
-                _ => {}
-            }
-        }
-        out
-    }
-
-    /// Every `/api/v1` operation the checked-in document describes. The
-    /// document is pinned to the mounted router in both directions by the
-    /// router's own suite, and CI fails when it drifts from the annotations,
-    /// so reading it here is reading the mounted surface.
-    fn documented_api_routes() -> BTreeSet<(String, String)> {
-        let spec: serde_json::Value =
-            serde_json::from_str(include_str!("../../../../openapi.json"))
-                .expect("openapi.json is valid JSON");
-        let paths = spec["paths"]
-            .as_object()
-            .expect("openapi.json carries a paths object");
-
-        let mut pairs = BTreeSet::new();
-        for (path, item) in paths {
-            if !path.starts_with("/api/v1") {
-                continue;
-            }
-            let item = item.as_object().expect("a path item is an object");
-            for method in item.keys() {
-                let upper = method.to_uppercase();
-                if matches!(
-                    upper.as_str(),
-                    "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
-                ) {
-                    pairs.insert((upper, normalise(path)));
-                }
-            }
-        }
-        pairs
-    }
-
-    /// The shipped half of this file, so a route named in this test module is
-    /// not mistaken for a route the client calls.
-    fn shipped_source() -> &'static str {
-        let src = include_str!("api_client.rs");
-        &src[..src.find("#[cfg(test)]").expect("test module marker")]
-    }
-
-    /// Every method and path pair this client requests. Each call is written
-    /// as `request(Method::X, "<literal>")`, so the literal that follows the
-    /// verb is the route. A call whose path is built somewhere else has no
-    /// literal to find, which `every_request_names_its_route` refuses.
-    fn requested_routes() -> BTreeSet<(String, String)> {
-        let mut pairs = BTreeSet::new();
-        for (method, literal) in request_sites() {
-            if let Some(literal) = literal {
-                pairs.insert((method, normalise(&literal)));
-            }
-        }
-        pairs
-    }
-
-    /// One entry per `reqwest::Method::` occurrence: the verb, and the string
-    /// literal that follows it before the next call boundary, if there is one.
-    fn request_sites() -> Vec<(String, Option<String>)> {
-        const MARKER: &str = "reqwest::Method::";
-        let src = shipped_source();
-        let mut sites = Vec::new();
-        let mut from = 0usize;
-
-        while let Some(rel) = src[from..].find(MARKER) {
-            let at = from + rel;
-            let after = at + MARKER.len();
-            let verb: String = src[after..]
-                .chars()
-                .take_while(char::is_ascii_uppercase)
-                .collect();
-            let rest = &src[after + verb.len()..];
-
-            // The literal, if any, sits between the comma and the closing
-            // paren of this one call. Stop at the paren so the next call's
-            // literal is never attributed to this verb.
-            let end = rest.find(')').unwrap_or(rest.len());
-            let head = &rest[..end];
-            let literal = head.find('"').and_then(|open| {
-                head[open + 1..]
-                    .find('"')
-                    .map(|close| head[open + 1..open + 1 + close].to_string())
-            });
-
-            sites.push((verb, literal));
-            from = after;
-        }
-        sites
-    }
-
+    /// Every operation the agent serves is reached by a command or excluded
+    /// in `cli-parity-exclusions.toml` with a reason, and every request names
+    /// its route beside the verb. The same check runs as `cargo xtask
+    /// cli-parity`; here it runs with the unit tests.
     #[test]
-    fn every_request_names_its_route() {
-        let anonymous: Vec<String> = request_sites()
-            .into_iter()
-            .filter(|(_, literal)| literal.is_none())
-            .map(|(verb, _)| verb)
-            .collect();
-        assert!(
-            anonymous.is_empty(),
-            "a request builds its path away from the verb, so route coverage \
-             cannot see it: {anonymous:?}. Pass the route as a literal and put \
-             the parameters on `query`."
-        );
-    }
-
-    #[test]
-    fn the_client_reaches_every_mounted_route() {
-        let documented = documented_api_routes();
+    fn every_operation_has_a_command_or_a_written_exclusion() {
+        let documented =
+            ebpfsentinel_cli_parity::documented(include_str!("../../../../openapi.json"))
+                .expect("openapi.json is a document");
         assert!(
             documented.len() > 90,
-            "the document describes only {} operations under /api/v1, which \
-             means it failed to load",
+            "only {} operations: the document failed to load",
             documented.len()
         );
-
-        let exempt: BTreeSet<(String, String)> = UNREACHED_ROUTES
-            .iter()
-            .map(|(method, path, _)| ((*method).to_string(), normalise(path)))
-            .collect();
-
-        let reachable: BTreeSet<(String, String)> =
-            requested_routes().union(&exempt).cloned().collect();
-
-        let unreachable: Vec<String> = documented
-            .difference(&reachable)
-            .map(|(method, path)| format!("{method} {path}"))
-            .collect();
-
-        assert!(
-            unreachable.is_empty(),
-            "mounted but reachable from no command, and carried on no \
-             exemption: {unreachable:?}"
-        );
-    }
-
-    #[test]
-    fn every_exemption_is_a_route_that_exists() {
-        let documented = documented_api_routes();
-        for (method, path, reason) in UNREACHED_ROUTES {
-            assert!(
-                documented.contains(&((*method).to_string(), normalise(path))),
-                "{method} {path} is exempted from the command tree but is \
-                 mounted nowhere, so the exemption outlived its route"
-            );
-            assert!(
-                reason.len() > 30,
-                "{method} {path} is exempted without saying why"
-            );
-        }
+        let sources = [("api_client.rs", include_str!("api_client.rs"))]
+            .map(|(file, text)| (file.to_string(), text.to_string()));
+        let (requested, anonymous) = ebpfsentinel_cli_parity::requested(&sources);
+        let exclusions = ebpfsentinel_cli_parity::exclusions(include_str!(
+            "../../../../cli-parity-exclusions.toml"
+        ))
+        .expect("the exclusion file parses");
+        let report =
+            ebpfsentinel_cli_parity::check(&documented, &requested, anonymous, &exclusions);
+        assert!(report.is_clean(), "{report}");
     }
 
     #[test]
@@ -5812,18 +5660,6 @@ mod tests {
             }
             Err(other) => panic!("a 401 is not the server saying it has no stream: {other}"),
             Ok(_) => panic!("a 401 is not an open stream"),
-        }
-    }
-
-    #[test]
-    fn no_exemption_is_also_called() {
-        let requested = requested_routes();
-        for (method, path, _) in UNREACHED_ROUTES {
-            assert!(
-                !requested.contains(&((*method).to_string(), normalise(path))),
-                "{method} {path} is called by the client and exempted at the \
-                 same time, so the exemption is stale"
-            );
         }
     }
 

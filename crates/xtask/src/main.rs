@@ -1,4 +1,5 @@
 mod build_ebpf;
+mod cli_parity;
 mod ebpf_cost;
 mod ebpf_load;
 
@@ -61,6 +62,24 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Fail on an operation of the API that no command reaches and no
+    /// exclusion names.
+    ///
+    /// Defaults to this tree: `openapi.json`, the sources under
+    /// `crates/agent/src/cli`, and `cli-parity-exclusions.toml`, all at the
+    /// workspace root. Another tree driving its own agent passes its own.
+    CliParity {
+        /// The OpenAPI document of the agent the command line drives.
+        #[arg(long)]
+        openapi: Option<PathBuf>,
+        /// A client source file, or a directory read for `.rs` files.
+        /// Repeat for several.
+        #[arg(long)]
+        client: Vec<PathBuf>,
+        /// The exclusion file.
+        #[arg(long)]
+        exclusions: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -76,6 +95,11 @@ fn main() -> Result<()> {
         }
         Commands::EmitOpenapi { output } => emit_openapi(output),
         Commands::EmitCapabilities { output } => emit_capabilities(output),
+        Commands::CliParity {
+            openapi,
+            client,
+            exclusions,
+        } => cli_parity::run(openapi, client, exclusions),
     }
 }
 

@@ -11,6 +11,7 @@ members = [
     "crates/warden-proto",
     "crates/warden-client",
     "crates/warden",
+    "crates/cli-parity",
     "crates/xtask",
 ]
 # eBPF program crates target bpfel-unknown-none (nightly) - excluded from default build
@@ -179,6 +180,7 @@ application = { path = "crates/application" }
 adapters = { path = "crates/adapters" }
 infrastructure = { path = "crates/infrastructure" }
 ebpfsentinel-agent = { path = "crates/agent" }
+ebpfsentinel-cli-parity = { path = "crates/cli-parity" }
 ebpfsentinel-warden-proto = { path = "crates/warden-proto" }
 ebpfsentinel-warden-client = { path = "crates/warden-client" }
 ebpfsentinel-warden = { path = "crates/warden" }
