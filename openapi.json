@@ -109,6 +109,77 @@
         ]
       }
     },
+    "/api/v1/agent/stop": {
+      "post": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Stop the agent and keep it stopped.",
+        "description": "The documented way to stop a host agent: the request is recorded under\nthe caller's name with its reason, the agent shuts down in order and exits\nwith status `79`, which its service unit does not restart. A stop by any\nother means is raised as an alert at the next start.",
+        "operationId": "stop_agent",
+        "requestBody": {
+          "description": "Why the agent is stopped",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StopRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The agent is stopping",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StopResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "This agent cannot be stopped through the API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/alerts": {
       "get": {
         "tags": [
@@ -19947,6 +20018,39 @@
           "scope": {
             "$ref": "#/components/schemas/ScopeBody",
             "description": "What to watch. Omitted means the whole node."
+          }
+        }
+      },
+      "StopRequest": {
+        "type": "object",
+        "description": "Why the agent is being stopped, for the record.",
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free text kept in the run record, the audit trail and the next\nstart's log line."
+          }
+        },
+        "additionalProperties": false
+      },
+      "StopResponse": {
+        "type": "object",
+        "description": "What the agent answers before it ends.",
+        "required": [
+          "status",
+          "exit_code"
+        ],
+        "properties": {
+          "exit_code": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The exit status the agent ends with, which its unit treats as final."
+          },
+          "status": {
+            "type": "string",
+            "description": "Always `stopping`: the answer leaves before the shutdown starts."
           }
         }
       },

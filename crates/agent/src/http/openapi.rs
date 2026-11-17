@@ -76,6 +76,7 @@ use super::zone_handler;
         // Agent
         agent_handler::agent_status,
         agent_handler::agent_identity,
+        agent_handler::stop_agent,
         // Metrics
         metrics_handler::metrics,
         // Firewall
@@ -362,6 +363,8 @@ use super::zone_handler;
         threatintel_handler::RefreshResponse,
         // Ops
         ops_handler::ReloadResponse,
+        agent_handler::StopRequest,
+        agent_handler::StopResponse,
         config_handler::ConfigSectionWrite,
         ops_handler::AttachBlockEntry,
         ops_handler::EbpfStatusResponse,

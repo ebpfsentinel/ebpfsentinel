@@ -6279,6 +6279,25 @@ pub async fn cmd_config_reload(client: &ApiClient, output: OutputFormat) -> Resu
     Ok(())
 }
 
+pub async fn cmd_stop(
+    client: &ApiClient,
+    reason: Option<&str>,
+    output: OutputFormat,
+) -> Result<()> {
+    let resp = client.stop_agent(reason).await?;
+
+    if output == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&resp)?);
+        return Ok(());
+    }
+
+    println!(
+        "The agent is stopping and exits with status {}, which its service unit does not restart.",
+        resp.exit_code
+    );
+    Ok(())
+}
+
 // ── DLP ─────────────────────────────────────────────────────────────────
 
 pub async fn cmd_dlp_status(client: &ApiClient, output: OutputFormat) -> Result<()> {

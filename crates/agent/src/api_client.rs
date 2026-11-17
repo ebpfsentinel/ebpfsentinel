@@ -3109,6 +3109,12 @@ pub struct ReloadResponse {
     pub message: String,
 }
 
+#[derive(Deserialize, Serialize)]
+pub struct StopResponse {
+    pub status: String,
+    pub exit_code: i32,
+}
+
 // ── Threat intelligence URLs ────────────────────
 
 #[derive(Deserialize, Serialize)]
@@ -4827,6 +4833,18 @@ impl ApiClient {
     pub async fn reload_config(&self) -> anyhow::Result<ReloadResponse> {
         let resp = self
             .request(reqwest::Method::POST, "/api/v1/config/reload")
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        handle_response(resp).await
+    }
+
+    /// Stop the agent; it answers before it ends.
+    pub async fn stop_agent(&self, reason: Option<&str>) -> anyhow::Result<StopResponse> {
+        let body = serde_json::json!({ "reason": reason });
+        let resp = self
+            .request(reqwest::Method::POST, "/api/v1/agent/stop")
+            .json(&body)
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;

@@ -55,7 +55,7 @@ const AUTH_RATE_LIMIT_BURST: u32 = 30;
 const METRICS_RATE_LIMIT_PER_MINUTE: u64 = 30;
 const METRICS_RATE_LIMIT_BURST: u32 = 10;
 
-use super::agent_handler::{agent_identity, agent_status};
+use super::agent_handler::{agent_identity, agent_status, stop_agent};
 use super::alert_handler::{
     get_alert, list_alerts, mark_false_positive, stream_alerts, triage_alert, triage_alerts,
 };
@@ -422,6 +422,7 @@ pub fn build_router(
             .route("/api/v1/ddos/policies", post(create_ddos_policy))
             .route("/api/v1/ddos/policies/{id}", delete(delete_ddos_policy))
             .route("/api/v1/config/reload", post(reload_config))
+            .route("/api/v1/agent/stop", post(stop_agent))
             .route("/api/v1/config/{section}", put(put_config_section))
             .route("/api/v1/conntrack/flush", post(flush_connections))
             .route("/api/v1/dns/cache", delete(flush_dns_cache))
@@ -536,11 +537,12 @@ pub fn build_router(
 /// Writes that change no policy the document owns: triage, a feed refresh,
 /// a reload of the document itself, a flush of state the datapath rebuilds,
 /// a learning session or replay that only observes, a capture, and the
-/// speaker grant an orchestrator renews on its own.
+/// speaker grant an orchestrator renews on its own, and the agent's own stop.
 const NOT_POLICY_WRITES: &[&str] = &[
     "/api/v1/alerts/",
     "/api/v1/threatintel/feeds/refresh",
     "/api/v1/config/reload",
+    "/api/v1/agent/stop",
     "/api/v1/conntrack/flush",
     "/api/v1/dns/cache",
     "/api/v1/learning/",

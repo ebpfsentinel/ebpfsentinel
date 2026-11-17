@@ -92,6 +92,9 @@ pub struct AppState {
     /// [`Self::config`]. `Some` at runtime; lets the reload endpoint block
     /// until the new config is observable before returning.
     pub reload_complete: Option<Arc<Notify>>,
+    /// The stop command's side. `Some` at runtime; a state without it answers
+    /// the stop route `503`.
+    pub local_stop: Option<Arc<crate::lifecycle::LocalStop>>,
     /// Manual threat-intel feed re-fetch trigger. `Some` only when the feed
     /// fetcher task is running (threat intel enabled with ≥1 feed); `None`
     /// otherwise, in which case the refresh endpoint reports unavailable.
@@ -292,6 +295,7 @@ impl AppState {
             reload_trigger,
             config_path: None,
             reload_complete: None,
+            local_stop: None,
             feed_refresh_trigger: None,
             feed_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             ebpf_program_status,
@@ -693,6 +697,13 @@ impl AppState {
     #[must_use]
     pub fn with_alert_store(mut self, store: Arc<dyn AlertStore>) -> Self {
         self.alert_store = Some(store);
+        self
+    }
+
+    /// Attach the stop command's side.
+    #[must_use]
+    pub fn with_local_stop(mut self, stop: Arc<crate::lifecycle::LocalStop>) -> Self {
+        self.local_stop = Some(stop);
         self
     }
 

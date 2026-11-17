@@ -102,6 +102,9 @@ pub enum AuditAction {
     InvestigationStopped,
     /// An investigation reached the end of its time and stopped by itself.
     InvestigationExpired,
+    /// The agent was stopped through its stop command, under the name of the
+    /// caller and the reason given.
+    AgentStopped,
 }
 
 impl AuditAction {
@@ -126,6 +129,7 @@ impl AuditAction {
             Self::InvestigationStarted => "investigation_started",
             Self::InvestigationStopped => "investigation_stopped",
             Self::InvestigationExpired => "investigation_expired",
+            Self::AgentStopped => "agent_stopped",
         }
     }
 }

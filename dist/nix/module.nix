@@ -162,6 +162,12 @@ in
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       wantedBy = [ "multi-user.target" ];
+      # Stopped with the agent and never alone: the agent's own stop command
+      # takes the warden down through this binding, and a crash of the agent
+      # between two restarts leaves it up.
+      bindsTo = [ "ebpfsentinel.service" ];
+      unitConfig.RefuseManualStop = true;
+      restartIfChanged = false;
 
       startLimitBurst = 5;
       startLimitIntervalSec = 300;
@@ -174,7 +180,7 @@ in
         # --uid 0: the agent maps namespace-0 to real root and presents uid 0
         # over SO_PEERCRED, and only that uid is served.
         ExecStart = "${cfg.package}/bin/ebpfsentinel-warden serve /run/ebpfsentinel/warden.sock --uid 0";
-        Restart = "on-failure";
+        Restart = "always";
         RestartSec = "2s";
         # The agent is stopped first and may be mid-call here; killing the
         # broker under a call in flight turns an ordered stop into a socket
@@ -198,6 +204,13 @@ in
         "ebpfsentinel-warden.service"
       ];
       wantedBy = [ "multi-user.target" ];
+      # `systemctl stop` and `restart` are refused: the way down is
+      # `ebpfsentinel-agent stop --reason "..."`, which records who asked and
+      # ends the agent with status 79, the one exit not restarted. A switch
+      # therefore leaves a changed unit running on its old definition until
+      # that stop and the next start; it never fails the switch.
+      unitConfig.RefuseManualStop = true;
+      restartIfChanged = false;
 
       startLimitBurst = 5;
       startLimitIntervalSec = 300;
@@ -221,9 +234,11 @@ in
         # The agent handles SIGHUP exactly like a file change or a reload
         # through the API.
         ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
-        Restart = "on-failure";
+        Restart = "always";
         RestartSec = "5s";
-        # Restart=on-failure covers an agent that exits, not one still
+        RestartPreventExitStatus = "79";
+        SuccessExitStatus = "79";
+        # Restart=always covers an agent that exits, not one still
         # running and no longer working: the agent withholds its ping once a
         # minute has gone by with no pass over its ring buffers, so a stall
         # costs one restart instead of a silent datapath.

@@ -77,6 +77,7 @@ pub const WRITE_ROLES: &[(&str, &str, WriteRole)] = &[
     ("POST", "/api/v1/ddos/policies", WriteRole::Admin),
     ("DELETE", "/api/v1/ddos/policies/{id}", WriteRole::Admin),
     ("POST", "/api/v1/config/reload", WriteRole::Admin),
+    ("POST", "/api/v1/agent/stop", WriteRole::Admin),
     ("PUT", "/api/v1/config/{section}", WriteRole::Admin),
     ("POST", "/api/v1/conntrack/flush", WriteRole::Admin),
     ("POST", "/api/v1/routing/gateways", WriteRole::Admin),

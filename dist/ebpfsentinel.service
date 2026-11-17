@@ -17,6 +17,15 @@ Wants=ebpfsentinel-warden.service
 StartLimitBurst=5
 StartLimitIntervalSec=300
 
+# `systemctl stop` and `systemctl restart` are refused: the way to stop the
+# agent is `ebpfsentinel-agent stop --reason "..."`, which records who asked and
+# why, then ends the agent with status 79 (below). Anything else that ends it -
+# a `systemctl kill`, a signal, a crash - is restarted, and raised as an alert
+# at the next start. This keeps an honest mistake and a careless script from
+# switching the agent off; it does not hold against root, who can still edit
+# this unit, and the agent raises a masked or edited unit within 30s.
+RefuseManualStop=yes
+
 [Service]
 Type=simple
 
@@ -44,10 +53,13 @@ ExecStart=/usr/local/bin/ebpfsentinel-agent --config /etc/ebpfsentinel/config.ya
 # `systemctl reload ebpfsentinel` re-reads the config file; the agent handles
 # SIGHUP exactly like a file change or POST /api/v1/config/reload.
 ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
+Restart=always
 RestartSec=5s
+# Status 79 is the agent's own stop command: final, and not a failure.
+RestartPreventExitStatus=79
+SuccessExitStatus=79
 
-# `Restart=on-failure` covers an agent that exits. It does nothing for one that
+# `Restart=always` covers an agent that exits. It does nothing for one that
 # is still running and no longer working: a ring-buffer reader wedged in a
 # record handler leaves the process alive, the HTTP surface answering and the
 # datapath undrained. So the agent reports its own liveness - it pings every

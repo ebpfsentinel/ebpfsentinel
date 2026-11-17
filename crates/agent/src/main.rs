@@ -29,10 +29,16 @@ fn main() -> Result<()> {
         ebpfsentinel_warden::userns_bootstrap::maybe_bootstrap_from_env();
     }
 
-    tokio::runtime::Builder::new_multi_thread()
+    let ran = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run_cli(cli))
+        .block_on(run_cli(cli));
+    // A stop through the API ends with a status of its own, so the unit
+    // restarting the agent on anything else leaves this one stopped.
+    if ran.is_ok() && ebpfsentinel_agent::lifecycle::stop_commanded() {
+        std::process::exit(ebpfsentinel_agent::lifecycle::STOP_EXIT_CODE);
+    }
+    ran
 }
 
 #[allow(clippy::too_many_lines)]
@@ -55,6 +61,11 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
             let outcome = ebpfsentinel_agent::uninstall::run(warden_sock)?;
             println!("{}", ebpfsentinel_agent::uninstall::report(&outcome));
             Ok(())
+        }
+
+        Some(Command::Stop { conn, reason }) => {
+            let client = ApiClient::new(&conn.host, conn.port, cli.token);
+            commands::cmd_stop(&client, reason.as_deref(), output).await
         }
 
         Some(Command::Status { conn }) => {

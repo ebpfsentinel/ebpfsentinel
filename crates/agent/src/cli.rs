@@ -72,6 +72,17 @@ pub enum Command {
         warden_sock: Option<std::path::PathBuf>,
     },
 
+    /// Stop the running agent and keep it stopped: the stop is recorded under
+    /// the caller's name, and the agent exits with a status its service unit
+    /// does not restart
+    Stop {
+        #[command(flatten)]
+        conn: ConnectionArgs,
+        /// Why, kept in the run record and the audit trail
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
     /// Query running agent status
     Status {
         #[command(flatten)]
@@ -1298,6 +1309,16 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Uninstall { warden_sock: Some(ref p) }) if p.as_os_str() == "/run/w.sock"
+        ));
+    }
+
+    #[test]
+    fn stop_takes_a_reason() {
+        let cli = Cli::try_parse_from(["ebpfsentinel-agent", "stop", "--reason", "kernel upgrade"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Stop { reason: Some(ref r), .. }) if r == "kernel upgrade"
         ));
     }
 

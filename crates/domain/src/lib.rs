@@ -28,6 +28,7 @@ pub mod ips;
 pub mod l2;
 pub mod l7;
 pub mod learning;
+pub mod lifecycle;
 pub mod loadbalancer;
 pub mod nat;
 pub mod netpol;

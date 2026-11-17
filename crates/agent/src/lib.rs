@@ -8,6 +8,7 @@ pub mod ebpf_lifecycle;
 pub mod ebpf_metrics;
 pub mod feed_fetch;
 pub mod http;
+pub mod lifecycle;
 pub mod mitigation_restore;
 pub mod reload;
 pub mod runtime;

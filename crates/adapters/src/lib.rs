@@ -11,6 +11,7 @@ pub mod flow;
 pub mod geoip;
 pub mod grpc;
 pub mod hypervisor;
+pub mod lifecycle;
 pub mod metrics;
 pub mod net;
 pub mod netfilter;

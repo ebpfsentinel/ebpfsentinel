@@ -1,6 +1,6 @@
 //! The keep-alive the service manager reads, and what it is read from.
 //!
-//! `Restart=on-failure` restarts an agent that exits. It does nothing for an
+//! `Restart=always` restarts an agent that exits. It does nothing for an
 //! agent that is still running and no longer working: a reader task wedged in a
 //! record handler, a runtime whose worker never comes back. The process is
 //! alive, the socket still accepts, and the datapath has stopped being drained.

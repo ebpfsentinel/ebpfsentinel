@@ -150,7 +150,17 @@ let
         "LimitMEMLOCK"
         "Restart"
         "RestartSec"
+        "RestartPreventExitStatus"
+        "SuccessExitStatus"
       ];
+
+    "both units refuse a manual stop and the warden goes down with the agent" =
+      agent.unitConfig.RefuseManualStop
+      && warden.unitConfig.RefuseManualStop
+      && unitValue "ebpfsentinel.service" "RefuseManualStop" == "yes"
+      && unitValue "ebpfsentinel-warden.service" "RefuseManualStop" == "yes"
+      && lib.elem "ebpfsentinel.service" warden.bindsTo
+      && unitValue "ebpfsentinel-warden.service" "BindsTo" == "ebpfsentinel.service";
 
     "the warden unit matches the installed one" =
       lib.all (key: toString warden.serviceConfig.${key} == unitValue "ebpfsentinel-warden.service" key) [

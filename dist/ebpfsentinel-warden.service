@@ -10,6 +10,13 @@ Wants=network-online.target
 StartLimitBurst=5
 StartLimitIntervalSec=300
 
+# Stopped with the agent and never alone: `systemctl stop` is refused, and the
+# agent's own stop command (`ebpfsentinel-agent stop`) takes the warden down
+# with it through this binding. While the agent is between two restarts the
+# binding holds, so a crash of the agent never costs the warden.
+RefuseManualStop=yes
+BindsTo=ebpfsentinel.service
+
 [Service]
 Type=simple
 
@@ -31,7 +38,7 @@ RuntimeDirectoryMode=0755
 # --uid 0: on bare-metal the agent runs as root and maps namespace-0 to real root,
 # so it presents uid 0 over SO_PEERCRED. Only that uid is served.
 ExecStart=/usr/local/bin/warden serve /run/ebpfsentinel/warden.sock --uid 0
-Restart=on-failure
+Restart=always
 RestartSec=2s
 
 # The warden answers one RPC at a time per connection and holds no eBPF, so its

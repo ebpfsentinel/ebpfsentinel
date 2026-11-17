@@ -1,12 +1,14 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use axum::Json;
 use axum::extract::State;
-use serde::Serialize;
+use axum::{Extension, Json};
+use domain::audit::entity::AuditAction;
+use domain::auth::entity::JwtClaims;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use super::error::ErrorBody;
+use super::error::{ApiError, ErrorBody};
 use super::state::AppState;
 
 /// Operator-managed metadata advertised to the dashboard, plus the
@@ -282,6 +284,80 @@ pub async fn agent_identity(State(state): State<Arc<AppState>>) -> Json<AgentIde
     })
 }
 
+/// Why the agent is being stopped, for the record.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StopRequest {
+    /// Free text kept in the run record, the audit trail and the next
+    /// start's log line.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// What the agent answers before it ends.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StopResponse {
+    /// Always `stopping`: the answer leaves before the shutdown starts.
+    pub status: String,
+    /// The exit status the agent ends with, which its unit treats as final.
+    pub exit_code: i32,
+}
+
+/// Stop the agent and keep it stopped.
+///
+/// The documented way to stop a host agent: the request is recorded under
+/// the caller's name with its reason, the agent shuts down in order and exits
+/// with status `79`, which its service unit does not restart. A stop by any
+/// other means is raised as an alert at the next start.
+#[utoipa::path(
+    post, path = "/api/v1/agent/stop",
+    tag = "Operations",
+    request_body(content = StopRequest, description = "Why the agent is stopped", content_type = "application/json"),
+    responses(
+        (status = 202, description = "The agent is stopping", body = StopResponse),
+        (status = 401, description = "Authentication required", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 503, description = "This agent cannot be stopped through the API", body = ErrorBody),
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("api_key" = []),
+    )
+)]
+pub async fn stop_agent(
+    State(state): State<Arc<AppState>>,
+    claims: Option<Extension<JwtClaims>>,
+    body: Option<Json<StopRequest>>,
+) -> Result<(axum::http::StatusCode, Json<StopResponse>), ApiError> {
+    let Some(stop) = state.local_stop.as_ref() else {
+        return Err(ApiError::ServiceUnavailable {
+            message: "this agent is not stopped through the API".to_string(),
+        });
+    };
+    let via = claims.map_or_else(|| "local".to_string(), |Extension(c)| c.sub);
+    let reason = body
+        .and_then(|Json(b)| b.reason)
+        .map(|r| domain::lifecycle::clean_stop_text(&r))
+        .filter(|r| !r.is_empty());
+    state.audit_service.record_config_change(
+        AuditAction::AgentStopped,
+        &format!(
+            "stopped by {via}{}",
+            reason
+                .as_deref()
+                .map_or_else(String::new, |r| format!(": {r}"))
+        ),
+    );
+    stop.request(Some(&via), reason.as_deref());
+    Ok((
+        axum::http::StatusCode::ACCEPTED,
+        Json(StopResponse {
+            status: "stopping".to_string(),
+            exit_code: domain::lifecycle::STOP_EXIT_CODE,
+        }),
+    ))
+}
+
 /// Read the system hostname at request time. Falls back to `"unknown"`
 /// if the syscall fails (e.g. in stripped containers without
 /// `gethostname` support). Also what the syslog and CEF flow sinks put in
@@ -401,6 +477,49 @@ mod tests {
             reload_tx,
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         ))
+    }
+
+    #[tokio::test]
+    async fn stop_is_unavailable_where_nothing_wired_it() {
+        let state = state_with_one_rule();
+        let refused = stop_agent(State(state), None, None).await;
+        assert!(matches!(refused, Err(ApiError::ServiceUnavailable { .. })));
+    }
+
+    #[tokio::test]
+    async fn stop_records_the_caller_and_ends_the_run() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (journal, _) =
+            adapters::lifecycle::RunJournal::open(dir.path().join("run.json"), "boot-1");
+        let journal = Arc::new(journal);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let state = Arc::into_inner(state_with_one_rule())
+            .expect("sole owner")
+            .with_local_stop(Arc::new(crate::lifecycle::LocalStop::new(
+                Arc::clone(&journal),
+                cancel.clone(),
+            )));
+        let claims: JwtClaims =
+            serde_json::from_value(serde_json::json!({ "sub": "ops", "exp": 0 })).expect("claims");
+        let (status, Json(resp)) = stop_agent(
+            State(Arc::new(state)),
+            Some(Extension(claims)),
+            Some(Json(StopRequest {
+                reason: Some("kernel upgrade".to_string()),
+            })),
+        )
+        .await
+        .expect("accepted");
+        assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+        assert_eq!(resp.exit_code, 79);
+        let end = journal.ended().expect("recorded");
+        assert_eq!(end.how, domain::lifecycle::EndCause::Command);
+        assert_eq!(end.requested_by.as_deref(), Some("ops"));
+        assert_eq!(end.reason.as_deref(), Some("kernel upgrade"));
+        assert!(crate::lifecycle::stop_commanded());
+        tokio::time::timeout(std::time::Duration::from_secs(5), cancel.cancelled())
+            .await
+            .expect("the run is ended once the answer left");
     }
 
     #[tokio::test]

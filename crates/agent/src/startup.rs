@@ -612,6 +612,10 @@ pub async fn run(
             return Err(anyhow::anyhow!("{e}"));
         }
     };
+    // Opened once the state directory is ours, so a refused second process
+    // never overwrites the record of the one it found running.
+    let (run_journal, previous_run) = crate::lifecycle::open_journal(&config.audit.storage_path);
+    let _run_guard = crate::lifecycle::RunGuard(Arc::clone(&run_journal));
 
     // ── 3. Convert and load firewall rules ──────────────────────────
     let firewall_mode = config.firewall_mode()?;
@@ -1324,6 +1328,7 @@ pub async fn run(
     // Create alert channel early so DNS services can emit alerts
     let (alert_tx, alert_rx) =
         mpsc::channel::<application::alert_event::AlertEvent>(ALERT_CHANNEL_CAPACITY);
+    crate::lifecycle::report_previous(&previous_run, &alert_tx).await;
 
     // ── Multi-WAN active health-probe loop ──────────────────────────
     // Probe each gateway's configured health-check target, drive the routing
@@ -1743,13 +1748,18 @@ pub async fn run(
             Arc::clone(adapter) as Arc<dyn ports::secondary::geoip_port::GeoIpPort>
         );
     }
+    // ── 6. Create cancellation token ────────────────────────────────
+    // Before the state is shared: the stop command ends the run through it.
+    let cancel_token = crate::shutdown::create_shutdown_token();
+    let app_state = app_state.with_local_stop(Arc::new(crate::lifecycle::LocalStop::new(
+        Arc::clone(&run_journal),
+        cancel_token.clone(),
+    )));
+    crate::lifecycle::spawn_unit_watch(alert_tx.clone(), cancel_token.clone());
     let app_state = Arc::new(app_state);
     // Filled once the resolver and the enrichers have decided, below. A status
     // read before that answers `starting` rather than a setting read back.
     let container_coverage = Arc::clone(&app_state.container_coverage);
-
-    // ── 6. Create cancellation token ────────────────────────────────
-    let cancel_token = crate::shutdown::create_shutdown_token();
 
     // ── 6. DNS allow-list resolver ───────────────────────────────────
     if config.dns.allowlist.enabled {
@@ -5118,6 +5128,7 @@ pub async fn run(
     drop(alert_tx); // close alert channel so alert consumer sees channel closed
     let _ = tokio::time::timeout(Duration::from_secs(1), alert_handle).await;
 
+    crate::lifecycle::record_end(&run_journal);
     info!("agent stopped");
     Ok(())
 }
