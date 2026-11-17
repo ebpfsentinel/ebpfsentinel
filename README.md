@@ -15,7 +15,7 @@ A unified, kernel-native **Network & Security platform** for Linux - one Rust ag
 
 ## What it does
 
-A snapshot of the capabilities below - see the [Features guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/features/overview.md) for the full reference on each engine.
+A snapshot of the capabilities below - see the [Features guide](https://docs.ebpfsentinel.io/features/overview) for the full reference on each engine.
 
 ### Network Security & Control
 
@@ -211,12 +211,12 @@ sudo ./demo.sh down
 ```
 
 The lab is pinned to the release it was downloaded with, and its checksum and
-signature are in that release's `SHA256SUMS`. From a checkout of this
+signature are in that release's `ebpfsentinel-SHA256SUMS`. From a checkout of this
 repository the same lab is `demo/`, and `sudo ./demo.sh up --local` builds the
 agent from your working tree instead of pulling the published image.
 
 What it shows, with the commands in the
-[tutorials](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/tutorials):
+[tutorials](https://docs.ebpfsentinel.io/tutorials):
 a SYN flood stopped and its source blocked, a card number caught inside TLS
 without a proxy and without a key, and a workload cut off for calling an AI
 provider. `demo/gitops/gitops.sh up` runs the same agent as a fleet driven by
@@ -266,7 +266,7 @@ configuration and the state with it. Either way both units are stopped and the
 eBPF programs are detached from every interface. A single `.deb` or `.rpm`
 verified against the release signing identity, the installed paths, the
 upgrade behaviour and the NixOS module are in the
-[packages guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/operations/deployment/packages.md).
+[packages guide](https://docs.ebpfsentinel.io/operations/deployment/packages).
 
 ### Install (tarball)
 
@@ -277,9 +277,10 @@ tarball ships the agent, the warden, prebuilt eBPF objects, both systemd units,
 the profiles and an `install.sh`:
 
 ```bash
-REL=<release>
+REL=<release>      # the release tag, without its v
+VER=<version>      # the agent's own version, named in that release's notes
 BASE=https://github.com/ebpfsentinel/ebpfsentinel-release/releases/download/v$REL
-curl -fsSLO "$BASE/ebpfsentinel-${REL}-linux-amd64.tar.gz"
+curl -fsSLO "$BASE/ebpfsentinel-${VER}-linux-amd64.tar.gz"
 curl -fsSLO "$BASE/ebpfsentinel-SHA256SUMS"
 curl -fsSLO "$BASE/ebpfsentinel-SHA256SUMS.sig"
 curl -fsSLO "$BASE/ebpfsentinel-SHA256SUMS.crt"
@@ -289,11 +290,12 @@ cosign verify-blob \
   --signature ebpfsentinel-SHA256SUMS.sig \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp '^https://github\.com/ebpfsentinel/ebpfsentinel-release/\.github/workflows/sign-blob\.yml@refs/tags/v.*$' \
+  --certificate-github-workflow-repository ebpfsentinel/ebpfsentinel-release \
   ebpfsentinel-SHA256SUMS
 sha256sum --ignore-missing -c ebpfsentinel-SHA256SUMS
 
-tar xzf "ebpfsentinel-${REL}-linux-amd64.tar.gz"
-cd "ebpfsentinel-${REL}-linux-amd64"
+tar xzf "ebpfsentinel-${VER}-linux-amd64.tar.gz"
+cd "ebpfsentinel-${VER}-linux-amd64"
 sudo ./install.sh            # installs to /usr/local, wires up both systemd units
 ```
 
@@ -329,14 +331,26 @@ The systemd install (`dist/install.sh`) wires this as two units - `ebpfsentinel-
 The agent loads eBPF **exclusively** through a BPF token - never `CAP_BPF`, never `--privileged`. The deployment is two containers: the privileged `warden` broker and the rootless `agent`, sharing a control socket. `docker compose up` wires both:
 
 ```bash
-# The agent runs as uid 65534 and rejects a world-readable config; make it
-# readable by that uid:
-#   sudo chown 65534:65534 config/ebpfsentinel.yaml && sudo chmod 640 config/ebpfsentinel.yaml
+REL=<release>
+BASE=https://github.com/ebpfsentinel/ebpfsentinel-release/releases/download/v$REL
+mkdir ebpfsentinel && cd ebpfsentinel
+for f in compose.yaml ebpfsentinel-agent.json ebpfsentinel-SHA256SUMS{,.sig,.crt}; do
+  curl -fsSLO "$BASE/$f"
+done
+# Verify ebpfsentinel-SHA256SUMS with cosign as in "Install (tarball)" above, then:
+sha256sum --ignore-missing -c ebpfsentinel-SHA256SUMS
+
+# Your configuration sits beside them. The agent runs as uid 65534 and rejects
+# a world-readable config:
+#   sudo chown 65534:65534 ebpfsentinel.yaml && sudo chmod 640 ebpfsentinel.yaml
 docker compose up -d        # starts the warden broker + the agent
 docker compose logs -f
 ```
 
-The capabilities are held by the `warden` broker (bpffs delegation, conntrack/routes, the pcap pool + ARP); the agent drops every capability - it self-unshares a user namespace and loads its own eBPF through the token. See the [BPF token guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/operations/deployment/bpf-token.md) for the systemd and Kubernetes paths and the full capability matrix.
+The compose file of a release names that release's images, so upgrading is
+fetching the next release's two files; no checkout is involved.
+
+The capabilities are held by the `warden` broker (bpffs delegation, conntrack/routes, the pcap pool + ARP); the agent drops every capability - it self-unshares a user namespace and loads its own eBPF through the token. See the [BPF token guide](https://docs.ebpfsentinel.io/operations/deployment/bpf-token) for the systemd and Kubernetes paths and the full capability matrix.
 
 ### Minimal config
 
@@ -362,28 +376,28 @@ The control plane is shut by default: it authenticates, and it stays on
 loopback unless TLS is configured. Both are one setting away from being opened
 deliberately, and neither can be opened by accident.
 
-See the [Getting Started guide](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/getting-started/quickstart.md) for detailed setup instructions.
+See the [Getting Started guide](https://docs.ebpfsentinel.io/getting-started/quickstart) for detailed setup instructions.
 
 ## Documentation
 
-Full documentation is available at [ebpfsentinel/ebpfsentinel-docs](https://github.com/ebpfsentinel/ebpfsentinel-docs):
+Full documentation is at [docs.ebpfsentinel.io](https://docs.ebpfsentinel.io):
 
 | Section | Description |
 | ------- | ----------- |
-| [Getting Started](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/getting-started/quickstart.md) | Installation, prerequisites, first run |
-| [Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/features/overview.md) | Detailed feature guides (firewall, IDS, DLP, ...) |
-| [Configuration](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/configuration/overview.md) | YAML reference for all sections |
-| [Architecture](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/architecture/overview.md) | Hexagonal/DDD design, eBPF pipeline, data flow |
-| [Kernel Reference](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/kernel/overview.md) | eBPF programs, maps, helpers, pipeline |
-| [Hot Reload](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/operations/hot-reload.md) | Dynamic eBPF program loading/unloading |
-| [REST API](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/api-reference/rest-api.md) | All endpoints with request/response formats |
-| [gRPC API](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/api-reference/grpc-api.md) | Alert streaming service |
-| [CLI Reference](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/cli-reference/index.md) | All commands and options |
-| [Prometheus Metrics](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/api-reference/prometheus-metrics.md) | Metric names and labels |
-| [Deployment](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/operations/deployment/docker.md) | Docker, Kubernetes, binary |
-| [Security](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/architecture/security-model.md) | TLS, auth, hardening |
-| [Development](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/development/building.md) | Building, testing, contributing |
-| [Examples](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/examples/index.md) | Real-world deployment scenarios |
+| [Getting Started](https://docs.ebpfsentinel.io/getting-started/quickstart) | Installation, prerequisites, first run |
+| [Features](https://docs.ebpfsentinel.io/features/overview) | Detailed feature guides (firewall, IDS, DLP, ...) |
+| [Configuration](https://docs.ebpfsentinel.io/configuration/overview) | YAML reference for all sections |
+| [Architecture](https://docs.ebpfsentinel.io/architecture/overview) | Hexagonal/DDD design, eBPF pipeline, data flow |
+| [Kernel Reference](https://docs.ebpfsentinel.io/kernel/overview) | eBPF programs, maps, helpers, pipeline |
+| [Hot Reload](https://docs.ebpfsentinel.io/operations/hot-reload) | Dynamic eBPF program loading/unloading |
+| [REST API](https://docs.ebpfsentinel.io/api-reference/rest-api) | All endpoints with request/response formats |
+| [gRPC API](https://docs.ebpfsentinel.io/api-reference/grpc-api) | Alert streaming service |
+| [CLI Reference](https://docs.ebpfsentinel.io/cli-reference/) | All commands and options |
+| [Prometheus Metrics](https://docs.ebpfsentinel.io/api-reference/prometheus-metrics) | Metric names and labels |
+| [Deployment](https://docs.ebpfsentinel.io/operations/deployment/docker) | Docker, Kubernetes, binary |
+| [Security](https://docs.ebpfsentinel.io/architecture/security-model) | TLS, auth, hardening |
+| [Development](https://docs.ebpfsentinel.io/development/building) | Building, testing, contributing |
+| [Examples](https://docs.ebpfsentinel.io/examples/) | Real-world deployment scenarios |
 
 Per-feature configuration examples are in [`config/examples/`](config/examples/).
 
@@ -396,7 +410,7 @@ The changelog is kept with the releases rather than here, so the whole product's
 - **Arch:** x86_64 and aarch64, the userspace tests run on both in CI
 - **Runtime:** Docker, Podman, Kubernetes (DaemonSet), Nomad
 
-See [Compatibility](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/operations/compatibility.md) for the full matrix.
+See [Compatibility](https://docs.ebpfsentinel.io/operations/compatibility) for the full matrix.
 
 ## OSS vs Enterprise
 
@@ -419,7 +433,7 @@ The **enterprise edition** layers on capabilities for fleets and regulated envir
 | Kubernetes operator | CRD-driven deployment & lifecycle management for the agent fleet |
 | Web dashboard | Multi-tenant web UI & control plane (MSSP front-end) |
 
-See [Enterprise Features](https://github.com/ebpfsentinel/ebpfsentinel-docs/tree/main/docs/features/enterprise/overview.md) for the full list and per-feature detail.
+See [Enterprise Features](https://docs.ebpfsentinel.io/features/enterprise/overview) for the full list and per-feature detail.
 
 ## License
 
