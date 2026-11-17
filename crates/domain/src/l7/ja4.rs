@@ -48,12 +48,16 @@ fn compute_section_a(hello: &TlsClientHello) -> String {
     // Protocol: "t" for TCP (we don't support QUIC yet)
     let proto = 't';
 
-    // TLS version: prefer supported_versions (TLS 1.3), fallback to handshake version
-    let version = if let Some(&max_ver) = hello.supported_versions.first() {
-        tls_version_str(max_ver)
-    } else {
-        tls_version_str(hello.handshake_version)
-    };
+    // TLS version: the highest the client offers in supported_versions, which
+    // a client lists in any order it likes, else the handshake header.
+    let version = tls_version_str(
+        hello
+            .supported_versions
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(hello.handshake_version),
+    );
 
     // SNI indicator: "d" if domain present, "i" if absent
     let sni_indicator = if hello.sni.is_some() { 'd' } else { 'i' };
@@ -62,70 +66,82 @@ fn compute_section_a(hello: &TlsClientHello) -> String {
     let cipher_count = hello.cipher_suites.len().min(99);
     let ext_count = hello.extension_types.len().min(99);
 
-    // ALPN hint: first and last char of first ALPN protocol, or "00"
+    // ALPN hint: first and last character of the first protocol, or "00".
+    // A value whose first or last byte is not alphanumeric is written as the
+    // first and last hex digit of the whole value instead.
     let alpn_hint = hello
         .alpn_protocols
         .first()
-        .and_then(|p| {
-            let bytes = p.as_bytes();
-            if bytes.is_empty() {
-                None
-            } else {
-                let first = bytes[0] as char;
-                let last = bytes[bytes.len() - 1] as char;
-                Some(format!("{first}{last}"))
-            }
-        })
+        .and_then(|p| alpn_hint(p.as_bytes()))
         .unwrap_or_else(|| "00".to_string());
 
     format!("{proto}{version}{sni_indicator}{cipher_count:02}{ext_count:02}{alpn_hint}")
 }
 
-/// Section b: SHA-256(sorted cipher suites as comma-separated hex), truncated to 12 hex chars.
+/// Section b: SHA-256(sorted cipher suites as comma-separated hex), truncated
+/// to 12 hex chars, or twelve zeros when the hello offers no cipher.
 fn compute_section_b(hello: &TlsClientHello) -> String {
+    if hello.cipher_suites.is_empty() {
+        return EMPTY_SECTION.to_string();
+    }
     let mut sorted = hello.cipher_suites.clone();
     sorted.sort_unstable();
-    let csv = sorted.iter().fold(String::new(), |mut acc, &cs| {
-        if !acc.is_empty() {
-            acc.push(',');
-        }
-        let _ = write!(acc, "{cs:04x}");
-        acc
-    });
-    sha256_12(&csv)
+    sha256_12(&hex_csv(&sorted))
 }
 
-/// Section c: SHA-256(sorted extensions + `_` + sorted signature algorithms), truncated to 12 hex chars.
+/// Section c: SHA-256(sorted extensions + `_` + signature algorithms in the
+/// order the client sent them), truncated to 12 hex chars.
+///
+/// SNI and ALPN are left out of the extension list (they are already in
+/// section a). The signature algorithms are not sorted: their order is part
+/// of what tells one client from another, and sorting them gives a value no
+/// published JA4 matches. With no signature algorithm the underscore is left
+/// out; with no extension at all the section is twelve zeros.
 fn compute_section_c(hello: &TlsClientHello) -> String {
-    // Sort extension types, excluding SNI (0x0000) and ALPN (0x0010) per JA4 spec
     let mut sorted_ext: Vec<u16> = hello
         .extension_types
         .iter()
         .copied()
         .filter(|&e| e != 0x0000 && e != 0x0010)
         .collect();
+    if sorted_ext.is_empty() {
+        return EMPTY_SECTION.to_string();
+    }
     sorted_ext.sort_unstable();
 
-    let ext_csv = sorted_ext.iter().fold(String::new(), |mut acc, &ext| {
-        if !acc.is_empty() {
-            acc.push(',');
-        }
-        let _ = write!(acc, "{ext:04x}");
-        acc
-    });
-
-    let mut sorted_sig = hello.signature_algorithms.clone();
-    sorted_sig.sort_unstable();
-    let sig_csv = sorted_sig.iter().fold(String::new(), |mut acc, &sig| {
-        if !acc.is_empty() {
-            acc.push(',');
-        }
-        let _ = write!(acc, "{sig:04x}");
-        acc
-    });
-
-    let input = format!("{ext_csv}_{sig_csv}");
+    let ext_csv = hex_csv(&sorted_ext);
+    let input = if hello.signature_algorithms.is_empty() {
+        ext_csv
+    } else {
+        format!("{ext_csv}_{}", hex_csv(&hello.signature_algorithms))
+    };
     sha256_12(&input)
+}
+
+/// Section b or c of a hello that carries nothing to hash.
+const EMPTY_SECTION: &str = "000000000000";
+
+fn hex_csv(values: &[u16]) -> String {
+    values.iter().fold(String::new(), |mut acc, &value| {
+        if !acc.is_empty() {
+            acc.push(',');
+        }
+        let _ = write!(acc, "{value:04x}");
+        acc
+    })
+}
+
+fn alpn_hint(value: &[u8]) -> Option<String> {
+    let (&first, &last) = (value.first()?, value.last()?);
+    if first.is_ascii_alphanumeric() && last.is_ascii_alphanumeric() {
+        return Some(format!("{}{}", first as char, last as char));
+    }
+    let hex = value.iter().fold(String::new(), |mut acc, byte| {
+        let _ = write!(acc, "{byte:02x}");
+        acc
+    });
+    let (head, tail) = (hex.chars().next()?, hex.chars().last()?);
+    Some(format!("{head}{tail}"))
 }
 
 fn tls_version_str(version: u16) -> &'static str {
@@ -330,6 +346,69 @@ mod tests {
             supported_versions: vec![0x0304, 0x0303],
             session_id: None,
         }
+    }
+
+    /// The worked example of the JA4 technical details published by `FoxIO`:
+    /// the value every JA4 database and feed uses for this client.
+    #[test]
+    fn ja4_matches_the_published_example() {
+        let hello = TlsClientHello {
+            sni: Some("example.com".to_string()),
+            record_version: 0x0301,
+            handshake_version: 0x0303,
+            cipher_suites: vec![
+                0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013,
+                0xc014, 0x009c, 0x009d, 0x002f, 0x0035,
+            ],
+            extension_types: vec![
+                0x001b, 0x0000, 0x0033, 0x0010, 0x4469, 0x0017, 0x002d, 0x000d, 0x0005, 0x0023,
+                0x0012, 0x002b, 0xff01, 0x000b, 0x000a, 0x0015,
+            ],
+            supported_groups: vec![0x001d, 0x0017, 0x0018],
+            signature_algorithms: vec![
+                0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601,
+            ],
+            alpn_protocols: vec!["h2".to_string(), "http/1.1".to_string()],
+            supported_versions: vec![0x0304, 0x0303],
+            session_id: None,
+        };
+        assert_eq!(
+            compute_ja4(&hello).ja4,
+            "t13d1516h2_8daaf6152771_e5627efa2ab1"
+        );
+    }
+
+    #[test]
+    fn ja4_signature_algorithm_order_matters() {
+        let hello = make_hello();
+        let mut swapped = make_hello();
+        swapped.signature_algorithms.reverse();
+        assert_ne!(compute_ja4(&hello).ja4_c, compute_ja4(&swapped).ja4_c);
+    }
+
+    #[test]
+    fn ja4_version_is_the_highest_offered() {
+        let mut hello = make_hello();
+        hello.supported_versions = vec![0x0303, 0x0304];
+        assert!(compute_section_a(&hello).starts_with("t13"));
+    }
+
+    #[test]
+    fn ja4_empty_sections_are_zeros_and_no_signature_drops_the_underscore() {
+        let mut hello = make_hello();
+        hello.cipher_suites.clear();
+        assert_eq!(compute_section_b(&hello), EMPTY_SECTION);
+        hello.signature_algorithms.clear();
+        assert_eq!(compute_section_c(&hello), sha256_12("000a,000d,002b"));
+        hello.extension_types = vec![0x0000, 0x0010];
+        assert_eq!(compute_section_c(&hello), EMPTY_SECTION);
+    }
+
+    #[test]
+    fn ja4_alpn_that_is_not_alphanumeric_is_written_in_hex() {
+        assert_eq!(alpn_hint(b"h2").as_deref(), Some("h2"));
+        assert_eq!(alpn_hint(&[0xab, 0x01]).as_deref(), Some("a1"));
+        assert_eq!(alpn_hint(b"").as_deref(), None);
     }
 
     #[test]
