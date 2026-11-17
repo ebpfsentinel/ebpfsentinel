@@ -3,9 +3,10 @@
 //! the two LSM links that decide it.
 //!
 //! The ids are the agent's own descriptors as `/proc/self/fdinfo` lists them,
-//! re-read on a timer: a map or a link the agent opens later is protected at
-//! the next reading, and one it closed stops being protected rather than
-//! leaving a stale id that a later object could be handed by the kernel.
+//! re-read on a timer and as soon as an object is loaded after the guard: a
+//! map or a link the agent opens later is protected once its loader settles,
+//! and one it closed stops being protected rather than leaving a stale id that
+//! a later object could be handed by the kernel.
 //!
 //! The allowed tasks are the agent and, where it runs rootless, the warden,
 //! whose inventory opens the agent's links by id to read where they sit. Each
@@ -53,6 +54,21 @@ pub struct BpfGuardStatus {
 }
 
 static STATUS: OnceLock<Mutex<BpfGuardStatus>> = OnceLock::new();
+
+/// Raised by every object load, so the guard reads the agent's descriptors
+/// again without waiting for its timer.
+static OBJECT_LOADED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Say that an object was loaded: its maps, and the links attached from it
+/// right after, are the agent's to protect.
+pub fn object_loaded() {
+    OBJECT_LOADED.notify_one();
+}
+
+/// Resolves once an object was loaded since the last time it resolved.
+pub async fn next_object_loaded() {
+    OBJECT_LOADED.notified().await;
+}
 
 fn status_cell() -> &'static Mutex<BpfGuardStatus> {
     STATUS.get_or_init(|| Mutex::new(BpfGuardStatus::default()))
@@ -447,6 +463,14 @@ impl BpfGuardAttacher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_load_before_anybody_waits_is_still_heard() {
+        object_loaded();
+        tokio::time::timeout(std::time::Duration::from_secs(1), next_object_loaded())
+            .await
+            .expect("a load signalled before the wait is kept for it");
+    }
 
     #[test]
     fn fdinfo_names_map_and_link_ids_and_nothing_else() {

@@ -8084,23 +8084,45 @@ fn publish_guard_status(maps: &adapters::ebpf::bpf_guard::BpfGuardMaps) {
 }
 
 /// How often the agent's own descriptors and the warden's identity are read
-/// again. An object loaded after start-up is unprotected for at most this
-/// long, and so is a warden that restarted.
+/// again: a warden that restarted is unprotected for at most this long.
 const BPF_GUARD_REFRESH: Duration = Duration::from_secs(30);
 
+/// How long the guard waits after an object load before reading the
+/// descriptors, so the links attached from that object right after its load
+/// are read in the same pass.
+const BPF_GUARD_SETTLE: Duration = Duration::from_millis(500);
+
 /// Keep the guard on what the agent holds now and on the warden as it runs
-/// now.
+/// now. An object loaded after start-up is read within [`BPF_GUARD_SETTLE`]
+/// of its load, rather than at the next tick.
 pub(crate) async fn refresh_bpf_guard(
     mut maps: adapters::ebpf::bpf_guard::BpfGuardMaps,
     mut tasks: adapters::ebpf::bpf_guard::GuardTasks,
     cancel: CancellationToken,
 ) {
+    use adapters::ebpf::bpf_guard::next_object_loaded;
     let mut tick = tokio::time::interval(BPF_GUARD_REFRESH);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick.tick().await;
     loop {
         tokio::select! {
             () = cancel.cancelled() => break,
+            () = next_object_loaded() => {
+                // Loads come in bursts at start-up; read once the burst
+                // settled rather than once per object.
+                loop {
+                    tokio::select! {
+                        () = cancel.cancelled() => return,
+                        () = next_object_loaded() => {}
+                        () = tokio::time::sleep(BPF_GUARD_SETTLE) => break,
+                    }
+                }
+                let ids = adapters::ebpf::bpf_guard::own_ids();
+                if let Err(e) = maps.replace(&ids) {
+                    warn!("guard refresh failed, the previous ids stay: {e}");
+                }
+                publish_guard_status(&maps);
+            }
             _ = tick.tick() => {
                 let ids = adapters::ebpf::bpf_guard::own_ids();
                 if let Err(e) = maps.replace(&ids) {

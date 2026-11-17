@@ -1952,6 +1952,7 @@ pub fn load_object_token(
         errno: e.raw_os_error().unwrap_or(0),
     })?;
     load_object_token_maps(elf, Some(pin_path), dev_bound_ifindex, optional)
+        .inspect(|_| super::bpf_guard::object_loaded())
 }
 
 /// Like [`load_object_token`], but no map is pinned and none is reused: the
@@ -1964,6 +1965,7 @@ pub fn load_object_token_unpinned(
     optional: &[&str],
 ) -> Result<TokenLoadedObject, KfuncLoaderError> {
     load_object_token_maps(elf, None, dev_bound_ifindex, optional)
+        .inspect(|_| super::bpf_guard::object_loaded())
 }
 
 fn load_object_token_maps(
