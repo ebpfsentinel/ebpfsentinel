@@ -582,6 +582,10 @@ mod tests {
         assert_eq!(end.how, domain::lifecycle::EndCause::Command);
         assert_eq!(end.requested_by.as_deref(), Some("local"));
         assert_eq!(end.reason.as_deref(), Some("host maintenance"));
+        assert!(
+            crate::lifecycle::stop_commanded(),
+            "the container ends with the stop's own status"
+        );
     }
 
     #[tokio::test]

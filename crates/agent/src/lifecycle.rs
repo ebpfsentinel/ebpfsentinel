@@ -75,6 +75,11 @@ pub async fn report_previous(previous: &PreviousRun, alerts: &mpsc::Sender<Alert
 
 /// Complete the record of a run that ends without its stop command, which
 /// leaves a signal as the only thing that could have ended it in order.
+///
+/// A signal inside an armed stop's window is that stop: the run ends with
+/// [`STOP_EXIT_CODE`] as a unit's would, so whatever reads the container's
+/// exit status, a kubelet and the operator reading it after, tells it from a
+/// stop nobody authorised.
 pub fn record_end(journal: &RunJournal) {
     match journal.armed() {
         Some((requested_by, reason)) => {
@@ -83,6 +88,7 @@ pub fn record_end(journal: &RunJournal) {
                 requested_by.as_deref(),
                 reason.as_deref(),
             );
+            STOP_COMMANDED.store(true, Ordering::SeqCst);
         }
         None => journal.finish(EndCause::Signal, None, None),
     }
