@@ -8873,7 +8873,16 @@ pub fn get_ifindex(iface: &str) -> Result<u32, anyhow::Error> {
 /// neutralizes the metadata kfuncs and a single program fd attaches to every
 /// interface. Returns `None` if the lone interface's ifindex can't be read
 /// (the loader then neutralizes too).
+///
+/// Never while links are pinned: a device-bound program kept alive by a
+/// pinned link after this process is gone faults the kernel when its netdev
+/// is unregistered (`bpf_dev_bound_netdev_unregister`, seen on 7.0), so an
+/// interface deleted after the agent stops would take the host down. The
+/// metadata only enriches events; the host staying up is not optional.
 fn metadata_dev_bound_ifindex(config: &AgentConfig) -> Option<u32> {
+    if adapters::ebpf::link_pin::enabled() {
+        return None;
+    }
     match config.agent.interfaces.as_slice() {
         [iface] => get_ifindex(iface).ok(),
         _ => None,
