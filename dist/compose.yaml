@@ -51,6 +51,11 @@ services:
       - warden-sock:/run/ebpfsentinel
       - /proc:/host/proc:ro
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      # The host bpffs, where the warden pins the agent's XDP, TC and cgroup
+      # links: they keep enforcing after `docker stop`, `docker rm` or a crash,
+      # and the next agent adopts them. `ebpfsentinel-agent uninstall` is the
+      # one command that removes them.
+      - /sys/fs/bpf:/sys/fs/bpf
     restart: unless-stopped
     stop_grace_period: 30s
 

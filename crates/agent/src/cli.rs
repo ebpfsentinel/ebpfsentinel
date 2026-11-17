@@ -62,6 +62,16 @@ pub enum Command {
     /// Display version and build information
     Version,
 
+    /// Take the agent's XDP, TC and cgroup hooks off this node: remove the
+    /// link pins that keep them enforcing after the agent stops, and the map
+    /// pins with them
+    Uninstall {
+        /// The warden holding the pins for a rootless agent; without one the
+        /// pins are removed from the host bpffs directly
+        #[arg(long, env = "EBPFSENTINEL_WARDEN_SOCK")]
+        warden_sock: Option<std::path::PathBuf>,
+    },
+
     /// Query running agent status
     Status {
         #[command(flatten)]
@@ -1274,6 +1284,21 @@ mod tests {
     fn cli_version_subcommand() {
         let cli = Cli::try_parse_from(["ebpfsentinel-agent", "version"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Version)));
+    }
+
+    #[test]
+    fn uninstall_takes_the_warden_socket() {
+        let cli = Cli::try_parse_from([
+            "ebpfsentinel-agent",
+            "uninstall",
+            "--warden-sock",
+            "/run/w.sock",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Uninstall { warden_sock: Some(ref p) }) if p.as_os_str() == "/run/w.sock"
+        ));
     }
 
     #[test]

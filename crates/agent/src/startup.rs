@@ -112,7 +112,7 @@ fn dns_feed_specs(
 /// copy and every TLS alert would miss the socket the kernel established.
 /// Nothing else uprobe-dlp or cgroup-attribution declares is named by a third
 /// object, so the isolation from the packet programs still holds.
-pub(crate) const DLP_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel-dlp";
+pub const DLP_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel-dlp";
 
 /// How often the guests' names are read again from the hypervisor records,
 /// which is how long a rule naming a guest waits for one defined late or
@@ -122,6 +122,28 @@ const GUEST_NAMES_REFRESH: Duration = Duration::from_secs(5);
 /// The warden control socket path when the agent runs against a privilege broker,
 /// or `None` when it runs standalone (host root). A set-but-empty value is treated
 /// as unset.
+/// Pin every XDP, TC and cgroup link on the host bpffs, so the datapath keeps
+/// enforcing whatever happens to this process, and record what a graceful
+/// exit does with the pins. A rootless agent's own bpffs dies with its mount
+/// namespace, so the warden, which lives in the host's, holds the pins for
+/// it. The store is chosen once per process; the exit policy follows the
+/// latest configuration.
+pub fn install_link_pins(config: &AgentConfig) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    adapters::ebpf::link_pin::set_on_exit(
+        config.agent.on_exit == infrastructure::config::OnExit::Keep,
+    );
+    ONCE.call_once(|| {
+        match warden_sock_from_env() {
+            Some(sock) => adapters::ebpf::link_pin::pin_through_warden(sock),
+            None => {
+                adapters::ebpf::link_pin::pin_directly(ebpfsentinel_warden::link_pins::pin_dir());
+            }
+        }
+        adapters::ebpf::link_pin::keep_on_panic();
+    });
+}
+
 pub(crate) fn warden_sock_from_env() -> Option<std::path::PathBuf> {
     std::env::var_os("EBPFSENTINEL_WARDEN_SOCK")
         .map(std::path::PathBuf::from)
@@ -1991,6 +2013,7 @@ pub async fn run(
     if let Some(sock) = &warden_sock {
         adapters::ebpf::tcx_order::use_warden(sock.clone());
     }
+    install_link_pins(&config);
 
     check_kernel_version()?;
 
@@ -2135,6 +2158,10 @@ pub async fn run(
             adapters::ebpf::DEFAULT_BPF_PIN_PATH,
             "startup: previous generation's pins are not introspectable",
         );
+        // The links the previous run pinned are a directory apart and are
+        // adopted, not wiped: they keep the previous program enforcing until
+        // this run has written its rules and swaps its own program in.
+        adapters::ebpf::link_pin::adopt();
         EbpfLoader::cleanup_pin_path_because(
             DLP_PIN_PATH,
             "startup: previous generation's pins are not introspectable",
@@ -5007,6 +5034,10 @@ pub async fn run(
         }
     }
 
+    // The rules are in the new maps: the links adopted from the previous run
+    // move onto this run's programs, and the ones nothing claimed come off.
+    adapters::ebpf::link_pin::complete_adoption();
+
     // ── 12. Ready - wait for cancellation ───────────────────────────
     info!("agent ready, waiting for shutdown signal");
     cancel_token.cancelled().await;
@@ -5051,7 +5082,15 @@ pub async fn run(
         }
     }
 
-    info!("shutdown phase 5: detaching eBPF programs");
+    // Under `on_exit: keep` the XDP, TC and cgroup links stay pinned and
+    // enforcing: dropping the loaders below then leaves them attached.
+    let keep = config.agent.on_exit == infrastructure::config::OnExit::Keep;
+    adapters::ebpf::link_pin::exit();
+    if keep {
+        info!("shutdown phase 5: releasing eBPF programs, pinned links stay enforcing");
+    } else {
+        info!("shutdown phase 5: detaching eBPF programs");
+    }
     if let Some(mut attacher) = signal_attacher.take() {
         // Taken down first: once the link is gone no armed target can be
         // signalled, whatever is still in the map on the way out.
@@ -5081,9 +5120,10 @@ pub async fn run(
 
 /// Holds eBPF resources that must live for the duration of the agent.
 ///
-/// When dropped, all loaders are dropped and their eBPF programs are detached.
-/// On kernel >= 6.6 (TCX), TC link FDs auto-close even on SIGKILL, so programs
-/// do not persist after a crash. Pinned maps are cleaned up as defense-in-depth.
+/// When dropped, all loaders are dropped. Their XDP, TC and cgroup links are
+/// pinned on the host bpffs and stay attached unless the pin is removed, which
+/// a drop does except on the way out under `agent.on_exit: keep`; a crash or a
+/// kill leaves them pinned too. Pinned maps are cleaned up as defense-in-depth.
 pub struct EbpfState {
     pub loaders: Vec<EbpfLoader>,
     /// BPF token + bpffs fds kept alive for the lifetime of the

@@ -619,6 +619,7 @@ impl EbpfLoader {
             anyhow::anyhow!("ProgramArray '{map_name}' not captured by this kfunc loader")
         })?;
         kfunc_attach::prog_array_set(array.as_raw_fd(), index, target_fd)?;
+        super::link_pin::pin_prog_array(map_name, array.as_raw_fd());
         info!(
             map_name,
             index, "tail-call target set in ProgramArray (raw)"

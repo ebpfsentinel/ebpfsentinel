@@ -2293,6 +2293,24 @@ pub struct AgentInfo {
     /// file.
     #[serde(default)]
     pub config_writes: ConfigWrites,
+
+    /// What the agent's XDP, TC and cgroup links do when the agent exits:
+    /// `keep` (the default) leaves them pinned and enforcing the last rules
+    /// written, `detach` removes them on a graceful exit. A crash or a kill
+    /// keeps them either way; `ebpfsentinel-agent uninstall` removes them.
+    #[serde(default)]
+    pub on_exit: OnExit,
+}
+
+/// What an exiting agent does with the hooks it attached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnExit {
+    /// The links stay pinned, so the datapath keeps enforcing.
+    #[default]
+    Keep,
+    /// The links are removed on a graceful exit.
+    Detach,
 }
 
 /// Whether a configuration screen may write back to the file this agent was

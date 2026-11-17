@@ -923,6 +923,7 @@ dependencies = [
  "ebpf-common",
  "ebpfsentinel-domain",
  "ebpfsentinel-warden",
+ "ebpfsentinel-warden-client",
  "governor",
  "http-body-util",
  "infrastructure",

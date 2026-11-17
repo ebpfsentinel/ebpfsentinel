@@ -51,6 +51,12 @@ async fn run_cli(mut cli: cli::Cli) -> Result<()> {
             Ok(())
         }
 
+        Some(Command::Uninstall { warden_sock }) => {
+            let outcome = ebpfsentinel_agent::uninstall::run(warden_sock)?;
+            println!("{}", ebpfsentinel_agent::uninstall::report(&outcome));
+            Ok(())
+        }
+
         Some(Command::Status { conn }) => {
             let client = ApiClient::new(&conn.host, conn.port, cli.token);
             commands::cmd_status_enhanced(&client, output).await

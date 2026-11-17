@@ -102,6 +102,10 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::ReadShareWriters { .. } => "ReadShareWriters",
         Command::ConnectPodman { .. } => "ConnectPodman",
         Command::ResolverSocket { .. } => "ResolverSocket",
+        Command::PinLink { .. } => "PinLink",
+        Command::PinnedLinks => "PinnedLinks",
+        Command::OpenPinnedLink { .. } => "OpenPinnedLink",
+        Command::UnpinLinks { .. } => "UnpinLinks",
     }
 }
 
@@ -343,6 +347,57 @@ impl WardenClient {
             }
             other => Err(unexpected("ResolverSocket", &other)),
         }
+    }
+
+    /// Pin the link `link_fd` (handed over `SCM_RIGHTS`) under `name` in the
+    /// warden's link directory on the host bpffs, where it outlives the
+    /// agent's own mount namespace.
+    #[cfg(feature = "fd-pass")]
+    pub fn pin_link(&mut self, name: &str, link_fd: std::os::fd::RawFd) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        self.send(&Command::PinLink {
+            name: name.to_owned(),
+        })?;
+        let sent = fd_pass::send_one_fd(self.stream.as_raw_fd(), link_fd);
+        self.classify("PinLink", "sending the link fd to", sent)?;
+        match self.recv("PinLink")? {
+            Response::Ok => Ok(()),
+            Response::Error { message } => Err(io::Error::other(message)),
+            other => Err(unexpected("PinLink", &other)),
+        }
+    }
+
+    /// Name every link pinned in the warden's link directory.
+    pub fn pinned_links(&mut self) -> io::Result<Vec<String>> {
+        match self.call(&Command::PinnedLinks)? {
+            Response::PinnedLinks { names } => Ok(names),
+            other => Err(unexpected("PinnedLinks", &other)),
+        }
+    }
+
+    /// Open the pinned link `name` and receive its fd over `SCM_RIGHTS`.
+    #[cfg(feature = "fd-pass")]
+    pub fn open_pinned_link(&mut self, name: &str) -> io::Result<std::os::fd::OwnedFd> {
+        self.send(&Command::OpenPinnedLink {
+            name: name.to_owned(),
+        })?;
+        match self.recv("OpenPinnedLink")? {
+            Response::FdReady => {
+                let result = fd_pass::recv_one_fd(&self.stream);
+                self.classify("OpenPinnedLink", "waiting for the link fd from", result)
+            }
+            other => Err(unexpected("OpenPinnedLink", &other)),
+        }
+    }
+
+    /// Remove the pins `names`, or every pin when `names` is empty.
+    pub fn unpin_links(&mut self, names: &[String]) -> io::Result<()> {
+        self.expect_ok(
+            &Command::UnpinLinks {
+                names: names.to_vec(),
+            },
+            "UnpinLinks",
+        )
     }
 
     /// List every packet socket on the node, with its holder and its filter.
@@ -994,6 +1049,29 @@ impl ReconnectingClient {
         prog_fd: std::os::fd::RawFd,
     ) -> io::Result<std::os::fd::OwnedFd> {
         self.with_retry(|c| c.attach_cgroup(cgroup_path, attach_type, prog_fd))
+    }
+
+    /// Pin a link through the warden, reconnecting if it bounced. A pin
+    /// replaces one of the same name, so a replay is harmless.
+    #[cfg(feature = "fd-pass")]
+    pub fn pin_link(&mut self, name: &str, link_fd: std::os::fd::RawFd) -> io::Result<()> {
+        self.with_retry(|c| c.pin_link(name, link_fd))
+    }
+
+    /// Name the pinned links, reconnecting if the warden bounced.
+    pub fn pinned_links(&mut self) -> io::Result<Vec<String>> {
+        self.with_retry(WardenClient::pinned_links)
+    }
+
+    /// Open one pinned link, reconnecting if the warden bounced.
+    #[cfg(feature = "fd-pass")]
+    pub fn open_pinned_link(&mut self, name: &str) -> io::Result<std::os::fd::OwnedFd> {
+        self.with_retry(|c| c.open_pinned_link(name))
+    }
+
+    /// Remove pinned links, reconnecting if the warden bounced.
+    pub fn unpin_links(&mut self, names: &[String]) -> io::Result<()> {
+        self.with_retry(|c| c.unpin_links(names))
     }
 
     /// Attach a TC program inside a pod's namespace through the warden,

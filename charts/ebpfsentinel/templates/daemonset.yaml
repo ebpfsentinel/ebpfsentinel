@@ -146,6 +146,16 @@ spec:
               # would cover the warden alone and no workload on the node.
               mountPath: /sys/fs/cgroup
               readOnly: true
+            {{- if not .Values.daemonset.bpfToken.bpffsEmptyDir }}
+            - name: bpf
+              # The node's bpffs, where the warden pins the agent's XDP, TC
+              # and cgroup links so they keep enforcing when the pod is
+              # deleted, restarted or killed; the next pod adopts them. Only
+              # `ebpfsentinel-agent uninstall` removes them. An in-pod tmpfs
+              # has no node bpffs behind it, and there the links go with the
+              # pod.
+              mountPath: /sys/fs/bpf
+            {{- end }}
             {{- range $i, $path := .Values.daemonset.warden.fileWatchHostPaths }}
             {{- if or (not (hasPrefix "/" $path)) (eq (trimSuffix "/" $path) "") }}
             {{- fail (printf "daemonset.warden.fileWatchHostPaths[%d]: %q must be an absolute directory other than /" $i $path) }}

@@ -14,4 +14,5 @@ pub mod runtime;
 pub mod schedule_eval;
 pub mod shutdown;
 pub mod startup;
+pub mod uninstall;
 pub mod watchdog;

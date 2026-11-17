@@ -15,13 +15,14 @@
 //! start: the reason is logged once and published, so an operator reading a
 //! flow with no workload can find out why instead of guessing.
 
-use std::os::fd::{OwnedFd, RawFd};
+use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use tracing::{info, warn};
 
 use super::kfunc_attach;
+use super::link_handover::{self, AttachedLink, LinkHook};
 use super::loader::EbpfLoader;
 
 /// `BPF_CGROUP_INET_EGRESS` from `enum bpf_attach_type`.
@@ -144,7 +145,7 @@ pub fn join_refused_reason(refusal: &str) -> String {
 /// what a hot reload that turns attribution off does.
 #[derive(Default)]
 pub struct AttributionAttacher {
-    links: Vec<OwnedFd>,
+    links: Vec<AttachedLink>,
     /// Set when the privileged `BPF_LINK_CREATE` goes through the warden.
     warden_sock: Option<PathBuf>,
     warden: Option<Mutex<ebpfsentinel_warden_client::ReconnectingClient>>,
@@ -246,18 +247,23 @@ impl AttributionAttacher {
         cgroup: &str,
         program: &str,
         attach_type: u32,
-    ) -> Result<OwnedFd, String> {
+    ) -> Result<AttachedLink, String> {
         let prog_fd: RawFd = loader
             .program_fd(program)
             .ok_or_else(|| format!("program `{program}` is not in the loaded object"))?;
-        match &self.warden {
+        let hook = LinkHook::Cgroup(attach_type);
+        if let Some(link) = link_handover::take_over(program, cgroup, hook, prog_fd) {
+            return Ok(link);
+        }
+        let fd = match &self.warden {
             Some(client) => {
                 crate::warden::attribution::attach_via_warden(client, prog_fd, cgroup, attach_type)
                     .map_err(|e| e.to_string())
             }
             None => kfunc_attach::attach_cgroup(program, prog_fd, cgroup, attach_type)
                 .map_err(|e| e.to_string()),
-        }
+        }?;
+        Ok(AttachedLink::new(program, cgroup, hook, fd))
     }
 
     /// How many hooks this attacher currently holds a link for.

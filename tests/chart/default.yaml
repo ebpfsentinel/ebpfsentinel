@@ -244,6 +244,14 @@ spec:
               # would cover the warden alone and no workload on the node.
               mountPath: /sys/fs/cgroup
               readOnly: true
+            - name: bpf
+              # The node's bpffs, where the warden pins the agent's XDP, TC
+              # and cgroup links so they keep enforcing when the pod is
+              # deleted, restarted or killed; the next pod adopts them. Only
+              # `ebpfsentinel-agent uninstall` removes them. An in-pod tmpfs
+              # has no node bpffs behind it, and there the links go with the
+              # pod.
+              mountPath: /sys/fs/bpf
       containers:
         - name: agent
           image: ghcr.io/ebpfsentinel/ebpfsentinel:0.0.0-dev

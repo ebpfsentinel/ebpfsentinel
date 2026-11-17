@@ -29,6 +29,7 @@ use domain::firewall::entity::IpNetwork;
 use tracing::{info, warn};
 
 use super::kfunc_attach;
+use super::link_handover::{self, AttachedLink, LinkHook};
 use super::loader::EbpfLoader;
 
 /// `BPF_CGROUP_INET_INGRESS` from `enum bpf_attach_type`.
@@ -195,7 +196,7 @@ pub fn enforcement_unavailable(reason: &str) -> String {
 /// Holds the cgroup links alive. Dropping it detaches every hook.
 #[derive(Default)]
 pub struct WorkloadFirewallAttacher {
-    links: Vec<OwnedFd>,
+    links: Vec<AttachedLink>,
     /// Set when the privileged `BPF_LINK_CREATE` goes through the warden.
     warden_sock: Option<PathBuf>,
     warden: Option<Mutex<ebpfsentinel_warden_client::ReconnectingClient>>,
@@ -286,15 +287,20 @@ impl WorkloadFirewallAttacher {
         cgroup: &str,
         program: &str,
         attach_type: u32,
-    ) -> Result<OwnedFd, String> {
-        match &self.warden {
+    ) -> Result<AttachedLink, String> {
+        let hook = LinkHook::Cgroup(attach_type);
+        if let Some(link) = link_handover::take_over(program, cgroup, hook, prog_fd) {
+            return Ok(link);
+        }
+        let fd = match &self.warden {
             Some(client) => {
                 crate::warden::attribution::attach_via_warden(client, prog_fd, cgroup, attach_type)
                     .map_err(|e| e.to_string())
             }
             None => kfunc_attach::attach_cgroup(program, prog_fd, cgroup, attach_type)
                 .map_err(|e| e.to_string()),
-        }
+        }?;
+        Ok(AttachedLink::new(program, cgroup, hook, fd))
     }
 
     /// How many hooks this attacher currently holds a link for.

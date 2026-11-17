@@ -24,7 +24,7 @@ use std::sync::{Mutex, OnceLock};
 
 use tracing::{info, warn};
 
-use super::kfunc_attach;
+use super::{kfunc_attach, link_pin};
 
 /// Which hook of an interface a link holds a program on.
 ///
@@ -43,6 +43,9 @@ pub enum LinkHook {
     NetkitPrimary,
     /// A netkit device's peer side.
     NetkitPeer,
+    /// A cgroup v2 hook, by its `enum bpf_attach_type` number; the target is
+    /// the cgroup's path.
+    Cgroup(u32),
 }
 
 impl LinkHook {
@@ -54,6 +57,7 @@ impl LinkHook {
             Self::TcxEgress => "tcx-egress",
             Self::NetkitPrimary => "netkit-primary",
             Self::NetkitPeer => "netkit-peer",
+            Self::Cgroup(_) => "cgroup",
         }
     }
 }
@@ -63,22 +67,31 @@ impl LinkHook {
 /// The fd owns the attachment: dropping it detaches. Carrying the program
 /// name and the interface beside it is what makes a link addressable, which
 /// an anonymous `OwnedFd` in a vector is not.
+///
+/// Where link pinning is on, the link is also pinned on the host bpffs
+/// ([`link_pin`]), so it survives the process. Dropping it removes the pin
+/// too, unless the process is exiting and keeping its hooks.
 #[derive(Debug)]
 pub struct AttachedLink {
     program: String,
     interface: String,
     hook: LinkHook,
     fd: OwnedFd,
+    pin: Option<String>,
 }
 
 impl AttachedLink {
-    /// Record a link just created for `program` on `interface`.
+    /// Record a link just created for `program` on `interface`, pinning it
+    /// where link pinning is on.
     pub fn new(program: &str, interface: &str, hook: LinkHook, fd: OwnedFd) -> Self {
+        let name = link_pin::pin_name(program, interface, hook);
+        let pin = link_pin::pin(&name, fd.as_raw_fd()).then_some(name);
         Self {
             program: program.to_owned(),
             interface: interface.to_owned(),
             hook,
             fd,
+            pin,
         }
     }
 
@@ -100,6 +113,14 @@ impl AttachedLink {
     /// The raw link fd, for a syscall that takes one.
     pub fn raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
+    }
+}
+
+impl Drop for AttachedLink {
+    fn drop(&mut self) {
+        if let Some(name) = &self.pin {
+            link_pin::release(name);
+        }
     }
 }
 
@@ -150,18 +171,25 @@ pub fn park(links: Vec<AttachedLink>) {
 /// which case the parked link is dropped (detaching the old program) and the
 /// refusal is counted and logged with both program names and the errno. The
 /// caller then creates a link the way it always did.
+///
+/// With nothing parked, a link pinned by the previous run of the agent is
+/// claimed instead: it is returned still running that run's program, and
+/// [`link_pin::complete_adoption`] swaps `new_prog_fd` in once start-up has
+/// written the rules.
 pub fn take_over(
     program: &str,
     interface: &str,
     hook: LinkHook,
     new_prog_fd: RawFd,
 ) -> Option<AttachedLink> {
-    let mut link = {
-        let mut guard = parked().lock().ok()?;
+    let parked_link = parked().lock().ok().and_then(|mut guard| {
         let idx = guard
             .iter()
             .position(|l| l.interface == interface && l.hook == hook)?;
-        guard.swap_remove(idx)
+        Some(guard.swap_remove(idx))
+    });
+    let Some(mut link) = parked_link else {
+        return adopt_pinned(program, interface, hook, new_prog_fd);
     };
 
     match kfunc_attach::link_update(program, link.raw_fd(), new_prog_fd) {
@@ -175,6 +203,9 @@ pub fn take_over(
                 "program replaced on a live link, no detach window"
             );
             program.clone_into(&mut link.program);
+            if let Some(name) = &link.pin {
+                link_pin::cancel_pending(name);
+            }
             Some(link)
         }
         Err(e) => {
@@ -192,6 +223,27 @@ pub fn take_over(
             None
         }
     }
+}
+
+/// Claim the link the previous run pinned for `(interface, hook)`.
+fn adopt_pinned(
+    program: &str,
+    interface: &str,
+    hook: LinkHook,
+    new_prog_fd: RawFd,
+) -> Option<AttachedLink> {
+    let (fd, old_name) = link_pin::claim(program, interface, hook, new_prog_fd)?;
+    info!(
+        program,
+        interface,
+        hook = hook.as_str(),
+        "pinned link adopted, the previous program enforces until the rules are written"
+    );
+    let link = AttachedLink::new(program, interface, hook, fd);
+    if link.pin.as_deref() != Some(old_name.as_str()) {
+        link_pin::release_name(&old_name);
+    }
+    Some(link)
 }
 
 /// Drop every link still parked, detaching whatever it still holds.
@@ -259,6 +311,7 @@ mod tests {
             LinkHook::TcxEgress.as_str(),
             LinkHook::NetkitPrimary.as_str(),
             LinkHook::NetkitPeer.as_str(),
+            LinkHook::Cgroup(10).as_str(),
         ];
         let mut sorted = names.to_vec();
         sorted.sort_unstable();

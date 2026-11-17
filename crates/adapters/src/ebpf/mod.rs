@@ -36,6 +36,7 @@ pub mod kfunc_loader;
 pub mod l7_ports_manager;
 pub mod lb_map_manager;
 pub mod link_handover;
+pub mod link_pin;
 pub mod link_watcher;
 pub mod loader;
 pub mod lpm_coordinator;

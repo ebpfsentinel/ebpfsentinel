@@ -26,9 +26,9 @@ use crate::pcap_slots::{PcapSlot, PcapSlots};
 use crate::write_refusal;
 use crate::{
     bpf_inventory, cgroup_ops, delegate_over_fd, dlp_scan, exe_read, facts_read, go_executables,
-    hidden_ports, hidden_processes, namespace_ids, net_ops, netns_tcx_ops, packet_sockets,
-    podman_connect, process_maps, recv_fd, resolver_socket, rooted_read, send_msg_fds, served_peer,
-    uprobe_ops,
+    hidden_ports, hidden_processes, link_pins, namespace_ids, net_ops, netns_tcx_ops,
+    packet_sockets, podman_connect, process_maps, recv_fd, resolver_socket, rooted_read,
+    send_msg_fds, served_peer, uprobe_ops,
 };
 
 /// How long a connection may hold a thread without saying `Hello`.
@@ -434,6 +434,37 @@ fn handle_conn_with_timeouts(
                     }
                 }
             }
+            // `PinLink` takes the link fd that follows the frame and answers
+            // `Ok` once it is pinned on the host bpffs.
+            Command::PinLink { name } => {
+                let link_fd = recv_fd(writer.as_raw_fd());
+                let resp = if link_fd < 0 {
+                    Response::Error {
+                        message: "no link fd received for the pin".into(),
+                    }
+                } else {
+                    let pinned = link_pins::pin(&link_pins::pin_dir(), name, link_fd);
+                    // SAFETY: the fd arrived over `SCM_RIGHTS` for this one
+                    // request and is owned here; the pin holds the link now.
+                    unsafe { libc::close(link_fd) };
+                    match pinned {
+                        Ok(()) => Response::Ok,
+                        Err(message) => {
+                            eprintln!("[warden] link pin {name:?} refused: {message}");
+                            Response::Error { message }
+                        }
+                    }
+                };
+                write_frame(&mut writer, &resp).is_ok()
+            }
+            // `OpenPinnedLink` answers out-of-band: the link, after an
+            // `FdReady`.
+            Command::OpenPinnedLink { name } => {
+                match link_pins::open(&link_pins::pin_dir(), name) {
+                    Ok(link) => serve_passed_fd(&mut writer, Ok(link.as_raw_fd())),
+                    Err(message) => serve_passed_fd(&mut writer, Err(message)),
+                }
+            }
             Command::FimOpen { paths } => {
                 let (watch, marks) = FimWatch::open(paths);
                 for mark in &marks {
@@ -721,6 +752,17 @@ fn dispatch(cmd: &Command, host: &dyn HostOps, proc_root: &Path) -> Response {
         Command::ArpAnnounce { iface, ip } => result_to_response(host.arp_announce(iface, ip)),
         Command::TcxChain { iface, egress } => match host.tcx_chain(iface, *egress) {
             Ok(prog_ids) => Response::TcxChain { prog_ids },
+            Err(message) => Response::Error { message },
+        },
+        Command::PinnedLinks => match link_pins::list(&link_pins::pin_dir()) {
+            Ok(names) => Response::PinnedLinks { names },
+            Err(message) => Response::Error { message },
+        },
+        Command::UnpinLinks { names } => match link_pins::unpin(&link_pins::pin_dir(), names) {
+            Ok(removed) => {
+                eprintln!("[warden] {removed} link pin(s) removed");
+                Response::Ok
+            }
             Err(message) => Response::Error { message },
         },
         Command::DlpScan => Response::DlpTargets {

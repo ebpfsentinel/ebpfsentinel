@@ -1036,6 +1036,48 @@ pub enum Command {
         /// A TCP listener rather than a UDP socket.
         stream: bool,
     },
+    /// Pin the BPF link whose fd rides in the accompanying `SCM_RIGHTS` cmsg
+    /// (sent right after this frame) under `name` in the warden's link
+    /// directory on the host bpffs, replacing a pin of that name. The agent's
+    /// own bpffs lives in its mount namespace and goes with it; a pin on the
+    /// host's keeps the hook attached after the agent exits, which is the
+    /// point. `name` is checked against [`valid_link_pin_name`].
+    PinLink {
+        /// The pin's file name.
+        name: String,
+    },
+    /// Name every link pinned in the warden's link directory, answered by
+    /// [`Response::PinnedLinks`].
+    PinnedLinks,
+    /// Open the pinned link `name` and hand its fd over in an `SCM_RIGHTS`
+    /// cmsg after [`Response::FdReady`], so a restarted agent swaps its own
+    /// program onto the hook rather than attaching a second one.
+    OpenPinnedLink {
+        /// The pin's file name.
+        name: String,
+    },
+    /// Remove the pins `names` from the warden's link directory, or every
+    /// pin there when `names` is empty. A link no process holds detaches
+    /// with its last pin.
+    UnpinLinks {
+        /// The pins to remove; empty for all of them.
+        names: Vec<String>,
+    },
+}
+
+/// Longest link pin name the warden accepts.
+pub const LINK_PIN_NAME_MAX: usize = 200;
+
+/// Whether `name` may name a link pin: non-empty, at most
+/// [`LINK_PIN_NAME_MAX`] bytes, ASCII letters, digits, `-` and `_` only. A
+/// bpffs refuses a dot in a name, and a slash would leave the directory.
+#[must_use]
+pub fn valid_link_pin_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= LINK_PIN_NAME_MAX
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// The most servers one [`Command::ReadShareWriters`] reads.
@@ -1241,6 +1283,9 @@ pub enum Response {
     /// The processes connected to a file-service port of one of the servers
     /// asked, lowest pid first, answering [`Command::ReadShareWriters`].
     ShareWriters { pids: Vec<u32> },
+    /// The links pinned in the warden's link directory, by pin name,
+    /// answering [`Command::PinnedLinks`].
+    PinnedLinks { names: Vec<String> },
 }
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
@@ -1275,11 +1320,12 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> io::Result<T> {
 mod tests {
     use super::{
         BindProbe, Command, ConntrackRestore, ConntrackTuple, DlpTarget, ExecutableIdentity,
-        FileRoot, GoExecutable, GoExecutableScan, HiddenProcessReading, ListedPort, MAX_FRAME_LEN,
-        MappedFile, MappingScan, NamespaceIdReading, NamespacePortReading, NetworkProgram,
-        OpenIntent, OpenerReading, PacketSocket, PidObservation, ProcessFactsReading,
-        ProcessMappings, ProcessStamp, ROOTED_CHUNK_MAX, Response, RootedFile, RootedRead,
-        RouteSpec, TaskIdentity, read_frame, valid_dpkg_list_name, write_frame,
+        FileRoot, GoExecutable, GoExecutableScan, HiddenProcessReading, LINK_PIN_NAME_MAX,
+        ListedPort, MAX_FRAME_LEN, MappedFile, MappingScan, NamespaceIdReading,
+        NamespacePortReading, NetworkProgram, OpenIntent, OpenerReading, PacketSocket,
+        PidObservation, ProcessFactsReading, ProcessMappings, ProcessStamp, ROOTED_CHUNK_MAX,
+        Response, RootedFile, RootedRead, RouteSpec, TaskIdentity, read_frame,
+        valid_dpkg_list_name, valid_link_pin_name, write_frame,
     };
     use std::io::Cursor;
 
@@ -1452,6 +1498,14 @@ mod tests {
                 listen: "172.17.0.1:53".parse().unwrap(),
                 stream: true,
             },
+            Command::PinLink {
+                name: "xdp_eth0".into(),
+            },
+            Command::PinnedLinks,
+            Command::OpenPinnedLink {
+                name: "xdp_eth0".into(),
+            },
+            Command::UnpinLinks { names: Vec::new() },
         ]
     }
 
@@ -1536,6 +1590,9 @@ mod tests {
         .into_iter()
         .chain(hidden_responses())
         .chain(inventory_responses())
+        .chain(std::iter::once(Response::PinnedLinks {
+            names: vec!["xdp_eth0".into(), "tcx-egress_eth0".into()],
+        }))
         .collect()
     }
 
@@ -1722,6 +1779,17 @@ mod tests {
                 pids: vec![4242, 4243],
             },
         ]
+    }
+
+    #[test]
+    fn a_link_pin_name_stays_inside_the_directory_and_has_no_dot() {
+        assert!(valid_link_pin_name("xdp_eth0"));
+        assert!(valid_link_pin_name("cgroup-10__sys_2Ffs"));
+        assert!(!valid_link_pin_name(""));
+        assert!(!valid_link_pin_name("../escape"));
+        assert!(!valid_link_pin_name("xdp_eth0.100"));
+        assert!(!valid_link_pin_name("a/b"));
+        assert!(!valid_link_pin_name(&"a".repeat(LINK_PIN_NAME_MAX + 1)));
     }
 
     #[test]

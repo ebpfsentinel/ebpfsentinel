@@ -41,6 +41,13 @@ agent:
   # the file on disk is what decides what this agent does.
   # config_writes: refused
 
+  # What the XDP, TC and cgroup links do when the agent exits. `keep` leaves
+  # them pinned on the host bpffs, enforcing the last rules written, and the
+  # next start adopts them; `detach` removes them on a graceful exit. A crash
+  # or a kill keeps them either way. `ebpfsentinel-agent uninstall` is the
+  # command that takes them off.
+  # on_exit: keep
+
   # Rate limits for the mutating (POST/DELETE/PATCH/PUT) control-plane API,
   # per client IP (GCRA token bucket), and a separate, looser one for reads.
   # Defaults shown: writes get a 60-request burst refilling at 1/s (= 60/min),

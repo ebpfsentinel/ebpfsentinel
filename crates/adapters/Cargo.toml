@@ -16,6 +16,7 @@ ebpfsentinel-warden-client = { workspace = true, features = ["fd-pass"] }
 # The ctnetlink code the warden runs, run in-process by an agent holding the
 # capability itself, so no conntrack binary is needed on the host.
 ebpfsentinel-warden = { workspace = true }
+ebpfsentinel-warden-proto = { workspace = true }
 
 anyhow = { workspace = true }
 libc = { workspace = true }
@@ -74,7 +75,6 @@ tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
 ports = { workspace = true, features = ["test-utils"] }
-ebpfsentinel-warden-proto = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }

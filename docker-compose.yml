@@ -91,6 +91,11 @@ services:
       # subtree holding only itself, so every cgroup hook would cover the
       # warden alone.
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      # The host bpffs, where the warden pins the agent's XDP, TC and cgroup
+      # links: they keep enforcing after `docker stop`, `docker rm` or a crash,
+      # and the next agent adopts them. `ebpfsentinel-agent uninstall` is the
+      # one command that removes them.
+      - /sys/fs/bpf:/sys/fs/bpf
       # The file watch (`file_watch` in the configuration, off by default) is
       # opened by the warden, so every path it names - `filesystems`, `paths`,
       # the profiles - is read in this container's mount namespace, where the

@@ -29,6 +29,7 @@ adapters = { workspace = true }
 infrastructure = { workspace = true }
 ebpf-common = { workspace = true }
 ebpfsentinel-warden = { workspace = true }
+ebpfsentinel-warden-client = { workspace = true }
 
 tokio = { workspace = true }
 arc-swap = { workspace = true }
