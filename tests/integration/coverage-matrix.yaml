@@ -1431,6 +1431,15 @@ attack_suites:
     surfaces: ["xdp-loadbalancer", "loadbalancer"]
     notes: "DNAT end-to-end: every TCP connection through three round-robin backends completes with the reply translated back to the VIP; a 3:1:1 weighted service spreads 100 connections in that proportion; least_conn keeps new connections off backends holding open ones"
 
+  - suite: "141"
+    name: flow-export-sinks
+    topology: 2vm
+    lanes: ["local"]
+    kernel_min: "6.12"
+    profile: nightly
+    surfaces: ["flow_export", "conntrack"]
+    notes: "A tracked TCP connection reaches a local collector as IPFIX over UDP (template set first, five-tuple, both directions' counters, end reason, observation domain), RFC 5424 syslog over TCP octet counted, CEF over UDP with the agent's version in the header, and JSON lines on disk; the status route reports four healthy sinks"
+
   - suite: "44"
     name: lb-dsr-maglev
     topology: 3vm
