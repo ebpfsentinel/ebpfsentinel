@@ -3235,6 +3235,21 @@ impl ApiClient {
         serde_json::from_slice(&bytes).context("failed to parse response body")
     }
 
+    /// One call to a route answering in text rather than JSON (a list of
+    /// addresses, an export), the body as the agent sent it. The route stays
+    /// a literal at the call site, as for [`Self::send_json`].
+    pub async fn send_text(&self, method: reqwest::Method, path: &str) -> anyhow::Result<String> {
+        let resp = self
+            .request(method, path)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        if !resp.status().is_success() {
+            return handle_response(resp).await;
+        }
+        resp.text().await.context("failed to read response body")
+    }
+
     // ── Health ──────────────────────────────────────────────────────
 
     pub async fn healthz(&self) -> anyhow::Result<HealthResponse> {
