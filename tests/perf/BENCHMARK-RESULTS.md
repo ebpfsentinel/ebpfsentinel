@@ -133,7 +133,7 @@ Not measured yet, and why:
 | `cgroup-workload-firewall` socket hooks | `cgroup_sock_addr` | no test run; no perf suite drives it with a rule set loaded |
 | `cgroup-clusterip` | `cgroup_sock_addr` | no test run; needs a Kubernetes view with opted-in workloads, which no perf lane provides |
 | `cgroup-connect-redirect` | `cgroup_sock_addr`, `sock_ops` | no test run; no perf suite configures a redirect listener |
-| `lsm-exec-network`, `lsm-bpf-guard`, `lsm-write-refusal` | BPF LSM | no test run; the agent guest boots with `bpf` in `lsm=`, so they attach there, but no perf suite times them under `bpf_stats` yet |
+| `lsm-exec-network`, `lsm-bpf-guard`, `lsm-tamper-guard`, `lsm-write-refusal` | BPF LSM | no test run; the agent guest boots with `bpf` in `lsm=`, so they attach there, but no perf suite times them under `bpf_stats` yet |
 | `tracepoint-tcp-health` | raw tracepoint | no timed test run; no perf suite counts its events under `bpf_stats` yet |
 | `tracepoint-signal` | raw tracepoint on `sys_enter` | no timed test run; it runs on every syscall of the host, so its figure is a per-syscall cost no suite measures yet |
 | `uprobe-crypto`, `uprobe-dlp` | uprobe | no test run for probes; `06-ebpf-feature-overhead-nat-dlp.bats` measures the DLP probe as goodput lost on a local openssl transfer, not per run |

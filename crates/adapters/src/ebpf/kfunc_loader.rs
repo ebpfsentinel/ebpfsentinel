@@ -2427,6 +2427,37 @@ mod tests {
     }
 
     #[test]
+    fn the_built_tamper_guard_object_names_its_five_hooks() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/bpfel-unknown-none/release/lsm-tamper-guard"
+        );
+        // The object exists only once the eBPF programs were built.
+        let Ok(elf) = std::fs::read(path) else {
+            return;
+        };
+        let hooks = lsm_hooks(&elf).expect("parse");
+        let obj = Object::parse(&elf).expect("object");
+        let mut by_program: Vec<(String, String)> = obj
+            .programs
+            .iter()
+            .map(|(name, p)| (name.clone(), hooks[&p.section_index].clone()))
+            .collect();
+        by_program.sort();
+        let mut expected: Vec<(String, String)> = super::super::tamper_guard::TAMPER_GUARD_PROGRAMS
+            .iter()
+            .map(|(program, hook, _)| {
+                (
+                    (*program).to_string(),
+                    hook.trim_start_matches("bpf_lsm_").to_string(),
+                )
+            })
+            .collect();
+        expected.sort();
+        assert_eq!(by_program, expected);
+    }
+
+    #[test]
     fn prog_attrs_maps_sections() {
         assert_eq!(
             prog_attrs(&ProgramSection::SchedClassifier),

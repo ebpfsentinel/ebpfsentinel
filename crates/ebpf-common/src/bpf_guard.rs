@@ -9,6 +9,13 @@
 //! the kernel already refuses to detach or replace a program a link owns
 //! through the older attach commands.
 //!
+//! A link pinned on the host bpffs hands out a descriptor by path too, so
+//! `BPF_LINK_DETACH` and `BPF_LINK_UPDATE` are decided on their own: the
+//! descriptor named in the call is followed through the caller's file table
+//! to the link behind it, and the call is refused when that link is one the
+//! agent holds. A descriptor to anything else reads as some other id and
+//! the kernel refuses the call itself.
+//!
 //! The `bpf` hook gained a parameter in a later kernel, and the verdict of
 //! the program before sits after the last one. The verifier refuses a read
 //! past the hook's arguments even on a branch never taken, so the hook is
@@ -48,6 +55,12 @@ pub const BPF_GUARD_REFUSAL: i32 = -1;
 /// `BPF_LINK_GET_FD_BY_ID` in `enum bpf_cmd`, part of the stable UAPI.
 pub const BPF_GUARD_CMD_LINK_GET_FD_BY_ID: i32 = 30;
 
+/// `BPF_LINK_UPDATE` in `enum bpf_cmd`: swaps the program behind a link.
+pub const BPF_GUARD_CMD_LINK_UPDATE: i32 = 29;
+
+/// `BPF_LINK_DETACH` in `enum bpf_cmd`: takes a link off its hook.
+pub const BPF_GUARD_CMD_LINK_DETACH: i32 = 34;
+
 /// `FMODE_WRITE`, the bit a writable map descriptor carries.
 pub const BPF_GUARD_FMODE_WRITE: u32 = 0x2;
 
@@ -73,6 +86,23 @@ pub struct BpfGuardConfig {
     pub map_id: u32,
     /// Non-zero once the slot and the tasks are written.
     pub valid: u32,
+    /// Non-zero once the six offsets below were read, which following a
+    /// descriptor to its link needs. Without them a detach through a
+    /// descriptor obtained from a pinned path is not decided here.
+    pub fd_walk: u32,
+    /// Byte offset of `task_struct.files`.
+    pub task_files: u32,
+    /// Byte offset of `files_struct.fdt`.
+    pub files_fdt: u32,
+    /// Byte offset of `fdtable.max_fds`.
+    pub fdt_max_fds: u32,
+    /// Byte offset of `fdtable.fd`.
+    pub fdt_fd: u32,
+    /// Byte offset of `file.private_data`.
+    pub file_private_data: u32,
+    /// Byte offset of `bpf_link.id`.
+    pub link_id: u32,
+    pub _pad: u32,
 }
 
 /// One thread group allowed to act on the protected objects.
@@ -101,9 +131,11 @@ mod tests {
     use core::mem;
 
     #[test]
-    fn the_config_is_two_words() {
-        assert_eq!(mem::size_of::<BpfGuardConfig>(), 8);
+    fn the_config_is_ten_words() {
+        assert_eq!(mem::size_of::<BpfGuardConfig>(), 40);
         assert_eq!(mem::offset_of!(BpfGuardConfig, valid), 4);
+        assert_eq!(mem::offset_of!(BpfGuardConfig, fd_walk), 8);
+        assert_eq!(mem::offset_of!(BpfGuardConfig, link_id), 32);
     }
 
     #[test]
@@ -117,5 +149,7 @@ mod tests {
     fn the_refusal_is_eperm_and_the_command_is_the_uapi_one() {
         assert_eq!(BPF_GUARD_REFUSAL, -1);
         assert_eq!(BPF_GUARD_CMD_LINK_GET_FD_BY_ID, 30);
+        assert_eq!(BPF_GUARD_CMD_LINK_UPDATE, 29);
+        assert_eq!(BPF_GUARD_CMD_LINK_DETACH, 34);
     }
 }

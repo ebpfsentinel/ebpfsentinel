@@ -103,10 +103,65 @@ pub fn resolve_layout() -> Result<GuardLayout, String> {
         .copied()
         .flatten()
         .ok_or_else(|| "the kernel BTF has no `bpf_map.id`".to_string())?;
+    let mut config = BpfGuardConfig {
+        map_id,
+        ..BpfGuardConfig::default()
+    };
+    match fd_walk_offsets() {
+        Ok(
+            [
+                task_files,
+                files_fdt,
+                fdt_max_fds,
+                fdt_fd,
+                file_private_data,
+                link_id,
+            ],
+        ) => {
+            config.task_files = task_files;
+            config.files_fdt = files_fdt;
+            config.fdt_max_fds = fdt_max_fds;
+            config.fdt_fd = fdt_fd;
+            config.file_private_data = file_private_data;
+            config.link_id = link_id;
+            config.fd_walk = 1;
+        }
+        Err(reason) => warn!(
+            reason,
+            "a detach through a descriptor taken from a pinned link is left to the kernel's \
+             own permission checks"
+        ),
+    }
     Ok(GuardLayout {
-        config: BpfGuardConfig { map_id, valid: 0 },
+        config,
         cmd_program,
     })
+}
+
+/// The offsets a descriptor is followed through to the link behind it:
+/// `task_struct.files`, `files_struct.fdt`, `fdtable.max_fds`, `fdtable.fd`,
+/// `file.private_data` and `bpf_link.id`.
+///
+/// # Errors
+///
+/// Returns the struct or member the kernel's BTF does not describe.
+pub fn fd_walk_offsets() -> Result<[u32; 6], String> {
+    let one = |structure: &str, member: &str| -> Result<u32, String> {
+        kfunc::vmlinux_struct_member_offsets(structure, &[member])
+            .map_err(|e| format!("the kernel BTF does not describe `{structure}`: {e}"))?
+            .first()
+            .copied()
+            .flatten()
+            .ok_or_else(|| format!("the kernel BTF has no `{structure}.{member}`"))
+    };
+    Ok([
+        one("task_struct", "files")?,
+        one("files_struct", "fdt")?,
+        one("fdtable", "max_fds")?,
+        one("fdtable", "fd")?,
+        one("file", "private_data")?,
+        one("bpf_link", "id")?,
+    ])
 }
 
 /// The `bpf` program for a hook taking `params` parameters.
@@ -441,6 +496,11 @@ mod tests {
         let layout = resolve_layout().expect("the kernel describes the bpf hook and bpf_map");
         assert!([BPF_GUARD_CMD_PROGRAM_3, BPF_GUARD_CMD_PROGRAM_4].contains(&layout.cmd_program));
         assert_eq!(layout.config.valid, 0);
+        assert_eq!(layout.config.fd_walk, 1, "the descriptor walk resolves");
+        assert!(
+            layout.config.link_id > 0,
+            "a link's id sits after its counter"
+        );
     }
 
     #[test]

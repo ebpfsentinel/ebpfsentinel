@@ -278,6 +278,16 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
         // links that the guard decided, then the refusals: a writable map
         // descriptor, or a link descriptor, asked for by another task.
         "BPF_GUARD_METRICS" => &[(0, "checked"), (1, "refused_map"), (2, "refused_link")],
+        // Every signal, trace, unlink, rename or cgroup write aimed at a
+        // protected task or inode that the tamper guard decided, the
+        // refusals, what passed because a signed stop had opened the window,
+        // and the refusals the ring had no room to report.
+        "TAMPER_GUARD_METRICS" => &[
+            (0, "checked"),
+            (1, "refused"),
+            (2, "window"),
+            (3, "event_lost"),
+        ],
         "REDIRECT_METRICS" => &[
             (0, "redirected"),
             (1, "refused"),
@@ -693,6 +703,10 @@ mod tests {
         (
             "BPF_GUARD_METRICS",
             ebpf_common::bpf_guard::BPF_GUARD_METRIC_COUNT,
+        ),
+        (
+            "TAMPER_GUARD_METRICS",
+            ebpf_common::tamper_guard::TAMPER_GUARD_METRIC_COUNT,
         ),
         (
             "REDIRECT_METRICS",

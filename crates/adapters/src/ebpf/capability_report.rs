@@ -402,8 +402,8 @@ fn fold_declared(answers: impl Iterator<Item = Option<bool>>) -> Option<bool> {
 fn host_evidence(id: &str) -> Option<Evidence> {
     use super::{
         attribution_attach, bpf_guard, exec_network, file_kfunc_probe, kfunc_feature_probe,
-        lsm_probe, process_attach, quarantine_map_manager, signal_attach, workload_firewall_attach,
-        write_refusal,
+        lsm_probe, process_attach, quarantine_map_manager, signal_attach, tamper_guard,
+        workload_firewall_attach, write_refusal,
     };
     match id {
         "bpf_lsm" => Some(lsm_evidence(lsm_probe::status())),
@@ -437,6 +437,10 @@ fn host_evidence(id: &str) -> Option<Evidence> {
         }
         "self_protection" => {
             let s = bpf_guard::status();
+            Some(attach_evidence(s.protected, s.reason))
+        }
+        "tamper_protection" => {
+            let s = tamper_guard::status();
             Some(attach_evidence(s.protected, s.reason))
         }
         "write_refusal" => {
@@ -901,9 +905,13 @@ mod tests {
                     declared: Some(false),
                     load: Load::Refused("the kernel does not declare bpf_send_signal_task".into()),
                 }),
-                "network_executables" | "write_refusal" | "self_protection" => Some(
-                    attach_evidence(false, Some("the LSM program did not attach".into())),
-                ),
+                "network_executables"
+                | "write_refusal"
+                | "self_protection"
+                | "tamper_protection" => Some(attach_evidence(
+                    false,
+                    Some("the LSM program did not attach".into()),
+                )),
                 _ => None,
             },
         );

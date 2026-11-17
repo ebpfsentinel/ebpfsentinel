@@ -1,0 +1,13 @@
+[package]
+name = "lsm-tamper-guard"
+version = "0.0.0-dev"
+edition = "2024"
+
+[dependencies]
+aya-ebpf = "0.3.0"
+ebpf-common = { path = "../../ebpf-common", default-features = false }
+ebpf-helpers = { path = "../../ebpf-helpers" }
+
+[[bin]]
+name = "lsm-tamper-guard"
+path = "src/main.rs"

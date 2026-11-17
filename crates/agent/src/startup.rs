@@ -3522,6 +3522,10 @@ pub async fn run(
             adapters::ebpf::bpf_guard::status().protected,
         );
         status.insert(
+            "lsm-tamper-guard".to_string(),
+            adapters::ebpf::tamper_guard::status().protected,
+        );
+        status.insert(
             "cgroup-workload-firewall".to_string(),
             adapters::ebpf::workload_firewall_attach::status().attached,
         );
@@ -8113,6 +8117,208 @@ pub(crate) async fn refresh_bpf_guard(
                     Err(e) => warn!("guard refresh: {e}"),
                 }
                 publish_guard_status(&maps);
+            }
+        }
+    }
+}
+
+/// What arming the tamper guard needs.
+pub struct TamperGuardStart<'a> {
+    /// Where the eBPF objects are read from.
+    pub ebpf_dir: &'a str,
+    /// What the guard protects.
+    pub targets: adapters::ebpf::tamper_guard::TamperGuardTargets,
+    /// The signals refused, one bit per signal number.
+    pub signals: u64,
+    /// Where the program's status and its ring are recorded.
+    pub metrics: &'a Arc<AgentMetrics>,
+    /// Where every refusal becomes an alert.
+    pub alert_tx: &'a mpsc::Sender<application::alert_event::AlertEvent>,
+    /// Ends the reader and the refresh.
+    pub cancel: &'a CancellationToken,
+}
+
+/// A running tamper guard. Dropping it detaches the hooks, which is the only
+/// way the guard ends short of the process ending.
+pub struct TamperGuardHandle {
+    /// The five LSM links, declared first so they go before the object.
+    pub attacher: adapters::ebpf::tamper_guard::TamperGuardAttacher,
+    /// The loaded object.
+    pub loader: EbpfLoader,
+    /// The program's counters, for whoever polls them.
+    pub metrics_reader: Option<MetricsReader>,
+    /// The maps the stop window is opened in.
+    pub maps: Arc<tokio::sync::Mutex<adapters::ebpf::tamper_guard::TamperGuardMaps>>,
+}
+
+/// Load the tamper guard, protect the agent, the warden and the targets,
+/// attach every hook, then arm it, so a hook never decides on a half-written
+/// set.
+///
+/// The community agent never calls this: the object refuses nothing until
+/// it is armed, and arming is for the build that holds the licence for it.
+///
+/// # Errors
+///
+/// Returns why the agent can be stopped like any process here, in one
+/// sentence, also published for the kernel-features endpoint.
+pub fn start_tamper_guard(start: TamperGuardStart<'_>) -> Result<TamperGuardHandle, String> {
+    use adapters::ebpf::tamper_guard as tg;
+    let started = load_tamper_guard(&start);
+    start
+        .metrics
+        .set_ebpf_program_status("lsm_tamper_guard", started.is_ok());
+    let (handle, reader) = match started {
+        Ok(started) => started,
+        Err(reason) => {
+            tg::publish_status(tg::TamperGuardStatus {
+                reason: Some(reason.clone()),
+                ..tg::TamperGuardStatus::default()
+            });
+            return Err(reason);
+        }
+    };
+    let (record_tx, mut record_rx) =
+        mpsc::channel::<domain::tamper::TamperRefusal>(WORKLOAD_DENIAL_CHANNEL_CAPACITY);
+    let observer = RingBufObserver::new(
+        tg::TAMPER_GUARD_OBJECT,
+        Arc::clone(start.metrics) as Arc<dyn MetricsPort>,
+    );
+    let reader_cancel = start.cancel.clone();
+    tokio::spawn(async move {
+        reader.run(record_tx, reader_cancel, observer).await;
+    });
+    let alert_tx = start.alert_tx.clone();
+    tokio::spawn(async move {
+        while let Some(refusal) = record_rx.recv().await {
+            warn!(
+                caller = refusal.caller_tgid,
+                comm = %refusal.caller_comm,
+                "{}",
+                refusal.message()
+            );
+            let alert = domain::alert::entity::Alert::from_tamper_refusal(&refusal);
+            if alert_tx
+                .send(application::alert_event::AlertEvent::System(Box::new(
+                    alert,
+                )))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    tokio::spawn(refresh_tamper_guard(
+        Arc::clone(&handle.maps),
+        start.targets,
+        adapters::ebpf::bpf_guard::GuardTasks::from_env(),
+        start.cancel.clone(),
+    ));
+    Ok(handle)
+}
+
+fn load_tamper_guard(
+    start: &TamperGuardStart<'_>,
+) -> Result<
+    (
+        TamperGuardHandle,
+        adapters::ebpf::tamper_guard::TamperGuardEventReader,
+    ),
+    String,
+> {
+    use adapters::ebpf::tamper_guard as tg;
+    let host = adapters::ebpf::lsm_probe::status();
+    if !host.active {
+        let reason = host
+            .reason
+            .clone()
+            .unwrap_or_else(|| "the BPF LSM is not active on this host".to_string());
+        return Err(match &host.remedy {
+            Some(remedy) => format!("{reason}; {remedy}"),
+            None => reason,
+        });
+    }
+    let layout = tg::resolve_layout()?;
+    let program_bytes = read_ebpf_program(start.ebpf_dir, tg::TAMPER_GUARD_OBJECT)
+        .map_err(|e| format!("the object is missing: {e}"))?;
+    let mut loader =
+        EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)
+            .map_err(|e| format!("the kernel refused the object: {e}"))?;
+    let metrics_reader = MetricsReader::new(loader.ebpf_mut(), "TAMPER_GUARD_METRICS").ok();
+    let mut maps = tg::TamperGuardMaps::new(loader.ebpf_mut()).map_err(|e| e.to_string())?;
+    let reader = tg::TamperGuardEventReader::new(loader.ebpf_mut(), maps.paths())
+        .map_err(|e| e.to_string())?;
+    let mut tasks = adapters::ebpf::bpf_guard::GuardTasks::from_env();
+    maps.set_tasks(&tasks.read()?).map_err(|e| e.to_string())?;
+    let (inodes, missing) = start.targets.resolve();
+    for entry in &missing {
+        info!("tamper guard: {entry}, protected once it exists");
+    }
+    maps.set_inodes(&inodes).map_err(|e| e.to_string())?;
+    let mut attacher = tg::TamperGuardAttacher::new();
+    attacher.attach(&loader)?;
+    maps.arm(layout, start.signals).map_err(|e| e.to_string())?;
+    let status = maps.status();
+    warn!(
+        tasks = status.tasks,
+        inodes = status.inodes,
+        "tamper guard armed: a signal, a trace or an unpin aimed at the agent is refused unless a signed stop opens the window"
+    );
+    tg::publish_status(status);
+    Ok((
+        TamperGuardHandle {
+            attacher,
+            loader,
+            metrics_reader,
+            maps: Arc::new(tokio::sync::Mutex::new(maps)),
+        },
+        reader,
+    ))
+}
+
+/// How often the protected tasks and inodes are read again: a warden that
+/// restarted is another thread group, and a pin written after start-up is
+/// another inode.
+const TAMPER_GUARD_REFRESH: Duration = Duration::from_secs(30);
+
+async fn refresh_tamper_guard(
+    maps: Arc<tokio::sync::Mutex<adapters::ebpf::tamper_guard::TamperGuardMaps>>,
+    targets: adapters::ebpf::tamper_guard::TamperGuardTargets,
+    mut tasks: adapters::ebpf::bpf_guard::GuardTasks,
+    cancel: CancellationToken,
+) {
+    let mut tick = tokio::time::interval(TAMPER_GUARD_REFRESH);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await;
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            _ = tick.tick() => {
+                let asked = tokio::task::spawn_blocking(move || {
+                    let read = tasks.read();
+                    (tasks, read)
+                })
+                .await;
+                let Ok((back, read)) = asked else {
+                    warn!("tamper guard refresh lost the protected tasks, the previous ones stay");
+                    break;
+                };
+                tasks = back;
+                let (inodes, _) = targets.resolve();
+                let mut held = maps.lock().await;
+                match read {
+                    Ok(read) => {
+                        if let Err(e) = held.set_tasks(&read) {
+                            warn!("tamper guard refresh could not write the protected tasks: {e}");
+                        }
+                    }
+                    Err(e) => warn!("tamper guard refresh: {e}"),
+                }
+                if let Err(e) = held.set_inodes(&inodes) {
+                    warn!("tamper guard refresh could not write the protected inodes: {e}");
+                }
+                adapters::ebpf::tamper_guard::publish_status(held.status());
             }
         }
     }

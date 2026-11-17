@@ -40,6 +40,7 @@ pub mod raw_socket;
 pub mod response;
 pub mod routing;
 pub mod share_writes;
+pub mod tamper;
 pub mod tcp_health;
 pub mod telemetry;
 pub mod threatintel;

@@ -3,7 +3,9 @@
 //! `bpf_map` decides every map descriptor the kernel hands out, by id or
 //! from a pinned path, and refuses a writable one on a protected map. `bpf`
 //! decides every `bpf(2)` call and refuses a descriptor to a protected link,
-//! which is what detaching it or swapping the program behind it needs.
+//! which is what detaching it or swapping the program behind it needs, and
+//! refuses the detach or the swap itself when the descriptor came from a
+//! pinned path instead.
 //!
 //! Both answer the same question first: is the calling thread group one of
 //! the tasks userspace wrote, as the kernel numbers it in that task's own pid
@@ -18,6 +20,7 @@
 #![no_main]
 
 use aya_ebpf::bindings::bpf_pidns_info;
+use aya_ebpf::helpers::bpf_get_current_task;
 use aya_ebpf::helpers::generated::{bpf_get_ns_current_pid_tgid, bpf_probe_read_kernel};
 use aya_ebpf::{
     btf_maps::{Array, HashMap, PerCpuArray},
@@ -25,7 +28,7 @@ use aya_ebpf::{
     programs::LsmContext,
 };
 use ebpf_common::bpf_guard::{
-    BPF_GUARD_CMD_LINK_GET_FD_BY_ID, BPF_GUARD_CONFIG_SLOT, BPF_GUARD_FMODE_WRITE,
+    BPF_GUARD_CMD_LINK_DETACH, BPF_GUARD_CMD_LINK_GET_FD_BY_ID, BPF_GUARD_CMD_LINK_UPDATE, BPF_GUARD_CONFIG_SLOT, BPF_GUARD_FMODE_WRITE,
     BPF_GUARD_MAX_LINKS, BPF_GUARD_MAX_MAPS, BPF_GUARD_MAX_TASKS, BPF_GUARD_METRIC_CHECKED,
     BPF_GUARD_METRIC_COUNT, BPF_GUARD_METRIC_REFUSED_LINK, BPF_GUARD_METRIC_REFUSED_MAP,
     BPF_GUARD_REFUSAL, BpfGuardConfig, BpfGuardTask,
@@ -108,21 +111,34 @@ pub fn bpf_guard_cmd4(ctx: LsmContext) -> i32 {
     decide_cmd(&ctx)
 }
 
-/// Refuse a descriptor to a protected link to anybody not allowed.
+/// Refuse a descriptor to a protected link, or a detach or a swap through
+/// one, to anybody not allowed.
 #[inline(always)]
 fn decide_cmd(ctx: &LsmContext) -> i32 {
     let cmd: i32 = ctx.arg(0);
-    if cmd != BPF_GUARD_CMD_LINK_GET_FD_BY_ID {
+    if cmd != BPF_GUARD_CMD_LINK_GET_FD_BY_ID
+        && cmd != BPF_GUARD_CMD_LINK_UPDATE
+        && cmd != BPF_GUARD_CMD_LINK_DETACH
+    {
         return 0;
     }
-    if armed().is_none() {
+    let Some(config) = armed() else {
         return 0;
-    }
+    };
     // The attribute block is the kernel's copy of what userspace passed, and
-    // `link_id` is its first word for this command.
+    // its first word is `link_id` for the lookup and `link_fd` for the other
+    // two.
     let attr: *const u8 = ctx.arg(1);
-    let Some(id) = read_u32(attr, 0) else {
+    let Some(first) = read_u32(attr, 0) else {
         return 0;
+    };
+    let id = if cmd == BPF_GUARD_CMD_LINK_GET_FD_BY_ID {
+        first
+    } else {
+        match link_id_of_fd(&config, first) {
+            Some(id) => id,
+            None => return 0,
+        }
     };
     if unsafe { BPF_GUARD_LINKS.get(&id) }.is_none() {
         return 0;
@@ -169,6 +185,45 @@ fn allowed() -> bool {
         slot += 1;
     }
     false
+}
+
+/// The id of the link behind descriptor `fd` of the calling task, followed
+/// through its file table. `None` when the layout was not read, the number is
+/// past the table or a read fails, which leaves the call to the kernel.
+#[inline(always)]
+fn link_id_of_fd(config: &BpfGuardConfig, fd: u32) -> Option<u32> {
+    if config.fd_walk == 0 {
+        return None;
+    }
+    let task = unsafe { bpf_get_current_task() } as *const u8;
+    let files = read_ptr(task, config.task_files)?;
+    let fdt = read_ptr(files, config.files_fdt)?;
+    let max = read_u32(fdt, config.fdt_max_fds)?;
+    if fd >= max {
+        return None;
+    }
+    let table = read_ptr(fdt, config.fdt_fd)?;
+    let file = read_ptr(table, fd.wrapping_mul(8))?;
+    let link = read_ptr(file, config.file_private_data)?;
+    read_u32(link, config.link_id)
+}
+
+/// Read the pointer at `offset` into `base`, refusing a null.
+#[inline(always)]
+fn read_ptr(base: *const u8, offset: u32) -> Option<*const u8> {
+    let mut out = 0u64;
+    let rc = unsafe {
+        bpf_probe_read_kernel(
+            &raw mut out as *mut core::ffi::c_void,
+            core::mem::size_of::<u64>() as u32,
+            base.wrapping_add(offset as usize) as *const core::ffi::c_void,
+        )
+    };
+    if rc < 0 || out == 0 {
+        None
+    } else {
+        Some(out as *const u8)
+    }
 }
 
 #[inline(always)]

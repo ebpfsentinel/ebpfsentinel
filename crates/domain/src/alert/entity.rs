@@ -28,6 +28,7 @@ use crate::ransom::{
 use crate::raw_socket::entity::{FilterState, RAW_SOCKET_COMPONENT, RawSocket};
 use crate::response::signal::ProcessKillOutcome;
 use crate::share_writes::{SHARE_WRITES_COMPONENT, ShareWritesVerdict};
+use crate::tamper::{TAMPER_COMPONENT, TamperRefusal};
 use crate::tcp_health::reset_scan::{ResetScan, TCP_HEALTH_COMPONENT};
 use crate::threatintel::entity::ThreatIntelAlert;
 use crate::workload::entity::Workload;
@@ -1699,6 +1700,67 @@ impl Alert {
             executable_source: None,
             flow_source: None,
             workload,
+        }
+    }
+
+    /// Create an alert for an attempt the kernel refused to stop, trace or
+    /// unpin the agent. Always critical: the caller already held the rights
+    /// to do it, and only the agent's own hook stood in the way.
+    #[must_use]
+    pub fn from_tamper_refusal(refusal: &TamperRefusal) -> Self {
+        let rule_id = refusal.kind.rule_id();
+        Self {
+            id: Self::generate_id(refusal.at_ns, &rule_id),
+            timestamp_ns: refusal.at_ns,
+            component: TAMPER_COMPONENT.to_string(),
+            severity: Severity::Critical,
+            rule_id,
+            action: DomainMode::Block,
+            src_addr: [0; 4],
+            dst_addr: [0; 4],
+            src_port: 0,
+            dst_port: 0,
+            protocol: 0,
+            is_ipv6: false,
+            message: refusal.message(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: Some(refusal.caller_tgid),
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: Some("refused".to_string()),
+            total_packets: None,
+            mitre_attack: Some(TamperRefusal::mitre()),
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
+            executable_path: None,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
+            workload: None,
         }
     }
 

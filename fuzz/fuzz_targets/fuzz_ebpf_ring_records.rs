@@ -9,11 +9,13 @@
 use core::mem::size_of;
 
 use adapters::ebpf::{
-    exec_network, process_event_reader, workload_dns_reader, workload_event_reader, write_refusal,
+    exec_network, process_event_reader, tamper_guard, workload_dns_reader, workload_event_reader,
+    write_refusal,
 };
 use ebpf_common::exec_network::ExecNetEvent;
 use ebpf_common::process::ProcessEvent;
 use ebpf_common::signal::SignalEvent;
+use ebpf_common::tamper_guard::TamperGuardEvent;
 use ebpf_common::workload_policy::{WorkloadDenialEvent, WorkloadDnsEvent};
 use ebpf_common::write_refusal::WriteRefusalEvent;
 use libfuzzer_sys::fuzz_target;
@@ -34,7 +36,7 @@ fuzz_target!(|data: &[u8]| {
     let Some((&selector, bytes)) = data.split_first() else {
         return;
     };
-    match selector % 6 {
+    match selector % 7 {
         // tracepoint-process: exec, fork, exit.
         0 => {
             if let Some(raw) = record::<ProcessEvent>(bytes) {
@@ -65,6 +67,20 @@ fuzz_target!(|data: &[u8]| {
                 let _ = format!("{:?}", write_refusal::parse(&raw, None));
                 let dir = String::from_utf8_lossy(bytes).into_owned();
                 let _ = format!("{:?}", write_refusal::parse(&raw, Some(dir)));
+            }
+        }
+        // lsm-tamper-guard: a refused signal, trace, unlink, rename or cgroup
+        // write, with and without the protected path known, and the alert
+        // message it becomes.
+        5 => {
+            if let Some(raw) = record::<TamperGuardEvent>(bytes) {
+                if let Some(refusal) = tamper_guard::parse(&raw, None) {
+                    let _ = refusal.message();
+                }
+                let path = String::from_utf8_lossy(bytes).into_owned();
+                if let Some(refusal) = tamper_guard::parse(&raw, Some(path)) {
+                    let _ = refusal.message();
+                }
             }
         }
         // tracepoint-signal: read whole and handed on as is.

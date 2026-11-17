@@ -230,6 +230,16 @@ pub const CATALOGUE: &[Capability] = &[
         fallback: "the agent's objects are guarded only by the privilege it takes to reach \
                    them, and the node reports itself unprotected",
     },
+    Capability {
+        id: "tamper_protection",
+        unlocks: "a signal, a trace or an unpin aimed at the agent refused unless a signed \
+                  stop opened the window",
+        probe: ProbeKind::AttachStatus,
+        since: KernelVersion::FLOOR,
+        needs_lsm: true,
+        fallback: "root stops the agent like any process, and the fleet raises the silence \
+                   after the fact",
+    },
 ];
 
 impl Capability {
@@ -314,6 +324,7 @@ mod tests {
         "network_executables",
         "write_refusal",
         "self_protection",
+        "tamper_protection",
     ];
 
     #[test]
