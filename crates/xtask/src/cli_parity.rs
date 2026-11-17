@@ -18,26 +18,6 @@ fn read(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
 }
 
-/// Every `.rs` file under `path`, or `path` itself when it is a file, sorted
-/// so the report reads the same on every machine.
-fn sources(path: &Path, out: &mut Vec<(String, String)>) -> Result<()> {
-    if path.is_file() {
-        out.push((path.display().to_string(), read(path)?));
-        return Ok(());
-    }
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(path)
-        .with_context(|| format!("listing {}", path.display()))?
-        .map(|entry| entry.map(|e| e.path()))
-        .collect::<Result<_, _>>()?;
-    entries.sort();
-    for entry in entries {
-        if entry.is_dir() || entry.extension().is_some_and(|ext| ext == "rs") {
-            sources(&entry, out)?;
-        }
-    }
-    Ok(())
-}
-
 pub fn run(
     openapi: Option<PathBuf>,
     client: Vec<PathBuf>,
@@ -56,7 +36,8 @@ pub fn run(
         .with_context(|| openapi.display().to_string())?;
     let mut files = Vec::new();
     for path in &client {
-        sources(path, &mut files)?;
+        ebpfsentinel_cli_parity::sources(path, &mut files)
+            .with_context(|| format!("reading {}", path.display()))?;
     }
     let (requested, anonymous) = ebpfsentinel_cli_parity::requested(&files);
     let excluded = ebpfsentinel_cli_parity::exclusions(&read(&exclusions)?)

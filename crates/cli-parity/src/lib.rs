@@ -12,7 +12,10 @@
 //! The check fails on an operation no command reaches and no exclusion names,
 //! on a route the client calls that the document does not describe, on an
 //! exclusion whose route is gone or is now reached anyway, and on an
-//! exclusion that does not say why. The OSS agent and the enterprise agent run
+//! exclusion that does not say why. An agent that serves another edition's
+//! command line may leave one of its routes unserved on purpose: the file
+//! says so in an `[[unserved]]` table, with its reason, and the command then
+//! refuses in words rather than meeting a 404. The OSS agent and the enterprise agent run
 //! the same check against their own documents.
 
 #![forbid(unsafe_code)]
@@ -58,9 +61,20 @@ pub enum Error {
 /// The shortest reason an exclusion may give, so "n/a" is not one.
 pub const MIN_REASON_CHARS: usize = 30;
 
-/// An operation the command line does not reach on purpose, and why.
+/// Which way an entry of the file departs from the document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// The document describes it, and no command reaches it.
+    Exclude,
+    /// A command calls it, and this agent does not serve it.
+    Unserved,
+}
+
+/// An operation the command line does not reach on purpose, or calls where
+/// this agent serves nothing, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Exclusion {
+    pub kind: Kind,
     pub method: String,
     pub path: String,
     pub reason: String,
@@ -72,7 +86,7 @@ impl Exclusion {
     }
 }
 
-/// The exclusion file: `[[exclude]]` tables, each holding `method`, `path`
+/// The exclusion file: `[[exclude]]` and `[[unserved]]` tables, each holding `method`, `path`
 /// and `reason` as basic strings on one line, with `#` comments and blank
 /// lines between. That is all of TOML the file uses, so that is all this
 /// reads; anything else is refused with its line rather than guessed at.
@@ -82,10 +96,10 @@ impl Exclusion {
 /// The first line that is not that, or a table missing a key.
 pub fn exclusions(text: &str) -> Result<Vec<Exclusion>, Error> {
     fn finish(
-        table: Option<(usize, BTreeMap<String, String>)>,
+        table: Option<(usize, Kind, BTreeMap<String, String>)>,
         out: &mut Vec<Exclusion>,
     ) -> Result<(), Error> {
-        let Some((line, mut keys)) = table else {
+        let Some((line, kind, mut keys)) = table else {
             return Ok(());
         };
         let mut take = |key: &str| {
@@ -95,6 +109,7 @@ pub fn exclusions(text: &str) -> Result<Vec<Exclusion>, Error> {
             })
         };
         out.push(Exclusion {
+            kind,
             method: take("method")?,
             path: take("path")?,
             reason: take("reason")?,
@@ -102,7 +117,7 @@ pub fn exclusions(text: &str) -> Result<Vec<Exclusion>, Error> {
         Ok(())
     }
     let mut out = Vec::new();
-    let mut table: Option<(usize, BTreeMap<String, String>)> = None;
+    let mut table: Option<(usize, Kind, BTreeMap<String, String>)> = None;
     for (index, raw) in text.lines().enumerate() {
         let line = index + 1;
         let fail = |why: &str| Error::Exclusions {
@@ -113,13 +128,18 @@ pub fn exclusions(text: &str) -> Result<Vec<Exclusion>, Error> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        if trimmed == "[[exclude]]" {
+        let header = match trimmed {
+            "[[exclude]]" => Some(Kind::Exclude),
+            "[[unserved]]" => Some(Kind::Unserved),
+            _ => None,
+        };
+        if let Some(kind) = header {
             finish(table.take(), &mut out)?;
-            table = Some((line, BTreeMap::new()));
+            table = Some((line, kind, BTreeMap::new()));
             continue;
         }
-        let Some((_, keys)) = table.as_mut() else {
-            return Err(fail("a key outside an [[exclude]] table"));
+        let Some((_, _, keys)) = table.as_mut() else {
+            return Err(fail("a key outside an [[exclude]] or [[unserved]] table"));
         };
         let (key, value) = trimmed
             .split_once('=')
@@ -252,6 +272,29 @@ pub fn requested(sources: &[(String, String)]) -> (BTreeSet<Operation>, Vec<Anon
     (operations, anonymous)
 }
 
+/// Every `.rs` file under `path`, or `path` itself when it is a file, with
+/// its text, sorted so the report reads the same on every machine.
+///
+/// # Errors
+///
+/// A directory that does not list or a file that does not read.
+pub fn sources(path: &std::path::Path, out: &mut Vec<(String, String)>) -> std::io::Result<()> {
+    if path.is_file() {
+        out.push((path.display().to_string(), std::fs::read_to_string(path)?));
+        return Ok(());
+    }
+    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(path)?
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<Result<_, _>>()?;
+    entries.sort();
+    for entry in entries {
+        if entry.is_dir() || entry.extension().is_some_and(|ext| ext == "rs") {
+            sources(&entry, out)?;
+        }
+    }
+    Ok(())
+}
+
 /// What the check found.
 #[derive(Debug, Default)]
 pub struct Report {
@@ -261,6 +304,8 @@ pub struct Report {
     pub reached: usize,
     /// Of those, excluded with a reason.
     pub excluded: usize,
+    /// Called by the client, left unserved here with a reason.
+    pub unserved: usize,
     /// Described, not reached, not excluded.
     pub unreached: Vec<Operation>,
     /// Called by the client, described nowhere.
@@ -288,6 +333,13 @@ impl fmt::Display for Report {
             "{} operations: {} reached by a command, {} excluded with a reason",
             self.documented, self.reached, self.excluded
         )?;
+        if self.unserved > 0 {
+            writeln!(
+                f,
+                "{} calls the client makes are not served here, each with a reason",
+                self.unserved
+            )?;
+        }
         for op in &self.unreached {
             writeln!(f, "  unreached: {op} has no command and no exclusion")?;
         }
@@ -326,9 +378,13 @@ pub fn check(
         *seen.entry(op.clone()).or_default() += 1;
         let why = if seen[&op] > 1 {
             Some("listed twice")
-        } else if !documented.contains(&op) {
+        } else if e.kind == Kind::Unserved && documented.contains(&op) {
+            Some("the document describes it now, so it is served")
+        } else if e.kind == Kind::Unserved && !requested.contains(&op) {
+            Some("no command calls it any more")
+        } else if e.kind == Kind::Exclude && !documented.contains(&op) {
             Some("the document no longer describes it")
-        } else if requested.contains(&op) {
+        } else if e.kind == Kind::Exclude && requested.contains(&op) {
             Some("a command reaches it now, so the exclusion goes")
         } else if e.reason.trim().chars().count() < MIN_REASON_CHARS {
             Some("the reason does not say why")
@@ -339,17 +395,33 @@ pub fn check(
             stale.push((e.clone(), why));
         }
     }
-    let excluded: BTreeSet<Operation> = exclusions.iter().map(Exclusion::operation).collect();
+    let of = |kind: Kind| -> BTreeSet<Operation> {
+        exclusions
+            .iter()
+            .filter(|e| e.kind == kind)
+            .map(Exclusion::operation)
+            .collect()
+    };
+    let excluded = of(Kind::Exclude);
+    let unserved = of(Kind::Unserved);
     Report {
         documented: documented.len(),
         reached: documented.intersection(requested).count(),
         excluded: documented.intersection(&excluded).count(),
+        unserved: requested
+            .difference(documented)
+            .filter(|op| unserved.contains(op))
+            .count(),
         unreached: documented
             .iter()
             .filter(|op| !requested.contains(op) && !excluded.contains(op))
             .cloned()
             .collect(),
-        undocumented: requested.difference(documented).cloned().collect(),
+        undocumented: requested
+            .difference(documented)
+            .filter(|op| !unserved.contains(op))
+            .cloned()
+            .collect(),
         anonymous,
         stale,
     }
@@ -454,6 +526,7 @@ mod tests {
         assert!(!report.is_clean());
 
         let excluded = [Exclusion {
+            kind: Kind::Exclude,
             method: "post".to_string(),
             path: "/api/v1/peer".to_string(),
             reason: reason(),
@@ -468,6 +541,7 @@ mod tests {
         let doc = documented(DOC).unwrap();
         let (req, _) = requested(&src(r#"Method::POST, "/api/v1/peer")"#));
         let ex = |method: &str, path: &str, reason: String| Exclusion {
+            kind: Kind::Exclude,
             method: method.to_string(),
             path: path.to_string(),
             reason,
@@ -507,12 +581,61 @@ mod tests {
     }
 
     #[test]
+    fn a_call_left_unserved_here_needs_its_reason_and_its_caller() {
+        let doc = documented(DOC).unwrap();
+        let (req, _) = requested(&src(
+            r#"Method::GET, "/api/v1/nowhere") Method::GET, "/api/v1/rules")"#,
+        ));
+        let entry = |method: &str, path: &str| Exclusion {
+            kind: Kind::Unserved,
+            method: method.to_string(),
+            path: path.to_string(),
+            reason: reason(),
+        };
+        let excluded = [
+            Exclusion {
+                kind: Kind::Exclude,
+                ..entry("POST", "/api/v1/rules")
+            },
+            entry("DELETE", "/api/v1/rules/{id}"),
+            entry("POST", "/api/v1/peer"),
+        ];
+        let mut all = excluded.to_vec();
+        all.push(entry("GET", "/api/v1/nowhere"));
+        let report = check(&doc, &req, Vec::new(), &all);
+        assert!(report.undocumented.is_empty(), "{report}");
+        assert_eq!(report.unserved, 1);
+        let whys: Vec<&str> = report.stale.iter().map(|(_, why)| *why).collect();
+        assert_eq!(
+            whys,
+            vec![
+                "the document describes it now, so it is served",
+                "the document describes it now, so it is served",
+            ]
+        );
+
+        let report = check(&doc, &req, Vec::new(), &excluded);
+        assert_eq!(
+            report.undocumented,
+            vec![Operation::new("GET", "/api/v1/nowhere")]
+        );
+
+        let (none, _) = requested(&src(""));
+        let report = check(&BTreeSet::new(), &none, Vec::new(), &[entry("GET", "/x")]);
+        assert_eq!(report.stale[0].1, "no command calls it any more");
+    }
+
+    #[test]
     fn the_exclusion_file_is_a_list_of_tables() {
         let parsed = exclusions(
             "[[exclude]]\nmethod = \"POST\"\npath = \"/api/v1/peer\"\nreason = \"why\"\n",
         )
         .unwrap();
         assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].kind, Kind::Exclude);
+        let parsed =
+            exclusions("[[unserved]]\nmethod = \"GET\"\npath = \"/x\"\nreason = \"r\"\n").unwrap();
+        assert_eq!(parsed[0].kind, Kind::Unserved);
         assert!(exclusions("").unwrap().is_empty());
         assert!(exclusions("[[exclude]]\nmethod = \"POST\"\n").is_err());
         assert!(
