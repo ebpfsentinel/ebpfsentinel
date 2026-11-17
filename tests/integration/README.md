@@ -147,11 +147,12 @@ Require **root** and **kernel >= 6.12** (or 2-VM mode). Measure agent overhead u
 
 **Profiles** (consumed by `.github/workflows/integration.yml`):
 
-- `pr` - runs on every pull request + push to `main` (≤30 s/suite p95, ≤15 min total budget). Existing fast functional suites (01-40 except heavy benches).
-- `nightly` - runs on the 02:00 UTC cron schedule. Attack-realism suites (41-63), perf benches (15, 29, 30), routing/multi-WAN, soak job.
-- `manual` - opt-in via `workflow_dispatch` with `profile=full`.
+- `pr` - runs on every pull request + push to `main` (≤30 s/suite p95, ≤15 min total budget). The userspace REST/gRPC suites, no root.
+- `datapath` - runs on every pull request + push to `main`, as root on hosted runners, sharded eight ways. Every single-host suite that loads the programs into a kernel.
+- `nightly` - runs on the 02:00 UTC cron schedule on the self-hosted Vagrant runner. Suites needing a second or third machine, a cluster or the container runtimes VM, plus the soak job.
+- `manual` - pinned to no job; a suite there is reached by hand only, and the audit names it.
 
-Per-suite mapping lives in the `suite_profiles:` block of `coverage-matrix.yaml`. The audit gate (`scripts/audit-coverage.sh`) fails the build if a new suite lands without an explicit profile pin. The workflow reads this block via `scripts/list-suites-by-profile.sh`, so adding a new suite needs **no** workflow edit.
+Per-suite mapping lives in the `suite_profiles:` block of `coverage-matrix.yaml`, keyed by the suite's number whatever its width. `scripts/list-suites-by-profile.sh` fails when a suite on disk has no entry, and the audit gate (`scripts/audit-coverage.sh`) fails when a suite's profile is one no job of `integration.yml` lists, or when the workflow skips suites by number. The workflow reads this block via `scripts/list-suites-by-profile.sh`, so adding a new suite needs **no** workflow edit.
 
 **Lanes** (consumed by the runners below):
 
@@ -170,11 +171,13 @@ What scoping cannot remove is a suite written for more than one lane whose indiv
 
 | Trigger | Profile resolved | Jobs that run |
 |---|---|---|
-| `pull_request`, `push` to main | `pr` | `pr-suites`, `pr-docker`, `pr-ebpf` |
-| `schedule` (02:00 UTC) | `nightly` | `nightly-suites` (matrix per suite), `nightly-soak` (8 h), `nightly-triage` on failure. **Commented out** until a `[self-hosted, linux, vagrant]` runner is registered: these jobs bring Vagrant VMs up on the runner itself |
-| `workflow_dispatch` profile=`pr`/`nightly`/`full` | as input | corresponding jobs (`full` runs both PR and nightly sets) |
+| `pull_request`, `push` to main | `pr` | `pr-suites`, `pr-docker`, `datapath-suites` (8 shards) |
+| `schedule` (02:00 UTC) | `nightly` | `nightly-suites` (matrix per suite, each through the runner of its lane), `nightly-soak` (8 h), `nightly-triage` on failure. Needs a `[self-hosted, linux, vagrant]` runner registered on the repository; until then the jobs wait in the queue |
+| `workflow_dispatch` profile=`pr`/`nightly`/`full` | as input | corresponding jobs (`full` runs all three) |
 
-**`pr-ebpf` is the only lane that loads the programs into a kernel**, so it runs with `EBPFSENTINEL_STRICT_SKIPS=1` and on the pull request rather than after the merge: a program the verifier refuses is caught nowhere else, and a gate that speaks only on `main` reports a datapath that is already broken for everybody. Whether a hosted runner can load them is what the first strict run answers; if it cannot, the job moves to the self-hosted Vagrant runner the nightly jobs use, where suites 06 and 67 were proven, rather than losing the strictness.
+**Every lane runs with `EBPFSENTINEL_STRICT_SKIPS=1`**, and the runner scripts default to it too (`EBPFSENTINEL_STRICT_SKIPS=0` downgrades a degraded dev box). A missing tool (`require_tool`), a kernel under the floor (`require_kernel`) or a prerequisite the suite owns fails the suite on a lane that is supposed to provide it; only `env_skip` - a capability the lane genuinely lacks, such as a second machine - still skips.
+
+**`datapath-suites` is provisioned by `scripts/provision-datapath-host.sh`**, the same script the agent VM's `base-packages` provisioner runs, so a tool added for a suite reaches both. The job checks the runner's kernel against the agent's floor first and stops with that reason if it is under it. The in-kernel harness (`ebpf_prog_test_run`, trace side effects, `signal_task`) runs on every pull request in `ebpf.yml`, and fails rather than skips when `EBPFSENTINEL_EBPF_DIR` names a directory without objects.
 
 **Budget guard** - the `pr-suites` job records its start epoch and asserts wall-clock ≤ `PR_BUDGET_MINUTES` (default 15) before exiting. Exceeding the budget fails the run rather than silently growing.
 

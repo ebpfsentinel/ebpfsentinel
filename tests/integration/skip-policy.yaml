@@ -32,9 +32,6 @@ env:
   - "no system libssl.so.3 to copy"
   - "nuclei not available on attacker VM"
   - "hyenae-ng not available on attacker VM"
-  - "${tool} not available on attacker VM"
-  - "${tool} not installed"
-  - "${tool} not installed on agent VM"
   - "kernel conntrack table unreadable by either source - event stream not wired"
   - "kernel conntrack table unreadable by either source - nothing to list"
   - "kernel conntrack table unreadable by either source - nothing to flush"
@@ -56,7 +53,6 @@ env:
   - "agent VM is missing the 'conntrack' tool (apt install conntrack)"
   - "agent binary not available on this host"
   - "agent binary not found:"
-  - "agent kernel $kernel_str <"
   - "amplification script missing:"
   - "cannot SSH to agent VM at"
   - "cgroup v2 unified hierarchy not mounted"
@@ -155,6 +151,13 @@ env:
 
 
 masking:
+  # A lane provisions every tool its suites drive and runs on a kernel at the
+  # agent's floor, so a missing tool or an older kernel there is a broken
+  # lane: the strict lanes fail on it, a degraded box still skips.
+  - "${tool} not available on attacker VM"
+  - "${tool} not installed"
+  - "${tool} not installed on agent VM"
+  - "agent kernel $kernel_str <"
   # The runtimes lane provisions all four sockets, and the suites skip
   # off that lane before reaching them, so a socket missing here is a
   # broken lane, not an absent capability.

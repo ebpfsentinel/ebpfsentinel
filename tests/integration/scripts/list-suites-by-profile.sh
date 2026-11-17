@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
-# list-suites-by-profile.sh - Resolve coverage-matrix.yaml per-feature
-# profile tags down to a flat list of bats suite ids per CI profile
-# (pr | nightly | manual). Used by .github/workflows/integration.yml
-# to build the matrix without baking the suite list into the workflow.
+# list-suites-by-profile.sh - list the bats suites of one CI profile
+# (pr | datapath | nightly | manual), read from the `suite_profiles` block of
+# coverage-matrix.yaml. Used by .github/workflows/integration.yml to build its
+# jobs without baking the suite list into the workflow.
 #
-# A suite belongs to a profile P if at least one feature row that
-# references it has `profile: P`. A suite that is referenced by both
-# `pr` and `nightly` rows is treated as `pr` (PR fast-feedback wins).
+# Every suite file under suites/ must carry an entry there, whatever the width
+# of its number: a suite with none is an error, not a default, because a
+# default is how a suite ends up in a job that skips it.
 #
 # Usage:
-#   list-suites-by-profile.sh --json         # full mapping
-#   list-suites-by-profile.sh --list pr      # space-separated ids
-#   list-suites-by-profile.sh --list nightly # space-separated ids
-#   list-suites-by-profile.sh --list manual
-#   list-suites-by-profile.sh --paths pr     # bats file paths (newline)
-#   list-suites-by-profile.sh --paths nightly
+#   list-suites-by-profile.sh --json                  # full mapping
+#   list-suites-by-profile.sh --list <profile>        # space-separated ids
+#   list-suites-by-profile.sh --list <profile> I/N    # shard I of N (0-based)
+#   list-suites-by-profile.sh --paths <profile>       # bats file paths (newline)
+#   list-suites-by-profile.sh --lane <id>             # lane the suite runs on
 #   list-suites-by-profile.sh --help
+#
+# --lane prints the first entry of the suite's `lanes` in `attack_suites`
+# (2vm, 3vm, runtimes) or `local` when it has no row there.
 #
 # Requires python3 + PyYAML.
 
@@ -29,7 +31,7 @@ case "${1:-}" in
     sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
-  --json|--list|--paths) ;;
+  --json|--list|--paths|--lane) ;;
   *)
     echo "unknown mode: $1" >&2
     exit 2
@@ -38,15 +40,21 @@ esac
 
 MODE="$1"
 PROFILE="${2:-}"
+SHARD="${3:-}"
+
+if [[ "${MODE}" == "--lane" && ! "${PROFILE}" =~ ^[0-9]+$ ]]; then
+  echo "--lane requires a suite id" >&2
+  exit 2
+fi
 
 if [[ "${MODE}" == "--list" || "${MODE}" == "--paths" ]]; then
   case "${PROFILE}" in
-    pr|nightly|manual) ;;
-    *) echo "${MODE} requires profile: pr | nightly | manual" >&2; exit 2 ;;
+    pr|datapath|nightly|manual) ;;
+    *) echo "${MODE} requires profile: pr | datapath | nightly | manual" >&2; exit 2 ;;
   esac
 fi
 
-exec python3 - "${INTEG_DIR}" "${MODE}" "${PROFILE}" <<'PY'
+exec python3 - "${INTEG_DIR}" "${MODE}" "${PROFILE}" "${SHARD}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -60,6 +68,9 @@ except ImportError:
 integ_dir = Path(sys.argv[1])
 mode = sys.argv[2]
 profile_arg = sys.argv[3]
+shard_arg = sys.argv[4]
+
+PROFILES = ("pr", "datapath", "nightly", "manual")
 
 matrix_path = integ_dir / "coverage-matrix.yaml"
 suites_dir = integ_dir / "suites"
@@ -67,80 +78,68 @@ suites_dir = integ_dir / "suites"
 with matrix_path.open() as fh:
     matrix = yaml.safe_load(fh)
 
-# Source of truth: top-level `suite_profiles:` map, one entry per
-# bats suite. Falls back to the feature-row `profile` field when a
-# suite id is not pinned explicitly (legacy / planned suites).
-explicit: dict[str, str] = {}
+pins: dict[str, str] = {}
 for sid, prof in (matrix.get("suite_profiles") or {}).items():
-    if prof not in {"pr", "nightly", "manual"}:
-        sys.stderr.write(
-            f"suite_profiles['{sid}'] has invalid profile '{prof}'\n"
-        )
+    if prof not in PROFILES:
+        sys.stderr.write(f"suite_profiles['{sid}'] has invalid profile '{prof}'\n")
         sys.exit(2)
-    explicit[str(sid)] = prof
+    pins[str(sid)] = prof
 
-derived: dict[str, set[str]] = {}
-for row in matrix.get("coverage") or []:
-    prof = row.get("profile")
-    if prof not in {"pr", "nightly", "manual"}:
-        continue
-    for s in row.get("suites") or []:
-        if s == "TBD":
-            continue
-        derived.setdefault(s, set()).add(prof)
-
-def fallback(profs: set[str]) -> str:
-    # Precedence on fallback: pr > nightly > manual so suites not
-    # pinned explicitly stay on the fast-feedback path by default.
-    if "pr" in profs:
-        return "pr"
-    if "nightly" in profs:
-        return "nightly"
-    return "manual"
-
-resolved: dict[str, str] = dict(explicit)
-for sid, profs in derived.items():
-    resolved.setdefault(sid, fallback(profs))
-
-# Enumerate all suite files on disk so unreferenced suites still get
-# a default. Any suite not present in the matrix defaults to `pr`
-# (existing behaviour pre-split).
 disk_suites: dict[str, str] = {}
-if suites_dir.exists():
-    for p in sorted(suites_dir.iterdir()):
-        if not p.name.endswith(".bats"):
-            continue
-        prefix = p.name.split("-", 1)[0]
-        if not prefix.isdigit() or len(prefix) != 2:
-            continue
-        disk_suites[prefix] = p.name
+for p in sorted(suites_dir.iterdir()):
+    if not p.name.endswith(".bats"):
+        continue
+    prefix = p.name.split("-", 1)[0]
+    if not prefix.isdigit():
+        sys.stderr.write(f"suite file without a numeric prefix: {p.name}\n")
+        sys.exit(2)
+    disk_suites[prefix] = p.name
 
-final: dict[str, list[str]] = {"pr": [], "nightly": [], "manual": []}
-for sid, fname in disk_suites.items():
-    prof = resolved.get(sid, "pr")
-    final[prof].append(sid)
+unpinned = sorted((sid for sid in disk_suites if sid not in pins), key=int)
+if unpinned:
+    sys.stderr.write(
+        "suites with no entry in suite_profiles of coverage-matrix.yaml: "
+        + " ".join(unpinned)
+        + "\n"
+    )
+    sys.exit(1)
 
+final: dict[str, list[str]] = {k: [] for k in PROFILES}
+for sid in disk_suites:
+    final[pins[sid]].append(sid)
 for k in final:
-    final[k].sort()
+    final[k].sort(key=int)
+
+selected = final.get(profile_arg, [])
+if shard_arg:
+    try:
+        index, count = (int(x) for x in shard_arg.split("/", 1))
+    except ValueError:
+        sys.stderr.write(f"shard must read I/N, got '{shard_arg}'\n")
+        sys.exit(2)
+    if count < 1 or not 0 <= index < count:
+        sys.stderr.write(f"shard {shard_arg} out of range\n")
+        sys.exit(2)
+    selected = selected[index::count]
 
 if mode == "--json":
-    print(json.dumps(
-        {
-            "pr": final["pr"],
-            "nightly": final["nightly"],
-            "manual": final["manual"],
-            "files": {sid: disk_suites[sid] for sid in disk_suites},
-        },
-        indent=2,
-        sort_keys=True,
-    ))
+    out = {k: final[k] for k in PROFILES}
+    out["files"] = disk_suites
+    print(json.dumps(out, indent=2, sort_keys=True))
 elif mode == "--list":
-    print(" ".join(final[profile_arg]))
+    print(" ".join(selected))
+elif mode == "--lane":
+    if profile_arg not in disk_suites:
+        sys.stderr.write(f"no suite {profile_arg} under suites/\n")
+        sys.exit(2)
+    lanes = {
+        str(row.get("suite")): row.get("lanes") or []
+        for row in matrix.get("attack_suites") or []
+    }
+    print((lanes.get(profile_arg) or ["local"])[0])
 elif mode == "--paths":
-    out = []
-    for sid in final[profile_arg]:
-        fname = disk_suites.get(sid)
-        if fname:
-            out.append(str((suites_dir / fname).relative_to(integ_dir.parent.parent)))
-    print("\n".join(out))
+    print("\n".join(
+        str((suites_dir / disk_suites[sid]).relative_to(integ_dir.parent.parent))
+        for sid in selected
+    ))
 PY

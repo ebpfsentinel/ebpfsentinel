@@ -23,7 +23,7 @@ require_reject_tools() {
     local tool
     for tool in tcpdump tshark ncat; do
         if ! command -v "$tool" >/dev/null 2>&1; then
-            env_skip "${tool} not available on attacker VM"
+            soft_skip "${tool} not available on attacker VM"
         fi
     done
 }

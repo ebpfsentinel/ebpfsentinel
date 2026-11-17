@@ -24,10 +24,10 @@ PERF_DIR="${INTEGRATION_DIR}/../perf"
 
 # ── Parse arguments ────────────────────────────────────────────────
 # A `soft_skip` on this lane means a prerequisite the lane is supposed to own
-# went missing, so allow callers to turn those skips into failures rather than
-# letting a provisioning gap read as a pass. `env_skip` is unaffected - see
-# lib/skip_policy.bash.
-export EBPFSENTINEL_STRICT_SKIPS="${EBPFSENTINEL_STRICT_SKIPS:-0}"
+# went missing, so those skips fail by default rather than letting a
+# provisioning gap read as a pass; EBPFSENTINEL_STRICT_SKIPS=0 downgrades them
+# on a degraded box. `env_skip` is unaffected - see lib/skip_policy.bash.
+export EBPFSENTINEL_STRICT_SKIPS="${EBPFSENTINEL_STRICT_SKIPS:-1}"
 
 SUITE=""
 EBPF_ONLY=false
@@ -262,7 +262,7 @@ vagrant ssh attacker -c \
      export AGENT_CTL_IP=${AGENT_CTL_IP:-192.168.56.10} && \
      export ATTACKER_VM_IP=192.168.56.20 && \
      export AGENT_SSH_KEY=~/.ssh/agent_key && \
-     export EBPFSENTINEL_STRICT_SKIPS=${EBPFSENTINEL_STRICT_SKIPS:-0} && \
+     export EBPFSENTINEL_STRICT_SKIPS=${EBPFSENTINEL_STRICT_SKIPS:-1} && \
      exec 9>/tmp/ebpfsentinel-lane.lock && \
      { flock -n 9 || { echo 'another lane run still drives the agent from this VM:' >&2; pgrep -af bats >&2; exit 1; }; } && \
      bats --timing ${REMOTE_SUITES}"

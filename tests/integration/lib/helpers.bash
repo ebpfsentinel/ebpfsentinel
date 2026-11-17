@@ -29,14 +29,15 @@ source "${HELPERS_DIR}/skip_policy.bash"
 # ── Tool guard ────────────────────────────────────────────────────
 
 # require_tool <command>
-# Skip the current test when a needed CLI is absent. Defined here on the
+# Skip the current test when a needed CLI is absent, and fail it on a strict
+# lane, which provisions every tool its suites name. Defined here on the
 # base helper so plain (non-eBPF) suites get it too; ebpf_helpers.bash and
 # the 2-VM vm_helpers.bash override this with lane-specific variants when
 # they are loaded on top.
 require_tool() {
     local tool="${1:?usage: require_tool <command>}"
     if ! command -v "$tool" &>/dev/null; then
-        env_skip "${tool} not installed"
+        soft_skip "${tool} not installed"
     fi
 }
 

@@ -31,9 +31,10 @@ esac
 PROJECT_ROOT="${PROJECT_ROOT:-/home/vagrant/ebpfsentinel}"
 # The canonical lane provisions every prerequisite a suite owns, so a
 # `soft_skip` here means a regression rather than a missing capability.
-# Export EBPFSENTINEL_STRICT_SKIPS=1 before calling this script to turn those
-# skips into failures (env_skip is unaffected - see lib/skip_policy.bash).
-export EBPFSENTINEL_STRICT_SKIPS="${EBPFSENTINEL_STRICT_SKIPS:-0}"
+# Strict by default, so those skips fail; export EBPFSENTINEL_STRICT_SKIPS=0
+# to downgrade them on a degraded box (env_skip is unaffected - see
+# lib/skip_policy.bash).
+export EBPFSENTINEL_STRICT_SKIPS="${EBPFSENTINEL_STRICT_SKIPS:-1}"
 cd "${PROJECT_ROOT}/tests/integration" || exit 1
 OUT=/tmp/local-lane-result.txt
 : >"$OUT"

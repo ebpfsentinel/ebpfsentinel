@@ -180,12 +180,12 @@ require_tool() {
     case "$tool" in
         bpftool|tc)
             if ! _agent_ssh_sudo which "$tool" &>/dev/null; then
-                env_skip "${tool} not installed on agent VM"
+                soft_skip "${tool} not installed on agent VM"
             fi
             ;;
         *)
             if ! command -v "$tool" &>/dev/null; then
-                env_skip "${tool} not installed"
+                soft_skip "${tool} not installed"
             fi
             ;;
     esac

@@ -99,11 +99,11 @@ jobs:
       - name: Run tests with extra UB checks
         run: cargo +nightly careful test --workspace --exclude ebpf-common
 
-  # ── Fuzz testing (critical parsers) ──────────────────────────────
+  # ── Fuzz testing (every target) ──────────────────────────────────
   fuzz:
-    name: Fuzz Critical Parsers
+    name: Fuzz Every Target
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
@@ -156,6 +156,23 @@ jobs:
         run: cargo +nightly fuzz run fuzz_dns_tcp -- -max_len=4096 -max_total_time=30
       - name: Fuzz Docker events and proc readers
         run: cargo +nightly fuzz run fuzz_container_events -- -max_len=8192 -max_total_time=30
+      # Every other target, read from fuzz/Cargo.toml rather than listed here,
+      # so a target added there is built and run on the next push instead of
+      # compiling nowhere until someone remembers this file. The parsers above
+      # keep their own budgets and seeds; the rest get 15 s each.
+      - name: Fuzz every remaining target
+        run: |
+          set -euo pipefail
+          cargo +nightly fuzz build
+          above="$(grep -oE 'fuzz run fuzz_[a-z0-9_]+' .github/workflows/security.yml | awk '{print $3}' | sort -u)"
+          for target in $(cargo +nightly fuzz list); do
+            if grep -qx "$target" <<<"$above"; then
+              continue
+            fi
+            echo "::group::$target"
+            cargo +nightly fuzz run "$target" -- -max_len=4096 -max_total_time=15
+            echo "::endgroup::"
+          done
 
   # ── SBOM generation ──────────────────────────────────────────────
   sbom:

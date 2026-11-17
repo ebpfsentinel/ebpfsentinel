@@ -1,29 +1,37 @@
 name: Integration Tests
 
-# CI split - fast PR feedback vs. heavy nightly attack/perf coverage.
+# Three lanes, each running every suite of its profile and nothing else.
 #
-#   pull_request / push: profile=pr - existing fast suites + 15-min
-#     PR budget guard. ≤30 s/suite p95 by design.
-#   schedule (02:00 UTC): profile=nightly - attack-realism suites
-#     (41-63), perf benches (15/29/30), feature overhead, soak job,
-#     3-VM transit topology.
-#   workflow_dispatch: choose profile = pr | nightly | full. Nightly
-#     failures auto-open a deduplicated GitHub issue.
+#   pr        userspace REST/gRPC suites, no root, on a hosted runner, under
+#             a 15-min budget guard; suite 09 runs in its own Docker job.
+#   datapath  every single-host suite that loads the programs into a kernel,
+#             on hosted runners as root, sharded, provisioned by
+#             scripts/provision-datapath-host.sh (the list the agent VM is
+#             provisioned from) and run with strict skips, so a tool or a
+#             kernel the lane lacks fails the suite instead of excusing it.
+#   nightly   suites that need a second or third machine, a cluster or the
+#             container runtimes VM, on the [self-hosted, linux, vagrant]
+#             runner, each through the runner of the lane its `lanes` field
+#             names, strict as well; plus the soak and the 3-VM transit run.
 #
-# The suite ↔ profile mapping is sourced from
-# tests/integration/coverage-matrix.yaml via
-# scripts/list-suites-by-profile.sh so adding a suite needs no
-# workflow edit - just a profile entry in the matrix.
+# pull_request / push run pr + datapath; the schedule runs nightly;
+# workflow_dispatch picks pr | nightly | full (all three). Nightly failures
+# auto-open a deduplicated GitHub issue.
+#
+# The suite to profile mapping is tests/integration/coverage-matrix.yaml,
+# read through scripts/list-suites-by-profile.sh: a suite on disk with no
+# profile fails the listing, and scripts/audit-coverage.sh fails on a profile
+# no job here lists.
 
 on:
   pull_request:
   push:
     branches: [main]
-  # Off until a runner labelled [self-hosted, linux, vagrant] is registered:
-  # the nightly jobs bring Vagrant VMs up on it, so on a hosted runner this
-  # schedule would queue a job every night that can never start.
-  # schedule:
-  #   - cron: "0 2 * * *"
+  # Needs a runner labelled [self-hosted, linux, vagrant] registered on the
+  # repository: until one is, the nightly jobs queue and never start, which
+  # the run page shows as waiting rather than as a pass.
+  schedule:
+    - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
       profile:
@@ -68,6 +76,7 @@ jobs:
     outputs:
       profile: ${{ steps.resolve.outputs.profile }}
       pr_suites: ${{ steps.resolve.outputs.pr_suites }}
+      datapath_suites: ${{ steps.resolve.outputs.datapath_suites }}
       nightly_suites: ${{ steps.resolve.outputs.nightly_suites }}
       nightly_suites_json: ${{ steps.resolve.outputs.nightly_suites_json }}
       soak_duration: ${{ steps.resolve.outputs.soak_duration }}
@@ -91,12 +100,14 @@ jobs:
           echo "profile=$profile" >> "$GITHUB_OUTPUT"
 
           pr_list="$(tests/integration/scripts/list-suites-by-profile.sh --list pr)"
+          datapath_list="$(tests/integration/scripts/list-suites-by-profile.sh --list datapath)"
           nightly_list="$(tests/integration/scripts/list-suites-by-profile.sh --list nightly)"
           # JSON array form for matrix strategy expansion (GitHub Actions
           # expressions can't transform a space-separated string into a
           # matrix value, so we materialise the array here).
           nightly_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1].split()))' "$nightly_list")"
           echo "pr_suites=$pr_list" >> "$GITHUB_OUTPUT"
+          echo "datapath_suites=$datapath_list" >> "$GITHUB_OUTPUT"
           echo "nightly_suites=$nightly_list" >> "$GITHUB_OUTPUT"
           echo "nightly_suites_json=$nightly_json" >> "$GITHUB_OUTPUT"
 
@@ -112,6 +123,7 @@ jobs:
 
           echo "Resolved profile=$profile soak_duration=$soak"
           echo "PR suites: $pr_list"
+          echo "Datapath suites: $datapath_list"
           echo "Nightly suites: $nightly_list"
 
   # ── Build agent binary and eBPF programs ─────────────────────────
@@ -209,28 +221,15 @@ jobs:
           ids="${{ needs.plan.outputs.pr_suites }}"
           failed=0
           for id in $ids; do
-            bats_path="$(ls tests/integration/suites/${id}-*.bats 2>/dev/null | head -n1 || true)"
-            [ -z "$bats_path" ] && continue
-            # Skip suites that require root / privileged docker / k8s - those
-            # run in the dedicated nightly jobs below. The PR job is the
-            # userspace REST/gRPC fast lane.
-            case "$id" in
-              06|10|11|12|13|14|18|19|20|21|22|23|24|25|26|27|28|29|30|31|32|33|34|35|40|69)
-                echo "::group::Skipping suite $id (requires kernel/root, deferred to nightly)"
-                echo "would-run: $bats_path"
-                echo "::endgroup::"
-                continue
-                ;;
-              09)
-                echo "::group::Skipping suite 09 (docker - see docker job)"
-                echo "::endgroup::"
-                continue
-                ;;
-            esac
+            bats_path="$(ls tests/integration/suites/${id}-*.bats | head -n1)"
+            # Suite 09 builds and runs the agent image; the Docker job below
+            # owns it.
+            [ "$id" = "09" ] && continue
             echo "::group::Suite $id"
-            bats --timing "$bats_path"
+            EBPFSENTINEL_STRICT_SKIPS=1 bats --timing "$bats_path" || failed=1
             echo "::endgroup::"
           done
+          exit "$failed"
 
       - name: PR budget guard
         if: always()
@@ -283,27 +282,34 @@ jobs:
       - name: Suite 09 - Docker Deployment
         run: sudo -E bats --timing tests/integration/suites/09-docker.bats
 
-  # ── PR eBPF (privileged, loads the datapath) ─────────────────────
+  # ── Datapath: every single-host kernel suite (profile=datapath) ──
   #
-  # Runs on the pull request, not only after the merge. A program the verifier
-  # refuses is caught by nothing else in this workflow, and a gate that only
-  # speaks once the change is on main reports a datapath that is already
-  # broken for everybody.
-  #
-  # Whether a hosted runner loads these programs at all is what the strict
-  # skips below answer: a kernel that cannot take them fails the step instead
-  # of excusing itself. If it turns out it cannot, the honest move is to put
-  # this job on the [self-hosted, linux, vagrant] runner the nightly jobs
-  # already use, where the suites were proven, rather than to drop the
-  # strictness and keep a lane that passes by skipping.
-  pr-ebpf:
-    name: PR eBPF Suite
+  # Runs on the pull request, not only after the merge: a program the verifier
+  # refuses, or a datapath assertion that no longer holds, is caught here and
+  # nowhere earlier. The profile is split across shards by position, so a
+  # suite added to the matrix lands in a shard with no edit here.
+  datapath-suites:
+    name: Datapath Suites (shard ${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     needs: [plan, build]
     if: needs.plan.outputs.profile == 'pr' || needs.plan.outputs.profile == 'full'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v7
+
+      # The agent refuses to start below its kernel floor, so a runner image
+      # under it would fail every suite one by one; this says why once.
+      - name: Kernel at the agent's floor
+        run: |
+          read -r major minor < <(uname -r | awk -F. '{print $1, $2}')
+          if [ "$major" -lt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -lt 12 ]; }; then
+            echo "::error::runner kernel $(uname -r) is below the agent's 6.12 floor"
+            exit 1
+          fi
 
       - name: Download agent binary
         uses: actions/download-artifact@v8
@@ -314,9 +320,8 @@ jobs:
       - name: Make agent executable
         run: chmod +x target/release/ebpfsentinel-agent target/release/warden
 
-      # Without the objects the suite's own environment check finds no local
-      # eBPF build and skips every test in the file, so the privileged lane
-      # has to carry them.
+      # Without the objects a suite's environment check finds no local eBPF
+      # build; under strict skips that is a failure, not a quiet lane.
       - name: Download eBPF programs
         uses: actions/download-artifact@v8
         with:
@@ -325,43 +330,54 @@ jobs:
 
       - uses: ./.github/actions/install-bats
 
-      - name: Install tools
+      - name: Install grpcurl
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq python3-scapy tcpdump curl
-          # The distribution package is built against no particular kernel, so
-          # it is the one that installs on a runner whose `uname -r` has no
-          # matching linux-tools; the per-kernel packages stay as fallbacks for
-          # an image that ships them.
-          sudo apt-get install -y bpftool 2>/dev/null \
-            || sudo apt-get install -y "linux-tools-$(uname -r)" 2>/dev/null \
-            || sudo apt-get install -y linux-tools-common linux-tools-generic 2>/dev/null \
-            || echo "::warning::bpftool not available - eBPF tests will be skipped"
-          # The conntrack, FOU and xfrm-interface kfuncs are registered by
-          # modules a hosted runner does not load by itself, and a program
-          # calling one is refused without its module, as on the test VMs.
-          sudo modprobe -a nf_conntrack fou fou6 xfrm_interface
+          GRPCURL_VERSION="1.9.1"
+          GRPCURL_SHA256="588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214"
+          curl -sSL -o /tmp/grpcurl.tar.gz \
+            "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz"
+          echo "${GRPCURL_SHA256}  /tmp/grpcurl.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/grpcurl.tar.gz -C /usr/local/bin grpcurl
+          rm -f /tmp/grpcurl.tar.gz
 
-      # Strict skips here and nowhere else in this workflow: this is the only
-      # lane that loads the programs into a kernel, so a test that excuses
-      # itself is the gate going quiet rather than a feature being absent.
-      - name: Suite 06 - eBPF Programs
-        run: sudo EBPFSENTINEL_STRICT_SKIPS=1 bats --timing tests/integration/suites/06-ebpf-programs.bats
+      # The list the agent VM is provisioned from, so a tool a suite needs is
+      # here as soon as it is there. bpftool is required: this kernel is final.
+      - name: Provision the datapath host
+        run: sudo bash tests/integration/scripts/provision-datapath-host.sh --require-bpftool
 
-      # The one lane that asks the verifier for every program at once. Suite 06
-      # loads the firewall alone, so a program broken in the object loads
-      # nowhere and nothing here notices.
-      - name: Suite 67 - Every eBPF Program Loads
-        run: sudo EBPFSENTINEL_STRICT_SKIPS=1 bats --timing tests/integration/suites/67-ebpf-every-program-loads.bats
+      - name: Generate TLS certificates
+        run: bash tests/integration/scripts/generate-certs.sh
 
-      # The runner carries Docker, so the published-port bypass is shown and
-      # closed here: a DROP in INPUT that Docker's DNAT walks past, then the
-      # agent's deny rule and a capture on the bridge recording nothing.
-      - name: Suite 69 - Docker Published Port
-        run: sudo EBPFSENTINEL_STRICT_SKIPS=1 bats --timing tests/integration/suites/69-docker-published-port.bats
+      - name: Generate JWT keys and tokens
+        run: bash tests/integration/scripts/generate-jwt-keys.sh
 
-      - name: Suite 40 - L2 VIP Announcer
-        run: sudo bats --timing tests/integration/suites/37-ebpf-vip-announcer-scenarios.bats
+      - name: Run profile=datapath suites
+        run: |
+          set -uo pipefail
+          ids="$(tests/integration/scripts/list-suites-by-profile.sh --list datapath ${{ matrix.shard }}/8)"
+          mkdir -p "$RUNNER_TEMP/datapath-logs"
+          failed=""
+          for id in $ids; do
+            bats_path="$(ls tests/integration/suites/${id}-*.bats | head -n1)"
+            echo "::group::Suite $id"
+            if ! sudo -E EBPFSENTINEL_STRICT_SKIPS=1 bats --timing "$bats_path" \
+                 2>&1 | tee "$RUNNER_TEMP/datapath-logs/suite-${id}.log"; then
+              failed="$failed $id"
+            fi
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::datapath suites failed:$failed"
+            exit 1
+          fi
+
+      - name: Upload suite logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: datapath-logs-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/datapath-logs
+          retention-days: 14
 
   # ── Nightly attack/perf bats matrix (self-hosted Vagrant) ────────
   nightly-suites:
@@ -387,18 +403,32 @@ jobs:
           fi
           echo "path=$bats_path" >> "$GITHUB_OUTPUT"
 
-      - name: Boot VMs (3-VM if suite needs it)
-        run: |
-          cd tests/integration/vagrant
-          if grep -q "TOPOLOGY=3vm\|VAGRANT_3VM" "${{ steps.lookup.outputs.path }}" 2>/dev/null; then
-            VAGRANT_3VM=1 vagrant up agent attacker backend
-          else
-            vagrant up agent attacker
-          fi
-
+      # Each suite runs through the runner of the lane its `lanes` field
+      # names, which boots that lane's machines and sets its mode; strict
+      # skips, so a lane that lost a prerequisite fails rather than passes.
       - name: Run suite ${{ matrix.suite }}
+        env:
+          EBPFSENTINEL_STRICT_SKIPS: "1"
         run: |
-          sudo bats --timing "${{ steps.lookup.outputs.path }}" | tee "/tmp/suite-${{ matrix.suite }}.log"
+          set -euo pipefail
+          id="${{ matrix.suite }}"
+          file="$(basename "${{ steps.lookup.outputs.path }}")"
+          lane="$(tests/integration/scripts/list-suites-by-profile.sh --lane "$id")"
+          log="/tmp/suite-${id}.log"
+          in_vm="cd /home/vagrant/ebpfsentinel/tests/integration && sudo EBPFSENTINEL_STRICT_SKIPS=1 bats --timing suites/${file}"
+          case "$lane" in
+            3vm) bash tests/integration/scripts/run-in-3vm.sh --suite "$id" 2>&1 | tee "$log" ;;
+            2vm) bash tests/integration/scripts/run-in-2vm.sh --suite "$id" 2>&1 | tee "$log" ;;
+            runtimes)
+              cd tests/integration/vagrant-runtimes
+              vagrant up runtimes
+              vagrant ssh runtimes -c "$in_vm" 2>&1 | tee "$log" ;;
+            local)
+              cd tests/integration/vagrant
+              vagrant up agent
+              vagrant ssh agent -c "$in_vm" 2>&1 | tee "$log" ;;
+            *) echo "::error::suite $id names unknown lane '$lane'"; exit 1 ;;
+          esac
 
       - name: Upload suite log
         if: always()
@@ -414,6 +444,7 @@ jobs:
           cd tests/integration/vagrant
           VAGRANT_3VM=1 vagrant destroy -f agent attacker backend || true
           vagrant destroy -f agent attacker || true
+          (cd ../vagrant-runtimes && vagrant destroy -f runtimes) || true
 
   # ── 8 h soak - gated to schedule + dispatch only ─────────────────
   nightly-soak:

@@ -1,6 +1,13 @@
 name: eBPF Build
 
+# On every pull request and push: the in-kernel harness, the trace side-effect
+# check and the signal test are the only gates that run the programs against
+# the verifier and a packet, so a gate reached by hand only reports a datapath
+# that is already broken.
 on:
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:

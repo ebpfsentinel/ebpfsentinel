@@ -270,11 +270,29 @@ for path in sorted(set(route_entries) - set(disk_routes)):
 
 # ── Validate suite_profiles map ─────────────────────────────────────
 suite_profiles_raw = matrix.get("suite_profiles") or {}
-valid_profiles = {"pr", "nightly", "manual"}
+valid_profiles = {"pr", "datapath", "nightly", "manual"}
 bad_profile_values: list[str] = []
 for sid, prof in suite_profiles_raw.items():
     if prof not in valid_profiles:
         bad_profile_values.append(f"  - {sid} -> '{prof}'")
+
+# A profile is only a promise if a job of the integration workflow lists it:
+# a suite pinned to a profile no job asks for is a suite that runs nowhere,
+# and a job that lists a profile but skips some of its suites by id hides the
+# same thing one level down.
+workflow_path = repo_root / ".github" / "workflows" / "integration.yml"
+workflow_text = workflow_path.read_text() if workflow_path.exists() else ""
+listed_profiles = set(re.findall(r"list-suites-by-profile\.sh --list (\w+)", workflow_text))
+unselected_suites = sorted(
+    f"  - {sid} -> '{prof}' (no job of integration.yml lists this profile)"
+    for sid, prof in suite_profiles_raw.items()
+    if prof in valid_profiles and prof not in listed_profiles
+)
+skipped_in_job = re.findall(r"deferred to nightly|requires kernel/root", workflow_text)
+if skipped_in_job:
+    unselected_suites.append(
+        "  - integration.yml skips suites of a listed profile by id: move them to the profile that runs them"
+    )
 
 suite_profile_keys = {str(k) for k in suite_profiles_raw}
 missing_profile_for_suite = sorted(known_suites - suite_profile_keys)
@@ -325,12 +343,16 @@ if stale_route_entries:
     failed = True
 
 if bad_profile_values:
-    banner("INVALID suite_profiles values (allowed: pr | nightly | manual)")
+    banner("INVALID suite_profiles values (allowed: pr | datapath | nightly | manual)")
     print("\n".join(bad_profile_values))
     failed = True
 if missing_profile_for_suite:
     banner("MISSING suite_profiles entries (suite on disk, no profile pin)")
     print("\n".join(f"  - {s}" for s in missing_profile_for_suite))
+    failed = True
+if unselected_suites:
+    banner("Suites no job of integration.yml runs")
+    print("\n".join(unselected_suites))
     failed = True
 if extra_profile_for_suite:
     banner("EXTRA suite_profiles entries (profile pin, no suite on disk)")

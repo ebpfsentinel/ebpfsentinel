@@ -57,7 +57,8 @@ require_root() {
     fi
 }
 
-# require_kernel <major> <minor> - skip if kernel is older than given version.
+# require_kernel <major> <minor> - skip if kernel is older than given version
+# (a failure on a strict lane, whose kernel is chosen to meet the floor).
 # In 2-VM / 3-VM mode the suite runs on the traffic-generating attacker VM, but
 # the eBPF programs load on the agent VM - so the kernel floor must be checked
 # against the agent's kernel, not the local one.
@@ -77,15 +78,15 @@ require_kernel() {
     kernel_minor="$(echo "$kernel_str" | cut -d. -f2)"
     if [ "$kernel_major" -lt "$req_major" ] || \
        { [ "$kernel_major" -eq "$req_major" ] && [ "$kernel_minor" -lt "$req_minor" ]; }; then
-        env_skip "agent kernel $kernel_str < ${req_major}.${req_minor}"
+        soft_skip "agent kernel $kernel_str < ${req_major}.${req_minor}"
     fi
 }
 
-# require_tool <command> - skip if command is not in PATH
+# require_tool <command> - skip if command is not in PATH (fail when strict)
 require_tool() {
     local tool="${1:?usage: require_tool <command>}"
     if ! command -v "$tool" &>/dev/null; then
-        env_skip "${tool} not installed"
+        soft_skip "${tool} not installed"
     fi
 }
 

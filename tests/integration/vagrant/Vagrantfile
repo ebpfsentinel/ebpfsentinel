@@ -171,63 +171,10 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     # ----------------------------------------------------------
     # Provisioner: base-packages
     # ----------------------------------------------------------
-    agent.vm.provision "shell", name: "base-packages", inline: <<-SHELL
-      set -euxo pipefail
-      export DEBIAN_FRONTEND=noninteractive
-
-      apt-get update
-      apt-get install -y --no-install-recommends \
-        build-essential pkg-config libssl-dev libpcap-dev protobuf-compiler llvm-dev \
-        iproute2 tcpdump curl wget jq git \
-        ca-certificates openssl \
-        iperf3 hping3 ncat stress-ng bc \
-        nmap wrk tshark \
-        hydra \
-        conntrack \
-        plocate sqlite3 ffmpeg logrotate rsync zstd samba smbclient
-      # plocate, sqlite3, ffmpeg, logrotate, rsync and zstd are the ordinary
-      # workloads the mass encryption verdict and the write refusal must
-      # stay quiet through: an index rebuild, a database compaction, a media
-      # encoder, log rotation, a mirror and a compressed backup.
-      # Samba is the file service a client in the test namespace writes
-      # through; the suite starts its own smbd, so the packaged one stays off.
-      systemctl disable --now smbd nmbd samba-ad-dc 2>/dev/null || true
-      # Real-client tools that drive the local-lane netns scenario suites on
-      # this VM: dnsperf (19 DNS load), t50 (22 multi-proto flood), swaks/lftp/
-      # smbclient (56 L7 SMTP/FTP/SMB clients), ncrack/sshpass (59 SSH brute).
-      # Best-effort: not every one is in every mirror, so a miss must not fail
-      # the batch - the matching test env-skips instead of masking.
-      for optpkg in dnsperf t50 swaks lftp smbclient ncrack sshpass; do
-        apt-get install -y --no-install-recommends "$optpkg" \
-          || echo "  (optional tool '$optpkg' unavailable in repo - its scenario test will skip)"
-      done
-
-      # Headers for the running kernel where the archive has them. A mainline
-      # kernel (AGENT_KERNEL) has none there, and its own header package may
-      # want a newer libc than this release carries; nothing here builds
-      # against them.
-      apt-get install -y --no-install-recommends "linux-headers-$(uname -r)" \
-        || echo "  (no headers for $(uname -r) in the archive)"
-
-      # Install bpftool if available
-      apt-get install -y --no-install-recommends linux-tools-$(uname -r) bpftool 2>/dev/null || true
-
-      # Start iperf3 server for bandwidth testing
-      systemctl enable --now iperf3 2>/dev/null || iperf3 -s -D
-
-      # eBPF sysctl tuning
-      cat >> /etc/sysctl.d/99-ebpfsentinel.conf <<SYSCTL
-net.core.bpf_jit_enable=1
-kernel.perf_event_paranoid=-1
-SYSCTL
-      sysctl --system
-
-      # Raise memlock limit for eBPF map allocation
-      cat >> /etc/security/limits.d/99-ebpfsentinel.conf <<LIMITS
-*  soft  memlock  unlimited
-*  hard  memlock  unlimited
-LIMITS
-    SHELL
+    # The tool list lives in one script the CI datapath lane runs too, so the
+    # VM and the hosted runner are provisioned from the same list.
+    agent.vm.provision "shell", name: "base-packages",
+      path: "../scripts/provision-datapath-host.sh"
 
     # ----------------------------------------------------------
     # Provisioner: kernel-hwe

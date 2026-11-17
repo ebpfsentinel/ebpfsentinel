@@ -73,13 +73,20 @@ routes:
   /api/v1/netpol/replay: {suites: ["87"]}
 
 # Suite-level CI profile (consumed by scripts/list-suites-by-profile.sh
-# which drives .github/workflows/integration.yml).
+# which drives .github/workflows/integration.yml). Every suite on disk carries
+# one entry; the listing script fails on a suite that has none, so a new suite
+# cannot land in no job.
 #
-#   pr      - runs on every pull-request + push (fast feedback, ≤30 s/suite p95
-#             per the 15-min CI budget)
-#   nightly - runs on the 02:00 UTC cron, plus workflow_dispatch profile=full
-#             (attack-realism suites 38+, perf benches 15/29/30, soak job)
-#   manual  - workflow_dispatch profile=full only
+#   pr       - userspace REST/gRPC suites, no root, no eBPF: the pr-suites job
+#              on every pull request and push. 09 (Docker) runs in pr-docker.
+#   datapath - one host, root, the programs loaded into the runner's kernel:
+#              the datapath job on every pull request and push, on hosted
+#              runners provisioned by scripts/provision-datapath-host.sh, with
+#              EBPFSENTINEL_STRICT_SKIPS=1.
+#   nightly  - a second or third machine, a container runtime other than
+#              Docker, LXC, libvirt or a Kubernetes node: the nightly job on
+#              the self-hosted Vagrant runner, cron and workflow_dispatch.
+#   manual   - workflow_dispatch profile=full only.
 #
 # The feature-level `profile` field on each coverage row remains informational
 # (it describes the *primary* execution profile of that feature); this block
@@ -90,38 +97,38 @@ suite_profiles:
   "03": pr
   "04": pr
   "05": pr
-  "06": pr
+  "06": datapath
   "07": pr
   "08": pr
   "09": pr
-  "10": pr
-  "11": pr
-  "12": pr
-  "13": pr
-  "14": pr
+  "10": nightly
+  "11": datapath
+  "12": datapath
+  "13": datapath
+  "14": datapath
   "15": pr
   "16": pr
-  "17": pr
-  "18": pr
-  "19": pr
-  "20": pr
-  "21": pr
-  "22": pr
-  "23": pr
-  "24": pr
-  "25": pr
-  "26": pr
-  "27": pr
-  "28": pr
-  "29": pr
-  "30": pr
-  "31": pr
-  "32": nightly
+  "17": datapath
+  "18": datapath
+  "19": datapath
+  "20": datapath
+  "21": datapath
+  "22": datapath
+  "23": datapath
+  "24": datapath
+  "25": datapath
+  "26": datapath
+  "27": datapath
+  "28": datapath
+  "29": datapath
+  "30": datapath
+  "31": datapath
+  "32": datapath
   "33": pr
   "34": pr
   "35": pr
   "36": pr
-  "37": pr
+  "37": datapath
   "38": nightly
   "39": nightly
   "40": nightly
@@ -132,117 +139,85 @@ suite_profiles:
   "45": nightly
   "46": nightly
   "47": nightly
-  "48": nightly
-  "49": nightly
+  "48": datapath
+  "49": datapath
   "50": nightly
-  "51": nightly
-  "52": nightly
-  "53": nightly
-  "54": nightly
-  "55": nightly
-  "56": nightly
-  "57": nightly
-  "58": nightly
-  "59": nightly
-  "60": nightly
-  "61": nightly
-  "62": nightly
-  # 63 is pure introspection (no agent, no root): cheap enough for every PR.
+  "51": pr
+  "52": datapath
+  "53": datapath
+  "54": datapath
+  "55": datapath
+  "56": datapath
+  "57": datapath
+  "58": datapath
+  "59": datapath
+  "60": datapath
+  "61": datapath
+  "62": datapath
   "63": pr
-  "64": nightly
-  "65": nightly
-  "66": nightly
-  # 67 loads every program at once: the only lane where a verifier refusal
-  # is visible, so it runs on every pull request rather than nightly.
-  "67": pr
-  # 69 needs root and a Docker daemon, both on the hosted runner, and proves
-  # the deny rule holds where Docker's DNAT would otherwise walk past it.
-  "69": pr
-  # 70 needs root and a 6.12 kernel, nothing the hosted runner lacks, but it
-  # loads one program off one config, so nightly is where it belongs.
-  # 68 swaps the XDP chain root under live traffic, sampling the interface
-  # every 20 ms; it needs root and an eBPF lane, so nightly.
-  "68": nightly
-  "70": nightly
-  # 77 shows the agent a release below its floor through a private mount
-  # namespace and unloads nf_conntrack: root on a throwaway host, so nightly.
-  "77": nightly
-  # 78 runs a copied binary from /tmp, promotes a rule by rewriting the
-  # configuration and restarting the agent, and waits for the kill: nightly.
-  "78": nightly
-  # 79 makes the host busy beside the agent and waits two passes of each
-  # hidden sweep at their shortest interval, about three minutes: nightly.
-  "79": nightly
-  # 80 builds two chroots beside the agent and waits one inventory reading:
-  # root on a throwaway host, so nightly.
-  "80": nightly
-  # 81 writes a few thousand files through real tools and restarts the
-  # agent once to promote the verdict: root on a throwaway host, so nightly.
-  "81": nightly
-  # 82 encrypts a tree under a promoted verdict and is killed by the stop:
-  # root on a throwaway host, so nightly.
-  "82": nightly
-  # 83 needs the BPF LSM active at boot, which the agent VM's boot line sets;
-  # where it is not, it skips: nightly.
-  "83": nightly
-  # 72 to 75 each start an agent beside a container or a guest the suite
-  # builds itself (LXC, a tap device, libvirt): root on a throwaway host,
-  # so nightly.
+  "64": datapath
+  "65": datapath
+  "66": datapath
+  "67": datapath
+  "68": datapath
+  "69": datapath
+  "70": datapath
+  "71": datapath
   "72": nightly
-  "73": nightly
-  "74": nightly
+  "73": datapath
+  "74": datapath
   "75": nightly
-  # 76 drives ICMP and TCP through shadow rules and reads their counters.
-  "76": nightly
-  # 84 runs the fanotify permission fallback with the BPF LSM hidden from
-  # the agent through a private mount namespace: root, so nightly.
-  "84": nightly
-  # 85 writes to listeners on port 445 inside a test namespace and waits a
-  # learning window cut to seconds: nightly.
-  "85": nightly
-  # 86 hides bpf from the security module list in a private mount namespace.
-  "86": nightly
-  # 87 stops and starts the agent twice around learning windows: nightly.
-  "87": nightly
-  # 88 restarts the agent once per test and once under a masked module list: nightly.
-  "88": nightly
-  # 89 serves TLS and HTTP on the host and reads them from the test namespace.
-  "89": nightly
-  # 90 serves on the host and in the namespace and hooks conntrack: nightly.
-  "90": nightly
-  "91": nightly
-  "92": nightly
-  "93": nightly
-  "94": nightly
-  "95": nightly
-  "96": nightly
-  "97": nightly
-  "98": nightly
-  "99": nightly
-  "100": nightly
-  "101": nightly
-  "102": nightly
-  "103": nightly
-  "104": nightly
-  "105": nightly
-  "106": nightly
+  "76": datapath
+  "77": datapath
+  "78": datapath
+  "79": datapath
+  "80": datapath
+  "81": datapath
+  "82": datapath
+  "83": datapath
+  "84": datapath
+  "85": datapath
+  "86": datapath
+  "87": datapath
+  "88": datapath
+  "89": datapath
+  "90": datapath
+  "91": datapath
+  "92": datapath
+  "93": datapath
+  "94": datapath
+  "95": datapath
+  "96": datapath
+  "97": datapath
+  "98": datapath
+  "99": datapath
+  "100": datapath
+  "101": datapath
+  "102": datapath
+  "103": datapath
+  "104": datapath
+  "105": datapath
+  "106": datapath
   "107": nightly
   "108": nightly
   "130": nightly
   "131": nightly
-  "132": nightly
-  # 133 hands every object of the build to the loader twice, privileged and
-  # through a token; it needs cargo or a prebuilt xtask, which the VM lane has.
+  "132": datapath
   "133": nightly
-  # 134 installs the chart with the tailored seccomp profile on a minikube
-  # node; it needs minikube, helm and docker, which the VM lane provisions.
   "134": nightly
-  "135": nightly
-  "136": nightly
-  "137": nightly
-  "138": nightly
+  "135": datapath
+  "136": datapath
+  "137": datapath
+  "138": datapath
   "139": nightly
-  "71": nightly
+  "140": datapath
+  "141": datapath
+  "142": datapath
+  "143": datapath
+  # 10 and 134 start a minikube node, 72 an LXC container, 75 a libvirt
+  # guest, 130 and 131 Podman, containerd and CRI-O: the VM lane provisions
+  # them. 133 builds xtask to hand every object to both loaders.
+  # 38-47, 50, 107, 108 and 139 need the attacker or backend VM.
   "perf/01": nightly
   "perf/02": nightly
   "perf/03": nightly

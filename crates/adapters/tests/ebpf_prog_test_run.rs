@@ -118,14 +118,23 @@ fn is_tc_action(retval: u32) -> bool {
     retval <= TC_ACT_SHOT + 6 || retval == u32::MAX
 }
 
+/// Without objects there is nothing to load, which is a skip on a developer's
+/// machine and a failure in a job that named where the objects are: there the
+/// absence is a broken build step, not a missing capability.
+fn no_objects(dir: &std::path::Path) {
+    assert!(
+        std::env::var_os("EBPFSENTINEL_EBPF_DIR").is_none(),
+        "EBPFSENTINEL_EBPF_DIR names {}, which holds no eBPF objects",
+        dir.display()
+    );
+    eprintln!("skipped: no eBPF objects in {}", dir.display());
+}
+
 #[test]
 fn every_entry_program_loads_and_answers_a_crafted_packet() {
     let dir = objects_dir();
     if !dir.join("xdp-pass").is_file() {
-        eprintln!(
-            "skipped: no eBPF objects in {}, run `cargo xtask ebpf-build` or set EBPFSENTINEL_EBPF_DIR",
-            dir.display()
-        );
+        no_objects(&dir);
         return;
     }
 
@@ -214,7 +223,7 @@ fn every_entry_program_loads_and_answers_a_crafted_packet() {
 fn a_tc_program_passes_an_unmatched_packet() {
     let dir = objects_dir();
     if !dir.join("tc-ids").is_file() {
-        eprintln!("skipped: no eBPF objects in {}", dir.display());
+        no_objects(&dir);
         return;
     }
 
