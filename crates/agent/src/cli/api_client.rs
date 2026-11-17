@@ -3250,6 +3250,51 @@ impl ApiClient {
         resp.text().await.context("failed to read response body")
     }
 
+    /// One call to a route answering in bytes (a capture, an archive),
+    /// written to `to` as it arrives and on the deadline-free client, so a
+    /// large answer neither sits in memory nor times out. Returns how many
+    /// bytes were written. A refusal leaves `to` untouched. The route stays a
+    /// literal at the call site, as for [`Self::send_json`].
+    pub async fn download(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        to: &std::path::Path,
+    ) -> anyhow::Result<u64> {
+        use std::io::Write as _;
+        let mut resp = self
+            .stream_request(method, path)
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        if !resp.status().is_success() {
+            return handle_response(resp).await;
+        }
+        let mut file =
+            std::fs::File::create(to).with_context(|| format!("cannot create {}", to.display()))?;
+        let mut written = 0u64;
+        while let Some(chunk) = resp.chunk().await.context("download interrupted")? {
+            file.write_all(&chunk)
+                .with_context(|| format!("cannot write {}", to.display()))?;
+            written += chunk.len() as u64;
+        }
+        file.sync_all()
+            .with_context(|| format!("cannot write {}", to.display()))?;
+        Ok(written)
+    }
+
+    /// Open a Server-Sent Events route this client has no typed method for.
+    /// The route, with its query, stays a literal at the call site, as for
+    /// [`Self::send_json`].
+    pub async fn open_event_stream(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+    ) -> Result<SseStream, StreamOpenError> {
+        let req = self.stream_request(method, path);
+        self.open_stream(req, None).await
+    }
+
     // ── Health ──────────────────────────────────────────────────────
 
     pub async fn healthz(&self) -> anyhow::Result<HealthResponse> {
@@ -5556,6 +5601,37 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         super::ApiClient::new("127.0.0.1", port, None)
+    }
+
+    #[tokio::test]
+    async fn a_download_lands_in_the_file_and_a_refusal_leaves_none() {
+        use axum::routing::get;
+
+        let app = axum::Router::new()
+            .route("/capture", get(|| async { vec![0u8, 1, 2, 255] }))
+            .route(
+                "/refused",
+                get(|| async { (axum::http::StatusCode::FORBIDDEN, "no") }),
+            );
+        let client = client_for(app).await;
+        let dir = tempfile::tempdir().expect("a directory");
+
+        let to = dir.path().join("c.pcapng");
+        let written = client
+            .download(reqwest::Method::GET, "/capture", &to)
+            .await
+            .expect("the download");
+        assert_eq!(written, 4);
+        assert_eq!(std::fs::read(&to).expect("the file"), vec![0u8, 1, 2, 255]);
+
+        let refused = dir.path().join("r.pcapng");
+        assert!(
+            client
+                .download(reqwest::Method::GET, "/refused", &refused)
+                .await
+                .is_err()
+        );
+        assert!(!refused.exists(), "a refusal writes no file");
     }
 
     #[tokio::test]
