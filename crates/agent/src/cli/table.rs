@@ -39,6 +39,7 @@ impl Table {
     }
 
     /// Prefix every line, for a table nested under a heading.
+    #[must_use]
     pub fn indent(mut self, indent: &'static str) -> Self {
         self.indent = indent;
         self

@@ -1261,10 +1261,6 @@ pub enum AliasesCommand {
     },
 }
 
-pub fn parse() -> Cli {
-    Cli::parse()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

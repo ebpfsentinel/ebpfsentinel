@@ -5326,8 +5326,9 @@ mod tests {
     /// router's own suite, and CI fails when it drifts from the annotations,
     /// so reading it here is reading the mounted surface.
     fn documented_api_routes() -> BTreeSet<(String, String)> {
-        let spec: serde_json::Value = serde_json::from_str(include_str!("../../../openapi.json"))
-            .expect("openapi.json is valid JSON");
+        let spec: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../openapi.json"))
+                .expect("openapi.json is valid JSON");
         let paths = spec["paths"]
             .as_object()
             .expect("openapi.json carries a paths object");
@@ -5828,17 +5829,17 @@ mod tests {
 
     #[test]
     fn a_triage_body_sends_null_only_to_unassign() {
-        let keep = crate::api_client::TriageBody {
+        let keep = crate::cli::api_client::TriageBody {
             status: Some("resolved".to_string()),
-            ..crate::api_client::TriageBody::default()
+            ..crate::cli::api_client::TriageBody::default()
         }
         .to_json();
         assert_eq!(keep, serde_json::json!({ "status": "resolved" }));
 
-        let clear = crate::api_client::TriageBody {
+        let clear = crate::cli::api_client::TriageBody {
             unassign: true,
             note: Some("done".to_string()),
-            ..crate::api_client::TriageBody::default()
+            ..crate::cli::api_client::TriageBody::default()
         }
         .to_json();
         assert_eq!(
@@ -5846,10 +5847,10 @@ mod tests {
             serde_json::json!({ "assignee": null, "note": "done" })
         );
 
-        let set = crate::api_client::TriageBody {
+        let set = crate::cli::api_client::TriageBody {
             assign: Some("bob".to_string()),
             author: Some("alice".to_string()),
-            ..crate::api_client::TriageBody::default()
+            ..crate::cli::api_client::TriageBody::default()
         }
         .to_json();
         assert_eq!(

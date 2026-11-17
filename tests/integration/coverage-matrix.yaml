@@ -22,7 +22,7 @@
 # Rules:
 #   - Every eBPF program under crates/ebpf-programs/* MUST have a row
 #     of kind ebpf_program with the same dir name as feature.
-#   - Every variant of `pub enum Command` in crates/agent/src/cli.rs
+#   - Every variant of `pub enum Command` in crates/agent/src/cli/args.rs
 #     MUST have a row of kind cli_subcommand (lowercase variant name).
 #   - Every dir under crates/domain/src/ except `common` MUST have a
 #     row of kind domain_module. `common` is shared types, no surface

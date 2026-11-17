@@ -2,15 +2,15 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
-use crate::api_client::{
+use crate::cli::api_client::{
     AlertResponse, ApiClient, ConnectionResponse, ConntrackEventFrame, HostRuleEntry,
     IdsRuleResponse, IpsRuleResponse, LearningScopeBody, LearningSelector, LearningSessionResponse,
     NetpolReplayBody, NetpolReplayResponse, ProcessEntryResponse, StartLearningBody,
     StreamOpenError, SuricataKeywordCount, SuricataRefusalResponse, SuricataReportResponse,
     SuricataRulesetResponse, TraceBody, TraceResponse,
 };
-use crate::cli::OutputFormat;
-use crate::table::{Align, Table, cells};
+use crate::cli::args::OutputFormat;
+use crate::cli::table::{Align, Table, cells};
 
 // ── Health ──────────────────────────────────────────────────────────────
 
@@ -823,7 +823,7 @@ pub async fn cmd_alerts_list(
     severity: Option<&str>,
     tactic: Option<&str>,
     technique: Option<&str>,
-    triage: &crate::api_client::TriageFilter,
+    triage: &crate::cli::api_client::TriageFilter,
     limit: u64,
     offset: u64,
     output: OutputFormat,
@@ -952,7 +952,7 @@ pub async fn cmd_alerts_show(client: &ApiClient, id: &str, output: OutputFormat)
 pub async fn cmd_alerts_triage(
     client: &ApiClient,
     ids: &[String],
-    change: crate::api_client::TriageBody,
+    change: crate::cli::api_client::TriageBody,
     output: OutputFormat,
 ) -> Result<()> {
     if let [id] = ids {
@@ -1009,7 +1009,7 @@ pub async fn cmd_alerts_stats(client: &ApiClient, limit: u64, output: OutputForm
             None,
             None,
             None,
-            &crate::api_client::ANY_TRIAGE,
+            &crate::cli::api_client::ANY_TRIAGE,
             limit,
             0,
         )
@@ -1453,7 +1453,7 @@ pub async fn cmd_processes_show(client: &ApiClient, pid: u32, output: OutputForm
 
 /// Print the chain above a process, parent first, marking the ancestors
 /// kept after their exit and saying when the chain was cut short.
-fn print_ancestry(ancestry: &crate::api_client::ProcessAncestryResponse) {
+fn print_ancestry(ancestry: &crate::cli::api_client::ProcessAncestryResponse) {
     if ancestry.ancestors.is_empty() && !ancestry.incomplete && !ancestry.truncated {
         return;
     }
@@ -2681,7 +2681,7 @@ async fn watch_alerts_by_polling(
             severity,
             None,
             None,
-            &crate::api_client::ANY_TRIAGE,
+            &crate::cli::api_client::ANY_TRIAGE,
             100,
             0,
         )
@@ -2701,7 +2701,7 @@ async fn watch_alerts_by_polling(
                 severity,
                 None,
                 None,
-                &crate::api_client::ANY_TRIAGE,
+                &crate::cli::api_client::ANY_TRIAGE,
                 50,
                 0,
             )
@@ -2880,7 +2880,7 @@ pub async fn cmd_service_graph(
         return Ok(());
     }
 
-    let end = |end: &crate::api_client::ServiceEndBody| match &end.service {
+    let end = |end: &crate::cli::api_client::ServiceEndBody| match &end.service {
         Some(service) => format!("{service} ({})", end.address),
         None => end.address.clone(),
     };
@@ -2933,7 +2933,7 @@ pub async fn cmd_service_graph(
 /// The round-trip time below which `quantile` of the samples fall, read as
 /// the upper bound of the bucket crossing it, in milliseconds. A quantile in
 /// the last bucket is above its lower bound and is written so.
-fn rtt_quantile_ms(rt: &crate::api_client::RoundTripBody, quantile: f64) -> String {
+fn rtt_quantile_ms(rt: &crate::cli::api_client::RoundTripBody, quantile: f64) -> String {
     let total: u64 = rt.buckets.iter().sum();
     if total == 0 {
         return "-".to_string();
@@ -3082,7 +3082,7 @@ pub async fn cmd_conntrack_list(
             // process and that is an answer.
             let workload = c.workload.as_ref().map_or_else(
                 || "-".to_string(),
-                crate::api_client::WorkloadResponse::summary,
+                crate::cli::api_client::WorkloadResponse::summary,
             );
             table.row(cells![
                 c.src_ip,
@@ -3240,7 +3240,7 @@ pub async fn cmd_score(client: &ApiClient, alert_limit: u64, output: OutputForma
             None,
             None,
             None,
-            &crate::api_client::ANY_TRIAGE,
+            &crate::cli::api_client::ANY_TRIAGE,
             alert_limit,
             0
         ),
@@ -3417,7 +3417,7 @@ fn enricher_state(state: &str) -> &str {
     }
 }
 
-fn print_container_coverage(coverage: &crate::api_client::ContainerCoverage) {
+fn print_container_coverage(coverage: &crate::cli::api_client::ContainerCoverage) {
     let procfs = if coverage.host_proc {
         "host procfs"
     } else {
@@ -3444,7 +3444,7 @@ fn print_container_coverage(coverage: &crate::api_client::ContainerCoverage) {
 }
 
 /// One Podman runtime, as the status line under the containers names it.
-fn podman_runtime_line(runtime: &crate::api_client::PodmanRuntime) -> String {
+fn podman_runtime_line(runtime: &crate::cli::api_client::PodmanRuntime) -> String {
     let owner = runtime.uid.map_or_else(
         || "podman root".to_string(),
         |uid| format!("podman uid {uid}"),
@@ -3465,7 +3465,15 @@ pub async fn cmd_status_enhanced(client: &ApiClient, output: OutputFormat) -> Re
     let (status, ebpf, alerts, conntrack, ddos) = tokio::join!(
         client.get_status(),
         client.ebpf_status(),
-        client.list_alerts(None, None, None, None, &crate::api_client::ANY_TRIAGE, 5, 0),
+        client.list_alerts(
+            None,
+            None,
+            None,
+            None,
+            &crate::cli::api_client::ANY_TRIAGE,
+            5,
+            0
+        ),
         client.conntrack_status(),
         client.ddos_status(),
     );
@@ -3695,7 +3703,7 @@ pub async fn cmd_investigate_process(
             None,
             None,
             None,
-            &crate::api_client::ANY_TRIAGE,
+            &crate::cli::api_client::ANY_TRIAGE,
             alert_limit,
             0
         ),
@@ -3788,7 +3796,7 @@ fn print_process_investigation(
 /// Print the lineage oldest first, each step indented under its parent.
 fn print_lineage(
     steps: &[LineageStep],
-    ancestry: Option<&crate::api_client::ProcessAncestryResponse>,
+    ancestry: Option<&crate::cli::api_client::ProcessAncestryResponse>,
 ) {
     println!("  Lineage (command lines as the agent redacted them):");
     if ancestry.is_some_and(|a| a.incomplete || a.truncated) {
@@ -3823,7 +3831,7 @@ pub async fn cmd_investigate(
             None,
             None,
             None,
-            &crate::api_client::ANY_TRIAGE,
+            &crate::cli::api_client::ANY_TRIAGE,
             alert_limit,
             0
         ),
@@ -4120,7 +4128,7 @@ pub async fn cmd_nat_rules(client: &ApiClient, output: OutputFormat) -> Result<(
 ///
 /// A rule naming none of the criteria translates every packet its direction
 /// carries, which is wider than any of the others rather than a blank cell.
-fn nat_match_words(rule: &crate::api_client::NatRuleResponse) -> String {
+fn nat_match_words(rule: &crate::cli::api_client::NatRuleResponse) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(ref src) = rule.match_src {
         parts.push(format!("src {src}"));
@@ -4991,7 +4999,7 @@ pub async fn cmd_exposure_listeners(client: &ApiClient, output: OutputFormat) ->
 }
 
 /// Who the packet firewall lets through to a listener, in one cell.
-fn allowed_sources(listener: &crate::api_client::ListenerEntry) -> String {
+fn allowed_sources(listener: &crate::cli::api_client::ListenerEntry) -> String {
     if !listener.reachable {
         return "none".to_string();
     }
@@ -5196,7 +5204,7 @@ fn root_label(kind: &str, container_id: Option<&str>, pid: u32) -> String {
 
 /// Say how many running executables were examined and which Go ones could
 /// not be read.
-fn print_go_notes(resp: &crate::api_client::PackagesResponse) {
+fn print_go_notes(resp: &crate::cli::api_client::PackagesResponse) {
     println!(
         "{} running executable(s) examined, {} carry Go build information.",
         resp.executables_examined,
@@ -5224,7 +5232,7 @@ fn print_go_notes(resp: &crate::api_client::PackagesResponse) {
 }
 
 /// Print one row per module of every running Go executable.
-fn print_go_modules(resp: &crate::api_client::PackagesResponse) {
+fn print_go_modules(resp: &crate::cli::api_client::PackagesResponse) {
     let mut modules = Table::new(&[
         ("ROOT", Align::Left),
         ("EXECUTABLE", Align::Left),
@@ -5629,7 +5637,7 @@ pub async fn cmd_ebpf_foreign_programs(client: &ApiClient, output: OutputFormat)
 
 /// The workload firewall's hooks, and the rule on the DNS ports when one is
 /// configured.
-fn print_workload_firewall(wf: &crate::api_client::WorkloadFirewallReport) {
+fn print_workload_firewall(wf: &crate::cli::api_client::WorkloadFirewallReport) {
     println!("\nWorkload firewall");
     println!("  Attached:   {}", yes_no(wf.attached));
     println!("  Cgroup:     {}", wf.cgroup);
@@ -5646,7 +5654,7 @@ fn print_workload_firewall(wf: &crate::api_client::WorkloadFirewallReport) {
 }
 
 /// Which processes may resolve, and what a rule on the DNS ports leaves out.
-fn print_dns_rule(dns: &crate::api_client::DnsRuleReport) {
+fn print_dns_rule(dns: &crate::cli::api_client::DnsRuleReport) {
     let ports: Vec<String> = dns.ports.iter().map(u16::to_string).collect();
     println!("  DNS rule:   {} on ports {}", dns.mode, ports.join(", "));
     if !dns.resolvers.is_empty() {
@@ -5663,7 +5671,7 @@ fn print_dns_rule(dns: &crate::api_client::DnsRuleReport) {
 /// The signal, the window and the size of the protected set are printed only
 /// when something is armed, because a figure beside a capability that is off
 /// reads as a capability that is on.
-fn print_process_signal(report: &crate::api_client::ProcessSignalReport) {
+fn print_process_signal(report: &crate::cli::api_client::ProcessSignalReport) {
     println!("\nStopping a process");
     println!("  Armed:      {}", yes_no(report.attached));
     if report.attached {
@@ -5687,7 +5695,7 @@ fn print_process_signal(report: &crate::api_client::ProcessSignalReport) {
 
 /// Print whether an LSM program can attach on the host, and the remedy when
 /// it cannot.
-fn print_bpf_lsm(report: &crate::api_client::BpfLsmReport) {
+fn print_bpf_lsm(report: &crate::cli::api_client::BpfLsmReport) {
     println!("\nBPF LSM");
     println!("  Active:     {}", yes_no(report.active));
     let built = match report.built {
@@ -5717,7 +5725,7 @@ const NETWORK_EXECUTABLES_LABEL: &str = "Executables allowed to reach the networ
 /// answer then deciding alone.
 fn network_executables_verdict(
     below_floor: Option<&str>,
-    report: &crate::api_client::BpfLsmReport,
+    report: &crate::cli::api_client::BpfLsmReport,
 ) -> Vec<String> {
     if below_floor.is_none() && report.active {
         return vec![format!(
@@ -5748,7 +5756,7 @@ fn network_executables_verdict(
 
 /// Print the two blocks that depend on the BPF LSM, saying so when an older
 /// agent does not report one.
-fn print_lsm_blocks(resp: &crate::api_client::KernelFeaturesResponse) {
+fn print_lsm_blocks(resp: &crate::cli::api_client::KernelFeaturesResponse) {
     match &resp.bpf_lsm {
         Some(report) => {
             println!();
@@ -5787,7 +5795,7 @@ fn print_lsm_blocks(resp: &crate::api_client::KernelFeaturesResponse) {
 
 /// Print every capability above the kernel floor: active, or why not, what
 /// runs instead, and how to switch it on where a change would help.
-fn print_capabilities(entries: &[crate::api_client::CapabilityEntry]) {
+fn print_capabilities(entries: &[crate::cli::api_client::CapabilityEntry]) {
     let active = entries.iter().filter(|e| e.active).count();
     println!(
         "\nCapabilities above the floor ({active} of {} active)",
@@ -5811,7 +5819,7 @@ fn print_capabilities(entries: &[crate::api_client::CapabilityEntry]) {
 
 /// Print each kernel fact no shipped program uses yet: whether this host
 /// offers it, how that was established, and what it would be used for.
-fn print_kfunc_features(report: &crate::api_client::KfuncFeaturesReport) {
+fn print_kfunc_features(report: &crate::cli::api_client::KfuncFeaturesReport) {
     println!("\nKernel facts not yet used");
     if !report.probed {
         println!("  Not probed: startup has not run the probe.");
@@ -5838,7 +5846,7 @@ fn print_kfunc_features(report: &crate::api_client::KfuncFeaturesReport) {
 
 /// Print whether the file kfuncs are usable, one line per kfunc, with the
 /// condition that failed where one did.
-fn print_file_kfuncs(report: &crate::api_client::FileKfuncReport) {
+fn print_file_kfuncs(report: &crate::cli::api_client::FileKfuncReport) {
     println!("\nFile kfuncs");
     let sleepable = match report.sleepable_lsm {
         Some(loads) => yes_no(loads),
@@ -5869,7 +5877,7 @@ fn print_file_kfuncs(report: &crate::api_client::FileKfuncReport) {
 }
 
 /// Print whether other tasks are refused the agent's maps and links.
-fn print_self_protection(report: &crate::api_client::SelfProtectionReport) {
+fn print_self_protection(report: &crate::cli::api_client::SelfProtectionReport) {
     println!("\nSelf-protection");
     println!("  Protected:  {}", yes_no(report.protected));
     if report.protected {
@@ -5883,7 +5891,7 @@ fn print_self_protection(report: &crate::api_client::SelfProtectionReport) {
 }
 
 /// Print whether the kernel decides which executables reach the network.
-fn print_network_executables(report: &crate::api_client::NetworkExecutablesReport) {
+fn print_network_executables(report: &crate::cli::api_client::NetworkExecutablesReport) {
     println!("\nNetwork executables");
     println!("  Attached:   {}", yes_no(report.attached));
     if report.attached {
@@ -5901,7 +5909,7 @@ fn print_network_executables(report: &crate::api_client::NetworkExecutablesRepor
 }
 
 /// Print whether the kernel refuses a write-open past a count.
-fn print_write_refusal(report: &crate::api_client::WriteRefusalReport) {
+fn print_write_refusal(report: &crate::cli::api_client::WriteRefusalReport) {
     println!("\nWrite refusal");
     println!("  Attached:   {}", yes_no(report.attached));
     if report.attached {
@@ -5934,7 +5942,7 @@ fn print_write_refusal(report: &crate::api_client::WriteRefusalReport) {
 /// reads the same files the agent reads, so it cannot disagree with what the
 /// agent would report once installed.
 pub fn cmd_ebpf_host_check(output: OutputFormat) -> Result<()> {
-    let report = crate::api_client::BpfLsmReport::from(adapters::ebpf::lsm_probe::status());
+    let report = crate::cli::api_client::BpfLsmReport::from(adapters::ebpf::lsm_probe::status());
     if output == OutputFormat::Json {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
@@ -5958,7 +5966,7 @@ pub fn cmd_ebpf_host_check(output: OutputFormat) -> Result<()> {
 /// armed, for the same reason as the block above. Whether the cut reaches the
 /// flows already open is printed either way, because that is the line between
 /// a workload off the network and one that merely opens nothing new.
-fn print_quarantine(report: &crate::api_client::QuarantineReport) {
+fn print_quarantine(report: &crate::cli::api_client::QuarantineReport) {
     println!("\nQuarantining a workload");
     println!("  Armed:      {}", yes_no(report.armed));
     println!("  Cuts flows: {}", yes_no(report.tears_down_flows));
@@ -6577,7 +6585,7 @@ pub async fn cmd_tls_posture(client: &ApiClient, output: OutputFormat) -> Result
         return Ok(());
     }
 
-    let end = |end: &crate::api_client::ServiceEndBody| match &end.service {
+    let end = |end: &crate::cli::api_client::ServiceEndBody| match &end.service {
         Some(service) => format!("{service} ({})", end.address),
         None => end.address.clone(),
     };
@@ -6615,7 +6623,7 @@ fn count_cell(count: u64, share: f64) -> String {
 }
 
 /// The clear-text count with its share and the protocols it was read in.
-fn clear_text_cell(counts: &crate::api_client::PostureCountsBody) -> String {
+fn clear_text_cell(counts: &crate::cli::api_client::PostureCountsBody) -> String {
     let cell = count_cell(counts.clear_text, counts.shares.clear_text);
     if counts.clear_text_protocols.is_empty() {
         return cell;
@@ -6630,7 +6638,7 @@ fn clear_text_cell(counts: &crate::api_client::PostureCountsBody) -> String {
 
 /// What the certificate column says: why nothing is known, or how far its
 /// end of validity is from now.
-fn certificate_cell(cert: &crate::api_client::CertificateBody, now: i64) -> String {
+fn certificate_cell(cert: &crate::cli::api_client::CertificateBody, now: i64) -> String {
     match (cert.state.as_str(), cert.not_after) {
         ("not_observable", _) => "not observable (TLS 1.3)".to_string(),
         ("read", Some(not_after)) => {
@@ -7468,7 +7476,7 @@ pub async fn cmd_host_rules_intents(client: &ApiClient, output: OutputFormat) ->
 
 /// Say which rules naming a workload on another node are decided where the
 /// connection leaves and nowhere else, with the reason, under the table.
-fn print_source_only(rules: &[crate::api_client::WorkloadReachEntry]) {
+fn print_source_only(rules: &[crate::cli::api_client::WorkloadReachEntry]) {
     for rule in rules {
         if rule.decided_at.as_deref() == Some("source") {
             println!(
@@ -7486,8 +7494,8 @@ fn print_source_only(rules: &[crate::api_client::WorkloadReachEntry]) {
 mod tests {
     use super::*;
 
-    fn lsm(active: bool) -> crate::api_client::BpfLsmReport {
-        crate::api_client::BpfLsmReport {
+    fn lsm(active: bool) -> crate::cli::api_client::BpfLsmReport {
+        crate::cli::api_client::BpfLsmReport {
             active,
             built: Some(true),
             modules: vec!["capability".into(), "apparmor".into()],
@@ -7650,7 +7658,7 @@ mod tests {
         let mut buckets = vec![0; 16];
         buckets[4] = 98; // below 1.024 ms
         buckets[15] = 2; // above the last bound
-        let rt = crate::api_client::RoundTripBody {
+        let rt = crate::cli::api_client::RoundTripBody {
             buckets,
             first_bound_us: 64,
             sum_us: 0,
@@ -7659,7 +7667,7 @@ mod tests {
         assert_eq!(rtt_quantile_ms(&rt, 0.5), "1.02");
         assert_eq!(rtt_quantile_ms(&rt, 0.98), "1.02");
         assert_eq!(rtt_quantile_ms(&rt, 0.99), ">1048.58");
-        let empty = crate::api_client::RoundTripBody {
+        let empty = crate::cli::api_client::RoundTripBody {
             buckets: vec![0; 16],
             first_bound_us: 64,
             sum_us: 0,
@@ -7670,7 +7678,7 @@ mod tests {
 
     #[test]
     fn the_certificate_cell_says_why_nothing_is_known_or_how_far_the_end_is() {
-        let cert = |state: &str, not_after: Option<i64>| crate::api_client::CertificateBody {
+        let cert = |state: &str, not_after: Option<i64>| crate::cli::api_client::CertificateBody {
             state: state.to_string(),
             not_before: None,
             not_after,
@@ -7695,7 +7703,7 @@ mod tests {
 
     #[test]
     fn the_clear_text_cell_names_its_protocols() {
-        let mut counts = crate::api_client::PostureCountsBody {
+        let mut counts = crate::cli::api_client::PostureCountsBody {
             clear_text: 3,
             ..Default::default()
         };
@@ -7708,7 +7716,7 @@ mod tests {
 
     #[test]
     fn a_podman_runtime_says_whose_it_is_and_why_it_names_nothing() {
-        let line = podman_runtime_line(&crate::api_client::PodmanRuntime {
+        let line = podman_runtime_line(&crate::cli::api_client::PodmanRuntime {
             uid: Some(1000),
             socket: "/run/user/1000/podman/podman.sock".to_string(),
             reach: "refused".to_string(),
@@ -7718,7 +7726,7 @@ mod tests {
             "podman uid 1000: unnamed, the socket refused the agent \
              (/run/user/1000/podman/podman.sock)"
         );
-        let root = podman_runtime_line(&crate::api_client::PodmanRuntime {
+        let root = podman_runtime_line(&crate::cli::api_client::PodmanRuntime {
             uid: None,
             socket: "/run/podman/podman.sock".to_string(),
             reach: "reachable".to_string(),
