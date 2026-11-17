@@ -3206,6 +3206,35 @@ impl ApiClient {
         req
     }
 
+    /// One call to a route this client has no typed method for, answered as
+    /// the JSON the agent sent, `null` for an empty body. For a binary that
+    /// extends the command line with routes of its own: the route stays a
+    /// literal at the call site, right after its method, where the parity
+    /// check reads it.
+    pub async fn send_json(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let mut req = self.request(method, path);
+        if let Some(body) = body {
+            req = req.json(body);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| connection_error(&self.base_url, &e))?;
+        if !resp.status().is_success() {
+            return handle_response(resp).await;
+        }
+        let bytes = resp.bytes().await.context("failed to read response body")?;
+        if bytes.is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        serde_json::from_slice(&bytes).context("failed to parse response body")
+    }
+
     // ── Health ──────────────────────────────────────────────────────
 
     pub async fn healthz(&self) -> anyhow::Result<HealthResponse> {

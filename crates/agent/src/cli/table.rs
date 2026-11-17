@@ -21,7 +21,7 @@ const GAP: &str = "  ";
 /// sized to its content.
 #[derive(Debug)]
 pub struct Table {
-    headers: Vec<&'static str>,
+    headers: Vec<String>,
     align: Vec<Align>,
     rows: Vec<Vec<String>>,
     indent: &'static str,
@@ -31,8 +31,20 @@ impl Table {
     /// A table with these columns, left to right.
     pub fn new(columns: &[(&'static str, Align)]) -> Self {
         Self {
-            headers: columns.iter().map(|(h, _)| *h).collect(),
+            headers: columns.iter().map(|(h, _)| (*h).to_string()).collect(),
             align: columns.iter().map(|(_, a)| *a).collect(),
+            rows: Vec::new(),
+            indent: "",
+        }
+    }
+
+    /// A table whose columns are known only once the answer is read, for a
+    /// command that prints whatever rows a route returns.
+    pub fn with_columns(columns: Vec<(String, Align)>) -> Self {
+        let (headers, align) = columns.into_iter().unzip();
+        Self {
+            headers,
+            align,
             rows: Vec::new(),
             indent: "",
         }
@@ -62,7 +74,7 @@ impl Table {
             }
         }
         let mut out = String::new();
-        self.line(&mut out, &widths, self.headers.iter().copied());
+        self.line(&mut out, &widths, self.headers.iter().map(String::as_str));
         for row in &self.rows {
             self.line(&mut out, &widths, row.iter().map(String::as_str));
         }
