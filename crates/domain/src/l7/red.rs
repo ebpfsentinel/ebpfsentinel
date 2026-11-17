@@ -379,12 +379,19 @@ impl ServiceNames {
 /// taken off, so every replica of a deployment is one service; elsewhere the
 /// systemd unit, then the container image without its tag, then the
 /// executable's file name.
+///
+/// A login session's scope is not a unit for this purpose: `session-32.scope`
+/// is numbered per login, so it names a sitting rather than a workload, and
+/// every new session would take a place under the cap. Whatever a person
+/// runs from a shell is named by what it is.
 #[must_use]
 pub fn service_name(workload: &Workload) -> String {
     if let (Some(namespace), Some(pod)) = (&workload.namespace, &workload.pod) {
         return format!("{namespace}/{}", controller_of(pod));
     }
-    if let Some(unit) = &workload.unit {
+    if let Some(unit) = &workload.unit
+        && !is_login_session(unit)
+    {
         return unit.clone();
     }
     if let Some(image) = &workload.image {
@@ -399,6 +406,13 @@ pub fn service_name(workload: &Workload) -> String {
         return name.to_string();
     }
     UNATTRIBUTED_SERVICE.to_string()
+}
+
+/// `session-<n>.scope`, the scope logind opens for one login.
+fn is_login_session(unit: &str) -> bool {
+    unit.strip_prefix("session-")
+        .and_then(|rest| rest.strip_suffix(".scope"))
+        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
 /// A pod name without what its controller generated: the five-character
@@ -602,6 +616,8 @@ mod tests {
         let mut w = workload();
         assert_eq!(service_name(&w), "nginx");
         w.image = Some("registry.example/team/api:1.4@sha256:abc".into());
+        assert_eq!(service_name(&w), "api");
+        w.unit = Some("session-32.scope".into());
         assert_eq!(service_name(&w), "api");
         w.unit = Some("nginx.service".into());
         assert_eq!(service_name(&w), "nginx.service");
