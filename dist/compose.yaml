@@ -56,7 +56,7 @@ services:
       # and the next agent adopts them. `ebpfsentinel-agent uninstall` is the
       # one command that removes them.
       - /sys/fs/bpf:/sys/fs/bpf
-    restart: unless-stopped
+    restart: always
     stop_grace_period: 30s
 
   # The rootless agent: uid 65534, every capability dropped. It unshares a user
@@ -100,7 +100,17 @@ services:
         target: /sys/fs/bpf
         tmpfs:
           mode: 0o1777
-    restart: unless-stopped
+    # Restarted on every exit, `docker compose stop` included once the daemon
+    # restarts: Docker cannot be prevented from stopping a container, and
+    # cannot be told to leave one exit status down. So a stop is announced
+    # first, then done:
+    #   docker compose exec agent ebpfsentinel-agent stop --reason "..."
+    #   docker compose stop
+    # The agent records the second as the stop the first asked for when it
+    # comes within five minutes; any other stop or kill is a signal the next
+    # start raises as an alert. The links pinned on the host bpffs keep
+    # enforcing the last rules either way, through `docker stop` and `docker rm`.
+    restart: always
     stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "ebpfsentinel-agent", "health"]

@@ -115,7 +115,7 @@
           "Operations"
         ],
         "summary": "Stop the agent and keep it stopped.",
-        "description": "The documented way to stop a host agent: the request is recorded under\nthe caller's name with its reason, the agent shuts down in order and exits\nwith status `79`, which its service unit does not restart. A stop by any\nother means is raised as an alert at the next start.",
+        "description": "The documented way to stop a host agent: the request is recorded under\nthe caller's name with its reason, the agent shuts down in order and exits\nwith status `79`, which its service unit does not restart. In a container,\nwhose runtime restarts on any exit status, the stop is armed instead: the\nagent keeps running and the runtime's own stop, inside the window, is\nrecorded as this one. A stop by any other means is raised as an alert at\nthe next start.",
         "operationId": "stop_agent",
         "requestBody": {
           "description": "Why the agent is stopped",
@@ -130,7 +130,7 @@
         },
         "responses": {
           "202": {
-            "description": "The agent is stopping",
+            "description": "The agent is stopping, or the stop is armed for the container runtime's",
             "content": {
               "application/json": {
                 "schema": {
@@ -20037,20 +20037,31 @@
       },
       "StopResponse": {
         "type": "object",
-        "description": "What the agent answers before it ends.",
+        "description": "What the agent answers to a stop.",
         "required": [
-          "status",
-          "exit_code"
+          "status"
         ],
         "properties": {
           "exit_code": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32",
-            "description": "The exit status the agent ends with, which its unit treats as final."
+            "description": "The exit status the agent ends with, which its unit treats as final;\nabsent when the stop is armed."
           },
           "status": {
             "type": "string",
-            "description": "Always `stopping`: the answer leaves before the shutdown starts."
+            "description": "`stopping` under a service unit: the answer leaves before the shutdown\nstarts. `armed` in a container, whose runtime restarts the agent on\nany exit: the agent keeps running, and the runtime's own stop inside\nthe window is recorded as this one."
+          },
+          "window_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How long an armed stop waits for the runtime's stop; absent when the\nagent is stopping.",
+            "minimum": 0
           }
         }
       },

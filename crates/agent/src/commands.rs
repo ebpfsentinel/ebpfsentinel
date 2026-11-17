@@ -6291,10 +6291,15 @@ pub async fn cmd_stop(
         return Ok(());
     }
 
-    println!(
-        "The agent is stopping and exits with status {}, which its service unit does not restart.",
-        resp.exit_code
-    );
+    match (resp.exit_code, resp.window_seconds) {
+        (Some(code), _) => println!(
+            "The agent is stopping and exits with status {code}, which its service unit does not restart."
+        ),
+        (None, Some(window)) => println!(
+            "The stop is armed for {window}s. The agent runs in a container, whose runtime restarts it on any exit: stop the container now (docker stop, docker compose stop) and the stop is recorded as this one."
+        ),
+        (None, None) => println!("The agent answered `{}`.", resp.status),
+    }
     Ok(())
 }
 

@@ -6,6 +6,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use domain::lifecycle::{
     EndCause, PreviousRun, RunEnd, RunRecord, UnitEntry, UnitFingerprint, clean_stop_text,
@@ -45,6 +46,17 @@ pub fn boot_id() -> String {
 pub struct RunJournal {
     path: PathBuf,
     record: Mutex<RunRecord>,
+    armed: Mutex<Option<ArmedStop>>,
+}
+
+/// A stop asked for where the agent cannot end itself for good, waiting for
+/// the supervisor's own stop to arrive.
+#[derive(Debug, Clone)]
+struct ArmedStop {
+    at: Instant,
+    window: Duration,
+    requested_by: Option<String>,
+    reason: Option<String>,
 }
 
 impl RunJournal {
@@ -66,6 +78,7 @@ impl RunJournal {
                 started_at: now_secs(),
                 ended: None,
             }),
+            armed: Mutex::new(None),
         };
         journal.persist();
         (journal, judged)
@@ -91,6 +104,32 @@ impl RunJournal {
             });
         }
         self.persist();
+    }
+
+    /// Remember a stop that was asked for, to be recorded as such when the
+    /// supervisor's own stop arrives inside `window`. A later request
+    /// replaces it.
+    pub fn arm(&self, requested_by: Option<&str>, reason: Option<&str>, window: Duration) {
+        *self
+            .armed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ArmedStop {
+            at: Instant::now(),
+            window,
+            requested_by: requested_by.map(str::to_string),
+            reason: reason.map(str::to_string),
+        });
+    }
+
+    /// The caller and the reason of a stop armed and still inside its window.
+    #[must_use]
+    pub fn armed(&self) -> Option<(Option<String>, Option<String>)> {
+        self.armed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|armed| armed.at.elapsed() <= armed.window)
+            .map(|armed| (armed.requested_by.clone(), armed.reason.clone()))
     }
 
     /// How this run is recorded as ending, if it is.
@@ -315,5 +354,24 @@ mod tests {
         };
         assert_eq!(end.reason.as_deref(), Some("upgrade"));
         assert_eq!(end.requested_by.as_deref(), Some("ops"));
+    }
+
+    #[test]
+    fn an_armed_stop_is_read_back_only_inside_its_window() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (journal, _) = RunJournal::open(dir.path().join(RUN_RECORD_FILE), "boot-1");
+        assert!(journal.armed().is_none());
+        journal.arm(
+            Some("ops"),
+            Some("host maintenance"),
+            Duration::from_secs(60),
+        );
+        assert_eq!(
+            journal.armed(),
+            Some((Some("ops".into()), Some("host maintenance".into())))
+        );
+        journal.arm(Some("ops"), None, Duration::ZERO);
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(journal.armed().is_none());
     }
 }

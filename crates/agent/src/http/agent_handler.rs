@@ -294,27 +294,56 @@ pub struct StopRequest {
     pub reason: Option<String>,
 }
 
-/// What the agent answers before it ends.
+/// What the agent answers to a stop.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct StopResponse {
-    /// Always `stopping`: the answer leaves before the shutdown starts.
+    /// `stopping` under a service unit: the answer leaves before the shutdown
+    /// starts. `armed` in a container, whose runtime restarts the agent on
+    /// any exit: the agent keeps running, and the runtime's own stop inside
+    /// the window is recorded as this one.
     pub status: String,
-    /// The exit status the agent ends with, which its unit treats as final.
-    pub exit_code: i32,
+    /// The exit status the agent ends with, which its unit treats as final;
+    /// absent when the stop is armed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// How long an armed stop waits for the runtime's stop; absent when the
+    /// agent is stopping.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_seconds: Option<u64>,
+}
+
+impl From<crate::lifecycle::StopOutcome> for StopResponse {
+    fn from(outcome: crate::lifecycle::StopOutcome) -> Self {
+        match outcome {
+            crate::lifecycle::StopOutcome::Stopping => Self {
+                status: "stopping".to_string(),
+                exit_code: Some(domain::lifecycle::STOP_EXIT_CODE),
+                window_seconds: None,
+            },
+            crate::lifecycle::StopOutcome::Armed { window } => Self {
+                status: "armed".to_string(),
+                exit_code: None,
+                window_seconds: Some(window.as_secs()),
+            },
+        }
+    }
 }
 
 /// Stop the agent and keep it stopped.
 ///
 /// The documented way to stop a host agent: the request is recorded under
 /// the caller's name with its reason, the agent shuts down in order and exits
-/// with status `79`, which its service unit does not restart. A stop by any
-/// other means is raised as an alert at the next start.
+/// with status `79`, which its service unit does not restart. In a container,
+/// whose runtime restarts on any exit status, the stop is armed instead: the
+/// agent keeps running and the runtime's own stop, inside the window, is
+/// recorded as this one. A stop by any other means is raised as an alert at
+/// the next start.
 #[utoipa::path(
     post, path = "/api/v1/agent/stop",
     tag = "Operations",
     request_body(content = StopRequest, description = "Why the agent is stopped", content_type = "application/json"),
     responses(
-        (status = 202, description = "The agent is stopping", body = StopResponse),
+        (status = 202, description = "The agent is stopping, or the stop is armed for the container runtime's", body = StopResponse),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
         (status = 503, description = "This agent cannot be stopped through the API", body = ErrorBody),
@@ -348,14 +377,8 @@ pub async fn stop_agent(
                 .map_or_else(String::new, |r| format!(": {r}"))
         ),
     );
-    stop.request(Some(&via), reason.as_deref());
-    Ok((
-        axum::http::StatusCode::ACCEPTED,
-        Json(StopResponse {
-            status: "stopping".to_string(),
-            exit_code: domain::lifecycle::STOP_EXIT_CODE,
-        }),
-    ))
+    let outcome = stop.request(Some(&via), reason.as_deref());
+    Ok((axum::http::StatusCode::ACCEPTED, Json(outcome.into())))
 }
 
 /// Read the system hostname at request time. Falls back to `"unknown"`
@@ -495,10 +518,10 @@ mod tests {
         let cancel = tokio_util::sync::CancellationToken::new();
         let state = Arc::into_inner(state_with_one_rule())
             .expect("sole owner")
-            .with_local_stop(Arc::new(crate::lifecycle::LocalStop::new(
-                Arc::clone(&journal),
-                cancel.clone(),
-            )));
+            .with_local_stop(Arc::new(
+                crate::lifecycle::LocalStop::new(Arc::clone(&journal), cancel.clone())
+                    .under_unit(true),
+            ));
         let claims: JwtClaims =
             serde_json::from_value(serde_json::json!({ "sub": "ops", "exp": 0 })).expect("claims");
         let (status, Json(resp)) = stop_agent(
@@ -511,7 +534,7 @@ mod tests {
         .await
         .expect("accepted");
         assert_eq!(status, axum::http::StatusCode::ACCEPTED);
-        assert_eq!(resp.exit_code, 79);
+        assert_eq!(resp.exit_code, Some(79));
         let end = journal.ended().expect("recorded");
         assert_eq!(end.how, domain::lifecycle::EndCause::Command);
         assert_eq!(end.requested_by.as_deref(), Some("ops"));
@@ -520,6 +543,45 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), cancel.cancelled())
             .await
             .expect("the run is ended once the answer left");
+    }
+
+    #[tokio::test]
+    async fn in_a_container_the_stop_is_armed_and_the_runtime_stop_is_recorded_as_it() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (journal, _) =
+            adapters::lifecycle::RunJournal::open(dir.path().join("run.json"), "boot-1");
+        let journal = Arc::new(journal);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let state = Arc::into_inner(state_with_one_rule())
+            .expect("sole owner")
+            .with_local_stop(Arc::new(
+                crate::lifecycle::LocalStop::new(Arc::clone(&journal), cancel.clone())
+                    .under_unit(false),
+            ));
+        let (status, Json(resp)) = stop_agent(
+            State(Arc::new(state)),
+            None,
+            Some(Json(StopRequest {
+                reason: Some("host maintenance".to_string()),
+            })),
+        )
+        .await
+        .expect("accepted");
+        assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+        assert_eq!(resp.status, "armed");
+        assert_eq!(resp.exit_code, None);
+        assert_eq!(
+            resp.window_seconds,
+            Some(crate::lifecycle::ARMED_STOP_WINDOW.as_secs())
+        );
+        assert!(journal.ended().is_none(), "the agent keeps running");
+        assert!(!cancel.is_cancelled());
+        // `docker stop` arrives: the end is the stop that was asked for.
+        crate::lifecycle::record_end(&journal);
+        let end = journal.ended().expect("recorded");
+        assert_eq!(end.how, domain::lifecycle::EndCause::Command);
+        assert_eq!(end.requested_by.as_deref(), Some("local"));
+        assert_eq!(end.reason.as_deref(), Some("host maintenance"));
     }
 
     #[tokio::test]

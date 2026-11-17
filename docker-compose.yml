@@ -110,7 +110,7 @@ services:
       # mount instead.
       # - /var/lib/docker:/var/lib/docker:ro
       # - /etc/ssh:/etc/ssh:ro
-    restart: unless-stopped
+    restart: always
     # The agent is stopped first and can be mid-call here, so the broker gets
     # the same budget rather than a shorter one: killing it under a call in
     # flight is what turns an ordered stop into a socket error.
@@ -231,7 +231,17 @@ services:
           memory: 256M
           cpus: "0.5"
 
-    restart: unless-stopped
+    # Restarted on every exit, `docker compose stop` included once the daemon
+    # restarts: Docker cannot be prevented from stopping a container, and
+    # cannot be told to leave one exit status down. So a stop is announced
+    # first, then done:
+    #   docker compose exec agent ebpfsentinel-agent stop --reason "..."
+    #   docker compose stop
+    # The agent records the second as the stop the first asked for when it
+    # comes within five minutes; any other stop or kill is a signal the next
+    # start raises as an alert. The links pinned on the host bpffs keep
+    # enforcing the last rules either way, through `docker stop` and `docker rm`.
+    restart: always
 
     # Compose's default grace period is 10s, under the agent's own stop budget:
     # the servers drain in 5s, a running capture closes its file inside that,

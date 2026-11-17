@@ -2,7 +2,11 @@
 //!
 //! The stop command is the documented way to stop a host agent: it records who
 //! asked and why, then ends the agent with [`STOP_EXIT_CODE`], which the units
-//! treat as final where every other exit is restarted. Shared with the
+//! treat as final where every other exit is restarted. A container runtime
+//! restarts on every exit status alike and cannot be told to keep one down, so
+//! outside a systemd unit the command arms the stop instead: the runtime's own
+//! stop, arriving inside the window, is recorded as the one asked for, and a
+//! stop nobody asked for stays a signal the next start raises. Shared with the
 //! enterprise layer, which calls the same pieces from its own boot.
 
 use std::path::Path;
@@ -25,6 +29,9 @@ pub const UNIT_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long a stop waits before ending the agent, for its answer to leave.
 const STOP_GRACE: Duration = Duration::from_millis(500);
+
+/// How long an armed stop waits for the container runtime's own stop.
+pub const ARMED_STOP_WINDOW: Duration = Duration::from_secs(300);
 
 /// Set once the stop command was accepted, read by `main` for the exit status.
 static STOP_COMMANDED: AtomicBool = AtomicBool::new(false);
@@ -69,7 +76,16 @@ pub async fn report_previous(previous: &PreviousRun, alerts: &mpsc::Sender<Alert
 /// Complete the record of a run that ends without its stop command, which
 /// leaves a signal as the only thing that could have ended it in order.
 pub fn record_end(journal: &RunJournal) {
-    journal.finish(EndCause::Signal, None, None);
+    match journal.armed() {
+        Some((requested_by, reason)) => {
+            journal.finish(
+                EndCause::Command,
+                requested_by.as_deref(),
+                reason.as_deref(),
+            );
+        }
+        None => journal.finish(EndCause::Signal, None, None),
+    }
 }
 
 /// Holds the run's record for the whole run: a run that leaves early on an
@@ -84,21 +100,68 @@ impl Drop for RunGuard {
     }
 }
 
-/// The stop command's side: records the request, then ends the run.
+/// What the stop command did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopOutcome {
+    /// The agent is ending with [`STOP_EXIT_CODE`].
+    Stopping,
+    /// The agent keeps running: the supervisor's own stop, inside `window`,
+    /// is recorded as this one.
+    Armed { window: Duration },
+}
+
+/// The stop command's side: records the request, then ends the run, or arms
+/// it where the supervisor would only start the agent again.
 #[derive(Debug)]
 pub struct LocalStop {
     journal: Arc<RunJournal>,
     stop: CancellationToken,
+    under_unit: bool,
 }
 
 impl LocalStop {
+    /// Ends the agent itself under a systemd unit, which honours the stop
+    /// status, and arms the stop anywhere else.
     #[must_use]
     pub fn new(journal: Arc<RunJournal>, stop: CancellationToken) -> Self {
-        Self { journal, stop }
+        let under_unit = adapters::lifecycle::own_unit().is_some();
+        Self {
+            journal,
+            stop,
+            under_unit,
+        }
     }
 
-    /// Record the stop and end the agent once the answer had time to leave.
-    pub fn request(&self, requested_by: Option<&str>, reason: Option<&str>) {
+    /// The same, with the supervisor stated rather than read off the cgroup.
+    #[must_use]
+    pub fn under_unit(mut self, under_unit: bool) -> Self {
+        self.under_unit = under_unit;
+        self
+    }
+
+    /// Record the stop and end the agent once the answer had time to leave,
+    /// or arm it for [`ARMED_STOP_WINDOW`] outside a unit.
+    pub fn request(&self, requested_by: Option<&str>, reason: Option<&str>) -> StopOutcome {
+        self.request_within(requested_by, reason, ARMED_STOP_WINDOW)
+    }
+
+    /// [`Self::request`] with the window an armed stop is held for.
+    pub fn request_within(
+        &self,
+        requested_by: Option<&str>,
+        reason: Option<&str>,
+        window: Duration,
+    ) -> StopOutcome {
+        if !self.under_unit {
+            self.journal.arm(requested_by, reason, window);
+            warn!(
+                requested_by = requested_by.unwrap_or("unknown"),
+                reason = reason.unwrap_or(""),
+                window_secs = window.as_secs(),
+                "stop requested through the API; outside a service unit the agent keeps running until its container is stopped, which is recorded as this stop"
+            );
+            return StopOutcome::Armed { window };
+        }
         self.journal.finish(EndCause::Command, requested_by, reason);
         STOP_COMMANDED.store(true, Ordering::SeqCst);
         warn!(
@@ -111,6 +174,7 @@ impl LocalStop {
             tokio::time::sleep(STOP_GRACE).await;
             stop.cancel();
         });
+        StopOutcome::Stopping
     }
 }
 
