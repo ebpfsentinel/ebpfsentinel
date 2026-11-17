@@ -1449,6 +1449,15 @@ attack_suites:
     surfaces: ["auto_capture", "capture", "ids"]
     notes: "A medium IDS alert under min_severity high starts no capture; a critical one starts exactly one, filtered on the alert's source, on the configured interface, which completes on its own and leaves a pcap tcpdump reads holding only the source's packets"
 
+  - suite: "143"
+    name: interface-groups
+    topology: 2vm
+    lanes: ["local"]
+    kernel_min: "6.12"
+    profile: nightly
+    surfaces: ["interface_groups", "firewall"]
+    notes: "Firewall rules scoped to a group holding the watched link, to a group without it, to each group's complement and to the link by name: traffic on the link is refused exactly where the scope includes it"
+
   - suite: "44"
     name: lb-dsr-maglev
     topology: 3vm

@@ -207,6 +207,9 @@ impl EmptyFeatures {
 
 struct Gates {
     features: EmptyFeatures,
+    /// Features a writer has opened for the life of the process, which no
+    /// later `publish(_, true)` may shut again.
+    held_open: [bool; FEATURE_COUNT],
     map: Option<Array<MapData, u32>>,
 }
 
@@ -215,6 +218,7 @@ fn gates() -> &'static Mutex<Gates> {
     GATES.get_or_init(|| {
         Mutex::new(Gates {
             features: EmptyFeatures::default(),
+            held_open: [false; FEATURE_COUNT],
             map: None,
         })
     })
@@ -247,7 +251,7 @@ pub fn publish(feature: Feature, empty: bool) {
     let Ok(mut gates) = gates().lock() else {
         return;
     };
-    if gates.features.is_empty(feature) == empty {
+    if gates.features.is_empty(feature) == empty || (empty && gates.held_open[feature.slot()]) {
         return;
     }
     gates.features.set(feature, empty);
@@ -259,6 +263,19 @@ pub fn publish(feature: Feature, empty: bool) {
         mask = format!("{mask:#010b}"),
         "firewall feature gate published"
     );
+}
+
+/// Open the lookup behind `feature` for the rest of the process.
+///
+/// For a table whose writer cannot tell whether it is the only one: a second
+/// owner built later knows only that it has written nothing itself, and its
+/// "empty" would shut the lookup over entries the first one wrote. Once held
+/// open, `publish(feature, true)` is ignored.
+pub fn hold_open(feature: Feature) {
+    if let Ok(mut gates) = gates().lock() {
+        gates.held_open[feature.slot()] = true;
+    }
+    publish(feature, false);
 }
 
 /// The mask as it stands, whether or not a map has been adopted.
@@ -297,6 +314,7 @@ pub fn is_empty(feature: Feature) -> bool {
 pub fn reset() {
     if let Ok(mut gates) = gates().lock() {
         gates.features = EmptyFeatures::default();
+        gates.held_open = [false; FEATURE_COUNT];
         gates.map = None;
     }
 }

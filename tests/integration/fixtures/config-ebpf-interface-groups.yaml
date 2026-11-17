@@ -1,0 +1,94 @@
+# config-ebpf-interface-groups.yaml - firewall rules scoped to a named group of
+# interfaces, to its complement, and to one interface by name.
+#
+# The agent watches two links: the test link, alone in `inside`, and a dummy
+# the suite creates, alone in `outside`. Traffic on the test link is in
+# `inside` and `!outside`, and in neither `outside` nor `!inside`.
+#
+# Network topology (placeholders substituted by prepare_ebpf_config):
+#   Host: __HOST_IP__  (veth-ebpf0)
+#   NS:   __NS_IP__    (veth-ebpf1 inside ebpf-test-ns)
+
+agent:
+  interfaces:
+    - __INTERFACE__
+    - ebpfgrp0
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  allow_plaintext_api: true
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+interface_groups:
+  inside:
+    interfaces: [__INTERFACE__]
+  outside:
+    interfaces: [ebpfgrp0]
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: pass
+  rules:
+    - id: fw-group-inside
+      priority: 10
+      action: deny
+      protocol: tcp
+      dst_port: 7301
+      interfaces: ["inside"]
+    - id: fw-group-outside
+      priority: 20
+      action: deny
+      protocol: tcp
+      dst_port: 7302
+      interfaces: ["outside"]
+    - id: fw-group-not-outside
+      priority: 30
+      action: deny
+      protocol: tcp
+      dst_port: 7303
+      interfaces: ["!outside"]
+    - id: fw-group-not-inside
+      priority: 40
+      action: deny
+      protocol: tcp
+      dst_port: 7304
+      interfaces: ["!inside"]
+    - id: fw-iface-by-name
+      priority: 50
+      action: deny
+      protocol: tcp
+      dst_port: 7305
+      scope:
+        interface: __INTERFACE__
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false
+
+threatintel:
+  enabled: false
+
+l7:
+  enabled: false
+
+alerting:
+  enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb
+
+# The suites drive the datapath, not the control plane's identity: the
+# agent answers unauthenticated plaintext here, which the two opt-outs
+# above are what make legal on a non-loopback bind.
+auth:
+  enabled: false

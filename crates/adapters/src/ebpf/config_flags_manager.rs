@@ -324,10 +324,15 @@ impl InterfaceGroupsManager {
             // The setters are additive - an empty slice removes nothing - so the
             // only safe reading of "this map holds no entry" is that nothing has
             // been put in it yet: once a write happens the lookup stays open for
-            // the life of this manager. A deployment that stops using the feature
-            // keeps paying for the lookup until the next load, which is the slower
-            // half of the trade and the only one safe to get wrong.
-            feature_gates::publish(Feature::InterfaceGroups, false);
+            // the life of the process. It is held rather than published because
+            // the program lifecycle builds a manager of its own after start-up
+            // wrote the memberships, and that one's "nothing written yet" would
+            // otherwise shut the lookup and leave every group-scoped rule
+            // reading the interface as in no group. A deployment that stops
+            // using the feature keeps paying for the lookup until the next
+            // load, which is the slower half of the trade and the only one safe
+            // to get wrong.
+            feature_gates::hold_open(Feature::InterfaceGroups);
         }
         for map in &mut self.maps {
             for &(ifindex, groups) in memberships {
@@ -399,6 +404,19 @@ mod tests {
         assert!(!feature_gates::is_empty(Feature::InterfaceGroups));
 
         assert!(mgr.set_interface_groups(&[(2, 0)]).is_ok());
+        assert!(!feature_gates::is_empty(Feature::InterfaceGroups));
+    }
+
+    #[test]
+    fn a_manager_built_after_a_write_does_not_shut_the_lookup() {
+        let _gates = feature_gates::test_lock();
+        feature_gates::reset();
+
+        let mut first = InterfaceGroupsManager::new();
+        assert!(first.set_interface_groups(&[(2, 0b1)]).is_ok());
+
+        let second = InterfaceGroupsManager::new();
+        assert_eq!(second.map_count(), 0);
         assert!(!feature_gates::is_empty(Feature::InterfaceGroups));
     }
 }
