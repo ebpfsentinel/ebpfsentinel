@@ -80,7 +80,7 @@ skip_domains = set(matrix.get("skip_domains") or [])
 # `nested_cli_subcommands` lists logical CLI surfaces that are nested
 # under a parent `Command` variant (e.g. `nat nptv6 ...`). They are
 # documented as cli_subcommand rows for traceability but don't appear
-# as top-level variants in cli.rs, so the audit must not flag them as
+# as top-level variants in cli/args.rs, so the audit must not flag them as
 # extras.
 allowed_nested_cli = set(matrix.get("nested_cli_subcommands") or [])
 rows = matrix.get("coverage") or []
@@ -102,17 +102,21 @@ disk_domains = sorted(
     if p.is_dir() and p.name not in skip_domains
 ) if domain_dir.exists() else []
 
-cli_path = repo_root / "crates" / "agent" / "src" / "cli.rs"
-disk_cli = []
-if cli_path.exists():
-    src = cli_path.read_text()
-    m = re.search(r"pub enum Command\s*\{(.*?)\n\}", src, re.DOTALL)
-    if not m:
-        sys.stderr.write("could not locate `pub enum Command` in cli.rs\n")
-        sys.exit(2)
-    body = m.group(1)
-    variant_re = re.compile(r"^\s*([A-Z][A-Za-z0-9]*)\s*(\(|,|\{)", re.M)
-    disk_cli = sorted({v.group(1).lower() for v in variant_re.finditer(body)})
+# The command enum lives in the CLI library's argument module. A missing file
+# is an error rather than an empty list: an empty list reads every CLI row as
+# extra and every command as covered, which is how a move went unnoticed.
+cli_path = repo_root / "crates" / "agent" / "src" / "cli" / "args.rs"
+if not cli_path.exists():
+    sys.stderr.write(f"CLI argument module not found at {cli_path}\n")
+    sys.exit(2)
+src = cli_path.read_text()
+m = re.search(r"pub enum Command\s*\{(.*?)\n\}", src, re.DOTALL)
+if not m:
+    sys.stderr.write(f"could not locate `pub enum Command` in {cli_path}\n")
+    sys.exit(2)
+body = m.group(1)
+variant_re = re.compile(r"^\s*([A-Z][A-Za-z0-9]*)\s*(\(|,|\{)", re.M)
+disk_cli = sorted({v.group(1).lower() for v in variant_re.finditer(body)})
 
 capabilities_path = repo_root / "capabilities.json"
 disk_capabilities: list[str] = []
@@ -263,8 +267,12 @@ for path in disk_routes:
         for s in entry.get("suites") or []:
             if s not in known_suites:
                 stale_suite_refs.append(f"  - route {path} references suite {s}")
-        if not entry.get("suites"):
-            bad_owners.append(f"  - route {path} lists neither suites nor an owner")
+        for ref in entry.get("elsewhere") or []:
+            why = resolve_elsewhere(ref)
+            if why:
+                stale_suite_refs.append(f"  - route {path} elsewhere: {why}")
+        if not entry.get("suites") and not entry.get("elsewhere"):
+            bad_owners.append(f"  - route {path} lists neither suites, elsewhere nor an owner")
 for path in sorted(set(route_entries) - set(disk_routes)):
     stale_route_entries.append(f"  - {path} is not a path of openapi.json")
 

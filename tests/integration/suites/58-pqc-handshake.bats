@@ -335,3 +335,42 @@ _restart_agent_with() {
         }
     fi
 }
+
+@test "crypto/posture names the api link, its policy and the group it last completed" {
+    # The handshakes of the tests above ran against the agent restarted in
+    # prefer mode; the curl below is one more, so the api link has at least one.
+    _restart_agent_with "${PREPARED_CONFIG_PREFER}" || {
+        echo "agent failed to restart in pq_mode=prefer" >&2
+        return 1
+    }
+    curl -s --max-time "${HTTP_TIMEOUT}" --cacert "${CERT_DIR}/ca.pem" \
+        "${TLS_URL}/api/v1/tls/status" >/dev/null || {
+        echo "handshake against the api link failed" >&2
+        return 1
+    }
+
+    local body
+    body="$(curl -s --max-time "${HTTP_TIMEOUT}" \
+        --cacert "${CERT_DIR}/ca.pem" \
+        "${TLS_URL}/api/v1/crypto/posture")" || {
+        echo "GET /api/v1/crypto/posture failed" >&2
+        return 1
+    }
+
+    local api
+    api="$(echo "${body}" | jq -c '.links[] | select(.link == "api")')"
+    [ -n "${api}" ] || {
+        echo "crypto/posture lists no api link; got: ${body}" >&2
+        return 1
+    }
+    [ "$(echo "${api}" | jq -r '.mode')" = "prefer" ] || {
+        echo "api link policy should be prefer; got: ${api}" >&2
+        return 1
+    }
+    [ -n "$(echo "${api}" | jq -r '.last_group // empty')" ] || {
+        echo "api link has no last negotiated group after a handshake; got: ${api}" >&2
+        return 1
+    }
+    [ "$(echo "${api}" | jq '[.groups[].handshakes] | add // 0')" -ge 1 ]
+    [ "$(echo "${body}" | jq -r '.all_required')" = "false" ]
+}

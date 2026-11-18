@@ -68,6 +68,7 @@ owners:
 # suite has since started requesting fails the audit, so the list shrinks
 # as the suites land.
 routes:
+  /api/v1/agent/stop: {suites: [], elsewhere: ["ebpfsentinel-enterprise/62"]}
   /api/v1/ebpf/hidden-ports: {suites: ["79"]}
   /api/v1/ebpf/hidden-processes: {suites: ["79"]}
   /api/v1/netpol/replay: {suites: ["87"]}
@@ -417,6 +418,15 @@ coverage:
     notes: "A writer's write-opens and truncations under a watched directory refused past a count inside a window, nothing refused once the agent is gone, and in shadow nothing refused or raised while the reading counts it by workload. Needs the BPF LSM active at boot (lsm=bpf); the suite skips where it is not"
 
   - kind: ebpf_program
+    feature: lsm-tamper-guard
+    suites: []
+    elsewhere: ["ebpfsentinel-enterprise/62"]
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "Refuses the signals, ptrace and writes that would end or alter a protected agent. Armed only by the enterprise tamper protection, so the suite lives there: ebpfsentinel-enterprise/tests/integration/suites/62-enterprise-signed-stop.bats asserts a kill is refused while armed and a signed stop ends the agent. Needs the BPF LSM active at boot (lsm=bpf)"
+
+  - kind: ebpf_program
     feature: tracepoint-drop-reason
     suites: ["90"]
     topology: none
@@ -464,6 +474,23 @@ coverage:
     kernel_min: "n/a"
     profile: pr
     notes: "Version + build info"
+
+  - kind: cli_subcommand
+    feature: stop
+    suites: []
+    elsewhere: ["ebpfsentinel-enterprise/62"]
+    topology: none
+    kernel_min: "n/a"
+    profile: manual
+    notes: "Posts a signed stop document to the agent and keeps it stopped. Only a tamper-protected agent demands the signature, so the suite lives in the enterprise repository: 62 runs the agent under a unit, stops it with the console's document and reads the stop status off the journal"
+
+  - kind: cli_subcommand
+    feature: uninstall
+    suites: ["140"]
+    topology: none
+    kernel_min: "6.12"
+    profile: nightly
+    notes: "Removes the pins and the state a graceful stop leaves behind, so nothing of the agent keeps enforcing; asserted in 140 after enforcement survived the agent"
 
   - kind: cli_subcommand
     feature: status
@@ -1209,6 +1236,15 @@ coverage:
     kernel_min: "6.12"
     profile: nightly
     notes: "A write refused at an LSM hook in 83; the boot parameter named when bpf is missing from the module list in 86"
+
+  - kind: capability
+    feature: tamper_protection
+    suites: []
+    elsewhere: ["ebpfsentinel-enterprise/62"]
+    topology: none
+    kernel_min: "6.12"
+    profile: manual
+    notes: "A signal, a trace or an unpin aimed at the agent refused unless a signed stop opened the window. Armed only by the enterprise layer: 62 asserts the refusal and the signed stop. Needs the BPF LSM active at boot (lsm=bpf)"
 
   - kind: capability
     feature: file_kfuncs
