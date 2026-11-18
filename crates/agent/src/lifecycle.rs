@@ -198,9 +198,9 @@ pub fn spawn_unit_watch(alerts: mpsc::Sender<AlertEvent>, cancel: CancellationTo
         files = baseline.len(),
         "watching the service unit for a mask or an edit"
     );
-    if let Some(mask) = baseline.masks().next() {
+    let masked_at_start = baseline.masks().next().map(|mask| {
         warn!(path = %mask, "the agent's unit is already masked at start: it will not come back after its next stop");
-        let _ = alerts.try_send(AlertEvent::System(Box::new(Alert::operational(
+        AlertEvent::System(Box::new(Alert::operational(
             domain::lifecycle::AGENT_LIFECYCLE_COMPONENT,
             domain::lifecycle::RULE_UNIT_MASKED,
             domain::common::entity::Severity::High,
@@ -208,9 +208,14 @@ pub fn spawn_unit_watch(alerts: mpsc::Sender<AlertEvent>, cancel: CancellationTo
                 "the agent's service unit is masked at start by {mask}: the next stop keeps it down"
             ),
             now_ns(),
-        ))));
-    }
+        )))
+    });
     tokio::spawn(async move {
+        // Sent on the watch's own task, which may wait for room: a start busy
+        // enough to fill the alert channel is no reason to lose this one.
+        if let Some(alert) = masked_at_start {
+            let _ = alerts.send(alert).await;
+        }
         let mut tick = tokio::time::interval(UNIT_CHECK_INTERVAL);
         tick.tick().await;
         loop {

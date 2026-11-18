@@ -965,9 +965,13 @@ impl EventDispatcher {
                 prevention.severity,
             );
             psa.kill_process = prevention.kill_process;
-            let _ = self.alert_tx.try_send(AlertEvent::PacketSecurity(psa));
-        } else if self.alert_tx.try_send(AlertEvent::Ids(alert)).is_err() {
-            self.metrics.record_event_dropped("alert_channel_full");
+            if psa.kill_process {
+                self.send_enforcing_alert(AlertEvent::PacketSecurity(psa));
+            } else {
+                self.send_alert(AlertEvent::PacketSecurity(psa));
+            }
+        } else {
+            self.send_alert(AlertEvent::Ids(alert));
         }
 
         if counts_toward_ips {
@@ -1128,13 +1132,7 @@ impl EventDispatcher {
             &detail,
         );
 
-        if self
-            .alert_tx
-            .try_send(AlertEvent::ThreatIntel(ti_alert))
-            .is_err()
-        {
-            self.metrics.record_event_dropped("alert_channel_full");
-        }
+        self.send_alert(AlertEvent::ThreatIntel(ti_alert));
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1543,7 +1541,30 @@ impl EventDispatcher {
     ) {
         let psa =
             self.packet_security_alert(component, event, rule_id, action_label, detail, severity);
-        let _ = self.alert_tx.try_send(AlertEvent::PacketSecurity(psa));
+        self.send_alert(AlertEvent::PacketSecurity(psa));
+    }
+
+    /// Hand an alert to the alert pipeline without waiting. A full channel
+    /// loses it, and that loss is counted rather than silent.
+    fn send_alert(&self, event: AlertEvent) {
+        if let Err(mpsc::error::TrySendError::Full(_)) = self.alert_tx.try_send(event) {
+            self.metrics.record_event_dropped("alert_channel_full");
+        }
+    }
+
+    /// Hand over an alert whose processing enforces something, a process kill
+    /// in the alert pipeline. A full channel does not lose it: the send waits
+    /// for room on a task of its own, so the packet path does not stall and
+    /// the kill still happens, late rather than never.
+    fn send_enforcing_alert(&self, event: AlertEvent) {
+        if let Err(mpsc::error::TrySendError::Full(event)) = self.alert_tx.try_send(event) {
+            self.metrics
+                .record_event_dropped("alert_channel_full_deferred");
+            let tx = self.alert_tx.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(event).await;
+            });
+        }
     }
 
     /// The alert a packet-level decision becomes, with the flow's
@@ -1629,7 +1650,7 @@ impl EventDispatcher {
                 timestamp_ns: header.timestamp_ns,
                 container: self.resolve_container_by_id(header.cgroup_id),
             };
-            let _ = self.alert_tx.try_send(AlertEvent::Dns(dns_alert));
+            self.send_alert(AlertEvent::Dns(dns_alert));
         }
     }
 
@@ -1693,7 +1714,7 @@ impl EventDispatcher {
             if alert.container.is_none() {
                 alert.container = self.resolve_container_by_id(header.cgroup_id);
             }
-            let _ = self.alert_tx.try_send(AlertEvent::System(Box::new(alert)));
+            self.send_alert(AlertEvent::System(Box::new(alert)));
         }
     }
 
@@ -1810,9 +1831,7 @@ impl EventDispatcher {
                             let mut dlp_alert = DlpAlert::from_event(event, pattern);
                             dlp_alert.container.clone_from(&ctx.container);
                             dlp_alert.executable.clone_from(&ctx.executable);
-                            if self.alert_tx.try_send(AlertEvent::Dlp(dlp_alert)).is_err() {
-                                self.metrics.record_event_dropped("alert_channel_full");
-                            }
+                            self.send_alert(AlertEvent::Dlp(dlp_alert));
                         }
                     }
                 }
@@ -1891,13 +1910,7 @@ impl EventDispatcher {
                     alert.executable_inode = Some(exe.inode);
                     alert.executable_source = Some(exe.source.as_str().to_string());
                 }
-                if self
-                    .alert_tx
-                    .try_send(AlertEvent::System(Box::new(alert)))
-                    .is_err()
-                {
-                    self.metrics.record_event_dropped("alert_channel_full");
-                }
+                self.send_alert(AlertEvent::System(Box::new(alert)));
             }
         }
     }
@@ -1951,9 +1964,7 @@ impl EventDispatcher {
                     dst_port: event.dst_port,
                     protocol: event.protocol,
                 };
-                if self.alert_tx.try_send(alert).is_err() {
-                    self.metrics.record_event_dropped("alert_channel_full");
-                }
+                self.send_alert(alert);
             }
         }
 
@@ -2666,6 +2677,56 @@ mod tests {
         dispatcher.dispatch_event(make_event(EVENT_TYPE_DLP, 0));
 
         assert_eq!(observer.0.load(Ordering::Relaxed), 3);
+    }
+
+    /// A full channel loses an alert that only reports, but not one whose
+    /// processing kills the process behind the flow: that one waits for room.
+    #[tokio::test]
+    async fn a_kill_alert_meeting_a_full_channel_still_arrives() {
+        let ids = make_service_with_rules(vec![make_ids_rule("ids-001")]);
+        let mut with_prevention = (**ids.load()).clone();
+        let mut prevention = make_ids_rule("ips-kill");
+        prevention.mode = DomainMode::Block;
+        prevention.kill_process = true;
+        with_prevention
+            .set_prevention_rules(vec![prevention])
+            .unwrap();
+        ids.store(Arc::new(with_prevention));
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(1);
+        alert_tx
+            .try_send(AlertEvent::System(Box::new(
+                domain::alert::entity::Alert::operational(
+                    "test",
+                    "filler",
+                    domain::common::entity::Severity::Low,
+                    "fills the channel".to_string(),
+                    0,
+                ),
+            )))
+            .unwrap();
+        let ips = Arc::new(ArcSwap::from_pointee(IpsAppService::new(
+            domain::ips::engine::IpsEngine::new(domain::ips::entity::IpsPolicy::default()),
+            Arc::new(TestMetrics::new()) as Arc<dyn MetricsPort>,
+        )));
+        let dispatcher =
+            make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx).with_ips_service(ips);
+
+        dispatcher.dispatch_event(make_event(EVENT_TYPE_IDS, 1));
+
+        let mut kills = 0;
+        for _ in 0..2 {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(2), alert_rx.recv())
+                .await
+                .expect("the deferred alert arrives")
+                .expect("the channel stays open");
+            if let AlertEvent::PacketSecurity(a) = event
+                && a.kill_process
+            {
+                kills += 1;
+            }
+        }
+        assert_eq!(kills, 1);
     }
 
     #[tokio::test]

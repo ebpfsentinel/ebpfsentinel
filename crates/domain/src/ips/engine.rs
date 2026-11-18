@@ -128,13 +128,21 @@ impl IpsEngine {
             // Drop the detection_counts lock before calling add_to_blacklist
             drop(detection_counts);
 
-            // Auto-blacklist (ignore error if already blacklisted or full)
-            let _ = self.add_to_blacklist(
-                ip,
-                "auto-blacklisted: detection threshold reached".to_string(),
-                true,
-                self.policy.max_blacklist_duration,
-            );
+            // Only an entry the list took is enforced: one refused because the
+            // list is full would otherwise reach the kernel past the cap, and
+            // with no entry here to expire, stay there for good. One already
+            // listed is already enforced.
+            if self
+                .add_to_blacklist(
+                    ip,
+                    "auto-blacklisted: detection threshold reached".to_string(),
+                    true,
+                    self.policy.max_blacklist_duration,
+                )
+                .is_err()
+            {
+                return Vec::new();
+            }
 
             let ttl = self.policy.max_blacklist_duration;
             let mut actions = vec![EnforcementAction::BlacklistIp { ip, ttl }];
@@ -253,7 +261,8 @@ impl IpsEngine {
     }
 
     /// Scan for and remove expired entries. Returns `UnblacklistIp` and
-    /// `UnblockSubnet` actions for each removed entry.
+    /// `UnblockSubnet` actions for each removed entry, and drops the detection
+    /// counts whose window has closed.
     pub fn cleanup_expired(&self) -> Vec<EnforcementAction> {
         let mut blacklist = self
             .blacklist
@@ -287,6 +296,17 @@ impl IpsEngine {
             subnet_blocks.remove(&(addr, prefix_len));
             actions.push(EnforcementAction::UnblockSubnet { addr, prefix_len });
         }
+        drop(subnet_blocks);
+
+        // A count whose window has closed would be reset by the next detection
+        // anyway, so keeping it only grows the table: a flood of forged sources
+        // that never reach the threshold would otherwise hold one entry each
+        // for the life of the process.
+        let window = self.policy.max_blacklist_duration;
+        self.detection_counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|_, (_, first_seen)| first_seen.elapsed() < window);
 
         actions
     }
@@ -543,6 +563,52 @@ mod tests {
 
         // Counter should reset, so 1 detection after reset
         assert!(engine.record_detection(addr).is_empty());
+    }
+
+    #[test]
+    fn a_full_list_emits_no_kernel_entry_for_the_source_it_refused() {
+        let policy = IpsPolicy {
+            max_blacklist_size: 1,
+            auto_blacklist_threshold: 1,
+            ..test_policy()
+        };
+        let engine = IpsEngine::new(policy);
+        assert_eq!(engine.record_detection(ip(10, 0, 0, 1)).len(), 1);
+        assert!(engine.record_detection(ip(10, 0, 0, 2)).is_empty());
+        assert_eq!(engine.blacklist_size(), 1);
+    }
+
+    #[test]
+    fn a_source_already_listed_emits_nothing_more() {
+        let policy = IpsPolicy {
+            auto_blacklist_threshold: 1,
+            ..test_policy()
+        };
+        let engine = IpsEngine::new(policy);
+        engine
+            .add_to_blacklist(
+                ip(10, 0, 0, 1),
+                "manual".to_string(),
+                false,
+                Duration::from_mins(1),
+            )
+            .unwrap();
+        assert!(engine.record_detection(ip(10, 0, 0, 1)).is_empty());
+    }
+
+    #[test]
+    fn the_sweep_drops_detection_counts_whose_window_closed() {
+        let policy = IpsPolicy {
+            max_blacklist_duration: Duration::from_millis(1),
+            ..test_policy()
+        };
+        let engine = IpsEngine::new(policy);
+        for d in 1..=50 {
+            engine.record_detection(ip(10, 0, 1, d));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+        engine.cleanup_expired();
+        assert!(engine.detection_counts.lock().unwrap().is_empty());
     }
 
     // ── cleanup_expired ──────────────────────────────────────────

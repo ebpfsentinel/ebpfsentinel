@@ -502,6 +502,40 @@ pub(crate) fn cgroup_shaping_service(
     Ok(Arc::new(service))
 }
 
+/// Load the configuration's pipes, queues and classifiers into the `QoS`
+/// service and its freshly bound maps. Each part that cannot be read or
+/// loaded is logged: shaping silently missing from a node reads, from the
+/// outside, like a link that is simply slow.
+pub(crate) fn sync_qos_from_config(
+    svc: &mut application::qos_service_impl::QosAppService,
+    config: &AgentConfig,
+) {
+    match config.qos_pipes() {
+        Ok(pipes) => {
+            if let Err(e) = svc.reload_pipes(pipes) {
+                warn!("QoS pipes not loaded: {e}");
+            }
+        }
+        Err(e) => warn!("QoS pipes unreadable, none loaded: {e}"),
+    }
+    match config.qos_queues() {
+        Ok(queues) => {
+            if let Err(e) = svc.reload_queues(queues) {
+                warn!("QoS queues not loaded: {e}");
+            }
+        }
+        Err(e) => warn!("QoS queues unreadable, none loaded: {e}"),
+    }
+    match config.qos_classifiers() {
+        Ok(classifiers) => {
+            if let Err(e) = svc.reload_classifiers(classifiers) {
+                warn!("QoS classifiers not loaded: {e}");
+            }
+        }
+        Err(e) => warn!("QoS classifiers unreadable, none loaded: {e}"),
+    }
+}
+
 /// Hand a freshly loaded tc-qos object's shaping tables to the shaping
 /// service, or tell it there are none, and start reading what they count.
 pub(crate) fn install_cgroup_shaping(
@@ -2305,18 +2339,32 @@ pub async fn run(
                         }
                     }
                     // Wire tail-call: firewall → ratelimit (if both loaded).
-                    if let Some(ref mut fw) = fw_loader {
-                        match rl_loader.program_raw_fd("xdp_ratelimit") {
-                            Ok(rl_fd) => {
-                                if let Err(e) = fw.set_tail_call_raw("XDP_PROG_ARRAY", 0, rl_fd) {
-                                    warn!("tail-call wiring failed (non-fatal): {e}");
-                                } else {
+                    // Behind the firewall the slot is the only way in, so a
+                    // slot left empty is a rate limiter no packet reaches,
+                    // and the status says so.
+                    let rl_reached = match fw_loader.as_mut() {
+                        None => true,
+                        Some(fw) => match rl_loader.program_raw_fd("xdp_ratelimit") {
+                            Ok(rl_fd) => match fw.set_tail_call_raw("XDP_PROG_ARRAY", 0, rl_fd) {
+                                Ok(()) => {
                                     info!("XDP tail-call: firewall → ratelimit wired");
+                                    true
                                 }
+                                Err(e) => {
+                                    warn!(
+                                        "firewall → ratelimit tail-call wiring failed, rate limiting is not applied: {e}"
+                                    );
+                                    false
+                                }
+                            },
+                            Err(e) => {
+                                warn!(
+                                    "ratelimit fd retrieval failed, rate limiting is not applied: {e}"
+                                );
+                                false
                             }
-                            Err(e) => warn!("ratelimit fd retrieval failed: {e}"),
-                        }
-                    }
+                        },
+                    };
                     iface_groups_mgr.add_map(rl_loader.ebpf_mut());
                     // Wire tail-call: ratelimit → syncookie (slot 0). Best-effort.
                     match try_load_xdp_ratelimit_syncookie(&ebpf_dir, &mut rl_loader) {
@@ -2355,33 +2403,51 @@ pub async fn run(
                                 if let Some(rdr) = lb_metrics_rdr {
                                     metrics_readers.push(rdr);
                                 }
-                                if let Ok(lb_fd) =
-                                    lb_loader_early.program_raw_fd("xdp_loadbalancer")
-                                {
-                                    if let Err(e) =
-                                        rl_loader.set_tail_call_raw("RL_PROG_ARRAY", 1, lb_fd)
-                                    {
-                                        warn!("ratelimit → LB tail-call wiring failed: {e}");
-                                    } else {
-                                        info!(
-                                            "XDP tail-call: ratelimit → loadbalancer wired (RL slot 1)"
-                                        );
+                                // The balancer is reached through the rate
+                                // limiter's slot 1, or through the firewall's
+                                // slot 2 where no rate limiter passes it on. A
+                                // balancer neither slot holds runs for nobody.
+                                let mut lb_reached = false;
+                                match lb_loader_early.program_raw_fd("xdp_loadbalancer") {
+                                    Ok(lb_fd) => {
+                                        match rl_loader.set_tail_call_raw("RL_PROG_ARRAY", 1, lb_fd)
+                                        {
+                                            Ok(()) => {
+                                                info!(
+                                                    "XDP tail-call: ratelimit → loadbalancer wired (RL slot 1)"
+                                                );
+                                                lb_reached |= rl_reached;
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    "ratelimit → LB tail-call wiring failed: {e}"
+                                                );
+                                            }
+                                        }
+                                        if let Some(ref mut fw) = fw_loader {
+                                            match fw.set_tail_call_raw("XDP_PROG_ARRAY", 2, lb_fd) {
+                                                Ok(()) => lb_reached = true,
+                                                Err(e) => warn!(
+                                                    "firewall → LB tail-call wiring failed: {e}"
+                                                ),
+                                            }
+                                        }
                                     }
-                                }
-                                // Also wire into firewall (slot 2) for the no-ratelimit fallback path.
-                                if let Some(ref mut fw) = fw_loader
-                                    && let Ok(lb_fd) =
-                                        lb_loader_early.program_raw_fd("xdp_loadbalancer")
-                                {
-                                    let _ = fw.set_tail_call_raw("XDP_PROG_ARRAY", 2, lb_fd);
+                                    Err(e) => warn!("loadbalancer fd retrieval failed: {e}"),
                                 }
                                 managed.push((
                                     "xdp_loadbalancer",
                                     lb_loader_early,
                                     lb_cancel.clone(),
                                 ));
-                                metrics.set_ebpf_program_status("xdp_loadbalancer", true);
-                                info!("eBPF xdp-loadbalancer active (via ratelimit chain)");
+                                metrics.set_ebpf_program_status("xdp_loadbalancer", lb_reached);
+                                if lb_reached {
+                                    info!("eBPF xdp-loadbalancer active (via ratelimit chain)");
+                                } else {
+                                    warn!(
+                                        "eBPF xdp-loadbalancer loaded but no tail-call slot reaches it: load balancing is not applied"
+                                    );
+                                }
                                 lb_pre_loaded = true;
                             }
                             Err(e) => {
@@ -2390,9 +2456,11 @@ pub async fn run(
                         }
                     }
                     managed.push(("xdp_ratelimit", rl_loader, rl_cancel.clone()));
-                    metrics.set_ebpf_program_status("xdp_ratelimit", true);
-                    info!("eBPF xdp-ratelimit active");
-                    true
+                    metrics.set_ebpf_program_status("xdp_ratelimit", rl_reached);
+                    if rl_reached {
+                        info!("eBPF xdp-ratelimit active");
+                    }
+                    rl_reached
                 }
                 Err(e) => {
                     warn!("xdp-ratelimit load failed (degraded mode): {e}");
@@ -3328,15 +3396,7 @@ pub async fn run(
                         // Bind the eBPF maps, then resync config so the just-wired
                         // maps reflect the pipes/queues/classifiers from config.
                         svc.set_map_port(Box::new(qos_mgr));
-                        if let Ok(pipes) = config.qos_pipes() {
-                            let _ = svc.reload_pipes(pipes);
-                        }
-                        if let Ok(queues) = config.qos_queues() {
-                            let _ = svc.reload_queues(queues);
-                        }
-                        if let Ok(classifiers) = config.qos_classifiers() {
-                            let _ = svc.reload_classifiers(classifiers);
-                        }
+                        sync_qos_from_config(&mut svc, &config);
                     }
                     if let Some(rdr) = qos_rdr {
                         metrics_readers.push(rdr);

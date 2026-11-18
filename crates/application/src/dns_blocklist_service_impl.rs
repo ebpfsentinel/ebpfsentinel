@@ -351,7 +351,10 @@ impl DnsBlocklistAppService {
                 timestamp_ns: now_ns,
                 container: None,
             };
-            let _ = tx.try_send(AlertEvent::Dns(dns_alert));
+            if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(AlertEvent::Dns(dns_alert))
+            {
+                self.metrics.record_event_dropped("alert_channel_full");
+            }
         }
     }
 

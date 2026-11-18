@@ -1287,19 +1287,31 @@ pub async fn load_ebpf_programs(
                         Err(e) => warn!("country tiers unreadable: {e}"),
                     }
                 }
-                // Wire tail-call: firewall → ratelimit
-                if let Some(ref mut fw) = fw_loader
-                    && let Ok(rl_fd) = rl_loader.program_raw_fd("xdp_ratelimit")
-                {
-                    let _ = fw.set_tail_call_raw("XDP_PROG_ARRAY", 0, rl_fd);
-                }
+                // Wire tail-call: firewall → ratelimit. Behind the firewall
+                // the slot is the only way in, so an empty slot is a rate
+                // limiter no packet reaches, and the status says so.
+                let rl_reached = match fw_loader.as_mut() {
+                    None => true,
+                    Some(fw) => match rl_loader
+                        .program_raw_fd("xdp_ratelimit")
+                        .and_then(|rl_fd| fw.set_tail_call_raw("XDP_PROG_ARRAY", 0, rl_fd))
+                    {
+                        Ok(()) => true,
+                        Err(e) => {
+                            warn!(
+                                "firewall → ratelimit tail-call wiring failed, rate limiting is not applied: {e}"
+                            );
+                            false
+                        }
+                    },
+                };
                 iface_groups_mgr.add_map(rl_loader.ebpf_mut());
                 tenant_vlan_mgr.add_map(rl_loader.ebpf_mut());
                 tenant_ifindex_mgr.add_map(rl_loader.ebpf_mut());
                 tenant_subnet_mgr.add_map(rl_loader.ebpf_mut());
                 tenant_subnet_mgr.add_v6_map(rl_loader.ebpf_mut());
                 ebpf_state.add_loader(rl_loader);
-                true
+                rl_reached
             }
             Err(e) => {
                 warn!("xdp-ratelimit load failed (degraded mode): {e}");
@@ -1694,15 +1706,7 @@ pub async fn load_ebpf_programs(
                     // Bind the maps, then resync the configuration so they
                     // carry the pipes, queues and classifiers it names.
                     svc.set_map_port(Box::new(qos_mgr));
-                    if let Ok(pipes) = config.qos_pipes() {
-                        let _ = svc.reload_pipes(pipes);
-                    }
-                    if let Ok(queues) = config.qos_queues() {
-                        let _ = svc.reload_queues(queues);
-                    }
-                    if let Ok(classifiers) = config.qos_classifiers() {
-                        let _ = svc.reload_classifiers(classifiers);
-                    }
+                    startup::sync_qos_from_config(&mut svc, config);
                 }
                 if let Some(rdr) = qos_rdr {
                     metrics_readers.push(rdr);
