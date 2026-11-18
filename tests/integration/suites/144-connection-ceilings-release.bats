@@ -62,10 +62,16 @@ setup_file() {
         return 1
     }
 
-    # Listeners on the host that keep every connection they accept.
+    # Listeners on the host that keep every connection they accept. A
+    # background job reads its input from /dev/null, and ncat closes the
+    # connection it holds when its input ends, `--recv-only` or not, so each
+    # listener reads a FIFO it holds open for writing itself: the input never
+    # ends and no other process stays behind to keep the file waiting.
     local port
+    mkfifo "${DATA_DIR}/listener.fifo"
     for port in "$SOURCE_PORT" "$RULE_PORT"; do
-        timeout 600 ncat -lk "$EBPF_HOST_IP" "$port" >/dev/null 2>&1 &
+        timeout 600 ncat -lk "$EBPF_HOST_IP" "$port" \
+            <>"${DATA_DIR}/listener.fifo" >/dev/null 2>&1 3>&- &
         echo $! >>"${DATA_DIR}/listeners.pid"
     done
     sleep 1
@@ -98,7 +104,7 @@ hold_open() {
     while [ "$i" -lt "$count" ]; do
         ip netns exec "$EBPF_TEST_NS" \
             timeout 120 sh -c "sleep 120 | ncat '$EBPF_HOST_IP' '$port'" \
-            >/dev/null 2>&1 &
+            >/dev/null 2>&1 3>&- &
         echo $! >>"${DATA_DIR}/clients.pid"
         i=$((i + 1))
         # One at a time, so which ones are refused is the order they came in.
@@ -139,6 +145,8 @@ close_all() {
 @test "a source that closed its connections opens as many again" {
     require_root
 
+    # The test before left the source at its ceiling.
+    sleep "$RELEASE_WAIT"
     hold_open "$SOURCE_PORT" 3
     [ "$(established "$SOURCE_PORT")" -eq 3 ]
     close_all

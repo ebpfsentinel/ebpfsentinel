@@ -48,3 +48,7 @@ dlp:
 
 ratelimit:
   enabled: false
+
+audit:
+  enabled: true
+  storage_path: __DATA_DIR__/audit.redb

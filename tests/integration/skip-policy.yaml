@@ -59,6 +59,7 @@ env:
   - "Docker agent not healthy"
   - "per-backend spread is read on the local lane; the VM lanes read it in suite 139"
   - "suite 145 serves the list beside the agent (local lane only)"
+  - "suite 140 deletes and creates its test interface again (local lane only)"
   - "Docker daemon not running"
   - "Docker engine not available"
   - "Docker not installed"

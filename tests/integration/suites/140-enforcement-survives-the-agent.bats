@@ -11,6 +11,9 @@
 #   * A restarted agent adopts the pinned links: one XDP program on the
 #     interface and each TC program once, the adoption is logged, and the
 #     deny still holds.
+#   * An interface deleted and created again while no agent ran is attached
+#     anew by the next agent: the pinned link on the old device is dead and
+#     is not adopted.
 #   * `ebpfsentinel-agent uninstall` after a graceful stop removes the pins
 #     and leaves nothing attached, so the denied flow passes.
 #
@@ -91,19 +94,21 @@ _start() {
 # _listen <port> - a listener on the agent's host that answers each
 # connection, for the length of one test.
 _listen() {
-    _on_agent "nohup timeout 20 ncat -l -p $1 -k -e /bin/echo >/dev/null 2>&1 &"
+    _on_agent "nohup timeout 20 ncat -l -p $1 -k -e /bin/cat >/dev/null 2>&1 &"
     sleep 0.5
 }
 
 # _reaches <port> - whether a connection from the client side to the agent's
-# host completes and gets an answer.
+# host completes and gets an answer. `--no-shutdown` keeps the connection
+# open once HELLO is sent: without it ncat closes on the end of its input
+# before the echo comes back, and an open port reads as refused.
 _reaches() {
     local out
     if _vm_lane; then
-        out="$(echo HELLO | timeout 4 ncat -w 2 "$EBPF_HOST_IP" "$1" 2>/dev/null)" || true
+        out="$(echo HELLO | timeout 4 ncat -w 2 --no-shutdown "$EBPF_HOST_IP" "$1" 2>/dev/null)" || true
     else
         out="$(echo HELLO | ip netns exec "$EBPF_TEST_NS" \
-            timeout 4 ncat -w 2 "$EBPF_HOST_IP" "$1" 2>/dev/null)" || true
+            timeout 4 ncat -w 2 --no-shutdown "$EBPF_HOST_IP" "$1" 2>/dev/null)" || true
     fi
     [ -n "$out" ]
 }
@@ -131,7 +136,7 @@ _kill_hard() {
 }
 
 _uninstall() {
-    _on_agent "EBPFSENTINEL_WARDEN_SOCK= $(_agent_binary) uninstall"
+    _on_agent "env -u EBPFSENTINEL_WARDEN_SOCK $(_agent_binary) uninstall"
 }
 
 # _xdp_programs <dev> / _tc_programs <dev> - what is attached there, one per line.
@@ -189,6 +194,35 @@ _tc_programs() {
         false
     }
 
+    _listen "$DENIED_PORT"
+    _listen "$ALLOWED_PORT"
+    _refused "$DENIED_PORT"
+    _reaches "$ALLOWED_PORT"
+}
+
+@test "an interface created again while no agent ran is attached anew, not adopted dead" {
+    _vm_lane && env_skip "suite 140 deletes and creates its test interface again (local lane only)"
+
+    _kill_hard
+    destroy_test_netns
+    create_test_netns
+    [ "$(_xdp_programs "$EBPF_VETH_HOST" | wc -l)" -eq 0 ]
+
+    _start
+    local waited=0
+    until grep -q "pinned links adopted" "$AGENT_LOG_FILE" 2>/dev/null; do
+        waited=$((waited + 1))
+        [ "$waited" -lt 30 ] || {
+            echo "# no adoption logged" >&3
+            false
+        }
+        sleep 1
+    done
+
+    [ "$(_xdp_programs "$EBPF_VETH_HOST" | wc -l)" -eq 1 ] || {
+        grep -E "pinned link|not swapped" "$AGENT_LOG_FILE" | tail -5 >&3
+        false
+    }
     _listen "$DENIED_PORT"
     _listen "$ALLOWED_PORT"
     _refused "$DENIED_PORT"

@@ -145,6 +145,15 @@ create_test_netns() {
     ip netns exec "$EBPF_TEST_NS" ip link set "$EBPF_VETH_NS" up
     ip netns exec "$EBPF_TEST_NS" ip link set lo up
 
+    # A veth offloads the transmit checksum: a datagram sent from the
+    # namespace leaves with only the pseudo-header sum in its checksum field,
+    # to be finished by a device that never comes. A frame the balancer
+    # rewrites and redirects in XDP keeps that partial field and is dropped
+    # by the backend as a bad checksum. A physical NIC finishes the sum before
+    # the wire, so the namespace computes it in software the same way.
+    ip netns exec "$EBPF_TEST_NS" ethtool -K "$EBPF_VETH_NS" tx off >/dev/null 2>&1 \
+        || echo "# ethtool could not turn off transmit checksum offload on ${EBPF_VETH_NS}" >&2
+
     # Attach a pass-through XDP program on the namespace-side veth. The kernel
     # only arms a veth's receive-side XDP path - and therefore only delivers
     # XDP_TX'd frames sent from the host side - when that end carries a native

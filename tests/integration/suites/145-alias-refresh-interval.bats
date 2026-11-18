@@ -34,8 +34,10 @@ setup_file() {
     mkdir -p "$LIST_DIR"
     # Listed at start: an address nobody uses, so the namespace passes.
     serve_list "192.0.2.99"
-    (cd "$LIST_DIR" && timeout 600 python3 -m http.server "$LIST_PORT" --bind 127.0.0.1 \
-        >/dev/null 2>&1) &
+    # Started without a subshell, so the pid written is the server's own and
+    # killing it leaves nothing holding the descriptors bats waits on.
+    timeout 600 python3 -m http.server "$LIST_PORT" --bind 127.0.0.1 \
+        --directory "$LIST_DIR" >/dev/null 2>&1 3>&- &
     echo $! >"${DATA_DIR}/server.pid"
 
     create_test_netns
@@ -51,7 +53,7 @@ setup_file() {
         return 1
     }
 
-    timeout 600 ncat -lk "$EBPF_HOST_IP" "$PROBE_PORT" >/dev/null 2>&1 &
+    timeout 600 ncat -lk "$EBPF_HOST_IP" "$PROBE_PORT" >/dev/null 2>&1 3>&- &
     echo $! >>"${DATA_DIR}/server.pid"
     sleep 1
 }
