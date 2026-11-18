@@ -41,6 +41,8 @@ pub mod process_handler;
 pub mod qos_handler;
 pub mod ratelimit_handler;
 pub mod raw_socket_handler;
+#[cfg(test)]
+pub(crate) mod request_bodies;
 pub mod response_handler;
 pub mod router;
 pub mod routing_handler;

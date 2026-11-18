@@ -38,6 +38,7 @@ const MASK: &str = "***";
 
 /// One section of the configuration, as the editor holds it.
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigSectionWrite {
     /// A YAML document rooted at the section's own key, exactly as the read
     /// route renders it, so the text an operator edited is the text that

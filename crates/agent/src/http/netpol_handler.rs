@@ -20,6 +20,7 @@ const MAX_REPLAY_FLOWS: usize = 100_000;
 // ── Request / response DTOs ───────────────────────────────────────
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NetpolReplayRequest {
     /// One or more `networking.k8s.io/v1` `NetworkPolicy` manifests, as a
     /// YAML stream. A `List` is read item by item. A policy with the

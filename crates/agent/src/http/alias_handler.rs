@@ -28,6 +28,7 @@ pub struct ExternalAliasContentResponse {
 
 /// Request body for `PUT /api/v1/aliases/{id}/content`.
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExternalAliasContent {
     /// IP addresses/CIDRs to load into the alias.
     pub ips: Vec<String>,

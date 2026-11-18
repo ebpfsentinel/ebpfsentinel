@@ -53,6 +53,7 @@ pub struct FeedResponse {
 
 /// Optional body for a feed refresh request.
 #[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RefreshFeedRequest {
     /// Feed to refresh. Accepted for forward compatibility; the fetcher
     /// currently refreshes every enabled feed in a single cycle.

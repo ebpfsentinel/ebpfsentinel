@@ -67,12 +67,14 @@ pub struct DomainBlockResponse {
 }
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PatchRuleModeRequest {
     /// `alert` or `block`.
     pub mode: String,
 }
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AddBlacklistRequest {
     /// IP address to blacklist (IPv4 or IPv6).
     pub ip: String,

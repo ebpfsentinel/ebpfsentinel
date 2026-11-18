@@ -79,6 +79,7 @@ pub struct QosMatchRuleResponse {
 }
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateQosPipeRequest {
     pub id: String,
     /// Bandwidth limit in bits per second; `0` leaves the pipe unlimited.
@@ -107,6 +108,7 @@ fn default_direction() -> String {
 }
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateQosQueueRequest {
     pub id: String,
     pub pipe_id: String,
@@ -116,6 +118,7 @@ pub struct CreateQosQueueRequest {
 }
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateQosClassifierRequest {
     pub id: String,
     pub queue_id: String,
@@ -130,6 +133,7 @@ fn default_priority() -> u32 {
 }
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateQosMatchRuleRequest {
     #[serde(default)]
     pub src_ip: Option<String>,

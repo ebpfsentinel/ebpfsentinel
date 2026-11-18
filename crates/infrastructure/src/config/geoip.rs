@@ -6,7 +6,7 @@ use super::common::ConfigError;
 
 /// `GeoIP` database provisioning configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "mode")]
+#[serde(tag = "mode", deny_unknown_fields)]
 pub enum GeoIpSource {
     /// `MaxMind` account: auto-download via account ID + license key.
     #[serde(rename = "maxmind_account")]
@@ -132,6 +132,21 @@ impl GeoIpConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_misspelt_key_in_a_source_is_refused() {
+        for source in [
+            "mode: file\n  city_path: /a.mmdb\n  asnpath: /b.mmdb",
+            "mode: url\n  city_url: https://m/c.mmdb\n  asn: https://m/a.mmdb",
+            "mode: maxmind_account\n  account_id: '1'\n  license_key: k\n  editions: []",
+        ] {
+            let yaml = format!("source:\n  {source}\n");
+            assert!(
+                serde_norway::from_str::<GeoIpConfig>(&yaml).is_err(),
+                "accepted: {source}"
+            );
+        }
+    }
 
     #[test]
     fn deserialize_file_mode() {

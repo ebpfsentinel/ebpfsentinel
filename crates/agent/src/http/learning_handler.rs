@@ -17,6 +17,7 @@ use super::state::AppState;
 /// One of the selectors a scope is written with, in the shape a workload
 /// rule already uses.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WorkloadSelectorBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exe: Option<String>,
@@ -30,7 +31,7 @@ pub struct WorkloadSelectorBody {
 
 /// What the window is asked to watch.
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScopeBody {
     /// Every workload on the node a flow can be attributed to.
     Node,
@@ -69,6 +70,7 @@ impl TryFrom<ScopeBody> for LearningScope {
 
 /// Open a window.
 #[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StartLearningRequest {
     /// What to watch. Omitted means the whole node.
     #[serde(default = "default_scope")]

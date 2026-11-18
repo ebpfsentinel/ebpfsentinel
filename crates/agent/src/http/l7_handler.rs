@@ -25,6 +25,7 @@ fn default_enabled() -> bool {
 }
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateL7RuleRequest {
     pub id: String,
     pub priority: u32,

@@ -275,6 +275,7 @@ pub struct NptV6RuleResponse {
 
 /// Request DTO for creating an `NPTv6` prefix translation rule.
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateNptV6RuleRequest {
     pub id: String,
     #[serde(default = "default_true")]

@@ -56,6 +56,7 @@ impl GatewayResponse {
 }
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateGatewayRequest {
     pub name: String,
     /// Gateway IPv4 address.

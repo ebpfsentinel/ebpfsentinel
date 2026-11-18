@@ -19,6 +19,7 @@ use super::validation::{
 // ── Request / Response DTOs ─────────────────────────────────────────
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateRateLimitRuleRequest {
     pub id: String,
     pub rate: u64,

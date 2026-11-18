@@ -24,6 +24,7 @@ use super::state::AppState;
 // ── Request/Response DTOs ────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateResponseRequest {
     /// Action type: `block_ip` or `throttle_ip`.
     pub action: String,

@@ -95,6 +95,7 @@ fn map_zone_error(err: &ZoneError) -> ApiError {
 // ── Request DTOs ──────────────────────────────────────────────────
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateZoneRequest {
     /// Zone name; used as the zone identifier.
     pub name: String,
@@ -110,6 +111,7 @@ pub struct CreateZoneRequest {
 }
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateZonePolicyRequest {
     /// Source zone identifier.
     pub source_zone: String,

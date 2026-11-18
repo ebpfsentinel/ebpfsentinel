@@ -18,6 +18,7 @@ const MAX_BPF_FILTER_LENGTH: usize = 2048;
 // ── DTOs ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StartCaptureRequest {
     /// BPF filter expression (e.g. "host 1.2.3.4 and port 443").
     pub filter: String,

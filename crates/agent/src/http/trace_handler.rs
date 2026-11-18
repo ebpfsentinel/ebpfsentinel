@@ -19,6 +19,7 @@ use super::state::AppState;
 // ── Request / response DTOs ───────────────────────────────────────
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TraceRequestBody {
     /// Source address. Left out when `workload` names the source.
     #[serde(default)]

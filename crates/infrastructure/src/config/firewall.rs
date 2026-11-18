@@ -991,7 +991,7 @@ impl FirewallRuleConfig {
 // ── Port range config ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum PortRangeConfig {
     Single(u16),
     Range(String),
@@ -1500,6 +1500,14 @@ vlan_id: 10
         );
 
         rule.validate(0).expect("an ordinary address rule");
+    }
+
+    #[test]
+    fn a_port_range_with_a_key_it_does_not_know_is_refused() {
+        assert!(serde_norway::from_str::<PortRangeConfig>("start: 80\nend: 90\n").is_ok());
+        assert!(
+            serde_norway::from_str::<PortRangeConfig>("start: 80\nend: 90\nstep: 2\n").is_err()
+        );
     }
 
     #[test]

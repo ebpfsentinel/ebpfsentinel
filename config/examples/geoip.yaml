@@ -38,8 +38,9 @@ geoip:
 
   # Auto-refresh interval in hours. Periodically re-extracts country
   # CIDRs from the database and reloads them into eBPF LPM Trie maps.
-  # Also re-downloads the database for maxmind_account and url modes.
-  # Set to 0 to disable auto-refresh.
+  # Also re-downloads the database for maxmind_account and url modes,
+  # where it must be at least 1. Only file mode accepts 0, which stops
+  # the periodic re-extraction.
   refresh_interval_hours: 24
 
   # Directory to store downloaded databases.

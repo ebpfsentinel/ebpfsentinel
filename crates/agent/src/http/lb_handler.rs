@@ -129,6 +129,7 @@ pub struct LbBackendResponse {
 // ── Request DTOs ──────────────────────────────────────────────────
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateLbServiceRequest {
     pub id: String,
     pub name: String,
@@ -148,6 +149,7 @@ pub struct CreateLbServiceRequest {
 }
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateLbBackendRequest {
     pub id: String,
     pub addr: String,
@@ -491,6 +493,7 @@ pub struct LbVipBgpSessionResponse {
 }
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LbVipAnnounceRequest {
     /// `disabled`, `primary`, `standby`, or `elected`.
     #[serde(default = "default_vip_role")]
@@ -505,12 +508,14 @@ pub struct LbVipAnnounceRequest {
 }
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LbVipRequest {
     pub name: String,
     pub addr: String,
 }
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LbVipGrantRequest {
     /// How long this node speaks for its VIPs unless renewed, in seconds,
     /// at most 300. Zero releases the role at once.

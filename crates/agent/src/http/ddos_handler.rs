@@ -104,6 +104,7 @@ impl DdosPolicyResponse {
 // ── Request DTOs ──────────────────────────────────────────────────
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateDdosPolicyRequest {
     pub id: String,
     pub attack_type: String,

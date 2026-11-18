@@ -1754,6 +1754,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_alert_list_filters_on_min_severity_and_refuses_what_it_cannot_read() {
+        let (router, _tmp) = triage_router(&["a1"]);
+        let high = json_of(&router, "GET", "/api/v1/alerts?min_severity=high", "").await;
+        assert_eq!(high["total"], 1);
+        let critical = json_of(&router, "GET", "/api/v1/alerts?min_severity=critical", "").await;
+        assert_eq!(critical["total"], 0);
+        for uri in [
+            "/api/v1/alerts?min_severity=urgent",
+            "/api/v1/alerts?severity=high",
+        ] {
+            assert_eq!(
+                status_of(&router, "GET", uri, "").await,
+                StatusCode::BAD_REQUEST,
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn triage_is_read_back_on_the_alert_and_filters_the_queue() {
         let (router, _tmp) = triage_router(&["a1", "a2"]);
         let answer = json_of(

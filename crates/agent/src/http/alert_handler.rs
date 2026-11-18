@@ -33,6 +33,7 @@ use super::workload_dto::{WorkloadResponse, workload_response};
 // ── Query parameters DTO ────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
 pub struct AlertQueryParams {
     /// Filter by component (e.g. "ids", "dlp", "threatintel").
     pub component: Option<String>,
@@ -216,6 +217,7 @@ pub struct AlertNoteResponse {
 /// `PATCH /api/v1/alerts/{id}/triage` body. A field left out stays as it
 /// was; `assignee: null` takes the alert off whoever held it.
 #[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TriageRequest {
     /// "open", "acknowledged", "investigating" or "resolved".
     pub status: Option<String>,
@@ -231,6 +233,7 @@ pub struct TriageRequest {
 
 /// `POST /api/v1/alerts/triage` body: one change applied to many alerts.
 #[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BulkTriageRequest {
     pub ids: Vec<String>,
     pub status: Option<String>,
@@ -476,6 +479,7 @@ pub fn triaged_response(a: Alert, triage: Option<&AlertTriage>) -> AlertResponse
     params(AlertQueryParams),
     responses(
         (status = 200, description = "Paginated alerts", body = AlertListResponse),
+        (status = 400, description = "Unknown parameter, or a severity or status it cannot read", body = ErrorBody),
         (status = 503, description = "Alert store not configured", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
@@ -500,7 +504,13 @@ pub async fn list_alerts(
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     let offset = params.offset.unwrap_or(0);
 
-    let min_severity = params.min_severity.as_deref().and_then(parse_severity);
+    let min_severity = match params.min_severity.as_deref() {
+        None => None,
+        Some(word) => Some(parse_severity(word).ok_or_else(|| ApiError::BadRequest {
+            code: "INVALID_SEVERITY",
+            message: format!("min_severity must be one of low|medium|high|critical, got {word:?}"),
+        })?),
+    };
     let filter = TriageFilter::from_params(
         params.status.as_deref(),
         params.assignee.clone(),

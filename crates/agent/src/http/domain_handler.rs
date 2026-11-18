@@ -51,6 +51,7 @@ pub struct DomainReputationListResponse {
 }
 
 #[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BlocklistAddRequest {
     pub domain: String,
 }
