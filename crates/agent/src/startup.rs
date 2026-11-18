@@ -5831,6 +5831,22 @@ pub fn try_load_xdp_firewall(
 
     map_manager.set_default_policy(firewall_policy_byte(config.firewall.default_policy))?;
 
+    let source_limits_written =
+        config.conntrack.max_src_states > 0 || config.conntrack.max_src_conn_rate > 0;
+    if source_limits_written && !config.conntrack.enabled {
+        warn!(
+            max_src_states = config.conntrack.max_src_states,
+            max_src_conn_rate = config.conntrack.max_src_conn_rate,
+            "per-source connection ceilings are configured with conntrack.enabled: false, \
+             nothing enforces them"
+        );
+    }
+    let source_limits = config.conntrack.enabled && source_limits_written;
+    map_manager.set_source_limits(source_limits);
+    if source_limits || config.firewall.caps_connections() {
+        spawn_connection_limit_reconciler(loader.ebpf_mut(), config);
+    }
+
     // The rule arrays are written by the firewall service when it is handed
     // this manager, not here: a rule is only what the kernel should see once
     // its aliases are resolved and its interface scope is turned into a group
@@ -5882,6 +5898,40 @@ pub fn try_load_xdp_firewall(
         zone_map_manager,
         zone_metrics_readers,
     ))
+}
+
+/// Keep the connection ceilings counting open connections: the datapath
+/// counts a flow when it admits one and never sees one end, so without this a
+/// source or a rule that reached its ceiling once stays refused.
+fn spawn_connection_limit_reconciler(
+    ebpf: &mut dyn adapters::ebpf::map_store::MapStore,
+    config: &AgentConfig,
+) {
+    use adapters::ebpf::connection_limits::{ConnectionLimitMaps, run_connection_limit_reconciler};
+
+    if !adapters::netfilter::conntrack::is_conntrack_readable() {
+        warn!(
+            "connection ceilings configured but the kernel conntrack table is unreadable: \
+             a connection counted against a ceiling is never released"
+        );
+        return;
+    }
+    let Some(maps) = ConnectionLimitMaps::take(ebpf) else {
+        warn!("xdp-firewall object carries no connection hold table, ceilings are not released");
+        return;
+    };
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        warn!("no runtime to reconcile connection ceilings on, ceilings are not released");
+        return;
+    };
+    let rate_window =
+        std::time::Duration::from_secs(u64::from(config.conntrack.conn_rate_window_secs));
+    runtime.spawn(run_connection_limit_reconciler(
+        maps,
+        Box::new(adapters::netfilter::conntrack::ProcNetfilterConntrackPort::new()),
+        rate_window,
+    ));
+    info!("connection ceiling reconciler started");
 }
 
 /// Load the xdp-firewall-reject program and wire it as a tail-call target.

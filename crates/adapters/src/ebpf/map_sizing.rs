@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use aya_obj::generated::bpf_map_type;
-use ebpf_common::conntrack::CT_SRC_COUNTER_MAX;
+use ebpf_common::conntrack::{CT_LIMIT_HOLD_MAX, CT_SRC_COUNTER_MAX};
 use ebpf_common::nat::{MAX_HAIRPIN_CT, MAX_NAT_REVERSE_ENTRIES};
 use ebpf_common::netpol::NETPOL_MAX_REPLIES;
 use infrastructure::config::{AgentConfig, NetworkPolicyMode};
@@ -50,6 +50,7 @@ pub const SIZED_MAPS: &[(&str, &str)] = &[
     ("FLOOD_COUNTERS", "ddos.max_tracked_sources"),
     ("CONN_TABLE", "ddos.connection_tracking.max_entries"),
     ("CT_SRC_COUNTERS", "conntrack.max_src_states"),
+    ("CT_LIMIT_HOLDS", "firewall.rules[].max_states"),
     ("NAT_HAIRPIN_CT", "nat.hairpin.enabled"),
     ("NAT_DNAT_REVERSE", "nat.enabled"),
     ("NAT_DNAT_REVERSE_V6", "nat.enabled"),
@@ -120,6 +121,17 @@ impl MapSizing {
             } else {
                 IDLE_TABLE_ENTRIES
             };
+        // One hold per flow a connection ceiling admitted, written only when a
+        // per-source limit or a per-rule ceiling exists. The table is an LRU,
+        // allocated whole, so a deployment with no ceiling pays for no slots;
+        // a ceiling added through the API applies to a table this plan sized,
+        // as every other sized map does, until the next start.
+        let limit_holds =
+            if src_counters == CT_SRC_COUNTER_MAX || config.firewall.caps_connections() {
+                CT_LIMIT_HOLD_MAX
+            } else {
+                IDLE_TABLE_ENTRIES
+            };
         // Hairpin NAT is the only writer of the reflection table, and the
         // program gates on the same flag before it reads a header.
         let hairpin = if config.nat.hairpin.enabled {
@@ -172,6 +184,7 @@ impl MapSizing {
                     "ddos.max_tracked_sources" => sources,
                     "ddos.connection_tracking.max_entries" => conn_table,
                     "conntrack.max_src_states" => src_counters,
+                    "firewall.rules[].max_states" => limit_holds,
                     "nat.hairpin.enabled" => hairpin,
                     "nat.enabled" => nat_reverse,
                     "firewall.rules[].action" => reject,
@@ -312,6 +325,7 @@ mod tests {
     fn a_feature_the_configuration_switches_off_is_sized_down() {
         let p = plan();
         assert_eq!(p.get("CT_SRC_COUNTERS"), Some(IDLE_TABLE_ENTRIES));
+        assert_eq!(p.get("CT_LIMIT_HOLDS"), Some(IDLE_TABLE_ENTRIES));
         assert_eq!(p.get("NAT_HAIRPIN_CT"), Some(IDLE_TABLE_ENTRIES));
         assert_eq!(p.get("NAT_DNAT_REVERSE"), Some(IDLE_TABLE_ENTRIES));
         assert_eq!(p.get("NAT_SNAT_REVERSE_V6"), Some(IDLE_TABLE_ENTRIES));
@@ -357,6 +371,10 @@ mod tests {
         assert_eq!(
             MapSizing::from_config(&config).get("CT_SRC_COUNTERS"),
             Some(CT_SRC_COUNTER_MAX)
+        );
+        assert_eq!(
+            MapSizing::from_config(&config).get("CT_LIMIT_HOLDS"),
+            Some(CT_LIMIT_HOLD_MAX)
         );
     }
 

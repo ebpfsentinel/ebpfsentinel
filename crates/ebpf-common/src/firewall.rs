@@ -18,6 +18,32 @@ pub const MAX_FIREWALL_RULES: u32 = 4096;
 /// packet is ever judged against half of each.
 pub const FIREWALL_RULE_BANKS: u32 = 2;
 
+/// Slots of the per-rule connection counter: one per array slot of either
+/// family, so an IPv4 rule and an IPv6 rule never share a counter, and a
+/// reload, which writes the other bank, starts its rules on counters of
+/// their own rather than inheriting what the old rule at that index held.
+pub const RULE_STATE_SLOTS: u32 = 2 * FIREWALL_RULE_BANKS * MAX_FIREWALL_RULES;
+
+/// The per-rule connection counter slot of the rule at `index` in the bank
+/// starting at `base`, for the IPv4 array or the IPv6 one.
+#[must_use]
+pub const fn rule_state_slot(v6: bool, base: u32, index: u32) -> u32 {
+    let family = if v6 {
+        FIREWALL_RULE_BANKS * MAX_FIREWALL_RULES
+    } else {
+        0
+    };
+    family + base + index
+}
+
+/// Whether a per-rule counter slot belongs to the bank starting at `base`, of
+/// either family.
+#[must_use]
+pub const fn rule_state_slot_in_bank(slot: u32, base: u32) -> bool {
+    let within = slot % (FIREWALL_RULE_BANKS * MAX_FIREWALL_RULES);
+    within >= base && within < base + MAX_FIREWALL_RULES
+}
+
 /// Bit of the generation word naming the bank the datapath reads.
 const RULE_BANK_BIT: u32 = 1 << 31;
 

@@ -32,6 +32,8 @@ use tracing::{info, warn};
 /// flips the word in one write, then removes the old bank's keys. A write
 /// that fails before the flip leaves the word, and so every rule the
 /// datapath enforces, as it was.
+// Each flag is one independent reason the conntrack gate stays open.
+#[allow(clippy::struct_excessive_bools)]
 pub struct FirewallMapManager {
     rules_v4: Array<MapData, FirewallRuleEntry>,
     rule_count_v4: Array<MapData, u32>,
@@ -61,6 +63,9 @@ pub struct FirewallMapManager {
     /// Whether the default policy needs the ESTABLISHED/RELATED bypass, which
     /// is exactly the case where it is not `pass`.
     policy_needs_ct: bool,
+    /// Whether a per-source connection ceiling is configured: without the
+    /// conntrack state every packet of a flow reads as its first one.
+    source_limits_need_ct: bool,
     /// The maps of the rules read after the verdict. Absent on an object built
     /// before them, in which case loading a shadow rule is refused.
     shadow: Option<ShadowMaps>,
@@ -268,6 +273,8 @@ impl FirewallMapManager {
         let bank_v4 = rule_count_v4.get(&0, 0).map_or(0, generation_bank);
         let bank_v6 = rule_count_v6.get(&0, 0).map_or(0, generation_bank);
 
+        crate::ebpf::connection_limits::publish_live_banks(bank_v4, bank_v6);
+
         info!("firewall array maps acquired (rules + default_policy)");
         Ok(Self {
             rules_v4,
@@ -289,6 +296,7 @@ impl FirewallMapManager {
             v4_needs_ct: true,
             v6_needs_ct: true,
             policy_needs_ct: true,
+            source_limits_need_ct: false,
             shadow,
         })
     }
@@ -336,10 +344,18 @@ impl FirewallMapManager {
     /// answer is a property of the two together. A failed write leaves the
     /// previous value, which is why the gate defaults open: the worst outcome
     /// of a stale gate is a probe nobody needed.
+    /// Say whether a per-source connection ceiling is configured, so the
+    /// conntrack gate stays open for it.
+    pub fn set_source_limits(&mut self, configured: bool) {
+        self.source_limits_need_ct = configured;
+        self.sync_ct_gate();
+    }
+
     fn sync_ct_gate(&mut self) {
         let open = self.v4_needs_ct
             || self.v6_needs_ct
             || self.policy_needs_ct
+            || self.source_limits_need_ct
             || self.shadow.as_ref().is_some_and(|s| s.needs_ct);
         if let Some(ref mut map) = self.ct_gate {
             if let Err(e) = map.set(0, &u8::from(open), 0) {
@@ -515,6 +531,7 @@ impl FirewallMapManager {
         match self.write_v4_bank(rules, next, step) {
             Ok((placements, count, hash_counts)) => {
                 self.bank_v4 = next;
+                crate::ebpf::connection_limits::publish_live_banks(self.bank_v4, self.bank_v6);
                 self.hash_counts_v4 = hash_counts;
                 self.drop_hash_bank(current as u8);
                 self.publish_hash_gates();
@@ -655,6 +672,7 @@ impl FirewallMapManager {
         }
 
         self.bank_v6 = next;
+        crate::ebpf::connection_limits::publish_live_banks(self.bank_v4, self.bank_v6);
         self.cached_v6_count = count;
         self.v6_needs_ct = rules
             .iter()

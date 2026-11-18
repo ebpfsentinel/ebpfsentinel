@@ -19,25 +19,26 @@ use aya_ebpf::{
 };
 use ebpf_common::{
     conntrack::{
-        CT_SRC_COUNTER_MAX, CT_STATE_ESTABLISHED, CT_STATE_NEW, CT_STATE_RELATED, ConnTrackConfig,
-        IPS_CONFIRMED, IPS_DYING, IPS_EXPECTED, IPS_SEEN_REPLY, NfConnOffsets, OVERLOAD_SET_ID,
+        CT_LIMIT_HOLD_MAX, CT_SRC_COUNTER_MAX, CT_STATE_ESTABLISHED, CT_STATE_NEW,
+        CT_STATE_RELATED, ConnTrackConfig, IPS_CONFIRMED, IPS_DYING, IPS_EXPECTED, IPS_SEEN_REPLY,
+        LIMIT_HOLD_NO_RULE, LimitHold, LimitHoldKey, NfConnOffsets, OVERLOAD_SET_ID,
         SRC_COUNTER_FLAG_OVERLOADED, SrcCounterKey, SrcStateCounter,
     },
     event::{EVENT_TYPE_FIREWALL, FLAG_IPV6, FLAG_VLAN, PacketEvent},
     firewall::{
         ACTION_DROP, ACTION_LOG, ACTION_PASS, ACTION_REJECT, CT_MATCH_ESTABLISHED,
         CT_MATCH_INVALID, CT_MATCH_NEW, CT_MATCH_RELATED, DEFAULT_POLICY_DROP, DSCP_MARK_NONE,
-        FIREWALL_RULE_BANKS, bank_base, generation_bank, generation_count,
-        FW_EMPTY_HASH_5TUPLE, FW_EMPTY_HASH_PORT, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_LPM_V4,
-        FW_EMPTY_LPM_V6, FW_EMPTY_SRC_LIMITS, FW_EMPTY_TENANTS, FW_EMPTY_ZONES, FirewallRuleEntry,
-        FirewallRuleEntryV6, FwHashKey5Tuple, FwHashKeyPort, FwHashValue, ICMP_WILDCARD,
-        IpSetKeyV4, LpmValue, MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT, MATCH_DST_SET,
-        MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT, MATCH_SRC_SET, MATCH2_DSCP, MATCH2_DST_MAC,
-        MATCH2_ICMP_CODE, MATCH2_ICMP_TYPE, MATCH2_NEGATE_DST, MATCH2_NEGATE_SRC, MATCH2_SRC_MAC,
-        MATCH2_TCP_FLAGS, MAX_FIREWALL_RULES, MAX_FW_HASH_5TUPLE, MAX_FW_HASH_PORT,
+        FIREWALL_RULE_BANKS, FW_EMPTY_HASH_5TUPLE, FW_EMPTY_HASH_PORT, FW_EMPTY_IFACE_GROUPS,
+        FW_EMPTY_LPM_V4, FW_EMPTY_LPM_V6, FW_EMPTY_SRC_LIMITS, FW_EMPTY_TENANTS, FW_EMPTY_ZONES,
+        FirewallRuleEntry, FirewallRuleEntryV6, FwHashKey5Tuple, FwHashKeyPort, FwHashValue,
+        ICMP_WILDCARD, IpSetKeyV4, LpmValue, MATCH_CT_STATE, MATCH_DST_IP, MATCH_DST_PORT,
+        MATCH_DST_SET, MATCH_PROTO, MATCH_SRC_IP, MATCH_SRC_PORT, MATCH_SRC_SET, MATCH2_DSCP,
+        MATCH2_DST_MAC, MATCH2_ICMP_CODE, MATCH2_ICMP_TYPE, MATCH2_NEGATE_DST, MATCH2_NEGATE_SRC,
+        MATCH2_SRC_MAC, MATCH2_TCP_FLAGS, MAX_FIREWALL_RULES, MAX_FW_HASH_5TUPLE, MAX_FW_HASH_PORT,
         MAX_IPSET_ENTRIES_V4, MAX_LPM_RULES, MAX_SHADOW_FLOWS, MAX_SHADOW_RULES, MAX_SHADOW_SAMPLE,
-        PacketCtx, SHADOW_FAMILY_V4, SHADOW_FAMILY_V6, SHADOW_STAT_SLOTS, SHADOW_VERDICT_ALLOW,
-        SHADOW_VERDICT_DENY, ShadowFlowKey, ShadowMeta, ShadowRuleStats, ShadowSample, VLAN_ANY,
+        PacketCtx, RULE_STATE_SLOTS, SHADOW_FAMILY_V4, SHADOW_FAMILY_V6, SHADOW_STAT_SLOTS,
+        SHADOW_VERDICT_ALLOW, SHADOW_VERDICT_DENY, ShadowFlowKey, ShadowMeta, ShadowRuleStats,
+        ShadowSample, VLAN_ANY, bank_base, generation_bank, generation_count, rule_state_slot,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
     zone::{
@@ -346,20 +347,40 @@ static FW_IPSET_V4: HashMap<IpSetKeyV4, u8, { MAX_IPSET_ENTRIES_V4 as usize }> =
 
 /// Per-source state counter, keyed by the whole source address of either
 /// family. Tracks concurrent connections and connection rate for overload
-/// protection.
+/// protection. Least recently seen source evicted when full, so a full table
+/// costs the oldest idle source its count rather than letting every new
+/// source through uncounted.
 #[btf_map]
-static CT_SRC_COUNTERS: HashMap<SrcCounterKey, SrcStateCounter, { CT_SRC_COUNTER_MAX as usize }> =
-    HashMap::new();
+static CT_SRC_COUNTERS: LruHashMap<
+    SrcCounterKey,
+    SrcStateCounter,
+    { CT_SRC_COUNTER_MAX as usize },
+> = LruHashMap::new();
 
 /// Global conntrack configuration (single element). Read by XDP for limit thresholds.
 /// Pinned at /sys/fs/bpf/ebpfsentinel/ct_config.
 #[btf_map]
 static CT_CONFIG: Array<ConnTrackConfig, 1> = Array::new();
 
-/// Per-rule state counter. Index = rule index in FIREWALL_RULES array.
-/// Tracks how many active connections were admitted by each rule.
+/// Per-rule state counter, indexed by `rule_state_slot`: family, bank and
+/// array slot. Tracks how many open connections each rule admitted.
 #[btf_map]
-static FW_RULE_STATE_COUNT: Array<u32, { MAX_FIREWALL_RULES as usize }> = Array::new();
+static FW_RULE_STATE_COUNT: Array<u32, { RULE_STATE_SLOTS as usize }> = Array::new();
+
+/// Every flow a connection ceiling counted, by original tuple. Userspace
+/// drops a hold once the kernel conntrack table no longer has the connection
+/// open and recomputes `CT_SRC_COUNTERS` and `FW_RULE_STATE_COUNT` from the
+/// holds left, so a ceiling counts what is open rather than what was ever
+/// opened. LRU: a table under pressure forgets its oldest admission, which
+/// undercounts rather than refusing a source forever.
+#[btf_map]
+static CT_LIMIT_HOLDS: LruHashMap<LimitHoldKey, LimitHold, { CT_LIMIT_HOLD_MAX as usize }> =
+    LruHashMap::new();
+
+/// Per-CPU scratch the hold key is built in, so the 40-byte key never sits
+/// on a stack the IPv6 path has already spent most of.
+#[btf_map]
+static LIMIT_HOLD_SCRATCH: PerCpuArray<LimitHoldKey, 1> = PerCpuArray::new();
 
 // ── Metric indices ──────────────────────────────────────────────────
 
@@ -1546,7 +1567,7 @@ fn process_firewall_v4(
         {
             if !check_connection_limits(
                 SrcCounterKey::from_v4(src_ip),
-                matched_rule_idx,
+                rule_slot(false, base, matched_rule_idx),
                 matched_max_states,
                 traced(ctx_raw),
             ) {
@@ -2059,9 +2080,23 @@ fn check_connection_limits(
         Some(c) => c,
         None => return true, // No config → no limits
     };
+    let src_limited = cfg.max_src_states > 0 || cfg.max_src_conn_rate > 0;
+    let rule_limited = max_rule_states > 0 && rule_idx >= 0;
+    if !src_limited && !rule_limited {
+        return true;
+    }
+
+    // A flow already counted is not counted again: the ceiling is on open
+    // connections, and a second packet of one connection is not a second
+    // connection, whatever conntrack verdict it arrived with.
+    let hold_key = fill_limit_hold_key();
+    let held = match hold_key {
+        Some(k) => unsafe { CT_LIMIT_HOLDS.get(&*k) }.is_some(),
+        None => false,
+    };
 
     // Check per-source limits.
-    if cfg.max_src_states > 0 || cfg.max_src_conn_rate > 0 {
+    if src_limited {
         if let Some(counter) = unsafe { CT_SRC_COUNTERS.get(&src_key) } {
             // Already overloaded and the mark still stands → DROP immediately.
             // A mark that has run out is cleared on the way through, below,
@@ -2070,6 +2105,9 @@ fn check_connection_limits(
             let now = unsafe { bpf_ktime_get_boot_ns() };
             if counter.is_overloaded(cfg.overload_ttl_secs, now) {
                 return false;
+            }
+            if held {
+                return true;
             }
             // Check concurrent connection limit.
             if cfg.max_src_states > 0 && counter.conn_count >= cfg.max_src_states {
@@ -2158,13 +2196,19 @@ fn check_connection_limits(
                 overloaded_at_ns: 0,
             }
         };
+        if held {
+            return true;
+        }
         if !traced {
             let _ = CT_SRC_COUNTERS.insert(&src_key, &new_counter, 0);
         }
+    } else if held {
+        return true;
     }
 
     // Check per-rule state limit.
-    if max_rule_states > 0 && rule_idx >= 0 {
+    let mut counted_rule = LIMIT_HOLD_NO_RULE;
+    if rule_limited {
         if let Some(count_ptr) = FW_RULE_STATE_COUNT.get_ptr_mut(rule_idx as u32) {
             let current = unsafe { *count_ptr };
             if current >= max_rule_states as u32 {
@@ -2174,11 +2218,49 @@ fn check_connection_limits(
                 unsafe {
                     *count_ptr = current + 1;
                 }
+                counted_rule = rule_idx;
             }
         }
     }
 
+    if !traced && let Some(k) = hold_key {
+        let hold = LimitHold {
+            rule_idx: counted_rule,
+            counted_src: src_limited as u8,
+            _pad: [0; 3],
+            admitted_ns: unsafe { bpf_ktime_get_boot_ns() },
+        };
+        let _ = CT_LIMIT_HOLDS.insert(unsafe { &*k }, &hold, 0);
+    }
+
     true
+}
+
+/// The per-rule counter slot of a matched array rule, or -1 for no match.
+#[inline(always)]
+fn rule_slot(v6: bool, base: u32, matched_rule_idx: i32) -> i32 {
+    if matched_rule_idx < 0 {
+        return -1;
+    }
+    rule_state_slot(v6, base, matched_rule_idx as u32) as i32
+}
+
+/// Build the admitted-flow key of the packet being judged in its per-CPU
+/// scratch slot, from the tuple both address families leave in `PKT_CTX`.
+#[inline(always)]
+fn fill_limit_hold_key() -> Option<*const LimitHoldKey> {
+    let pkt = PKT_CTX.get(0)?;
+    let k = LIMIT_HOLD_SCRATCH.get_ptr_mut(0)?;
+    unsafe {
+        (*k).src = pkt.src_addr;
+        (*k).dst = pkt.dst_addr;
+        (*k).src_port = pkt.src_port;
+        (*k).dst_port = pkt.dst_port;
+        (*k).protocol = pkt.protocol;
+        (*k).family = if pkt.flags & FLAG_IPV6 != 0 { 6 } else { 4 };
+        (*k)._pad = [0; 2];
+    }
+    Some(k as *const LimitHoldKey)
 }
 
 /// Convert a conntrack state constant to the corresponding CT_MATCH_* bitmask.
@@ -2554,7 +2636,7 @@ fn process_firewall_v6(
         {
             if !check_connection_limits(
                 SrcCounterKey::from_v6(src_addr),
-                matched_rule_idx,
+                rule_slot(true, base, matched_rule_idx),
                 matched_max_states,
                 traced(ctx_raw),
             ) {

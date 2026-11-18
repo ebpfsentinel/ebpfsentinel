@@ -316,6 +316,15 @@ impl FirewallConfig {
             .iter()
             .any(|rule| matches!(parse_action(&rule.action), Ok(FirewallAction::Reject)))
     }
+
+    /// Whether a configured rule caps how many connections it admits, which
+    /// is what makes the datapath record each flow it lets through.
+    #[must_use]
+    pub fn caps_connections(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|rule| rule.max_states.is_some_and(|n| n > 0))
+    }
 }
 
 impl Default for FirewallConfig {

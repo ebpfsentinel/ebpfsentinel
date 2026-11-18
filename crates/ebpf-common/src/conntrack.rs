@@ -357,6 +357,55 @@ pub const SRC_COUNTER_FLAG_OVERLOADED: u8 = 0x01;
 /// Reserved IP set ID for the overload blacklist.
 pub const OVERLOAD_SET_ID: u8 = 255;
 
+// ── Admitted-flow holds ──────────────────────────────────────────────
+
+/// Default capacity of the admitted-flow table, overridden at load from
+/// `conntrack.max_src_states`.
+pub const CT_LIMIT_HOLD_MAX: u32 = 262_144;
+
+/// No rule admitted the flow through a per-rule ceiling.
+pub const LIMIT_HOLD_NO_RULE: i32 = -1;
+
+/// One flow a connection ceiling admitted, keyed by its original tuple.
+///
+/// A ceiling counts connections that are open, so every admission it counts
+/// must be uncounted when the connection ends. The datapath never sees the
+/// end of a connection, so it records here which flow it counted and against
+/// what; userspace reads the kernel conntrack table, drops the holds whose
+/// connection is gone and recomputes the counters from what is left. A flow
+/// already held is never counted twice, which is also what keeps a packet
+/// that reaches the check without a conntrack verdict from counting again.
+///
+/// Addresses are the words the datapath reads off the packet, host order; an
+/// IPv4 flow is held with the address in the first word and the other three
+/// zero, ports in host order, zero for a protocol without ports.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LimitHoldKey {
+    pub src: [u32; 4],
+    pub dst: [u32; 4],
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub protocol: u8,
+    /// 4 or 6.
+    pub family: u8,
+    pub _pad: [u8; 2],
+}
+
+/// What one admitted flow was counted against.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LimitHold {
+    /// Index of the rule whose per-rule ceiling counted the flow, or
+    /// [`LIMIT_HOLD_NO_RULE`].
+    pub rule_idx: i32,
+    /// 1 when the flow was counted against its source.
+    pub counted_src: u8,
+    pub _pad: [u8; 3],
+    /// When the flow was admitted (`bpf_ktime_get_boot_ns`).
+    pub admitted_ns: u64,
+}
+
 // ── Key normalization helper ─────────────────────────────────────────
 
 /// Normalize a 5-tuple so the lower IP:port is always "src".
@@ -453,6 +502,10 @@ unsafe impl aya::Pod for ConnTrackConfig {}
 unsafe impl aya::Pod for SrcStateCounter {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for SrcCounterKey {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for LimitHoldKey {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for LimitHold {}
 
 // ── Tests ────────────────────────────────────────────────────────────
 
@@ -466,6 +519,10 @@ mod tests {
     #[test]
     fn src_counter_key_is_sixteen_bytes() {
         assert_eq!(mem::size_of::<SrcCounterKey>(), 16);
+        assert_eq!(mem::size_of::<LimitHoldKey>(), 40);
+        assert_eq!(mem::align_of::<LimitHoldKey>(), 4);
+        assert_eq!(mem::size_of::<LimitHold>(), 16);
+        assert_eq!(mem::offset_of!(LimitHold, admitted_ns), 8);
         assert_eq!(mem::align_of::<SrcCounterKey>(), 4);
     }
 
