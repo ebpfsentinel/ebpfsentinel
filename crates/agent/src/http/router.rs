@@ -1754,6 +1754,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_write_carrying_a_key_it_does_not_know_changes_nothing() {
+        let (router, _tmp) = triage_router(&["a1"]);
+        assert_eq!(
+            status_of(
+                &router,
+                "POST",
+                "/api/v1/firewall/rules",
+                r#"{"id":"fw-1","priority":10,"action":"deny","dstport":"22"}"#
+            )
+            .await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            status_of(
+                &router,
+                "PATCH",
+                "/api/v1/alerts/a1/triage",
+                r#"{"status":"resolved","asignee":"bob"}"#
+            )
+            .await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let alert = json_of(&router, "GET", "/api/v1/alerts/a1", "").await;
+        assert_eq!(alert["status"], "open");
+    }
+
+    #[tokio::test]
     async fn the_alert_list_filters_on_min_severity_and_refuses_what_it_cannot_read() {
         let (router, _tmp) = triage_router(&["a1"]);
         let high = json_of(&router, "GET", "/api/v1/alerts?min_severity=high", "").await;
