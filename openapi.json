@@ -362,6 +362,16 @@
               }
             }
           },
+          "400": {
+            "description": "Unknown parameter, or a severity or status it cannot read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Authentication required",
             "content": {
@@ -10181,7 +10191,8 @@
             "description": "Optional TTL in seconds. Defaults to - and is capped at - the policy's\nmaximum blacklist duration.",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "AgentIdentityResponse": {
         "type": "object",
@@ -10901,7 +10912,8 @@
           "domain": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "BlocklistAddResponse": {
         "type": "object",
@@ -11033,7 +11045,8 @@
               "null"
             ]
           }
-        }
+        },
+        "additionalProperties": false
       },
       "BulkTriageResponse": {
         "type": "object",
@@ -11259,7 +11272,8 @@
             "type": "string",
             "description": "A YAML document rooted at the section's own key, exactly as the read\nroute renders it, so the text an operator edited is the text that\ncomes back."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "ConnTrackStatusResponse": {
         "type": "object",
@@ -11660,7 +11674,8 @@
           "mitigation_action": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateGatewayRequest": {
         "type": "object",
@@ -11701,7 +11716,8 @@
             "description": "Routing weight; maps to failover priority (lower = preferred).",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateL7RuleRequest": {
         "type": "object",
@@ -11811,7 +11827,8 @@
               "null"
             ]
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateLbBackendRequest": {
         "type": "object",
@@ -11843,7 +11860,8 @@
             "format": "int32",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateLbServiceRequest": {
         "type": "object",
@@ -11891,7 +11909,8 @@
           "protocol": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateNptV6RuleRequest": {
         "type": "object",
@@ -11920,7 +11939,8 @@
             "format": "int32",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateQosClassifierRequest": {
         "type": "object",
@@ -11950,7 +11970,8 @@
           "queue_id": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateQosMatchRuleRequest": {
         "type": "object",
@@ -11996,7 +12017,8 @@
             "description": "802.1Q VLAN ID: omit for any VLAN, 0 for untagged only, 1-4094 exact.",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateQosPipeRequest": {
         "type": "object",
@@ -12035,7 +12057,8 @@
             "description": "Bandwidth limit in bits per second; `0` leaves the pipe unlimited.",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateQosQueueRequest": {
         "type": "object",
@@ -12056,7 +12079,8 @@
             "description": "Relative share of the pipe when it is saturated, at least 1.",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateRateLimitRuleRequest": {
         "type": "object",
@@ -12093,7 +12117,8 @@
             "type": "string",
             "description": "Source host to limit, as a bare address or a `/32`."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateResponseRequest": {
         "type": "object",
@@ -12124,7 +12149,8 @@
             "type": "string",
             "description": "TTL duration string (e.g. \"1h\", \"30m\", \"86400s\")."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateRuleRequest": {
         "type": "object",
@@ -12217,7 +12243,8 @@
             "description": "Optional 802.1Q VLAN ID filter.",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateZonePolicyRequest": {
         "type": "object",
@@ -12239,7 +12266,8 @@
             "type": "string",
             "description": "Source zone identifier."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateZoneRequest": {
         "type": "object",
@@ -12268,7 +12296,8 @@
             "type": "string",
             "description": "Zone name; used as the zone identifier."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CryptoPostureResponse": {
         "type": "object",
@@ -13185,7 +13214,8 @@
             },
             "description": "IP addresses/CIDRs to load into the alias."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "ExternalAliasContentResponse": {
         "type": "object",
@@ -15420,7 +15450,8 @@
             },
             "description": "VIPs this node owns. Must be non-empty unless role is disabled,\nand ignored when it is."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "LbVipBgpResponse": {
         "type": "object",
@@ -15492,7 +15523,8 @@
             "description": "How long this node speaks for its VIPs unless renewed, in seconds,\nat most 300. Zero releases the role at once.",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "LbVipRequest": {
         "type": "object",
@@ -15507,7 +15539,8 @@
           "name": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "LbVipResponse": {
         "type": "object",
@@ -16927,7 +16960,8 @@
             "type": "string",
             "description": "One or more `networking.k8s.io/v1` `NetworkPolicy` manifests, as a\nYAML stream. A `List` is read item by item. A policy with the\nnamespace and name of one in force replaces it; any other is added."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "NetpolReplayResponse": {
         "type": "object",
@@ -17427,7 +17461,8 @@
             "type": "string",
             "description": "`alert` or `block`."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "PeerWorkloadResponse": {
         "type": "object",
@@ -18922,7 +18957,8 @@
             ],
             "description": "Feed to refresh. Accepted for forward compatibility; the fetcher\ncurrently refreshes every enabled feed in a single cycle."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "RefreshResponse": {
         "type": "object",
@@ -20000,7 +20036,8 @@
             "description": "Snap length: max bytes per packet (default 1500).",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "StartLearningRequest": {
         "type": "object",
@@ -20019,7 +20056,8 @@
             "$ref": "#/components/schemas/ScopeBody",
             "description": "What to watch. Omitted means the whole node."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "StopRequest": {
         "type": "object",
@@ -20585,7 +20623,8 @@
             ],
             "description": "A pod as `namespace/name`, whose address becomes the source."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "TraceResponse": {
         "type": "object",
@@ -20756,7 +20795,8 @@
             ],
             "description": "\"open\", \"acknowledged\", \"investigating\" or \"resolved\"."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "TriageResponse": {
         "type": "object",
@@ -21337,7 +21377,8 @@
               "null"
             ]
           }
-        }
+        },
+        "additionalProperties": false
       },
       "WriteRefusalReport": {
         "type": "object",
