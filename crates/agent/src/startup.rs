@@ -502,6 +502,48 @@ pub(crate) fn cgroup_shaping_service(
     Ok(Arc::new(service))
 }
 
+/// Refresh the aliases read from the `GeoIP` database (country, ASN and
+/// interface groups) every `geoip.refresh_interval_hours`, and give the
+/// firewall the sets they now hold. Nothing runs when `GeoIP` is off or the
+/// period is 0.
+pub fn spawn_database_alias_refresh(
+    alias_svc: Arc<RwLock<AliasAppService>>,
+    firewall_svc: Arc<RwLock<application::firewall_service_impl::FirewallAppService>>,
+    geoip: Option<&infrastructure::config::GeoIpConfig>,
+    cancel: CancellationToken,
+) {
+    let hours = geoip
+        .filter(|c| c.enabled)
+        .map_or(0, |c| c.refresh_interval_hours);
+    if hours == 0 {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(hours * 3600));
+        interval.tick().await; // skip first (already done at startup)
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => break,
+                _ = interval.tick() => {}
+            }
+            // URL tables and DNS names keep their own interval.
+            match alias_svc.write().await.refresh_database_aliases() {
+                Ok(n) => info!(count = n, "periodic GeoIP alias refresh completed"),
+                Err(e) => warn!("periodic GeoIP alias refresh failed: {e}"),
+            }
+            // A refresh can give an alias its first content, and with it the
+            // IP set the firewall rules naming it match against.
+            let bindings =
+                application::firewall_aliases::collect_bindings(&*alias_svc.read().await);
+            firewall_svc.write().await.set_alias_bindings(bindings);
+        }
+    });
+    info!(
+        interval_hours = hours,
+        "periodic database alias refresh task spawned"
+    );
+}
+
 /// Refresh each URL table and DNS-name alias on the interval it carries.
 ///
 /// One schedule holds every alias's next due time and the task sleeps until
@@ -509,7 +551,7 @@ pub(crate) fn cgroup_shaping_service(
 /// is fetched without waiting out somebody else's interval. Resolution runs
 /// outside the service lock: a slow server delays its own alias, not the
 /// firewall reading the others.
-fn spawn_timed_alias_refresh(
+pub fn spawn_timed_alias_refresh(
     alias_svc: Arc<RwLock<AliasAppService>>,
     firewall_svc: Arc<RwLock<application::firewall_service_impl::FirewallAppService>>,
     cancel: CancellationToken,
@@ -5121,49 +5163,13 @@ pub async fn run(
         cancel_token.clone(),
     );
 
-    // ── 11f. Spawn periodic GeoIP and BGP alias refresh ──
-    {
-        let refresh_interval_secs = config
-            .geoip
-            .as_ref()
-            .filter(|c| c.enabled)
-            .map_or(0, |c| c.refresh_interval_hours * 3600);
-
-        if refresh_interval_secs > 0 {
-            let alias_svc_clone = Arc::clone(&alias_svc);
-            let fw_svc_clone = Arc::clone(&firewall_svc);
-            let refresh_cancel = cancel_token.clone();
-            tokio::spawn(async move {
-                let mut interval =
-                    tokio::time::interval(Duration::from_secs(refresh_interval_secs));
-                interval.tick().await; // skip first (already done at startup)
-                loop {
-                    tokio::select! {
-                        () = refresh_cancel.cancelled() => break,
-                        _ = interval.tick() => {}
-                    }
-                    // URL tables and DNS names keep their own interval.
-                    match alias_svc_clone.write().await.refresh_database_aliases() {
-                        Ok(n) => info!(count = n, "periodic GeoIP alias refresh completed"),
-                        Err(e) => warn!("periodic GeoIP alias refresh failed: {e}"),
-                    }
-                    // A refresh can give an alias its first content, and with
-                    // it the IP set the firewall rules naming it match against.
-                    let bindings = application::firewall_aliases::collect_bindings(
-                        &*alias_svc_clone.read().await,
-                    );
-                    fw_svc_clone.write().await.set_alias_bindings(bindings);
-                }
-            });
-            info!(
-                interval_hours = config
-                    .geoip
-                    .as_ref()
-                    .map_or(0, |c| c.refresh_interval_hours),
-                "periodic dynamic alias refresh task spawned"
-            );
-        }
-    }
+    // ── 11f. GeoIP, ASN and interface aliases, on the database period ──
+    spawn_database_alias_refresh(
+        Arc::clone(&alias_svc),
+        Arc::clone(&firewall_svc),
+        config.geoip.as_ref(),
+        cancel_token.clone(),
+    );
 
     // The rules are in the new maps: the links adopted from the previous run
     // move onto this run's programs, and the ones nothing claimed come off.
