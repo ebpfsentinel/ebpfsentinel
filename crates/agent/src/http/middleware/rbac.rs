@@ -33,12 +33,6 @@ pub enum WriteRole {
 pub const WRITE_ROLES: &[(&str, &str, WriteRole)] = &[
     ("POST", "/api/v1/firewall/rules", WriteRole::Operator),
     ("DELETE", "/api/v1/firewall/rules/{id}", WriteRole::Operator),
-    ("POST", "/api/v1/firewall/l7-rules", WriteRole::Operator),
-    (
-        "DELETE",
-        "/api/v1/firewall/l7-rules/{id}",
-        WriteRole::Operator,
-    ),
     ("POST", "/api/v1/learning/sessions", WriteRole::Operator),
     (
         "POST",
@@ -68,6 +62,9 @@ pub const WRITE_ROLES: &[(&str, &str, WriteRole)] = &[
         "/api/v1/domains/blocklist/{domain}",
         WriteRole::Operator,
     ),
+    // An L7 rule carries no namespace and holds every flow the node parses.
+    ("POST", "/api/v1/firewall/l7-rules", WriteRole::Admin),
+    ("DELETE", "/api/v1/firewall/l7-rules/{id}", WriteRole::Admin),
     ("POST", "/api/v1/ips/blacklist", WriteRole::Admin),
     ("DELETE", "/api/v1/ips/blacklist/{ip}", WriteRole::Admin),
     ("POST", "/api/v1/ratelimit/rules", WriteRole::Admin),

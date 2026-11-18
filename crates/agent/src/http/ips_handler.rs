@@ -168,8 +168,11 @@ pub async fn patch_ips_rule_mode(
         message: format!("invalid mode: {e}"),
     })?;
 
-    // Capture before snapshot for audit trail
+    // Held until the kernel array is rebuilt, so two mode changes are applied
+    // and installed in the order they were answered.
     let group_bits = state.config.read().await.interface_group_bitmasks();
+    let _serial = state.swap_writes.lock().await;
+    // Capture before snapshot for audit trail
     let before_json = {
         let svc = state.ips_service.load();
         svc.list_rules()

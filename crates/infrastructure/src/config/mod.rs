@@ -481,8 +481,10 @@ impl AgentConfig {
         Ok(())
     }
 
-    /// Return a copy of the config with sensitive values masked.
-    /// Masks: API key secrets, TLS key paths, JWT key paths.
+    /// Return a copy of the config with sensitive values masked: API keys and
+    /// their salt, the TLS key path, the SMTP and CrowdSec passwords, the
+    /// CrowdSec bouncer key, feed, webhook and OTLP header values, the path and
+    /// query of every webhook URL, and the `GeoIP` licence key.
     #[must_use]
     pub fn sanitized(&self) -> Self {
         let mut sanitized = self.clone();
@@ -518,11 +520,24 @@ impl AgentConfig {
         // Mask webhook header values - they commonly carry an `Authorization`
         // bearer token or API key. Keep the header names so the sanitized view
         // still shows which headers are set, but never the secret values.
+        // The URL keeps its host only: a Slack or Teams incoming webhook has no
+        // header at all, its path is the credential.
         for route in &mut sanitized.alerting.routes {
             if let Some(ref mut headers) = route.webhook_headers {
                 for value in headers.values_mut() {
                     *value = "***".to_string();
                 }
+            }
+            if let Some(ref mut url) = route.webhook_url {
+                *url = url_host_only(url);
+            }
+        }
+        // The OTLP headers are how a hosted collector is authenticated.
+        if let Some(ref mut otlp) = sanitized.alerting.otlp
+            && let Some(ref mut headers) = otlp.headers
+        {
+            for value in headers.values_mut() {
+                *value = "***".to_string();
             }
         }
         // Mask GeoIP license key
@@ -2676,6 +2691,24 @@ impl std::str::FromStr for LogFormat {
             "text" | "pretty" => Ok(Self::Text),
             _ => Err(format!("invalid log format '{s}': expected json|text")),
         }
+    }
+}
+
+/// `scheme://host/***`: what a URL reaches, without the path, query or user
+/// information that may carry its credential.
+fn url_host_only(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "***".to_string();
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    if end == rest.len() && host.len() == authority.len() {
+        url.to_string()
+    } else {
+        format!("{scheme}://{host}/***")
     }
 }
 
@@ -4911,10 +4944,10 @@ alerting:
             Some("***")
         );
         assert_eq!(headers.get("X-Api-Key").map(String::as_str), Some("***"));
-        // URL is not a secret and stays visible.
+        // The host stays visible; the path may be the credential.
         assert_eq!(
             sanitized.alerting.routes[0].webhook_url.as_deref(),
-            Some("https://hooks.example.com/alert")
+            Some("https://hooks.example.com/***")
         );
     }
 
@@ -4990,6 +5023,235 @@ threatintel:
 
         let bad = yaml.replace("http://127.0.0.1:8080", "ftp://127.0.0.1");
         assert!(AgentConfig::from_yaml(&bad).is_err());
+    }
+
+    /// Every value the sanitized view must hide, set to a sentinel the
+    /// serialized view is then searched for.
+    const EVERY_SECRET_SET: &str = r#"
+agent:
+  interfaces: [eth0]
+  tls:
+    enabled: true
+    cert_path: /etc/ebpfsentinel/tls.crt
+    key_path: /etc/ebpfsentinel/SENTINEL-tls-key-path.pem
+auth:
+  enabled: true
+  api_key_salt: SENTINEL-salt
+  api_keys:
+    - name: svc
+      key: SENTINEL-api-key
+      role: admin
+alerting:
+  smtp:
+    host: smtp.example.com
+    from_address: alerts@example.com
+    username: admin
+    password: SENTINEL-smtp-password
+  otlp:
+    endpoint: "https://collector.example.com:4318"
+    protocol: http
+    headers:
+      Authorization: "Bearer SENTINEL-otlp-header"
+  routes:
+    - name: slack
+      destination: webhook
+      min_severity: high
+      webhook_url: "https://hooks.slack.com/services/T000/B000/SENTINEL-slack-path"
+    - name: teams
+      destination: webhook
+      min_severity: high
+      webhook_url: "https://user:SENTINEL-userinfo@example.webhook.office.com/hook?sig=SENTINEL-teams-query"
+      webhook_headers:
+        X-Api-Key: SENTINEL-webhook-header
+threatintel:
+  enabled: true
+  feeds:
+    - id: feed-1
+      name: test-feed
+      url: "https://example.com/feed.txt"
+      auth_header: "X-API-KEY: SENTINEL-feed-header"
+  crowdsec:
+    enabled: true
+    lapi_url: "http://127.0.0.1:8080"
+    bouncer_key: SENTINEL-bouncer-key
+    report:
+      enabled: true
+      machine_id: agent-1
+      password: SENTINEL-crowdsec-password
+geoip:
+  enabled: true
+  source:
+    mode: maxmind_account
+    account_id: "1"
+    license_key: SENTINEL-geoip-licence
+"#;
+
+    #[test]
+    fn the_config_view_shows_no_secret_it_was_given() {
+        let config = AgentConfig::from_yaml(EVERY_SECRET_SET).unwrap();
+        let shown = serde_json::to_string(&config.sanitized()).unwrap();
+        assert!(!shown.contains("SENTINEL"), "{shown}");
+        // What a reader needs to recognise a route survives.
+        assert!(shown.contains("https://hooks.slack.com/***"));
+        assert!(shown.contains("https://example.webhook.office.com/***"));
+        assert!(shown.contains("\"Authorization\""));
+    }
+
+    /// Every configuration field named like a secret is either masked by
+    /// `sanitized` and set in `EVERY_SECRET_SET`, or written down here as not
+    /// a secret with the reason. A field added under such a name fails this
+    /// test until someone has decided which.
+    #[test]
+    #[allow(clippy::too_many_lines)] // the two tables are the test
+    fn every_field_named_like_a_secret_is_masked_or_explained() {
+        const MASKED: &[&str] = &[
+            "alerting.rs:headers",
+            "alerting.rs:password",
+            "alerting.rs:webhook_url",
+            "alerting.rs:webhook_headers",
+            "auth.rs:api_key_salt",
+            "auth.rs:key",
+            "mod.rs:key_path",
+            "threatintel.rs:bouncer_key",
+            "threatintel.rs:password",
+            "threatintel.rs:auth_header",
+            "geoip.rs:license_key",
+        ];
+        const NOT_SECRET: &[(&str, &str)] = &[
+            (
+                "auth.rs:bootstrap_key_path",
+                "where the bootstrap key file is, readable by root alone",
+            ),
+            (
+                "auth.rs:public_key_path",
+                "a public key verifies, it grants nothing",
+            ),
+            (
+                "auth.rs:ml_dsa_public_key_path",
+                "a public key verifies, it grants nothing",
+            ),
+            (
+                "loadbalancer.rs:password_file",
+                "the path of the file, never its content",
+            ),
+        ];
+        const SOURCES: &[(&str, &str)] = &[
+            ("alerting.rs", include_str!("alerting.rs")),
+            ("alias.rs", include_str!("alias.rs")),
+            ("attribution.rs", include_str!("attribution.rs")),
+            ("audit.rs", include_str!("audit.rs")),
+            ("auth.rs", include_str!("auth.rs")),
+            ("capture.rs", include_str!("capture.rs")),
+            ("common.rs", include_str!("common.rs")),
+            ("conntrack.rs", include_str!("conntrack.rs")),
+            ("container.rs", include_str!("container.rs")),
+            ("ddos.rs", include_str!("ddos.rs")),
+            ("dlp.rs", include_str!("dlp.rs")),
+            ("dns.rs", include_str!("dns.rs")),
+            ("file_watch.rs", include_str!("file_watch.rs")),
+            ("firewall.rs", include_str!("firewall.rs")),
+            ("flow_export.rs", include_str!("flow_export.rs")),
+            ("geoip.rs", include_str!("geoip.rs")),
+            ("hidden_checks.rs", include_str!("hidden_checks.rs")),
+            ("host_rules.rs", include_str!("host_rules.rs")),
+            ("ids.rs", include_str!("ids.rs")),
+            ("ips.rs", include_str!("ips.rs")),
+            ("kernel_drops.rs", include_str!("kernel_drops.rs")),
+            ("l7.rs", include_str!("l7.rs")),
+            ("learning.rs", include_str!("learning.rs")),
+            ("loadbalancer.rs", include_str!("loadbalancer.rs")),
+            ("management.rs", include_str!("management.rs")),
+            ("mod.rs", include_str!("mod.rs")),
+            ("nat.rs", include_str!("nat.rs")),
+            ("network_inventory.rs", include_str!("network_inventory.rs")),
+            ("package_inventory.rs", include_str!("package_inventory.rs")),
+            ("process_table.rs", include_str!("process_table.rs")),
+            ("profile.rs", include_str!("profile.rs")),
+            ("provenance.rs", include_str!("provenance.rs")),
+            ("qos.rs", include_str!("qos.rs")),
+            ("ratelimit.rs", include_str!("ratelimit.rs")),
+            ("response.rs", include_str!("response.rs")),
+            ("routing.rs", include_str!("routing.rs")),
+            ("share_writes.rs", include_str!("share_writes.rs")),
+            ("tcp_health.rs", include_str!("tcp_health.rs")),
+            ("telemetry.rs", include_str!("telemetry.rs")),
+            ("threatintel.rs", include_str!("threatintel.rs")),
+            ("zone.rs", include_str!("zone.rs")),
+        ];
+        const SECRET_WORDS: &[&str] = &[
+            "password",
+            "secret",
+            "token",
+            "key",
+            "auth",
+            "header",
+            "salt",
+            "credential",
+            "webhook_url",
+            "license",
+            "licence",
+            "cookie",
+            "bearer",
+        ];
+        let mut found = Vec::new();
+        for (file, source) in SOURCES {
+            for line in source.lines() {
+                let line = line.trim_start();
+                let line = line
+                    .strip_prefix("pub(crate) ")
+                    .or_else(|| line.strip_prefix("pub "))
+                    .unwrap_or(line);
+                let Some((name, ty)) = line.split_once(':') else {
+                    continue;
+                };
+                let is_ident =
+                    !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '_');
+                let ty = ty.trim();
+                let holds_text = ty.trim_end_matches(',').ends_with("String")
+                    || ty.contains("String>")
+                    || ty.contains("HashMap<String, String>");
+                if is_ident
+                    && holds_text
+                    && ty.ends_with(',')
+                    && SECRET_WORDS.iter().any(|w| name.contains(w))
+                {
+                    found.push(format!("{file}:{name}"));
+                }
+            }
+        }
+        found.sort();
+        found.dedup();
+        let unexplained: Vec<_> = found
+            .iter()
+            .filter(|f| !MASKED.contains(&f.as_str()) && !NOT_SECRET.iter().any(|(n, _)| n == f))
+            .collect();
+        assert!(
+            unexplained.is_empty(),
+            "named like a secret, neither masked nor explained: {unexplained:?}"
+        );
+        for listed in MASKED.iter().chain(NOT_SECRET.iter().map(|(n, _)| n)) {
+            assert!(
+                found.iter().any(|f| f == listed),
+                "{listed} is listed but no longer declared"
+            );
+        }
+    }
+
+    #[test]
+    fn a_url_keeps_its_host_and_loses_what_may_be_its_credential() {
+        assert_eq!(
+            url_host_only("https://a.example/x/y?z=1"),
+            "https://a.example/***"
+        );
+        assert_eq!(
+            url_host_only("https://u:p@a.example:8443"),
+            "https://a.example:8443/***"
+        );
+        assert_eq!(
+            url_host_only("https://a.example:8443"),
+            "https://a.example:8443"
+        );
+        assert_eq!(url_host_only("not a url"), "***");
     }
 
     #[test]

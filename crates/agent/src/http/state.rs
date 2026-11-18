@@ -220,6 +220,11 @@ pub struct AppState {
     /// Whether the process-tree detections are sampling, for the coverage
     /// matrix.
     pub process_detections: AtomicBool,
+    /// Held across every API read-modify-write of a service kept behind an
+    /// `ArcSwap` (L7 rules, `DDoS` policies, IPS rule modes). Two writes that
+    /// each cloned the same snapshot would both be answered and audited while
+    /// the second store dropped the first change.
+    pub swap_writes: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -264,6 +269,7 @@ impl AppState {
             guest_inventory: ArcSwapOption::empty(),
             learning_service: ArcSwapOption::empty(),
             process_detections: AtomicBool::new(false),
+            swap_writes: tokio::sync::Mutex::new(()),
             service_graph: ArcSwapOption::empty(),
             crypto_posture: ArcSwapOption::empty(),
             kernel_drops: ArcSwapOption::empty(),

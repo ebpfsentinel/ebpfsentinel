@@ -326,6 +326,7 @@ pub async fn create_l7_rule(
     let rule_id = rule.id.0.clone();
     let after_json = serde_json::to_string(&rule).ok();
     {
+        let _serial = state.swap_writes.lock().await;
         let mut svc = (**state.l7_service.load()).clone();
         svc.add_rule(rule)?;
         state.l7_service.store(Arc::new(svc));
@@ -363,20 +364,19 @@ pub async fn delete_l7_rule(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Capture before snapshot for audit trail
+    // The before snapshot is read off the same clone the removal changes.
     let before_json = {
-        let svc = state.l7_service.load();
-        svc.rules()
+        let _serial = state.swap_writes.lock().await;
+        let mut svc = (**state.l7_service.load()).clone();
+        let before_json = svc
+            .rules()
             .iter()
             .find(|r| r.id.0 == id)
-            .and_then(|r| serde_json::to_string(r).ok())
-    };
-
-    {
-        let mut svc = (**state.l7_service.load()).clone();
+            .and_then(|r| serde_json::to_string(r).ok());
         svc.remove_rule(&RuleId(id.clone()))?;
         state.l7_service.store(Arc::new(svc));
-    }
+        before_json
+    };
 
     state.audit_service.record_rule_change(
         domain::audit::entity::AuditComponent::L7,
@@ -393,6 +393,127 @@ pub async fn delete_l7_rule(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct NoopSink;
+
+    impl ports::secondary::audit_sink::AuditSink for NoopSink {
+        fn write_entry(
+            &self,
+            _entry: &domain::audit::entity::AuditEntry,
+        ) -> Result<(), domain::audit::error::AuditError> {
+            Ok(())
+        }
+    }
+
+    fn state() -> AppState {
+        let noop = Arc::new(adapters::metrics::AgentMetrics::new());
+        let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(1);
+        AppState::new(
+            Arc::clone(&noop),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            Arc::new(tokio::sync::RwLock::new(
+                application::firewall_service_impl::FirewallAppService::new(
+                    domain::firewall::engine::FirewallEngine::new(),
+                    None,
+                    Arc::clone(&noop) as Arc<dyn ports::secondary::metrics_port::MetricsPort>,
+                ),
+            )),
+            Arc::new(arc_swap::ArcSwap::from_pointee(
+                application::ips_service_impl::IpsAppService::new(
+                    domain::ips::engine::IpsEngine::new(domain::ips::entity::IpsPolicy::default()),
+                    Arc::clone(&noop) as Arc<dyn ports::secondary::metrics_port::MetricsPort>,
+                ),
+            )),
+            Arc::new(arc_swap::ArcSwap::from_pointee(
+                application::l7_service_impl::L7AppService::new(
+                    domain::l7::engine::L7Engine::new(),
+                    Arc::clone(&noop) as Arc<dyn ports::secondary::metrics_port::MetricsPort>,
+                ),
+            )),
+            Arc::new(tokio::sync::RwLock::new(
+                application::ratelimit_service_impl::RateLimitAppService::new(
+                    domain::ratelimit::engine::RateLimitEngine::new(),
+                    Arc::clone(&noop) as Arc<dyn ports::secondary::metrics_port::MetricsPort>,
+                ),
+            )),
+            Arc::new(arc_swap::ArcSwap::from_pointee(
+                application::threatintel_service_impl::ThreatIntelAppService::new(
+                    domain::threatintel::engine::ThreatIntelEngine::new(1_000),
+                    Arc::clone(&noop) as Arc<dyn ports::secondary::metrics_port::MetricsPort>,
+                    vec![],
+                ),
+            )),
+            Arc::new(application::audit_service_impl::AuditAppService::new(
+                Arc::new(NoopSink) as Arc<dyn ports::secondary::audit_sink::AuditSink>,
+            )),
+            Arc::new(tokio::sync::RwLock::new(
+                infrastructure::config::AgentConfig::from_yaml("agent:\n  interfaces: [eth0]")
+                    .expect("a minimal configuration"),
+            )),
+            reload_tx,
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        )
+    }
+
+    fn http_rule(id: String) -> CreateL7RuleRequest {
+        CreateL7RuleRequest {
+            id,
+            priority: 10,
+            action: "deny".to_string(),
+            protocol: "http".to_string(),
+            method: Some("DELETE".to_string()),
+            path: Some("/admin".to_string()),
+            host: None,
+            content_type: None,
+            sni: None,
+            service: None,
+            grpc_method: None,
+            command: None,
+            smb_command: None,
+            is_smb2: None,
+            src_ip: None,
+            dst_ip: None,
+            dst_port: None,
+            enabled: true,
+        }
+    }
+
+    /// Each write clones the rule set, changes the clone and stores it. Two
+    /// writes in flight at once used to clone the same set, and the second
+    /// store dropped the rule the first had added while both answered 201.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_creates_all_keep_their_rule() {
+        let state = Arc::new(state());
+        let writes: Vec<_> = (0..32)
+            .map(|n| {
+                let state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    create_l7_rule(State(state), Json(http_rule(format!("l7-{n:02}"))))
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .collect();
+        for write in writes {
+            assert!(write.await.expect("the write ran").is_ok());
+        }
+        assert_eq!(state.l7_service.load().rule_count(), 32);
+
+        let deletes: Vec<_> = (0..16)
+            .map(|n| {
+                let state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    delete_l7_rule(State(state), Path(format!("l7-{n:02}")))
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .collect();
+        for delete in deletes {
+            assert!(delete.await.expect("the delete ran").is_ok());
+        }
+        assert_eq!(state.l7_service.load().rule_count(), 16);
+    }
 
     #[test]
     fn parse_action_valid() {

@@ -289,9 +289,12 @@ pub async fn create_ddos_policy(
         code: "SERVICE_NOT_AVAILABLE",
         message: "DDoS protection not enabled".to_string(),
     })?;
-    let mut svc = (**ddos.load()).clone();
-    svc.add_policy(policy.clone())?;
-    ddos.store(Arc::new(svc));
+    {
+        let _serial = state.swap_writes.lock().await;
+        let mut svc = (**ddos.load()).clone();
+        svc.add_policy(policy.clone())?;
+        ddos.store(Arc::new(svc));
+    }
 
     tracing::info!(rule_id = %rule_id, "DDoS policy created via API");
 
@@ -335,17 +338,19 @@ pub async fn delete_ddos_policy(
         message: "DDoS protection not enabled".to_string(),
     })?;
 
+    // The before snapshot is read off the same clone the removal changes.
     let before_json = {
-        let svc = ddos.load();
-        svc.policies()
+        let _serial = state.swap_writes.lock().await;
+        let mut svc = (**ddos.load()).clone();
+        let before_json = svc
+            .policies()
             .iter()
             .find(|p| p.id.0 == id)
-            .and_then(|p| serde_json::to_string(p).ok())
+            .and_then(|p| serde_json::to_string(p).ok());
+        svc.remove_policy(&RuleId(id.clone()))?;
+        ddos.store(Arc::new(svc));
+        before_json
     };
-
-    let mut svc = (**ddos.load()).clone();
-    svc.remove_policy(&RuleId(id.clone()))?;
-    ddos.store(Arc::new(svc));
 
     tracing::info!(rule_id = %id, "DDoS policy deleted via API");
 
