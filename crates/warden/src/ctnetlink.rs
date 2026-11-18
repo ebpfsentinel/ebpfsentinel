@@ -55,6 +55,7 @@ const CTA_COUNTERS_BYTES: u16 = 2;
 
 const IPS_SEEN_REPLY: u32 = 1 << 1;
 const IPS_ASSURED: u32 = 1 << 2;
+const IPS_CONFIRMED: u32 = 1 << 3;
 const TCP_CONNTRACK_ESTABLISHED: u8 = 3;
 
 /// The kernel's names for its TCP tracking states, by number.
@@ -461,6 +462,10 @@ fn write_tuple(msg: &mut Message, kind: u16, src: IpAddr, dst: IpAddr, sport: u1
         .end();
 }
 
+/// The status of a restored flow: it saw both directions, it is assured, and
+/// it carries the confirmation the kernel gives every entry it creates.
+const RESTORE_STATUS: u32 = IPS_SEEN_REPLY | IPS_ASSURED | IPS_CONFIRMED;
+
 /// The request writing one established TCP flow.
 fn restore_message(restore: &ConntrackRestore) -> Result<Vec<u8>, String> {
     if !restore.is_restorable() {
@@ -489,7 +494,10 @@ fn restore_message(restore: &ConntrackRestore) -> Result<Vec<u8>, String> {
     );
     write_tuple(&mut msg, CTA_TUPLE_ORIG, src, dst, f.src_port, f.dst_port);
     write_tuple(&mut msg, CTA_TUPLE_REPLY, rsrc, rdst, rsport, rdport);
-    msg.attr(CTA_STATUS, &(IPS_SEEN_REPLY | IPS_ASSURED).to_be_bytes())
+    // The kernel marks a created entry confirmed before it applies the status
+    // it was sent, and refuses with EBUSY a status that would clear the bit:
+    // a status without it is a request to unconfirm, not a silence about it.
+    msg.attr(CTA_STATUS, &RESTORE_STATUS.to_be_bytes())
         .attr(CTA_TIMEOUT, &CONNTRACK_RESTORE_TIMEOUT_SECS.to_be_bytes())
         .begin(CTA_PROTOINFO)
         .begin(CTA_PROTOINFO_TCP)
@@ -652,6 +660,24 @@ mod tests {
             .and_then(|p| netlink::attribute(p, CTA_PROTOINFO_TCP))
             .and_then(|t| netlink::attribute(t, CTA_PROTOINFO_TCP_STATE));
         assert_eq!(state, Some(&[TCP_CONNTRACK_ESTABLISHED][..]));
+    }
+
+    #[test]
+    fn a_restore_keeps_the_confirmation_the_kernel_sets_on_create() {
+        let restore = ConntrackRestore {
+            flow: tuple(6, "10.0.0.1", "10.0.0.2", 40000, 8080),
+            reply: None,
+        };
+        let msg = restore_message(&restore).unwrap();
+        let attrs = &msg[netlink::NLMSG_HDRLEN + 4..];
+        let status = netlink::attribute(attrs, CTA_STATUS)
+            .and_then(netlink::be32)
+            .unwrap();
+        assert_eq!(status & IPS_CONFIRMED, IPS_CONFIRMED, "status {status:#x}");
+        assert_eq!(
+            status & (IPS_SEEN_REPLY | IPS_ASSURED),
+            IPS_SEEN_REPLY | IPS_ASSURED
+        );
     }
 
     #[test]
