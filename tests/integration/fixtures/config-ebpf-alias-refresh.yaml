@@ -1,0 +1,50 @@
+# config-ebpf-alias-refresh.yaml - A URL table alias follows its served list
+#
+# The firewall denies every source listed at a URL the suite serves on the
+# host, and the alias refreshes every 3 seconds. GeoIP is off, so nothing else
+# in the agent drives a refresh: the list changes in the datapath only if the
+# alias keeps its own interval.
+#
+# Network topology (placeholders substituted by prepare_ebpf_config):
+#   Host: __HOST_IP__  (veth-ebpf0)
+#   NS:   __NS_IP__    (veth-ebpf1)
+
+agent:
+  interfaces:
+    - __INTERFACE__
+  bind_address: "0.0.0.0"
+  allow_unauthenticated_api: true
+  allow_plaintext_api: true
+  log_level: debug
+  log_format: json
+  http_port: 8080
+  grpc_port: 50051
+  metrics_port: 9090
+
+firewall:
+  enabled: true
+  mode: block
+  default_policy: pass
+  aliases:
+    served-denylist:
+      type: url_table
+      url: "http://127.0.0.1:9975/denylist.txt"
+      refresh_interval: 3
+  rules:
+    - id: fw-deny-served-list
+      action: deny
+      src_alias: served-denylist
+      priority: 10
+      enabled: true
+
+ids:
+  enabled: false
+
+ips:
+  enabled: false
+
+dlp:
+  enabled: false
+
+ratelimit:
+  enabled: false

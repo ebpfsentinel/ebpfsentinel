@@ -171,14 +171,31 @@ impl AliasAppService {
     /// Refresh dynamic aliases (URL tables, DNS, `GeoIP`) using the resolution port.
     /// Returns the number of aliases refreshed.
     pub fn refresh_dynamic(&mut self) -> Result<usize, DomainError> {
+        Ok(self.refresh_matching(|_| true))
+    }
+
+    /// Refresh the aliases resolved through the `GeoIP` and BGP databases,
+    /// which change when those databases do. URL tables and DNS names are
+    /// left to their own interval.
+    pub fn refresh_database_aliases(&mut self) -> Result<usize, DomainError> {
+        Ok(self.refresh_matching(|alias| refresh_interval_secs(alias).is_none()))
+    }
+
+    fn refresh_matching(&mut self, keep: impl Fn(&Alias) -> bool) -> usize {
         use domain::alias::entity::AliasKind;
 
         let Some(resolution_port) = self.resolution_port.clone() else {
-            return Ok(0);
+            return 0;
         };
 
         let mut refreshed = 0;
-        let aliases = self.resolver.aliases().clone();
+        let aliases: Vec<(String, Alias)> = self
+            .resolver
+            .aliases()
+            .iter()
+            .filter(|(_, alias)| keep(alias))
+            .map(|(name, alias)| (name.clone(), alias.clone()))
+            .collect();
 
         // Accumulate all GeoIP/BGP ASN CIDRs across aliases for a single bulk load
         let mut all_geoip_v4_src: Vec<FirewallLpmEntryV4> = Vec::new();
@@ -200,23 +217,8 @@ impl AliasAppService {
                 let (v4_entries, v6_entries) = convert_to_lpm_entries(&ips, ACTION_DROP);
                 all_geoip_v4_src.extend(v4_entries);
                 all_geoip_v6_src.extend(v6_entries);
-            } else {
-                // Other dynamic aliases → IP set maps
-                let Some(set_id) = self.get_or_assign_set_id(name) else {
-                    tracing::warn!(
-                        alias = name,
-                        "no kernel IP set left; rules naming this alias are not installed"
-                    );
-                    continue;
-                };
-
-                if let Some(ref mut ipset_port) = self.ipset_port {
-                    let addrs = ipset_host_addrs(name, &ips);
-
-                    if let Err(e) = ipset_port.load_ipset_v4(set_id, &addrs) {
-                        tracing::warn!(alias = name, "failed to load IP set: {e}");
-                    }
-                }
+            } else if !self.load_ip_set(name, &ips) {
+                continue;
             }
 
             refreshed += 1;
@@ -248,7 +250,68 @@ impl AliasAppService {
         }
 
         self.update_metrics();
-        Ok(refreshed)
+        refreshed
+    }
+
+    /// Load resolved addresses into the kernel IP set of an alias. False
+    /// when no set is left for it.
+    fn load_ip_set(&mut self, name: &str, ips: &[IpNetwork]) -> bool {
+        let Some(set_id) = self.get_or_assign_set_id(name) else {
+            tracing::warn!(
+                alias = name,
+                "no kernel IP set left; rules naming this alias are not installed"
+            );
+            return false;
+        };
+        if let Some(ref mut ipset_port) = self.ipset_port {
+            let addrs = ipset_host_addrs(name, ips);
+            if let Err(e) = ipset_port.load_ipset_v4(set_id, &addrs) {
+                tracing::warn!(alias = name, "failed to load IP set: {e}");
+            }
+        }
+        true
+    }
+
+    /// Every alias that refreshes on an interval of its own (URL tables and
+    /// DNS names), with that interval in seconds.
+    pub fn timed_aliases(&self) -> Vec<(String, u64)> {
+        self.resolver
+            .aliases()
+            .iter()
+            .filter_map(|(name, alias)| refresh_interval_secs(alias).map(|s| (name.clone(), s)))
+            .collect()
+    }
+
+    /// What is needed to resolve the named alias away from the service: the
+    /// alias as loaded and the port that resolves it. `None` once the alias
+    /// is gone or nothing resolves aliases.
+    pub fn resolution_job(&self, name: &str) -> Option<(Alias, Arc<dyn AliasResolutionPort>)> {
+        let port = self.resolution_port.clone()?;
+        let alias = self.resolver.get(name)?.clone();
+        Some((alias, port))
+    }
+
+    /// Resolve an alias through the port. A fetch that fails is logged and
+    /// yields nothing, which [`Self::apply_resolved`] takes as keep what is
+    /// loaded: a list that cannot be read for a moment is not an empty list.
+    pub fn resolve(alias: &Alias, port: &dyn AliasResolutionPort) -> Vec<IpNetwork> {
+        Self::resolve_dynamic_alias(alias, port)
+    }
+
+    /// Load what a timed alias resolved to, if the alias is still the one
+    /// that was resolved. True when the kernel set was replaced.
+    pub fn apply_resolved(&mut self, resolved: &Alias, ips: &[IpNetwork]) -> bool {
+        if ips.is_empty() {
+            return false;
+        }
+        let name = resolved.id.0.clone();
+        // Reloaded in the meantime: the new definition gets its own refresh.
+        if self.resolver.get(&name) != Some(resolved) {
+            return false;
+        }
+        let loaded = self.load_ip_set(&name, ips);
+        self.update_metrics();
+        loaded
     }
 
     /// Return the number of loaded aliases.
@@ -383,6 +446,27 @@ fn convert_to_lpm_entries(
     action: u8,
 ) -> (Vec<FirewallLpmEntryV4>, Vec<FirewallLpmEntryV6>) {
     crate::convert_to_lpm_entries(ips, action)
+}
+
+/// The interval an alias refreshes on by itself, `None` for an alias that is
+/// either static or follows the `GeoIP` and BGP databases.
+fn refresh_interval_secs(alias: &Alias) -> Option<u64> {
+    use domain::alias::entity::AliasKind;
+    match &alias.kind {
+        AliasKind::UrlTable {
+            refresh_interval_secs,
+            ..
+        }
+        | AliasKind::DynamicDns {
+            refresh_interval_secs,
+            ..
+        }
+        | AliasKind::UrlTableJson {
+            refresh_interval_secs,
+            ..
+        } => Some(*refresh_interval_secs),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -645,6 +729,103 @@ mod tests {
         fn ipset_entry_count(&self) -> Result<usize, DomainError> {
             Ok(self.loaded.lock().unwrap().len())
         }
+    }
+
+    /// Answers every DNS name with one address and counts the questions.
+    #[derive(Default)]
+    struct CountingDns {
+        asked: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ports::secondary::alias_resolution_port::AliasResolutionPort for CountingDns {
+        fn fetch_url_table(&self, _url: &str) -> Result<Vec<IpNetwork>, DomainError> {
+            Ok(Vec::new())
+        }
+        fn fetch_url_table_json(&self, _: &str, _: &str) -> Result<Vec<IpNetwork>, DomainError> {
+            Ok(Vec::new())
+        }
+        fn resolve_dns(&self, _hostname: &str) -> Result<Vec<IpNetwork>, DomainError> {
+            self.asked
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(vec![IpNetwork::V4 {
+                addr: 0xC000_0201,
+                prefix_len: 32,
+            }])
+        }
+        fn lookup_geoip(&self, _codes: &[String]) -> Result<Vec<IpNetwork>, DomainError> {
+            Ok(Vec::new())
+        }
+        fn lookup_bgp_asn(&self, _asns: &[u32]) -> Result<Vec<IpNetwork>, DomainError> {
+            Ok(Vec::new())
+        }
+        fn resolve_interfaces(&self, _: &[String]) -> Result<Vec<IpNetwork>, DomainError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn dns_alias(secs: u64) -> Alias {
+        Alias {
+            id: AliasId("partner".to_string()),
+            kind: AliasKind::DynamicDns {
+                hostnames: vec!["partner.example".to_string()],
+                refresh_interval_secs: secs,
+            },
+            description: None,
+        }
+    }
+
+    #[test]
+    fn a_timed_alias_is_left_to_its_own_interval_by_the_database_refresh() {
+        let mut svc = make_service();
+        let port = Arc::new(CountingDns::default());
+        svc.set_resolution_port(Arc::clone(&port) as Arc<dyn AliasResolutionPort>);
+        svc.reload_aliases(vec![dns_alias(60)]).unwrap();
+
+        assert_eq!(svc.timed_aliases(), vec![("partner".to_string(), 60)]);
+        assert_eq!(svc.refresh_database_aliases().unwrap(), 0);
+        assert_eq!(port.asked.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(svc.refresh_dynamic().unwrap(), 1);
+        assert_eq!(port.asked.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_resolved_timed_alias_replaces_its_kernel_set() {
+        let mut svc = make_service();
+        let recorder = RecordingIpSet::default();
+        svc.set_ipset_port(Box::new(recorder.clone()));
+        svc.set_resolution_port(Arc::new(CountingDns::default()));
+        svc.reload_aliases(vec![dns_alias(60)]).unwrap();
+
+        let (alias, port) = svc.resolution_job("partner").expect("alias is loaded");
+        let ips = AliasAppService::resolve(&alias, port.as_ref());
+        assert!(svc.apply_resolved(&alias, &ips));
+
+        let set_id = svc.assigned_set_id("partner").expect("set assigned");
+        assert_eq!(
+            recorder.loaded.lock().unwrap().clone(),
+            vec![(set_id, vec![0xC000_0201])]
+        );
+    }
+
+    #[test]
+    fn a_failed_or_stale_resolution_keeps_what_is_loaded() {
+        let mut svc = make_service();
+        let recorder = RecordingIpSet::default();
+        svc.set_ipset_port(Box::new(recorder.clone()));
+        svc.set_resolution_port(Arc::new(CountingDns::default()));
+        svc.reload_aliases(vec![dns_alias(60)]).unwrap();
+        let (resolved, _) = svc.resolution_job("partner").expect("alias is loaded");
+
+        // Nothing came back: an unreadable list is not an empty one.
+        assert!(!svc.apply_resolved(&resolved, &[]));
+        // Reloaded while resolving: the old definition's answer is dropped.
+        svc.reload_aliases(vec![dns_alias(120)]).unwrap();
+        let ips = [IpNetwork::V4 {
+            addr: 1,
+            prefix_len: 32,
+        }];
+        assert!(!svc.apply_resolved(&resolved, &ips));
+        assert!(recorder.loaded.lock().unwrap().is_empty());
     }
 
     #[test]

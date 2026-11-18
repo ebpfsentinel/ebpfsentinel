@@ -103,7 +103,7 @@ impl std::fmt::Display for AliasId {
 }
 
 /// The kind of alias - determines how IPs/ports are resolved.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AliasKind {
     /// Static set of IP addresses/CIDRs with optional exclusions.
@@ -151,7 +151,7 @@ pub enum AliasKind {
 }
 
 /// A named alias definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Alias {
     pub id: AliasId,
     #[serde(flatten)]

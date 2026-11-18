@@ -502,6 +502,55 @@ pub(crate) fn cgroup_shaping_service(
     Ok(Arc::new(service))
 }
 
+/// Refresh each URL table and DNS-name alias on the interval it carries.
+///
+/// One schedule holds every alias's next due time and the task sleeps until
+/// the earliest, waking at least every few seconds so an alias a reload adds
+/// is fetched without waiting out somebody else's interval. Resolution runs
+/// outside the service lock: a slow server delays its own alias, not the
+/// firewall reading the others.
+fn spawn_timed_alias_refresh(
+    alias_svc: Arc<RwLock<AliasAppService>>,
+    firewall_svc: Arc<RwLock<application::firewall_service_impl::FirewallAppService>>,
+    cancel: CancellationToken,
+) {
+    /// Longest sleep, so a reload is noticed within this.
+    const RESCAN: Duration = Duration::from_secs(5);
+    tokio::spawn(async move {
+        let mut schedule = application::alias_refresh_schedule::AliasRefreshSchedule::new();
+        let mut started = false;
+        loop {
+            let timed = alias_svc.read().await.timed_aliases();
+            let due = schedule.due(std::time::Instant::now(), &timed, started);
+            started = true;
+            let mut changed = false;
+            for name in due {
+                let Some((alias, port)) = alias_svc.read().await.resolution_job(&name) else {
+                    continue;
+                };
+                let ips = AliasAppService::resolve(&alias, port.as_ref());
+                if alias_svc.write().await.apply_resolved(&alias, &ips) {
+                    info!(alias = %name, members = ips.len(), "alias refreshed");
+                    changed = true;
+                }
+            }
+            if changed {
+                let bindings =
+                    application::firewall_aliases::collect_bindings(&*alias_svc.read().await);
+                firewall_svc.write().await.set_alias_bindings(bindings);
+            }
+            let wake = schedule.next_due().map_or(RESCAN, |at| {
+                at.saturating_duration_since(std::time::Instant::now())
+                    .min(RESCAN)
+            });
+            tokio::select! {
+                () = cancel.cancelled() => break,
+                () = tokio::time::sleep(wake) => {}
+            }
+        }
+    });
+}
+
 /// Load the configuration's pipes, queues and classifiers into the `QoS`
 /// service and its freshly bound maps. Each part that cannot be read or
 /// loaded is logged: shaping silently missing from a node reads, from the
@@ -5065,7 +5114,14 @@ pub async fn run(
         });
     }
 
-    // ── 11f. Spawn periodic dynamic alias refresh (GeoIP + URL tables) ──
+    // ── 11e'. URL tables and DNS names, each on its own interval ──
+    spawn_timed_alias_refresh(
+        Arc::clone(&alias_svc),
+        Arc::clone(&firewall_svc),
+        cancel_token.clone(),
+    );
+
+    // ── 11f. Spawn periodic GeoIP and BGP alias refresh ──
     {
         let refresh_interval_secs = config
             .geoip
@@ -5086,9 +5142,10 @@ pub async fn run(
                         () = refresh_cancel.cancelled() => break,
                         _ = interval.tick() => {}
                     }
-                    match alias_svc_clone.write().await.refresh_dynamic() {
-                        Ok(n) => info!(count = n, "periodic dynamic alias refresh completed"),
-                        Err(e) => warn!("periodic dynamic alias refresh failed: {e}"),
+                    // URL tables and DNS names keep their own interval.
+                    match alias_svc_clone.write().await.refresh_database_aliases() {
+                        Ok(n) => info!(count = n, "periodic GeoIP alias refresh completed"),
+                        Err(e) => warn!("periodic GeoIP alias refresh failed: {e}"),
                     }
                     // A refresh can give an alias its first content, and with
                     // it the IP set the firewall rules naming it match against.
