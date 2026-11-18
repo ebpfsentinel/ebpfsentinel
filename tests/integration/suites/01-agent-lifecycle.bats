@@ -81,12 +81,17 @@ teardown() {
         local pid
         pid="$(cat "$AGENT_PID_FILE")"
         kill -TERM "$pid"
+        # Up to 10 seconds, so an agent slower than the bound is measured
+        # by the elapsed check below rather than cut short here.
         local waited=0
-        while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 10 ]; do
+        while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 50 ]; do
             sleep 0.2
             waited=$((waited + 1))
         done
-        ! kill -0 "$pid" 2>/dev/null
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "the agent was still running 10 seconds after SIGTERM" >&2
+            return 1
+        fi
     fi
 
     local end_time
@@ -94,7 +99,10 @@ teardown() {
     local elapsed=$((end_time - start_time))
 
     # Should complete within 5 seconds
-    [ "$elapsed" -lt 6 ]
+    [ "$elapsed" -le 5 ] || {
+        echo "shutdown took ${elapsed}s" >&2
+        return 1
+    }
 
     # Clean up PID file since we killed it manually
     rm -f "$AGENT_PID_FILE"

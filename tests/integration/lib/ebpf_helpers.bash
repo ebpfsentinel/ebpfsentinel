@@ -104,7 +104,10 @@ _has_docker_image() {
     docker image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -qF "$EBPF_DOCKER_IMAGE"
 }
 
-# require_ebpf_env - skip if neither local eBPF nor Docker image available
+# require_ebpf_env - skip if neither local eBPF nor Docker image available.
+# A soft skip: the datapath and VM lanes build the objects before they run, so
+# under strict skips their absence there is a broken build step, not a host
+# without the capability.
 require_ebpf_env() {
     if _has_local_ebpf; then
         return 0
@@ -112,7 +115,7 @@ require_ebpf_env() {
     if _has_docker_image; then
         return 0
     fi
-    env_skip "no eBPF environment (no local build, no Docker image '${EBPF_DOCKER_IMAGE}')"
+    soft_skip "no eBPF environment (no local build, no Docker image '${EBPF_DOCKER_IMAGE}')"
 }
 
 # ── Network namespace / veth pair management ─────────────────────────
@@ -754,7 +757,7 @@ wait_for_ebpf_program() {
 # helpers in vm_helpers.bash are loaded.
 skip_if_not_3vm() {
     if [ "${EBPF_3VM_MODE:-false}" != "true" ]; then
-        env_skip "Test requires 3-VM transit topology (set EBPF_3VM_MODE=true)"
+        lane_skip transit-3vm "Test requires 3-VM transit topology (set EBPF_3VM_MODE=true)"
     fi
 }
 

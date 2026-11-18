@@ -210,11 +210,17 @@ vagrant ssh attacker -c '
       sshpass -p vagrant ssh-copy-id -i ~/.ssh/agent_key.pub \
         -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
         vagrant@192.168.56.10 >/dev/null 2>&1 \
-        && echo "agent SSH trust established" \
-        || echo "WARN: could not establish agent SSH trust"
+        && echo "agent SSH trust established"
     fi
+    ssh -i ~/.ssh/agent_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes \
+        vagrant@192.168.56.10 true 2>/dev/null
   fi
-' || true
+' || {
+    # A lane that cannot reach its agent tests nothing; say so here rather
+    # than in every suite.
+    echo "ERROR: the attacker VM cannot SSH to the agent VM with ~/.ssh/agent_key" >&2
+    exit 1
+}
 cd "$INTEGRATION_DIR"
 
 # ── Run BATS suites on attacker VM ─────────────────────────────────

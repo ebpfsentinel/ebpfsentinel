@@ -193,39 +193,6 @@ esac
 echo "  eBPF programs:"
 ls -1 "${EBPF_INSTALL_DIR}/" 2>/dev/null || echo "  WARNING: No eBPF programs found in ${EBPF_INSTALL_DIR}"
 
-# ── Install OpenSSL 3.5 (post-quantum hybrid client) ───────────────
-# The distro openssl predates X25519MLKEM768, so it cannot drive the PQ
-# handshake tests as a client even though the agent negotiates the hybrid.
-# 3.5 is installed side-by-side under /opt so the system openssl (and
-# everything linked against it) is left untouched; the suite picks the
-# private build up by path.
-echo "=== [6/9] Installing OpenSSL 3.5 (PQ hybrid client) ==="
-OPENSSL_PQ_VERSION="3.5.4"
-OPENSSL_PQ_PREFIX="/opt/openssl-3.5"
-if "${OPENSSL_PQ_PREFIX}/bin/openssl" list -kem-algorithms 2>/dev/null | grep -q X25519MLKEM768; then
-    echo "  OpenSSL ${OPENSSL_PQ_VERSION} already present with X25519MLKEM768"
-else
-    sudo apt-get install -y --no-install-recommends build-essential perl >/dev/null
-    tmp="$(mktemp -d)"
-    if curl -fsSL --retry 3 \
-        "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_PQ_VERSION}/openssl-${OPENSSL_PQ_VERSION}.tar.gz" \
-        | tar -xz -C "${tmp}"; then
-        (
-            cd "${tmp}/openssl-${OPENSSL_PQ_VERSION}"
-            # no-shared keeps the build self-contained: nothing on the box
-            # ever links against this copy, only the CLI is used.
-            ./Configure --prefix="${OPENSSL_PQ_PREFIX}" \
-                --openssldir="${OPENSSL_PQ_PREFIX}/ssl" no-shared no-docs >/dev/null
-            make -j"$(nproc)" >/dev/null
-            sudo make install_sw >/dev/null
-        ) && echo "  installed: $("${OPENSSL_PQ_PREFIX}/bin/openssl" version)" \
-            || echo "  WARNING: OpenSSL ${OPENSSL_PQ_VERSION} build failed - PQ client tests will skip"
-    else
-        echo "  WARNING: OpenSSL ${OPENSSL_PQ_VERSION} download failed - PQ client tests will skip"
-    fi
-    rm -rf "${tmp}"
-fi
-
 # ── Start iperf3 server ────────────────────────────────────────────
 echo "=== [7/9] Starting iperf3 server ==="
 pkill -f "iperf3 -s" 2>/dev/null || true
@@ -314,43 +281,6 @@ echo "=== Installing JWKS/JWT deps (python3-jwt, python3-cryptography) ==="
 sudo apt-get install -y python3-jwt python3-cryptography >/dev/null 2>&1 || true
 echo "  jwt: $(python3 -c 'import jwt; print(jwt.__version__)' 2>&1)" \
      "| cryptography: $(python3 -c 'import cryptography; print(cryptography.__version__)' 2>&1)"
-
-# ── OpenSSL 3.5 (PQ-hybrid client for suite 61) ────────────────────
-# 61-pqc-handshake drives an X25519MLKEM768 handshake against the agent's PQ
-# TLS server. The hybrid named group needs OpenSSL >= 3.5, which Ubuntu 24.04
-# does not package, so build it to a private prefix (/opt/openssl-3.5) without
-# touching the system openssl. The suite auto-detects this build and only then
-# runs the PQ-handshake assertions (otherwise they skip). Idempotent: skip the
-# ~5-minute build if the binary already advertises the group.
-if { /opt/openssl-3.5/bin/openssl list -groups 2>/dev/null; \
-     /opt/openssl-3.5/bin/openssl list -kem-algorithms 2>/dev/null; } \
-     | grep -q 'X25519MLKEM768'; then
-    echo "=== OpenSSL 3.5 PQ client already present ==="
-else
-    echo "=== Building OpenSSL 3.5 (PQ-hybrid client for suite 61) ==="
-    OSSL_VER="3.5.0"
-    sudo apt-get install -y build-essential perl wget >/dev/null 2>&1 || true
-    tmp_ossl="$(mktemp -d)"
-    if wget -qO "${tmp_ossl}/openssl.tar.gz" \
-        "https://github.com/openssl/openssl/releases/download/openssl-${OSSL_VER}/openssl-${OSSL_VER}.tar.gz"; then
-        tar -xzf "${tmp_ossl}/openssl.tar.gz" -C "${tmp_ossl}"
-        (
-            cd "${tmp_ossl}/openssl-${OSSL_VER}" || exit 1
-            # rpath so the binary loads its own libcrypto/libssl 3.5 rather than
-            # the system 3.0 (otherwise: "version OPENSSL_3.5.0 not found").
-            ./Configure --prefix=/opt/openssl-3.5 --openssldir=/opt/openssl-3.5 \
-                --libdir=lib no-docs "-Wl,-rpath,/opt/openssl-3.5/lib" >/dev/null 2>&1
-            make -j"$(nproc)" >/dev/null 2>&1
-            sudo make install_sw >/dev/null 2>&1
-        )
-        rm -rf "${tmp_ossl}"
-        echo "  openssl: $(/opt/openssl-3.5/bin/openssl version 2>&1)" \
-             "| MLKEM: $(/opt/openssl-3.5/bin/openssl list -groups 2>/dev/null | grep -c X25519MLKEM768)"
-    else
-        echo "  WARN: openssl ${OSSL_VER} download failed - suite 61 PQ tests will skip"
-        rm -rf "${tmp_ossl}"
-    fi
-fi
 
 # ── Scapy venv (agent-local netns suites) ──────────────────────────
 # The agent-local (netns) suites - VIP-announcer ARP probes, byte-level

@@ -201,7 +201,7 @@ _agent_xdp_link() {
 
 @test "with the BPF LSM active, a detach of the agent's XDP link is refused" {
     grep -qw bpf /sys/kernel/security/lsm 2>/dev/null \
-        || env_skip "the BPF LSM is not among this host's security modules"
+        || lane_skip bpf-lsm "the BPF LSM is not among this host's security modules"
     _start
 
     local report waited=0

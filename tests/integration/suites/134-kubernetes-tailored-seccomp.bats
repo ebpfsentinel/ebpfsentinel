@@ -193,7 +193,7 @@ teardown_file() {
     # is what too tight a profile looks like.
     local gate
     gate="$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)"
-    [ "$gate" = "0" ] || env_skip "kernel.apparmor_restrict_unprivileged_userns=1 on this host refuses the user namespace before seccomp is consulted"
+    [ "$gate" = "0" ] || lane_skip userns "kernel.apparmor_restrict_unprivileged_userns=1 on this host refuses the user namespace before seccomp is consulted"
 
     local pod log waited=0
     pod="$(agent_pod)"

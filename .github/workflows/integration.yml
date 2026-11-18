@@ -28,8 +28,8 @@ on:
   push:
     branches: [main]
   # Needs a runner labelled [self-hosted, linux, vagrant] registered on the
-  # repository: until one is, the nightly jobs queue and never start, which
-  # the run page shows as waiting rather than as a pass.
+  # repository: until one is, the nightly jobs queue and never start. The
+  # nightly-watch job turns that into an issue and a red run within the hour.
   schedule:
     - cron: "0 2 * * *"
   workflow_dispatch:
@@ -51,6 +51,7 @@ on:
 permissions:
   contents: read
   issues: write
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -102,6 +103,10 @@ jobs:
           pr_list="$(tests/integration/scripts/list-suites-by-profile.sh --list pr)"
           datapath_list="$(tests/integration/scripts/list-suites-by-profile.sh --list datapath)"
           nightly_list="$(tests/integration/scripts/list-suites-by-profile.sh --list nightly)"
+          # Datapath suites holding tests the hosted runner cannot boot for
+          # (the BPF LSM): run again on the agent VM, which claims it.
+          vm_reruns="$(tests/integration/scripts/list-suites-by-profile.sh --list vm-rerun)"
+          nightly_list="$(echo $nightly_list $vm_reruns)"
           # JSON array form for matrix strategy expansion (GitHub Actions
           # expressions can't transform a space-separated string into a
           # matrix value, so we materialise the array here).
@@ -360,7 +365,12 @@ jobs:
           for id in $ids; do
             bats_path="$(ls tests/integration/suites/${id}-*.bats | head -n1)"
             echo "::group::Suite $id"
-            if ! sudo -E EBPFSENTINEL_STRICT_SKIPS=1 bats --timing "$bats_path" \
+            # What this lane provisions (scripts/provision-datapath-host.sh);
+            # a test skipping for one of these fails here. The BPF LSM is
+            # not claimed: a hosted runner cannot set the boot line, and the
+            # suites relying on it run again nightly on the agent VM.
+            if ! sudo -E EBPFSENTINEL_STRICT_SKIPS=1 EBPFSENTINEL_LANE_CLAIMS="openssl-mlkem userns" \
+                 bats --timing "$bats_path" \
                  2>&1 | tee "$RUNNER_TEMP/datapath-logs/suite-${id}.log"; then
               failed="$failed $id"
             fi
@@ -415,7 +425,9 @@ jobs:
           file="$(basename "${{ steps.lookup.outputs.path }}")"
           lane="$(tests/integration/scripts/list-suites-by-profile.sh --lane "$id")"
           log="/tmp/suite-${id}.log"
-          in_vm="cd /home/vagrant/ebpfsentinel/tests/integration && sudo EBPFSENTINEL_STRICT_SKIPS=1 bats --timing suites/${file}"
+          # The agent VM boots with lsm=bpf and is provisioned by the same
+          # script as the datapath lane, so it claims all three.
+          in_vm="cd /home/vagrant/ebpfsentinel/tests/integration && sudo EBPFSENTINEL_STRICT_SKIPS=1 EBPFSENTINEL_LANE_CLAIMS='bpf-lsm openssl-mlkem userns' bats --timing suites/${file}"
           case "$lane" in
             3vm) bash tests/integration/scripts/run-in-3vm.sh --suite "$id" 2>&1 | tee "$log" ;;
             2vm) bash tests/integration/scripts/run-in-2vm.sh --suite "$id" 2>&1 | tee "$log" ;;
@@ -477,11 +489,80 @@ jobs:
           cd tests/integration/vagrant
           vagrant destroy -f agent attacker || true
 
+  # ── A nightly that never starts is a failure, not a wait ─────────
+  # The nightly jobs run on [self-hosted, linux, vagrant]. With no such runner
+  # online they sit queued until GitHub drops them a day later, and nothing
+  # reads red meanwhile. This job, on a hosted runner, gives them an hour to
+  # start; any still queued then opens the regression issue and fails the run.
+  nightly-watch:
+    name: Nightly runner watch
+    needs: [plan]
+    if: needs.plan.outputs.profile == 'nightly' || needs.plan.outputs.profile == 'full'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Wait for the self-hosted jobs to start
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const deadline = Date.now() + 60 * 60 * 1000;
+            const selfHosted = j => (j.labels || []).includes('vagrant');
+            let queued = [];
+            while (Date.now() < deadline) {
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.runId,
+                per_page: 100,
+              });
+              queued = jobs.filter(j => selfHosted(j) && j.status === 'queued');
+              const mine = jobs.filter(selfHosted);
+              if (mine.length > 0 && queued.length === 0) {
+                core.info(`all ${mine.length} self-hosted jobs started`);
+                return;
+              }
+              await new Promise(r => setTimeout(r, 60 * 1000));
+            }
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const today = new Date().toISOString().slice(0, 10);
+            const body = [
+              `${queued.length} nightly job(s) were still queued an hour after the run started:`,
+              ``,
+              ...queued.map(j => `* ${j.name}`),
+              ``,
+              `No runner labelled \`[self-hosted, linux, vagrant]\` picked them up, so these suites tested nothing.`,
+              `* run: ${runUrl}`,
+            ].join("\n");
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'nightly-regression',
+              state: 'open',
+              per_page: 50,
+            });
+            const dup = existing.find(i => i.title.endsWith(today));
+            if (dup) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: dup.number, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: `nightly regression - ${today}`, body, labels: ['nightly-regression'],
+              });
+            }
+            core.setFailed(`${queued.length} self-hosted nightly job(s) never started`);
+
   # ── Auto-open a dedup'd GitHub issue when nightly fails ──────────
   nightly-triage:
     name: Nightly Failure Triage
     needs: [plan, nightly-suites, nightly-soak]
-    if: always() && needs.plan.outputs.profile == 'nightly' && github.event_name == 'schedule' && (needs.nightly-suites.result == 'failure' || needs.nightly-soak.result == 'failure')
+    # A cancelled job is a run that tested nothing (a runner that went away,
+    # a timeout while queued), which is a failure of the lane, not a pass.
+    if: >-
+      always() && needs.plan.outputs.profile == 'nightly' && github.event_name == 'schedule' &&
+      (needs.nightly-suites.result == 'failure' || needs.nightly-soak.result == 'failure' ||
+       needs.nightly-suites.result == 'cancelled' || needs.nightly-soak.result == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 480
     steps:
@@ -510,7 +591,8 @@ jobs:
             // ticket-spam from multi-day outages but still surfaces fresh
             // regressions on the first nightly that fails.
             const today = new Date().toISOString().slice(0, 10);
-            const label = soakResult === 'failure' ? 'nightly-regression' : 'nightly-flake';
+            const label = (soakResult === 'failure' || suiteResult === 'cancelled' || soakResult === 'cancelled')
+              ? 'nightly-regression' : 'nightly-flake';
             const { data: existing } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,

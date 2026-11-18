@@ -53,7 +53,7 @@ teardown() {
 
 _require_bpf_lsm() {
     grep -qw bpf /sys/kernel/security/lsm 2>/dev/null \
-        || env_skip "the BPF LSM is not among this host's security modules"
+        || lane_skip bpf-lsm "the BPF LSM is not among this host's security modules"
 }
 
 # _start <observe|enforce>

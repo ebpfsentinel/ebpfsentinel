@@ -1,6 +1,13 @@
 #!/usr/bin/env bats
 # 20-ebpf-loadbalancer-scenarios.bats - Load balancer eBPF scenario tests
-# Requires: root, kernel >= 6.12, bpftool, ncat
+# Requires: root, kernel >= 6.12, bpftool, ncat, python3
+#
+# The spread tests send UDP datagrams from the client namespace to a service
+# on the host side, which the agent rewrites to backends in a second
+# namespace reached through the host. Each datagram leaves from a socket of
+# its own, so each is a new flow the algorithm places; the backends count
+# what reaches each port. The path is one way, so no reply has to be
+# translated back, and the round trip is suite 139's.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
@@ -19,6 +26,10 @@ setup_file() {
     mkdir -p "$DATA_DIR"
 
     create_test_netns
+    if _spread_lane; then
+        require_tool python3
+        _create_backend_ns || return 1
+    fi
 
     PREPARED_CONFIG="$(prepare_ebpf_config "${FIXTURE_DIR}/config-ebpf-loadbalancer.yaml")"
     export PREPARED_CONFIG
@@ -33,9 +44,140 @@ setup_file() {
 
 teardown_file() {
     stop_ebpf_agent 2>/dev/null || true
+    _destroy_backend_ns
     destroy_test_netns 2>/dev/null || true
     rm -rf "${DATA_DIR:-/tmp/ebpfsentinel-test-data-lb-$$}"
     rm -f "${PREPARED_CONFIG:-}"
+}
+
+# ── Backends behind the host ─────────────────────────────────────
+
+LB_BE_NS="lb-backend-ns"
+LB_BE_HOST_IF="veth-lbbe0"
+LB_BE_NS_IF="veth-lbbe1"
+LB_BE_HOST_IP="10.201.0.1"
+LB_BE_ADDR="10.201.0.2"
+LB_FORWARD_SAVED="${BATS_FILE_TMPDIR:-/tmp}/lb-ip-forward"
+
+# The spread is read where the suite owns both namespaces; on the VM lanes
+# the client is another machine, and suite 139 reads the spread there.
+_spread_lane() {
+    [ "${EBPF_2VM_MODE:-false}" != "true" ] && [ "${EBPF_3VM_MODE:-false}" != "true" ]
+}
+
+# _create_backend_ns - a namespace holding the backends, reached from the
+# host through a veth pair. The agent's DNAT routes a rewritten datagram
+# with a FIB lookup, which answers only with forwarding on, and redirects it
+# into the host veth, whose peer receives redirected frames only while it
+# carries an XDP program of its own.
+_create_backend_ns() {
+    _destroy_backend_ns
+    sysctl -n net.ipv4.ip_forward >"$LB_FORWARD_SAVED"
+    sysctl -qw net.ipv4.ip_forward=1
+    ip netns add "$LB_BE_NS"
+    ip link add "$LB_BE_HOST_IF" type veth peer name "$LB_BE_NS_IF"
+    ip link set "$LB_BE_NS_IF" netns "$LB_BE_NS"
+    ip addr add "${LB_BE_HOST_IP}/24" dev "$LB_BE_HOST_IF"
+    ip link set "$LB_BE_HOST_IF" up
+    ip netns exec "$LB_BE_NS" ip addr add "${LB_BE_ADDR}/24" dev "$LB_BE_NS_IF"
+    ip netns exec "$LB_BE_NS" ip link set "$LB_BE_NS_IF" up
+    ip netns exec "$LB_BE_NS" ip link set lo up
+    ip netns exec "$LB_BE_NS" ip route add default via "$LB_BE_HOST_IP"
+    local obj="${EBPF_PROGRAM_DIR:-${PROJECT_ROOT}/target/bpfel-unknown-none/release}/xdp-pass"
+    [ -f "$obj" ] || {
+        echo "no xdp-pass object at ${obj}: the backend veth would drop every redirected frame" >&2
+        return 1
+    }
+    ip netns exec "$LB_BE_NS" ip link set dev "$LB_BE_NS_IF" xdpdrv obj "$obj" sec xdp 2>/dev/null \
+        || ip netns exec "$LB_BE_NS" ip link set dev "$LB_BE_NS_IF" xdp obj "$obj" sec xdp || {
+            echo "xdp-pass did not attach to ${LB_BE_NS_IF}" >&2
+            return 1
+        }
+    # The neighbour is resolved before the first datagram, so the FIB
+    # lookup answers with both MACs instead of handing it to the stack.
+    ping -c1 -W2 "$LB_BE_ADDR" >/dev/null || {
+        echo "the host does not reach ${LB_BE_ADDR}" >&2
+        return 1
+    }
+}
+
+_destroy_backend_ns() {
+    ip netns del "$LB_BE_NS" 2>/dev/null || true
+    ip link delete "$LB_BE_HOST_IF" 2>/dev/null || true
+    if [ -s "$LB_FORWARD_SAVED" ]; then
+        sysctl -qw "net.ipv4.ip_forward=$(cat "$LB_FORWARD_SAVED")"
+        rm -f "$LB_FORWARD_SAVED"
+    fi
+}
+
+# _udp_service <id> <listen_port> <algo> <port:weight:enabled>... - a UDP
+# service whose backends are ports of the backend namespace.
+_udp_service() {
+    local id="$1" listen="$2" algo="$3" backends="" be port weight enabled
+    shift 3
+    for be in "$@"; do
+        IFS=':' read -r port weight enabled <<<"$be"
+        [ -z "$backends" ] || backends+=","
+        backends+="{\"id\":\"b${port}\",\"addr\":\"${LB_BE_ADDR}\",\"port\":${port},\"weight\":${weight},\"enabled\":${enabled}}"
+    done
+    api_post /api/v1/lb/services \
+        "{\"id\":\"${id}\",\"name\":\"${id}\",\"protocol\":\"udp\",\"listen_port\":${listen},\"algorithm\":\"${algo}\",\"enabled\":true,\"backends\":[${backends}]}" \
+        >/dev/null
+    _load_http_status
+    [ "$HTTP_STATUS" = "201" ] || {
+        echo "creating ${id} answered ${HTTP_STATUS}" >&2
+        return 1
+    }
+    # The service reaches the kernel maps on the next sync.
+    sleep 2
+}
+
+# _spread <listen_port> <flows> <out> <backend port>... - send one datagram
+# per flow to the service and write the backend port each one reached, one
+# line per datagram, to <out>.
+_spread() {
+    local listen="$1" flows="$2" out="$3" listener port i
+    shift 3
+    local ports
+    ports="$(IFS=,; echo "$*")"
+    ip netns exec "$LB_BE_NS" python3 -c '
+import select, socket, sys, time
+out, ports, deadline = sys.argv[1], sys.argv[2].split(","), time.time() + float(sys.argv[3])
+socks = []
+for p in ports:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("0.0.0.0", int(p)))
+    socks.append(s)
+with open(out, "w", buffering=1) as f:
+    while time.time() < deadline:
+        ready, _, _ = select.select(socks, [], [], 0.2)
+        for s in ready:
+            s.recvfrom(64)
+            f.write("%d\n" % s.getsockname()[1])
+' "$out" "$ports" 60 &
+    listener=$!
+    for port in "$@"; do
+        for i in $(seq 1 20); do
+            ip netns exec "$LB_BE_NS" ss -Hlun "sport = :${port}" | grep -q . && break
+            sleep 0.2
+        done
+    done
+    ip netns exec "$EBPF_TEST_NS" python3 -c '
+import socket, sys
+host, port, n = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+for _ in range(n):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.sendto(b"x", (host, port))
+    s.close()
+' "$EBPF_HOST_IP" "$listen" "$flows"
+    sleep 1
+    kill "$listener" 2>/dev/null || true
+    wait "$listener" 2>/dev/null || true
+}
+
+# _reached <out> <port> - datagrams that reached one backend port.
+_reached() {
+    grep -cx "$2" "$1" || true
 }
 
 # ── XDP program attachment ───────────────────────────────────────
@@ -128,18 +270,6 @@ teardown_file() {
     assert_json_array_length "$body" '.' '0'
 }
 
-# ── Metrics ──────────────────────────────────────────────────────
-
-@test "LB metrics counters present" {
-    require_root
-
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-
-    [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_lb|ebpfsentinel_loadbalancer|ebpfsentinel_packets"
-}
-
 # ── CRUD lifecycle (round-robin service) ─────────────────────────
 
 @test "LB service CRUD - create TCP service" {
@@ -203,33 +333,53 @@ teardown_file() {
     api_delete /api/v1/lb/services/weighted-svc >/dev/null || true
 }
 
-@test "LB metrics present" {
-    require_root
-
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-
-    [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_lb_forwarded|ebpfsentinel_lb_backends_healthy|ebpfsentinel_packets"
-}
-
 # ── Extended LB algorithm & protocol tests ────────────────────────
+
+@test "round robin places new flows on every backend in turn" {
+    require_root
+    _spread_lane || env_skip "per-backend spread is read on the local lane; the VM lanes read it in suite 139"
+
+    _udp_service lb-rr-spread 19089 round_robin 9091:1:true 9092:1:true 9093:1:true
+    _spread 19089 30 "${DATA_DIR}/rr.txt" 9091 9092 9093
+    api_delete /api/v1/lb/services/lb-rr-spread >/dev/null 2>&1 || true
+
+    local port n total=0
+    for port in 9091 9092 9093; do
+        n="$(_reached "${DATA_DIR}/rr.txt" "$port")"
+        total=$((total + n))
+        [ "$n" -ge 5 ] || {
+            echo "backend ${port} received ${n} of 30 flows, round robin gives it 10" >&2
+            sort "${DATA_DIR}/rr.txt" | uniq -c >&2
+            return 1
+        }
+    done
+    [ "$total" -eq 30 ] || {
+        echo "${total} of 30 datagrams reached a backend" >&2
+        return 1
+    }
+}
 
 @test "weighted algorithm distributes traffic by weight" {
     require_root
+    _spread_lane || env_skip "per-backend spread is read on the local lane; the VM lanes read it in suite 139"
 
-    local svc='{"id":"lb-weighted-001","name":"weighted-test","protocol":"tcp","listen_port":19090,"algorithm":"weighted","backends":[{"id":"b1","addr":"10.200.0.1","port":9091,"weight":3,"enabled":true},{"id":"b2","addr":"10.200.0.1","port":9092,"weight":1,"enabled":true}],"enabled":true}'
-    local body
-    body="$(api_post /api/v1/lb/services "$svc")"
-    _load_http_status
-    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
-
-    local algo
-    algo="$(echo "$body" | jq -r '.algorithm // empty' 2>/dev/null)" || true
-    [ "$algo" = "weighted" ]
-
-    # Cleanup
+    _udp_service lb-weighted-001 19090 weighted 9091:3:true 9092:1:true
+    _spread 19090 100 "${DATA_DIR}/weighted.txt" 9091 9092
     api_delete /api/v1/lb/services/lb-weighted-001 >/dev/null 2>&1 || true
+
+    local heavy light
+    heavy="$(_reached "${DATA_DIR}/weighted.txt" 9091)"
+    light="$(_reached "${DATA_DIR}/weighted.txt" 9092)"
+    echo "# weighted spread: 9091=${heavy} 9092=${light}" >&3
+    [ $((heavy + light)) -eq 100 ] || {
+        echo "$((heavy + light)) of 100 datagrams reached a backend" >&2
+        return 1
+    }
+    # Expected 75/25; the bounds sit about four standard deviations out.
+    [ "$heavy" -ge 58 ] && [ "$heavy" -le 92 ] || {
+        echo "9091 took ${heavy} of 100 flows, weight 3 of 4 gives it about 75" >&2
+        return 1
+    }
 }
 
 @test "ip_hash algorithm configured via API" {
@@ -266,28 +416,42 @@ teardown_file() {
 
 @test "unhealthy backend is skipped in selection" {
     require_root
+    _spread_lane || env_skip "per-backend spread is read on the local lane; the VM lanes read it in suite 139"
 
-    local svc='{"id":"lb-health-001","name":"health-test","protocol":"tcp","listen_port":9095,"algorithm":"round_robin","backends":[{"id":"b1","addr":"10.200.0.1","port":9096,"enabled":false},{"id":"b2","addr":"10.200.0.1","port":9097,"enabled":true}],"enabled":true}'
-    api_post /api/v1/lb/services "$svc" >/dev/null
-    _load_http_status
-    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
-
-    # Verify service created with healthy/unhealthy backends
-    local body
-    body="$(api_get /api/v1/lb/services/lb-health-001)"
-    _load_http_status
-    [ "$HTTP_STATUS" = "200" ]
-
+    _udp_service lb-health-001 19095 round_robin 9096:1:false 9097:1:true
+    _spread 19095 20 "${DATA_DIR}/health.txt" 9096 9097
     api_delete /api/v1/lb/services/lb-health-001 >/dev/null 2>&1 || true
+
+    local skipped served
+    skipped="$(_reached "${DATA_DIR}/health.txt" 9096)"
+    served="$(_reached "${DATA_DIR}/health.txt" 9097)"
+    [ "$skipped" -eq 0 ] || {
+        echo "the disabled backend received ${skipped} of 20 flows" >&2
+        return 1
+    }
+    [ "$served" -eq 20 ] || {
+        echo "the enabled backend received ${served} of 20 flows" >&2
+        return 1
+    }
 }
 
-@test "LB metrics endpoint returns forwarding counters" {
+@test "the forwarded counter counts the datagrams the balancer rewrote" {
     require_root
+    _spread_lane || env_skip "per-backend spread is read on the local lane; the VM lanes read it in suite 139"
 
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-    [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_lb|ebpfsentinel_loadbalancer" || true
+    wait_for_ebpf_counters LB_METRICS
+    local before after
+    before="$(ebpf_counter LB_METRICS forwarded)"
+    _udp_service lb-count-001 19098 round_robin 9099:1:true
+    _spread 19098 25 "${DATA_DIR}/count.txt" 9099
+    api_delete /api/v1/lb/services/lb-count-001 >/dev/null 2>&1 || true
+
+    after="$(ebpf_counter_above LB_METRICS forwarded "${before:-0}")"
+    [ "$after" -ge $(( ${before:-0} + 25 )) ] || {
+        echo "forwarded went from ${before:-0} to ${after}, 25 datagrams were rewritten" >&2
+        dump_ebpf_counters LB_METRICS >&2
+        return 1
+    }
 }
 
 @test "a Maglev service past the rings reserved at start is refused" {

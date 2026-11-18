@@ -245,7 +245,10 @@ _kill_agent_while_writing() {
     rm -f "${dir}"/*.txt
     run _kill_agent_while_writing "${dir}"
     [ "$(tail -n 1 <<<"${output}")" = "0" ]
-    ! kill -0 "$(cat "${AGENT_PID_FILE}")" 2>/dev/null
+    if kill -0 "$(cat "${AGENT_PID_FILE}")" 2>/dev/null; then
+        echo "the agent outlived the kill" >&2
+        return 1
+    fi
 
     rm -f "${dir}"/*.txt
     run timeout 10 bash -c "$(declare -f _write); _write '${dir}' ${ATTEMPTS}"
@@ -271,7 +274,10 @@ _kill_agent_while_writing() {
     local dir="${DATA_DIR}/watched/run"
     rm -f "${dir}"/*.txt
     run _write "${dir}" "${ATTEMPTS}"
-    ! grep -qx EPERM <<<"${output}"
+    if grep -qx EPERM <<<"${output}"; then
+        echo "a write was refused with EPERM: ${output}" >&2
+        return 1
+    fi
     [ "$(grep -cx ok <<<"${output}")" -eq "${ATTEMPTS}" ]
 
     local body="" attempt=0

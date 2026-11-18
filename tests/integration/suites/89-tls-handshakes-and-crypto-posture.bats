@@ -44,6 +44,19 @@ setup_file() {
 
     create_test_netns
 
+    # The post-quantum handshake needs both ends to offer ML-KEM, which the
+    # distribution's openssl may not; the 3.5 build the datapath provisioning
+    # installs side by side does.
+    PQ_OPENSSL=""
+    local candidate
+    for candidate in /opt/openssl-3.5/bin/openssl openssl; do
+        if "$candidate" list -kem-algorithms 2>/dev/null | grep -qi mlkem768; then
+            PQ_OPENSSL="$candidate"
+            break
+        fi
+    done
+    export PQ_OPENSSL
+
     openssl req -x509 -newkey rsa:2048 -nodes -days 30 \
         -subj "/CN=posture.test" \
         -keyout "${DATA_DIR}/key.pem" -out "${DATA_DIR}/cert.pem" >/dev/null 2>&1
@@ -57,7 +70,7 @@ setup_file() {
         return 1
     }
 
-    setsid openssl s_server -accept "$TLS_PORT" -www \
+    setsid "${PQ_OPENSSL:-openssl}" s_server -accept "$TLS_PORT" -www \
         -cert "${DATA_DIR}/cert.pem" -key "${DATA_DIR}/key.pem" \
         >"${DATA_DIR}/s_server.log" 2>&1 </dev/null &
     echo $! > "${DATA_DIR}/s_server.pid"
@@ -93,7 +106,7 @@ _client() {
     local port="$1"
     shift
     echo | timeout 10 ip netns exec "$EBPF_TEST_NS" \
-        openssl s_client -connect "${EBPF_HOST_IP}:${port}" -servername posture.test "$@" \
+        "${CLIENT_OPENSSL:-openssl}" s_client -connect "${EBPF_HOST_IP}:${port}" -servername posture.test "$@" \
         >"${DATA_DIR}/s_client.log" 2>&1
 }
 
@@ -160,9 +173,9 @@ _wait_edge() {
 }
 
 @test "a TLS 1.3 handshake over X25519MLKEM768 is recorded and counted as post-quantum" {
-    openssl list -kem-algorithms 2>/dev/null | grep -qi mlkem768 \
-        || env_skip "this host's openssl has no ML-KEM"
-    _client "$TLS_PORT" -tls1_3 -groups X25519MLKEM768 || {
+    [ -n "${PQ_OPENSSL}" ] \
+        || lane_skip openssl-mlkem "no openssl with ML-KEM on this host"
+    CLIENT_OPENSSL="$PQ_OPENSSL" _client "$TLS_PORT" -tls1_3 -groups X25519MLKEM768 || {
         cat "${DATA_DIR}/s_client.log" >&3
         false
     }

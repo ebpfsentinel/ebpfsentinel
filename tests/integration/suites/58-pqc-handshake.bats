@@ -55,7 +55,7 @@ setup_file() {
 
     # Resolve the openssl client binary. X25519MLKEM768 needs OpenSSL >= 3.5,
     # which Ubuntu 24.04 does not ship; the provisioner builds it under
-    # /opt/openssl-3.5 (see setup-agent.sh). Prefer that build when it advertises
+    # /opt/openssl-3.5 (see scripts/provision-datapath-host.sh). Prefer that build when it advertises
     # the hybrid group, else fall back to the system openssl (PQ tests skip).
     # OpenSSL 3.5 advertises the hybrid under `list -kem-algorithms`; the older
     # `list -groups` is empty there, so probe both listings.
@@ -227,7 +227,7 @@ _restart_agent_with() {
 
 @test "PQ-aware client (X25519MLKEM768) lands on the hybrid group in prefer mode" {
     if [ "${EBPF_OPENSSL_HAS_MLKEM:-0}" != "1" ]; then
-        env_skip "no openssl with X25519MLKEM768 on this host (provision the 3.5 build)"
+        lane_skip openssl-mlkem "no openssl with X25519MLKEM768 on this host (provision the 3.5 build)"
     fi
     local group
     group="$(_s_client_named_group X25519MLKEM768)" || {
@@ -268,7 +268,7 @@ _restart_agent_with() {
 
 @test "pq_mode=require still accepts PQ-aware clients" {
     if [ "${EBPF_OPENSSL_HAS_MLKEM:-0}" != "1" ]; then
-        env_skip "no openssl with X25519MLKEM768 on this host (provision the 3.5 build)"
+        lane_skip openssl-mlkem "no openssl with X25519MLKEM768 on this host (provision the 3.5 build)"
     fi
     local group
     group="$(_s_client_named_group X25519MLKEM768)" || {

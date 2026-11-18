@@ -165,11 +165,13 @@ require_root() {
 # checking for local binary/Docker image
 require_ebpf_env() {
     if ! _agent_ssh true 2>/dev/null; then
-        env_skip "cannot SSH to agent VM at ${AGENT_CTL_IP} (EBPF_2VM_MODE)"
+        # The mode is the lane's word that a second machine is there; an
+        # agent it cannot reach is that lane broken, never a lane absent.
+        soft_skip "cannot SSH to agent VM at ${AGENT_CTL_IP} (EBPF_2VM_MODE)"
     fi
     # Verify the agent binary exists on the remote host
     if ! _agent_ssh test -x /usr/local/bin/ebpfsentinel-agent 2>/dev/null; then
-        env_skip "ebpfsentinel-agent not found on agent VM ${AGENT_VM_IP}"
+        soft_skip "ebpfsentinel-agent not found on agent VM ${AGENT_VM_IP}"
     fi
 }
 
@@ -294,12 +296,16 @@ wait_for_agent_exit() {
     remote_pid="$(cat "$AGENT_PID_FILE" 2>/dev/null)" || true
     [ -z "$remote_pid" ] && return 0
 
-    local waited=0
-    while _agent_ssh_sudo kill -0 "$remote_pid" 2>/dev/null && [ "$waited" -lt "$max" ]; do
+    # <max> is seconds, read against the clock: each probe is a round trip
+    # over SSH, so counting probes would not measure time.
+    local deadline=$((SECONDS + max))
+    while _agent_ssh_sudo kill -0 "$remote_pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
         sleep 0.2
-        waited=$((waited + 1))
     done
-    ! _agent_ssh_sudo kill -0 "$remote_pid" 2>/dev/null
+    if _agent_ssh_sudo kill -0 "$remote_pid" 2>/dev/null; then
+        echo "the agent was still running ${max}s after the signal" >&2
+        return 1
+    fi
 }
 
 # start_agent_expect_fail <config_file> [extra_args...]

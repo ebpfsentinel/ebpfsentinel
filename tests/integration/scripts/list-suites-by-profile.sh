@@ -14,6 +14,7 @@
 #   list-suites-by-profile.sh --list <profile> I/N    # shard I of N (0-based)
 #   list-suites-by-profile.sh --paths <profile>       # bats file paths (newline)
 #   list-suites-by-profile.sh --lane <id>             # lane the suite runs on
+#   list-suites-by-profile.sh --list vm-rerun         # datapath suites rerun on the agent VM
 #   list-suites-by-profile.sh --help
 #
 # --lane prints the first entry of the suite's `lanes` in `attack_suites`
@@ -49,8 +50,8 @@ fi
 
 if [[ "${MODE}" == "--list" || "${MODE}" == "--paths" ]]; then
   case "${PROFILE}" in
-    pr|datapath|nightly|manual) ;;
-    *) echo "${MODE} requires profile: pr | datapath | nightly | manual" >&2; exit 2 ;;
+    pr|datapath|nightly|manual|vm-rerun) ;;
+    *) echo "${MODE} requires profile: pr | datapath | nightly | manual | vm-rerun" >&2; exit 2 ;;
   esac
 fi
 
@@ -109,6 +110,15 @@ for sid in disk_suites:
     final[pins[sid]].append(sid)
 for k in final:
     final[k].sort(key=int)
+
+# Datapath suites the nightly lane runs again on the agent VM, for the tests
+# a hosted runner cannot hold the capability for.
+reruns = [str(x) for x in (matrix.get("vm_reruns") or {})]
+for sid in reruns:
+    if sid not in disk_suites or pins.get(sid) != "datapath":
+        sys.stderr.write(f"vm_reruns names '{sid}', which is not a datapath suite on disk\n")
+        sys.exit(2)
+final["vm-rerun"] = sorted(reruns, key=int)
 
 selected = final.get(profile_arg, [])
 if shard_arg:

@@ -302,6 +302,22 @@ if skipped_in_job:
         "  - integration.yml skips suites of a listed profile by id: move them to the profile that runs them"
     )
 
+# A row's `profile` is read as the trigger its verdict comes from, so it must
+# be the profile of one of its suites: a row saying `pr` whose suites all run
+# nightly promises a pull-request verdict nobody gives.
+row_profile_lies: list[str] = []
+for row in rows:
+    pinned = {
+        suite_profiles_raw[str(s)]
+        for s in row.get("suites") or []
+        if str(s) in suite_profiles_raw
+    }
+    if pinned and row.get("profile") not in pinned:
+        row_profile_lies.append(
+            f"  - {row.get('kind')}/{row.get('feature')}: profile '{row.get('profile')}', "
+            f"its suites run on {sorted(pinned)}"
+        )
+
 suite_profile_keys = {str(k) for k in suite_profiles_raw}
 missing_profile_for_suite = sorted(known_suites - suite_profile_keys)
 extra_profile_for_suite = sorted(suite_profile_keys - known_suites)
@@ -361,6 +377,10 @@ if missing_profile_for_suite:
 if unselected_suites:
     banner("Suites no job of integration.yml runs")
     print("\n".join(unselected_suites))
+    failed = True
+if row_profile_lies:
+    banner("Rows naming a profile none of their suites runs on")
+    print("\n".join(row_profile_lies))
     failed = True
 if extra_profile_for_suite:
     banner("EXTRA suite_profiles entries (profile pin, no suite on disk)")

@@ -157,8 +157,8 @@ jobs:
       - name: Fuzz Docker events and proc readers
         run: cargo +nightly fuzz run fuzz_container_events -- -max_len=8192 -max_total_time=30
       # Every other target, read from fuzz/Cargo.toml rather than listed here,
-      # so a target added there is built and run on the next push instead of
-      # compiling nowhere until someone remembers this file. The parsers above
+      # so a target added there is built and run by the next daily run instead
+      # of compiling nowhere until someone remembers this file. The parsers above
       # keep their own budgets and seeds; the rest get 15 s each.
       - name: Fuzz every remaining target
         run: |

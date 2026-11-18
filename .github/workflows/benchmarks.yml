@@ -44,10 +44,31 @@ jobs:
         with:
           shared-key: bench
 
+      # On a pull request the base is measured first, on this same runner,
+      # and saved as a criterion baseline; the head is then compared against
+      # it. A hosted runner is noisy, so a regression is the lower bound of
+      # criterion's confidence interval on the mean above 20%: a change that
+      # might be 20% slower is noise, one that is at least 20% slower fails.
+      - name: Measure the base
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+          git worktree add ../base FETCH_HEAD
+          (cd ../base && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
+            cargo bench -p ebpfsentinel-domain -- --save-baseline base)
+
       - name: Run benchmarks
-        run: cargo bench -p ebpfsentinel-domain -- --output-format bencher 2>&1 | tee bench-output.txt
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            cargo bench -p ebpfsentinel-domain -- --baseline base 2>&1 | tee bench-output.txt
+          else
+            cargo bench -p ebpfsentinel-domain 2>&1 | tee bench-output.txt
+          fi
 
       - name: Upload benchmark results
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: criterion-reports
@@ -55,16 +76,28 @@ jobs:
           retention-days: 30
 
       - name: Upload raw output
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: bench-output
           path: bench-output.txt
           retention-days: 30
 
-      - name: Check for regressions (PR only)
+      - name: Fail on a regression (PR only)
         if: github.event_name == 'pull_request'
         run: |
-          # Parse benchmark output for significant regressions (>20% slower)
-          if grep -E "change:.*\+[2-9][0-9]\." bench-output.txt; then
-            echo "::warning::Significant benchmark regression detected (>20%). Review the criterion reports."
-          fi
+          python3 - <<'PY'
+          import json, pathlib, sys
+          found, slower = 0, []
+          for est in pathlib.Path("target/criterion").rglob("change/estimates.json"):
+              found += 1
+              lower = json.loads(est.read_text())["mean"]["confidence_interval"]["lower_bound"]
+              if lower > 0.20:
+                  slower.append(f"{est.parent.parent.relative_to('target/criterion')}: at least {lower:.0%} slower")
+          if found == 0:
+              sys.exit("no benchmark was compared against the base: the comparison measured nothing")
+          print(f"{found} benchmarks compared against the base")
+          if slower:
+              print("\n".join(slower))
+              sys.exit(f"{len(slower)} benchmark(s) regressed by more than 20%")
+          PY

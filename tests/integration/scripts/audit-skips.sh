@@ -11,6 +11,8 @@
 #   - every reason used is registered in skip-policy.yaml, under the same
 #     class as the helper it is called through
 #   - every registered reason is still used somewhere (no rotting entries)
+#   - every `lane_skip <claim>` names a claim declared under `claims:`, and
+#     its reason is registered under `lane:`
 #
 # Modes:
 #   audit-skips.sh            check only - exit 1 on any violation
@@ -66,8 +68,10 @@ with policy_path.open() as fh:
 
 env_keys = set(policy.get("env") or [])
 mask_keys = set(policy.get("masking") or [])
+lane_keys = set(policy.get("lane") or [])
+claims = set((policy.get("claims") or {}).keys())
 
-overlap = env_keys & mask_keys
+overlap = (env_keys & mask_keys) | (lane_keys & (env_keys | mask_keys))
 if overlap:
     sys.stderr.write(f"reason registered in both classes: {sorted(overlap)}\n")
     sys.exit(2)
@@ -90,7 +94,10 @@ unregistered: list[str] = []
 misclassified: list[str] = []
 used_env: set[str] = set()
 used_mask: set[str] = set()
-counts = {"env": 0, "masking": 0}
+counts = {"env": 0, "masking": 0, "lane": 0}
+used_lane: set[str] = set()
+used_claims: set[str] = set()
+lane_re = re.compile(r'(?<![\w-])lane_skip\s+([\w-]+)\s+"([^"]*)"')
 
 call_re = re.compile(r'(?<![\w-])(env_skip|soft_skip|skip)\s+"([^"]*)"')
 
@@ -100,6 +107,16 @@ for path in files:
         stripped = line.lstrip()
         if stripped.startswith("#"):
             continue
+        for m in lane_re.finditer(line):
+            claim, reason = m.group(1), m.group(2)
+            counts["lane"] += 1
+            k = key(reason)
+            used_lane.add(k)
+            used_claims.add(claim)
+            if claim not in claims:
+                unregistered.append(f"  - {rel}:{lineno}  [claim] {claim}")
+            if k not in lane_keys:
+                unregistered.append(f"  - {rel}:{lineno}  [lane] {k[:60]}")
         for m in call_re.finditer(line):
             helper, reason = m.group(1), m.group(2)
             if helper == "skip":
@@ -125,13 +142,17 @@ for path in files:
                 elif k not in mask_keys:
                     unregistered.append(f"  - {rel}:{lineno}  [masking] {k[:60]}")
 
-stale = sorted((env_keys - used_env) | (mask_keys - used_mask))
+stale = sorted(
+    (env_keys - used_env) | (mask_keys - used_mask) | (lane_keys - used_lane)
+    | {f"claim {c}" for c in claims - used_claims}
+)
 
 print("Skip audit - tests/integration/skip-policy.yaml")
 print(f"  files scanned          : {len(files)}")
 print(f"  env_skip call sites    : {counts['env']}")
 print(f"  soft_skip call sites   : {counts['masking']}")
-print(f"  registered reasons     : {len(env_keys)} env / {len(mask_keys)} masking")
+print(f"  lane_skip call sites   : {counts['lane']}")
+print(f"  registered reasons     : {len(env_keys)} env / {len(mask_keys)} masking / {len(lane_keys)} lane")
 
 if mode == "--report":
     print("\n== masking reasons (fail under EBPFSENTINEL_STRICT_SKIPS=1) ==")

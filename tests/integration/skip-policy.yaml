@@ -18,7 +18,27 @@
 # interpolation (`... ${AGENT_BIN}`) is registered by its literal head.
 # scripts/audit-skips.sh fails on any unregistered reason and on any bare
 # `skip` call left in a suite.
+#
+#   lane     a capability some lanes provide and others cannot: the reason
+#            is called through `lane_skip <claim>`, which skips where the
+#            running lane's EBPFSENTINEL_LANE_CLAIMS does not name the claim
+#            and behaves as `soft_skip` where it does. Each claim below says
+#            which lanes promise it; a lane that promises one and lacks it
+#            fails under strict skips instead of reporting green.
 
+claims:
+  bpf-lsm: "the BPF LSM is active at boot - the agent VM (lsm=bpf provisioner); a hosted runner cannot set the boot line"
+  openssl-mlkem: "an openssl offering X25519MLKEM768 - every host provisioned by provision-datapath-host.sh"
+  userns: "unprivileged user namespaces are not refused by AppArmor - every host provisioned by provision-datapath-host.sh"
+  transit-3vm: "the 3-VM transit topology - run-in-3vm.sh"
+
+lane:
+  - "the BPF LSM is not active on this host (lsm=bpf at boot)"
+  - "the BPF LSM is not among this host's security modules"
+  - "no openssl with X25519MLKEM768 on this host (provision the 3.5 build)"
+  - "no openssl with ML-KEM on this host"
+  - "kernel.apparmor_restrict_unprivileged_userns=1 on this host refuses the user namespace before seccomp is consulted"
+  - "Test requires 3-VM transit topology (set EBPF_3VM_MODE=true)"
 
 env:
   - "ebpfsentinel:integration-test image not built - run the docker build first"
@@ -36,8 +56,9 @@ env:
   - "kernel conntrack table unreadable by either source - nothing to list"
   - "kernel conntrack table unreadable by either source - nothing to flush"
   - "Agent binary not found:"
-  - "kernel.apparmor_restrict_unprivileged_userns=1 on this host refuses the user namespace before seccomp is consulted"
   - "Docker agent not healthy"
+  - "per-backend spread is read on the local lane; the VM lanes read it in suite 139"
+  - "suite 145 serves the list beside the agent (local lane only)"
   - "Docker daemon not running"
   - "Docker engine not available"
   - "Docker not installed"
@@ -49,25 +70,20 @@ env:
   - "MHDDoS not provisioned at"
   - "MHDDoS target"
   - "TCP/22 is in use by sshd in 2VM mode; suite 59 is single-netns only"
-  - "Test requires 3-VM transit topology (set EBPF_3VM_MODE=true)"
   - "agent VM is missing the 'conntrack' tool (apt install conntrack)"
   - "agent binary not available on this host"
   - "agent binary not found:"
   - "amplification script missing:"
-  - "cannot SSH to agent VM at"
   - "cgroup v2 unified hierarchy not mounted"
   - "curl not available on attacker VM"
   - "eBPF objects not found in"
   - "ebpfsentinel-agent CLI not installed on agent VM"
-  - "ebpfsentinel-agent not found on agent VM"
   - "kernel refused 802.1Q sub-interface on veth"
   - "this kernel signals at the next syscall only:"
   - "kubectl not installed"
   - "minikube not installed"
-  - "no eBPF environment (no local build, no Docker image '"
   - "no fou module BTF on this kernel"
   - "no nf_conntrack module BTF on this kernel"
-  - "no openssl with X25519MLKEM768 on this host (provision the 3.5 build)"
   - "openssl not available on attacker VM"
   - "pktgen control files need root (passwordless sudo unavailable)"
   - "pktgen kernel module unavailable on this host"
@@ -119,8 +135,6 @@ env:
   - "docker daemon not reachable"
   - "cannot pull"
   - "securityfs is not mounted on this host"
-  - "this host's openssl has no ML-KEM"
-  - "the BPF LSM is not among this host's security modules"
   - "fou is not available on this kernel"
   - "fou is built into this kernel"
   - "fou is held by another user"
@@ -131,7 +145,6 @@ env:
   - "suite 81 writes its files on the agent's host (local lane only)"
   - "git is not installed on this host"
   - "suite 82 writes its files on the agent's host (local lane only)"
-  - "the BPF LSM is not active on this host (lsm=bpf at boot)"
   - "suite 83 writes its files on the agent's host (local lane only)"
   - "suite 84 writes its files on the agent's host (local lane only)"
   - "suite 85 writes from the agent's own host (local lane only)"
@@ -151,6 +164,9 @@ env:
 
 
 masking:
+  - "no eBPF environment (no local build, no Docker image '"
+  - "ebpfsentinel-agent not found on agent VM"
+  - "cannot SSH to agent VM at"
   # A lane provisions every tool its suites drive and runs on a kernel at the
   # agent's floor, so a missing tool or an older kernel there is a broken
   # lane: the strict lanes fail on it, a degraded box still skips.

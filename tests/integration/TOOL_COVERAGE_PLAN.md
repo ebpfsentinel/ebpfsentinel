@@ -12,7 +12,7 @@ Lane legend: local = bats netns on agent VM · 2VM = attacker NIC → agent ·
 | # | Fix | File | Check |
 |---|---|---|---|
 | 1.1 | install Go toolchain (pinned) | setup-attacker.sh | `go version` |
-| 1.2 | openssl 3.5 (done) verify | setup-agent.sh | `list -kem-algorithms | grep X25519MLKEM768` |
+| 1.2 | openssl 3.5 (done) verify | scripts/provision-datapath-host.sh | `list -kem-algorithms | grep X25519MLKEM768` |
 | 1.3 | MHDDoS bootstrap hardening (clone pinned if submodule empty; fail loud) | setup-attacker.sh | `/opt/MHDDoS/start.py` present |
 | 1.4 | kubectl/minikube pin + retry | Vagrantfile | `kubectl version --client` |
 | 1.5 | extend attacker_tools_check to Go + every tk tool | attacker_tools_check.sh | 0 missing |

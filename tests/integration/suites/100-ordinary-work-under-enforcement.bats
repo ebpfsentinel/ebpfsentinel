@@ -44,7 +44,7 @@ setup_file() {
     done
 
     if ! tr ',' '\n' </sys/kernel/security/lsm 2>/dev/null | grep -qx bpf; then
-        env_skip "the BPF LSM is not active on this host (lsm=bpf at boot)"
+        lane_skip bpf-lsm "the BPF LSM is not active on this host (lsm=bpf at boot)"
     fi
 
     export PROJECT_ROOT

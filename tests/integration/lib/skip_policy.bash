@@ -12,6 +12,13 @@
 #   env_skip   the capability is absent from this machine or lane. Always
 #              skips. Nothing is being hidden - the test could not run.
 #
+#   lane_skip  <claim> <reason>: a capability some lanes provide and others
+#              cannot (the BPF LSM, which a hosted runner cannot boot with).
+#              Skips like env_skip on a lane that does not claim it, and
+#              like soft_skip on one that does: a lane listing the claim in
+#              EBPFSENTINEL_LANE_CLAIMS has promised the capability, so its
+#              absence there is a regression.
+#
 #   soft_skip  a prerequisite the suite itself was supposed to provide is
 #              missing, or an earlier step produced nothing to assert on.
 #              Skips by default (so a degraded dev box stays usable), but
@@ -48,6 +55,25 @@ soft_skip() {
         # continuing on to assertions whose prerequisite is missing. A bare
         # `return 1` would only fail the test while errexit happens to be on.
         exit 1
+    fi
+    skip "${reason}"
+}
+
+# lane_claims <claim> - did this lane promise the capability?
+lane_claims() {
+    case " ${EBPFSENTINEL_LANE_CLAIMS:-} " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# lane_skip <claim> <reason> - the capability is absent; skip where the lane
+# never claimed it, refuse to under strict where it did.
+lane_skip() {
+    local claim="${1:?usage: lane_skip <claim> <reason>}"
+    local reason="${2:?usage: lane_skip <claim> <reason>}"
+    if lane_claims "${claim}"; then
+        soft_skip "${reason} (this lane claims ${claim})"
     fi
     skip "${reason}"
 }

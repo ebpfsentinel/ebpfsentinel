@@ -345,6 +345,7 @@ echo "  Agent control address: ${AGENT_CTL_IP:-192.168.56.10 (eth0 not resolved)
 VAGRANT_3VM=1 vagrant ssh attacker -c \
     "cd /home/vagrant/ebpfsentinel/tests/integration && \
      export EBPF_3VM_MODE=true && \
+     export EBPFSENTINEL_LANE_CLAIMS='transit-3vm' && \
      export EBPF_2VM_MODE=true && \
      export AGENT_VM_IP=192.168.56.10 && \
      export AGENT_CTL_IP=${AGENT_CTL_IP:-192.168.56.10} && \

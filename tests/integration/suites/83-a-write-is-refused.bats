@@ -43,7 +43,7 @@ setup_file() {
     require_root
 
     if ! tr ',' '\n' </sys/kernel/security/lsm 2>/dev/null | grep -qx bpf; then
-        env_skip "the BPF LSM is not active on this host (lsm=bpf at boot)"
+        lane_skip bpf-lsm "the BPF LSM is not active on this host (lsm=bpf at boot)"
     fi
 
     export PROJECT_ROOT
@@ -246,7 +246,10 @@ _kill_agent_while_writing() {
 
     run _kill_agent_while_writing "${DATA_DIR}/watched/run/during"
     [ "$(tail -n 1 <<<"${output}")" = "0" ]
-    ! kill -0 "$(cat "${AGENT_PID_FILE}")" 2>/dev/null
+    if kill -0 "$(cat "${AGENT_PID_FILE}")" 2>/dev/null; then
+        echo "the agent outlived the kill" >&2
+        return 1
+    fi
 
     local after="${DATA_DIR}/watched/run/after"
     mkdir -p "${after}"
@@ -273,7 +276,10 @@ _kill_agent_while_writing() {
     local dir="${DATA_DIR}/watched/run/shadow"
     mkdir -p "${dir}"
     run _write "${dir}" "${ATTEMPTS}"
-    ! grep -qx EACCES <<<"${output}"
+    if grep -qx EACCES <<<"${output}"; then
+        echo "a write was refused with EACCES: ${output}" >&2
+        return 1
+    fi
     [ "$(grep -cx ok <<<"${output}")" -eq "${ATTEMPTS}" ]
     [ "$(tail -n 1 <<<"${output}")" = "truncate ok" ]
 

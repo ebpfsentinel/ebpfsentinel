@@ -70,7 +70,7 @@ _config() {
 # real list.
 _lsm_without_bpf() {
     grep -qw bpf /sys/kernel/security/lsm 2>/dev/null ||
-        env_skip "the BPF LSM is not among this host's security modules"
+        lane_skip bpf-lsm "the BPF LSM is not among this host's security modules"
     local fake="${DATA_DIR}/lsm"
     tr ',' '\n' </sys/kernel/security/lsm | grep -vx bpf | paste -sd, - | tr -d '\n' >"${fake}"
     echo "${fake}"

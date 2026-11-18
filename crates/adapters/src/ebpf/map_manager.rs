@@ -931,7 +931,9 @@ mod tests {
     /// The in-kernel half: the firewall object loaded for real, and a packet
     /// a rule denies pushed through it after every single map write of a
     /// reload. Needs the built objects and the privilege to load them; without
-    /// either it says so and returns, as the program harness does.
+    /// either it says so and returns, as the program harness does, except
+    /// where `EBPFSENTINEL_EBPF_DIR` names the objects: a job that set it
+    /// promised them, and their absence there is a broken build step.
     mod in_kernel {
         use super::*;
         use crate::ebpf::loader::EbpfLoader;
@@ -950,6 +952,11 @@ mod tests {
             );
             let bytes = std::fs::read(dir.join("xdp-firewall")).ok();
             if bytes.is_none() {
+                assert!(
+                    std::env::var_os("EBPFSENTINEL_EBPF_DIR").is_none(),
+                    "EBPFSENTINEL_EBPF_DIR names {}, which holds no xdp-firewall object",
+                    dir.display()
+                );
                 eprintln!("skipped: no xdp-firewall object in {}", dir.display());
             }
             bytes

@@ -193,7 +193,10 @@ PY
     while read -r pid; do
         [ ! -d "/proc/${pid}" ] || [ "$(cat "/proc/${pid}/comm")" != "me-encrypt" ]
     done <"${DATA_DIR}/work/workers"
-    ! pgrep -x me-encrypt
+    if pgrep -x me-encrypt >&2; then
+        echo "a me-encrypt worker is still running" >&2
+        return 1
+    fi
     [ "$(_rewritten "${victim}")" -lt "${DOCUMENTS}" ]
 }
 

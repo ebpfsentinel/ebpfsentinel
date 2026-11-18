@@ -102,11 +102,49 @@ fi
 
 systemctl enable --now iperf3 2>/dev/null || iperf3 -s -D
 
+# OpenSSL 3.5 beside the distribution's, for the X25519MLKEM768 handshakes:
+# the distribution's predates ML-KEM, and a suite reading the post-quantum
+# posture needs both ends to offer it. Built static under /opt, so nothing
+# on the host links against it; the suites pick it up by path. A host
+# provisioned here claims `openssl-mlkem` (tests/integration/skip-policy.yaml),
+# so a build that fails stops the provisioning rather than a suite skipping.
+OPENSSL_PQ_VERSION="3.5.4"
+OPENSSL_PQ_SHA256="967311f84955316969bdb1d8d4b983718ef42338639c621ec4c34fddef355e99"
+OPENSSL_PQ_PREFIX="/opt/openssl-3.5"
+if ! "${OPENSSL_PQ_PREFIX}/bin/openssl" list -kem-algorithms 2>/dev/null | grep -qi mlkem768; then
+    apt-get install -y --no-install-recommends perl
+    ossl_tmp="$(mktemp -d)"
+    curl -fsSL --retry 3 -o "${ossl_tmp}/openssl.tar.gz" \
+        "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_PQ_VERSION}/openssl-${OPENSSL_PQ_VERSION}.tar.gz"
+    echo "${OPENSSL_PQ_SHA256}  ${ossl_tmp}/openssl.tar.gz" | sha256sum -c -
+    tar -xzf "${ossl_tmp}/openssl.tar.gz" -C "${ossl_tmp}"
+    (
+        cd "${ossl_tmp}/openssl-${OPENSSL_PQ_VERSION}"
+        ./Configure --prefix="${OPENSSL_PQ_PREFIX}" \
+            --openssldir="${OPENSSL_PQ_PREFIX}/ssl" no-shared no-docs >/dev/null
+        make -j"$(nproc)" >/dev/null
+        make install_sw >/dev/null
+    )
+    rm -rf "${ossl_tmp}"
+    "${OPENSSL_PQ_PREFIX}/bin/openssl" list -kem-algorithms | grep -qi mlkem768 || {
+        echo "OpenSSL ${OPENSSL_PQ_VERSION} installed without ML-KEM" >&2
+        exit 1
+    }
+fi
+
+# Ubuntu refuses unprivileged user namespaces through AppArmor by default,
+# before seccomp or the agent's own token is consulted; the rootless suites
+# create one. A host provisioned here claims `userns`.
 cat > /etc/sysctl.d/99-ebpfsentinel.conf <<'SYSCTL'
 net.core.bpf_jit_enable=1
 kernel.perf_event_paranoid=-1
+kernel.apparmor_restrict_unprivileged_userns=0
 SYSCTL
 sysctl --system >/dev/null
+if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" != "0" ]; then
+    echo "kernel.apparmor_restrict_unprivileged_userns stayed on" >&2
+    exit 1
+fi
 
 cat > /etc/security/limits.d/99-ebpfsentinel.conf <<'LIMITS'
 *  soft  memlock  unlimited
