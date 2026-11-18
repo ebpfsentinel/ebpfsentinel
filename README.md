@@ -80,7 +80,7 @@ A snapshot of the capabilities below - see the [Features guide](https://docs.ebp
 | **Alert Pipeline** | Routing to email, webhook, log, OTLP with dedup + throttling |
 | **Audit Trail** | Rule change history with before/after diff and actor tracking |
 | **Packet Capture** | libpcap capture with BPF filters, manual or triggered by an alert |
-| **CLI** | Forty-three subcommands with `--output table\|json` and `--token` auth, every API route reachable |
+| **CLI** | Forty-six subcommands with `--output table\|json` and `--token` auth, every API route reachable |
 | **Authentication** | JWT, OIDC, and API keys with role-based access |
 | **TLS 1.3** | rustls + aws_lc_rs, post-quantum hybrid key exchange (X25519MLKEM768) |
 
