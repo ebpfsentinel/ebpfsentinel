@@ -362,6 +362,21 @@ pub(crate) fn claim(
             .position(|(n, _)| claims(n, program, target, hook))?;
         adopted.swap_remove(idx)
     };
+    let fdinfo = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", link.as_raw_fd()));
+    if let Ok(fdinfo) = fdinfo
+        && severed(&fdinfo, hook, interface_index(target, hook))
+    {
+        info!(
+            pin = name,
+            program,
+            target,
+            "pinned link no longer holds its hook, the interface or cgroup it ran on is gone: \
+             released and attached anew"
+        );
+        drop(link);
+        release_name(&name);
+        return None;
+    }
     let new_name = pin_name(program, target, hook);
     if let (Some(link_dup), Some(prog)) = (dup(link.as_raw_fd()), dup(prog_fd)) {
         lock(&PENDING).push(PendingSwap {
@@ -378,6 +393,48 @@ pub(crate) fn claim(
     );
     release_name(&name);
     None
+}
+
+/// The index `target` has now, for a hook whose link names its interface by
+/// index. A netkit link names the device it was created on, which is not
+/// always the one the target spells, so it is only read for a zero.
+fn interface_index(target: &str, hook: LinkHook) -> Option<u32> {
+    match hook {
+        LinkHook::Xdp | LinkHook::TcxIngress | LinkHook::TcxEgress => {
+            let name = std::ffi::CString::new(target).ok()?;
+            // SAFETY: `name` is a NUL-terminated string that outlives the call,
+            // which reads it and nothing else.
+            let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
+            Some(index)
+        }
+        LinkHook::NetkitPrimary | LinkHook::NetkitPeer | LinkHook::Cgroup(_) => None,
+    }
+}
+
+/// Whether a pinned link, by its `fdinfo`, no longer runs on anything.
+///
+/// The kernel keeps a link whose interface was unregistered or whose cgroup
+/// was removed, pinned and alive, with `ifindex` or `cgroup_id` at zero; such
+/// a link refuses `BPF_LINK_UPDATE` and adopting it would leave the hook
+/// empty. An interface deleted and created again under the same name is a
+/// new device: the link still names the old index, or zero. `now` is the
+/// target's current index where the hook names one, zero when no interface
+/// carries the name.
+fn severed(fdinfo: &str, hook: LinkHook, now: Option<u32>) -> bool {
+    let field = |key: &str| {
+        fdinfo.lines().find_map(|l| {
+            l.strip_prefix(key)
+                .and_then(|v| v.trim().parse::<u64>().ok())
+        })
+    };
+    match hook {
+        LinkHook::Cgroup(_) => field("cgroup_id:") == Some(0),
+        _ => match field("ifindex:") {
+            Some(0) => true,
+            Some(held) => now.is_some_and(|now| u64::from(now) != held),
+            None => false,
+        },
+    }
 }
 
 /// What [`complete_adoption`] did.
@@ -532,5 +589,45 @@ mod tests {
         assert!(!pin("xdp-eth0-p", 0));
         release("xdp-eth0-p");
         assert_eq!(complete_adoption(), Adoption::default());
+    }
+
+    const XDP_ON_7: &str =
+        "link_type:\txdp\nlink_id:\t12\nprog_tag:\tab\nprog_id:\t52\nifindex:\t7\n";
+    const XDP_GONE: &str =
+        "link_type:\txdp\nlink_id:\t12\nprog_tag:\tab\nprog_id:\t52\nifindex:\t0\n";
+
+    #[test]
+    fn a_link_whose_interface_was_unregistered_is_severed() {
+        assert!(severed(XDP_GONE, LinkHook::Xdp, Some(7)));
+        assert!(severed(XDP_GONE, LinkHook::NetkitPeer, None));
+    }
+
+    #[test]
+    fn a_link_on_an_interface_created_again_under_its_name_is_severed() {
+        assert!(severed(XDP_ON_7, LinkHook::Xdp, Some(9)));
+        assert!(severed(XDP_ON_7, LinkHook::TcxIngress, Some(0)));
+    }
+
+    #[test]
+    fn a_link_still_on_its_interface_is_adopted() {
+        assert!(!severed(XDP_ON_7, LinkHook::Xdp, Some(7)));
+        assert!(!severed(XDP_ON_7, LinkHook::NetkitPrimary, None));
+    }
+
+    #[test]
+    fn a_cgroup_link_is_severed_only_once_its_cgroup_is_gone() {
+        let live = "link_type:\tcgroup\ncgroup_id:\t4211\nattach_type:\t10\n";
+        let gone = "link_type:\tcgroup\ncgroup_id:\t0\nattach_type:\t10\n";
+        assert!(!severed(live, LinkHook::Cgroup(10), None));
+        assert!(severed(gone, LinkHook::Cgroup(10), None));
+    }
+
+    #[test]
+    fn a_link_whose_fdinfo_names_no_target_is_kept() {
+        assert!(!severed(
+            "link_type:\txdp\nlink_id:\t12\n",
+            LinkHook::Xdp,
+            Some(3)
+        ));
     }
 }

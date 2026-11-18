@@ -15,10 +15,14 @@
 //! whatever the table says, because the firewall admits a flow before
 //! netfilter has created the entry for it.
 //!
-//! The counters are rewritten while the datapath may be incrementing them, so
-//! an admission landing between the read of the holds and the write of the
-//! counters is missing from that one write and present in the next: the
-//! ceiling can be exceeded by what is admitted within one pass, never by more.
+//! The datapath keeps counting while a pass runs, and a pass that wrote back
+//! what it read from the holds would erase every admission landing between
+//! that read and the write, letting a source past its ceiling. So each
+//! counter is read before the holds and again just before it is written. When
+//! nothing was admitted in between, the holds that remain are the whole count
+//! and are written as they stand, which also mends a count a lost hold left
+//! too high. When something was, the pass only takes off the holds it
+//! released, so the admissions it never saw stay counted.
 
 use std::collections::{HashMap as StdHashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -190,6 +194,10 @@ pub struct Reconciliation {
     pub per_source: StdHashMap<[u32; 4], u32>,
     /// Open connections per live rule counter slot.
     pub per_rule: StdHashMap<u32, u32>,
+    /// Released holds per source, by source address words.
+    pub released_per_source: StdHashMap<[u32; 4], u32>,
+    /// Released holds per live rule counter slot.
+    pub released_per_rule: StdHashMap<u32, u32>,
 }
 
 /// Decide what one pass writes.
@@ -206,6 +214,17 @@ pub fn reconcile<S: std::hash::BuildHasher>(
         let young = now_ns.saturating_sub(hold.admitted_ns) < grace_ns;
         if !young && !open.contains(&FlowTuple::of_hold(key)) {
             out.release.push(*key);
+            if hold.counted_src != 0 {
+                *out.released_per_source
+                    .entry(source_key(key).addr)
+                    .or_insert(0) += 1;
+            }
+            if let Some(s) = u32::try_from(hold.rule_idx)
+                .ok()
+                .filter(|s| hold.rule_idx != LIMIT_HOLD_NO_RULE && live.holds_slot(*s))
+            {
+                *out.released_per_rule.entry(s).or_insert(0) += 1;
+            }
             continue;
         }
         if hold.counted_src != 0 {
@@ -226,6 +245,18 @@ pub fn reconcile<S: std::hash::BuildHasher>(
         }
     }
     out
+}
+
+/// What a counter becomes: the holds that remain when the counter did not move
+/// since the pass read it, otherwise the counter as it now stands less the
+/// holds the pass released.
+#[must_use]
+pub fn settled_count(before: u32, now: u32, held: u32, released: u32) -> u32 {
+    if now == before {
+        held
+    } else {
+        now.saturating_sub(released)
+    }
 }
 
 /// The counter a source should carry once its open connections are known, or
@@ -278,9 +309,21 @@ impl ConnectionLimitMaps {
         rate_window: Duration,
     ) -> PassReport {
         let now_ns = boottime_now_ns();
+        let live = live_banks();
+        // The counters first: one that has not moved by the time it is
+        // written saw no admission the holds below could have missed.
+        let sources_before: StdHashMap<[u32; 4], u32> = self
+            .sources
+            .iter()
+            .filter_map(Result::ok)
+            .map(|(k, c)| (k.addr, c.conn_count))
+            .collect();
+        let rules_before: Vec<u32> = (0..RULE_STATE_SLOTS)
+            .map(|slot| self.rules.get(&slot, 0).unwrap_or(0))
+            .collect();
         let holds: Vec<(LimitHoldKey, LimitHold)> =
             self.holds.iter().filter_map(Result::ok).collect();
-        let plan = reconcile(&holds, open, now_ns, live_banks());
+        let plan = reconcile(&holds, open, now_ns, live);
 
         for key in &plan.release {
             let _ = self.holds.remove(key);
@@ -290,11 +333,23 @@ impl ConnectionLimitMaps {
         }
 
         let rate_window_ns = u64::try_from(rate_window.as_nanos()).unwrap_or(u64::MAX);
-        let sources: Vec<(SrcCounterKey, SrcStateCounter)> =
-            self.sources.iter().filter_map(Result::ok).collect();
+        let keys: Vec<SrcCounterKey> = self.sources.keys().filter_map(Result::ok).collect();
         let mut sources_written = 0usize;
-        for (key, current) in sources {
-            let open_now = plan.per_source.get(&key.addr).copied().unwrap_or(0);
+        for key in keys {
+            let Ok(current) = self.sources.get(&key, 0) else {
+                continue;
+            };
+            // A source first seen after the counters were read moved since.
+            let before = sources_before.get(&key.addr).copied().unwrap_or(u32::MAX);
+            let open_now = settled_count(
+                before,
+                current.conn_count,
+                plan.per_source.get(&key.addr).copied().unwrap_or(0),
+                plan.released_per_source
+                    .get(&key.addr)
+                    .copied()
+                    .unwrap_or(0),
+            );
             match next_source_counter(current, open_now, now_ns, rate_window_ns) {
                 None => {
                     let _ = self.sources.remove(&key);
@@ -311,7 +366,22 @@ impl ConnectionLimitMaps {
         let mut rules_written = 0usize;
         for slot in 0..RULE_STATE_SLOTS {
             let current = self.rules.get(&slot, 0).unwrap_or(0);
-            let want = plan.per_rule.get(&slot).copied().unwrap_or(0);
+            // A slot of the bank a reload left behind counts nothing.
+            let want = if live.holds_slot(slot) {
+                let before = usize::try_from(slot)
+                    .ok()
+                    .and_then(|i| rules_before.get(i))
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                settled_count(
+                    before,
+                    current,
+                    plan.per_rule.get(&slot).copied().unwrap_or(0),
+                    plan.released_per_rule.get(&slot).copied().unwrap_or(0),
+                )
+            } else {
+                0
+            };
             if current != want && self.rules.set(slot, &want, 0).is_ok() {
                 rules_written += 1;
             }
@@ -449,6 +519,31 @@ mod tests {
         assert_eq!(plan.release, vec![holds[1].0]);
         let key = SrcCounterKey::from_v4(u32::from(Ipv4Addr::new(192, 0, 2, 1)));
         assert_eq!(plan.per_source.get(&key.addr), Some(&1));
+    }
+
+    #[test]
+    fn an_admission_during_the_pass_stays_counted() {
+        // Read 2, two holds seen, one released; the datapath admitted a third
+        // connection meanwhile and the counter now reads 3.
+        assert_eq!(settled_count(2, 3, 1, 1), 2);
+        // Nothing moved: the remaining holds are the count.
+        assert_eq!(settled_count(2, 2, 1, 1), 1);
+        // A count a lost hold left too high is mended once it stands still.
+        assert_eq!(settled_count(5, 5, 2, 0), 2);
+    }
+
+    #[test]
+    fn a_released_hold_is_taken_off_its_source_and_its_live_rule() {
+        let holds = vec![
+            v4_hold([192, 0, 2, 1], 40000, 3, 0),
+            v4_hold([192, 0, 2, 1], 40001, 3, 0),
+        ];
+        let open = open_set(&[open_conn("192.0.2.1", 40000, ConnectionState::Established)]);
+        let plan = reconcile(&holds, &open, 60 * SEC, LiveBanks::default());
+        let key = SrcCounterKey::from_v4(u32::from(Ipv4Addr::new(192, 0, 2, 1)));
+        assert_eq!(plan.released_per_source.get(&key.addr), Some(&1));
+        assert_eq!(plan.released_per_rule.get(&3), Some(&1));
+        assert_eq!(plan.per_rule.get(&3), Some(&1));
     }
 
     #[test]
