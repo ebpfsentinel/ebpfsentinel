@@ -72,8 +72,19 @@ ENV EBPFSENTINEL_TELEMETRY_ENDPOINT=${TELEMETRY_ENDPOINT}
 # Build the agent (static, musl). It loads its own eBPF through a BPF token (a
 # user-namespace feature) - rootless. The warden broker ships in its own image
 # (Dockerfile.warden).
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    case "${TARGETARCH}" in \
+# Unset in a release build. ebpfsentinel-devimg sets them for a local test
+# image: without whole-program LTO a one-line change relinks in seconds, not
+# the minutes a fat LTO pass over the whole binary takes.
+ARG CARGO_PROFILE_RELEASE_LTO
+ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS
+ARG CARGO_PROFILE_RELEASE_INCREMENTAL
+# The target directory is a BuildKit cache mount: a rebuild after a source
+# change recompiles the crates that changed, not every dependency. It is not
+# part of any layer, so the binary is copied out in the same step.
+RUN --mount=type=cache,id=agent-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=agent-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=agent-target,target=/build/target,sharing=locked \
+        case "${TARGETARCH}" in \
         arm64) MUSL_TARGET="aarch64-unknown-linux-musl" ;; \
         *)     MUSL_TARGET="x86_64-unknown-linux-musl" ;; \
     esac && \
