@@ -8,9 +8,9 @@ wardenImage:
 
 daemonset:
   bpfToken:
-    # A kind node's /sys/fs/bpf cannot be delegated, so the token's bpffs
-    # lives in the pod. A real node leaves this false.
-    bpffsEmptyDir: true
+    # A kind node has no bpffs to pin the links on, so they go with the
+    # pod. A real node leaves this true.
+    pinLinksOnNode: false
 
 configOverride: |
   agent:

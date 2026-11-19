@@ -102,7 +102,7 @@ setup_file() {
         --namespace "$NAMESPACE" --create-namespace \
         --set "image.repository=${AGENT_IMAGE%:*},image.tag=${AGENT_IMAGE##*:},image.pullPolicy=IfNotPresent" \
         --set "wardenImage.repository=${WARDEN_IMAGE%:*},wardenImage.tag=${WARDEN_IMAGE##*:}" \
-        --set daemonset.bpfToken.bpffsEmptyDir=true \
+        --set daemonset.bpfToken.pinLinksOnNode=false \
         --set daemonset.state.ephemeral=true \
         --set daemonset.tailoredSeccomp.enabled=true
 

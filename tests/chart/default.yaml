@@ -244,13 +244,12 @@ spec:
               # would cover the warden alone and no workload on the node.
               mountPath: /sys/fs/cgroup
               readOnly: true
-            - name: bpf
+            - name: node-bpf
               # The node's bpffs, where the warden pins the agent's XDP, TC
               # and cgroup links so they keep enforcing when the pod is
               # deleted, restarted or killed; the next pod adopts them. Only
-              # `ebpfsentinel-agent uninstall` removes them. An in-pod tmpfs
-              # has no node bpffs behind it, and there the links go with the
-              # pod.
+              # `ebpfsentinel-agent uninstall` removes them. Without it the
+              # links go with the pod.
               mountPath: /sys/fs/bpf
       containers:
         - name: agent
@@ -339,11 +338,9 @@ spec:
               mountPath: /etc/ebpfsentinel
               readOnly: true
             - name: bpf
+              # The agent mounts the delegated bpffs under this path inside its
+              # own private mount namespace.
               mountPath: /sys/fs/bpf
-              # The agent mounts the delegated bpffs over this path inside its
-              # own private mount namespace; expose the host bpffs to the pod.
-              # (Omitted for an in-pod tmpfs, where there is no host bpffs.)
-              mountPropagation: HostToContainer
             - name: debug
               mountPath: /sys/kernel/debug
               readOnly: true
@@ -380,10 +377,15 @@ spec:
             # default to 0644, so pin a stricter mode.
             defaultMode: 0640
         - name: bpf
-          # A container's /sys is read-only, so the agent needs this writable
-          # host bpffs to create the delegated mountpoint. On nested runtimes
-          # (kind, minikube) whose /sys/fs/bpf is read-only or absent, set
-          # daemonset.bpfToken.bpffsEmptyDir=true to use an in-pod tmpfs instead.
+          # A container's /sys is read-only, so the delegated bpffs needs a
+          # writable directory to be mounted on. It is the pod's own: the agent
+          # runs as 65534 and the node's bpffs is root's, 0700 where systemd
+          # mounted it and absent on a nested node, so a mountpoint under it
+          # can never be created. The bpffs mounted here is a new instance the
+          # agent opened, so nothing of the node's is behind it.
+          emptyDir:
+            medium: Memory
+        - name: node-bpf
           hostPath:
             path: /sys/fs/bpf
         - name: debug

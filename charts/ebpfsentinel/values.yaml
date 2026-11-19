@@ -150,12 +150,12 @@ daemonset:
   # in sync via this one value; they must point at the same mount.
   bpfToken:
     bpffsPath: /sys/fs/bpf/ebpfsentinel
-    # -- Back the bpffs mount with an in-pod tmpfs (emptyDir medium: Memory)
-    # instead of the host's /sys/fs/bpf. Required on nested runtimes (kind,
-    # minikube) whose node /sys/fs/bpf is read-only or absent - there the
-    # hostPath mount fails. On a real node leave this false so pinned maps live
-    # on the host bpffs.
-    bpffsEmptyDir: false
+    # -- Give the warden the node's /sys/fs/bpf, where it pins the agent's
+    # links so they keep enforcing while no agent runs. The agent itself never
+    # touches the node's bpffs: its delegated bpffs is mounted in an in-pod
+    # tmpfs. Set false on nested runtimes (kind, minikube) whose node has no
+    # bpffs; there the links go with the pod.
+    pinLinksOnNode: true
   # -- The privileged warden broker (native sidecar).
   warden:
     # -- Warden security context. The broker holds the host capabilities:
