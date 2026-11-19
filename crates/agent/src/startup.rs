@@ -112,7 +112,13 @@ fn dns_feed_specs(
 /// copy and every TLS alert would miss the socket the kernel established.
 /// Nothing else uprobe-dlp or cgroup-attribution declares is named by a third
 /// object, so the isolation from the packet programs still holds.
-pub const DLP_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel-dlp";
+///
+/// It is a directory inside the default pin path rather than beside it: a
+/// rootless agent's only bpffs is the one the warden delegated, mounted at
+/// that path, and a sibling of it lands on the pod's tmpfs, where nothing can
+/// be pinned. Every wipe of the default path happens where this one is wiped
+/// too, so the nesting takes nothing away from the DLP objects early.
+pub const DLP_PIN_PATH: &str = "/sys/fs/bpf/ebpfsentinel/dlp";
 
 /// How often the guests' names are read again from the hypervisor records,
 /// which is how long a rule naming a guest waits for one defined late or

@@ -807,6 +807,40 @@ impl AgentConfig {
             check_groups(format!("ids.rules[{idx}].interfaces"), &rule_cfg.interfaces)?;
         }
 
+        // Every other section scoping its rules by interface group is held to
+        // the same names. Left to the section's own conversion, a name no
+        // group declares only surfaced once the section was loaded, as a
+        // warning and an empty table, on a configuration already accepted.
+        for (idx, rule) in self.ratelimit.rules.iter().enumerate() {
+            check_groups(
+                format!("ratelimit.rules[{idx}].interfaces"),
+                &rule.interfaces,
+            )?;
+        }
+        for (section, rules) in [
+            ("nat.snat_rules", &self.nat.snat_rules),
+            ("nat.dnat_rules", &self.nat.dnat_rules),
+        ] {
+            for (idx, rule) in rules.iter().enumerate() {
+                check_groups(format!("{section}[{idx}].interfaces"), &rule.interfaces)?;
+            }
+        }
+        for (idx, rule) in self.nat.nptv6_rules.iter().enumerate() {
+            check_groups(
+                format!("nat.nptv6_rules[{idx}].interfaces"),
+                &rule.interfaces,
+            )?;
+        }
+        for (idx, pipe) in self.qos.pipes.iter().enumerate() {
+            check_groups(format!("qos.pipes[{idx}].interfaces"), &pipe.interfaces)?;
+        }
+        for (idx, classifier) in self.qos.classifiers.iter().enumerate() {
+            check_groups(
+                format!("qos.classifiers[{idx}].interfaces"),
+                &classifier.interfaces,
+            )?;
+        }
+
         // Validate IDS sampling
         if let Some(ref suricata) = self.ids.suricata {
             suricata.validate()?;
@@ -5873,6 +5907,43 @@ interface_groups:
     interfaces: [eth0, eth1]
 ";
         assert!(AgentConfig::from_yaml(yaml).is_err());
+    }
+
+    #[test]
+    fn a_qos_pipe_naming_no_declared_group_is_refused_at_load() {
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+interface_groups:
+  lan:
+    interfaces: [eth0]
+qos:
+  enabled: true
+  pipes:
+    - id: pipe-wan
+      bandwidth: "100mbps"
+      interfaces: [wan]
+"#;
+        let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("qos.pipes[0].interfaces"), "{err}");
+        assert!(err.contains("unknown interface group: 'wan'"), "{err}");
+        assert!(AgentConfig::from_yaml(&yaml.replace("[wan]", "[lan]")).is_ok());
+    }
+
+    #[test]
+    fn a_nat_rule_naming_no_declared_group_is_refused_at_load() {
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+nat:
+  enabled: true
+  snat_rules:
+    - id: snat-out
+      type: masquerade
+      interfaces: ["!wan"]
+"#;
+        let err = AgentConfig::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("nat.snat_rules[0].interfaces"), "{err}");
     }
 
     #[test]
