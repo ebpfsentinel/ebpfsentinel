@@ -1,48 +1,16 @@
-# Build artifacts
-target/
+# An allow-list, not a deny-list: everything stays out of the build context
+# unless named here. A deny-list has to foresee every directory that grows
+# (target-docker/, fuzz/target/, Vagrant disks); a path a Dockerfile needs and
+# this file forgets fails the build at once instead.
+*
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!deny.toml
+!.cargo/
+!crates/
+!proto/
+!config/ebpfsentinel.yaml
+!dist/seccomp/
+!ebpf-out/
 **/target/
-
-# Version control
-.git/
-.gitignore
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# Secrets & environment
-.env
-.env.local
-*.pem
-*.key
-credentials.json
-
-# CI/CD
-.github/
-
-# Test/bench/fuzz (not needed for production build)
-tests/
-benches/
-fuzz/
-
-# Mutation testing / coverage
-mutants.out/
-*.profraw
-*.profdata
-
-# Docker image export
-ebpfsentinel-image.tar
-
-# Infra
-.vagrant/
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# IA
-CLAUDE.md
-.claude
