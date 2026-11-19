@@ -388,7 +388,7 @@ impl EbpfLoader {
             if let Some(link) =
                 link_handover::take_over(program_name, interface, LinkHook::TcxIngress, raw)
             {
-                check_tcx_order(program_name, interface, false, raw)?;
+                check_tcx_order(program_name, interface, false, raw, link.raw_fd())?;
                 self.links.push(link);
                 attach_inspect::clear_block(program_name, interface);
                 return Ok(());
@@ -413,7 +413,7 @@ impl EbpfLoader {
                     ));
                 }
             };
-            check_tcx_order(program_name, interface, false, raw)?;
+            check_tcx_order(program_name, interface, false, raw, link.as_raw_fd())?;
             self.links.push(AttachedLink::new(
                 program_name,
                 interface,
@@ -450,7 +450,7 @@ impl EbpfLoader {
             if let Some(link) =
                 link_handover::take_over(program_name, interface, LinkHook::TcxEgress, raw)
             {
-                check_tcx_order(program_name, interface, true, raw)?;
+                check_tcx_order(program_name, interface, true, raw, link.raw_fd())?;
                 self.links.push(link);
                 attach_inspect::clear_block(program_name, interface);
                 return Ok(());
@@ -473,7 +473,7 @@ impl EbpfLoader {
                     ));
                 }
             };
-            check_tcx_order(program_name, interface, true, raw)?;
+            check_tcx_order(program_name, interface, true, raw, link.as_raw_fd())?;
             self.links.push(AttachedLink::new(
                 program_name,
                 interface,
@@ -842,9 +842,10 @@ fn check_tcx_order(
     interface: &str,
     egress: bool,
     prog_fd: RawFd,
+    link_fd: RawFd,
 ) -> Result<(), anyhow::Error> {
     let hook = tcx_order::Hook { interface, egress };
-    let Err(reason) = tcx_order::verify(program_name, hook, prog_fd) else {
+    let Err(reason) = tcx_order::verify(program_name, hook, prog_fd, link_fd) else {
         return Ok(());
     };
     warn!(program_name, interface, reason = %reason, "attach refused");

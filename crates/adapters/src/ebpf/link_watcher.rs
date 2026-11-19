@@ -975,7 +975,7 @@ fn attach_one(name: &str, fd: RawFd, side: HookSide, target: &Attach) -> Result<
     };
     // A refusal drops the link on return: the agent does not stay attached
     // where a program ahead of it decides what it sees.
-    tcx_order::verify(name, hook, fd)?;
+    tcx_order::verify(name, hook, fd, link_fd.as_raw_fd())?;
     Ok(link_fd)
 }
 

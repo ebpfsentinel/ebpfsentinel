@@ -32,8 +32,8 @@ use ebpfsentinel_warden_client::ReconnectingClient;
 use ebpfsentinel_warden_proto::LINK_PIN_NAME_MAX;
 use tracing::{info, warn};
 
-use super::kfunc_attach;
 use super::link_handover::LinkHook;
+use super::{kfunc_attach, tcx_order};
 
 /// Who holds the pins.
 enum PinStore {
@@ -333,6 +333,14 @@ pub fn adopt() -> usize {
             links = count,
             "links pinned by the previous run found, they keep enforcing until swapped"
         );
+    }
+    // Each adopted link keeps the previous run's program on its hook until
+    // the swap: those programs are the agent's, and a chain read meanwhile
+    // must not take one ahead of a new attach for a foreign program.
+    for (_, fd) in &opened {
+        if let Some(id) = tcx_order::link_program_id(fd.as_raw_fd()) {
+            tcx_order::register_ours(id);
+        }
     }
     let mut pinned = lock(&PINNED);
     for (name, _) in &opened {

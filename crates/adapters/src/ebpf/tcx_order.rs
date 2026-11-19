@@ -269,18 +269,50 @@ fn read_chain(interface: &str, egress: bool) -> Result<Vec<u32>, String> {
     }
 }
 
-/// Read the chain back after attaching `prog_fd` and judge where it landed.
+/// Count `id` among the agent's own programs: a program a link pinned by the
+/// previous run still carries, which sits on the chain until the adoption
+/// swap replaces it and must not read as foreign meanwhile.
+pub fn register_ours(id: u32) {
+    registry()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(id);
+}
+
+/// The program a link carries now, read from its `fdinfo`.
+#[must_use]
+pub fn link_program_id(link_fd: RawFd) -> Option<u32> {
+    let fdinfo = std::fs::read_to_string(format!("/proc/self/fdinfo/{link_fd}")).ok()?;
+    program_id_in(&fdinfo)
+}
+
+fn program_id_in(fdinfo: &str) -> Option<u32> {
+    fdinfo
+        .lines()
+        .find_map(|l| l.strip_prefix("prog_id:"))
+        .and_then(|v| v.trim().parse().ok())
+}
+
+/// Read the chain back once `link_fd` holds the hook for `prog_fd`, and judge
+/// where it landed.
+///
+/// The program judged is the one the link carries now. A fresh link carries
+/// `prog_fd`; a link adopted from the previous run still carries that run's
+/// program until the adoption swap, so `prog_fd` is not on the chain yet and
+/// looking for it would refuse every restart.
 ///
 /// `Err` carries the refusal an operator reads; the caller drops the link.
 /// A chain nobody could read is a warning, once per hook, and not a refusal.
-pub fn verify(program: &str, hook: Hook<'_>, prog_fd: RawFd) -> Result<(), String> {
-    let Some(this) = attach_inspect::program_id(prog_fd) else {
+pub fn verify(program: &str, hook: Hook<'_>, prog_fd: RawFd, link_fd: RawFd) -> Result<(), String> {
+    let loaded = attach_inspect::program_id(prog_fd);
+    let Some(this) = link_program_id(link_fd).or(loaded) else {
         warn!(program, %hook, "TCX order unverified: the program's own id is unreadable");
         return Ok(());
     };
     let ours = {
         let mut ours = registry().lock().unwrap_or_else(PoisonError::into_inner);
         ours.insert(this);
+        ours.extend(loaded);
         ours.clone()
     };
     record_placed(hook, this);
@@ -393,6 +425,26 @@ mod tests {
         record_placed(hook, 7);
         assert_eq!(anchors("anchor-test0", true), vec![7, 9]);
         assert!(anchors("anchor-test0", false).is_empty());
+    }
+
+    #[test]
+    fn the_program_a_link_carries_is_read_from_its_fdinfo() {
+        let fdinfo = "pos:\t0\nflags:\t02000000\nlink_type:\ttcx\nlink_id:\t7\nprog_tag:\t00\nprog_id:\t99\nifindex:\t2\n";
+        assert_eq!(program_id_in(fdinfo), Some(99));
+        assert_eq!(program_id_in("link_type:\ttcx\n"), None);
+    }
+
+    #[test]
+    fn an_adopted_program_ahead_is_ours_not_foreign() {
+        // Restart: the previous run's programs 40 and 41 hold the chain
+        // through their adopted links, and the link judged carries 41.
+        let mut adopted = ours(&[40]);
+        adopted.insert(41);
+        assert_eq!(judge(&[40, 41, 90], &adopted, 41), Ok(()));
+        assert_eq!(
+            judge(&[40, 41, 90], &ours(&[41]), 41),
+            Err(OrderFault::ForeignAhead { ids: vec![40] })
+        );
     }
 
     #[test]
