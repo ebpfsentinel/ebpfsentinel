@@ -926,6 +926,13 @@ fn process_dnat_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16) -> Result<i3
 // updates after address/port changes.  These are the right helpers for
 // single-field rewrites.
 //
+// Both helpers take the old and new values as they sit in the packet, in
+// network byte order loaded as a native integer, because the checksum they
+// adjust is read the same way. A port or address passed in host order moves
+// the checksum by the byte-swapped difference: invisible while the skb is
+// CHECKSUM_PARTIAL and the stack completes the sum later, a dropped packet
+// (UDP_CSUM, a bad IP header) as soon as it is not.
+//
 
 /// Rewrite the destination IP address in the IPv4 header and update checksums.
 #[inline(always)]
@@ -969,8 +976,8 @@ fn rewrite_dst_ip(
         bpf_l3_csum_replace(
             raw_skb(ctx) as *mut _,
             ip_csum_off,
-            u32::from_be_bytes(old_be) as u64,
-            u32::from_be_bytes(new_be) as u64,
+            u32::from_ne_bytes(old_be) as u64,
+            u32::from_ne_bytes(new_be) as u64,
             4,
         )
     };
@@ -989,8 +996,8 @@ fn rewrite_dst_ip(
         bpf_l4_csum_replace(
             raw_skb(ctx) as *mut _,
             l4_csum_off,
-            u32::from_be_bytes(old_be) as u64,
-            u32::from_be_bytes(new_be) as u64,
+            u32::from_ne_bytes(old_be) as u64,
+            u32::from_ne_bytes(new_be) as u64,
             4 | BPF_F_PSEUDO_HDR,
         )
     };
@@ -1047,8 +1054,8 @@ fn rewrite_src_ip(
         bpf_l3_csum_replace(
             raw_skb(ctx) as *mut _,
             ip_csum_off,
-            u32::from_be_bytes(old_be) as u64,
-            u32::from_be_bytes(new_be) as u64,
+            u32::from_ne_bytes(old_be) as u64,
+            u32::from_ne_bytes(new_be) as u64,
             4,
         )
     };
@@ -1067,8 +1074,8 @@ fn rewrite_src_ip(
         bpf_l4_csum_replace(
             raw_skb(ctx) as *mut _,
             l4_csum_off,
-            u32::from_be_bytes(old_be) as u64,
-            u32::from_be_bytes(new_be) as u64,
+            u32::from_ne_bytes(old_be) as u64,
+            u32::from_ne_bytes(new_be) as u64,
             4 | BPF_F_PSEUDO_HDR,
         )
     };
@@ -1186,8 +1193,8 @@ fn rewrite_dst_port(
         bpf_l4_csum_replace(
             raw_skb(ctx) as *mut _,
             l4_csum_off,
-            old_port as u64,
-            new_port as u64,
+            old_port.to_be() as u64,
+            new_port.to_be() as u64,
             2,
         )
     };

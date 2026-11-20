@@ -601,9 +601,11 @@ fn scrub_tcp_reserved_flags(ctx: &mut TcContext, l4_offset: usize) -> Result<(),
         return Ok(()); // nothing to change
     }
 
-    // Build old and new 16-bit values for checksum update (bytes 12-13).
-    let old_val = ((byte12 as u16) << 8) | (byte13 as u16);
-    let new_val = ((new_byte12 as u16) << 8) | (new_byte13 as u16);
+    // Old and new 16-bit words for the checksum update (bytes 12-13), read
+    // the way the helper reads the checksum: the packet's bytes loaded as a
+    // native integer, never assembled into host order.
+    let old_val = u16::from_ne_bytes([byte12, byte13]);
+    let new_val = u16::from_ne_bytes([new_byte12, new_byte13]);
 
     if new_byte12 != byte12 {
         ctx.store(l4_offset + 12, &new_byte12, 0).map_err(|_| ())?;
