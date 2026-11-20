@@ -177,3 +177,85 @@ fn as_agent_document(body: &str) -> Option<(String, String)> {
         ))
     }
 }
+
+/// What a suite's helper writes in place of each placeholder, as a value of
+/// the type the key holding it takes.
+const FIXTURE_PLACEHOLDERS: &[(&str, &str)] = &[
+    ("__INTERFACE__", "eth1"),
+    ("__IFACE__", "eth1"),
+    ("__HOST_IP__", "10.200.0.1"),
+    ("__NS_IP__", "10.200.0.2"),
+    ("__GATEWAY__", "172.17.0.1"),
+    ("__UPSTREAM__", "10.200.0.53:53"),
+    ("__WHITELIST_SUBNET__", "10.200.0.0/24"),
+    ("__PUBLISHED_PORT__", "8081"),
+    ("__CERT_PATH__", "/etc/ebpfsentinel/tls/agent.crt"),
+    ("__KEY_PATH__", "/etc/ebpfsentinel/tls/agent.key"),
+    ("__JWT_PUBKEY__", "/etc/ebpfsentinel/jwt.pub"),
+    ("__EBPF_DIR__", "/usr/local/lib/ebpfsentinel"),
+    ("__CGROUP_ROOT__", "/sys/fs/cgroup"),
+    ("__DOCKER_ROOT__", "/var/lib/docker"),
+    ("__CURL__", "/usr/bin/curl"),
+    ("__PYCOPY__", "/tmp/python3-copy"),
+    ("__PYTHON__", "/usr/bin/python3"),
+    ("__TIMEOUT__", "/usr/bin/timeout"),
+    (
+        "__PYMARK_HASH__",
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    ),
+    ("__GOVERNED__", "governed"),
+    ("__EXEC_MODE__", "observe"),
+    ("__KILL__", "false"),
+    ("__LABELS__", "true"),
+    ("__RULES__", "[]"),
+];
+
+/// Every configuration a suite hands the agent loads whole: types, enum
+/// spellings and the loader's own validation, once the placeholders hold
+/// what the suite writes there.
+///
+/// Naming only known keys is not enough: a value of the wrong type, an enum
+/// word the loader does not have or a rule its validation refuses leaves the
+/// agent on a document that never boots, and the suite then tests nothing.
+/// `config-invalid.yaml` is the one fixture written to be refused. The data
+/// directory holds the ruleset the Suricata import suite writes there.
+#[test]
+fn every_integration_fixture_loads_whole() {
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/integration/fixtures"
+    );
+    let data_dir = std::env::temp_dir().join(format!("fixtures-load-{}", std::process::id()));
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(
+        data_dir.join("suite.rules"),
+        "alert tcp any any -> any 4445 (msg:\"probe\"; content:\"PROBE\"; sid:9000001; rev:1;)\n",
+    )
+    .unwrap();
+    let data_dir_text = data_dir.to_string_lossy().to_string();
+    let mut fails = Vec::new();
+    let mut loaded = 0;
+    for f in yaml_files_in(dir) {
+        let name = f.file_name().unwrap().to_string_lossy().to_string();
+        let mut yaml = std::fs::read_to_string(&f).unwrap();
+        if !yaml.lines().any(|l| l.starts_with("agent:")) {
+            continue;
+        }
+        yaml = yaml.replace("__DATA_DIR__", &data_dir_text);
+        for (placeholder, value) in FIXTURE_PLACEHOLDERS {
+            yaml = yaml.replace(placeholder, value);
+        }
+        let result = AgentConfig::from_yaml(&yaml);
+        if name == "config-invalid.yaml" {
+            assert!(result.is_err(), "config-invalid.yaml loads");
+            continue;
+        }
+        match result {
+            Ok(_) => loaded += 1,
+            Err(e) => fails.push(format!("{name}: {e}")),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&data_dir);
+    assert!(loaded > 50, "only {loaded} fixtures loaded under {dir}");
+    assert!(fails.is_empty(), "fixtures the agent refuses: {fails:#?}");
+}
