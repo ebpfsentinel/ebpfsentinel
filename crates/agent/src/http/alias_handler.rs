@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
+use domain::common::error::DomainError;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -18,12 +19,18 @@ pub struct AliasStatusResponse {
 /// Response to `PUT /api/v1/aliases/{id}/content`.
 #[derive(Serialize, ToSchema)]
 pub struct ExternalAliasContentResponse {
-    /// Always `ok`: a refused content answers 400.
+    /// Always `ok`: a refused content answers 400, a kernel IP set that
+    /// refuses the load answers 500.
     pub status: &'static str,
     /// The alias the content was loaded into.
     pub alias: String,
-    /// How many addresses the alias now holds.
+    /// How many addresses the alias now holds, for rules resolved in
+    /// userspace.
     pub ips_loaded: usize,
+    /// How many of them the kernel IP set matches on: IPv4 host addresses
+    /// only, a network or an IPv6 member stays out of it. `0` on an agent
+    /// whose firewall program did not load.
+    pub kernel_set_entries: usize,
 }
 
 /// Request body for `PUT /api/v1/aliases/{id}/content`.
@@ -64,6 +71,9 @@ pub async fn alias_status(
 }
 
 /// `PUT /api/v1/aliases/{id}/content` - push content for an External alias.
+///
+/// Needs the admin role: the alias feeds the kernel IP set node-wide rules
+/// match on, so its content changes what those rules let through.
 #[utoipa::path(
     put, path = "/api/v1/aliases/{id}/content",
     tag = "Aliases",
@@ -74,7 +84,8 @@ pub async fn alias_status(
         (status = 404, description = "Alias service not enabled", body = ErrorBody),
         (status = 400, description = "Invalid content or alias is not External", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
-        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions: needs the admin role", body = ErrorBody),
+        (status = 500, description = "The kernel IP set refused the content; the previous content stays", body = ErrorBody),
     ),
     security(
         ("bearer_auth" = []),
@@ -102,15 +113,20 @@ pub async fn set_external_alias_content(
     }
 
     let mut svc = alias_svc.write().await;
-    svc.set_external_ips(&alias_id, &ips)
-        .map_err(|e| ApiError::BadRequest {
+    let load = svc.set_external_ips(&alias_id, &ips).map_err(|e| match e {
+        DomainError::EngineError(_) => ApiError::Internal {
+            message: e.to_string(),
+        },
+        _ => ApiError::BadRequest {
             code: "SET_EXTERNAL_FAILED",
             message: e.to_string(),
-        })?;
+        },
+    })?;
 
     Ok(Json(ExternalAliasContentResponse {
         status: "ok",
         alias: alias_id,
-        ips_loaded: body.ips.len(),
+        ips_loaded: load.members,
+        kernel_set_entries: load.kernel_hosts,
     }))
 }

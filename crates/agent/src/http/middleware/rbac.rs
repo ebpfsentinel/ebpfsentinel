@@ -54,7 +54,6 @@ pub const WRITE_ROLES: &[(&str, &str, WriteRole)] = &[
         "/api/v1/threatintel/feeds/refresh",
         WriteRole::Operator,
     ),
-    ("PUT", "/api/v1/aliases/{id}/content", WriteRole::Operator),
     ("DELETE", "/api/v1/dns/cache", WriteRole::Operator),
     ("POST", "/api/v1/domains/blocklist", WriteRole::Operator),
     (
@@ -65,6 +64,9 @@ pub const WRITE_ROLES: &[(&str, &str, WriteRole)] = &[
     // An L7 rule carries no namespace and holds every flow the node parses.
     ("POST", "/api/v1/firewall/l7-rules", WriteRole::Admin),
     ("DELETE", "/api/v1/firewall/l7-rules/{id}", WriteRole::Admin),
+    // An external alias feeds the kernel IP set node-wide rules match on:
+    // its content changes what those rules let through.
+    ("PUT", "/api/v1/aliases/{id}/content", WriteRole::Admin),
     ("POST", "/api/v1/ips/blacklist", WriteRole::Admin),
     ("DELETE", "/api/v1/ips/blacklist/{ip}", WriteRole::Admin),
     ("POST", "/api/v1/ratelimit/rules", WriteRole::Admin),
@@ -281,6 +283,19 @@ mod tests {
         assert_eq!(
             write_role("PATCH", "/api/v1/alerts/{id}/triage"),
             WriteRole::Operator
+        );
+    }
+
+    #[test]
+    fn external_alias_content_needs_admin() {
+        assert_eq!(
+            write_role("PUT", "/api/v1/aliases/{id}/content"),
+            WriteRole::Admin
+        );
+        let operator = make_claims(Some("operator"), Some(vec!["prod"]));
+        assert!(
+            require_write_role(&operator, write_role("PUT", "/api/v1/aliases/{id}/content"))
+                .is_err()
         );
     }
 

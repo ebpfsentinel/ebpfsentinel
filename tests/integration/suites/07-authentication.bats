@@ -139,3 +139,34 @@ get_token() {
     api_post /api/v1/firewall/rules "$rule" -H "Authorization: Bearer $(get_token operator)" >/dev/null
     assert_http_status "403" "$HTTP_STATUS"
 }
+
+# An external alias feeds the kernel IP set that node-wide rules match on,
+# so changing its content is an admin act even for an operator whose
+# namespace a rule would accept.
+@test "operator cannot push external alias content (403 names the admin role)" {
+    local body
+    body="$(api_put /api/v1/aliases/it-ext/content '{"ips":["10.1.0.5"]}' \
+        -H "Authorization: Bearer $(get_token operator)")"
+    _load_http_status
+    assert_http_status "403" "$HTTP_STATUS"
+    [[ "$body" == *"admin"* ]]
+}
+
+@test "viewer cannot push external alias content (403)" {
+    api_put /api/v1/aliases/it-ext/content '{"ips":["10.1.0.5"]}' \
+        -H "Authorization: Bearer $(get_token viewer)" >/dev/null
+    _load_http_status
+    assert_http_status "403" "$HTTP_STATUS"
+}
+
+@test "admin pushing external alias content passes the role check" {
+    # No alias is configured here, so an admin reaching the handler is
+    # answered by it (no such external alias), never 401 or 403 by the
+    # role check.
+    local body
+    body="$(api_put /api/v1/aliases/it-ext/content '{"ips":["10.1.0.5"]}' \
+        -H "Authorization: Bearer $(get_token admin)")"
+    _load_http_status
+    [[ "$HTTP_STATUS" == "400" || "$HTTP_STATUS" == "404" ]]
+    [[ "$body" != *"Insufficient permissions"* ]]
+}
