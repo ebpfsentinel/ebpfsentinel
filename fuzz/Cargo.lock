@@ -486,6 +486,7 @@ dependencies = [
  "application",
  "ebpf-common",
  "ebpfsentinel-domain",
+ "ebpfsentinel-warden",
  "infrastructure",
  "libfuzzer-sys",
  "serde_json",

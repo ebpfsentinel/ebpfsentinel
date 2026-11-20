@@ -31,12 +31,12 @@ setup_file() {
     export PROJECT_ROOT
     PROJECT_ROOT="$(find_project_root)"
     export AGENT_BIN="${AGENT_BIN:-${PROJECT_ROOT}/target/release/ebpfsentinel-agent}"
-    [ -x "$AGENT_BIN" ] || env_skip "agent binary not found: ${AGENT_BIN}"
+    [ -x "$AGENT_BIN" ] || lane_skip agent-build "agent binary not found: ${AGENT_BIN}"
 
     bpf_token_build_launcher
 
     export EBPF_DIR="${PROJECT_ROOT}/target/bpfel-unknown-none/release"
-    [ -f "${EBPF_DIR}/xdp-firewall" ] || env_skip "eBPF objects not found in ${EBPF_DIR}"
+    [ -f "${EBPF_DIR}/xdp-firewall" ] || lane_skip agent-build "eBPF objects not found in ${EBPF_DIR}"
 
     export DATA_DIR="/tmp/ebpfsentinel-bpf-token-data-$$"
     mkdir -p "$DATA_DIR"

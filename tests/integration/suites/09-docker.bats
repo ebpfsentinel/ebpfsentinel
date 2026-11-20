@@ -313,8 +313,11 @@ teardown_file() {
         echo "# ICMP avg latency: ${avg_ms} ms"
     fi
 
-    # Just verify pings succeed (latency is informational)
-    echo "$ping_output" | grep -q "bytes from" || true
+    # The latency is informational; the replies are not.
+    echo "$ping_output" | grep -q "bytes from" || {
+        echo "no ICMP reply through the Docker agent: ${ping_output}" >&2
+        return 1
+    }
 }
 
 # ── Test 7: Container RSS and CPU ─────────────────────────────────

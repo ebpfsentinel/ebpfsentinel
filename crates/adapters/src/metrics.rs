@@ -2665,6 +2665,87 @@ mod tests {
         port.record_false_positive("ids", "ids-001");
         port.set_memory_usage_bytes(1024 * 1024);
         port.set_cpu_usage_percent(25.5);
+
+        // Every call through the trait object lands on the series the agent
+        // serves, with the labels and the value it was given.
+        let encoded = metrics.encode();
+        let has = |name: &str, labels: &[&str], value: &str| {
+            encoded.lines().any(|line| {
+                line.starts_with(name)
+                    && line[name.len()..].starts_with(['{', ' '])
+                    && labels.iter().all(|l| line.contains(l))
+                    && line.ends_with(&format!(" {value}"))
+            })
+        };
+        let expected: [(&str, &[&str], &str); 14] = [
+            (
+                "ebpfsentinel_packets_total",
+                &["interface=\"lo\"", "action=\"pass\""],
+                "1",
+            ),
+            (
+                "ebpfsentinel_rules_loaded",
+                &["component=\"firewall\""],
+                "5",
+            ),
+            ("ebpfsentinel_ebpf_program_status", &[], "1"),
+            (
+                "ebpfsentinel_events_dropped_total",
+                &["reason=\"parse_error\""],
+                "1",
+            ),
+            (
+                "ebpfsentinel_rules_reloads_total",
+                &["component=\"firewall\"", "result=\"success\""],
+                "1",
+            ),
+            (
+                "ebpfsentinel_alerts_total",
+                &[
+                    "component=\"ids\"",
+                    "severity=\"high\"",
+                    "technique_id=\"T1071\"",
+                ],
+                "1",
+            ),
+            (
+                "ebpfsentinel_alerts_dropped_total",
+                &["reason=\"dedup\""],
+                "1",
+            ),
+            (
+                "ebpfsentinel_alert_sender_circuit_state",
+                &["destination=\"webhook\""],
+                "0",
+            ),
+            ("ebpfsentinel_ips_blacklist_size", &[], "5"),
+            ("ebpfsentinel_ips_blocks_total", &[], "1"),
+            (
+                "ebpfsentinel_alerts_by_rule_total",
+                &["component=\"ids\"", "rule_id=\"ids-001\""],
+                "1",
+            ),
+            (
+                "ebpfsentinel_false_positives_total",
+                &["component=\"ids\"", "rule_id=\"ids-001\""],
+                "1",
+            ),
+            ("ebpfsentinel_memory_usage_bytes", &[], "1048576"),
+            ("ebpfsentinel_cpu_usage_percent", &[], "25.5"),
+        ];
+        for (name, labels, value) in expected {
+            assert!(
+                has(name, labels, value),
+                "no {name} {labels:?} = {value} in:\n{encoded}"
+            );
+        }
+        // The duration went to its histogram: one observation.
+        assert!(
+            encoded.lines().any(|l| l
+                .starts_with("ebpfsentinel_packet_processing_duration_seconds_count")
+                && l.ends_with(" 1")),
+            "no processing duration observation in:\n{encoded}"
+        );
     }
 
     #[test]

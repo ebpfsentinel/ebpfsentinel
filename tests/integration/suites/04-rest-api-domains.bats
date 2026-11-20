@@ -182,6 +182,23 @@ teardown_file() {
 
 @test "Domains: DELETE blocklist removes domain and returns 200" {
     local body
+    # The pattern is listed before the delete, so its absence afterwards is
+    # the delete's doing and not an add that never landed.
+    body="$(api_get /api/v1/dns/blocklist)"
+    assert_http_status "200" "$HTTP_STATUS"
+    echo "$body" | jq -e 'any(.[]; .pattern == "test-block.example.com")' >/dev/null || {
+        echo "test-block.example.com is not listed before the delete: ${body}" >&2
+        return 1
+    }
+
     body="$(api_delete /api/v1/domains/blocklist/test-block.example.com)"
     assert_http_status "200" "$HTTP_STATUS"
+    assert_json_field "$body" '.removed' 'true'
+
+    body="$(api_get /api/v1/dns/blocklist)"
+    assert_http_status "200" "$HTTP_STATUS"
+    echo "$body" | jq -e 'any(.[]; .pattern == "test-block.example.com") | not' >/dev/null || {
+        echo "test-block.example.com is still listed after the delete: ${body}" >&2
+        return 1
+    }
 }

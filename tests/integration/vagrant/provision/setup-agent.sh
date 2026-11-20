@@ -8,9 +8,11 @@
 #   "full"   - build from source + Docker image (default, ~5min)
 #   "fast"   - build from source only, skip Docker (saves ~2min)
 #   "docker" - extract from Docker image only (requires pre-built image tar)
+#   "prebuilt" - install nothing; the host pushes binaries and objects built
+#              for this VM through scripts/sync-to-agent-vm.sh afterwards
 #
 # Environment:
-#   PROVISION_MODE        - "full" (default), "fast", or "docker"
+#   PROVISION_MODE        - "full" (default), "fast", "docker" or "prebuilt"
 #   EBPF_SKIP_VALIDATION  - set to "true" to skip the eBPF load verification step
 set -euxo pipefail
 
@@ -171,6 +173,13 @@ case "$PROVISION_MODE" in
     fast)
         build_from_source
         ;;
+    prebuilt)
+        # The binaries and objects come from the host, built for this VM's
+        # glibc and pushed by scripts/sync-to-agent-vm.sh once the machine is
+        # up: compiling them here again on four cores costs the better part of
+        # an hour and proves nothing the host build did not.
+        echo "  Prebuilt mode: run scripts/sync-to-agent-vm.sh --binary --warden --ebpf next"
+        ;;
     full)
         build_from_source
         # Also build Docker image for Docker-based tests
@@ -235,6 +244,8 @@ fi
 echo "=== [9/9] Validating eBPF environment ==="
 if [ "${EBPF_SKIP_VALIDATION:-false}" = "true" ]; then
     echo "  Skipping eBPF validation (EBPF_SKIP_VALIDATION=true)"
+elif [ "$PROVISION_MODE" = "prebuilt" ]; then
+    echo "  Skipping eBPF validation: nothing is installed until the host syncs"
 else
     # Quick smoke test: start agent, check eBPF loads, stop
     SMOKE_CONFIG="/tmp/ebpfsentinel-prepared-config-minimal.yaml"

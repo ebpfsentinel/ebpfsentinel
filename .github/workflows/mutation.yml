@@ -37,21 +37,35 @@ jobs:
             --file 'crates/domain/src/ratelimit/engine.rs' \
             --timeout 120 \
             --jobs 4 \
-            2>&1 | tee mutants-output.txt
+            2>&1 | tee mutants-output.txt || rc=$?
+          # 2 = some mutants missed, 3 = some timed out: the score step judges
+          # those. Anything else (1 usage, 4 baseline tests failed) is a failure.
+          case "${rc:-0}" in 0|2|3) ;; *) echo "::error::cargo mutants exited ${rc}"; exit "${rc}";; esac
       - name: Check mutation score
         run: |
-          total=$(grep -oP 'tested: \K[0-9]+' mutants-output.txt | head -1 || echo 0)
-          killed=$(grep -oP 'killed: \K[0-9]+' mutants-output.txt | head -1 || echo 0)
-          if [ "$total" -gt 0 ]; then
-            score=$(echo "scale=1; $killed * 100 / $total" | bc -l)
-            echo "Mutation score: ${score}% (${killed}/${total})"
-            echo "## Mutation Testing" >> "$GITHUB_STEP_SUMMARY"
-            echo "Score: **${score}%** (${killed}/${total} mutants killed)" >> "$GITHUB_STEP_SUMMARY"
-            if [ "$(echo "$score < 70" | bc -l)" = "1" ]; then
-              echo "::warning::Mutation score ${score}% is below 70% threshold"
-            fi
-          else
-            echo "No mutants tested"
+          # cargo-mutants writes its counts to mutants.out/outcomes.json.
+          # Caught and timed-out mutants are killed; unviable ones never ran.
+          out=mutants.out/outcomes.json
+          if [ ! -s "$out" ]; then
+            echo "::error::cargo-mutants wrote no outcomes.json"
+            exit 1
+          fi
+          caught=$(jq '.caught // 0' "$out")
+          timeout=$(jq '.timeout // 0' "$out")
+          missed=$(jq '.missed // 0' "$out")
+          killed=$((caught + timeout))
+          total=$((killed + missed))
+          if [ "$total" -eq 0 ]; then
+            echo "::error::No mutant was tested"
+            exit 1
+          fi
+          score=$(echo "scale=1; $killed * 100 / $total" | bc -l)
+          echo "Mutation score: ${score}% (${killed}/${total})"
+          echo "## Mutation Testing" >> "$GITHUB_STEP_SUMMARY"
+          echo "Score: **${score}%** (${killed}/${total} mutants killed)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$(echo "$score < 70" | bc -l)" = "1" ]; then
+            echo "::error::Mutation score ${score}% is below the 70% threshold"
+            exit 1
           fi
       - name: Upload mutation report
         if: always()

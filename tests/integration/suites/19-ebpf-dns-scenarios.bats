@@ -107,6 +107,10 @@ _cached_ips() {
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ]
+    echo "$body" | jq -e '(.entries | type == "array") and (.page | type == "number")' >/dev/null || {
+        echo "the cache listing is not a page of entries: ${body}" >&2
+        return 1
+    }
 }
 
 @test "DNS stats returns valid response" {
@@ -117,6 +121,15 @@ _cached_ips() {
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ]
+    echo "$body" | jq -e '
+        (.total_entries | type == "number")
+        and (.hit_count | type == "number")
+        and (.miss_count | type == "number")
+        and (.top_queried | type == "array")
+    ' >/dev/null || {
+        echo "the stats answer lacks its counters: ${body}" >&2
+        return 1
+    }
 }
 
 @test "DNS blocklist is accessible" {
@@ -127,15 +140,34 @@ _cached_ips() {
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ]
+    # The fixture configures an empty blocklist: the listing is an array and
+    # carries no pattern.
+    echo "$body" | jq -e 'type == "array" and length == 0' >/dev/null || {
+        echo "the blocklist listing is not the configured empty list: ${body}" >&2
+        return 1
+    }
 }
 
 @test "DNS cache flush succeeds" {
     require_root
 
-    api_delete /api/v1/dns/cache >/dev/null
+    local body
+    body="$(api_delete /api/v1/dns/cache)"
     _load_http_status
-
     [ "$HTTP_STATUS" = "200" ]
+    echo "$body" | jq -e '.flushed_entries | type == "number"' >/dev/null || {
+        echo "the flush answer does not say how many entries it removed: ${body}" >&2
+        return 1
+    }
+
+    # After the flush the cache reads empty.
+    body="$(api_get /api/v1/dns/cache)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+    echo "$body" | jq -e '.entries | length == 0' >/dev/null || {
+        echo "the cache still lists entries after the flush: ${body}" >&2
+        return 1
+    }
 }
 
 # ── DNS packet capture ──────────────────────────────────────────

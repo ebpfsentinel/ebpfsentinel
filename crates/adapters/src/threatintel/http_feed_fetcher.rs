@@ -197,8 +197,11 @@ mod tests {
     }
 
     #[test]
-    fn default_constructs() {
-        let fetcher = HttpFeedFetcher::default();
-        let _ = fetcher;
+    fn both_clients_build_with_the_address_guard_and_no_redirect() {
+        // `Default` panics where `new` fails, so the fallible constructor is
+        // what a test can name: the TLS backend, the guarded resolver and the
+        // redirect policy must all be accepted by the client builder.
+        let built = HttpFeedFetcher::new();
+        assert!(built.is_ok(), "{:?}", built.err());
     }
 }

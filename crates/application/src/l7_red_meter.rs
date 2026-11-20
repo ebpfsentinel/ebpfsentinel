@@ -328,6 +328,8 @@ mod tests {
             rss_hash: 0,
             rss_hash_type: 0,
             rx_hw_timestamp_ns: 0,
+            pkt_len: 0,
+            _pad: 0,
         }
     }
 
@@ -425,7 +427,9 @@ mod tests {
     }
 
     #[test]
-    fn a_meter_on_a_noop_port_accepts_traffic() {
+    fn a_meter_on_a_noop_port_still_feeds_the_service_graph() {
+        // The service map reads the graph, not the metrics port: a build with
+        // metrics off must still count the request on its edge.
         let meter = L7RedMeter::new(
             RedConfig::default(),
             ServiceNames::default(),
@@ -434,5 +438,20 @@ mod tests {
         );
         meter.observe(&event(1, 80, 1), "http", b"GET / HTTP/1.1\r\n");
         meter.observe(&event(80, 1, 2), "http", b"HTTP/1.1 200 OK\r\n");
+
+        let graph = meter.graph(2, 1);
+        assert_eq!(graph.edges.len(), 1);
+        let (edge, counts) = &graph.edges[0];
+        assert_eq!(edge.server_port, 80);
+        assert_eq!(
+            (
+                counts.requests,
+                counts.errors,
+                counts.answered,
+                counts.unanswered
+            ),
+            (1, 0, 1, 0)
+        );
+        assert_eq!(counts.duration_ns_sum, 1);
     }
 }

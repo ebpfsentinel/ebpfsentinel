@@ -46,7 +46,7 @@ setup_file() {
                 "${AGENT_BIN}" >/dev/null 2>&1 && chmod +x "${AGENT_BIN}"
         fi
     fi
-    [ -x "${AGENT_BIN}" ] || env_skip "agent binary not available on this host"
+    [ -x "${AGENT_BIN}" ] || lane_skip agent-build "agent binary not available on this host"
     export AGENT_BIN
 
     if [ ! -f "${CERT_DIR}/server.pem" ]; then

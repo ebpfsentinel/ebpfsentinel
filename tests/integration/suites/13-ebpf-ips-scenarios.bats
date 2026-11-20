@@ -205,15 +205,33 @@ teardown_file() {
         soft_skip "no IPS rules available to patch"
     fi
 
-    # Toggle the first rule to alert mode and verify the response
-    local patch_resp
-    patch_resp="$(api_patch "/api/v1/ips/rules/${rule_id}" '{"mode":"alert"}')"
-    _load_http_status
+    # Set the rule to the mode it is not in, read it back from the listing
+    # (a handler that answered 200 and ignored the body would leave the
+    # stored mode as it was), then restore and read that back too.
+    local original target
+    original="$(echo "$rules" | jq -r --arg id "$rule_id" '.[] | select(.id == $id) | .mode')"
+    if [ "$original" = "alert" ]; then target="block"; else target="alert"; fi
 
+    api_patch "/api/v1/ips/rules/${rule_id}" "{\"mode\":\"${target}\"}" >/dev/null
+    _load_http_status
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "204" ]
 
-    # Restore original mode (best-effort)
-    api_patch "/api/v1/ips/rules/${rule_id}" '{"mode":"block"}' >/dev/null 2>&1 || true
+    local stored
+    stored="$(api_get /api/v1/ips/rules | jq -r --arg id "$rule_id" '.[] | select(.id == $id) | .mode')"
+    [ "$stored" = "$target" ] || {
+        echo "rule ${rule_id} reads mode '${stored}' after being set to '${target}'" >&2
+        api_patch "/api/v1/ips/rules/${rule_id}" "{\"mode\":\"${original}\"}" >/dev/null 2>&1 || true
+        return 1
+    }
+
+    api_patch "/api/v1/ips/rules/${rule_id}" "{\"mode\":\"${original}\"}" >/dev/null
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "204" ]
+    stored="$(api_get /api/v1/ips/rules | jq -r --arg id "$rule_id" '.[] | select(.id == $id) | .mode')"
+    [ "$stored" = "$original" ] || {
+        echo "rule ${rule_id} reads mode '${stored}' after being restored to '${original}'" >&2
+        return 1
+    }
 }
 
 # ── MITRE coverage sweep ───────────────────────────────────────────

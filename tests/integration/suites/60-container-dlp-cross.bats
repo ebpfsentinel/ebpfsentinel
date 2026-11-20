@@ -22,6 +22,7 @@
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
+load '../lib/uprobe_helpers'
 
 # A Visa test number carried over the neighbour's TLS - matches dlp-pci-visa.
 SENTINEL_VISA="4111111111111111"
@@ -115,10 +116,12 @@ teardown_file() {
 
 @test "DLP uprobe program is active" {
     require_root
-    local body
-    body="$(api_get /healthz)"
-    _load_http_status
-    [ "${HTTP_STATUS}" = "200" ]
+    require_tool bpftool
+    require_tool jq
+
+    # A kernel link running the SSL_write probe is the attach; /healthz
+    # answers 200 without one.
+    wait_for_uprobe_link ssl_write 20
 }
 
 # ── Libraries with no name left ─────────────────────────────────────

@@ -50,10 +50,11 @@ EBPF_AGENT_VIA_DOCKER="false"
 
 # ── Skip guards ──────────────────────────────────────────────────────
 
-# require_root - skip test/suite if not running as root
+# require_root - skip test/suite if not running as root. A lane that runs
+# its suites under sudo claims `root`, so there the skip is a failure.
 require_root() {
     if [ "$(id -u)" -ne 0 ]; then
-        env_skip "requires root privileges"
+        lane_skip root "requires root privileges"
     fi
 }
 

@@ -4,6 +4,7 @@
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
+load '../lib/wire_helpers'
 
 setup_file() {
     require_root
@@ -54,95 +55,109 @@ teardown_file() {
 
 # ── HTTP path enforcement ────────────────────────────────────────
 
-@test "L7 HTTP path deny blocks /admin" {
+# An L7 deny judges a copy of the payload: the packet that carried it has
+# already been forwarded, so the connection itself is not refused (the L3/L4
+# firewall and the IPS drop at line rate, see the L7 firewall feature page).
+# What a deny owes is the decision: the rule's alert under component l7 and
+# the deny counter moving. A listener on the agent side completes the
+# handshake, without which no payload segment is ever written.
+
+@test "L7 HTTP path deny on /admin raises its rule's alert and counts a deny" {
     require_root
     require_tool ncat
 
-    # Start a simple HTTP listener on port 8888 to absorb the connection
-    ip netns exec "$EBPF_TEST_NS" ncat -l -p 8888 -k --sh-exec "echo -e 'HTTP/1.1 200 OK\r\n\r\nOK'" </dev/null >/dev/null 2>&1 &
-    local listener_pid=$!
-    sleep 0.5
+    local deny_before
+    deny_before="$(l7_counter deny)"
 
-    # Send HTTP GET /admin from namespace to host - the L7 rule should generate an alert
-    send_tcp_from_ns "$EBPF_HOST_IP" 8888 "GET /admin HTTP/1.1\r\nHost: testhost\r\n\r\n" 3
+    wire_start_listener 8888
+    send_tcp_from_ns "$EBPF_HOST_IP" 8888 $'GET /admin HTTP/1.1\r\nHost: testhost\r\n\r\n' 3
+    wire_stop_listeners
 
-    sleep 3
+    local deny_after
+    deny_after="$(wait_l7_counter_above deny "$deny_before" 15)"
+    [ "${deny_after%.*}" -gt "${deny_before%.*}" ] || {
+        echo "the L7 deny counter did not move after GET /admin: ${deny_before} -> ${deny_after}" >&2
+        return 1
+    }
 
-    # Clean up listener
-    kill "$listener_pid" 2>/dev/null || true
-
-    # Verify an alert was generated for the /admin path
-    local body
-    body="$(api_get /api/v1/alerts)"
-    _load_http_status
-
-    [ "$HTTP_STATUS" = "200" ]
-    # The alerts endpoint returns {"alerts": [...]} or a plain array
-    local alerts
-    alerts="$(echo "$body" | jq '.alerts // .' 2>/dev/null)" || alerts="$body"
-    [ -n "$alerts" ]
+    wait_for_alert \
+        '.[] | select(.rule_id == "l7-test-deny-admin" and .component == "l7")' \
+        15 1 >/dev/null || {
+        echo "no l7-test-deny-admin alert after GET /admin" >&2
+        api_get /api/v1/alerts >&2 || true
+        return 1
+    }
 }
 
-@test "L7 HTTP path allow passes /api" {
+@test "L7 HTTP path allow on /api is judged allow and counts no deny" {
     require_root
     require_tool ncat
 
-    # Record current alert count before the test
-    local before_body before_count
-    before_body="$(api_get /api/v1/alerts)" || true
-    before_count="$(echo "$before_body" | jq '(.alerts // .) | length' 2>/dev/null)" || before_count=0
+    local deny_before allow_before
+    deny_before="$(l7_counter deny)"
+    allow_before="$(l7_counter allow)"
 
-    # Start a simple HTTP listener on port 8888
-    ip netns exec "$EBPF_TEST_NS" ncat -l -p 8888 -k --sh-exec "echo -e 'HTTP/1.1 200 OK\r\n\r\nOK'" </dev/null >/dev/null 2>&1 &
-    local listener_pid=$!
-    sleep 0.5
+    wire_start_listener 8888
+    send_tcp_from_ns "$EBPF_HOST_IP" 8888 $'GET /api/health HTTP/1.1\r\nHost: testhost\r\n\r\n' 3
+    wire_stop_listeners
 
-    # Send HTTP GET /api/health from namespace - the allow rule should not generate a new alert
-    send_tcp_from_ns "$EBPF_HOST_IP" 8888 "GET /api/health HTTP/1.1\r\nHost: testhost\r\n\r\n" 3
+    # The allow decision is counted as the payload is judged; once it moved,
+    # the same payload had its whole chance to be counted as a deny.
+    local allow_after
+    allow_after="$(wait_l7_counter_above allow "$allow_before" 15)"
+    [ "${allow_after%.*}" -gt "${allow_before%.*}" ] || {
+        echo "GET /api/health was never judged by the allow rule: ${allow_before} -> ${allow_after}" >&2
+        return 1
+    }
 
-    sleep 2
-
-    kill "$listener_pid" 2>/dev/null || true
-
-    # Alert count should not have increased for the allow path
-    local after_body after_count
-    after_body="$(api_get /api/v1/alerts)" || true
-    after_count="$(echo "$after_body" | jq '(.alerts // .) | length' 2>/dev/null)" || after_count=0
-
-    # Allowed traffic should not produce new alerts (count stays same or check passes either way)
-    [ "$after_count" -ge "$before_count" ]
+    local deny_after
+    deny_after="$(l7_counter deny)"
+    [ "${deny_after%.*}" -eq "${deny_before%.*}" ] || {
+        echo "an allowed path was counted as a deny: ${deny_before} -> ${deny_after}" >&2
+        return 1
+    }
 }
 
 # ── TLS SNI enforcement ──────────────────────────────────────────
 
-@test "L7 TLS SNI deny blocks malware.com" {
+# A real ClientHello carries the SNI; the X25519 group alone keeps the hello
+# in one segment, since the fixture runs without stream reassembly and a
+# hello carrying a post-quantum key share would span two.
+_send_client_hello() {
+    local servername="$1"
+    wire_client timeout 3 openssl s_client \
+        -connect "${EBPF_HOST_IP}:8443" \
+        -servername "${servername}" \
+        -groups X25519 \
+        </dev/null >/dev/null 2>&1 || true
+}
+
+@test "L7 TLS SNI deny on bad.malware.com raises its rule's alert and counts a deny" {
     require_root
     require_tool ncat
+    require_tool openssl
 
-    # Simulate a TLS ClientHello from the namespace toward the host by sending
-    # a raw payload containing the SNI extension for bad.malware.com.
-    # A real openssl s_client connection is preferred when available.
-    if command -v openssl &>/dev/null; then
-        ip netns exec "$EBPF_TEST_NS" \
-            timeout 3 openssl s_client \
-            -connect "${EBPF_HOST_IP}:8443" \
-            -servername "bad.malware.com" \
-            -quiet 2>/dev/null || true
-    else
-        # Fallback: send a minimal TLS ClientHello payload via ncat
-        send_tcp_from_ns "$EBPF_HOST_IP" 8443 \
-            $'\x16\x03\x01\x00\x7c\x01\x00\x00\x78\x03\x03' 2
-    fi
+    local deny_before
+    deny_before="$(l7_counter deny)"
 
-    sleep 3
+    wire_start_listener 8443
+    _send_client_hello "bad.malware.com"
+    wire_stop_listeners
 
-    local body
-    body="$(api_get /api/v1/alerts)"
-    _load_http_status
+    local deny_after
+    deny_after="$(wait_l7_counter_above deny "$deny_before" 15)"
+    [ "${deny_after%.*}" -gt "${deny_before%.*}" ] || {
+        echo "the L7 deny counter did not move after a hello for bad.malware.com: ${deny_before} -> ${deny_after}" >&2
+        return 1
+    }
 
-    [ "$HTTP_STATUS" = "200" ]
-    # Alerts endpoint accessible; SNI alert may or may not appear depending on
-    # whether TLS inspection reached the SNI bytes - the API must respond 200.
+    wait_for_alert \
+        '.[] | select(.rule_id == "l7-test-deny-malware-sni" and .component == "l7")' \
+        15 1 >/dev/null || {
+        echo "no l7-test-deny-malware-sni alert after a hello for bad.malware.com" >&2
+        api_get /api/v1/alerts >&2 || true
+        return 1
+    }
 }
 
 # ── Rule CRUD ────────────────────────────────────────────────────
@@ -221,10 +236,17 @@ teardown_file() {
     count="$(echo "$rules" | jq 'length' 2>/dev/null)" || true
     [ "${count:-0}" -ge 2 ]
 
-    # Verify the high-priority rule (priority=5) sorts before the low-priority (priority=90)
-    local first_id
-    first_id="$(echo "$rules" | jq -r 'sort_by(.priority) | .[0].id' 2>/dev/null)" || true
-    [ "$first_id" = "$id_high" ]
+    # The engine evaluates in the order it serves: the high-priority rule
+    # (priority=5), created last, must come before the low-priority one
+    # (priority=90) as returned, and the whole listing must be in ascending
+    # priority without any client-side sort.
+    echo "$rules" | jq -e --arg low "$id_low" --arg high "$id_high" '
+        (map(.id) | index($high)) < (map(.id) | index($low))
+        and ([.[].priority] == ([.[].priority] | sort))
+    ' >/dev/null || {
+        echo "the server does not list the rules in priority order: ${rules}" >&2
+        return 1
+    }
 
     # Clean up
     api_delete "/api/v1/firewall/l7-rules/${id_low}" >/dev/null 2>&1 || true
@@ -398,74 +420,72 @@ teardown_file() {
 
 # ── TLS SNI allow ───────────────────────────────────────────────
 
-@test "L7 TLS SNI allow passes trusted domain" {
+@test "L7 TLS SNI outside every deny rule is inspected and counts no deny" {
     require_root
     require_tool ncat
+    require_tool openssl
 
-    # Record current alert count before the test
-    local before_body before_count
-    before_body="$(api_get /api/v1/alerts)" || true
-    before_count="$(echo "$before_body" | jq '(.alerts // .) | length' 2>/dev/null)" || before_count=0
+    local deny_before tls_before
+    deny_before="$(l7_counter deny)"
+    tls_before="$(l7_counter tls)"
 
-    # Simulate a TLS ClientHello with a trusted SNI (allowed.example.com)
-    if command -v openssl &>/dev/null; then
-        ip netns exec "$EBPF_TEST_NS" \
-            timeout 3 openssl s_client \
-            -connect "${EBPF_HOST_IP}:8443" \
-            -servername "allowed.example.com" \
-            -quiet 2>/dev/null || true
-    else
-        send_tcp_from_ns "$EBPF_HOST_IP" 8443 \
-            $'\x16\x03\x01\x00\x7c\x01\x00\x00\x78\x03\x03' 2
-    fi
+    wire_start_listener 8443
+    _send_client_hello "allowed.example.com"
+    wire_stop_listeners
 
-    sleep 2
+    # No rule names allowed.example.com, so the hello is counted under its
+    # protocol; once it is, it had its whole chance to be counted as a deny.
+    local tls_after
+    tls_after="$(wait_l7_counter_above tls "$tls_before" 15)"
+    [ "${tls_after%.*}" -gt "${tls_before%.*}" ] || {
+        echo "the hello for allowed.example.com was never inspected: ${tls_before} -> ${tls_after}" >&2
+        return 1
+    }
 
-    # Alert count should not have increased for the allowed SNI
-    local after_body after_count
-    after_body="$(api_get /api/v1/alerts)" || true
-    after_count="$(echo "$after_body" | jq '(.alerts // .) | length' 2>/dev/null)" || after_count=0
-
-    # Allowed traffic should not produce new alerts
-    [ "$after_count" -ge "$before_count" ]
+    local deny_after
+    deny_after="$(l7_counter deny)"
+    [ "${deny_after%.*}" -eq "${deny_before%.*}" ] || {
+        echo "a trusted SNI was counted as a deny: ${deny_before} -> ${deny_after}" >&2
+        return 1
+    }
 }
 
-# ── HTTP path deny with response code ───────────────────────────
+# ── HTTP path deny on a rule created at runtime ─────────────────
 
-@test "L7 HTTP path deny /wp-admin generates alert" {
+@test "L7 HTTP path deny /wp-admin created via API raises its alert" {
     require_root
     require_tool ncat
 
-    # Start a simple HTTP listener on port 8889
-    ip netns exec "$EBPF_TEST_NS" ncat -l -p 8889 -k --sh-exec "echo -e 'HTTP/1.1 200 OK\r\n\r\nOK'" </dev/null >/dev/null 2>&1 &
-    local listener_pid=$!
-    sleep 0.5
-
-    # Create a rule to deny /wp-admin
     local create_body
     create_body="$(api_post /api/v1/firewall/l7-rules \
-        '{"id":"deny-wp-admin","protocol":"http","action":"log","priority":8,"path":"/wp-admin","enabled":true}')"
+        '{"id":"deny-wp-admin","protocol":"http","action":"deny","priority":8,"path":"/wp-admin","enabled":true}')"
     _load_http_status
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
-    local rule_id
-    rule_id="$(echo "$create_body" | jq -r '.id // .rule_id' 2>/dev/null)" || true
 
-    sleep 1
+    local deny_before
+    deny_before="$(l7_counter deny)"
 
-    # Send HTTP GET /wp-admin from namespace - should generate an alert
-    send_tcp_from_ns "$EBPF_HOST_IP" 8889 "GET /wp-admin HTTP/1.1\r\nHost: testhost\r\n\r\n" 3
+    wire_start_listener 8889
+    send_tcp_from_ns "$EBPF_HOST_IP" 8889 $'GET /wp-admin HTTP/1.1\r\nHost: testhost\r\n\r\n' 3
+    wire_stop_listeners
 
-    sleep 3
+    local deny_after alert_found=0
+    deny_after="$(wait_l7_counter_above deny "$deny_before" 15)"
+    wait_for_alert \
+        '.[] | select(.rule_id == "deny-wp-admin" and .component == "l7")' \
+        15 1 >/dev/null && alert_found=1
 
-    # Clean up listener and rule
-    kill "$listener_pid" 2>/dev/null || true
-    api_delete "/api/v1/firewall/l7-rules/${rule_id}" >/dev/null 2>&1 || true
+    api_delete /api/v1/firewall/l7-rules/deny-wp-admin >/dev/null 2>&1 || true
 
-    # Verify an alert was generated
-    local body
-    body="$(api_get /api/v1/alerts)"
-    _load_http_status
-    [ "$HTTP_STATUS" = "200" ]
+    [ "${deny_after%.*}" -gt "${deny_before%.*}" ] || {
+        echo "the L7 deny counter did not move after GET /wp-admin: ${deny_before} -> ${deny_after}" >&2
+        return 1
+    }
+    [ "$alert_found" -eq 1 ] || {
+        echo "no deny-wp-admin alert after GET /wp-admin" >&2
+        api_get /api/v1/alerts >&2 || true
+        return 1
+    }
 }
 
 # ── L7 metrics counter increments ──────────────────────────────
@@ -474,28 +494,22 @@ teardown_file() {
     require_root
     require_tool ncat
 
-    # Read initial L7 metrics value
+    # Neither path matches a rule on 8890 (the alias rule there names
+    # /aliased), so both requests are counted under their protocol.
     local before
-    before="$(get_metrics_value ebpfsentinel_packets_total '{interface="l7"')" || before=0
+    before="$(l7_counter http)"
 
-    # Start a simple HTTP listener on port 8890
-    ip netns exec "$EBPF_TEST_NS" ncat -l -p 8890 -k --sh-exec "echo -e 'HTTP/1.1 200 OK\r\n\r\nOK'" </dev/null >/dev/null 2>&1 &
-    local listener_pid=$!
-    sleep 0.5
+    wire_start_listener 8890
+    send_tcp_from_ns "$EBPF_HOST_IP" 8890 $'GET /metrics-test HTTP/1.1\r\nHost: testhost\r\n\r\n' 3
+    send_tcp_from_ns "$EBPF_HOST_IP" 8890 $'GET /metrics-test2 HTTP/1.1\r\nHost: testhost\r\n\r\n' 3
+    wire_stop_listeners
 
-    # Send traffic to trigger L7 inspection
-    send_tcp_from_ns "$EBPF_HOST_IP" 8890 "GET /metrics-test HTTP/1.1\r\nHost: testhost\r\n\r\n" 3
-    send_tcp_from_ns "$EBPF_HOST_IP" 8890 "GET /metrics-test2 HTTP/1.1\r\nHost: testhost\r\n\r\n" 3
-
-    sleep 3
-
-    kill "$listener_pid" 2>/dev/null || true
-
-    # Verify metrics endpoint is accessible and contains L7 counters
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
-    [ -n "$metrics" ]
-    echo "$metrics" | grep -qE 'ebpfsentinel_rules_loaded\{[^}]*component="l7"|ebpfsentinel_packets_total\{[^}]*interface="l7"'
+    local after
+    after="$(wait_l7_counter_above http "$((${before%.*} + 1))" 15)"
+    [ "${after%.*}" -ge "$((${before%.*} + 2))" ] || {
+        echo "two inspected requests did not move the L7 http counter by two: ${before} -> ${after}" >&2
+        return 1
+    }
 }
 
 # ── L7 rule update (via recreate) ───────────────────────────────

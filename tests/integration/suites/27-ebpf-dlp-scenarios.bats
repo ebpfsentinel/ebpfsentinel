@@ -11,6 +11,7 @@
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
+load '../lib/uprobe_helpers'
 
 setup_file() {
     require_root
@@ -57,12 +58,12 @@ teardown_file() {
 
 @test "DLP program attaches successfully" {
     require_root
+    require_tool bpftool
+    require_tool jq
 
-    local body
-    body="$(api_get /healthz)"
-    _load_http_status
-
-    [ "$HTTP_STATUS" = "200" ]
+    # The probe on SSL_write is what reads outbound plaintext: a kernel link
+    # running it is the attach, whatever /healthz answers.
+    wait_for_uprobe_link ssl_write 20
 }
 
 # ── DLP configuration API ────────────────────────────────────────
@@ -555,7 +556,16 @@ _dlp_flow_sources_since() {
     local metrics
     metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
     [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_dlp" || true
+
+    # Every payload the probes captured is scanned once: the TLS writes above
+    # must have moved the scan counter off zero, not merely declared it.
+    local scans
+    scans="$(echo "$metrics" | awk '/^ebpfsentinel_dlp_scans_total /{print $2; exit}')"
+    [ -n "$scans" ] && [ "${scans%.*}" -gt 0 ] || {
+        echo "the DLP scan counter did not move after TLS traffic: '${scans}'" >&2
+        echo "$metrics" | grep "ebpfsentinel_dlp" >&2 || true
+        return 1
+    }
 }
 
 # ── MITRE coverage sweep ───────────────────────────────────────────

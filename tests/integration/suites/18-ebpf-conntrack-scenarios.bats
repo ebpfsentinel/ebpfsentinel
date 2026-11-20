@@ -4,6 +4,7 @@
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'
+load '../lib/wire_helpers'
 
 setup_file() {
     require_root
@@ -67,29 +68,50 @@ teardown_file() {
 
 # ── Connection tracking ──────────────────────────────────────────
 
+# _ct_flow_count <port> - how many tracked connections the agent lists toward
+# <port> from the test client. The listing is bounded by `limit`, and the
+# table is the host's (the SSH session and the test's own API calls are in it
+# too), so the limit is set well past what a test host carries.
+_ct_flow_count() {
+    local port="$1" conns
+    conns="$(api_get '/api/v1/conntrack/connections?limit=65536')" || return 1
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || return 1
+    echo "${conns}" | jq --argjson port "${port}" '
+        [ (if type == "array" then . else (.connections // []) end)[]
+          | select(.dst_port == $port and .protocol == 6) ] | length
+    '
+}
+
+# _ct_open_flow <port> <payload> - complete one TCP conversation toward
+# <port> on the agent side, so the kernel tracks it.
+_ct_open_flow() {
+    local port="$1" payload="$2"
+    wire_start_listener "${port}"
+    send_tcp_from_ns "$EBPF_HOST_IP" "${port}" "${payload}" 2
+    wire_stop_listeners
+}
+
 @test "TCP connection creates conntrack entry" {
     require_root
     require_tool ncat
 
-    # Start a listener and establish a TCP connection
-    timeout 10 ncat -l "$EBPF_HOST_IP" 9876 >/dev/null 2>&1 &
-    local listener_pid=$!
-    sleep 0.5
+    _ct_open_flow 9876 "CONNTRACK_TEST"
 
-    # Send traffic from namespace
-    send_tcp_from_ns "$EBPF_HOST_IP" 9876 "CONNTRACK_TEST" 3
-
-    sleep 2
-
-    kill "$listener_pid" 2>/dev/null || true
-    wait "$listener_pid" 2>/dev/null || true
-
-    # Check connection table via API
-    local body
-    body="$(api_get /api/v1/conntrack/connections)"
-    _load_http_status
-
-    [ "$HTTP_STATUS" = "200" ]
+    # A closed connection stays in the table through TIME_WAIT, so the entry
+    # is there to be listed for minutes after the conversation ended.
+    local count=0 attempt=0
+    while [ "${attempt}" -lt 10 ]; do
+        count="$(_ct_flow_count 9876)" || count=0
+        [ "${count:-0}" -ge 1 ] && break
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    [ "${count:-0}" -ge 1 ] || {
+        echo "no tracked connection toward :9876 after a completed conversation" >&2
+        api_get '/api/v1/conntrack/connections?limit=65536' >&2 || true
+        return 1
+    }
 }
 
 @test "conntrack connection count reflects active connections" {
@@ -116,16 +138,6 @@ teardown_file() {
     else
         [ "$count" = "null" ]
     fi
-}
-
-@test "conntrack flush clears connections" {
-    require_root
-
-    local body
-    body="$(api_post /api/v1/conntrack/flush '{}')"
-    _load_http_status
-
-    [ "$HTTP_STATUS" = "200" ]
 }
 
 # ── Metrics ──────────────────────────────────────────────────────
@@ -158,48 +170,46 @@ teardown_file() {
 
 @test "Conntrack flush clears connections" {
     require_root
+    require_tool ncat
 
-    # Establish at least one tracked connection first
-    send_tcp_from_ns "$EBPF_HOST_IP" 9876 "CT_PRE_FLUSH" 2 || true
-    sleep 1
+    # A port of its own, so the entry an earlier test left in TIME_WAIT is
+    # not what this one reads as its precondition.
+    _ct_open_flow 9877 "CT_PRE_FLUSH"
 
-    local before
-    before="$(api_get /api/v1/conntrack/status | jq -r '.connection_count // 0' 2>/dev/null)" || before=0
+    local present=0 attempt=0
+    while [ "${attempt}" -lt 10 ]; do
+        present="$(_ct_flow_count 9877)" || present=0
+        [ "${present:-0}" -ge 1 ] && break
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    [ "${present:-0}" -ge 1 ] || {
+        echo "precondition: the flow to :9877 is not tracked before the flush" >&2
+        return 1
+    }
 
     local body
     body="$(api_post /api/v1/conntrack/flush '{}')"
     _load_http_status
-
     [ "$HTTP_STATUS" = "200" ]
 
-    # The table is the kernel's, shared with everything else on this host:
-    # the administration SSH session and the test's own HTTP calls are
-    # tracked too, and are re-tracked the moment their next packet flows.
-    # An empty table is therefore not something a flush can promise - what
-    # it must deliver is that the flow this test created is gone and that
-    # the table did not grow.
-    local status_body after
-    status_body="$(api_get /api/v1/conntrack/status)"
-    _load_http_status
-    [ "$HTTP_STATUS" = "200" ]
-    after="$(echo "$status_body" | jq -r '.connection_count // 0' 2>/dev/null)" || after=0
-
-    [ "${after:-0}" -le "${before:-0}" ] || {
-        echo "flush did not reduce the table: ${before} -> ${after}" >&2
+    local flushed
+    flushed="$(echo "$body" | jq -r '.flushed' 2>/dev/null)" || flushed=""
+    [[ "$flushed" =~ ^[0-9]+$ ]] && [ "$flushed" -ge 1 ] || {
+        echo "the flush reports removing nothing while a flow was tracked: ${body}" >&2
         return 1
     }
 
-    local conns
-    conns="$(api_get /api/v1/conntrack/connections)" || conns=""
-    # The endpoint returns a bare array; `.connections // .` would raise
-    # before the alternative applies, so branch on the type explicitly
-    # (same idiom as suites 13/59).
-    echo "${conns}" | jq -e '
-        [ (if type == "array" then . else (.connections // []) end)[]
-          | select(.dst_port == 9876) ] | length == 0
-    ' >/dev/null || {
-        echo "the flushed flow to :9876 is still tracked" >&2
-        echo "${conns}" >&2
+    # The table is the kernel's, shared with everything else on this host:
+    # the administration SSH session and the test's own HTTP calls are
+    # re-tracked the moment their next packet flows, so an empty table is not
+    # something a flush can promise. The flow this test created, which sends
+    # nothing more, must be gone.
+    local after
+    after="$(_ct_flow_count 9877)" || after=""
+    [ "${after}" = "0" ] || {
+        echo "the flushed flow to :9877 is still tracked (${after} entries)" >&2
+        api_get '/api/v1/conntrack/connections?limit=65536' >&2 || true
         return 1
     }
 }
@@ -212,4 +222,16 @@ teardown_file() {
 
     [ -n "$metrics" ]
     echo "$metrics" | grep -q "ebpfsentinel_conntrack"
+}
+
+@test "Conntrack events endpoint opens an SSE stream" {
+    require_root
+
+    # The stream is wired at start-up when the agent reads the kernel table,
+    # which the flow tests above have just shown it does: a 404 here is the
+    # stream missing on a host where it must exist.
+    local headers
+    headers="$(curl -sI -H 'Accept: text/event-stream' --max-time 3 \
+        "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/api/v1/conntrack/events" 2>&1 || true)"
+    assert_contains "$headers" "text/event-stream"
 }

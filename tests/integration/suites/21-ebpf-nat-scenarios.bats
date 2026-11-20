@@ -169,13 +169,32 @@ teardown_file() {
     _load_http_status
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
 
-    # Read back
+    # Read back: the rule is listed with the prefixes and length it was
+    # written with.
     body="$(api_get /api/v1/nat/nptv6 2>/dev/null)"
     _load_http_status
     [ "$HTTP_STATUS" = "200" ]
+    echo "$body" | jq -e '
+        [ .[] | select(.id == "nptv6-001"
+                       and .prefix_len == 48
+                       and (.internal_prefix | startswith("fd00::"))
+                       and (.external_prefix | startswith("2001:db8::"))) ]
+        | length == 1
+    ' >/dev/null || {
+        echo "the created NPTv6 rule is not listed as written: ${body}" >&2
+        api_delete /api/v1/nat/nptv6/nptv6-001 >/dev/null 2>&1 || true
+        return 1
+    }
 
-    # Delete
-    api_delete /api/v1/nat/nptv6/nptv6-001 >/dev/null 2>&1 || true
+    # Delete, and the listing no longer carries it.
+    api_delete /api/v1/nat/nptv6/nptv6-001 >/dev/null
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "204" ]
+    body="$(api_get /api/v1/nat/nptv6 2>/dev/null)"
+    echo "$body" | jq -e '[ .[] | select(.id == "nptv6-001") ] | length == 0' >/dev/null || {
+        echo "the deleted NPTv6 rule is still listed: ${body}" >&2
+        return 1
+    }
 }
 
 @test "hairpin NAT config accepted" {
@@ -261,8 +280,17 @@ _ct_insert_failed() {
         | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^insert_failed=/) { split($i, kv, "="); n += kv[2] } } END { print n + 0 }'
 }
 
+# _require_local_client
+# The redirect tests send from a namespace on the agent itself, which only the
+# local lane creates; on the 2VM and 3VM lanes the client is another machine.
+_require_local_client() {
+    ip netns list 2>/dev/null | grep -qw "$EBPF_TEST_NS" \
+        || env_skip "the redirect client is a namespace on the agent: local lane only"
+}
+
 @test "redirect rule delivers a UDP datagram to the translated port and the reply comes back from the original one" {
     require_root
+    _require_local_client
     require_tool python3
 
     local out="${DATA_DIR}/redirect-udp.out"
@@ -291,7 +319,13 @@ for _ in range(3):
 ' "$marker" "$EBPF_HOST_IP")"
 
     wait "$NAT_LISTENER_PID" || true
-    [ -f "$out" ]
+    if [ ! -f "$out" ]; then
+        echo "nothing reached the listener on the translated port" >&2
+        dump_ebpf_counters NAT_METRICS >&2
+        nstat -az UdpInCsumErrors UdpNoPorts UdpInErrors IpInHdrErrors IpInAddrErrors >&2 || true
+        curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" | grep kernel_drops >&2 || true
+        return 1
+    fi
     [ "$(cat "$out")" = "$marker" ]
     [ "$echo" = "$marker" ]
 
@@ -304,6 +338,7 @@ for _ in range(3):
 
 @test "redirect rule carries a TCP connection to the translated port both ways" {
     require_root
+    _require_local_client
     require_tool python3
     require_tool conntrack
 
@@ -330,7 +365,13 @@ c.close()
 ' "$marker" "$EBPF_HOST_IP")"
 
     wait "$NAT_LISTENER_PID" || true
-    [ -f "$out" ]
+    if [ ! -f "$out" ]; then
+        echo "nothing reached the listener on the translated port" >&2
+        dump_ebpf_counters NAT_METRICS >&2
+        nstat -az UdpInCsumErrors UdpNoPorts UdpInErrors IpInHdrErrors IpInAddrErrors >&2 || true
+        curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" | grep kernel_drops >&2 || true
+        return 1
+    fi
     [ "$(cat "$out")" = "$marker" ]
     [ "$echo" = "$marker" ]
 

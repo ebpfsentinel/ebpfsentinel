@@ -218,6 +218,8 @@ suite_profiles:
   "143": datapath
   "144": datapath
   "145": datapath
+  "146": datapath
+  "147": datapath
   # 10 and 134 start a minikube node, 72 an LXC container, 75 a libvirt
   # guest, 130 and 131 Podman, containerd and CRI-O: the VM lane provisions
   # them. 133 builds xtask to hand every object to both loaders.
@@ -355,7 +357,7 @@ coverage:
     topology: 2vm
     kernel_min: "6.12"
     profile: datapath
-    notes: "Traffic shaping (TC egress)"
+    notes: "Traffic shaping (TC egress); reports through QOS_METRICS counters only, asserted in 28 to move under a saturated pipe while firewall alerts still arrive"
 
   - kind: ebpf_program
     feature: tc-scrub
@@ -873,7 +875,7 @@ coverage:
     topology: none
     kernel_min: "n/a"
     profile: pr
-    notes: "AliasSet (CIDR aliases); suite 16 covers alias_count plus PUT /api/v1/aliases/{id}/content on an External alias (accept) and on ip_set / unknown / invalid-CIDR inputs (reject)"
+    notes: "AliasSet (CIDR aliases); suite 16 covers alias_count plus PUT /api/v1/aliases/{id}/content on an External alias (accept, with the kernel set entries it answers) and on ip_set / unknown / invalid-CIDR inputs (reject)"
 
   - kind: domain_module
     feature: audit
@@ -905,7 +907,7 @@ coverage:
     topology: 3vm
     kernel_min: "6.12"
     profile: pr
-    notes: "Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; what the kernel confirmed it tore down against what the agent decided, on both sides of the tc hook order, in 66; GET /api/v1/conntrack/events SSE stream asserted in 16 (skipped when /proc/net/nf_conntrack is absent); brokered teardown from the user-namespace agent asserted in 62"
+    notes: "Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; what the kernel confirmed it tore down against what the agent decided, on both sides of the tc hook order, in 66; GET /api/v1/conntrack/events SSE stream, a tracked flow read back from the listing and removed by the flush asserted in 18 on the datapath lane; brokered teardown from the user-namespace agent asserted in 62"
 
   - kind: domain_module
     feature: container
@@ -1501,6 +1503,24 @@ attack_suites:
     surfaces: ["alias", "firewall"]
     notes: "A url_table alias with GeoIP off refreshes on its own interval: a source added to the served list is dropped and one removed reaches the host again"
 
+  - suite: "146"
+    name: connection-ceilings-added-by-reload
+    topology: 2vm
+    lanes: ["local"]
+    kernel_min: "6.12"
+    profile: datapath
+    surfaces: ["conntrack", "firewall", "config-reload"]
+    notes: "An agent started with no per-source ceiling admits every connection; a reload setting max_src_states enforces it from then on, and closed connections give the room back so the source opens as many again"
+
+  - suite: "147"
+    name: ddos-half-open-released
+    topology: 2vm
+    lanes: ["local"]
+    kernel_min: "6.12"
+    profile: datapath
+    surfaces: ["xdp-ratelimit", "ddos"]
+    notes: "A source completing its handshakes opens many times the half-open threshold one after another and is never refused; one past the threshold on SYNs a closed port reset is refused, then admitted again once its count has aged"
+
   - suite: "44"
     name: lb-dsr-maglev
     topology: 3vm
@@ -1544,7 +1564,7 @@ attack_suites:
     kernel_min: "6.12"
     profile: nightly
     surfaces: ["responses", "response"]
-    notes: "Time-bounded ResponseEngine via /api/v1/responses/manual: TTL-bound block_ip surfaces in list_active with decreasing remaining_secs; entry drops from active list after TTL; DELETE /api/v1/responses/{id} revokes before TTL; CLI parity via `responses create --action --target --ttl`; AC #3 audit-trail entry deferred (response engine emits no AuditEntry today)"
+    notes: "Time-bounded ResponseEngine via /api/v1/responses/manual: TTL-bound block_ip surfaces in list_active with decreasing remaining_secs; entry drops from active list after TTL; DELETE /api/v1/responses/{id} revokes before TTL; CLI parity via `responses create --action --target --ttl`; the create lands a responses/rule_added audit entry and the TTL expiry a responses/rule_removed one"
 
   - suite: "49"
     name: capture-pcap-export

@@ -391,7 +391,25 @@ _reached() {
     _load_http_status
     [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
 
+    # Read the service back: a handler that answered 201 and fell back to
+    # its default algorithm would serve round_robin here.
+    local algorithm
+    body="$(api_get /api/v1/lb/services/lb-iphash-001)"
+    _load_http_status
+    algorithm="$(echo "$body" | jq -r '.algorithm' 2>/dev/null)" || algorithm=""
+    # The delete below sets HTTP_STATUS again, so the read's answer is kept.
+    local read_status="$HTTP_STATUS"
+
     api_delete /api/v1/lb/services/lb-iphash-001 >/dev/null 2>&1 || true
+
+    [ "$read_status" = "200" ] || {
+        echo "the created service could not be read back (${read_status}): ${body}" >&2
+        return 1
+    }
+    [ "$algorithm" = "ip_hash" ] || {
+        echo "the service reads algorithm '${algorithm}' after being created with ip_hash" >&2
+        return 1
+    }
 }
 
 @test "UDP service configured and listed" {
