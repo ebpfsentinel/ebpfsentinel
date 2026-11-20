@@ -228,12 +228,53 @@ for row in rows:
             stale_suite_refs.append(f"  - {kind}/{feat} references suite {s}")
 
 # ── Routes: found in the suites, or listed with suites or an owner ──
+# A route counts where code requests it: a full-line comment naming a path
+# requests nothing, and a path requested inside a lib helper is requested by
+# every suite that calls that helper, directly or through another helper.
+def uncommented(text: str) -> str:
+    return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+
+func_def_re = re.compile(r"^\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{?\s*$")
+lib_funcs: dict[str, str] = {}
+lib_dir = integ_dir / "lib"
+if lib_dir.exists():
+    for p in sorted(lib_dir.glob("*.bash")):
+        name, body = None, []
+        for line in uncommented(p.read_text()).splitlines():
+            m = func_def_re.match(line)
+            if m:
+                if name:
+                    lib_funcs[name] = lib_funcs.get(name, "") + "\n".join(body)
+                name, body = m.group(1), []
+            elif name:
+                body.append(line)
+        if name:
+            lib_funcs[name] = lib_funcs.get(name, "") + "\n".join(body)
+
+def word_re(name: str) -> re.Pattern:
+    return re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])")
+
+lib_func_res = {name: word_re(name) for name in lib_funcs}
+
+def with_helpers(text: str) -> str:
+    seen: set[str] = set()
+    pending = [text]
+    parts = [text]
+    while pending:
+        chunk = pending.pop()
+        for name, rx in lib_func_res.items():
+            if name not in seen and rx.search(chunk):
+                seen.add(name)
+                parts.append(lib_funcs[name])
+                pending.append(lib_funcs[name])
+    return "\n".join(parts)
+
 suite_texts: dict[str, str] = {}
 if suites_dir.exists():
     for p in sorted(suites_dir.iterdir()):
         m = re.match(r"^(\d{2,})-.*\.bats$", p.name)
         if m:
-            suite_texts[m.group(1)] = p.read_text()
+            suite_texts[m.group(1)] = with_helpers(uncommented(p.read_text()))
 
 def route_pattern(path: str) -> re.Pattern:
     rx = re.escape(path)
