@@ -35,6 +35,8 @@ jobs:
         run: bash tests/integration/scripts/audit-coverage.sh
       - name: Verify README coverage block is up-to-date
         run: bash tests/integration/scripts/audit-coverage.sh --check-render
+      - name: Every alert component and metric reached by a suite, or named
+        run: python3 tests/integration/scripts/audit-alerts-metrics.py
 
   # ── Format check ──────────────────────────────────────────────────
   fmt:
