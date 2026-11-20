@@ -20,6 +20,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod invocations;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 

@@ -1,0 +1,419 @@
+# Every leaf of the agent's command line that no integration suite runs.
+# Read by tests/cli_subcommands.rs. Each table carries exactly one of
+# suites, reason, gap; the gap count equals gap_ceiling.
+
+gap_ceiling = 138
+
+["alerts list"]
+gap = "no suite runs it"
+
+["alerts mark-fp"]
+gap = "no suite runs it"
+
+["alerts show"]
+gap = "no suite runs it"
+
+["alerts stats"]
+gap = "no suite runs it"
+
+["alerts triage"]
+gap = "no suite runs it"
+
+["aliases set-content"]
+gap = "no suite runs it"
+
+["aliases status"]
+gap = "no suite runs it"
+
+["audit history"]
+gap = "no suite runs it"
+
+["audit logs"]
+gap = "no suite runs it"
+
+["capture list"]
+gap = "no suite runs it"
+
+["capture stop"]
+gap = "no suite runs it"
+
+["config reload"]
+gap = "no suite runs it"
+
+["config set"]
+gap = "no suite runs it"
+
+["config show"]
+gap = "no suite runs it"
+
+["conntrack flush"]
+gap = "no suite runs it"
+
+["conntrack list"]
+gap = "no suite runs it"
+
+["conntrack status"]
+gap = "no suite runs it"
+
+["conntrack watch"]
+gap = "no suite runs it"
+
+["ddos add"]
+gap = "no suite runs it"
+
+["ddos attacks"]
+gap = "no suite runs it"
+
+["ddos delete"]
+gap = "no suite runs it"
+
+["ddos history"]
+gap = "no suite runs it"
+
+["ddos policies"]
+gap = "no suite runs it"
+
+["ddos status"]
+gap = "no suite runs it"
+
+["dlp patterns"]
+gap = "no suite runs it"
+
+["dlp scope"]
+gap = "no suite runs it"
+
+["dlp status"]
+gap = "no suite runs it"
+
+["dns blocklist"]
+gap = "no suite runs it"
+
+["dns cache"]
+gap = "no suite runs it"
+
+["dns flush"]
+gap = "no suite runs it"
+
+["dns stats"]
+gap = "no suite runs it"
+
+["dns status"]
+gap = "no suite runs it"
+
+["domains block"]
+gap = "no suite runs it"
+
+["domains reputation"]
+gap = "no suite runs it"
+
+["domains unblock"]
+gap = "no suite runs it"
+
+["ebpf coverage"]
+gap = "no suite runs it"
+
+["ebpf drops"]
+gap = "no suite runs it"
+
+["ebpf foreign-programs"]
+gap = "no suite runs it"
+
+["ebpf guests"]
+gap = "no suite runs it"
+
+["ebpf hidden-ports"]
+gap = "no suite runs it"
+
+["ebpf hidden-processes"]
+gap = "no suite runs it"
+
+["ebpf host-check"]
+gap = "no suite runs it"
+
+["ebpf kernel-features"]
+gap = "no suite runs it"
+
+["ebpf raw-sockets"]
+gap = "no suite runs it"
+
+["ebpf status"]
+gap = "no suite runs it"
+
+["ebpf uprobes"]
+gap = "no suite runs it"
+
+["exposure listeners"]
+gap = "no suite runs it"
+
+["fingerprints summary"]
+gap = "no suite runs it"
+
+["firewall add"]
+gap = "no suite runs it"
+
+["firewall delete"]
+gap = "no suite runs it"
+
+["firewall fqdn"]
+gap = "no suite runs it"
+
+["firewall labels"]
+gap = "no suite runs it"
+
+["firewall list"]
+gap = "no suite runs it"
+
+["firewall reach"]
+gap = "no suite runs it"
+
+["firewall shadow"]
+gap = "no suite runs it"
+
+["firewall workload"]
+gap = "no suite runs it"
+
+["flows export"]
+gap = "no suite runs it"
+
+["flows services"]
+gap = "no suite runs it"
+
+["geoip lookup"]
+gap = "no suite runs it"
+
+["geoip status"]
+gap = "no suite runs it"
+
+["host-rules intents"]
+gap = "no suite runs it"
+
+["host-rules list"]
+gap = "no suite runs it"
+
+["host-rules mass-encryption"]
+gap = "no suite runs it"
+
+["host-rules write-refusal"]
+gap = "no suite runs it"
+
+["ids rules"]
+gap = "no suite runs it"
+
+["ids status"]
+gap = "no suite runs it"
+
+["ids suricata"]
+gap = "no suite runs it"
+
+["ids suricata-check"]
+gap = "no suite runs it"
+
+["ips blacklist add"]
+gap = "no suite runs it"
+
+["ips blacklist delete"]
+gap = "no suite runs it"
+
+["ips domain-blocks"]
+gap = "no suite runs it"
+
+["ips list"]
+gap = "no suite runs it"
+
+["ips set-mode"]
+gap = "no suite runs it"
+
+["l7 add"]
+gap = "no suite runs it"
+
+["l7 delete"]
+gap = "no suite runs it"
+
+["l7 list"]
+gap = "no suite runs it"
+
+["lb add"]
+gap = "no suite runs it"
+
+["lb announce"]
+gap = "no suite runs it"
+
+["lb bgp"]
+gap = "no suite runs it"
+
+["lb delete"]
+gap = "no suite runs it"
+
+["lb grant"]
+gap = "no suite runs it"
+
+["lb service"]
+gap = "no suite runs it"
+
+["lb services"]
+gap = "no suite runs it"
+
+["lb status"]
+gap = "no suite runs it"
+
+["lb vips"]
+gap = "no suite runs it"
+
+["learning edges"]
+gap = "no suite runs it"
+
+["learning policy"]
+gap = "no suite runs it"
+
+["learning segmentation"]
+gap = "no suite runs it"
+
+["learning start"]
+gap = "no suite runs it"
+
+["learning stop"]
+gap = "no suite runs it"
+
+["metrics"]
+gap = "no suite runs it"
+
+["mitre coverage"]
+gap = "no suite runs it"
+
+["nat nptv6 create"]
+gap = "no suite runs it"
+
+["nat nptv6 delete"]
+gap = "no suite runs it"
+
+["nat rules"]
+gap = "no suite runs it"
+
+["nat status"]
+gap = "no suite runs it"
+
+["qos add-classifier"]
+gap = "no suite runs it"
+
+["qos add-pipe"]
+gap = "no suite runs it"
+
+["qos add-queue"]
+gap = "no suite runs it"
+
+["qos classifiers"]
+gap = "no suite runs it"
+
+["qos delete-classifier"]
+gap = "no suite runs it"
+
+["qos delete-pipe"]
+gap = "no suite runs it"
+
+["qos delete-queue"]
+gap = "no suite runs it"
+
+["qos pipes"]
+gap = "no suite runs it"
+
+["qos queues"]
+gap = "no suite runs it"
+
+["qos shaping"]
+gap = "no suite runs it"
+
+["qos status"]
+gap = "no suite runs it"
+
+["ratelimit add"]
+gap = "no suite runs it"
+
+["ratelimit delete"]
+gap = "no suite runs it"
+
+["ratelimit list"]
+gap = "no suite runs it"
+
+["responses list"]
+gap = "no suite runs it"
+
+["responses revoke"]
+gap = "no suite runs it"
+
+["routing add-gateway"]
+gap = "no suite runs it"
+
+["routing delete-gateway"]
+gap = "no suite runs it"
+
+["routing gateways"]
+gap = "no suite runs it"
+
+["routing routes"]
+gap = "no suite runs it"
+
+["routing status"]
+gap = "no suite runs it"
+
+["score"]
+gap = "no suite runs it"
+
+["status"]
+gap = "no suite runs it"
+
+["stop"]
+gap = "no suite runs it"
+
+["threatintel feeds refresh"]
+gap = "no suite runs it"
+
+["threatintel iocs"]
+gap = "no suite runs it"
+
+["threatintel status"]
+gap = "no suite runs it"
+
+["threatintel urls"]
+gap = "no suite runs it"
+
+["tls handshakes"]
+gap = "no suite runs it"
+
+["tls links"]
+gap = "no suite runs it"
+
+["tls posture"]
+gap = "no suite runs it"
+
+["tls status"]
+gap = "no suite runs it"
+
+["top"]
+gap = "no suite runs it"
+
+["version"]
+gap = "no suite runs it"
+
+["watch"]
+gap = "no suite runs it"
+
+["zones add"]
+gap = "no suite runs it"
+
+["zones add-policy"]
+gap = "no suite runs it"
+
+["zones delete"]
+gap = "no suite runs it"
+
+["zones delete-policy"]
+gap = "no suite runs it"
+
+["zones list"]
+gap = "no suite runs it"
+
+["zones policies"]
+gap = "no suite runs it"
+
+["zones status"]
+gap = "no suite runs it"

@@ -5,9 +5,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Holds a command line to the OpenAPI document of the agent it drives"
+description = "Holds a command line to the OpenAPI document of the agent it drives, and to the suites that run it"
 
 [dependencies]
+clap = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
