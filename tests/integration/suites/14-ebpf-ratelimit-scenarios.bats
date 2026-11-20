@@ -109,6 +109,22 @@ _rl_counter() {
     }
 }
 
+@test "the flood past the burst raises a ratelimit alert and an audit entry" {
+    require_root
+
+    # The kernel reports a source only once its bucket is empty, and every
+    # report is an alert of the ratelimit component and a written audit entry.
+    wait_for_alert '.[] | select(.component == "ratelimit") | .id' 15 1 >/dev/null || {
+        echo "no alert of component ratelimit after the SYN flood" >&2
+        api_get /api/v1/alerts >&2 || true
+        return 1
+    }
+    wait_for_metric ebpfsentinel_audit_events_total 1 15 >/dev/null || {
+        echo "ebpfsentinel_audit_events_total did not move" >&2
+        return 1
+    }
+}
+
 @test "dynamic strict rule enforces new limit" {
     require_root
 
@@ -214,7 +230,9 @@ _rl_counter() {
     passed_before="$(_rl_counter passed)"
     # Ten SYNs a second for two seconds: under the rate, all passed.
     hping3_flood_from_ns "$EBPF_HOST_IP" 8888 20 u100000
-    passed_after="$(ebpf_counter_above RATELIMIT_METRICS passed "$passed_before")"
+    # The counters are copied on a timer, so one read can land mid-flood:
+    # wait for all twenty rather than the first rise.
+    passed_after="$(ebpf_counter_above RATELIMIT_METRICS passed "$((passed_before + 19))")"
 
     [ $((passed_after - passed_before)) -ge 20 ] || {
         echo "a source under its rate was not passed (before ${passed_before}, after ${passed_after})" >&2
@@ -227,7 +245,7 @@ _rl_counter() {
     require_root
 
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics)" || true
     echo "$metrics" | grep -q 'ebpfsentinel_packets_total{interface="RATELIMIT_METRICS",action="dropped"}' || {
         echo "no xdp-ratelimit drop counter on /metrics" >&2
         return 1

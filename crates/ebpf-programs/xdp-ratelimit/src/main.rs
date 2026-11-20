@@ -566,8 +566,12 @@ fn process_ratelimit_v4(
     let l4_offset = l3_offset + ihl;
 
     // ── DDoS: ICMP flood protection ────────────────────────────────
-    if protocol == PROTO_ICMP {
-        return process_icmp_v4(ctx, l4_offset, src_ip, dst_ip, flags, vlan_id);
+    // With the protection off, ICMP is a packet like any other and the
+    // source's rate-limit rule below counts it.
+    if protocol == PROTO_ICMP
+        && let Some(cfg) = icmp_protection()
+    {
+        return process_icmp_v4(ctx, cfg, l4_offset, src_ip, dst_ip, flags, vlan_id);
     }
 
     // ── DDoS: SYN cookie ACK validation + SYN flood detection ─────
@@ -620,7 +624,7 @@ fn process_ratelimit_v4(
         }
         let src_addr = [src_ip, 0, 0, 0];
         let dst_addr = [dst_ip, 0, 0, 0];
-        let (src_port, dst_port) = read_l4_ports_v4(ctx, l4_offset);
+        let (src_port, dst_port) = read_l4_ports_raw(ctx, l4_offset, protocol);
         emit_ratelimit_event(
             ctx,
             &src_addr,
@@ -663,7 +667,7 @@ fn process_ratelimit_v4(
     } else {
         let src_addr = [src_ip, 0, 0, 0];
         let dst_addr = [dst_ip, 0, 0, 0];
-        let (src_port, dst_port) = read_l4_ports_v4(ctx, l4_offset);
+        let (src_port, dst_port) = read_l4_ports_raw(ctx, l4_offset, protocol);
 
         emit_ratelimit_event(
             ctx,
@@ -711,10 +715,20 @@ fn process_ratelimit_v6(
     let src_hash = hash_ipv6_src(&src_addr);
 
     // ── DDoS: ICMPv6 flood protection ──────────────────────────────
+    // With the protection off, an echo request is counted by the source's
+    // rate-limit rule below; every other ICMPv6 type (neighbour discovery
+    // among them) is passed, since starving it cuts the link.
     if next_hdr == PROTO_ICMPV6 {
-        return process_icmp_v6(
-            ctx, l4_offset, &src_addr, &dst_addr, src_hash, flags, vlan_id,
-        );
+        if let Some(cfg) = icmp_protection() {
+            return process_icmp_v6(
+                ctx, cfg, l4_offset, &src_addr, &dst_addr, src_hash, flags, vlan_id,
+            );
+        }
+        let icmphdr: *const IcmpHdr = unsafe { ptr_at(ctx, l4_offset)? };
+        if unsafe { (*icmphdr).icmp_type } != ICMPV6_ECHO_REQUEST {
+            increment_metric(traced, METRIC_PASSED);
+            return Ok(xdp_action::XDP_PASS);
+        }
     }
 
     // ── DDoS: SYN cookie ACK validation + SYN flood detection (IPv6)
@@ -907,21 +921,7 @@ fn dispatch_algorithm(
     }
 }
 
-/// Read L4 ports from an IPv4 packet (best-effort, 0 if unavailable).
-#[inline(always)]
-fn read_l4_ports_v4(ctx: &XdpContext, l4_offset: usize) -> (u16, u16) {
-    if let Ok(ports) = unsafe { ptr_at::<[u8; 4]>(ctx, l4_offset) } {
-        let ports = unsafe { &*ports };
-        (
-            u16::from_be_bytes([ports[0], ports[1]]),
-            u16::from_be_bytes([ports[2], ports[3]]),
-        )
-    } else {
-        (0u16, 0u16)
-    }
-}
-
-/// Read L4 ports from a raw protocol byte (IPv6 next_hdr).
+/// Read the ports of a TCP or UDP header, 0 for any other protocol.
 #[inline(always)]
 fn read_l4_ports_raw(ctx: &XdpContext, l4_offset: usize, protocol: u8) -> (u16, u16) {
     if (protocol == PROTO_TCP || protocol == PROTO_UDP)
@@ -1143,10 +1143,17 @@ fn syn_rate_exceeds_threshold(
 
 // ── DDoS: ICMP Flood Protection ────────────────────────────────────
 
+/// The ICMP flood protection, when it is configured and switched on.
+#[inline(always)]
+fn icmp_protection() -> Option<&'static IcmpConfig> {
+    ICMP_CONFIG.get(0).filter(|cfg| cfg.enabled != 0)
+}
+
 /// Process ICMP packets (IPv4). Rate limits echo requests per source.
 #[inline(always)]
 fn process_icmp_v4(
     ctx: &XdpContext,
+    cfg: &IcmpConfig,
     l4_offset: usize,
     src_ip: u32,
     dst_ip: u32,
@@ -1154,19 +1161,6 @@ fn process_icmp_v4(
     vlan_id: u16,
 ) -> Result<u32, ()> {
     let traced = trace::xdp(ctx);
-    let cfg = match ICMP_CONFIG.get(0) {
-        Some(c) => c,
-        None => {
-            // No ICMP config → pass through to generic rate limiting
-            increment_metric(traced, METRIC_PASSED);
-            return Ok(xdp_action::XDP_PASS);
-        }
-    };
-
-    if cfg.enabled == 0 {
-        increment_metric(traced, METRIC_PASSED);
-        return Ok(xdp_action::XDP_PASS);
-    }
 
     let icmphdr: *const IcmpHdr = unsafe { ptr_at(ctx, l4_offset)? };
     let icmp_type = unsafe { (*icmphdr).icmp_type };
@@ -1232,8 +1226,10 @@ fn process_icmp_v4(
 
 /// Process ICMPv6 packets. Rate limits echo requests per source.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn process_icmp_v6(
     ctx: &XdpContext,
+    cfg: &IcmpConfig,
     l4_offset: usize,
     src_addr: &[u32; 4],
     dst_addr: &[u32; 4],
@@ -1242,18 +1238,6 @@ fn process_icmp_v6(
     vlan_id: u16,
 ) -> Result<u32, ()> {
     let traced = trace::xdp(ctx);
-    let cfg = match ICMP_CONFIG.get(0) {
-        Some(c) => c,
-        None => {
-            increment_metric(traced, METRIC_PASSED);
-            return Ok(xdp_action::XDP_PASS);
-        }
-    };
-
-    if cfg.enabled == 0 {
-        increment_metric(traced, METRIC_PASSED);
-        return Ok(xdp_action::XDP_PASS);
-    }
 
     let icmphdr: *const IcmpHdr = unsafe { ptr_at(ctx, l4_offset)? };
     let icmp_type = unsafe { (*icmphdr).icmp_type };
