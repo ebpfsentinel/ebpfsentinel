@@ -49,23 +49,27 @@ impl PcapSocketPool {
     /// Build a pool from the `EBPFSENTINEL_PCAP_FDS` env var (a comma-separated
     /// fd list set by the launcher). Returns `None` when unset or empty - packet
     /// capture then degrades gracefully (no sockets to capture on).
+    ///
+    /// The launcher's fds belong to the process, so every caller gets the same
+    /// pool: two pools over one list would lend the same socket to two readers,
+    /// each then taking frames the other was owed.
     #[must_use]
     pub fn from_env() -> Option<Arc<Self>> {
-        let raw = std::env::var("EBPFSENTINEL_PCAP_FDS").ok()?;
-        let fds: Vec<RawFd> = raw
-            .split(',')
-            .filter(|s| !s.is_empty())
-            .filter_map(|s| s.parse::<RawFd>().ok())
-            .filter(|&fd| fd >= 0)
-            .collect();
-        if fds.is_empty() {
-            return None;
-        }
-        tracing::info!(
-            count = fds.len(),
-            "packet-capture sockets provisioned by the launcher"
-        );
-        Some(Self::build(fds, None))
+        static LAUNCHER_POOL: OnceLock<Option<Arc<PcapSocketPool>>> = OnceLock::new();
+        LAUNCHER_POOL
+            .get_or_init(|| {
+                let raw = std::env::var("EBPFSENTINEL_PCAP_FDS").ok()?;
+                let fds = parse_fd_list(&raw);
+                if fds.is_empty() {
+                    return None;
+                }
+                tracing::info!(
+                    count = fds.len(),
+                    "packet-capture sockets provisioned by the launcher"
+                );
+                Some(Self::build(fds, None))
+            })
+            .clone()
     }
 
     /// Construct a pool from explicit fds (used in tests).
@@ -135,6 +139,16 @@ impl PcapSocketPool {
             metrics.set_pcap_sockets(self.in_use() as u64, self.total as u64);
         }
     }
+}
+
+/// The fds of a comma-separated `EBPFSENTINEL_PCAP_FDS` value, skipping what
+/// is empty, not a number or negative.
+fn parse_fd_list(raw: &str) -> Vec<RawFd> {
+    raw.split(',')
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<RawFd>().ok())
+        .filter(|&fd| fd >= 0)
+        .collect()
 }
 
 /// RAII lease that returns its socket to the pool on drop.
@@ -468,6 +482,14 @@ mod tests {
         // SAFETY: single-threaded test mutating process env.
         unsafe { std::env::remove_var("EBPFSENTINEL_PCAP_FDS") };
         assert!(PcapSocketPool::from_env().is_none());
+        assert!(PcapSocketPool::from_env().is_none());
+    }
+
+    #[test]
+    fn fd_list_keeps_only_valid_fds() {
+        assert_eq!(parse_fd_list("3,4"), vec![3, 4]);
+        assert_eq!(parse_fd_list(",5,,x,-1,6,"), vec![5, 6]);
+        assert!(parse_fd_list("").is_empty());
     }
 
     #[test]
