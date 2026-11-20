@@ -1526,6 +1526,10 @@ fn emit_event(
         (*ptr).rss_hash = rss_h;
         (*ptr).rss_hash_type = rss_t;
         (*ptr).rx_hw_timestamp_ns = xdp_rx_timestamp(ctx_raw.cast_const()).unwrap_or(0);
+        // The linear frame, which is what the forwarded-bytes counter reads.
+        let frame = XdpContext::new(ctx_raw.cast());
+        (*ptr).pkt_len = frame.data_end().saturating_sub(frame.data()) as u32;
+        (*ptr)._pad = 0;
         event.submit(submit_flags(avail_data(&EVENTS)));
     }
 }

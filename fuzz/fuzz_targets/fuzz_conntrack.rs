@@ -41,6 +41,7 @@ fuzz_target!(|data: &[u8]| {
 
                 let settings = ConnTrackSettings {
                     enabled: chunk[0] & 1 != 0,
+                    byte_accounting: chunk[0] & 2 != 0,
                     tcp_established_timeout_secs: u64::from_le_bytes([
                         chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
                         chunk[8],
@@ -89,6 +90,7 @@ fuzz_target!(|data: &[u8]| {
 
                 let settings = ConnTrackSettings {
                     enabled: chunk[0] & 1 != 0,
+                    byte_accounting: chunk[0] & 2 != 0,
                     tcp_established_timeout_secs: u64::from_le_bytes([
                         chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
                         chunk[8],

@@ -61,6 +61,8 @@ fn make_event(rule_id: u32) -> PacketEvent {
         rss_hash: 0,
         rss_hash_type: 0,
         rx_hw_timestamp_ns: 0,
+        pkt_len: 0,
+        _pad: 0,
     }
 }
 

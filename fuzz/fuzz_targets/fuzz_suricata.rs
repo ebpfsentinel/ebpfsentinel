@@ -51,6 +51,8 @@ fuzz_target!(|data: &[u8]| {
             rss_hash: 0,
             rss_hash_type: 0,
             rx_hw_timestamp_ns: 0,
+            pkt_len: 0,
+            _pad: 0,
         };
         let _ = engine.evaluate_payload_with_context(&event, data, None);
     }

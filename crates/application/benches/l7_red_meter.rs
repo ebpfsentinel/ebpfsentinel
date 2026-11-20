@@ -33,6 +33,8 @@ fn event(src: u32, dst: u32, src_port: u16, dst_port: u16, at_ns: u64) -> Packet
         rss_hash: 0,
         rss_hash_type: 0,
         rx_hw_timestamp_ns: 0,
+        pkt_len: 0,
+        _pad: 0,
     }
 }
 

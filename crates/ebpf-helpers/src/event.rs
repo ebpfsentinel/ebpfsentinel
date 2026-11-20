@@ -26,7 +26,9 @@
 ///     EVENT_TYPE_IDS, action, rule_id, flags, vlan; tc ctx);
 /// ```
 ///
-/// Without the `; tc $ctx` suffix, `socket_cookie` is set to 0 (XDP mode).
+/// Without the `; tc $ctx` suffix, `socket_cookie` and `pkt_len` are set to
+/// 0 (XDP mode, no context handed in). With it, `pkt_len` is the socket
+/// buffer's length.
 ///
 /// The commit wakes the reader only once a batch has built up (see
 /// [`crate::ringbuf::submit_flags`]); the reader drains the rest on its tick.
@@ -65,11 +67,13 @@ macro_rules! emit_packet_event {
                 let skb: &aya_ebpf::programs::TcContext = ::core::borrow::Borrow::borrow(&$ctx);
                 (*ptr).socket_cookie =
                     aya_ebpf::helpers::bpf_get_socket_cookie($crate::raw_skb(skb) as *mut _);
+                (*ptr).pkt_len = skb.len();
                 (*ptr).cgroup_id = $cgroup_id;
                 (*ptr).cgroup1_id = 0;
                 (*ptr).rss_hash = 0;
                 (*ptr).rss_hash_type = 0;
                 (*ptr).rx_hw_timestamp_ns = 0;
+                (*ptr)._pad = 0;
             }
             entry.submit($crate::ringbuf::submit_flags(backlog));
         } else {
@@ -107,6 +111,7 @@ macro_rules! emit_packet_event {
                 let skb: &aya_ebpf::programs::TcContext = ::core::borrow::Borrow::borrow(&$ctx);
                 (*ptr).socket_cookie =
                     aya_ebpf::helpers::bpf_get_socket_cookie($crate::raw_skb(skb) as *mut _);
+                (*ptr).pkt_len = skb.len();
                 // Valid only when current task owns the skb (egress).
                 // Ingress softirq has no process context, so this returns
                 // 0 and userspace falls back to /proc parsing.
@@ -121,6 +126,7 @@ macro_rules! emit_packet_event {
                 (*ptr).rss_hash = 0;
                 (*ptr).rss_hash_type = 0;
                 (*ptr).rx_hw_timestamp_ns = 0;
+                (*ptr)._pad = 0;
             }
             entry.submit($crate::ringbuf::submit_flags(backlog));
         } else {
@@ -154,6 +160,8 @@ macro_rules! emit_packet_event {
                 (*ptr).vlan_id = $vlan_id;
                 (*ptr).cpu_id = aya_ebpf::helpers::bpf_get_smp_processor_id() as u16;
                 (*ptr).socket_cookie = 0;
+                // No context to read the frame length from here.
+                (*ptr).pkt_len = 0;
                 // XDP runs before any task context; cgroup_id is always 0.
                 (*ptr).cgroup_id = 0;
                 // Zero the trailing fields this generic path does not populate.
@@ -164,6 +172,7 @@ macro_rules! emit_packet_event {
                 (*ptr).rss_hash = 0;
                 (*ptr).rss_hash_type = 0;
                 (*ptr).rx_hw_timestamp_ns = 0;
+                (*ptr)._pad = 0;
             }
             entry.submit($crate::ringbuf::submit_flags(backlog));
         } else {

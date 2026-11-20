@@ -842,8 +842,8 @@ fn increment_metric(traced: bool, index: u32) {
 /// Emit an L7 event: `PacketEvent` header + raw payload bytes from the packet.
 ///
 /// Uses tiered `RingBuf` reservation to minimize bandwidth:
-/// - Packets with <= 512 bytes of TCP payload -> `L7EventSmall` (608 bytes)
-/// - Packets with > 512 bytes -> `L7EventBuf` (2144 bytes, up to 2048 payload bytes)
+/// - Packets with <= 512 bytes of TCP payload -> `L7EventSmall` (616 bytes)
+/// - Packets with > 512 bytes -> `L7EventBuf` (2152 bytes, up to 2048 payload bytes)
 ///
 /// Both tiers use compile-time constant lengths for `bpf_skb_load_bytes`
 /// (required by the eBPF verifier on kernel 6.1+).
@@ -882,7 +882,7 @@ fn emit_l7_event(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize) {
     }
 }
 
-/// Small L7 event (608 bytes): for packets with at most 512 bytes of TCP payload.
+/// Small L7 event (616 bytes): for packets with at most 512 bytes of TCP payload.
 #[inline(always)]
 fn emit_l7_small(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_avail: usize) {
     // Bound the copy to what the packet actually carries, capped at the
@@ -938,7 +938,7 @@ fn emit_l7_small(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_ava
     }
 }
 
-/// Full L7 event (2144 bytes): for packets with > 512 bytes TCP payload.
+/// Full L7 event (2152 bytes): for packets with > 512 bytes TCP payload.
 ///
 /// Emitted via `RingBuf`. TC programs are not sleepable, so the
 /// sleepable arena-alloc kfunc is unavailable here; the copy-based
@@ -1040,6 +1040,8 @@ unsafe fn fill_l7_header(
         header.rss_hash = 0;
         header.rss_hash_type = 0;
         header.rx_hw_timestamp_ns = 0;
+        header.pkt_len = ctx.len();
+        header._pad = 0;
     }
 }
 

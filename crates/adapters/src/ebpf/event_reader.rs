@@ -209,9 +209,10 @@ mod tests {
 
     #[test]
     fn packet_event_byte_parsing() {
-        // Construct known bytes matching the 96-byte PacketEvent layout
-        // (80 bytes + rss_hash u32 + rss_hash_type u32 + rx_hw_timestamp_ns u64).
-        let mut bytes = [0u8; 96];
+        // Construct known bytes matching the 104-byte PacketEvent layout
+        // (80 bytes + rss_hash u32 + rss_hash_type u32 + rx_hw_timestamp_ns u64
+        // + pkt_len u32 + tail padding u32).
+        let mut bytes = [0u8; 104];
 
         // timestamp_ns at offset 0 (u64 LE)
         let ts: u64 = 1_000_000_000;
@@ -282,6 +283,10 @@ mod tests {
         let hw_ts: u64 = 1_700_000_000_123_456_789;
         bytes[88..96].copy_from_slice(&hw_ts.to_ne_bytes());
 
+        // pkt_len at offset 96 (u32)
+        let pkt_len: u32 = 1514;
+        bytes[96..100].copy_from_slice(&pkt_len.to_ne_bytes());
+
         // Parse the event
         let event: PacketEvent =
             // SAFETY: the length was checked against `size_of::<PacketEvent>()` above, the type
@@ -305,16 +310,18 @@ mod tests {
         assert_eq!(event.rss_hash, 0xDEAD_BEEF);
         assert_eq!(event.rss_hash_type, rss_type);
         assert_eq!(event.rx_hw_timestamp_ns, 1_700_000_000_123_456_789);
+        assert_eq!(event.pkt_len, 1514);
         assert!(event.has_hw_rss_hash());
         assert!(event.has_hw_timestamp());
     }
 
     #[test]
-    fn packet_event_size_is_96_bytes() {
+    fn packet_event_size_is_104_bytes() {
         // 80-byte layout grew to 96 when the rss_hash + rss_hash_type
         // + rx_hw_timestamp_ns fields were appended for the
-        // bpf_xdp_metadata_rx_hash / _rx_timestamp kfuncs (kernel 6.3+).
-        assert_eq!(std::mem::size_of::<PacketEvent>(), 96);
+        // bpf_xdp_metadata_rx_hash / _rx_timestamp kfuncs, then to 104
+        // when the packet's length on the wire was added.
+        assert_eq!(std::mem::size_of::<PacketEvent>(), 104);
     }
 
     #[test]

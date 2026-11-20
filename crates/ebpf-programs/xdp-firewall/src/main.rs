@@ -3006,7 +3006,7 @@ fn emit_event(ctx_raw: *mut core::ffi::c_void, action: u8) {
 
     // Validates the dynptr kfunc path from XDP context and provides
     // the full frame size including multi-buffer fragments.
-    let _xdp_frame_size = unsafe { xdp_frame_size(ctx_raw) }.unwrap_or(0);
+    let frame_size = unsafe { xdp_frame_size(ctx_raw) }.unwrap_or(0);
     let (rss_hash, rss_hash_type) = unsafe { xdp_rx_hash(ctx_raw.cast_const()) }.unwrap_or((0, 0));
     let rx_hw_ts = unsafe { xdp_rx_timestamp(ctx_raw.cast_const()) }.unwrap_or(0);
     if let Some(mut entry) = EVENTS.reserve_untyped::<PacketEvent>(0) {
@@ -3030,6 +3030,8 @@ fn emit_event(ctx_raw: *mut core::ffi::c_void, action: u8) {
             (*ptr).rss_hash = rss_hash;
             (*ptr).rss_hash_type = rss_hash_type;
             (*ptr).rx_hw_timestamp_ns = rx_hw_ts;
+            (*ptr).pkt_len = frame_size;
+            (*ptr)._pad = 0;
         }
         entry.submit(submit_flags(avail_data(&EVENTS)));
     } else {

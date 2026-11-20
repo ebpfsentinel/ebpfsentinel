@@ -7,7 +7,9 @@ pub const EVENT_TYPE_RATELIMIT: u8 = 4;
 pub const EVENT_TYPE_THREATINTEL: u8 = 5;
 pub const EVENT_TYPE_L7: u8 = 6;
 pub const EVENT_TYPE_DNS: u8 = 7;
-pub const EVENT_TYPE_QOS: u8 = 8;
+// 8 was the traffic shaper's per-packet event. The shaper reports through its
+// metrics map instead, and the number stays unassigned so a record from an
+// older kernel object can never be read as some other kind.
 
 /// Maximum L7 payload bytes captured by eBPF and sent via RingBuf.
 ///
@@ -63,7 +65,7 @@ pub const fn is_tcp(flags: u8) -> bool {
 /// - IPv4: `[v4_addr, 0, 0, 0]`
 /// - IPv6: full 128-bit address in network order
 ///
-/// Size: 96 bytes (aligned to 8 bytes due to `timestamp_ns` u64).
+/// Size: 104 bytes (aligned to 8 bytes due to `timestamp_ns` u64).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PacketEvent {
@@ -118,6 +120,16 @@ pub struct PacketEvent {
     /// a TC context. Used by beaconing/jitter detectors to record
     /// arrival times with sub-microsecond precision.
     pub rx_hw_timestamp_ns: u64,
+    /// Bytes on the wire for the packet this event reports, link-layer
+    /// header included: the whole XDP frame (fragments of a multi-buffer
+    /// frame counted where the program can read them) or the socket
+    /// buffer's length in TC. 0 when the emitting program could not
+    /// measure it. Byte-weighted consumers (volume baselines, top talkers)
+    /// sum this rather than counting events.
+    pub pkt_len: u32,
+    /// Explicit tail padding, always written as 0, so the record holds no
+    /// byte the kernel did not set.
+    pub _pad: u32,
 }
 
 // SAFETY: Both types are #[repr(C)], Copy, 'static, and contain only primitive
@@ -173,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_packet_event_size() {
-        assert_eq!(mem::size_of::<PacketEvent>(), 96);
+        assert_eq!(mem::size_of::<PacketEvent>(), 104);
     }
 
     #[test]
@@ -191,7 +203,6 @@ mod tests {
         assert_eq!(EVENT_TYPE_THREATINTEL, 5);
         assert_eq!(EVENT_TYPE_L7, 6);
         assert_eq!(EVENT_TYPE_DNS, 7);
-        assert_eq!(EVENT_TYPE_QOS, 8);
         assert_eq!(MAX_L7_PAYLOAD, 2048);
         assert_eq!(SMALL_L7_PAYLOAD, 512);
         const { assert!(SMALL_L7_PAYLOAD < MAX_L7_PAYLOAD) };
@@ -238,7 +249,9 @@ mod tests {
         assert_eq!(mem::offset_of!(PacketEvent, rss_hash), 80);
         assert_eq!(mem::offset_of!(PacketEvent, rss_hash_type), 84);
         assert_eq!(mem::offset_of!(PacketEvent, rx_hw_timestamp_ns), 88);
-        assert_eq!(mem::size_of::<PacketEvent>(), 96);
+        assert_eq!(mem::offset_of!(PacketEvent, pkt_len), 96);
+        assert_eq!(mem::offset_of!(PacketEvent, _pad), 100);
+        assert_eq!(mem::size_of::<PacketEvent>(), 104);
     }
 
     #[test]
@@ -262,6 +275,8 @@ mod tests {
             rss_hash: 0,
             rss_hash_type: 0,
             rx_hw_timestamp_ns: 0,
+            pkt_len: 0,
+            _pad: 0,
         };
         assert_eq!(event.src_ip(), 0xC0A8_0001);
         assert_eq!(event.dst_ip(), 0x0A00_0001);
@@ -290,6 +305,8 @@ mod tests {
             rss_hash: 0,
             rss_hash_type: 0,
             rx_hw_timestamp_ns: 0,
+            pkt_len: 0,
+            _pad: 0,
         };
         assert!(event.is_ipv6());
         assert!(!event.has_vlan());
@@ -297,9 +314,9 @@ mod tests {
 
     #[test]
     fn event_type_constants_are_unique() {
-        // All EVENT_TYPE_* constants across all modules: event(0-8), ddos(10-13), lb(14).
-        // Gap at 9 is intentional (reserved for future use).
-        let types: [u8; 14] = [
+        // All EVENT_TYPE_* constants across all modules: event(0-7), ddos(10-13), lb(14).
+        // 8 is retired (the shaper's former per-packet event) and 9 is reserved.
+        let types: [u8; 13] = [
             0,  // EVENT_TYPE_FIREWALL
             1,  // EVENT_TYPE_IDS
             2,  // EVENT_TYPE_IPS
@@ -308,7 +325,6 @@ mod tests {
             5,  // EVENT_TYPE_THREATINTEL
             6,  // EVENT_TYPE_L7
             7,  // EVENT_TYPE_DNS
-            8,  // EVENT_TYPE_QOS
             10, // EVENT_TYPE_DDOS_SYN
             11, // EVENT_TYPE_DDOS_ICMP
             12, // EVENT_TYPE_DDOS_AMP
@@ -346,6 +362,8 @@ mod tests {
             rss_hash: 0,
             rss_hash_type: 0,
             rx_hw_timestamp_ns: 0,
+            pkt_len: 0,
+            _pad: 0,
         };
         assert!(!event.is_ipv6());
         assert!(event.has_vlan());

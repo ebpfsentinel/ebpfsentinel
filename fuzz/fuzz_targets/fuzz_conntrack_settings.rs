@@ -34,6 +34,7 @@ fuzz_target!(|data: &[u8]| {
 
     let settings = ConnTrackSettings {
         enabled,
+        byte_accounting: data[0] & 2 != 0,
         tcp_established_timeout_secs: tcp_established,
         tcp_syn_timeout_secs: tcp_syn,
         tcp_fin_timeout_secs: tcp_fin,
