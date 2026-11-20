@@ -433,6 +433,17 @@ impl FirewallAppService {
         self.sync_or_log("program load");
     }
 
+    /// Tell the loaded program whether a per-source connection ceiling is in
+    /// force, so it keeps reading the conntrack state the ceiling counts by.
+    /// A reload that adds or removes the ceiling calls this; with no program
+    /// loaded there is nothing to tell, and the next load reads the
+    /// configuration itself.
+    pub fn set_source_limits(&mut self, enforced: bool) {
+        if let Some(port) = self.map_port.as_mut() {
+            port.set_source_limits(enforced);
+        }
+    }
+
     /// Clear the eBPF map port (program unloaded).
     pub fn clear_map_port(&mut self) {
         self.map_port = None;
@@ -1400,6 +1411,8 @@ mod tests {
         /// Stands in for a kernel refusing an IPv4 write: the load fails and
         /// the previous set stays, as the map manager leaves it.
         refuse_v4: Arc<std::sync::atomic::AtomicBool>,
+        /// The last word on whether a per-source ceiling is in force.
+        source_limits: Arc<std::sync::Mutex<Option<bool>>>,
     }
 
     impl FirewallArrayMapPort for RecordingMap {
@@ -1453,6 +1466,24 @@ mod tests {
         fn read_shadow(&self) -> Result<ShadowCounts, DomainError> {
             Ok(self.shadow_counts.lock().unwrap().clone())
         }
+
+        fn set_source_limits(&mut self, enforced: bool) {
+            *self.source_limits.lock().unwrap() = Some(enforced);
+        }
+    }
+
+    #[test]
+    fn a_source_ceiling_added_by_reload_reaches_the_loaded_program() {
+        let map = RecordingMap::default();
+        let mut svc = make_service();
+        svc.set_source_limits(true);
+        assert_eq!(*map.source_limits.lock().unwrap(), None);
+
+        svc.set_map_port(Box::new(map.clone()));
+        svc.set_source_limits(true);
+        assert_eq!(*map.source_limits.lock().unwrap(), Some(true));
+        svc.set_source_limits(false);
+        assert_eq!(*map.source_limits.lock().unwrap(), Some(false));
     }
 
     #[test]

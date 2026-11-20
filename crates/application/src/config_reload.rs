@@ -598,6 +598,17 @@ impl ConfigReloadService {
             .set_interface_scope(scope);
     }
 
+    /// Tell the loaded firewall whether a per-source connection ceiling is in
+    /// force after a conntrack reload, so a ceiling the reload adds is
+    /// enforced without a restart.
+    pub async fn set_firewall_source_limits(&self, enforced: bool) {
+        let _guard = self.reload_locks.firewall.lock().await;
+        self.firewall_service
+            .write()
+            .await
+            .set_source_limits(enforced);
+    }
+
     /// Publish the anti-lockout settings ahead of a firewall reload, which is
     /// what installs the rules they produce.
     pub async fn set_firewall_anti_lockout(

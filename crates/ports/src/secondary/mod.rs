@@ -28,7 +28,6 @@ pub mod executable_digest_port;
 pub mod feed_source;
 pub mod file_watch_port;
 pub mod flow_sink_port;
-pub mod geoip_lpm_port;
 pub mod geoip_port;
 pub mod guest_naming_port;
 pub mod hidden_port_port;

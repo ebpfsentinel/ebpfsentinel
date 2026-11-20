@@ -24,7 +24,6 @@ pub mod event_reader;
 pub mod exec_network;
 pub mod feature_gates;
 pub mod file_kfunc_probe;
-pub mod geoip_lpm_manager;
 pub mod helper_probe;
 pub mod ids_map_manager;
 pub mod ids_mirror_map_manager;
@@ -113,7 +112,6 @@ pub use dns_event_reader::DnsEventReader;
 pub use ebpf_map_write_adapter::EbpfMapWriteAdapter;
 pub use event_reader::EventReader;
 pub use feature_gates::Feature as FirewallFeature;
-pub use geoip_lpm_manager::GeoIpLpmManager;
 pub use helper_probe::{
     HelperReport, HelperSupport, MissingHelper, ProbeStatus, ProbeType,
     cached as cached_kernel_helpers, init_cached as init_kernel_helpers,

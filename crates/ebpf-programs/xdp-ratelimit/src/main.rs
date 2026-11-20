@@ -32,8 +32,9 @@ use ebpf_common::{
         DDOS_METRIC_SYNCOOKIE_INVALID, DDOS_METRIC_SYNCOOKIE_VALID, DdosConnTrackConfig,
         DdosConnTrackKey, DdosConnTrackValue, DdosSynConfig, EVENT_TYPE_DDOS_AMP,
         EVENT_TYPE_DDOS_CONNTRACK, EVENT_TYPE_DDOS_ICMP, EVENT_TYPE_DDOS_SYN, FLOOD_TYPE_ACK,
-        FLOOD_TYPE_FIN, FLOOD_TYPE_RST, FloodCounterKey, IcmpConfig, MAX_DDOS_CONN_TABLE_ENTRIES,
-        MAX_DDOS_TRACKED_SOURCES, SynRateState, SyncookieCtx,
+        FLOOD_TYPE_FIN, FLOOD_TYPE_RST, FloodCounterKey, HALF_OPEN_HALF_LIFE_NS, HalfOpenCounter,
+        IcmpConfig, MAX_DDOS_CONN_TABLE_ENTRIES, MAX_DDOS_TRACKED_SOURCES, SynRateState,
+        SyncookieCtx, half_open_aged,
     },
     event::{EVENT_TYPE_RATELIMIT, FLAG_IPV6, FLAG_VLAN, PacketEvent},
     firewall::{
@@ -247,10 +248,15 @@ static CONN_TABLE: LruPerCpuHashMap<
 > = LruPerCpuHashMap::new();
 
 /// Per-source half-open connection counter (per-CPU LRU).
-/// Counts SYNs without matching ACKs per source IP.
+/// Counts the SYNs of a source whose handshake has neither completed nor
+/// closed; a retransmitted SYN is the handshake already counted, and the
+/// count halves every `HALF_OPEN_HALF_LIFE_NS` for the ones never seen end.
 #[btf_map]
-static HALF_OPEN_COUNTERS: LruPerCpuHashMap<u32, u64, { MAX_DDOS_TRACKED_SOURCES as usize }> =
-    LruPerCpuHashMap::new();
+static HALF_OPEN_COUNTERS: LruPerCpuHashMap<
+    u32,
+    HalfOpenCounter,
+    { MAX_DDOS_TRACKED_SOURCES as usize },
+> = LruPerCpuHashMap::new();
 
 /// Per-source per-flood-type rate counter (per-CPU LRU, fixed window).
 /// Tracks RST/FIN/ACK flood rates.
@@ -1597,16 +1603,7 @@ fn process_conntrack_tcp(
             increment_ddos_metric(traced, DDOS_METRIC_RST_FLOOD_DROPS);
             return Some(xdp_action::XDP_DROP);
         }
-        // Remove connection entry on RST
-        let key = DdosConnTrackKey {
-            src_ip,
-            dst_ip,
-            src_port,
-            dst_port,
-        };
-        if !traced {
-            let _ = CONN_TABLE.remove(&key);
-        }
+        close_tracked(traced, src_ip, dst_ip, src_port, dst_port);
         return None;
     }
 
@@ -1634,30 +1631,43 @@ fn process_conntrack_tcp(
             increment_ddos_metric(traced, DDOS_METRIC_FIN_FLOOD_DROPS);
             return Some(xdp_action::XDP_DROP);
         }
-        // Remove connection entry on FIN
+        close_tracked(traced, src_ip, dst_ip, src_port, dst_port);
+        return None;
+    }
+
+    // ── SYN: create NEW connection entry, track half-open ────────
+    if is_syn {
         let key = DdosConnTrackKey {
             src_ip,
             dst_ip,
             src_port,
             dst_port,
         };
-        if !traced {
-            let _ = CONN_TABLE.remove(&key);
+        // A retransmitted SYN is the handshake already counted: it neither
+        // counts again nor is refused for a ceiling its first copy passed.
+        if let Some(entry) = CONN_TABLE.get_ptr_mut(&key)
+            && unsafe { (*entry).state } == CONN_NEW
+        {
+            if !traced {
+                unsafe { (*entry).last_seen_ns = now };
+            }
+            return None;
         }
-        return None;
-    }
 
-    // ── SYN: create NEW connection entry, track half-open ────────
-    if is_syn {
         // Check half-open threshold before adding
-        if let Some(count) = HALF_OPEN_COUNTERS.get_ptr_mut(&src_ip) {
-            let mut count_shadow = unsafe { *count };
-            let count = if traced {
-                &mut count_shadow
+        if let Some(counter) = HALF_OPEN_COUNTERS.get_ptr_mut(&src_ip) {
+            let mut counter_shadow = unsafe { *counter };
+            let counter = if traced {
+                &mut counter_shadow
             } else {
-                unsafe { &mut *count }
+                unsafe { &mut *counter }
             };
-            if *count >= cfg.half_open_threshold as u64 {
+            let elapsed = now.saturating_sub(counter.aged_ns);
+            if elapsed >= HALF_OPEN_HALF_LIFE_NS {
+                counter.count = half_open_aged(counter.count, elapsed);
+                counter.aged_ns = now;
+            }
+            if counter.count >= cfg.half_open_threshold as u64 {
                 // Too many half-open connections from this source
                 emit_ddos_event(
                     ctx,
@@ -1674,21 +1684,16 @@ fn process_conntrack_tcp(
                 increment_ddos_metric(traced, DDOS_METRIC_HALF_OPEN_DROPS);
                 return Some(xdp_action::XDP_DROP);
             }
-            *count += 1;
-        } else {
-            let initial: u64 = 1;
-            if !traced {
-                let _ = HALF_OPEN_COUNTERS.insert(&src_ip, &initial, 0);
-            }
+            counter.count += 1;
+        } else if !traced {
+            let initial = HalfOpenCounter {
+                count: 1,
+                aged_ns: now,
+            };
+            let _ = HALF_OPEN_COUNTERS.insert(&src_ip, &initial, 0);
         }
 
         // Insert NEW connection
-        let key = DdosConnTrackKey {
-            src_ip,
-            dst_ip,
-            src_port,
-            dst_port,
-        };
         let val = DdosConnTrackValue {
             state: CONN_NEW,
             _pad: [0; 7],
@@ -1729,16 +1734,7 @@ fn process_conntrack_tcp(
             entry.last_seen_ns = now;
             if entry.state == CONN_NEW {
                 entry.state = CONN_ESTABLISHED;
-                // Decrement half-open counter
-                if let Some(count) = HALF_OPEN_COUNTERS.get_ptr_mut(&src_ip) {
-                    let mut count_shadow = unsafe { *count };
-                    let count = if traced {
-                        &mut count_shadow
-                    } else {
-                        unsafe { &mut *count }
-                    };
-                    *count = count.saturating_sub(1);
-                }
+                release_half_open(traced, src_ip);
             }
             true
         } else {
@@ -1757,16 +1753,8 @@ fn process_conntrack_tcp(
                 entry.last_seen_ns = now;
                 if entry.state == CONN_NEW {
                     entry.state = CONN_ESTABLISHED;
-                    // Decrement half-open counter for the original SYN sender
-                    if let Some(count) = HALF_OPEN_COUNTERS.get_ptr_mut(&dst_ip) {
-                        let mut count_shadow = unsafe { *count };
-                        let count = if traced {
-                            &mut count_shadow
-                        } else {
-                            unsafe { &mut *count }
-                        };
-                        *count = count.saturating_sub(1);
-                    }
+                    // The original SYN sender is this packet's destination.
+                    release_half_open(traced, dst_ip);
                 }
             } else {
                 // ACK to non-existent connection - potential ACK flood
@@ -1816,6 +1804,57 @@ fn process_conntrack_tcp(
     }
 
     None
+}
+
+/// Give `syn_sender` back one half-open handshake: it completed or closed.
+#[inline(always)]
+fn release_half_open(traced: bool, syn_sender: u32) {
+    if traced {
+        return;
+    }
+    if let Some(counter) = HALF_OPEN_COUNTERS.get_ptr_mut(&syn_sender) {
+        let counter = unsafe { &mut *counter };
+        counter.count = counter.count.saturating_sub(1);
+    }
+}
+
+/// Forget the tracked connection a RST or FIN ends.
+///
+/// From the side that opened it the entry goes whatever its state, as it
+/// always has. From the other side only a handshake still half open goes:
+/// that is the server refusing it, and an established connection keeps its
+/// entry until its opener closes. A handshake that never completed gives its
+/// opener its half-open count back.
+#[inline(always)]
+fn close_tracked(traced: bool, src_ip: u32, dst_ip: u32, src_port: u16, dst_port: u16) {
+    if traced {
+        return;
+    }
+    let key = DdosConnTrackKey {
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+    };
+    if let Some(entry) = CONN_TABLE.get_ptr(&key) {
+        if unsafe { (*entry).state } == CONN_NEW {
+            release_half_open(traced, src_ip);
+        }
+        let _ = CONN_TABLE.remove(&key);
+        return;
+    }
+    let rev_key = DdosConnTrackKey {
+        src_ip: dst_ip,
+        dst_ip: src_ip,
+        src_port: dst_port,
+        dst_port: src_port,
+    };
+    if let Some(entry) = CONN_TABLE.get_ptr(&rev_key)
+        && unsafe { (*entry).state } == CONN_NEW
+    {
+        release_half_open(traced, dst_ip);
+        let _ = CONN_TABLE.remove(&rev_key);
+    }
 }
 
 /// Check if a flood rate threshold is exceeded for a given source and flood type.
@@ -1973,6 +2012,8 @@ fn emit_ddos_event(
             (*ptr).rss_hash = rss_hash;
             (*ptr).rss_hash_type = rss_hash_type;
             (*ptr).rx_hw_timestamp_ns = rx_hw_ts;
+            (*ptr).pkt_len = ctx.data_end().saturating_sub(ctx.data()) as u32;
+            (*ptr)._pad = 0;
         }
         entry.submit(submit_flags(avail_data(&EVENTS)));
     } else {
@@ -2305,8 +2346,8 @@ fn increment_metric(traced: bool, index: u32) {
 
 /// Emit a rate-limit `PacketEvent` via the EVENTS `RingBuf`. Skips
 /// emission under backpressure (>75% full); increments the dropped
-/// metric when the ring is saturated. At 96 B per event the 4 MiB
-/// ring holds ~50k drops, outperforming a same-size arena.
+/// metric when the ring is saturated. At 104 B per event the 4 MiB
+/// ring holds ~40k drops, outperforming a same-size arena.
 ///
 /// `action` is the verdict the configuration asked for, carried through so
 /// userspace can tell an enforced drop from a `pass` rule that only counted
@@ -2356,6 +2397,8 @@ fn emit_ratelimit_event(
             (*ptr).rss_hash = rss_hash;
             (*ptr).rss_hash_type = rss_hash_type;
             (*ptr).rx_hw_timestamp_ns = rx_hw_ts;
+            (*ptr).pkt_len = ctx.data_end().saturating_sub(ctx.data()) as u32;
+            (*ptr)._pad = 0;
         }
         entry.submit(submit_flags(avail_data(&EVENTS)));
     } else {

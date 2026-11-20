@@ -23,8 +23,8 @@ pub struct ShadowCounts {
 /// the rules are written beside the ones in force and published by one
 /// write, so on an error the previous set is still the one enforced.
 ///
-/// CIDR-only LPM Trie rules (e.g. `GeoIP` blocking) are handled by the
-/// separate `GeoIpLpmPort` trait.
+/// The CIDR-only LPM Trie rules (country blocks, large alias sets) are
+/// written by the LPM coordinator, not through this port.
 ///
 /// Implemented by `FirewallMapManager` in the adapter layer.
 pub trait FirewallArrayMapPort: Send + Sync {
@@ -64,6 +64,11 @@ pub trait FirewallArrayMapPort: Send + Sync {
 
     /// Read what the shadow rules have counted since they were loaded.
     fn read_shadow(&self) -> Result<ShadowCounts, DomainError>;
+
+    /// Say whether a per-source connection ceiling is in force, so the
+    /// datapath keeps reading the conntrack state it counts flows by. A map
+    /// without such a gate has nothing to record.
+    fn set_source_limits(&mut self, _enforced: bool) {}
 }
 
 #[cfg(test)]

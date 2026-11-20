@@ -1318,6 +1318,11 @@ pub async fn run(
     // Signalled by the reload task once a reload finishes, so the
     // /config/reload endpoint can wait for completion before returning.
     let reload_complete = Arc::new(tokio::sync::Notify::new());
+    // Each reload counted as it starts and as it ends, with the reason a
+    // refused one gives, so the endpoint answers whether the agent runs the
+    // file.
+    let (reload_outcome_tx, reload_outcome_rx) =
+        tokio::sync::watch::channel(crate::reload::ReloadOutcome::default());
     // Manual threat-intel feed re-fetch channel. Only wired into AppState
     // when the feed fetcher task actually runs (threat intel enabled with
     // at least one feed); otherwise the refresh endpoint reports the feature
@@ -1352,6 +1357,8 @@ pub async fn run(
     );
     app_state.config_path = Some(Arc::from(config_path));
     app_state.reload_complete = Some(Arc::clone(&reload_complete));
+    app_state.reload_outcome = Some(reload_outcome_rx);
+    app_state.boot_config = Some(Arc::new(config.clone()));
     if let Some(trigger) = feed_trigger {
         app_state = app_state.with_feed_refresh_trigger(trigger.tx, trigger.in_flight);
     }
@@ -3476,18 +3483,7 @@ pub async fn run(
         // 10j. TC QoS
         qos_ok = if config.qos.enabled {
             match try_load_tc_qos(&ebpf_dir, &config) {
-                Ok((mut loader, qos_mgr, qos_rdr, opt_reader)) => {
-                    if let Some(reader) = opt_reader {
-                        let event_tx_clone = event_tx.clone();
-                        let rb_obs = RingBufObserver::new(
-                            "tc-qos",
-                            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
-                        );
-                        let task_cancel_11 = readers.clone();
-                        tokio::spawn(async move {
-                            reader.run(event_tx_clone, task_cancel_11, rb_obs).await;
-                        });
-                    }
+                Ok((mut loader, qos_mgr, qos_rdr)) => {
                     {
                         let mut svc = qos_svc.write().await;
                         // Bind the eBPF maps, then resync config so the just-wired
@@ -3956,6 +3952,7 @@ pub async fn run(
         Arc::clone(&shared_config),
         Arc::clone(&ebpf_manager),
         Arc::clone(&reload_complete),
+        reload_outcome_tx,
     );
 
     // ── 10d. Build container resolver ───────────────────────────────
@@ -5960,21 +5957,10 @@ pub fn try_load_xdp_firewall(
 
     map_manager.set_default_policy(firewall_policy_byte(config.firewall.default_policy))?;
 
-    let source_limits_written =
-        config.conntrack.max_src_states > 0 || config.conntrack.max_src_conn_rate > 0;
-    if source_limits_written && !config.conntrack.enabled {
-        warn!(
-            max_src_states = config.conntrack.max_src_states,
-            max_src_conn_rate = config.conntrack.max_src_conn_rate,
-            "per-source connection ceilings are configured with conntrack.enabled: false, \
-             nothing enforces them"
-        );
-    }
-    let source_limits = config.conntrack.enabled && source_limits_written;
-    map_manager.set_source_limits(source_limits);
-    if source_limits || config.firewall.caps_connections() {
-        spawn_connection_limit_reconciler(loader.ebpf_mut(), config);
-    }
+    map_manager.set_source_limits(source_limits_enforced(config));
+    // Started whatever the configuration says now: a ceiling added by a later
+    // reload counts from its first packet, and a pass with no hold is cheap.
+    spawn_connection_limit_reconciler(loader.ebpf_mut(), config);
 
     // The rule arrays are written by the firewall service when it is handed
     // this manager, not here: a rule is only what the kernel should see once
@@ -6029,20 +6015,52 @@ pub fn try_load_xdp_firewall(
     ))
 }
 
+/// Whether the per-source connection ceilings are in force: configured, and
+/// conntrack on to tell a flow's first packet from the rest. Warns when they
+/// are configured with conntrack off, since nothing then enforces them.
+pub fn source_limits_enforced(config: &AgentConfig) -> bool {
+    let configured = source_limits_configured(config);
+    if configured && !config.conntrack.enabled {
+        warn!(
+            max_src_states = config.conntrack.max_src_states,
+            max_src_conn_rate = config.conntrack.max_src_conn_rate,
+            "per-source connection ceilings are configured with conntrack.enabled: false, \
+             nothing enforces them"
+        );
+    }
+    config.conntrack.enabled && configured
+}
+
+fn source_limits_configured(config: &AgentConfig) -> bool {
+    config.conntrack.max_src_states > 0 || config.conntrack.max_src_conn_rate > 0
+}
+
 /// Keep the connection ceilings counting open connections: the datapath
 /// counts a flow when it admits one and never sees one end, so without this a
 /// source or a rule that reached its ceiling once stays refused.
+///
+/// One reconciler runs per agent: this one replaces the reconciler of any
+/// earlier xdp-firewall load, whose pinned tables are the same.
 fn spawn_connection_limit_reconciler(
     ebpf: &mut dyn adapters::ebpf::map_store::MapStore,
     config: &AgentConfig,
 ) {
-    use adapters::ebpf::connection_limits::{ConnectionLimitMaps, run_connection_limit_reconciler};
+    use adapters::ebpf::connection_limits::{
+        ConnectionLimitMaps, start_connection_limit_reconciler,
+    };
 
     if !adapters::netfilter::conntrack::is_conntrack_readable() {
-        warn!(
-            "connection ceilings configured but the kernel conntrack table is unreadable: \
-             a connection counted against a ceiling is never released"
-        );
+        if source_limits_configured(config) || config.firewall.caps_connections() {
+            warn!(
+                "connection ceilings configured but the kernel conntrack table is unreadable: \
+                 a connection counted against a ceiling is never released"
+            );
+        } else {
+            info!(
+                "kernel conntrack table unreadable: a connection ceiling added later by a \
+                 reload would never release what it counts"
+            );
+        }
         return;
     }
     let Some(maps) = ConnectionLimitMaps::take(ebpf) else {
@@ -6055,11 +6073,12 @@ fn spawn_connection_limit_reconciler(
     };
     let rate_window =
         std::time::Duration::from_secs(u64::from(config.conntrack.conn_rate_window_secs));
-    runtime.spawn(run_connection_limit_reconciler(
+    start_connection_limit_reconciler(
+        &runtime,
         maps,
         Box::new(adapters::netfilter::conntrack::ProcNetfilterConntrackPort::new()),
         rate_window,
-    ));
+    );
     info!("connection ceiling reconciler started");
 }
 
@@ -9231,17 +9250,17 @@ pub fn try_load_tc_scrub(
 }
 
 /// Load the TC `QoS` program: attach TC, acquire the `QoS` maps, and create
-/// the metrics + event readers. The caller binds the returned map manager to
-/// the `QoS` service and syncs pipes/queues/classifiers from config.
+/// the metrics reader. The caller binds the returned map manager to the `QoS`
+/// service and syncs pipes/queues/classifiers from config.
+///
+/// No event reader: the shaper reports through `QOS_METRICS` alone. It acts
+/// on every packet of a shaped link, and a record per packet on the channel
+/// the firewall and IDS alerts share would push those alerts out when it
+/// fills.
 pub fn try_load_tc_qos(
     ebpf_dir: &str,
     config: &AgentConfig,
-) -> anyhow::Result<(
-    EbpfLoader,
-    QosMapManager,
-    Option<MetricsReader>,
-    Option<EventReader>,
-)> {
+) -> anyhow::Result<(EbpfLoader, QosMapManager, Option<MetricsReader>)> {
     let program_bytes = read_ebpf_program(ebpf_dir, "tc-qos")?;
     let mut loader =
         EbpfLoader::load_with_pin_path(&program_bytes, adapters::ebpf::DEFAULT_BPF_PIN_PATH)?;
@@ -9263,9 +9282,8 @@ pub fn try_load_tc_qos(
 
     let qos_mgr = QosMapManager::new(loader.ebpf_mut())?;
     let qos_metrics_rdr = MetricsReader::new(loader.ebpf_mut(), "QOS_METRICS").ok();
-    let opt_reader = EventReader::new(loader.ebpf_mut()).ok();
 
-    Ok((loader, qos_mgr, qos_metrics_rdr, opt_reader))
+    Ok((loader, qos_mgr, qos_metrics_rdr))
 }
 
 /// Build `ScrubFlags` from the agent config's scrub section.

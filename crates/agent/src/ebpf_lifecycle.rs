@@ -1376,6 +1376,9 @@ impl EbpfProgramManager {
                     }
                 }
                 self.services.firewall_svc.write().await.clear_map_port();
+                // The counters outlive the program in their pins; the next
+                // load starts its own reconciler once this one has returned.
+                adapters::ebpf::connection_limits::stop_connection_limit_reconciler();
                 self.drop_metrics_readers("xdp_firewall").await;
                 self.clear_status("xdp_firewall").await;
             }

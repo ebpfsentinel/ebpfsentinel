@@ -184,6 +184,34 @@ pub struct DdosConnTrackValue {
     pub last_seen_ns: u64,
 }
 
+/// Per-source count of SYNs whose handshake has neither completed nor
+/// closed, as one CPU saw them (`HALF_OPEN_COUNTERS`, a per-CPU map).
+///
+/// Size: 16 bytes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HalfOpenCounter {
+    /// Handshakes outstanding.
+    pub count: u64,
+    /// When the count was last aged.
+    pub aged_ns: u64,
+}
+
+/// How long a half-open count takes to halve. The datapath releases a
+/// handshake when it sees it complete or close, and some it never sees end:
+/// a reset leaving by another path, a lost SYN-ACK, a client that gave up.
+/// Ageing lets those go instead of keeping the source refused for good.
+pub const HALF_OPEN_HALF_LIFE_NS: u64 = 10_000_000_000;
+
+/// The half-open count once `elapsed_ns` has passed since it was last aged:
+/// halved once per [`HALF_OPEN_HALF_LIFE_NS`].
+#[inline(always)]
+#[must_use]
+pub fn half_open_aged(count: u64, elapsed_ns: u64) -> u64 {
+    let halvings = elapsed_ns / HALF_OPEN_HALF_LIFE_NS;
+    if halvings >= 64 { 0 } else { count >> halvings }
+}
+
 /// Connection state: SYN received, awaiting ACK.
 pub const CONN_NEW: u8 = 0;
 /// Connection state: SYN+ACK exchange complete.
@@ -374,6 +402,28 @@ mod tests {
         assert_eq!(mem::offset_of!(DdosConnTrackValue, state), 0);
         assert_eq!(mem::offset_of!(DdosConnTrackValue, first_seen_ns), 8);
         assert_eq!(mem::offset_of!(DdosConnTrackValue, last_seen_ns), 16);
+    }
+
+    #[test]
+    fn half_open_counter_layout() {
+        assert_eq!(mem::size_of::<HalfOpenCounter>(), 16);
+        assert_eq!(mem::offset_of!(HalfOpenCounter, count), 0);
+        assert_eq!(mem::offset_of!(HalfOpenCounter, aged_ns), 8);
+    }
+
+    #[test]
+    fn a_half_open_count_halves_once_per_half_life() {
+        assert_eq!(half_open_aged(100, 0), 100);
+        assert_eq!(half_open_aged(100, HALF_OPEN_HALF_LIFE_NS - 1), 100);
+        assert_eq!(half_open_aged(100, HALF_OPEN_HALF_LIFE_NS), 50);
+        assert_eq!(half_open_aged(100, 3 * HALF_OPEN_HALF_LIFE_NS), 12);
+        assert_eq!(half_open_aged(100, 7 * HALF_OPEN_HALF_LIFE_NS), 0);
+    }
+
+    #[test]
+    fn a_long_idle_source_has_no_half_open_left() {
+        assert_eq!(half_open_aged(u64::MAX, 64 * HALF_OPEN_HALF_LIFE_NS), 0);
+        assert_eq!(half_open_aged(u64::MAX, u64::MAX), 0);
     }
 
     #[test]

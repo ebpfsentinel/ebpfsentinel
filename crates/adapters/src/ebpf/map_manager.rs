@@ -24,8 +24,8 @@ use tracing::{info, warn};
 /// - `FIREWALL_RULE_COUNT_V6`: `Array<u32>` (V6 generation word)
 /// - `FIREWALL_DEFAULT_POLICY`: `Array<u8>` (single element: default action)
 ///
-/// LPM Trie maps for CIDR-only rules (`GeoIP` blocking) are managed
-/// separately by `GeoIpLpmManager`.
+/// LPM Trie maps for CIDR-only rules are written separately, by the LPM
+/// coordinator.
 ///
 /// Reload protocol: the datapath reads the bank the generation word names.
 /// A reload writes the other bank in full, fast-path keys included, then
@@ -210,8 +210,8 @@ impl FirewallMapManager {
     /// Create a new `FirewallMapManager` by taking ownership of the
     /// five array-based firewall maps from the loaded eBPF program.
     ///
-    /// LPM Trie maps must be taken **before** calling this constructor
-    /// (see `GeoIpLpmManager`), as `take_map()` is destructive.
+    /// The LPM Trie maps are not taken here, so the LPM coordinator can take
+    /// them from the same object; `take_map()` is destructive.
     pub fn new(ebpf: &mut dyn MapStore) -> Result<Self, anyhow::Error> {
         let rules_v4 = Array::try_from(
             ebpf.take_map("FIREWALL_RULES")
@@ -338,12 +338,6 @@ impl FirewallMapManager {
         feature_gates::publish(Feature::HashPort, self.hash_counts_v4.1 == 0);
     }
 
-    /// Publish whether the datapath still has to probe conntrack.
-    ///
-    /// Called after every load and after the default policy moves, because the
-    /// answer is a property of the two together. A failed write leaves the
-    /// previous value, which is why the gate defaults open: the worst outcome
-    /// of a stale gate is a probe nobody needed.
     /// Say whether a per-source connection ceiling is configured, so the
     /// conntrack gate stays open for it.
     pub fn set_source_limits(&mut self, configured: bool) {
@@ -351,6 +345,12 @@ impl FirewallMapManager {
         self.sync_ct_gate();
     }
 
+    /// Publish whether the datapath still has to probe conntrack.
+    ///
+    /// Called after every load and after the default policy moves, because the
+    /// answer is a property of the two together. A failed write leaves the
+    /// previous value, which is why the gate defaults open: the worst outcome
+    /// of a stale gate is a probe nobody needed.
     fn sync_ct_gate(&mut self) {
         let open = self.v4_needs_ct
             || self.v6_needs_ct
@@ -764,6 +764,10 @@ impl FirewallArrayMapPort for FirewallMapManager {
             Some(shadow) => shadow.read(),
             None => Ok(ShadowCounts::default()),
         }
+    }
+
+    fn set_source_limits(&mut self, enforced: bool) {
+        FirewallMapManager::set_source_limits(self, enforced);
     }
 }
 

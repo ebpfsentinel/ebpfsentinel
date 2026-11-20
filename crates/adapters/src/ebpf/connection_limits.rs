@@ -26,7 +26,8 @@
 
 use std::collections::{HashMap as StdHashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use aya::maps::{Array, HashMap, MapData};
@@ -39,6 +40,9 @@ use ebpf_common::firewall::{
     FIREWALL_RULE_BANKS, MAX_FIREWALL_RULES, RULE_STATE_SLOTS, bank_base, rule_state_slot_in_bank,
 };
 use ports::secondary::conntrack_map_port::ConnTrackMapPort;
+use tokio::runtime::Handle;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::ebpf::map_store::MapStore;
@@ -405,20 +409,126 @@ pub struct PassReport {
     pub rules_written: usize,
 }
 
-/// Bring the ceilings back to what is open on every interval, for as long as
-/// the agent runs. A pass whose conntrack read fails changes nothing: a hold
-/// is only released on the table's word that its connection is gone.
+/// The window the per-source rate is measured over, in seconds, as the
+/// configuration last said: a reload moves it without restarting the pass.
+static RATE_WINDOW_SECS: AtomicU64 = AtomicU64::new(5);
+
+/// Record the window the per-source rate is measured over.
+pub fn set_rate_window(window: Duration) {
+    RATE_WINDOW_SECS.store(window.as_secs(), Ordering::Release);
+}
+
+fn rate_window() -> Duration {
+    Duration::from_secs(RATE_WINDOW_SECS.load(Ordering::Acquire))
+}
+
+/// The one reconciler running on the firewall's tables. Two passes over the
+/// same holds would each subtract what they release, so a start stops the
+/// previous task and waits for it to end before its own first pass.
+pub struct ReconcilerSlot {
+    running: Mutex<Option<Running>>,
+}
+
+struct Running {
+    cancel: CancellationToken,
+    handle: JoinHandle<()>,
+}
+
+impl Default for ReconcilerSlot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ReconcilerSlot {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            running: Mutex::new(None),
+        }
+    }
+
+    /// Run `task` as the one reconciler. The task receives its token and is
+    /// expected to return once it is cancelled; it starts only after the task
+    /// it replaces has returned.
+    pub fn start<F, Fut>(&self, runtime: &Handle, task: F)
+    where
+        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        // The slot only ever holds a whole value, so a panic elsewhere while
+        // it was locked leaves nothing half written.
+        let mut slot = self.running.lock().unwrap_or_else(PoisonError::into_inner);
+        let previous = slot.take();
+        if let Some(prev) = previous.as_ref() {
+            prev.cancel.cancel();
+        }
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let handle = runtime.spawn(async move {
+            if let Some(prev) = previous
+                && let Err(e) = prev.handle.await
+            {
+                debug!(error = %e, "previous connection ceiling reconciler ended abnormally");
+            }
+            if token.is_cancelled() {
+                return;
+            }
+            task(token).await;
+        });
+        *slot = Some(Running { cancel, handle });
+    }
+
+    /// Stop the running reconciler, if any. A later start still waits for it
+    /// to return.
+    pub fn stop(&self) {
+        let slot = self.running.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(running) = slot.as_ref() {
+            running.cancel.cancel();
+        }
+    }
+}
+
+/// The reconciler of this agent's xdp-firewall tables.
+static RECONCILER: ReconcilerSlot = ReconcilerSlot::new();
+
+/// Start releasing the ceilings of a freshly loaded xdp-firewall, replacing
+/// the reconciler of any earlier load: the tables are pinned, so a firewall
+/// disabled then enabled again writes the same counters.
+pub fn start_connection_limit_reconciler(
+    runtime: &Handle,
+    maps: ConnectionLimitMaps,
+    conntrack: Box<dyn ConnTrackMapPort>,
+    rate_window: Duration,
+) {
+    set_rate_window(rate_window);
+    RECONCILER.start(runtime, move |cancel| {
+        run_connection_limit_reconciler(maps, conntrack, cancel)
+    });
+}
+
+/// Stop releasing the ceilings, when the firewall is unloaded.
+pub fn stop_connection_limit_reconciler() {
+    RECONCILER.stop();
+}
+
+/// Bring the ceilings back to what is open on every interval, until `cancel`
+/// fires. A pass whose conntrack read fails changes nothing: a hold is only
+/// released on the table's word that its connection is gone.
 pub async fn run_connection_limit_reconciler(
     mut maps: ConnectionLimitMaps,
     conntrack: Box<dyn ConnTrackMapPort>,
-    rate_window: Duration,
+    cancel: CancellationToken,
 ) {
     let conntrack: std::sync::Arc<dyn ConnTrackMapPort> = std::sync::Arc::from(conntrack);
     let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut failing = false;
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            _ = ticker.tick() => {}
+        }
         let port = std::sync::Arc::clone(&conntrack);
         let snapshot = tokio::task::spawn_blocking(move || port.get_connections(usize::MAX)).await;
         let connections = match snapshot {
@@ -438,11 +548,16 @@ pub async fn run_connection_limit_reconciler(
                 continue;
             }
         };
+        // A replacement waits for this task to return, so checking here keeps
+        // a pass that was reading conntrack from writing after it.
+        if cancel.is_cancelled() {
+            break;
+        }
         let open: HashSet<FlowTuple> = connections
             .iter()
             .filter_map(FlowTuple::of_open_connection)
             .collect();
-        let report = maps.apply(&open, rate_window);
+        let report = maps.apply(&open, rate_window());
         debug!(
             held = report.held,
             released = report.released,
@@ -451,6 +566,7 @@ pub async fn run_connection_limit_reconciler(
             "connection ceilings reconciled"
         );
     }
+    debug!("connection ceiling reconciler stopped");
 }
 
 #[cfg(test)]
@@ -656,6 +772,80 @@ mod tests {
             FlowTuple::of_open_connection(&conn),
             Some(FlowTuple::of_hold(&key))
         );
+    }
+
+    /// A task that stays inside its pass for a while each round, counting
+    /// how many such tasks ever ran at once.
+    async fn counted_task(
+        cancel: CancellationToken,
+        active: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        peak: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        started.fetch_add(1, Ordering::SeqCst);
+        loop {
+            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            active.fetch_sub(1, Ordering::SeqCst);
+            if cancel.is_cancelled() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restarted_reconciler_never_runs_beside_the_one_it_replaces() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+
+        let slot = ReconcilerSlot::new();
+        let runtime = Handle::current();
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
+        for _ in 0..3 {
+            let (a, p, s) = (Arc::clone(&active), Arc::clone(&peak), Arc::clone(&started));
+            slot.start(&runtime, move |cancel| counted_task(cancel, a, p, s));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+        assert_eq!(started.load(Ordering::SeqCst), 3);
+
+        slot.stop();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_start_right_after_a_stop_waits_for_the_stopped_task() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+
+        let slot = ReconcilerSlot::new();
+        let runtime = Handle::current();
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
+        let (a, p, s) = (Arc::clone(&active), Arc::clone(&peak), Arc::clone(&started));
+        slot.start(&runtime, move |cancel| counted_task(cancel, a, p, s));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        slot.stop();
+        let (a, p, s) = (Arc::clone(&active), Arc::clone(&peak), Arc::clone(&started));
+        slot.start(&runtime, move |cancel| counted_task(cancel, a, p, s));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+        assert_eq!(started.load(Ordering::SeqCst), 2);
+        slot.stop();
+    }
+
+    #[test]
+    fn the_rate_window_follows_the_last_configuration() {
+        set_rate_window(Duration::from_secs(42));
+        assert_eq!(rate_window(), Duration::from_secs(42));
+        set_rate_window(Duration::from_secs(5));
+        assert_eq!(rate_window(), Duration::from_secs(5));
     }
 
     #[test]
