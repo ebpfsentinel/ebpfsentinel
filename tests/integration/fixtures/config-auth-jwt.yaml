@@ -55,3 +55,18 @@ auth:
     public_key_path: __JWT_PUBKEY__
     issuer: ebpfsentinel-test
     audience: ebpfsentinel
+  # Tokens minted for the suite carry no ML-DSA cosignature; the header is
+  # not read at all.
+  pq_tokens: disable
+  # Beside the tokens, one static key for a scraper-style client, held to the
+  # same namespace an operator token holds.
+  api_keys:
+    - name: it-operator-key
+      key: sk-it-operator-0123456789
+      role: operator
+      namespaces: [prod]
+  # A fixed salt, so the key's hash is the same across the restarts a lane
+  # makes.
+  api_key_salt: it-api-key-salt-0123456789abcdef
+  # The scraper reaches /metrics without a credential; the API still asks.
+  metrics_auth_required: false

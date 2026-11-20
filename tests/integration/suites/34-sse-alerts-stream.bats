@@ -103,7 +103,7 @@ teardown_file() {
 @test "alerts_sse_subscribers gauge increments while client is connected" {
     # Baseline.
     local before
-    before="$(curl -sf "${BASE_URL}/metrics" \
+    before="$(scrape_metrics \
         | awk '/^ebpfsentinel_alerts_sse_subscribers / {print $2}')"
     before="${before:-0}"
 
@@ -114,7 +114,7 @@ teardown_file() {
     sleep 2
 
     local during
-    during="$(curl -sf "${BASE_URL}/metrics" \
+    during="$(scrape_metrics \
         | awk '/^ebpfsentinel_alerts_sse_subscribers / {print $2}')"
     during="${during:-0}"
 
@@ -122,7 +122,7 @@ teardown_file() {
     sleep 1
 
     local after
-    after="$(curl -sf "${BASE_URL}/metrics" \
+    after="$(scrape_metrics \
         | awk '/^ebpfsentinel_alerts_sse_subscribers / {print $2}')"
     after="${after:-0}"
 

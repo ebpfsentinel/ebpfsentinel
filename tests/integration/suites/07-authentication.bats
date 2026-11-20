@@ -176,3 +176,33 @@ get_token() {
     [[ "$HTTP_STATUS" == "400" || "$HTTP_STATUS" == "404" ]]
     [[ "$body" != *"Insufficient permissions"* ]]
 }
+
+# ── API keys and metrics ──────────────────────────────────────────
+
+@test "a configured API key reads the API" {
+    local body
+    body="$(api_get /api/v1/firewall/rules -H "X-API-Key: sk-it-operator-0123456789")"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array"' >/dev/null
+}
+
+@test "an unknown API key returns 401" {
+    local body
+    body="$(api_get /api/v1/firewall/rules -H "X-API-Key: sk-it-not-configured")"
+    assert_http_status "401"
+    assert_error_body "$body"
+}
+
+@test "an operator API key is held to its namespace (namespace:finance returns 403)" {
+    local rule='{"id":"it-rbac-key-001","priority":100,"action":"deny","protocol":"tcp","scope":"namespace:finance"}'
+    local body
+    body="$(api_post /api/v1/firewall/rules "$rule" -H "X-API-Key: sk-it-operator-0123456789")"
+    assert_http_status "403"
+    assert_error_body "$body"
+}
+
+@test "metrics answer without a credential when metrics_auth_required is off" {
+    local status_code
+    status_code="$(api_status /metrics)"
+    assert_http_status "200" "$status_code"
+}

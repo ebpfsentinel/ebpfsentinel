@@ -11,8 +11,7 @@ setup_file() {
     mkdir -p "$DATA_DIR"
 
     export PREPARED_CONFIG="/tmp/ebpfsentinel-test-config-$$.yaml"
-    sed "s|__DATA_DIR__|${DATA_DIR}|g" \
-        "${FIXTURE_DIR}/config-full.yaml" > "$PREPARED_CONFIG"
+    prepare_full_config "$PREPARED_CONFIG"
 
     start_agent "$PREPARED_CONFIG"
 }

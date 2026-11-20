@@ -99,10 +99,23 @@ teardown_file() {
     require_root
 
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || true
 
     [ -n "$metrics" ]
     echo "$metrics" | grep -qE "ebpfsentinel_routing|ebpfsentinel_packets"
+
+    # The gateway answers no probe: past its failure threshold it is reported
+    # down under its name.
+    local i value=""
+    for i in $(seq 1 40); do
+        value="$(get_metrics_value ebpfsentinel_routing_gateway_status '{gateway="gw-test-primary"}')" || value=""
+        [ "$value" = "0" ] && break
+        sleep 1
+    done
+    [ "$value" = "0" ] || {
+        echo "routing_gateway_status for gw-test-primary: '${value}'" >&2
+        return 1
+    }
 }
 
 # ── Gateway CRUD - create and delete ────────────────────────────

@@ -224,7 +224,6 @@ masking:
   - "launcher produced no output"
   - "metrics endpoint not available"
   - "neighbour TLS container could not run (image pull / apk / openssl)"
-  - "no GeoIP-specific metrics found"
   - "no IPS rules available to patch"
   - "no IPv6 probe reached backend - transit link not established"
   - "no OTLP export recorded yet"

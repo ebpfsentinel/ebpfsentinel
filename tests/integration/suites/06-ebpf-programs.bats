@@ -199,3 +199,23 @@ teardown_file() {
     [ "${worst%.*}" -ge 0 ]
     [ "${worst%.*}" -le 1000 ]
 }
+
+@test "the scrape says how XDP is attached, how the agent loaded and what the kernel allowed" {
+    require_root
+
+    local body
+    body="$(scrape_metrics)"
+    # One attachment mode is the active one on the interface the agent holds.
+    [ "$(echo "$body" | grep "^ebpfsentinel_xdp_attach_mode{interface=\"${EBPF_VETH_HOST}\"," | awk '$2 == 1' | wc -l)" -eq 1 ] || {
+        echo "$body" | grep '^ebpfsentinel_xdp_attach_mode' >&2
+        return 1
+    }
+    # The programs loaded, so the loader is reported either way, token or not.
+    echo "$body" | grep -qE '^ebpfsentinel_bpf_token_used [01]$'
+    # Every capability above the floor is reported active or not, by name.
+    echo "$body" | grep -qE '^ebpfsentinel_kernel_capability_active\{capability="[^"]+"\} [01]$'
+    # The write-once maps are reported, and this kernel refused none of them.
+    # Both are families without labels, which the exposition writes as `{}`.
+    echo "$body" | grep -qE '^ebpfsentinel_ebpf_frozen_maps(\{\})? [0-9]+$'
+    echo "$body" | grep -qE '^ebpfsentinel_ebpf_map_freeze_refusals(\{\})? 0$'
+}

@@ -152,7 +152,7 @@ _agent_xdp_link() {
     [ "$(echo "$entry" | jq -r '.host_netns')" = "true" ]
     assert_contains "$(echo "$entry" | jq -r '.executable // ""')" "python3"
 
-    run wait_for_alert '.[] | select(.rule_id == "raw-socket-opened") | .rule_id' 20 1
+    run wait_for_alert '.[] | select(.rule_id == "raw-socket-opened" and .component == "raw_socket") | .rule_id' 20 1
     [ "$status" -eq 0 ]
 }
 
@@ -261,7 +261,7 @@ _agent_xdp_link() {
         false
     }
 
-    run wait_for_alert '.[] | select(.rule_id == "network-path-link-detached") | .rule_id' 20 1
+    run wait_for_alert '.[] | select(.rule_id == "network-path-link-detached" and .component == "network_path") | .rule_id' 20 1
     [ "$status" -eq 0 ]
 }
 

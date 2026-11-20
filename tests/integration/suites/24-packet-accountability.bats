@@ -243,3 +243,26 @@ wait_for_metrics_flush() {
     # Check that total_seen appears in the metrics output for the firewall
     echo "$body" | grep -q 'interface="FIREWALL_METRICS",action="total_seen"'
 }
+
+# ── Userspace: every event read off the ring is handled and timed ──
+
+@test "metrics: the events the kernel handed up were dispatched, timed and none went unread" {
+    require_root
+
+    local body
+    body="$(scrape_metrics)"
+    _at_least() {
+        echo "$body" | awk -v s="$1" 'index($0, s) == 1 && $NF >= 1 { ok = 1 } END { exit !ok }' || {
+            echo "no ${1} at 1 or more" >&2
+            echo "$body" | grep -E '^ebpfsentinel_(worker|packet_processing|events_dropped)' >&2
+            return 1
+        }
+    }
+    # The dropped connections above reached userspace as events: a worker
+    # took each one, and both the worker and the program it came from timed it.
+    _at_least 'ebpfsentinel_worker_events_total{worker_id="'
+    _at_least 'ebpfsentinel_worker_processing_duration_seconds_count{worker_id="'
+    _at_least 'ebpfsentinel_packet_processing_duration_seconds_count{program="'
+    # Every event type the kernel wrote has a reader.
+    [ "$(echo "$body" | grep -c '^ebpfsentinel_events_dropped_total{reason="unhandled_event_type"}')" -eq 0 ]
+}

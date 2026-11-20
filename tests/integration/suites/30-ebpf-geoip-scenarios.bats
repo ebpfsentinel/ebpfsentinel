@@ -191,7 +191,7 @@ teardown_file() {
     require_root
 
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || true
 
     [ -n "$metrics" ]
     echo "$metrics" | grep -qE "ebpfsentinel_geoip|ebpfsentinel_country|ebpfsentinel_packets"
@@ -303,7 +303,7 @@ teardown_file() {
     fi
 
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || true
     [ -n "$metrics" ]
 
     local kp
@@ -381,21 +381,16 @@ teardown_file() {
     sleep 3
 
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || true
 
     [ -n "$metrics" ]
 
-    # After traffic, at least one GeoIP-related metric should have a non-zero value
-    local geoip_line
-    geoip_line="$(echo "$metrics" | grep -E "ebpfsentinel_geoip|ebpfsentinel_country" | head -1)" || true
-
-    if [ -z "$geoip_line" ]; then
-        soft_skip "no GeoIP-specific metrics found"
-    fi
-
-    local value
-    value="$(echo "$geoip_line" | awk '{print $2}')" || true
-    [ -n "$value" ]
+    # The namespace resolves to a country in the fixture database, and the
+    # lookups the enrichment and the endpoint above made are counted as hits.
+    echo "$metrics" | awk '/^ebpfsentinel_geoip_lookups_total\{result="hit"\}/ && $2 >= 1 { ok = 1 } END { exit !ok }' || {
+        echo "$metrics" | grep '^ebpfsentinel_geoip_lookups' >&2
+        return 1
+    }
 }
 
 # ── MITRE coverage sweep ───────────────────────────────────────────

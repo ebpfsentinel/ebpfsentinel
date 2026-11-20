@@ -216,6 +216,28 @@ _ti_counter() {
     }
 }
 
+@test "the feed counters say what each feed loaded, what matched and how long the load took" {
+    local metrics
+    metrics="$(scrape_metrics)"
+    _ti_series() {
+        echo "$metrics" | awk -v s="$1" -v n="$2" 'index($0, s) == 1 && $NF >= n { ok = 1 } END { exit !ok }' || {
+            echo "no ${1} at ${2} or more" >&2
+            echo "$metrics" | grep '^ebpfsentinel_threatintel_' >&2
+            return 1
+        }
+    }
+    # Both feeds loaded indicators, each stamped with the time it was read.
+    _ti_series 'ebpfsentinel_threatintel_feed_indicators{feed="ti-plain"}' 1
+    _ti_series 'ebpfsentinel_threatintel_feed_indicators{feed="ti-csv"}' 1
+    _ti_series 'ebpfsentinel_threatintel_feed_last_refresh_timestamp_seconds{feed="ti-plain"}' 1700000000
+    _ti_series 'ebpfsentinel_threatintel_feed_last_refresh_timestamp_seconds{feed="ti-csv"}' 1700000000
+    # The listed address that was dropped matched one feed.
+    _ti_series 'ebpfsentinel_threatintel_matches_total{feed="' 1
+    # The map was loaded at start and again on the reload, with indicators.
+    _ti_series 'ebpfsentinel_threatintel_reload_duration_seconds_count ' 1
+    _ti_series 'ebpfsentinel_threatintel_reload_indicators ' 1
+}
+
 @test "alerts emitted by this suite carry a MITRE technique mapping" {
     assert_alert_has_any_mitre_technique 15
 }

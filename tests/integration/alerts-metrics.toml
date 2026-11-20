@@ -2,118 +2,34 @@
 # Read by scripts/audit-alerts-metrics.py; exactly one of suites, reason, gap
 # per line, and gap_ceiling equals the number of gap lines.
 
-gap_ceiling = 86
-
-[component."agent_files"]
-gap = "no suite waits for an alert of this component"
-
-[component."agent_lifecycle"]
-gap = "no suite waits for an alert of this component"
-
-[component."ddos"]
-gap = "no suite waits for an alert of this component"
-
-[component."dns"]
-gap = "no suite waits for an alert of this component"
-
-[component."file_integrity"]
-gap = "no suite waits for an alert of this component"
+gap_ceiling = 9
 
 [component."hidden_port"]
-gap = "suite 79 asserts only that a clean host raises none"
+reason = "needs a kernel rootkit hiding a listening port from /proc; suite 79 asserts a clean host raises none"
 
 [component."hidden_process"]
-gap = "suite 79 asserts only that a clean host raises none"
-
-[component."host_rule"]
-gap = "no suite waits for an alert of this component"
-
-[component."ips"]
-gap = "no suite waits for an alert of this component"
+reason = "needs a kernel rootkit hiding a process from /proc; suite 79 asserts a clean host raises none"
 
 [component."ml-anomaly"]
-gap = "no suite waits for an alert of this component"
-
-[component."network_path"]
-gap = "no suite waits for an alert of this component"
-
-[component."ratelimit"]
-gap = "no suite waits for an alert of this component"
-
-[component."raw_socket"]
-gap = "no suite waits for an alert of this component"
+reason = "raised only by the enterprise ML engine through Alert::from_ml_anomaly, which the OSS agent never calls"
 
 [component."share_writes"]
 suites = ["85"]
 
 [component."tamper_protection"]
-gap = "no suite waits for an alert of this component"
-
-[component."tcp_health"]
-gap = "no suite waits for an alert of this component"
-
-[component."workload-firewall"]
-gap = "no suite waits for an alert of this component"
-
-[metric."alerts_by_rule"]
-gap = "no suite reads ebpfsentinel_alerts_by_rule"
-
-[metric."audit_events"]
-gap = "no suite reads ebpfsentinel_audit_events"
+reason = "armed only by enterprise tamper protection; the OSS agent never refuses a tamper attempt on its own"
 
 [metric."audit_failures"]
-gap = "no suite reads ebpfsentinel_audit_failures"
+gap = "needs the audit store or a sink to refuse a write; no suite breaks one"
 
 [metric."auto_responses"]
 gap = "no suite reads ebpfsentinel_auto_responses"
 
-[metric."bpf_token_used"]
-gap = "no suite reads ebpfsentinel_bpf_token_used"
-
-[metric."cgroup_shaping_achieved_bps"]
-gap = "no suite reads ebpfsentinel_cgroup_shaping_achieved_bps"
-
-[metric."cgroup_shaping_bytes"]
-gap = "no suite reads ebpfsentinel_cgroup_shaping_bytes"
-
-[metric."cgroup_shaping_dropped_horizon"]
-gap = "no suite reads ebpfsentinel_cgroup_shaping_dropped_horizon"
-
-[metric."conntrack_active"]
-gap = "no suite reads ebpfsentinel_conntrack_active"
-
-[metric."cpu_usage_percent"]
-gap = "no suite reads ebpfsentinel_cpu_usage_percent"
-
-[metric."ddos_attacks_active"]
-gap = "no suite reads ebpfsentinel_ddos_attacks_active"
-
-[metric."ddos_attacks_detected"]
-gap = "no suite reads ebpfsentinel_ddos_attacks_detected"
-
 [metric."ddos_mitigations"]
 gap = "no suite reads ebpfsentinel_ddos_mitigations"
 
-[metric."dlp_matches"]
-gap = "no suite reads ebpfsentinel_dlp_matches"
-
-[metric."dlp_scan_duration_seconds"]
-gap = "no suite reads ebpfsentinel_dlp_scan_duration_seconds"
-
-[metric."dns_blocked_domains"]
-gap = "no suite reads ebpfsentinel_dns_blocked_domains"
-
-[metric."dns_cache_entries"]
-gap = "no suite reads ebpfsentinel_dns_cache_entries"
-
 [metric."dns_cache_evictions"]
 gap = "no suite reads ebpfsentinel_dns_cache_evictions"
-
-[metric."dns_cache_hits"]
-gap = "no suite reads ebpfsentinel_dns_cache_hits"
-
-[metric."dns_injected_ips"]
-gap = "no suite reads ebpfsentinel_dns_injected_ips"
 
 [metric."domain_auto_blocked"]
 gap = "no suite reads ebpfsentinel_domain_auto_blocked"
@@ -121,146 +37,11 @@ gap = "no suite reads ebpfsentinel_domain_auto_blocked"
 [metric."domain_reputation_high_risk"]
 gap = "no suite reads ebpfsentinel_domain_reputation_high_risk"
 
-[metric."ebpf_frozen_maps"]
-gap = "no suite reads ebpfsentinel_ebpf_frozen_maps"
-
-[metric."ebpf_map_freeze_refusals"]
-gap = "no suite reads ebpfsentinel_ebpf_map_freeze_refusals"
-
-[metric."encrypted_dns_detections"]
-gap = "no suite reads ebpfsentinel_encrypted_dns_detections"
-
-[metric."events_dropped"]
-gap = "no suite reads ebpfsentinel_events_dropped"
-
-[metric."false_positives"]
-gap = "no suite reads ebpfsentinel_false_positives"
-
-[metric."file_baselines"]
-gap = "no suite reads ebpfsentinel_file_baselines"
-
-[metric."file_baselines_refused"]
-gap = "no suite reads ebpfsentinel_file_baselines_refused"
-
-[metric."file_change_overflows"]
-gap = "no suite reads ebpfsentinel_file_change_overflows"
-
-[metric."file_changes"]
-gap = "no suite reads ebpfsentinel_file_changes"
-
-[metric."file_drifts"]
-gap = "no suite reads ebpfsentinel_file_drifts"
-
-[metric."file_watch_filesystems"]
-gap = "no suite reads ebpfsentinel_file_watch_filesystems"
-
-[metric."file_watch_filesystems_refused"]
-gap = "no suite reads ebpfsentinel_file_watch_filesystems_refused"
-
-[metric."fingerprints_seen"]
-gap = "no suite reads ebpfsentinel_fingerprints_seen"
-
-[metric."flow_export_failures"]
-gap = "no suite reads ebpfsentinel_flow_export_failures"
-
-[metric."flows_dropped"]
-gap = "no suite reads ebpfsentinel_flows_dropped"
-
-[metric."flows_exported"]
-gap = "no suite reads ebpfsentinel_flows_exported"
-
-[metric."geoip_lookups"]
-gap = "no suite reads ebpfsentinel_geoip_lookups"
-
 [metric."ids_domain_matches"]
 gap = "no suite reads ebpfsentinel_ids_domain_matches"
 
-[metric."ips_blacklist_size"]
-gap = "no suite reads ebpfsentinel_ips_blacklist_size"
-
-[metric."ips_blocks"]
-gap = "no suite reads ebpfsentinel_ips_blocks"
-
-[metric."kernel_capability_active"]
-gap = "no suite reads ebpfsentinel_kernel_capability_active"
-
-[metric."kernel_drops"]
-gap = "no suite reads ebpfsentinel_kernel_drops"
-
-[metric."kernel_drops_uncounted"]
-gap = "no suite reads ebpfsentinel_kernel_drops_uncounted"
-
-[metric."l7_port_promise_uncounted"]
-gap = "no suite reads ebpfsentinel_l7_port_promise_uncounted"
-
-[metric."lb_backends_healthy"]
-gap = "no suite reads ebpfsentinel_lb_backends_healthy"
-
-[metric."lb_vip_bgp_session_established"]
-gap = "no suite reads ebpfsentinel_lb_vip_bgp_session_established"
-
-[metric."lb_vip_speaker"]
-gap = "no suite reads ebpfsentinel_lb_vip_speaker"
-
-[metric."learning_edges"]
-gap = "no suite reads ebpfsentinel_learning_edges"
-
-[metric."learning_observations"]
-gap = "no suite reads ebpfsentinel_learning_observations"
-
 [metric."link_inspected_twice_seconds"]
-gap = "no suite reads ebpfsentinel_link_inspected_twice_seconds"
-
-[metric."memory_usage_bytes"]
-gap = "no suite reads ebpfsentinel_memory_usage_bytes"
-
-[metric."open_fds"]
-gap = "no suite reads ebpfsentinel_open_fds"
-
-[metric."packet_processing_duration_seconds"]
-gap = "no suite reads ebpfsentinel_packet_processing_duration_seconds"
-
-[metric."pcap_sockets_in_use"]
-gap = "no suite reads ebpfsentinel_pcap_sockets_in_use"
-
-[metric."pcap_sockets_pooled"]
-gap = "no suite reads ebpfsentinel_pcap_sockets_pooled"
-
-[metric."routing_gateway_status"]
-gap = "no suite reads ebpfsentinel_routing_gateway_status"
+gap = "needs a pod profile agent claiming a workload link; no OSS lane runs one"
 
 [metric."tcp_retransmits"]
 gap = "no suite reads ebpfsentinel_tcp_retransmits"
-
-[metric."thread_count"]
-gap = "no suite reads ebpfsentinel_thread_count"
-
-[metric."threatintel_feed_indicators"]
-gap = "no suite reads ebpfsentinel_threatintel_feed_indicators"
-
-[metric."threatintel_feed_last_refresh_timestamp_seconds"]
-gap = "no suite reads ebpfsentinel_threatintel_feed_last_refresh_timestamp_seconds"
-
-[metric."threatintel_matches"]
-gap = "no suite reads ebpfsentinel_threatintel_matches"
-
-[metric."threatintel_reload_duration_seconds"]
-gap = "no suite reads ebpfsentinel_threatintel_reload_duration_seconds"
-
-[metric."threatintel_reload_indicators"]
-gap = "no suite reads ebpfsentinel_threatintel_reload_indicators"
-
-[metric."tls_handshakes"]
-gap = "no suite reads ebpfsentinel_tls_handshakes"
-
-[metric."worker_events"]
-gap = "no suite reads ebpfsentinel_worker_events"
-
-[metric."worker_processing_duration_seconds"]
-gap = "no suite reads ebpfsentinel_worker_processing_duration_seconds"
-
-[metric."workload_denials"]
-gap = "no suite reads ebpfsentinel_workload_denials"
-
-[metric."xdp_attach_mode"]
-gap = "no suite reads ebpfsentinel_xdp_attach_mode"

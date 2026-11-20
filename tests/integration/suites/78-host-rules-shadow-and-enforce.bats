@@ -160,7 +160,7 @@ _loop_requires_applicable() {
     # Killed by a signal: neither a clean exit nor the timeout's 124.
     [ "$status" -ne 0 ]
     [ "$status" -ne 124 ]
-    wait_for_alert '.[] | select(.rule_id == "hr-loop")' 15 1
+    wait_for_alert '.[] | select(.rule_id == "hr-loop" and .component == "host_rule")' 15 1
     [ "$(_host_rules | jq -r '.matched')" -ge 1 ]
 }
 

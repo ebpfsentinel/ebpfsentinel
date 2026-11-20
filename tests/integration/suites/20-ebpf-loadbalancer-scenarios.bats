@@ -251,6 +251,14 @@ _reached() {
     [ "$HTTP_STATUS" = "200" ]
     assert_json_field "$body" '.id' 'lb-ebpf-001'
     assert_json_array_length "$body" '.backends' '1'
+
+    # Its one enabled backend is counted healthy under the service's id.
+    local value
+    value="$(get_metrics_value ebpfsentinel_lb_backends_healthy '{service="lb-ebpf-001"}')" || value=""
+    [ "${value:-}" = "1" ] || {
+        echo "lb_backends_healthy for lb-ebpf-001: '${value}'" >&2
+        return 1
+    }
 }
 
 @test "LB service deletion removes from eBPF maps" {

@@ -121,8 +121,9 @@ _dial() {
     echo $! | tee "${DATA_DIR}/dial-$1.pid"
 }
 
+# A prevention rule reports under the IPS component, not the IDS one.
 _alert_on() {
-    wait_for_alert "[.[] | select(.rule_id == \"$1\")] | first" 20 1
+    wait_for_alert "[.[] | select(.rule_id == \"$1\" and .component == \"ips\")] | first" 20 1
 }
 
 @test "the rule that asks for it is loaded in block mode with kill_process" {

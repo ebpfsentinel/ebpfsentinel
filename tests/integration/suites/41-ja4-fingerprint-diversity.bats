@@ -114,6 +114,11 @@ _ja4_drive_available_clients() {
         echo "expected cache to grow: before=${before} after=${after} fired=${fired}" >&2
         return 1
     }
+    # Every handshake fingerprinted is counted on the scrape too.
+    wait_for_metric ebpfsentinel_fingerprints_seen_total 2 10 >/dev/null || {
+        echo "ebpfsentinel_fingerprints_seen_total below 2 after ${fired} clients" >&2
+        return 1
+    }
 }
 
 @test "malicious SNI client triggers an alert with MITRE technique tag" {

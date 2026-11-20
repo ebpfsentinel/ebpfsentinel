@@ -112,6 +112,8 @@ _ddos_counter() {
 @test "SYN flood grows the DDoS connection-tracking action on /metrics" {
     require_root
 
+    local DDOS_CONN_TRACKED_LABELS='{interface="DDOS_METRICS",action="conn_tracked"}'
+
     local before
     before="$(get_metrics_value ebpfsentinel_packets_total \
         "$DDOS_CONN_TRACKED_LABELS" 2>/dev/null || true)"
@@ -123,7 +125,11 @@ _ddos_counter() {
     wait
 
     assert_metric_increased ebpfsentinel_packets_total "$before" 1 \
-        "$DDOS_CONN_TRACKED_LABELS"
+        "$DDOS_CONN_TRACKED_LABELS" || {
+        dump_ebpf_counters DDOS_METRICS >&2
+        dump_ebpf_counters RATELIMIT_METRICS >&2
+        return 1
+    }
 }
 
 # ── Attack history ───────────────────────────────────────────────
@@ -152,7 +158,7 @@ _ddos_counter() {
     require_root
 
     local metrics action
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || true
     for action in syn_rcv icmp_drop conn_tracked rst_flood_drops fin_flood_drops ack_flood_drops; do
         echo "$metrics" | grep -q "ebpfsentinel_packets_total{interface=\"DDOS_METRICS\",action=\"${action}\"}" || {
             echo "no DDoS counter ${action} on /metrics" >&2

@@ -170,6 +170,13 @@ _apply_role() {
         return 1
     }
     [ "$(echo "$body" | jq -r '.bindings_count')" -ge 1 ] || { echo "$body" >&2; return 1; }
+    # The scrape agrees with the API: this node speaks, and no BGP session is up.
+    [ "$(get_metrics_value ebpfsentinel_lb_vip_speaker)" = "1" ] || {
+        scrape_metrics | grep '^ebpfsentinel_lb_vip' >&2
+        return 1
+    }
+    [ "$(scrape_metrics \
+        | grep '^ebpfsentinel_lb_vip_bgp_session_established{' | awk '$NF >= 1' | wc -l)" -eq 0 ]
 }
 
 @test "POST /api/v1/lb/vips to standby silences the ARP responder, primary restores it" {

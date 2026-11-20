@@ -61,6 +61,13 @@ setup_file() {
         (exec 3<>"/dev/tcp/127.0.0.1/${SYSLOG_PORT}") 2>/dev/null && break
         sleep 0.2
     done
+    # A collector left behind by an interrupted run holds the ports and
+    # writes to a file that no longer exists; this one then dies at bind.
+    kill -0 "$COLLECTOR_PID" 2>/dev/null || {
+        echo "the flow collector did not start:" >&2
+        cat "${DATA_DIR}/collector.stderr" >&2
+        return 1
+    }
 
     create_test_netns
 
@@ -221,4 +228,18 @@ _wait_for_flow() {
         echo "status: ${status}" >&2
         return 1
     }
+}
+
+@test "the scrape agrees with the status route: sent by every sink, none failed or dropped" {
+    _wait_for_flow ipfix
+    local metrics
+    metrics="$(scrape_metrics)"
+    # Four sinks delivered, each counted under its own name.
+    [ "$(echo "$metrics" | awk '/^ebpfsentinel_flows_exported_total\{sink="/ && $2 >= 1' | wc -l)" -eq 4 ] || {
+        echo "$metrics" | grep -E '^ebpfsentinel_flow' >&2
+        return 1
+    }
+    # A failure or a drop opens its series: on a healthy run neither exists.
+    [ "$(echo "$metrics" | grep -c '^ebpfsentinel_flow_export_failures_total{')" -eq 0 ]
+    [ "$(echo "$metrics" | grep -c '^ebpfsentinel_flows_dropped_total{')" -eq 0 ]
 }

@@ -80,6 +80,20 @@ _run_amp_and_assert() {
     assert_metric_increased "$metric" "$before" 1
     assert_alert_has_mitre_technique T1498.002 || \
         assert_alert_has_mitre_technique T1498
+    # The reflection attack is raised by the DDoS engine under its own
+    # component, and the engine counts what it detected and mitigated.
+    wait_for_alert '.[] | select(.component == "ddos") | .id' 15 1 >/dev/null || {
+        echo "no alert of component ddos after the ${vector} flood" >&2
+        return 1
+    }
+    wait_for_metric ebpfsentinel_ddos_attacks_detected_total 1 15 >/dev/null || {
+        echo "ebpfsentinel_ddos_attacks_detected_total did not move" >&2
+        return 1
+    }
+    wait_for_metric ebpfsentinel_ddos_attacks_active 1 15 >/dev/null || {
+        echo "ebpfsentinel_ddos_attacks_active did not report the attack in progress" >&2
+        return 1
+    }
 }
 
 # ── Per-vector tests ──────────────────────────────────────────────────

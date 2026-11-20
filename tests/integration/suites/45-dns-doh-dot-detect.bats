@@ -77,6 +77,11 @@ teardown_file() {
         return 1
     }
     [ "${count:-0}" -gt 0 ]
+
+    # The detection is a DNS alert, and it is counted by protocol and resolver.
+    wait_for_alert '.[] | select(.component == "dns" and (.rule_id | startswith("dns-encrypted:doh:")))' 5 1 >/dev/null
+    scrape_metrics \
+        | awk 'index($0, "ebpfsentinel_encrypted_dns_detections_total{protocol=\"doh\",") == 1 && $NF >= 1 { ok = 1 } END { exit !ok }'
 }
 
 # ── DoH-by-SNI (custom dns.doh_resolvers) ────────────────────────────

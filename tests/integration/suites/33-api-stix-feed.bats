@@ -173,7 +173,7 @@ teardown_file() {
 
 @test "STIX feed metrics recorded" {
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || true
 
     [ -n "$metrics" ]
     # Config reload metric is recorded for each feed fetch (success or failure)
@@ -336,7 +336,7 @@ teardown_file() {
 
 @test "STIX threatintel metrics include feed label" {
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || true
 
     [ -n "$metrics" ]
 

@@ -362,6 +362,16 @@ teardown_file() {
         echo "no capture id in the response: ${resp}" >&2
         return 1
     }
+
+    # The session holds one of the pooled sockets while it runs.
+    wait_for_metric ebpfsentinel_pcap_sockets_pooled 1 3 >/dev/null || {
+        echo "the scrape reports no pooled capture socket" >&2
+        return 1
+    }
+    wait_for_metric ebpfsentinel_pcap_sockets_in_use 1 3 >/dev/null || {
+        echo "the running session holds no pooled capture socket" >&2
+        return 1
+    }
 }
 
 @test "DLP uprobes attach through the broker" {
@@ -421,7 +431,7 @@ teardown_file() {
 
     # And the takeover is reflected in the metric the announcer bumps.
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || metrics=""
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || metrics=""
     echo "${metrics}" | grep -qE 'ebpfsentinel_lb_vip_takeovers_total\{[^}]*vip="warden-vip"' || {
         echo "no lb_vip_takeovers_total series for vip=warden-vip" >&2
         echo "${metrics}" | grep -i "vip" >&2 || true

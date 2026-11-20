@@ -175,7 +175,7 @@ teardown_file() {
     wait_for_metric "ebpfsentinel_packets_total" 1 20 '{interface="SCRUB_METRICS",action="total_seen"}' >/dev/null || true
 
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || true
 
     [ -n "$metrics" ]
     echo "$metrics" | grep -qE 'ebpfsentinel_packets_total\{interface="SCRUB_METRICS"'

@@ -221,7 +221,7 @@ _expect() {
     out="$(_run "$SYS_PYTHON" 7201)"
     _expect ok "$out" "the system python3 on 7201"
 
-    run wait_for_alert ".[] | select(.rule_id == \"fw-wl-exe\" and .workload.pid == ${pid})" 15 1
+    run wait_for_alert ".[] | select(.rule_id == \"fw-wl-exe\" and .component == \"workload-firewall\" and .workload.pid == ${pid})" 15 1
     [ "$status" -eq 0 ] || {
         api_get /api/v1/alerts | jq -c '[.alerts // . | .[] | select(.rule_id == "fw-wl-exe")]' >&3
         false
@@ -232,6 +232,20 @@ _expect() {
     [ "$(echo "$alert" | jq -r '.workload.exe')" = "$PYCOPY" ]
     [ "$(echo "$alert" | jq -r '.workload.exe_hash')" = "sha256:$(sha256sum "$PYCOPY" | cut -d' ' -f1)" ]
     assert_contains "$(echo "$alert" | jq -r '.message')" "workload rule fw-wl-exe refused pid ${pid}"
+    # The refusal is counted under the rule and the mode it ran in, once the
+    # agent's next read of the kernel's per-rule counters has passed.
+    local i counted=""
+    for i in $(seq 1 15); do
+        scrape_metrics \
+            | awk 'index($0, "ebpfsentinel_workload_denials_total{rule_id=\"fw-wl-exe\",mode=\"enforce\"}") == 1 && $NF >= 1 { ok = 1 } END { exit !ok }' \
+            && { counted=1; break; }
+        sleep 1
+    done
+    [ -n "$counted" ] || {
+        echo "no enforced denial counted for fw-wl-exe" >&2
+        scrape_metrics | grep '^ebpfsentinel_workload_denials' >&2
+        return 1
+    }
 }
 
 @test "exe_hash refuses the marked bytes under two paths and lets other bytes through at both" {

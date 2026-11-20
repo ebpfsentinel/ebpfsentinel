@@ -95,6 +95,11 @@ geoip:
     mode: file
     city_path: __DATA_DIR__/GeoLite2-City.mmdb
     asn_path: __DATA_DIR__/GeoLite2-ASN.mmdb
+  # The suite's databases do not change while it runs: country aliases are
+  # re-resolved every two days rather than every day, and a database the
+  # agent downloaded would land beside them.
+  refresh_interval_hours: 48
+  database_dir: __DATA_DIR__/geoip
 
 alerting:
   enabled: true

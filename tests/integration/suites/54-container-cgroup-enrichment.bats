@@ -334,7 +334,7 @@ teardown_file() {
 
 @test "container resolver metrics are exposed when enabled" {
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || true
     [ -n "${metrics}" ]
 
     local missing=()

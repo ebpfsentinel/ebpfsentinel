@@ -6767,14 +6767,17 @@ pub async fn cmd_ips_blacklist_delete(
     ip: &str,
     output: OutputFormat,
 ) -> Result<()> {
-    let resp = client.remove_blacklist_entry(ip).await?;
+    client.remove_blacklist_entry(ip).await?;
 
     if output == OutputFormat::Json {
-        println!("{}", serde_json::to_string_pretty(&resp)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "ip": ip, "removed": true }))?
+        );
         return Ok(());
     }
 
-    println!("Removed from blacklist: {}", resp.ip);
+    println!("Removed from blacklist: {ip}");
     Ok(())
 }
 

@@ -12,8 +12,7 @@ setup_file() {
     mkdir -p "$DATA_DIR"
 
     export PREPARED_CONFIG="/tmp/ebpfsentinel-test-config-$$.yaml"
-    sed "s|__DATA_DIR__|${DATA_DIR}|g" \
-        "${FIXTURE_DIR}/config-full.yaml" > "$PREPARED_CONFIG"
+    prepare_full_config "$PREPARED_CONFIG"
 
     start_agent "$PREPARED_CONFIG"
 }
@@ -249,6 +248,36 @@ teardown_file() {
     body="$(api_get /api/v1/config)"
     assert_http_status "200"
     echo "$body" | jq -e 'type == "object" and length > 0' >/dev/null
+}
+
+@test "Ops: GET config serves what config-full.yaml set, its secrets masked" {
+    # Read before any PUT below rewrites a section.
+    local body
+    body="$(api_get /api/v1/config)"
+    assert_http_status "200" "$HTTP_STATUS"
+    echo "$body" | jq -e '
+        .agent.on_exit == "detach"
+        and .agent.xdp_mode == "generic"
+        and .agent.event_workers == 2
+        and .agent.api_rate_limit.read_per_minute == 6000
+        and .firewall.schedules["it-office-hours"].entries[0].time == "08:00-18:00"
+        and (.firewall.rules | map(select(.id == "fw-test-tcp-shape")) | .[0].schedule) == "it-office-hours"
+        and .ratelimit.max_buckets == 65536
+        and (.auto_response.policies | length) == 2
+        and .alerting.routes[0].event_types == ["firewall", "ids"]
+        and .response.kill_process.signal == 15
+        and .loadbalancer.max_backends == 1024
+        and .alerting.smtp.password == "***"
+        and .threatintel.crowdsec.bouncer_key == "***"
+        and .threatintel.crowdsec.report.password == "***"
+        and .threatintel.feeds[0].auth_header == "***"' >/dev/null || {
+        echo "the served configuration differs from config-full.yaml: ${body}" >&2
+        return 1
+    }
+    if echo "$body" | grep -q 'it-relay-password\|it-bouncer-key\|it-machine-password\|it-feed-token'; then
+        echo "a secret from config-full.yaml is served: ${body}" >&2
+        return 1
+    fi
 }
 
 @test "Ops: GET ebpf status returns 200" {

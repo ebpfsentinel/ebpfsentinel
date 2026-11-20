@@ -373,4 +373,9 @@ _restart_agent_with() {
     }
     [ "$(echo "${api}" | jq '[.groups[].handshakes] | add // 0')" -ge 1 ]
     [ "$(echo "${body}" | jq -r '.all_required')" = "false" ]
+    # The fixture sets the outbound policy apart from the listeners'.
+    [ "$(echo "${body}" | jq -r '.outbound_mode')" = "disable" ] || {
+        echo "outbound policy should be disable; got: ${body}" >&2
+        return 1
+    }
 }

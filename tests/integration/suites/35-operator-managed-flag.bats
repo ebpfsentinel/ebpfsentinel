@@ -37,12 +37,13 @@ _set_management() {
     local managed="$1" endpoint="${2:-}"
     # Drop any previous management: block.
     sed -i '/^management:/,$d' "$PREPARED_CONFIG"
-    {
-        printf '\nmanagement:\n  operator_managed: %s\n' "$managed"
-        if [ -n "$endpoint" ]; then
-            printf '  operator_endpoint: %s\n' "$endpoint"
-        fi
-    } >> "$PREPARED_CONFIG"
+    # An empty endpoint is written as null, which reads as no endpoint.
+    cat >> "$PREPARED_CONFIG" <<EOF
+
+management:
+  operator_managed: ${managed}
+  operator_endpoint: ${endpoint:-null}
+EOF
     chmod 640 "$PREPARED_CONFIG"
 }
 

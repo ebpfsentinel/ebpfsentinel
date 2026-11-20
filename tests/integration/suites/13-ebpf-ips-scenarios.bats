@@ -100,6 +100,34 @@ teardown_file() {
     [ "$count" -ge 1 ]
 }
 
+@test "the auto-blacklist raises an ips alert and moves the IPS counters" {
+    require_root
+
+    local rule
+    rule="$(wait_for_alert '[.[] | select(.component == "ips" and (.rule_id | startswith("ips-blacklist:")))] | first | .rule_id // empty' 15 1)" || {
+        echo "no ips alert announced the auto-blacklist" >&2
+        api_get /api/v1/alerts >&2 || true
+        return 1
+    }
+
+    local metrics
+    metrics="$(scrape_metrics)"
+    # One block decided, at least one address held, and the alert counted
+    # under the rule that raised it.
+    echo "$metrics" | awk '/^ebpfsentinel_ips_blocks_total / && $2 >= 1 { ok = 1 } END { exit !ok }' || {
+        echo "$metrics" | grep '^ebpfsentinel_ips_' >&2
+        return 1
+    }
+    echo "$metrics" | awk '/^ebpfsentinel_ips_blacklist_size / && $2 >= 1 { ok = 1 } END { exit !ok }' || {
+        echo "$metrics" | grep '^ebpfsentinel_ips_' >&2
+        return 1
+    }
+    echo "$metrics" | grep -F "ebpfsentinel_alerts_by_rule_total{component=\"ips\",rule_id=\"${rule}\"}" >/dev/null || {
+        echo "$metrics" | grep '^ebpfsentinel_alerts_by_rule_total' >&2
+        return 1
+    }
+}
+
 @test "blacklist entry has auto_generated flag" {
     require_root
 

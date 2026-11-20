@@ -632,7 +632,7 @@ get_metrics_value() {
 
     local metrics_url="${BASE_URL}/metrics"
     local body
-    body="$(curl -sf --max-time "$HTTP_TIMEOUT" "$metrics_url" 2>/dev/null)" || return 1
+    body="$(scrape_metrics "$metrics_url" 2>/dev/null)" || return 1
 
     if [ -n "$label_filter" ]; then
         echo "$body" | grep "^${metric}${label_filter}" | awk '{print $2}' | head -1
@@ -644,7 +644,7 @@ get_metrics_value() {
 # dump_ebpf_counters <MAP> - every packets_total line of one kernel metrics
 # map, for a failure message to show what the datapath did count.
 dump_ebpf_counters() {
-    curl -sf --max-time "$HTTP_TIMEOUT" "${BASE_URL}/metrics" 2>/dev/null \
+    scrape_metrics 2>/dev/null \
         | grep "interface=\"$1\"" || echo "(no ${1} line on /metrics)"
 }
 
@@ -664,7 +664,7 @@ ebpf_counter() {
 wait_for_ebpf_counters() {
     local map="$1" max="${2:-25}" i
     for i in $(seq 1 "$max"); do
-        curl -sf --max-time "$HTTP_TIMEOUT" "${BASE_URL}/metrics" 2>/dev/null \
+        scrape_metrics 2>/dev/null \
             | grep -q "interface=\"${map}\"" && return 0
         sleep 1
     done

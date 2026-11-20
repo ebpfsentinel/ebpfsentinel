@@ -24,6 +24,9 @@ agent:
     cert_path: __CERT_PATH__
     key_path: __KEY_PATH__
     pq_mode: prefer
+    # The agent's own clients dial classical only here, apart from what its
+    # listeners accept; crypto/posture says which policy they carry.
+    outbound_pq_mode: disable
 
 firewall:
   enabled: true

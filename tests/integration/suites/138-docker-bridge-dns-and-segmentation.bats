@@ -129,7 +129,7 @@ _lookup() {
 
 # _counted <container> <verdict> - the resolver's count for that pair.
 _counted() {
-    curl -sf --max-time "$HTTP_TIMEOUT" "${BASE_URL}/metrics" \
+    scrape_metrics \
         | awk -v c="${PREFIX}-$1" -v v="$2" '
             /^ebpfsentinel_dns_allowlist_queries_total\{/ && index($0, "container=\"" c "\"") && index($0, "verdict=\"" v "\"") {sum += $NF}
             END {print sum + 0}'
@@ -175,6 +175,20 @@ _counted() {
         sleep 1
     done
     sleep 4
+    # While the window is open the scrape counts what it learned: the edges
+    # it holds, and each path first seen as a new edge.
+    local metrics
+    metrics="$(scrape_metrics)"
+    echo "$metrics" | awk '$1 == "ebpfsentinel_learning_edges" && $2 >= 2 { ok = 1 } END { exit !ok }' || {
+        echo "$metrics" | grep '^ebpfsentinel_learning' >&3
+        api_post "/api/v1/learning/sessions/${id}/stop" '{}' >/dev/null
+        false
+    }
+    echo "$metrics" | awk 'index($0, "ebpfsentinel_learning_observations_total{outcome=\"new_edge\"}") == 1 && $NF >= 2 { ok = 1 } END { exit !ok }' || {
+        echo "$metrics" | grep '^ebpfsentinel_learning' >&3
+        api_post "/api/v1/learning/sessions/${id}/stop" '{}' >/dev/null
+        false
+    }
     api_post "/api/v1/learning/sessions/${id}/stop" '{}' >/dev/null
 
     body="$(api_get "/api/v1/learning/sessions/${id}/segmentation")"

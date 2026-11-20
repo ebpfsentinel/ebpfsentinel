@@ -49,6 +49,9 @@ qos:
       workload:
         cgroup: /ebpf-shape-suite
       rate: 8mbps
+      # Five seconds of queue rather than the default two: deep enough for
+      # the burst the sender opens with, and read back by the suite.
+      horizon_ms: 5000
 
 alerting:
   enabled: false

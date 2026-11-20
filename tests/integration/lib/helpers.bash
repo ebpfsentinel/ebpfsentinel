@@ -150,6 +150,17 @@ assert_config_loaded() {
 # start_agent <config_file> [extra_args...]
 # Starts the agent in the background with the given config.
 # Sets AGENT_PID and writes to AGENT_PID_FILE.
+# prepare_full_config <out> - write config-full.yaml with its data directory
+# filled in, and the files it names outside the configuration created there:
+# the BGP peer password is read at load even with announcement off, and an
+# unreadable file refuses the whole configuration.
+prepare_full_config() {
+    local out="$1"
+    sed "s|__DATA_DIR__|${DATA_DIR}|g" \
+        "${FIXTURE_DIR}/config-full.yaml" > "$out"
+    ( umask 077; printf 'it-peer-md5-secret\n' > "${DATA_DIR}/bgp-it-peer.secret" )
+}
+
 start_agent() {
     local config_file="${1:?usage: start_agent <config_file> [extra_args...]}"
     shift
@@ -294,6 +305,25 @@ _load_http_status() {
 
 # api_get <path> [extra_curl_args...]
 # Returns the response body. HTTP status is stored in $HTTP_STATUS.
+# scrape_metrics [url] - the exposition, waiting out the scrape limit.
+# The agent answers at most ten scrapes at once and one every two seconds
+# after that, per address, so a suite polling a counter once a second runs
+# into 429 after ten reads; a 429 here waits and asks again, any other
+# error fails.
+scrape_metrics() {
+    local url="${1:-${BASE_URL}/metrics}" i out code
+    for i in $(seq 1 10); do
+        out="$(curl -s --max-time "$HTTP_TIMEOUT" -w '\n%{http_code}' "$url")" || return 1
+        code="${out##*$'\n'}"
+        case "$code" in
+            200) printf '%s\n' "${out%$'\n'*}"; return 0 ;;
+            429) sleep 2 ;;
+            *) return 1 ;;
+        esac
+    done
+    return 1
+}
+
 api_get() {
     local path="${1:?usage: api_get <path>}"
     shift

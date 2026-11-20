@@ -131,6 +131,10 @@ while True: s.sendall(b)'"
         echo "rule missing: $body" >&2
         return 1
     }
+    [ "$(echo "$body" | jq -r '.rules[] | select(.id == "shape-suite") | .horizon_ms')" = "5000" ] || {
+        echo "horizon from the fixture not served: $body" >&2
+        return 1
+    }
     [ "$(echo "$body" | jq -r --arg i "$EBPF_VETH_HOST" '.interfaces[] | select(.name == $i) | .root_qdisc')" = "fq" ] || {
         echo "root qdisc not read as fq: $body" >&2
         return 1
@@ -185,6 +189,20 @@ _report_while_sending() {
     [ "$(echo "$row" | jq -r '.rate_bps')" = "$SHAPE_RATE_BPS" ] || { echo "$row" >&2; return 1; }
     [ "$(echo "$row" | jq -r '.bytes')" -gt 1000000 ] || { echo "datapath counted too little: $row" >&2; return 1; }
     [ "$(echo "$row" | jq -r '.cgroup // ""')" = "/ebpf-shape-suite" ] || { echo "cgroup path not read: $row" >&2; return 1; }
+    # The scrape carries the same rule: bytes paced, its achieved rate, and the
+    # horizon drop series published for it.
+    local metrics
+    metrics="$(scrape_metrics)"
+    _rule_series() {
+        echo "$metrics" | awk -v s="$1{rule_id=\"shape-suite\"}" -v min="$2" \
+            'index($0, s) == 1 && $NF >= min { ok = 1 } END { exit !ok }' || {
+            echo "$metrics" | grep '^ebpfsentinel_cgroup_shaping' >&2
+            return 1
+        }
+    }
+    _rule_series ebpfsentinel_cgroup_shaping_bytes_total 1000000
+    _rule_series ebpfsentinel_cgroup_shaping_achieved_bps 0
+    _rule_series ebpfsentinel_cgroup_shaping_dropped_horizon_total 0
 }
 
 @test "an interface without fq is reported as one where the shaper stands aside" {

@@ -167,6 +167,12 @@ _drive_alert_traffic() {
     _load_http_status
 
     [ "$HTTP_STATUS" = "200" ]
+
+    # The marking is counted, so a tuning review can see how often rules misfire.
+    wait_for_metric ebpfsentinel_false_positives_total 1 10 >/dev/null || {
+        echo "ebpfsentinel_false_positives_total did not move" >&2
+        return 1
+    }
 }
 
 @test "false positive flag persisted" {

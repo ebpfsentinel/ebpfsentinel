@@ -84,7 +84,7 @@ teardown_file() {
     require_root
 
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || true
 
     [ -n "$metrics" ]
 
@@ -396,6 +396,24 @@ _send_tls_data_and_linger() {
     [ "$HTTP_STATUS" = "200" ]
 }
 
+@test "every scan is timed and a pattern that matched is counted under its id" {
+    require_root
+    [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
+
+    local metrics
+    metrics="$(scrape_metrics)"
+    echo "$metrics" | awk '/^ebpfsentinel_dlp_scan_duration_seconds_count / && $2 >= 1 { ok = 1 } END { exit !ok }' || {
+        echo "$metrics" | grep '^ebpfsentinel_dlp' >&2
+        return 1
+    }
+    # The payloads above carry a card number, an address and a password:
+    # at least one pattern matched and is counted by its id.
+    echo "$metrics" | awk 'index($0, "ebpfsentinel_dlp_matches_total{rule_id=\"") == 1 && $NF >= 1 { ok = 1 } END { exit !ok }' || {
+        echo "$metrics" | grep '^ebpfsentinel_dlp' >&2
+        return 1
+    }
+}
+
 @test "a DLP alert names the binary that leaked" {
     require_root
     [ -f "$DATA_DIR/tls_server.pid" ] || soft_skip "TLS server not running"
@@ -554,7 +572,7 @@ _dlp_flow_sources_since() {
     require_root
 
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || true
     [ -n "$metrics" ]
 
     # Every payload the probes captured is scanned once: the TLS writes above

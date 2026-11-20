@@ -73,3 +73,21 @@ teardown_file() {
     assert_json_field_exists "$body" '.openapi'
     assert_json_field_exists "$body" '.paths'
 }
+
+@test "GET /metrics reports the agent's own memory, threads, descriptors and CPU" {
+    # The process sampler reads /proc every five seconds: give it two
+    # readings, so the CPU share has a difference to compute from.
+    local body="" attempt
+    for attempt in $(seq 1 15); do
+        body="$(scrape_metrics)" || body=""
+        echo "$body" | awk '/^ebpfsentinel_memory_usage_bytes / && $2 > 0 { ok = 1 } END { exit !ok }' \
+            && echo "$body" | grep -q '^ebpfsentinel_cpu_usage_percent ' \
+            && break
+        sleep 1
+    done
+    # A running agent holds memory, more than one thread and open descriptors.
+    echo "$body" | awk '/^ebpfsentinel_memory_usage_bytes / && $2 > 0 { ok = 1 } END { exit !ok }'
+    echo "$body" | awk '/^ebpfsentinel_thread_count / && $2 > 1 { ok = 1 } END { exit !ok }'
+    echo "$body" | awk '/^ebpfsentinel_open_fds / && $2 > 0 { ok = 1 } END { exit !ok }'
+    echo "$body" | awk '/^ebpfsentinel_cpu_usage_percent / && $2 >= 0 { ok = 1 } END { exit !ok }'
+}

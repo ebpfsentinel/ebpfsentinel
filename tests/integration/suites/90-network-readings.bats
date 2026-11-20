@@ -173,7 +173,7 @@ _serve() {
         "http://${EBPF_HOST_IP}:${GRAPH_PORT}/"
     local i body requests="" buckets=""
     for i in $(seq 1 20); do
-        body="$(curl -sf --max-time "$HTTP_TIMEOUT" "${BASE_URL}/metrics")"
+        body="$(scrape_metrics)"
         requests="$(echo "$body" | grep '^ebpfsentinel_l7_requests_total{' | grep 'protocol="http"' | head -1)"
         buckets="$(echo "$body" | grep '^ebpfsentinel_l7_request_duration_seconds_count{' | head -1)"
         [ -n "$requests" ] && [ -n "$buckets" ] && break
@@ -203,10 +203,12 @@ _serve() {
     local value
     value="$(wait_for_metric ebpfsentinel_l7_port_promise_total 1 20 \
         "{port=\"${PROMISE_PORT}\",verdict=\"mismatch\"}")" || {
-        echo "# $(curl -sf "${BASE_URL}/metrics" | grep l7_port_promise)" >&3
+        echo "# $(scrape_metrics | grep l7_port_promise)" >&3
         false
     }
     [ "${value%%.*}" -eq 1 ]
+    # The judgement table had room for this connection, so none went unjudged.
+    [ "$(get_metrics_value ebpfsentinel_l7_port_promise_uncounted_total)" = "0" ]
 }
 
 @test "datagrams to a port nothing listens on are counted as NO_SOCKET on their interface" {
@@ -243,6 +245,15 @@ PY
     }
     [ "$(echo "$body" | jq -r '[.drops[] | select(.reason == "NO_SOCKET")][0].description')" != "null" ]
     [ "$(echo "$body" | jq -r '.total')" -ge "$now" ]
+
+    # The scrape carries the same reading by reason and interface, and the
+    # table had room for every pair, so nothing was folded into uncounted.
+    wait_for_metric ebpfsentinel_kernel_drops_total 45 20 \
+        "{reason=\"NO_SOCKET\",interface=\"${EBPF_VETH_HOST}\"}" >/dev/null || {
+        echo "# $(scrape_metrics | grep '^ebpfsentinel_kernel_drops')" >&3
+        false
+    }
+    [ "$(get_metrics_value ebpfsentinel_kernel_drops_uncounted_total)" = "0" ]
 }
 
 @test "a listener is reported with its binary, reachable or closed by the rule that names it" {

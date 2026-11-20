@@ -55,6 +55,9 @@ auth:
     algorithm: EdDSA
     jwks_url: http://127.0.0.1:${JWKS_PORT}/.well-known/jwks.json
     jwks_cache_ttl_seconds: 3600
+    # A key id the cached set does not hold is refused without asking the
+    # endpoint again; the unknown-kid test counts the fetches.
+    jwks_refresh_on_unknown_kid: false
     issuer: dashboard-test
     audience: ebpfsentinel-agent
 EOF
@@ -94,6 +97,8 @@ mint_token() {
 @test "Token signed with unknown kid is rejected" {
     local token
     token="$(mint_token "kid-rotated-out" "x")"
+    local fetches_before
+    fetches_before="$(grep -c 'GET /.well-known/jwks.json' "$JWKS_DIR/server.log" || true)"
     local body
     body="$(curl -s -w '\n%{http_code}' --max-time 3 \
         -H "Authorization: Bearer ${token}" \
@@ -102,6 +107,14 @@ mint_token() {
     body="${body%$'\n'*}"
     [ "$status" = "401" ]
     assert_error_body "$body" AUTHENTICATION_REQUIRED
+    # jwks_refresh_on_unknown_kid is off: the refusal comes from the cached
+    # set, and the endpoint is not asked again.
+    local fetches_after
+    fetches_after="$(grep -c 'GET /.well-known/jwks.json' "$JWKS_DIR/server.log" || true)"
+    [ "$fetches_after" = "$fetches_before" ] || {
+        echo "the unknown kid fetched the key set again: ${fetches_before} -> ${fetches_after}" >&2
+        return 1
+    }
 }
 
 @test "Token without bearer prefix is rejected" {

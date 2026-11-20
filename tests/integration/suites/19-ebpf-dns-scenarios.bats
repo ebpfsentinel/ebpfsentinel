@@ -182,7 +182,7 @@ _cached_ips() {
 
     # DNS metrics should reflect packet observation
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || true
 
     [ -n "$metrics" ]
     echo "$metrics" | grep -qE "ebpfsentinel_dns|ebpfsentinel_packets"
@@ -320,4 +320,61 @@ _dns_observed_metric() {
         echo "last answer missing - payload truncated. cached: ${ips}" >&2
         return 1
     }
+}
+
+@test "the cache counts its entries and the lookups it answered" {
+    require_root
+
+    # A search by name walks the table and counts nothing; resolving an
+    # address back to its name is the lookup the cache answers, and counts.
+    local reverse
+    reverse="$(api_get "/api/v1/dns/cache?ip=203.0.113.26")"
+    echo "$reverse" | grep -q '203.0.113.26' || {
+        echo "the reverse lookup found nothing: ${reverse}" >&2
+        return 1
+    }
+
+    local metrics
+    metrics="$(scrape_metrics)"
+    # The responses above were cached, and one was answered by address.
+    echo "$metrics" | awk '/^ebpfsentinel_dns_cache_entries / && $2 >= 1 { ok = 1 } END { exit !ok }' || {
+        echo "$metrics" | grep '^ebpfsentinel_dns_cache' >&2
+        return 1
+    }
+    echo "$metrics" | awk '/^ebpfsentinel_dns_cache_hits_total / && $2 >= 1 { ok = 1 } END { exit !ok }' || {
+        echo "$metrics" | grep '^ebpfsentinel_dns_cache' >&2
+        return 1
+    }
+}
+
+@test "a resolution of a blocklisted domain raises a dns alert and injects its address" {
+    require_root
+    require_tool dig
+    require_tool python3
+
+    local domain="blocked.example.test"
+    api_post /api/v1/domains/blocklist "{\"domain\":\"${domain}\"}" >/dev/null
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+
+    _start_stub_resolver 1 203.0.113.9
+    dig +tries=1 +time=2 "@${EBPF_NS_IP}" "${domain}" A > /dev/null 2>&1 || true
+
+    local found=0
+    wait_for_alert ".[] | select(.component == \"dns\" and .rule_id == \"dns-blocklist:${domain}\")" 15 1 >/dev/null && found=1
+    _stop_stub_resolver
+
+    local metrics
+    metrics="$(scrape_metrics)"
+    # Leave the blocklist as the fixture wrote it, whatever the outcome.
+    api_delete "/api/v1/domains/blocklist/${domain}" >/dev/null || true
+
+    [ "$found" -eq 1 ] || {
+        echo "no dns-blocklist alert for ${domain}" >&2
+        api_get /api/v1/alerts >&2 || true
+        return 1
+    }
+    # The match is counted, and the answered address went to the data plane.
+    echo "$metrics" | awk '/^ebpfsentinel_dns_blocked_domains_total / && $2 >= 1 { ok = 1 } END { exit !ok }'
+    echo "$metrics" | awk '/^ebpfsentinel_dns_injected_ips / && $2 >= 1 { ok = 1 } END { exit !ok }'
 }

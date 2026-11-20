@@ -113,7 +113,7 @@ teardown_file() {
     require_root
 
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || true
 
     [ -n "$metrics" ]
     echo "$metrics" | grep -qE "ebpfsentinel_zone_interfaces|ebpfsentinel_zone_policies"
@@ -193,7 +193,7 @@ teardown_file() {
     sleep 2
 
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || true
 
     [ -n "$metrics" ]
 
@@ -327,7 +327,7 @@ teardown_file() {
 
     local attempt=0 series=""
     while [ "${attempt}" -lt 20 ]; do
-        series="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null \
+        series="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" \
             | grep -E '^ebpfsentinel_zone_packets_total\{' || true)"
         [ -n "${series}" ] && break
         sleep 2
@@ -336,7 +336,7 @@ teardown_file() {
 
     [ -n "${series}" ] || {
         echo "no ebpfsentinel_zone_packets_total series after 40s" >&2
-        curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null \
+        scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" \
             | grep -i zone >&2 || true
         return 1
     }

@@ -142,14 +142,24 @@ _ct_open_flow() {
 
 # ── Metrics ──────────────────────────────────────────────────────
 
-@test "conntrack metrics counters present" {
+@test "the active-connections gauge carries the count the table last answered" {
     require_root
 
-    local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    local body count
+    body="$(api_get /api/v1/conntrack/status)"
+    count="$(echo "$body" | jq -r '.connection_count')"
+    [[ "$count" =~ ^[0-9]+$ ]] || {
+        echo "the table gave no count: ${body}" >&2
+        return 1
+    }
 
-    [ -n "$metrics" ]
-    echo "$metrics" | grep -qE "ebpfsentinel_conntrack|ebpfsentinel_packets"
+    local metrics
+    metrics="$(scrape_metrics)"
+    echo "$metrics" | grep -qx "ebpfsentinel_conntrack_active ${count}" || {
+        echo "status answered ${count}, the scrape says:" >&2
+        echo "$metrics" | grep '^ebpfsentinel_conntrack_active' >&2
+        return 1
+    }
 }
 
 @test "Conntrack max connections configurable" {
@@ -218,7 +228,7 @@ _ct_open_flow() {
     require_root
 
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || true
 
     [ -n "$metrics" ]
     echo "$metrics" | grep -q "ebpfsentinel_conntrack"

@@ -374,7 +374,7 @@ teardown_file() {
     _wait_for_delivery "${SINK_LOG}" 30 || soft_skip "no delivery recorded yet"
 
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || metrics=""
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || metrics=""
     [ -n "${metrics}" ] || {
         echo "metrics endpoint returned nothing" >&2
         return 1
@@ -401,7 +401,7 @@ teardown_file() {
     _wait_for_delivery "${SINK_LOG}" 30 || soft_skip "no delivery recorded yet"
 
     local metrics count
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || metrics=""
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || metrics=""
     [ -n "${metrics}" ] || {
         echo "metrics endpoint returned nothing" >&2
         return 1
@@ -484,7 +484,7 @@ _wait_for_mail() {
     _wait_for_mail 30 || soft_skip "no mail recorded yet"
 
     local metrics count
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || metrics=""
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || metrics=""
     [ -n "${metrics}" ] || {
         echo "metrics endpoint returned nothing" >&2
         return 1
@@ -734,7 +734,7 @@ _assert_otlp_clock() {
     # export counters exist to make visible.
     local attempt=0 metrics count=""
     while [ "${attempt}" -lt 20 ]; do
-        metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || metrics=""
+        metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || metrics=""
         count="$(echo "${metrics}" \
             | grep -E '^ebpfsentinel_alerts_export_failures_total\{[^}]*destination="webhook"' \
             | awk '{print $2}' | head -1)"

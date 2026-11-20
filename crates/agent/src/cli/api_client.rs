@@ -4985,10 +4985,8 @@ impl ApiClient {
         handle_response(resp).await
     }
 
-    pub async fn remove_blacklist_entry(
-        &self,
-        ip: &str,
-    ) -> anyhow::Result<BlacklistMutationResponse> {
+    /// The route answers 204 with no body, so success carries nothing to parse.
+    pub async fn remove_blacklist_entry(&self, ip: &str) -> anyhow::Result<()> {
         let resp = self
             .request(
                 reqwest::Method::DELETE,
@@ -4997,7 +4995,7 @@ impl ApiClient {
             .send()
             .await
             .map_err(|e| connection_error(&self.base_url, &e))?;
-        handle_response(resp).await
+        handle_delete(resp).await
     }
 
     // ── DNS status and conntrack flush ──────────────────────────────

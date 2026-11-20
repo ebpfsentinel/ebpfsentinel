@@ -115,6 +115,13 @@ teardown_file() {
     assert_http_status "200" "$status_code"
 }
 
+@test "a TLS 1.2 client is served where agent.tls.allow_tls12 is on" {
+    local status_code
+    status_code="$(curl -s -o /dev/null --max-time "$HTTP_TIMEOUT" -w '%{http_code}' \
+        --tlsv1.2 --tls-max 1.2 --cacert "${CERT_DIR}/ca.pem" "${TLS_URL}/healthz")"
+    assert_http_status "200" "$status_code"
+}
+
 @test "HTTPS rejects without CA cert (self-signed)" {
     # curl should fail because the server cert is self-signed
     local exit_code=0
@@ -183,4 +190,19 @@ teardown_file() {
 
     exec {stalled}>&-
     assert_contains "$output" "SERVING"
+}
+
+@test "the handshakes above are counted on the api and grpc links" {
+    local body
+    body="$(curl -sf --max-time "$HTTP_TIMEOUT" --cacert "${CERT_DIR}/ca.pem" "${TLS_URL}/metrics")"
+    # Every handshake is counted by the link it reached and the group it
+    # agreed on, whichever group that was.
+    echo "$body" | awk 'index($0, "ebpfsentinel_tls_handshakes_total{link=\"api\",") == 1 && $NF >= 1 { ok = 1 } END { exit !ok }' || {
+        echo "$body" | grep '^ebpfsentinel_tls_handshakes' >&2
+        return 1
+    }
+    echo "$body" | awk 'index($0, "ebpfsentinel_tls_handshakes_total{link=\"grpc\",") == 1 && $NF >= 1 { ok = 1 } END { exit !ok }' || {
+        echo "$body" | grep '^ebpfsentinel_tls_handshakes' >&2
+        return 1
+    }
 }

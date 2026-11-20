@@ -106,6 +106,7 @@ _dump() {
     pid="$(_writer "echo second > ${file}")"
     run _alert_for watched-path-changed "$file"
     [ "$status" -eq 0 ] || { _dump; false; }
+    echo "$output" | jq -e '.component == "file_integrity"' >/dev/null
     local message
     message="$(echo "$output" | jq -r '.message')"
     assert_contains "$message" "was changed by process ${pid}"
@@ -142,6 +143,7 @@ _dump() {
     pid="$(_writer "echo '# touched by the suite' >> ${PREPARED_CONFIG}")"
     run _alert_for agent-configuration-changed "$PREPARED_CONFIG"
     [ "$status" -eq 0 ] || { _dump; false; }
+    echo "$output" | jq -e '.component == "agent_files"' >/dev/null
     assert_contains "$(echo "$output" | jq -r '.message')" "was changed by process ${pid}"
 }
 
@@ -156,4 +158,30 @@ _dump() {
     [ -n "$mover" ]
     [ "$mover" != "$shell" ]
     [ "$(echo "$output" | jq -r '.workload.ancestry.ancestors[0].pid // empty')" = "$shell" ]
+}
+
+@test "the file watch counters say what it covered, saw and found drifted" {
+    local metrics
+    metrics="$(scrape_metrics)"
+    _at_least() {
+        echo "$metrics" | awk -v s="$1" -v n="$2" 'index($0, s) == 1 && $NF >= n { ok = 1 } END { exit !ok }' || {
+            echo "no ${1} at ${2} or more" >&2
+            echo "$metrics" | grep -E '^ebpfsentinel_file_' >&2
+            return 1
+        }
+    }
+    # The watched directory sits on a filesystem the watch marked.
+    _at_least 'ebpfsentinel_file_watch_filesystems ' 1
+    _at_least 'ebpfsentinel_file_watch_filesystems_refused ' 0
+    # The files the suite rewrote and created were seen as such.
+    _at_least 'ebpfsentinel_file_changes_total{kind="written"}' 1
+    _at_least 'ebpfsentinel_file_changes_total{kind="created"}' 1
+    # The baselines taken at start-up named the content and the mode drift.
+    _at_least 'ebpfsentinel_file_baselines ' 1
+    _at_least 'ebpfsentinel_file_drifts_total{what="content"}' 1
+    _at_least 'ebpfsentinel_file_drifts_total{what="mode"}' 1
+    # A handful of writes neither overflows the kernel's queue nor runs out
+    # of room for a baseline.
+    echo "$metrics" | grep -qx 'ebpfsentinel_file_change_overflows_total 0'
+    echo "$metrics" | grep -qx 'ebpfsentinel_file_baselines_refused_total 0'
 }

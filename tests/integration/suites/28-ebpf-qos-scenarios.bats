@@ -199,7 +199,7 @@ teardown_file() {
     wait_for_metric "ebpfsentinel_packets_total" 1 20 '{interface="QOS_METRICS",action="total_seen"}' >/dev/null || true
 
     local metrics
-    metrics="$(curl -sf --max-time 5 "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics" 2>/dev/null)" || true
+    metrics="$(scrape_metrics "http://${AGENT_HOST}:${AGENT_HTTP_PORT}/metrics")" || true
 
     [ -n "$metrics" ]
     echo "$metrics" | grep -qE 'ebpfsentinel_packets_total\{interface="QOS_METRICS"'
@@ -493,7 +493,7 @@ _udp_received_bps() {
     }
     [ "$light" -gt 0 ] || {
         echo "the light queue was starved: heavy ${heavy} bps, light ${light} bps" >&2
-        curl -sf --max-time "$HTTP_TIMEOUT" "${BASE_URL}/metrics" | grep -i qos >&2 || true
+        scrape_metrics | grep -i qos >&2 || true
         return 1
     }
 

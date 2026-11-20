@@ -142,7 +142,35 @@ qos:
 # xdp-loadbalancer, plus xdp-vip-announcer through the announce block.
 loadbalancer:
   enabled: true
-  services: []
+  # One service, off, on a documentation address: the program loads with a
+  # service table that holds an entry, and no packet is steered.
+  services:
+    - id: lb-load-gate
+      name: load gate service
+      enabled: false
+      protocol: udp
+      listen_addr: "203.0.113.80"
+      listen_port: 8053
+      algorithm: maglev
+      mode: dnat
+      backends:
+        - id: lb-load-gate-a
+          addr: "192.0.2.81"
+          port: 53
+          weight: 3
+          enabled: true
+        - id: lb-load-gate-b
+          addr: "192.0.2.82"
+          port: 53
+          weight: 1
+          enabled: false
+          same_segment: true
+      health_check:
+        protocol: icmp
+        interval_secs: 30
+        timeout_secs: 3
+        unhealthy_threshold: 4
+        healthy_threshold: 2
   announce:
     role: primary
     interface: __INTERFACE__

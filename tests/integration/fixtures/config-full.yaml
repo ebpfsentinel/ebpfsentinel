@@ -17,6 +17,27 @@ agent:
   http_port: 8080
   grpc_port: 50051
   metrics_port: 9090
+  # The attach path the loopback lane takes anyway, named rather than
+  # guessed, and programs taken off the interface when the agent stops so
+  # the next suite starts on a bare loopback.
+  xdp_mode: generic
+  attach_mode: tc
+  on_exit: detach
+  event_workers: 2
+  # Generous enough for every request a suite sends from the attacker VM,
+  # where the loopback exemption does not apply, and still a limit.
+  api_rate_limit:
+    write_per_second: 50
+    write_burst: 500
+    read_per_minute: 6000
+    read_burst: 1000
+    exempt_loopback: false
+  pod_claims_dir: __DATA_DIR__/pod-claims
+
+# Rules name the interfaces they apply to through a group.
+interface_groups:
+  it-loopback:
+    interfaces: [lo]
 
 firewall:
   enabled: true
@@ -31,6 +52,67 @@ firewall:
       type: ip_set
       values:
         - "10.99.0.0/24"
+      exclude:
+        - "10.99.0.128/25"
+      description: integration ip set, upper half carved out
+    it-alias-ports:
+      type: port_set
+      values:
+        - 9998
+        - 9999
+    it-alias-macs:
+      type: mac_set
+      values:
+        - "02:00:5e:00:53:01"
+    it-alias-nested:
+      type: nested
+      aliases:
+        - it-alias-ipset
+        - it-alias-external
+      exclude:
+        - "10.99.0.64/26"
+    it-alias-dns:
+      type: dynamic_dns
+      hostnames:
+        - localhost
+      refresh_interval: 3600
+    it-alias-ifaces:
+      type: interface_group
+      interfaces:
+        - lo
+    it-alias-json:
+      type: url_table_json
+      url: "http://127.0.0.1:9/list.json"
+      json_path: "$.prefixes[*].cidr"
+      refresh_interval: 3600
+    it-alias-asn:
+      type: bgp_asn
+      asn_numbers:
+        - 64496
+  # The API port stays reachable whatever a rule says, on the one interface
+  # this agent watches.
+  anti_lockout:
+    enabled: true
+    interfaces:
+      - lo
+    ports:
+      - 8080
+      - 50051
+  scrub:
+    enabled: false
+    min_hop_limit: 32
+    scrub_tcp_flags: true
+    strip_ecn: true
+    normalize_tos: true
+    tos_value: 0
+  schedules:
+    it-office-hours:
+      entries:
+        - days: [mon, tue, wed, thu, fri]
+          time: "08:00-18:00"
+  dns_clients:
+    enabled: false
+    priority: 250
   rules:
     - id: fw-test-001
       priority: 100
@@ -39,11 +121,125 @@ firewall:
       dst_port: 9999
       scope: global
       enabled: true
+    # The rules below match only documentation ranges (RFC 5737) and are off,
+    # so they load, validate and are served without changing a packet.
+    - id: fw-test-tcp-shape
+      enabled: false
+      priority: 200
+      action: deny
+      protocol: tcp
+      src_ip: "192.0.2.0/24"
+      src_port: "1024-65535"
+      dst_alias: it-alias-ipset
+      flags: "S/SA"
+      state: [new]
+      vlan_id: 100
+      dscp_match: 10
+      dscp_mark: 46
+      negate_destination: true
+      schedule: it-office-hours
+      tenant_id: 7
+    - id: fw-test-icmp
+      enabled: false
+      priority: 210
+      action: deny
+      protocol: icmp
+      src_ip: "198.51.100.0/24"
+      negate_source: true
+      dst_ip: "203.0.113.0/24"
+      icmp_type: 8
+      icmp_code: 0
+    - id: fw-test-mac
+      enabled: false
+      priority: 220
+      action: deny
+      protocol: tcp
+      src_mac: "02:00:5e:00:53:02"
+      dst_mac: "02:00:5e:00:53:03"
+      src_port_alias: it-alias-ports
+      dst_port_alias: it-alias-ports
+    - id: fw-test-mac-alias
+      enabled: false
+      priority: 230
+      action: deny
+      protocol: tcp
+      src_mac_alias: it-alias-macs
+      dst_mac_alias: it-alias-macs
+      dst_ip: "203.0.113.10"
+      scope:
+        interface: lo
+    - id: fw-test-workload
+      enabled: false
+      priority: 240
+      action: deny
+      protocol: tcp
+      dst_port: 5432
+      workload:
+        service_account: it-sa
+        pods:
+          match_labels:
+            app: it-web
+        namespaces:
+          match_labels:
+            team: it
+        peer:
+          service_account: it-db
 
 ids:
   enabled: true
   mode: alert
-  rules: []
+  # Countries named high risk are inspected whole, the rest at one packet
+  # in two. Nothing here would match: the one rule is off.
+  sampling:
+    mode: country_based
+    high_risk_countries: [KP, IR]
+    high_risk_rate: 1.0
+    default_rate: 0.5
+  rules:
+    - id: ids-test-marker
+      enabled: false
+      description: payload marker from a documentation range client
+      severity: high
+      protocol: tcp
+      src_port: 40000
+      dst_port: 9999
+      pattern: "it-ids-marker"
+      tenant_id: 7
+      country_thresholds:
+        KP:
+          type: threshold
+          count: 5
+          window_secs: 60
+    - id: ids-test-workload
+      enabled: false
+      severity: medium
+      protocol: tcp
+      dst_port: 5432
+      workload:
+        unit: it-web.service
+        container: it-web
+        service_account: it-sa
+        pods:
+          match_labels:
+            app: it-web
+        namespaces:
+          match_labels:
+            team: it
+    - id: ids-test-domain
+      enabled: false
+      severity: medium
+      protocol: udp
+      dst_port: 53
+      domain_pattern: "*.it-blocked.example"
+      domain_match_mode: wildcard
+      interfaces: [it-loopback]
+  suricata:
+    vars:
+      addresses:
+        HOME_NET: "[10.200.0.0/24]"
+        EXTERNAL_NET: "!$HOME_NET"
+      ports:
+        HTTP_PORTS: "[80,8080]"
 
 ips:
   enabled: true
@@ -52,37 +248,165 @@ ips:
   auto_blacklist_threshold: 3
   max_blacklist_size: 10000
   whitelist: []
-  rules: []
+  whitelist_aliases: [it-alias-ipset]
+  country_thresholds:
+    KP: 1
+  sampling:
+    mode: hash
+    rate: 1.0
+  rules:
+    - id: ips-test-marker
+      enabled: false
+      severity: critical
+      protocol: tcp
+      dst_port: 9999
+      mode: block
+      pattern: "it-ips-marker"
+      tenant_id: 7
+      kill_process: true
 
 dlp:
   enabled: true
   mode: alert
-  patterns: []
+  patterns:
+    - id: dlp-pii-it-badge
+      name: integration badge number
+      regex: "ITB-[0-9]{8}"
+      severity: low
+      data_type: pii
+      mode: alert
+      description: a made-up badge format no real traffic carries
+      enabled: false
+  # Read only the workloads named here, none of which runs on the lane.
+  scope:
+    mode: workloads
+    cgroups:
+      - /system.slice/it-absent.service
+    selectors:
+      - name: it-absent-unit
+        unit: it-absent.service
+    refresh_seconds: 30
 
 ratelimit:
   enabled: true
   default_rate: 1000
   default_burst: 2000
-  rules: []
+  max_buckets: 65536
+  rules:
+    - id: rl-test-docnet
+      enabled: false
+      rate: 10
+      burst: 20
+      src_ip: "192.0.2.10"
+      action: drop
+      algorithm: sliding_window
+      interfaces: [it-loopback]
+      tenant_id: 7
+  country_tiers:
+    - tier_id: 2
+      country_codes: [KP]
+      rate: 50
+      burst: 100
+      algorithm: fixed_window
+      action: drop
 
 threatintel:
   enabled: true
   mode: alert
-  feeds: []
+  max_entries: 50000
+  country_confidence_boost:
+    KP: 20
+    CH: -10
+  feeds:
+    - id: it-feed-off
+      name: integration feed, off
+      url: "https://feeds.it.example/feed.json"
+      format: json
+      enabled: false
+      max_iocs: 1000
+      default_action: alert
+      ip_field: ip
+      category_field: category
+      auth_header: "Bearer it-feed-token"
+  # A local API nobody runs on the lane: off, so no poll is made, and the
+  # keys still load and are served masked.
+  crowdsec:
+    enabled: false
+    lapi_url: "http://127.0.0.1:8090"
+    bouncer_key: it-bouncer-key
+    refresh_interval_secs: 30
+    max_decisions: 5000
+    default_action: alert
+    report:
+      enabled: false
+      machine_id: it-agent
+      password: it-machine-password
+      interval_secs: 120
+      decision_duration: 2h
 
 l7:
   enabled: true
   ports:
     - 80
     - 443
-  rules: []
+  port_mismatch:
+    enabled: true
+    ignore_ports: [8080]
+  rules:
+    - id: l7-test-http
+      enabled: false
+      priority: 10
+      action: deny
+      protocol: http
+      method: POST
+      host: it-blocked.example
+      content_type: application/x-it
+      src_ip: "192.0.2.0/24"
+      dst_ip: "203.0.113.0/24"
+      dst_port: 80
+      src_country_codes: [KP]
+      dst_country_codes: [CU]
+    - id: l7-test-grpc
+      enabled: false
+      priority: 20
+      action: deny
+      protocol: grpc
+      service: it.Admin
+      grpc_method: Shutdown
+      src_ip_alias: it-alias-ipset
+      dst_ip_alias: it-alias-nested
+    - id: l7-test-smb
+      enabled: false
+      priority: 30
+      action: deny
+      protocol: smb
+      smb_command: 5
 
 alerting:
   enabled: true
   dedup_window_secs: 60
   throttle_window_secs: 300
   throttle_max: 100
-  routes: []
+  # A collector no route sends to, its certificate left unchecked, which
+  # only the http protocol allows.
+  otlp:
+    endpoint: "https://collector.it.example:4318"
+    protocol: http
+    verify_tls: false
+  # A mail relay no route sends to: the keys load, the password is served
+  # masked, and nothing leaves the host.
+  smtp:
+    host: 127.0.0.1
+    port: 2525
+    username: it-relay
+    password: it-relay-password
+    from_address: agent@it.example
+    tls: false
+  routes:
+    - name: it-route-log
+      destination: log
+      min_severity: high
+      event_types: [firewall, ids]
 
 dns:
   enabled: true
@@ -95,15 +419,28 @@ dns:
     action: block
     inject_target: threatintel
     grace_period_secs: 300
+    # A list on a reserved name (RFC 2606) that never resolves: the fetch
+    # fails quietly every refresh and the static list above still applies.
+    feeds:
+      - name: it-dns-feed
+        url: "https://lists.it.example/domains.txt"
+        format: hosts
+        refresh_interval_secs: 3600
   reputation:
     enabled: true
     max_tracked_domains: 10000
     auto_block_threshold: 0.8
     auto_block_enabled: false
     decay_half_life_hours: 24
+    auto_block_ttl_secs: 900
+    high_risk_countries: [KP]
 
 ddos:
   enabled: true
+  max_tracked_sources: 50000
+  icmp_protection:
+    enabled: false
+    max_payload_size: 512
   syn_protection:
     enabled: true
     threshold_mode: true
@@ -119,10 +456,104 @@ ddos:
 conntrack:
   enabled: true
 
+# Translation rules on documentation ranges, each off: they load, validate
+# and are served, and no packet is rewritten.
 nat:
   enabled: true
-  snat_rules: []
-  dnat_rules: []
+  snat_rules:
+    - id: snat-test-masq
+      enabled: false
+      priority: 10
+      type: snat
+      match_src: "192.0.2.0/24"
+      translated_addr: "203.0.113.1"
+      port_range: "20000-30000"
+      interfaces: [it-loopback]
+      tenant_id: 7
+    - id: snat-test-alias
+      enabled: false
+      priority: 20
+      type: masquerade
+      match_src_alias: it-alias-ipset
+      match_dst_alias: it-alias-nested
+      interface: lo
+    - id: snat-test-fou
+      enabled: false
+      priority: 30
+      type: snat
+      match_src: "198.51.100.0/24"
+      translated_addr: "203.0.113.2"
+      fou:
+        dport: 5555
+        sport: 5556
+        encapsulation: gue
+    - id: snat-test-ipsec
+      enabled: false
+      priority: 40
+      type: snat
+      match_src: "198.51.100.128/25"
+      translated_addr: "203.0.113.3"
+      ipsec:
+        if_id: 42
+        link: 1
+  dnat_rules:
+    - id: dnat-test-onetoone
+      enabled: false
+      priority: 10
+      type: one_to_one
+      external_addr: "203.0.113.10"
+      internal_addr: "192.0.2.10"
+    - id: dnat-test-ports
+      enabled: false
+      priority: 20
+      type: dnat
+      external_addr: "203.0.113.11"
+      internal_addr: "192.0.2.11"
+      ext_port: "8000-8010"
+      int_port: "9000-9010"
+      translated_addr: "192.0.2.11"
+  nptv6_rules:
+    - id: nptv6-test-off
+      enabled: false
+      internal_prefix: "fd00:99::"
+      external_prefix: "2001:db8:99::"
+      prefix_len: 64
+      interfaces: [it-loopback]
+  hairpin:
+    enabled: false
+    internal_subnet: "192.0.2.0/24"
+    hairpin_snat_ip: "192.0.2.1"
+
+# Shaping off: the pipe, queue and classifier load, validate and are
+# served, and no packet is queued.
+qos:
+  enabled: false
+  pipes:
+    - id: pipe-test-off
+      bandwidth: "100mbps"
+      burst: "128kb"
+      direction: egress
+      enabled: false
+      interfaces: [it-loopback]
+      tenant_id: 7
+  queues:
+    - id: queue-test-off
+      pipe_id: pipe-test-off
+      enabled: false
+  classifiers:
+    - id: cls-test-off
+      queue_id: queue-test-off
+      priority: 3
+      interfaces: [it-loopback]
+      tenant_id: 7
+      match:
+        src_ip: "192.0.2.10/32"
+        dst_ip: "203.0.113.10/32"
+        src_port: 40000
+        dst_port: 9999
+        protocol: tcp
+        dscp: 46
+        vlan_id: 100
 
 routing:
   enabled: true
@@ -131,6 +562,123 @@ routing:
 loadbalancer:
   enabled: true
   services: []
+  max_maglev_services: 64
+  max_backends: 1024
+  max_flows: 65536
+  # Announcement is off; the peer keys load and are served.
+  announce:
+    bgp:
+      enabled: false
+      local_asn: 64512
+      peers:
+        - name: it-peer
+          address: "192.0.2.254"
+          asn: 64513
+          port: 1179
+          hold_time: 30
+          password_file: __DATA_DIR__/bgp-it-peer.secret
+
+# Kill a process only where a blocking rule asks it to, which no rule here
+# does; the shells and the agent itself are never signalled.
+response:
+  max_ttl_secs: 7200
+  kill_process:
+    enabled: true
+    signal: 15
+    window_ms: 5000
+    protected_commands: [sshd, bash]
+    protected_pids: [1]
+  quarantine:
+    enabled: false
+    window_secs: 120
+    max_window_secs: 3600
+    tear_down_flows: false
+    max_flows_scanned: 4096
+    protected_paths: [/system.slice/sshd.service]
+    protected_ids: [1]
+    sweep_interval_secs: 15
+
+# React to critical IDS alerts only; the IDS has no enabled rule, so nothing
+# here fires on the lane.
+auto_response:
+  enabled: true
+  policies:
+    - name: it-ids-critical-block
+      min_severity: critical
+      components: [ids]
+      action: block
+      ttl_secs: 300
+    - name: it-ddos-throttle
+      min_severity: critical
+      components: [ddos]
+      action: throttle
+      ttl_secs: 60
+      rate_pps: 1000
+
+capture:
+  max_duration_secs: 120
+  retention_days: 2
+  max_total_size_mb: 256
+
+process_table:
+  capacity: 8192
+  detections:
+    interval_secs: 30
+    kinds:
+      reverse_shell: true
+      fileless: false
+      server_descendant: true
+    interpreters: [bash, sh, "python3*"]
+    servers: [nginx, sshd]
+    expected: [/usr/bin/curl]
+
+attribution:
+  max_sockets: 32768
+
+file_watch:
+  enabled: false
+  max_hash_bytes: 1048576
+  max_baselines: 4096
+  canaries:
+    enabled: false
+    directories: [__DATA_DIR__/canaries]
+    names: [it-canary.docx]
+    exempt: [/usr/bin/rsync]
+
+flow_export:
+  enabled: false
+  table_capacity: 16384
+  sampling: 4
+  queue_depth: 2048
+  batch_size: 64
+  ipfix:
+    enabled: false
+    enterprise_number: 32473
+    max_message_bytes: 1400
+  otlp:
+    enabled: true
+
+container:
+  resolver:
+    cgroup_root: /sys/fs/cgroup
+  lxc:
+    enabled: false
+    cache_size: 64
+    cache_ttl_seconds: 30
+    timeout_ms: 500
+  kubernetes:
+    enabled: false
+    node_name: it-node-1
+    label_filter: [app, team]
+    cluster_ip:
+      enabled: false
+      workloads:
+        - pods:
+            match_labels:
+              app: it-web
+          namespaces:
+            match_labels:
+              team: it
 
 audit:
   enabled: true
@@ -143,3 +691,10 @@ audit:
 # above are what make legal on a non-loopback bind.
 auth:
   enabled: false
+  # Inert while authentication is off; loaded, validated and served so a
+  # screen reading the configuration finds them.
+  bootstrap_key_path: __DATA_DIR__/auth/api-key
+  oidc:
+    jwks_url: "https://idp.it.example/.well-known/jwks.json"
+    issuer: "https://idp.it.example"
+    audience: ebpfsentinel-it

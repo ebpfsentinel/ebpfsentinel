@@ -71,7 +71,7 @@ teardown_file() {
 _sum() {
     local family="${1:?usage: _sum <family> <labels>}"
     local labels="${2:-}"
-    curl -sf --max-time "${HTTP_TIMEOUT}" "${BASE_URL}/metrics" \
+    scrape_metrics \
         | grep "^${family}{" | grep -E "${labels}" \
         | awk '{ s += $2 } END { printf "%d\n", s + 0 }'
 }
@@ -166,7 +166,7 @@ _listen() {
     local attempt=0 body alert=""
     while [ "$attempt" -lt 10 ]; do
         body="$(api_get /api/v1/alerts)"
-        alert="$(echo "$body" | jq -c '[.alerts[]? | select(.rule_id == "tcp-reset-scan")][0] // empty' 2>/dev/null)" || true
+        alert="$(echo "$body" | jq -c '[.alerts[]? | select(.rule_id == "tcp-reset-scan" and .component == "tcp_health")][0] // empty' 2>/dev/null)" || true
         [ -n "$alert" ] && break
         sleep 2
         attempt=$((attempt + 1))
@@ -181,7 +181,7 @@ _listen() {
 
     # The previous tests polled the scrape endpoint; let its quota refill.
     sleep 3
-    run curl -sf --max-time "${HTTP_TIMEOUT}" "${BASE_URL}/metrics"
+    run scrape_metrics
     [ "$status" -eq 0 ] || { echo "metrics scrape failed: ${status}" >&2; return 1; }
     local edges uncounted
     edges="$(echo "$output" | grep -c '^ebpfsentinel_tcp_connections_total{' || true)"

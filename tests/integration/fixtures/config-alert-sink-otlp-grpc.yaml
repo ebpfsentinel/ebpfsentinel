@@ -57,6 +57,10 @@ alerting:
     endpoint: "http://127.0.0.1:18089"
     protocol: grpc
     timeout_ms: 2000
+    # Sent as gRPC metadata on every export, the way a hosted collector is
+    # authenticated; served masked.
+    headers:
+      x-it-tenant: it-sink
   dedup_window_secs: 1
   throttle_window_secs: 60
   throttle_max: 1000
