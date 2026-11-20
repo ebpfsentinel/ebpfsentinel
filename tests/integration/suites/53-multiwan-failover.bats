@@ -2,12 +2,8 @@
 # 53-multiwan-failover.bats - Multi-WAN gateway selection + failover surface.
 #
 # Scope:
-#   The full end-to-end transit-failover path (egress shifts on link-down
-#   between two real WAN gateways with traffic in flight) needs a 3-VM
-#   topology with two upstream NICs on the agent VM. The fields the agent
-#   surfaces today (REST /api/v1/routing/gateways + Prometheus metrics)
-#   are independent of that topology, so this suite asserts the
-#   observable contract from a single-VM run:
+#   The fields the agent surfaces (REST /api/v1/routing/gateways + Prometheus
+#   metrics) and its own health probing are asserted from a single-VM run:
 #
 #     * Two configured gateways round-trip through the gateways REST list
 #       sorted by priority, primary first.
@@ -17,20 +13,13 @@
 #     * A SIGHUP-driven priority swap re-orders the list deterministically,
 #       proving the failover-ordering contract that the kernel-side policy
 #       lookup relies on.
+#     * The in-process probe loop marks unreachable gateways down and raises
+#       the WAN_ALL_DOWN alert (`routing-wan-all-down`) when none is left.
+#     * A gateway added through the API is probed like a configured one.
 #
-# Coverage gaps (tracked, deferred):
-#
-#   * In-process active health probing loop (AC #1: ≤3 s detection).
-#     The probe scheduler that calls record_probe_failure/record_probe_success
-#     based on interval_secs is not wired into the agent runtime. Health
-#     status currently stays at "unknown" without explicit state writes.
-#   * Real link-down → egress reroute (AC #2/#3). Requires the 3-VM
-#     transit topology - covered by a future tagging in coverage-matrix.yaml.
-#   * WAN_ALL_DOWN alert (AC #2 simultaneous failure). Tied to the missing
-#     probe loop above.
-#
-# Both gaps land on the same internal task (multi-WAN probe loop + alert)
-# and are explicitly skipped here rather than silently passed.
+# Not asserted here: egress shifting between two real WAN gateways on a link
+# going down with traffic in flight. That needs two upstream NICs on the agent
+# VM (the 3-VM transit topology), and no suite runs it yet.
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

@@ -87,6 +87,7 @@ allowed_nested_cli = set(matrix.get("nested_cli_subcommands") or [])
 rows = matrix.get("coverage") or []
 owners = set((matrix.get("owners") or {}).keys())
 route_entries = matrix.get("routes") or {}
+routes_gap_ceiling = matrix.get("routes_gap_ceiling")
 
 # ── Enumerate observable surface on disk ────────────────────────────
 ebpf_dir = repo_root / "crates" / "ebpf-programs"
@@ -536,6 +537,15 @@ if stale_route_entries:
     banner("STALE `routes` lines")
     print("\n".join(stale_route_entries))
     failed = True
+if not isinstance(routes_gap_ceiling, int):
+    banner("`routes_gap_ceiling` is missing from coverage-matrix.yaml")
+    failed = True
+elif routes_gaps != routes_gap_ceiling:
+    banner(
+        f"{routes_gaps} routes wait on an owner, routes_gap_ceiling is {routes_gap_ceiling}: "
+        + ("a new hole, cover it or own it" if routes_gaps > routes_gap_ceiling else "lower the ceiling with the fix")
+    )
+    failed = True
 
 if bad_profile_values:
     banner("INVALID suite_profiles values (allowed: pr | datapath | nightly | manual)")
@@ -683,7 +693,7 @@ if failed:
 # lines naming an owner are the gaps.
 print(
     f"\nebpfsentinel/routes: {len(disk_routes)} surfaces, {routes_by_scan} by scan, "
-    f"{routes_by_suite} by suite, 0 by reason, {routes_gaps} gaps"
+    f"{routes_by_suite} by suite, 0 by reason, {routes_gaps} gaps (ceiling {routes_gap_ceiling})"
 )
 sys.exit(0)
 PY

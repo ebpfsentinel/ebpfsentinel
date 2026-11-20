@@ -18,19 +18,9 @@
 #     * DNS - AAAA query observation: the DNS subsystem accepts AAAA on
 #       the observer surface and the metrics family is exposed.
 #
-# Coverage gaps (tracked, deferred - require multi-VM topology):
-#
-#   * Wire-level IPv6 traffic that triggers an IDS alert via tc-ids on
-#     the veth pair. The tc-ids program inspects both families, but the
-#     deterministic alert assertion needs a dual-stack 2-VM topology
-#     with full IPv6 reachability through the agent (AC #1 IDS/IPS).
-#   * End-to-end IPv6 NAT/forward path (AC #1 NAT). Suite 54 covers the
-#     NPTv6 prefix swap; regular IPv6 forward across the agent transit
-#     interface requires the 3-VM layout.
-#
-# Both gaps land on the same multi-VM enablement work (cross-VM IPv6
-# routing fixture) and are explicitly skipped here rather than silently
-# passed.
+#     * Wire level - an IPv6 TCP probe fires the tc-ids alert (local lane),
+#       and the agent transit-forwards regular IPv6 with the source prefix
+#       unchanged (3-VM lane; NPTv6 is suite 50).
 
 load '../lib/helpers'
 load '../lib/ebpf_helpers'

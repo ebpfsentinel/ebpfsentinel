@@ -66,7 +66,10 @@ owners:
 # reach it under a name built at run time (`suites`), or names the owner of
 # the suite it is waiting on (`owner`). A route listed with an owner that a
 # suite has since started requesting fails the audit, so the list shrinks
-# as the suites land.
+# as the suites land. The routes waiting on an owner are the gaps, and their
+# count must equal `routes_gap_ceiling`: a new one fails, and closing one
+# lowers the ceiling in the same change.
+routes_gap_ceiling: 0
 routes:
   /api/v1/agent/stop: {suites: [], elsewhere: ["ebpfsentinel-enterprise/62"]}
   /api/v1/ebpf/hidden-ports: {suites: ["79"]}
@@ -979,7 +982,7 @@ coverage:
     topology: 2vm
     kernel_min: "6.12"
     profile: datapath
-    notes: "Intrusion detection engine; a rule scoped to one container by name fires on that container behind its own bridge link and not on a neighbour sending the same, in 130 on the vagrant-runtimes lane; the block branch's two counters - the attempt and the kernel's own confirmation of the conntrack tear-down - asserted against each other in 66; behavioural signatures stressed in 38; slow-attack signatures in 39; IPv6-scoped signature surface asserted in 55 (wire-level v6 IDS alert via tc-ids deferred - needs dual-stack 2-VM topology); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 59 (real hydra/ncrack credential bursts deferred - same dataplane contract is driven by the SYN-burst path)"
+    notes: "Intrusion detection engine; a rule scoped to one container by name fires on that container behind its own bridge link and not on a neighbour sending the same, in 130 on the vagrant-runtimes lane; the block branch's two counters - the attempt and the kernel's own confirmation of the conntrack tear-down - asserted against each other in 66; behavioural signatures stressed in 38; slow-attack signatures in 39; IPv6-scoped signature surface asserted in 55 (and a wire-level IPv6 probe firing the tc-ids alert on the local lane); SSH brute-force threshold rule surface + MITRE T1110(.001) alert path asserted in 59 (and a real hydra credential burst firing the same alert)"
 
   - kind: domain_module
     feature: ips
@@ -1003,7 +1006,7 @@ coverage:
     topology: 2vm
     kernel_min: "6.12"
     profile: pr
-    notes: "HTTP/TLS/SNI/gRPC/SMTP/FTP/SMB; slow-request timeout in 39; SMTP/FTP/SMB matcher round-trip + parser robustness (truncated TCP, invalid-protocol POST rejection) asserted in 56. Wire-level swaks/lftp/smbclient per-command behaviour deferred (needs extra deps on test VMs; covered by domain l7::engine unit tests)"
+    notes: "HTTP/TLS/SNI/gRPC/SMTP/FTP/SMB; slow-request timeout in 39; SMTP/FTP/SMB matcher round-trip + parser robustness (truncated TCP, invalid-protocol POST rejection) asserted in 56. real swaks, lftp and smbclient dialogues on the wire asserted in 56 (SMTP EHLO on the audit trail, FTP PORT and SMB1 negotiate denied)"
 
   - kind: domain_module
     feature: loadbalancer
@@ -1051,7 +1054,7 @@ coverage:
     topology: 2vm
     kernel_min: "6.12"
     profile: datapath
-    notes: "Multi-WAN routing; failover ordering + REST + metrics surface asserted in 53 (priority-ordered list, gateways_total gauge, failovers_total counter, SIGHUP-driven priority swap). Active health probe loop + WAN_ALL_DOWN alert + real link-down egress reroute tracked as deferred ACs in the suite header"
+    notes: "Multi-WAN routing; failover ordering + REST + metrics surface asserted in 53 (priority-ordered list, gateways_total gauge, failovers_total counter, SIGHUP-driven priority swap). The in-process probe loop marking gateways down, the WAN_ALL_DOWN alert and an API-added gateway being probed are asserted in 53; egress shifting on a real link-down with traffic in flight needs the 3-VM transit topology and no suite runs it yet"
 
   - kind: domain_module
     feature: telemetry
@@ -1079,12 +1082,12 @@ coverage:
 
   - kind: domain_module
     feature: coverage
-    suites: ["TBD"]
-    owner: restart-state
+    suites: ["87"]
+    elsewhere: ["ebpfsentinel-operator/coexistence/08"]
     topology: k8s
     kernel_min: "6.12"
-    profile: manual
-    notes: "What the node agent sees of each pod and why it misses what it misses. 87 asserts the refusal on a node without a pod inventory; the per-pod report needs an agent watching a cluster's pods, which only the operator's kind lanes run, and none of their suites reads it yet"
+    profile: datapath
+    notes: "What the node agent sees of each pod and why it misses what it misses. 87 asserts the refusal on a node without a pod inventory; the operator's coexistence suite 08-pods-and-guests.bats reads the per-pod report on kind beside Cilium and Calico (the test pod listed with its attached link and an unobserved loopback) and the counts and named gaps the operator folds into the agent resource's status"
 
   - kind: domain_module
     feature: drops
@@ -1546,7 +1549,7 @@ attack_suites:
     kernel_min: "6.12"
     profile: nightly
     surfaces: ["tc-scrub", "firewall"]
-    notes: "Byte-level pcap assertions on the post-transit backend capture: TTL floor (min_ttl raises low TTL to 64), TCP MSS option clamped to max_mss=1400, IPv4 DF flag cleared, IPv4 identification randomized away from sender-chosen value; fragment-policy AC deferred (no ScrubConfig knob yet)"
+    notes: "Byte-level pcap assertions on the post-transit backend capture: TTL floor (min_ttl raises low TTL to 64), TCP MSS option clamped to max_mss=1400, IPv4 DF flag cleared, IPv4 identification randomized away from sender-chosen value; with `drop_fragments` set, no IPv4 fragment reaches the backend while the unfragmented control SYN does"
 
   - suite: "47"
     name: conntrack-kernel-ct-kill
@@ -1609,7 +1612,7 @@ attack_suites:
     kernel_min: "6.12"
     profile: nightly
     surfaces: ["routing"]
-    notes: "Multi-WAN failover-ordering contract: both gateways round-trip /api/v1/routing/gateways sorted primary→secondary by priority, /api/v1/routing/status reports the configured count, ebpfsentinel_routing_gateways gauge equals 2, ebpfsentinel_routing_failovers counter is exposed, and a SIGHUP-driven priority swap re-orders the list deterministically without changing the agent PID. Active probe loop + WAN_ALL_DOWN alert + real link-down 3-VM transit reroute are deferred ACs"
+    notes: "Multi-WAN failover-ordering contract: both gateways round-trip /api/v1/routing/gateways sorted primary→secondary by priority, /api/v1/routing/status reports the configured count, ebpfsentinel_routing_gateways gauge equals 2, ebpfsentinel_routing_failovers counter is exposed, and a SIGHUP-driven priority swap re-orders the list deterministically without changing the agent PID. The probe loop marks both unreachable gateways down and raises WAN_ALL_DOWN (routing-wan-all-down), and a gateway added through the API is probed rather than reported healthy for ever. Egress shifting on a real link-down needs the 3-VM transit topology and is not run"
 
   - suite: "54"
     name: container-cgroup-enrichment
@@ -1618,7 +1621,7 @@ attack_suites:
     kernel_min: "6.12"
     profile: nightly
     surfaces: ["container"]
-    notes: "Container cgroup → identity surface: container_resolver_cache_{hits,misses,errors} counters present when container.resolver.enabled=true; Docker-driven probe traffic on tc-ids signature port advances the cache-misses counter (proves cgroup_id reaches the resolver); a container created after the agent connected to the Docker socket is named and imaged on its alert, which is the metadata cache being written while the agent runs rather than at startup. AlertResponse REST container fields and kubernetes pod enrichment via suite 10 fixtures are deferred ACs tracked in the suite header. Per-tenant TENANT_CGROUP_MAP filtering is enterprise-only and is tested in the enterprise repo"
+    notes: "Container cgroup → identity surface: container_resolver_cache_{hits,misses,errors} counters present when container.resolver.enabled=true; Docker-driven probe traffic on tc-ids signature port advances the cache-misses counter (proves cgroup_id reaches the resolver); a container created after the agent connected to the Docker socket is named and imaged on its alert, which is the metadata cache being written while the agent runs rather than at startup. The alerts REST surface carries the container identity; Kubernetes pod enrichment is exercised by suite 10. Per-tenant TENANT_CGROUP_MAP filtering is enterprise-only and is tested in the enterprise repo"
 
   - suite: "55"
     name: ipv6-full-path-sweep
@@ -1627,7 +1630,7 @@ attack_suites:
     kernel_min: "6.12"
     profile: nightly
     surfaces: ["firewall", "ids", "ips", "ratelimit", "dns"]
-    notes: "IPv6 parity sweep across dataplane features: firewall surfaces IPv6 CIDR rules with the v6 prefix preserved and co-loads matching v4 + v6 rules without conflict; IDS surfaces the v6-scoped signature; IPS blacklist endpoint accepts v6 sources; ratelimit surfaces the per-v6 source rule; mixed v4/v6 burst does not move the packets counter backwards or kill /healthz; DNS parser stays ready under a synthetic AAAA query. Wire-level v6 IDS alert via tc-ids and end-to-end v6 NAT forward across agent transit are deferred ACs (need dual-stack 2-/3-VM topology; NPTv6 covered by suite 50)"
+    notes: "IPv6 parity sweep across dataplane features: firewall surfaces IPv6 CIDR rules with the v6 prefix preserved and co-loads matching v4 + v6 rules without conflict; IDS surfaces the v6-scoped signature; IPS blacklist endpoint accepts v6 sources; ratelimit surfaces the per-v6 source rule; mixed v4/v6 burst does not move the packets counter backwards or kill /healthz; DNS parser stays ready under a synthetic AAAA query. A wire-level IPv6 probe fires the tc-ids alert on the local lane, and on the 3-VM lane the agent transit-forwards regular IPv6 with the source prefix unchanged (NPTv6 covered by suite 50)"
 
   - suite: "56"
     name: l7-smtp-ftp-smb-edge
@@ -1636,7 +1639,7 @@ attack_suites:
     kernel_min: "6.12"
     profile: nightly
     surfaces: ["l7"]
-    notes: "L7 SMTP/FTP/SMB edge-case sweep: pre-loaded SMTP/FTP/SMB rules round-trip GET /api/v1/firewall/l7-rules with command/is_smb2 matcher fields preserved; POST + DELETE round-trip per protocol; invalid protocol returns 4xx (not 5xx, not silent accept) without crashing the agent; truncated TCP segments on the L7-hooked ports (25/21/445) leave /readyz reporting ebpf_loaded=true. Wire-level swaks/lftp/smbclient per-command behaviour (SMTP pipelining, FTP PASV gating, SMB2 dialect capture, SMB1 policy reject) is deferred to a follow-up that adds those tools to the test VMs; per-command parser logic is exercised by domain l7::engine unit tests"
+    notes: "L7 SMTP/FTP/SMB edge-case sweep: pre-loaded SMTP/FTP/SMB rules round-trip GET /api/v1/firewall/l7-rules with command/is_smb2 matcher fields preserved; POST + DELETE round-trip per protocol; invalid protocol returns 4xx (not 5xx, not silent accept) without crashing the agent; truncated TCP segments on the L7-hooked ports (25/21/445) leave /readyz reporting ebpf_loaded=true. FTP PORT and SMB1 commands fire L7 deny alerts, and real swaks, lftp and smbclient clients drive the same dialogues on the wire (SMTP EHLO recorded on the audit trail, FTP PORT and SMB1 negotiate denied); every alert carries a MITRE technique"
 
   - suite: "58"
     name: pqc-handshake
@@ -1645,7 +1648,7 @@ attack_suites:
     kernel_min: "n/a"
     profile: nightly
     surfaces: ["tls", "crypto"]
-    notes: "X25519MLKEM768 PQ-hybrid TLS sweep: pq_mode=prefer accepts both classical clients (fallback path proven) and PQ-aware clients (openssl s_client -groups X25519MLKEM768 lands on the hybrid named group); pq_mode=require rejects classical-only clients at the handshake and still accepts PQ-aware clients. PQ-handshake assertions are skipped cleanly when local openssl lacks X25519MLKEM768 (< 3.5). The /api/v1/tls/status per-connection negotiated-group surface (AC #1 second bullet) and the HA mTLS PQ path (AC #3) are tracked as deferred ACs in the suite header"
+    notes: "X25519MLKEM768 PQ-hybrid TLS sweep: pq_mode=prefer accepts both classical clients (fallback path proven) and PQ-aware clients (openssl s_client -groups X25519MLKEM768 lands on the hybrid named group); pq_mode=require rejects classical-only clients at the handshake and still accepts PQ-aware clients. PQ-handshake assertions are skipped cleanly when local openssl lacks X25519MLKEM768 (< 3.5). /api/v1/tls/status surfaces the negotiated key-exchange group and /api/v1/crypto/posture names the api link with its policy and last group; the HA replication link is enterprise and is asserted there"
 
   - suite: "59"
     name: ssh-brute-force-real
@@ -1654,7 +1657,7 @@ attack_suites:
     kernel_min: "6.12"
     profile: nightly
     surfaces: ["ids", "ips"]
-    notes: "SSH brute-force IDS + IPS sweep: pre-loaded threshold rules (port 22, count=5 in 30s, track_by=src_ip) round-trip via /api/v1/ids/rules + /api/v1/ips/rules; a SYN burst from the test netns to TCP/22 fires an alert with rule_id=ids-ssh-bruteforce, severity=high, MITRE T1110(.001) per the domain dst-port mapping; the IPS auto-blacklist captures the source under the same threshold. Real hydra/ncrack credential bursts and the sshd no-successful-auth negative assertion are deferred (extra deps + multi-VM topology)"
+    notes: "SSH brute-force IDS + IPS sweep: pre-loaded threshold rules (port 22, count=5 in 30s, track_by=src_ip) round-trip via /api/v1/ids/rules + /api/v1/ips/rules; a SYN burst from the test netns to TCP/22 fires an alert with rule_id=ids-ssh-bruteforce, severity=high, MITRE T1110(.001) per the domain dst-port mapping; the IPS auto-blacklist captures the source under the same threshold. A real hydra credential burst fires the same alert and cracks nothing"
 
   - suite: "107"
     name: identity-across-hosts

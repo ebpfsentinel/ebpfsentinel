@@ -12,12 +12,8 @@
 #   * IPv4 IP-ID rand  - random_ip_id: true→ send id=12345, expect id != 12345
 #   * TCP MSS option   - max_mss: 1400     → send MSS=65535, expect MSS <= 1400
 #
-# Fragment policy AC: the current ScrubConfig (firewall.rs) has no
-# fragment_policy / drop_fragments / reassemble field - the kernel
-# program only normalizes headers on first-fragment / unfragmented
-# packets. The fragment-policy AC is deferred to a follow-up Rust
-# feature story and explicitly skipped here so the suite remains
-# honest about coverage.
+#   * Fragments        - drop_fragments: true → no IPv4 fragment reaches
+#     the backend, while an unfragmented control SYN does.
 #
 # Requires: 3-VM mode, kernel >= 6.12, scapy on attacker
 # (/opt/scapy-venv), tcpdump on the bats runner, libpcap on backend.
@@ -163,7 +159,7 @@ _scrub_bpf() {
     }
 }
 
-# ── Fragment policy (deferred) ───────────────────────────────────────
+# ── Fragment policy ───────────────────────────────────────
 
 @test "tc-scrub drops IPv4 fragments when drop_fragments is enabled" {
     skip_if_not_3vm
