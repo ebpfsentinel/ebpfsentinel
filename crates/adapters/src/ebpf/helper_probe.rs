@@ -351,20 +351,19 @@ pub const REQUIREMENTS: &[ObjectRequirements] = &[
         ],
         false,
     ),
+    // The shaper reports through its metrics map only: a per-packet record
+    // from it would share the alert path with the firewall and IDS.
     tc(
         "tc-qos",
         &[
-            BPF_FUNC_get_current_cgroup_id,
             BPF_FUNC_get_prandom_u32,
-            BPF_FUNC_get_smp_processor_id,
-            BPF_FUNC_get_socket_cookie,
             BPF_FUNC_ktime_get_boot_ns,
             BPF_FUNC_ktime_get_ns,
             BPF_FUNC_skb_cgroup_id,
             BPF_FUNC_skb_ecn_set_ce,
             BPF_FUNC_skb_set_tstamp,
         ],
-        true,
+        false,
     ),
     tc(
         "tc-scrub",
@@ -715,6 +714,30 @@ mod tests {
         assert!(
             !scrub.helpers().any(|h| h.name == "bpf_ringbuf_reserve"),
             "tc-scrub emits no events and must not require the ring buffer"
+        );
+    }
+
+    #[test]
+    fn the_shaper_emits_no_packet_event() {
+        // tc-qos acts on every packet of a shaped link. A record per packet
+        // landed on the channel the firewall and IDS alerts travel, and a
+        // full channel drops whatever arrives next, so shaping a busy link
+        // cost security alerts. Its counters are its only report; the
+        // `requirements_match_sources` test holds this flag to the source.
+        let qos = REQUIREMENTS
+            .iter()
+            .find(|r| r.object == "tc-qos")
+            .expect("tc-qos entry");
+        assert!(!qos.uses_ringbuf);
+        assert!(
+            !qos.helpers().any(|h| h.name == "bpf_ringbuf_reserve"),
+            "tc-qos must not reserve ring-buffer records"
+        );
+        assert!(
+            program_sources("tc-qos")
+                .iter()
+                .all(|src| !src.contains("emit_packet_event!")),
+            "tc-qos must not emit packet events"
         );
     }
 

@@ -141,8 +141,8 @@ teardown_file() {
     bps_int="$(echo "$bps" | cut -d. -f1)"
     [ "$bps_int" -le "$max_bps" ] || {
         echo "throughput above the pipe cap: ${bps_int} bps (ceiling ${max_bps})" >&2
-        echo "qos drops: $(get_metrics_value ebpfsentinel_packets_total \
-            '{interface="QOS_METRICS",action="dropped"}' 2>/dev/null)" >&2
+        echo "qos counters:" >&2
+        dump_ebpf_counters QOS_METRICS >&2
         return 1
     }
 }
@@ -205,6 +205,101 @@ teardown_file() {
     echo "$metrics" | grep -qE 'ebpfsentinel_packets_total\{interface="QOS_METRICS"'
 }
 
+# ── Shaping beside security alerts ──────────────────────────────
+
+# The shaper reports through its counters alone. A saturated pipe used to push
+# one ring event per packet into the channel the firewall's alerts share, so a
+# deny seen while shaping could be lost before it became an alert. Here a flow
+# twice the pipe's rate runs while a denied port is probed: the counters must
+# move, and the deny must still arrive as a firewall alert.
+@test "QoS counters move under shaping while firewall alerts still arrive" {
+    require_root
+    require_tool iperf3
+    require_tool ncat
+
+    wait_for_ebpf_counters QOS_METRICS || return 1
+
+    local seen_before shaped_before delayed_before queue_before
+    seen_before="$(ebpf_counter QOS_METRICS total_seen)"
+    shaped_before="$(ebpf_counter QOS_METRICS shaped)"
+    delayed_before="$(ebpf_counter QOS_METRICS delayed)"
+    queue_before="$(ebpf_counter QOS_METRICS dropped_queue)"
+    seen_before="${seen_before:-0}"
+    shaped_before="${shaped_before:-0}"
+    delayed_before="${delayed_before:-0}"
+    queue_before="${queue_before:-0}"
+
+    local rule='{"id":"fw-deny-7790","priority":2,"action":"deny","protocol":"tcp","dst_port":7790,"scope":"global","enabled":true}'
+    api_post /api/v1/firewall/rules "$rule" >/dev/null
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]
+    sleep 2
+
+    iperf3 -s -p 5201 -D --logfile /tmp/iperf3-qos-alerts-$$.log 2>/dev/null || true
+    sleep 1
+
+    # 50 Mbit/s into the 10 Mbit/s pipe for long enough to probe during it.
+    iperf3_from_ns "$EBPF_HOST_IP" 8 "" -p 5201 -b 50M >/dev/null 2>&1 &
+    local load_pid=$!
+    sleep 2
+
+    local probe
+    for probe in 1 2 3; do
+        send_tcp_from_ns "$EBPF_HOST_IP" 7790 "DENIED_WHILE_SHAPING" 1
+        sleep 0.5
+    done
+
+    local alert
+    alert="$(wait_for_alert \
+        '[.[] | select(.component == "firewall" and .dst_port == 7790)][0]' 15 1)" || true
+
+    wait "$load_pid" 2>/dev/null || true
+    pkill -f "iperf3 -s -p 5201" 2>/dev/null || true
+    rm -f /tmp/iperf3-qos-alerts-$$.log
+    api_delete /api/v1/firewall/rules/fw-deny-7790 >/dev/null 2>&1 || true
+
+    if [ -z "$alert" ] || [ "$alert" = "null" ]; then
+        echo "no firewall alert for the denied port while the pipe was saturated" >&2
+        dump_ebpf_counters QOS_METRICS >&2
+        return 1
+    fi
+
+    local shaped_after seen_after delayed_after queue_after
+    shaped_after="$(ebpf_counter_above QOS_METRICS shaped "$shaped_before")"
+    seen_after="$(ebpf_counter QOS_METRICS total_seen)"
+    delayed_after="$(ebpf_counter QOS_METRICS delayed)"
+    queue_after="$(ebpf_counter QOS_METRICS dropped_queue)"
+    seen_after="${seen_after:-0}"
+    delayed_after="${delayed_after:-0}"
+    queue_after="${queue_after:-0}"
+
+    [ "$shaped_after" -gt "$shaped_before" ] || {
+        echo "shaped stayed at ${shaped_before} under a saturated pipe" >&2
+        dump_ebpf_counters QOS_METRICS >&2
+        return 1
+    }
+    [ "$seen_after" -gt "$seen_before" ] || {
+        echo "total_seen stayed at ${seen_before} under a saturated pipe" >&2
+        dump_ebpf_counters QOS_METRICS >&2
+        return 1
+    }
+
+    # Twice the pipe's rate cannot pass untouched: the excess is either held
+    # back to its departure time or dropped at the queue.
+    local acted=$(((delayed_after - delayed_before) + (queue_after - queue_before)))
+    [ "$acted" -gt 0 ] || {
+        echo "neither delayed nor dropped_queue moved under a saturated pipe" >&2
+        dump_ebpf_counters QOS_METRICS >&2
+        return 1
+    }
+
+    # The counters are the shaper's whole report: no slot for lost events.
+    if dump_ebpf_counters QOS_METRICS | grep -q 'action="events_dropped"'; then
+        echo "QOS_METRICS still exports an events_dropped slot" >&2
+        return 1
+    fi
+}
+
 # ── Pipe bandwidth enforcement ──────────────────────────────────
 
 @test "QoS pipe bandwidth enforcement - upload capped" {
@@ -248,8 +343,8 @@ teardown_file() {
     bps_int="$(echo "$bps" | cut -d. -f1)"
     [ "$bps_int" -le "$max_bps" ] || {
         echo "upload above the pipe cap: ${bps_int} bps (ceiling ${max_bps})" >&2
-        echo "qos drops: $(get_metrics_value ebpfsentinel_packets_total \
-            '{interface="QOS_METRICS",action="dropped"}' 2>/dev/null)" >&2
+        echo "qos counters:" >&2
+        dump_ebpf_counters QOS_METRICS >&2
         return 1
     }
 }

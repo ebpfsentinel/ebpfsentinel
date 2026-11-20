@@ -14,6 +14,9 @@ agent:
 
 firewall:
   enabled: true
+  # Block, so the deny the shaping test probes is enforced and raised as an
+  # alert; the default alert mode would install it as a log rule.
+  mode: block
   default_policy: pass
   rules: []
 

@@ -390,6 +390,8 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (4, "total_seen"),
             (5, "mtu_exceeded"),
         ],
+        // The shaper's whole report: it emits no per-packet event, so there
+        // is no `events_dropped` slot to read here.
         "QOS_METRICS" => &[
             (0, "total_seen"),
             (1, "shaped"),
@@ -397,7 +399,6 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (3, "dropped_queue"),
             (4, "delayed"),
             (5, "errors"),
-            (6, "events_dropped"),
         ],
         _ => &[(0, "index_0"), (1, "index_1"), (2, "errors")],
     }
@@ -722,6 +723,33 @@ mod tests {
             ebpf_common::clusterip::CLUSTERIP_METRIC_COUNT,
         ),
     ];
+
+    #[test]
+    fn the_shaper_reports_through_named_counters_only() {
+        // tc-qos reports nothing on the event ring, so these slots are what an
+        // operator watches while a link is shaped. Each one carries the name
+        // of what it counts, and none claims a ring-buffer refusal the
+        // program can no longer make.
+        let labels: Vec<&str> = metric_labels("QOS_METRICS")
+            .iter()
+            .map(|(_, l)| *l)
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "total_seen",
+                "shaped",
+                "dropped_loss",
+                "dropped_queue",
+                "delayed",
+                "errors"
+            ]
+        );
+        assert_eq!(
+            u32::try_from(labels.len()).ok(),
+            Some(ebpf_common::qos::QOS_METRIC_COUNT)
+        );
+    }
 
     #[test]
     fn every_map_labels_every_index_the_kernel_writes() {

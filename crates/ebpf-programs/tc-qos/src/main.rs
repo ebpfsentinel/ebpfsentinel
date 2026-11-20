@@ -7,21 +7,20 @@ use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
     btf_maps::{
-        Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, PerCpuHashMap, RingBuf,
-        lpm_trie::Key,
+        Array, HashMap, LpmTrie, LruPerCpuHashMap, PerCpuArray, PerCpuHashMap, lpm_trie::Key,
     },
     helpers::{bpf_get_prandom_u32, bpf_ktime_get_boot_ns, bpf_ktime_get_ns},
     macros::{btf_map, classifier},
     programs::TcContext,
 };
 use ebpf_common::{
-    event::{EVENT_TYPE_QOS, FLAG_IPV6, PacketEvent},
+    event::FLAG_IPV6,
     firewall::FW_EMPTY_QOS_CLASSIFIERS,
     qos::{
         MAX_QOS_CGROUP_LINKS, MAX_QOS_CGROUP_SHAPES, MAX_QOS_EDT_INTERFACES, QOS_METRIC_COUNT,
         QOS_METRIC_DELAYED, QOS_METRIC_DROPPED_LOSS, QOS_METRIC_DROPPED_QUEUE, QOS_METRIC_ERRORS,
-        QOS_METRIC_EVENTS_DROPPED, QOS_METRIC_SHAPED, QOS_METRIC_TOTAL_SEEN, QOS_SCOPE_MASK,
-        QOS_SCOPE_SHAPES_EMPTY, QOS_SCOPE_STRIDE, QOS_SHAPE_CATCHALL, QOS_SHAPE_DPORT,
+        QOS_METRIC_SHAPED, QOS_METRIC_TOTAL_SEEN, QOS_SCOPE_MASK, QOS_SCOPE_SHAPES_EMPTY,
+        QOS_SCOPE_STRIDE, QOS_SHAPE_CATCHALL, QOS_SHAPE_DPORT,
         QOS_SHAPE_DSCP, QOS_SHAPE_FULL, QOS_SHAPE_HOSTS, QOS_SHAPE_HOSTS_DPORT, QOS_SHAPE_NO_DSCP,
         QOS_SHAPE_PORTS, QOS_SHAPE_PROTO, QOS_SHAPE_SPORT, QosCgroupCounters, QosCgroupShape,
         QosCharge, QosClassifierKey, QosClassifierValue, QosFlowState, QosPipeConfig, QosPipeState,
@@ -37,7 +36,7 @@ use ebpf_helpers::pktmeta;
 use ebpf_helpers::raw_skb;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::trace::{self, reason, stage};
-use ebpf_helpers::{emit_packet_event, increment_metric};
+use ebpf_helpers::increment_metric;
 use network_types::{
     ip::{IpProto, Ipv4Hdr},
     tcp::TcpHdr,
@@ -130,7 +129,13 @@ static QOS_QUEUE_STATE: Array<QosQueueState, 256> = Array::new();
 #[btf_map]
 static QOS_FLOW_STATE: LruPerCpuHashMap<u32, QosFlowState, 65536> = LruPerCpuHashMap::new();
 
-/// Per-CPU packet counters.
+/// Per-CPU packet counters, the whole of what this program reports.
+///
+/// Shaping acts on every packet of a busy link, so a per-packet record would
+/// be the loudest producer on the host. It has no event channel of its own:
+/// the agent polls these slots and exports them as
+/// `ebpfsentinel_packets_total{interface="QOS_METRICS",action=...}`, which
+/// keeps the security alert path free of traffic that is not an alert.
 #[btf_map]
 static QOS_METRICS: PerCpuArray<u64, { QOS_METRIC_COUNT as usize }> = PerCpuArray::new();
 
@@ -174,11 +179,6 @@ static QOS_CGROUP_COUNTERS: PerCpuHashMap<
 #[btf_map]
 static QOS_EDT_INTERFACES: HashMap<u32, u8, { MAX_QOS_EDT_INTERFACES as usize }> = HashMap::new();
 
-/// Kernel->userspace event ring buffer, 1 MiB: about 7,500 packet events
-/// before backpressure refuses new ones (sizing in `ebpf_helpers::ringbuf`).
-#[btf_map]
-static EVENTS: RingBuf<PacketEvent, { 256 * 4096 }> = RingBuf::new();
-
 /// Per-interface group membership bitmask. Key = ifindex (u32), Value = group bitmask (u32).
 #[btf_map]
 static INTERFACE_GROUPS: HashMap<u32, u32, 64> = HashMap::new();
@@ -203,13 +203,6 @@ static TENANT_SUBNET_V4: LpmTrie<[u8; 4], u32, { MAX_TENANT_SUBNET_LPM_ENTRIES a
 #[btf_map]
 static TENANT_SUBNET_V6: LpmTrie<[u8; 16], u32, { MAX_TENANT_SUBNET_V6_LPM_ENTRIES as usize }> =
     LpmTrie::new();
-
-// ── Constants ───────────────────────────────────────────────────────
-
-/// Action code for "shaped" (delayed/rate-limited but passed).
-const ACTION_SHAPED: u8 = 1;
-/// Action code for "dropped" by `QoS` policy.
-const ACTION_DROPPED: u8 = 2;
 
 // ── Helper wrappers ─────────────────────────────────────────────────
 
@@ -516,12 +509,10 @@ fn process_qos_v4(
     };
 
     let src_addr = [src_ip, 0, 0, 0];
-    let dst_addr = [dst_ip, 0, 0, 0];
 
     apply_qos(
         ctx,
         &src_addr,
-        &dst_addr,
         src_ip,
         dst_ip,
         src_port,
@@ -592,7 +583,6 @@ fn process_qos_v6(
     apply_qos(
         ctx,
         &src_addr,
-        &dst_addr,
         src_ip_hash,
         dst_ip_hash,
         src_port,
@@ -809,7 +799,6 @@ fn flow_hash(src_ip: u32, dst_ip: u32, src_port: u16, dst_port: u16, protocol: u
 fn apply_qos(
     ctx: &TcContext,
     src_addr: &[u32; 4],
-    dst_addr: &[u32; 4],
     src_ip: u32,
     dst_ip: u32,
     src_port: u16,
@@ -905,11 +894,6 @@ fn apply_qos(
         let rand = unsafe { bpf_get_prandom_u32() } % 10000;
         if rand < u32::from(pipe_cfg.loss_rate) {
             increment_qos_metric(traced, QOS_METRIC_DROPPED_LOSS);
-            (|| {
-                emit_packet_event!(EVENTS, QOS_METRICS, QOS_METRIC_EVENTS_DROPPED,
-                    src_addr, dst_addr, src_port, dst_port, protocol,
-                    EVENT_TYPE_QOS, ACTION_DROPPED, pipe_id, flags, vlan_id; tc ctx);
-            })();
             return Ok(TC_ACT_SHOT);
         }
     }
@@ -966,14 +950,6 @@ fn apply_qos(
         if should_drop {
             increment_qos_metric(traced, QOS_METRIC_DROPPED_QUEUE);
             trace::tc_record(ctx, stage::QOS, reason::RATE, pipe_id, queue_id);
-            if traced {
-                return Ok(TC_ACT_SHOT);
-            }
-            (|| {
-                emit_packet_event!(EVENTS, QOS_METRICS, QOS_METRIC_EVENTS_DROPPED,
-                    src_addr, dst_addr, src_port, dst_port, protocol,
-                    EVENT_TYPE_QOS, ACTION_DROPPED, pipe_id, flags, vlan_id; tc ctx);
-            })();
             return Ok(TC_ACT_SHOT);
         }
     }
@@ -1030,13 +1006,6 @@ fn apply_qos(
         }
 
         increment_qos_metric(traced, QOS_METRIC_DELAYED);
-        if !traced {
-            (|| {
-                emit_packet_event!(EVENTS, QOS_METRICS, QOS_METRIC_EVENTS_DROPPED,
-                    src_addr, dst_addr, src_port, dst_port, protocol,
-                    EVENT_TYPE_QOS, ACTION_SHAPED, pipe_id, flags, vlan_id; tc ctx);
-            })();
-        }
     }
 
     // Mark as shaped if any shaping was applied

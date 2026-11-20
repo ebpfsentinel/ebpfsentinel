@@ -691,8 +691,12 @@ impl EventDispatcher {
                 self.process_lb_event(&event);
             }
             other => {
+                // A record no handler reads is not a packet anyone counted:
+                // filing it under `packets_total{interface="unknown"}` grew a
+                // series that read like traffic. It is an event dropped for
+                // want of a consumer, and counted as one.
                 tracing::debug!(event_type = other, "unhandled event type");
-                self.metrics.record_packet("unknown", "unknown");
+                self.metrics.record_event_dropped(UNHANDLED_EVENT_TYPE);
             }
         }
     }
@@ -1500,6 +1504,8 @@ impl EventDispatcher {
             rss_hash: 0,
             rss_hash_type: 0,
             rx_hw_timestamp_ns: 0,
+            pkt_len: 0,
+            _pad: 0,
         }
     }
 
@@ -2022,6 +2028,9 @@ fn action_label(action: u8) -> &'static str {
     }
 }
 
+/// `events_dropped_total` reason for a record whose type no handler reads.
+const UNHANDLED_EVENT_TYPE: &str = "unhandled_event_type";
+
 fn event_type_label(event_type: u8) -> &'static str {
     match event_type {
         EVENT_TYPE_FIREWALL => "firewall",
@@ -2074,6 +2083,7 @@ mod tests {
         last_fingerprint: std::sync::Mutex<String>,
         last_encrypted_dns: std::sync::Mutex<(String, String)>,
         port_promises: std::sync::Mutex<Vec<(u16, String)>>,
+        last_dropped_reason: std::sync::Mutex<String>,
     }
 
     impl TestMetrics {
@@ -2088,6 +2098,7 @@ mod tests {
                 last_fingerprint: std::sync::Mutex::new(String::new()),
                 last_encrypted_dns: std::sync::Mutex::new((String::new(), String::new())),
                 port_promises: std::sync::Mutex::new(Vec::new()),
+                last_dropped_reason: std::sync::Mutex::new(String::new()),
             }
         }
     }
@@ -2119,8 +2130,9 @@ mod tests {
     impl SystemMetrics for TestMetrics {}
     impl ConfigMetrics for TestMetrics {}
     impl EventMetrics for TestMetrics {
-        fn record_event_dropped(&self, _reason: &str) {
+        fn record_event_dropped(&self, reason: &str) {
             self.dropped_calls.fetch_add(1, Ordering::Relaxed);
+            *self.last_dropped_reason.lock().unwrap() = reason.to_string();
         }
     }
     impl DlpMetrics for TestMetrics {}
@@ -2182,6 +2194,8 @@ mod tests {
             rss_hash: 0,
             rss_hash_type: 0,
             rx_hw_timestamp_ns: 0,
+            pkt_len: 0,
+            _pad: 0,
             rule_id,
         }
     }
@@ -2640,7 +2654,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_event_type_records_metric() {
+    async fn unknown_event_type_is_counted_as_a_dropped_event_not_a_packet() {
         let ids = make_service_with_rules(vec![]);
         let metrics = Arc::new(TestMetrics::new());
         let (alert_tx, _alert_rx) = mpsc::channel(10);
@@ -2648,8 +2662,28 @@ mod tests {
 
         dispatcher.dispatch_event(make_event(EVENT_TYPE_DLP, 0));
 
-        assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(*metrics.last_component.lock().unwrap(), "unknown");
+        assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.dropped_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            *metrics.last_dropped_reason.lock().unwrap(),
+            "unhandled_event_type"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_retired_shaper_event_type_records_no_packet() {
+        // 8 was the traffic shaper's per-packet event. An older kernel object
+        // still emitting it must not grow `packets_total{interface="unknown"}`.
+        let ids = make_service_with_rules(vec![]);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
+
+        dispatcher.dispatch_event(make_event(8, 0));
+
+        assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.dropped_calls.load(Ordering::Relaxed), 1);
+        assert!(alert_rx.try_recv().is_err());
     }
 
     struct CountingPacketObserver(std::sync::atomic::AtomicUsize);

@@ -23,10 +23,11 @@ pub const QOS_METRIC_DROPPED_QUEUE: u32 = 3;
 pub const QOS_METRIC_DELAYED: u32 = 4;
 /// Metric index: internal errors.
 pub const QOS_METRIC_ERRORS: u32 = 5;
-/// Metric index: events dropped (ring buffer full).
-pub const QOS_METRIC_EVENTS_DROPPED: u32 = 6;
 /// Total number of `QoS` metric slots.
-pub const QOS_METRIC_COUNT: u32 = 7;
+///
+/// There is no events-dropped slot: tc-qos emits no per-packet event, so
+/// these counters are the whole of what it reports.
+pub const QOS_METRIC_COUNT: u32 = 6;
 
 // ── Shared eBPF map types ────────────────────────────────────────────
 
@@ -981,13 +982,12 @@ mod tests {
         assert_eq!(QOS_METRIC_DROPPED_QUEUE, 3);
         assert_eq!(QOS_METRIC_DELAYED, 4);
         assert_eq!(QOS_METRIC_ERRORS, 5);
-        assert_eq!(QOS_METRIC_EVENTS_DROPPED, 6);
-        assert_eq!(QOS_METRIC_COUNT, 7);
+        assert_eq!(QOS_METRIC_COUNT, 6);
     }
 
     #[test]
     fn metric_count_covers_all() {
         // QOS_METRIC_COUNT should be one past the last index
-        const _: () = assert!(QOS_METRIC_EVENTS_DROPPED < QOS_METRIC_COUNT);
+        const _: () = assert!(QOS_METRIC_ERRORS + 1 == QOS_METRIC_COUNT);
     }
 }

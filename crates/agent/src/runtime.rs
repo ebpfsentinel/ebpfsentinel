@@ -1689,18 +1689,7 @@ pub async fn load_ebpf_programs(
     // ── TC QoS ──────────────────────────────────────────────────
     let qos_ok = if config.qos.enabled {
         match startup::try_load_tc_qos(&ebpf_dir, config) {
-            Ok((mut loader, qos_mgr, qos_rdr, opt_reader)) => {
-                if let Some(reader) = opt_reader {
-                    let event_tx_clone = event_tx.clone();
-                    let rb_obs = RingBufObserver::new(
-                        "tc-qos",
-                        Arc::clone(&services.metrics) as Arc<dyn MetricsPort>,
-                    );
-                    let task_cancel = readers.clone();
-                    tokio::spawn(async move {
-                        reader.run(event_tx_clone, task_cancel, rb_obs).await;
-                    });
-                }
+            Ok((mut loader, qos_mgr, qos_rdr)) => {
                 {
                     let mut svc = services.qos_svc.write().await;
                     // Bind the maps, then resync the configuration so they
