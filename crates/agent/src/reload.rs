@@ -8,7 +8,7 @@ use adapters::auth::oidc_provider::{self, OidcAuthProvider};
 use application::config_reload::ConfigReloadService;
 use infrastructure::config::AgentConfig;
 use notify::Watcher as _;
-use tokio::sync::{Mutex, Notify, RwLock, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use adapters::ebpf::{
@@ -139,9 +139,31 @@ fn watch_config_file(
     }
 }
 
+/// What the reload task has done, for a caller that triggered a reload and
+/// waits for its verdict.
+///
+/// Reloads run one at a time, so `started` and `finished` count the same
+/// sequence: a caller that read `started` before it triggered waits until
+/// `finished` passes that number, and then the last reload read the file
+/// after the caller's write. `refused` is the reason the last finished
+/// reload kept the running configuration, `None` when it applied the file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReloadOutcome {
+    /// Reloads begun since start.
+    pub started: u64,
+    /// Reloads ended since start.
+    pub finished: u64,
+    /// Why the last finished reload refused the file.
+    pub refused: Option<String>,
+}
+
 /// Spawn a background task that watches the config file for changes,
 /// listens for SIGHUP signals, and accepts API-triggered reloads via
 /// the `api_trigger` channel.
+///
+/// Each reload is counted on `outcome` when it starts and again when it
+/// ends, with the reason when the file was refused, so a caller that asked
+/// for one can tell whether the agent runs the file it wrote.
 ///
 /// Returns the `JoinHandle` so the caller can await cleanup on shutdown.
 #[allow(clippy::too_many_arguments)]
@@ -154,6 +176,7 @@ pub fn spawn_reload_task(
     shared_config: Arc<RwLock<AgentConfig>>,
     ebpf_manager: Arc<Mutex<EbpfProgramManager>>,
     reload_complete: Arc<Notify>,
+    outcome: watch::Sender<ReloadOutcome>,
 ) -> tokio::task::JoinHandle<()> {
     let auth_handle = auth_handle.map(Arc::new);
     let path = config_path.clone();
@@ -168,8 +191,10 @@ pub fn spawn_reload_task(
             let auth_handle = auth_handle.clone();
             let shared_config = Arc::clone(&shared_config);
             let ebpf_manager = Arc::clone(&ebpf_manager);
+            let outcome = outcome.clone();
             async move {
-                perform_reload(
+                outcome.send_modify(|o| o.started += 1);
+                let verdict = perform_reload(
                     &path,
                     &reload_service,
                     auth_handle.as_deref(),
@@ -177,6 +202,10 @@ pub fn spawn_reload_task(
                     &ebpf_manager,
                 )
                 .await;
+                outcome.send_modify(|o| {
+                    o.finished = o.started;
+                    o.refused = verdict.err();
+                });
             }
         },
     )
@@ -289,16 +318,17 @@ where
 
 /// Perform a single standalone reload: the rules, the kernel maps, the
 /// program set, then the configuration the ops endpoints read.
+///
+/// A refused file leaves everything as it ran and comes back as the reason.
 async fn perform_reload(
     config_path: &str,
     reload_service: &ConfigReloadService,
     auth_handle: Option<&AuthProviderHandle>,
     shared_config: &RwLock<AgentConfig>,
     ebpf_manager: &Mutex<EbpfProgramManager>,
-) {
-    let Some(config) = apply_config_file(config_path, reload_service, auth_handle).await else {
-        return;
-    };
+) -> Result<(), String> {
+    let config =
+        apply_config_file_checked(config_path, reload_service, auth_handle, |_| Ok(())).await?;
 
     // Re-sync eBPF kernel maps (L7_PORTS, CONFIG_FLAGS, INTERFACE_GROUPS)
     {
@@ -354,6 +384,7 @@ async fn perform_reload(
 
     // Update shared config for ops endpoints
     *shared_config.write().await = config;
+    Ok(())
 }
 
 /// Write the kernel maps that are read straight off the configuration rather
@@ -439,295 +470,341 @@ pub async fn apply_config_file(
 /// sources this agent does not read, adds them here so they are validated
 /// and applied with the rest. A `prepare` that fails rejects the file like
 /// any other refusal, and the running rules stay whole.
-#[allow(clippy::too_many_lines, clippy::similar_names)] // reload is inherently sequential with many phases
 pub async fn apply_config_file_prepared(
     config_path: &str,
     reload_service: &ConfigReloadService,
     auth_handle: Option<&AuthProviderHandle>,
     prepare: impl FnOnce(&mut AgentConfig) -> Result<(), String>,
 ) -> Option<AgentConfig> {
-    // Phase 1: serde deserialization
-    let (mut config, digest) = match AgentConfig::load_with_digest(Path::new(config_path)) {
-        Ok(loaded) => loaded,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid YAML");
-            return None;
-        }
+    apply_config_file_checked(config_path, reload_service, auth_handle, prepare)
+        .await
+        .ok()
+}
+
+/// The checks a configuration must pass before the agent runs it: the
+/// conversions start-up refuses to start without, run the way the reload
+/// runs them before it applies anything.
+///
+/// A configuration write and an API reload validate a file with this after
+/// [`AgentConfig::load`], so a file they accept is one the running agent
+/// applies and the next start accepts. The one refusal that is not about
+/// the file is included: a workload rule that refuses, on a host whose
+/// cgroup hooks did not attach.
+///
+/// # Errors
+///
+/// The first conversion that refuses, named.
+pub fn validate_config(config: &AgentConfig) -> Result<(), String> {
+    convert_config(config).map(|_| ())
+}
+
+/// How much of one top-level block of the configuration a reload reads
+/// again.
+enum Reread {
+    /// Every key of the block.
+    All,
+    /// Every key but these, which are read once at start.
+    AllBut(&'static [&'static str]),
+    /// These keys alone; the rest of the block is read once at start.
+    Only(&'static [&'static str]),
+}
+
+/// What [`perform_reload`] applies, by block. A block absent from this table
+/// is read once at start, and an edit to it waits for a restart.
+const REREAD: &[(&str, Reread)] = &[
+    ("firewall", Reread::All),
+    ("ids", Reread::All),
+    ("ips", Reread::All),
+    ("l7", Reread::All),
+    ("ratelimit", Reread::All),
+    ("ddos", Reread::All),
+    ("conntrack", Reread::All),
+    ("nat", Reread::All),
+    ("aliases", Reread::All),
+    ("routing", Reread::All),
+    ("zones", Reread::All),
+    ("loadbalancer", Reread::All),
+    ("interface_groups", Reread::All),
+    ("dlp", Reread::AllBut(&["scope"])),
+    ("qos", Reread::AllBut(&["enabled"])),
+    ("threatintel", Reread::AllBut(&["crowdsec", "max_entries"])),
+    ("dns", Reread::Only(&["enabled"])),
+    ("attribution", Reread::Only(&["enabled"])),
+    ("process_table", Reread::Only(&["enabled"])),
+    (
+        "container",
+        Reread::Only(&["kubernetes.cluster_ip.enabled"]),
+    ),
+    (
+        "auth",
+        Reread::Only(&["jwt.public_key_path", "oidc.jwks_url"]),
+    ),
+    ("agent", Reread::Only(&["config_writes"])),
+];
+
+/// The parts of `now` that differ from `boot`, the configuration the agent
+/// started with, and that a reload does not apply: they are in the file and
+/// not in what the agent runs until it restarts.
+///
+/// Blocks are named by their key, a key inside a block a reload otherwise
+/// applies by its dotted path. The kernel tables sized at start are named by
+/// the setting that sizes them: a reload writes their entries but cannot
+/// change how many they hold. The list is sorted and empty when the agent
+/// runs everything the file says.
+#[must_use]
+pub fn pending_restart(boot: &AgentConfig, now: &AgentConfig) -> Vec<String> {
+    use adapters::ebpf::map_sizing::{MapSizing, SIZED_MAPS};
+    use serde_json::Value;
+
+    let (Ok(Value::Object(boot_blocks)), Ok(Value::Object(now_blocks))) =
+        (serde_json::to_value(boot), serde_json::to_value(now))
+    else {
+        return Vec::new();
     };
-    if let Err(e) = prepare(&mut config) {
-        tracing::warn!(error = %e, "config reload rejected");
-        return None;
+    let pointer = |path: &str| format!("/{}", path.replace('.', "/"));
+    let mut pending = std::collections::BTreeSet::new();
+
+    let keys: std::collections::BTreeSet<&String> =
+        boot_blocks.keys().chain(now_blocks.keys()).collect();
+    for key in keys {
+        let mut before = boot_blocks.get(key).cloned().unwrap_or(Value::Null);
+        let mut after = now_blocks.get(key).cloned().unwrap_or(Value::Null);
+        match REREAD.iter().find(|(block, _)| *block == key.as_str()) {
+            Some((_, Reread::All)) => {}
+            Some((_, Reread::AllBut(fixed))) => {
+                for path in *fixed {
+                    if before.pointer(&pointer(path)) != after.pointer(&pointer(path)) {
+                        pending.insert(format!("{key}.{path}"));
+                    }
+                }
+            }
+            Some((_, Reread::Only(reread))) => {
+                for path in *reread {
+                    drop_path(&mut before, path);
+                    drop_path(&mut after, path);
+                }
+                if before != after {
+                    pending.insert(key.clone());
+                }
+            }
+            None => {
+                if before != after {
+                    pending.insert(key.clone());
+                }
+            }
+        }
     }
 
-    // Phase 2: domain validation (convert config rules to domain entities)
-    let rules = match config.firewall_rules() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid rules");
-            return None;
+    let (boot_sizes, now_sizes) = (MapSizing::from_config(boot), MapSizing::from_config(now));
+    for (map, field) in SIZED_MAPS {
+        if boot_sizes.get(map) != now_sizes.get(map) {
+            pending.insert((*field).to_string());
         }
-    };
+    }
 
-    // Phase 2b: the workload half of those rules, and the one refusal that
-    // is not about the file being malformed.
+    pending.into_iter().collect()
+}
+
+/// Remove the key at the dotted `path` inside `value`, when it is there.
+fn drop_path(value: &mut serde_json::Value, path: &str) {
+    let (parent, last) = match path.rsplit_once('.') {
+        Some((parent, last)) => (
+            value.pointer_mut(&format!("/{}", parent.replace('.', "/"))),
+            last,
+        ),
+        None => (Some(value), path),
+    };
+    if let Some(object) = parent.and_then(serde_json::Value::as_object_mut) {
+        object.remove(last);
+    }
+}
+
+/// Everything the reload converts out of a parsed configuration before it
+/// applies any of it.
+struct ConvertedConfig {
+    rules: Vec<domain::firewall::entity::FirewallRule>,
+    workload_policy: domain::firewall::workload::WorkloadPolicy,
+    dns_rule: Option<adapters::ebpf::workload_firewall_attach::DnsRuleStatus>,
+    mode: domain::common::entity::DomainMode,
+    ids_rules: Vec<domain::ids::entity::IdsRule>,
+    ids_mode: domain::common::entity::DomainMode,
+    ids_sampling: domain::ids::entity::SamplingMode,
+    l7_rules: Vec<domain::l7::entity::L7Rule>,
+    dlp_patterns: Vec<domain::dlp::entity::DlpPattern>,
+    dlp_mode: domain::common::entity::DomainMode,
+    rl_policies: Vec<domain::ratelimit::entity::RateLimitPolicy>,
+    ddos_policies: Vec<domain::ddos::entity::DdosPolicy>,
+    dnat_rules: Vec<domain::nat::entity::NatRule>,
+    snat_rules: Vec<domain::nat::entity::NatRule>,
+    nptv6_rules: Vec<domain::nat::entity::NptV6Rule>,
+    aliases: Vec<domain::alias::entity::Alias>,
+    lb_services: Vec<domain::loadbalancer::entity::LbService>,
+    vip_announce: domain::loadbalancer::vip::VipAnnounceConfig,
+    vip_bgp: domain::loadbalancer::bgp::BgpConfig,
+    qos_pipes: Vec<domain::qos::entity::QosPipe>,
+    qos_queues: Vec<domain::qos::entity::QosQueue>,
+    qos_classifiers: Vec<domain::qos::entity::QosClassifier>,
+    qos_cgroup_shaping: Vec<domain::qos::cgroup_shaping::CgroupShapingRule>,
+    ips_rules: Vec<domain::ids::entity::IdsRule>,
+    ips_mode: domain::common::entity::DomainMode,
+    ips_whitelist: Vec<domain::ips::entity::WhitelistEntry>,
+    ips_sampling: domain::ids::entity::SamplingMode,
+    ti_feeds: Vec<domain::threatintel::entity::FeedConfig>,
+    ti_mode: domain::common::entity::DomainMode,
+}
+
+/// A conversion's refusal, named by what it converts.
+fn refused<T, E: std::fmt::Display>(result: Result<T, E>, what: &str) -> Result<T, String> {
+    result.map_err(|e| format!("invalid {what}: {e}"))
+}
+
+/// Run every conversion that can reject a configuration, in the order the
+/// reload has always run them, and keep what they produced.
+fn convert_config(config: &AgentConfig) -> Result<ConvertedConfig, String> {
+    use adapters::ebpf::workload_firewall_attach as workload_attach;
+
+    let rules = refused(config.firewall_rules(), "firewall rules")?;
+
+    // The workload half of those rules, and the one refusal that is not
+    // about the file being malformed.
     //
     // A rule that refuses is only worth anything where the cgroup hooks
     // attached: a file adding one on a host that refused them would leave the
     // operator reading a deny rule the kernel never sees. Rejecting the file
     // keeps the rules in force and says why, which is the same answer
     // start-up gives. An agent that started with no rule loaded the object
-    // and kept its hooks, and they are attached below, once nothing else in
-    // the file can reject it.
-    let workload_policy = match domain::firewall::workload::WorkloadPolicy::from_rules(&rules) {
-        Ok(policy) => policy,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid workload rules");
-            return None;
-        }
-    };
-    let workload_policy = match config
-        .workload_dns()
-        .map_err(|e| e.to_string())
-        .and_then(|dns| workload_policy.with_dns(dns).map_err(|e| e.to_string()))
-    {
-        Ok(policy) => policy,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid workload DNS settings");
-            return None;
-        }
-    };
-    let dns_rule = match config.dns_clients() {
-        Ok(block) => block
-            .as_ref()
-            .map(adapters::ebpf::workload_firewall_attach::DnsRuleStatus::of),
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid dns_clients");
-            return None;
-        }
-    };
+    // and kept its hooks, and they are attached by the reload, once nothing
+    // else in the file can reject it.
+    let workload_policy = refused(
+        domain::firewall::workload::WorkloadPolicy::from_rules(&rules),
+        "workload rules",
+    )?;
+    let workload_policy = refused(
+        config
+            .workload_dns()
+            .map_err(|e| e.to_string())
+            .and_then(|dns| workload_policy.with_dns(dns).map_err(|e| e.to_string())),
+        "workload DNS settings",
+    )?;
+    let dns_rule = refused(config.dns_clients(), "dns_clients")?
+        .as_ref()
+        .map(workload_attach::DnsRuleStatus::of);
     if workload_policy.enforces()
-        && !adapters::ebpf::workload_firewall_attach::status().attached
-        && !adapters::ebpf::workload_firewall_attach::attach_pending()
+        && !workload_attach::status().attached
+        && !workload_attach::attach_pending()
     {
-        let reason = adapters::ebpf::workload_firewall_attach::status()
+        let reason = workload_attach::status()
             .reason
             .unwrap_or_else(|| "the hooks are not attached on this host".to_string());
-        tracing::warn!(
-            "config reload rejected: {}",
-            adapters::ebpf::workload_firewall_attach::enforcement_unavailable(&reason)
-        );
-        return None;
+        return Err(workload_attach::enforcement_unavailable(&reason));
     }
 
-    // Phase 3: parse firewall mode
-    let mode = match config.firewall_mode() {
-        Ok(m) => m,
+    Ok(ConvertedConfig {
+        rules,
+        workload_policy,
+        dns_rule,
+        mode: refused(config.firewall_mode(), "firewall mode")?,
+        ids_rules: refused(config.ids_rules(), "IDS rules")?,
+        ids_mode: refused(config.ids_mode(), "IDS mode")?,
+        ids_sampling: refused(config.ids_sampling(), "IDS sampling")?,
+        l7_rules: refused(config.l7_rules(), "L7 rules")?,
+        dlp_patterns: refused(config.dlp_patterns(), "DLP patterns")?,
+        dlp_mode: refused(config.dlp_mode(), "DLP mode")?,
+        rl_policies: refused(config.ratelimit_policies(), "ratelimit policies")?,
+        ddos_policies: refused(config.ddos_policies(), "DDoS policies")?,
+        dnat_rules: refused(config.nat_dnat_rules(), "NAT DNAT rules")?,
+        snat_rules: refused(config.nat_snat_rules(), "NAT SNAT rules")?,
+        nptv6_rules: refused(config.nat_nptv6_rules(), "NAT NPTv6 rules")?,
+        aliases: refused(config.aliases(), "aliases")?,
+        lb_services: refused(config.lb_services(), "LB services")?,
+        vip_announce: refused(config.lb_announce(), "VIP announce config")?,
+        vip_bgp: refused(config.lb_announce_bgp(), "BGP announce config")?,
+        qos_pipes: refused(config.qos_pipes(), "QoS pipes")?,
+        qos_queues: refused(config.qos_queues(), "QoS queues")?,
+        qos_classifiers: refused(config.qos_classifiers(), "QoS classifiers")?,
+        qos_cgroup_shaping: refused(
+            config.qos.to_domain_cgroup_shaping(),
+            "per-workload shaping",
+        )?,
+        ips_rules: refused(config.ips_rules(), "IPS rules")?,
+        ips_mode: refused(config.ips_mode(), "IPS mode")?,
+        ips_whitelist: refused(config.ips_whitelist(), "IPS whitelist")?,
+        ips_sampling: refused(config.ips_sampling(), "IPS sampling")?,
+        ti_feeds: refused(config.threatintel_feeds(), "threat intel feeds")?,
+        ti_mode: refused(config.threatintel_mode(), "threat intel mode")?,
+    })
+}
+
+/// [`apply_config_file_prepared`], answering why a refused file was
+/// refused.
+///
+/// The reload loop hands the refusal to whoever asked for the reload, so an
+/// API caller is told the file was not applied instead of reading `ok` while
+/// the agent kept the rules it had.
+///
+/// # Errors
+///
+/// The reason the file was refused: unreadable or invalid, a `prepare`
+/// that failed, a conversion that refused, or a workload hook the kernel
+/// would not attach for a rule that refuses. Nothing was applied.
+#[allow(clippy::too_many_lines, clippy::similar_names)] // reload is inherently sequential with many phases
+pub async fn apply_config_file_checked(
+    config_path: &str,
+    reload_service: &ConfigReloadService,
+    auth_handle: Option<&AuthProviderHandle>,
+    prepare: impl FnOnce(&mut AgentConfig) -> Result<(), String>,
+) -> Result<AgentConfig, String> {
+    // Phase 1: serde deserialization
+    let (mut config, digest) = match AgentConfig::load_with_digest(Path::new(config_path)) {
+        Ok(loaded) => loaded,
         Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid firewall mode");
-            return None;
+            tracing::warn!(error = %e, "config reload rejected: invalid YAML");
+            return Err(format!("invalid configuration: {e}"));
         }
     };
+    if let Err(e) = prepare(&mut config) {
+        tracing::warn!(error = %e, "config reload rejected");
+        return Err(e);
+    }
 
-    // Every other conversion that can reject the file runs here, before
+    // Phase 2: every conversion that can reject the file runs here, before
     // anything is applied, so a rejected reload leaves the running
     // configuration whole rather than half of it swapped.
-    let ids_rules = match config.ids_rules() {
-        Ok(r) => r,
+    let ConvertedConfig {
+        rules,
+        workload_policy,
+        dns_rule,
+        mode,
+        ids_rules,
+        ids_mode,
+        ids_sampling,
+        l7_rules,
+        dlp_patterns,
+        dlp_mode,
+        rl_policies,
+        ddos_policies,
+        dnat_rules,
+        snat_rules,
+        nptv6_rules,
+        aliases,
+        lb_services,
+        vip_announce,
+        vip_bgp,
+        qos_pipes,
+        qos_queues,
+        qos_classifiers,
+        qos_cgroup_shaping,
+        ips_rules,
+        ips_mode,
+        ips_whitelist,
+        ips_sampling,
+        ti_feeds,
+        ti_mode,
+    } = match convert_config(&config) {
+        Ok(converted) => converted,
         Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid IDS rules");
-            return None;
-        }
-    };
-
-    let ids_mode = match config.ids_mode() {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid IDS mode");
-            return None;
-        }
-    };
-
-    let ids_sampling = match config.ids_sampling() {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid IDS sampling");
-            return None;
-        }
-    };
-
-    let l7_rules = match config.l7_rules() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid L7 rules");
-            return None;
-        }
-    };
-
-    let dlp_patterns = match config.dlp_patterns() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid DLP patterns");
-            return None;
-        }
-    };
-
-    let dlp_mode = match config.dlp_mode() {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid DLP mode");
-            return None;
-        }
-    };
-
-    let rl_policies = match config.ratelimit_policies() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid ratelimit policies");
-            return None;
-        }
-    };
-
-    let ddos_policies = match config.ddos_policies() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid DDoS policies");
-            return None;
-        }
-    };
-
-    let dnat_rules = match config.nat_dnat_rules() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid NAT DNAT rules");
-            return None;
-        }
-    };
-
-    let snat_rules = match config.nat_snat_rules() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid NAT SNAT rules");
-            return None;
-        }
-    };
-
-    let nptv6_rules = match config.nat_nptv6_rules() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid NAT NPTv6 rules");
-            return None;
-        }
-    };
-
-    let aliases = match config.aliases() {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid aliases");
-            return None;
-        }
-    };
-
-    let lb_services = match config.lb_services() {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid LB services");
-            return None;
-        }
-    };
-
-    let vip_announce = match config.lb_announce() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid VIP announce config");
-            return None;
-        }
-    };
-
-    let vip_bgp = match config.lb_announce_bgp() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid BGP announce config");
-            return None;
-        }
-    };
-
-    let qos_pipes = match config.qos_pipes() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid QoS pipes");
-            return None;
-        }
-    };
-
-    let qos_queues = match config.qos_queues() {
-        Ok(q) => q,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid QoS queues");
-            return None;
-        }
-    };
-
-    let qos_classifiers = match config.qos_classifiers() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid QoS classifiers");
-            return None;
-        }
-    };
-
-    let qos_cgroup_shaping = match config.qos.to_domain_cgroup_shaping() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid per-workload shaping");
-            return None;
-        }
-    };
-
-    let ips_rules = match config.ips_rules() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid IPS rules");
-            return None;
-        }
-    };
-
-    let ips_mode = match config.ips_mode() {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid IPS mode");
-            return None;
-        }
-    };
-
-    let ips_whitelist = match config.ips_whitelist() {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid IPS whitelist");
-            return None;
-        }
-    };
-
-    let ips_sampling = match config.ips_sampling() {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid IPS sampling");
-            return None;
-        }
-    };
-
-    let ti_feeds = match config.threatintel_feeds() {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid threat intel feeds");
-            return None;
-        }
-    };
-
-    let ti_mode = match config.threatintel_mode() {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(error = %e, "config reload rejected: invalid threat intel mode");
-            return None;
+            tracing::warn!(error = %e, "config reload rejected");
+            return Err(e);
         }
     };
 
@@ -744,11 +821,10 @@ pub async fn apply_config_file_prepared(
             .reason
             .unwrap_or_else(|| "the kernel refused the attach".to_string());
         if workload_policy.enforces() {
-            tracing::warn!(
-                "config reload rejected: {}",
-                adapters::ebpf::workload_firewall_attach::enforcement_unavailable(&reason)
-            );
-            return None;
+            let refusal =
+                adapters::ebpf::workload_firewall_attach::enforcement_unavailable(&reason);
+            tracing::warn!("config reload rejected: {refusal}");
+            return Err(refusal);
         }
         tracing::warn!(
             "workload firewall hooks did not attach, the rules that observe observe nothing: \
@@ -903,6 +979,15 @@ pub async fn apply_config_file_prepared(
     {
         tracing::warn!(error = %e, "conntrack config reload failed at application level");
     }
+    // The per-source ceilings the reload may have added or removed: the
+    // firewall keeps reading conntrack state for them, and the reconciler
+    // ages their rate over the window now configured.
+    reload_service
+        .set_firewall_source_limits(crate::startup::source_limits_enforced(&config))
+        .await;
+    adapters::ebpf::connection_limits::set_rate_window(Duration::from_secs(u64::from(
+        config.conntrack.conn_rate_window_secs,
+    )));
 
     // Phase 6d: NAT reload
     let hairpin_cfg = match config.nat_hairpin_parsed() {
@@ -1096,7 +1181,7 @@ pub async fn apply_config_file_prepared(
     }
 
     infrastructure::config::provenance::record_load(digest);
-    Some(config)
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -1140,6 +1225,65 @@ mod tests {
 
         cancel.cancel();
         handle.await.expect("loop stops on cancel");
+    }
+
+    #[test]
+    fn validation_refuses_what_parsing_accepts_and_start_up_refuses() {
+        let yaml = "agent:\n  interfaces: [lo]\nfirewall:\n  rules:\n    - id: deny-eth9\n      \
+                    priority: 10\n      action: deny\n      scope: { interface: eth9 }\n";
+        let parsed = AgentConfig::from_yaml(yaml).expect("the file parses");
+        let err = validate_config(&parsed).expect_err("start-up refuses this rule");
+        assert!(err.starts_with("invalid firewall rules"), "{err}");
+        assert!(err.contains("eth9"), "{err}");
+
+        let fine = AgentConfig::from_yaml(&yaml.replace("eth9", "lo")).expect("the file parses");
+        assert_eq!(validate_config(&fine), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_refused_reload_answers_why_and_keeps_the_running_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(&path, "agent:\n  interfaces: [lo]\n").unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+        let mut config = AgentConfig::load(&path).unwrap();
+        config.audit.storage_path = dir.path().join("audit.redb").display().to_string();
+        let services = crate::runtime::build_services(&config).unwrap();
+        let reload_service = services.config_reload_service();
+        let before: Vec<String> = services
+            .firewall_svc
+            .read()
+            .await
+            .list_rules()
+            .iter()
+            .map(|r| r.id.to_string())
+            .collect();
+
+        std::fs::write(
+            &path,
+            "agent:\n  interfaces: [lo]\nfirewall:\n  rules:\n    - id: deny-eth9\n      \
+             priority: 10\n      action: deny\n      scope: { interface: eth9 }\n",
+        )
+        .unwrap();
+        let verdict =
+            apply_config_file_checked(path.to_str().unwrap(), &reload_service, None, |_| Ok(()))
+                .await;
+
+        let err = verdict.expect_err("a rule start-up refuses is refused by the reload");
+        assert!(err.contains("eth9"), "{err}");
+        let after: Vec<String> = services
+            .firewall_svc
+            .read()
+            .await
+            .list_rules()
+            .iter()
+            .map(|r| r.id.to_string())
+            .collect();
+        assert_eq!(
+            after, before,
+            "a refused file leaves the running rules as they were"
+        );
     }
 
     #[tokio::test]
@@ -1250,5 +1394,102 @@ mod tests {
             .await;
         assert!(applied.is_some());
         assert!(has_added(&services));
+    }
+
+    /// Firewall map port that keeps only the last word on the per-source
+    /// ceilings.
+    #[derive(Clone, Default)]
+    struct SourceLimitsMap {
+        enforced: Arc<std::sync::Mutex<Option<bool>>>,
+    }
+
+    mod source_limits_map {
+        use domain::common::error::DomainError;
+        use domain::trace::RulePlacement;
+        use ebpf_common::firewall::{FirewallRuleEntry, FirewallRuleEntryV6};
+        use ports::secondary::ebpf_map_port::{FirewallArrayMapPort, ShadowCounts};
+
+        fn placements(len: usize) -> Vec<RulePlacement> {
+            (0..len)
+                .map(|i| RulePlacement::Array(u32::try_from(i).unwrap()))
+                .collect()
+        }
+
+        impl FirewallArrayMapPort for super::SourceLimitsMap {
+            fn load_v4_rules(
+                &mut self,
+                rules: &[FirewallRuleEntry],
+            ) -> Result<Vec<RulePlacement>, DomainError> {
+                Ok(placements(rules.len()))
+            }
+
+            fn load_v6_rules(
+                &mut self,
+                rules: &[FirewallRuleEntryV6],
+            ) -> Result<Vec<RulePlacement>, DomainError> {
+                Ok(placements(rules.len()))
+            }
+
+            fn set_default_policy(&mut self, _policy: u8) -> Result<(), DomainError> {
+                Ok(())
+            }
+
+            fn rule_count(&self) -> Result<usize, DomainError> {
+                Ok(0)
+            }
+
+            fn load_shadow_rules(
+                &mut self,
+                _v4: &[FirewallRuleEntry],
+                _v6: &[FirewallRuleEntryV6],
+            ) -> Result<bool, DomainError> {
+                Ok(false)
+            }
+
+            fn read_shadow(&self) -> Result<ShadowCounts, DomainError> {
+                Ok(ShadowCounts::default())
+            }
+
+            fn set_source_limits(&mut self, enforced: bool) {
+                *self.enforced.lock().unwrap() = Some(enforced);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_source_ceiling_added_by_reload_opens_the_firewall_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(&path, "agent:\n  interfaces: [lo]\n").unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+
+        let mut config = AgentConfig::load(&path).unwrap();
+        config.audit.storage_path = dir.path().join("audit.redb").display().to_string();
+        let services = crate::runtime::build_services(&config).unwrap();
+        let map = SourceLimitsMap::default();
+        services
+            .firewall_svc
+            .write()
+            .await
+            .set_map_port(Box::new(map.clone()));
+        let reload_service = services.config_reload_service();
+
+        let applied = apply_config_file(path.to_str().unwrap(), &reload_service, None).await;
+        assert!(applied.is_some());
+        assert_eq!(*map.enforced.lock().unwrap(), Some(false));
+
+        std::fs::write(
+            &path,
+            "agent:\n  interfaces: [lo]\nconntrack:\n  enabled: true\n  max_src_states: 10\n",
+        )
+        .unwrap();
+        let applied = apply_config_file(path.to_str().unwrap(), &reload_service, None).await;
+        assert!(applied.is_some());
+        assert_eq!(
+            *map.enforced.lock().unwrap(),
+            Some(true),
+            "a ceiling added by reload must be enforced without a restart"
+        );
     }
 }

@@ -92,6 +92,16 @@ pub struct AppState {
     /// [`Self::config`]. `Some` at runtime; lets the reload endpoint block
     /// until the new config is observable before returning.
     pub reload_complete: Option<Arc<Notify>>,
+    /// The reload task's count of reloads begun and ended, with the reason
+    /// the last one refused the file. `Some` in the standalone agent; lets
+    /// the reload endpoint and a configuration write answer what the agent
+    /// runs rather than that a reload was asked for. A caller that leaves it
+    /// `None` keeps the [`Self::reload_complete`] answer.
+    pub reload_outcome: Option<tokio::sync::watch::Receiver<crate::reload::ReloadOutcome>>,
+    /// The configuration the agent started with. `Some` at runtime; the
+    /// blocks a reload does not re-read are compared against it to report
+    /// which edits wait for a restart.
+    pub boot_config: Option<Arc<AgentConfig>>,
     /// The stop command's side. `Some` at runtime; a state without it answers
     /// the stop route `503`.
     pub local_stop: Option<Arc<crate::lifecycle::LocalStop>>,
@@ -301,6 +311,8 @@ impl AppState {
             reload_trigger,
             config_path: None,
             reload_complete: None,
+            reload_outcome: None,
+            boot_config: None,
             local_stop: None,
             feed_refresh_trigger: None,
             feed_refresh_in_flight: Arc::new(AtomicBool::new(false)),

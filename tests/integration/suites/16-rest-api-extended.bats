@@ -63,53 +63,9 @@ teardown_file() {
     assert_json_field "$body" '.enabled' 'true'
 }
 
-# The listing, the flush and the event stream all read the kernel table, so
-# they answer only where the agent's host can read it by one of its sources:
-# the proc file, or a `conntrack -L` that succeeds. The question is put with
-# the agent's own privileges: the userspace lane starts it as an unprivileged
-# user on a host where `sudo` reads the table, and that agent answers with an
-# error, which is not the endpoint being broken.
-_conntrack_table_readable() {
-    local run=_agent_ssh_sudo uid
-    uid="$(_agent_ssh ps -o uid= -C ebpfsentinel-agent 2>/dev/null | head -n1 | tr -d ' ')"
-    [ -n "$uid" ] && [ "$uid" != "0" ] && run=_agent_ssh
-    "$run" test -r /proc/net/nf_conntrack ||
-        "$run" conntrack -L >/dev/null 2>&1
-}
-
-@test "Conntrack: GET connections returns 200" {
-    _conntrack_table_readable ||
-        env_skip "kernel conntrack table unreadable by either source - nothing to list"
-    local body
-    body="$(api_get /api/v1/conntrack/connections)"
-    assert_http_status "200" "$HTTP_STATUS"
-}
-
-@test "Conntrack: POST flush returns 200" {
-    _conntrack_table_readable ||
-        env_skip "kernel conntrack table unreadable by either source - nothing to flush"
-    local body
-    body="$(api_post /api/v1/conntrack/flush '{}')"
-    assert_http_status "200" "$HTTP_STATUS"
-}
-
-@test "Conntrack: GET events opens an SSE stream" {
-    # The stream is wired when the agent can read the kernel conntrack table by
-    # either source, which is the rule its own startup applies: the proc file
-    # when the kernel was built with CONFIG_NF_CONNTRACK_PROCFS, and otherwise a
-    # `conntrack -L` that succeeds. Asking only for the proc file asked for a
-    # deprecated interface distributions are dropping - it is unset on the
-    # kernel these VMs run - so this test skipped on a host where the feature
-    # was live. The question is put to the agent's own host, which is a machine
-    # of its own on the two- and three-machine lanes.
-    _conntrack_table_readable ||
-        env_skip "kernel conntrack table unreadable by either source - event stream not wired"
-
-    local headers
-    headers="$(curl -sI -H 'Accept: text/event-stream' \
-        --max-time 3 "${BASE_URL}/api/v1/conntrack/events" 2>&1 || true)"
-    assert_contains "$headers" "text/event-stream"
-}
+# The listing, the flush and the event stream read the kernel table, which
+# this lane's unprivileged agent cannot read. They are asserted in suite 18,
+# on the datapath lane, where a root agent tracks a flow the test opens.
 
 # ── NAT ───────────────────────────────────────────────────────────
 
@@ -171,6 +127,12 @@ _conntrack_table_readable() {
         return 1
     }
     assert_json_field "$body" '.alias' 'it-alias-external'
+    # The kernel set holds IPv4 hosts only: the /24 is matched in userspace
+    # and the answer says so instead of counting it as loaded.
+    echo "$body" | jq -e '.kernel_set_entries == 1 or .kernel_set_entries == 0' >/dev/null || {
+        echo "expected kernel_set_entries to count the one host at most: ${body}" >&2
+        return 1
+    }
 }
 
 @test "Aliases: PUT content on a non-External alias returns 400" {
@@ -360,6 +322,87 @@ _conntrack_table_readable() {
     }
 
     body="$(api_post /api/v1/config/reload '{}' --max-time 30)"
+    assert_http_status "200" "$HTTP_STATUS"
+}
+
+@test "Ops: PUT config section refuses a rule start-up refuses, and the rules stay" {
+    # The file parses, and start-up still refuses it: a rule scoped to an
+    # interface the agent does not watch. Before the write ran the start-up
+    # checks it landed, the reload refused it in a log line, and the answer
+    # was a 200 over an agent running the previous rules.
+    local body
+    body="$(api_put /api/v1/config/firewall.rules \
+        '{"yaml":"firewall:\n  rules:\n    - id: it-eth9\n      priority: 10\n      action: deny\n      scope:\n        interface: it-absent9\n"}' \
+        --max-time 30)"
+    assert_http_status "400" "$HTTP_STATUS"
+    echo "$body" | jq -e '.error.code == "INVALID_CONFIG"' >/dev/null || {
+        echo "expected INVALID_CONFIG: ${body}" >&2
+        return 1
+    }
+
+    body="$(api_get /api/v1/config)"
+    assert_http_status "200" "$HTTP_STATUS"
+    echo "$body" | jq -e '[.firewall.rules[].id] | index("fw-test-001") != null
+                          and index("it-eth9") == null' >/dev/null || {
+        echo "the refused write changed the running rules: ${body}" >&2
+        return 1
+    }
+}
+
+@test "Ops: PUT config section names what waits for a restart" {
+    # Alerting is read once at start: the write lands, the reload applies
+    # the rest, and the answer says this block is not running yet.
+    local body
+    body="$(api_put /api/v1/config/alerting.dedup_window_secs \
+        '{"yaml":"alerting:\n  dedup_window_secs: 61\n"}' --max-time 30)"
+    assert_http_status "200" "$HTTP_STATUS"
+    echo "$body" | jq -e '.status != "ok" or (.pending_restart | index("alerting") != null)' \
+        >/dev/null || {
+        echo "expected pending_restart to name alerting: ${body}" >&2
+        return 1
+    }
+}
+
+@test "Ops: GET config masks a feed URL and the mask round-trips" {
+    # A feed URL carries its token in the path or the query; the served
+    # configuration shows the scheme and host only. Sent back as served, the
+    # write keeps the URL on disk; sent back with another host, it is
+    # refused rather than written as asterisks.
+    local body
+    body="$(api_put /api/v1/config/threatintel.feeds \
+        '{"yaml":"threatintel:\n  feeds:\n    - id: it-feed\n      name: it-feed\n      url: https://feeds.example.com/list.txt?token=it-secret\n      enabled: false\n"}' \
+        --max-time 30)"
+    assert_http_status "200" "$HTTP_STATUS"
+
+    body="$(api_get /api/v1/config)"
+    assert_http_status "200" "$HTTP_STATUS"
+    echo "$body" | jq -e '.threatintel.feeds[0].url == "https://feeds.example.com/***"' \
+        >/dev/null || {
+        echo "the feed URL is not masked: ${body}" >&2
+        return 1
+    }
+    if echo "$body" | grep -q 'it-secret'; then
+        echo "the feed token is served: ${body}" >&2
+        return 1
+    fi
+
+    body="$(api_put /api/v1/config/threatintel.feeds \
+        '{"yaml":"threatintel:\n  feeds:\n    - id: it-feed\n      name: it-feed\n      url: https://feeds.example.com/***\n      enabled: false\n"}' \
+        --max-time 30)"
+    assert_http_status "200" "$HTTP_STATUS"
+
+    body="$(api_put /api/v1/config/threatintel.feeds \
+        '{"yaml":"threatintel:\n  feeds:\n    - id: it-feed\n      name: it-feed\n      url: https://elsewhere.example.com/***\n      enabled: false\n"}' \
+        --max-time 30)"
+    assert_http_status "400" "$HTTP_STATUS"
+    echo "$body" | jq -e '.error.code == "UNRESOLVED_MASK"' >/dev/null || {
+        echo "expected UNRESOLVED_MASK: ${body}" >&2
+        return 1
+    }
+
+    # Leave the fixture as it was for the tests after this one.
+    body="$(api_put /api/v1/config/threatintel.feeds \
+        '{"yaml":"threatintel:\n  feeds: []\n"}' --max-time 30)"
     assert_http_status "200" "$HTTP_STATUS"
 }
 

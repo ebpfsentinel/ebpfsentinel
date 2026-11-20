@@ -13,10 +13,19 @@ use super::state::AppState;
 
 // ── Response types ────────────────────────────────────────────────
 
+/// What a reload, or a configuration write that reloads, left running.
 #[derive(Serialize, ToSchema)]
 pub struct ReloadResponse {
+    /// `ok` once the agent runs the file, `pending` when the reload had not
+    /// finished within the bound the endpoint waits.
     pub status: String,
     pub message: String,
+    /// Settings the file changes since the agent started that a reload does
+    /// not apply: they take effect at the next restart. Blocks are named by
+    /// their key, a key inside a reloaded block by its dotted path. Empty
+    /// when the agent runs everything the file says, or when the reload is
+    /// still pending.
+    pub pending_restart: Vec<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -607,9 +616,9 @@ const RELOAD_CONFIRM_TIMEOUT: Duration = Duration::from_secs(8);
     post, path = "/api/v1/config/reload",
     tag = "Operations",
     responses(
-        (status = 200, description = "Reload triggered successfully", body = ReloadResponse),
+        (status = 200, description = "The agent runs the file, or the reload is still in progress (`pending`); `pending_restart` names what waits for a restart", body = ReloadResponse),
         (status = 500, description = "Failed to trigger reload", body = ErrorBody),
-        (status = 400, description = "Invalid request", body = ErrorBody),
+        (status = 400, description = "The file is refused, by the checks start-up runs (`INVALID_CONFIG`) or by the reload itself (`RELOAD_REFUSED`); the running configuration stays", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Insufficient permissions", body = ErrorBody),
     ),
@@ -626,14 +635,15 @@ pub async fn reload_config(
     // reads files and compiles every rule regex, which measured 16 s cold on
     // a test VM - far too long to run on a runtime worker, where it would
     // stall every other request in flight. Hand it to a blocking thread.
+    // The checks are the ones start-up runs, so a file accepted here is one
+    // the next start accepts too.
     if let Some(path) = state.config_path.as_deref() {
         let path = path.to_string();
-        let validated =
-            tokio::task::spawn_blocking(move || AgentConfig::load(Path::new(&path)).map(|_| ()))
-                .await
-                .map_err(|e| ApiError::Internal {
-                    message: format!("config validation task failed: {e}"),
-                })?;
+        let validated = tokio::task::spawn_blocking(move || load_and_validate(Path::new(&path)))
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("config validation task failed: {e}"),
+            })?;
         if let Err(e) = validated {
             return Err(ApiError::BadRequest {
                 code: "INVALID_CONFIG",
@@ -645,11 +655,25 @@ pub async fn reload_config(
     Ok(Json(trigger_and_confirm_reload(&state).await?))
 }
 
-/// Trigger a reload and wait, bounded, for the reload task to confirm it.
+/// Parse the file at `path` and run on it the checks start-up runs.
+///
+/// Reads files and compiles every rule regex: call it off the runtime.
+pub(crate) fn load_and_validate(path: &Path) -> Result<AgentConfig, String> {
+    let config = AgentConfig::load(path).map_err(|e| e.to_string())?;
+    crate::reload::validate_config(&config)?;
+    Ok(config)
+}
+
+/// Trigger a reload and wait, bounded, for the reload task's verdict.
 ///
 /// Shared with the configuration write route, which has to do exactly this
 /// once the new file is on disk: two copies of a notify-before-trigger
 /// sequence is one copy away from a route that misses the signal.
+///
+/// Where the reload task reports its verdict, a refused file is an error
+/// naming why, and an applied one is answered with the settings that wait
+/// for a restart. A caller that only wires the completion signal is told the
+/// reload ran.
 pub(crate) async fn trigger_and_confirm_reload(
     state: &AppState,
 ) -> Result<ReloadResponse, ApiError> {
@@ -660,6 +684,10 @@ pub(crate) async fn trigger_and_confirm_reload(
         fut.as_mut().enable();
         fut
     });
+    // Reloads run one at a time: one that starts after this reading reads
+    // the file after the caller wrote it.
+    let mut outcome = state.reload_outcome.clone();
+    let started_before = outcome.as_mut().map(|rx| rx.borrow_and_update().started);
 
     state
         .reload_trigger
@@ -673,17 +701,57 @@ pub(crate) async fn trigger_and_confirm_reload(
     // the reload is still running: say so instead of reporting success, or a
     // caller that reads state next would be told it is looking at the new
     // config when it may still be the old one.
-    let confirmed = match notified {
-        Some(fut) => tokio::time::timeout(RELOAD_CONFIRM_TIMEOUT, fut)
-            .await
-            .is_ok(),
-        None => false,
+    let confirmed = match (outcome.as_mut(), started_before) {
+        (Some(rx), Some(seen)) => {
+            match tokio::time::timeout(RELOAD_CONFIRM_TIMEOUT, rx.wait_for(|o| o.finished > seen))
+                .await
+            {
+                Ok(Ok(verdict)) => match verdict.refused.clone() {
+                    Some(reason) => {
+                        return Err(ApiError::BadRequest {
+                            code: "RELOAD_REFUSED",
+                            message: format!(
+                                "the agent refused the file and keeps running the previous \
+                                 configuration: {reason}"
+                            ),
+                        });
+                    }
+                    None => true,
+                },
+                // The reload task is gone: nothing will apply the file.
+                Ok(Err(_)) => {
+                    return Err(ApiError::Internal {
+                        message: "the reload task has stopped".to_string(),
+                    });
+                }
+                Err(_) => false,
+            }
+        }
+        _ => match notified {
+            Some(fut) => tokio::time::timeout(RELOAD_CONFIRM_TIMEOUT, fut)
+                .await
+                .is_ok(),
+            None => false,
+        },
     };
 
     if confirmed {
+        let pending_restart = match state.boot_config.as_deref() {
+            Some(boot) => crate::reload::pending_restart(boot, &*state.config.read().await),
+            None => Vec::new(),
+        };
+        let message = if pending_restart.is_empty() {
+            "configuration reloaded".to_string()
+        } else {
+            format!(
+                "configuration reloaded; {} take effect at the next restart",
+                pending_restart.join(", ")
+            )
+        };
         Ok(ReloadResponse {
             status: "ok".to_string(),
-            message: "configuration reloaded".to_string(),
+            message,
+            pending_restart,
         })
     } else {
         Ok(ReloadResponse {
@@ -692,6 +760,7 @@ pub(crate) async fn trigger_and_confirm_reload(
                 "reload triggered but not confirmed within {}s; it is still in progress",
                 RELOAD_CONFIRM_TIMEOUT.as_secs()
             ),
+            pending_restart: Vec::new(),
         })
     }
 }
@@ -1098,6 +1167,67 @@ mod tests {
         let result = reload_config(State(state)).await;
         let Json(resp) = result.expect("reload should succeed");
         assert_eq!(resp.status, "ok");
+    }
+
+    /// A reload task that answers every trigger with `refused`, counting each
+    /// reload the way the real one does.
+    fn answering_reload_task(
+        mut rx: tokio::sync::mpsc::Receiver<()>,
+        refused: Option<&'static str>,
+    ) -> tokio::sync::watch::Receiver<crate::reload::ReloadOutcome> {
+        let (tx, outcome) = tokio::sync::watch::channel(crate::reload::ReloadOutcome::default());
+        tokio::spawn(async move {
+            while rx.recv().await.is_some() {
+                tx.send_modify(|o| o.started += 1);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                tx.send_modify(|o| {
+                    o.finished = o.started;
+                    o.refused = refused.map(str::to_string);
+                });
+            }
+        });
+        outcome
+    }
+
+    #[tokio::test]
+    async fn a_refused_reload_is_an_error_not_an_ok() {
+        let (mut state, rx) = make_state_mut();
+        state.reload_outcome = Some(answering_reload_task(
+            rx,
+            Some("invalid firewall rules: interface 'eth9' is not in agent.interfaces"),
+        ));
+        // The completion signal alone would have been read as success.
+        state.reload_complete = Some(Arc::new(tokio::sync::Notify::new()));
+
+        let result = reload_config(State(Arc::new(state))).await;
+        match result {
+            Err(ApiError::BadRequest { code, message }) => {
+                assert_eq!(code, "RELOAD_REFUSED");
+                assert!(message.contains("eth9"), "{message}");
+            }
+            Err(other) => panic!("expected RELOAD_REFUSED, got {other:?}"),
+            Ok(Json(resp)) => panic!("a refused reload answered {}", resp.status),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_applied_reload_names_what_waits_for_a_restart() {
+        let (mut state, rx) = make_state_mut();
+        state.reload_outcome = Some(answering_reload_task(rx, None));
+        let boot = state.config.read().await.clone();
+        state.boot_config = Some(Arc::new(boot));
+        *state.config.write().await = AgentConfig::from_yaml(
+            "agent:\n  interfaces: [eth0]\nalerting:\n  dedup_window_secs: 7\n\
+             firewall:\n  default_policy: drop\n",
+        )
+        .unwrap();
+
+        let Json(resp) = reload_config(State(Arc::new(state)))
+            .await
+            .expect("an applied reload is ok");
+        assert_eq!(resp.status, "ok");
+        assert_eq!(resp.pending_restart, vec!["alerting".to_string()]);
+        assert!(resp.message.contains("alerting"), "{}", resp.message);
     }
 
     #[tokio::test]

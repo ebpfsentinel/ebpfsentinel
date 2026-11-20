@@ -11,6 +11,17 @@ use ports::secondary::lpm_coordinator_port::LpmCoordinatorPort;
 use ports::secondary::metrics_port::MetricsPort;
 use ports::secondary::nat_map_port::IpSetMapPort;
 
+/// What an external alias holds once its content is pushed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalAliasLoad {
+    /// Members the alias resolves to for rules matched in userspace.
+    pub members: usize,
+    /// IPv4 host addresses written into the kernel IP set. A network or an
+    /// IPv6 member stays out of it, and an agent with no kernel IP set
+    /// writes none.
+    pub kernel_hosts: usize,
+}
+
 /// Application-level alias service.
 ///
 /// Orchestrates alias resolution across static, nested, URL table,
@@ -117,11 +128,18 @@ impl AliasAppService {
     }
 
     /// Set external alias content (IPs pushed via API).
+    ///
+    /// Answers what the alias now holds: every member for the rules resolved
+    /// in userspace, and the IPv4 host addresses the kernel IP set matches
+    /// on. A set the kernel refuses to load is an
+    /// [`DomainError::EngineError`] and leaves the content last pushed in
+    /// place, so the answer never claims addresses the datapath does not
+    /// hold.
     pub fn set_external_ips(
         &mut self,
         alias_name: &str,
         ips: &[IpNetwork],
-    ) -> Result<(), DomainError> {
+    ) -> Result<ExternalAliasLoad, DomainError> {
         let alias = self
             .resolver
             .get(alias_name)
@@ -139,17 +157,26 @@ impl AliasAppService {
                 "no kernel IP set left for alias '{alias_name}'"
             )));
         };
-        if let Some(ref mut ipset_port) = self.ipset_port {
-            let addrs = ipset_host_addrs(alias_name, ips);
-            if let Err(e) = ipset_port.load_ipset_v4(set_id, &addrs) {
-                tracing::warn!(alias = alias_name, "failed to load external IP set: {e}");
+        let addrs = ipset_host_addrs(alias_name, ips);
+        let kernel_hosts = match self.ipset_port {
+            Some(ref mut ipset_port) => {
+                ipset_port.load_ipset_v4(set_id, &addrs).map_err(|e| {
+                    DomainError::EngineError(format!(
+                        "the kernel refused the IP set of alias '{alias_name}': {e}"
+                    ))
+                })?;
+                addrs.len()
             }
-        }
+            None => 0,
+        };
         self.external_ips
             .insert(alias_name.to_string(), ips.to_vec());
 
         self.update_metrics();
-        Ok(())
+        Ok(ExternalAliasLoad {
+            members: ips.len(),
+            kernel_hosts,
+        })
     }
 
     /// Get or assign a `set_id` for an alias name (for eBPF IP set maps).
@@ -877,6 +904,108 @@ mod tests {
         let set_id = svc.assigned_set_id("feed").expect("external alias set id");
         let loaded = reloaded.loaded.lock().unwrap().clone();
         assert_eq!(loaded, vec![(set_id, vec![0xC000_0201])]);
+    }
+
+    /// A kernel IP set that refuses every load.
+    struct RefusingIpSet;
+
+    impl IpSetMapPort for RefusingIpSet {
+        fn load_ipset_v4(&mut self, _set_id: u8, _addrs: &[u32]) -> Result<(), DomainError> {
+            Err(DomainError::EngineError("map full".to_string()))
+        }
+        fn clear_ipset_v4(&mut self, _set_id: u8) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn ipset_entry_count(&self) -> Result<usize, DomainError> {
+            Ok(0)
+        }
+    }
+
+    fn external_feed_service() -> AliasAppService {
+        let mut svc = make_service();
+        svc.reload_aliases(vec![Alias {
+            id: AliasId("feed".to_string()),
+            kind: AliasKind::External,
+            description: None,
+        }])
+        .unwrap();
+        svc
+    }
+
+    #[test]
+    fn external_content_answers_the_hosts_the_kernel_set_holds() {
+        let mut svc = external_feed_service();
+        svc.set_ipset_port(Box::new(RecordingIpSet::default()));
+        let load = svc
+            .set_external_ips(
+                "feed",
+                &[
+                    IpNetwork::V4 {
+                        addr: 0xC000_0201,
+                        prefix_len: 32,
+                    },
+                    IpNetwork::V4 {
+                        addr: 0xC633_6400,
+                        prefix_len: 24,
+                    },
+                    IpNetwork::V6 {
+                        addr: [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                        prefix_len: 128,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            load,
+            ExternalAliasLoad {
+                members: 3,
+                kernel_hosts: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn an_agent_with_no_kernel_set_answers_that_none_was_written() {
+        let mut svc = external_feed_service();
+        let load = svc
+            .set_external_ips(
+                "feed",
+                &[IpNetwork::V4 {
+                    addr: 0xC000_0201,
+                    prefix_len: 32,
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            load,
+            ExternalAliasLoad {
+                members: 1,
+                kernel_hosts: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn a_kernel_refusal_is_an_error_and_keeps_the_previous_content() {
+        let mut svc = external_feed_service();
+        let first = [IpNetwork::V4 {
+            addr: 0xC000_0201,
+            prefix_len: 32,
+        }];
+        svc.set_external_ips("feed", &first).unwrap();
+        svc.set_ipset_port(Box::new(RefusingIpSet));
+
+        let err = svc
+            .set_external_ips(
+                "feed",
+                &[IpNetwork::V4 {
+                    addr: 0xC000_0202,
+                    prefix_len: 32,
+                }],
+            )
+            .unwrap_err();
+        assert!(matches!(err, DomainError::EngineError(_)), "{err:?}");
+        assert_eq!(svc.external_ips.get("feed"), Some(&first.to_vec()));
     }
 
     #[test]
