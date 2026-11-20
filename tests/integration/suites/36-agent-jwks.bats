@@ -81,27 +81,36 @@ mint_token() {
 @test "EdDSA token signed by JWKS-listed key is accepted" {
     local token
     token="$(mint_token "kid-test" "soc-analyst")"
-    local status
-    status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+    local body
+    body="$(curl -s -w '\n%{http_code}' --max-time 3 \
         -H "Authorization: Bearer ${token}" \
         "${BASE_URL}/api/v1/agent/identity")"
+    local status="${body##*$'\n'}"
+    body="${body%$'\n'*}"
     [ "$status" = "200" ]
+    echo "$body" | jq -e '(.version | type == "string") and (.hostname | type == "string")' >/dev/null
 }
 
 @test "Token signed with unknown kid is rejected" {
     local token
     token="$(mint_token "kid-rotated-out" "x")"
-    local status
-    status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+    local body
+    body="$(curl -s -w '\n%{http_code}' --max-time 3 \
         -H "Authorization: Bearer ${token}" \
         "${BASE_URL}/api/v1/agent/identity")"
+    local status="${body##*$'\n'}"
+    body="${body%$'\n'*}"
     [ "$status" = "401" ]
+    assert_error_body "$body" AUTHENTICATION_REQUIRED
 }
 
 @test "Token without bearer prefix is rejected" {
-    local status
-    status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+    local body
+    body="$(curl -s -w '\n%{http_code}' --max-time 3 \
         -H "Authorization: not-a-token" \
         "${BASE_URL}/api/v1/agent/identity")"
+    local status="${body##*$'\n'}"
+    body="${body%$'\n'*}"
     [ "$status" = "401" ]
+    assert_error_body "$body" AUTHENTICATION_REQUIRED
 }

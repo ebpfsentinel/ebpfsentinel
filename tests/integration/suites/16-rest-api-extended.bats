@@ -36,7 +36,8 @@ teardown_file() {
 @test "IDS: GET rules returns 200" {
     local body
     body="$(api_get /api/v1/ids/rules)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array" and all(.[]; has("id"))' >/dev/null
 }
 
 # ── DLP ───────────────────────────────────────────────────────────
@@ -51,7 +52,8 @@ teardown_file() {
 @test "DLP: GET patterns returns 200" {
     local body
     body="$(api_get /api/v1/dlp/patterns)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array" and all(.[]; has("id") and has("data_type"))' >/dev/null
 }
 
 # ── Conntrack ─────────────────────────────────────────────────────
@@ -79,7 +81,8 @@ teardown_file() {
 @test "NAT: GET rules returns 200" {
     local body
     body="$(api_get /api/v1/nat/rules)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array" and all(.[]; has("id") and has("direction"))' >/dev/null
 }
 
 # ── Routing ───────────────────────────────────────────────────────
@@ -94,7 +97,8 @@ teardown_file() {
 @test "Routing: GET gateways returns 200" {
     local body
     body="$(api_get /api/v1/routing/gateways)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array" and all(.[]; has("id") and has("gateway_ip"))' >/dev/null
 }
 
 # ── Aliases ───────────────────────────────────────────────────────
@@ -102,7 +106,8 @@ teardown_file() {
 @test "Aliases: GET status returns 200" {
     local body
     body="$(api_get /api/v1/aliases/status)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e '.alias_count | type == "number"' >/dev/null
 }
 
 @test "Aliases: status counts the fixture aliases" {
@@ -136,18 +141,24 @@ teardown_file() {
 }
 
 @test "Aliases: PUT content on a non-External alias returns 400" {
-    api_put /api/v1/aliases/it-alias-ipset/content '{"ips":["203.0.113.11/32"]}' >/dev/null
-    assert_http_status "400" "$HTTP_STATUS"
+    local body
+    body="$(api_put /api/v1/aliases/it-alias-ipset/content '{"ips":["203.0.113.11/32"]}')"
+    assert_http_status "400"
+    assert_error_body "$body"
 }
 
 @test "Aliases: PUT content on an unknown alias returns 400" {
-    api_put /api/v1/aliases/no-such-alias/content '{"ips":["203.0.113.12/32"]}' >/dev/null
-    assert_http_status "400" "$HTTP_STATUS"
+    local body
+    body="$(api_put /api/v1/aliases/no-such-alias/content '{"ips":["203.0.113.12/32"]}')"
+    assert_http_status "400"
+    assert_error_body "$body"
 }
 
 @test "Aliases: PUT content with an invalid CIDR returns 400" {
-    api_put /api/v1/aliases/it-alias-external/content '{"ips":["not-an-ip"]}' >/dev/null
-    assert_http_status "400" "$HTTP_STATUS"
+    local body
+    body="$(api_put /api/v1/aliases/it-alias-external/content '{"ips":["not-an-ip"]}')"
+    assert_http_status "400"
+    assert_error_body "$body"
 }
 
 # ── Load Balancer ─────────────────────────────────────────────────
@@ -187,29 +198,41 @@ teardown_file() {
 @test "LB: DELETE service returns 204" {
     api_delete /api/v1/lb/services/it-lb-001 >/dev/null
     assert_http_status "204" "$HTTP_STATUS"
+    local listing
+    listing="$(api_get /api/v1/lb/services)"
+    echo "$listing" | jq -e --arg id "it-lb-001" 'type == "array" and (map(.id) | index($id) | not)' >/dev/null || {
+        echo "it-lb-001 still listed after delete: $listing" >&2; return 1; }
 }
 
 @test "LB: DELETE nonexistent service returns 404" {
-    api_delete /api/v1/lb/services/no-such-svc >/dev/null 2>&1 || true
-    assert_http_status "404" "$HTTP_STATUS"
+    local body
+    body="$(api_delete /api/v1/lb/services/no-such-svc)"
+    assert_http_status "404"
+    assert_error_body "$body"
 }
 
 @test "LB: POST with invalid protocol returns 400" {
     local svc='{"id":"it-lb-bad","name":"bad","protocol":"invalid","listen_port":80,"backends":[{"id":"be-1","addr":"10.0.0.1","port":80,"weight":1}]}'
-    api_post /api/v1/lb/services "$svc" >/dev/null 2>&1 || true
-    assert_http_status "400" "$HTTP_STATUS"
+    local body
+    body="$(api_post /api/v1/lb/services "$svc")"
+    assert_http_status "400"
+    assert_error_body "$body"
 }
 
 @test "LB: POST with zero listen_port returns 400" {
     local svc='{"id":"it-lb-bad2","name":"bad","protocol":"tcp","listen_port":0,"backends":[{"id":"be-1","addr":"10.0.0.1","port":80,"weight":1}]}'
-    api_post /api/v1/lb/services "$svc" >/dev/null 2>&1 || true
-    assert_http_status "400" "$HTTP_STATUS"
+    local body
+    body="$(api_post /api/v1/lb/services "$svc")"
+    assert_http_status "400"
+    assert_error_body "$body"
 }
 
 @test "LB: POST with empty backends returns 400" {
     local svc='{"id":"it-lb-bad3","name":"bad","protocol":"tcp","listen_port":80,"backends":[]}'
-    api_post /api/v1/lb/services "$svc" >/dev/null 2>&1 || true
-    assert_http_status "400" "$HTTP_STATUS"
+    local body
+    body="$(api_post /api/v1/lb/services "$svc")"
+    assert_http_status "400"
+    assert_error_body "$body"
 }
 
 @test "LB: list is empty after deletion" {
@@ -224,13 +247,15 @@ teardown_file() {
 @test "Ops: GET config returns 200" {
     local body
     body="$(api_get /api/v1/config)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "object" and length > 0' >/dev/null
 }
 
 @test "Ops: GET ebpf status returns 200" {
     local body
     body="$(api_get /api/v1/ebpf/status)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e '.programs | type == "array"' >/dev/null
 }
 
 @test "Ops: POST config reload returns 200" {
@@ -240,7 +265,8 @@ teardown_file() {
     # timeout is shorter than the endpoint's own contract. Measured cold on
     # the VM: 16.3 s first call, 4.6 s second, 0.02 s warm.
     body="$(api_post /api/v1/config/reload '{}' --max-time 30)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e '(.status == "ok" or .status == "pending") and (.message | type == "string")' >/dev/null
 }
 
 # ── Writing one section back ──────────────────────────────────────
@@ -411,7 +437,8 @@ teardown_file() {
 @test "IPS: GET domain-blocks returns 200" {
     local body
     body="$(api_get /api/v1/ips/domain-blocks)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array" and all(.[]; has("domain") and has("ip"))' >/dev/null
 }
 
 # ── MITRE ATT&CK coverage ─────────────────────────────────────────

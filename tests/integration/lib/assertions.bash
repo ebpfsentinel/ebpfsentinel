@@ -38,6 +38,25 @@ assert_json_field() {
     fi
 }
 
+# assert_error_body <json_string> [expected_code]
+# The agent's error shape: {"error":{"code":"SCREAMING_SNAKE","message":"..."}}.
+# With expected_code, the code must equal it; without, it must be present.
+assert_error_body() {
+    local json="$1"
+    local expected="${2:-}"
+    local code message
+    code="$(echo "$json" | jq -r '.error.code // empty' 2>/dev/null)"
+    message="$(echo "$json" | jq -r '.error.message // empty' 2>/dev/null)"
+    if [ -z "$code" ] || [ -z "$message" ]; then
+        echo "expected an error body with a code and a message, got: $json" >&2
+        return 1
+    fi
+    if [ -n "$expected" ] && [ "$code" != "$expected" ]; then
+        echo "expected error code $expected, got $code ($message)" >&2
+        return 1
+    fi
+}
+
 # assert_json_array_length <json_string> <jq_array_expression> <expected_length>
 assert_json_array_length() {
     local json="$1"

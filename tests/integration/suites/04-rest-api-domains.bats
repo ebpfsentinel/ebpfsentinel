@@ -28,7 +28,8 @@ teardown_file() {
 @test "L7: GET list returns 200" {
     local body
     body="$(api_get /api/v1/firewall/l7-rules)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array" and all(.[]; has("id") and has("action"))' >/dev/null
 }
 
 @test "L7: POST creates rule and returns 201" {
@@ -42,6 +43,10 @@ teardown_file() {
 @test "L7: DELETE rule returns 204" {
     api_delete /api/v1/firewall/l7-rules/it-l7-001 >/dev/null
     assert_http_status "204" "$HTTP_STATUS"
+    local listing
+    listing="$(api_get /api/v1/firewall/l7-rules)"
+    echo "$listing" | jq -e --arg id "it-l7-001" 'type == "array" and (map(.id) | index($id) | not)' >/dev/null || {
+        echo "it-l7-001 still listed after delete: $listing" >&2; return 1; }
 }
 
 # ── IPS ────────────────────────────────────────────────────────────
@@ -49,13 +54,15 @@ teardown_file() {
 @test "IPS: GET rules returns 200" {
     local body
     body="$(api_get /api/v1/ips/rules)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array" and all(.[]; has("id"))' >/dev/null
 }
 
 @test "IPS: GET blacklist returns 200" {
     local body
     body="$(api_get /api/v1/ips/blacklist)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array" and all(.[]; has("ip"))' >/dev/null
 }
 
 # ── Rate Limit ─────────────────────────────────────────────────────
@@ -63,7 +70,8 @@ teardown_file() {
 @test "Rate Limit: GET list returns 200" {
     local body
     body="$(api_get /api/v1/ratelimit/rules)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array" and all(.[]; has("id") and has("algorithm"))' >/dev/null
 }
 
 @test "Rate Limit: POST creates rule and returns 201" {
@@ -82,6 +90,10 @@ teardown_file() {
 @test "Rate Limit: DELETE rule returns 204" {
     api_delete /api/v1/ratelimit/rules/it-rl-001 >/dev/null
     assert_http_status "204" "$HTTP_STATUS"
+    local listing
+    listing="$(api_get /api/v1/ratelimit/rules)"
+    echo "$listing" | jq -e --arg id "it-rl-001" 'type == "array" and (map(.id) | index($id) | not)' >/dev/null || {
+        echo "it-rl-001 still listed after delete: $listing" >&2; return 1; }
 }
 
 # ── Threat Intel ───────────────────────────────────────────────────
@@ -89,19 +101,22 @@ teardown_file() {
 @test "Threat Intel: GET status returns 200" {
     local body
     body="$(api_get /api/v1/threatintel/status)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e '(.enabled | type == "boolean") and (.ioc_count | type == "number") and (.feed_count | type == "number")' >/dev/null
 }
 
 @test "Threat Intel: GET iocs returns 200" {
     local body
     body="$(api_get /api/v1/threatintel/iocs)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array"' >/dev/null
 }
 
 @test "Threat Intel: GET feeds returns 200" {
     local body
     body="$(api_get /api/v1/threatintel/feeds)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array" and all(.[]; has("id") and has("format"))' >/dev/null
 }
 
 # ── Alerts ─────────────────────────────────────────────────────────
@@ -109,7 +124,8 @@ teardown_file() {
 @test "Alerts: GET list returns 200 (empty)" {
     local body
     body="$(api_get /api/v1/alerts)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e '(.alerts | type == "array") and (.total | type == "number") and .total >= (.alerts | length)' >/dev/null
 }
 
 # ── Audit ──────────────────────────────────────────────────────────
@@ -117,13 +133,15 @@ teardown_file() {
 @test "Audit: GET logs returns 200" {
     local body
     body="$(api_get /api/v1/audit/logs)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e '(.entries | type == "array") and (.total | type == "number")' >/dev/null
 }
 
 @test "Audit: GET rule history returns 200" {
     local body
     body="$(api_get /api/v1/audit/rules/any-rule/history)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e '.rule_id == "any-rule" and (.entries | type == "array")' >/dev/null
 }
 
 # ── DNS Intelligence ──────────────────────────────────────────────
@@ -131,31 +149,36 @@ teardown_file() {
 @test "DNS: GET cache returns 200" {
     local body
     body="$(api_get /api/v1/dns/cache)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e '(.entries | type == "array") and (.page | type == "number")' >/dev/null
 }
 
 @test "DNS: GET cache with domain filter returns 200" {
     local body
     body="$(api_get '/api/v1/dns/cache?domain=example.com')"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e '(.entries | type == "array") and all(.entries[]; (.domain // "") | test("example\\.com$"))' >/dev/null
 }
 
 @test "DNS: GET stats returns 200" {
     local body
     body="$(api_get /api/v1/dns/stats)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e '(.hit_count | type == "number") and (.miss_count | type == "number") and (.top_queried | type == "array")' >/dev/null
 }
 
 @test "DNS: GET blocklist returns 200" {
     local body
     body="$(api_get /api/v1/dns/blocklist)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array" and all(.[]; has("pattern"))' >/dev/null
 }
 
 @test "DNS: DELETE cache (flush) returns 200" {
     local body
     body="$(api_delete /api/v1/dns/cache)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e '.flushed_entries | type == "number"' >/dev/null
 }
 
 # ── Domain Reputation ─────────────────────────────────────────────
@@ -163,13 +186,15 @@ teardown_file() {
 @test "Domains: GET reputation returns 200" {
     local body
     body="$(api_get /api/v1/domains/reputation)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e '(.entries | type == "array") and (.page_size | type == "number")' >/dev/null
 }
 
 @test "Domains: GET reputation with filters returns 200" {
     local body
     body="$(api_get '/api/v1/domains/reputation?domain=example.com&min_score=0.5')"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e '.entries | type == "array"' >/dev/null
 }
 
 @test "Domains: POST blocklist adds domain and returns 200" {

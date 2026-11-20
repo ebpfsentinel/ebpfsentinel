@@ -37,13 +37,15 @@ teardown_file() {
 @test "DDoS: GET attacks returns 200 (empty)" {
     local body
     body="$(api_get /api/v1/ddos/attacks)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array"' >/dev/null
 }
 
 @test "DDoS: GET attacks history returns 200" {
     local body
     body="$(api_get '/api/v1/ddos/attacks/history?limit=10')"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array" and length <= 10' >/dev/null
 }
 
 # ── DDoS Policies ────────────────────────────────────────────────
@@ -51,7 +53,8 @@ teardown_file() {
 @test "DDoS: GET policies returns 200 with seed policy" {
     local body
     body="$(api_get /api/v1/ddos/policies)"
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'any(.[]; .id == "ddos-test-syn" and .attack_type == "syn_flood" and .detection_threshold_pps == 10000)' >/dev/null
 }
 
 @test "DDoS: POST creates policy and returns 201" {
@@ -65,23 +68,33 @@ teardown_file() {
 @test "DDoS: DELETE policy returns 204" {
     api_delete /api/v1/ddos/policies/it-ddos-001 >/dev/null
     assert_http_status "204" "$HTTP_STATUS"
+    local listing
+    listing="$(api_get /api/v1/ddos/policies)"
+    echo "$listing" | jq -e --arg id "it-ddos-001" 'type == "array" and (map(.id) | index($id) | not)' >/dev/null || {
+        echo "it-ddos-001 still listed after delete: $listing" >&2; return 1; }
 }
 
 # ── Validation ────────────────────────────────────────────────────
 
 @test "DDoS: POST with invalid attack_type returns 400" {
     local policy='{"id":"it-ddos-bad","attack_type":"invalid","detection_threshold_pps":1000,"mitigation_action":"alert"}'
-    api_post /api/v1/ddos/policies "$policy" >/dev/null 2>&1 || true
-    assert_http_status "400" "$HTTP_STATUS"
+    local body
+    body="$(api_post /api/v1/ddos/policies "$policy")"
+    assert_http_status "400"
+    assert_error_body "$body"
 }
 
 @test "DDoS: POST with zero threshold returns 400" {
     local policy='{"id":"it-ddos-bad2","attack_type":"syn_flood","detection_threshold_pps":0,"mitigation_action":"alert"}'
-    api_post /api/v1/ddos/policies "$policy" >/dev/null 2>&1 || true
-    assert_http_status "400" "$HTTP_STATUS"
+    local body
+    body="$(api_post /api/v1/ddos/policies "$policy")"
+    assert_http_status "400"
+    assert_error_body "$body"
 }
 
 @test "DDoS: DELETE non-existent policy returns 404" {
-    api_delete /api/v1/ddos/policies/no-such-policy >/dev/null 2>&1 || true
-    assert_http_status "404" "$HTTP_STATUS"
+    local body
+    body="$(api_delete /api/v1/ddos/policies/no-such-policy)"
+    assert_http_status "404"
+    assert_error_body "$body"
 }

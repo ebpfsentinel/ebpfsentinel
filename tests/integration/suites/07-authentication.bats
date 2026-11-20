@@ -64,45 +64,46 @@ get_token() {
 }
 
 @test "API endpoint without token returns 401" {
-    local status_code
-    status_code="$(api_status /api/v1/firewall/rules)"
-    assert_http_status "401" "$status_code"
+    local body
+    body="$(api_get /api/v1/firewall/rules)"
+    assert_http_status "401"
+    assert_error_body "$body" AUTHENTICATION_REQUIRED
 }
 
 @test "valid admin token returns 200" {
     local body
     body="$(api_get /api/v1/firewall/rules -H "Authorization: Bearer $(get_token admin)")"
-    _load_http_status
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array"' >/dev/null
 }
 
 @test "expired token returns 401" {
-    local status_code
-    status_code="$(curl -s -o /dev/null --max-time "$HTTP_TIMEOUT" -w '%{http_code}' \
-        -H "Authorization: Bearer $(get_token expired)" \
-        "${BASE_URL}/api/v1/firewall/rules")"
-    assert_http_status "401" "$status_code"
+    local body
+    body="$(api_get /api/v1/firewall/rules -H "Authorization: Bearer $(get_token expired)")"
+    assert_http_status "401"
+    assert_error_body "$body" AUTHENTICATION_REQUIRED
 }
 
 @test "garbage token returns 401" {
-    local status_code
-    status_code="$(curl -s -o /dev/null --max-time "$HTTP_TIMEOUT" -w '%{http_code}' \
-        -H "Authorization: Bearer this.is.garbage" \
-        "${BASE_URL}/api/v1/firewall/rules")"
-    assert_http_status "401" "$status_code"
+    local body
+    body="$(api_get /api/v1/firewall/rules -H "Authorization: Bearer this.is.garbage")"
+    assert_http_status "401"
+    assert_error_body "$body" AUTHENTICATION_REQUIRED
 }
 
 @test "viewer can read (GET rules returns 200)" {
     local body
     body="$(api_get /api/v1/firewall/rules -H "Authorization: Bearer $(get_token viewer)")"
-    _load_http_status
-    assert_http_status "200" "$HTTP_STATUS"
+    assert_http_status "200"
+    echo "$body" | jq -e 'type == "array"' >/dev/null
 }
 
 @test "viewer cannot write (POST rule returns 403)" {
     local rule='{"id":"it-rbac-001","priority":100,"action":"deny","protocol":"tcp","scope":"global"}'
-    api_post /api/v1/firewall/rules "$rule" -H "Authorization: Bearer $(get_token viewer)" >/dev/null
-    assert_http_status "403" "$HTTP_STATUS"
+    local body
+    body="$(api_post /api/v1/firewall/rules "$rule" -H "Authorization: Bearer $(get_token viewer)")"
+    assert_http_status "403"
+    assert_error_body "$body"
 }
 
 @test "admin can create firewall rule" {
@@ -121,8 +122,8 @@ get_token() {
     local rule='{"id":"it-rbac-op-001","priority":100,"action":"deny","protocol":"tcp","dst_ip":"10.1.0.5/32","scope":"namespace:prod"}'
     local body
     body="$(api_post /api/v1/firewall/rules "$rule" -H "Authorization: Bearer $(get_token operator)")"
-    _load_http_status
-    assert_http_status "201" "$HTTP_STATUS"
+    assert_http_status "201"
+    echo "$body" | jq -e '.id == "it-rbac-op-001" and .action == "deny"' >/dev/null
 
     # Cleanup
     api_delete /api/v1/firewall/rules/it-rbac-op-001 -H "Authorization: Bearer $(get_token admin)" >/dev/null
@@ -130,14 +131,18 @@ get_token() {
 
 @test "operator cannot write own-namespace rule outside its CIDRs (403)" {
     local rule='{"id":"it-rbac-op-003","priority":100,"action":"deny","protocol":"tcp","dst_ip":"10.2.0.5/32","scope":"namespace:prod"}'
-    api_post /api/v1/firewall/rules "$rule" -H "Authorization: Bearer $(get_token operator)" >/dev/null
-    assert_http_status "403" "$HTTP_STATUS"
+    local body
+    body="$(api_post /api/v1/firewall/rules "$rule" -H "Authorization: Bearer $(get_token operator)")"
+    assert_http_status "403"
+    assert_error_body "$body"
 }
 
 @test "operator cannot create rule in other namespace (namespace:finance returns 403)" {
     local rule='{"id":"it-rbac-op-002","priority":100,"action":"deny","protocol":"tcp","scope":"namespace:finance"}'
-    api_post /api/v1/firewall/rules "$rule" -H "Authorization: Bearer $(get_token operator)" >/dev/null
-    assert_http_status "403" "$HTTP_STATUS"
+    local body
+    body="$(api_post /api/v1/firewall/rules "$rule" -H "Authorization: Bearer $(get_token operator)")"
+    assert_http_status "403"
+    assert_error_body "$body"
 }
 
 # An external alias feeds the kernel IP set that node-wide rules match on,
@@ -153,10 +158,11 @@ get_token() {
 }
 
 @test "viewer cannot push external alias content (403)" {
-    api_put /api/v1/aliases/it-ext/content '{"ips":["10.1.0.5"]}' \
-        -H "Authorization: Bearer $(get_token viewer)" >/dev/null
-    _load_http_status
-    assert_http_status "403" "$HTTP_STATUS"
+    local body
+    body="$(api_put /api/v1/aliases/it-ext/content '{"ips":["10.1.0.5"]}' \
+        -H "Authorization: Bearer $(get_token viewer)")"
+    assert_http_status "403"
+    assert_error_body "$body"
 }
 
 @test "admin pushing external alias content passes the role check" {

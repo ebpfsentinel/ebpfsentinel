@@ -66,24 +66,34 @@ teardown_file() {
 
 @test "POST duplicate id returns 409" {
     local rule='{"id":"it-fw-001","priority":200,"action":"allow","protocol":"udp","scope":"global"}'
-    api_post /api/v1/firewall/rules "$rule" >/dev/null
-    assert_http_status "409" "$HTTP_STATUS"
+    local body
+    body="$(api_post /api/v1/firewall/rules "$rule")"
+    assert_http_status "409"
+    assert_error_body "$body"
 }
 
 @test "POST invalid action returns 400" {
     local rule='{"id":"it-fw-bad","priority":100,"action":"nope","protocol":"tcp","scope":"global"}'
-    api_post /api/v1/firewall/rules "$rule" >/dev/null
-    assert_http_status "400" "$HTTP_STATUS"
+    local body
+    body="$(api_post /api/v1/firewall/rules "$rule")"
+    assert_http_status "400"
+    assert_error_body "$body"
 }
 
 @test "DELETE rule returns 204" {
     api_delete /api/v1/firewall/rules/it-fw-001 >/dev/null
     assert_http_status "204" "$HTTP_STATUS"
+    local listing
+    listing="$(api_get /api/v1/firewall/rules)"
+    echo "$listing" | jq -e --arg id "it-fw-001" 'type == "array" and (map(.id) | index($id) | not)' >/dev/null || {
+        echo "it-fw-001 still listed after delete: $listing" >&2; return 1; }
 }
 
 @test "DELETE nonexistent rule returns 404" {
-    api_delete /api/v1/firewall/rules/nonexistent-rule >/dev/null
-    assert_http_status "404" "$HTTP_STATUS"
+    local body
+    body="$(api_delete /api/v1/firewall/rules/nonexistent-rule)"
+    assert_http_status "404"
+    assert_error_body "$body"
 }
 
 @test "list holds no user rule after deletion" {
