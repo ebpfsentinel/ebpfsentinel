@@ -3,8 +3,10 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
+use adapters::tls_accept::{HandshakeLimits, Handshaken, spawn_tls_acceptor};
 use infrastructure::config::PqMode;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::pem::PemObject;
@@ -101,21 +103,37 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TlsL
     }
 }
 
-/// A TCP listener that performs TLS handshakes on accepted connections.
+/// A TCP listener that yields connections whose TLS handshake completed.
+///
+/// Handshakes run off the accept path, each under
+/// [`HANDSHAKE_TIMEOUT`](adapters::tls_accept::HANDSHAKE_TIMEOUT) and a cap on
+/// how many may be pending at once, so a client that connects and never sends
+/// a `ClientHello` does not stop the REST API, the health probes or the
+/// metrics scrape from answering anyone else.
 ///
 /// Implements [`axum::serve::Listener`] so it can be used as a drop-in
 /// replacement for [`TcpListener`] in `axum::serve`.
 pub struct TlsListener {
-    inner: TcpListener,
-    acceptor: TlsAcceptor,
+    local: SocketAddr,
+    ready: mpsc::Receiver<Handshaken>,
 }
 
 impl TlsListener {
-    pub fn new(listener: TcpListener, config: Arc<ServerConfig>) -> Self {
-        Self {
-            inner: listener,
-            acceptor: TlsAcceptor::from(config),
-        }
+    /// Start accepting on `listener`; must be called inside a Tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// The listener has no local address.
+    pub fn new(listener: TcpListener, config: Arc<ServerConfig>) -> io::Result<Self> {
+        let local = listener.local_addr()?;
+        let ready = spawn_tls_acceptor(
+            listener,
+            TlsAcceptor::from(config),
+            HandshakeLimits::default(),
+            "api",
+            |_| {},
+        );
+        Ok(Self { local, ready })
     }
 }
 
@@ -124,25 +142,107 @@ impl axum::serve::Listener for TlsListener {
     type Addr = SocketAddr;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        loop {
-            let (stream, addr) = match self.inner.accept().await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    tracing::error!(error = %e, "TCP accept error");
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    continue;
-                }
-            };
-            match self.acceptor.accept(stream).await {
-                Ok(tls) => return (tls, addr),
-                Err(e) => {
-                    tracing::debug!(error = %e, %addr, "TLS handshake failed");
-                }
-            }
+        match self.ready.recv().await {
+            Some(conn) => conn,
+            // The accept loop only stops once this receiver is dropped, so
+            // this is never reached while the listener is alive.
+            None => std::future::pending().await,
         }
     }
 
     fn local_addr(&self) -> io::Result<Self::Addr> {
-        self.inner.local_addr()
+        Ok(self.local)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use axum::Router;
+    use axum::routing::get;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+    use tokio_rustls::TlsConnector;
+    use tokio_rustls::rustls::pki_types::ServerName;
+    use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+
+    use super::*;
+
+    const HEALTHZ: &[u8] = b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+
+    /// A TCP client that never sends a `ClientHello` must not stop a second
+    /// client from completing a request: the accept loop used to await each
+    /// handshake inline, so the first one froze the whole API.
+    #[tokio::test]
+    async fn a_client_that_never_sends_a_client_hello_does_not_freeze_the_api() {
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("a self-signed certificate");
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cert_path = dir.path().join("api.pem");
+        let key_path = dir.path().join("api.key");
+        std::fs::write(&cert_path, generated.cert.pem()).expect("the certificate is written");
+        std::fs::write(&key_path, generated.signing_key.serialize_pem())
+            .expect("the key is written");
+        let config = load_rustls_config(&cert_path, &key_path, PqMode::Prefer, false)
+            .expect("the listener configuration loads");
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let tls = TlsListener::new(listener, config).expect("the listener starts");
+        let addr = axum::serve::Listener::local_addr(&tls).expect("a bound address");
+        let router = Router::new().route("/healthz", get(|| async { "ok" }));
+        tokio::spawn(async move {
+            let _ = axum::serve(
+                tls,
+                router.into_make_service_with_connect_info::<TlsConnectInfo>(),
+            )
+            .await;
+        });
+
+        let _stalled = TcpStream::connect(addr)
+            .await
+            .expect("the stalled client connects");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(generated.cert.der().clone())
+            .expect("the test certificate is an authority");
+        let client = ClientConfig::builder_with_provider(Arc::new(build_crypto_provider(
+            adapters::tls::LINK_OUTBOUND,
+            PqMode::Prefer,
+        )))
+        .with_safe_default_protocol_versions()
+        .expect("TLS 1.3 is available")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(client));
+        let name = ServerName::try_from("localhost").expect("a valid server name");
+
+        let response = tokio::time::timeout(Duration::from_secs(5), async move {
+            let tcp = TcpStream::connect(addr).await?;
+            let mut stream = connector.connect(name, tcp).await?;
+            stream.write_all(HEALTHZ).await?;
+            let mut response = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                match stream.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => response.extend_from_slice(&buf[..n]),
+                }
+            }
+            Ok::<_, std::io::Error>(String::from_utf8_lossy(&response).into_owned())
+        })
+        .await
+        .expect("the second client is answered while the first stalls")
+        .expect("the second request completes");
+
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "unexpected response: {response}"
+        );
+        assert!(response.ends_with("ok"), "unexpected body: {response}");
     }
 }

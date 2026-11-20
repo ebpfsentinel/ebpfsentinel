@@ -14,12 +14,14 @@ use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{Stream, StreamExt};
 use tonic::transport::Server;
 use tower::ServiceBuilder;
 
 use super::alert_service::AlertStreamServiceImpl;
 use super::interceptor::auth::AuthLayer;
 use super::proto::alert_stream_service_server::AlertStreamServiceServer;
+use crate::tls_accept::{HandshakeLimits, spawn_tls_acceptor as spawn_handshakes};
 
 /// TLS material and policy for the gRPC server.
 pub struct GrpcTlsConfig {
@@ -33,15 +35,10 @@ pub struct GrpcTlsConfig {
     pub allow_tls12: bool,
 }
 
-/// Number of handshaken connections held between the accept loop and tonic.
-const ACCEPT_BACKLOG: usize = 128;
 /// Keepalive on an accepted gRPC connection. tonic sets this itself when it
 /// owns the listener, and ignores its own setting when it is served a stream,
 /// so it is applied here.
 const GRPC_KEEPALIVE: Duration = Duration::from_secs(60);
-/// How long the accept loop waits after an accept error, so a listener in a
-/// bad state does not spin a core.
-const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Build the rustls [`ServerConfig`] the gRPC listener terminates with.
 ///
@@ -86,43 +83,23 @@ fn grpc_server_config(tls: &GrpcTlsConfig) -> anyhow::Result<Arc<ServerConfig>> 
 }
 
 /// Accepts connections and completes each TLS handshake off the accept loop,
-/// handing tonic the streams that finished one. A peer that stalls mid
-/// handshake therefore holds up nothing but itself, and a handshake that
+/// under the shared deadline and cap on pending handshakes, handing tonic the
+/// streams that finished one. A peer that stalls mid handshake therefore holds
+/// up nothing but its own slot, and only until the deadline; a handshake that
 /// fails is dropped rather than reported to the server, which has no
 /// connection to answer on.
 fn spawn_tls_acceptor(
     listener: TcpListener,
     acceptor: TlsAcceptor,
-) -> ReceiverStream<Result<tokio_rustls::server::TlsStream<TcpStream>, std::io::Error>> {
-    let (tx, rx) = tokio::sync::mpsc::channel(ACCEPT_BACKLOG);
-
-    tokio::spawn(async move {
-        loop {
-            let (stream, peer) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    tracing::error!(error = %e, "gRPC TCP accept error");
-                    tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
-                    continue;
-                }
-            };
-            apply_keepalive(&stream, GRPC_KEEPALIVE);
-            let acceptor = acceptor.clone();
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                match acceptor.accept(stream).await {
-                    Ok(tls) => {
-                        let _ = tx.send(Ok(tls)).await;
-                    }
-                    Err(e) => {
-                        tracing::debug!(error = %e, %peer, "gRPC TLS handshake failed");
-                    }
-                }
-            });
-        }
-    });
-
-    ReceiverStream::new(rx)
+) -> impl Stream<Item = Result<tokio_rustls::server::TlsStream<TcpStream>, std::io::Error>> {
+    let ready = spawn_handshakes(
+        listener,
+        acceptor,
+        HandshakeLimits::default(),
+        "grpc",
+        |stream| apply_keepalive(stream, GRPC_KEEPALIVE),
+    );
+    ReceiverStream::new(ready).map(|(tls, _peer)| Ok(tls))
 }
 
 /// Keep the TCP keepalive the plain listener gets, which tonic applies itself

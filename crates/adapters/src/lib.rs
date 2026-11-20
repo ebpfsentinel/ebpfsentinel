@@ -22,5 +22,6 @@ pub mod system_metrics;
 pub mod telemetry;
 pub mod threatintel;
 pub mod tls;
+pub mod tls_accept;
 pub mod warden;
 pub mod write_refusal_fanotify;

@@ -64,7 +64,7 @@ async fn serve(
         // `Connected` impl and a middleware to convert it back to
         // `ConnectInfo<SocketAddr>` so `tower_governor::PeerIpKeyExtractor`
         // can extract the client IP.
-        let tls_listener = TlsListener::new(listener, tls);
+        let tls_listener = TlsListener::new(listener, tls)?;
         let router = router.layer(axum::middleware::from_fn(tls_connect_info_to_socket_addr));
         tracing::info!(%bind_address, port, server = label, "HTTPS server listening");
         axum::serve(

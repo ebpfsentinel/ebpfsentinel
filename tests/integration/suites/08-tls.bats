@@ -150,3 +150,37 @@ teardown_file() {
         grpc.health.v1.Health/Check 2>/dev/null || exit_code=$?
     [ "$exit_code" -ne 0 ]
 }
+
+@test "HTTPS healthz answers while a client holds a connection without a ClientHello" {
+    # Three TCP connections that never start a TLS handshake. The listener
+    # used to await each handshake inline, so the first one froze every
+    # later request, health probes included.
+    local stalled_1 stalled_2 stalled_3
+    exec {stalled_1}<>"/dev/tcp/${AGENT_HOST}/${AGENT_TLS_PORT}"
+    exec {stalled_2}<>"/dev/tcp/${AGENT_HOST}/${AGENT_TLS_PORT}"
+    exec {stalled_3}<>"/dev/tcp/${AGENT_HOST}/${AGENT_TLS_PORT}"
+    sleep 0.5
+
+    local status_code
+    status_code="$(curl -s -o /dev/null --max-time 5 -w '%{http_code}' \
+        --cacert "${CERT_DIR}/ca.pem" "${TLS_URL}/healthz")" || true
+
+    exec {stalled_1}>&- {stalled_2}>&- {stalled_3}>&-
+    assert_http_status "200" "$status_code"
+}
+
+@test "gRPC health answers while a client holds a connection without a ClientHello" {
+    command -v grpcurl &>/dev/null || { echo "grpcurl not installed" >&2; return 1; }
+
+    local stalled
+    exec {stalled}<>"/dev/tcp/${AGENT_HOST}/${AGENT_GRPC_PORT}"
+    sleep 0.5
+
+    local output
+    output="$(timeout 10 grpcurl -max-time 5 -cacert "${CERT_DIR}/ca.pem" \
+        -import-path "${FIXTURE_DIR}" -proto health.proto \
+        "${AGENT_HOST}:${AGENT_GRPC_PORT}" grpc.health.v1.Health/Check 2>&1)" || true
+
+    exec {stalled}>&-
+    assert_contains "$output" "SERVING"
+}
