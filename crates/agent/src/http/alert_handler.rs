@@ -23,7 +23,7 @@ use domain::alert::triage::{
 use domain::audit::entity::{AuditAction, AuditComponent};
 use domain::auth::entity::JwtClaims;
 use domain::common::entity::Severity;
-use ports::secondary::alert_store::AlertTriageStore;
+use ports::secondary::alert_store::{AlertStore, AlertTriageStore};
 use ports::secondary::metrics_port::{AlertMetrics, MetricsPort};
 
 use super::error::{ApiError, ErrorBody};
@@ -1001,8 +1001,9 @@ pub async fn mark_false_positive(
 /// Query-string filters accepted by `GET /api/v1/alerts/stream`.
 ///
 /// All fields are optional. A missing field means "do not filter on
-/// this dimension". Tenant scoping is an Enterprise-only concern and
-/// is not exposed by the OSS endpoint.
+/// this dimension". A layer mounted in front of the handler may further
+/// narrow what a caller receives through [`AlertScope`]; no query
+/// parameter widens or names that scope.
 #[derive(Debug, Default, Deserialize, IntoParams)]
 pub struct StreamFilters {
     /// Minimum severity to receive (`low`, `medium`, `high`, `critical`).
@@ -1011,6 +1012,95 @@ pub struct StreamFilters {
     pub component: Option<String>,
     /// MITRE ATT&CK tactic (kebab-case, case-insensitive).
     pub mitre_tactic: Option<String>,
+}
+
+/// Which alerts one request may receive, decided before the handler runs.
+///
+/// A middleware in front of the alert routes inserts it into the request
+/// extensions when the caller may see only part of the alerts on the node;
+/// the stream then drops, from the replay and from the live feed alike,
+/// every alert the predicate refuses. Absent, nothing is narrowed.
+#[derive(Clone)]
+pub struct AlertScope(pub Arc<dyn Fn(&Alert) -> bool + Send + Sync>);
+
+impl AlertScope {
+    /// Wrap a predicate answering whether the request may receive an alert.
+    #[must_use]
+    pub fn new(admits: impl Fn(&Alert) -> bool + Send + Sync + 'static) -> Self {
+        Self(Arc::new(admits))
+    }
+
+    /// Whether the request may receive `alert`.
+    #[must_use]
+    pub fn admits(&self, alert: &Alert) -> bool {
+        (self.0)(alert)
+    }
+}
+
+impl std::fmt::Debug for AlertScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AlertScope(..)")
+    }
+}
+
+/// Whether an optional scope lets `alert` through: no scope admits all.
+fn in_scope(scope: Option<&AlertScope>, alert: &Alert) -> bool {
+    scope.is_none_or(|s| s.admits(alert))
+}
+
+/// Whether a write naming alert `id` may reach it under `scope`.
+///
+/// No scope admits every ID without a lookup. Under a scope, an alert the
+/// store does not hold and an alert the scope refuses answer the same
+/// `false`, so a narrowed caller cannot tell another tenant's alert from one
+/// that never existed. Callers answer `404` for one ID and list it as missing
+/// in a bulk change.
+///
+/// # Errors
+///
+/// Returns [`ApiError::Internal`] when the store lookup fails.
+pub fn write_admitted(
+    store: &dyn AlertStore,
+    scope: Option<&AlertScope>,
+    id: &str,
+) -> Result<bool, ApiError> {
+    let Some(scope) = scope else {
+        return Ok(true);
+    };
+    let alert = store.get_alert(id).map_err(|e| ApiError::Internal {
+        message: format!("alert lookup failed: {e}"),
+    })?;
+    Ok(alert.is_some_and(|a| scope.admits(&a)))
+}
+
+/// Split a bulk change's IDs into those `scope` lets the caller write and
+/// those it answers as missing, keeping the caller's order.
+///
+/// # Errors
+///
+/// Returns [`ApiError::BadRequest`] past the bulk ceiling, before any
+/// lookup, and [`ApiError::Internal`] when a store lookup fails.
+pub fn partition_admitted(
+    store: &dyn AlertStore,
+    scope: Option<&AlertScope>,
+    ids: Vec<String>,
+) -> Result<(Vec<String>, Vec<String>), ApiError> {
+    if ids.len() > MAX_BULK {
+        return Err(ApiError::BadRequest {
+            code: "INVALID_TRIAGE",
+            message: format!("name between 1 and {MAX_BULK} alerts"),
+        });
+    }
+    let mut admitted = Vec::with_capacity(ids.len());
+    let mut refused = Vec::new();
+    for id in ids {
+        if write_admitted(store, scope, &id)? {
+            admitted.push(id);
+        } else {
+            refused.push(id);
+        }
+    }
+    Ok((admitted, refused))
 }
 
 impl StreamFilters {
@@ -1144,6 +1234,7 @@ fn last_event_id(headers: &HeaderMap) -> Option<String> {
 pub async fn stream_alerts(
     State(state): State<Arc<AppState>>,
     Query(filters): Query<StreamFilters>,
+    scope: Option<Extension<AlertScope>>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let tx = state
@@ -1175,18 +1266,22 @@ pub async fn stream_alerts(
     let metrics: Arc<dyn MetricsPort> = Arc::clone(&state.metrics) as Arc<dyn MetricsPort>;
     let guard = SubscriberGuard::new(metrics, subscriber_counter());
 
+    let scope = scope.map(|Extension(s)| s);
     let replay_filter = filter.clone();
+    let replay_scope = scope.clone();
     let replay_stream = tokio_stream::iter(
         replay
             .into_iter()
-            .filter(move |a| replay_filter.matches(a))
+            .filter(move |a| replay_filter.matches(a) && in_scope(replay_scope.as_ref(), a))
             .map(|a| Ok::<_, Infallible>(alert_to_event(&a))),
     );
 
     let live_filter = filter;
     let live_stream = BroadcastStream::new(rx).filter_map(move |item| match item {
         Ok(alert) if replayed_ids.contains(&alert.id) => None,
-        Ok(alert) if live_filter.matches(&alert) => Some(Ok(alert_to_event(&alert))),
+        Ok(alert) if live_filter.matches(&alert) && in_scope(scope.as_ref(), &alert) => {
+            Some(Ok(alert_to_event(&alert)))
+        }
         Ok(_) | Err(_) => None,
     });
 
@@ -1209,6 +1304,79 @@ mod tests {
     use super::*;
 
     use domain::common::entity::{DomainMode, RuleId};
+
+    /// An IPv4 alert from `src`, everything else fixed.
+    fn alert_from(id: &str, src: u32) -> Alert {
+        Alert {
+            id: id.to_string(),
+            timestamp_ns: 1_000_000_000,
+            component: "ids".to_string(),
+            severity: Severity::High,
+            rule_id: RuleId("ids-001".to_string()),
+            action: DomainMode::Alert,
+            src_addr: [src, 0, 0, 0],
+            dst_addr: [0x0A00_0001, 0, 0, 0],
+            src_port: 12345,
+            dst_port: 80,
+            protocol: 6,
+            is_ipv6: false,
+            message: "test alert".to_string(),
+            false_positive: false,
+            src_domain: None,
+            dst_domain: None,
+            src_domain_score: None,
+            dst_domain_score: None,
+            src_geo: None,
+            dst_geo: None,
+            confidence: None,
+            threat_type: None,
+            data_type: None,
+            pid: None,
+            tgid: None,
+            direction: None,
+            matched_domain: None,
+            attack_type: None,
+            peak_pps: None,
+            current_pps: None,
+            mitigation_status: None,
+            total_packets: None,
+            mitre_attack: None,
+            ja4_fingerprint: None,
+            ml_anomaly_score: None,
+            ml_top_feature: None,
+            ml_engine: None,
+            ai_provider: None,
+            ai_sni: None,
+            ai_bytes_sent: None,
+            ai_exfil_type: None,
+            tls_threat_category: None,
+            tls_pqc_status: None,
+            container: None,
+            container_metadata: None,
+            executable_path: None,
+            executable_dev: None,
+            executable_inode: None,
+            executable_source: None,
+            flow_source: None,
+            workload: None,
+        }
+    }
+
+    /// A scope narrows the feed to what its predicate admits, and a request
+    /// carrying none receives everything, so a layer in front decides alone
+    /// which alerts a caller sees.
+    #[test]
+    fn a_scope_admits_only_what_its_predicate_admits() {
+        let inside = alert_from("alert-in", 0x0A00_0001);
+        let outside = alert_from("alert-out", 0xC0A8_0001);
+        let scope = AlertScope::new(|a: &Alert| a.src_addr[0] >> 24 == 10);
+
+        assert!(in_scope(Some(&scope), &inside));
+        assert!(!in_scope(Some(&scope), &outside));
+        assert!(in_scope(None, &inside));
+        assert!(in_scope(None, &outside));
+        assert_eq!(format!("{scope:?}"), "AlertScope(..)");
+    }
 
     /// A row opened out of the queue is the row the queue showed: the two
     /// readings share one mapping, so a field can never be written on the
@@ -1618,5 +1786,71 @@ mod tests {
         assert_eq!(parse_severity("critical"), Some(Severity::Critical));
         assert_eq!(parse_severity("unknown"), None);
         assert_eq!(parse_severity(""), None);
+    }
+
+    /// A store holding a fixed set of alerts, enough to answer lookups.
+    struct Held(Vec<Alert>);
+
+    impl AlertStore for Held {
+        fn store_alert(&self, _: &Alert) -> Result<(), domain::alert::error::AlertError> {
+            Ok(())
+        }
+        fn get_alert(&self, id: &str) -> Result<Option<Alert>, domain::alert::error::AlertError> {
+            Ok(self.0.iter().find(|a| a.id == id).cloned())
+        }
+        fn mark_false_positive(&self, _: &str) -> Result<bool, domain::alert::error::AlertError> {
+            Ok(false)
+        }
+        fn query_alerts(
+            &self,
+            _: &AlertQuery,
+        ) -> Result<Vec<Alert>, domain::alert::error::AlertError> {
+            Ok(self.0.clone())
+        }
+        fn alert_count(&self) -> Result<usize, domain::alert::error::AlertError> {
+            Ok(self.0.len())
+        }
+    }
+
+    fn ten_net() -> AlertScope {
+        AlertScope::new(|a: &Alert| a.src_addr[0] >> 24 == 10)
+    }
+
+    #[test]
+    fn a_scoped_write_reaches_its_alert_and_nothing_else_looks_different() {
+        let store = Held(vec![
+            alert_from("mine", 0x0A00_0002),
+            alert_from("theirs", 0xC0A8_0001),
+        ]);
+        let scope = ten_net();
+        assert!(write_admitted(&store, Some(&scope), "mine").expect("lookup"));
+        assert!(!write_admitted(&store, Some(&scope), "theirs").expect("lookup"));
+        assert!(!write_admitted(&store, Some(&scope), "gone").expect("lookup"));
+        assert!(write_admitted(&store, None, "theirs").expect("lookup"));
+        assert!(write_admitted(&store, None, "gone").expect("lookup"));
+    }
+
+    #[test]
+    fn a_scoped_bulk_change_keeps_order_and_answers_foreign_ids_as_missing() {
+        let store = Held(vec![
+            alert_from("a", 0x0A00_0002),
+            alert_from("b", 0xC0A8_0001),
+            alert_from("c", 0x0A00_0003),
+        ]);
+        let ids = ["c", "b", "x", "a"].map(String::from).to_vec();
+        let (admitted, refused) =
+            partition_admitted(&store, Some(&ten_net()), ids).expect("partition");
+        assert_eq!(admitted, ["c", "a"]);
+        assert_eq!(refused, ["b", "x"]);
+    }
+
+    #[test]
+    fn a_scoped_bulk_change_past_the_ceiling_is_refused_before_any_lookup() {
+        let store = Held(Vec::new());
+        let ids = (0..=MAX_BULK).map(|i| i.to_string()).collect();
+        assert!(matches!(
+            partition_admitted(&store, Some(&ten_net()), ids),
+            Err(ApiError::BadRequest { .. })
+        ));
     }
 }
