@@ -1,5 +1,6 @@
 # config-ebpf-dns.yaml - DNS intelligence eBPF scenario test config
-# Tests: DNS cache, blocklist enforcement, domain reputation
+# Tests: DNS cache, blocklist enforcement, domain reputation, domain-aware
+# IDS rules
 #
 # Network topology:
 #   Host: 10.200.0.1 (veth-ebpf0)
@@ -22,8 +23,21 @@ firewall:
   default_policy: pass
   rules: []
 
+# One domain-aware rule: it matches only a destination the DNS cache names
+# c2.ids-domain.example.test, which the suite's stub resolver answers with
+# the host address.
 ids:
-  enabled: false
+  enabled: true
+  mode: alert
+  rules:
+    - id: ids-domain-c2
+      description: "Traffic to a domain named by a C2 rule"
+      severity: high
+      protocol: tcp
+      dst_port: 9447
+      domain_pattern: "c2.ids-domain.example.test"
+      domain_match_mode: exact
+      enabled: true
 
 ips:
   enabled: false
@@ -48,12 +62,30 @@ dns:
     action: block
     inject_target: threatintel
     grace_period_secs: 300
+  # A domain answered by an address in a listed country takes the
+  # high-risk-country factor (weight 0.4), which clears this threshold on its
+  # own: one answer from 1.0.1.0/24 (CN in the test databases) makes the
+  # domain high risk and auto-blocks it. The IPS keeps its default alert
+  # mode, so the block is recorded and never installed in the datapath.
   reputation:
     enabled: true
     max_tracked_domains: 10000
-    auto_block_threshold: 0.8
-    auto_block_enabled: false
+    auto_block_threshold: 0.3
+    auto_block_enabled: true
+    auto_block_ttl_secs: 300
     decay_half_life_hours: 24
+    high_risk_countries: [CN]
+
+# The suite copies the synthetic databases from tests/fixtures into its data
+# directory before the agent starts.
+geoip:
+  enabled: true
+  source:
+    mode: file
+    city_path: __DATA_DIR__/GeoLite2-City.mmdb
+    asn_path: __DATA_DIR__/GeoLite2-ASN.mmdb
+  refresh_interval_hours: 48
+  database_dir: __DATA_DIR__/geoip
 
 l7:
   enabled: false

@@ -2,7 +2,7 @@
 # Read by scripts/audit-alerts-metrics.py; exactly one of suites, reason, gap
 # per line, and gap_ceiling equals the number of gap lines.
 
-gap_ceiling = 9
+gap_ceiling = 1
 
 [component."hidden_port"]
 reason = "needs a kernel rootkit hiding a listening port from /proc; suite 79 asserts a clean host raises none"
@@ -20,28 +20,10 @@ suites = ["85"]
 reason = "armed only by enterprise tamper protection; the OSS agent never refuses a tamper attempt on its own"
 
 [metric."audit_failures"]
-gap = "needs the audit store or a sink to refuse a write; no suite breaks one"
-
-[metric."auto_responses"]
-gap = "no suite reads ebpfsentinel_auto_responses"
-
-[metric."ddos_mitigations"]
-gap = "no suite reads ebpfsentinel_ddos_mitigations"
-
-[metric."dns_cache_evictions"]
-gap = "no suite reads ebpfsentinel_dns_cache_evictions"
-
-[metric."domain_auto_blocked"]
-gap = "no suite reads ebpfsentinel_domain_auto_blocked"
-
-[metric."domain_reputation_high_risk"]
-gap = "no suite reads ebpfsentinel_domain_reputation_high_risk"
-
-[metric."ids_domain_matches"]
-gap = "no suite reads ebpfsentinel_ids_domain_matches"
+reason = "counted only when the redb audit store or the log sink refuses a write, an I/O error or a full disk; no lane breaks the disk under a running agent"
 
 [metric."link_inspected_twice_seconds"]
-gap = "needs a pod profile agent claiming a workload link; no OSS lane runs one"
+reason = "observed only when a pod profile agent claims a Kubernetes workload link the node agent already inspects; no lane runs a pod profile agent beside a node agent, and the link watcher's unit tests pin the observation"
 
-[metric."tcp_retransmits"]
-gap = "no suite reads ebpfsentinel_tcp_retransmits"
+[metric."dns_cache_evictions"]
+gap = "counted by DnsCacheAppService::purge_loop, which the agent never spawns, so an expired entry is never purged"

@@ -97,6 +97,19 @@ teardown_file() {
     [ "$severity" = "critical" ]
 }
 
+@test "a critical IDS alert is answered by the auto-response policy" {
+    require_root
+
+    # The reverse-shell alert above is critical, which the fixture's policy
+    # answers by blacklisting its source.
+    wait_for_metric ebpfsentinel_auto_responses_total 1 15 \
+        '{policy="it-ids-critical-block"}' >/dev/null || {
+        echo "no auto-response counted for it-ids-critical-block" >&2
+        scrape_metrics | grep '^ebpfsentinel_auto_responses' >&2 || true
+        return 1
+    }
+}
+
 @test "threshold suppresses after count (SSH rule)" {
     require_root
     require_tool ncat

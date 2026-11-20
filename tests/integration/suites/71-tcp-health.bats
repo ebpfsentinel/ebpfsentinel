@@ -17,6 +17,7 @@
 #     edge's histogram, on the client end and on the server end.
 #   * A sweep of closed ports drawing more resets than the line raises
 #     one reset scan alert naming the prober.
+#   * A SYN nobody answers is sent again and counted as a retransmit.
 #   * No event was lost to a full table, an unwritten layout or an
 #     unreadable socket.
 
@@ -174,6 +175,19 @@ _listen() {
     [ -n "$alert" ] || { echo "no tcp-reset-scan alert; alerts: ${body}" >&2; return 1; }
     echo "$alert" | jq -e '.message | test("resets from closed ports|refused")' >/dev/null \
         || { echo "unexpected message: ${alert}" >&2; return 1; }
+}
+
+@test "a SYN nobody answers is sent again and counted as a retransmit" {
+    wait_for_ebpf_program "tracepoint-tcp-health" 30 || { echo "the TCP health counter did not attach" >&2; return 1; }
+
+    # Nothing in the namespace's subnet holds this address: its neighbour
+    # never resolves, no reply comes back, and the client sends the SYN
+    # again once a second has passed without one.
+    local silent="10.200.0.99"
+    ncat -w 4 "$silent" 7113 </dev/null >/dev/null 2>&1 || true
+
+    run _wait_sum ebpfsentinel_tcp_retransmits_total 'role="client"' 1
+    [ "$status" -eq 0 ] || { echo "client retransmits: ${output}, want at least 1" >&2; return 1; }
 }
 
 @test "the hooks lost no event to a full table or an unwritten layout" {

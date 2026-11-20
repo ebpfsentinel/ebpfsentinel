@@ -79,6 +79,18 @@ ddos:
       auto_block_duration_secs: 60
       enabled: true
 
+# The suite copies the synthetic databases from tests/fixtures into its data
+# directory: they place the test namespace (10.200.0.0/24) in KP, so an attack
+# from it carries a country and a block policy can cut that country off.
+geoip:
+  enabled: true
+  source:
+    mode: file
+    city_path: __DATA_DIR__/GeoLite2-City.mmdb
+    asn_path: __DATA_DIR__/GeoLite2-ASN.mmdb
+  refresh_interval_hours: 48
+  database_dir: __DATA_DIR__/geoip
+
 l7:
   enabled: false
 

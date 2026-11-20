@@ -83,6 +83,18 @@ audit:
   enabled: true
   storage_path: __DATA_DIR__/audit.redb
 
+# A critical IDS alert sends its source to the IPS blacklist. The IPS keeps
+# its default alert mode, so the entry is recorded and never installed in the
+# datapath: the test namespace keeps its traffic for the rest of the suite.
+auto_response:
+  enabled: true
+  policies:
+    - name: it-ids-critical-block
+      min_severity: critical
+      components: [ids]
+      action: block
+      ttl_secs: 300
+
 # The suites drive the datapath, not the control plane's identity: the
 # agent answers unauthenticated plaintext here, which the two opt-outs
 # above are what make legal on a non-loopback bind.

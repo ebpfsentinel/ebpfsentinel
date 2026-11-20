@@ -17,6 +17,16 @@ setup_file() {
     export DATA_DIR="/tmp/ebpfsentinel-test-data-ddos-$$"
     mkdir -p "$DATA_DIR"
 
+    # The synthetic databases place the test namespace in KP, the country the
+    # last test blocks.
+    local db
+    for db in City ASN; do
+        cp "${PROJECT_ROOT}/tests/fixtures/GeoLite2-${db}.mmdb" "${DATA_DIR}/" || {
+            echo "missing tests/fixtures/GeoLite2-${db}.mmdb" >&2
+            return 1
+        }
+    done
+
     create_test_netns
 
     PREPARED_CONFIG="$(prepare_ebpf_config "${FIXTURE_DIR}/config-ebpf-ddos.yaml")"
@@ -352,6 +362,54 @@ _wait_metric_grows() {
     local after
     after="$(_wait_metric_grows "$before")" || {
         echo "packet counter did not grow under t50 flood: ${before} -> ${after}" >&2
+        return 1
+    }
+}
+
+# ── Country block ────────────────────────────────────────────────
+#
+# Last on purpose: the block drops the whole test namespace at the firewall
+# until the attack expires, five minutes after the flood stops, and the agent
+# is stopped long before that. Its tables are not pinned, so nothing outlives
+# the suite.
+
+@test "a SYN flood under a block policy cuts its source country off" {
+    require_root
+    require_tool hping3
+
+    local policy='{"id":"ddos-test-syn-country","attack_type":"syn_flood","detection_threshold_pps":100,"mitigation_action":"block","auto_block_duration_secs":60,"enabled":true}'
+    api_post /api/v1/ddos/policies "$policy" >/dev/null
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ] || {
+        echo "the block policy was refused: ${HTTP_STATUS}" >&2
+        return 1
+    }
+
+    # The country is blocked when an attack becomes active. A SYN flood the
+    # earlier floods left active would not become active again, so wait for
+    # it to settle first: thirty quiet seconds take it out of active.
+    local i active=1
+    for i in $(seq 1 60); do
+        active="$(api_get /api/v1/ddos/attacks 2>/dev/null \
+            | jq '[.[] | select(.attack_type == "syn_flood" and .status == "active")] | length' 2>/dev/null)"
+        [ "${active:-1}" = "0" ] && break
+        sleep 1
+    done
+    [ "${active:-1}" = "0" ] || {
+        echo "a SYN flood attack is still active after a minute" >&2
+        api_get /api/v1/ddos/attacks >&2 || true
+        return 1
+    }
+
+    # About 2000 SYN a second for two seconds, far past the 100 pps line,
+    # keeps the attack above it for the three seconds that make it active.
+    hping3_flood_from_ns "$EBPF_HOST_IP" 8888 4000 u500 -S
+
+    wait_for_metric ebpfsentinel_ddos_mitigations_total 1 15 \
+        '{attack_type="block_country"}' >/dev/null || {
+        echo "no country block counted after the SYN flood" >&2
+        scrape_metrics | grep '^ebpfsentinel_ddos_' >&2 || true
+        api_get /api/v1/ddos/attacks >&2 || true
         return 1
     }
 }

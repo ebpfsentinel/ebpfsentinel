@@ -17,6 +17,16 @@ setup_file() {
     export DATA_DIR="/tmp/ebpfsentinel-test-data-dns-$$"
     mkdir -p "$DATA_DIR"
 
+    # The synthetic databases place 1.0.1.0/24 in CN, the country the
+    # fixture's reputation lists as high risk.
+    local db
+    for db in City ASN; do
+        cp "${PROJECT_ROOT}/tests/fixtures/GeoLite2-${db}.mmdb" "${DATA_DIR}/" || {
+            echo "missing tests/fixtures/GeoLite2-${db}.mmdb" >&2
+            return 1
+        }
+    done
+
     create_test_netns
 
     PREPARED_CONFIG="$(prepare_ebpf_config "${FIXTURE_DIR}/config-ebpf-dns.yaml")"
@@ -377,4 +387,74 @@ _dns_observed_metric() {
     # The match is counted, and the answered address went to the data plane.
     echo "$metrics" | awk '/^ebpfsentinel_dns_blocked_domains_total / && $2 >= 1 { ok = 1 } END { exit !ok }'
     echo "$metrics" | awk '/^ebpfsentinel_dns_injected_ips / && $2 >= 1 { ok = 1 } END { exit !ok }'
+}
+
+@test "traffic to an address the cache names after a domain rule counts a domain match" {
+    require_root
+    require_tool dig
+    require_tool python3
+
+    # The stub answers with the host address, so the cache names the host
+    # c2.ids-domain.example.test and the rule's port then matches on it.
+    local domain="c2.ids-domain.example.test"
+    _start_stub_resolver 1 "${EBPF_HOST_IP}"
+    dig +tries=1 +time=2 "@${EBPF_NS_IP}" "${domain}" A > /dev/null 2>&1 || true
+
+    local i ips=""
+    for i in $(seq 1 20); do
+        ips="$(_cached_ips "${domain}")"
+        [ -n "${ips}" ] && break
+        sleep 0.5
+    done
+    _stop_stub_resolver
+
+    echo "${ips}" | grep -qx "${EBPF_HOST_IP}" || {
+        echo "the cache does not name ${EBPF_HOST_IP} after ${domain}: ${ips}" >&2
+        return 1
+    }
+
+    send_tcp_from_ns "${EBPF_HOST_IP}" 9447 "IDS_DOMAIN_TEST" 2
+
+    wait_for_metric ebpfsentinel_ids_domain_matches_total 1 15 \
+        '{rule_id="ids-domain-c2"}' >/dev/null || {
+        echo "no domain match counted for ids-domain-c2" >&2
+        scrape_metrics | grep '^ebpfsentinel_ids_' >&2 || true
+        return 1
+    }
+}
+
+@test "a domain answered from a high-risk country is scored high risk and auto-blocked" {
+    require_root
+    require_tool dig
+    require_tool python3
+
+    local domain="risky.reputation.example.test"
+    _start_stub_resolver 1 1.0.1.5
+    dig +tries=1 +time=2 "@${EBPF_NS_IP}" "${domain}" A > /dev/null 2>&1 || true
+
+    local i ips=""
+    for i in $(seq 1 20); do
+        ips="$(_cached_ips "${domain}")"
+        [ -n "${ips}" ] && break
+        sleep 0.5
+    done
+    _stop_stub_resolver
+
+    echo "${ips}" | grep -qx "1.0.1.5" || {
+        echo "the cache does not name 1.0.1.5 after ${domain}: ${ips}" >&2
+        return 1
+    }
+
+    # The answer's country gives the domain a score past the threshold: the
+    # engine counts it high risk and blocks the address it resolved to.
+    wait_for_metric ebpfsentinel_domain_reputation_high_risk 1 10 >/dev/null || {
+        echo "no domain counted high risk after ${domain}" >&2
+        scrape_metrics | grep '^ebpfsentinel_domain_' >&2 || true
+        return 1
+    }
+    wait_for_metric ebpfsentinel_domain_auto_blocked_total 1 10 >/dev/null || {
+        echo "no domain auto-blocked after ${domain}" >&2
+        scrape_metrics | grep '^ebpfsentinel_domain_' >&2 || true
+        return 1
+    }
 }
