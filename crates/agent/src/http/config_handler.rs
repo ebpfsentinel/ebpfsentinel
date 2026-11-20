@@ -8,33 +8,51 @@
 //!
 //! Three things make this safe to expose rather than merely possible:
 //!
-//! * It is off unless `agent.allow_config_write` is set, because an agent
+//! * It is off unless `agent.config_writes` is `allowed`, because an agent
 //!   whose file is rendered by the Kubernetes operator has it rewritten at
 //!   the next reconcile and a write accepted here would vanish silently.
 //! * A masked value is never written back. The served configuration masks
-//!   every secret as `***`, so a section round-tripped through a screen
-//!   carries that string where the password was; writing it would replace
-//!   the secret with three asterisks. Wherever the submitted document holds
-//!   the mask, the value already on disk is kept.
-//! * The merged document is validated as a whole before it replaces
-//!   anything, and it lands by rename, so a rejected edit leaves the file
-//!   exactly as it was and an accepted one is never half-written.
+//!   every secret as `***`, and a URL that may carry one as
+//!   `scheme://host/***`, so a section round-tripped through a screen
+//!   carries those strings where the secret was; writing them would replace
+//!   the secret with asterisks. Wherever the submitted document holds a
+//!   mask, the value already on disk is kept, and a list item is matched to
+//!   the one on disk by its `id`, or its `name`, never by its position.
+//! * The merged document is validated as a whole, by the checks start-up
+//!   runs, before it replaces anything, and it lands by rename, so a
+//!   rejected edit leaves the file exactly as it was and an accepted one is
+//!   never half-written. Writes are taken one at a time, and the answer is
+//!   the reload's own: a file the agent refuses to run is an error, and the
+//!   settings that wait for a restart are named.
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Json;
 use axum::extract::{Path, State};
-use infrastructure::config::{AgentConfig, ConfigWrites};
+use infrastructure::config::{ConfigWrites, url_host_only};
 use serde::Deserialize;
 use serde_norway::Value;
 use utoipa::ToSchema;
 
 use super::error::{ApiError, ErrorBody};
-use super::ops_handler::{ReloadResponse, trigger_and_confirm_reload};
+use super::ops_handler::{ReloadResponse, load_and_validate, trigger_and_confirm_reload};
 use super::state::AppState;
 
 /// What the served configuration writes where a secret is.
 const MASK: &str = "***";
+
+/// What the served configuration ends a URL with when it dropped the path,
+/// query and credentials, which is where a URL carries a secret.
+const URL_MASK_TAIL: &str = "/***";
+
+/// One configuration write at a time, from the file read to the reload's
+/// answer: two writes merged into the same file read would each drop the
+/// other's section, and a reload answer would describe whichever file won.
+static WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Tells the staging files of one process apart.
+static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// One section of the configuration, as the editor holds it.
 #[derive(Deserialize, ToSchema)]
@@ -93,9 +111,16 @@ fn put_at(document: &mut Value, section: &str, value: Value) -> Result<(), Strin
 ///
 /// The mask is a string the served document carries in place of a secret,
 /// so the rule is only ever about strings: anywhere the incoming value is
-/// exactly that string, the file wins. A sequence is paired by position,
-/// which is what a round-trip through an editor preserves, and a mask with
-/// nothing behind it at that position is refused rather than resolved to
+/// exactly `***`, the file wins, and anywhere it is a URL ending in `/***`,
+/// the file's URL wins when its scheme and host are the ones shown.
+///
+/// A list item is paired with the item on disk that carries the same `id`,
+/// or the same `name` when it has no `id`: an editor that reorders, inserts
+/// or deletes items moves positions, and pairing by position would hand one
+/// item's secret to another. An item with neither key, or whose key is not
+/// unique on disk, has nothing behind it.
+///
+/// A mask with nothing behind it is refused rather than resolved to
 /// something - writing `***` as a password and quietly dropping the field
 /// are both ways of destroying a secret nobody asked to change.
 fn keep_masked(incoming: Value, on_disk: Option<&Value>, path: &str) -> Result<Value, String> {
@@ -103,6 +128,15 @@ fn keep_masked(incoming: Value, on_disk: Option<&Value>, path: &str) -> Result<V
         Value::String(ref text) if text == MASK => on_disk.cloned().ok_or_else(|| {
             format!("`{path}` is masked and the file holds no value there; write the value out")
         }),
+        Value::String(ref text) if text.ends_with(URL_MASK_TAIL) => match on_disk {
+            Some(Value::String(held)) if url_host_only(held) == *text => {
+                Ok(Value::String(held.clone()))
+            }
+            _ => Err(format!(
+                "`{path}` is a masked URL and the file holds no URL with that scheme and host \
+                 there; write the URL out"
+            )),
+        },
         Value::Mapping(map) => {
             let mut merged = serde_norway::Mapping::new();
             for (key, value) in map {
@@ -122,7 +156,8 @@ fn keep_masked(incoming: Value, on_disk: Option<&Value>, path: &str) -> Result<V
                 .into_iter()
                 .enumerate()
                 .map(|(i, item)| {
-                    keep_masked(item, held.and_then(|s| s.get(i)), &format!("{path}[{i}]"))
+                    let paired = held.and_then(|s| same_item(&item, s));
+                    keep_masked(item, paired, &format!("{path}[{i}]"))
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map(Value::Sequence)
@@ -131,13 +166,33 @@ fn keep_masked(incoming: Value, on_disk: Option<&Value>, path: &str) -> Result<V
     }
 }
 
+/// The key a list item is known by: its `id`, else its `name`, when that is
+/// a string.
+fn item_key(item: &Value) -> Option<(&'static str, &str)> {
+    ["id", "name"]
+        .into_iter()
+        .find_map(|field| item.get(field).and_then(Value::as_str).map(|v| (field, v)))
+}
+
+/// The one item of `on_disk` known by the same key as `item`; `None` when
+/// `item` has no key or the key names no item, or more than one.
+fn same_item<'a>(item: &Value, on_disk: &'a [Value]) -> Option<&'a Value> {
+    let (field, key) = item_key(item)?;
+    let mut matching = on_disk
+        .iter()
+        .filter(|held| held.get(field).and_then(Value::as_str) == Some(key));
+    let found = matching.next()?;
+    matching.next().is_none().then_some(found)
+}
+
 /// A temporary file beside the target, so the rename that follows stays on
 /// one filesystem and is therefore atomic.
 fn staging_path(target: &FsPath) -> PathBuf {
     let name = target
         .file_name()
         .map_or_else(|| "config.yaml".to_string(), |n| n.to_string_lossy().into());
-    target.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
+    let seq = STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+    target.with_file_name(format!(".{name}.{}.{seq}.tmp", std::process::id()))
 }
 
 /// Write one section of the agent configuration file and reload.
@@ -149,8 +204,8 @@ fn staging_path(target: &FsPath) -> PathBuf {
     ),
     request_body = ConfigSectionWrite,
     responses(
-        (status = 200, description = "Section written and reload triggered", body = ReloadResponse),
-        (status = 400, description = "Malformed section, malformed YAML, or a configuration the agent refuses", body = ErrorBody),
+        (status = 200, description = "Section written; `ok` once the agent runs it, `pending` while the reload is still in progress; `pending_restart` names what waits for a restart", body = ReloadResponse),
+        (status = 400, description = "Malformed section, malformed YAML, a mask with no value behind it (`UNRESOLVED_MASK`), a configuration start-up would refuse (`INVALID_CONFIG`), or one the reload refused (`RELOAD_REFUSED`)", body = ErrorBody),
         (status = 401, description = "Authentication required", body = ErrorBody),
         (status = 403, description = "Configuration writes are not enabled on this agent", body = ErrorBody),
         (status = 500, description = "The file could not be read or replaced", body = ErrorBody),
@@ -200,6 +255,9 @@ pub async fn put_config_section(
     };
     let incoming = incoming.clone();
 
+    // Held until the reload has answered: the file read, the merge, the
+    // replace and the verdict belong to this write alone.
+    let _write = WRITE_LOCK.lock().await;
     let text = tokio::fs::read_to_string(&path)
         .await
         .map_err(|e| ApiError::Internal {
@@ -231,9 +289,10 @@ pub async fn put_config_section(
 
 /// Stage, validate, and only then replace.
 ///
-/// Validation is the same `AgentConfig::load` the agent runs at boot, on a
-/// blocking thread because it parses and validates the whole document and a
-/// runtime worker blocked on it is every request in flight blocked with it.
+/// Validation is what start-up runs: `AgentConfig::load`, then every
+/// conversion the agent refuses to start without. It runs on a blocking
+/// thread because it parses and validates the whole document and a runtime
+/// worker blocked on it is every request in flight blocked with it.
 /// The staged file carries the permissions of the file it replaces, so a
 /// configuration holding secrets does not widen to the process umask on the
 /// way through - and it is set before validation rather than after, since
@@ -267,7 +326,7 @@ async fn write_validated(path: &FsPath, rendered: String) -> Result<(), ApiError
     }
 
     let candidate = staging.clone();
-    let validated = tokio::task::spawn_blocking(move || AgentConfig::load(&candidate).map(|_| ()))
+    let validated = tokio::task::spawn_blocking(move || load_and_validate(&candidate).map(|_| ()))
         .await
         .map_err(|e| ApiError::Internal {
             message: format!("config validation task failed: {e}"),
@@ -350,21 +409,130 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_masked_value_in_a_list_is_paired_by_position() {
-        let on_disk =
-            yaml("api_keys:\n  - name: one\n    key: first\n  - name: two\n    key: second\n");
-        let incoming =
-            yaml("api_keys:\n  - name: one\n    key: '***'\n  - name: two\n    key: '***'\n");
-        let merged = keep_masked(incoming, Some(&on_disk), "auth").expect("nothing unresolved");
-        let keys: Vec<&str> = merged
-            .get("api_keys")
+    fn keys_by_name(merged: &Value, list: &str) -> Vec<(String, String)> {
+        merged
+            .get(list)
             .and_then(Value::as_sequence)
             .expect("the list survives")
             .iter()
-            .filter_map(|entry| entry.get("key").and_then(Value::as_str))
+            .map(|entry| {
+                let field = |name: &str| {
+                    entry
+                        .get(name)
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                (field("name"), field("key"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_masked_value_in_a_list_is_paired_by_key_not_position() {
+        let on_disk =
+            yaml("api_keys:\n  - name: one\n    key: first\n  - name: two\n    key: second\n");
+        // The editor reordered the list and inserted a key of its own.
+        let incoming = yaml(
+            "api_keys:\n  - name: new\n    key: fresh\n  - name: two\n    key: '***'\n  \
+             - name: one\n    key: '***'\n",
+        );
+        let merged = keep_masked(incoming, Some(&on_disk), "auth").expect("nothing unresolved");
+        assert_eq!(
+            keys_by_name(&merged, "api_keys"),
+            vec![
+                ("new".to_string(), "fresh".to_string()),
+                ("two".to_string(), "second".to_string()),
+                ("one".to_string(), "first".to_string()),
+            ],
+            "each secret stays with the item that owns it"
+        );
+    }
+
+    #[test]
+    fn a_list_item_is_known_by_its_id_before_its_name() {
+        let on_disk = yaml(
+            "feeds:\n  - id: a\n    name: same\n    auth_header: 'Bearer A'\n  \
+             - id: b\n    name: same\n    auth_header: 'Bearer B'\n",
+        );
+        let incoming = yaml(
+            "feeds:\n  - id: b\n    name: same\n    auth_header: '***'\n  \
+             - id: a\n    name: same\n    auth_header: '***'\n",
+        );
+        let merged =
+            keep_masked(incoming, Some(&on_disk), "threatintel").expect("nothing unresolved");
+        let headers: Vec<&str> = merged
+            .get("feeds")
+            .and_then(Value::as_sequence)
+            .expect("the list survives")
+            .iter()
+            .filter_map(|feed| feed.get("auth_header").and_then(Value::as_str))
             .collect();
-        assert_eq!(keys, vec!["first", "second"]);
+        assert_eq!(headers, vec!["Bearer B", "Bearer A"]);
+    }
+
+    /// Deleting the first item used to hand the second item the deleted
+    /// one's secret, by position.
+    #[test]
+    fn a_deleted_item_takes_its_secret_with_it() {
+        let on_disk =
+            yaml("api_keys:\n  - name: one\n    key: first\n  - name: two\n    key: second\n");
+        let incoming = yaml("api_keys:\n  - name: two\n    key: '***'\n");
+        let merged = keep_masked(incoming, Some(&on_disk), "auth").expect("nothing unresolved");
+        assert_eq!(
+            keys_by_name(&merged, "api_keys"),
+            vec![("two".to_string(), "second".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_masked_item_with_no_key_is_refused() {
+        let on_disk = yaml("tokens:\n  - secret: first\n");
+        let incoming = yaml("tokens:\n  - secret: '***'\n");
+        let refusal = keep_masked(incoming, Some(&on_disk), "auth")
+            .expect_err("a keyless item is not paired by position");
+        assert!(refusal.contains("auth.tokens[0].secret"), "{refusal}");
+    }
+
+    #[test]
+    fn a_masked_item_whose_key_is_not_unique_on_disk_is_refused() {
+        let on_disk =
+            yaml("api_keys:\n  - name: dup\n    key: first\n  - name: dup\n    key: second\n");
+        let incoming = yaml("api_keys:\n  - name: dup\n    key: '***'\n");
+        keep_masked(incoming, Some(&on_disk), "auth")
+            .expect_err("which secret is meant is unknown");
+    }
+
+    /// The served configuration shows a webhook or feed URL as
+    /// `scheme://host/***`; sent back unchanged it is the URL on disk.
+    #[test]
+    fn a_masked_url_is_taken_from_the_file_when_scheme_and_host_match() {
+        let on_disk = yaml(
+            "routes:\n  - name: hook\n    webhook_url: 'https://hooks.example.com/T0/B0/s3cr3t?k=v'\n",
+        );
+        let incoming =
+            yaml("routes:\n  - name: hook\n    webhook_url: 'https://hooks.example.com/***'\n");
+        let merged =
+            keep_masked(incoming, Some(&on_disk), "alerting").expect("the URL is restored");
+        let url = merged
+            .get("routes")
+            .and_then(Value::as_sequence)
+            .and_then(|routes| routes.first())
+            .and_then(|route| route.get("webhook_url"))
+            .and_then(Value::as_str);
+        assert_eq!(url, Some("https://hooks.example.com/T0/B0/s3cr3t?k=v"));
+    }
+
+    #[test]
+    fn a_masked_url_whose_host_changed_is_refused() {
+        let on_disk = yaml("url: 'https://feeds.example.com/list?token=abc'\n");
+        let incoming = yaml("url: 'https://elsewhere.example.com/***'\n");
+        let refusal = keep_masked(incoming, Some(&on_disk), "threatintel")
+            .expect_err("a masked URL cannot move to another host");
+        assert!(refusal.contains("threatintel.url"), "{refusal}");
+
+        let incoming = yaml("url: 'https://new.example.com/***'\n");
+        keep_masked(incoming, None, "threatintel").expect_err("nothing on disk to restore");
     }
 
     /// A mask with nothing behind it is refused rather than resolved: both
@@ -390,6 +558,14 @@ mod tests {
             FsPath::new("/etc/ebpfsentinel/agent.yaml").parent()
         );
         assert_ne!(staged, PathBuf::from("/etc/ebpfsentinel/agent.yaml"));
+    }
+
+    /// Two writes in flight never share a staging file, so neither can
+    /// rename the other's half-written document into place.
+    #[test]
+    fn every_staging_file_has_a_name_of_its_own() {
+        let target = FsPath::new("/etc/ebpfsentinel/agent.yaml");
+        assert_ne!(staging_path(target), staging_path(target));
     }
 
     fn config_file(text: &str) -> (tempfile::TempDir, PathBuf) {
@@ -434,6 +610,32 @@ mod tests {
             .filter(|name| name != "agent.yaml")
             .collect();
         assert!(left_behind.is_empty(), "the staged file is cleaned up");
+    }
+
+    /// The file parses, and start-up would still refuse it: a rule scoped
+    /// to an interface the agent does not watch. Accepting it would leave an
+    /// agent that runs the previous rules and a file the next start refuses.
+    #[tokio::test]
+    async fn a_configuration_start_up_refuses_is_refused_before_it_lands() {
+        let original = "agent:\n  interfaces: [eth0]\n";
+        let (_dir, path) = config_file(original);
+        let refusal = write_validated(
+            &path,
+            "agent:\n  interfaces: [eth0]\nfirewall:\n  rules:\n    - id: deny-eth9\n      \
+             priority: 10\n      action: deny\n      scope: { interface: eth9 }\n"
+                .to_string(),
+        )
+        .await
+        .expect_err("start-up refuses this rule");
+        assert!(
+            matches!(&refusal, ApiError::BadRequest { code, message }
+                if *code == "INVALID_CONFIG" && message.contains("eth9")),
+            "{refusal:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the file is readable"),
+            original,
+        );
     }
 
     #[cfg(unix)]

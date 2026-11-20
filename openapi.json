@@ -951,6 +951,7 @@
           "Aliases"
         ],
         "summary": "`PUT /api/v1/aliases/{id}/content` - push content for an External alias.",
+        "description": "Needs the admin role: the alias feeds the kernel IP set node-wide rules\nmatch on, so its content changes what those rules let through.",
         "operationId": "set_external_alias_content",
         "parameters": [
           {
@@ -1005,7 +1006,7 @@
             }
           },
           "403": {
-            "description": "Insufficient permissions",
+            "description": "Insufficient permissions: needs the admin role",
             "content": {
               "application/json": {
                 "schema": {
@@ -1016,6 +1017,16 @@
           },
           "404": {
             "description": "Alias service not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The kernel IP set refused the content; the previous content stays",
             "content": {
               "application/json": {
                 "schema": {
@@ -1575,7 +1586,7 @@
         "operationId": "reload_config",
         "responses": {
           "200": {
-            "description": "Reload triggered successfully",
+            "description": "The agent runs the file, or the reload is still in progress (`pending`); `pending_restart` names what waits for a restart",
             "content": {
               "application/json": {
                 "schema": {
@@ -1585,7 +1596,7 @@
             }
           },
           "400": {
-            "description": "Invalid request",
+            "description": "The file is refused, by the checks start-up runs (`INVALID_CONFIG`) or by the reload itself (`RELOAD_REFUSED`); the running configuration stays",
             "content": {
               "application/json": {
                 "schema": {
@@ -1665,7 +1676,7 @@
         },
         "responses": {
           "200": {
-            "description": "Section written and reload triggered",
+            "description": "Section written; `ok` once the agent runs it, `pending` while the reload is still in progress; `pending_restart` names what waits for a restart",
             "content": {
               "application/json": {
                 "schema": {
@@ -1675,7 +1686,7 @@
             }
           },
           "400": {
-            "description": "Malformed section, malformed YAML, or a configuration the agent refuses",
+            "description": "Malformed section, malformed YAML, a mask with no value behind it (`UNRESOLVED_MASK`), a configuration start-up would refuse (`INVALID_CONFIG`), or one the reload refused (`RELOAD_REFUSED`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -13223,7 +13234,8 @@
         "required": [
           "status",
           "alias",
-          "ips_loaded"
+          "ips_loaded",
+          "kernel_set_entries"
         ],
         "properties": {
           "alias": {
@@ -13232,12 +13244,17 @@
           },
           "ips_loaded": {
             "type": "integer",
-            "description": "How many addresses the alias now holds.",
+            "description": "How many addresses the alias now holds, for rules resolved in\nuserspace.",
+            "minimum": 0
+          },
+          "kernel_set_entries": {
+            "type": "integer",
+            "description": "How many of them the kernel IP set matches on: IPv4 host addresses\nonly, a network or an IPv6 member stays out of it. `0` on an agent\nwhose firewall program did not load.",
             "minimum": 0
           },
           "status": {
             "type": "string",
-            "description": "Always `ok`: a refused content answers 400."
+            "description": "Always `ok`: a refused content answers 400, a kernel IP set that\nrefuses the load answers 500."
           }
         }
       },
@@ -18978,16 +18995,26 @@
       },
       "ReloadResponse": {
         "type": "object",
+        "description": "What a reload, or a configuration write that reloads, left running.",
         "required": [
           "status",
-          "message"
+          "message",
+          "pending_restart"
         ],
         "properties": {
           "message": {
             "type": "string"
           },
+          "pending_restart": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Settings the file changes since the agent started that a reload does\nnot apply: they take effect at the next restart. Blocks are named by\ntheir key, a key inside a reloaded block by its dotted path. Empty\nwhen the agent runs everything the file says, or when the reload is\nstill pending."
+          },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "`ok` once the agent runs the file, `pending` when the reload had not\nfinished within the bound the endpoint waits."
           }
         }
       },

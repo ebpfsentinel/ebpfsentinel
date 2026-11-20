@@ -484,7 +484,7 @@ impl AgentConfig {
     /// Return a copy of the config with sensitive values masked: API keys and
     /// their salt, the TLS key path, the SMTP and CrowdSec passwords, the
     /// CrowdSec bouncer key, feed, webhook and OTLP header values, the path and
-    /// query of every webhook URL, and the `GeoIP` licence key.
+    /// query of every webhook, feed and alias URL, and the `GeoIP` licence key.
     #[must_use]
     pub fn sanitized(&self) -> Self {
         let mut sanitized = self.clone();
@@ -503,10 +503,24 @@ impl AgentConfig {
         {
             smtp.password = Some("***".to_string());
         }
-        // Mask threat intel feed auth headers
+        // Mask threat intel feed auth headers. A feed URL keeps its host only:
+        // a commercial feed commonly carries its token in the query string.
         for feed in &mut sanitized.threatintel.feeds {
             if feed.auth_header.is_some() {
                 feed.auth_header = Some("***".to_string());
+            }
+            feed.url = url_host_only(&feed.url);
+        }
+        for feed in &mut sanitized.dns.blocklist.feeds {
+            feed.url = url_host_only(&feed.url);
+        }
+        for alias in sanitized
+            .aliases
+            .values_mut()
+            .chain(sanitized.firewall.aliases.values_mut())
+        {
+            if let Some(ref mut url) = alias.url {
+                *url = url_host_only(url);
             }
         }
         // Mask the CrowdSec bouncer key and machine password
@@ -2729,8 +2743,10 @@ impl std::str::FromStr for LogFormat {
 }
 
 /// `scheme://host/***`: what a URL reaches, without the path, query or user
-/// information that may carry its credential.
-fn url_host_only(url: &str) -> String {
+/// information that may carry its credential. Public so a writer of the
+/// configuration can recognise a URL it served masked and restore the original.
+#[must_use]
+pub fn url_host_only(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return "***".to_string();
     };
@@ -5014,7 +5030,7 @@ threatintel:
   feeds:
     - id: feed-1
       name: test-feed
-      url: "https://example.com/feed.txt"
+      url: "https://example.com/feed.txt?token=secret-in-query"
       auth_header: "X-API-KEY: secret-token-123"
 "#;
         let config = AgentConfig::from_yaml(yaml).unwrap();
@@ -5023,10 +5039,52 @@ threatintel:
             sanitized.threatintel.feeds[0].auth_header.as_deref(),
             Some("***")
         );
-        // URL is NOT masked
+        // The host stays visible; the path and query may carry the token.
         assert_eq!(
             sanitized.threatintel.feeds[0].url,
-            "https://example.com/feed.txt"
+            "https://example.com/***"
+        );
+    }
+
+    #[test]
+    fn sanitized_masks_blocklist_feed_and_alias_urls() {
+        let yaml = r#"
+agent:
+  interfaces: [eth0]
+dns:
+  blocklist:
+    feeds:
+      - name: paid
+        url: "https://lists.example.com/dl?key=blocklist-secret"
+aliases:
+  shared:
+    type: url_table
+    url: "https://user:alias-secret@tables.example.com/list.txt"
+    refresh_interval: 300
+firewall:
+  aliases:
+    local:
+      type: url_table
+      url: "https://tables.example.com/local.txt?token=fw-secret"
+      refresh_interval: 300
+"#;
+        let config = AgentConfig::from_yaml(yaml).unwrap();
+        let served = serde_json::to_string(&config.sanitized()).unwrap();
+        for secret in ["blocklist-secret", "alias-secret", "fw-secret"] {
+            assert!(!served.contains(secret), "{secret} is served: {served}");
+        }
+        let sanitized = config.sanitized();
+        assert_eq!(
+            sanitized.dns.blocklist.feeds[0].url,
+            "https://lists.example.com/***"
+        );
+        assert_eq!(
+            sanitized.aliases["shared"].url.as_deref(),
+            Some("https://tables.example.com/***")
+        );
+        assert_eq!(
+            sanitized.firewall.aliases["local"].url.as_deref(),
+            Some("https://tables.example.com/***")
         );
     }
 
