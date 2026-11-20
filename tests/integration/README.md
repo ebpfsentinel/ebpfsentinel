@@ -207,7 +207,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `tc-ids` | 12, 25, perf/04, 39, 66, 67, 77 | 2vm | 6.12 | datapath | Intrusion detection (TC); ringbuf overrun behaviour at >1 Mpps in perf/04; slow-attack signatures in 39; what the agent decided to drop against what the kernel confirmed it tore down in 66, driven from both sides of the tc hook so the confirmation is not read as a copy of the drop count; refused by name with fou unloaded in 77 |
 | `tc-nat-egress` | 21, 50, perf/06, 67 | 2vm | 6.12 | datapath | SNAT (TC egress); NPTv6 (RFC 6296) checksum-neutral prefix swap config + CLI/REST surface asserted in 50 (wire-level swap gated on IPv6 routability); SNAT/masquerade datapath throughput overhead measured in perf/06 |
 | `tc-nat-ingress` | 21, 50, perf/06, 67 | 2vm | 6.12 | datapath | DNAT (TC ingress); NPTv6 reverse-prefix translation surface asserted via REST + CLI in 50; DNAT datapath throughput overhead measured in perf/06 |
-| `tc-qos` | 28, 67 | 2vm | 6.12 | datapath | Traffic shaping (TC egress) |
+| `tc-qos` | 28, 67 | 2vm | 6.12 | datapath | Traffic shaping (TC egress); reports through QOS_METRICS counters only, asserted in 28 to move under a saturated pipe while firewall alerts still arrive |
 | `tc-scrub` | 23, 40, 46, 67 | 3vm | 6.12 | datapath | Packet normalization; spoofed-source amplification drop in 40; byte-level pcap assertions (TTL floor, MSS clamp, DF clear, IP-ID rand) in 46 |
 | `tc-threatintel` | 17, 33, 67 | 2vm | 6.12 | pr | OSINT feed IOC matching (TC) |
 | `tracepoint-drop-reason` | 90 | none | 6.12 | datapath | Counts the packets the kernel frees undelivered, under the skb_drop_reason it gives; 90 sends datagrams to a closed port and reads them back as NO_SOCKET on the interface they arrived on |
@@ -285,7 +285,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `auth` | 07, 36 | none | n/a | pr | JWT/OIDC/JWKS/API-key + RBAC |
 | `capture` | 49, 62 | 2vm | 6.12 | datapath | Pcap export lifecycle (Running → Completed) + on-disk pcap validity asserted in 49; broker-provided AF_PACKET sockets (PcapOpen fd hand-off) asserted in 62 |
 | `clusterip` | ebpfsentinel-operator/coexistence/03 | none | 6.12 | manual | The plan deciding which Services an opted-in workload resolves at connect and which stay with kube-proxy. Exercised by the operator's coexistence suite 03-clusterip.bats on kind, where an opted-in pod's connection is translated and a bystander's stays with kube-proxy; the plan is built from the cluster's Services and EndpointSlices, which no lane here serves |
-| `conntrack` | 16, 18, 24, 47, 62, 66 | 3vm | 6.12 | pr | Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; what the kernel confirmed it tore down against what the agent decided, on both sides of the tc hook order, in 66; GET /api/v1/conntrack/events SSE stream asserted in 16 (skipped when /proc/net/nf_conntrack is absent); brokered teardown from the user-namespace agent asserted in 62 |
+| `conntrack` | 16, 18, 24, 47, 62, 66 | 3vm | 6.12 | pr | Connection tracking; kernel-CT kill on block-rule injection mid-flow in 47; what the kernel confirmed it tore down against what the agent decided, on both sides of the tc hook order, in 66; GET /api/v1/conntrack/events SSE stream, a tracked flow read back from the listing and removed by the flush asserted in 18 on the datapath lane; brokered teardown from the user-namespace agent asserted in 62 |
 | `container` | 54, 130, 131, 137 | 2vm | 6.12 | nightly | cgroup_id enrichment via Docker enricher + resolver metric surface asserted in 54; a Podman container named by id, name and image, rootful and rootless through its user's own socket, with each runtime reported reachable, in 130; a container containerd and CRI-O start through the CRI attributed to its id, its runtime and its scope in 131, both on the vagrant-runtimes lane; a veth created after start-up, its peer in a namespace of its own, carries the agent's TC programs within seconds and the window before the attach is counted under its kind, in 137. The agent itself running as a Podman container has no suite: no agent image is published to pull, and building one is a full Rust build per run. Per-tenant cgroup filtering is enterprise-only and is tested in the enterprise repo |
 | `coverage` | No suite yet (restart-state) | k8s | 6.12 | manual | What the node agent sees of each pod and why it misses what it misses. 87 asserts the refusal on a node without a pod inventory; the per-pod report needs an agent watching a cluster's pods, which only the operator's kind lanes run, and none of their suites reads it yet |
 | `ddos` | 15, 22, 38, 39, 40 | 2vm | 6.12 | pr | DDoS detection + policy; MHDDoS flood matrix in 38; service-exhaustion in 39; amplification in 40 |
@@ -352,15 +352,15 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/agent/identity` | 35, 36 |
 | `/api/v1/agent/status` | 02, 08, 105, 130, 141, 30 |
 | `/api/v1/agent/stop` | _MISSING_ |
-| `/api/v1/alerts` | 04, 102, 12, 13, 130, 131, 135, 17, 25, 27, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 52, 53, 54, 55, 56, 59, 60, 61, 71, 79, 83, 84, 88, 90, 91, 92, 93, 94, 95, 96, 97 |
+| `/api/v1/alerts` | 04, 100, 101, 102, 108, 12, 13, 130, 131, 135, 136, 138, 142, 17, 25, 27, 28, 29, 30, 31, 38, 39, 40, 41, 43, 44, 45, 51, 52, 53, 54, 55, 56, 59, 60, 61, 71, 74, 75, 78, 79, 81, 82, 83, 84, 85, 88, 90, 91, 92, 93, 94, 95, 96, 97, 98 |
 | `/api/v1/alerts/stream` | 25, 34 |
 | `/api/v1/alerts/triage` | 25 |
 | `/api/v1/alerts/{id}` | 25, 34 |
 | `/api/v1/alerts/{id}/false-positive` | 25 |
 | `/api/v1/alerts/{id}/triage` | 25 |
 | `/api/v1/aliases/status` | 16 |
-| `/api/v1/aliases/{id}/content` | 16 |
-| `/api/v1/audit/logs` | 04, 56 |
+| `/api/v1/aliases/{id}/content` | 07, 16 |
+| `/api/v1/audit/logs` | 04, 48, 56 |
 | `/api/v1/audit/rules/{id}/history` | 04 |
 | `/api/v1/captures` | 142, 49 |
 | `/api/v1/captures/manual` | 49, 62 |
@@ -368,9 +368,9 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/config` | 16, 23, 25 |
 | `/api/v1/config/reload` | 16, 17, 35, 52, 99 |
 | `/api/v1/config/{section}` | 16, 17, 27, 35, 52, 99 |
-| `/api/v1/conntrack/connections` | 107, 16, 18 |
-| `/api/v1/conntrack/events` | 16 |
-| `/api/v1/conntrack/flush` | 16, 18, 62 |
+| `/api/v1/conntrack/connections` | 107, 18 |
+| `/api/v1/conntrack/events` | 18 |
+| `/api/v1/conntrack/flush` | 18, 62 |
 | `/api/v1/conntrack/status` | 16, 18, 21, 65 |
 | `/api/v1/crypto/posture` | 58 |
 | `/api/v1/ddos/attacks` | 15, 22 |
@@ -397,13 +397,13 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/ebpf/kernel-features` | 100, 27, 77, 82, 83, 84, 86, 88, 95, 99 |
 | `/api/v1/ebpf/raw-sockets` | 88 |
 | `/api/v1/ebpf/status` | 06, 16, 62, 68 |
-| `/api/v1/ebpf/uprobes` | 60 |
+| `/api/v1/ebpf/uprobes` | 27, 60 |
 | `/api/v1/exposure/listeners` | 90 |
 | `/api/v1/fingerprints/summary` | 41 |
 | `/api/v1/firewall/l7-rules` | 04, 29, 30, 56 |
 | `/api/v1/firewall/l7-rules/{id}` | 04, 29, 56 |
-| `/api/v1/firewall/rules` | 03, 07, 105, 11, 143, 26, 30, 47, 55, 76 |
-| `/api/v1/firewall/rules/{id}` | 03, 07, 11, 47, 76 |
+| `/api/v1/firewall/rules` | 03, 07, 105, 11, 143, 26, 28, 30, 47, 55, 76 |
+| `/api/v1/firewall/rules/{id}` | 03, 11, 28, 47 |
 | `/api/v1/firewall/shadow` | 76 |
 | `/api/v1/firewall/workload/fqdn` | 92 |
 | `/api/v1/firewall/workload/labels` | 92, 98 |
@@ -414,18 +414,18 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/geoip/status` | 30 |
 | `/api/v1/host-rules` | 135, 78 |
 | `/api/v1/host-rules/intents` | 78 |
-| `/api/v1/host-rules/mass-encryption` | 100, 101, 104, 108, 81, 82, 96 |
+| `/api/v1/host-rules/mass-encryption` | 100, 104, 81, 96 |
 | `/api/v1/host-rules/write-refusal` | 83, 84 |
 | `/api/v1/ids/rules` | 102, 12, 16, 55, 59 |
 | `/api/v1/ids/status` | 12, 16, 33 |
 | `/api/v1/ids/suricata/report` | 102 |
 | `/api/v1/ips/blacklist` | 04, 13, 38, 39, 55, 59 |
-| `/api/v1/ips/blacklist/{ip}` | 38, 39, 55 |
+| `/api/v1/ips/blacklist/{ip}` | 55 |
 | `/api/v1/ips/domain-blocks` | 13, 16 |
 | `/api/v1/ips/rules` | 04, 13, 136, 59 |
 | `/api/v1/ips/rules/{id}` | 13 |
-| `/api/v1/lb/services` | 16, 20 |
-| `/api/v1/lb/services/{id}` | 16, 20 |
+| `/api/v1/lb/services` | 139, 16, 20, 44 |
+| `/api/v1/lb/services/{id}` | 16, 20, 44 |
 | `/api/v1/lb/status` | 16, 20 |
 | `/api/v1/lb/vips` | 37 |
 | `/api/v1/lb/vips/bgp` | 37 |
@@ -453,7 +453,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/qos/shaping` | 103 |
 | `/api/v1/qos/status` | 28 |
 | `/api/v1/ratelimit/rules` | 04, 14, 55 |
-| `/api/v1/ratelimit/rules/{id}` | 04, 14, 55 |
+| `/api/v1/ratelimit/rules/{id}` | 04, 14 |
 | `/api/v1/responses` | 48 |
 | `/api/v1/responses/manual` | 48 |
 | `/api/v1/responses/{id}` | 48 |
@@ -480,9 +480,9 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `/api/v1/zones/policies/{id}` | 31 |
 | `/api/v1/zones/status` | 31 |
 | `/api/v1/zones/{id}` | 31 |
-| `/healthz` | 01, 02, 06, 07, 08, 09, 105, 11, 132, 137, 23, 26, 27, 38, 43, 52, 55, 56, 58, 60, 68, 91, 99 |
-| `/metrics` | 02, 06, 10, 105, 11, 12, 138, 14, 18, 19, 21, 22, 23, 24, 27, 28, 29, 30, 31, 32, 33, 34, 38, 40, 52, 53, 54, 61, 62, 64, 65, 66, 67, 71, 90 |
-| `/readyz` | 01, 02, 06, 07, 132, 23, 55, 56 |
+| `/healthz` | 01, 02, 06, 07, 08, 09, 105, 106, 11, 132, 137, 140, 23, 26, 37, 38, 41, 43, 52, 55, 56, 58, 60, 61, 68, 77, 78, 81, 83, 84, 86, 87, 88, 91, 93, 99 |
+| `/metrics` | 02, 06, 10, 100, 104, 105, 11, 12, 137, 138, 14, 147, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 29, 30, 31, 32, 33, 34, 37, 38, 39, 40, 42, 43, 44, 52, 53, 54, 55, 61, 62, 64, 65, 66, 67, 68, 71, 83, 84, 90 |
+| `/readyz` | 01, 02, 06, 07, 106, 132, 140, 23, 37, 41, 55, 56, 60, 61, 77, 78, 81, 83, 84, 86, 87, 88, 91, 93 |
 
 <!-- coverage:end -->
 

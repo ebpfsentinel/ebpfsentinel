@@ -176,6 +176,17 @@ teardown_file() {
     }
 
     api_delete "/api/v1/ips/blacklist/${target}" >/dev/null 2>&1 || true
+    _load_http_status
+    [ "${HTTP_STATUS}" = "204" ] || {
+        echo "unexpected status ${HTTP_STATUS} for DELETE /api/v1/ips/blacklist/${target}" >&2
+        return 1
+    }
+    list="$(api_get /api/v1/ips/blacklist)" || true
+    if echo "${list}" | grep -qi 'fd00:59::dead'; then
+        echo "ipv6 blacklist entry still listed after DELETE" >&2
+        echo "${list}" >&2
+        return 1
+    fi
 }
 
 # ── Ratelimit - the v4/v6 source boundary holds ────────────────────

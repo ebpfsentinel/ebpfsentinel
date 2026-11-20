@@ -3,7 +3,8 @@
 # (eBPF programs, CLI subcommands, domain modules, the capabilities of
 # capabilities.json and the paths of openapi.json) and verifies that
 # every entry has a row in tests/integration/coverage-matrix.yaml, or for
-# a path, a suite requesting it.
+# a path, a suite requesting it and reading the answer. The last line printed
+# is the routes summary the meta runner scripts/audit-surfaces.sh collects.
 #
 # Modes:
 #   audit-coverage.sh             check only - exit 1 on any missing row
@@ -27,7 +28,7 @@ MODE="${1:-audit}"
 
 case "${MODE}" in
   --help|-h)
-    sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   --render|--check-render|audit) ;;
@@ -228,9 +229,14 @@ for row in rows:
             stale_suite_refs.append(f"  - {kind}/{feat} references suite {s}")
 
 # ── Routes: found in the suites, or listed with suites or an owner ──
-# A route counts where code requests it: a full-line comment naming a path
-# requests nothing, and a path requested inside a lib helper is requested by
-# every suite that calls that helper, directly or through another helper.
+# A route counts where code requests it and reads the answer: a full-line
+# comment naming a path requests nothing, a path requested inside a lib helper
+# is requested by every suite that calls that helper, directly or through
+# another helper, and inside one `@test` an assertion (`assert_*`, `jq -e`, a
+# `[ ... ]` test, `grep -q`) must follow the line that requests the route, or
+# the helper call that does. A path requested only in `setup_file`, or by a
+# test that reads nothing back, is not covered. Tests whose only check is a
+# status code are listed after the audit, for a reader to judge.
 def uncommented(text: str) -> str:
     return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
 
@@ -254,45 +260,166 @@ if lib_dir.exists():
 def word_re(name: str) -> re.Pattern:
     return re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])")
 
-lib_func_res = {name: word_re(name) for name in lib_funcs}
-
-def with_helpers(text: str) -> str:
-    seen: set[str] = set()
-    pending = [text]
-    parts = [text]
-    while pending:
-        chunk = pending.pop()
-        for name, rx in lib_func_res.items():
-            if name not in seen and rx.search(chunk):
-                seen.add(name)
-                parts.append(lib_funcs[name])
-                pending.append(lib_funcs[name])
-    return "\n".join(parts)
-
-suite_texts: dict[str, str] = {}
-if suites_dir.exists():
-    for p in sorted(suites_dir.iterdir()):
-        m = re.match(r"^(\d{2,})-.*\.bats$", p.name)
-        if m:
-            suite_texts[m.group(1)] = with_helpers(uncommented(p.read_text()))
-
 def route_pattern(path: str) -> re.Pattern:
     rx = re.escape(path)
     rx = re.sub(r"\\\{[^}]*\\\}", r"[^/\\s\"']+", rx)
     return re.compile(rx + r"(?![A-Za-z0-9_/-])")
 
+TEST_START = re.compile(r"^@test\s+[\"'](.*)[\"']\s*\{\s*$")
+ASSERTION = re.compile(
+    r"(?<![A-Za-z0-9_])(?:assert_[A-Za-z_]+|jq\s+(?:-[A-Za-z]*\s+)*-[A-Za-z]*e[A-Za-z]*\b"
+    r"|grep\s+-[A-Za-z]*q|\[\[?\s|\bcmp\s|\bdiff\s)"
+)
+STATUS_ONLY = re.compile(
+    r"^\s*(?:assert_http_status\b|\[\s+\"\$(?:output|status|code|http_code)\"\s+(?:=|-eq)\s+\"?\d{3}\"?\s+\])"
+)
+
+def blocks_of(text: str) -> tuple[list[tuple[str, list[str]]], dict[str, list[str]]]:
+    """Each `@test` of a suite as its name and body lines, and the functions
+    the suite defines for its tests, as their body lines."""
+    tests: list[tuple[str, list[str]]] = []
+    local: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for line in text.splitlines():
+        test = TEST_START.match(line)
+        func = func_def_re.match(line)
+        if test:
+            current = []
+            tests.append((test.group(1), current))
+        elif func and not line.startswith((" ", "\t")):
+            current = local.setdefault(func.group(1), [])
+        elif line.startswith("}"):
+            current = None
+        elif current is not None:
+            current.append(line)
+    return tests, local
+
+def calls_of(names) -> re.Pattern | None:
+    """One pattern matching a call to any of these functions, as a word."""
+    if not names:
+        return None
+    alternatives = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    return re.compile(r"(?<![A-Za-z0-9_])(" + alternatives + r")(?![A-Za-z0-9_])")
+
+def reads_answer(lines, rx, calls, reading, checking) -> tuple[bool, bool]:
+    """Whether these lines request the route, and whether an assertion reads
+    the answer: one follows the request, the call that requests it is to a
+    function that reads the answer itself, or the path is handed as an
+    argument to a function that checks what it gets back. `calls` matches a
+    call to a function already known to request the route."""
+    requested = False
+    for i, line in enumerate(lines):
+        direct = rx.search(line)
+        called = set(calls.findall(line)) if calls else set()
+        if not direct and not called:
+            continue
+        requested = True
+        if called & reading:
+            return True, True
+        if direct and any(call.search(line) for call in checking.values()):
+            return True, True
+        if any(ASSERTION.search(rest) for rest in lines[i:]):
+            return True, True
+    return requested, False
+
+lib_lines = {name: body.splitlines() for name, body in lib_funcs.items()}
+lib_text = "\n".join(lib_funcs.values())
+parsed_suites: dict[str, tuple[list[tuple[str, list[str]]], dict[str, list[str]]]] = {}
+suite_raw: dict[str, str] = {}
+if suites_dir.exists():
+    for p in sorted(suites_dir.iterdir()):
+        m = re.match(r"^(\d{2,})-.*\.bats$", p.name)
+        if m:
+            suite_raw[m.group(1)] = uncommented(p.read_text())
+            parsed_suites[m.group(1)] = blocks_of(suite_raw[m.group(1)])
+
+def checkers(bodies: dict[str, list[str]]) -> dict[str, re.Pattern]:
+    """The functions that assert on what they get, as the pattern of a line
+    handing them an argument."""
+    return {
+        name: re.compile(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+|!\s+|run\s+)*" + re.escape(name) + r"(?![A-Za-z0-9_])")
+        for name, lines in bodies.items()
+        if any(ASSERTION.search(line) for line in lines)
+    }
+
+def settle(bodies, rx, checking, requesting: dict, reading: set) -> None:
+    """Grow the functions that request the route and those that read its
+    answer until no body adds one."""
+    changed = True
+    while changed:
+        changed = False
+        calls = calls_of(requesting)
+        for name, lines in bodies.items():
+            did, read = reads_answer(lines, rx, calls, reading, checking)
+            if did and name not in requesting:
+                requesting[name] = True
+                changed = True
+            if read and name not in reading:
+                reading.add(name)
+                changed = True
+
+lib_checking = checkers(lib_lines)
+# A suite's own function shadows a library one of the same name.
+suite_bodies = {s: {**lib_lines, **local} for s, (_, local) in parsed_suites.items()}
+suite_checking = {s: checkers(bodies) for s, bodies in suite_bodies.items()}
+
+def read_back(path: str) -> tuple[list[str], list[str]]:
+    """The suites whose tests request the route and read the answer, and
+    the tests that request it and read nothing back."""
+    rx = route_pattern(path)
+    asserted, silent = [], []
+    in_lib = bool(rx.search(lib_text))
+    lib_requesting: dict[str, bool] = {}
+    lib_reading: set[str] = set()
+    if in_lib:
+        settle(lib_lines, rx, lib_checking, lib_requesting, lib_reading)
+    for suite, (blocks, local) in parsed_suites.items():
+        # Nothing names the path: no line of this suite can request it.
+        if not in_lib and not rx.search(suite_raw[suite]):
+            continue
+        # The library alone answers part of the question; a suite that
+        # shadows none of its functions starts from that answer.
+        shadowed = bool(set(local) & set(lib_lines))
+        requesting = {} if shadowed else dict(lib_requesting)
+        reading = set() if shadowed else set(lib_reading)
+        settle(suite_bodies[suite], rx, suite_checking[suite], requesting, reading)
+        calls = calls_of(requesting)
+        for name, lines in blocks:
+            did, read = reads_answer(lines, rx, calls, reading, suite_checking[suite])
+            if read:
+                if suite not in asserted:
+                    asserted.append(suite)
+            elif did:
+                silent.append(f"{suite}: {name}")
+    return sorted(asserted), silent
+
 route_suites: dict[str, list[str]] = {}
+route_silent: dict[str, list[str]] = {}
 for path in disk_routes:
-    pat = route_pattern(path)
-    route_suites[path] = sorted(s for s, text in suite_texts.items() if pat.search(text))
+    route_suites[path], route_silent[path] = read_back(path)
+
+# Tests whose only check is a status code: covered, but for a reader to judge.
+status_only_tests: list[str] = []
+for suite, (blocks, _) in parsed_suites.items():
+    for name, lines in blocks:
+        checks = [line for line in lines if ASSERTION.search(line)]
+        if checks and all(STATUS_ONLY.match(line) for line in checks) and "/api/" in "\n".join(lines):
+            status_only_tests.append(f"  - {suite}: {name}")
 
 uncovered_routes: list[str] = []
 stale_route_entries: list[str] = []
+routes_by_scan = routes_by_suite = routes_gaps = 0
 for path in disk_routes:
     entry = route_entries.get(path)
     found = route_suites[path]
     if entry is None:
-        if not found:
+        if found:
+            routes_by_scan += 1
+        elif route_silent[path]:
+            uncovered_routes.append(
+                f"  - {path} (requested by {'; '.join(route_silent[path])}, and no assertion reads the answer)"
+            )
+        else:
             uncovered_routes.append(f"  - {path}")
         continue
     if "owner" in entry:
@@ -303,6 +430,7 @@ for path in disk_routes:
                 f"  - {path} is requested by {', '.join(found)}: drop its `routes` line"
             )
         else:
+            routes_gaps += 1
             tbd_rows.append(f"  - route {path} (owner: {entry['owner']})")
     else:
         for s in entry.get("suites") or []:
@@ -314,6 +442,8 @@ for path in disk_routes:
                 stale_suite_refs.append(f"  - route {path} elsewhere: {why}")
         if not entry.get("suites") and not entry.get("elsewhere"):
             bad_owners.append(f"  - route {path} lists neither suites, elsewhere nor an owner")
+        else:
+            routes_by_suite += 1
 for path in sorted(set(route_entries) - set(disk_routes)):
     stale_route_entries.append(f"  - {path} is not a path of openapi.json")
 
@@ -542,7 +672,18 @@ elif mode == "--check-render":
     else:
         print("\nREADME coverage block is up-to-date")
 
+if status_only_tests:
+    banner(f"Status only ({len(status_only_tests)} tests whose only check is a status code, for a reader to judge)")
+    print("\n".join(status_only_tests))
+
 if failed:
     sys.exit(1)
+# The routes half of this audit in the standard form the meta runner
+# `scripts/audit-surfaces.sh` collects: no `routes` line has a reason, and the
+# lines naming an owner are the gaps.
+print(
+    f"\nebpfsentinel/routes: {len(disk_routes)} surfaces, {routes_by_scan} by scan, "
+    f"{routes_by_suite} by suite, 0 by reason, {routes_gaps} gaps"
+)
 sys.exit(0)
 PY
