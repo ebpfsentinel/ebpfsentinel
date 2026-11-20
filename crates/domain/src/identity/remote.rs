@@ -24,6 +24,7 @@ use super::{AddressIdentity, is_publishable};
 /// the node keeps the one it had.
 pub const REMOTE_IDENTITIES_MAX: usize = 65_536;
 
+// Wire type: a newer node may send fields an older one does not know (rolling upgrade skew).
 /// One address of another node, and the node holding it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteEntry {
@@ -33,6 +34,7 @@ pub struct RemoteEntry {
     pub identity: AddressIdentity,
 }
 
+// Wire type: a newer node may send fields an older one does not know (rolling upgrade skew).
 /// A list as the console hands it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteSnapshot {
@@ -214,5 +216,39 @@ mod tests {
         let back = serde_json::to_value(&parsed.entries[0]).unwrap();
         assert_eq!(back["node"], "n2");
         assert_eq!(back["address"], "10.0.0.9");
+    }
+
+    /// The console may be newer than the node: a key the node does not know,
+    /// at any depth of the list, is ignored rather than refusing the list. A
+    /// selector an operator writes still refuses a key it does not know.
+    #[test]
+    fn a_key_from_a_newer_console_is_ignored_and_an_operator_selector_refuses_one() {
+        let entry = serde_json::json!({"address": "10.0.0.9", "kind": "container", "node": "n2"});
+        let list = |entry: serde_json::Value, extra: Option<(&str, serde_json::Value)>| {
+            let mut wire = serde_json::json!({"version": "abc", "entries": [entry]});
+            if let Some((key, value)) = extra {
+                wire[key] = value;
+            }
+            serde_json::from_value::<RemoteSnapshot>(wire)
+        };
+        assert!(list(entry.clone(), None).is_ok());
+        assert!(list(entry.clone(), Some(("generated_at", serde_json::json!(1)))).is_ok());
+        let mut newer = entry.clone();
+        newer["zone"] = serde_json::json!("eu-west");
+        let parsed = list(newer, None).unwrap();
+        assert_eq!(parsed.entries[0].node, "n2");
+        let mut service = entry;
+        service["services"] =
+            serde_json::json!([{"protocol": "tcp", "port": 80, "unit": "nginx", "pid": 4}]);
+        let parsed = list(service, None).unwrap();
+        assert_eq!(parsed.entries[0].identity.services[0].port, 80);
+
+        let selector = serde_json::json!({"kind": "pod", "namespce": "shop"});
+        let Err(err) =
+            serde_json::from_value::<crate::firewall::workload_peer::PeerSelector>(selector)
+        else {
+            panic!("a key an operator misspells in a selector is refused");
+        };
+        assert!(err.to_string().contains("namespce"), "{err}");
     }
 }

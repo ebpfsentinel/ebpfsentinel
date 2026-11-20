@@ -68,6 +68,7 @@ impl IdentityKind {
     }
 }
 
+// Wire type: a newer node may send fields an older one does not know (rolling upgrade skew).
 /// A service listening on one of the host's addresses, and who runs it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ServiceIdentity {
@@ -88,6 +89,7 @@ pub struct ServiceIdentity {
     pub namespace: Option<String>,
 }
 
+// Wire type: a newer node may send fields an older one does not know (rolling upgrade skew).
 /// One address of this node and what it is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AddressIdentity {
