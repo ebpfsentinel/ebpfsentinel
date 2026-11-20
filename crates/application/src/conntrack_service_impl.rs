@@ -184,8 +184,15 @@ impl ConnTrackAppService {
     pub fn connection_count(&self) -> Result<Option<u64>, DomainError> {
         // Same reasoning as `get_connections`: the shadow counts nothing, so
         // masking a read failure with it reports an idle host.
+        //
+        // Each figure read is also the gauge's figure, so the scrape says what
+        // the last read said; a failed read leaves the gauge where it stood.
         match self.netfilter_port {
-            Some(ref nf) => nf.connection_count().map(Some),
+            Some(ref nf) => {
+                let count = nf.connection_count()?;
+                self.metrics.set_conntrack_active(count);
+                Ok(Some(count))
+            }
             None => Ok(None),
         }
     }
@@ -335,6 +342,76 @@ mod tests {
         }));
         svc.require_byte_accounting();
         assert!(last.lock().expect("recording port lock").is_none());
+    }
+
+    /// A netfilter table holding a fixed number of rows, or one that cannot
+    /// be read at all.
+    struct CountingTable(Option<u64>);
+
+    impl ConnTrackMapPort for CountingTable {
+        fn get_connections(&self, _limit: usize) -> Result<Vec<Connection>, DomainError> {
+            Ok(Vec::new())
+        }
+
+        fn flush_all(&mut self) -> Result<u64, DomainError> {
+            Ok(0)
+        }
+
+        fn set_config(&mut self, _settings: &ConnTrackSettings) -> Result<(), DomainError> {
+            Ok(())
+        }
+
+        fn connection_count(&self) -> Result<u64, DomainError> {
+            self.0
+                .ok_or_else(|| DomainError::EngineError("table unreadable".into()))
+        }
+    }
+
+    /// Keeps the last figure the service gave the active-connections gauge.
+    #[derive(Default)]
+    struct ActiveGauge(std::sync::Mutex<Option<u64>>);
+
+    impl ports::secondary::metrics_port::PacketMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::FirewallMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::AlertMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::IpsMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::DnsMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::DomainMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::SystemMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::ConfigMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::EventMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::DlpMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::DdosMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::RoutingMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::AuditMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::LbMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::FingerprintMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::ContainerMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::CtMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::ThreatIntelMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::ZoneMetrics for ActiveGauge {}
+    impl ports::secondary::metrics_port::ConntrackMetrics for ActiveGauge {
+        fn set_conntrack_active(&self, count: u64) {
+            *self.0.lock().expect("gauge lock") = Some(count);
+        }
+    }
+
+    #[test]
+    fn a_count_read_from_the_table_is_the_active_gauge() {
+        let gauge = Arc::new(ActiveGauge::default());
+        let mut svc = ConnTrackAppService::new(Arc::clone(&gauge) as Arc<dyn MetricsPort>);
+        svc.set_netfilter_port(Box::new(CountingTable(Some(42))));
+        assert_eq!(svc.connection_count().expect("count"), Some(42));
+        assert_eq!(*gauge.0.lock().expect("gauge lock"), Some(42));
+    }
+
+    #[test]
+    fn an_unreadable_table_leaves_the_active_gauge_alone() {
+        let gauge = Arc::new(ActiveGauge::default());
+        let mut svc = ConnTrackAppService::new(Arc::clone(&gauge) as Arc<dyn MetricsPort>);
+        svc.set_netfilter_port(Box::new(CountingTable(None)));
+        assert!(svc.connection_count().is_err());
+        assert_eq!(*gauge.0.lock().expect("gauge lock"), None);
     }
 
     #[test]
