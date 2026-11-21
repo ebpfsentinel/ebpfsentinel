@@ -43,6 +43,11 @@ STRUCT = re.compile(
     r"#\[derive\(([^)]*)\)\]((?:\s*#\[[^\]]*\]|\s*///[^\n]*)*)\s*pub struct (\w+)\s*\{(.*?)\n\}",
     re.S,
 )
+UNTAGGED = re.compile(
+    r"#\[serde\([^)]*\buntagged\b[^)]*\)\]((?:\s*#\[[^\]]*\]|\s*///[^\n]*)*)\s*pub enum (\w+)\s*\{(.*?)\n\}",
+    re.S,
+)
+VARIANT = re.compile(r"^\w+\s*\(\s*([A-Za-z_]\w*)\s*\)\s*,?$")
 FIELD = re.compile(r"^pub(?:\([^)]*\))?\s+(?:r#)?(\w+)\s*:\s*(.+?),?$")
 WRAPPERS = {"Option", "Vec", "Box", "Arc", "HashMap", "BTreeMap", "IndexMap", "HashSet", "BTreeSet"}
 
@@ -75,6 +80,27 @@ def structs(sources: list[Path]) -> dict[str, dict[str, tuple[str, list[str]]]]:
                 elif line and not line.startswith("//"):
                     pending = ""
             out.setdefault(name, {}).update(fields)
+    # An untagged enum is whichever of its newtype variants the value parses
+    # as, so its keys are those of every variant struct, as a flatten would be.
+    for path in sources:
+        for _, name, body in UNTAGGED.findall(path.read_text()):
+            for raw in body.split("\n"):
+                variant = VARIANT.match(raw.strip())
+                if variant:
+                    out.setdefault(name, {})[f"<variant {variant[1]}>"] = ("flatten", [variant[1]])
+    return out
+
+
+def keys(graph, name: str) -> set[str]:
+    """The keys a value of this type may carry, through flattens and variants."""
+    out: set[str] = set()
+    for key, (kind, types) in graph.get(name, {}).items():
+        if kind == "key":
+            out.add(key)
+        else:
+            for t in types:
+                if t != name:
+                    out |= keys(graph, t)
     return out
 
 
@@ -101,7 +127,7 @@ def descend(graph, name: str, value, seen: set[str]) -> None:
         for item in value:
             descend(graph, name, item, seen)
     elif isinstance(value, dict):
-        if any(str(k) in graph[name] for k in value) or not value:
+        if any(str(k) in keys(graph, name) for k in value) or not value:
             walk(graph, name, value, seen)
         else:
             for item in value.values():

@@ -31,8 +31,5 @@ reason = "read from a Kubernetes API server, which requires container.kubernetes
 [keys."NetworkPolicyConfig.mode"]
 reason = "read from a Kubernetes API server, which requires container.kubernetes.enabled; the Kubernetes lanes configure the agent from the chart, not from a fixture"
 
-[keys."ScopeMap.interface"]
-reason = "reached through the untagged ScopeConfig enum the scan does not walk; config-full.yaml and config-ebpf-interface-groups.yaml set it"
-
 [keys."ScopeMap.namespace"]
-reason = "reached through the untagged ScopeConfig enum the scan does not walk; suite 07 writes namespace-scoped rules through the API"
+reason = "a namespace scope matches only traffic of a container the enricher has named, which no fixture-started agent has; suite 07 writes namespace-scoped rules through the API, where the role decides by that namespace"
