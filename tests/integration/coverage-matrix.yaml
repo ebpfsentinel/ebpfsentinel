@@ -223,6 +223,7 @@ suite_profiles:
   "145": datapath
   "146": datapath
   "147": datapath
+  "148": datapath
   # 10 and 134 start a minikube node, 72 an LXC container, 75 a libvirt
   # guest, 130 and 131 Podman, containerd and CRI-O: the VM lane provisions
   # them. 133 builds xtask to hand every object to both loaders.
