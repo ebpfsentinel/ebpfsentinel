@@ -156,7 +156,7 @@ _serve() {
         sleep 0.5
     done
     [ -n "$edge" ] || {
-        echo "# no edge on ${GRAPH_PORT} with three requests: ${body}" >&3
+        echo "no edge on ${GRAPH_PORT} with three requests: ${body}" >&2
         false
     }
     [ "$(echo "$edge" | jq -r '.protocol')" = "http" ]

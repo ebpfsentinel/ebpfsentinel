@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use super::entity::{ProcessEntry, ProcessKey, ProcessTableStats};
 
@@ -6,6 +6,12 @@ use super::entity::{ProcessEntry, ProcessKey, ProcessTableStats};
 /// runtime, a shell, an interpreter and what it launched, short enough that a
 /// chain broken into a loop by a lost record still ends.
 pub const MAX_LINEAGE: usize = 8;
+
+/// How many of the latest exits the table remembers for [`ProcessTable::recently_exited`].
+/// A change a process made is often read after the process is gone: a `mv`
+/// or an `echo >` lives for a millisecond, and the notification naming its
+/// pid may reach the reader after the exit did.
+pub const RECENT_EXITS: usize = 256;
 
 /// The ancestors of a process, parent first, and how the walk ended.
 ///
@@ -66,6 +72,10 @@ pub struct ProcessTable {
     ancestors: HashMap<ProcessKey, ProcessEntry>,
     /// How many known processes, live or kept, name each key as parent.
     children: HashMap<ProcessKey, u32>,
+    /// The latest exits, oldest first, at most [`RECENT_EXITS`]. Never
+    /// read by [`ProcessTable::get`]: a flow seen after an exit must not be
+    /// named after a process that no longer holds the pid.
+    recent_exits: VecDeque<ProcessEntry>,
     capacity: usize,
     ancestor_capacity: usize,
     recorded: u64,
@@ -91,6 +101,7 @@ impl ProcessTable {
             entries: HashMap::with_capacity(capacity.min(4096)),
             ancestors: HashMap::new(),
             children: HashMap::new(),
+            recent_exits: VecDeque::new(),
             capacity,
             ancestor_capacity: (capacity / 4).max(1),
             recorded: 0,
@@ -174,9 +185,13 @@ impl ProcessTable {
     /// A process left the live table: keep it while something names it as
     /// parent, otherwise let it go and tell its own parent.
     fn retire(&mut self, mut entry: ProcessEntry, at_ns: u64) {
+        entry.exited_at_ns = Some(at_ns);
+        if self.recent_exits.len() == RECENT_EXITS {
+            self.recent_exits.pop_front();
+        }
+        self.recent_exits.push_back(entry.clone());
         let key = entry.key();
         if self.children.get(&key).copied().unwrap_or(0) > 0 {
-            entry.exited_at_ns = Some(at_ns);
             self.ancestors.insert(key, entry);
             self.evict_ancestors_while_over_capacity();
         } else if let Some(parent) = entry.parent_key() {
@@ -235,10 +250,30 @@ impl ProcessTable {
     /// table lost.
     #[must_use]
     pub fn lineage(&self, pid: u32) -> Lineage {
+        match self.entries.get(&pid) {
+            Some(entry) => self.lineage_of(entry),
+            None => Lineage::default(),
+        }
+    }
+
+    /// The process that held `pid` and exited last, among the latest
+    /// [`RECENT_EXITS`] exits, when no live process holds it now. For a
+    /// reader holding a pid the kernel reported before the exit: a file
+    /// change, never a flow.
+    #[must_use]
+    pub fn recently_exited(&self, pid: u32) -> Option<&ProcessEntry> {
+        if self.entries.contains_key(&pid) {
+            return None;
+        }
+        self.recent_exits.iter().rev().find(|e| e.pid == pid)
+    }
+
+    /// The ancestors of `entry`, live or exited, parent first, walked as
+    /// [`ProcessTable::lineage`] walks them.
+    #[must_use]
+    pub fn lineage_of(&self, entry: &ProcessEntry) -> Lineage {
         let mut lineage = Lineage::default();
-        let Some(mut current) = self.entries.get(&pid) else {
-            return lineage;
-        };
+        let mut current = entry;
         loop {
             // Pid 0 is the idle task: the root, never in the table and
             // never lost.
@@ -391,6 +426,40 @@ mod tests {
         assert!(table.get(10).is_none());
         assert_eq!(table.stats().purged, 1);
         assert_eq!(table.stats().missing_exit, 0);
+    }
+
+    #[test]
+    fn an_exited_process_is_named_to_a_late_reader_with_its_parent() {
+        let mut table = ProcessTable::new(8);
+        table.record(child(10, 100, (1, 0), 1));
+        table.record_fork(child(11, 200, (10, 100), 2));
+        table.purge(11, Some(200), 5);
+        assert!(table.get(11).is_none());
+        let gone = table.recently_exited(11).expect("the exit is remembered");
+        assert_eq!(gone.exited_at_ns, Some(5));
+        let lineage = table.lineage_of(gone);
+        assert_eq!(lineage.ancestors.first().map(|e| e.pid), Some(10));
+    }
+
+    #[test]
+    fn a_pid_held_again_is_not_answered_by_its_previous_holder() {
+        let mut table = ProcessTable::new(8);
+        table.record(entry(11, 1));
+        table.purge(11, None, 5);
+        table.record(entry(11, 6));
+        assert!(table.recently_exited(11).is_none());
+    }
+
+    #[test]
+    fn only_the_latest_exits_are_remembered() {
+        let mut table = ProcessTable::new(RECENT_EXITS * 2);
+        let last = u32::try_from(RECENT_EXITS).unwrap_or(u32::MAX) + 1;
+        for pid in 1..=last {
+            table.record(entry(pid, u64::from(pid)));
+            table.purge(pid, None, u64::from(pid));
+        }
+        assert!(table.recently_exited(1).is_none());
+        assert!(table.recently_exited(last).is_some());
     }
 
     #[test]

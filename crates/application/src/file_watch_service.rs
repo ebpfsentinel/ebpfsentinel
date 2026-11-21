@@ -894,8 +894,7 @@ impl FileWatcher {
         if !wanted {
             return None;
         }
-        let table = feed.processes.as_ref()?;
-        table.get(pid).map(|entry| (table.lineage(pid), entry))
+        feed.processes.as_ref()?.reported(pid)
     }
 
     /// Queue the path each change names, to be read again.
@@ -1113,11 +1112,9 @@ impl FileWatcher {
         // The writer as it was when the change arrived, and the table only
         // where that was not read.
         let writer = pending.writer.clone().or_else(|| {
-            feed.processes.as_ref().and_then(|table| {
-                table
-                    .get(pending.pid)
-                    .map(|entry| (table.lineage(pending.pid), entry))
-            })
+            feed.processes
+                .as_ref()
+                .and_then(|table| table.reported(pending.pid))
         });
         let at_ns = now_ns();
         if let (Some(ransom), Some((lineage, entry))) = (feed.ransom.as_ref(), writer.as_ref()) {

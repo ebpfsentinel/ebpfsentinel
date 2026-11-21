@@ -177,7 +177,8 @@ pub struct ProcessEntry {
     /// change nor a suspend, and it is what orders the table for eviction.
     pub started_at_ns: u64,
     /// When the kernel said the process exited. Only an entry kept as an
-    /// ancestor carries one; a live entry never does.
+    /// ancestor or remembered as a recent exit carries one; a live entry
+    /// never does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exited_at_ns: Option<u64>,
 }

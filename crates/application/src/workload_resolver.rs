@@ -259,7 +259,12 @@ impl WorkloadResolver {
         let Some(processes) = processes.as_ref() else {
             return workload;
         };
-        if let Some(entry) = processes.get(owner.pid) {
+        // A short-lived client (a `curl`, a probe) has often exited by the
+        // time its payload is read, so the last process the kernel reported
+        // under the pid names it. The kernel hands pids out in a cycle of
+        // `pid_max`, so among the few hundred exits the table remembers a
+        // second holder of the same pid is not a case that arises.
+        if let Some((lineage, entry)) = processes.reported(owner.pid) {
             let uid = workload.uid;
             let cgroup = workload.cgroup;
             workload = workload.with_process(&entry);
@@ -267,7 +272,7 @@ impl WorkloadResolver {
             workload.cgroup = cgroup.or(workload.cgroup);
             // The chain is read only for a process the table holds: a pid it
             // never saw has no parent recorded to start the walk from.
-            workload = workload.with_lineage(&processes.lineage(owner.pid));
+            workload = workload.with_lineage(&lineage);
         }
         if workload.container.is_none()
             && let Some(cgroup) = workload.cgroup
@@ -521,6 +526,50 @@ mod tests {
         // the opening task, and that is the one a reader is owed.
         assert_eq!(workload.uid, Some(1_000));
         assert_eq!(workload.cgroup, Some(77));
+    }
+
+    #[tokio::test]
+    async fn a_socket_read_after_its_opener_exited_still_names_it() {
+        let table = Arc::new(ProcessTableService::new(16, false));
+        table
+            .apply(ProcessLifecycleEvent::bare(
+                ProcessEventKind::Exec,
+                4_000,
+                "bash",
+                1,
+            ))
+            .await;
+        table
+            .apply(ProcessLifecycleEvent {
+                parent_pid: Some(4_000),
+                ..ProcessLifecycleEvent::bare(ProcessEventKind::Exec, 4_242, "curl", 2)
+            })
+            .await;
+        let resolver = WorkloadResolver::new()
+            .with_sockets(Box::new(FixedSocket(Some(owner()))))
+            .with_processes(Arc::clone(&table));
+        let live = resolver.by_cookie(42).unwrap();
+        table
+            .apply(ProcessLifecycleEvent::bare(
+                ProcessEventKind::Exit,
+                4_242,
+                "curl",
+                1,
+            ))
+            .await;
+        assert!(table.get(4_242).is_none());
+        // The request is read after the client is gone: the workload is the
+        // one that opened the socket, not a bare pid.
+        let gone = resolver.by_cookie(42).unwrap();
+        let parents = |workload: &Workload| {
+            workload
+                .ancestry
+                .as_ref()
+                .map(|ancestry| ancestry.ancestors.iter().map(|a| a.pid).collect::<Vec<_>>())
+        };
+        assert_eq!(parents(&live), Some(vec![4_000]));
+        assert_eq!(parents(&gone), parents(&live));
+        assert_eq!(gone.uid, Some(1_000));
     }
 
     struct CgroupOf(&'static str);

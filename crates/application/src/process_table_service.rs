@@ -634,6 +634,20 @@ impl ProcessTableService {
             .lineage(pid)
     }
 
+    /// The process the kernel reported as `pid` before this read, with its
+    /// ancestry: the live holder, or the last one to exit when nothing holds
+    /// the pid now. For a change or a socket made by a process that may be
+    /// gone by the time it is read.
+    #[must_use]
+    pub fn reported(&self, pid: u32) -> Option<(Lineage, ProcessEntry)> {
+        let table = self
+            .table
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = table.get(pid).or_else(|| table.recently_exited(pid))?;
+        Some((table.lineage_of(entry), entry.clone()))
+    }
+
     /// The table's counters.
     #[must_use]
     pub fn stats(&self) -> ProcessTableStats {
@@ -1208,6 +1222,17 @@ mod tests {
         let service = ProcessTableService::new(16, false).with_executables(Arc::new(NoExecutable));
         service.apply(exec(42, 1)).await;
         assert_eq!(service.get(42).unwrap().identity, ProcessIdentity::Unknown);
+    }
+
+    #[tokio::test]
+    async fn a_change_read_after_the_exit_still_names_its_writer() {
+        let service = ProcessTableService::new(16, false);
+        service.apply(exec(42, 1)).await;
+        service.apply(exit(42)).await;
+        assert!(service.get(42).is_none());
+        let (_, entry) = service.reported(42).expect("the exit is remembered");
+        assert_eq!(entry.pid, 42);
+        assert!(entry.exited_at_ns.is_some());
     }
 
     #[tokio::test]
