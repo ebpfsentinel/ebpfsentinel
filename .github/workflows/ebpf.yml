@@ -63,6 +63,11 @@ jobs:
 
       - uses: ./.github/actions/install-bpf-linker
 
+      # The xtask and the kfunc test below build the adapters crate, whose
+      # build script compiles the protobuf definitions and links libpcap.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libpcap-dev
+
       - name: Build all eBPF kernel programs
         run: cargo xtask ebpf-build
 

@@ -20,14 +20,15 @@ use ebpf_common::{
         MAX_QOS_CGROUP_LINKS, MAX_QOS_CGROUP_SHAPES, MAX_QOS_EDT_INTERFACES, QOS_METRIC_COUNT,
         QOS_METRIC_DELAYED, QOS_METRIC_DROPPED_LOSS, QOS_METRIC_DROPPED_QUEUE, QOS_METRIC_ERRORS,
         QOS_METRIC_SHAPED, QOS_METRIC_TOTAL_SEEN, QOS_SCOPE_MASK, QOS_SCOPE_SHAPES_EMPTY,
-        QOS_SCOPE_STRIDE, QOS_SHAPE_CATCHALL, QOS_SHAPE_DPORT,
-        QOS_SHAPE_DSCP, QOS_SHAPE_FULL, QOS_SHAPE_HOSTS, QOS_SHAPE_HOSTS_DPORT, QOS_SHAPE_NO_DSCP,
-        QOS_SHAPE_PORTS, QOS_SHAPE_PROTO, QOS_SHAPE_SPORT, QosCgroupCounters, QosCgroupShape,
-        QosCharge, QosClassifierKey, QosClassifierValue, QosFlowState, QosPipeConfig, QosPipeState,
+        QOS_SCOPE_STRIDE, QOS_SHAPE_CATCHALL, QOS_SHAPE_DPORT, QOS_SHAPE_DSCP, QOS_SHAPE_FULL,
+        QOS_SHAPE_HOSTS, QOS_SHAPE_HOSTS_DPORT, QOS_SHAPE_NO_DSCP, QOS_SHAPE_PORTS,
+        QOS_SHAPE_PROTO, QOS_SHAPE_SPORT, QosCgroupCounters, QosCgroupShape, QosCharge,
+        QosClassifierKey, QosClassifierValue, QosFlowState, QosPipeConfig, QosPipeState,
         QosQueueConfig, QosQueueState, VLAN_ANY, qos_charge, qos_direction_matches, qos_spacing_ns,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
+use ebpf_helpers::increment_metric;
 use ebpf_helpers::net::{
     IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4, u16_from_be_bytes,
     u32_from_be_bytes,
@@ -36,7 +37,6 @@ use ebpf_helpers::pktmeta;
 use ebpf_helpers::raw_skb;
 use ebpf_helpers::tc::{ptr_at, skip_ipv6_ext_headers};
 use ebpf_helpers::trace::{self, reason, stage};
-use ebpf_helpers::increment_metric;
 use network_types::{
     ip::{IpProto, Ipv4Hdr},
     tcp::TcpHdr,
