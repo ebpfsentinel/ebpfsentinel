@@ -49,6 +49,11 @@ const CTA_PROTO_ICMPV6_CODE: u16 = 9;
 
 const CTA_PROTOINFO_TCP: u16 = 1;
 const CTA_PROTOINFO_TCP_STATE: u16 = 1;
+const CTA_PROTOINFO_TCP_FLAGS_ORIGINAL: u16 = 4;
+const CTA_PROTOINFO_TCP_FLAGS_REPLY: u16 = 5;
+
+/// `IP_CT_TCP_FLAG_BE_LIBERAL`: the direction is not held to a tracked window.
+const TCP_FLAG_BE_LIBERAL: u8 = 0x08;
 
 const CTA_COUNTERS_PACKETS: u16 = 1;
 const CTA_COUNTERS_BYTES: u16 = 2;
@@ -497,11 +502,21 @@ fn restore_message(restore: &ConntrackRestore) -> Result<Vec<u8>, String> {
     // The kernel marks a created entry confirmed before it applies the status
     // it was sent, and refuses with EBUSY a status that would clear the bit:
     // a status without it is a request to unconfirm, not a silence about it.
+    //
+    // A handed-over flow carries no window: neither end's scale factor nor
+    // the sequence it reached is known here, so a tracked window would read
+    // the peer's scaled window as bytes and call the next segment INVALID,
+    // which a firewall in the forward path then drops. Both directions are
+    // marked liberal (flags then mask), as conntrackd does for a flow it
+    // picks up mid-stream; state, timeout and both tuples are still tracked.
+    let liberal = [TCP_FLAG_BE_LIBERAL, TCP_FLAG_BE_LIBERAL];
     msg.attr(CTA_STATUS, &RESTORE_STATUS.to_be_bytes())
         .attr(CTA_TIMEOUT, &CONNTRACK_RESTORE_TIMEOUT_SECS.to_be_bytes())
         .begin(CTA_PROTOINFO)
         .begin(CTA_PROTOINFO_TCP)
         .attr(CTA_PROTOINFO_TCP_STATE, &[TCP_CONNTRACK_ESTABLISHED])
+        .attr(CTA_PROTOINFO_TCP_FLAGS_ORIGINAL, &liberal)
+        .attr(CTA_PROTOINFO_TCP_FLAGS_REPLY, &liberal)
         .end()
         .end();
     Ok(msg.finish())
@@ -660,6 +675,29 @@ mod tests {
             .and_then(|p| netlink::attribute(p, CTA_PROTOINFO_TCP))
             .and_then(|t| netlink::attribute(t, CTA_PROTOINFO_TCP_STATE));
         assert_eq!(state, Some(&[TCP_CONNTRACK_ESTABLISHED][..]));
+    }
+
+    #[test]
+    fn a_restored_flow_is_not_held_to_a_window_it_never_saw() {
+        let restore = ConntrackRestore {
+            flow: tuple(6, "10.0.0.1", "10.0.0.2", 40000, 8080),
+            reply: None,
+        };
+        let msg = restore_message(&restore).unwrap();
+        let attrs = &msg[netlink::NLMSG_HDRLEN + 4..];
+        let tcp = netlink::attribute(attrs, CTA_PROTOINFO)
+            .and_then(|p| netlink::attribute(p, CTA_PROTOINFO_TCP))
+            .unwrap();
+        for dir in [
+            CTA_PROTOINFO_TCP_FLAGS_ORIGINAL,
+            CTA_PROTOINFO_TCP_FLAGS_REPLY,
+        ] {
+            assert_eq!(
+                netlink::attribute(tcp, dir),
+                Some(&[TCP_FLAG_BE_LIBERAL, TCP_FLAG_BE_LIBERAL][..]),
+                "direction {dir}"
+            );
+        }
     }
 
     #[test]
