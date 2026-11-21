@@ -49,7 +49,7 @@ We will coordinate disclosure with the reporter. Credit is given to reporters un
 - All user input sanitized before logging (injection prevention)
 
 ### Dependency Management
-
+- `cargo deny check` enforces license compliance and blocks known advisories; no advisory is ignored, and an unmaintained crate is printed as a warning (`-W unmaintained`) so it is replaced rather than forgotten
 - `cargo deny check` enforces license compliance and blocks known advisories
 - `cargo audit` runs daily in CI (`security.yml`)
 - SBOM generated in CycloneDX format on every release

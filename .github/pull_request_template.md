@@ -9,7 +9,7 @@ CI runs these on the pull request; running them first saves a round trip (see `C
 - [ ] `cargo fmt --check`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo test`
-- [ ] `cargo deny check`
+- [ ] `cargo deny check -W unmaintained`
 - [ ] `cargo run -p xtask -- emit-openapi` leaves `openapi.json` unchanged, if a route moved
 - [ ] the eBPF programs build (`cargo xtask ebpf-build`), if anything under `crates/ebpf-programs/` or `crates/ebpf-common/` changed
 

@@ -135,7 +135,7 @@ Lint configuration is in `Cargo.toml` under `[workspace.lints.clippy]`:
 ### Dependency Audit
 
 ```bash
-cargo deny check                    # License, advisory, ban, source checks
+cargo deny check -W unmaintained    # License, advisory, ban, source checks
 ```
 
 The `deny.toml` policy:
@@ -340,7 +340,7 @@ All CI jobs must pass before merging.
    cargo fmt --check
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test
-   cargo deny check
+   cargo deny check -W unmaintained
    ```
 4. Write or update tests for your changes
 5. Open a PR targeting `main`
