@@ -209,7 +209,7 @@ _Generated from `coverage-matrix.yaml`. Run `scripts/audit-coverage.sh --render`
 | `tc-nat-ingress` | 21, 50, perf/06, 67 | 2vm | 6.12 | datapath | DNAT (TC ingress); NPTv6 reverse-prefix translation surface asserted via REST + CLI in 50; DNAT datapath throughput overhead measured in perf/06 |
 | `tc-qos` | 28, 67 | 2vm | 6.12 | datapath | Traffic shaping (TC egress); reports through QOS_METRICS counters only, asserted in 28 to move under a saturated pipe while firewall alerts still arrive |
 | `tc-scrub` | 23, 40, 46, 67 | 3vm | 6.12 | datapath | Packet normalization; spoofed-source amplification drop in 40; byte-level pcap assertions (TTL floor, MSS clamp, DF clear, IP-ID rand) in 46 |
-| `tc-threatintel` | 17, 33, 67 | 2vm | 6.12 | pr | OSINT feed IOC matching (TC) |
+| `tc-threatintel` | 17, 33, 67 | 2vm | 6.12 | datapath | OSINT feed IOC matching (TC) |
 | `tracepoint-drop-reason` | 90 | none | 6.12 | datapath | Counts the packets the kernel frees undelivered, under the skb_drop_reason it gives; 90 sends datagrams to a closed port and reads them back as NO_SOCKET on the interface they arrived on |
 | `tracepoint-process` | 67, 70, perf/07 | none | 6.12 | datapath | Exec, fork and exit feeding the process table; 67 reads a program that execed after the hooks attached, 70 decides workload rules on the chain of parents it records, exec() cost measured in perf/07 |
 | `tracepoint-signal` | 82, 93 | none | 6.12 | datapath | Signals the named task at its next syscall: the mass encryption run stopped in 82, the reverse shell stopped in 93 |

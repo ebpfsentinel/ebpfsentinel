@@ -387,6 +387,8 @@ _dns_observed_metric() {
     # The match is counted, and the answered address went to the data plane.
     echo "$metrics" | awk '/^ebpfsentinel_dns_blocked_domains_total / && $2 >= 1 { ok = 1 } END { exit !ok }'
     echo "$metrics" | awk '/^ebpfsentinel_dns_injected_ips / && $2 >= 1 { ok = 1 } END { exit !ok }'
+    # A blocklisted resolution is command and control over DNS.
+    assert_alert_has_mitre_technique T1071.004 15
 }
 
 @test "traffic to an address the cache names after a domain rule counts a domain match" {

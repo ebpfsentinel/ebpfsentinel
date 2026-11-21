@@ -129,7 +129,7 @@ suite_profiles:
   "30": datapath
   "31": datapath
   "32": datapath
-  "33": pr
+  "33": datapath
   "34": pr
   "35": pr
   "36": pr
@@ -320,7 +320,7 @@ coverage:
     suites: ["17", "33", "67"]
     topology: 2vm
     kernel_min: "6.12"
-    profile: pr
+    profile: datapath
     notes: "OSINT feed IOC matching (TC)"
 
   - kind: ebpf_program

@@ -87,6 +87,8 @@ teardown_file() {
         api_get /api/v1/alerts >&2 || true
         return 1
     }
+    # Port 8888 is no web port, so the deny maps to the generic protocol technique.
+    assert_alert_has_mitre_technique T1071 15
 }
 
 @test "L7 HTTP path allow on /api is judged allow and counts no deny" {

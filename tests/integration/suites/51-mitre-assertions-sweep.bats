@@ -36,15 +36,15 @@ _expected_technique_for_suite() {
     case "${1}" in
         12) echo "ids|T1071" ;;                  # IDS signature match
         13) echo "ips|T1071" ;;                  # IPS auto-blacklist
-        14) echo "ratelimit|T1499" ;;            # Endpoint Denial of Service
+        14) echo "ratelimit|T1498" ;;            # Network DoS, SYN flood on a non-web port
         15) echo "rest-only|" ;;                 # DDoS REST surface, drives no traffic
-        17) echo "rest-only|" ;;                 # ThreatIntel feed/REST surface
-        19) echo "rest-only|" ;;                 # DNS observation surface
+        17) echo "threatintel|T1071" ;;          # listed address dropped, technique by port
+        19) echo "dns|T1071.004" ;;              # blocklisted domain resolved
         21) echo "rest-only|" ;;                 # NAT REST surface, no detector
         22) echo "rest-only|" ;;                 # DDoS REST surface, sub-threshold traffic
         25) echo "ids|T1071" ;;                  # alert end-to-end
         27) echo "dlp|T1041" ;;                  # DLP exfiltration over C2
-        29) echo "rest-only|" ;;                 # L7 rule surface; denies audit, no alert
+        29) echo "l7|T1071" ;;                   # L7 deny on a non-standard port
         30) echo "geoip|T1071" ;;                # GeoIP-enriched alerts
         33) echo "rest-only|" ;;                 # STIX feed load; no matching traffic
         38) echo "ratelimit|T1499" ;;            # MHDDoS L7 floods

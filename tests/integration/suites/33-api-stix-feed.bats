@@ -1,11 +1,16 @@
 #!/usr/bin/env bats
 # 33-api-stix-feed.bats - STIX 2.1 feed parsing via REST API (userspace-only)
-# Does NOT require eBPF or root privileges.
-# Starts a local HTTP server to serve the STIX bundle fixture.
+# Needs no eBPF, but needs root: the bundle is served from a dummy interface,
+# because the agent refuses a feed on loopback. Without root that interface
+# never exists, the server never answers, and every test after the first
+# fails for a reason that has nothing to do with STIX.
 
 load '../lib/helpers'
+load '../lib/ebpf_helpers'
 
 setup_file() {
+    require_root
+
     export PROJECT_ROOT
     PROJECT_ROOT="$(find_project_root)"
 
@@ -36,6 +41,7 @@ setup_file() {
         waited=$((waited + 1))
         if [ "$waited" -ge 25 ]; then
             echo "STIX HTTP server did not start in time" >&2
+            cat "$DATA_DIR/http-server.log" >&2 || true
             break
         fi
     done

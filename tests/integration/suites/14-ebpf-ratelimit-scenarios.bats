@@ -119,6 +119,8 @@ _rl_counter() {
         api_get /api/v1/alerts >&2 || true
         return 1
     }
+    # A flood on a port that serves no web traffic is a network denial of service.
+    assert_alert_has_mitre_technique T1498 15
     wait_for_metric ebpfsentinel_audit_events_total 1 15 >/dev/null || {
         echo "ebpfsentinel_audit_events_total did not move" >&2
         return 1
