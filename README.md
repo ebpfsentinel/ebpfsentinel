@@ -481,11 +481,37 @@ The **commercial layer** (`ebpfsentinel-enterprise`, the web console and the
 Kubernetes operator) is for running a fleet, investigating across it and proving
 it to an auditor. It comes in three tiers, each containing the one before it:
 
-| Tier | Built for | Adds |
-| ---- | --------- | ---- |
-| **Professional** | A platform team running Kubernetes in production | A commercial licence in place of the AGPL obligations; the web console (entity pages, process tree behind an alert, service map merged across the fleet, rule replay before a change ships); the Kubernetes operator; fleet inventory, drift detection and exposure across nodes; advanced RBAC; advanced DLP (Vectorscan, custom patterns, block mode); application attack detection, per-protocol policies (Redis, MongoDB, Kafka, SQL, LDAP, SSH) and OWASP/MITRE/PCI enrichment; curated detection content delivered signed, with a rollback; your scanner's findings ranked by what the host runs and exposes; compliance reports with PDF export (PCI-DSS 4, HIPAA, GDPR, SOC 2, NIS2, DORA, SecNumCloud, HDS); bare-metal Services of type LoadBalancer over ARP or BGP; offline licence activation |
-| **Enterprise** | A team that runs a SOC | Cases, hunting over the fleet's history and false-positive suppressions; SIEM connectors (Splunk, Elasticsearch, OpenSearch, Wazuh, Sentinel, QRadar, syslog, OTLP, S3, ClickHouse); Sigma rules compiled into the agent's own rules; TAXII 2.1 and MISP feeds, retroactive indicator matching; ML anomaly detection with a signed base model (C2 beaconing, DGA and DNS tunnelling, heavy hitters); TLS intelligence, cipher policy, post-quantum readiness and a cryptography migration report; extended TLS library coverage (Go, static OpenSSL and BoringSSL, kTLS, GnuTLS, wolfSSL, mbedTLS, s2n-tls) and extended L7 parsers (MQTT, AMQP, NATS, Cassandra); AI and LLM security, agent and MCP traffic; response orchestration, process response, workload quarantine and SOAR webhooks; a tamper-protected agent that root cannot stop without a signed order; network forensics, investigation graph and incident evidence pack; multi-cluster federation |
-| **Critical** | Regulated estates and providers serving tenants | NIS2 and DORA notification drafts built from a case; controls proven continuously by tracing packets through each node's loaded rules; attested nodes; a sealed audit record; high availability with established connections carried across failover, active-active; multi-tenancy with per-tenant templates and a provider tier the tenant cannot override; air-gapped deployment and content across the air gap |
+| | OSS | Professional | Enterprise | Critical |
+| --- | :---: | :---: | :---: | :---: |
+| *Built for* | *Anyone* | *A platform team on Kubernetes* | *A team running a SOC* | *Regulated estates, providers* |
+| **Every engine of the agent**, unlimited hosts | ✓ | ✓ | ✓ | ✓ |
+| Commercial licence instead of AGPL obligations |  | ✓ | ✓ | ✓ |
+| Web console: entity pages, process tree, fleet service map, rule replay |  | ✓ | ✓ | ✓ |
+| Kubernetes operator |  | ✓ | ✓ | ✓ |
+| Fleet inventory, drift and exposure across nodes |  | ✓ | ✓ | ✓ |
+| Advanced RBAC, offline licence activation |  | ✓ | ✓ | ✓ |
+| Advanced DLP (Vectorscan, custom patterns, block mode) |  | ✓ | ✓ | ✓ |
+| Application attack detection, per-protocol policies |  | ✓ | ✓ | ✓ |
+| Signed detection content, with a rollback |  | ✓ | ✓ | ✓ |
+| Scanner findings ranked by what the host runs and exposes |  | ✓ | ✓ | ✓ |
+| Compliance reports (PCI-DSS, HIPAA, GDPR, SOC 2, NIS2, DORA, SecNumCloud, HDS) |  | ✓ | ✓ | ✓ |
+| Bare-metal LoadBalancer over ARP or BGP |  | ✓ | ✓ | ✓ |
+| Cases, hunting, false-positive suppressions |  |  | ✓ | ✓ |
+| SIEM connectors (10) and Sigma rules |  |  | ✓ | ✓ |
+| TAXII 2.1 and MISP feeds, retroactive matching |  |  | ✓ | ✓ |
+| ML anomaly detection with a signed base model |  |  | ✓ | ✓ |
+| TLS intelligence and post-quantum readiness |  |  | ✓ | ✓ |
+| Extended TLS libraries and L7 parsers |  |  | ✓ | ✓ |
+| AI, LLM and MCP traffic security |  |  | ✓ | ✓ |
+| Response orchestration, process response, workload quarantine |  |  | ✓ | ✓ |
+| Tamper-protected agent, stopped only by a signed order |  |  | ✓ | ✓ |
+| Network forensics and incident evidence pack |  |  | ✓ | ✓ |
+| Multi-cluster federation |  |  | ✓ | ✓ |
+| NIS2 and DORA notification drafts |  |  |  | ✓ |
+| Controls proven continuously, attested nodes, sealed audit record |  |  |  | ✓ |
+| High availability, active-active |  |  |  | ✓ |
+| Multi-tenancy for providers |  |  |  | ✓ |
+| Air-gapped deployment |  |  |  | ✓ |
 
 Prices are per node and published, and every paid tier is bought online:
 [ebpfsentinel.io/pricing](https://ebpfsentinel.io/pricing). The row-by-row
