@@ -1,17 +1,41 @@
 # eBPFsentinel
 
 <p align="center">
-  <img src="./assets/ebpfsentinel-lockup-light.svg" width="600">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/ebpfsentinel-lockup-dark.svg">
+    <img src="./assets/ebpfsentinel-lockup-light.svg" width="600" alt="eBPFsentinel">
+  </picture>
 </p>
 
-A unified, kernel-native **Network & Security platform** for Linux - one Rust agent that replaces your firewall, IDS/IPS, DDoS mitigation, DLP, and 10+ more tools, all running in-kernel via eBPF at about a microsecond of kernel time per packet (see [benchmark results](tests/perf/BENCHMARK-RESULTS.md)). Not an endpoint agent - it enforces security inline, right where your traffic flows.
+<p align="center">
+  <b>Network and host security for every Linux node, in one rootless eBPF agent.</b><br>
+  Firewall · IDS/IPS · DDoS · DLP inside TLS · threat intel · NAT · load balancing · QoS<br>
+  workload firewall · process, file and mass-encryption detection · packet trace · flow export<br>
+  <i>52 capabilities, free and open source, enforced in the kernel.</i>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0"></a>
+  <img src="https://img.shields.io/badge/kernel-6.12%2B-informational" alt="Linux kernel 6.12+">
+  <img src="https://img.shields.io/badge/arch-x86__64%20%7C%20aarch64-informational" alt="x86_64 and aarch64">
+  <a href="https://docs.ebpfsentinel.io"><img src="https://img.shields.io/badge/docs-docs.ebpfsentinel.io-7c5cff" alt="Documentation"></a>
+</p>
+
+eBPFsentinel is a network and host security agent for Linux, written in Rust. It
+loads 29 eBPF programs at XDP, TC, cgroup, LSM, tracepoint and uprobe hooks and
+takes its verdicts there: an unwanted packet is dropped in the network driver
+before the kernel has allocated anything for it, a TLS payload is read in the
+application's own library without a proxy or a key, and a process is named,
+followed and stopped from the kernel. About **1 µs of kernel time per packet**
+on the full receive path ([benchmark results](tests/perf/BENCHMARK-RESULTS.md)).
 
 ## Why eBPFsentinel
 
-- **One agent, not a stack.** Firewall, IDS/IPS, DDoS, DLP, threat intel, NAT, and QoS normally mean a rack of appliances or a pile of daemons - each with its own config, parser, and packet copy. eBPFsentinel runs them as one agent sharing one kernel pipeline, beside a small privileged broker (the warden) that holds the few operations the kernel will not delegate: less to deploy, less to patch, less attack surface.
-- **In-kernel, at the source.** Programs attach at XDP/TC/uprobe hook points, so traffic is inspected and dropped in the kernel - no packet copy to userspace on the fast path, no sidecar hop. Malicious traffic dies on the wire instead of costing you CPU upstack.
-- **Network placement, not endpoint sprawl.** It runs where traffic flows - host NIC, node boundary - not as an agent on every workload. One enforcement point per node sees east-west and north-south alike, with no per-app instrumentation.
-- **Built for trust.** Pure Rust with `#![forbid(unsafe_code)]` across the domain and application layers and a hexagonal/DDD design. The agent runs **rootless** via BPF token delegation - zero `CAP_BPF` / `CAP_NET_ADMIN` in the agent itself - and tags every alert with MITRE ATT&CK for your SIEM.
+- **One agent, not a stack.** Firewall, IDS/IPS, DDoS, DLP, threat intel, NAT, QoS and host detection share one kernel pipeline and one configuration, instead of a rack of appliances or a pile of daemons each with its own parser and its own copy of the packet. Less to deploy, less to patch, less attack surface.
+- **The verdict at the driver.** Unwanted traffic dies at XDP, before a socket, a copy or a context switch exists for it. What passes is inspected at TC without leaving the kernel: no sidecar hop, no packet copied to userspace on the fast path.
+- **Network and host, from one vantage point.** One agent per node sees east-west and north-south traffic, and also the process behind each flow, the files it changes and the executables allowed to reach the network. No per-app instrumentation, no sidecar per workload.
+- **Rootless by construction.** The agent loads its programs through a BPF token and holds zero `CAP_BPF` / `CAP_NET_ADMIN`; a small broker, the warden, keeps the few operations the kernel will not delegate. The domain, ports, application and agent crates are `#![forbid(unsafe_code)]`, and every alert carries its MITRE ATT&CK technique.
+- **Free, whole.** Every engine below is in this repository under AGPL-3.0, on as many hosts as you like. Nothing in the agent is paywalled; the [commercial layer](#oss-vs-enterprise) adds fleet, investigation and compliance on top.
 
 ## What it does
 
@@ -90,7 +114,7 @@ A snapshot of the capabilities below - see the [Features guide](https://docs.ebp
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./assets/ebpfsentinel-datapath-dark.svg">
     <img src="./assets/ebpfsentinel-datapath-light.svg" width="900"
-         alt="A looping animation of the datapath. A packet arrives on the wire and is held at XDP in the network card driver, which is where the firewall verdict is taken: what is unwanted is dropped there, with no copy, no socket and no kernel stack, and what passes goes on to the TC programs for inspection, rewriting and metering, which take the verdicts that need the packet parsed first, then to the kernel stack and the application. In user space a DLP uprobe sits in the application's own TLS library, where the plaintext is. Every program reports through one ring buffer to the eBPFsentinel agent, one rootless Rust binary, which writes the next rule back into the eBPF maps and serves REST and gRPC for control and alerts. Under the agent sits the warden broker, which holds the capabilities the agent drops: it delegates the bpffs the agent loads its programs into, and answers for conntrack, routes and packet capture.">
+         alt="A looping animation of the datapath. A packet arrives on the wire and is held at XDP in the network card driver, which is where the firewall verdict is taken: what is unwanted is dropped there, with no copy, no socket and no kernel stack, and what passes goes on to the TC programs for inspection, rewriting and metering, which take the verdicts that need the packet parsed first, then to the kernel stack and the application. In user space a DLP uprobe sits in the application's own TLS library, where the plaintext is. Every program reports through one ring buffer to the eBPFsentinel agent, one rootless Rust binary, which writes the next rule back into the eBPF maps and serves REST and gRPC for control and alerts. Under the agent sits the warden broker, which holds the capabilities the agent drops: it delegates the bpffs the agent loads its programs into, and answers for conntrack, routes and packet capture. A second band of eBPF programs watches the host rather than the packet: cgroup hooks decide each workload's connect, bind and sendmsg, BPF LSM hooks decide which executables reach the network and guard the agent's own programs, and tracepoints follow every fork, exec and exit and every packet the kernel drops, reporting to the same agent, which writes workload rules back.">
   </picture>
 </p>
 
@@ -226,9 +250,12 @@ Details, host requirements and the lab's own addresses are in
 
 ### Install for real
 
-**Requirements:** Linux kernel 6.12+ on x86_64 or aarch64, with BTF (`CONFIG_DEBUG_INFO_BTF=y`). The floor is the kernel the managed node images (GKE COS, EKS AL2023, Ubuntu HWE) converge on; **BPF token delegation**, which arrived in 6.9, is what lets the agent load its eBPF programs with zero `CAP_BPF` / `CAP_NET_ADMIN` (rootless).
+**Requirements:** Linux kernel 6.12+ on x86_64 or aarch64, with BTF (`CONFIG_DEBUG_INFO_BTF=y`). The floor is the kernel the managed node images (GKE COS, EKS AL2023, Ubuntu HWE) converge on; **BPF token delegation** is what lets the agent load its eBPF programs with zero `CAP_BPF` / `CAP_NET_ADMIN` (rootless).
 
-### Install (package)
+Pick the path that matches the host. The first four install signed release artifacts, and all five run the same two processes: the rootless agent and the warden broker.
+
+<details>
+<summary><b>Debian, Ubuntu, Fedora, RHEL - package repository</b></summary>
 
 The shortest path onto a Linux host, and the one that upgrades and removes
 through the mechanism the host already runs. The packages are release
@@ -268,7 +295,60 @@ verified against the release signing identity, the installed paths, the
 upgrade behaviour and the NixOS module are in the
 [packages guide](https://docs.ebpfsentinel.io/operations/deployment/packages).
 
-### Install (tarball)
+</details>
+
+<details>
+<summary><b>Docker Compose - rootless agent and warden</b></summary>
+
+The agent loads eBPF **exclusively** through a BPF token - never `CAP_BPF`, never `--privileged`. The deployment is two containers: the privileged `warden` broker and the rootless `agent`, sharing a control socket. `docker compose up` wires both:
+
+```bash
+REL=<release>
+BASE=https://github.com/ebpfsentinel/ebpfsentinel-release/releases/download/v$REL
+mkdir ebpfsentinel && cd ebpfsentinel
+for f in compose.yaml ebpfsentinel-agent.json ebpfsentinel-SHA256SUMS{,.sig,.crt}; do
+  curl -fsSLO "$BASE/$f"
+done
+# Verify ebpfsentinel-SHA256SUMS with cosign as in the tarball section below, then:
+sha256sum --ignore-missing -c ebpfsentinel-SHA256SUMS
+
+# Your configuration sits beside them. The agent runs as uid 65534 and rejects
+# a world-readable config:
+#   sudo chown 65534:65534 ebpfsentinel.yaml && sudo chmod 640 ebpfsentinel.yaml
+docker compose up -d        # starts the warden broker + the agent
+docker compose logs -f
+```
+
+The compose file of a release names that release's images, so upgrading is
+fetching the next release's two files; no checkout is involved.
+
+The capabilities are held by the `warden` broker (bpffs delegation, conntrack/routes, the pcap pool + ARP); the agent drops every capability - it self-unshares a user namespace and loads its own eBPF through the token. See the [BPF token guide](https://docs.ebpfsentinel.io/operations/deployment/bpf-token) for the systemd and Kubernetes paths and the full capability matrix.
+
+</details>
+
+<details>
+<summary><b>Kubernetes - Helm chart</b></summary>
+
+The chart is published as an OCI artifact beside the images of each release,
+and needs Kubernetes 1.30 or later. It runs the warden and the agent as two
+containers of one DaemonSet pod, sharing the broker socket:
+
+```bash
+helm install ebpfsentinel oci://ghcr.io/ebpfsentinel/charts/ebpfsentinel \
+  --version <version> \
+  --namespace ebpfsentinel --create-namespace \
+  --set agent.interfaces='{eth0}'
+```
+
+`agent.interfaces` names the node's own interfaces, since the pod runs on the
+host network. Values, upgrades, admission policies and the CNI coexistence
+matrix are in the
+[Kubernetes guide](https://docs.ebpfsentinel.io/operations/deployment/kubernetes).
+
+</details>
+
+<details>
+<summary><b>Any Linux host - signed tarball</b></summary>
 
 For a host that carries no third-party repository. Every artifact comes from
 the [release](https://github.com/ebpfsentinel/ebpfsentinel-release/releases),
@@ -305,7 +385,10 @@ workflow at a tag; `sha256sum -c` says the file on disk is the one it names.
 install. Each release also carries a dual-signed inventory of every binary hash
 and image digest, checkable with `policy/verify.sh` from the same release.
 
-### Build from source
+</details>
+
+<details>
+<summary><b>Build from source - contributors</b></summary>
 
 For contributors and for reading the code. A local build produces eBPF objects nobody signed, so it is not what a published install path uses.
 
@@ -326,31 +409,7 @@ sudo EBPFSENTINEL_WARDEN_SOCK=/run/ebpfsentinel/warden.sock \
 
 The systemd install (`dist/install.sh`) wires this as two units - `ebpfsentinel-warden.service` (broker) + `ebpfsentinel.service` (agent) - mirroring the Docker split.
 
-### Docker (rootless)
-
-The agent loads eBPF **exclusively** through a BPF token - never `CAP_BPF`, never `--privileged`. The deployment is two containers: the privileged `warden` broker and the rootless `agent`, sharing a control socket. `docker compose up` wires both:
-
-```bash
-REL=<release>
-BASE=https://github.com/ebpfsentinel/ebpfsentinel-release/releases/download/v$REL
-mkdir ebpfsentinel && cd ebpfsentinel
-for f in compose.yaml ebpfsentinel-agent.json ebpfsentinel-SHA256SUMS{,.sig,.crt}; do
-  curl -fsSLO "$BASE/$f"
-done
-# Verify ebpfsentinel-SHA256SUMS with cosign as in "Install (tarball)" above, then:
-sha256sum --ignore-missing -c ebpfsentinel-SHA256SUMS
-
-# Your configuration sits beside them. The agent runs as uid 65534 and rejects
-# a world-readable config:
-#   sudo chown 65534:65534 ebpfsentinel.yaml && sudo chmod 640 ebpfsentinel.yaml
-docker compose up -d        # starts the warden broker + the agent
-docker compose logs -f
-```
-
-The compose file of a release names that release's images, so upgrading is
-fetching the next release's two files; no checkout is involved.
-
-The capabilities are held by the `warden` broker (bpffs delegation, conntrack/routes, the pcap pool + ARP); the agent drops every capability - it self-unshares a user namespace and loads its own eBPF through the token. See the [BPF token guide](https://docs.ebpfsentinel.io/operations/deployment/bpf-token) for the systemd and Kubernetes paths and the full capability matrix.
+</details>
 
 ### Minimal config
 
@@ -414,26 +473,26 @@ See [Compatibility](https://docs.ebpfsentinel.io/operations/compatibility) for t
 
 ## OSS vs Enterprise
 
-The **open-source agent** is fully functional on its own: every security domain shown above, plus the REST/gRPC APIs, CLI, authentication, and observability. Nothing in the core is paywalled.
+The **open-source agent** is complete on its own: every engine listed above, the
+REST and gRPC APIs, the CLI, authentication and observability, on as many hosts
+as you like. Nothing in it is paywalled and nothing in it phones a licence server.
 
-The **enterprise edition** layers on capabilities for fleets and regulated environments:
+The **commercial layer** (`ebpfsentinel-enterprise`, the web console and the
+Kubernetes operator) is for running a fleet, investigating across it and proving
+it to an auditor. It comes in three tiers, each containing the one before it:
 
-| Area | Enterprise adds |
-| ---- | --------------- |
-| Detection | ML anomaly detection (Z-score, EWMA, CUSUM, ONNX with a delivered base model, heavy-hitter CMS, DGA/tunneling, C2 beaconing, TLS clustering), AI/LLM security, TLS intelligence, Sigma rules compiled into the agent's own rules, threat intelligence platforms (TAXII 2.1, MISP) |
-| Investigation | Cases with an owner, a timeline and an evidence pack, network forensics with workload investigations, threat hunting over the fleet's history |
-| L7 deep inspection | Extended protocol parsers (MQTT, AMQP, NATS, Cassandra), application attack detection (SQLi/XSS/injection signatures), per-protocol policies (Redis/Mongo/Kafka/SQL/LDAP/SSH), alert enrichment (OWASP/MITRE/PCI), extended TLS-library hooking (Go, static OpenSSL/BoringSSL, kTLS, GnuTLS, wolfSSL, mbedTLS, s2n-tls) |
-| Data protection | Advanced DLP (Vectorscan engine, custom patterns, block mode) |
-| Content channel | Signed content delivered without a redeploy: IDS rules, DLP patterns, JA4 fingerprints, AI providers, ML models, TLS offsets, host rule profiles and file watch profiles per distribution |
-| Operations | HA clustering, multi-cluster federation, fleet management, air-gap mode, bare-metal LoadBalancer addresses over ARP or BGP |
-| Multi-tenancy & access | Multi-tenancy (isolation + quotas), advanced RBAC, advanced analytics & reports |
-| Integration & response | SIEM integration (10 connectors), automated response orchestration (SOAR), a mass encryption run stopped across the fleet and its counting thresholds learned per host |
-| Compliance | Compliance reports (PCI-DSS 4, HIPAA, GDPR, SOC 2, NIS2, DORA, SecNumCloud, HDS) |
-| Licensing & integrity | Ed25519 + ML-DSA-65 dual-signed keys, machine fingerprint binding, air-gap activation, SHA-256 + Ed25519 binary self-verification at startup |
-| Kubernetes operator | CRD-driven deployment & lifecycle management for the agent fleet |
-| Web dashboard | Multi-tenant web UI & control plane (MSSP front-end) |
+| Tier | Built for | Adds |
+| ---- | --------- | ---- |
+| **Professional** | A platform team running Kubernetes in production | A commercial licence in place of the AGPL obligations; the web console (entity pages, process tree behind an alert, service map merged across the fleet, rule replay before a change ships); the Kubernetes operator; fleet inventory, drift detection and exposure across nodes; advanced RBAC; advanced DLP (Vectorscan, custom patterns, block mode); application attack detection, per-protocol policies (Redis, MongoDB, Kafka, SQL, LDAP, SSH) and OWASP/MITRE/PCI enrichment; curated detection content delivered signed, with a rollback; your scanner's findings ranked by what the host runs and exposes; compliance reports with PDF export (PCI-DSS 4, HIPAA, GDPR, SOC 2, NIS2, DORA, SecNumCloud, HDS); bare-metal Services of type LoadBalancer over ARP or BGP; offline licence activation |
+| **Enterprise** | A team that runs a SOC | Cases, hunting over the fleet's history and false-positive suppressions; SIEM connectors (Splunk, Elasticsearch, OpenSearch, Wazuh, Sentinel, QRadar, syslog, OTLP, S3, ClickHouse); Sigma rules compiled into the agent's own rules; TAXII 2.1 and MISP feeds, retroactive indicator matching; ML anomaly detection with a signed base model (C2 beaconing, DGA and DNS tunnelling, heavy hitters); TLS intelligence, cipher policy, post-quantum readiness and a cryptography migration report; extended TLS library coverage (Go, static OpenSSL and BoringSSL, kTLS, GnuTLS, wolfSSL, mbedTLS, s2n-tls) and extended L7 parsers (MQTT, AMQP, NATS, Cassandra); AI and LLM security, agent and MCP traffic; response orchestration, process response, workload quarantine and SOAR webhooks; a tamper-protected agent that root cannot stop without a signed order; network forensics, investigation graph and incident evidence pack; multi-cluster federation |
+| **Critical** | Regulated estates and providers serving tenants | NIS2 and DORA notification drafts built from a case; controls proven continuously by tracing packets through each node's loaded rules; attested nodes; a sealed audit record; high availability with established connections carried across failover, active-active; multi-tenancy with per-tenant templates and a provider tier the tenant cannot override; air-gapped deployment and content across the air gap |
 
-See [Enterprise Features](https://docs.ebpfsentinel.io/features/enterprise/overview) for the full list and per-feature detail.
+Prices are per node and published, and every paid tier is bought online:
+[ebpfsentinel.io/pricing](https://ebpfsentinel.io/pricing). The row-by-row
+matrix, with the licence feature behind each line, is at
+[ebpfsentinel.io/compare](https://ebpfsentinel.io/compare), and each feature
+has its page under
+[Enterprise Features](https://docs.ebpfsentinel.io/features/enterprise/overview).
 
 ## License
 

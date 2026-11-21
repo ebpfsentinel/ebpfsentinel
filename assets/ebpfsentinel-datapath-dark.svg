@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 108 900 380"
-     width="900" height="380" role="img" aria-labelledby="dp-t dp-d">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 108 900 492"
+     width="900" height="492" role="img" aria-labelledby="dp-t dp-d">
   <title id="dp-t">Where an eBPFsentinel verdict is taken</title>
   <desc id="dp-d">A packet arrives on the wire and meets XDP in the network card driver, which
     is where the verdict is taken: unwanted traffic is dropped there, with no copy, no socket
@@ -9,7 +9,12 @@
     ring buffer to the eBPFsentinel agent, one rootless Rust binary, which writes the next rule
     back into the eBPF maps and serves REST and gRPC for control and alerts. Under it the warden
     broker holds the capabilities the agent drops: it delegates the bpffs the agent loads its
-    programs into, and answers for conntrack, routes and packet capture.</desc>
+    programs into, and answers for conntrack, routes and packet capture. Below, a second band of
+    eBPF programs watches the host rather than the packet: cgroup hooks take a verdict on each
+    workload's connect, bind and sendmsg, BPF LSM hooks decide which executables reach the
+    network and keep the agent's own programs and files out of other hands, and tracepoints
+    follow every fork, exec and exit and every packet the kernel drops. They report to the
+    same agent, which writes workload rules back into their maps.</desc>
 
   <defs>
     <!-- Cards are lit from above rather than filled flat, which is the difference between a
@@ -91,6 +96,25 @@
       40%, 100% { transform: translateY(96px); opacity: 0; }
     }
 
+
+    /* The host band runs on the same beat, half a cycle ahead of the packet's own report:
+       a process event rises while the packet is still at the driver, and the workload rule
+       goes back down before the packet has left. */
+    .pkt-hev { animation-name: hev; }
+    .pkt-hrule { animation-name: hrule; }
+    @keyframes hev {
+      0%, 6%  { transform: translateY(0); opacity: 0; }
+      10% { opacity: 1; }
+      26% { transform: translateY(-108px); opacity: 1; }
+      30%, 100% { transform: translateY(-108px); opacity: 0; }
+    }
+    @keyframes hrule {
+      0%, 32% { transform: translateY(0); opacity: 0; }
+      36% { opacity: 1; }
+      52% { transform: translateY(108px); opacity: 1; }
+      56%, 100% { transform: translateY(108px); opacity: 0; }
+    }
+
     /* The ring fires on the beat the packet lands at the driver. SVG geometry has its
        transform origin at 0 0, so a circle drawn at the origin scales about its centre. */
     .ring { animation: ring 5s ease-out infinite; opacity: 0; }
@@ -103,7 +127,10 @@
     /* The agent lights when the event lands on it, not on a clock of its own. */
     .agent-lit { animation: agent 5s ease-out infinite; opacity: 0; }
     @keyframes agent {
-      0%, 66% { opacity: 0; }
+      0%, 24% { opacity: 0; }
+      28% { opacity: 0.8; }
+      36% { opacity: 0; }
+      66% { opacity: 0; }
       72% { opacity: 1; }
       88%, 100% { opacity: 0; }
     }
@@ -120,8 +147,8 @@
     }
   </style>
 
-  <rect y="108" width="900" height="380" fill="#0d1117"/>
-  <rect y="108" width="900" height="380" fill="url(#grid)"/>
+  <rect y="108" width="900" height="492" fill="#0d1117"/>
+  <rect y="108" width="900" height="492" fill="url(#grid)"/>
 
 
   <rect x="168" y="126" width="580" height="106" rx="16" fill="#ecedff"
@@ -333,6 +360,71 @@
   <g transform="translate(822 210)">
     <g class="pkt pkt-dlp"><circle r="7" fill="#ecedff" opacity="0.18"/>
       <circle r="3.2" fill="#ecedff" opacity="0.8"/></g>
+  </g>
+
+  <!-- The host band. Fourteen of the programs never see a packet: they sit on the socket
+       calls of a cgroup, on the LSM hooks and on tracepoints, and answer who rather than
+       what. Same agent, same maps, same ring buffer. -->
+  <rect x="168" y="494" width="580" height="98" rx="16" fill="#ecedff"
+        fill-opacity="0.045" stroke="#ecedff" stroke-opacity="0.14"/>
+  <text x="182" y="512" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="10" font-weight="700"
+        letter-spacing="1.4" fill="#ecedff" opacity="0.55">LINUX KERNEL - eBPF, ON THE HOST</text>
+  <g>
+    <rect x="184" y="522" width="172" height="56" rx="12" fill="url(#face)"
+          stroke="#ecedff" stroke-opacity="0.26" stroke-width="1.3"/>
+    <path d="M196,522.5 H344" stroke="#ecedff" stroke-opacity="0.22"
+          stroke-width="1"/>
+    <text x="270" y="546" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+          font-size="13.5" font-weight="600"
+          fill="#ecedff">cgroup</text>
+    <text x="270" y="564" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="10.5" fill="#ecedff" opacity="0.62">connect - bind - sendmsg</text>
+  </g>
+  <g>
+    <rect x="372" y="522" width="172" height="56" rx="12" fill="url(#face)"
+          stroke="#ecedff" stroke-opacity="0.26" stroke-width="1.3"/>
+    <path d="M384,522.5 H532" stroke="#ecedff" stroke-opacity="0.22"
+          stroke-width="1"/>
+    <text x="458" y="546" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+          font-size="13.5" font-weight="600"
+          fill="#ecedff">BPF LSM</text>
+    <text x="458" y="564" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="10.5" fill="#ecedff" opacity="0.62">executables - self-guard</text>
+  </g>
+  <g>
+    <rect x="560" y="522" width="172" height="56" rx="12" fill="url(#face)"
+          stroke="#ecedff" stroke-opacity="0.26" stroke-width="1.3"/>
+    <path d="M572,522.5 H720" stroke="#ecedff" stroke-opacity="0.22"
+          stroke-width="1"/>
+    <text x="646" y="546" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+          font-size="13.5" font-weight="600"
+          fill="#ecedff">tracepoints</text>
+    <text x="646" y="564" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+          font-size="10.5" fill="#ecedff" opacity="0.62">process tree - drops</text>
+  </g>
+
+  <path d="M640,494 V382" stroke="#ecedff" stroke-opacity="0.18" stroke-width="1.5"/>
+  <path class="rail-v" d="M640,494 V382" stroke="#ecedff"
+        stroke-opacity="0.45" stroke-width="1.5" stroke-dasharray="3 9"/>
+  <path d="M636,387 l4,-5 4,5" fill="none" stroke="#ecedff" stroke-opacity="0.35"
+        stroke-width="1.5"/>
+  <text x="652" y="442" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5"
+        fill="#ecedff" opacity="0.62">RingBuf - who, not what</text>
+  <path d="M260,382 V494" stroke="#a78bfa" stroke-opacity="0.22" stroke-width="1.5"/>
+  <path class="rail-v" d="M260,382 V494" stroke="#a78bfa"
+        stroke-opacity="0.85" stroke-width="1.5" stroke-dasharray="3 9"/>
+  <path d="M256,489 l4,5 4,-5" fill="none" stroke="#a78bfa" stroke-opacity="0.6"
+        stroke-width="1.5"/>
+  <text x="248" y="442" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10.5"
+        fill="#a78bfa">maps - workload rules</text>
+
+  <g transform="translate(640 490)">
+    <g class="pkt pkt-hev"><circle r="7" fill="#ecedff" opacity="0.18"/>
+      <circle r="3.2" fill="#ecedff" opacity="0.8"/></g>
+  </g>
+  <g transform="translate(260 386)">
+    <g class="pkt pkt-hrule"><circle r="7" fill="#a78bfa" opacity="0.22"/>
+      <circle r="3.2" fill="#a78bfa"/></g>
   </g>
 
 </svg>
