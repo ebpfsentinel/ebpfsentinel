@@ -25,6 +25,10 @@ all-features = true
 # ignored: a vulnerability is fixed by a release or a replacement.
 unmaintained = "all"
 ignore = []
+# An entry added here later fails the run the day the lock no longer holds the
+# advisory it was written for, so an exclusion cannot outlive its reason and
+# go on muting the id if an affected version ever comes back.
+unused-ignored-advisory = "deny"
 
 [licenses]
 allow = [
