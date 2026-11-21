@@ -72,8 +72,8 @@ fi
 
 # ── Load kernel modules exposing eBPF kfuncs ───────────────────────
 # xdp-firewall uses the conntrack lookup kfuncs (bpf_xdp_ct_lookup),
-# tc-ids uses the FOU/GUE encap kfuncs (bpf_skb_get_fou_encap) and
-# tc-nat-ingress/egress use the xfrm interface kfuncs
+# tc-nat-ingress/egress use the FOU/GUE encap kfunc
+# (bpf_skb_set_fou_encap) and the xfrm interface kfuncs
 # (bpf_skb_get_xfrm_info). Those kfuncs are registered by the
 # `nf_conntrack`, `fou` and `xfrm_interface` modules; loading the modules
 # publishes their BTF under /sys/kernel/btf/<module> so the agent's kfunc

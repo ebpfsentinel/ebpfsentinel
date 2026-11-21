@@ -34,9 +34,7 @@ use ebpf_common::{
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
-use ebpf_helpers::kfuncs::{
-    BpfCtOpts, CtTuple, kill_flow_via_skb_ct, skb_get_fou_encap, skb_packet_size,
-};
+use ebpf_helpers::kfuncs::{BpfCtOpts, CtTuple, kill_flow_via_skb_ct, skb_packet_size};
 use ebpf_helpers::net::{
     IPV6_HDR_LEN, Ipv6Hdr, PROTO_TCP, PROTO_UDP, ipv6_addr_to_u32x4, u16_from_be_bytes,
     u32_from_be_bytes,
@@ -861,11 +859,6 @@ fn emit_l7_event(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize) {
         increment_metric(false, METRIC_EVENTS_DROPPED);
         return;
     }
-
-    // Detect incoming FOU/GUE overlay encapsulation. Non-None means
-    // the packet arrived through a FOU/GUE tunnel - useful for
-    // overlay-aware IDS rules in cloud environments.
-    let _fou_encap = unsafe { skb_get_fou_encap(raw_skb(ctx) as *mut _) };
 
     // Full packet size including non-linear fragments, which `ctx.len()`
     // alone does not count. Falls back to `ctx.len()` if the dynptr cannot

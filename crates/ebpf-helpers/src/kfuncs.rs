@@ -21,7 +21,6 @@
 //! | `bpf_xdp_metadata_rx_timestamp` | 6.3    | `int(*)(const struct xdp_md *ctx, u64 *timestamp) __ksym;`                                                                                       |
 //! | `bpf_dynptr_from_skb`           | 6.4    | `int(*)(struct __sk_buff *skb, u64 flags, struct bpf_dynptr *ptr__uninit) __ksym;`                                                               |
 //! | `bpf_dynptr_from_xdp`           | 6.4    | `int(*)(struct xdp_md *xdp, u64 flags, struct bpf_dynptr *ptr__uninit) __ksym;`                                                                  |
-//! | `bpf_skb_get_fou_encap`         | 6.4    | `int(*)(struct __sk_buff *skb, struct bpf_fou_encap *encap) __ksym;`                                                                             |
 //! | `bpf_skb_set_fou_encap`         | 6.4    | `int(*)(struct __sk_buff *skb, struct bpf_fou_encap *encap, int type) __ksym;`                                                                   |
 //! | `bpf_dynptr_size`               | 6.5    | `u32(*)(const struct bpf_dynptr *p) __ksym;`                                                                                                     |
 //! | `bpf_xdp_metadata_rx_vlan_tag`  | 6.8    | `int(*)(const struct xdp_md *ctx, __be16 *vlan_proto, u16 *vlan_tci) __ksym;`                                                                    |
@@ -112,7 +111,7 @@ pub struct BpfXfrmInfo {
 
 /// `struct bpf_fou_encap` from `include/uapi/linux/bpf.h`. 4 bytes,
 /// network byte order, kernel 6.4+. Used by
-/// `bpf_skb_{get,set}_fou_encap` to attach FOU (Foo-over-UDP) or GUE
+/// `bpf_skb_set_fou_encap` to attach FOU (Foo-over-UDP) or GUE
 /// (Generic UDP Encapsulation) encapsulation parameters to a TC
 /// egress skb so cloud-overlay tunnels can be built without leaving
 /// the kernel.
@@ -423,13 +422,9 @@ unsafe extern "C" {
 
     // ── Kernel 6.4 FOU/GUE overlay encapsulation ───────────────
     //
-    // `bpf_skb_{get,set}_fou_encap` query / install Foo-over-UDP
-    // (or GUE) encapsulation parameters on a TC egress skb. Used
-    // to build cloud-overlay tunnels without leaving the kernel.
-
-    /// Read the FOU encap parameters attached to a TC skb. Kernel
-    /// 6.4+. Returns `0` on success, negative errno otherwise.
-    pub fn bpf_skb_get_fou_encap(skb: *mut core::ffi::c_void, encap: *mut BpfFouEncap) -> i32;
+    // `bpf_skb_set_fou_encap` installs Foo-over-UDP (or GUE)
+    // encapsulation parameters on a TC egress skb. Used to build
+    // cloud-overlay tunnels without leaving the kernel.
 
     /// Install FOU or GUE encap parameters on a TC skb. `type_` is
     /// the `bpf_fou_encap_type` discriminant. Kernel 6.4+. Returns
@@ -777,9 +772,6 @@ pub mod host_stubs {
     static HOST_LAST_FOU_SPORT: AtomicU32 = AtomicU32::new(0);
     static HOST_LAST_FOU_DPORT: AtomicU32 = AtomicU32::new(0);
     static HOST_LAST_FOU_TYPE: AtomicI32 = AtomicI32::new(-1);
-    static HOST_NEXT_FOU_SPORT: AtomicU32 = AtomicU32::new(0);
-    static HOST_NEXT_FOU_DPORT: AtomicU32 = AtomicU32::new(0);
-    static HOST_NEXT_FOU_GET_ERROR: AtomicI32 = AtomicI32::new(0);
     static HOST_NEXT_FOU_SET_ERROR: AtomicI32 = AtomicI32::new(0);
 
     /// Test helper: queue the `BpfXfrmInfo` returned by the next
@@ -812,19 +804,6 @@ pub mod host_stubs {
         } else {
             Some((HOST_LAST_XFRM_IF_ID.load(Ordering::SeqCst), link))
         }
-    }
-
-    /// Test helper: queue the `BpfFouEncap` returned by the next
-    /// `skb_get_fou_encap` call.
-    pub fn host_set_next_fou_encap(sport: u16, dport: u16) {
-        HOST_NEXT_FOU_SPORT.store(u32::from(sport), Ordering::SeqCst);
-        HOST_NEXT_FOU_DPORT.store(u32::from(dport), Ordering::SeqCst);
-    }
-
-    /// Test helper: inject an error for the next `skb_get_fou_encap`
-    /// call.
-    pub fn host_set_next_fou_get_error(errno: i32) {
-        HOST_NEXT_FOU_GET_ERROR.store(errno, Ordering::SeqCst);
     }
 
     /// Test helper: inject an error for the next `skb_set_fou_encap`
@@ -862,9 +841,6 @@ pub mod host_stubs {
         HOST_LAST_FOU_SPORT.store(0, Ordering::SeqCst);
         HOST_LAST_FOU_DPORT.store(0, Ordering::SeqCst);
         HOST_LAST_FOU_TYPE.store(-1, Ordering::SeqCst);
-        HOST_NEXT_FOU_SPORT.store(0, Ordering::SeqCst);
-        HOST_NEXT_FOU_DPORT.store(0, Ordering::SeqCst);
-        HOST_NEXT_FOU_GET_ERROR.store(0, Ordering::SeqCst);
         HOST_NEXT_FOU_SET_ERROR.store(0, Ordering::SeqCst);
     }
 
@@ -894,24 +870,6 @@ pub mod host_stubs {
             unsafe {
                 HOST_LAST_XFRM_IF_ID.store((*from).if_id, Ordering::SeqCst);
                 HOST_LAST_XFRM_LINK.store((*from).link, Ordering::SeqCst);
-            }
-        }
-        0
-    }
-
-    pub unsafe fn bpf_skb_get_fou_encap(
-        _skb: *mut core::ffi::c_void,
-        encap: *mut BpfFouEncap,
-    ) -> i32 {
-        let err = HOST_NEXT_FOU_GET_ERROR.swap(0, Ordering::SeqCst);
-        if err != 0 {
-            return err;
-        }
-        if !encap.is_null() {
-            #[allow(clippy::cast_possible_truncation)]
-            unsafe {
-                (*encap).sport = HOST_NEXT_FOU_SPORT.load(Ordering::SeqCst) as u16;
-                (*encap).dport = HOST_NEXT_FOU_DPORT.load(Ordering::SeqCst) as u16;
             }
         }
         0
@@ -1126,26 +1084,6 @@ pub unsafe fn xdp_frame_size(xdp: *mut core::ffi::c_void) -> Option<u32> {
     #[cfg(not(target_arch = "bpf"))]
     let sz = unsafe { host_stubs::bpf_dynptr_size(&raw const inner) };
     Some(sz)
-}
-
-/// Read FOU/GUE encapsulation parameters attached to a TC skb.
-/// Returns `None` when no encap metadata is present.
-///
-/// # Safety
-/// `skb` must point to a live `__sk_buff` owned by the current TC
-/// program invocation.
-#[inline(always)]
-#[must_use]
-pub unsafe fn skb_get_fou_encap(skb: *mut core::ffi::c_void) -> Option<BpfFouEncap> {
-    let mut encap = BpfFouEncap::default();
-    #[cfg(target_arch = "bpf")]
-    let rc = unsafe { bpf_skb_get_fou_encap(skb, &raw mut encap) };
-    #[cfg(not(target_arch = "bpf"))]
-    let rc = unsafe { host_stubs::bpf_skb_get_fou_encap(skb, &raw mut encap) };
-    if rc != 0 {
-        return None;
-    }
-    Some(encap)
 }
 
 // ── Conntrack lookup safe wrappers ──────────────────────────────

@@ -17,7 +17,7 @@
 # The verifier is also the only judge available. These objects resolve kfuncs
 # through the agent's own loader, so `bpftool prog loadall` refuses them
 # before it gets as far as the instructions ("failed to find BTF for extern
-# 'bpf_skb_get_fou_encap'"), and there is no static bound either: the limit is
+# 'bpf_skb_set_fou_encap'"), and there is no static bound either: the limit is
 # on the frames of a bpf-to-bpf call chain, and the call graph is not derivable
 # from the object without hand-parsing relocations. So the gate is a real
 # kernel being asked, with the config that asks for all of it.

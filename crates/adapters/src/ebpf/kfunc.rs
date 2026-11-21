@@ -72,12 +72,11 @@ const MODULE_BTF_DIR: &str = "/sys/kernel/btf";
 /// them, and a kfunc whose module is absent from `/sys/kernel/btf` resolves
 /// nowhere. Knowing the owner is what lets the loader refuse with the module's
 /// name instead of the kernel's "not found in vmlinux or any loaded module".
-pub const MODULE_KFUNCS: [(&str, &str); 8] = [
+pub const MODULE_KFUNCS: [(&str, &str); 7] = [
     ("bpf_xdp_ct_lookup", "nf_conntrack"),
     ("bpf_skb_ct_lookup", "nf_conntrack"),
     ("bpf_ct_release", "nf_conntrack"),
     ("bpf_ct_change_timeout", "nf_conntrack"),
-    ("bpf_skb_get_fou_encap", "fou"),
     ("bpf_skb_set_fou_encap", "fou"),
     ("bpf_skb_get_xfrm_info", "xfrm_interface"),
     ("bpf_skb_set_xfrm_info", "xfrm_interface"),

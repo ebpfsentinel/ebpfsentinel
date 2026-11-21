@@ -89,6 +89,27 @@ jobs:
           EBPFSENTINEL_EBPF_DIR: ${{ github.workspace }}/target/bpfel-unknown-none/release
         run: cargo test -p adapters --test tail_call_placement
 
+      # Five programs call kfuncs a kernel module registers, and a runner,
+      # like any minimal host, loads none of those modules until asked. The
+      # steps below load every object, so the runner is prepared the way the
+      # prerequisites page tells an operator to prepare a host: without it a
+      # program is refused for a missing module and is never verified at all.
+      # A kernel shipping a module only in the extra package gets that package.
+      - name: Load the kernel modules the programs call kfuncs from
+        run: |
+          set -eu
+          modules="nf_conntrack fou fou6 xfrm_interface"
+          if ! sudo modprobe -a $modules; then
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe -a $modules
+          fi
+          for module in nf_conntrack fou xfrm_interface; do
+            test -e "/sys/kernel/btf/$module" || {
+              echo "::error::$module is loaded but publishes no BTF, so its kfuncs resolve nowhere"
+              exit 1
+            }
+          done
+
       # Loading a program is what asks the verifier, and nothing before this
       # step has asked it. The harness loads every object just built and runs
       # its entry program with BPF_PROG_TEST_RUN, so a rejection fails here

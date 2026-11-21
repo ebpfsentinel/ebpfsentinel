@@ -51,7 +51,6 @@ const KFUNC_EXPORTS: &[&str] = &[
     "bpf_dynptr_from_xdp",
     "bpf_dynptr_size",
     "bpf_skb_ct_lookup",
-    "bpf_skb_get_fou_encap",
     "bpf_skb_get_xfrm_info",
     "bpf_skb_set_fou_encap",
     "bpf_skb_set_xfrm_info",
