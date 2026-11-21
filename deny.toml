@@ -31,9 +31,7 @@ unmaintained = "workspace"
 # fetches the distribution over the network instead. Drop these three entries
 # the day `utoipa-swagger-ui` takes `zip 9`.
 ignore = [
-    "RUSTSEC-2026-0367",
     "RUSTSEC-2026-0368",
-    "RUSTSEC-2026-0369",
 ]
 
 [licenses]
