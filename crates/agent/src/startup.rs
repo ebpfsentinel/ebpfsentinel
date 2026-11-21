@@ -666,19 +666,6 @@ pub(crate) fn install_ids_workload_scope(
     }
 }
 
-/// Build a capture-socket pool from the warden when the delegation handshake
-/// provisioned none and the agent runs against a warden (`EBPFSENTINEL_WARDEN_SOCK`
-/// set). The warden performs the privileged `socket(AF_PACKET)`; the agent rebinds
-/// and filters per capture. Returns `None` outside warden mode or when the warden
-/// serves no socket, leaving capture gracefully unavailable.
-fn warden_pcap_pool(
-    config: &AgentConfig,
-) -> Option<std::sync::Arc<adapters::net::pcap_capture::PcapSocketPool>> {
-    let sock = warden_sock_from_env()?;
-    let iface = config.agent.interfaces.first()?;
-    adapters::warden::pcap::pool_from_warden(&sock, iface, 2)
-}
-
 /// How often each load balancer backend's open-connection count is rebuilt
 /// from the kernel's flow table.
 const LB_CONNECTION_RECOUNT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -1372,59 +1359,17 @@ pub async fn run(
         app_state = app_state.with_auth_provider(provider, config.auth.metrics_auth_required);
     }
 
-    // Wire capture engine for manual packet capture. The ceiling is the
-    // `capture.max_duration_secs` key, validated at load, and the engine also
-    // carries what the files it writes are allowed to cost on disk.
-    let capture_engine = Arc::new(RwLock::new(domain::capture::engine::CaptureEngine::new(
-        config.capture.max_duration_secs,
-        config.capture.retention(),
-    )));
+    // Wire capture engine for manual packet capture, with what the last run
+    // left in the capture directory adopted and swept.
+    let capture_engine = crate::runtime::open_capture_engine(&config).await;
     app_state = app_state.with_capture_engine(Arc::clone(&capture_engine));
-
-    // Capture files outlive the process that wrote them, so a restart finds
-    // whatever the last run left in the directory: adopt each one as an
-    // interrupted session, so the API accounts for a short file instead of
-    // leaving an operator to guess, then sweep what is past its retention.
-    {
-        let dir = std::path::Path::new(adapters::capture::retention_fs::CAPTURE_DIR);
-        let mut engine = capture_engine.write().await;
-        let known = engine.known_ids();
-        let adopted = adapters::capture::retention_fs::orphan_sessions(
-            dir,
-            &known,
-            std::time::SystemTime::now(),
-        );
-        if !adopted.is_empty() {
-            info!(
-                captures = adopted.len(),
-                "capture files from an earlier run listed as interrupted"
-            );
-            for session in adopted {
-                engine.adopt(session);
-            }
-        }
-        let outcome = adapters::capture::retention_fs::sweep(
-            dir,
-            &engine.retention(),
-            &engine.files_in_use(),
-        );
-        if outcome.deleted > 0 || outcome.failed > 0 {
-            info!(
-                deleted = outcome.deleted,
-                bytes_freed = outcome.bytes_freed,
-                failed = outcome.failed,
-                "capture retention sweep at startup"
-            );
-        }
-    }
 
     // Adopt the AF_PACKET sockets the privileged launcher pre-opened for
     // rootless packet capture (advertised via EBPFSENTINEL_PCAP_FDS). Absent in
     // a non-launcher run - fall back to the warden (rootless warden-client mode),
     // which performs the privileged socket() and hands the fd over SCM_RIGHTS;
     // capture degrades gracefully when neither source provisions a socket.
-    let pcap_pool = adapters::net::pcap_capture::PcapSocketPool::from_env()
-        .or_else(|| warden_pcap_pool(&config));
+    let pcap_pool = crate::runtime::capture_socket_pool(&config);
     if let Some(ref pool) = pcap_pool {
         // The pool is a fixed budget handed to this process, so how much of it
         // is borrowed is worth a gauge: a capture that refuses to start because
@@ -5194,33 +5139,10 @@ pub async fn run(
     info!("shutdown phase 3: stopping config watcher");
     let _ = tokio::time::timeout(Duration::from_secs(1), reload_handle).await;
 
-    // A capture reads packets on a socket of its own and owes nothing to the
-    // eBPF programs, but it is stopped before they are detached because the
-    // operator reading the file afterwards will compare it against the alerts
-    // the datapath raised, and a capture that outlived the datapath records a
-    // window nothing was watching.
-    let interrupted = capture_engine.write().await.interrupt_running();
-    if !interrupted.is_empty() {
-        info!(
-            captures = ?interrupted,
-            "shutdown phase 4: stopping packet captures"
-        );
-        let deadline = tokio::time::Instant::now() + CAPTURE_STOP_TIMEOUT;
-        loop {
-            if capture_engine.read().await.unfinished().is_empty() {
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                warn!(
-                    captures = ?capture_engine.read().await.unfinished(),
-                    timeout_secs = CAPTURE_STOP_TIMEOUT.as_secs(),
-                    "these captures had not closed their file when the window closed"
-                );
-                break;
-            }
-            tokio::time::sleep(adapters::net::pcap_capture::POLL_INTERVAL).await;
-        }
-    }
+    // Captures are stopped before the programs are detached, so a file never
+    // records a window nothing was watching.
+    info!("shutdown phase 4: stopping packet captures");
+    crate::runtime::stop_captures(&capture_engine, CAPTURE_STOP_TIMEOUT).await;
 
     // Under `on_exit: keep` the XDP, TC and cgroup links stay pinned and
     // enforcing: dropping the loaders below then leaves them attached.

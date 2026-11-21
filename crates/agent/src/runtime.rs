@@ -3339,6 +3339,108 @@ pub fn open_mitigation_store(
     Some(store)
 }
 
+/// The engine holding manual and automatic packet captures, with whatever
+/// the last run left in the capture directory already accounted for.
+///
+/// The ceiling is the `capture.max_duration_secs` key, validated at load, and
+/// the engine also carries what the files it writes are allowed to cost on
+/// disk. Capture files outlive the process that wrote them, so each one a
+/// restart finds is adopted as an interrupted session, so the API accounts
+/// for a short file instead of leaving an operator to guess, then whatever is
+/// past its retention is swept.
+pub async fn open_capture_engine(
+    config: &AgentConfig,
+) -> Arc<RwLock<domain::capture::engine::CaptureEngine>> {
+    let engine = Arc::new(RwLock::new(domain::capture::engine::CaptureEngine::new(
+        config.capture.max_duration_secs,
+        config.capture.retention(),
+    )));
+    let dir = Path::new(adapters::capture::retention_fs::CAPTURE_DIR);
+    let mut guard = engine.write().await;
+    let known = guard.known_ids();
+    let adopted =
+        adapters::capture::retention_fs::orphan_sessions(dir, &known, std::time::SystemTime::now());
+    if !adopted.is_empty() {
+        info!(
+            captures = adopted.len(),
+            "capture files from an earlier run listed as interrupted"
+        );
+        for session in adopted {
+            guard.adopt(session);
+        }
+    }
+    let outcome =
+        adapters::capture::retention_fs::sweep(dir, &guard.retention(), &guard.files_in_use());
+    if outcome.deleted > 0 || outcome.failed > 0 {
+        info!(
+            deleted = outcome.deleted,
+            bytes_freed = outcome.bytes_freed,
+            failed = outcome.failed,
+            "capture retention sweep at startup"
+        );
+    }
+    drop(guard);
+    engine
+}
+
+/// The `AF_PACKET` sockets a capture reads from: the ones the privileged
+/// launcher pre-opened (advertised through `EBPFSENTINEL_PCAP_FDS`), else two
+/// handed over by the warden for the first configured interface. `None` when
+/// neither source provisions a socket, and a capture then fails at start
+/// rather than running with nothing behind it.
+///
+/// The launcher's sockets are adopted once per process: a second pool over
+/// the same descriptors would hand one socket to two readers.
+#[must_use]
+pub fn capture_socket_pool(
+    config: &AgentConfig,
+) -> Option<Arc<adapters::net::pcap_capture::PcapSocketPool>> {
+    static LAUNCHER: std::sync::OnceLock<Option<Arc<adapters::net::pcap_capture::PcapSocketPool>>> =
+        std::sync::OnceLock::new();
+    LAUNCHER
+        .get_or_init(adapters::net::pcap_capture::PcapSocketPool::from_env)
+        .clone()
+        .or_else(|| {
+            let sock = crate::startup::warden_sock_from_env()?;
+            let iface = config.agent.interfaces.first()?;
+            adapters::warden::pcap::pool_from_warden(&sock, iface, 2)
+        })
+}
+
+/// Stop every running capture and wait, up to `timeout`, for each to close its
+/// file.
+///
+/// A capture reads packets on a socket of its own and owes nothing to the
+/// eBPF programs, but it is stopped before they are detached because the
+/// operator reading the file afterwards compares it against the alerts the
+/// datapath raised, and a capture that outlived the datapath records a window
+/// nothing was watching.
+pub async fn stop_captures(
+    engine: &RwLock<domain::capture::engine::CaptureEngine>,
+    timeout: std::time::Duration,
+) {
+    let interrupted = engine.write().await.interrupt_running();
+    if interrupted.is_empty() {
+        return;
+    }
+    info!(captures = ?interrupted, "stopping packet captures");
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if engine.read().await.unfinished().is_empty() {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            warn!(
+                captures = ?engine.read().await.unfinished(),
+                timeout_secs = timeout.as_secs(),
+                "these captures had not closed their file when the window closed"
+            );
+            return;
+        }
+        tokio::time::sleep(adapters::net::pcap_capture::POLL_INTERVAL).await;
+    }
+}
+
 /// The engine holding the manual response actions, and the sweeper that
 /// lifts each one off the data plane when its TTL runs out.
 ///
