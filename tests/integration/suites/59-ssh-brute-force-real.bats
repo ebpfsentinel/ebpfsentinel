@@ -322,8 +322,12 @@ _drive_ssh_ncrack() {
         echo "${_HYDRA_OUT}" >&2
         return 1
     fi
-    # And hydra's own tally must read zero valid passwords found.
-    echo "${_HYDRA_OUT}" | grep -qiE '\b0 valid password' || {
+    # And hydra's own tally must read zero valid passwords found, or sshd
+    # refused the source before any password was tried: OpenSSH from 9.8 on
+    # penalises an address that kept failing (PerSourcePenalties), and the
+    # earlier bursts in this file are exactly that, so hydra is reset on
+    # connect and prints no tally. Either way nothing was cracked.
+    echo "${_HYDRA_OUT}" | grep -qiE '\b0 valid password|could not connect to ssh://.*(reset by peer|refused)' || {
         echo "expected '0 valid password found' from hydra; got:" >&2
         echo "${_HYDRA_OUT}" >&2
         return 1

@@ -128,22 +128,33 @@ PY
     fi
 }
 
-# _sample_across_reload <pid> - sample the interface every 20 ms for six
-# seconds, sending SIGHUP half a second in, and echo "<samples> <gaps> <ids>"
-# where a gap is a sample that found no XDP program at all and ids is how
-# many distinct program ids the window saw.
+# _sample_across_reload <pid> - sample the interface every 20 ms, sending
+# SIGHUP a second in, until two seconds after the program id first changed
+# or 30 s have passed, and echo "<samples> <gaps> <ids>" where a gap is a
+# sample that found no XDP program at all and ids is how many distinct
+# program ids the window saw. The window follows the swap rather than a fixed
+# clock: a reload rebuilds every engine before it touches the chain, which
+# takes longer on a shared runner than on a quiet VM.
 _sample_across_reload() {
     local pid="${1:?usage: _sample_across_reload <pid>}"
     local snippet
     snippet=$(cat <<SNIPPET
 out=\$(mktemp)
-deadline=\$(( \$(date +%s) + 6 ))
+deadline=\$(( \$(date +%s) + 30 ))
 hupped=0
+first=
 started=\$(date +%s)
 while [ "\$(date +%s)" -lt "\$deadline" ]; do
     id=\$(ip link show dev ${EBPF_VETH_HOST} 2>/dev/null \
         | grep -oE '${_XDP_ID_PATTERN}' | head -1 | grep -oE '[0-9]+\$')
     echo "\${id:-none}" >>"\$out"
+    if [ -n "\$id" ]; then
+        if [ -z "\$first" ]; then
+            first=\$id
+        elif [ "\$id" != "\$first" ] && [ "\$deadline" -gt \$(( \$(date +%s) + 2 )) ]; then
+            deadline=\$(( \$(date +%s) + 2 ))
+        fi
+    fi
     if [ "\$hupped" -eq 0 ] && [ "\$(date +%s)" -gt "\$started" ]; then
         kill -HUP ${pid} 2>/dev/null || true
         hupped=1
@@ -194,7 +205,11 @@ _metric_or_zero() {
     [ "${gaps:-1}" -eq 0 ]
 
     # And the window really did cover a swap rather than a quiet reload.
-    [ "${ids:-1}" -ge 2 ]
+    [ "${ids:-1}" -ge 2 ] || {
+        echo "no root swap within the window; what the agent said:" >&2
+        grep -iE "reload|xdp|chain|handover" "${AGENT_LOG_FILE}" 2>/dev/null | tail -30 >&2
+        return 1
+    }
 
     local id_after
     id_after="$(_xdp_program_id)"

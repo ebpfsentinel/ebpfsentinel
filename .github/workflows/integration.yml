@@ -320,7 +320,9 @@ jobs:
           set -euo pipefail
           tap="$(mktemp)"
           rc=0
-          sudo -E bats --timing --formatter tap tests/integration/suites/09-docker.bats \
+          # sudo-rs ignores -E, so what the suite reads is passed by name.
+          sudo env EBPFSENTINEL_STRICT_SKIPS="$EBPFSENTINEL_STRICT_SKIPS" \
+            bats --timing --formatter tap tests/integration/suites/09-docker.bats \
             | tee "$tap" || rc=$?
           if grep -E '# skip (Docker agent not healthy|Docker daemon not running|Docker not installed|no eBPF objects available|ebpfsentinel:integration-test image not built)' "$tap"; then
             echo "::error::suite 09 skipped on the thing this lane runs it for"
@@ -411,7 +413,8 @@ jobs:
             # test skipping for one of these fails here. The BPF LSM is
             # not claimed: a hosted runner cannot set the boot line, and the
             # suites relying on it run again nightly on the agent VM.
-            if ! sudo -E EBPFSENTINEL_STRICT_SKIPS=1 EBPFSENTINEL_LANE_CLAIMS="openssl-mlkem userns agent-build root" \
+            # sudo-rs ignores -E, so what the suite reads is passed by name.
+            if ! sudo env EBPFSENTINEL_STRICT_SKIPS=1 EBPFSENTINEL_LANE_CLAIMS="openssl-mlkem userns agent-build root" \
                  bats --timing "$bats_path" \
                  2>&1 | tee "$RUNNER_TEMP/datapath-logs/suite-${id}.log"; then
               failed="$failed $id"
@@ -423,12 +426,21 @@ jobs:
             exit 1
           fi
 
+      # The agent's own log is where a failure says why; the suites archive
+      # it per suite under /tmp/ebpfsentinel-artifacts, written as root.
+      - name: Make the agent logs readable
+        if: always()
+        run: sudo chmod -R a+rX /tmp/ebpfsentinel-artifacts 2>/dev/null || true
+
       - name: Upload suite logs
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: datapath-logs-shard-${{ matrix.shard }}
-          path: ${{ runner.temp }}/datapath-logs
+          path: |
+            ${{ runner.temp }}/datapath-logs
+            /tmp/ebpfsentinel-artifacts
+          if-no-files-found: warn
           retention-days: 14
 
   # ── Nightly attack/perf bats matrix (self-hosted Vagrant) ────────

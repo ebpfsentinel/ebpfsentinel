@@ -19,6 +19,11 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=64m
+      # The image's working directory is its state directory: the run lock,
+      # the audit store and every relative path land there. The shipped
+      # compose keeps it on a named volume; a test container keeps it in
+      # memory, since nothing outlives the suite.
+      - /var/lib/ebpfsentinel:size=64m
 
     volumes:
       # BTF type info - required for eBPF CO-RE

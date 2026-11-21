@@ -155,10 +155,24 @@ _alert_on() {
 
 @test "a block rule that does not ask for it leaves the process running" {
     local pid
-    pid="$(_dial "$KEEP_PORT")"
+    # Started from this shell rather than a substitution, so it is a child
+    # whose exit status can be read.
+    _dial "$KEEP_PORT" >/dev/null
+    pid="$(cat "${DATA_DIR}/dial-${KEEP_PORT}.pid")"
     run _alert_on ips-keep-dialer-block
     [ "$status" -eq 0 ]
     sleep 3
-    kill -0 "$pid"
+    # The block cuts the connection, and ncat may leave on its own once its
+    # peer is gone; what the rule must not do is stop it. A process the
+    # agent stops dies of SIGKILL and leaves a decision in the log.
+    if ! kill -0 "$pid" 2>/dev/null; then
+        local rc=0
+        wait "$pid" 2>/dev/null || rc=$?
+        [ "$rc" -ne 137 ] || {
+            echo "the dialer died of SIGKILL" >&2
+            false
+        }
+    fi
     kill "$pid" 2>/dev/null || true
+    ! grep 'process kill' "$AGENT_LOG_FILE" | grep -q 'ips-keep-dialer-block'
 }

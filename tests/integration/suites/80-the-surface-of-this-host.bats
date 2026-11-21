@@ -282,7 +282,11 @@ _root_of() {
     local svc pid body libc
     svc="${DATA_DIR}/surface-service"
     cp "$(readlink -f "$(command -v sleep)")" "$svc"
-    "$svc" 3600 &
+    # Called through a link named `sleep`, so a coreutils that picks the tool
+    # by the name it was called under (uutils) still sleeps; the process maps
+    # the file the link resolves to, which is the copy.
+    ln -sf "$(basename "$svc")" "${DATA_DIR}/sleep"
+    "${DATA_DIR}/sleep" 3600 &
     pid=$!
     echo "$pid" >> "${ROOTS_PIDS_FILE}"
     body="$(_wait_loaded 150 --argjson pid "$pid" --arg svc "$svc" \

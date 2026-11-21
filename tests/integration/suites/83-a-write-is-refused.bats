@@ -57,8 +57,12 @@ setup_file() {
     export DATA_DIR="/var/tmp/ebpfsentinel-test-data-write-refusal-$$"
     mkdir -p "${DATA_DIR}/watched" "${DATA_DIR}/outside" "${DATA_DIR}/system" "${DATA_DIR}/bin"
     # The expected writer is a copy, so it is a file of its own and the
-    # original stays an executable nobody expects.
-    install -m 0755 "$(command -v tee)" "${DATA_DIR}/bin/expected-writer"
+    # original stays an executable nobody expects. It is called through a
+    # link named `tee`: where coreutils is one binary that picks the tool by
+    # the name it was called under (uutils), the copy called as itself would
+    # be no tool at all. The kernel names the file the link resolves to.
+    install -m 0755 "$(readlink -f "$(command -v tee)")" "${DATA_DIR}/bin/expected-writer"
+    ln -s expected-writer "${DATA_DIR}/bin/tee"
     echo original >"${DATA_DIR}/held.conf"
 
     stop_ebpf_agent 2>/dev/null || true
@@ -201,10 +205,10 @@ _kill_agent_while_writing() {
 }
 
 @test "the expected writer writes under a system path, and a file beside the held one is free" {
-    run "${DATA_DIR}/bin/expected-writer" "${DATA_DIR}/system/unit.conf" <<<"expected"
+    run "${DATA_DIR}/bin/tee" "${DATA_DIR}/system/unit.conf" <<<"expected"
     [ "$status" -eq 0 ]
     [ "$(cat "${DATA_DIR}/system/unit.conf")" = "expected" ]
-    run "${DATA_DIR}/bin/expected-writer" "${DATA_DIR}/held.conf" <<<"updated"
+    run "${DATA_DIR}/bin/tee" "${DATA_DIR}/held.conf" <<<"updated"
     [ "$status" -eq 0 ]
     [ "$(cat "${DATA_DIR}/held.conf")" = "updated" ]
     run tee "${DATA_DIR}/beside.conf" <<<"free"

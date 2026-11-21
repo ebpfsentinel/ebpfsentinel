@@ -138,23 +138,31 @@ with open(sys.argv[1], 'w') as f:
         [ -n "$pid" ] && kill -HUP "$pid"
     fi
 
-    # Wait for reload to take effect
-    sleep 3
-
-    local body
-    body="$(api_get /api/v1/firewall/rules)"
-    _load_http_status
-
-    [ "$HTTP_STATUS" = "200" ]
-
-    local count
-    count="$(echo "$body" | jq 'length' 2>/dev/null)" || true
-
-    # Count should have increased by 2 from initial
+    # Count should have increased by 2 from initial. A reload rebuilds every
+    # engine and reattaches what changed, which takes longer on a shared
+    # runner than on a quiet VM, so the answer is polled rather than read
+    # once after a fixed pause.
     local initial_count
     initial_count="$(cat "${DATA_DIR}/initial_rule_count.txt" 2>/dev/null)" || initial_count=3
     local expected=$(( initial_count + 2 ))
-    [ "$count" -eq "$expected" ] || [ "$count" -ge "$expected" ]
+
+    local body count=0 waited=0
+    while [ "$waited" -lt 30 ]; do
+        body="$(api_get /api/v1/firewall/rules)"
+        _load_http_status
+        if [ "$HTTP_STATUS" = "200" ]; then
+            count="$(echo "$body" | jq 'length' 2>/dev/null)" || count=0
+            [ "${count:-0}" -ge "$expected" ] && break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    [ "${count:-0}" -ge "$expected" ] || {
+        echo "rules after reload: ${count:-none}, expected ${expected}" >&2
+        grep -iE "reload|config" "$AGENT_LOG_FILE" 2>/dev/null | tail -20 >&2
+        return 1
+    }
 
     # Verify the new rules exist
     local has_5555 has_6666

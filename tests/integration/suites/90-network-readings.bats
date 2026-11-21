@@ -78,6 +78,14 @@ setup_file() {
         return 1
     }
 
+    # The listener table is filled by the bind hook of the attribution
+    # program, which attaches on its own schedule: a server bound before it
+    # is attached is never listed, whatever the process table knows.
+    wait_for_ebpf_program cgroup-attribution 30 || {
+        tail -20 "$AGENT_LOG_FILE" >&2
+        return 1
+    }
+
     # Every server starts after the agent, so the bind hook sees each one.
     _serve host "$EBPF_HOST_IP" "$GRAPH_PORT" graph
     _serve ns "0.0.0.0" "$FLOW_PORT" flow

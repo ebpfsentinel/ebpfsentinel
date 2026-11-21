@@ -297,7 +297,7 @@ teardown_file() {
     # refusal rather than a policy that silently denies.
     local body
     body="$(api_post /api/v1/zones/policies \
-        '{"name":"test-bad-policy","source_zone":"external","dest_zone":"internal","action":"alert","priority":98,"enabled":true}')"
+        '{"source_zone":"external","dest_zone":"internal","action":"alert"}')"
     _load_http_status
 
     [ "$HTTP_STATUS" = "400" ] || {
