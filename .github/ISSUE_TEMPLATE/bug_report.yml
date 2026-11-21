@@ -41,7 +41,7 @@ body:
       label: Deployment
       options:
         - Binary on the host
-        - Docker or Podman
+        - Docker (Compose)
         - Kubernetes (Helm chart)
         - Kubernetes (operator)
         - Other
