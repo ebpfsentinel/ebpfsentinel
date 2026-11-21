@@ -52,6 +52,7 @@ loadbalancer:
       socket: __DATA_DIR__/bird.ctl
       config_path: __DATA_DIR__/bird-ebpfsentinel.conf
       local_asn: 65001
+      local_port: 1179
       router_id: 10.200.0.1
       peers:
         - name: upstream

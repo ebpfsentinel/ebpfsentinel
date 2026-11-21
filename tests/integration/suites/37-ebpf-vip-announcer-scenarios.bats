@@ -388,6 +388,13 @@ PY
         echo "peer missing from the daemon configuration: $(cat "${log}.conf")" >&2
         return 1
     }
+    # The daemon listens where local_port says, off a port another speaker
+    # on the node may hold, and still dials the peer on its own port.
+    grep -q "local port 1179 as 65001;" "${log}.conf" || {
+        kill "$bird_pid" 2>/dev/null
+        echo "listening port missing from the daemon configuration: $(cat "${log}.conf")" >&2
+        return 1
+    }
 
     # A standby keeps its session but withdraws the route.
     body="$(_apply_role standby)"
