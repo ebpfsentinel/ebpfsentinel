@@ -504,11 +504,14 @@ fn restore_message(restore: &ConntrackRestore) -> Result<Vec<u8>, String> {
     // a status without it is a request to unconfirm, not a silence about it.
     //
     // A handed-over flow carries no window: neither end's scale factor nor
-    // the sequence it reached is known here, so a tracked window would read
-    // the peer's scaled window as bytes and call the next segment INVALID,
-    // which a firewall in the forward path then drops. Both directions are
-    // marked liberal (flags then mask), as conntrackd does for a flow it
-    // picks up mid-stream; state, timeout and both tuples are still tracked.
+    // the sequence it reached is known here, so nothing here can tell the
+    // kernel what window to hold the flow to. Both directions are marked
+    // liberal (flags then mask), as conntrackd does for a flow it picks up
+    // mid-stream; state, timeout and both tuples are still tracked. The flag
+    // is a guarantee, not what the flow measurably needs: on the kernels the
+    // enterprise HA suite runs (7.0), an entry created without it carried a
+    // megabyte in one line too, the kernel learning each direction's window
+    // from the first segment it sees on an entry that holds none.
     let liberal = [TCP_FLAG_BE_LIBERAL, TCP_FLAG_BE_LIBERAL];
     msg.attr(CTA_STATUS, &RESTORE_STATUS.to_be_bytes())
         .attr(CTA_TIMEOUT, &CONNTRACK_RESTORE_TIMEOUT_SECS.to_be_bytes())
