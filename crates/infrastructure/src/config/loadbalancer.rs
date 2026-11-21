@@ -246,6 +246,12 @@ pub struct BgpAnnounceConfig {
     #[serde(default)]
     pub local_asn: u32,
 
+    /// Port BIRD listens on. Sessions it opens still reach each peer on
+    /// the peer's `port`; move this off 179 where another BGP speaker on
+    /// the node (a CNI in BGP mode, a load balancer) already holds it.
+    #[serde(default = "default_bgp_port")]
+    pub local_port: u16,
+
     /// BGP router ID (IPv4 notation); BIRD derives one when unset.
     #[serde(default)]
     pub router_id: Option<String>,
@@ -261,6 +267,7 @@ impl Default for BgpAnnounceConfig {
             socket: default_bird_socket(),
             config_path: default_bird_config_path(),
             local_asn: 0,
+            local_port: DEFAULT_BGP_PORT,
             router_id: None,
             peers: Vec::new(),
         }
@@ -343,6 +350,7 @@ impl BgpAnnounceConfig {
         let cfg = BgpConfig {
             enabled: self.enabled,
             local_asn: self.local_asn,
+            local_port: self.local_port,
             router_id,
             peers,
         };

@@ -140,8 +140,8 @@ pub fn render_config(config: &BgpConfig, routes: &[IpAddr]) -> String {
         };
         let _ = writeln!(
             out,
-            "\nprotocol bgp {PROTO_PREFIX}{} {{\n  local as {};\n  neighbor {} port {} as {};\n  hold time {};",
-            p.name, config.local_asn, p.address, p.port, p.asn, p.hold_time
+            "\nprotocol bgp {PROTO_PREFIX}{} {{\n  local port {} as {};\n  neighbor {} port {} as {};\n  hold time {};",
+            p.name, config.local_port, config.local_asn, p.address, p.port, p.asn, p.hold_time
         );
         if let Some(pw) = &p.password {
             let _ = writeln!(out, "  password \"{pw}\";");
@@ -238,6 +238,7 @@ mod tests {
         BgpConfig {
             enabled: true,
             local_asn: 64513,
+            local_port: 1179,
             router_id: Some("10.0.0.10".parse().unwrap()),
             peers: vec![
                 BgpPeer {
@@ -271,6 +272,8 @@ mod tests {
         assert!(text.contains("route 192.0.2.10/32 blackhole;"));
         assert!(text.contains("route 2001:db8::10/128 blackhole;"));
         assert!(text.contains("protocol bgp ebpfs_tor1 {"));
+        // The daemon listens on the local port and dials the peer's own.
+        assert!(text.contains("local port 1179 as 64513;"));
         assert!(text.contains("neighbor 10.0.0.1 port 179 as 64512;"));
         assert!(text.contains("password \"s3cret\";"));
         assert!(text.contains("ipv4 { import none; export where proto = \"ebpfs_vips4\"; };"));

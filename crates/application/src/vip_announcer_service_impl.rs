@@ -845,6 +845,7 @@ mod tests {
         BgpConfig {
             enabled: true,
             local_asn: 64513,
+            local_port: 1179,
             router_id: None,
             peers: vec![domain::loadbalancer::bgp::BgpPeer {
                 name: "tor1".into(),

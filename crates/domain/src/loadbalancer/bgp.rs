@@ -44,6 +44,11 @@ pub struct BgpPeer {
 pub struct BgpConfig {
     pub enabled: bool,
     pub local_asn: u32,
+    /// Port the daemon listens on for its sessions. Sessions it opens still
+    /// reach each peer on the peer's port; this one only has to be free on
+    /// the node, which 179 is not where another speaker (a CNI in BGP mode,
+    /// a load balancer) already listens there.
+    pub local_port: u16,
     /// Router ID; the daemon picks one from the interfaces when unset.
     pub router_id: Option<std::net::Ipv4Addr>,
     pub peers: Vec<BgpPeer>,
@@ -58,6 +63,11 @@ impl BgpConfig {
         if self.local_asn == 0 {
             return Err(LbError::InvalidService(
                 "bgp local_asn must be set".to_string(),
+            ));
+        }
+        if self.local_port == 0 {
+            return Err(LbError::InvalidService(
+                "bgp local_port must not be zero".to_string(),
             ));
         }
         if self.peers.is_empty() {
@@ -170,6 +180,7 @@ mod tests {
         BgpConfig {
             enabled: true,
             local_asn: 64513,
+            local_port: 1179,
             router_id: None,
             peers,
         }
@@ -195,6 +206,9 @@ mod tests {
         c.local_asn = 0;
         assert!(c.validate().is_err());
         assert!(cfg(vec![]).validate().is_err());
+        let mut c = cfg(vec![peer("tor1", "10.0.0.1")]);
+        c.local_port = 0;
+        assert!(c.validate().is_err());
     }
 
     #[test]
