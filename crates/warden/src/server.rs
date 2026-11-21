@@ -27,8 +27,8 @@ use crate::write_refusal;
 use crate::{
     bpf_inventory, cgroup_ops, delegate_over_fd, dlp_scan, exe_read, facts_read, go_executables,
     hidden_ports, hidden_processes, link_pins, namespace_ids, net_ops, netns_tcx_ops,
-    packet_sockets, podman_connect, process_maps, recv_fd, resolver_socket, rooted_read,
-    send_msg_fds, served_peer, uprobe_ops,
+    packet_sockets, podman_connect, process_maps, recv_fd, resolver_socket, root_runtime,
+    rooted_read, send_msg_fds, served_peer, uprobe_ops,
 };
 
 /// How long a connection may hold a thread without saying `Hello`.
@@ -419,6 +419,20 @@ fn handle_conn_with_timeouts(
                     }
                     Err(message) => {
                         eprintln!("[warden] podman connect for uid {uid} refused: {message}");
+                        serve_passed_fd(&mut writer, Err(message))
+                    }
+                }
+            }
+            // `ConnectRootRuntime` answers out-of-band: the agent's end of a
+            // relay that forwards only the reads it makes, after an `FdReady`.
+            Command::ConnectRootRuntime { runtime } => {
+                match root_runtime::open(Path::new(runtime.socket()), 0) {
+                    Ok(stream) => {
+                        // Dup'd into the agent by `SCM_RIGHTS`; ours closes here.
+                        serve_passed_fd(&mut writer, Ok(stream.as_raw_fd()))
+                    }
+                    Err(message) => {
+                        eprintln!("[warden] {runtime:?} connect refused: {message}");
                         serve_passed_fd(&mut writer, Err(message))
                     }
                 }

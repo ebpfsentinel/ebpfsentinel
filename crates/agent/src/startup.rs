@@ -1821,7 +1821,7 @@ pub async fn run(
         // Asked only when somebody renders a segmentation document, so a
         // socket that is missing now answers then, with the reason.
         app_state =
-            app_state.with_bridge_networks(Arc::new(adapters::container::DockerClient::new(
+            app_state.with_bridge_networks(Arc::new(adapters::container::DockerClient::docker(
                 &config.container.docker.socket,
                 config.container.docker.timeout_ms,
             )));
@@ -3908,12 +3908,11 @@ pub async fn run(
     let docker_enricher: Option<
         Arc<dyn ports::secondary::metadata_enricher_port::MetadataEnricher>,
     > = if config.container.docker.enabled {
-        let socket_path = std::path::Path::new(&config.container.docker.socket);
-        if socket_path.exists() {
-            let client = adapters::container::DockerClient::new(
-                &config.container.docker.socket,
-                config.container.docker.timeout_ms,
-            );
+        let client = adapters::container::DockerClient::docker(
+            &config.container.docker.socket,
+            config.container.docker.timeout_ms,
+        );
+        if client.may_reach() {
             let cache = Arc::new(adapters::container::DockerCache::new(
                 config.container.docker.cache_size,
                 Duration::from_secs(config.container.docker.cache_ttl_seconds),
@@ -9738,7 +9737,7 @@ pub async fn spawn_dns_allowlist_resolver(
         .context("dns.allowlist.containers")?;
     let service = application::dns_allowlist_service::DnsAllowListService::new(
         list,
-        Arc::new(adapters::container::DockerClient::new(
+        Arc::new(adapters::container::DockerClient::docker(
             &config.container.docker.socket,
             config.container.docker.timeout_ms,
         )),

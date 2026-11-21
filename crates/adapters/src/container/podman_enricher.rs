@@ -37,7 +37,7 @@ use tracing::{info, warn};
 use domain::container::engine::rootless_uid;
 use domain::container::entity::{ContainerInfo, ContainerMetadata, ContainerRuntime};
 use domain::container::error::ContainerError;
-use ebpfsentinel_warden_client::ReconnectingClient;
+use ebpfsentinel_warden_client::{ReconnectingClient, RootRuntime};
 use ports::secondary::metadata_enricher_port::MetadataEnricher;
 
 use super::docker_cache::DockerCache;
@@ -145,10 +145,7 @@ impl PodmanEnricher {
             timeout_ms,
             cache,
             seen: Mutex::new(BTreeMap::new()),
-            warden: std::env::var_os(super::proc_digest::WARDEN_SOCK_ENV)
-                .map(PathBuf::from)
-                .filter(|p| !p.as_os_str().is_empty())
-                .map(|p| Arc::new(Mutex::new(ReconnectingClient::new(p)))),
+            warden: super::docker_client::warden_from_env(),
         }
     }
 
@@ -171,6 +168,17 @@ impl PodmanEnricher {
                 let brokered = Dialer::podman_through_warden(socket, Arc::clone(warden), uid);
                 let reach = probe(&brokered, timeout).await;
                 (brokered, reach)
+            }
+            // Root's runtime is root on the host: the warden relays the
+            // reads the agent makes, never the socket.
+            (PodmanOwner::Root, PodmanReach::Refused | PodmanReach::NoSocket, Some(warden)) => {
+                let relayed = Dialer::root_runtime_with(
+                    socket,
+                    RootRuntime::Podman,
+                    Some(Arc::clone(warden)),
+                );
+                let reach = probe(&relayed, timeout).await;
+                (relayed, reach)
             }
             _ => (direct, reach),
         }
@@ -458,8 +466,14 @@ mod tests {
                 let (counter, runtime) = (Arc::clone(&counter), runtime.clone());
                 std::thread::spawn(move || {
                     while let Ok(cmd) = read_frame::<_, Command>(&mut conn) {
-                        let Command::ConnectPodman { uid: asked } = cmd else {
-                            panic!("unexpected command {cmd:?}");
+                        let asked = match cmd {
+                            Command::ConnectPodman { uid: asked } => asked,
+                            // Root's runtime: the real warden hands over a
+                            // relay, a stream answering the same reads.
+                            Command::ConnectRootRuntime {
+                                runtime: RootRuntime::Podman,
+                            } => 0,
+                            cmd => panic!("unexpected command {cmd:?}"),
                         };
                         if asked != uid {
                             let message = format!(
@@ -477,6 +491,28 @@ mod tests {
             }
         });
         served
+    }
+
+    #[tokio::test]
+    async fn roots_runtime_the_agent_cannot_reach_is_read_through_the_wardens_relay() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = dir.path().join("runtime.sock");
+        let server = serve_inspect(&runtime);
+        let sock = dir.path().join("warden.sock");
+        let served = fake_warden(&sock, 0, runtime);
+
+        // The rootful socket is not mounted for the agent: only the warden
+        // reaches it.
+        let enricher = PodmanEnricher::new(dir.path().join("rootful.sock"), None, 2_000, cache())
+            .with_warden(&sock);
+        let md = enricher.enrich(&rootful()).await.unwrap();
+        let Some(ContainerMetadata::Docker(md)) = md else {
+            panic!("expected metadata, runtimes {:?}", enricher.runtimes());
+        };
+        assert_eq!(md.name, "web");
+        assert!(served.load(Ordering::Relaxed) >= 1);
+        assert_eq!(enricher.runtimes()[0].reach, PodmanReach::Reachable);
+        server.abort();
     }
 
     /// A user's socket behind a directory the agent may not enter, as a

@@ -1063,6 +1063,87 @@ pub enum Command {
         /// The pins to remove; empty for all of them.
         names: Vec<String>,
     },
+    /// Open a connection to the API of a container runtime root runs on the
+    /// host and hand the agent's end over in an `SCM_RIGHTS` cmsg after
+    /// [`Response::FdReady`]. That API is root on the host, so what crosses
+    /// is never the runtime's socket: it is one end of a pair whose other end
+    /// the warden reads. The warden takes one request from it, refuses it
+    /// unless it is a `GET` of a path in [`root_runtime_path_allowed`], sends
+    /// a request of its own for that path on the socket it names itself, and
+    /// copies the answer back. The agent writes nothing else the runtime sees.
+    ConnectRootRuntime {
+        /// Which runtime is asked.
+        runtime: RootRuntime,
+    },
+}
+
+/// A container runtime root runs, reached through
+/// [`Command::ConnectRootRuntime`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RootRuntime {
+    /// The Docker Engine, at `/var/run/docker.sock`.
+    Docker,
+    /// Podman's rootful service, at `/run/podman/podman.sock`.
+    Podman,
+}
+
+impl RootRuntime {
+    /// The socket the warden connects to, as the host names it.
+    #[must_use]
+    pub fn socket(self) -> &'static str {
+        match self {
+            Self::Docker => "/var/run/docker.sock",
+            Self::Podman => "/run/podman/podman.sock",
+        }
+    }
+}
+
+/// The Docker API version every path the agent asks for carries; Podman
+/// serves the same compatible paths.
+pub const ROOT_RUNTIME_API_PREFIX: &str = "/v1.43";
+
+/// Whether `target`, the request target of a `GET` the agent wrote to a root
+/// runtime, is one the warden forwards. Six reads, and nothing else: the
+/// liveness ping, the container list, one container's inspect, the network
+/// list, one network's inspect, and the event stream. An id or a name is
+/// letters, digits, `_`, `.` and `-`, so no segment can climb out of its
+/// path, and only the three list reads take a query.
+#[must_use]
+pub fn root_runtime_path_allowed(target: &str) -> bool {
+    fn id(segment: &str) -> bool {
+        !segment.is_empty()
+            && segment.len() <= 128
+            && segment
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+            && segment != "."
+            && segment != ".."
+    }
+    fn query(q: &str) -> bool {
+        q.len() <= 2048
+            && q.bytes()
+                .all(|b| b.is_ascii_graphic() && !matches!(b, b'#' | b'/' | b'\\'))
+    }
+    if target == "/_ping" {
+        return true;
+    }
+    let Some(rest) = target.strip_prefix(ROOT_RUNTIME_API_PREFIX) else {
+        return false;
+    };
+    let (path, q) = match rest.split_once('?') {
+        Some((path, q)) => (path, Some(q)),
+        None => (rest, None),
+    };
+    if q.is_some_and(|q| !query(q)) {
+        return false;
+    }
+    let segments: Vec<&str> = path.split('/').collect();
+    match segments.as_slice() {
+        ["", "containers", "json"] | ["", "networks" | "events"] => true,
+        ["", "containers", container, "json"] => q.is_none() && id(container),
+        ["", "networks", network] => q.is_none() && id(network),
+        _ => false,
+    }
 }
 
 /// Longest link pin name the warden accepts.
@@ -1324,8 +1405,8 @@ mod tests {
         ListedPort, MAX_FRAME_LEN, MappedFile, MappingScan, NamespaceIdReading,
         NamespacePortReading, NetworkProgram, OpenIntent, OpenerReading, PacketSocket,
         PidObservation, ProcessFactsReading, ProcessMappings, ProcessStamp, ROOTED_CHUNK_MAX,
-        Response, RootedFile, RootedRead, RouteSpec, TaskIdentity, read_frame,
-        valid_dpkg_list_name, valid_link_pin_name, write_frame,
+        Response, RootRuntime, RootedFile, RootedRead, RouteSpec, TaskIdentity, read_frame,
+        root_runtime_path_allowed, valid_dpkg_list_name, valid_link_pin_name, write_frame,
     };
     use std::io::Cursor;
 
@@ -1506,6 +1587,9 @@ mod tests {
                 name: "xdp_eth0".into(),
             },
             Command::UnpinLinks { names: Vec::new() },
+            Command::ConnectRootRuntime {
+                runtime: RootRuntime::Docker,
+            },
         ]
     }
 
@@ -1896,5 +1980,49 @@ mod tests {
         write_frame(&mut buf, &Command::ConntrackDump).unwrap();
         buf.truncate(buf.len() - 1);
         assert!(read_frame::<_, Command>(&mut Cursor::new(&buf)).is_err());
+    }
+
+    #[test]
+    fn the_reads_the_agent_makes_reach_a_root_runtime() {
+        for target in [
+            "/_ping",
+            "/v1.43/containers/json",
+            "/v1.43/containers/0123abcdef/json",
+            "/v1.43/containers/web-1_a.b/json",
+            "/v1.43/networks?filters=%7B%22driver%22%3A%7B%22bridge%22%3Atrue%7D%7D",
+            "/v1.43/networks/bridge",
+            "/v1.43/events?filters=%7B%22type%22%3A%5B%22container%22%5D%7D",
+        ] {
+            assert!(root_runtime_path_allowed(target), "{target}");
+        }
+    }
+
+    #[test]
+    fn anything_else_a_root_runtime_serves_is_refused() {
+        for target in [
+            "",
+            "/",
+            "/containers/json",
+            "/v1.44/containers/json",
+            "/v1.43/containers/create",
+            "/v1.43/containers/abc/export",
+            "/v1.43/containers/abc/archive?path=/etc/shadow",
+            "/v1.43/containers/abc/logs",
+            "/v1.43/containers/../secrets/json",
+            "/v1.43/containers/%2e%2e/json",
+            "/v1.43/containers/abc/json?size=1",
+            "/v1.43/containers/abc/json/",
+            "/v1.43/images/json",
+            "/v1.43/secrets",
+            "/v1.43/networks/abc/connect",
+            "/v1.43/networks/abc?verbose=true",
+            "/v1.43/events?until=1#x",
+            "/v1.43/events?a=/b",
+            "/v1.43/exec/abc/start",
+            "/v1.43/swarm",
+            "/v1.43/_ping",
+        ] {
+            assert!(!root_runtime_path_allowed(target), "{target}");
+        }
     }
 }

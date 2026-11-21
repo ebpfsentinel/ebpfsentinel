@@ -33,6 +33,7 @@ use domain::firewall::container_labels::ListedContainer;
 
 use super::docker_cache::DockerCache;
 use super::docker_client::{DEFAULT_TIMEOUT_MS, Dialer, DockerClient};
+use ebpfsentinel_warden_client::RootRuntime;
 
 /// Events we ask Docker for. Anything else is noise for a metadata cache.
 const WANTED_ACTIONS: [&str; 4] = ["create", "start", "die", "destroy"];
@@ -453,7 +454,11 @@ impl DockerEventWatcher {
         cache: Arc<DockerCache>,
         labels: Option<mpsc::Sender<LabelUpdate>>,
     ) -> Self {
-        Self::spawn_dialing(Dialer::direct(socket), cache, labels)
+        Self::spawn_dialing(
+            Dialer::root_runtime(socket, RootRuntime::Docker),
+            cache,
+            labels,
+        )
     }
 
     /// As [`Self::spawn_with_labels`], with every connection opened by

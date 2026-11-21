@@ -387,8 +387,8 @@ pub async fn build_workload_enrichers(
         Vec::new();
 
     let docker = &config.container.docker;
-    if docker.enabled && Path::new(&docker.socket).exists() {
-        let client = adapters::container::DockerClient::new(&docker.socket, docker.timeout_ms);
+    let client = adapters::container::DockerClient::docker(&docker.socket, docker.timeout_ms);
+    if docker.enabled && client.may_reach() {
         let cache = Arc::new(adapters::container::DockerCache::new(
             docker.cache_size,
             std::time::Duration::from_secs(docker.cache_ttl_seconds),
@@ -466,7 +466,10 @@ pub fn build_podman_enricher(
     if !podman.enabled {
         return (EnricherState::OffByConfiguration, None);
     }
-    if !podman.rootless && !Path::new(&podman.socket).exists() {
+    if !podman.rootless
+        && !Path::new(&podman.socket).exists()
+        && adapters::container::warden_from_env().is_none()
+    {
         warn!(
             socket = %podman.socket,
             "Podman container enrichment is off: the socket is not there and rootless \

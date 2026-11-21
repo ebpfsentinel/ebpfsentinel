@@ -78,6 +78,7 @@ services:
       - PERFMON # uprobe attach (perf/tracing)
       - DAC_READ_SEARCH # name the directory a watched file changed in
       - NET_BIND_SERVICE # port 53 for the DNS allow-list resolver, handed to the agent
+      - DAC_OVERRIDE # connect to a user's rootless Podman socket, mode 0600
     security_opt:
       - apparmor=unconfined # delegation does fsconfig/move_mount
       - seccomp=unconfined # mount/bpf/netlink syscalls
@@ -96,6 +97,29 @@ services:
       # and the next agent adopts them. `ebpfsentinel-agent uninstall` is the
       # one command that removes them.
       - /sys/fs/bpf:/sys/fs/bpf
+      # The container runtimes, for the names, images and labels on an alert.
+      # The agent is never handed these sockets: it asks the warden, which
+      # sends one read of its own for each request the agent makes and
+      # refuses every other call, so a compromised agent does not get the
+      # runtime's API, which is root on this host.
+      #
+      # Docker. To run without it, drop the line and set
+      # `container.docker.enabled: false` in config/ebpfsentinel.yaml: alerts
+      # keep the container id, which the cgroup resolver reads without any
+      # socket, and lose the name, the image and the labels.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Podman, rootful and rootless (`container.podman`). The directories
+      # are mounted rather than the sockets, so a `podman.socket` started
+      # after the warden, or a user logging in later, is seen. On a host
+      # without Podman, Docker creates an empty /run/podman, which a reboot
+      # removes; drop both mounts there if that matters.
+      - /run/podman:/run/podman:ro
+      - type: bind
+        source: /run/user
+        target: /run/user
+        read_only: true
+        bind:
+          propagation: rslave
       # The file watch (`file_watch` in the configuration, off by default) is
       # opened by the warden, so every path it names - `filesystems`, `paths`,
       # the profiles - is read in this container's mount namespace, where the
@@ -174,23 +198,11 @@ services:
       - /proc:/host/proc:ro
       # The warden's control socket (read-only - the agent only connects).
       - warden-sock:/run/ebpfsentinel:ro
-      # The Docker socket, read-only, for `container.docker` in the config
-      # file: the agent reads /events and /containers/<id>/json so an alert
-      # carries the container's name, image and labels instead of a 64-hex id.
-      #
-      # Read this before keeping it: the Docker API is root on this host. The
-      # read-only flag stops writes to the socket file and nothing else - every
-      # API call still goes through, and one of them starts a privileged
-      # container. The agent only ever issues GETs, it is the one process in
-      # this file that is not root (65534), and it is the socket's group that
-      # decides what that uid may do, so the exposure is the agent's own
-      # compromise, not a widening of what the host already runs.
-      #
-      # To run without it: drop these two lines and set
-      # `container.docker.enabled: false` in config/ebpfsentinel.yaml. What is
-      # lost is the name, the image and the labels on an alert; the container
-      # id still arrives, through the cgroup resolver, which reads no socket.
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # No container runtime socket: the Docker API, and Podman's rootful
+      # one, are root on this host, so they are mounted in the warden, which
+      # forwards only the reads `container.docker` and `container.podman`
+      # make (the event stream, the container list, one container's or one
+      # network's inspect) and answers 403 to anything else.
       # Persistent state: the redb stores (audit, alerts, rule change history)
       # under data/, GeoIP databases, the telemetry installation identifier and
       # the API key the agent drew for itself at first start, under auth/.

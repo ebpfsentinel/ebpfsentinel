@@ -34,7 +34,7 @@ pub use ebpfsentinel_warden_proto::{
     GoExecutable, GoExecutableScan, HeldBpfObjects, HiddenProcessReading, ListedPort, MappedFile,
     MappingScan, NamespaceIdReading, NamespacePortReading, NetworkProgram, OPENER_READINGS_MAX,
     OpenIntent, OpenerReading, PacketSocket, PidObservation, ProcessFactsReading, ProcessMappings,
-    ProcessStamp, ROOTED_CHUNK_MAX, RootedFile, RootedRead, RouteSpec, TaskIdentity,
+    ProcessStamp, ROOTED_CHUNK_MAX, RootRuntime, RootedFile, RootedRead, RouteSpec, TaskIdentity,
     hidden_processes_call_timeout,
 };
 
@@ -106,6 +106,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::PinnedLinks => "PinnedLinks",
         Command::OpenPinnedLink { .. } => "OpenPinnedLink",
         Command::UnpinLinks { .. } => "UnpinLinks",
+        Command::ConnectRootRuntime { .. } => "ConnectRootRuntime",
     }
 }
 
@@ -323,6 +324,29 @@ impl WardenClient {
                 )
             }
             other => Err(unexpected("ConnectPodman", &other)),
+        }
+    }
+
+    /// Ask the warden for a relay to `runtime`, a runtime root runs, and
+    /// receive the agent's end over `SCM_RIGHTS`: a stream on which one read
+    /// the warden forwards is answered. A runtime with no socket, or a socket
+    /// root does not own, answers a typed error.
+    #[cfg(feature = "fd-pass")]
+    pub fn connect_root_runtime(
+        &mut self,
+        runtime: RootRuntime,
+    ) -> io::Result<std::os::fd::OwnedFd> {
+        self.send(&Command::ConnectRootRuntime { runtime })?;
+        match self.recv("ConnectRootRuntime")? {
+            Response::FdReady => {
+                let result = fd_pass::recv_one_fd(&self.stream);
+                self.classify(
+                    "ConnectRootRuntime",
+                    "waiting for the runtime relay from",
+                    result,
+                )
+            }
+            other => Err(unexpected("ConnectRootRuntime", &other)),
         }
     }
 
@@ -916,6 +940,17 @@ impl ReconnectingClient {
     #[cfg(feature = "fd-pass")]
     pub fn connect_podman(&mut self, uid: u32) -> io::Result<std::os::fd::OwnedFd> {
         self.with_retry(|c| c.connect_podman(uid))
+    }
+
+    /// Open a relay to a runtime root runs through the warden, reconnecting
+    /// if it bounced. A relay opened twice is two relays, each closed by
+    /// whoever holds it.
+    #[cfg(feature = "fd-pass")]
+    pub fn connect_root_runtime(
+        &mut self,
+        runtime: RootRuntime,
+    ) -> io::Result<std::os::fd::OwnedFd> {
+        self.with_retry(|c| c.connect_root_runtime(runtime))
     }
 
     /// List every packet socket on the node through the warden, reconnecting

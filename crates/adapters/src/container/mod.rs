@@ -29,7 +29,9 @@ pub use cri_client::{
 };
 pub use dlp_workload_scan::CgroupWorkloadScanner;
 pub use docker_cache::{DEFAULT_CAPACITY as DOCKER_CACHE_DEFAULT_CAPACITY, DockerCache};
-pub use docker_client::{DEFAULT_SOCKET as DOCKER_DEFAULT_SOCKET, DockerClient};
+pub use docker_client::{
+    DEFAULT_SOCKET as DOCKER_DEFAULT_SOCKET, Dialer, DockerClient, warden_from_env,
+};
 pub use docker_enricher::DockerEnricher;
 pub use docker_events::{ContainerEvent, DockerEventStats, DockerEventWatcher, LabelUpdate};
 #[cfg(feature = "kubernetes")]

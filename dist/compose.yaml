@@ -42,7 +42,8 @@ services:
     environment:
       EBPFSENTINEL_HOST_PROC: /host/proc
     cap_drop: [ALL]
-    cap_add: [SYS_ADMIN, NET_ADMIN, NET_RAW, SYS_PTRACE, BPF, PERFMON, DAC_READ_SEARCH, NET_BIND_SERVICE]
+    # DAC_OVERRIDE connects to a user's rootless Podman socket, mode 0600.
+    cap_add: [SYS_ADMIN, NET_ADMIN, NET_RAW, SYS_PTRACE, BPF, PERFMON, DAC_READ_SEARCH, NET_BIND_SERVICE, DAC_OVERRIDE]
     security_opt:
       # Delegation does fsconfig and move_mount, and the broker speaks netlink.
       - apparmor=unconfined
@@ -56,6 +57,22 @@ services:
       # and the next agent adopts them. `ebpfsentinel-agent uninstall` is the
       # one command that removes them.
       - /sys/fs/bpf:/sys/fs/bpf
+      # The container runtimes, read by `container.docker` and
+      # `container.podman` for the names, images and labels on an alert. The
+      # agent is never handed them: the warden sends one read of its own for
+      # each request the agent makes and refuses every other call, since
+      # these APIs are root on this host. Drop the Docker line and set
+      # `container.docker.enabled: false` to run without it. On a host
+      # without Podman, Docker creates an empty /run/podman, which a reboot
+      # removes; drop the two Podman mounts there if that matters.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /run/podman:/run/podman:ro
+      - type: bind
+        source: /run/user
+        target: /run/user
+        read_only: true
+        bind:
+          propagation: rslave
     restart: always
     stop_grace_period: 30s
 
@@ -85,10 +102,6 @@ services:
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - /proc:/host/proc:ro
       - warden-sock:/run/ebpfsentinel:ro
-      # Read by `container.docker` for the container's name, image and labels.
-      # The Docker API is root on this host whatever the :ro says: drop this
-      # line and set `container.docker.enabled: false` to run without it.
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       - ebpfsentinel-state:/var/lib/ebpfsentinel
       - ebpfsentinel-captures:/var/lib/ebpfsentinel/captures
       - type: bind

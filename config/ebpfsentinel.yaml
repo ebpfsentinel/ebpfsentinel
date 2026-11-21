@@ -203,23 +203,26 @@ dns:
 # EBPFSENTINEL_HOST_PROC where this file leaves `resolver.proc_path` at its
 # default, so the same file serves a host and a container.
 #
-# The Docker enricher turns that container id into a name, an image and the
-# labels, by reading the Docker socket. It keeps a cache fed by the event
-# stream, so a container started after the agent is named without a restart.
-# Mounting that socket is handing the agent the Docker API: read-only on the
-# mount stops nothing, since the API is a request away from starting a
-# privileged container, which is why the agent runs as 65534 and the socket
-# group is what actually decides. Set `enabled: false` below and remove the
-# mount from docker-compose.yml to run without it: alerts then keep the
-# container id and lose the name, the image and the labels, and every other
-# subsystem is unaffected. With it enabled and no socket at that path, the
-# agent says so once at startup and carries on.
+# The Docker and Podman enrichers turn that container id into a name, an
+# image and the labels, by reading the runtime's API. Each keeps a cache fed
+# by the event stream, so a container started after the agent is named
+# without a restart. Those APIs are root on the host, so the agent is not
+# handed them: docker-compose.yml mounts the sockets in the warden, which
+# forwards only the reads made here and refuses every other call. An agent
+# running as root without a warden connects itself. Set `enabled: false`
+# below to run without either: alerts then keep the container id and lose
+# the name, the image and the labels, and every other subsystem is
+# unaffected. With one enabled and no socket at that path, the agent says
+# so once and carries on. Podman is asked only once a Podman container is
+# seen, root's runtime at `socket` and each user's under `run_user_root`.
 container:
   resolver:
     enabled: true
   docker:
     enabled: true
     socket: /var/run/docker.sock
+  podman:
+    enabled: true
 
 # Socket attribution: the workload behind a flow, recorded by the cgroup
 # socket hooks when the socket is opened. Records only, enforces nothing.

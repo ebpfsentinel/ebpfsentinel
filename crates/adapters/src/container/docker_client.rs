@@ -9,7 +9,8 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -21,7 +22,7 @@ use tokio::time::timeout;
 use domain::container::entity::DockerMetadata;
 use domain::container::error::ContainerError;
 use domain::learning::segmentation::{BridgeMember, BridgeNetwork, BridgeSubnet};
-use ebpfsentinel_warden_client::ReconnectingClient;
+use ebpfsentinel_warden_client::{ReconnectingClient, RootRuntime};
 use ports::secondary::bridge_network_port::BridgeNetworkPort;
 
 /// Default socket path.
@@ -69,12 +70,45 @@ struct DockerConfig {
 }
 
 /// How a connection to a runtime's API socket is opened: by the agent
-/// itself, or by the warden on behalf of the user owning the socket, whose
-/// inode the agent's user namespace cannot reach.
+/// itself, or by the warden, either on behalf of the user owning a rootless
+/// socket the agent's user namespace cannot reach, or as a relay to a runtime
+/// root runs, whose API the agent is never handed.
 #[derive(Clone)]
 pub struct Dialer {
     socket: PathBuf,
-    warden: Option<(Arc<Mutex<ReconnectingClient>>, u32)>,
+    broker: Broker,
+}
+
+#[derive(Clone)]
+enum Broker {
+    /// The agent connects itself.
+    None,
+    /// The warden connects to user `uid`'s rootless Podman socket.
+    Podman(Arc<Mutex<ReconnectingClient>>, u32),
+    /// The agent connects itself while it can; when its connect finds no
+    /// socket or is refused, the warden relays the reads it makes to
+    /// `runtime`. `relayed` remembers the last connection went through the
+    /// warden, so the agent's own connect is not tried each time.
+    Root {
+        warden: Arc<Mutex<ReconnectingClient>>,
+        runtime: RootRuntime,
+        relayed: Arc<AtomicBool>,
+    },
+}
+
+/// The warden this agent runs beside, named by its environment, shared by
+/// every dialer that needs it.
+#[must_use]
+pub fn warden_from_env() -> Option<Arc<Mutex<ReconnectingClient>>> {
+    static WARDEN: OnceLock<Option<Arc<Mutex<ReconnectingClient>>>> = OnceLock::new();
+    WARDEN
+        .get_or_init(|| {
+            std::env::var_os(super::proc_digest::WARDEN_SOCK_ENV)
+                .map(PathBuf::from)
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| Arc::new(Mutex::new(ReconnectingClient::new(p))))
+        })
+        .clone()
 }
 
 impl Dialer {
@@ -82,7 +116,7 @@ impl Dialer {
     pub fn direct(socket: impl Into<PathBuf>) -> Self {
         Self {
             socket: socket.into(),
-            warden: None,
+            broker: Broker::None,
         }
     }
 
@@ -96,7 +130,31 @@ impl Dialer {
     ) -> Self {
         Self {
             socket: socket.into(),
-            warden: Some((warden, uid)),
+            broker: Broker::Podman(warden, uid),
+        }
+    }
+
+    /// `runtime`, a runtime root runs, at `socket`: the agent connects
+    /// itself, and through the warden named by its environment when its own
+    /// connect finds no socket or is refused.
+    pub fn root_runtime(socket: impl Into<PathBuf>, runtime: RootRuntime) -> Self {
+        Self::root_runtime_with(socket, runtime, warden_from_env())
+    }
+
+    /// As [`Self::root_runtime`], with the warden given rather than read
+    /// from the environment.
+    pub fn root_runtime_with(
+        socket: impl Into<PathBuf>,
+        runtime: RootRuntime,
+        warden: Option<Arc<Mutex<ReconnectingClient>>>,
+    ) -> Self {
+        Self {
+            socket: socket.into(),
+            broker: warden.map_or(Broker::None, |warden| Broker::Root {
+                warden,
+                runtime,
+                relayed: Arc::new(AtomicBool::new(false)),
+            }),
         }
     }
 
@@ -105,37 +163,79 @@ impl Dialer {
         &self.socket
     }
 
-    /// Whether connections go through the warden.
+    /// Whether connections go through the warden: always for a user's
+    /// runtime, and for a runtime root runs once the agent's own connect
+    /// was refused.
     pub fn through_warden(&self) -> bool {
-        self.warden.is_some()
+        match &self.broker {
+            Broker::None => false,
+            Broker::Podman(..) => true,
+            Broker::Root { relayed, .. } => relayed.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Whether a connection can be tried at all: the socket is there for the
+    /// agent, or a warden may reach it on its behalf.
+    pub fn may_reach(&self) -> bool {
+        !matches!(self.broker, Broker::None) || self.socket.exists()
     }
 
     /// One fresh connection.
     ///
     /// # Errors
     ///
-    /// The connect's own error, or the warden's refusal as `PermissionDenied`
-    /// when it answered and `Other` when it could not be reached.
+    /// The connect's own error, or the warden's refusal as `NotFound` when
+    /// it found no socket, `PermissionDenied` for any other refusal, and
+    /// `Other` when it could not be reached.
     pub async fn connect(&self) -> std::io::Result<UnixStream> {
-        let Some((warden, uid)) = &self.warden else {
-            return UnixStream::connect(&self.socket).await;
-        };
-        let (warden, uid) = (Arc::clone(warden), *uid);
-        let fd = tokio::task::spawn_blocking(move || {
-            // The client holds a connection and nothing the stream depends
-            // on, so a poisoned lock leaves it usable.
-            warden
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .connect_podman(uid)
-        })
-        .await
-        .map_err(std::io::Error::other)?
-        .map_err(warden_refusal)?;
-        let stream = std::os::unix::net::UnixStream::from(fd);
-        stream.set_nonblocking(true)?;
-        UnixStream::from_std(stream)
+        match &self.broker {
+            Broker::None => UnixStream::connect(&self.socket).await,
+            Broker::Podman(warden, uid) => {
+                let uid = *uid;
+                brokered(warden, move |c| c.connect_podman(uid)).await
+            }
+            Broker::Root {
+                warden,
+                runtime,
+                relayed,
+            } => {
+                if !relayed.load(Ordering::Relaxed) {
+                    match UnixStream::connect(&self.socket).await {
+                        Ok(stream) => return Ok(stream),
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                            ) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                let runtime = *runtime;
+                let result = brokered(warden, move |c| c.connect_root_runtime(runtime)).await;
+                relayed.store(result.is_ok(), Ordering::Relaxed);
+                result
+            }
+        }
     }
+}
+
+/// A stream the warden opened with `ask` and handed over.
+async fn brokered<F>(warden: &Arc<Mutex<ReconnectingClient>>, ask: F) -> std::io::Result<UnixStream>
+where
+    F: FnOnce(&mut ReconnectingClient) -> std::io::Result<std::os::fd::OwnedFd> + Send + 'static,
+{
+    let warden = Arc::clone(warden);
+    let fd = tokio::task::spawn_blocking(move || {
+        // The client holds a connection and nothing the stream depends on,
+        // so a poisoned lock leaves it usable.
+        ask(&mut warden.lock().unwrap_or_else(PoisonError::into_inner))
+    })
+    .await
+    .map_err(std::io::Error::other)?
+    .map_err(warden_refusal)?;
+    let stream = std::os::unix::net::UnixStream::from(fd);
+    stream.set_nonblocking(true)?;
+    UnixStream::from_std(stream)
 }
 
 /// What the warden's answer means for the socket: its own refusal names the
@@ -163,6 +263,20 @@ pub struct DockerClient {
 impl DockerClient {
     pub fn new(socket: impl Into<PathBuf>, timeout_ms: u64) -> Self {
         Self::with_dialer(Dialer::direct(socket), timeout_ms)
+    }
+
+    /// The Docker Engine at `socket`, reached through the warden's relay
+    /// when the agent cannot reach it itself.
+    pub fn docker(socket: impl Into<PathBuf>, timeout_ms: u64) -> Self {
+        Self::with_dialer(
+            Dialer::root_runtime(socket, RootRuntime::Docker),
+            timeout_ms,
+        )
+    }
+
+    /// Whether a request can be tried at all, see [`Dialer::may_reach`].
+    pub fn may_reach(&self) -> bool {
+        self.dialer.may_reach()
     }
 
     /// A client whose connections `dialer` opens.
