@@ -49,6 +49,10 @@ const BACKOFF_FLOOR: Duration = Duration::from_secs(1);
 const BACKOFF_CEILING: Duration = Duration::from_secs(60);
 /// How long the startup policy check waits on a collector, per step.
 const POLICY_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a connect may take. Without it a collector whose address drops
+/// the SYN holds the drain for the kernel's whole retry schedule, about two
+/// minutes, and the agent's shutdown waits behind it.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long to wait before the next attempt, doubling with each failure.
 fn backoff_for(consecutive_failures: u32) -> Duration {
@@ -421,8 +425,14 @@ async fn udp_socket(destination: SocketAddr) -> Result<UdpSocket, DomainError> {
 
 /// A connected stream.
 async fn tcp_stream(destination: SocketAddr) -> Result<TcpStream, DomainError> {
-    TcpStream::connect(destination)
+    tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(destination))
         .await
+        .map_err(|_| {
+            DomainError::EngineError(format!(
+                "connect failed: no answer within {}s",
+                CONNECT_TIMEOUT.as_secs()
+            ))
+        })?
         .map_err(|error| DomainError::EngineError(format!("connect failed: {error}")))
 }
 

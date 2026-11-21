@@ -15,7 +15,13 @@
 #     message id is `CEF`, and the extension holds the same five-tuple;
 #   * JSON lines on disk hold the same flow;
 #   * the status route counts what each sink sent and reports every sink
-#     healthy.
+#     healthy;
+#   * with sampling at two, about half the flows of a six hundred connection
+#     burst are left out and counted so; while the only sink is stuck on a
+#     connect that gets no answer, the bounded queue drops and counts rather
+#     than holding the reader of kernel events, the connect gives up after
+#     its timeout and the sink says so, and readings the burst made the
+#     collector miss are counted too.
 #
 # The flow source is the kernel connection table, which records nothing until
 # something registers a netfilter hook that asks for it; the suite installs a
@@ -242,4 +248,101 @@ _wait_for_flow() {
     # A failure or a drop opens its series: on a healthy run neither exists.
     [ "$(echo "$metrics" | grep -c '^ebpfsentinel_flow_export_failures_total{')" -eq 0 ]
     [ "$(echo "$metrics" | grep -c '^ebpfsentinel_flows_dropped_total{')" -eq 0 ]
+}
+
+# The last test restarts the agent on a second configuration, so it runs after
+# every reading of the first one.
+@test "sampling leaves flows out and counts them; a full queue drops and counts rather than waits" {
+    stop_ebpf_agent
+    # One sink, plain TCP, towards a port whose SYN never gets an answer: the
+    # dispatcher waits on the connect, so the queue fills behind it.
+    local blackhole=18194
+    nft add chain inet "$NFT_TABLE" output '{ type filter hook output priority 0; policy accept; }'
+    nft add rule inet "$NFT_TABLE" output tcp dport "$blackhole" drop
+    local config="${DATA_DIR}/sampled.yaml"
+    python3 - "$PREPARED_CONFIG" "$config" "$blackhole" <<'PY'
+import sys
+source, target, port = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(source).read()
+# Every sink of the first configuration goes; one stuck sink replaces them.
+head, rest = text.split("  ipfix:\n", 1)
+tail = rest[rest.index("\n# "):]
+block = f"""  sampling: 2
+  queue_depth: 64
+  batch_size: 1
+  syslog:
+    enabled: true
+    targets:
+      - address: "127.0.0.1:{port}"
+        transport: tcp
+    facility: 16
+    hostname: flow-suite
+"""
+open(target, "w").write(head + block + tail)
+PY
+    start_ebpf_agent "$config"
+    wait_for_ebpf_loaded 30
+
+    # Six hundred short connections, each its own five-tuple, on a port of
+    # their own so nothing left from the first configuration answers them.
+    local burst_port=18195
+    setsid python3 -c '
+import socket, sys
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((sys.argv[1], int(sys.argv[2]))); s.listen(1024)
+while True:
+    c, _ = s.accept(); c.close()
+' "$EBPF_HOST_IP" "$burst_port" </dev/null >/dev/null 2>&1 &
+    local listener="$!" attempt
+    for attempt in $(seq 1 30); do
+        ss -ltn "sport = :${burst_port}" | grep -q LISTEN && break
+        sleep 0.2
+    done
+    ip netns exec "$EBPF_TEST_NS" python3 -c '
+import socket, sys
+opened = 0
+for _ in range(600):
+    try:
+        socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=2).close()
+        opened += 1
+    except OSError:
+        pass
+if opened < 500:
+    sys.exit(f"only {opened} of 600 connections opened")
+' "$EBPF_HOST_IP" "$burst_port"
+    kill "$listener" 2>/dev/null || true
+
+    # The burst outruns the conntrack event channel: what the collector missed
+    # is counted under conntrack_lag, so seen plus missed accounts for every
+    # connection, and nothing is lost without a number.
+    local status metrics lag queue_full seen
+    for attempt in $(seq 1 30); do
+        sleep 1
+        status="$(api_get "/api/v1/flows/export")"
+        metrics="$(scrape_metrics)"
+        lag="$(echo "$metrics" | awk '/^ebpfsentinel_flows_dropped_total\{reason="conntrack_lag"\}/ {print int($2)}')"
+        seen="$(echo "$status" | jq -r '.observed')"
+        [ $(( seen + ${lag:-0} )) -ge 600 ] && echo "$status" | jq -e '.queue_drops >= 1' >/dev/null && break
+    done
+    queue_full="$(echo "$metrics" | awk '/^ebpfsentinel_flows_dropped_total\{reason="queue_full"\}/ {print int($2)}')"
+    # One flow in four is kept, decided by a hash of the five-tuple: of what
+    # was seen, between three in five and nine in ten are left out.
+    echo "$status" | jq -e '
+        .sampling == 2 and .queue_depth == 64 and .observed >= 100
+        and .sampled_out * 10 >= .observed * 3 and .sampled_out * 10 <= .observed * 7
+        and .queue_drops >= 1
+        and any(.sinks[]; .healthy == false and .records_failed >= 1
+            and (.detail | test("no answer within")))
+    ' >/dev/null || {
+        echo "status: ${status}" >&2
+        return 1
+    }
+    [ $(( seen + ${lag:-0} )) -ge 600 ] || {
+        echo "seen ${seen} plus missed ${lag:-0} does not account for 600 connections" >&2
+        return 1
+    }
+    [ "$(echo "$status" | jq -r '.queue_drops')" = "${queue_full:-0}" ] || {
+        echo "status route counts $(echo "$status" | jq -r '.queue_drops') queue drops, the scrape ${queue_full:-0}" >&2
+        return 1
+    }
 }

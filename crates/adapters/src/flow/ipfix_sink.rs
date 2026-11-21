@@ -38,6 +38,9 @@ const BACKOFF_FLOOR: Duration = Duration::from_secs(1);
 /// The longest wait between two attempts. A collector that comes back must
 /// be noticed in the same minute, not in the same hour.
 const BACKOFF_CEILING: Duration = Duration::from_secs(60);
+/// How long a TCP connect may take, so a collector whose address drops the
+/// SYN costs one attempt rather than the kernel's two-minute retry schedule.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long to wait before the next attempt, doubling with each failure.
 fn backoff_for(consecutive_failures: u32) -> Duration {
@@ -192,9 +195,17 @@ impl IpfixSink {
                 Connection::Udp(socket)
             }
             FlowTransport::Tcp => {
-                let stream = TcpStream::connect(destination).await.map_err(|error| {
-                    DomainError::EngineError(format!("connect failed: {error}"))
-                })?;
+                let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(destination))
+                    .await
+                    .map_err(|_| {
+                        DomainError::EngineError(format!(
+                            "connect failed: no answer within {}s",
+                            CONNECT_TIMEOUT.as_secs()
+                        ))
+                    })?
+                    .map_err(|error| {
+                        DomainError::EngineError(format!("connect failed: {error}"))
+                    })?;
                 Connection::Tcp(stream)
             }
             // Configuration refuses a tls target for this sink, because the
