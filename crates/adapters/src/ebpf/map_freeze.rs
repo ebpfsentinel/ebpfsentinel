@@ -232,22 +232,25 @@ pub fn freeze(ebpf: &dyn MapStore, name: &str) -> Result<(), FreezeError> {
     let Some(entry) = write_once_entry(name) else {
         return Err(FreezeError::Unsupported(name.to_owned()));
     };
-    if is_frozen(name) {
-        return Ok(());
-    }
+    // The registry says a map of this name was frozen once in this process,
+    // not that this object's map is: a reload after a detach (an HA standby
+    // promoted again) carries a fresh instance, so the syscall is always
+    // issued and an instance already frozen answers EBUSY.
     let map = ebpf
         .map(name)
         .ok_or_else(|| FreezeError::Absent(name.to_owned()))?;
     let fd = map_fd(map).ok_or_else(|| FreezeError::Unsupported(name.to_owned()))?;
     freeze_fd(name, fd)?;
-    if let Ok(mut names) = registry().lock() {
-        names.insert(entry.name);
+    let first = registry()
+        .lock()
+        .is_ok_and(|mut names| names.insert(entry.name));
+    if first {
+        info!(
+            map = entry.name,
+            carries = entry.carries,
+            "map frozen after initialisation"
+        );
     }
-    info!(
-        map = entry.name,
-        carries = entry.carries,
-        "map frozen after initialisation"
-    );
     Ok(())
 }
 
@@ -259,6 +262,11 @@ pub fn freeze(ebpf: &dyn MapStore, name: &str) -> Result<(), FreezeError> {
 /// back and compared instead of written again, and only a reading that
 /// disagrees with itself is worth a failure.
 ///
+/// What is read is this object's map, never the process's memory of having
+/// frozen one by that name: programs loaded again after a detach (an HA
+/// standby promoted a second time) carry a fresh, zeroed instance, which is
+/// written and frozen like the first.
+///
 /// # Errors
 ///
 /// Returns an error if the object does not carry the map, if the write fails,
@@ -267,22 +275,27 @@ pub fn push_once<V>(ebpf: &mut dyn MapStore, name: &str, value: V) -> anyhow::Re
 where
     V: aya::Pod + PartialEq + std::fmt::Debug,
 {
-    if is_frozen(name) {
-        let map = ebpf
-            .map(name)
-            .ok_or_else(|| anyhow::anyhow!("{name} map not found"))?;
-        let held = aya::maps::Array::<_, V>::try_from(map)?.get(&0, 0)?;
-        anyhow::ensure!(
-            held == value,
-            "{name} is frozen and holds {held:?}, which is not the {value:?} being pushed"
-        );
-        debug!(map = name, "map already frozen with the same value");
+    let map = ebpf
+        .map(name)
+        .ok_or_else(|| anyhow::anyhow!("{name} map not found"))?;
+    let held = aya::maps::Array::<_, V>::try_from(map)?.get(&0, 0)?;
+    if held == value {
+        debug!(map = name, "map already holds the value being pushed");
+        freeze_after_init(ebpf, name);
         return Ok(());
     }
     let map = ebpf
         .map_mut(name)
         .ok_or_else(|| anyhow::anyhow!("{name} map not found"))?;
-    aya::maps::Array::<_, V>::try_from(map)?.set(0, &value, 0)?;
+    // A frozen map refuses the write, and then it holds another reading.
+    if aya::maps::Array::<_, V>::try_from(map)?
+        .set(0, &value, 0)
+        .is_err()
+    {
+        anyhow::bail!(
+            "{name} is frozen and holds {held:?}, which is not the {value:?} being pushed"
+        );
+    }
     freeze_after_init(ebpf, name);
     Ok(())
 }
