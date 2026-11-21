@@ -73,7 +73,7 @@ A snapshot of the capabilities below - see the [Features guide](https://docs.ebp
 | **TCP Health Per Edge** | Retransmissions, resets and failed connections counted per pair of services |
 | **Flow Export** | Connection table as IPFIX, OTLP logs, syslog, CEF or JSON lines |
 | **Hot Reload** | Update rules and toggle eBPF programs without restart |
-| **REST API** | OpenAPI 3.0 with Swagger UI, all domains covered |
+| **REST API** | OpenAPI 3.1 with Swagger UI, all domains covered |
 | **gRPC Streaming** | Real-time alert subscriptions with severity/component filters |
 | **Prometheus Metrics** | Per-domain and kernel-side eBPF counters |
 | **OTLP Export** | Alerts as OpenTelemetry Logs (gRPC or HTTP) |
@@ -408,7 +408,7 @@ The changelog is kept with the releases rather than here, so the whole product's
 - **OS:** Linux only (kernel 6.12+ with BTF)
 - **Distros:** Debian 13+, Debian 12 with the bookworm-backports kernel (6.12), Ubuntu 26.04 (7.0), Ubuntu 24.04 with the HWE kernel (7.0 since 24.04.5), RHEL / Rocky 10+, Fedora 41+, Alpine 3.21+, Arch, NixOS 25.05+, Talos 1.9+, and AKS on its Ubuntu 26.04 node image. Not Debian 12 on its stock kernel (6.1), Ubuntu 22.04 (HWE stops at 6.8), Ubuntu 24.04 on its GA kernel (6.8), RHEL 9 (5.14) or Alpine 3.20 (6.6) without a newer kernel
 - **Arch:** x86_64 and aarch64, the userspace tests run on both in CI
-- **Runtime:** Docker, Podman, Kubernetes (DaemonSet), Nomad
+- **Runtime:** Docker, Kubernetes (DaemonSet)
 
 See [Compatibility](https://docs.ebpfsentinel.io/operations/compatibility) for the full matrix.
 
