@@ -17,7 +17,7 @@
 //! cryptographic libraries with uprobes, reads the rpm database's SQLite file
 //! and the dpkg and apk databases as file formats, and watches files through
 //! fanotify. None of that needs an implementation of any of them in this
-//! tree, and the README says so where a licence reviewer looks; the lock files
+//! tree, and LICENSING.md says so where a licence reviewer looks; the lock files
 //! are where it would stop being true, so they are read here.
 
 use std::collections::BTreeMap;
@@ -417,7 +417,7 @@ fn what_the_agent_reads_or_probes_is_never_linked() {
     }
     assert!(
         found.is_empty(),
-        "an implementation of something the agent only reads entered the tree; the README's licence section says it does not:\n{}",
+        "an implementation of something the agent only reads entered the tree; LICENSING.md says it does not:\n{}",
         found.join("\n")
     );
 }
