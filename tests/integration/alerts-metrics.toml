@@ -2,7 +2,7 @@
 # Read by scripts/audit-alerts-metrics.py; exactly one of suites, reason, gap
 # per line, and gap_ceiling equals the number of gap lines.
 
-gap_ceiling = 1
+gap_ceiling = 0
 
 [component."hidden_port"]
 reason = "needs a kernel rootkit hiding a listening port from /proc; suite 79 asserts a clean host raises none"
@@ -25,5 +25,3 @@ reason = "counted only when the redb audit store or the log sink refuses a write
 [metric."link_inspected_twice_seconds"]
 reason = "observed only when a pod profile agent claims a Kubernetes workload link the node agent already inspects; no lane runs a pod profile agent beside a node agent, and the link watcher's unit tests pin the observation"
 
-[metric."dns_cache_evictions"]
-gap = "counted by DnsCacheAppService::purge_loop, which the agent never spawns, so an expired entry is never purged"

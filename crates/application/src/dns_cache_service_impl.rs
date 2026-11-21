@@ -1,6 +1,6 @@
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use domain::dns::engine::DnsCacheEngine;
 use domain::dns::entity::{DnsCacheConfig, DnsCacheEntry, DnsCacheStats};
@@ -19,43 +19,44 @@ fn now_ns() -> u64 {
 ///
 /// Wraps the domain `DnsCacheEngine` with thread-safe access (`RwLock`)
 /// and metrics updates. Implements `DnsCachePort` for use by adapters.
+///
+/// Expired entries are purged by the service itself, at most once per
+/// `purge_interval_secs`, by the first insert or domain lookup past the
+/// deadline: no task has to be spawned beside it, so every binary that
+/// builds the service gets the purge.
 pub struct DnsCacheAppService {
     engine: RwLock<DnsCacheEngine>,
     metrics: Arc<dyn MetricsPort>,
-    purge_interval: Duration,
+    purge_interval_ns: u64,
+    next_purge_ns: AtomicU64,
 }
 
 impl DnsCacheAppService {
     pub fn new(config: DnsCacheConfig, metrics: Arc<dyn MetricsPort>) -> Self {
-        let purge_interval = Duration::from_secs(config.purge_interval_secs);
+        let purge_interval_ns = config
+            .purge_interval_secs
+            .max(1)
+            .saturating_mul(1_000_000_000);
         Self {
             engine: RwLock::new(DnsCacheEngine::new(config)),
             metrics,
-            purge_interval,
+            purge_interval_ns,
+            next_purge_ns: AtomicU64::new(now_ns().saturating_add(purge_interval_ns)),
         }
     }
 
-    /// Run the background purge loop. Call this from a spawned Tokio task.
-    pub async fn purge_loop(self: Arc<Self>) {
-        let mut interval = tokio::time::interval(self.purge_interval);
-        loop {
-            interval.tick().await;
-            self.purge_expired();
+    /// Purge expired entries when the interval has elapsed, under the write
+    /// lock the caller already holds.
+    fn purge_if_due(&self, engine: &mut DnsCacheEngine, now_ns: u64) {
+        if now_ns < self.next_purge_ns.load(Ordering::Relaxed) {
+            return;
         }
-    }
-
-    /// Purge expired entries and update metrics.
-    fn purge_expired(&self) {
-        let now_ns = now_ns();
-
-        let mut engine = self
-            .engine
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.next_purge_ns.store(
+            now_ns.saturating_add(self.purge_interval_ns),
+            Ordering::Relaxed,
+        );
         let evicted = engine.purge_expired(now_ns);
         let entry_count = engine.entry_count();
-        drop(engine);
-
         if evicted > 0 {
             for _ in 0..evicted {
                 self.metrics.increment_dns_cache_evictions();
@@ -114,6 +115,7 @@ impl DnsCachePort for DnsCacheAppService {
             .engine
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.purge_if_due(&mut engine, now_ns);
         let result = engine.lookup_domain(domain, now_ns).cloned();
 
         if result.is_some() {
@@ -143,6 +145,7 @@ impl DnsCachePort for DnsCacheAppService {
             .engine
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.purge_if_due(&mut engine, now_ns());
         engine.insert(domain, ips, ttl_secs, timestamp_ns);
         self.update_metrics(&engine);
     }
@@ -226,5 +229,22 @@ mod tests {
 
         let page = svc.lookup_all(0, 3);
         assert_eq!(page.len(), 3);
+    }
+
+    #[test]
+    fn an_expired_entry_is_purged_once_the_interval_has_passed() {
+        let svc = make_service();
+        let ip = "10.0.0.9".parse().unwrap();
+        svc.insert("stale.com".to_string(), vec![ip], 60, 0);
+
+        // Before the interval, an expired entry stays until something purges.
+        assert!(svc.lookup_domain("stale.com").is_some());
+
+        svc.next_purge_ns.store(0, Ordering::Relaxed);
+        svc.insert("fresh.com".to_string(), vec![ip], 60, now_ns());
+
+        assert!(svc.lookup_domain("stale.com").is_none());
+        assert!(svc.lookup_domain("fresh.com").is_some());
+        assert!(svc.next_purge_ns.load(Ordering::Relaxed) > now_ns());
     }
 }

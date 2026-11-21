@@ -458,3 +458,44 @@ _dns_observed_metric() {
         return 1
     }
 }
+
+# Last on purpose: the purge it waits for empties the entries the tests above
+# read.
+@test "an entry past its lifetime is purged by the next response and counted" {
+    require_root
+    require_tool dig
+    require_tool python3
+
+    # Every entry above lives at least min_ttl_secs (60) and the cache purges
+    # at most every purge_interval_secs (30): past both, the next response
+    # cached triggers the purge.
+    [ -n "$(_cached_ips tier-small.example.test)" ] || {
+        echo "no entry left from the tier tests to expire" >&2
+        return 1
+    }
+    sleep 65
+
+    _start_stub_resolver 1 203.0.113.40
+    dig +tries=1 +time=2 "@${EBPF_NS_IP}" purge-trigger.example.test A > /dev/null 2>&1 || true
+    local i ips=""
+    for i in $(seq 1 20); do
+        ips="$(_cached_ips purge-trigger.example.test)"
+        [ -n "${ips}" ] && break
+        sleep 0.5
+    done
+    _stop_stub_resolver
+    [ -n "${ips}" ] || {
+        echo "the response that should trigger the purge was not cached" >&2
+        return 1
+    }
+
+    [ -z "$(_cached_ips tier-small.example.test)" ] || {
+        echo "tier-small.example.test outlived its lifetime: $(api_get "/api/v1/dns/cache?domain=tier-small.example.test")" >&2
+        return 1
+    }
+    wait_for_metric ebpfsentinel_dns_cache_evictions_total 1 10 >/dev/null || {
+        echo "no eviction counted" >&2
+        scrape_metrics | grep '^ebpfsentinel_dns_cache' >&2 || true
+        return 1
+    }
+}
