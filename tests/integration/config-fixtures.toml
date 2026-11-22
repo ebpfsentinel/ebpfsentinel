@@ -2,7 +2,7 @@
 # scripts/audit-config-fixtures.py; exactly one of reason, gap per line, and
 # gap_ceiling equals the number of gap lines.
 
-gap_ceiling = 0
+gap_ceiling = 2
 
 [keys."AgentConfig.enterprise"]
 reason = "captured opaquely for the enterprise loader, whose own gate walks its keys"
@@ -33,3 +33,9 @@ reason = "read from a Kubernetes API server, which requires container.kubernetes
 
 [keys."ScopeMap.namespace"]
 reason = "a namespace scope matches only traffic of a container the enricher has named, which no fixture-started agent has; suite 07 writes namespace-scoped rules through the API, where the role decides by that namespace"
+
+[keys."PodmanEnricherConfig.storage_root"]
+gap = "no suite yet names a rootful Podman container read from its store with the socket off"
+
+[keys."PodmanEnricherConfig.rootless_storage"]
+gap = "no suite yet names a rootless Podman container read from its store with the socket off"
