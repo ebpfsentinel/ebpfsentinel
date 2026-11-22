@@ -182,8 +182,9 @@ pub struct PodmanEnricherConfig {
     pub run_user_root: String,
 
     /// Root's container store, read where root's socket does not answer:
-    /// it names a container and its image, never its labels. Empty to
-    /// never read it.
+    /// Podman's database there names a container, its image, its labels and
+    /// its state; an older store without one, its name and image alone.
+    /// Read by the warden where one runs. Absolute; empty to never read it.
     #[serde(default = "default_podman_storage_root")]
     pub storage_root: String,
 
@@ -439,12 +440,27 @@ impl PodmanEnricherConfig {
                     message: "path must not be empty".to_string(),
                 });
             }
+            let climbs = |p: &str| {
+                std::path::Path::new(p)
+                    .components()
+                    .any(|c| c == std::path::Component::ParentDir)
+            };
+            if !self.storage_root.is_empty()
+                && (!std::path::Path::new(&self.storage_root).is_absolute()
+                    || climbs(&self.storage_root))
+            {
+                return Err(ConfigError::Validation {
+                    field: "container.podman.storage_root".to_string(),
+                    message: "path is absolute and does not climb with `..`".to_string(),
+                });
+            }
             if !self.rootless_storage.is_empty()
-                && std::path::Path::new(&self.rootless_storage).is_absolute()
+                && (std::path::Path::new(&self.rootless_storage).is_absolute()
+                    || climbs(&self.rootless_storage))
             {
                 return Err(ConfigError::Validation {
                     field: "container.podman.rootless_storage".to_string(),
-                    message: "path is relative to each user's home".to_string(),
+                    message: "path is relative to each user's home and stays under it".to_string(),
                 });
             }
             if self.cache_size == 0 {
@@ -608,6 +624,25 @@ mod tests {
         assert!(cfg.validate().is_ok());
         cfg.podman.timeout_ms = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn a_podman_store_path_never_climbs_out_of_where_it_is_named() {
+        let mut cfg = ContainerConfig::default();
+        cfg.podman.enabled = true;
+        for root in ["var/lib/containers/storage", "/var/lib/../../etc"] {
+            cfg.podman.storage_root = root.into();
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("container.podman.storage_root"), "{err}");
+        }
+        cfg.podman.storage_root = String::new();
+        for rel in ["/home/alice/storage", "../bob/storage"] {
+            cfg.podman.rootless_storage = rel.into();
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("container.podman.rootless_storage"), "{err}");
+        }
+        cfg.podman.rootless_storage = String::new();
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

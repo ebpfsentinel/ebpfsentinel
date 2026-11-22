@@ -73,6 +73,17 @@ services:
         read_only: true
         bind:
           propagation: rslave
+      # Podman's container store, read where no Podman socket answers
+      # (`podman.socket` is off by default): the warden reads the one
+      # record the agent asks for - name, image, labels, state - and hands
+      # back nothing else. Root's store; drop the line on a host without
+      # Podman, where Docker would create it empty.
+      - /var/lib/containers/storage:/var/lib/containers/storage:ro
+      # Users' stores sit under their homes, found through the host's
+      # password file; uncomment both to name rootless containers without
+      # their sockets.
+      # - /home:/home:ro
+      # - /etc/passwd:/etc/passwd:ro
     restart: always
     stop_grace_period: 30s
 

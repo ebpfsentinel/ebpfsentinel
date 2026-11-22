@@ -111,7 +111,8 @@ pub enum PodmanReach {
     /// Rootless runtimes are turned off in the configuration.
     RootlessOff,
     /// No socket answered and the owner's container store is read instead:
-    /// containers are named with their image, without their labels.
+    /// containers are named with their image, their labels and their state
+    /// from Podman's database, with their image alone from an older store.
     Store,
 }
 

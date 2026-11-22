@@ -62,6 +62,7 @@ pub mod netns_tcx_ops;
 pub mod packet_sockets;
 pub mod pcap_slots;
 pub mod podman_connect;
+pub mod podman_store;
 pub mod process_maps;
 pub mod resolver_socket;
 pub mod root_runtime;

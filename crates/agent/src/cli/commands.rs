@@ -3455,7 +3455,7 @@ fn podman_runtime_line(runtime: &crate::cli::api_client::PodmanRuntime) -> Strin
         "refused" => "unnamed, the socket refused the agent",
         "unavailable" => "unnamed, the socket did not answer",
         "rootless_off" => "unnamed, rootless runtimes are off by configuration",
-        "store" => "named from the container store, without labels (no socket answered)",
+        "store" => "named from the container store (no socket answered)",
         other => other,
     };
     format!("{owner}: {reach} ({})", runtime.socket)

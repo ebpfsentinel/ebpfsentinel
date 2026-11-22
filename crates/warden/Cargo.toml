@@ -22,6 +22,9 @@ libc = { workspace = true }
 object = { workspace = true }
 sha2 = { workspace = true }
 ebpfsentinel-warden-proto = { workspace = true }
+domain = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 ebpfsentinel-warden-client = { workspace = true, features = ["fd-pass"] }

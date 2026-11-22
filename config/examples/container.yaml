@@ -65,7 +65,9 @@ container:
   # socket under run_user_root. Where no socket answers (podman.socket is not
   # enabled by default), the container store is read instead: root's under
   # storage_root, a user's under rootless_storage relative to their home.
-  # The store names the container and its image, never its labels.
+  # Podman's database there names the container, its image, its labels and
+  # its state; an older store without one (BoltDB) gives the name and image
+  # alone. Where a warden runs it reads the store for the agent.
   podman:
     enabled: true
     socket: /run/podman/podman.sock

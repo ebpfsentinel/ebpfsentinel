@@ -216,7 +216,7 @@ dns:
 # so once and carries on. Podman is asked only once a Podman container is
 # seen, root's runtime at `socket` and each user's under `run_user_root`;
 # where no socket answers, the owner's container store on disk names the
-# container and its image, without its labels.
+# container, its image and, from Podman's database, its labels.
 container:
   resolver:
     enabled: true

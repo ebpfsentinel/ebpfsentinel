@@ -27,8 +27,8 @@ use crate::write_refusal;
 use crate::{
     bpf_inventory, cgroup_ops, delegate_over_fd, dlp_scan, exe_read, facts_read, go_executables,
     hidden_ports, hidden_processes, link_pins, namespace_ids, net_ops, netns_tcx_ops,
-    packet_sockets, podman_connect, process_maps, recv_fd, resolver_socket, root_runtime,
-    rooted_read, send_msg_fds, served_peer, uprobe_ops,
+    packet_sockets, podman_connect, podman_store, process_maps, recv_fd, resolver_socket,
+    root_runtime, rooted_read, send_msg_fds, served_peer, uprobe_ops,
 };
 
 /// How long a connection may hold a thread without saying `Hello`.
@@ -819,6 +819,9 @@ fn dispatch(cmd: &Command, host: &dyn HostOps, proc_root: &Path) -> Response {
             len,
         } => Response::RootedRead {
             read: rooted_read::read_rooted_file(proc_root, *pid, file, *offset, *len),
+        },
+        Command::ReadPodmanRecord { uid, store, id } => Response::PodmanRecord {
+            read: podman_store::read(Path::new(podman_store::PASSWD), *uid, store, id),
         },
         Command::GoExecutables => Response::GoExecutables {
             scan: go_executables::scan(proc_root),

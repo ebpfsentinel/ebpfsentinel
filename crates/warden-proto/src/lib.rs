@@ -1075,6 +1075,58 @@ pub enum Command {
         /// Which runtime is asked.
         runtime: RootRuntime,
     },
+    /// Read one Podman container's record from its owner's container store,
+    /// answered by [`Response::PodmanRecord`]. Podman is daemonless and its
+    /// socket is off unless enabled, while its store is always written, and
+    /// is root's to read. Read-only: the store's `db.sql` opened read-only,
+    /// else its `containers.json`, and what crosses back is the container's
+    /// name, image, labels, creation time and state, nothing else. A store
+    /// whose directory is not owned by the container's owner is not read.
+    ReadPodmanRecord {
+        /// The owner, `None` for root.
+        uid: Option<u32>,
+        /// Root's store directory, absolute; for a user, the store relative
+        /// to the home the password file gives them.
+        store: String,
+        /// The container's 64-hex-digit id.
+        id: String,
+    },
+}
+
+/// What [`Command::ReadPodmanRecord`] found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PodmanStoreRead {
+    /// No store there, or not owned by the container's owner.
+    NoStore,
+    /// The store is there and does not list the container.
+    Missing,
+    /// The container's record.
+    Found(PodmanRecord),
+}
+
+/// One container as Podman's store records it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PodmanRecord {
+    /// The container's name.
+    pub name: String,
+    /// The image it was created from, by name, else by id.
+    pub image: String,
+    /// Its labels, sorted by key; empty when only `containers.json` was
+    /// there, which does not carry them.
+    pub labels: Vec<(String, String)>,
+    /// Whether the labels were read, from the database.
+    pub labels_read: bool,
+    /// When it was created, RFC 3339.
+    pub created: String,
+    /// Its state: `created`, `running`, `exited` and so on; empty when not
+    /// recorded.
+    pub status: String,
+}
+
+/// A Podman container id: 64 lowercase hex digits.
+#[must_use]
+pub fn valid_podman_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// A container runtime root runs, reached through
@@ -1367,6 +1419,8 @@ pub enum Response {
     /// The links pinned in the warden's link directory, by pin name,
     /// answering [`Command::PinnedLinks`].
     PinnedLinks { names: Vec<String> },
+    /// One container's record, answering [`Command::ReadPodmanRecord`].
+    PodmanRecord { read: PodmanStoreRead },
 }
 
 /// Write one framed message: a `u32` little-endian length prefix followed by the
@@ -1404,9 +1458,10 @@ mod tests {
         FileRoot, GoExecutable, GoExecutableScan, HiddenProcessReading, LINK_PIN_NAME_MAX,
         ListedPort, MAX_FRAME_LEN, MappedFile, MappingScan, NamespaceIdReading,
         NamespacePortReading, NetworkProgram, OpenIntent, OpenerReading, PacketSocket,
-        PidObservation, ProcessFactsReading, ProcessMappings, ProcessStamp, ROOTED_CHUNK_MAX,
-        Response, RootRuntime, RootedFile, RootedRead, RouteSpec, TaskIdentity, read_frame,
-        root_runtime_path_allowed, valid_dpkg_list_name, valid_link_pin_name, write_frame,
+        PidObservation, PodmanRecord, PodmanStoreRead, ProcessFactsReading, ProcessMappings,
+        ProcessStamp, ROOTED_CHUNK_MAX, Response, RootRuntime, RootedFile, RootedRead, RouteSpec,
+        TaskIdentity, read_frame, root_runtime_path_allowed, valid_dpkg_list_name,
+        valid_link_pin_name, write_frame,
     };
     use std::io::Cursor;
 
@@ -1590,6 +1645,11 @@ mod tests {
             Command::ConnectRootRuntime {
                 runtime: RootRuntime::Docker,
             },
+            Command::ReadPodmanRecord {
+                uid: Some(1000),
+                store: ".local/share/containers/storage".into(),
+                id: "a".repeat(64),
+            },
         ]
     }
 
@@ -1677,7 +1737,29 @@ mod tests {
         .chain(std::iter::once(Response::PinnedLinks {
             names: vec!["xdp_eth0".into(), "tcx-egress_eth0".into()],
         }))
+        .chain(podman_responses())
         .collect()
+    }
+
+    fn podman_responses() -> Vec<Response> {
+        vec![
+            Response::PodmanRecord {
+                read: PodmanStoreRead::Found(PodmanRecord {
+                    name: "web".into(),
+                    image: "docker.io/library/nginx:1.27".into(),
+                    labels: vec![("tier".into(), "front".into())],
+                    labels_read: true,
+                    created: "2026-11-22T00:30:40Z".into(),
+                    status: "running".into(),
+                }),
+            },
+            Response::PodmanRecord {
+                read: PodmanStoreRead::NoStore,
+            },
+            Response::PodmanRecord {
+                read: PodmanStoreRead::Missing,
+            },
+        ]
     }
 
     /// The answers of the two hidden checks.
@@ -1881,6 +1963,20 @@ mod tests {
         let me = TaskIdentity::of_self().expect("procfs is mounted");
         assert_eq!(me.tgid, std::process::id());
         assert_ne!(me.pid_ns_ino, 0);
+    }
+
+    #[test]
+    fn a_podman_id_is_64_lowercase_hex_digits() {
+        assert!(super::valid_podman_id(&"0f".repeat(32)));
+        for bad in [
+            "",
+            "abc",
+            &"A".repeat(64),
+            &"0".repeat(65),
+            &"../".repeat(21),
+        ] {
+            assert!(!super::valid_podman_id(bad), "{bad}");
+        }
     }
 
     #[test]

@@ -980,10 +980,13 @@ dependencies = [
 name = "ebpfsentinel-warden"
 version = "0.0.0-dev"
 dependencies = [
+ "ebpfsentinel-domain",
  "ebpfsentinel-warden-client",
  "ebpfsentinel-warden-proto",
  "libc",
  "object",
+ "serde",
+ "serde_json",
  "sha2",
  "tempfile",
 ]

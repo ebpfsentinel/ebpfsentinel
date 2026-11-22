@@ -26,8 +26,9 @@
 //! says why instead of looking like a bare id.
 //!
 //! Where no socket answers, the owner's container store is read instead
-//! ([`PodmanStorage`]): it names the container and its image, never its
-//! labels, and the runtime is then reported as [`PodmanReach::Store`].
+//! ([`PodmanStorage`]), through the warden where one runs: Podman's database
+//! names the container, its image, its labels and its state, and the runtime
+//! is then reported as [`PodmanReach::Store`].
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -43,13 +44,13 @@ use domain::container::entity::{
     ContainerInfo, ContainerMetadata, ContainerRuntime, DockerMetadata,
 };
 use domain::container::error::ContainerError;
-use ebpfsentinel_warden_client::{ReconnectingClient, RootRuntime};
+use ebpfsentinel_warden_client::{PodmanRecord, PodmanStoreRead, ReconnectingClient, RootRuntime};
 use ports::secondary::metadata_enricher_port::MetadataEnricher;
 
 use super::docker_cache::DockerCache;
 use super::docker_client::{Dialer, DockerClient};
 use super::docker_events::DockerEventWatcher;
-use super::podman_storage::PodmanStorage;
+use super::podman_storage::{PodmanStorage, metadata_of};
 
 /// The socket root's containers are served on.
 pub const DEFAULT_ROOTFUL_SOCKET: &str = "/run/podman/podman.sock";
@@ -86,7 +87,9 @@ pub enum PodmanReach {
     /// The container is rootless and rootless runtimes are not asked.
     RootlessOff,
     /// No socket answered, and the owner's container store is read instead:
-    /// containers are named with their image, without their labels.
+    /// containers are named with their image, their labels and their state
+    /// from Podman's database, with their image alone where an older Podman
+    /// left no database.
     Store,
 }
 
@@ -117,7 +120,7 @@ pub struct PodmanEnricher {
     /// the agent's user namespace cannot reach.
     warden: Option<Arc<Mutex<ReconnectingClient>>>,
     /// The container stores read where no socket answers.
-    storage: Option<PodmanStorage>,
+    storage: Option<Arc<PodmanStorage>>,
 }
 
 /// The socket a user's Podman serves its API on.
@@ -162,32 +165,40 @@ impl PodmanEnricher {
         }
     }
 
-    /// Read each owner's container store where its socket does not answer.
+    /// Read each owner's container store where its socket does not answer,
+    /// through the warden when one runs.
     #[must_use]
     pub fn with_storage(mut self, storage: PodmanStorage) -> Self {
-        self.storage = storage.enabled().then_some(storage);
+        self.storage = storage
+            .enabled()
+            .then(|| Arc::new(storage.through(self.warden.clone())));
         self
     }
 
-    /// Whether `owner`'s container store is there to be read.
-    fn has_store(&self, owner: PodmanOwner) -> bool {
-        self.storage
-            .as_ref()
-            .and_then(|s| s.store_of(owner_uid(owner)))
-            .is_some_and(|dir| dir.is_dir())
+    /// The container `id` as `owner`'s store records it.
+    async fn stored(&self, owner: PodmanOwner, id: &str) -> PodmanStoreRead {
+        let Some(storage) = self.storage.as_ref().map(Arc::clone) else {
+            return PodmanStoreRead::NoStore;
+        };
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || storage.lookup(owner_uid(owner), &id))
+            .await
+            .unwrap_or(PodmanStoreRead::NoStore)
     }
 
-    /// The container `id` as `owner`'s store records it.
-    fn stored(&self, owner: PodmanOwner, id: &str) -> Option<DockerMetadata> {
-        self.storage
-            .as_ref()?
-            .lookup(owner_uid(owner), id)
-            .map(|(md, _)| md)
+    /// A store's record, kept in the cache like an inspected one so the next
+    /// sighting within its lifetime asks nobody.
+    fn remember(&self, id: &str, record: PodmanRecord) -> ContainerMetadata {
+        let md = metadata_of(record);
+        if !md.created_at.is_empty() {
+            self.cache.insert(id.to_owned(), md.clone());
+        }
+        ContainerMetadata::Docker(md)
     }
 
     /// `owner`'s runtime did not answer: say so, or that its store answers
-    /// for it, and name the container from the event stream or the store.
-    fn unreached(
+    /// for it, and name the container from the store or the event stream.
+    async fn unreached(
         &self,
         owner: PodmanOwner,
         dialer: &Dialer,
@@ -195,27 +206,34 @@ impl PodmanEnricher {
         id: &str,
         from_stream: Option<DockerMetadata>,
     ) -> Option<ContainerMetadata> {
-        let reach = if self.has_store(owner) {
-            PodmanReach::Store
-        } else {
+        let read = self.stored(owner, id).await;
+        let reach = if read == PodmanStoreRead::NoStore {
             reach
+        } else {
+            PodmanReach::Store
         };
         self.record(owner, dialer, reach);
-        self.named_without_api(owner, reach, id, from_stream)
+        match read {
+            PodmanStoreRead::Found(record) => Some(self.remember(id, record)),
+            _ => from_stream.map(ContainerMetadata::Docker),
+        }
     }
 
-    /// The stream's partial entry first, since it carries labels, then the
-    /// store's when the runtime is read from its store.
-    fn named_without_api(
+    /// The store's record when the runtime is read from its store, else the
+    /// stream's partial entry.
+    async fn named_without_api(
         &self,
         owner: PodmanOwner,
         reach: PodmanReach,
         id: &str,
         from_stream: Option<DockerMetadata>,
     ) -> Option<ContainerMetadata> {
-        from_stream
-            .or_else(|| (reach == PodmanReach::Store).then(|| self.stored(owner, id))?)
-            .map(ContainerMetadata::Docker)
+        if reach == PodmanReach::Store
+            && let PodmanStoreRead::Found(record) = self.stored(owner, id).await
+        {
+            return Some(self.remember(id, record));
+        }
+        from_stream.map(ContainerMetadata::Docker)
     }
 
     /// Connect to users' sockets through the warden at `sock` whenever the
@@ -314,7 +332,7 @@ impl PodmanEnricher {
                 ?owner,
                 socket = %socket.display(),
                 "Podman runtime not answering on its socket: this owner's containers are named \
-                 from its container store, with their image and without their labels"
+                 from its container store"
             );
         } else if changed && reach != PodmanReach::Reachable {
             warn!(
@@ -390,12 +408,16 @@ impl MetadataEnricher for PodmanEnricher {
         let dialer = match self.known(owner) {
             Some((PodmanReach::Reachable, _, dialer)) => dialer,
             Some((reach, false, _)) => {
-                return Ok(self.named_without_api(owner, reach, container_id, from_stream));
+                return Ok(self
+                    .named_without_api(owner, reach, container_id, from_stream)
+                    .await);
             }
             _ => {
                 let (dialer, reach) = self.reach(owner, &socket).await;
                 if reach != PodmanReach::Reachable {
-                    return Ok(self.unreached(owner, &dialer, reach, container_id, from_stream));
+                    return Ok(self
+                        .unreached(owner, &dialer, reach, container_id, from_stream)
+                        .await);
                 }
                 self.record(owner, &dialer, reach);
                 dialer
@@ -412,13 +434,15 @@ impl MetadataEnricher for PodmanEnricher {
             }
             Err(
                 ContainerError::DockerUnavailable { .. } | ContainerError::DockerTimeout { .. },
-            ) => Ok(self.unreached(
-                owner,
-                &dialer,
-                PodmanReach::Unavailable,
-                container_id,
-                from_stream,
-            )),
+            ) => Ok(self
+                .unreached(
+                    owner,
+                    &dialer,
+                    PodmanReach::Unavailable,
+                    container_id,
+                    from_stream,
+                )
+                .await),
             Err(_) => stream_only(),
         }
     }
@@ -444,6 +468,13 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
+
+    /// Who runs the tests: the owner of a directory they just made.
+    fn me() -> u32 {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::metadata(dir.path()).unwrap().uid()
+    }
 
     const ID: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
@@ -736,9 +767,9 @@ mod tests {
             ),
         )
         .unwrap();
-        let enricher =
-            PodmanEnricher::new(dir.path().join("rootful.sock"), None, 200, cache()).with_storage(
-                PodmanStorage::new(Some(store), None, dir.path().join("passwd")),
+        let enricher = PodmanEnricher::new(dir.path().join("rootful.sock"), None, 200, cache())
+            .with_storage(
+                PodmanStorage::new(Some(store), None, dir.path().join("passwd")).owned_by(me()),
             );
 
         let Some(ContainerMetadata::Docker(md)) = enricher.enrich(&rootful()).await.unwrap() else {

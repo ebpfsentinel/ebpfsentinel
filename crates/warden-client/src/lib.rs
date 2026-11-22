@@ -33,9 +33,9 @@ pub use ebpfsentinel_warden_proto::{
     FimCanary, FimEvent, FimFacts, FimFile, FimFileType, FimMark, FimReading, FimXattr,
     GoExecutable, GoExecutableScan, HeldBpfObjects, HiddenProcessReading, ListedPort, MappedFile,
     MappingScan, NamespaceIdReading, NamespacePortReading, NetworkProgram, OPENER_READINGS_MAX,
-    OpenIntent, OpenerReading, PacketSocket, PidObservation, ProcessFactsReading, ProcessMappings,
-    ProcessStamp, ROOTED_CHUNK_MAX, RootRuntime, RootedFile, RootedRead, RouteSpec, TaskIdentity,
-    hidden_processes_call_timeout,
+    OpenIntent, OpenerReading, PacketSocket, PidObservation, PodmanRecord, PodmanStoreRead,
+    ProcessFactsReading, ProcessMappings, ProcessStamp, ROOTED_CHUNK_MAX, RootRuntime, RootedFile,
+    RootedRead, RouteSpec, TaskIdentity, hidden_processes_call_timeout,
 };
 
 /// How long one warden call may take before the client gives up on it.
@@ -107,6 +107,7 @@ fn op_name(cmd: &Command) -> &'static str {
         Command::OpenPinnedLink { .. } => "OpenPinnedLink",
         Command::UnpinLinks { .. } => "UnpinLinks",
         Command::ConnectRootRuntime { .. } => "ConnectRootRuntime",
+        Command::ReadPodmanRecord { .. } => "ReadPodmanRecord",
     }
 }
 
@@ -496,6 +497,23 @@ impl WardenClient {
         }
     }
 
+    /// Read one Podman container's record from its owner's container store.
+    pub fn read_podman_record(
+        &mut self,
+        uid: Option<u32>,
+        store: &str,
+        id: &str,
+    ) -> io::Result<PodmanStoreRead> {
+        match self.call(&Command::ReadPodmanRecord {
+            uid,
+            store: store.to_owned(),
+            id: id.to_owned(),
+        })? {
+            Response::PodmanRecord { read } => Ok(read),
+            other => Err(unexpected("ReadPodmanRecord", &other)),
+        }
+    }
+
     /// Hand back the build information section of every running Go
     /// executable.
     pub fn go_executables(&mut self) -> io::Result<GoExecutableScan> {
@@ -874,6 +892,17 @@ impl ReconnectingClient {
         len: u32,
     ) -> io::Result<RootedRead> {
         self.with_retry(|c| c.read_rooted_file(pid, file.clone(), offset, len))
+    }
+
+    /// Read one Podman container's record through the warden, reconnecting
+    /// if it bounced. A read, so replaying it is harmless.
+    pub fn read_podman_record(
+        &mut self,
+        uid: Option<u32>,
+        store: &str,
+        id: &str,
+    ) -> io::Result<PodmanStoreRead> {
+        self.with_retry(|c| c.read_podman_record(uid, store, id))
     }
 
     /// Read the build information of every running Go executable through
