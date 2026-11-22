@@ -17608,7 +17608,8 @@
           "no_socket",
           "refused",
           "unavailable",
-          "rootless_off"
+          "rootless_off",
+          "store"
         ]
       },
       "PodmanRuntimeReport": {

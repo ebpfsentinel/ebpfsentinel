@@ -214,7 +214,9 @@ dns:
 # the name, the image and the labels, and every other subsystem is
 # unaffected. With one enabled and no socket at that path, the agent says
 # so once and carries on. Podman is asked only once a Podman container is
-# seen, root's runtime at `socket` and each user's under `run_user_root`.
+# seen, root's runtime at `socket` and each user's under `run_user_root`;
+# where no socket answers, the owner's container store on disk names the
+# container and its image, without its labels.
 container:
   resolver:
     enabled: true

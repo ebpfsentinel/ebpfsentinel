@@ -62,12 +62,17 @@ container:
               app: checkout
 
   # Podman metadata enrichment, rootful socket plus each user's rootless
-  # socket under run_user_root.
+  # socket under run_user_root. Where no socket answers (podman.socket is not
+  # enabled by default), the container store is read instead: root's under
+  # storage_root, a user's under rootless_storage relative to their home.
+  # The store names the container and its image, never its labels.
   podman:
     enabled: true
     socket: /run/podman/podman.sock
     rootless: true
     run_user_root: /run/user
+    storage_root: /var/lib/containers/storage
+    rootless_storage: .local/share/containers/storage
     cache_size: 1024
     cache_ttl_seconds: 300
     timeout_ms: 2000

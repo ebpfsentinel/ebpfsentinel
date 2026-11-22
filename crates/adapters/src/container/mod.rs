@@ -13,6 +13,7 @@ pub mod netpol_watch;
 pub mod pod_cgroups;
 pub mod pod_claims;
 pub mod podman_enricher;
+pub mod podman_storage;
 pub mod proc_details;
 pub mod proc_digest;
 pub mod proc_executable;
@@ -54,6 +55,10 @@ pub use podman_enricher::{
     DEFAULT_ROOTFUL_SOCKET as PODMAN_DEFAULT_SOCKET,
     DEFAULT_RUN_USER_ROOT as PODMAN_DEFAULT_RUN_USER_ROOT, PodmanEnricher, PodmanOwner,
     PodmanReach, PodmanRuntime, rootless_socket as podman_rootless_socket,
+};
+pub use podman_storage::{
+    DEFAULT_ROOTLESS_STORAGE as PODMAN_DEFAULT_ROOTLESS_STORAGE,
+    DEFAULT_STORAGE_ROOT as PODMAN_DEFAULT_STORAGE_ROOT, PASSWD as PODMAN_PASSWD, PodmanStorage,
 };
 pub use proc_details::ProcDetailsResolver;
 pub use proc_digest::ProcExecutableDigester;

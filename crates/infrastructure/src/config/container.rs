@@ -32,6 +32,14 @@ fn default_docker_timeout_ms() -> u64 {
     2_000
 }
 
+fn default_podman_storage_root() -> String {
+    "/var/lib/containers/storage".to_string()
+}
+
+fn default_podman_rootless_storage() -> String {
+    ".local/share/containers/storage".to_string()
+}
+
 fn default_podman_socket() -> String {
     "/run/podman/podman.sock".to_string()
 }
@@ -173,6 +181,18 @@ pub struct PodmanEnricherConfig {
     #[serde(default = "default_run_user_root")]
     pub run_user_root: String,
 
+    /// Root's container store, read where root's socket does not answer:
+    /// it names a container and its image, never its labels. Empty to
+    /// never read it.
+    #[serde(default = "default_podman_storage_root")]
+    pub storage_root: String,
+
+    /// Each user's container store, relative to the home the password file
+    /// gives them, read where that user's socket does not answer. Empty to
+    /// never read users' stores; unused while `rootless` is off.
+    #[serde(default = "default_podman_rootless_storage")]
+    pub rootless_storage: String,
+
     #[serde(default = "default_docker_cache_size")]
     pub cache_size: usize,
 
@@ -190,6 +210,8 @@ impl Default for PodmanEnricherConfig {
             socket: default_podman_socket(),
             rootless: true,
             run_user_root: default_run_user_root(),
+            storage_root: default_podman_storage_root(),
+            rootless_storage: default_podman_rootless_storage(),
             cache_size: default_docker_cache_size(),
             cache_ttl_seconds: default_docker_cache_ttl_seconds(),
             timeout_ms: default_docker_timeout_ms(),
@@ -415,6 +437,14 @@ impl PodmanEnricherConfig {
                 return Err(ConfigError::Validation {
                     field: format!("container.podman.{name}"),
                     message: "path must not be empty".to_string(),
+                });
+            }
+            if !self.rootless_storage.is_empty()
+                && std::path::Path::new(&self.rootless_storage).is_absolute()
+            {
+                return Err(ConfigError::Validation {
+                    field: "container.podman.rootless_storage".to_string(),
+                    message: "path is relative to each user's home".to_string(),
                 });
             }
             if self.cache_size == 0 {

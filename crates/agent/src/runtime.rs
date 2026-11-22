@@ -468,12 +468,13 @@ pub fn build_podman_enricher(
     }
     if !podman.rootless
         && !Path::new(&podman.socket).exists()
+        && !Path::new(&podman.storage_root).is_dir()
         && adapters::container::warden_from_env().is_none()
     {
         warn!(
             socket = %podman.socket,
             "Podman container enrichment is off: the socket is not there and rootless \
-             runtimes are not asked. Alerts keep their container id and lose the container \
+             runtimes are not asked, and root's container store is not there either. Alerts keep their container id and lose the container \
              name, image and labels. Enable podman.socket, mount it read-only, or set \
              container.podman.enabled to false to stop asking for it"
         );
@@ -490,11 +491,18 @@ pub fn build_podman_enricher(
             .then(|| std::path::PathBuf::from(&podman.run_user_root)),
         podman.timeout_ms,
         cache,
-    );
+    )
+    .with_storage(adapters::container::PodmanStorage::new(
+        (!podman.storage_root.is_empty()).then(|| std::path::PathBuf::from(&podman.storage_root)),
+        (podman.rootless && !podman.rootless_storage.is_empty())
+            .then(|| std::path::PathBuf::from(&podman.rootless_storage)),
+        std::path::PathBuf::from(adapters::container::PODMAN_PASSWD),
+    ));
     info!(
         socket = %podman.socket,
         rootless = podman.rootless,
         run_user_root = %podman.run_user_root,
+        storage_root = %podman.storage_root,
         "Podman metadata enricher initialized: each owner's runtime is reached the first time \
          one of their containers is seen"
     );

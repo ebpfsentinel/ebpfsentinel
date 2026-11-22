@@ -110,6 +110,9 @@ pub enum PodmanReach {
     Unavailable,
     /// Rootless runtimes are turned off in the configuration.
     RootlessOff,
+    /// No socket answered and the owner's container store is read instead:
+    /// containers are named with their image, without their labels.
+    Store,
 }
 
 impl From<adapters::container::PodmanRuntime> for PodmanRuntimeReport {
@@ -127,6 +130,7 @@ impl From<adapters::container::PodmanRuntime> for PodmanRuntimeReport {
                 Found::Refused => PodmanReach::Refused,
                 Found::Unavailable => PodmanReach::Unavailable,
                 Found::RootlessOff => PodmanReach::RootlessOff,
+                Found::Store => PodmanReach::Store,
             },
         }
     }
