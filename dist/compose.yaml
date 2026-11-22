@@ -112,6 +112,9 @@ services:
       - ./ebpfsentinel.yaml:/etc/ebpfsentinel/config.yaml
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - /proc:/host/proc:ro
+      # securityfs, read-only: the active security modules, without which the
+      # agent cannot tell the BPF LSM is on and refuses the exec-network list.
+      - /sys/kernel/security:/sys/kernel/security:ro
       - warden-sock:/run/ebpfsentinel:ro
       - ebpfsentinel-state:/var/lib/ebpfsentinel
       - ebpfsentinel-captures:/var/lib/ebpfsentinel/captures

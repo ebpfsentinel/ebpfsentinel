@@ -344,6 +344,11 @@ spec:
             - name: debug
               mountPath: /sys/kernel/debug
               readOnly: true
+            - name: securityfs
+              # The active security modules, read to tell whether the BPF LSM
+              # is on; the pod's own /sys does not carry securityfs.
+              mountPath: /sys/kernel/security
+              readOnly: true
             - name: host-cgroup
               # Read-only host cgroupfs so the container resolver can map a
               # packet's cgroup id (from bpf_skb_cgroup_id on the TC egress
@@ -391,6 +396,9 @@ spec:
         - name: debug
           hostPath:
             path: /sys/kernel/debug
+        - name: securityfs
+          hostPath:
+            path: /sys/kernel/security
         - name: host-cgroup
           hostPath:
             path: /sys/fs/cgroup

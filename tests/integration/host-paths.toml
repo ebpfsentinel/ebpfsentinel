@@ -1,0 +1,257 @@
+# Host paths the agent and the warden read that a containerised deployment
+# does not mount, each judged. Read by audit-host-paths.py; a gap is a
+# deployment that silently reads nothing where a host install reads the path.
+
+gap_ceiling = 20
+
+[compose."/etc/ebpfsentinel"]
+reason = "a prefix a configured key path must sit under: compared, never opened; the operator mounts the file the key names; the configuration itself is mounted at /etc/ebpfsentinel/config.yaml"
+
+[compose."/etc/hostname"]
+reason = "read only when HOSTNAME is unset; under network_mode host the runtime writes the host's name here"
+
+[compose."/etc/pki"]
+reason = "a prefix a configured key path must sit under: compared, never opened; the operator mounts the file the key names"
+
+[compose."/etc/pve/lxc"]
+gap = "guest enrichment on a Proxmox, libvirt or Incus host: compose neither mounts nor offers it, and it was never run from a container"
+
+[compose."/etc/pve/qemu-server"]
+gap = "guest enrichment on a Proxmox, libvirt or Incus host: compose neither mounts nor offers it, and it was never run from a container"
+
+[compose."/etc/ssl"]
+reason = "a prefix a configured key path must sit under: compared, never opened; the operator mounts the file the key names"
+
+[compose."/etc/systemd/system"]
+reason = "fingerprints the agent's own systemd unit; the watch is off outside a systemd service, so never in a container"
+
+[compose."/etc/tls"]
+reason = "a prefix a configured key path must sit under: compared, never opened; the operator mounts the file the key names"
+
+[compose."/lib/aarch64-linux-gnu"]
+gap = "the crypto call counter's fallback reads the image's own libraries in a container, not the host's; a host library is probed only once a process maps it, through /host/proc"
+
+[compose."/lib/systemd/system"]
+reason = "fingerprints the agent's own systemd unit; the watch is off outside a systemd service, so never in a container"
+
+[compose."/lib/x86_64-linux-gnu"]
+gap = "the crypto call counter's fallback reads the image's own libraries in a container, not the host's; a host library is probed only once a process maps it, through /host/proc"
+
+[compose."/proc/net/nf_conntrack"]
+reason = "per network namespace, and the service runs in the host's (network_mode host, hostNetwork)"
+
+[compose."/proc/stat"]
+reason = "kernel-wide: the container's procfs reads the same value as the host's"
+
+[compose."/proc/sys/fs/fanotify/max_user_marks"]
+reason = "the container's own procfs answers with the limit that applies to the process placing the marks"
+
+[compose."/proc/sys/kernel/hostname"]
+reason = "the UTS namespace: the host's under network_mode host and hostNetwork"
+
+[compose."/proc/sys/kernel/osrelease"]
+reason = "kernel-wide: the container's procfs reads the same value as the host's"
+
+[compose."/proc/sys/kernel/random/boot_id"]
+reason = "kernel-wide: the container's procfs reads the same value as the host's"
+
+[compose."/proc/sys/net/ipv4/tcp_syncookies"]
+reason = "per network namespace, and the service runs in the host's (network_mode host, hostNetwork)"
+
+[compose."/proc/sys/net/netfilter/nf_conntrack_count"]
+reason = "per network namespace, and the service runs in the host's (network_mode host, hostNetwork)"
+
+[compose."/run/bird/bird.ctl"]
+gap = "BGP announcement drives BIRD through this socket and file; the deployment neither mounts nor offers them, so the feature is package-only without saying so"
+
+[compose."/run/bird/ebpfsentinel.conf"]
+gap = "BGP announcement drives BIRD through this socket and file; the deployment neither mounts nor offers them, so the feature is package-only without saying so"
+
+[compose."/run/containerd/containerd.sock"]
+reason = "the agent never dials it; only the enterprise tenant watcher does, through its own deployment"
+
+[compose."/run/crio/crio.sock"]
+reason = "the agent never dials it; only the enterprise tenant watcher does, through its own deployment"
+
+[compose."/run/libvirt/qemu"]
+gap = "guest enrichment on a Proxmox, libvirt or Incus host: compose neither mounts nor offers it, and it was never run from a container"
+
+[compose."/run/secrets"]
+reason = "a prefix a configured key path must sit under: compared, never opened; the operator mounts the file the key names"
+
+[compose."/run/systemd/system"]
+reason = "fingerprints the agent's own systemd unit; the watch is off outside a systemd service, so never in a container"
+
+[compose."/sys/kernel/btf"]
+reason = "the read-only sysfs every container gets carries the kernel's BTF"
+
+[compose."/sys/kernel/btf/vmlinux"]
+reason = "the read-only sysfs every container gets carries the kernel's BTF"
+
+[compose."/usr/lib"]
+gap = "the crypto call counter's fallback reads the image's own libraries in a container, not the host's; a host library is probed only once a process maps it, through /host/proc"
+
+[compose."/usr/lib/aarch64-linux-gnu"]
+gap = "the crypto call counter's fallback reads the image's own libraries in a container, not the host's; a host library is probed only once a process maps it, through /host/proc"
+
+[compose."/usr/lib/ebpfsentinel"]
+reason = "the packages' program directory; the image carries its objects under /usr/local/lib/ebpfsentinel"
+
+[compose."/usr/lib/systemd/system"]
+reason = "fingerprints the agent's own systemd unit; the watch is off outside a systemd service, so never in a container"
+
+[compose."/usr/lib/x86_64-linux-gnu"]
+gap = "the crypto call counter's fallback reads the image's own libraries in a container, not the host's; a host library is probed only once a process maps it, through /host/proc"
+
+[compose."/usr/lib64"]
+gap = "the crypto call counter's fallback reads the image's own libraries in a container, not the host's; a host library is probed only once a process maps it, through /host/proc"
+
+[compose."/usr/local/lib/ebpfsentinel"]
+reason = "inside the image: Dockerfile.agent copies the eBPF objects there"
+
+[compose."/usr/local/lib/systemd/system"]
+reason = "fingerprints the agent's own systemd unit; the watch is off outside a systemd service, so never in a container"
+
+[compose."/var/cache"]
+reason = "a system root a file-integrity canary is refused under: compared, never opened"
+
+[compose."/var/lib"]
+reason = "a system root a file-integrity canary is refused under: compared, never opened"
+
+[compose."/var/lib/incus/unix.socket"]
+gap = "guest enrichment on a Proxmox, libvirt or Incus host: compose neither mounts nor offers it, and it was never run from a container"
+
+[compose."/var/run"]
+reason = "a system root a file-integrity canary is refused under: compared, never opened"
+
+[chart."/etc/hostname"]
+reason = "read only when HOSTNAME is unset; under hostNetwork the kubelet sets it to the node's name"
+
+[chart."/etc/passwd"]
+reason = "a Kubernetes node runs its pods through CRI; the chart names containers through the Kubernetes enricher, Docker and Podman are compose or package deployments"
+
+[chart."/etc/pki"]
+reason = "a prefix a configured key path must sit under: compared, never opened; the operator mounts the file the key names"
+
+[chart."/etc/pve/lxc"]
+reason = "guest enrichment is for a hypervisor host (Proxmox, libvirt, Incus), which is not a Kubernetes node"
+
+[chart."/etc/pve/qemu-server"]
+reason = "guest enrichment is for a hypervisor host (Proxmox, libvirt, Incus), which is not a Kubernetes node"
+
+[chart."/etc/ssl"]
+reason = "a prefix a configured key path must sit under: compared, never opened; the operator mounts the file the key names"
+
+[chart."/etc/systemd/system"]
+reason = "fingerprints the agent's own systemd unit; the watch is off outside a systemd service, so never in a container"
+
+[chart."/etc/tls"]
+reason = "a prefix a configured key path must sit under: compared, never opened; the operator mounts the file the key names"
+
+[chart."/lib/aarch64-linux-gnu"]
+gap = "the crypto call counter's fallback reads the image's own libraries in a container, not the host's; a host library is probed only once a process maps it, through /host/proc"
+
+[chart."/lib/systemd/system"]
+reason = "fingerprints the agent's own systemd unit; the watch is off outside a systemd service, so never in a container"
+
+[chart."/lib/x86_64-linux-gnu"]
+gap = "the crypto call counter's fallback reads the image's own libraries in a container, not the host's; a host library is probed only once a process maps it, through /host/proc"
+
+[chart."/proc/net/nf_conntrack"]
+reason = "per network namespace, and the service runs in the host's (network_mode host, hostNetwork)"
+
+[chart."/proc/stat"]
+reason = "kernel-wide: the container's procfs reads the same value as the host's"
+
+[chart."/proc/sys/fs/fanotify/max_user_marks"]
+reason = "the container's own procfs answers with the limit that applies to the process placing the marks"
+
+[chart."/proc/sys/kernel/hostname"]
+reason = "the UTS namespace: the host's under network_mode host and hostNetwork"
+
+[chart."/proc/sys/kernel/osrelease"]
+reason = "kernel-wide: the container's procfs reads the same value as the host's"
+
+[chart."/proc/sys/kernel/random/boot_id"]
+reason = "kernel-wide: the container's procfs reads the same value as the host's"
+
+[chart."/proc/sys/net/ipv4/tcp_syncookies"]
+reason = "per network namespace, and the service runs in the host's (network_mode host, hostNetwork)"
+
+[chart."/proc/sys/net/netfilter/nf_conntrack_count"]
+reason = "per network namespace, and the service runs in the host's (network_mode host, hostNetwork)"
+
+[chart."/run/bird/bird.ctl"]
+gap = "BGP announcement drives BIRD through this socket and file; the deployment neither mounts nor offers them, so the feature is package-only without saying so"
+
+[chart."/run/bird/ebpfsentinel.conf"]
+gap = "BGP announcement drives BIRD through this socket and file; the deployment neither mounts nor offers them, so the feature is package-only without saying so"
+
+[chart."/run/containerd/containerd.sock"]
+reason = "the agent never dials it; only the enterprise tenant watcher does, through its own deployment"
+
+[chart."/run/crio/crio.sock"]
+reason = "the agent never dials it; only the enterprise tenant watcher does, through its own deployment"
+
+[chart."/run/libvirt/qemu"]
+reason = "guest enrichment is for a hypervisor host (Proxmox, libvirt, Incus), which is not a Kubernetes node"
+
+[chart."/run/podman/podman.sock"]
+reason = "a Kubernetes node runs its pods through CRI; the chart names containers through the Kubernetes enricher, Docker and Podman are compose or package deployments"
+
+[chart."/run/secrets"]
+reason = "a prefix a configured key path must sit under: compared, never opened; the operator mounts the file the key names"
+
+[chart."/run/systemd/system"]
+reason = "fingerprints the agent's own systemd unit; the watch is off outside a systemd service, so never in a container"
+
+[chart."/run/user"]
+reason = "a Kubernetes node runs its pods through CRI; the chart names containers through the Kubernetes enricher, Docker and Podman are compose or package deployments"
+
+[chart."/sys/kernel/btf"]
+reason = "the read-only sysfs every container gets carries the kernel's BTF"
+
+[chart."/sys/kernel/btf/vmlinux"]
+reason = "the read-only sysfs every container gets carries the kernel's BTF"
+
+[chart."/usr/lib"]
+gap = "the crypto call counter's fallback reads the image's own libraries in a container, not the host's; a host library is probed only once a process maps it, through /host/proc"
+
+[chart."/usr/lib/aarch64-linux-gnu"]
+gap = "the crypto call counter's fallback reads the image's own libraries in a container, not the host's; a host library is probed only once a process maps it, through /host/proc"
+
+[chart."/usr/lib/ebpfsentinel"]
+reason = "the packages' program directory; the image carries its objects under /usr/local/lib/ebpfsentinel"
+
+[chart."/usr/lib/systemd/system"]
+reason = "fingerprints the agent's own systemd unit; the watch is off outside a systemd service, so never in a container"
+
+[chart."/usr/lib/x86_64-linux-gnu"]
+gap = "the crypto call counter's fallback reads the image's own libraries in a container, not the host's; a host library is probed only once a process maps it, through /host/proc"
+
+[chart."/usr/lib64"]
+gap = "the crypto call counter's fallback reads the image's own libraries in a container, not the host's; a host library is probed only once a process maps it, through /host/proc"
+
+[chart."/usr/local/lib/ebpfsentinel"]
+reason = "inside the image: Dockerfile.agent copies the eBPF objects there"
+
+[chart."/usr/local/lib/systemd/system"]
+reason = "fingerprints the agent's own systemd unit; the watch is off outside a systemd service, so never in a container"
+
+[chart."/var/cache"]
+reason = "a system root a file-integrity canary is refused under: compared, never opened"
+
+[chart."/var/lib"]
+reason = "a system root a file-integrity canary is refused under: compared, never opened"
+
+[chart."/var/lib/containers/storage"]
+reason = "a Kubernetes node runs its pods through CRI; the chart names containers through the Kubernetes enricher, Docker and Podman are compose or package deployments"
+
+[chart."/var/lib/incus/unix.socket"]
+reason = "guest enrichment is for a hypervisor host (Proxmox, libvirt, Incus), which is not a Kubernetes node"
+
+[chart."/var/run"]
+reason = "a system root a file-integrity canary is refused under: compared, never opened"
+
+[chart."/var/run/docker.sock"]
+reason = "a Kubernetes node runs its pods through CRI; the chart names containers through the Kubernetes enricher, Docker and Podman are compose or package deployments"

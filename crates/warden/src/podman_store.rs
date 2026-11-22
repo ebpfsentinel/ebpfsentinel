@@ -264,7 +264,8 @@ mod tests {
     use super::*;
 
     /// A store Podman 5 wrote: `shop-front` created with two labels,
-    /// `shop-back` running with one, `batch` exited without any.
+    /// `shop-back` running with one, `batch` exited without any. Written by
+    /// `tests/fixtures/make-podman-db.sh`, which prints the ids below.
     const DB: &[u8] = include_bytes!("../tests/fixtures/podman-db.sqlite");
     const CREATED: &str = "91cc0e1d480f880f85305a968913b924d4a3b16f35b58aa2e7cd426f1ec4c813";
     const RUNNING: &str = "4042b1292d417efd87a72b02b936d667ce79642811512435fc4f624097bca743";

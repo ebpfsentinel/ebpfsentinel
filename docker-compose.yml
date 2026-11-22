@@ -207,6 +207,9 @@ services:
       # Read-only host /proc (EBPFSENTINEL_HOST_PROC) so the agent resolves every
       # node process's libssl for cross-container TLS DLP.
       - /proc:/host/proc:ro
+      # securityfs, read-only: the active security modules, without which the
+      # agent cannot tell the BPF LSM is on and refuses the exec-network list.
+      - /sys/kernel/security:/sys/kernel/security:ro
       # The warden's control socket (read-only - the agent only connects).
       - warden-sock:/run/ebpfsentinel:ro
       # No container runtime socket: the Docker API, and Podman's rootful
