@@ -56,6 +56,27 @@ RestartSec=2s
 # socket error in the agent's last log line.
 TimeoutStopSec=20s
 
+# The warden confines itself before it serves (no new privileges, Landlock,
+# a seccomp filter); these hold from the first instruction, before that.
+# ProtectSystem=full rather than strict: a canary the file watch plants may
+# sit in any data directory the configuration names. Tunables stay writable:
+# the warden turns on TCP syncookies at start.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# What the broker uses and nothing else: DAC_OVERRIDE reaches a user's
+# rootless Podman socket (mode 0600), NET_BIND_SERVICE binds the resolver's
+# port 53 on the agent's behalf.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_PTRACE CAP_BPF CAP_PERFMON CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_NET_BIND_SERVICE
+
 # No WatchdogSec: the warden has no loop of its own to be wedged in. It blocks
 # on accept() and answers what arrives, so liveness is the agent's call
 # timeouts (10s, from the agent side) rather than a keep-alive from here.

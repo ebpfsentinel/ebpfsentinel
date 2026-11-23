@@ -238,6 +238,7 @@ spec:
               - DAC_READ_SEARCH
               drop:
               - ALL
+            readOnlyRootFilesystem: true
             runAsUser: 0
             seccompProfile:
               type: Unconfined

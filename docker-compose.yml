@@ -117,9 +117,10 @@ services:
       - DAC_READ_SEARCH # name the directory a watched file changed in
       - NET_BIND_SERVICE # port 53 for the DNS allow-list resolver, handed to the agent
       - DAC_OVERRIDE # connect to a user's rootless Podman socket, mode 0600
+    read_only: true
     security_opt:
-      - apparmor=unconfined # delegation does fsconfig/move_mount
-      - seccomp=unconfined # mount/bpf/netlink syscalls
+      - apparmor=unconfined # delegation does fsconfig
+      - seccomp=unconfined # the warden installs its own filter before it serves
     volumes:
       - warden-sock:/run/ebpfsentinel
       # What the warden answers, written by warden-policy; the agent never

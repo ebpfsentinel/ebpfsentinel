@@ -70,8 +70,15 @@ services:
     cap_drop: [ALL]
     # DAC_OVERRIDE connects to a user's rootless Podman socket, mode 0600.
     cap_add: [SYS_ADMIN, NET_ADMIN, NET_RAW, SYS_PTRACE, BPF, PERFMON, DAC_READ_SEARCH, NET_BIND_SERVICE, DAC_OVERRIDE]
+    # Nothing in the image is written: the socket, the policy and the pins
+    # are volumes.
+    read_only: true
     security_opt:
-      # Delegation does fsconfig and move_mount, and the broker speaks netlink.
+      # Delegation does fsconfig and the broker speaks netlink. The runtime's
+      # own profiles are left off because the warden installs a stricter one
+      # of its own before it serves: no new privileges, Landlock fencing
+      # writes and execution, and a seccomp filter that kills execve, mount,
+      # module loading, ptrace and namespace creation.
       - apparmor=unconfined
       - seccomp=unconfined
     volumes:

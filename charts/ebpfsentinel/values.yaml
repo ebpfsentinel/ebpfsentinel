@@ -165,10 +165,17 @@ daemonset:
     # its `libssl`), and CAP_BPF + CAP_PERFMON (create the DLP uprobe
     # `BPF_LINK_CREATE`), and CAP_DAC_READ_SEARCH (name the directory a watched
     # file changed in, from the handle the kernel reports). These tracing
-    # capabilities live on the warden ONLY - the agent stays `cap-drop: ALL`. It issues fsconfig + netlink + AF_PACKET + bpf,
-    # so AppArmor + seccomp are Unconfined.
+    # capabilities live on the warden ONLY - the agent stays `cap-drop: ALL`.
+    # It issues fsconfig + netlink + AF_PACKET + bpf, so the runtime's AppArmor
+    # and seccomp profiles are off; the warden installs a stricter confinement
+    # of its own before it serves (no new privileges, Landlock fencing writes
+    # and execution, a seccomp filter that kills execve, mount, module
+    # loading, ptrace and namespace creation). Kubernetes refuses
+    # `allowPrivilegeEscalation: false` beside CAP_SYS_ADMIN, which is why the
+    # warden sets no-new-privileges itself.
     securityContext:
       runAsUser: 0
+      readOnlyRootFilesystem: true
       capabilities:
         add: [SYS_ADMIN, NET_ADMIN, NET_RAW, SYS_PTRACE, BPF, PERFMON, DAC_READ_SEARCH]
         drop: [ALL]

@@ -210,6 +210,15 @@ fn serve(
             proc_root.display()
         );
     }
+    // Everything privileged that is not an answer is done: confine before the
+    // first connection is read.
+    match ebpfsentinel_warden::confine::confine_for_serving(&policy) {
+        Ok(posture) => eprintln!("[warden] confined: {posture}"),
+        Err(e) => {
+            eprintln!("[warden] refusing to serve unconfined: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
     serve_loop(
         &listener,
         std::sync::Arc::new(btf),

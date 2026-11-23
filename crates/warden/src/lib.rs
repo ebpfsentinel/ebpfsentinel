@@ -44,6 +44,7 @@ use std::ptr;
 
 pub mod bpf_inventory;
 pub mod cgroup_ops;
+pub mod confine;
 pub mod ctnetlink;
 pub mod dlp_scan;
 pub mod exe_read;
