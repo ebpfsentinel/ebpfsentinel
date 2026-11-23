@@ -69,9 +69,9 @@ A snapshot of the capabilities below - see the [Features guide](https://docs.ebp
 | Feature | Summary |
 |---------|---------|
 | **IDS / IPS** | Kernel-side pattern matching with automatic blocking |
-| **Threat Intelligence** | Any OSINT feed (CSV, JSON, STIX 2.1) with real-time IOC matching on addresses, domains and URLs |
-| **DLP** | TLS plaintext inspection for PCI, PII, and credential patterns via uprobe |
-| **DNS Security** | Passive capture, blocklists, behavioral reputation scoring, DoH/DoT detection |
+| **Threat Intelligence** | Feeds fetched by URL (STIX 2.1 bundles, CSV, JSON, plain lists) and a CrowdSec local API, matched in real time on addresses, domains and URLs. Pulling from a MISP or TAXII server is Enterprise |
+| **DLP** | Built-in PCI, PII and credential patterns on TLS plaintext, read by a uprobe in the process's shared OpenSSL or BoringSSL library, detect and alert. Custom patterns, blocking, and Go, Java or statically linked TLS are Enterprise |
+| **DNS Security** | Passive capture, blocklists, behavioral reputation scoring, DoH/DoT detection. Blocking DoH/DoT by policy is Enterprise |
 | **Host Rules** | Rules written as intentions (`process.connects`, `file.changes`, `bpf.foreign_program`), each served by whichever hook the host's kernel offers, in shadow before they alert |
 | **Process Table** | Every fork, exec and exit, with the container and the chain of ancestors, so a pid becomes a name |
 | **Process Detections** | Reverse shells, binaries with no file on disk, and a server's unexpected descendant, read off the process tree where it holds a connection |
@@ -85,7 +85,7 @@ A snapshot of the capabilities below - see the [Features guide](https://docs.ebp
 | **JA4 Fingerprinting** | TLS client fingerprinting for C2 and malware detection, following the JA4 method by FoxIO (BSD 3-Clause) |
 | **Network Cryptography** | Which flows negotiate a post-quantum hybrid, a classical curve or less than TLS 1.2, read off the handshakes without decrypting |
 | **GeoIP Enforcement** | MaxMind country resolution shared across all engines |
-| **Automated Response** | Time-bounded block and throttle, manual or on severity-based policies, expiring on their own |
+| **Automated Response** | Time-bounded block and throttle, manual or on up to three policies matching severity and component, expiring on their own. MITRE conditions, flow isolation, cooldowns and unlimited policies are Enterprise |
 
 ### Operations
 
@@ -103,9 +103,9 @@ A snapshot of the capabilities below - see the [Features guide](https://docs.ebp
 | **OTLP Export** | Alerts as OpenTelemetry Logs (gRPC or HTTP) |
 | **Alert Pipeline** | Routing to email, webhook, log, OTLP with dedup + throttling |
 | **Audit Trail** | Rule change history with before/after diff and actor tracking |
-| **Packet Capture** | libpcap capture with BPF filters, manual or triggered by an alert |
+| **Packet Capture** | libpcap capture with BPF filters, manual or triggered by an alert, one capture at a time, 60 s when an alert starts it. Concurrent captures and the forensics API are Enterprise |
 | **CLI** | Forty-six subcommands with `--output table\|json` and `--token` auth, every API route reachable |
-| **Authentication** | JWT, OIDC, and API keys with role-based access |
+| **Authentication** | JWT, OIDC, and API keys, with three fixed roles (admin, operator, viewer). Custom roles are Enterprise |
 | **TLS 1.3** | rustls + aws_lc_rs, post-quantum hybrid key exchange (X25519MLKEM768) |
 
 ## Architecture
@@ -401,13 +401,19 @@ cargo xtask ebpf-build        # eBPF programs (the pinned nightly)
 # eBPF loads only through a BPF token (a user-namespace feature). The privileged
 # `warden` broker (bpffs delegation, conntrack, routes, ARP, pcap) runs alongside
 # the agent, which self-unshares a user namespace and loads its own eBPF through
-# the token - never CAP_BPF. Start the broker, then the agent:
-sudo ./target/release/warden serve /run/ebpfsentinel/warden.sock --uid 0 &
-sudo EBPFSENTINEL_WARDEN_SOCK=/run/ebpfsentinel/warden.sock \
+# the token - never CAP_BPF, never as root: started as root it drops to 65534
+# first, the uid the broker serves by default. Start the broker, then the agent
+# in a mount namespace with a tmpfs on /sys/fs/bpf, where it creates the
+# directory the delegated bpffs is mounted on:
+sudo ./target/release/warden serve /run/ebpfsentinel/warden.sock &
+sudo chown 65534 config/ebpfsentinel.yaml && sudo chmod 640 config/ebpfsentinel.yaml
+sudo unshare --mount --propagation private sh -c \
+  'mount -t tmpfs -o mode=1777 tmpfs /sys/fs/bpf && exec "$@"' sh \
+  env EBPFSENTINEL_WARDEN_SOCK=/run/ebpfsentinel/warden.sock \
   ./target/release/ebpfsentinel-agent --config config/ebpfsentinel.yaml
 ```
 
-The systemd install (`dist/install.sh`) wires this as two units - `ebpfsentinel-warden.service` (broker) + `ebpfsentinel.service` (agent) - mirroring the Docker split.
+The systemd install (`dist/install.sh`) wires this as two units - `ebpfsentinel-warden.service` (broker) + `ebpfsentinel.service` (agent, as its own `ebpfsentinel` user) - mirroring the Docker split.
 
 </details>
 

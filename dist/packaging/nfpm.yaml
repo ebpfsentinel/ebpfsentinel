@@ -35,9 +35,9 @@ license: AGPL-3.0-only
 depends:
   - systemd
 recommends:
-  # Only read on hosts that gate unprivileged user namespaces behind AppArmor.
-  # A recommendation rather than a dependency, because the agent runs as root
-  # in the shipped unit and is exempt there.
+  # Only read on hosts that gate unprivileged user namespaces behind AppArmor,
+  # where it lets the agent's own user alone create one. A recommendation rather
+  # than a dependency, because a host without AppArmor has no such gate.
   - apparmor
 
 overrides:
@@ -80,6 +80,11 @@ contents:
       mode: 0644
   - src: ${STAGE}/systemd/ebpfsentinel-warden.service
     dst: /usr/lib/systemd/system/ebpfsentinel-warden.service
+    file_info:
+      mode: 0644
+
+  - src: ${STAGE}/sysusers.d/ebpfsentinel.conf
+    dst: /usr/lib/sysusers.d/ebpfsentinel.conf
     file_info:
       mode: 0644
 

@@ -139,6 +139,10 @@ in
         assertion = lib.versionAtLeast config.boot.kernelPackages.kernel.version "6.12";
         message = "services.ebpfsentinel: the agent needs kernel 6.12 or newer; this host runs ${config.boot.kernelPackages.kernel.version}.";
       }
+      {
+        assertion = config.security.allowUserNamespaces;
+        message = "services.ebpfsentinel: the agent creates a user namespace as its own unprivileged user, which security.allowUserNamespaces = false refuses.";
+      }
     ];
 
     environment.systemPackages = [ cfg.package ];
@@ -148,11 +152,22 @@ in
     # narrows to 0700. Both are created here so the mode is right on a host
     # whose umask is loose.
     systemd.tmpfiles.rules = [
-      "d /var/lib/ebpfsentinel 0755 root root -"
-      "d /var/lib/ebpfsentinel/data 0755 root root -"
-      "d /var/lib/ebpfsentinel/captures 0755 root root -"
-      "d /var/lib/ebpfsentinel/auth 0700 root root -"
+      "d /var/lib/ebpfsentinel 0750 ebpfsentinel ebpfsentinel -"
+      "d /var/lib/ebpfsentinel/data 0750 ebpfsentinel ebpfsentinel -"
+      "d /var/lib/ebpfsentinel/captures 0750 ebpfsentinel ebpfsentinel -"
+      "d /var/lib/ebpfsentinel/auth 0700 ebpfsentinel ebpfsentinel -"
     ];
+
+    # The agent never runs as root: it runs as this user, with no login and no
+    # capability, and maps its user namespace's root onto it. The warden serves
+    # only it.
+    users.users.ebpfsentinel = {
+      isSystemUser = true;
+      group = "ebpfsentinel";
+      home = "/var/lib/ebpfsentinel";
+      description = "eBPFsentinel agent";
+    };
+    users.groups.ebpfsentinel = { };
 
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openApiPort [ cfg.apiPort ];
 
@@ -177,9 +192,9 @@ in
         # The control socket directory, removed when the broker stops.
         RuntimeDirectory = "ebpfsentinel";
         RuntimeDirectoryMode = "0755";
-        # --uid 0: the agent maps namespace-0 to real root and presents uid 0
-        # over SO_PEERCRED, and only that uid is served.
-        ExecStart = "${cfg.package}/bin/ebpfsentinel-warden serve /run/ebpfsentinel/warden.sock --uid 0";
+        # --user ebpfsentinel: the agent runs as its own unprivileged user and
+        # presents that uid over SO_PEERCRED. Only that uid is served.
+        ExecStart = "${cfg.package}/bin/ebpfsentinel-warden serve /run/ebpfsentinel/warden.sock --user ebpfsentinel";
         Restart = "always";
         RestartSec = "2s";
         # The agent is stopped first and may be mid-call here; killing the
@@ -248,8 +263,33 @@ in
         # and a stop waiting on the warden can hold a brokered call for 10s.
         TimeoutStopSec = "20s";
         LimitMEMLOCK = "infinity";
-        # Deliberately no NoNewPrivileges: it would block the user-namespace
-        # setup the BPF token depends on.
+        User = "ebpfsentinel";
+        Group = "ebpfsentinel";
+        # No capability survives into the agent's process on the host. The
+        # user namespace it creates starts with a full set of its own, which is
+        # all the token needs.
+        CapabilityBoundingSet = "";
+        AmbientCapabilities = "";
+        # Deliberately no NoNewPrivileges: under it AppArmor refuses the
+        # transition into the agent's profile, which is what grants the user
+        # namespace on hosts that gate it.
+        ProtectSystem = "strict";
+        ProtectHome = "yes";
+        PrivateTmp = "yes";
+        PrivateDevices = "yes";
+        ProtectKernelModules = "yes";
+        ProtectKernelLogs = "yes";
+        ProtectClock = "yes";
+        ProtectHostname = "yes";
+        RestrictSUIDSGID = "yes";
+        RestrictRealtime = "yes";
+        LockPersonality = "yes";
+        SystemCallArchitectures = "native";
+        RestrictNamespaces = "user mnt";
+        # The delegated bpffs is mounted on a directory the agent creates here,
+        # in its own mount namespace.
+        TemporaryFileSystem = "/sys/fs/bpf:mode=1777";
+        StateDirectoryMode = "0750";
       };
     };
   };

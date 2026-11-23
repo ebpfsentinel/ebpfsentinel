@@ -94,7 +94,8 @@ const DEFAULT_BPFFS: &str = "/sys/fs/bpf/ebpfsentinel";
 /// (`verify_root_map`, anti-escalation). Under a stock container runtime the pod
 /// runs in the init user namespace (e.g. containerd on Talos/Kubernetes), so a
 /// global-root process cannot self-map. Dropping to a non-root id first makes the
-/// map target non-root, which is permitted. The agent needs no init-ns
+/// map target non-root, which is permitted. On a host the agent is started as its
+/// own `ebpfsentinel` user and never reaches this id. The agent needs no init-ns
 /// capabilities: the warden performs the bpffs delegation and opens the
 /// pcap/module-BTF fds, handing them over the control socket. The agent then runs
 /// as this host id (namespace-root), so deployments make its config
@@ -557,53 +558,19 @@ pub fn delegate_over_fd(fs: RawFd) -> bool {
     true
 }
 
-/// Probe, in a throwaway fork, whether this process may map namespace-uid 0 to
-/// the *real* root (uid 0) in a fresh user namespace. True for a global-root
-/// process on a real host; false for a container running in the init user
-/// namespace, where the kernel's `verify_root_map` forbids mapping to real root
-/// unless privileged over the parent userns (e.g. containerd on Talos/Kubernetes).
-/// The probe runs in a child process so its namespace work never affects the
-/// caller.
-fn root_userns_self_map_ok() -> bool {
-    // SAFETY: the only caller is the self-bootstrap trampoline, which runs before
-    // any runtime or thread exists, so the child inherits no lock held elsewhere
-    // and may allocate; it leaves through `_exit` on every path.
-    let pid = unsafe { libc::fork() };
-    if pid == 0 {
-        // SAFETY: `unshare` takes no pointer.
-        if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
-            // SAFETY: `_exit` ends the child without running the parent's destructors or atexit
-            // handlers twice.
-            unsafe { libc::_exit(1) };
-        }
-        let _ = std::fs::write("/proc/self/setgroups", "deny");
-        let ok = std::fs::write("/proc/self/uid_map", "0 0 1").is_ok();
-        // SAFETY: `_exit` ends the child without running the parent's destructors or atexit
-        // handlers twice.
-        unsafe { libc::_exit(i32::from(!ok)) };
-    }
-    if pid < 0 {
-        return false;
-    }
-    let mut st: libc::c_int = 0;
-    // SAFETY: `st` is a live `c_int` for the kernel to write the status into.
-    unsafe { libc::waitpid(pid, &raw mut st, 0) };
-    libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0
-}
-
-/// Drop to an unprivileged uid before creating a user namespace, but only when
-/// running as global root under a runtime that forbids the root self-map.
+/// Drop to an unprivileged uid before creating a user namespace when started as
+/// root.
 ///
-/// Under a stock container runtime the pod runs in the init user namespace,
-/// where a global-root process cannot self-map namespace-0 to real root
-/// (`verify_root_map`). Detect that and drop to a non-root id first so the
-/// self-map targets a non-root uid (see [`UNPRIV_UID`]). On a real host running
-/// as global root the root self-map is permitted, so keep uid 0 (the process
-/// then runs as host root, preserving the systemd/bare-metal behaviour). No-op
-/// if already running unprivileged. Exits the process on failure.
+/// The agent is never host root, in any deployment. A process started as uid 0
+/// would map namespace-0 onto the real root and own every root-owned file on the
+/// host through it, so it drops to [`UNPRIV_UID`] first and the self-map targets
+/// that id instead. Under a container runtime the kernel would refuse the root
+/// self-map anyway (`verify_root_map`); on a host the systemd unit starts the
+/// agent as its own `ebpfsentinel` user and this is a no-op. Exits the process on
+/// failure.
 pub fn drop_to_unpriv_if_needed() {
     // SAFETY: `getuid` takes no argument and cannot fail.
-    if unsafe { libc::getuid() } == 0 && !root_userns_self_map_ok() {
+    if unsafe { libc::getuid() } == 0 {
         // SAFETY: a zero-length list with a null pointer is the documented way to clear
         // supplementary groups.
         unsafe { libc::setgroups(0, ptr::null()) };
@@ -624,6 +591,77 @@ pub fn drop_to_unpriv_if_needed() {
     }
 }
 
+/// The uid and primary gid `name` carries in a `passwd(5)` text, if listed.
+///
+/// The warden is told which agent it serves by user name on a host, where the
+/// uid is whatever the package's `sysusers.d` entry was given, and the binary is
+/// static, so it reads `/etc/passwd` itself rather than through NSS.
+#[must_use]
+pub fn uid_of_user(passwd: &str, name: &str) -> Option<(u32, u32)> {
+    passwd.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        if fields.next()? != name {
+            return None;
+        }
+        let _password = fields.next()?;
+        let uid = fields.next()?.parse().ok()?;
+        let gid = fields.next()?.parse().ok()?;
+        Some((uid, gid))
+    })
+}
+
+/// The peer uid to serve: `--uid <n>`, or `--user <name>` read from
+/// `/etc/passwd`, or `None` when neither is given. A name that is not listed, or
+/// both flags at once, is an error the caller reports rather than a fallback to
+/// the default, because serving the wrong uid is a warden nobody can reach or one
+/// that serves somebody else.
+pub fn peer_uid_from_args(args: &[String]) -> Result<Option<u32>, String> {
+    let opt = |flag: &str| {
+        let i = args.iter().position(|a| a == flag)?;
+        args.get(i + 1).cloned()
+    };
+    match (opt("--uid"), opt("--user")) {
+        (Some(_), Some(_)) => Err("--uid and --user are exclusive".to_string()),
+        (Some(n), None) => n
+            .parse()
+            .map(Some)
+            .map_err(|_| format!("--uid {n}: not a number")),
+        (None, Some(name)) => {
+            let passwd = std::fs::read_to_string("/etc/passwd")
+                .map_err(|e| format!("--user {name}: read /etc/passwd: {e}"))?;
+            uid_of_user(&passwd, &name)
+                .map(|(uid, _)| Some(uid))
+                .ok_or_else(|| format!("--user {name}: no such user in /etc/passwd"))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+/// Which host setting refused an unprivileged user namespace, read through
+/// `read` (a sysctl path to its trimmed value), or `None` when none of the known
+/// ones is set against it.
+pub fn userns_refusal_hint(read: impl Fn(&str) -> Option<String>) -> Option<&'static str> {
+    if read("/proc/sys/user/max_user_namespaces").as_deref() == Some("0") {
+        return Some(
+            "user.max_user_namespaces=0 refuses user namespaces to every user; \
+             raise it (the agent needs one)",
+        );
+    }
+    if read("/proc/sys/kernel/unprivileged_userns_clone").as_deref() == Some("0") {
+        return Some(
+            "kernel.unprivileged_userns_clone=0 refuses user namespaces to unprivileged users; \
+             set it to 1",
+        );
+    }
+    if read("/proc/sys/kernel/apparmor_restrict_unprivileged_userns").as_deref() == Some("1") {
+        return Some(
+            "kernel.apparmor_restrict_unprivileged_userns=1: load the agent's AppArmor profile \
+             (apparmor_parser -r /etc/apparmor.d/ebpfsentinel-agent) so it alone is allowed one",
+        );
+    }
+    None
+}
+
 /// Enter a fresh user namespace (single-uid self-map) and a private mount
 /// namespace. Used by the agent self-bootstrap trampoline; exits the process on
 /// failure. Must run single-threaded (before any runtime).
@@ -634,6 +672,13 @@ pub fn enter_userns() {
     // which `CLONE_NEWUSER` requires.
     if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
         perror("unshare USER");
+        if let Some(hint) = userns_refusal_hint(|p| {
+            std::fs::read_to_string(p)
+                .ok()
+                .map(|v| v.trim().to_string())
+        }) {
+            eprintln!("[warden] {hint}");
+        }
         std::process::exit(1);
     }
     write_file("/proc/self/setgroups", "deny");
@@ -885,5 +930,70 @@ mod tests {
             assert_eq!(rejoined, names);
         }
         assert!(DELEGATED_ATTACHS.join(":").len() > FSCONFIG_VALUE_MAX);
+    }
+
+    #[test]
+    fn a_user_is_found_by_its_exact_name_and_nothing_else() {
+        let passwd = "root:x:0:0:root:/root:/bin/sh\n\
+                      ebpfsentinel-old:x:990:990::/:/usr/sbin/nologin\n\
+                      ebpfsentinel:x:991:992:eBPFsentinel agent:/var/lib/ebpfsentinel:/usr/sbin/nologin\n\
+                      broken:x:notanumber:1::/:/bin/false\n";
+        assert_eq!(uid_of_user(passwd, "ebpfsentinel"), Some((991, 992)));
+        assert_eq!(uid_of_user(passwd, "ebpf"), None);
+        assert_eq!(uid_of_user(passwd, "broken"), None);
+        assert_eq!(uid_of_user(passwd, "absent"), None);
+    }
+
+    #[test]
+    fn a_refused_user_namespace_names_the_setting_that_refused_it() {
+        let host = |set: &'static [(&'static str, &'static str)]| {
+            move |p: &str| {
+                set.iter()
+                    .find(|(k, _)| *k == p)
+                    .map(|(_, v)| (*v).to_string())
+            }
+        };
+        assert!(
+            userns_refusal_hint(host(&[("/proc/sys/user/max_user_namespaces", "0")]))
+                .is_some_and(|h| h.starts_with("user.max_user_namespaces"))
+        );
+        assert!(
+            userns_refusal_hint(host(&[("/proc/sys/kernel/unprivileged_userns_clone", "0")]))
+                .is_some_and(|h| h.starts_with("kernel.unprivileged_userns_clone"))
+        );
+        assert!(
+            userns_refusal_hint(host(&[(
+                "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+                "1"
+            )]))
+            .is_some_and(|h| h.contains("ebpfsentinel-agent"))
+        );
+        assert_eq!(
+            userns_refusal_hint(host(&[
+                ("/proc/sys/user/max_user_namespaces", "63000"),
+                (
+                    "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+                    "0"
+                ),
+            ])),
+            None
+        );
+    }
+
+    #[test]
+    fn the_served_uid_is_named_once_or_not_at_all() {
+        let args = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(peer_uid_from_args(&args(&["serve", "/s"])), Ok(None));
+        assert_eq!(
+            peer_uid_from_args(&args(&["serve", "/s", "--uid", "991"])),
+            Ok(Some(991))
+        );
+        assert!(peer_uid_from_args(&args(&["serve", "/s", "--uid", "x"])).is_err());
+        assert!(
+            peer_uid_from_args(&args(&["serve", "/s", "--uid", "1", "--user", "root"])).is_err()
+        );
+        assert!(
+            peer_uid_from_args(&args(&["serve", "/s", "--user", "no-such-user-here"])).is_err()
+        );
     }
 }

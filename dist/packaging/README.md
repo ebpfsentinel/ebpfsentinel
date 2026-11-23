@@ -35,6 +35,7 @@ at all, so the two layouts differ:
 | profiles | `/usr/local/share/ebpfsentinel/profiles` | `/usr/share/ebpfsentinel/profiles` |
 | configuration | `/etc/ebpfsentinel/config.yaml` | the same, as a conffile |
 | state | `/var/lib/ebpfsentinel` | the same, through tmpfiles |
+| agent user | `useradd`, or `systemd-sysusers` when present | `/usr/lib/sysusers.d/ebpfsentinel.conf` |
 
 The agent looks for its objects in `/usr/local/lib/ebpfsentinel` first and
 `/usr/lib/ebpfsentinel` second, so both layouts work and a host carrying both
@@ -53,7 +54,9 @@ rewrite table does not carry.
 - `preinst` refuses the install on a kernel below 6.12 or without BTF. The
   agent cannot load its eBPF on either, and a package that installs anyway
   leaves a failed unit and no explanation.
-- `postinst` creates the state directories through tmpfiles, reloads systemd,
+- `postinst` creates the agent's own user through sysusers, hands it the
+  state directory and group read on the configuration, creates the state
+  directories through tmpfiles, reloads systemd,
   loads the AppArmor profile where the host restricts unprivileged user
   namespaces, and restarts on an upgrade only what was already running.
   **Neither unit is enabled or started**: the shipped configuration names
@@ -66,11 +69,6 @@ rewrite table does not carry.
 
 ## What is deliberately not in the package
 
-- **A sysusers fragment.** Both units run as root, by construction rather
-  than by preference: the agent self-unshares a user namespace and maps
-  namespace 0 to real root so it can load eBPF through a BPF token, and the
-  warden holds the capabilities the kernel will not delegate. A system user
-  nothing runs as is configuration that lies about the deployment.
 - **The sysctl drop-in**, which is host-wide. It ships in
   `/usr/share/ebpfsentinel/sysctl.d/` and the documentation says when to copy
   it into `/etc/sysctl.d/`. A package widening a host-wide kernel setting

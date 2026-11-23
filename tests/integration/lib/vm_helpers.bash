@@ -143,14 +143,15 @@ _agent_scp() {
 #   "config file: ... is world-readable (mode 100664) - chmod 640 or stricter"
 # So a suite that rewrote a config mid-run and only scp'd it had every reload
 # rejected on the mode, which reads on the lane as the reload contract being
-# broken. The userns agent maps uid 0 only, so root has to own it as well.
+# broken. The agent is never root: started as root it drops to 65534 before
+# its user namespace, so that id has to own it as well.
 # start_ebpf_agent applies the same two rules to the config it starts with.
 _agent_push_config() {
     local local_path="${1:?usage: _agent_push_config <local_path> <remote_path>}"
     local remote_path="${2:?usage: _agent_push_config <local_path> <remote_path>}"
 
     _agent_scp "$local_path" "$remote_path" || return 1
-    _agent_ssh_sudo chown root:root "$remote_path" 2>/dev/null || true
+    _agent_ssh_sudo chown 65534:65534 "$remote_path" 2>/dev/null || true
     _agent_ssh_sudo chmod 640 "$remote_path" 2>/dev/null || true
 }
 
@@ -359,11 +360,11 @@ start_ebpf_agent() {
         return 1
     }
     rm -f "$rewritten_config"
-    # The agent runs in a child user namespace (via the launcher); files owned by
-    # an unmapped uid (the vagrant user that scp'd them) are unreadable there.
-    # Give the config + data dir to root (uid 0 is the only mapped id) so the
-    # userns agent can read its config and write its audit/alert stores.
-    _agent_ssh_sudo chown -R root:root "${_REMOTE_CONFIG_DIR}" "${_REMOTE_DATA_DIR}" 2>/dev/null || true
+    # The agent runs in a child user namespace whose root maps onto 65534, the
+    # id it drops to when started as root; files owned by any other uid (the
+    # vagrant user that scp'd them) are unreadable there. Give the config + data
+    # dir to 65534 so it can read its config and write its audit/alert stores.
+    _agent_ssh_sudo chown -R 65534:65534 "${_REMOTE_CONFIG_DIR}" "${_REMOTE_DATA_DIR}" 2>/dev/null || true
     _agent_ssh_sudo chmod 755 "${_REMOTE_CONFIG_DIR}" "${_REMOTE_DATA_DIR}" 2>/dev/null || true
     _agent_ssh_sudo chmod 640 "$remote_config" 2>/dev/null || true
 
@@ -380,15 +381,18 @@ start_ebpf_agent() {
     # the agent alone (no warden) and it starts in API-only mode (no eBPF).
     # Binaries + objects live under /usr/local (world-traversable), so the userns
     # agent needs no staging. nohup so the processes survive SSH disconnect. The
-    # warden's PID file lets stop drop both. --uid 0: the agent runs as root.
+    # warden's PID file lets stop drop both. The warden serves its default uid,
+    # 65534, the one the agent drops to; the agent starts in a mount namespace
+    # with a tmpfs on /sys/fs/bpf, as the unit gives it, so the unprivileged id
+    # can create the directory the delegated bpffs is mounted on.
     _agent_ssh_sudo bash -c \
         "'sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 >/dev/null 2>&1 || true; \
           WARDEN=/usr/local/bin/warden; SOCK=/run/ebpfsentinel/warden.sock; \
           if [ -x \"\$WARDEN\" ]; then \
             mkdir -p /run/ebpfsentinel; rm -f \"\$SOCK\"; \
-            nohup \"\$WARDEN\" serve \"\$SOCK\" --uid 0 >>${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}.warden; \
+            nohup \"\$WARDEN\" serve \"\$SOCK\" >>${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}.warden; \
             for _ in \$(seq 1 100); do [ -S \"\$SOCK\" ] && break; sleep 0.1; done; \
-            nohup env EBPF_PROGRAM_DIR=/usr/local/lib/ebpfsentinel EBPFSENTINEL_BPFFS=/sys/fs/bpf/ebpfsentinel EBPFSENTINEL_WARDEN_SOCK=\"\$SOCK\" /usr/local/bin/ebpfsentinel-agent --config ${remote_config}${extra_args} >${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}; \
+            nohup unshare --mount --propagation private sh -c \"mount -t tmpfs -o mode=1777 tmpfs /sys/fs/bpf && exec \\\"\\\$@\\\"\" sh env EBPF_PROGRAM_DIR=/usr/local/lib/ebpfsentinel EBPFSENTINEL_BPFFS=/sys/fs/bpf/ebpfsentinel EBPFSENTINEL_WARDEN_SOCK=\"\$SOCK\" /usr/local/bin/ebpfsentinel-agent --config ${remote_config}${extra_args} >${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}; \
           else \
             nohup /usr/local/bin/ebpfsentinel-agent --config ${remote_config}${extra_args} >${_REMOTE_LOG_FILE} 2>&1 & echo \$! > ${_REMOTE_PID_FILE}; \
           fi'" || {

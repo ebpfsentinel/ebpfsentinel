@@ -136,7 +136,8 @@ _assert_every_object_loaded() {
 @test "every object loads through a BPF token from a user namespace, bound to a device" {
     : >"$LOAD_LOG"
     rm -f "$BPF_TOKEN_WARDEN_SOCK"
-    "$BPF_TOKEN_WARDEN_BIN" serve "$BPF_TOKEN_WARDEN_SOCK" --uid 0 >>"$LOAD_LOG" 2>&1 &
+    bpf_token_prepare_mount_target
+    "$BPF_TOKEN_WARDEN_BIN" serve "$BPF_TOKEN_WARDEN_SOCK" >>"$LOAD_LOG" 2>&1 &
     BPF_TOKEN_WARDEN_PID=$!
     local _i
     for _i in $(seq 1 100); do

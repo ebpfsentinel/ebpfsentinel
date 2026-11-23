@@ -19,6 +19,23 @@ case "${1:-}" in
   2) first_install=no ;;
 esac
 
+# The agent's own user, before the directories it owns. sysusers is part of
+# systemd, which the package depends on; useradd covers a host that strips it.
+if command -v systemd-sysusers >/dev/null 2>&1; then
+  systemd-sysusers /usr/lib/sysusers.d/ebpfsentinel.conf
+elif ! getent passwd ebpfsentinel >/dev/null 2>&1; then
+  useradd --system --user-group --home-dir "$STATE" --no-create-home \
+    --shell /usr/sbin/nologin --comment "eBPFsentinel agent" ebpfsentinel
+fi
+
+# The agent reads its configuration through its group; root keeps the file.
+# An upgrade from a root-run install hands the state directory over too.
+chgrp ebpfsentinel "$CONFIG" 2>/dev/null || true
+chmod 0640 "$CONFIG" 2>/dev/null || true
+if [ -d "$STATE" ]; then
+  chown -R ebpfsentinel:ebpfsentinel "$STATE"
+fi
+
 if command -v systemd-tmpfiles >/dev/null 2>&1; then
   systemd-tmpfiles --create /usr/lib/tmpfiles.d/ebpfsentinel.conf || true
 fi
@@ -27,13 +44,12 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true
 fi
 
-# The agent self-unshares a user namespace to load its eBPF. Hosts that gate
-# that behind AppArmor (Ubuntu 24.04 and up) refuse it to a process without
-# CAP_SYS_ADMIN in the init namespace. The unit runs as root, which is exempt,
-# so this only bites a reconfigured deployment - the per-binary profile is
-# installed by the package and loaded here, and the host-wide sysctl drop-in
-# stays in /usr/share where it is a documented fallback rather than something
-# a package silently widened.
+# The agent self-unshares a user namespace to load its eBPF, as its own
+# unprivileged user. Hosts that gate that behind AppArmor (Ubuntu 24.04 and up)
+# refuse it to a process without CAP_SYS_ADMIN in the init namespace, so the
+# per-binary profile is installed by the package and loaded here; the host-wide
+# sysctl drop-in stays in /usr/share where it is a documented fallback rather
+# than something a package silently widened.
 if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = "1" ] &&
    command -v apparmor_parser >/dev/null 2>&1 &&
    [ -f /etc/apparmor.d/ebpfsentinel-agent ]; then

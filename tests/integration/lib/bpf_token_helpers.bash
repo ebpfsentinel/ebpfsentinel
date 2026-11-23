@@ -90,14 +90,20 @@ bpf_token_run() {
     local config="${1:?usage: bpf_token_run <config> [seconds]}"
     local secs="${2:-9}"
     chmod 640 "$config"
+    # The agent is never root: started as root it drops to 65534 before its
+    # user namespace. It reads its config as that id and mounts the delegated
+    # bpffs on a directory that id cannot create under /run, so both are
+    # handed to it here.
+    chown 65534:65534 "$config"
+    bpf_token_prepare_mount_target
     # Stage the agent under /tmp so the user-namespace exec can reach it.
     install -m755 "$AGENT_BIN" "$BPF_TOKEN_AGENT_STAGE"
     : >"$BPF_TOKEN_LOG"
     rm -f "$BPF_TOKEN_WARDEN_SOCK"
 
-    # Start the privileged warden broker. --uid 0: the test agent runs as root and
-    # maps namespace-0 to real root, so it presents uid 0 over SO_PEERCRED.
-    "$BPF_TOKEN_WARDEN_BIN" serve "$BPF_TOKEN_WARDEN_SOCK" --uid 0 \
+    # Start the privileged warden broker. It serves its default uid, 65534, the
+    # one the agent drops to and presents over SO_PEERCRED.
+    "$BPF_TOKEN_WARDEN_BIN" serve "$BPF_TOKEN_WARDEN_SOCK" \
         >>"$BPF_TOKEN_LOG" 2>&1 &
     BPF_TOKEN_WARDEN_PID=$!
     export BPF_TOKEN_WARDEN_PID
@@ -125,6 +131,13 @@ bpf_token_run() {
     [ -s "$BPF_TOKEN_LOG" ]
 }
 
+# bpf_token_prepare_mount_target - create the directory the delegated bpffs is
+# mounted on, owned by the unprivileged id the agent runs as.
+bpf_token_prepare_mount_target() {
+    mkdir -p "$BPF_TOKEN_BPFFS"
+    chown 65534:65534 "$BPF_TOKEN_BPFFS"
+}
+
 # bpf_token_log - echo the captured log (for assertion `run` blocks).
 bpf_token_log() {
     cat "$BPF_TOKEN_LOG" 2>/dev/null || true
@@ -141,6 +154,7 @@ bpf_token_log_has() {
 bpf_token_cleanup() {
     [ -n "$BPF_TOKEN_WARDEN_PID" ] && kill "$BPF_TOKEN_WARDEN_PID" 2>/dev/null || true
     umount "$BPF_TOKEN_BPFFS" 2>/dev/null || true
+    rmdir "$BPF_TOKEN_BPFFS" 2>/dev/null || true
     rm -f "$BPF_TOKEN_LOG" "$BPF_TOKEN_AGENT_STAGE" "$BPF_TOKEN_WARDEN_SOCK" \
         "/tmp/warden-build-$$.log"
     rm -rf "$BPF_TOKEN_EBPF_STAGE"

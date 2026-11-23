@@ -91,6 +91,9 @@ else
   rm -f /etc/systemd/system/ebpfsentinel.service /etc/systemd/system/ebpfsentinel-warden.service
   rm -f /etc/apparmor.d/ebpfsentinel-agent
   rm -f /etc/sysctl.d/60-ebpfsentinel-userns.conf
+  # The agent's user stays, as every distribution leaves a system user behind:
+  # a file it still owns would otherwise pass to the next account given its id.
+  rm -f /usr/lib/sysusers.d/ebpfsentinel.conf
   command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload || true
 fi
 

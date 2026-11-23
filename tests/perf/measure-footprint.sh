@@ -270,7 +270,14 @@ PROPS=(-p MemoryAccounting=yes -p CPUAccounting=yes -p LimitMEMLOCK=infinity --c
 case "${LAUNCH}" in
     oss|enterprise-token)
         rm -f "${REMOTE}/warden.sock"
-        systemd-run --unit fp-warden "${PROPS[@]}" -- /usr/local/bin/warden serve "${REMOTE}/warden.sock" --uid 0
+        # The warden serves its default uid, 65534, the one the agent drops to
+        # when started as root. That id reads the config and writes the data
+        # directory, and creates the bpffs mount target on a tmpfs of its own,
+        # as the installed unit gives it.
+        systemd-run --unit fp-warden "${PROPS[@]}" -- /usr/local/bin/warden serve "${REMOTE}/warden.sock"
+        chown 65534:65534 "${CONFIG}"
+        chown -R 65534:65534 "${REMOTE}/data"
+        PROPS+=(-p TemporaryFileSystem=/sys/fs/bpf:mode=1777)
         for _ in $(seq 1 100); do [ -S "${REMOTE}/warden.sock" ] && break; sleep 0.1; done
         [ -S "${REMOTE}/warden.sock" ] || { echo '{"error":"warden socket never appeared"}'; exit 1; }
         ENVS=(--setenv=EBPF_PROGRAM_DIR=/usr/local/lib/ebpfsentinel --setenv=EBPFSENTINEL_BPFFS=/sys/fs/bpf/ebpfsentinel --setenv=EBPFSENTINEL_WARDEN_SOCK="${REMOTE}/warden.sock")

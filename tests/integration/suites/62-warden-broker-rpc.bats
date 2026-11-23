@@ -232,6 +232,33 @@ teardown_file() {
     }
 }
 
+@test "the agent is not host root and holds no capability on the host" {
+    local apid
+    apid="$(_agent_pid)"
+    [ -n "${apid}" ] && [ -d "/proc/${apid}" ] || soft_skip "agent pid not resolvable"
+
+    # /proc/<pid>/status read from the init namespace gives host ids. None of
+    # the four may be root: started as root, the agent drops before its user
+    # namespace, so that namespace's root maps onto an unprivileged id.
+    local uids
+    uids="$(awk '/^Uid:/ {print $2, $3, $4, $5}' "/proc/${apid}/status")"
+    case " ${uids} " in
+        *" 0 "*)
+            echo "the agent carries host uid 0 (real effective saved fs: ${uids})" >&2
+            return 1
+            ;;
+    esac
+    # The capabilities it shows belong to its own user namespace and reach
+    # only what that namespace owns; a process left in the init namespace would
+    # hold them over the host, so it must have none there.
+    if [ "$(readlink "/proc/${apid}/ns/user")" = "$(readlink /proc/1/ns/user)" ]; then
+        [ "$(awk '/^CapEff:/ {print $2}' "/proc/${apid}/status")" = "0000000000000000" ] || {
+            echo "the agent holds capabilities in the init user namespace" >&2
+            return 1
+        }
+    fi
+}
+
 # ── SO_PEERCRED gate ───────────────────────────────────────────────
 
 @test "a peer with an unserved uid is dropped without being served" {
@@ -239,10 +266,12 @@ teardown_file() {
     sock="$(_warden_sock)"
     [ -S "${sock}" ] || soft_skip "no broker socket to probe"
 
+    # The broker serves the agent's id, 65534; root is not that id, and a
+    # root peer is refused like any other.
     local verdict
-    verdict="$(_probe_as 65534)"
+    verdict="$(_probe_as root)"
     [ "${verdict}" = "closed" ] || {
-        echo "expected the broker to drop uid 65534; probe said '${verdict}'" >&2
+        echo "expected the broker to drop root; probe said '${verdict}'" >&2
         return 1
     }
 }
@@ -252,12 +281,12 @@ teardown_file() {
     sock="$(_warden_sock)"
     [ -S "${sock}" ] || soft_skip "no broker socket to probe"
 
-    # The harness starts the warden with --uid 0 and the probe runs as root,
-    # so the connection must be accepted and held awaiting a request frame.
+    # The harness starts the warden on its default uid, the agent's 65534, so
+    # a probe under that id must be accepted and held awaiting a request frame.
     local verdict
-    verdict="$(_probe_as root)"
+    verdict="$(_probe_as 65534)"
     [ "${verdict}" = "open" ] || {
-        echo "expected the broker to serve uid 0; probe said '${verdict}'" >&2
+        echo "expected the broker to serve uid 65534; probe said '${verdict}'" >&2
         return 1
     }
 }
@@ -267,7 +296,7 @@ teardown_file() {
     sock="$(_warden_sock)"
     [ -S "${sock}" ] || soft_skip "no broker socket to probe"
 
-    _probe_as 65534 >/dev/null || true
+    _probe_as root >/dev/null || true
 
     local wpid
     wpid="$(_warden_pid)"
@@ -278,9 +307,9 @@ teardown_file() {
 
     # And it still serves the legitimate uid afterwards.
     local verdict
-    verdict="$(_probe_as root)"
+    verdict="$(_probe_as 65534)"
     [ "${verdict}" = "open" ] || {
-        echo "broker stopped serving uid 0 after a rejection: '${verdict}'" >&2
+        echo "broker stopped serving uid 65534 after a rejection: '${verdict}'" >&2
         return 1
     }
 }

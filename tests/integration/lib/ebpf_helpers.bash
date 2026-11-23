@@ -339,6 +339,11 @@ start_ebpf_agent() {
 
     # Config must not be world-readable (agent enforces strict permissions)
     chmod 640 "$config_file"
+    # The agent is never root: started as root it drops to 65534 before its
+    # user namespace, so the config it reads and the directory it writes in
+    # belong to that id, as they belong to the agent's user on a host.
+    chown 65534:65534 "$config_file" 2>/dev/null || true
+    chown -R 65534:65534 "$DATA_DIR" 2>/dev/null || true
 
     # ── Strategy 1: local binary with local eBPF programs ──
     if [ "${FORCE_DOCKER:-false}" != "true" ] && _has_local_ebpf; then
@@ -387,8 +392,8 @@ start_ebpf_agent() {
             chmod 755 "$staged_ebpf"
             chmod a+r "$staged_ebpf"/* 2>/dev/null || true
             rm -f "$sock"
-            # The privileged warden broker (root, init netns). --uid 0: the test
-            # agent runs as root and maps namespace-0 to real root, presenting 0.
+            # The privileged warden broker (root, init netns). It serves its
+            # default uid, 65534, the one the agent drops to.
             # The warden gets its own log: the agent's redirection below
             # truncates $AGENT_LOG_FILE, so anything the warden had already
             # written there would be lost before the first test runs.
@@ -404,10 +409,10 @@ start_ebpf_agent() {
                     sh -c "mount --bind /proc '${WARDEN_PID_NS_HOST_PROC}' \
                         && mount -t proc proc /proc \
                         && exec env EBPFSENTINEL_HOST_PROC='${WARDEN_PID_NS_HOST_PROC}' \
-                            '$warden' serve '$sock' --uid 0" \
+                            '$warden' serve '$sock'" \
                     </dev/null >>"${AGENT_LOG_FILE}.warden" 2>&1 &
             else
-                setsid "$warden" serve "$sock" --uid 0 \
+                setsid "$warden" serve "$sock" \
                     </dev/null >>"${AGENT_LOG_FILE}.warden" 2>&1 &
             fi
             echo "$!" > "${AGENT_PID_FILE}.warden"
@@ -417,9 +422,14 @@ start_ebpf_agent() {
             # /sys/kernel/security/lsm, bound over it in a mount namespace of
             # the agent's own, so a suite can present a host whose security
             # modules leave a given one out without rebooting it.
+            #
+            # Either way the agent starts in a mount namespace of its own with a
+            # tmpfs on /sys/fs/bpf, the one the unit and the compose file give
+            # it: the host's bpffs is root's, and the delegated one is mounted
+            # on a directory the unprivileged agent creates there.
             if [ -n "${EBPF_AGENT_LSM_FILE:-}" ]; then
                 setsid unshare --mount --propagation private sh -c \
-                    'mount --bind "$1" /sys/kernel/security/lsm && shift && exec "$@"' \
+                    'mount -t tmpfs -o mode=1777 tmpfs /sys/fs/bpf && mount --bind "$1" /sys/kernel/security/lsm && shift && exec "$@"' \
                     sh "$EBPF_AGENT_LSM_FILE" \
                     env EBPF_PROGRAM_DIR="$staged_ebpf" \
                     EBPFSENTINEL_BPFFS=/sys/fs/bpf/ebpfsentinel \
@@ -427,7 +437,9 @@ start_ebpf_agent() {
                     "$staged_agent" --config "$config_file" "$@" \
                     </dev/null >"$AGENT_LOG_FILE" 2>&1 &
             else
-                setsid env EBPF_PROGRAM_DIR="$staged_ebpf" \
+                setsid unshare --mount --propagation private sh -c \
+                    'mount -t tmpfs -o mode=1777 tmpfs /sys/fs/bpf && exec "$@"' sh \
+                    env EBPF_PROGRAM_DIR="$staged_ebpf" \
                     EBPFSENTINEL_BPFFS=/sys/fs/bpf/ebpfsentinel \
                     EBPFSENTINEL_WARDEN_SOCK="$sock" \
                     "$staged_agent" --config "$config_file" "$@" \

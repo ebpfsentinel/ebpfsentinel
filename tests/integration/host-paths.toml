@@ -46,6 +46,9 @@ reason = "kernel-wide: the container's procfs reads the same value as the host's
 [compose."/proc/sys/fs/fanotify/max_user_marks"]
 reason = "the container's own procfs answers with the limit that applies to the process placing the marks"
 
+[compose."/proc/sys/kernel/apparmor_restrict_unprivileged_userns"]
+reason = "kernel-wide: the container's procfs reads the same value as the host's; read only to name the setting that refused a user namespace"
+
 [compose."/proc/sys/kernel/hostname"]
 reason = "the UTS namespace: the host's under network_mode host and hostNetwork"
 
@@ -55,11 +58,17 @@ reason = "kernel-wide: the container's procfs reads the same value as the host's
 [compose."/proc/sys/kernel/random/boot_id"]
 reason = "kernel-wide: the container's procfs reads the same value as the host's"
 
+[compose."/proc/sys/kernel/unprivileged_userns_clone"]
+reason = "kernel-wide: the container's procfs reads the same value as the host's; read only to name the setting that refused a user namespace"
+
 [compose."/proc/sys/net/ipv4/tcp_syncookies"]
 reason = "per network namespace, and the service runs in the host's (network_mode host, hostNetwork)"
 
 [compose."/proc/sys/net/netfilter/nf_conntrack_count"]
 reason = "per network namespace, and the service runs in the host's (network_mode host, hostNetwork)"
+
+[compose."/proc/sys/user/max_user_namespaces"]
+reason = "the container shares the host's user namespace, whose limit its procfs reads; read only to name the setting that refused a user namespace"
 
 [compose."/run/bird/bird.ctl"]
 gap = "BGP announcement drives BIRD through this socket and file; the deployment neither mounts nor offers them, so the feature is package-only without saying so"
@@ -166,6 +175,9 @@ reason = "kernel-wide: the container's procfs reads the same value as the host's
 [chart."/proc/sys/fs/fanotify/max_user_marks"]
 reason = "the container's own procfs answers with the limit that applies to the process placing the marks"
 
+[chart."/proc/sys/kernel/apparmor_restrict_unprivileged_userns"]
+reason = "kernel-wide: the container's procfs reads the same value as the host's; read only to name the setting that refused a user namespace"
+
 [chart."/proc/sys/kernel/hostname"]
 reason = "the UTS namespace: the host's under network_mode host and hostNetwork"
 
@@ -175,11 +187,17 @@ reason = "kernel-wide: the container's procfs reads the same value as the host's
 [chart."/proc/sys/kernel/random/boot_id"]
 reason = "kernel-wide: the container's procfs reads the same value as the host's"
 
+[chart."/proc/sys/kernel/unprivileged_userns_clone"]
+reason = "kernel-wide: the container's procfs reads the same value as the host's; read only to name the setting that refused a user namespace"
+
 [chart."/proc/sys/net/ipv4/tcp_syncookies"]
 reason = "per network namespace, and the service runs in the host's (network_mode host, hostNetwork)"
 
 [chart."/proc/sys/net/netfilter/nf_conntrack_count"]
 reason = "per network namespace, and the service runs in the host's (network_mode host, hostNetwork)"
+
+[chart."/proc/sys/user/max_user_namespaces"]
+reason = "the container shares the host's user namespace, whose limit its procfs reads; read only to name the setting that refused a user namespace"
 
 [chart."/run/bird/bird.ctl"]
 gap = "BGP announcement drives BIRD through this socket and file; the deployment neither mounts nor offers them, so the feature is package-only without saying so"

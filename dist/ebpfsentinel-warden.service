@@ -35,9 +35,9 @@ RuntimeDirectoryMode=0755
 # share the host PID namespace, so /proc already names every process - no
 # /host/proc bind-mount is needed (that is the containerized deployment's path).
 #
-# --uid 0: on bare-metal the agent runs as root and maps namespace-0 to real root,
-# so it presents uid 0 over SO_PEERCRED. Only that uid is served.
-ExecStart=/usr/local/bin/warden serve /run/ebpfsentinel/warden.sock --uid 0
+# --user ebpfsentinel: the agent runs as its own unprivileged user and presents
+# that uid over SO_PEERCRED. Only that uid is served; root is not.
+ExecStart=/usr/local/bin/warden serve /run/ebpfsentinel/warden.sock --user ebpfsentinel
 Restart=always
 RestartSec=2s
 

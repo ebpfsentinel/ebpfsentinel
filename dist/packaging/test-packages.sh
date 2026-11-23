@@ -75,6 +75,15 @@ installed_files_are_in_place() {
   check "the configuration is mode 0640" [ "$(mode_of /etc/ebpfsentinel/config.yaml)" = 640 ]
   check "the three host profiles are shipped" [ "$(find /usr/share/ebpfsentinel/profiles -name '*.yaml' | wc -l)" -ge 3 ]
   check "the tmpfiles drop-in is installed" [ -f /usr/lib/tmpfiles.d/ebpfsentinel.conf ]
+  check "the agent has its own user, with no login" \
+    sh -c 'getent passwd ebpfsentinel | grep -q ":/usr/sbin/nologin$"'
+  check "the agent's user is not root" [ "$(id -u ebpfsentinel)" != 0 ]
+  check "the configuration is readable by the agent's group" \
+    [ "$(stat -c %G /etc/ebpfsentinel/config.yaml)" = ebpfsentinel ]
+  check "the state directory belongs to the agent's user" \
+    [ "$(stat -c %U /var/lib/ebpfsentinel)" = ebpfsentinel ]
+  check "the agent unit runs as that user" grep -qx 'User=ebpfsentinel' /usr/lib/systemd/system/ebpfsentinel.service
+  check "the warden serves that user" grep -q -- '--user ebpfsentinel' /usr/lib/systemd/system/ebpfsentinel-warden.service
   check "the AppArmor profile is installed" [ -f /etc/apparmor.d/ebpfsentinel-agent ]
   check "the userns sysctl is shipped, not applied" \
     sh -c '[ -f /usr/share/ebpfsentinel/sysctl.d/60-ebpfsentinel-userns.conf ] && [ ! -e /etc/sysctl.d/60-ebpfsentinel-userns.conf ]'

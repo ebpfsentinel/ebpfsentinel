@@ -129,7 +129,7 @@ let
 
     "the warden is served on the socket the agent is told about" =
       warden.serviceConfig.ExecStart
-      == "${package}/bin/ebpfsentinel-warden serve /run/ebpfsentinel/warden.sock --uid 0"
+      == "${package}/bin/ebpfsentinel-warden serve /run/ebpfsentinel/warden.sock --user ebpfsentinel"
       && agent.environment.EBPFSENTINEL_WARDEN_SOCK == "/run/ebpfsentinel/warden.sock";
 
     "the agent loads its objects from the store" =
@@ -152,7 +152,31 @@ let
         "RestartSec"
         "RestartPreventExitStatus"
         "SuccessExitStatus"
+        "User"
+        "Group"
+        "CapabilityBoundingSet"
+        "AmbientCapabilities"
+        "ProtectSystem"
+        "ProtectHome"
+        "PrivateTmp"
+        "PrivateDevices"
+        "ProtectKernelModules"
+        "ProtectKernelLogs"
+        "ProtectClock"
+        "ProtectHostname"
+        "RestrictSUIDSGID"
+        "RestrictRealtime"
+        "LockPersonality"
+        "SystemCallArchitectures"
+        "RestrictNamespaces"
+        "TemporaryFileSystem"
+        "StateDirectoryMode"
       ];
+
+    "the agent has its own user, and it is not root" =
+      base.users.users.ebpfsentinel.isSystemUser
+      && base.users.users.ebpfsentinel.group == "ebpfsentinel"
+      && agent.serviceConfig.User == "ebpfsentinel";
 
     "both units refuse a manual stop and the warden goes down with the agent" =
       agent.unitConfig.RefuseManualStop
@@ -174,8 +198,8 @@ let
       lib.hasInfix (lib.removePrefix "/bin/sh -c " (unitValue "ebpfsentinel.service" "ExecStartPre")) agent.serviceConfig.ExecStartPre;
 
     "the state directory and auth/ at 0700 are created" =
-      lib.elem "d /var/lib/ebpfsentinel/auth 0700 root root -" base.systemd.tmpfiles.rules
-      && lib.elem "d /var/lib/ebpfsentinel/data 0755 root root -" base.systemd.tmpfiles.rules;
+      lib.elem "d /var/lib/ebpfsentinel/auth 0700 ebpfsentinel ebpfsentinel -" base.systemd.tmpfiles.rules
+      && lib.elem "d /var/lib/ebpfsentinel/data 0750 ebpfsentinel ebpfsentinel -" base.systemd.tmpfiles.rules;
 
     "the API port stays closed unless asked" =
       !(lib.elem 8080 base.networking.firewall.allowedTCPPorts)

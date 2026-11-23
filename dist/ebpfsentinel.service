@@ -32,10 +32,52 @@ Type=simple
 # eBPF is loaded EXCLUSIVELY through a BPF token, a user-namespace
 # feature. The agent self-unshares a user namespace, has the warden delegate a
 # bpffs over the socket, and loads its own eBPF through the token - holding NO
-# capabilities over the host (no CAP_BPF). It runs as root only so it can map
-# namespace-0 to real root and create the bpffs mountpoint under /sys/fs/bpf; do
-# NOT set NoNewPrivileges (it would block the userns setup). Needs unprivileged
-# user namespaces enabled on the host.
+# capabilities over the host (no CAP_BPF). It runs as its own unprivileged
+# user, never as root: its namespace root maps onto that user, so a compromised
+# agent owns nothing on the host but its own state directory. The package
+# creates the user (sysusers.d/ebpfsentinel.conf); the warden serves only it
+# (`--user ebpfsentinel`). Files the configuration names (keys, certificates,
+# feeds) must be readable by the group ebpfsentinel.
+#
+# Needs unprivileged user namespaces for this user. Ubuntu 24.04 and later
+# gate them behind AppArmor (kernel.apparmor_restrict_unprivileged_userns=1):
+# the package installs and loads a profile for the agent binary alone. A host
+# that set user.max_user_namespaces=0, or an older Debian kernel with
+# kernel.unprivileged_userns_clone=0, refuses them to every user; the agent
+# names the setting at start.
+User=ebpfsentinel
+Group=ebpfsentinel
+# No capability survives into the agent's process on the host: the bounding set
+# is empty, so even a setuid binary it executed would grant none. The user
+# namespace it creates starts with a full set of its own (the kernel resets the
+# bounding set in a new user namespace), which is all the token needs.
+CapabilityBoundingSet=
+AmbientCapabilities=
+# NoNewPrivileges stays off: under it AppArmor refuses the transition into the
+# agent's profile, which is what grants the user namespace on Ubuntu.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+# The agent creates a user namespace and a mount namespace and nothing else.
+RestrictNamespaces=user mnt
+# The host's /sys/fs/bpf is root's: the delegated bpffs is mounted on a
+# directory the agent creates here, in its own mount namespace, the same tmpfs
+# the compose deployment gives it.
+TemporaryFileSystem=/sys/fs/bpf:mode=1777
+# /var/lib/ebpfsentinel, owned by the agent's user (handed over on an upgrade
+# from a root-owned install), the only place it writes.
+StateDirectory=ebpfsentinel
+StateDirectoryMode=0750
+
 Environment=EBPFSENTINEL_WARDEN_SOCK=/run/ebpfsentinel/warden.sock
 
 # The agent's bootstrap connects to the warden once (no retry), so wait for the

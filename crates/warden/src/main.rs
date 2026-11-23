@@ -28,12 +28,13 @@ use ebpfsentinel_warden::host_ops::LocalHostOps;
 use ebpfsentinel_warden::server::serve_loop;
 use ebpfsentinel_warden::{
     AGENT_SECCOMP_PROFILE_FILE, ProfileInstall, collect_module_btf_fds, enable_tcp_syncookies,
-    install_seccomp_profile, open_pcap_pool, prepare_state_dir, prioritize_and_cap_btf,
+    install_seccomp_profile, open_pcap_pool, peer_uid_from_args, prepare_state_dir,
+    prioritize_and_cap_btf,
 };
 use ebpfsentinel_warden_proto::PROTOCOL_VERSION;
 
 /// Default peer uid the warden accepts - the rootless agent's id. Override with
-/// `--uid <n>`.
+/// `--uid <n>`, or `--user <name>` on a host where the agent has its own user.
 const DEFAULT_UID: u32 = 65534;
 
 /// Where the host procfs is, when it is not `/proc`.
@@ -45,7 +46,7 @@ const DEFAULT_UID: u32 = 65534;
 /// of the host's instead.
 const HOST_PROC_ENV: &str = "EBPFSENTINEL_HOST_PROC";
 
-const USAGE: &str = "usage: warden serve <socket> [--uid <n>]\n       warden prepare-state <dir> [--uid <n>]\n       warden install-seccomp-profile <dir>";
+const USAGE: &str = "usage: warden serve <socket> [--uid <n> | --user <name>]\n       warden prepare-state <dir> [--uid <n> | --user <name>]\n       warden install-seccomp-profile <dir>";
 
 /// The agent's seccomp profile, compiled in from the one file the compose
 /// deployment and the release read, so the copy a cluster installs cannot
@@ -72,7 +73,13 @@ fn main() -> ExitCode {
                 eprintln!("{USAGE}");
                 return ExitCode::from(2);
             };
-            let uid = parse_uid(&args).unwrap_or(DEFAULT_UID);
+            let uid = match peer_uid_from_args(&args) {
+                Ok(uid) => uid.unwrap_or(DEFAULT_UID),
+                Err(e) => {
+                    eprintln!("[warden] {e}");
+                    return ExitCode::from(2);
+                }
+            };
             serve(sock, uid)
         }
         Some("prepare-state") => {
@@ -80,7 +87,13 @@ fn main() -> ExitCode {
                 eprintln!("{USAGE}");
                 return ExitCode::from(2);
             };
-            let uid = parse_uid(&args).unwrap_or(DEFAULT_UID);
+            let uid = match peer_uid_from_args(&args) {
+                Ok(uid) => uid.unwrap_or(DEFAULT_UID),
+                Err(e) => {
+                    eprintln!("[warden] {e}");
+                    return ExitCode::from(2);
+                }
+            };
             match prepare_state_dir(Path::new(dir), uid) {
                 Ok(()) => {
                     eprintln!("[warden] state directory {dir} ready for uid {uid}");
@@ -129,17 +142,6 @@ fn install_profile(dir: &Path, profile: &[u8]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// Parse `--uid <n>` if present.
-fn parse_uid(args: &[String]) -> Option<u32> {
-    parse_opt(args, "--uid")?.parse().ok()
-}
-
-/// Parse the value following `flag` if present.
-fn parse_opt(args: &[String], flag: &str) -> Option<String> {
-    let i = args.iter().position(|a| a == flag)?;
-    args.get(i + 1).cloned()
 }
 
 /// Bind the listening socket (mode `0600`) and broker for rootless agents.

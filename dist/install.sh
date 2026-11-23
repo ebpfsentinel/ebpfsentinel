@@ -71,10 +71,25 @@ if [[ -d "${SCRIPT_DIR}/ebpf" ]]; then
   cp -a "${SCRIPT_DIR}/ebpf/"* "${INSTALL_LIB}/"
 fi
 
+# ── The agent's own user ─────────────────────────────────────────
+#
+# The agent never runs as root: it runs as `ebpfsentinel`, with no login and no
+# capability, and maps its user namespace's root onto that user. The warden
+# serves only it.
+
+if command -v systemd-sysusers >/dev/null 2>&1 && [[ -f "${SCRIPT_DIR}/sysusers.d/ebpfsentinel.conf" ]]; then
+  install -Dm644 "${SCRIPT_DIR}/sysusers.d/ebpfsentinel.conf" /usr/lib/sysusers.d/ebpfsentinel.conf
+  systemd-sysusers /usr/lib/sysusers.d/ebpfsentinel.conf
+elif ! getent passwd ebpfsentinel >/dev/null 2>&1; then
+  useradd --system --user-group --home-dir "${INSTALL_VAR}" --no-create-home \
+    --shell /usr/sbin/nologin --comment "eBPFsentinel agent" ebpfsentinel
+fi
+
 # ── Install configuration ─────────────────────────────────────────
 #
 # The agent refuses a world-readable config file (it may carry API keys and
-# alert credentials), so the file is installed 0640 rather than 0644.
+# alert credentials), so the file is installed 0640, owned by root and readable
+# by the agent's group: the agent reads it and cannot rewrite it.
 
 mkdir -p "${INSTALL_ETC}"
 if [[ ! -f "${INSTALL_ETC}/config.yaml" ]]; then
@@ -83,6 +98,8 @@ if [[ ! -f "${INSTALL_ETC}/config.yaml" ]]; then
 else
   echo "Configuration already exists at ${INSTALL_ETC}/config.yaml, skipping."
 fi
+chgrp ebpfsentinel "${INSTALL_ETC}/config.yaml"
+chmod 0640 "${INSTALL_ETC}/config.yaml"
 
 # ── Install the host profiles ─────────────────────────────────────
 #
@@ -120,6 +137,10 @@ chmod 700 "${INSTALL_VAR}/auth"
 # The redb stores do not create their directory; the unit runs from
 # ${INSTALL_VAR}, so the default `data/*.redb` paths need this one.
 mkdir -p "${INSTALL_VAR}/data"
+# All of it belongs to the agent's user, including what a root-run install
+# left behind.
+chown -R ebpfsentinel:ebpfsentinel "${INSTALL_VAR}"
+chmod 750 "${INSTALL_VAR}"
 
 # ── Install systemd units ─────────────────────────────────────────
 #
@@ -135,10 +156,8 @@ systemctl daemon-reload
 # The agent self-unshares a user namespace to load eBPF through a BPF token. On
 # kernels that gate unprivileged userns behind AppArmor
 # (kernel.apparmor_restrict_unprivileged_userns=1), a process without
-# CAP_SYS_ADMIN in the init user namespace cannot create one. The bare-metal unit
-# runs the agent as root (exempt), so this only bites if the agent is reconfigured
-# to run unprivileged - handle it anyway for that case and for parity with the
-# container deployments. Prefer a per-binary AppArmor profile (scoped to the
+# CAP_SYS_ADMIN in the init user namespace cannot create one, and the agent runs
+# as its own unprivileged user. Prefer a per-binary AppArmor profile (scoped to the
 # agent, keeps the host-wide restriction); fall back to a sysctl drop-in
 # (host-wide) only when apparmor_parser is unavailable to load the profile.
 APPARMOR_SYSCTL="kernel.apparmor_restrict_unprivileged_userns"

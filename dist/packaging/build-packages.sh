@@ -67,13 +67,14 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "${STAGE}"' EXIT
 
 mkdir -p "${STAGE}/ebpf" "${STAGE}/systemd" "${STAGE}/profiles" \
-  "${STAGE}/tmpfiles.d" "${STAGE}/apparmor.d" "${STAGE}/sysctl.d" "${OUT_DIR}"
+  "${STAGE}/sysusers.d" "${STAGE}/tmpfiles.d" "${STAGE}/apparmor.d" "${STAGE}/sysctl.d" "${OUT_DIR}"
 
 install -m 0755 "${BIN_DIR}/ebpfsentinel-agent" "${STAGE}/ebpfsentinel-agent"
 install -m 0755 "${BIN_DIR}/warden" "${STAGE}/warden"
 cp "${EBPF_DIR}"/* "${STAGE}/ebpf/"
 install -m 0640 "${SOURCE_ROOT}/config/ebpfsentinel.yaml" "${STAGE}/config.yaml"
 cp "${SOURCE_ROOT}"/config/profiles/*.yaml "${STAGE}/profiles/"
+install -m 0644 "${DIST_DIR}/sysusers.d/ebpfsentinel.conf" "${STAGE}/sysusers.d/ebpfsentinel.conf"
 install -m 0644 "${DIST_DIR}/tmpfiles.d/ebpfsentinel.conf" "${STAGE}/tmpfiles.d/ebpfsentinel.conf"
 install -m 0644 "${DIST_DIR}/apparmor.d/ebpfsentinel-agent" "${STAGE}/apparmor.d/ebpfsentinel-agent"
 install -m 0644 "${DIST_DIR}/sysctl.d/60-ebpfsentinel-userns.conf" "${STAGE}/sysctl.d/60-ebpfsentinel-userns.conf"
