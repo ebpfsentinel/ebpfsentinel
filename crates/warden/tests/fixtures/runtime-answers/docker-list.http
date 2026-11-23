@@ -1,0 +1,10 @@
+HTTP/1.1 200 OK
+Api-Version: 1.56
+Content-Type: application/json
+Docker-Experimental: false
+Ostype: linux
+Server: Docker/29.9.3 (linux)
+Date: Mon, 23 Nov 2026 11:30:07 GMT
+Content-Length: 1055
+
+[{"Id":"c7a9d2bb6ec962bbe735a3b36f852cc936c3598bbf4ce8aa365db8f1ec7d3058","Names":["/ebpfsentinel-fixture"],"Image":"docker.io/library/alpine:3.22","ImageID":"sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8","Command":"sh -c 'sleep 600' fixture --password=fixture-arg-secret","Created":1795433406,"Ports":[],"Labels":{"team":"payments","tier":"front"},"State":"running","Status":"Up Less than a second","HostConfig":{"NetworkMode":"bridge"},"NetworkSettings":{"Networks":{"bridge":{"IPAMConfig":null,"Links":null,"Aliases":null,"DriverOpts":null,"GwPriority":0,"NetworkID":"bd5e05940ac26981790959cf4e4424920b50b80bbaf8037288e5810ad8b7d448","EndpointID":"00f1440db2f1de288afab889a492d02aaaf0b4f2b9581ee99938ad9bf3fd92d3","Gateway":"172.17.0.1","IPAddress":"172.17.0.2","MacAddress":"46:07:05:33:70:56","IPPrefixLen":16,"IPv6Gateway":"","GlobalIPv6Address":"","GlobalIPv6PrefixLen":0,"DNSNames":null}}},"Mounts":[{"Type":"bind","Source":"/tmp/tmp.VoV4QDuR1G","Destination":"/data","Mode":"ro","RW":false,"Propagation":"rprivate"}]}]

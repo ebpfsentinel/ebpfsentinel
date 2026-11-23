@@ -21,6 +21,7 @@ use ebpfsentinel_warden_proto::{
 };
 
 use crate::fim_watch::FimWatch;
+use crate::handed::{self, Handed, Ledger};
 use crate::host_ops::HostOps;
 use crate::pcap_slots::{PcapSlot, PcapSlots};
 use crate::policy::WardenPolicy;
@@ -155,6 +156,7 @@ pub fn serve_loop(
             }
         );
     }
+    let ledger = Arc::new(Ledger::new());
     for stream in listener.incoming() {
         match stream {
             Ok(conn) => {
@@ -165,6 +167,7 @@ pub fn serve_loop(
                     let slots = Arc::clone(&slots);
                     let proc_root = Arc::clone(&proc_root);
                     let policy = Arc::clone(&policy);
+                    let ledger = Arc::clone(&ledger);
                     std::thread::spawn(move || {
                         handle_conn(
                             conn,
@@ -175,6 +178,7 @@ pub fn serve_loop(
                                 ext: ext.as_deref(),
                                 proc_root: &proc_root,
                                 policy: &policy,
+                                handed: &ledger,
                             },
                         );
                     });
@@ -250,6 +254,8 @@ struct Served<'a> {
     proc_root: &'a Path,
     /// What this warden serves, read once at start.
     policy: &'a WardenPolicy,
+    /// What each agent process was handed, for the things handed once.
+    handed: &'a Ledger,
 }
 
 /// [`handle_conn`] with both waits given rather than taken from the constants,
@@ -270,7 +276,12 @@ fn handle_conn_with_timeouts(
         ext,
         proc_root,
         policy,
+        handed,
     } = *served;
+    // The process at the other end, for what is handed once per process. A
+    // peer the kernel names no pidfd for is served everything else and
+    // refused those.
+    let peer = handed::Peer::of(&conn).map_err(|e| format!("the agent's pidfd: {e}"));
     // Every slot this connection claimed, held until the connection ends: the
     // agent's own pool keeps this connection open for its whole life, so the
     // sockets are in use for exactly as long as it is there to read them.
@@ -373,6 +384,21 @@ fn handle_conn_with_timeouts(
             }
             continue;
         }
+        // What is handed once per agent process is refused a second time
+        // before any handler runs, like a refused family.
+        if let Some(what) = handed_once(&cmd) {
+            let taken = peer
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|peer| handed.take(peer, what));
+            if let Err(message) = taken {
+                eprintln!("[warden] refused: {message}");
+                if !refuse_handed(&mut writer, &cmd, message) {
+                    break;
+                }
+                continue;
+            }
+        }
         // `PcapOpen` answers out-of-band: an `FdReady` frame followed by a fd in an
         // `SCM_RIGHTS` cmsg, so it bypasses `dispatch`.
         let ok = match &cmd {
@@ -442,10 +468,16 @@ fn handle_conn_with_timeouts(
                     Err(message) => serve_passed_fd(&mut writer, Err(message)),
                 }
             }
-            // `ConnectPodman` answers out-of-band: a stream connected to one
-            // user's rootless Podman API, after an `FdReady`.
+            // `ConnectPodman` answers out-of-band: the agent's end of a relay
+            // to one user's rootless Podman API, after an `FdReady`. The
+            // relay is the root runtime's, so a user's runtime is asked the
+            // same reads and answers through the same projection: one call of
+            // that API starts a container as that user.
             Command::ConnectPodman { uid } => {
-                match podman_connect::connect(Path::new(podman_connect::RUN_USER_ROOT), *uid) {
+                match podman_connect::connect(Path::new(podman_connect::RUN_USER_ROOT), *uid)
+                    .and_then(|stream| {
+                        root_runtime::relay_to(stream, format!("the Podman API of uid {uid}"))
+                    }) {
                     Ok(stream) => {
                         // Dup'd into the agent by `SCM_RIGHTS`; ours closes here.
                         serve_passed_fd(&mut writer, Ok(stream.as_raw_fd()))
@@ -628,6 +660,39 @@ fn serve_passed_fd(writer: &mut UnixStream, fd: Result<RawFd, String>) -> bool {
             send_msg_fds(writer.as_raw_fd(), &[0u8], &[fd])
         }
         Err(message) => write_frame(writer, &Response::Error { message }).is_ok(),
+    }
+}
+
+/// The handed-once record a command takes, if it takes one.
+fn handed_once(cmd: &Command) -> Option<Handed> {
+    match cmd {
+        Command::Delegate => Some(Handed::Delegation),
+        Command::WriteRefusalGroup => Some(Handed::WriteRefusalGroup),
+        Command::ResolverSocket { listen, stream } => Some(Handed::ResolverSocket {
+            listen: *listen,
+            stream: *stream,
+        }),
+        Command::PcapOpen { .. } => Some(Handed::CaptureSocket),
+        _ => None,
+    }
+}
+
+/// Answer a handed-once command refused a second time the way its own handler
+/// answers a failure: `Delegate` with an `Error` once the bpffs descriptor it
+/// carries is taken off the socket and closed, the others with the `Error`
+/// their out-of-band answer gives.
+fn refuse_handed(writer: &mut UnixStream, cmd: &Command, message: String) -> bool {
+    if cmd.sends_fd() {
+        let stray = recv_fd(writer.as_raw_fd());
+        if stray >= 0 {
+            // SAFETY: the fd arrived over `SCM_RIGHTS` for this one refused
+            // request and nothing else holds this number.
+            unsafe { libc::close(stray) };
+        }
+    }
+    match cmd {
+        Command::Delegate => write_frame(writer, &Response::Error { message }).is_ok(),
+        _ => serve_passed_fd(writer, Err(message)),
     }
 }
 
@@ -973,6 +1038,7 @@ mod tests {
                     ext: ext.as_deref(),
                     proc_root: Path::new("/proc"),
                     policy: &test_policy(),
+                    handed: &crate::handed::Ledger::new(),
                 },
             );
         })
@@ -1208,9 +1274,59 @@ mod tests {
                     ext: None,
                     proc_root: Path::new("/proc"),
                     policy: &WardenPolicy::default(),
+                    handed: &crate::handed::Ledger::new(),
                 },
             );
         })
+    }
+
+    #[test]
+    fn one_agent_process_is_handed_at_most_its_capture_ceiling_across_connections() {
+        let slots = PcapSlots::new(Vec::new(), false);
+        let ledger = Arc::new(crate::handed::Ledger::new());
+        let ask = |ledger: &Arc<crate::handed::Ledger>| {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let slots = Arc::clone(&slots);
+            let ledger = Arc::clone(ledger);
+            let handle = std::thread::spawn(move || {
+                let host = NullHost;
+                handle_conn(
+                    server,
+                    &Served {
+                        btf: &[],
+                        pcap: &slots,
+                        host: &host,
+                        ext: None,
+                        proc_root: Path::new("/proc"),
+                        policy: &WardenPolicy::default(),
+                        handed: &ledger,
+                    },
+                );
+            });
+            hello(&mut client);
+            write_frame(
+                &mut client,
+                &Command::PcapOpen {
+                    iface: "lo".into(),
+                    filter: String::new(),
+                },
+            )
+            .unwrap();
+            let response: Response = read_frame(&mut client).unwrap();
+            drop(client);
+            handle.join().unwrap();
+            response
+        };
+        for _ in 0..crate::handed::MAX_PCAP_PER_PROCESS {
+            let Response::Error { message } = ask(&ledger) else {
+                panic!("an empty pool answers an error");
+            };
+            assert!(message.contains("no packet-capture socket"), "{message}");
+        }
+        let Response::Error { message } = ask(&ledger) else {
+            panic!("past the ceiling answers an error");
+        };
+        assert!(message.contains("32 capture sockets"), "{message}");
     }
 
     /// One connection asking for one capture socket. The connection and its
@@ -1327,6 +1443,7 @@ mod tests {
                     ext: None,
                     proc_root: Path::new("/proc"),
                     policy: &WardenPolicy::default(),
+                    handed: &crate::handed::Ledger::new(),
                 },
                 handshake,
                 idle,
@@ -1437,6 +1554,7 @@ mod tests {
                     ext: None,
                     proc_root: Path::new("/proc"),
                     policy: &WardenPolicy::default(),
+                    handed: &crate::handed::Ledger::new(),
                 },
                 Duration::from_secs(5),
                 Duration::from_millis(50),

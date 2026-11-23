@@ -51,6 +51,7 @@ pub mod facts_read;
 pub mod file_facts;
 pub mod fim_watch;
 pub mod go_executables;
+pub mod handed;
 pub mod hidden_ports;
 pub mod hidden_processes;
 pub mod host_ops;

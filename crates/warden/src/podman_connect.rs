@@ -4,8 +4,9 @@
 //! mode `0600` inside a `0700` directory. The agent runs as root inside a user
 //! namespace of its own, where an inode owned by any other uid is out of reach
 //! whatever its capabilities, so it cannot name a single rootless container.
-//! The warden runs in the initial user namespace and connects for it, then
-//! hands the connected stream over.
+//! The warden runs in the initial user namespace and connects for it. The
+//! agent is handed a relay over that connection, the one the root runtimes
+//! are read through, never the connection itself.
 //!
 //! The path is built here from the uid alone, so the agent names a user and
 //! never a file. Two checks keep the connection to that one user's runtime: the
