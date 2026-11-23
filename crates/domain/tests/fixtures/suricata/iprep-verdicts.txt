@@ -1,0 +1,74 @@
+# This is Suricata version 8.0.8 RELEASE, run by make-iprep-verdicts.py; do not edit by hand.
+# The lists the configuration names, beside.
+categories 0 iprep/categories.txt
+reputation 0 iprep/reputation.list
+# 'rule SID RULE', or 'refused SID RULE' when Suricata does not load it,
+# then 'packet NS HEX SIDS': the packet's time in nanoseconds, its IP
+# bytes and the sids that alerted on it, a sid once per alert, '-' for none,
+# then 'end N SIDS': what alerted when flow N was flushed at the end of
+# the capture, its last address byte being N, then 'proto N NAME': the
+# application protocol Suricata logged for flow N.
+rule 13000 alert udp any any -> any any (msg:"iprep 13000"; iprep:src,BadHosts,>,30;)
+rule 13001 alert udp any any -> any any (msg:"iprep 13001"; iprep:dst,BadHosts,>,30;)
+rule 13002 alert udp any any -> any any (msg:"iprep 13002"; iprep:any,BadHosts,>,30;)
+rule 13003 alert udp any any -> any any (msg:"iprep 13003"; iprep:both,BadHosts,>,30;)
+rule 13004 alert udp any any -> any any (msg:"iprep 13004"; iprep:src,BadHosts,<,20;)
+rule 13005 alert udp any any -> any any (msg:"iprep 13005"; iprep:src,BadHosts,=,10;)
+rule 13006 alert udp any any -> any any (msg:"iprep 13006"; iprep:src,Google,isset;)
+rule 13007 alert udp any any -> any any (msg:"iprep 13007"; iprep:dst,Google,isset;)
+rule 13008 alert udp any any -> any any (msg:"iprep 13008"; iprep:src,BadHosts,isnotset;)
+rule 13009 alert udp any any -> any any (msg:"iprep 13009"; iprep:any,Unused,isset;)
+rule 13010 alert udp any any -> any any (msg:"iprep 13010"; iprep:src,Google,=,0;)
+refused 13011 alert udp any any -> any any (msg:"iprep 13011"; iprep:src,Nobody,>,1;)
+rule 13012 alert udp any any -> any any (msg:"iprep 13012"; iprep:src,BadHosts,>,128;)
+rule 13013 alert udp any any -> any any (msg:"iprep 13013"; iprep:src,BadHosts,>=,1;)
+rule 13014 alert udp any any -> any any (msg:"iprep 13014"; iprep:src,BadHosts,<,201;)
+rule 13015 alert udp any any -> any any (msg:"iprep 13015"; iprep:src,BadHosts,>,60; iprep:src,Google,>,10;)
+rule 13016 alert udp any any -> any any (msg:"iprep 13016"; iprep:src,BadHosts,<=,10;)
+rule 13017 alert udp any any -> any any (msg:"iprep 13017"; iprep:src,BadHosts,!=,50;)
+refused 13018 alert udp any any -> any any (msg:"iprep 13018"; iprep:src,BadHosts,40-60;)
+rule 13019 alert udp any any -> any any (msg:"iprep 13019"; iprep:src,BadHosts,>,255;)
+refused 13020 alert udp any any -> any any (msg:"iprep 13020"; iprep:src,BadHosts,>,256;)
+rule 13021 alert udp any any -> any any (msg:"iprep 13021"; iprep:src,BadHosts,=,70;)
+refused 13022 alert udp any any -> any any (msg:"iprep 13022"; iprep:src,badhosts,>,1;)
+refused 13023 alert udp any any -> any any (msg:"iprep 13023"; iprep:sideways,BadHosts,>,1;)
+packet 10000000000000 4500002000010000401166b80a0900010a0a0001a7f914e9000c500e70696e67 13000,13001,13002,13003,13006,13007,13009,13010,13013,13014
+packet 10000010000000 4500002000010000401166b80a0a00010a09000114e9a7f9000c5008706f6e67 13000,13001,13002,13003,13006,13007,13009,13010,13013,13014,13017
+packet 20000000000000 4500002000010000401166b60a0900020a0a0002a7fa14e9000c500b70696e67 13004,13005,13006,13009,13010,13013,13014,13016,13017
+packet 20000010000000 4500002000010000401166b60a0a00020a09000214e9a7fa000c5005706f6e67 13007,13008,13009
+packet 30000000000000 4500002000010000401166b40a0900030a0a0003a7fb14e9000c500870696e67 13007,13008,13009
+packet 30000010000000 4500002000010000401166b40a0a00030a09000314e9a7fb000c5002706f6e67 13004,13006,13008,13009,13014,13016,13017
+packet 40000000000000 4500002000010000401166b20a0900040a0a0004a7fc14e9000c500570696e67 13008
+packet 40000010000000 4500002000010000401166b20a0a00040a09000414e9a7fc000c4fff706f6e67 13008
+packet 50000000000000 4500002000010000401166b00a0900050a0a0005a7fd14e9000c500270696e67 13004,13006,13008,13009,13010,13014,13016,13017
+packet 50000010000000 4500002000010000401166b00a0a00050a09000514e9a7fd000c4ffc706f6e67 13007,13008,13009
+packet 60000000000000 4500002000010000401166ae0a0900060a0a0006a7fe14e9000c4fff70696e67 13004,13006,13008,13009,13010,13014,13016,13017
+packet 60000010000000 4500002000010000401166ae0a0a00060a09000614e9a7fe000c4ff9706f6e67 13007,13008,13009
+packet 70000000000000 4500002000010000401166ac0a0900070a0a0007a7ff14e9000c4ffc70696e67 13008
+packet 70000010000000 4500002000010000401166ac0a0a00070a09000714e9a7ff000c4ff6706f6e67 13008
+packet 80000000000000 4500002000010000401166aa0a0900080a0a0008a80014e9000c4ff970696e67 13000,13002,13013,13014,13017,13021
+packet 80000010000000 4500002000010000401166aa0a0a00080a09000814e9a800000c4ff3706f6e67 13001,13002,13008
+packet 90000000000000 4500002000010000401166a80a0900090a0a0009a80114e9000c4ff670696e67 13004,13006,13008,13009,13014,13016,13017
+packet 90000010000000 4500002000010000401166a80a0a00090a09000914e9a801000c4ff0706f6e67 13007,13008,13009
+packet 100000000000000 4500002000010000401166a60a09000a0a0a000aa80214e9000c4ff370696e67 13000,13002,13013,13014,13017,13021
+packet 100000010000000 4500002000010000401166a60a0a000a0a09000a14e9a802000c4fed706f6e67 13001,13002,13008
+end 1 -
+end 2 -
+end 3 -
+end 4 -
+end 5 -
+end 6 -
+end 7 -
+end 8 -
+end 9 -
+end 10 -
+proto 1 failed
+proto 2 failed
+proto 3 failed
+proto 4 failed
+proto 5 failed
+proto 6 failed
+proto 7 failed
+proto 8 failed
+proto 9 failed
+proto 10 failed

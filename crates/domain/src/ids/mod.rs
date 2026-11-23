@@ -1,6 +1,7 @@
 pub mod applayer;
 pub mod capture;
 pub mod dataset;
+pub mod reputation;
 pub mod dcerpc;
 pub mod dns;
 pub mod engine;

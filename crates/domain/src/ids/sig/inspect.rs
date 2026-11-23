@@ -27,6 +27,7 @@ use crate::ids::applayer::{AppProto, AppView};
 use crate::ids::dataset::{Command, Datasets, SetRef};
 use crate::ids::flow::{Seen, State};
 use crate::ids::packet::{IpPacket, L4, opt};
+use crate::ids::reputation::{IprepTest, Reputation, Side};
 use crate::ids::suricata::{Compiled, Refused};
 use crate::ids::tx::Fields;
 
@@ -1021,7 +1022,7 @@ fn refused(keyword: impl Into<String>, reason: impl Into<String>) -> Refused {
 }
 
 /// One condition on the packet headers.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum HeaderCheck {
     Int(HeaderField, IntMatch),
     Flags(TcpFlags),
@@ -1033,10 +1034,17 @@ enum HeaderCheck {
     /// which Suricata accepts and never matches.
     IpOpt(u16),
     SameIp,
+    /// An address's score in a reputation category.
+    Iprep {
+        reputation: Reputation,
+        side: Side,
+        category: u8,
+        test: IprepTest,
+    },
 }
 
 impl HeaderCheck {
-    fn compile(check: &Check) -> Compiled<Option<Self>> {
+    fn compile(check: &Check, reputation: &Reputation) -> Compiled<Option<Self>> {
         Ok(Some(match check {
             Check::Header(field, m) => match field {
                 HeaderField::VlanId | HeaderField::VlanLayers => {
@@ -1074,6 +1082,18 @@ impl HeaderCheck {
                 }
             }),
             Check::SameIp => Self::SameIp,
+            Check::Iprep {
+                side,
+                category,
+                test,
+            } => Self::Iprep {
+                reputation: reputation.clone(),
+                side: *side,
+                category: reputation
+                    .category(category)
+                    .map_err(|reason| Refused::new("iprep", reason))?,
+                test: *test,
+            },
             _ => return Ok(None),
         }))
     }
@@ -1090,6 +1110,12 @@ impl HeaderCheck {
             }
             Self::IpOpt(bit) => p.v4.is_some_and(|v4| v4.options & bit != 0),
             Self::SameIp => p.src == p.dst,
+            Self::Iprep {
+                ref reputation,
+                side,
+                category,
+                test,
+            } => reputation.matches(side, category, test, p.src, p.dst),
         }
     }
 }
@@ -1163,7 +1189,11 @@ impl Program {
     ///
     /// Refuses a match this engine does not run, a variable read before a
     /// match sets it, and a pcre or transform argument PCRE2 rejects.
-    pub fn compile(signature: &Signature, datasets: &Datasets) -> Compiled<Self> {
+    pub fn compile(
+        signature: &Signature,
+        datasets: &Datasets,
+        reputation: &Reputation,
+    ) -> Compiled<Self> {
         let mut names: HashMap<String, usize> = HashMap::new();
         let mut vars = Vec::new();
         let mut lists = Vec::new();
@@ -1196,7 +1226,7 @@ impl Program {
         let headers = signature
             .checks
             .iter()
-            .filter_map(|check| HeaderCheck::compile(check).transpose())
+            .filter_map(|check| HeaderCheck::compile(check, reputation).transpose())
             .collect::<Compiled<Vec<_>>>()?;
         let mut session = Session::compile(signature, &lists)?;
         stream_alone(signature, &lists, &headers, &session)?;
@@ -2357,10 +2387,14 @@ mod tests {
         let signature =
             super::super::parse_signature(&text, &crate::ids::suricata::SuricataVars::default())
                 .expect("parses");
-        Program::compile(&signature, &crate::ids::dataset::Datasets::default())
-            .expect("compiles")
-            .fast_pattern()
-            .cloned()
+        Program::compile(
+            &signature,
+            &crate::ids::dataset::Datasets::default(),
+            &Reputation::default(),
+        )
+        .expect("compiles")
+        .fast_pattern()
+        .cloned()
     }
 
     #[test]

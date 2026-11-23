@@ -8,6 +8,7 @@ use domain::common::entity::RuleId;
 use domain::firewall::workload::{KubernetesMatchers, LineageMatchers, WorkloadSelector};
 use domain::ids::dataset::SetKind;
 use domain::ids::entity::{IdsRule, SamplingMode, ThresholdConfig, ThresholdType, TrackBy};
+use domain::ids::reputation::Reputation;
 use domain::ids::suricata::{ImportedRulesets, SuricataVars, compile_rulesets};
 use domain::netpol::LabelSelector;
 use serde::{Deserialize, Serialize};
@@ -316,6 +317,22 @@ pub struct SuricataImportConfig {
     /// cannot be read is refused.
     #[serde(default)]
     pub datasets: BTreeMap<String, DatasetConfig>,
+
+    /// The reputation lists `iprep` rules read. Without them, or when one
+    /// cannot be read, an `iprep` rule is refused.
+    #[serde(default)]
+    pub reputation: Option<ReputationConfig>,
+}
+
+/// Suricata's `reputation-categories-file` and `reputation-files`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReputationConfig {
+    /// `id,short name,description` per line.
+    pub categories: String,
+    /// `address[/prefix],category id,score` per line, the score from 0 to
+    /// 127.
+    pub lists: Vec<String>,
 }
 
 /// A set, as Suricata's `datasets` section names one.
@@ -396,6 +413,33 @@ impl SuricataImportConfig {
                 });
             }
         }
+        if let Some(reputation) = &self.reputation {
+            if reputation.lists.len() > MAX_SETS {
+                return Err(ConfigError::Validation {
+                    field: "ids.suricata.reputation.lists".to_string(),
+                    message: format!(
+                        "count {} exceeds maximum {MAX_SETS}",
+                        reputation.lists.len()
+                    ),
+                });
+            }
+            for (field, path) in std::iter::once(("categories".to_string(), &reputation.categories))
+                .chain(
+                    reputation
+                        .lists
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, path)| (format!("lists[{idx}]"), path)),
+                )
+            {
+                if path.trim().is_empty() {
+                    return Err(ConfigError::Validation {
+                        field: format!("ids.suricata.reputation.{field}"),
+                        message: "is empty".to_string(),
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
@@ -406,7 +450,29 @@ impl SuricataImportConfig {
         for (idx, path) in self.rulesets.iter().enumerate() {
             texts.push(read_ruleset(idx, Path::new(path))?);
         }
-        let vars = SuricataVars::with_overrides(&self.vars.addresses, &self.vars.ports);
+        let mut vars = SuricataVars::with_overrides(&self.vars.addresses, &self.vars.ports);
+        if let Some(reputation) = &self.reputation {
+            let categories = read_set(Path::new(&reputation.categories));
+            let lists: Vec<_> = reputation
+                .lists
+                .iter()
+                .map(|path| (path.as_str(), read_set(Path::new(path))))
+                .collect();
+            let (loaded, warnings) = Reputation::load(
+                (
+                    reputation.categories.as_str(),
+                    categories.as_deref().map_err(Clone::clone),
+                ),
+                &lists
+                    .iter()
+                    .map(|(path, text)| (*path, text.as_deref().map_err(Clone::clone)))
+                    .collect::<Vec<_>>(),
+            );
+            for warning in warnings {
+                tracing::warn!("reputation {warning}");
+            }
+            vars.reputation = loaded;
+        }
         for (name, set) in &self.datasets {
             let Some(kind) = SetKind::from_name(&set.kind) else {
                 continue;
@@ -473,13 +539,13 @@ fn read_ruleset(idx: usize, path: &Path) -> Result<String, ConfigError> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// A set file's text, or why it cannot be read.
+/// A set or reputation file's text, or why it cannot be read.
 fn read_set(path: &Path) -> Result<String, String> {
     let unreadable = |e: std::io::Error| format!("{} cannot be read: {e}", path.display());
     let size = std::fs::metadata(path).map_err(unreadable)?.len();
     if size > MAX_SET_BYTES {
         return Err(format!(
-            "{} is {size} bytes, above the {MAX_SET_BYTES} a set file may be",
+            "{} is {size} bytes, above the {MAX_SET_BYTES} a set or list file may be",
             path.display()
         ));
     }
@@ -895,9 +961,61 @@ mod tests {
                     )
                 })
                 .collect(),
+            reputation: None,
         };
         config.validate().unwrap();
         config.import().unwrap()
+    }
+
+    fn import_with_reputation(rules: &str, reputation: ReputationConfig) -> ImportedRulesets {
+        let ruleset = Scratch::new("iprep-rules", rules);
+        let config = SuricataImportConfig {
+            rulesets: vec![ruleset.path()],
+            vars: SuricataVarsConfig::default(),
+            max_refused_share: 1.0,
+            datasets: BTreeMap::new(),
+            reputation: Some(reputation),
+        };
+        config.validate().unwrap();
+        config.import().unwrap()
+    }
+
+    #[test]
+    fn reputation_lists_the_configuration_names_are_read_and_a_missing_one_refuses_iprep() {
+        let rule = r#"alert ip any any -> any any (msg:"bad"; iprep:src,Bad,>,30; sid:1;)"#;
+        let unknown = r#"alert ip any any -> any any (msg:"who"; iprep:src,Nobody,>,30; sid:2;)"#;
+        let categories = Scratch::new("categories", "1,Bad,Known bad\n");
+        let list = Scratch::new("reputation", "10.0.0.1,1,50\n");
+        let imported = import_with_reputation(
+            &format!("{rule}\n{unknown}\n"),
+            ReputationConfig {
+                categories: categories.path(),
+                lists: vec![list.path()],
+            },
+        );
+        assert_eq!(imported.rules.len(), 1);
+        let refused = &imported.rulesets[0].report.refused[0];
+        assert!(refused.reason.contains("'Nobody'"), "{}", refused.reason);
+
+        let missing = std::env::temp_dir()
+            .join("ebpfsentinel-no-such-reputation.list")
+            .display()
+            .to_string();
+        let imported = import_with_reputation(
+            rule,
+            ReputationConfig {
+                categories: categories.path(),
+                lists: vec![missing],
+            },
+        );
+        assert!(imported.rules.is_empty());
+        let refused = &imported.rulesets[0].report.refused[0];
+        assert_eq!(refused.keyword, "iprep");
+        assert!(
+            refused.reason.contains("cannot be read"),
+            "{}",
+            refused.reason
+        );
     }
 
     const DATASET_RULE: &str =
@@ -938,6 +1056,7 @@ mod tests {
                 },
             )]
             .into(),
+            reputation: None,
         };
         assert!(config.validate().unwrap_err().to_string().contains("type"));
     }

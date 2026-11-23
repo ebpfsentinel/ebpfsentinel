@@ -674,9 +674,9 @@ pub enum Check {
         argument: String,
     },
     Iprep {
-        side: String,
+        side: crate::ids::reputation::Side,
         category: String,
-        value: IntMatch,
+        test: crate::ids::reputation::IprepTest,
     },
     Geoip {
         side: String,

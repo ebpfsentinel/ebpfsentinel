@@ -16,6 +16,7 @@ use super::model::{
     ProtoMode, RuleProto, Signature, StreamSide, Tag, TcpFlags, TcpFlagsMode, Threshold,
     ThresholdKind, Track, Transform, Value,
 };
+use crate::ids::reputation::{IprepTest, Side};
 use crate::ids::suricata::{
     Compiled, MAX_VARIABLE_DEPTH, Refused, SuricataVars, decode_content, parse_addresses,
     parse_options, split_header, split_list, unescape, unquote,
@@ -2078,50 +2079,39 @@ fn parse_stream_size(value: &str) -> Compiled<Check> {
 fn parse_iprep(value: &str) -> Compiled<Check> {
     let k = "iprep";
     let args: Vec<&str> = split_args(value).collect();
-    let (side, category, cmp) = match args.as_slice() {
+    let (side, category, test) = match args.as_slice() {
+        [side, category, "isset"] => (*side, *category, IprepTest::IsSet),
+        [side, category, "isnotset"] => (*side, *category, IprepTest::IsNotSet),
         [side, category, op, score] => {
             let n = number(score).map_err(|e| bad(k, e))?;
-            if n > 127 {
-                return Err(bad(k, "scores above 127"));
+            if n > u64::from(u8::MAX) {
+                return Err(bad(k, "scores above 255"));
             }
             let op = match *op {
                 "<" => IntOp::Lt,
                 ">" => IntOp::Gt,
                 "=" => IntOp::Eq,
+                "<=" => IntOp::Le,
+                ">=" => IntOp::Ge,
+                "!=" => IntOp::Ne,
                 other => return Err(bad(k, format!("'{other}' is not an operator"))),
             };
-            (*side, *category, IntMatch { op, a: n, b: 0 })
+            (
+                *side,
+                *category,
+                IprepTest::Score(IntMatch { op, a: n, b: 0 }),
+            )
         }
-        [side, category, "isset"] => (
-            *side,
-            *category,
-            IntMatch {
-                op: IntOp::Ge,
-                a: 0,
-                b: 0,
-            },
-        ),
-        [side, category, "isnotset"] => (
-            *side,
-            *category,
-            IntMatch {
-                op: IntOp::Lt,
-                a: 0,
-                b: 0,
-            },
-        ),
         _ => return Err(bad(k, "is not 'side, category, operator, score'")),
     };
-    if !matches!(side, "any" | "src" | "dst" | "both") {
-        return Err(bad(k, format!("'{side}' is not a side")));
-    }
+    let side = Side::from_name(side).ok_or_else(|| bad(k, format!("'{side}' is not a side")))?;
     if !is_name(category) {
         return Err(bad(k, format!("'{category}' is not a category")));
     }
     Ok(Check::Iprep {
-        side: side.to_string(),
+        side,
         category: category.to_string(),
-        value: cmp,
+        test,
     })
 }
 

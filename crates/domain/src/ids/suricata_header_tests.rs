@@ -24,6 +24,7 @@ const APPLAYER: &str = include_str!("../../tests/fixtures/suricata/applayer-verd
 const HTTP: &str = include_str!("../../tests/fixtures/suricata/http-verdicts.txt");
 const DNS: &str = include_str!("../../tests/fixtures/suricata/dns-verdicts.txt");
 const DATASETS: &str = include_str!("../../tests/fixtures/suricata/dataset-verdicts.txt");
+const IPREP: &str = include_str!("../../tests/fixtures/suricata/iprep-verdicts.txt");
 const TLS: &str = include_str!("../../tests/fixtures/suricata/tls-verdicts.txt");
 const WINDOWS: &str = include_str!("../../tests/fixtures/suricata/windows-verdicts.txt");
 const HTTP_PAYLOAD: &str = include_str!("../../tests/fixtures/suricata/http-payload-verdicts.txt");
@@ -284,6 +285,11 @@ fn dataset_and_datarep_rules_alert_on_the_packets_suricata_alerts_on() {
 }
 
 #[test]
+fn iprep_rules_alert_on_the_packets_suricata_alerts_on() {
+    replay(IPREP, 15);
+}
+
+#[test]
 fn smtp_files_alert_on_the_packets_suricata_alerts_on() {
     replay(SMTP, 80);
 }
@@ -319,11 +325,39 @@ fn configure(vars: &SuricataVars, name: &str, rest: &str) {
     );
 }
 
+/// The variables a fixture compiles its rules with: the reputation lists
+/// its 'categories' and 'reputation' lines name, read from beside it.
+fn vars_for(fixture: &str) -> SuricataVars {
+    let read = |file: &str| {
+        let path = format!(
+            "{}/tests/fixtures/suricata/{file}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        std::fs::read_to_string(path).expect("the list is beside")
+    };
+    let named = |kind: &str| -> Vec<String> {
+        fixture
+            .lines()
+            .filter_map(|l| l.strip_prefix(kind))
+            .filter_map(|l| l.split_once(' ').map(|(_, file)| read(file)))
+            .collect()
+    };
+    let mut vars = SuricataVars::default();
+    if let Some(categories) = named("categories ").first() {
+        let lists = named("reputation ");
+        let lists: Vec<(&str, Result<&str, String>)> =
+            lists.iter().map(|t| ("list", Ok(t.as_str()))).collect();
+        vars.reputation =
+            crate::ids::reputation::Reputation::load(("categories", Ok(categories)), &lists).0;
+    }
+    vars
+}
+
 /// Plays a fixture's conversations through the engine, packet by packet,
 /// then flushes every flow, and compares what alerted with what Suricata
 /// alerted on.
 fn replay(fixture: &str, at_least: usize) {
-    let vars = SuricataVars::default();
+    let vars = vars_for(fixture);
     let mut rules: Vec<IdsRule> = Vec::new();
     let mut packets: Vec<(u64, Vec<u8>, Vec<u32>)> = Vec::new();
     let mut ends: Vec<(u8, Vec<u32>)> = Vec::new();

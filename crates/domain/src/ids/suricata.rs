@@ -359,8 +359,8 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "iprep",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the reputation lists the configuration names are loaded.",
+        support: Support::Compiled,
+        note: "Over the categories file and the lists the configuration names. An address listed on its own scores in every category, 0 where no line gives one, and hides the networks it sits in; 'isnotset' holds for an address not listed or scoring 0. A rule naming a category the file does not name, or with no lists configured, is refused.",
     },
     KeywordSupport {
         keyword: "geoip",
@@ -2218,6 +2218,9 @@ pub struct SuricataVars {
     /// rules compiled with these variables.
     #[serde(skip)]
     pub datasets: super::dataset::Datasets,
+    /// The reputation lists `iprep` reads.
+    #[serde(skip)]
+    pub reputation: super::reputation::Reputation,
 }
 
 impl Default for SuricataVars {
@@ -2267,6 +2270,7 @@ impl Default for SuricataVars {
             addresses,
             ports,
             datasets: super::dataset::Datasets::default(),
+            reputation: super::reputation::Reputation::default(),
         }
     }
 }
@@ -2567,12 +2571,12 @@ pub(crate) fn compile_rule_admitting(
         .parse::<u32>()
         .map_err(|_| Refused::new("sid", format!("'{}' is not a number", sid.1.trim())))?;
 
-    let inspection = super::sig::inspect::Program::compile(&signature, &vars.datasets).map_err(
-        |mut refused| {
-            refused.sid = Some(sid);
-            refused
-        },
-    )?;
+    let inspection =
+        super::sig::inspect::Program::compile(&signature, &vars.datasets, &vars.reputation)
+            .map_err(|mut refused| {
+                refused.sid = Some(sid);
+                refused
+            })?;
     let pattern = label(&signature);
     if !pending {
         // The header's own refusals first: they say what the rule is.

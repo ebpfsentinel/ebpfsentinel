@@ -1,0 +1,3 @@
+1,BadHosts,Known bad hosts
+2,Google,Known google hosts
+3,Unused,Nothing listed in it
