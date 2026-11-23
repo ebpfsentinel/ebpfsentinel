@@ -9,7 +9,7 @@ use crate::common::entity::RuleId;
 use crate::common::error::DomainError;
 use ebpf_common::event::PacketEvent;
 
-use super::entity::{DomainMatchMode, IdsRule, SamplingMode, ThresholdType};
+use super::entity::{DomainMatchMode, IdsRule, ImportedAction, SamplingMode, ThresholdType};
 use super::error::IdsError;
 use super::flow::{Ended, FlowTable, Packet, Seen, Wire};
 use super::http1::Ready;
@@ -481,14 +481,20 @@ impl IdsEngine {
                 _ => None,
             },
         };
-        let observed = self
-            .flows
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .observe(&Packet::of(event), event, wire);
+        let (observed, settled) = {
+            let packet = Packet::of(event);
+            let mut flows = self.flows.lock().unwrap_or_else(PoisonError::into_inner);
+            let observed = flows.observe(&packet, event, wire);
+            (observed, flows.settled(&packet))
+        };
+        // A flow a `pass`, `drop` or `reject` reached is inspected no
+        // further, as Suricata leaves it; its streams are still kept.
+        if settled {
+            return Vec::new();
+        }
         let seen = observed.seen;
         let streamed = seen.stream_size.is_some();
-        let mut matched: Vec<(usize, &IdsRule)> = self
+        let on_packet: Vec<(usize, &IdsRule)> = self
             .prefilter()
             .candidates(&keys, payload)
             .into_iter()
@@ -502,14 +508,55 @@ impl IdsEngine {
                 (on_packet && program.matches_packet(&packet)).then_some((idx, rule))
             })
             .collect();
+        let mut on_flow = Vec::new();
         for block in &observed.blocks {
-            matched.extend(self.stream_matches(event, ports, &seen, block));
-            matched.extend(self.window_matches(event, ports, &seen, block, &observed.open));
+            on_flow.extend(self.stream_matches(event, ports, &seen, block));
+            on_flow.extend(self.window_matches(event, ports, &seen, block, &observed.open));
         }
         for tx in &observed.txs {
-            matched.extend(self.transaction_matches(event, ports, &seen, tx));
+            on_flow.extend(self.transaction_matches(event, ports, &seen, tx));
         }
-        self.run_state(event, matched)
+        self.act(event, on_packet, on_flow)
+    }
+
+    /// Run the matched rules' state, then their actions in Suricata's
+    /// order: a `pass` silences every match of this inspection, and a
+    /// `pass`, `drop` or `reject` made on the stream or on a transaction
+    /// (`on_flow`) leaves the rest of the flow uninspected. What remains
+    /// alerts; a `drop` or `reject` among it tells the caller to stop the
+    /// flow.
+    fn act<'a>(
+        &self,
+        event: &PacketEvent,
+        on_packet: Vec<(usize, &'a IdsRule)>,
+        on_flow: Vec<(usize, &'a IdsRule)>,
+    ) -> Vec<(usize, &'a IdsRule)> {
+        let action = |rule: &IdsRule| {
+            rule.imported
+                .as_ref()
+                .map_or(ImportedAction::Alert, |i| i.action)
+        };
+        let reaching: Vec<usize> = on_flow
+            .iter()
+            .filter(|(_, rule)| !action(rule).is_alert())
+            .map(|(idx, _)| *idx)
+            .collect();
+        let mut matched = on_packet;
+        matched.extend(on_flow);
+        let matched = self.run_state(event, matched);
+        let passed = matched
+            .iter()
+            .any(|(_, rule)| action(rule) == ImportedAction::Pass);
+        let settles = matched
+            .iter()
+            .any(|(idx, rule)| reaching.contains(idx) && (passed || action(rule).stops()));
+        if settles {
+            self.flows
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .settle(&Packet::of(event));
+        }
+        if passed { Vec::new() } else { matched }
     }
 
     /// Inspect what the flows idle past their timeout still hold, as
@@ -539,6 +586,14 @@ impl IdsEngine {
         let mut out = Vec::new();
         for end in ended {
             let ports = Some((end.event.src_port, end.event.dst_port));
+            let settled = self
+                .flows
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .settled(&Packet::of(&end.event));
+            if settled {
+                continue;
+            }
             let mut matched = Vec::new();
             for block in &end.blocks {
                 matched.extend(self.stream_matches(&end.event, ports, &end.seen, block));
@@ -548,7 +603,7 @@ impl IdsEngine {
                 matched.extend(self.transaction_matches(&end.event, ports, &end.seen, tx));
             }
             out.extend(
-                self.run_state(&end.event, matched)
+                self.act(&end.event, Vec::new(), matched)
                     .into_iter()
                     .map(|(idx, rule)| (end.event, idx, rule)),
             );

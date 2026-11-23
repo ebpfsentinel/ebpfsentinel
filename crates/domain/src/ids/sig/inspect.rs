@@ -91,9 +91,17 @@ fn inspect(
             Inspect::Transaction
         };
     }
+    // An `ip` rule reads a TCP packet's payload on the stream, as a `tcp`
+    // rule does; a `Stream` rule reads a packet with no stream on the
+    // packet.
     if !matches!(
         signature.header.proto,
-        RuleProto::Tcp | RuleProto::TcpStream | RuleProto::App(_)
+        RuleProto::Tcp
+            | RuleProto::TcpStream
+            | RuleProto::App(_)
+            | RuleProto::Ip
+            | RuleProto::Ipv4
+            | RuleProto::Ipv6
     ) || flow.no_stream
         || !headers.is_empty()
         || !session.counters.is_empty()

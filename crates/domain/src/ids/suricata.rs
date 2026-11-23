@@ -22,8 +22,8 @@ use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 
 use super::entity::{
-    AddressMatch, IdsRule, ImportedRule, Inspection, PacketProto, PacketScope, ThresholdConfig,
-    ThresholdType, TrackBy,
+    AddressMatch, IdsRule, ImportedAction, ImportedRule, Inspection, PacketProto, PacketScope,
+    ThresholdConfig, ThresholdType, TrackBy,
 };
 use crate::common::entity::{DomainMode, Protocol, RuleId, Severity};
 use crate::firewall::entity::IpNetwork;
@@ -2602,6 +2602,7 @@ fn compile_parts(
         dst: signature.header.dst.clone(),
         inspection: Some(inspection),
         scope: Some(scope),
+        action: imported_action(signature.header.action)?,
     };
     Ok(vec![IdsRule {
         id: RuleId(format!("suricata-{}", body.sid)),
@@ -2668,24 +2669,25 @@ fn label(signature: &super::sig::model::Signature) -> Option<String> {
 
 // ── Header ───────────────────────────────────────────────────────
 
+/// What the agent does on a match of a rule whose header names `action`.
+fn imported_action(action: super::sig::model::Action) -> Compiled<ImportedAction> {
+    use super::sig::model::Action;
+    match action {
+        Action::Alert => Ok(ImportedAction::Alert),
+        Action::Pass => Ok(ImportedAction::Pass),
+        Action::Drop => Ok(ImportedAction::Drop),
+        Action::Reject | Action::RejectSrc => Ok(ImportedAction::Reject),
+        other @ (Action::RejectDst | Action::RejectBoth) => Err(Refused::new(
+            other.keyword(),
+            "answers the destination, and the agent answers only the sender",
+        )),
+    }
+}
+
 /// The packets a parsed header selects, or why the agent does not import it.
 fn packet_scope(header: &super::sig::model::Header) -> Compiled<PacketScope> {
-    use super::sig::model::{Action, Direction, RuleProto};
-    match header.action {
-        Action::Alert => {}
-        Action::Pass => {
-            return Err(Refused::new(
-                "pass",
-                "exempts traffic from other rules, which the engine does not order",
-            ));
-        }
-        other => {
-            return Err(Refused::new(
-                other.keyword(),
-                "would drop traffic; imported rules alert only",
-            ));
-        }
-    }
+    use super::sig::model::{Direction, RuleProto};
+    imported_action(header.action)?;
     let proto = match &header.proto {
         RuleProto::Ip => PacketProto::Ip,
         RuleProto::Tcp | RuleProto::TcpStream => PacketProto::Tcp,
@@ -3513,8 +3515,8 @@ mod tests {
     fn refuses_headers_it_does_not_decide() {
         let base = "(msg:\"x\"; content:\"abc\"; sid:1;)";
         let cases = [
-            ("drop tcp any any -> any 80", "drop"),
-            ("pass tcp any any -> any 80", "pass"),
+            ("rejectdst tcp any any -> any 80", "rejectdst"),
+            ("rejectboth tcp any any -> any 80", "rejectboth"),
             ("alert sctp any any -> any 80", "protocol"),
             ("alert http2 any any -> any 80", "http2"),
             ("alert tcp any any => any 80", "=>"),
@@ -3526,6 +3528,38 @@ mod tests {
             assert_eq!(refused.keyword, keyword, "{header}: {}", refused.reason);
             assert_eq!(refused.sid, Some(1));
         }
+    }
+
+    #[test]
+    fn keeps_the_action_its_header_names() {
+        use crate::ids::entity::ImportedAction;
+        for (action, expected) in [
+            ("alert", ImportedAction::Alert),
+            ("pass", ImportedAction::Pass),
+            ("drop", ImportedAction::Drop),
+            ("reject", ImportedAction::Reject),
+            ("rejectsrc", ImportedAction::Reject),
+        ] {
+            let rules = compile(&format!(
+                "{action} tcp any any -> any 80 (msg:\"x\"; content:\"abc\"; sid:1;)"
+            ));
+            let got = rules[0].imported.as_ref().map(|i| i.action);
+            assert_eq!(got, Some(expected), "{action}");
+        }
+    }
+
+    #[test]
+    fn an_ip_rule_reads_tcp_payload_on_the_stream() {
+        // Suricata raises an `ip` rule's content on a TCP flow at the
+        // stream's inspection, not at the packet (action-verdicts.txt,
+        // rule 16021); with no stream the engine reads the packet.
+        let rules = compile("alert ip any any -> any any (msg:\"x\"; content:\"abc\"; sid:1;)");
+        let inspect = rules[0]
+            .imported
+            .as_ref()
+            .and_then(|i| i.inspection.as_ref())
+            .map(|i| i.0.inspect());
+        assert_eq!(inspect, Some(crate::ids::sig::inspect::Inspect::Stream));
     }
 
     #[test]
@@ -3548,7 +3582,6 @@ mod tests {
         for header in [
             "alert udp any any -> any 53",
             "alert icmp any any -> any any",
-            "alert ip any any -> any any",
             "alert tcp-pkt any any -> any any",
         ] {
             assert_eq!(

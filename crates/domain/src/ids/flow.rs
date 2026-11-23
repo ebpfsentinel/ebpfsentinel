@@ -137,6 +137,9 @@ struct Flow {
     bits: HashSet<String>,
     ints: HashMap<String, i64>,
     session: Option<Session>,
+    /// A `pass`, `drop` or `reject` reached the flow: it is inspected no
+    /// further.
+    settled: bool,
 }
 
 /// How many transaction alerts a connection records before forgetting the
@@ -564,6 +567,17 @@ impl FlowTable {
             }
         }
         ended
+    }
+
+    /// Whether a `pass`, `drop` or `reject` reached the packet's flow.
+    #[must_use]
+    pub fn settled(&self, packet: &Packet) -> bool {
+        self.flows.get(&packet.flow).is_some_and(|f| f.settled)
+    }
+
+    /// Inspect the packet's flow no further.
+    pub fn settle(&mut self, packet: &Packet) {
+        self.flow(packet).settled = true;
     }
 
     /// Whether `rule` alerts on this side of the flow's transaction for the

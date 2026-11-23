@@ -1010,6 +1010,45 @@ impl EventDispatcher {
         if counts_toward_ips {
             self.feed_ips_counter(event, prevention);
         }
+        if let Some(action) = rule.imported.as_ref().map(|i| i.action)
+            && action.stops()
+        {
+            self.stop_imported(event, &rule.id.0, action);
+        }
+    }
+
+    /// Stop the source of a flow an imported rule's `drop` or `reject`
+    /// matched: the IPS blocks it from its next packet, answering it with a
+    /// reset or an unreachable on `reject`. The matched packet went through,
+    /// so the alert never claims it stopped. The IPS toggle gates the block.
+    fn stop_imported(
+        &self,
+        event: &PacketEvent,
+        rule_id: &str,
+        action: domain::ids::entity::ImportedAction,
+    ) {
+        let Some(ref ips_svc) = self.ips_service else {
+            return;
+        };
+        let svc = ips_svc.load();
+        if !svc.enabled() {
+            return;
+        }
+        let src_ip = addr_to_ip(event.src_addr, event.is_ipv6());
+        let answer = action == domain::ids::entity::ImportedAction::Reject;
+        let reason = format!("{} rule {rule_id}", action.keyword());
+        if svc.stop_source(src_ip, reason, answer) {
+            self.emit_packet_security_alert(
+                domain::alert::entity::PacketAlertComponent::Ips,
+                event,
+                &format!("ips-blacklist:{src_ip}"),
+                action.keyword(),
+                &format!(
+                    "IDS rule {rule_id} {}: {src_ip} stopped from its next packet",
+                    action.keyword()
+                ),
+            );
+        }
     }
 
     /// Match a captured TCP payload against the IDS and IPS content rules.
@@ -3175,6 +3214,108 @@ mod tests {
         let alert = unwrap_ids_alert(alert_rx.try_recv().unwrap());
         assert_eq!(alert.rule_id.0, "suricata-42");
         assert_eq!(alert.protocol, 1);
+    }
+
+    /// A datapath that takes every entry it is handed.
+    struct AcceptingLpm;
+
+    impl ports::secondary::lpm_coordinator_port::LpmCoordinatorPort for AcceptingLpm {
+        fn replace_source_entries(
+            &self,
+            _source: &str,
+            _src_v4: &[ebpf_common::firewall::FirewallLpmEntryV4],
+            _dst_v4: &[ebpf_common::firewall::FirewallLpmEntryV4],
+            _src_v6: &[ebpf_common::firewall::FirewallLpmEntryV6],
+            _dst_v6: &[ebpf_common::firewall::FirewallLpmEntryV6],
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+
+        fn insert_entries(
+            &self,
+            _source: &str,
+            _src_v4: &[ebpf_common::firewall::FirewallLpmEntryV4],
+            _src_v6: &[ebpf_common::firewall::FirewallLpmEntryV6],
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+
+        fn remove_entries(
+            &self,
+            _source: &str,
+            _src_v4: &[ebpf_common::firewall::FirewallLpmEntryV4],
+            _src_v6: &[ebpf_common::firewall::FirewallLpmEntryV6],
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+
+        fn remove_all_for_source(
+            &self,
+            _source: &str,
+        ) -> Result<(), domain::common::error::DomainError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_imported_drop_alerts_and_has_the_ips_block_the_source() {
+        let rules = domain::ids::suricata::compile_rule(
+            "drop icmp any any -> any any (msg:\"ping\"; itype:8; sid:43;)",
+            &domain::ids::suricata::SuricataVars::default(),
+        )
+        .unwrap();
+        let ids = make_service_with_rules(rules);
+        let mut ips_svc = IpsAppService::new(
+            domain::ips::engine::IpsEngine::new(domain::ips::entity::IpsPolicy::default()),
+            Arc::new(TestMetrics::new()),
+        );
+        ips_svc.set_mode(DomainMode::Block);
+        ips_svc.set_lpm_coordinator(Arc::new(AcceptingLpm));
+        let ips = Arc::new(ArcSwap::from_pointee(ips_svc));
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx)
+            .with_ips_service(Arc::clone(&ips));
+
+        dispatcher.dispatch_agent_event(packet_event(icmp_packet(8)));
+
+        let alert = unwrap_ids_alert(alert_rx.try_recv().unwrap());
+        assert_eq!(alert.rule_id.0, "suricata-43");
+        match alert_rx.try_recv().unwrap() {
+            AlertEvent::PacketSecurity(a) => {
+                assert_eq!(
+                    a.component,
+                    domain::alert::entity::PacketAlertComponent::Ips
+                );
+                assert_eq!(a.action_label, "drop");
+            }
+            _ => panic!("expected the IPS block of the source"),
+        }
+        assert_eq!(ips.load().list_blacklist().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_imported_pass_raises_nothing() {
+        let mut rules = Vec::new();
+        for text in [
+            "alert icmp any any -> any any (msg:\"ping\"; itype:8; sid:44;)",
+            "pass icmp any any -> any any (msg:\"ok\"; itype:8; sid:45;)",
+        ] {
+            rules.extend(
+                domain::ids::suricata::compile_rule(
+                    text,
+                    &domain::ids::suricata::SuricataVars::default(),
+                )
+                .unwrap(),
+            );
+        }
+        let ids = make_service_with_rules(rules);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
+
+        dispatcher.dispatch_agent_event(packet_event(icmp_packet(8)));
+        assert!(alert_rx.try_recv().is_err());
     }
 
     // ── L7 dispatch tests ──────────────────────────────────────────

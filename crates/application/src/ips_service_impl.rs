@@ -9,7 +9,7 @@ use domain::ips::engine::IpsEngine;
 use domain::ips::entity::{
     BlacklistEntry, EnforcementAction, IpsPolicy, PersistedBlock, WhitelistEntry,
 };
-use ebpf_common::firewall::{ACTION_DROP, FirewallLpmEntryV4, FirewallLpmEntryV6};
+use ebpf_common::firewall::{ACTION_DROP, ACTION_REJECT, FirewallLpmEntryV4, FirewallLpmEntryV6};
 use ports::secondary::geoip_port::GeoIpPort;
 use ports::secondary::lpm_coordinator_port::LpmCoordinatorPort;
 use ports::secondary::metrics_port::MetricsPort;
@@ -213,6 +213,43 @@ impl IpsAppService {
         Ok(())
     }
 
+    /// Stop a source an imported rule's `drop` or `reject` matched on.
+    ///
+    /// The source joins the blacklist for the policy's blacklist duration,
+    /// and its later packets are dropped by the firewall, or answered with a
+    /// TCP reset or an ICMP unreachable when `answer` is set. The packet that
+    /// matched has already gone through: the agent reads a copy of it.
+    ///
+    /// Returns whether the block was installed. In alert mode it is recorded
+    /// only, as every IPS block; a source already blocked or whitelisted is
+    /// left as it is. A block brought back after a restart drops, whichever
+    /// action installed it.
+    pub fn stop_source(&self, ip: IpAddr, reason: String, answer: bool) -> bool {
+        let ttl = self.engine.policy().max_blacklist_duration;
+        if let Err(e) = self.engine.add_to_blacklist(ip, reason, true, ttl) {
+            tracing::debug!(%ip, "imported rule did not block its source: {e}");
+            return false;
+        }
+        self.metrics.record_ips_block();
+        self.update_blacklist_metric();
+        self.write_down(ip);
+        if self.mode != DomainMode::Block {
+            return false;
+        }
+        let Some(ref coordinator) = self.lpm_coordinator else {
+            return false;
+        };
+        let action = if answer { ACTION_REJECT } else { ACTION_DROP };
+        let (v4, v6) = Self::ip_to_lpm_entries(ip, host_prefix_len(ip), action);
+        match coordinator.insert_entries("ips", &v4, &v6) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(addr = %ip, "imported rule: failed to inject LPM entry: {e}");
+                false
+            }
+        }
+    }
+
     /// Remove an IP from the blacklist, and its host route from the datapath.
     pub fn remove_from_blacklist(&self, ip: IpAddr) -> Result<(), DomainError> {
         self.engine
@@ -370,7 +407,8 @@ impl IpsAppService {
             }
             match action {
                 EnforcementAction::BlacklistIp { ip, .. } => {
-                    let (src_v4, src_v6) = Self::ip_to_lpm_entries(*ip, host_prefix_len(*ip));
+                    let (src_v4, src_v6) =
+                        Self::ip_to_lpm_entries(*ip, host_prefix_len(*ip), ACTION_DROP);
                     if let Err(e) = coordinator.insert_entries("ips", &src_v4, &src_v6) {
                         tracing::warn!(addr = %ip, "IPS blacklist: failed to inject LPM entry: {e}");
                     } else {
@@ -378,7 +416,8 @@ impl IpsAppService {
                     }
                 }
                 EnforcementAction::UnblacklistIp { ip } => {
-                    let (src_v4, src_v6) = Self::ip_to_lpm_entries(*ip, host_prefix_len(*ip));
+                    let (src_v4, src_v6) =
+                        Self::ip_to_lpm_entries(*ip, host_prefix_len(*ip), ACTION_DROP);
                     if let Err(e) = coordinator.remove_entries("ips", &src_v4, &src_v6) {
                         tracing::warn!(addr = %ip, "IPS blacklist: failed to remove LPM entry: {e}");
                     } else {
@@ -388,7 +427,7 @@ impl IpsAppService {
                 EnforcementAction::BlockSubnet {
                     addr, prefix_len, ..
                 } => {
-                    let (src_v4, src_v6) = Self::ip_to_lpm_entries(*addr, *prefix_len);
+                    let (src_v4, src_v6) = Self::ip_to_lpm_entries(*addr, *prefix_len, ACTION_DROP);
                     if let Err(e) = coordinator.insert_entries("ips", &src_v4, &src_v6) {
                         tracing::warn!(
                             addr = %addr,
@@ -404,7 +443,7 @@ impl IpsAppService {
                     }
                 }
                 EnforcementAction::UnblockSubnet { addr, prefix_len } => {
-                    let (src_v4, src_v6) = Self::ip_to_lpm_entries(*addr, *prefix_len);
+                    let (src_v4, src_v6) = Self::ip_to_lpm_entries(*addr, *prefix_len, ACTION_DROP);
                     if let Err(e) = coordinator.remove_entries("ips", &src_v4, &src_v6) {
                         tracing::warn!(
                             addr = %addr,
@@ -427,13 +466,14 @@ impl IpsAppService {
     fn ip_to_lpm_entries(
         addr: IpAddr,
         prefix_len: u8,
+        action: u8,
     ) -> (Vec<FirewallLpmEntryV4>, Vec<FirewallLpmEntryV6>) {
         match addr {
             IpAddr::V4(v4) => {
                 let entry = FirewallLpmEntryV4 {
                     prefix_len: u32::from(prefix_len),
                     addr: v4.octets(),
-                    action: ACTION_DROP,
+                    action,
                 };
                 (vec![entry], Vec::new())
             }
@@ -441,7 +481,7 @@ impl IpsAppService {
                 let entry = FirewallLpmEntryV6 {
                     prefix_len: u32::from(prefix_len),
                     addr: v6.octets(),
-                    action: ACTION_DROP,
+                    action,
                 };
                 (Vec::new(), vec![entry])
             }
@@ -894,6 +934,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingCoordinator {
         inserted: Mutex<Vec<(u32, [u8; 4])>>,
+        actions: Mutex<Vec<u8>>,
         removed: Mutex<Vec<(u32, [u8; 4])>>,
     }
 
@@ -917,6 +958,8 @@ mod tests {
         ) -> Result<(), DomainError> {
             let mut guard = self.inserted.lock().expect("lock");
             guard.extend(src_v4.iter().map(|e| (e.prefix_len, e.addr)));
+            let mut actions = self.actions.lock().expect("lock");
+            actions.extend(src_v4.iter().map(|e| e.action));
             Ok(())
         }
 
@@ -942,6 +985,39 @@ mod tests {
         svc.set_lpm_coordinator(Arc::clone(&coordinator) as Arc<dyn LpmCoordinatorPort>);
         svc.set_mode(DomainMode::Block);
         (svc, coordinator)
+    }
+
+    #[test]
+    fn an_imported_drop_or_reject_blocks_its_source_from_the_next_packet() {
+        let (svc, coordinator) = service_with_coordinator();
+        let dropped = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 6));
+        let rejected = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+
+        assert!(svc.stop_source(dropped, "drop rule".to_string(), false));
+        assert!(svc.stop_source(rejected, "reject rule".to_string(), true));
+        // A source already blocked stays as it is.
+        assert!(!svc.stop_source(dropped, "drop rule".to_string(), true));
+
+        assert!(svc.is_blacklisted(dropped) && svc.is_blacklisted(rejected));
+        assert_eq!(
+            *coordinator.inserted.lock().expect("lock"),
+            vec![(32, [203, 0, 113, 6]), (32, [203, 0, 113, 7])]
+        );
+        assert_eq!(
+            *coordinator.actions.lock().expect("lock"),
+            vec![ACTION_DROP, ACTION_REJECT]
+        );
+    }
+
+    #[test]
+    fn an_imported_drop_in_alert_mode_is_recorded_only() {
+        let (mut svc, coordinator) = service_with_coordinator();
+        svc.set_mode(DomainMode::Alert);
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8));
+
+        assert!(!svc.stop_source(ip, "drop rule".to_string(), false));
+        assert!(svc.is_blacklisted(ip));
+        assert!(coordinator.inserted.lock().expect("lock").is_empty());
     }
 
     #[test]

@@ -29,6 +29,7 @@ const HTTP_PAYLOAD: &str = include_str!("../../tests/fixtures/suricata/http-payl
 const DCERPC: &str = include_str!("../../tests/fixtures/suricata/dcerpc-verdicts.txt");
 const SSH: &str = include_str!("../../tests/fixtures/suricata/ssh-verdicts.txt");
 const SMTP: &str = include_str!("../../tests/fixtures/suricata/smtp-verdicts.txt");
+const ACTION: &str = include_str!("../../tests/fixtures/suricata/action-verdicts.txt");
 
 /// The second the conversation fixtures' captures start at, which their
 /// packet times count from: the time Suricata read a certificate's validity
@@ -279,6 +280,11 @@ fn dcerpc_rules_alert_on_the_packets_suricata_alerts_on() {
 #[test]
 fn smtp_files_alert_on_the_packets_suricata_alerts_on() {
     replay(SMTP, 80);
+}
+
+#[test]
+fn pass_drop_and_reject_reach_as_far_as_in_suricata() {
+    replay(ACTION, 60);
 }
 
 #[test]

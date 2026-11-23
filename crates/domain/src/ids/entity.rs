@@ -280,6 +280,53 @@ pub struct ImportedRule {
     /// native rule's own and only the addresses are read from here.
     #[serde(skip)]
     pub scope: Option<PacketScope>,
+    /// What the rule's header asks for beside its alert.
+    #[serde(default, skip_serializing_if = "ImportedAction::is_alert")]
+    pub action: ImportedAction,
+}
+
+/// The action a Suricata rule's header names.
+///
+/// Suricata reads `pass` before `drop`, `reject` and `alert`: a `pass` match
+/// silences every other match of the same inspection and raises no alert of
+/// its own. `pass`, `drop` and `reject` reach the rest of the flow when the
+/// match was made on the reassembled stream or on an application
+/// transaction, and the packet alone when it was made on a packet; a flow
+/// they reach is inspected no further.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportedAction {
+    #[default]
+    Alert,
+    Pass,
+    /// Stop the flow: the alert asks the agent to cut it.
+    Drop,
+    /// Stop the flow and answer its sender with a reset or an unreachable.
+    Reject,
+}
+
+impl ImportedAction {
+    /// The keyword the rule's header carries.
+    #[must_use]
+    pub const fn keyword(self) -> &'static str {
+        match self {
+            Self::Alert => "alert",
+            Self::Pass => "pass",
+            Self::Drop => "drop",
+            Self::Reject => "reject",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_alert(&self) -> bool {
+        matches!(self, Self::Alert)
+    }
+
+    /// Whether the action stops the flow it matched.
+    #[must_use]
+    pub const fn stops(self) -> bool {
+        matches!(self, Self::Drop | Self::Reject)
+    }
 }
 
 /// The protocol a rule's header names, among those the agent inspects.
