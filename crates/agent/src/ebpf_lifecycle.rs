@@ -352,6 +352,7 @@ impl EbpfProgramManager {
         match name {
             "tc_ids" => {
                 self.services.ids_workload_scope.clear_maps();
+                self.services.l7_flow_refusals.clear_map();
                 let mut svc = (**self.services.ids_svc.load()).clone();
                 svc.clear_map_port();
                 self.services.ids_svc.store(Arc::new(svc));
@@ -456,6 +457,7 @@ impl EbpfProgramManager {
         let reader_handles = vec![jh];
 
         startup::install_ids_workload_scope(&self.services.ids_workload_scope, &mut loader);
+        startup::install_l7_flow_refusals(&self.services.l7_flow_refusals, &mut loader);
         if let Some(ids_mgr) = ids_mgr_opt {
             {
                 let mut svc = (**self.services.ids_svc.load()).clone();

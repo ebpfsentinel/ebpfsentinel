@@ -123,7 +123,8 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
         // tc-ids carries two indices tc-threatintel does not: attribution to
         // the sending cgroup, which is counted separately from a tenant
         // resolved through the cgroup map, and the kernel's confirmation that
-        // the flow behind a dropped packet was actually marked dying.
+        // the flow behind a dropped packet was actually marked dying. The
+        // last one counts the packets of a connection an L7 rule refused.
         "IDS_METRICS" => &[
             (0, "matched"),
             (1, "dropped"),
@@ -133,6 +134,7 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (5, "cgroup_resolved"),
             (6, "cgroup_attributed"),
             (7, "ct_kill_confirmed"),
+            (8, "l7_flow_dropped"),
         ],
         "THREATINTEL_METRICS" => &[
             (0, "matched"),

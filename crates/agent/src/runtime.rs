@@ -52,6 +52,9 @@ pub struct ServiceHandles {
     pub firewall_svc: Arc<RwLock<FirewallAppService>>,
     pub ids_svc: Arc<ArcSwap<IdsAppService>>,
     pub ids_workload_scope: Arc<IdsWorkloadScopeService>,
+    /// Writes L7 `deny` and `reject` verdicts into the loaded classifier's
+    /// table of refused connections.
+    pub l7_flow_refusals: Arc<application::l7_flow_refusal_service::L7FlowRefusalService>,
     pub ips_svc: Arc<ArcSwap<IpsAppService>>,
     pub rl_svc: Arc<RwLock<RateLimitAppService>>,
     pub ti_svc: Arc<ArcSwap<ThreatIntelAppService>>,
@@ -901,6 +904,9 @@ pub fn build_services(config: &AgentConfig) -> anyhow::Result<ServiceHandles> {
         firewall_svc,
         ids_svc,
         ids_workload_scope,
+        l7_flow_refusals: Arc::new(
+            application::l7_flow_refusal_service::L7FlowRefusalService::new(),
+        ),
         ips_svc,
         rl_svc,
         ti_svc,
@@ -1354,7 +1360,9 @@ pub async fn load_ebpf_programs(
     }
 
     // ── TC IDS ──────────────────────────────────────────────────
-    let ids_ok = if config.ids.enabled {
+    // tc-ids captures L7 payloads as well as matching IDS patterns, so L7
+    // filtering alone loads it, as the standalone agent does.
+    let ids_ok = if config.ids.enabled || config.l7.enabled {
         match startup::try_load_tc_ids(&ebpf_dir, config) {
             Ok((mut loader, ids_mgr_opt, l7_mgr_opt, ids_rdr, reader)) => {
                 let event_tx_clone = event_tx.clone();
@@ -1367,6 +1375,7 @@ pub async fn load_ebpf_programs(
                     reader.run(event_tx_clone, task_cancel_3, rb_obs).await;
                 });
                 startup::install_ids_workload_scope(&services.ids_workload_scope, &mut loader);
+                startup::install_l7_flow_refusals(&services.l7_flow_refusals, &mut loader);
                 if let Some(ids_mgr) = ids_mgr_opt {
                     let mut svc = (**services.ids_svc.load()).clone();
                     svc.set_map_port(Box::new(ids_mgr));
@@ -1812,7 +1821,7 @@ pub async fn load_ebpf_programs(
     {
         use adapters::ebpf::link_watcher::HookSide;
         let loaded = |name: &str| program_status.get(name).copied().unwrap_or(false);
-        let ids_egress = config.ids.inspect_egress || config.container.resolver.enabled;
+        let ids_egress = config.ids_on_egress();
         let wanted = [
             ("tc_ids", loaded("tc_ids"), HookSide::Ingress),
             (

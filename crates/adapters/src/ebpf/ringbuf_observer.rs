@@ -494,6 +494,7 @@ mod tests {
         let mut events = vec![
             AgentEvent::L4(packet_event_stamped(boot_ns)),
             AgentEvent::L7 {
+                segment: None,
                 header: packet_event_stamped(boot_ns),
                 payload: Vec::new(),
             },

@@ -34,6 +34,7 @@ pub mod kfunc;
 pub mod kfunc_attach;
 pub mod kfunc_feature_probe;
 pub mod kfunc_loader;
+pub mod l7_denied_flows;
 pub mod l7_ports_manager;
 pub mod lb_map_manager;
 pub mod link_handover;
@@ -127,6 +128,7 @@ pub use kernel_probe::{
     upgrade_hint as kernel_upgrade_hint,
 };
 pub use kfunc::set_module_btf_fd;
+pub use l7_denied_flows::L7DeniedFlowsMap;
 pub use l7_ports_manager::L7PortsManager;
 pub use lb_map_manager::LbMapManager;
 pub use loader::{DEFAULT_BPF_PIN_PATH, EbpfLoader, xdp_mode_to_flags};

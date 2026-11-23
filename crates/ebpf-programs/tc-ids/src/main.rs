@@ -7,7 +7,7 @@ use aya_ebpf::helpers::generated::{
 use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
-    btf_maps::{Array, HashMap, LpmTrie, PerCpuArray, RingBuf, lpm_trie::Key},
+    btf_maps::{Array, HashMap, LpmTrie, LruHashMap, PerCpuArray, RingBuf, lpm_trie::Key},
     helpers::{
         bpf_get_current_cgroup_id, bpf_get_prandom_u32, bpf_get_smp_processor_id,
         bpf_ktime_get_boot_ns,
@@ -17,8 +17,8 @@ use aya_ebpf::{
 };
 use ebpf_common::{
     event::{
-        EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, MAX_L7_PAYLOAD, MAX_L7_PORTS, PacketEvent,
-        SMALL_L7_PAYLOAD,
+        EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, L7Segment, MAX_L7_PAYLOAD, MAX_L7_PORTS,
+        PacketEvent, SMALL_L7_PAYLOAD,
     },
     firewall::{
         FW_EMPTY_IDS_PATTERNS, FW_EMPTY_IDS_SRC_PATTERNS, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_L7_PORTS,
@@ -27,10 +27,11 @@ use ebpf_common::{
     ids::{
         IDS_ACTION_DROP, IDS_METRIC_CGROUP_ATTRIBUTED, IDS_METRIC_CGROUP_TENANT_RESOLVED,
         IDS_METRIC_COUNT, IDS_METRIC_CT_KILL_CONFIRMED, IDS_METRIC_DROPPED, IDS_METRIC_ERRORS,
-        IDS_METRIC_EVENTS_DROPPED, IDS_METRIC_MATCHED, IDS_METRIC_TOTAL_SEEN, IDS_MIRROR_COPY_MARK,
-        IDS_SAMPLING_RANDOM, IDS_SCOPE_WORKLOAD, IDS_WORKLOAD_SCOPE_MAX_ENTRIES, IdsPatternKey,
-        IdsPatternValue, IdsSamplingConfig, IdsWorkloadScopeKey, WORKLOAD_LINK_MAX_ENTRIES,
-        is_mirror_copy,
+        IDS_METRIC_EVENTS_DROPPED, IDS_METRIC_L7_FLOW_DROPPED, IDS_METRIC_MATCHED,
+        IDS_METRIC_TOTAL_SEEN, IDS_MIRROR_COPY_MARK, IDS_SAMPLING_RANDOM, IDS_SCOPE_WORKLOAD,
+        IDS_WORKLOAD_SCOPE_MAX_ENTRIES, IdsPatternKey, IdsPatternValue, IdsSamplingConfig,
+        IdsWorkloadScopeKey, L7_DENIED_FLOWS_MAX_ENTRIES, L7FlowKey, L7FlowVerdict,
+        WORKLOAD_LINK_MAX_ENTRIES, is_mirror_copy,
     },
     tenant::{MAX_TENANT_SUBNET_LPM_ENTRIES, MAX_TENANT_SUBNET_V6_LPM_ENTRIES},
 };
@@ -174,6 +175,23 @@ static TENANT_CGROUP_MAP: HashMap<u64, u32, 4096> = HashMap::new();
 #[btf_map]
 static L7_PORTS: HashMap<u16, u8, { MAX_L7_PORTS as usize }> = HashMap::new();
 
+/// Connections an L7 rule refused, one entry per direction, written by the
+/// agent when a captured request matches a `deny` or `reject` rule. A packet
+/// of such a connection is shot here, in both directions, until the entry
+/// expires or a new connection opens on the same addresses and ports.
+#[btf_map]
+static L7_DENIED_FLOWS: LruHashMap<
+    L7FlowKey,
+    L7FlowVerdict,
+    { L7_DENIED_FLOWS_MAX_ENTRIES as usize },
+> = LruHashMap::new();
+
+/// Per-CPU room for the `L7_DENIED_FLOWS` key. The classifier's frame is
+/// close to the verifier's 512-byte ceiling, so a 40-byte key is built here
+/// rather than on the stack.
+#[btf_map]
+static L7_FLOW_SCRATCH: PerCpuArray<L7FlowKey, 1> = PerCpuArray::new();
+
 /// Whether either end of the conversation is a configured L7 service port.
 ///
 /// A configured port identifies a *service*, and only the client→server
@@ -196,6 +214,7 @@ fn l7_port_configured(gates: u32, src_port: u16, dst_port: u16) -> bool {
 #[repr(C)]
 struct L7EventSmall {
     header: PacketEvent,
+    segment: L7Segment,
     payload: [u8; SMALL_L7_PAYLOAD],
 }
 
@@ -204,6 +223,7 @@ struct L7EventSmall {
 #[repr(C)]
 struct L7EventBuf {
     header: PacketEvent,
+    segment: L7Segment,
     payload: [u8; MAX_L7_PAYLOAD],
 }
 
@@ -230,6 +250,8 @@ const METRIC_CGROUP_ATTRIBUTED: u32 = IDS_METRIC_CGROUP_ATTRIBUTED;
 /// this program decided and this is what the kernel applied: a flow with no
 /// entry to tear down is dropped all the same and confirms nothing.
 const METRIC_CT_KILL_CONFIRMED: u32 = IDS_METRIC_CT_KILL_CONFIRMED;
+/// A packet of a connection an L7 rule refused was shot.
+const METRIC_L7_FLOW_DROPPED: u32 = IDS_METRIC_L7_FLOW_DROPPED;
 
 /// Returns `true` if the EVENTS RingBuf has backpressure (>75% full).
 #[inline(always)]
@@ -538,13 +560,16 @@ fn process_ids_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
     if let Some(tcphdr) = tcp_hdr_ptr
         && l7_port_configured(gates, src_port, dst_port)
     {
+        if let Some(rule_hash) = l7_flow_refused(&flow, opening_syn(tcphdr)) {
+            return Ok(drop_refused_l7_flow(ctx, &flow, rule_hash));
+        }
         let tcp_data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
         let l7_offset = l4_offset + tcp_data_off;
         // bpf_skb_load_bytes handles fragmented packets natively
         // (via skb_header_pointer), so linearization via
         // bpf_skb_pull_data is unnecessary and wastes ~1µs on
         // large packets. Removed in favour of direct load.
-        emit_l7_event(ctx, &flow, l7_offset);
+        emit_l7_event(ctx, &flow, l7_offset, tcp_seq(tcphdr));
     }
 
     // IDS pattern matching (key is port+protocol, no IP in key)
@@ -598,11 +623,14 @@ fn process_ids_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
     if let Some(tcphdr) = tcp_hdr_ptr
         && l7_port_configured(gates, src_port, dst_port)
     {
+        if let Some(rule_hash) = l7_flow_refused(&flow, opening_syn(tcphdr)) {
+            return Ok(drop_refused_l7_flow(ctx, &flow, rule_hash));
+        }
         let tcp_data_off = (unsafe { (*tcphdr).doff() } as usize) * 4;
         let l7_offset = l4_offset + tcp_data_off;
         // bpf_skb_load_bytes handles fragments natively - no
         // linearization needed (see IPv4 path comment).
-        emit_l7_event(ctx, &flow, l7_offset);
+        emit_l7_event(ctx, &flow, l7_offset, tcp_seq(tcphdr));
     }
 
     // IDS pattern matching (key is port+protocol, same map for v4/v6)
@@ -804,6 +832,81 @@ fn process_ids_pattern(
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+/// Sequence number of the segment's first payload byte, host order.
+#[inline(always)]
+fn tcp_seq(tcphdr: *const TcpHdr) -> u32 {
+    // SAFETY: `tcphdr` was bounds-checked by `ptr_at` before it was kept.
+    u32_from_be_bytes(unsafe { (*tcphdr).seq })
+}
+
+/// Whether the segment opens a connection: SYN without ACK.
+#[inline(always)]
+fn opening_syn(tcphdr: *const TcpHdr) -> bool {
+    // SAFETY: `tcphdr` was bounds-checked by `ptr_at` before it was kept.
+    unsafe { (*tcphdr).syn() != 0 && (*tcphdr).ack() == 0 }
+}
+
+/// The rule hash of the refusal standing against this packet's connection,
+/// or `None` when the connection is not refused.
+///
+/// An entry past its expiry is removed and lets the packet through. An
+/// opening SYN on a refused tuple is a new connection the old verdict does
+/// not cover: both directions are removed, so the handshake and the request
+/// that follows are judged on their own.
+#[inline(always)]
+fn l7_flow_refused(flow: &FlowMeta, opening: bool) -> Option<u32> {
+    let key = L7_FLOW_SCRATCH.get_ptr_mut(0)?;
+    // SAFETY: the per-CPU slot belongs to this program for the length of
+    // this call; the classifier does not run re-entrantly on one CPU.
+    let key = unsafe { &mut *key };
+    key.src_addr = flow.src_addr;
+    key.dst_addr = flow.dst_addr;
+    key.src_port = flow.src_port;
+    key.dst_port = flow.dst_port;
+    key.ipv6 = u8::from((flow.flags & FLAG_IPV6) != 0);
+    key._padding = [0; 3];
+    // SAFETY: the value is copied out before the map is touched again.
+    let verdict = unsafe { L7_DENIED_FLOWS.get(key) }.copied()?;
+    if opening {
+        let _ = L7_DENIED_FLOWS.remove(key);
+        key.src_addr = flow.dst_addr;
+        key.dst_addr = flow.src_addr;
+        key.src_port = flow.dst_port;
+        key.dst_port = flow.src_port;
+        let _ = L7_DENIED_FLOWS.remove(key);
+        return None;
+    }
+    // SAFETY: a helper with no argument and no side effect.
+    if unsafe { bpf_ktime_get_boot_ns() } >= verdict.expires_boot_ns {
+        let _ = L7_DENIED_FLOWS.remove(key);
+        return None;
+    }
+    Some(verdict.rule_hash)
+}
+
+/// Shoot a packet of a refused connection and tear its conntrack entry down,
+/// as an IDS drop does, so the connection stops holding an entry it will
+/// never close.
+#[inline(always)]
+fn drop_refused_l7_flow(ctx: &TcContext, flow: &FlowMeta, rule_hash: u32) -> i32 {
+    let traced = trace::tc(ctx);
+    trace::tc_record(ctx, stage::IDS, reason::LIST, rule_hash, TC_ACT_SHOT as u32);
+    if !traced {
+        let tuple = if (flow.flags & FLAG_IPV6) != 0 {
+            CtTuple::v6(flow.src_addr, flow.dst_addr, flow.src_port, flow.dst_port)
+        } else {
+            CtTuple::v4(flow.src_addr[0], flow.dst_addr[0], flow.src_port, flow.dst_port)
+        };
+        let mut opts = BpfCtOpts::tcp();
+        // SAFETY: the context is this program's own `__sk_buff`.
+        if unsafe { kill_flow_via_skb_ct(raw_skb(ctx) as *mut _, tuple, &mut opts) } {
+            increment_metric(traced, METRIC_CT_KILL_CONFIRMED);
+        }
+    }
+    increment_metric(traced, METRIC_L7_FLOW_DROPPED);
+    TC_ACT_SHOT
+}
+
 // ptr_at, skip_ipv6_ext_headers imported from ebpf_helpers::tc
 
 /// Emit the IDS event for a matched packet.
@@ -840,8 +943,8 @@ fn increment_metric(traced: bool, index: u32) {
 /// Emit an L7 event: `PacketEvent` header + raw payload bytes from the packet.
 ///
 /// Uses tiered `RingBuf` reservation to minimize bandwidth:
-/// - Packets with <= 512 bytes of TCP payload -> `L7EventSmall` (616 bytes)
-/// - Packets with > 512 bytes -> `L7EventBuf` (2152 bytes, up to 2048 payload bytes)
+/// - Packets with <= 512 bytes of TCP payload -> `L7EventSmall` (624 bytes)
+/// - Packets with > 512 bytes -> `L7EventBuf` (2160 bytes, up to 2048 payload bytes)
 ///
 /// Both tiers use compile-time constant lengths for `bpf_skb_load_bytes`
 /// (required by the eBPF verifier on kernel 6.1+).
@@ -850,7 +953,7 @@ fn increment_metric(traced: bool, index: u32) {
 /// including fragments without linearization, then falls back to
 /// `ctx.len()` if the dynptr creation fails (should not happen on the 6.12 floor).
 #[inline(always)]
-fn emit_l7_event(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize) {
+fn emit_l7_event(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, seq: u32) {
     // A traced packet is nobody's traffic, so its payload is not captured.
     if trace::tc(ctx) {
         return;
@@ -868,16 +971,26 @@ fn emit_l7_event(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize) {
         .map_or(ctx.len() as usize, |total| total as usize);
     let payload_avail = pkt_len.saturating_sub(l7_offset);
 
+    let segment = L7Segment {
+        tcp_seq: seq,
+        wire_len: payload_avail as u32,
+    };
     if payload_avail <= SMALL_L7_PAYLOAD {
-        emit_l7_small(ctx, flow, l7_offset, payload_avail);
+        emit_l7_small(ctx, flow, l7_offset, payload_avail, segment);
     } else {
-        emit_l7_full(ctx, flow, l7_offset, payload_avail);
+        emit_l7_full(ctx, flow, l7_offset, payload_avail, segment);
     }
 }
 
-/// Small L7 event (616 bytes): for packets with at most 512 bytes of TCP payload.
+/// Small L7 event (624 bytes): for packets with at most 512 bytes of TCP payload.
 #[inline(always)]
-fn emit_l7_small(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_avail: usize) {
+fn emit_l7_small(
+    ctx: &TcContext,
+    flow: &FlowMeta,
+    l7_offset: usize,
+    payload_avail: usize,
+    segment: L7Segment,
+) {
     // Bound the copy to what the packet actually carries, capped at the
     // buffer size. The clamp gives the verifier a known upper bound for
     // the `bpf_skb_load_bytes` length, and loading the exact available
@@ -905,6 +1018,7 @@ fn emit_l7_small(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_ava
         let ptr = entry.as_mut_ptr();
         let loaded = unsafe {
             fill_l7_header(ctx, &mut (*ptr).header, flow, to_load as u32);
+            (*ptr).segment = segment;
             // `bpf_skb_load_bytes` marks its destination region initialized
             // for the verifier, so no separate memset of the payload is
             // needed - an explicit memset of a RingBuf reservation explodes
@@ -931,13 +1045,19 @@ fn emit_l7_small(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_ava
     }
 }
 
-/// Full L7 event (2152 bytes): for packets with > 512 bytes TCP payload.
+/// Full L7 event (2160 bytes): for packets with > 512 bytes TCP payload.
 ///
 /// Emitted via `RingBuf`. TC programs are not sleepable, so the
 /// sleepable arena-alloc kfunc is unavailable here; the copy-based
 /// `RingBuf` path is the sole transport.
 #[inline(always)]
-fn emit_l7_full(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_avail: usize) {
+fn emit_l7_full(
+    ctx: &TcContext,
+    flow: &FlowMeta,
+    l7_offset: usize,
+    payload_avail: usize,
+    segment: L7Segment,
+) {
     // Bound the copy to what the packet actually carries, capped at the
     // buffer size. The clamp gives the verifier a known upper bound for
     // the `bpf_skb_load_bytes` length, and loading the exact available
@@ -965,6 +1085,7 @@ fn emit_l7_full(ctx: &TcContext, flow: &FlowMeta, l7_offset: usize, payload_avai
         let ptr = entry.as_mut_ptr();
         let loaded = unsafe {
             fill_l7_header(ctx, &mut (*ptr).header, flow, to_load as u32);
+            (*ptr).segment = segment;
             // `bpf_skb_load_bytes` marks its destination region initialized
             // for the verifier, so no separate memset of the payload is
             // needed - an explicit memset of a RingBuf reservation explodes

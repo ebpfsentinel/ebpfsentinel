@@ -54,6 +54,9 @@ l7:
     - 8888
     - 8889
     - 8890
+    # The agent's own gRPC port: suite 29 calls it with grpcurl, a client
+    # that Huffman-codes the request path, to prove a grpc rule reads it.
+    - 50051
   rules:
     - id: l7-test-deny-admin
       priority: 10
@@ -73,6 +76,12 @@ l7:
       protocol: http
       path: "/aliased"
       dst_port_alias: l7-test-alias-ports
+      enabled: true
+    - id: l7-test-deny-grpc-admin
+      priority: 10
+      action: deny
+      protocol: grpc
+      service: "admin.AdminService"
       enabled: true
     - id: l7-test-deny-malware-sni
       priority: 10

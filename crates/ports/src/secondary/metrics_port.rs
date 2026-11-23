@@ -53,6 +53,16 @@ pub trait PacketMetrics: Send + Sync {
     /// connections was full.
     fn record_l7_port_promise_uncounted(&self) {}
 
+    /// Count one L7 `deny` or `reject` verdict by what became of it:
+    /// `refused` when the connection went into the classifier's table of
+    /// refused connections, `not_enforced` when it could not.
+    fn record_l7_flow_refusal(&self, _outcome: &str) {}
+
+    /// Count one cleartext HTTP/2 connection the L7 reader stopped reading,
+    /// by reason: `lost_bytes`, `hpack`, `too_large`, `bad_frame`, or
+    /// `evicted` when the table of connections was full.
+    fn record_l7_http2_unread(&self, _reason: &str) {}
+
     /// Record one L7 request that finished, against the service it is
     /// counted under and the side of the connection that service was on.
     ///

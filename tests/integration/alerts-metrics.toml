@@ -22,6 +22,9 @@ reason = "armed only by enterprise tamper protection; the OSS agent never refuse
 [metric."audit_failures"]
 reason = "counted only when the redb audit store or the log sink refuses a write, an I/O error or a full disk; no lane breaks the disk under a running agent"
 
+[metric."l7_http2_unread"]
+reason = "counted only when a cleartext HTTP/2 connection loses header bytes, carries a malformed frame or HPACK block, or overflows 1024 tracked connections; no lane loses capture bytes on demand, and the domain http2 tests pin each reason on curl captures"
+
 [metric."link_inspected_twice_seconds"]
 reason = "observed only when a pod profile agent claims a Kubernetes workload link the node agent already inspects; no lane runs a pod profile agent beside a node agent, and the link watcher's unit tests pin the observation"
 

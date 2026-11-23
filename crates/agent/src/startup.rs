@@ -648,6 +648,24 @@ pub(crate) fn install_cgroup_shaping(
     }
 }
 
+/// Hand a freshly loaded tc-ids object's table of refused connections to the
+/// service that writes L7 refusals, or tell it there is none, so a verdict
+/// reached without one is reported as not enforced.
+pub(crate) fn install_l7_flow_refusals(
+    refusals: &application::l7_flow_refusal_service::L7FlowRefusalService,
+    loader: &mut EbpfLoader,
+) {
+    match adapters::ebpf::L7DeniedFlowsMap::new(loader.ebpf_mut()) {
+        Ok(map) => refusals.set_map(Box::new(map)),
+        Err(e) => {
+            refusals.clear_map();
+            warn!(
+                "L7 refused-connection table not available, L7 deny verdicts are not enforced: {e}"
+            );
+        }
+    }
+}
+
 /// Hand a freshly loaded tc-ids object's scope tables to the scope service,
 /// or tell it there are none, before the pattern map is handed over: the
 /// pattern sync is what decides whether a scoped rule can be installed.
@@ -799,6 +817,8 @@ pub async fn run(
     let firewall_svc = Arc::new(RwLock::new(svc));
 
     let ids_workload_scope = ids_workload_scope_service(&config);
+    let l7_flow_refusals =
+        Arc::new(application::l7_flow_refusal_service::L7FlowRefusalService::new());
     let mut ids_svc = IdsAppService::new(
         ids_engine,
         None,
@@ -2699,6 +2719,7 @@ pub async fn run(
                         reader.run(event_tx_clone, task_cancel_5, rb_obs).await;
                     });
                     install_ids_workload_scope(&ids_workload_scope, &mut loader);
+                    install_l7_flow_refusals(&l7_flow_refusals, &mut loader);
                     if let Some(ids_mgr) = ids_mgr_opt {
                         {
                             let mut svc = (**ids_svc.load()).clone();
@@ -3693,7 +3714,7 @@ pub async fn run(
 
         // Each side in the order the chain runs on a configured interface:
         // programs on one hook run in the order they were attached.
-        let ids_egress = config.ids.inspect_egress || config.container.resolver.enabled;
+        let ids_egress = config.ids_on_egress();
         let wanted = [
             ("tc_ids", ids_ok, HookSide::Ingress),
             ("tc_threatintel", ti_ok, HookSide::Ingress),
@@ -3749,6 +3770,7 @@ pub async fn run(
                 firewall_svc: Arc::clone(&firewall_svc),
                 ids_svc: Arc::clone(&ids_svc),
                 ids_workload_scope: Arc::clone(&ids_workload_scope),
+                l7_flow_refusals: Arc::clone(&l7_flow_refusals),
                 ips_svc: Arc::clone(&ips_svc),
                 rl_svc: Arc::clone(&rl_svc),
                 ti_svc: Arc::clone(&ti_svc),
@@ -3855,7 +3877,7 @@ pub async fn run(
             adapters::ebpf::datapath_trace::EbpfDatapathTracer::new(Box::new(move |direction| {
                 let ids_egress = {
                     let config = traced_config.blocking_read();
-                    config.ids.inspect_egress || config.container.resolver.enabled
+                    config.ids_on_egress()
                 };
                 manager.blocking_lock().trace_plan(direction, ids_egress)
             }));
@@ -4525,7 +4547,8 @@ pub async fn run(
     .with_dlp_service(Arc::clone(&dlp_svc))
     .with_doh_resolvers(&config.dns.doh_resolvers)
     .with_fingerprint_cache(Arc::clone(&ja4_cache))
-    .with_handshake_log(Arc::clone(&handshake_log));
+    .with_handshake_log(Arc::clone(&handshake_log))
+    .with_l7_flow_refusals(Arc::clone(&l7_flow_refusals));
     // Wire DNS services into the dispatcher for DNS response processing
     let dispatcher = if let Some(ref svc) = dns_cache_svc_concrete {
         dispatcher.with_dns_cache_svc(Arc::clone(svc))
@@ -6177,9 +6200,10 @@ pub fn try_load_tc_ids(ebpf_dir: &str, config: &AgentConfig) -> anyhow::Result<T
     // via `bpf_skb_cgroup_id` - the ingress softirq path cannot recover it.
     // This is needed for container attribution, so it fires whenever the
     // container resolver is on; `inspect_egress` keeps it available even when
-    // attribution is off. NOTE: an egress-attached tc-ids also enforces IDS
-    // verdicts on outbound traffic, not only ingress.
-    if config.ids.inspect_egress || config.container.resolver.enabled {
+    // attribution is off. L7 filtering needs it too: a refused connection's
+    // reply leaves a serving host through egress. NOTE: an egress-attached
+    // tc-ids also enforces IDS verdicts on outbound traffic, not only ingress.
+    if config.ids_on_egress() {
         for iface in &config.agent.interfaces {
             if let Err(e) = loader.attach_tc_egress("tc_ids", iface) {
                 warn!("tc-ids egress attach on '{iface}' failed: {e}");

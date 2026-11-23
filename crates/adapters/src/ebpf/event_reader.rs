@@ -4,7 +4,7 @@ use crate::ebpf::map_store::MapStore;
 use crate::ebpf::ringbuf_observer::{DrainTrigger, RingBufObserver};
 use aya::maps::{MapData, RingBuf};
 use domain::common::agent_event::AgentEvent;
-use ebpf_common::event::{EVENT_TYPE_L7, PacketEvent};
+use ebpf_common::event::{EVENT_TYPE_L7, L7_SEGMENT_LEN, L7Segment, PacketEvent};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Interval, MissedTickBehavior};
@@ -176,7 +176,8 @@ fn drain(
 /// Decode one `RingBuf` record into an [`AgentEvent`].
 ///
 /// Returns `None` when the record is too short to hold a [`PacketEvent`].
-/// For L7 events the kernel reserves a fixed-size buffer (512 or 2048 B)
+/// An L7 record carries an [`L7Segment`] after the header, then the
+/// payload. The kernel reserves a fixed-size payload buffer (512 or 2048 B)
 /// but only fills `header.rule_id` bytes via `bpf_skb_load_bytes`; the
 /// remaining bytes are uninitialised kernel memory. The payload is trimmed
 /// to that captured length so downstream parsers never read - nor leak -
@@ -191,11 +192,16 @@ fn decode_event(bytes: &[u8]) -> Option<AgentEvent> {
     // with any alignment.
     let event = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<PacketEvent>()) };
 
-    if event.event_type == EVENT_TYPE_L7 && bytes.len() > header_len {
-        let raw = &bytes[header_len..];
+    if event.event_type == EVENT_TYPE_L7 && bytes.len() > header_len + L7_SEGMENT_LEN {
+        // SAFETY: L7Segment is #[repr(C)] with two u32 fields the kernel
+        // writes verbatim; the length is checked above.
+        let segment =
+            unsafe { std::ptr::read_unaligned(bytes[header_len..].as_ptr().cast::<L7Segment>()) };
+        let raw = &bytes[header_len + L7_SEGMENT_LEN..];
         let real_len = (event.rule_id as usize).min(raw.len());
         Some(AgentEvent::L7 {
             header: event,
+            segment: Some(segment),
             payload: raw[..real_len].to_vec(),
         })
     } else {
@@ -339,12 +345,23 @@ mod tests {
         let mut bytes = vec![0u8; header_len];
         bytes[45] = EVENT_TYPE_L7; // event_type
         bytes[48..52].copy_from_slice(&(real.len() as u32).to_ne_bytes()); // rule_id = captured len
+        bytes.extend_from_slice(&0x0102_0304u32.to_ne_bytes()); // tcp_seq
+        bytes.extend_from_slice(&700u32.to_ne_bytes()); // wire_len
         bytes.extend_from_slice(&real);
         // Fixed small-tier buffer tail (512 B) of uninitialised garbage.
         bytes.extend_from_slice(&[0xFFu8; 512 - 5]);
 
         match decode_event(&bytes) {
-            Some(AgentEvent::L7 { payload, .. }) => {
+            Some(AgentEvent::L7 {
+                payload, segment, ..
+            }) => {
+                assert_eq!(
+                    segment,
+                    Some(L7Segment {
+                        tcp_seq: 0x0102_0304,
+                        wire_len: 700
+                    })
+                );
                 assert_eq!(payload.len(), real.len(), "must trim to captured length");
                 assert_eq!(payload, real, "must not leak the stale tail");
             }
@@ -359,6 +376,7 @@ mod tests {
         let mut bytes = vec![0u8; header_len];
         bytes[45] = EVENT_TYPE_L7;
         bytes[48..52].copy_from_slice(&9999u32.to_ne_bytes());
+        bytes.extend_from_slice(&[0u8; L7_SEGMENT_LEN]);
         bytes.extend_from_slice(&[0xABu8; 10]);
 
         match decode_event(&bytes) {

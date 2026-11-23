@@ -1,0 +1,17 @@
+// l7-admin.proto - a gRPC service the agent does not serve, for suite 29: a
+// call to it is what an L7 grpc rule on admin.AdminService refuses. grpcurl
+// reads the method from here; the agent answers Unimplemented when the call
+// reaches it.
+syntax = "proto3";
+
+package admin;
+
+service AdminService {
+    rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+}
+
+message DeleteUserRequest {
+    string name = 1;
+}
+
+message DeleteUserResponse {}

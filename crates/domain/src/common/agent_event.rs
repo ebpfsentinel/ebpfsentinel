@@ -1,6 +1,6 @@
 use ebpf_common::dlp::DlpEvent;
 use ebpf_common::dns::DnsEvent;
-use ebpf_common::event::PacketEvent;
+use ebpf_common::event::{L7Segment, PacketEvent};
 
 /// Wrapper around events flowing from the eBPF event reader to the dispatcher.
 ///
@@ -11,6 +11,8 @@ pub enum AgentEvent {
     L4(PacketEvent),
     L7 {
         header: PacketEvent,
+        /// Where the payload sits in its TCP stream, when the capture said.
+        segment: Option<L7Segment>,
         payload: Vec<u8>,
     },
     Dns {

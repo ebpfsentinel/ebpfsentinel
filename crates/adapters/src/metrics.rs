@@ -324,6 +324,18 @@ pub struct PortPromiseLabels {
     pub verdict: String,
 }
 
+/// Labels for `l7_flow_refusals`: `refused` or `not_enforced`.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct L7FlowRefusalLabels {
+    pub outcome: String,
+}
+
+/// Labels for `l7_http2_unread`: why a connection stopped being read.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct L7Http2UnreadLabels {
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct L7DurationLabels {
     pub service: String,
@@ -584,6 +596,12 @@ pub struct AgentMetrics {
     pub l7_port_promise_total: Family<PortPromiseLabels, Counter>,
     /// Connections left unjudged because the table of judged ones was full.
     pub l7_port_promise_uncounted_total: Counter,
+    /// L7 `deny` and `reject` verdicts, by whether the connection was written
+    /// into the classifier's table of refused connections.
+    pub l7_flow_refusals_total: Family<L7FlowRefusalLabels, Counter>,
+    /// Cleartext HTTP/2 connections whose header blocks stopped being
+    /// decoded, by reason.
+    pub l7_http2_unread_total: Family<L7Http2UnreadLabels, Counter>,
     pub container_resolver_cache_hits_total: Counter,
     pub container_resolver_cache_misses_total: Counter,
     pub container_resolver_errors_total: Counter,
@@ -1329,6 +1347,20 @@ impl AgentMetrics {
             l7_port_promise_uncounted_total.clone(),
         );
 
+        let l7_flow_refusals_total = Family::<L7FlowRefusalLabels, Counter>::default();
+        registry.register(
+            "l7_flow_refusals",
+            "L7 deny and reject verdicts, by whether the connection was refused in the datapath or left unenforced",
+            l7_flow_refusals_total.clone(),
+        );
+
+        let l7_http2_unread_total = Family::<L7Http2UnreadLabels, Counter>::default();
+        registry.register(
+            "l7_http2_unread",
+            "Cleartext HTTP/2 connections the L7 reader stopped decoding, by reason",
+            l7_http2_unread_total.clone(),
+        );
+
         let l7_requests_total = Family::<L7RequestLabels, Counter>::default();
         registry.register(
             "l7_requests",
@@ -1538,6 +1570,8 @@ impl AgentMetrics {
             tcp_rtt_seconds,
             l7_port_promise_total,
             l7_port_promise_uncounted_total,
+            l7_flow_refusals_total,
+            l7_http2_unread_total,
             container_resolver_cache_hits_total,
             container_resolver_cache_misses_total,
             container_resolver_errors_total,
@@ -1707,6 +1741,22 @@ impl PacketMetrics for AgentMetrics {
 
     fn record_l7_port_promise_uncounted(&self) {
         self.l7_port_promise_uncounted_total.inc();
+    }
+
+    fn record_l7_flow_refusal(&self, outcome: &str) {
+        self.l7_flow_refusals_total
+            .get_or_create(&L7FlowRefusalLabels {
+                outcome: outcome.to_string(),
+            })
+            .inc();
+    }
+
+    fn record_l7_http2_unread(&self, reason: &str) {
+        self.l7_http2_unread_total
+            .get_or_create(&L7Http2UnreadLabels {
+                reason: reason.to_string(),
+            })
+            .inc();
     }
 
     fn observe_processing_duration(&self, program: &str, duration_seconds: f64) {
@@ -3198,6 +3248,8 @@ mod tests {
         ("l7_requests", "counter"),
         ("l7_port_promise", "counter"),
         ("l7_port_promise_uncounted", "counter"),
+        ("l7_flow_refusals", "counter"),
+        ("l7_http2_unread", "counter"),
         ("learning_edges", "gauge"),
         ("learning_observations", "counter"),
         ("link_attach_gap_seconds", "histogram"),
@@ -3548,6 +3600,8 @@ mod tests {
             },
         );
         m.record_l7_port_promise(443, "mismatch");
+        m.record_l7_flow_refusal("refused");
+        m.record_l7_http2_unread("lost_bytes");
         m.record_file_changes("written", 1);
         m.record_file_drifts("content", 1);
         m.dlp_scan_duration_seconds.observe(0.000_01);

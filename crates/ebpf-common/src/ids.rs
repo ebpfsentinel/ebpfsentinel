@@ -38,8 +38,12 @@ pub const IDS_METRIC_CGROUP_ATTRIBUTED: u32 = 6;
 /// differ whenever the flow has no conntrack entry to mark, so folding them
 /// into one slot would report a decision as an enforcement.
 pub const IDS_METRIC_CT_KILL_CONFIRMED: u32 = 7;
+/// Metric index: a packet of a connection an L7 rule refused, shot by the
+/// datapath. Counted apart from `IDS_METRIC_DROPPED`, which counts the
+/// packets an IDS pattern dropped, so each enforcement reads on its own.
+pub const IDS_METRIC_L7_FLOW_DROPPED: u32 = 8;
 /// Total number of IDS metric slots (one past the last index).
-pub const IDS_METRIC_COUNT: u32 = 8;
+pub const IDS_METRIC_COUNT: u32 = 9;
 
 /// `skb->mark` of a forensics mirror copy.
 ///
@@ -159,6 +163,64 @@ pub struct IdsWorkloadScopeKey {
     pub _padding: u32,
 }
 
+/// Capacity of `L7_DENIED_FLOWS`. Each refused connection takes two entries,
+/// one per direction, so 32768 entries hold 16384 refused connections at
+/// once; past that the least recently used entry goes first.
+pub const L7_DENIED_FLOWS_MAX_ENTRIES: u32 = 32768;
+
+/// How long a refused connection stays refused once an L7 rule denied it,
+/// in nanoseconds (ten minutes). A connection still sending past this is
+/// judged again on its next captured request; a new connection on the same
+/// addresses and ports is judged afresh as soon as its SYN is seen.
+pub const L7_DENIED_FLOW_TTL_NS: u64 = 600 * 1_000_000_000;
+
+/// Key of `L7_DENIED_FLOWS`: one direction of a TCP connection, as the
+/// packet carries it. Addresses use the layout of `PacketEvent`: an IPv4
+/// address in the first word, host byte order, the other three zero.
+/// Size: 40 bytes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct L7FlowKey {
+    pub src_addr: [u32; 4],
+    pub dst_addr: [u32; 4],
+    pub src_port: u16,
+    pub dst_port: u16,
+    /// `1` for IPv6, `0` for IPv4, so an IPv4 address never collides with
+    /// the IPv6 address whose first word it equals.
+    pub ipv6: u8,
+    pub _padding: [u8; 3],
+}
+
+impl L7FlowKey {
+    /// The key of the opposite direction of the same connection.
+    pub const fn reversed(&self) -> Self {
+        Self {
+            src_addr: self.dst_addr,
+            dst_addr: self.src_addr,
+            src_port: self.dst_port,
+            dst_port: self.src_port,
+            ipv6: self.ipv6,
+            _padding: [0; 3],
+        }
+    }
+}
+
+/// Value of `L7_DENIED_FLOWS`: until when the connection is refused, on the
+/// kernel's boot clock (`bpf_ktime_get_boot_ns`), and which rule refused it.
+/// Size: 16 bytes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct L7FlowVerdict {
+    pub expires_boot_ns: u64,
+    /// Stable hash of the L7 rule id, for a reader of the map.
+    pub rule_hash: u32,
+    pub _padding: u32,
+}
+
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for L7FlowKey {}
+#[cfg(feature = "userspace")]
+unsafe impl aya::Pod for L7FlowVerdict {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for IdsPatternKey {}
 #[cfg(feature = "userspace")]
@@ -170,6 +232,30 @@ unsafe impl aya::Pod for IdsWorkloadScopeKey {}
 mod tests {
     use super::*;
     use core::mem;
+
+    #[test]
+    fn l7_flow_key_and_verdict_have_the_layout_the_kernel_reads() {
+        assert_eq!(mem::size_of::<L7FlowKey>(), 40);
+        assert_eq!(mem::offset_of!(L7FlowKey, src_port), 32);
+        assert_eq!(mem::offset_of!(L7FlowKey, ipv6), 36);
+        assert_eq!(mem::size_of::<L7FlowVerdict>(), 16);
+    }
+
+    #[test]
+    fn a_reversed_key_is_the_other_direction_and_reverses_back() {
+        let key = L7FlowKey {
+            src_addr: [0x0a00_0001, 0, 0, 0],
+            dst_addr: [0x0a00_0002, 0, 0, 0],
+            src_port: 40000,
+            dst_port: 8888,
+            ipv6: 0,
+            _padding: [0; 3],
+        };
+        let back = key.reversed();
+        assert_eq!(back.src_addr, key.dst_addr);
+        assert_eq!(back.dst_port, key.src_port);
+        assert_eq!(back.reversed(), key);
+    }
 
     #[test]
     fn test_ids_pattern_key_size() {

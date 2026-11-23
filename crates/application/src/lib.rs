@@ -90,6 +90,7 @@ pub mod ips_service_impl;
 pub mod ips_whitelist;
 pub mod kernel_drop_service;
 pub mod l7_aliases;
+pub mod l7_flow_refusal_service;
 pub mod l7_red_meter;
 pub mod l7_service_impl;
 pub mod lb_service_impl;

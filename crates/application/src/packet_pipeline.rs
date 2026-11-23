@@ -105,6 +105,9 @@ pub struct EventDispatcher {
     /// Connections already compared with the protocol their port promises.
     /// `None` when the check is off.
     port_promise: Option<Arc<Mutex<domain::l7::port_promise::PortPromiseTracker>>>,
+    /// Cleartext HTTP/2 connections read from their preface, so every
+    /// header block is decoded with the HPACK state of its connection.
+    http2: Arc<Mutex<domain::l7::http2::Http2Connections>>,
     /// Names the workload behind a flow for the L7 observers. The same
     /// resolver the meter reads, empty until the socket tables are wired.
     workloads: crate::workload_resolver::WorkloadResolver,
@@ -117,6 +120,10 @@ pub struct EventDispatcher {
         Vec<Arc<dyn ports::secondary::tls_plaintext_observer_port::TlsPlaintextObserver>>,
     /// Extensions handed every L4 event once the dispatcher acted on it.
     packet_observers: Vec<Arc<dyn ports::secondary::packet_observer_port::PacketObserver>>,
+    /// The table of refused connections the classifier shoots, written on an
+    /// L7 `deny` or `reject`. `None` leaves every such verdict unenforced,
+    /// which the audit record and the alert then say.
+    l7_flow_refusals: Option<Arc<crate::l7_flow_refusal_service::L7FlowRefusalService>>,
 }
 
 /// What one DLP event's process resolves to, read once per event.
@@ -168,6 +175,7 @@ impl EventDispatcher {
             crypto_posture: Arc::new(crate::crypto_posture_meter::CryptoPostureMeter::new(
                 crate::workload_resolver::WorkloadResolver::new(),
             )),
+            http2: Arc::new(Mutex::new(domain::l7::http2::Http2Connections::default())),
             port_promise: Some(Arc::new(Mutex::new(
                 domain::l7::port_promise::PortPromiseTracker::new(
                     domain::l7::port_promise::PortPromiseConfig::default(),
@@ -178,8 +186,20 @@ impl EventDispatcher {
             dns_query_observers: Vec::new(),
             tls_plaintext_observers: Vec::new(),
             packet_observers: Vec::new(),
+            l7_flow_refusals: None,
             metrics,
         }
+    }
+
+    /// Enforce L7 `deny` and `reject` verdicts in the datapath, through the
+    /// table of refused connections the loaded classifier reads.
+    #[must_use]
+    pub fn with_l7_flow_refusals(
+        mut self,
+        refusals: Arc<crate::l7_flow_refusal_service::L7FlowRefusalService>,
+    ) -> Self {
+        self.l7_flow_refusals = Some(refusals);
+        self
     }
 
     /// The meter counting requests per service, which the service map reads.
@@ -658,7 +678,11 @@ impl EventDispatcher {
         };
         match event {
             AgentEvent::L4(pkt) => self.dispatch_event(pkt),
-            AgentEvent::L7 { header, payload } => self.process_l7_event(header, &payload),
+            AgentEvent::L7 {
+                header,
+                segment,
+                payload,
+            } => self.process_l7_event(header, segment, &payload),
             AgentEvent::Dns { header, payload } => self.process_dns_event(header, &payload),
             AgentEvent::Dlp(event) => self.process_dlp_event(&event),
         }
@@ -1149,7 +1173,15 @@ impl EventDispatcher {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn process_l7_event(&self, header: PacketEvent, payload: &[u8]) {
+    fn process_l7_event(
+        &self,
+        header: PacketEvent,
+        segment: Option<ebpf_common::event::L7Segment>,
+        payload: &[u8],
+    ) {
+        if self.read_http2(&header, segment, payload) {
+            return;
+        }
         // If reassembly is enabled, accumulate fragments per flow. The
         // first full message emitted by the reassembler replaces the
         // raw payload slice for downstream protocol parsing.
@@ -1178,6 +1210,82 @@ impl EventDispatcher {
         };
 
         self.process_l7_payload(&header, payload);
+    }
+
+    /// Read a segment of a cleartext HTTP/2 connection opened while the
+    /// agent watched, and judge every request whose header block it ends.
+    ///
+    /// Returns `false` when the flow is no such connection, leaving the
+    /// segment to the per-payload path. The connection's segments bypass the
+    /// reassembler: the reader keeps its own place in the stream.
+    fn read_http2(
+        &self,
+        header: &PacketEvent,
+        segment: Option<ebpf_common::event::L7Segment>,
+        payload: &[u8],
+    ) -> bool {
+        use domain::l7::http2::{Http2Request, Offer};
+
+        const TCP: u8 = 6;
+        if header.protocol != TCP {
+            return false;
+        }
+        let flow = domain::l7::reassembler::FlowId::new(
+            header.src_addr,
+            header.dst_addr,
+            header.src_port,
+            header.dst_port,
+            header.is_ipv6(),
+        );
+        // A poisoned lock leaves connections each updated whole by `offer`,
+        // or one connection mid-read whose next segment fails cleanly.
+        let offer = self
+            .http2
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .offer(flow, segment, payload);
+        let Offer::Tracked {
+            requests,
+            failed,
+            evicted,
+        } = offer
+        else {
+            return false;
+        };
+        if evicted {
+            self.metrics.record_l7_http2_unread("evicted");
+        }
+        if let Some(reason) = failed {
+            self.metrics.record_l7_http2_unread(reason.label());
+            tracing::debug!(
+                src_port = header.src_port,
+                dst_port = header.dst_port,
+                reason = reason.label(),
+                "HTTP/2 connection no longer decoded; its later requests are not judged by L7 rules"
+            );
+        }
+
+        self.process_ids_content(header, payload);
+        let label = DetectedProtocol::Grpc.label();
+        self.check_port_promise(header, DetectedProtocol::Grpc, payload.len());
+        self.red_meter.observe(header, label, payload);
+        self.crypto_posture
+            .observe_payload(header, label, payload, wall_clock_ns());
+
+        for request in requests {
+            let parsed = Http2Request::into_parsed(request);
+            let protocol_label = if matches!(parsed, ParsedProtocol::Grpc(_)) {
+                DetectedProtocol::Grpc.label()
+            } else {
+                DetectedProtocol::Http.label()
+            };
+            let l7_svc = self.l7_service.load();
+            let l7_result = l7_svc.evaluate(header, &parsed);
+            drop(l7_svc);
+            self.apply_l7_rule_result(header, protocol_label, l7_result);
+            self.notify_l7_observers(header, protocol_label, &parsed, payload.len());
+        }
+        true
     }
 
     /// Detect the protocol, compute fingerprints, run encrypted-DNS
@@ -1375,6 +1483,49 @@ impl EventDispatcher {
         );
     }
 
+    /// Write the connection `header` travelled on into the classifier's table
+    /// of refused connections.
+    fn refuse_l7_flow(&self, header: &PacketEvent, rule_id: &str) -> Result<(), String> {
+        let outcome = self.write_l7_refusal(header, rule_id);
+        match &outcome {
+            Ok(()) => self.metrics.record_l7_flow_refusal("refused"),
+            Err(reason) => {
+                tracing::warn!(
+                    src_ip = %header.src_ip(),
+                    dst_ip = %header.dst_ip(),
+                    src_port = header.src_port,
+                    dst_port = header.dst_port,
+                    rule_id,
+                    "L7 refusal not enforced: {reason}"
+                );
+                self.metrics.record_l7_flow_refusal("not_enforced");
+            }
+        }
+        outcome
+    }
+
+    fn write_l7_refusal(&self, header: &PacketEvent, rule_id: &str) -> Result<(), String> {
+        use ports::secondary::l7_flow_refusal_port::RefusedL7Flow;
+
+        const TCP: u8 = 6;
+        let Some(ref refusals) = self.l7_flow_refusals else {
+            return Err("no datapath enforcement is wired".to_string());
+        };
+        if header.protocol != TCP {
+            return Err("only TCP connections are refused".to_string());
+        }
+        refusals
+            .refuse(&RefusedL7Flow {
+                src_addr: header.src_addr,
+                dst_addr: header.dst_addr,
+                src_port: header.src_port,
+                dst_port: header.dst_port,
+                ipv6: header.is_ipv6(),
+                rule_hash: crate::l7_flow_refusal_service::rule_hash(rule_id),
+            })
+            .map_err(|e| e.to_string())
+    }
+
     /// Log, audit, alert, and record metrics for the outcome of evaluating
     /// the L7 rule engine against a parsed payload.
     fn apply_l7_rule_result(
@@ -1415,11 +1566,29 @@ impl EventDispatcher {
                 );
             }
 
-            let audit_action = match action {
-                FirewallAction::Deny | FirewallAction::Reject => AuditAction::Drop,
-                _ => AuditAction::Pass,
+            // The request that matched is already on its way; what a refusal
+            // stops is the rest of the connection, both directions. It is a
+            // drop only once the classifier holds it, and says so otherwise.
+            let refusing = action == FirewallAction::Deny || action == FirewallAction::Reject;
+            let enforcement = if refusing {
+                Some(self.refuse_l7_flow(header, &rule_id.0))
+            } else {
+                None
             };
-            let detail = format!("L7 {protocol_label} {action_label} rule={rule_id}");
+            let audit_action = match enforcement {
+                Some(Ok(())) => AuditAction::Drop,
+                Some(Err(_)) => AuditAction::Alert,
+                None => AuditAction::Pass,
+            };
+            let detail = match &enforcement {
+                Some(Ok(())) => format!(
+                    "L7 {protocol_label} {action_label} rule={rule_id}: connection refused in the datapath"
+                ),
+                Some(Err(reason)) => format!(
+                    "L7 {protocol_label} {action_label} rule={rule_id}: not enforced, {reason}"
+                ),
+                None => format!("L7 {protocol_label} {action_label} rule={rule_id}"),
+            };
             self.audit_service.record_security_decision(
                 AuditComponent::L7,
                 audit_action,
@@ -1434,8 +1603,7 @@ impl EventDispatcher {
                 &detail,
             );
 
-            // Emit alert for L7 deny/reject
-            if action == FirewallAction::Deny || action == FirewallAction::Reject {
+            if refusing {
                 self.emit_packet_security_alert(
                     domain::alert::entity::PacketAlertComponent::L7,
                     header,
@@ -2093,6 +2261,7 @@ mod tests {
         last_encrypted_dns: std::sync::Mutex<(String, String)>,
         port_promises: std::sync::Mutex<Vec<(u16, String)>>,
         last_dropped_reason: std::sync::Mutex<String>,
+        l7_refusals: std::sync::Mutex<Vec<String>>,
     }
 
     impl TestMetrics {
@@ -2108,6 +2277,7 @@ mod tests {
                 last_encrypted_dns: std::sync::Mutex::new((String::new(), String::new())),
                 port_promises: std::sync::Mutex::new(Vec::new()),
                 last_dropped_reason: std::sync::Mutex::new(String::new()),
+                l7_refusals: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -2117,6 +2287,10 @@ mod tests {
             self.packet_calls.fetch_add(1, Ordering::Relaxed);
             *self.last_component.lock().unwrap() = interface.to_string();
             *self.last_action.lock().unwrap() = action.to_string();
+        }
+
+        fn record_l7_flow_refusal(&self, outcome: &str) {
+            self.l7_refusals.lock().unwrap().push(outcome.to_string());
         }
 
         fn record_l7_port_promise(&self, port: u16, verdict: &str) {
@@ -2353,7 +2527,7 @@ mod tests {
         let client_hello = build_tls_client_hello("dot.example");
 
         // Live path: the complete record is parsed inline → DoT alert now.
-        dispatcher.process_l7_event(header, &client_hello);
+        dispatcher.process_l7_event(header, None, &client_hello);
         match alert_rx.try_recv() {
             Ok(AlertEvent::Dns(alert)) => match alert.reason {
                 domain::dns::entity::DnsAlertReason::EncryptedDns { protocol, .. } => {
@@ -2390,7 +2564,7 @@ mod tests {
 
         let mut header = make_event(EVENT_TYPE_L7, 0);
         header.dst_port = 853;
-        dispatcher.process_l7_event(header, &build_tls_client_hello("dot.example"));
+        dispatcher.process_l7_event(header, None, &build_tls_client_hello("dot.example"));
 
         assert_eq!(metrics.fingerprint_calls.load(Ordering::Relaxed), 1);
         assert!(
@@ -2926,7 +3100,11 @@ mod tests {
         let header = make_event(EVENT_TYPE_L7, 0);
         let payload = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec();
 
-        dispatcher.dispatch_agent_event(AgentEvent::L7 { header, payload });
+        dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            header,
+            segment: None,
+            payload,
+        });
 
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "l7");
@@ -2956,7 +3134,11 @@ mod tests {
         let mut payload = vec![0x16, 0x03, 0x03, 0, u8::try_from(hs.len()).unwrap()];
         payload.extend(hs);
 
-        dispatcher.dispatch_agent_event(AgentEvent::L7 { header, payload });
+        dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            header,
+            segment: None,
+            payload,
+        });
 
         let log = dispatcher.handshake_log().recent();
         assert_eq!(log.len(), 1);
@@ -2971,6 +3153,7 @@ mod tests {
         // The same connection counts once on its edge, and a clear request
         // to another port counts as clear text there.
         dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            segment: None,
             header: PacketEvent {
                 src_port: 51_001,
                 dst_port: 6379,
@@ -3005,6 +3188,7 @@ mod tests {
             ..request
         };
         let l7 = |header| AgentEvent::L7 {
+            segment: None,
             header,
             payload: Vec::new(),
         };
@@ -3025,6 +3209,7 @@ mod tests {
             crate::workload_resolver::WorkloadResolver::new(),
         ));
         let request = || AgentEvent::L7 {
+            segment: None,
             header: PacketEvent {
                 src_port: 51_001,
                 dst_port: 6379,
@@ -3112,6 +3297,7 @@ mod tests {
         let payload = b"POST /v1/messages HTTP/1.1\r\nHost: api.example.com\r\n\r\n".to_vec();
         let len = payload.len();
         dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            segment: None,
             header: make_event(EVENT_TYPE_L7, 0),
             payload,
         });
@@ -3137,6 +3323,7 @@ mod tests {
             .with_l7_observer(Arc::clone(&observer) as _);
 
         dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            segment: None,
             header: make_event(EVENT_TYPE_L7, 0),
             payload: b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec(),
         });
@@ -3310,6 +3497,7 @@ mod tests {
         let payload = b"SSH-2.0-OpenSSH_9.6\r\n".to_vec();
         for _ in 0..3 {
             dispatcher.dispatch_agent_event(AgentEvent::L7 {
+                segment: None,
                 header: l7_event_to(443),
                 payload: payload.clone(),
             });
@@ -3333,10 +3521,12 @@ mod tests {
         let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
 
         dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            segment: None,
             header: l7_event_to(22),
             payload: b"SSH-2.0-OpenSSH_9.6\r\n".to_vec(),
         });
         dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            segment: None,
             header: PacketEvent {
                 src_port: 23_456,
                 ..l7_event_to(443)
@@ -3360,6 +3550,7 @@ mod tests {
             .with_port_promise(None);
 
         dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            segment: None,
             header: l7_event_to(443),
             payload: b"SSH-2.0-OpenSSH_9.6\r\n".to_vec(),
         });
@@ -3378,7 +3569,11 @@ mod tests {
         let header = make_event(EVENT_TYPE_L7, 0);
         let payload = vec![0x01, 0x02, 0x03, 0x04];
 
-        dispatcher.dispatch_agent_event(AgentEvent::L7 { header, payload });
+        dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            header,
+            segment: None,
+            payload,
+        });
 
         assert_eq!(metrics.packet_calls.load(Ordering::Relaxed), 1);
         assert_eq!(*metrics.last_component.lock().unwrap(), "l7");
@@ -3398,7 +3593,11 @@ mod tests {
         let header = make_event(EVENT_TYPE_L7, 0);
         let payload = b"GET / HTTP/1.1\r\nHost: test.com\r\n\r\n".to_vec();
         event_tx
-            .send(AgentEvent::L7 { header, payload })
+            .send(AgentEvent::L7 {
+                header,
+                segment: None,
+                payload,
+            })
             .await
             .unwrap();
 
@@ -3441,11 +3640,300 @@ mod tests {
 
         let header = make_event(EVENT_TYPE_L7, 0);
         let payload = b"DELETE /admin HTTP/1.1\r\nHost: evil.com\r\n\r\n".to_vec();
-        dispatcher.dispatch_agent_event(AgentEvent::L7 { header, payload });
+        dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            header,
+            segment: None,
+            payload,
+        });
 
         // The L7 service records "deny" metric internally
         assert_eq!(*metrics.last_component.lock().unwrap(), "l7");
         assert_eq!(*metrics.last_action.lock().unwrap(), "deny");
+    }
+
+    // ── L7 refusals reach the datapath ──────────────────────────────
+
+    struct RefusalTable(
+        Arc<std::sync::Mutex<Vec<ports::secondary::l7_flow_refusal_port::RefusedL7Flow>>>,
+    );
+    impl ports::secondary::l7_flow_refusal_port::L7FlowRefusalMapPort for RefusalTable {
+        fn refuse(
+            &mut self,
+            flow: &ports::secondary::l7_flow_refusal_port::RefusedL7Flow,
+        ) -> Result<(), domain::common::error::DomainError> {
+            self.0.lock().unwrap().push(*flow);
+            Ok(())
+        }
+    }
+
+    struct AuditCapture(std::sync::Mutex<Vec<AuditEntry>>);
+    impl AuditSink for AuditCapture {
+        fn write_entry(&self, entry: &AuditEntry) -> Result<(), AuditError> {
+            self.0.lock().unwrap().push(entry.clone());
+            Ok(())
+        }
+    }
+
+    fn deny_admin_rule(action: FirewallAction) -> L7Rule {
+        L7Rule {
+            id: RuleId("l7-deny-admin".to_string()),
+            priority: 10,
+            action,
+            matcher: L7Matcher::Http {
+                method: None,
+                path_pattern: Some("/admin".to_string()),
+                host_pattern: None,
+                content_type: None,
+            },
+            src_ip: None,
+            dst_ip: None,
+            dst_port: None,
+            enabled: true,
+            src_country_codes: None,
+            dst_country_codes: None,
+            src_ip_alias: None,
+            dst_ip_alias: None,
+            dst_port_alias: None,
+        }
+    }
+
+    /// Dispatch one `GET /admin` on `header` through a dispatcher that denies
+    /// it with `action`, wired to a refusal table when `wired`.
+    fn refuse_admin(
+        action: FirewallAction,
+        header: PacketEvent,
+        wired: bool,
+    ) -> (
+        Vec<ports::secondary::l7_flow_refusal_port::RefusedL7Flow>,
+        Vec<AuditEntry>,
+        Vec<String>,
+        bool,
+    ) {
+        let table = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::new(AuditCapture(std::sync::Mutex::new(Vec::new())));
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let mut dispatcher = EventDispatcher::new(
+            make_service_with_rules(vec![]),
+            make_l7_service_with_rules(vec![deny_admin_rule(action)]),
+            make_ti_service(),
+            Arc::new(AuditAppService::new(Arc::clone(&sink) as Arc<dyn AuditSink>)),
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+            alert_tx,
+            None,
+        );
+        if wired {
+            let refusals = crate::l7_flow_refusal_service::L7FlowRefusalService::new();
+            refusals.set_map(Box::new(RefusalTable(Arc::clone(&table))));
+            dispatcher = dispatcher.with_l7_flow_refusals(Arc::new(refusals));
+        }
+        let payload = b"GET /admin HTTP/1.1\r\nHost: app\r\n\r\n".to_vec();
+        dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            header,
+            segment: None,
+            payload,
+        });
+        let alerted = alert_rx.try_recv().is_ok();
+        let flows = table.lock().unwrap().clone();
+        let entries = sink.0.lock().unwrap().clone();
+        let outcomes = metrics.l7_refusals.lock().unwrap().clone();
+        (flows, entries, outcomes, alerted)
+    }
+
+    fn l7_entries(entries: &[AuditEntry]) -> Vec<&AuditEntry> {
+        entries
+            .iter()
+            .filter(|e| e.component == AuditComponent::L7)
+            .collect()
+    }
+
+    /// Two gRPC calls curl sent on one connection, paths Huffman-coded,
+    /// the second's fields taken from the dynamic table.
+    const CURL_TWO_GRPC_CALLS: &[u8] =
+        include_bytes!("../../domain/tests/fixtures/http2/curl-two-grpc-calls.bin");
+
+    fn deny_grpc_rule(service: &str, method: &str) -> L7Rule {
+        L7Rule {
+            id: RuleId("grpc-deny".to_string()),
+            matcher: L7Matcher::Grpc {
+                service_pattern: Some(service.to_string()),
+                method_pattern: Some(method.to_string()),
+            },
+            ..deny_admin_rule(FirewallAction::Deny)
+        }
+    }
+
+    /// Dispatch the capture cut at `cut` into two segments through a
+    /// dispatcher wired to a refusal table, under `rule`.
+    fn dispatch_grpc_capture(
+        rule: L7Rule,
+        cut: usize,
+    ) -> (
+        Vec<ports::secondary::l7_flow_refusal_port::RefusedL7Flow>,
+        Vec<AuditEntry>,
+    ) {
+        let table = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::new(AuditCapture(std::sync::Mutex::new(Vec::new())));
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        let refusals = crate::l7_flow_refusal_service::L7FlowRefusalService::new();
+        refusals.set_map(Box::new(RefusalTable(Arc::clone(&table))));
+        let dispatcher = EventDispatcher::new(
+            make_service_with_rules(vec![]),
+            make_l7_service_with_rules(vec![rule]),
+            make_ti_service(),
+            Arc::new(AuditAppService::new(Arc::clone(&sink) as Arc<dyn AuditSink>)),
+            Arc::new(TestMetrics::new()) as Arc<dyn MetricsPort>,
+            alert_tx,
+            None,
+        )
+        .with_l7_flow_refusals(Arc::new(refusals));
+        let header = make_event(EVENT_TYPE_L7, 0);
+        let (head, tail) = CURL_TWO_GRPC_CALLS.split_at(cut);
+        for (seq, part) in [(5000u32, head), (5000 + cut as u32, tail)] {
+            dispatcher.dispatch_agent_event(AgentEvent::L7 {
+                header,
+                segment: Some(ebpf_common::event::L7Segment {
+                    tcp_seq: seq,
+                    wire_len: part.len() as u32,
+                }),
+                payload: part.to_vec(),
+            });
+        }
+        let flows = table.lock().unwrap().clone();
+        let entries = sink.0.lock().unwrap().clone();
+        (flows, entries)
+    }
+
+    #[tokio::test]
+    async fn a_grpc_deny_reads_a_huffman_coded_path_and_refuses_the_connection() {
+        let (flows, entries) =
+            dispatch_grpc_capture(deny_grpc_rule("AdminService", "DeleteUser"), 100);
+        assert_eq!(flows.len(), 1);
+        assert_eq!(
+            flows[0].rule_hash,
+            crate::l7_flow_refusal_service::rule_hash("grpc-deny")
+        );
+        assert_eq!(l7_entries(&entries)[0].action, AuditAction::Drop);
+    }
+
+    #[tokio::test]
+    async fn a_grpc_deny_reads_a_call_named_from_the_dynamic_table() {
+        // The second call sits in the second segment and names its
+        // authority and content type by dynamic table index.
+        let (flows, _) = dispatch_grpc_capture(deny_grpc_rule("Greeter", "SayHello"), 200);
+        assert_eq!(flows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_grpc_rule_that_matches_no_call_refuses_nothing() {
+        let (flows, entries) = dispatch_grpc_capture(deny_grpc_rule("Billing", "Charge"), 100);
+        assert!(flows.is_empty());
+        assert!(
+            l7_entries(&entries)
+                .iter()
+                .all(|e| e.action == AuditAction::Pass)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_l7_deny_writes_the_connection_into_the_datapath_and_audits_a_drop() {
+        let header = make_event(EVENT_TYPE_L7, 0);
+        let (flows, entries, outcomes, alerted) = refuse_admin(FirewallAction::Deny, header, true);
+
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0].src_addr, header.src_addr);
+        assert_eq!(flows[0].dst_addr, header.dst_addr);
+        assert_eq!(flows[0].src_port, header.src_port);
+        assert_eq!(flows[0].dst_port, header.dst_port);
+        assert!(!flows[0].ipv6);
+        assert_eq!(
+            flows[0].rule_hash,
+            crate::l7_flow_refusal_service::rule_hash("l7-deny-admin")
+        );
+        let l7 = l7_entries(&entries);
+        assert_eq!(l7.len(), 1);
+        assert_eq!(l7[0].action, AuditAction::Drop);
+        assert!(l7[0].detail.contains("connection refused in the datapath"));
+        assert_eq!(outcomes, vec!["refused".to_string()]);
+        assert!(alerted, "a refusal still raises its alert");
+    }
+
+    #[tokio::test]
+    async fn an_l7_reject_is_refused_like_a_deny() {
+        let (flows, entries, _, _) =
+            refuse_admin(FirewallAction::Reject, make_event(EVENT_TYPE_L7, 0), true);
+
+        assert_eq!(flows.len(), 1);
+        assert_eq!(l7_entries(&entries)[0].action, AuditAction::Drop);
+    }
+
+    #[tokio::test]
+    async fn an_l7_deny_without_a_classifier_is_audited_as_not_enforced() {
+        let (flows, entries, outcomes, alerted) =
+            refuse_admin(FirewallAction::Deny, make_event(EVENT_TYPE_L7, 0), false);
+
+        assert!(flows.is_empty());
+        let l7 = l7_entries(&entries);
+        assert_eq!(l7[0].action, AuditAction::Alert);
+        assert!(l7[0].detail.contains("not enforced"));
+        assert_eq!(outcomes, vec!["not_enforced".to_string()]);
+        assert!(alerted);
+    }
+
+    #[tokio::test]
+    async fn an_l7_deny_on_a_service_without_a_table_is_not_enforced() {
+        // Wired, but the classifier was detached: the service has no map.
+        let header = make_event(EVENT_TYPE_L7, 0);
+        let sink = Arc::new(AuditCapture(std::sync::Mutex::new(Vec::new())));
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, _alert_rx) = mpsc::channel(10);
+        let dispatcher = EventDispatcher::new(
+            make_service_with_rules(vec![]),
+            make_l7_service_with_rules(vec![deny_admin_rule(FirewallAction::Deny)]),
+            make_ti_service(),
+            Arc::new(AuditAppService::new(Arc::clone(&sink) as Arc<dyn AuditSink>)),
+            Arc::clone(&metrics) as Arc<dyn MetricsPort>,
+            alert_tx,
+            None,
+        )
+        .with_l7_flow_refusals(Arc::new(
+            crate::l7_flow_refusal_service::L7FlowRefusalService::new(),
+        ));
+        let payload = b"GET /admin HTTP/1.1\r\nHost: app\r\n\r\n".to_vec();
+        dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            header,
+            segment: None,
+            payload,
+        });
+
+        let entries = sink.0.lock().unwrap();
+        assert_eq!(l7_entries(&entries)[0].action, AuditAction::Alert);
+        assert_eq!(
+            *metrics.l7_refusals.lock().unwrap(),
+            vec!["not_enforced".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_l7_deny_on_udp_is_not_enforced() {
+        let mut header = make_event(EVENT_TYPE_L7, 0);
+        header.protocol = 17;
+        let (flows, entries, outcomes, _) = refuse_admin(FirewallAction::Deny, header, true);
+
+        assert!(flows.is_empty());
+        let l7 = l7_entries(&entries);
+        assert!(l7[0].detail.contains("only TCP connections are refused"));
+        assert_eq!(outcomes, vec!["not_enforced".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn an_l7_log_rule_is_audited_as_a_pass_and_writes_nothing() {
+        let (flows, entries, outcomes, _) =
+            refuse_admin(FirewallAction::Log, make_event(EVENT_TYPE_L7, 0), true);
+
+        assert!(flows.is_empty());
+        assert_eq!(l7_entries(&entries)[0].action, AuditAction::Pass);
+        assert!(outcomes.is_empty());
     }
 
     #[tokio::test]
@@ -3459,7 +3947,11 @@ mod tests {
 
         let header = make_event(EVENT_TYPE_L7, 0);
         let payload = b"GET /safe HTTP/1.1\r\nHost: ok.com\r\n\r\n".to_vec();
-        dispatcher.dispatch_agent_event(AgentEvent::L7 { header, payload });
+        dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            header,
+            segment: None,
+            payload,
+        });
 
         // No rule matched → dispatcher records protocol label
         assert_eq!(*metrics.last_component.lock().unwrap(), "l7");
@@ -3501,7 +3993,11 @@ mod tests {
 
         let header = make_event(EVENT_TYPE_L7, 0);
         let payload = b"DELETE /admin HTTP/1.1\r\nHost: evil.com\r\n\r\n".to_vec();
-        dispatcher.dispatch_agent_event(AgentEvent::L7 { header, payload });
+        dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            header,
+            segment: None,
+            payload,
+        });
 
         // Service disabled → no deny, just protocol metric
         assert_eq!(*metrics.last_component.lock().unwrap(), "l7");
@@ -3540,7 +4036,11 @@ mod tests {
 
         let header = make_event(EVENT_TYPE_L7, 0);
         let payload = b"PUB secrets.vault 5\r\nhello\r\n".to_vec();
-        dispatcher.dispatch_agent_event(AgentEvent::L7 { header, payload });
+        dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            header,
+            segment: None,
+            payload,
+        });
 
         assert_eq!(*metrics.last_component.lock().unwrap(), "l7");
         assert_eq!(*metrics.last_action.lock().unwrap(), "deny");
@@ -3558,7 +4058,11 @@ mod tests {
 
         let header = make_event(EVENT_TYPE_L7, 0);
         let payload = b"PUB telemetry.cpu 2\r\n42\r\n".to_vec();
-        dispatcher.dispatch_agent_event(AgentEvent::L7 { header, payload });
+        dispatcher.dispatch_agent_event(AgentEvent::L7 {
+            header,
+            segment: None,
+            payload,
+        });
 
         assert_eq!(*metrics.last_action.lock().unwrap(), "nats");
         assert!(alert_rx.try_recv().is_err());

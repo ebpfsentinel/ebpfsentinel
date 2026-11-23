@@ -55,12 +55,35 @@ teardown_file() {
 
 # ── HTTP path enforcement ────────────────────────────────────────
 
-# An L7 deny judges a copy of the payload: the packet that carried it has
-# already been forwarded, so the connection itself is not refused (the L3/L4
-# firewall and the IPS drop at line rate, see the L7 firewall feature page).
-# What a deny owes is the decision: the rule's alert under component l7 and
-# the deny counter moving. A listener on the agent side completes the
-# handshake, without which no payload segment is ever written.
+# An L7 deny judges a copy of the payload: the segment that carried it has
+# already been forwarded, so the server receives the matching request. What the
+# deny refuses is the rest of the connection: once the verdict is written,
+# tc-ids drops every packet of it both ways. A listener on the agent side
+# completes the handshake, without which no payload segment is ever written.
+
+# _http_exchange <port> <path> [wait] - one HTTP/1.1 request on a fresh
+# connection from the attacking side; prints "answered" when the server's
+# answer arrives within <wait> seconds, "silent" when nothing does, "closed"
+# when the connection ends with no answer.
+_http_exchange() {
+    local port="$1" path="$2" wait="${3:-4}"
+    wire_client timeout "$((wait + 5))" python3 -c '
+import socket, sys
+host, port, path, wait = sys.argv[1], int(sys.argv[2]), sys.argv[3], float(sys.argv[4])
+s = socket.create_connection((host, port), timeout=wait)
+s.sendall(("GET %s HTTP/1.1\r\nHost: testhost\r\n\r\n" % path).encode())
+try:
+    print("answered" if s.recv(4096) else "closed")
+except socket.timeout:
+    print("silent")
+' "$EBPF_HOST_IP" "$port" "$path" "$wait" 2>/dev/null || echo "error"
+}
+
+_l7_refusals() {
+    local value
+    value="$(get_metrics_value ebpfsentinel_l7_flow_refusals_total '{outcome="refused"}')" || true
+    echo "${value:-0}"
+}
 
 @test "L7 HTTP path deny on /admin raises its rule's alert and counts a deny" {
     require_root
@@ -89,6 +112,117 @@ teardown_file() {
     }
     # Port 8888 is no web port, so the deny maps to the generic protocol technique.
     assert_alert_has_mitre_technique T1071 15
+}
+
+@test "L7 HTTP path deny refuses the connection: the answer never arrives" {
+    require_root
+    require_tool ncat
+    require_tool python3
+
+    wait_for_ebpf_counters IDS_METRICS 25
+    local dropped_before refused_before
+    dropped_before="$(ebpf_counter IDS_METRICS l7_flow_dropped)"
+    dropped_before="${dropped_before:-0}"
+    refused_before="$(_l7_refusals)"
+
+    wire_start_listener 8888 "${FIXTURE_DIR}/l7-late-http-responder.sh"
+
+    # The same responder answers an allowed path on its own connection, so a
+    # silence below is the refusal, not a server that never answers.
+    local allowed
+    allowed="$(_http_exchange 8888 /api/health 4)"
+    [ "$allowed" = "answered" ] || {
+        wire_stop_listeners
+        echo "the responder did not answer an allowed request: ${allowed}" >&2
+        return 1
+    }
+
+    local denied
+    denied="$(_http_exchange 8888 /admin 4)"
+    wire_stop_listeners
+    [ "$denied" != "answered" ] || {
+        echo "GET /admin was denied but its answer reached the client" >&2
+        return 1
+    }
+
+    local refused_after
+    refused_after="$(_l7_refusals)"
+    [ "${refused_after%.*}" -gt "${refused_before%.*}" ] || {
+        echo "no refusal written for GET /admin: ${refused_before} -> ${refused_after}" >&2
+        scrape_metrics | grep l7_flow_refusals >&2 || true
+        return 1
+    }
+
+    # The server's late answer and its retransmissions are dropped by tc-ids.
+    local dropped_after
+    dropped_after="$(ebpf_counter_above IDS_METRICS l7_flow_dropped "${dropped_before%.*}" 25)"
+    [ "${dropped_after%.*}" -gt "${dropped_before%.*}" ] || {
+        echo "tc-ids dropped no packet of the refused connection: ${dropped_before} -> ${dropped_after}" >&2
+        dump_ebpf_counters IDS_METRICS >&2
+        return 1
+    }
+}
+
+# ── gRPC over cleartext HTTP/2 ───────────────────────────────────
+
+# grpcurl (Go's HTTP/2 stack) Huffman-codes the :path header, so the method
+# name never appears in the clear on the wire: the rule matches only if the
+# agent decodes HPACK. The call goes to the agent's own gRPC port, listed in
+# l7.ports by the fixture; the agent answers Unimplemented at once, often
+# before the verdict lands, so what is asserted is the decision, the refusal,
+# and the packets of the connection dropped after it.
+
+@test "L7 gRPC deny reads a Huffman-coded path and refuses the connection" {
+    require_root
+    require_tool grpcurl
+
+    wait_for_ebpf_counters IDS_METRICS 25
+    local dropped_before refused_before
+    dropped_before="$(ebpf_counter IDS_METRICS l7_flow_dropped)"
+    dropped_before="${dropped_before:-0}"
+    refused_before="$(_l7_refusals)"
+
+    # An allowed call on its own connection is answered.
+    local health
+    health="$(wire_client grpcurl -plaintext -max-time 5 \
+        -import-path "${FIXTURE_DIR}" -proto health.proto \
+        "${EBPF_HOST_IP}:50051" grpc.health.v1.Health/Check 2>&1)" || true
+    assert_contains "$health" "SERVING"
+
+    wire_client grpcurl -plaintext -max-time 5 \
+        -import-path "${FIXTURE_DIR}" -proto l7-admin.proto -d '{"name":"alice"}' \
+        "${EBPF_HOST_IP}:50051" admin.AdminService/DeleteUser >/dev/null 2>&1 || true
+
+    wait_for_alert \
+        '.[] | select(.rule_id == "l7-test-deny-grpc-admin" and .component == "l7")' \
+        15 1 >/dev/null || {
+        echo "no l7-test-deny-grpc-admin alert after the DeleteUser call" >&2
+        api_get /api/v1/alerts >&2 || true
+        return 1
+    }
+
+    local refused_after
+    refused_after="$(_l7_refusals)"
+    [ "${refused_after%.*}" -gt "${refused_before%.*}" ] || {
+        echo "no refusal written for the DeleteUser call: ${refused_before} -> ${refused_after}" >&2
+        return 1
+    }
+
+    # Whatever crossed before the verdict, the client's goodbye and the
+    # server's retransmissions after it are dropped.
+    local dropped_after
+    dropped_after="$(ebpf_counter_above IDS_METRICS l7_flow_dropped "${dropped_before%.*}" 25)"
+    [ "${dropped_after%.*}" -gt "${dropped_before%.*}" ] || {
+        echo "tc-ids dropped no packet of the refused gRPC connection: ${dropped_before} -> ${dropped_after}" >&2
+        dump_ebpf_counters IDS_METRICS >&2
+        return 1
+    }
+
+    # The refusal is per connection: a new one is judged again and answered.
+    health="$(wire_client grpcurl -plaintext -max-time 5 \
+        -import-path "${FIXTURE_DIR}" -proto health.proto \
+        "${EBPF_HOST_IP}:50051" grpc.health.v1.Health/Check 2>&1)" || true
+    assert_contains "$health" "SERVING"
 }
 
 @test "L7 HTTP path allow on /api is judged allow and counts no deny" {

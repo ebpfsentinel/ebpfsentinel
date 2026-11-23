@@ -178,9 +178,36 @@ impl PacketEvent {
     }
 }
 
+/// Where an L7 record's payload sits in its TCP stream.
+///
+/// Written by `tc-ids` between the [`PacketEvent`] header and the payload of
+/// every L7 record. A capture is capped at [`MAX_L7_PAYLOAD`] bytes, and a
+/// stream reader that cannot tell how much it missed, or that a segment is a
+/// retransmission of bytes it already read, reads garbage as protocol: the
+/// sequence number and the length on the wire let it tell.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct L7Segment {
+    /// TCP sequence number of the segment's first payload byte, host order.
+    pub tcp_seq: u32,
+    /// Payload bytes the segment carried on the wire, of which the record
+    /// holds at most the capture cap.
+    pub wire_len: u32,
+}
+
+/// Bytes an [`L7Segment`] takes in an L7 record.
+pub const L7_SEGMENT_LEN: usize = core::mem::size_of::<L7Segment>();
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn l7_segment_is_two_words() {
+        assert_eq!(L7_SEGMENT_LEN, 8);
+        assert_eq!(core::mem::offset_of!(L7Segment, tcp_seq), 0);
+        assert_eq!(core::mem::offset_of!(L7Segment, wire_len), 4);
+    }
     use core::mem;
 
     #[test]

@@ -8,7 +8,7 @@ use super::error::L7Error;
 // ── Protocol detection ─────────────────────────────────────────────
 
 /// HTTP/2 connection preface (first 24 bytes of an HTTP/2 connection).
-const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+const HTTP2_PREFACE: &[u8] = super::http2::PREFACE;
 
 /// Detect the application-layer protocol from the first bytes of a TCP payload.
 pub fn detect_protocol(payload: &[u8]) -> DetectedProtocol {
@@ -324,10 +324,13 @@ pub fn parse_payload_with(protocol: DetectedProtocol, payload: &[u8]) -> ParsedP
                 Err(_) => ParsedProtocol::Unknown,
             },
         },
-        DetectedProtocol::Grpc => match parse_grpc(payload) {
-            Ok(req) => ParsedProtocol::Grpc(req),
-            Err(_) => ParsedProtocol::Unknown,
-        },
+        DetectedProtocol::Grpc => super::http2::read_buffer(payload)
+            .into_iter()
+            .next()
+            .map_or(
+                ParsedProtocol::Unknown,
+                super::http2::Http2Request::into_parsed,
+            ),
         DetectedProtocol::Smtp => match parse_smtp(payload) {
             Ok(cmd) => ParsedProtocol::Smtp(cmd),
             Err(_) => ParsedProtocol::Unknown,
@@ -849,75 +852,26 @@ fn extract_sni(data: &[u8]) -> Option<String> {
 
 // ── gRPC parser ────────────────────────────────────────────────────
 
-/// Parse a gRPC request by scanning for the `:path` header in HTTP/2 frames.
+/// Parse the first gRPC call in a buffer that opens an HTTP/2 connection.
 ///
-/// Full HPACK decompression is out of scope. This parser detects the HTTP/2
-/// connection preface, then scans raw bytes for the `:path` pseudo-header
-/// containing `/package.Service/Method`.
+/// The header blocks are decoded with HPACK, Huffman-coded strings and
+/// dynamic table references included, so the `:path` read is the one the
+/// server reads. A connection followed segment by segment is read by
+/// [`Http2Connections`](super::http2::Http2Connections) instead.
 pub fn parse_grpc(payload: &[u8]) -> Result<GrpcRequest, L7Error> {
-    if payload.len() < HTTP2_PREFACE.len() || !payload.starts_with(HTTP2_PREFACE) {
+    if !payload.starts_with(HTTP2_PREFACE) {
         return Err(L7Error::InvalidFormat {
             protocol: "gRPC",
             detail: "missing HTTP/2 connection preface".to_string(),
         });
     }
-
-    // Scan for a path pattern "/...Service/Method" in the raw bytes.
-    // In HPACK, the :path pseudo-header is often encoded with a literal or
-    // an indexed representation that keeps the path value as raw ASCII.
-    let path = find_grpc_path(payload).ok_or(L7Error::InvalidFormat {
-        protocol: "gRPC",
-        detail: "could not find :path header in HEADERS frame".to_string(),
-    })?;
-
-    // Split "/package.Service/Method" into service and method
-    let trimmed = path.trim_start_matches('/');
-    let (service, method) = trimmed.rsplit_once('/').ok_or(L7Error::InvalidFormat {
-        protocol: "gRPC",
-        detail: format!("invalid gRPC path format: {path}"),
-    })?;
-
-    Ok(GrpcRequest {
-        service: service.to_string(),
-        method: method.to_string(),
-    })
-}
-
-/// Scan raw bytes for a gRPC-style path pattern.
-fn find_grpc_path(payload: &[u8]) -> Option<String> {
-    // Look for a slash-delimited path pattern in the bytes after the preface.
-    // The :path header value in HPACK literal representation appears as raw ASCII
-    // preceded by the length. We scan for "/" followed by printable ASCII
-    // containing another "/" to split service/method.
-    let search_start = HTTP2_PREFACE.len();
-    if search_start >= payload.len() {
-        return None;
-    }
-    let data = &payload[search_start..];
-
-    // Find sequences that look like gRPC paths: /something/something
-    let mut i = 0;
-    while i < data.len() {
-        if data[i] == b'/' {
-            // Try to read a path starting here
-            let start = i;
-            let mut end = i + 1;
-            while end < data.len() && data[end] >= 0x20 && data[end] < 0x7f && data[end] != b' ' {
-                end += 1;
-            }
-            let candidate = &data[start..end];
-            if let Ok(s) = core::str::from_utf8(candidate) {
-                // Must have at least two segments: /service/method
-                let trimmed = s.trim_start_matches('/');
-                if trimmed.contains('/') && !trimmed.ends_with('/') {
-                    return Some(s.to_string());
-                }
-            }
-        }
-        i += 1;
-    }
-
-    None
+    super::http2::read_buffer(payload)
+        .iter()
+        .find_map(super::http2::Http2Request::grpc)
+        .ok_or(L7Error::InvalidFormat {
+            protocol: "gRPC",
+            detail: "no gRPC request in the decoded header blocks".to_string(),
+        })
 }
 
 // ── SMTP parser ────────────────────────────────────────────────────
@@ -1902,14 +1856,56 @@ mod tests {
         let mut payload = HTTP2_PREFACE.to_vec();
         // SETTINGS frame (empty)
         payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
-        // Simulate a HEADERS frame with raw path bytes
-        payload.extend_from_slice(b"\x00\x00\x20\x01\x04\x00\x00\x00\x01");
-        payload.extend_from_slice(b"/grpc.health.v1.Health/Check");
-        payload.extend_from_slice(&[0x00; 5]); // padding
+        // HEADERS: :method POST, :scheme http, :path as a literal, then
+        // content-type: application/grpc as a literal with indexed name.
+        let mut block = vec![0x83, 0x86, 0x44, 28];
+        block.extend_from_slice(b"/grpc.health.v1.Health/Check");
+        block.extend_from_slice(&[0x5f, 16]);
+        block.extend_from_slice(b"application/grpc");
+        payload.extend_from_slice(&[
+            0x00,
+            0x00,
+            block.len() as u8,
+            0x01,
+            0x04,
+            0x00,
+            0x00,
+            0x00,
+            0x01,
+        ]);
+        payload.extend_from_slice(&block);
 
         let result = parse_grpc(&payload).unwrap();
         assert_eq!(result.service, "grpc.health.v1.Health");
         assert_eq!(result.method, "Check");
+    }
+
+    #[test]
+    fn parse_grpc_ignores_path_like_bytes_outside_header_blocks() {
+        let mut payload = HTTP2_PREFACE.to_vec();
+        // A DATA frame whose body looks like a path.
+        let body = b"/evil.Service/Method";
+        payload.extend_from_slice(&[
+            0x00,
+            0x00,
+            body.len() as u8,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x01,
+        ]);
+        payload.extend_from_slice(body);
+        assert!(parse_grpc(&payload).is_err());
+    }
+
+    #[test]
+    fn parse_grpc_reads_a_huffman_coded_path() {
+        let payload = include_bytes!("../../tests/fixtures/http2/curl-two-grpc-calls.bin");
+        let result = parse_grpc(payload).unwrap();
+        assert_eq!(result.service, "admin.AdminService");
+        assert_eq!(result.method, "DeleteUser");
     }
 
     #[test]

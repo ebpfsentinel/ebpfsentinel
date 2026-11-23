@@ -1696,6 +1696,17 @@ impl AgentConfig {
             .collect()
     }
 
+    /// Whether the IDS classifier is attached on the egress hook as well as
+    /// on ingress.
+    ///
+    /// Egress is where the originating socket's cgroup can be read, which
+    /// container attribution needs, and where a server's reply leaves the
+    /// host, which an L7 refusal needs: a refused connection is shot in both
+    /// directions, and its reply only crosses egress on the host that answers.
+    pub fn ids_on_egress(&self) -> bool {
+        self.ids.inspect_egress || self.container.resolver.enabled || self.l7.enabled
+    }
+
     /// Extract the unique set of L7-inspected ports for the eBPF `L7_PORTS` map.
     ///
     /// Carries the ports the content rules name as well as the ones L7
