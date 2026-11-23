@@ -553,8 +553,10 @@ fn transaction(
     if let Some(other) = other_transaction(signature, lists, headers, &names, keywords, first) {
         return other;
     }
+    let files_only = keywords.is_empty() && names.iter().all(|n| *n == "file.data");
     if let RuleProto::App(name) = &signature.header.proto
         && !matches!(name.as_str(), "http" | "http1")
+        && !(name == "smtp" && files_only)
     {
         return Err(refused(
             first,

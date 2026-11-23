@@ -660,12 +660,12 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     KeywordSupport {
         keyword: "file.data",
         support: Support::Compiled,
-        note: "The body of an HTTP request or response, decompressed from gzip or deflate as Suricata does. Files carried by other protocols are not read yet: such a rule is refused.",
+        note: "The content of a file: the body of an HTTP request or response, decompressed from gzip or deflate, and an attachment of a mail sent over SMTP, decoded from base64 or quoted-printable, as Suricata reads them. Files carried by other protocols are not read yet: such a rule is refused.",
     },
     KeywordSupport {
         keyword: "file_data",
         support: Support::Compiled,
-        note: "The older name of `file.data`. The body of an HTTP request or response, decompressed from gzip or deflate as Suricata does. Files carried by other protocols are not read yet: such a rule is refused.",
+        note: "The older name of `file.data`. The content of a file: the body of an HTTP request or response, decompressed from gzip or deflate, and an attachment of a mail sent over SMTP, decoded from base64 or quoted-printable, as Suricata reads them. Files carried by other protocols are not read yet: such a rule is refused.",
     },
     KeywordSupport {
         keyword: "file.name",

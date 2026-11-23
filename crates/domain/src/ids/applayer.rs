@@ -47,13 +47,15 @@
 //! These rules are held to Suricata by
 //! `tests/fixtures/suricata/applayer-verdicts.txt`,
 //! `tests/fixtures/suricata/windows-verdicts.txt`,
-//! `tests/fixtures/suricata/dcerpc-verdicts.txt` and
-//! `tests/fixtures/suricata/ssh-verdicts.txt`.
+//! `tests/fixtures/suricata/dcerpc-verdicts.txt`,
+//! `tests/fixtures/suricata/ssh-verdicts.txt` and
+//! `tests/fixtures/suricata/smtp-verdicts.txt`.
 
 use super::dcerpc::Dcerpc;
 use super::dns::{self, Dns};
 use super::http1::{Http1, Ready};
 use super::smb::Smb;
+use super::smtp::Smtp;
 use super::ssh::Ssh;
 use super::tls::Tls;
 
@@ -468,6 +470,8 @@ pub struct AppLayer {
     smb: Option<Box<Smb>>,
     /// The SSH identification reader, once the flow speaks SSH.
     ssh: Option<Box<Ssh>>,
+    /// The SMTP message reader, once the flow speaks SMTP.
+    smtp: Option<Box<Smtp>>,
 }
 
 /// What the application layer says of one packet.
@@ -508,6 +512,7 @@ impl AppLayer {
             dcerpc: None,
             smb: None,
             ssh: None,
+            smtp: None,
         }
     }
 
@@ -663,6 +668,9 @@ impl AppLayer {
             }
             Some(AppProto::Tls) if !self.udp => {
                 self.tls.get_or_insert_with(Box::default).feed(side, bytes)
+            }
+            Some(AppProto::Smtp) if !self.udp => {
+                self.smtp.get_or_insert_with(Box::default).feed(side, bytes)
             }
             Some(AppProto::Ssh) if !self.udp => {
                 self.ssh.get_or_insert_with(Box::default).feed(side, bytes)

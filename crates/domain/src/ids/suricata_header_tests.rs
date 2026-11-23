@@ -28,6 +28,7 @@ const WINDOWS: &str = include_str!("../../tests/fixtures/suricata/windows-verdic
 const HTTP_PAYLOAD: &str = include_str!("../../tests/fixtures/suricata/http-payload-verdicts.txt");
 const DCERPC: &str = include_str!("../../tests/fixtures/suricata/dcerpc-verdicts.txt");
 const SSH: &str = include_str!("../../tests/fixtures/suricata/ssh-verdicts.txt");
+const SMTP: &str = include_str!("../../tests/fixtures/suricata/smtp-verdicts.txt");
 
 /// The second the conversation fixtures' captures start at, which their
 /// packet times count from: the time Suricata read a certificate's validity
@@ -273,6 +274,11 @@ fn rdp_smb_dcerpc_and_telnet_rules_alert_on_the_packets_suricata_alerts_on() {
 #[test]
 fn dcerpc_rules_alert_on_the_packets_suricata_alerts_on() {
     replay(DCERPC, 150);
+}
+
+#[test]
+fn smtp_files_alert_on_the_packets_suricata_alerts_on() {
+    replay(SMTP, 80);
 }
 
 #[test]
