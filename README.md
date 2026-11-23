@@ -464,10 +464,42 @@ The changelog is kept with the releases rather than here, so the whole product's
 
 ## Compatibility
 
-- **OS:** Linux only (kernel 6.12+ with BTF)
-- **Distros:** Debian 13+, Debian 12 with the bookworm-backports kernel (6.12), Ubuntu 26.04 (7.0), Ubuntu 24.04 with the HWE kernel (7.0 since 24.04.5), RHEL / Rocky 10+, Fedora 41+, Alpine 3.21+, Arch, NixOS 25.05+, Talos 1.9+, and AKS on its Ubuntu 26.04 node image. Not Debian 12 on its stock kernel (6.1), Ubuntu 22.04 (HWE stops at 6.8), Ubuntu 24.04 on its GA kernel (6.8), RHEL 9 (5.14) or Alpine 3.20 (6.6) without a newer kernel
-- **Arch:** x86_64 and aarch64, the userspace tests run on both in CI
-- **Runtime:** Docker, Kubernetes (DaemonSet)
+Linux only, kernel **6.12 or later with BTF** (`/sys/kernel/btf/vmlinux`), on x86_64 and aarch64 (the userspace tests run on both in CI). What matters is the running kernel, not the release.
+
+| Distribution | Kernel it ships | Supported |
+|---|---|---|
+| Debian 13+ | 6.12 | Yes |
+| Debian 12 | 6.1 | With the bookworm-backports kernel (6.12) |
+| Ubuntu 26.04 LTS | 7.0 | Yes |
+| Ubuntu 24.04 | 6.8 (GA), 7.0 (HWE since 24.04.5) | With the HWE kernel |
+| Ubuntu 22.04 | 5.15, HWE stops at 6.8 | No |
+| RHEL / Rocky 10+ | 6.12 | Yes |
+| RHEL / Rocky 9 | 5.14 | Only with a 6.12+ kernel (ELRepo `kernel-ml`) |
+| Fedora 41+ | current stable | Yes |
+| Alpine 3.21+ | 6.12 (`linux-lts`) | Yes |
+| Alpine 3.20 and earlier | 6.6 | No |
+| Arch Linux | rolling | Yes |
+| NixOS 25.05+ | 6.12+ | Yes |
+| Talos 1.9+ | 6.12 | Yes |
+| AKS (Ubuntu 26.04 node image) | 7.0 | Yes; GKE, EKS and the other node images in the full matrix |
+
+| Runs as | How |
+|---|---|
+| Native package | `.deb` / `.rpm`, systemd units for the agent and the warden |
+| Signed tarball | any Linux host, same systemd units |
+| Docker Compose | rootless agent and privileged warden, `network_mode: host` |
+| Kubernetes | DaemonSet from the Helm chart, warden as a native sidecar |
+| NixOS | the module in `dist/nix` |
+
+Every container gets its id and runtime from its cgroup path; the name, image and labels come from the enricher of its runtime.
+
+| Container runtime on the host | Name, image, labels |
+|---|---|
+| Docker | Docker enricher |
+| Podman, rootful and rootless | Podman enricher (socket), or the container store when no socket answers |
+| containerd, CRI-O under Kubernetes | Kubernetes enricher (pod, namespace, labels) |
+| containerd, CRI-O outside Kubernetes | id and runtime only |
+| LXC, Incus, LXD, Proxmox CT | LXC enricher |
 
 See [Compatibility](https://docs.ebpfsentinel.io/operations/compatibility) for the full matrix.
 
