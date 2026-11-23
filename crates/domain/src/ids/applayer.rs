@@ -30,6 +30,7 @@
 //! These rules are held to Suricata by
 //! `tests/fixtures/suricata/applayer-verdicts.txt`.
 
+use super::dns::{self, Dns};
 use super::http1::{Http1, Ready};
 
 /// An application protocol the agent finds, or the verdict that none was.
@@ -127,6 +128,18 @@ enum Verdict {
     None,
 }
 
+/// A UDP flow to port 53 is DNS when its first datagram parses as a DNS
+/// message, and has failed when it does not, as Suricata's probe decides.
+fn detect_datagram(udp: bool, server_port: u16, datagram: &[u8]) -> Option<Verdict> {
+    (udp && server_port == 53).then(|| {
+        if dns::parse(datagram).is_some() {
+            Verdict::Found(AppProto::Dns)
+        } else {
+            Verdict::None
+        }
+    })
+}
+
 fn detect(side: usize, head: &[u8], server_port: u16, udp: bool) -> Verdict {
     if server_port == 53 {
         return Verdict::Found(AppProto::Dns);
@@ -192,6 +205,8 @@ pub struct AppLayer {
     closed: bool,
     /// The HTTP/1 parser, once the flow speaks it.
     http: Option<Box<Http1>>,
+    /// The DNS parser, once the flow speaks it.
+    dns: Option<Box<Dns>>,
 }
 
 /// What the application layer says of one packet.
@@ -227,6 +242,7 @@ impl AppLayer {
             udp,
             closed: false,
             http: None,
+            dns: None,
         }
     }
 
@@ -282,23 +298,27 @@ impl AppLayer {
             let proto = match self.flow {
                 Some(AppProto::Failed) => None,
                 Some(known) => Some(known),
-                None => match detect(side, &self.dirs[side].head, self.server_port, self.udp) {
-                    Verdict::Found(found) => {
-                        self.flow = Some(found);
-                        let other = &mut self.dirs[1 - side];
-                        if other.proto.is_none() && other.fed > 0 {
-                            other.proto = Some(found);
-                            other.head = Vec::new();
-                            other.announce = true;
+                None => {
+                    match detect_datagram(self.udp, self.server_port, bytes).unwrap_or_else(|| {
+                        detect(side, &self.dirs[side].head, self.server_port, self.udp)
+                    }) {
+                        Verdict::Found(found) => {
+                            self.flow = Some(found);
+                            let other = &mut self.dirs[1 - side];
+                            if other.proto.is_none() && other.fed > 0 {
+                                other.proto = Some(found);
+                                other.head = Vec::new();
+                                other.announce = true;
+                            }
+                            Some(found)
                         }
-                        Some(found)
+                        Verdict::Wait | Verdict::None if self.udp => {
+                            self.flow.get_or_insert(AppProto::Failed);
+                            Some(AppProto::Failed)
+                        }
+                        Verdict::Wait | Verdict::None => None,
                     }
-                    Verdict::Wait | Verdict::None if self.udp => {
-                        self.flow.get_or_insert(AppProto::Failed);
-                        Some(AppProto::Failed)
-                    }
-                    Verdict::Wait | Verdict::None => None,
-                },
+                }
             };
             if let Some(proto) = proto {
                 fed.announced = self.settle(side, proto, packet_side);
@@ -324,10 +344,18 @@ impl AppLayer {
     /// Hand a direction's bytes to its protocol's parser, if the agent has
     /// one for it.
     fn parse(&mut self, side: usize, bytes: &[u8]) -> Vec<Ready> {
-        if self.dirs[side].proto != Some(AppProto::Http) {
-            return Vec::new();
+        match self.dirs[side].proto {
+            Some(AppProto::Http) => self.http.get_or_insert_with(Box::default).feed(side, bytes),
+            Some(AppProto::Dns) => {
+                let dns = self.dns.get_or_insert_with(Box::default);
+                if self.udp {
+                    dns.datagram(side, bytes)
+                } else {
+                    dns.stream(side, bytes)
+                }
+            }
+            _ => Vec::new(),
         }
-        self.http.get_or_insert_with(Box::default).feed(side, bytes)
     }
 
     /// The connection ended: what each direction's parser still held to the

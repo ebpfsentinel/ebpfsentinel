@@ -1,5 +1,6 @@
 pub mod applayer;
 pub mod capture;
+pub mod dns;
 pub mod engine;
 pub mod entity;
 pub mod error;
@@ -10,3 +11,4 @@ pub mod prefilter;
 pub mod sig;
 pub mod stream;
 pub mod suricata;
+pub mod tx;

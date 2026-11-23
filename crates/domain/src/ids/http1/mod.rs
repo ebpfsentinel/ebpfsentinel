@@ -12,6 +12,8 @@ pub mod uri;
 use std::io::Read;
 use std::sync::Arc;
 
+pub use super::tx::{Fields, Ready};
+
 /// The most of a body Suricata keeps for inspection, its default
 /// `request-body-limit` and `response-body-limit`.
 pub const BODY_LIMIT: usize = 100 * 1024;
@@ -19,47 +21,6 @@ pub const BODY_LIMIT: usize = 100 * 1024;
 /// The longest header block or start line the parser waits for. A message
 /// whose head runs past it is no HTTP the parser follows.
 const HEAD_LIMIT: usize = 64 * 1024;
-
-/// The buffers of one side of a transaction: each name once, or once per
-/// instance for a buffer holding several (`http.request_header`).
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Fields {
-    entries: Vec<(&'static str, Vec<u8>)>,
-}
-
-impl Fields {
-    fn put(&mut self, name: &'static str, bytes: Vec<u8>) {
-        if !bytes.is_empty() {
-            self.entries.push((name, bytes));
-        }
-    }
-
-    /// The `index`th instance of a buffer.
-    #[must_use]
-    pub fn get(&self, name: &str, index: usize) -> Option<&[u8]> {
-        self.entries
-            .iter()
-            .filter(|(n, _)| *n == name)
-            .nth(index)
-            .map(|(_, b)| b.as_slice())
-    }
-
-    /// Whether the side holds this buffer.
-    #[must_use]
-    pub fn has(&self, name: &str) -> bool {
-        self.entries.iter().any(|(n, _)| *n == name)
-    }
-}
-
-/// A transaction side ready for inspection.
-#[derive(Debug, Clone)]
-pub struct Ready {
-    /// The transaction's number on its connection, from 0.
-    pub id: u64,
-    /// 0 for the request, 1 for the response.
-    pub side: usize,
-    pub fields: Arc<Fields>,
-}
 
 /// A header as it reads after folding, duplicates merged.
 #[derive(Debug, Clone)]
@@ -556,6 +517,7 @@ impl Http1 {
                 id: tx,
                 side: 1,
                 fields: Arc::new(fields),
+                payload: Arc::default(),
             });
             return;
         }
@@ -619,6 +581,7 @@ impl Http1 {
                 id: dir.tx,
                 side,
                 fields: Arc::new(dir.fields.clone()),
+                payload: Arc::default(),
             });
             dir.state = State::Body(framing);
         } else {
@@ -743,6 +706,7 @@ impl Http1 {
             id: dir.tx,
             side,
             fields: Arc::new(fields),
+            payload: Arc::default(),
         });
         dir.state = State::Line;
     }

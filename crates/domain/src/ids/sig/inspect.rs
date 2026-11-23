@@ -25,9 +25,9 @@ use super::model::{
 };
 use crate::ids::applayer::{AppProto, AppView};
 use crate::ids::flow::{Seen, State};
-use crate::ids::http1::Fields;
 use crate::ids::packet::{IpPacket, L4, opt};
 use crate::ids::suricata::{Compiled, Refused};
+use crate::ids::tx::{Fields, int_of};
 
 /// A rule kept to the stream, by `tcp-stream` or `flow:only_stream`, may
 /// not read what only a packet has: a header field, a header buffer, a flow
@@ -127,9 +127,117 @@ const RESPONSE_ONLY: &[&str] = &[
     "http.response_body",
 ];
 
-/// Whether a buffer is one an HTTP transaction fills.
+/// Whether a buffer is one an HTTP or a DNS transaction fills.
 fn transaction_buffer(name: &str) -> bool {
-    name == "file.data" || sticky(name).is_some_and(|b| b.proto == "http")
+    name == "file.data" || sticky(name).is_some_and(|b| matches!(b.proto, "http" | "dns"))
+}
+
+/// The integer fields of a DNS message a rule compares, each with the
+/// condition it puts on any of the field's values.
+fn transaction_fields(signature: &Signature) -> Compiled<Vec<(&'static str, IntMatch)>> {
+    let mut out = Vec::new();
+    for check in &signature.checks {
+        let Check::Field { keyword, argument } = check else {
+            continue;
+        };
+        let max = match *keyword {
+            "dns.opcode" | "dns.rcode" => u64::from(u8::MAX),
+            "dns.rrtype" => u64::from(u16::MAX),
+            other => return Err(refused(other, "is not run by the inspection engine")),
+        };
+        let condition = IntMatch::parse(argument, max).map_err(|e| refused(*keyword, e))?;
+        out.push((*keyword, condition));
+    }
+    Ok(out)
+}
+
+/// The transaction sides a rule reading DNS buffers or fields is inspected
+/// on. Suricata loads such a rule beside payload matches, which then read
+/// the message as it travelled; it refuses `dns.query` under
+/// `flow:to_client`, `dns.response.rrname` under `flow:to_server`, and a
+/// DNS buffer on another application protocol or on `tcp-pkt`.
+fn dns_transaction(
+    signature: &Signature,
+    lists: &[List],
+    headers: &[HeaderCheck],
+    names: &[&'static str],
+    first: &'static str,
+) -> Compiled<Option<[bool; 2]>> {
+    if let Some(http) = names.iter().find(|n| !n.starts_with("dns.")) {
+        return Err(refused(
+            *http,
+            "is an HTTP buffer beside a DNS one, which no transaction holds together",
+        ));
+    }
+    match &signature.header.proto {
+        RuleProto::App(name) if name != "dns" => {
+            return Err(refused(
+                first,
+                format!("is a DNS buffer, which Suricata refuses on {name}"),
+            ));
+        }
+        RuleProto::TcpPkt => {
+            return Err(refused(
+                first,
+                "is a DNS buffer, which Suricata refuses on tcp-pkt",
+            ));
+        }
+        RuleProto::App(_)
+        | RuleProto::Ip
+        | RuleProto::Ipv4
+        | RuleProto::Ipv6
+        | RuleProto::Tcp
+        | RuleProto::Udp => {}
+        _ => {
+            return Err(refused(
+                first,
+                "is read on DNS over UDP and TCP, not yet with this rule protocol",
+            ));
+        }
+    }
+    if lists
+        .iter()
+        .any(|l| matches!(l.source, Source::Sticky(name) if !transaction_buffer(name)))
+    {
+        return Err(refused(
+            first,
+            "is not yet read beside a buffer of another protocol",
+        ));
+    }
+    if !headers.is_empty() {
+        return Err(refused(
+            first,
+            "is not yet read beside a packet header keyword",
+        ));
+    }
+    let flow = &signature.flow;
+    let request = names.contains(&"dns.query");
+    let response = names.contains(&"dns.response.rrname");
+    if request && response {
+        return Err(refused(
+            "dns.response.rrname",
+            "is read on responses and dns.query on requests, which no message holds together",
+        ));
+    }
+    if request && flow.to_client {
+        return Err(refused(
+            "dns.query",
+            "is a request buffer under flow:to_client, which Suricata refuses",
+        ));
+    }
+    if response && flow.to_server {
+        return Err(refused(
+            "dns.response.rrname",
+            "is a response buffer under flow:to_server, which Suricata refuses",
+        ));
+    }
+    Ok(Some(if request || flow.to_server {
+        [true, false]
+    } else if response || flow.to_client {
+        [false, true]
+    } else {
+        [true, true]
+    }))
 }
 
 /// The transaction sides a rule reading HTTP buffers is inspected on,
@@ -142,6 +250,7 @@ fn transaction(
     signature: &Signature,
     lists: &[List],
     headers: &[HeaderCheck],
+    fields: &[(&'static str, IntMatch)],
     session: &mut Session,
 ) -> Compiled<Option<[bool; 2]>> {
     let names: Vec<&'static str> = lists
@@ -151,9 +260,13 @@ fn transaction(
             _ => None,
         })
         .collect();
-    let Some(&first) = names.first() else {
+    let Some(first) = names.first().copied().or(fields.first().map(|f| f.0)) else {
         return Ok(None);
     };
+    let dns = !fields.is_empty() || names.iter().any(|n| n.starts_with("dns."));
+    if dns {
+        return dns_transaction(signature, lists, headers, &names, first);
+    }
     if let RuleProto::App(name) = &signature.header.proto
         && !matches!(name.as_str(), "http" | "http1")
     {
@@ -251,9 +364,11 @@ pub struct Program {
     state: Option<State>,
     session: Session,
     inspect: Inspect,
-    /// The HTTP transaction sides the rule is inspected on, request then
-    /// response, for a rule reading HTTP buffers.
+    /// The transaction sides the rule is inspected on, request then
+    /// response, for a rule reading HTTP or DNS buffers.
     tx: Option<[bool; 2]>,
+    /// The DNS integer fields the rule compares.
+    fields: Vec<(&'static str, IntMatch)>,
 }
 
 /// Where a rule's payload matches run on a TCP connection whose streams are
@@ -770,7 +885,8 @@ impl Program {
             .collect::<Compiled<Vec<_>>>()?;
         let mut session = Session::compile(signature, &lists)?;
         stream_alone(signature, &lists, &headers, &session)?;
-        let tx = transaction(signature, &lists, &headers, &mut session)?;
+        let fields = transaction_fields(signature)?;
+        let tx = transaction(signature, &lists, &headers, &fields, &mut session)?;
         let inspect = inspect(signature, &lists, &headers, &session, tx);
         Ok(Self {
             lists,
@@ -781,6 +897,7 @@ impl Program {
             session,
             inspect,
             tx,
+            fields,
         })
     }
 
@@ -804,15 +921,25 @@ impl Program {
         self.session.alproto.is_some() || !self.session.protocols.is_empty() || self.tx.is_some()
     }
 
-    /// Whether the rule holds on one side of an HTTP transaction, 0 the
-    /// request, its buffers read from `fields`.
+    /// Whether the rule holds on one side of an application transaction, 0
+    /// the request, its buffers read from `fields` and its payload matches
+    /// from `payload`, the message as it travelled.
     #[must_use]
-    pub fn matches_transaction(&self, side: usize, fields: &Fields) -> bool {
+    pub fn matches_transaction(&self, side: usize, fields: &Fields, payload: &[u8]) -> bool {
         if !self.tx.is_some_and(|sides| sides[side]) {
             return false;
         }
+        let holds = |name: &str, condition: &IntMatch| {
+            (0..)
+                .map_while(|i| fields.get(name, i))
+                .filter_map(int_of)
+                .any(|v| condition.matches(v))
+        };
+        if !self.fields.iter().all(|(name, c)| holds(name, c)) {
+            return false;
+        }
         let sticky = |name: &str, index: usize| fields.get(name, index);
-        self.run(&[], &sticky)
+        self.run(payload, &sticky)
     }
 
     /// Whether the signature's matches hold on a window of a stream: its

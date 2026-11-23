@@ -595,7 +595,7 @@ impl IdsEngine {
             .collect()
     }
 
-    /// The rules matching one side of an HTTP transaction the packet's
+    /// The rules matching one side of an application transaction the packet's
     /// sender completed, each raised once per transaction side.
     fn transaction_matches(
         &self,
@@ -607,12 +607,12 @@ impl IdsEngine {
         let keys: Vec<u16> = ports.map_or_else(Vec::new, |(s, d)| vec![d, s]);
         let matched: Vec<(usize, &IdsRule)> = self
             .prefilter()
-            .candidates(&keys, &[])
+            .candidates(&keys, &tx.payload)
             .into_iter()
             .filter_map(|idx| {
                 let (rule, program) = self.imported(idx, event, ports, seen)?;
                 (program.inspect() == Inspect::Transaction
-                    && program.matches_transaction(tx.side, &tx.fields))
+                    && program.matches_transaction(tx.side, &tx.fields, &tx.payload))
                 .then_some((idx, rule))
             })
             .collect();

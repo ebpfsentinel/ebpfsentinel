@@ -375,7 +375,8 @@ impl FlowTable {
         };
         let mut blocks = Vec::new();
         let mut sizes = None;
-        let txs = std::mem::take(&mut session.txs[side]);
+        let mut txs = std::mem::take(&mut session.txs[side]);
+        let mut datagram_txs = Vec::new();
         let mut announced = session.app.as_mut().is_some_and(|app| app.begin(side));
         if let (Some(streams), Some(segment)) = (session.streams.as_mut(), wire.segment) {
             let observed = streams.observe(side, segment, &mut self.held);
@@ -397,13 +398,17 @@ impl FlowTable {
                 }
             }
         } else if let (Some(app), Some(data)) = (session.app.as_mut(), wire.datagram) {
-            announced |= app.feed(side, data, side).announced;
+            // A datagram's transaction is read on the datagram itself.
+            let fed = app.feed(side, data, side);
+            announced |= fed.announced;
+            datagram_txs = fed.txs;
         }
         let mut seen = session.seen(side, packet.now, established);
         if sizes.is_some() {
             seen.stream_size = sizes;
         }
         seen.app.announced = announced;
+        txs.extend(datagram_txs);
         Observation { seen, blocks, txs }
     }
 

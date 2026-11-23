@@ -22,6 +22,7 @@ const SESSIONS: &str = include_str!("../../tests/fixtures/suricata/session-verdi
 const STREAMS: &str = include_str!("../../tests/fixtures/suricata/stream-verdicts.txt");
 const APPLAYER: &str = include_str!("../../tests/fixtures/suricata/applayer-verdicts.txt");
 const HTTP: &str = include_str!("../../tests/fixtures/suricata/http-verdicts.txt");
+const DNS: &str = include_str!("../../tests/fixtures/suricata/dns-verdicts.txt");
 
 /// The Ethernet header Suricata counts in a flow's bytes, as `skb->len`
 /// does where tc-ids reads it.
@@ -242,6 +243,11 @@ fn application_rules_alert_on_the_packets_suricata_alerts_on() {
 #[test]
 fn http_rules_alert_on_the_packets_suricata_alerts_on() {
     replay(HTTP, 150);
+}
+
+#[test]
+fn dns_rules_alert_on_the_packets_suricata_alerts_on() {
+    replay(DNS, 60);
 }
 
 /// Plays a fixture's conversations through the engine, packet by packet,
