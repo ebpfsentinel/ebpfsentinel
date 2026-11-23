@@ -21,6 +21,7 @@ use super::model::{
     Base64Decode, Buffer, ByteOp, ByteRead, Check, Content, Endian, FastPattern, FloatMatch,
     HeaderField, Match, MathOp, NumBase, Pcre, Signature, Transform, Value,
 };
+use crate::ids::flow::State;
 use crate::ids::suricata::{Compiled, Refused};
 
 /// How many times one inspection may return to an earlier match to try its
@@ -34,6 +35,7 @@ pub struct Program {
     dsize: Vec<IntMatch>,
     slots: usize,
     fast: Option<Needle>,
+    state: Option<State>,
 }
 
 /// Bytes every payload the program matches holds somewhere, so a payload
@@ -241,7 +243,15 @@ impl Program {
             dsize,
             slots: names.len(),
             fast: fast_pattern(signature),
+            state: State::compile(signature)?,
         })
+    }
+
+    /// What the rule reads and writes outside the packet, `None` when it
+    /// touches nothing there.
+    #[must_use]
+    pub const fn state(&self) -> Option<&State> {
+        self.state.as_ref()
     }
 
     /// The bytes a payload must hold for the program to match it: the

@@ -1,0 +1,156 @@
+# Flow, host and pair state cases. A `scenario` line opens one: its own
+# server port and client address. Each rule line under it starts with `>`
+# (the rule reads what clients send to that port) or `<` (what the server
+# sends back), then holds the rule's options. Each indented line is a packet:
+# the second it is sent, `>` from a client or `<` from the server, optionally
+# `cN` for the client port (c0 when absent), then the payload as a Suricata
+# content string. make-flow-verdicts.py sends them to a real Suricata and
+# records which rules alerted on each packet.
+
+scenario a bit set by one rule is read by a later packet, in order only
+> flowbits:set,auth; flowbits:noalert; content:"LOGIN";
+> flowbits:isset,auth; content:"DATA";
+  0 > "DATA"
+  1 > "LOGIN"
+  2 > "DATA"
+  3 > c1 "DATA"
+
+scenario a bit set by the client is read on the server's answer
+> flowbits:set,req; content:"REQ";
+< flowbits:isset,req; content:"RESP";
+  0 < "RESP"
+  1 > "REQ"
+  2 < "RESP"
+
+scenario a rule setting a bit runs before a rule reading it on one packet
+> flowbits:isset,both; content:"AB";
+> flowbits:set,both; content:"A";
+  0 > "AB"
+  1 > c1 "B"
+  2 > c1 "AB"
+
+scenario unset, toggle and isnotset
+> flowbits:set,on; content:"SET";
+> flowbits:unset,on; content:"CLEAR";
+> flowbits:toggle,on; content:"FLIP";
+> flowbits:isset,on; content:"ASK";
+> flowbits:isnotset,on; content:"NOT";
+  0 > "ASK NOT"
+  1 > "SET"
+  2 > "ASK NOT"
+  3 > "CLEAR"
+  4 > "ASK NOT"
+  5 > "FLIP"
+  6 > "ASK NOT"
+  7 > "FLIP"
+  8 > "ASK NOT"
+
+scenario a test of a|b reads any of the names
+> flowbits:set,b; flowbits:noalert; content:"SETB";
+> flowbits:isset,a|b; content:"ANY";
+> flowbits:isnotset,a|b; content:"NONE";
+  0 > "ANY NONE"
+  1 > "SETB"
+  2 > "ANY NONE"
+
+scenario a&b is one bit of that name
+> flowbits:set,a; content:"SETA";
+> flowbits:set,b; content:"SETB";
+> flowbits:isset,a&b; content:"ALL";
+> flowbits:isnotset,a&b; content:"NALL";
+> flowbits:set,x|y; content:"SETXY";
+> flowbits:isset,x; content:"ISX";
+  0 > "SETA SETB"
+  1 > "ALL NALL"
+  2 > "SETXY"
+  3 > "ISX"
+
+scenario noalert alone still writes
+> noalert; flowbits:set,quiet; content:"HUSH";
+> flowbits:isset,quiet; content:"LOUD";
+  0 > "HUSH"
+  1 > "LOUD"
+
+scenario a flowint counts packets
+> flowint:hits,+,1; flowint:hits,>=,3; content:"HIT";
+  0 > "HIT"
+  1 > "HIT"
+  2 > "HIT"
+  3 > "HIT"
+  4 > c1 "HIT"
+
+scenario a flowint written by one rule is compared by another
+> flowint:level,=,5; content:"SETL";
+> flowint:level,+,2; content:"ADDL";
+> flowint:level,==,7; content:"IS7";
+> flowint:level,>,other; content:"VAR";
+> flowint:level,isset; content:"HAS";
+> flowint:unset_var,notset; content:"NOV";
+  0 > "IS7 HAS NOV VAR"
+  1 > "SETL"
+  2 > "IS7"
+  3 > "ADDL"
+  4 > "IS7 HAS VAR"
+
+scenario a flowint added by one rule and compared by another
+> flowint:count,+,1; flowint:noalert_unused,notset; content:"INC";
+> flowint:count,>=,2; content:"INC";
+> flowint:count,<,other; content:"LESS";
+> flowint:count,==,other; content:"SAME";
+  0 > "INC"
+  1 > "INC"
+  2 > "INC LESS SAME"
+
+scenario a flowint compared before it is added in one rule
+> flowint:seen,>=,1; flowint:seen,+,1; content:"TWICE";
+  0 > "TWICE"
+  1 > "TWICE"
+  2 > "TWICE"
+
+scenario a flowint step before a failing content
+> flowint:early,+,1; content:"NEVER";
+> flowint:early,isset; content:"EARLY";
+  0 > "EARLY"
+  1 > "EARLY"
+
+scenario a pair bit is seen from the other address of the pair
+> xbits:set,pair,track ip_pair; content:"PSET";
+< xbits:isset,pair,track ip_pair; content:"PGET";
+  0 > "PSET"
+  1 < c1 "PGET"
+
+scenario a source bit lives on the address and expires
+> xbits:set,seen,track ip_src,expire 10; xbits:noalert; content:"MARK";
+> xbits:isset,seen,track ip_src; content:"CHECK";
+  0 > "MARK"
+  1 > c1 "CHECK"
+  10 > c2 "CHECK"
+  11 > c3 "CHECK"
+  100 > "MARK"
+  105 > "MARK"
+  111 > c1 "CHECK"
+
+scenario a destination bit is the server's address
+> xbits:set,target,track ip_dst; content:"TSET";
+< xbits:isset,target,track ip_src; content:"TGET";
+> xbits:isset,target,track ip_src; content:"TSRC";
+  0 > "TSET"
+  1 < "TGET"
+  2 > "TSRC"
+
+scenario hostbits share the host's bits
+> hostbits:set,host,src; content:"HSET";
+< hostbits:isset,host,dst; content:"HGET";
+< xbits:isset,host,track ip_dst; content:"XGET";
+  0 > "HSET"
+  1 < c1 "HGET XGET"
+
+scenario a detection filter alerts past its count until its window closes
+> detection_filter:track by_src, count 2, seconds 10; content:"FLOOD";
+  0 > "FLOOD"
+  1 > c1 "FLOOD"
+  2 > c2 "FLOOD"
+  3 > c3 "FLOOD"
+  10 > "FLOOD"
+  11 > "FLOOD"
+  12 > "FLOOD"

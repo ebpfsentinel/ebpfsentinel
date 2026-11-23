@@ -1107,6 +1107,10 @@ impl Builder {
                 }
                 Check::Bits(parse_bits("flowbits", value)?)
             }
+            "xbits" | "hostbits" if value == "noalert" => {
+                self.sig.noalert = true;
+                return Ok(true);
+            }
             "xbits" => Check::Bits(parse_bits("xbits", value)?),
             "hostbits" => Check::Bits(parse_bits("hostbits", value)?),
             "flowint" => Check::Flowint(Self::parse_flowint(value)?),
@@ -1905,22 +1909,35 @@ fn parse_bits(keyword: &'static str, value: &str) -> Compiled<Bits> {
     let (names, options) = rest
         .split_first()
         .ok_or_else(|| bad(k, "needs a bit name"))?;
-    let any = names.contains('|');
-    if any && names.contains('&') {
-        return Err(bad(k, "mixes '|' and '&' between names"));
-    }
-    let names: Vec<String> = names
-        .split(['|', '&'])
-        .map(str::trim)
-        .map(str::to_string)
-        .collect();
-    if names.iter().any(|n| !is_name(n)) {
+    // Suricata reads `|` as "any of" when a flow bit is tested, and nowhere
+    // else: a bit set as `a|b` or `a&b` is one bit of that name, which a test
+    // naming it then reads as the names around the `|`.
+    let flow = keyword == "flowbits";
+    let any = flow && matches!(op, BitOp::IsSet | BitOp::IsNotSet) && names.contains('|');
+    let names: Vec<String> = if any {
+        names
+            .split('|')
+            .map(str::trim)
+            .map(str::to_string)
+            .collect()
+    } else {
+        vec![names.to_string()]
+    };
+    let malformed = |n: &String| {
+        if flow {
+            n.is_empty() || n.contains(char::is_whitespace)
+        } else {
+            !is_name(n)
+        }
+    };
+    if names.iter().any(malformed) {
         return Err(bad(k, "has an empty or malformed bit name"));
     }
-    if names.len() > 1 && keyword != "flowbits" {
-        return Err(bad(k, "names more than one bit"));
-    }
-    let mut scope = BitScope::Flow;
+    let mut scope = if keyword == "xbits" {
+        BitScope::Untracked
+    } else {
+        BitScope::Flow
+    };
     let mut expire = None;
     for option in options {
         let (name, arg) = option
@@ -1939,7 +1956,7 @@ fn parse_bits(keyword: &'static str, value: &str) -> Compiled<Bits> {
                     "ip_src" | "by_src" => BitScope::IpSrc,
                     "ip_dst" | "by_dst" => BitScope::IpDst,
                     "ip_pair" | "by_both" => BitScope::IpPair,
-                    "tx" => BitScope::Flow,
+                    "tx" => BitScope::Transaction,
                     other => return Err(bad(k, format!("'{other}' is not a track"))),
                 };
             }
@@ -2093,6 +2110,7 @@ fn parse_threshold(k: &str, value: &str) -> Compiled<Threshold> {
     let mut count = None;
     let mut seconds = None;
     let mut multiplier = None;
+    let mut unique_on = false;
     for part in split_args(value) {
         let (name, arg) = part
             .split_once(' ')
@@ -2128,6 +2146,7 @@ fn parse_threshold(k: &str, value: &str) -> Compiled<Threshold> {
                 if !matches!(arg, "src_port" | "dst_port") {
                     return Err(bad(k, format!("'{arg}' is neither src_port nor dst_port")));
                 }
+                unique_on = true;
             }
             _ => return Err(bad(k, format!("'{name}' is not an option of it"))),
         }
@@ -2151,6 +2170,7 @@ fn parse_threshold(k: &str, value: &str) -> Compiled<Threshold> {
         count,
         seconds,
         multiplier,
+        unique_on,
     })
 }
 

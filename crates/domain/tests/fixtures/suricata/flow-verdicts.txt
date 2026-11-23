@@ -1,0 +1,117 @@
+# This is Suricata version 8.0.8 RELEASE, run by make-flow-verdicts.py; do not edit by hand.
+# 'rule SID loaded|refused RULE', then 'packet NS SRC SPORT DST DPORT HEX SIDS'
+# per packet, NS its time in nanoseconds and SIDS the alerted rules or '-'.
+rule 3000 loaded alert tcp any any -> any 21001 (msg:"case 3000"; flowbits:set,auth; flowbits:noalert; content:"LOGIN"; sid:3000;)
+rule 3001 loaded alert tcp any any -> any 21001 (msg:"case 3001"; flowbits:isset,auth; content:"DATA"; sid:3001;)
+rule 3002 loaded alert tcp any any -> any 21002 (msg:"case 3002"; flowbits:set,req; content:"REQ"; sid:3002;)
+rule 3003 loaded alert tcp any 21002 -> any any (msg:"case 3003"; flowbits:isset,req; content:"RESP"; sid:3003;)
+rule 3004 loaded alert tcp any any -> any 21003 (msg:"case 3004"; flowbits:isset,both; content:"AB"; sid:3004;)
+rule 3005 loaded alert tcp any any -> any 21003 (msg:"case 3005"; flowbits:set,both; content:"A"; sid:3005;)
+rule 3006 loaded alert tcp any any -> any 21004 (msg:"case 3006"; flowbits:set,on; content:"SET"; sid:3006;)
+rule 3007 loaded alert tcp any any -> any 21004 (msg:"case 3007"; flowbits:unset,on; content:"CLEAR"; sid:3007;)
+rule 3008 loaded alert tcp any any -> any 21004 (msg:"case 3008"; flowbits:toggle,on; content:"FLIP"; sid:3008;)
+rule 3009 loaded alert tcp any any -> any 21004 (msg:"case 3009"; flowbits:isset,on; content:"ASK"; sid:3009;)
+rule 3010 loaded alert tcp any any -> any 21004 (msg:"case 3010"; flowbits:isnotset,on; content:"NOT"; sid:3010;)
+rule 3011 loaded alert tcp any any -> any 21005 (msg:"case 3011"; flowbits:set,b; flowbits:noalert; content:"SETB"; sid:3011;)
+rule 3012 loaded alert tcp any any -> any 21005 (msg:"case 3012"; flowbits:isset,a|b; content:"ANY"; sid:3012;)
+rule 3013 loaded alert tcp any any -> any 21005 (msg:"case 3013"; flowbits:isnotset,a|b; content:"NONE"; sid:3013;)
+rule 3014 loaded alert tcp any any -> any 21006 (msg:"case 3014"; flowbits:set,a; content:"SETA"; sid:3014;)
+rule 3015 loaded alert tcp any any -> any 21006 (msg:"case 3015"; flowbits:set,b; content:"SETB"; sid:3015;)
+rule 3016 loaded alert tcp any any -> any 21006 (msg:"case 3016"; flowbits:isset,a&b; content:"ALL"; sid:3016;)
+rule 3017 loaded alert tcp any any -> any 21006 (msg:"case 3017"; flowbits:isnotset,a&b; content:"NALL"; sid:3017;)
+rule 3018 loaded alert tcp any any -> any 21006 (msg:"case 3018"; flowbits:set,x|y; content:"SETXY"; sid:3018;)
+rule 3019 loaded alert tcp any any -> any 21006 (msg:"case 3019"; flowbits:isset,x; content:"ISX"; sid:3019;)
+rule 3020 loaded alert tcp any any -> any 21007 (msg:"case 3020"; noalert; flowbits:set,quiet; content:"HUSH"; sid:3020;)
+rule 3021 loaded alert tcp any any -> any 21007 (msg:"case 3021"; flowbits:isset,quiet; content:"LOUD"; sid:3021;)
+rule 3022 loaded alert tcp any any -> any 21008 (msg:"case 3022"; flowint:hits,+,1; flowint:hits,>=,3; content:"HIT"; sid:3022;)
+rule 3023 loaded alert tcp any any -> any 21009 (msg:"case 3023"; flowint:level,=,5; content:"SETL"; sid:3023;)
+rule 3024 loaded alert tcp any any -> any 21009 (msg:"case 3024"; flowint:level,+,2; content:"ADDL"; sid:3024;)
+rule 3025 loaded alert tcp any any -> any 21009 (msg:"case 3025"; flowint:level,==,7; content:"IS7"; sid:3025;)
+rule 3026 loaded alert tcp any any -> any 21009 (msg:"case 3026"; flowint:level,>,other; content:"VAR"; sid:3026;)
+rule 3027 loaded alert tcp any any -> any 21009 (msg:"case 3027"; flowint:level,isset; content:"HAS"; sid:3027;)
+rule 3028 loaded alert tcp any any -> any 21009 (msg:"case 3028"; flowint:unset_var,notset; content:"NOV"; sid:3028;)
+rule 3029 loaded alert tcp any any -> any 21010 (msg:"case 3029"; flowint:count,+,1; flowint:noalert_unused,notset; content:"INC"; sid:3029;)
+rule 3030 loaded alert tcp any any -> any 21010 (msg:"case 3030"; flowint:count,>=,2; content:"INC"; sid:3030;)
+rule 3031 loaded alert tcp any any -> any 21010 (msg:"case 3031"; flowint:count,<,other; content:"LESS"; sid:3031;)
+rule 3032 loaded alert tcp any any -> any 21010 (msg:"case 3032"; flowint:count,==,other; content:"SAME"; sid:3032;)
+rule 3033 loaded alert tcp any any -> any 21011 (msg:"case 3033"; flowint:seen,>=,1; flowint:seen,+,1; content:"TWICE"; sid:3033;)
+rule 3034 loaded alert tcp any any -> any 21012 (msg:"case 3034"; flowint:early,+,1; content:"NEVER"; sid:3034;)
+rule 3035 loaded alert tcp any any -> any 21012 (msg:"case 3035"; flowint:early,isset; content:"EARLY"; sid:3035;)
+rule 3036 loaded alert tcp any any -> any 21013 (msg:"case 3036"; xbits:set,pair,track ip_pair; content:"PSET"; sid:3036;)
+rule 3037 loaded alert tcp any 21013 -> any any (msg:"case 3037"; xbits:isset,pair,track ip_pair; content:"PGET"; sid:3037;)
+rule 3038 loaded alert tcp any any -> any 21014 (msg:"case 3038"; xbits:set,seen,track ip_src,expire 10; xbits:noalert; content:"MARK"; sid:3038;)
+rule 3039 loaded alert tcp any any -> any 21014 (msg:"case 3039"; xbits:isset,seen,track ip_src; content:"CHECK"; sid:3039;)
+rule 3040 loaded alert tcp any any -> any 21015 (msg:"case 3040"; xbits:set,target,track ip_dst; content:"TSET"; sid:3040;)
+rule 3041 loaded alert tcp any 21015 -> any any (msg:"case 3041"; xbits:isset,target,track ip_src; content:"TGET"; sid:3041;)
+rule 3042 loaded alert tcp any any -> any 21015 (msg:"case 3042"; xbits:isset,target,track ip_src; content:"TSRC"; sid:3042;)
+rule 3043 loaded alert tcp any any -> any 21016 (msg:"case 3043"; hostbits:set,host,src; content:"HSET"; sid:3043;)
+rule 3044 loaded alert tcp any 21016 -> any any (msg:"case 3044"; hostbits:isset,host,dst; content:"HGET"; sid:3044;)
+rule 3045 loaded alert tcp any 21016 -> any any (msg:"case 3045"; xbits:isset,host,track ip_dst; content:"XGET"; sid:3045;)
+rule 3046 loaded alert tcp any any -> any 21017 (msg:"case 3046"; detection_filter:track by_src, count 2, seconds 10; content:"FLOOD"; sid:3046;)
+packet 10000000000000 10.1.0.1 40000 10.2.0.1 21001 44415441 -
+packet 10001000000000 10.1.0.1 40000 10.2.0.1 21001 4c4f47494e -
+packet 10002000000000 10.1.0.1 40000 10.2.0.1 21001 44415441 3001
+packet 10003000000000 10.1.0.1 40001 10.2.0.1 21001 44415441 -
+packet 20000000000000 10.2.0.2 21002 10.1.0.2 40000 52455350 -
+packet 20001000000000 10.1.0.2 40000 10.2.0.2 21002 524551 3002
+packet 20002000000000 10.2.0.2 21002 10.1.0.2 40000 52455350 3003
+packet 30000000000000 10.1.0.3 40000 10.2.0.3 21003 4142 3004,3005
+packet 30001000000000 10.1.0.3 40001 10.2.0.3 21003 42 -
+packet 30002000000000 10.1.0.3 40001 10.2.0.3 21003 4142 3004,3005
+packet 40000000000000 10.1.0.4 40000 10.2.0.4 21004 41534b204e4f54 3010
+packet 40001000000000 10.1.0.4 40000 10.2.0.4 21004 534554 3006
+packet 40002000000000 10.1.0.4 40000 10.2.0.4 21004 41534b204e4f54 3009
+packet 40003000000000 10.1.0.4 40000 10.2.0.4 21004 434c454152 3007
+packet 40004000000000 10.1.0.4 40000 10.2.0.4 21004 41534b204e4f54 3010
+packet 40005000000000 10.1.0.4 40000 10.2.0.4 21004 464c4950 3008
+packet 40006000000000 10.1.0.4 40000 10.2.0.4 21004 41534b204e4f54 3009
+packet 40007000000000 10.1.0.4 40000 10.2.0.4 21004 464c4950 3008
+packet 40008000000000 10.1.0.4 40000 10.2.0.4 21004 41534b204e4f54 3010
+packet 50000000000000 10.1.0.5 40000 10.2.0.5 21005 414e59204e4f4e45 3013
+packet 50001000000000 10.1.0.5 40000 10.2.0.5 21005 53455442 -
+packet 50002000000000 10.1.0.5 40000 10.2.0.5 21005 414e59204e4f4e45 3012,3013
+packet 60000000000000 10.1.0.6 40000 10.2.0.6 21006 534554412053455442 3014,3015
+packet 60001000000000 10.1.0.6 40000 10.2.0.6 21006 414c4c204e414c4c 3017
+packet 60002000000000 10.1.0.6 40000 10.2.0.6 21006 5345545859 3018
+packet 60003000000000 10.1.0.6 40000 10.2.0.6 21006 495358 -
+packet 70000000000000 10.1.0.7 40000 10.2.0.7 21007 48555348 -
+packet 70001000000000 10.1.0.7 40000 10.2.0.7 21007 4c4f5544 3021
+packet 80000000000000 10.1.0.8 40000 10.2.0.8 21008 484954 -
+packet 80001000000000 10.1.0.8 40000 10.2.0.8 21008 484954 -
+packet 80002000000000 10.1.0.8 40000 10.2.0.8 21008 484954 -
+packet 80003000000000 10.1.0.8 40000 10.2.0.8 21008 484954 -
+packet 80004000000000 10.1.0.8 40001 10.2.0.8 21008 484954 -
+packet 90000000000000 10.1.0.9 40000 10.2.0.9 21009 49533720484153204e4f5620564152 3028
+packet 90001000000000 10.1.0.9 40000 10.2.0.9 21009 5345544c 3023
+packet 90002000000000 10.1.0.9 40000 10.2.0.9 21009 495337 -
+packet 90003000000000 10.1.0.9 40000 10.2.0.9 21009 4144444c 3024
+packet 90004000000000 10.1.0.9 40000 10.2.0.9 21009 4953372048415320564152 3025,3026,3027
+packet 100000000000000 10.1.0.10 40000 10.2.0.10 21010 494e43 3029
+packet 100001000000000 10.1.0.10 40000 10.2.0.10 21010 494e43 3029,3030
+packet 100002000000000 10.1.0.10 40000 10.2.0.10 21010 494e43204c4553532053414d45 3029,3030
+packet 110000000000000 10.1.0.11 40000 10.2.0.11 21011 5457494345 -
+packet 110001000000000 10.1.0.11 40000 10.2.0.11 21011 5457494345 -
+packet 110002000000000 10.1.0.11 40000 10.2.0.11 21011 5457494345 -
+packet 120000000000000 10.1.0.12 40000 10.2.0.12 21012 4541524c59 -
+packet 120001000000000 10.1.0.12 40000 10.2.0.12 21012 4541524c59 -
+packet 130000000000000 10.1.0.13 40000 10.2.0.13 21013 50534554 3036
+packet 130001000000000 10.2.0.13 21013 10.1.0.13 40001 50474554 3037
+packet 140000000000000 10.1.0.14 40000 10.2.0.14 21014 4d41524b -
+packet 140001000000000 10.1.0.14 40001 10.2.0.14 21014 434845434b 3039
+packet 140010000000000 10.1.0.14 40002 10.2.0.14 21014 434845434b 3039
+packet 140011000000000 10.1.0.14 40003 10.2.0.14 21014 434845434b -
+packet 140100000000000 10.1.0.14 40000 10.2.0.14 21014 4d41524b -
+packet 140105000000000 10.1.0.14 40000 10.2.0.14 21014 4d41524b -
+packet 140111000000000 10.1.0.14 40001 10.2.0.14 21014 434845434b -
+packet 150000000000000 10.1.0.15 40000 10.2.0.15 21015 54534554 3040
+packet 150001000000000 10.2.0.15 21015 10.1.0.15 40000 54474554 3041
+packet 150002000000000 10.1.0.15 40000 10.2.0.15 21015 54535243 -
+packet 160000000000000 10.1.0.16 40000 10.2.0.16 21016 48534554 3043
+packet 160001000000000 10.2.0.16 21016 10.1.0.16 40001 484745542058474554 3044,3045
+packet 170000000000000 10.1.0.17 40000 10.2.0.17 21017 464c4f4f44 -
+packet 170001000000000 10.1.0.17 40001 10.2.0.17 21017 464c4f4f44 -
+packet 170002000000000 10.1.0.17 40002 10.2.0.17 21017 464c4f4f44 3046
+packet 170003000000000 10.1.0.17 40003 10.2.0.17 21017 464c4f4f44 3046
+packet 170010000000000 10.1.0.17 40000 10.2.0.17 21017 464c4f4f44 3046
+packet 170011000000000 10.1.0.17 40000 10.2.0.17 21017 464c4f4f44 -
+packet 170012000000000 10.1.0.17 40000 10.2.0.17 21017 464c4f4f44 -

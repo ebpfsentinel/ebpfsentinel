@@ -257,83 +257,83 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "flowbits",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+        support: Support::Compiled,
+        note: "Every command, `noalert`, and `a|b` as any of the names on `isset` and `isnotset`; elsewhere `|` and `&` are part of the name, as in Suricata. A bit set on a packet is seen on that packet by the rules that test it, and by both directions of the flow after it.",
     },
     KeywordSupport {
         keyword: "xbits",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+        support: Support::Compiled,
+        note: "On `ip_src`, `ip_dst` and `ip_pair`, with `expire` (30 seconds when unnamed; setting a live bit again keeps its expiry), and `noalert`. A rule naming no `track`, which Suricata keeps nowhere, and `track tx` are refused.",
     },
     KeywordSupport {
         keyword: "hostbits",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+        support: Support::Compiled,
+        note: "On the source, the destination or both, sharing the host bits of `xbits`, with `expire`.",
     },
     KeywordSupport {
         keyword: "flowint",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+        support: Support::Compiled,
+        note: "Every operator, against a number or another flow variable. A comparison on a variable never set fails; adding to one starts it from 0.",
     },
     KeywordSupport {
         keyword: "flowvar",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+        note: "Parsed and checked; a rule carrying it is refused until pcre captures are kept on the flow.",
     },
     KeywordSupport {
         keyword: "pktvar",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+        note: "Parsed and checked; a rule carrying it is refused until pcre captures are kept on the packet.",
     },
     KeywordSupport {
         keyword: "noalert",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+        support: Support::Compiled,
+        note: "The rule raises no alert and still writes the state it names.",
     },
     KeywordSupport {
         keyword: "detection_filter",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+        support: Support::Compiled,
+        note: "Alerts on every match past `count` in a window of `seconds` opened by the first match, tracked by source, destination, both, rule or flow. `unique_on` is refused.",
     },
     KeywordSupport {
         keyword: "flow.age",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over every packet of the flow, which its counters count.",
     },
     KeywordSupport {
         keyword: "flow.pkts",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over every packet of the flow, which its counters count.",
     },
     KeywordSupport {
         keyword: "flow.pkts_toserver",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over every packet of the flow, which its counters count.",
     },
     KeywordSupport {
         keyword: "flow.pkts_toclient",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over every packet of the flow, which its counters count.",
     },
     KeywordSupport {
         keyword: "flow.bytes",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over every packet of the flow, which its counters count.",
     },
     KeywordSupport {
         keyword: "flow.bytes_toserver",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over every packet of the flow, which its counters count.",
     },
     KeywordSupport {
         keyword: "flow.bytes_toclient",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over every packet of the flow, which its counters count.",
     },
     KeywordSupport {
         keyword: "flow.elephant",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the flow table keeps the state it reads.",
+        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over every packet of the flow, which its counters count.",
     },
     KeywordSupport {
         keyword: "stream_size",
@@ -3348,7 +3348,7 @@ mod tests {
     const ET_FOKIRTOR: &str = r#"alert tcp $EXTERNAL_NET any -> any 22 (msg:"ET MALWARE Possible SSH Linux.Fokirtor backchannel command"; flow:established,to_server; content:"|3a 21 3b 2e|"; pcre:"/^(?:[A-Za-z0-9\+\/]{4})*(?:[A-Za-z0-9\+\/]{2}==|[A-Za-z0-9\+\/]{3}=|[A-Za-z0-9\+\/]{4})/R"; classtype:trojan-activity; sid:2017727; rev:6;)"#;
     const ET_ORACLE_BACKREF: &str = r#"alert tcp $EXTERNAL_NET any -> $SQL_SERVERS $ORACLE_PORTS (msg:"GPL SQL dbms_repcat.add_column_group_to_flavor buffer overflow attempt"; flow:established,to_server; content:"dbms_repcat.add_column_group_to_flavor"; nocase; fast_pattern; pcre:"/((\w+)[\r\n\s]*\x3a=[\r\n\s]*\x27[^\x27]{10,}\x27[\r\n\s]*\x3b.*gname[\r\n\s]*=>[\r\n\s]*\2)/si"; classtype:attempted-user; sid:2102850; rev:5;)"#;
     const ET_HTTP: &str = r#"alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET INFO Example"; flow:established,to_server; http.method; content:"GET"; http.uri; content:"/x.php"; classtype:bad-unknown; sid:2030000; rev:1;)"#;
-    const ET_FLOWBITS: &str = r#"alert tcp $EXTERNAL_NET 21 -> $HOME_NET any (msg:"ET FTP Example"; flow:established,to_client; flowbits:isset,ET.ftp; content:"230 "; depth:4; classtype:misc-activity; sid:2030001; rev:1;)"#;
+    const ET_LUA: &str = r#"alert tcp $EXTERNAL_NET 21 -> $HOME_NET any (msg:"ET FTP Example"; flow:established,to_client; content:"230 "; depth:4; lua:ftp.lua; classtype:misc-activity; sid:2030001; rev:1;)"#;
 
     fn vars() -> SuricataVars {
         SuricataVars::default()
@@ -3560,7 +3560,7 @@ mod tests {
     fn refuses_what_it_does_not_implement_and_names_the_keyword() {
         let cases = [
             (ET_HTTP, "http.method", "HTTP/1 parser"),
-            (ET_FLOWBITS, "flowbits", "flow table"),
+            (ET_LUA, "lua", "no interpreter"),
         ];
         for (text, keyword, reason) in cases {
             let refused = refusal(text);
@@ -3678,7 +3678,7 @@ mod tests {
     #[test]
     fn a_ruleset_reports_every_refusal_with_its_line() {
         let text = format!(
-            "# a comment\n\n{ET_SMTP_EXPN}\n#{ET_PCANYWHERE}\n{ET_FLOWBITS}\nalert tcp any any -> any 80 (msg:\"cont\"; \\\n content:\"abc\"; sid:42;)\n{ET_SMTP_EXPN}\n"
+            "# a comment\n\n{ET_SMTP_EXPN}\n#{ET_PCANYWHERE}\n{ET_LUA}\nalert tcp any any -> any 80 (msg:\"cont\"; \\\n content:\"abc\"; sid:42;)\n{ET_SMTP_EXPN}\n"
         );
         let ruleset = compile_ruleset(&text, &vars());
         let report = &ruleset.report;
@@ -3691,11 +3691,11 @@ mod tests {
             .iter()
             .map(|r| (r.line, r.keyword.as_str()))
             .collect();
-        assert_eq!(lines, [(5, "flowbits"), (8, "sid")]);
+        assert_eq!(lines, [(5, "lua"), (8, "sid")]);
         assert!((report.refused_share() - 0.5).abs() < f64::EPSILON);
         assert_eq!(
             report.refusals_by_keyword(),
-            [("flowbits".to_string(), 1), ("sid".to_string(), 1)]
+            [("lua".to_string(), 1), ("sid".to_string(), 1)]
         );
         assert_eq!(ruleset.rules.len(), 2);
     }
@@ -3703,7 +3703,7 @@ mod tests {
     #[test]
     fn a_sid_is_one_rule_across_the_rulesets_of_an_import() {
         let first = format!("{ET_SMTP_EXPN}\n");
-        let second = format!("{ET_SMTP_EXPN}\n{ET_FLOWBITS}\n");
+        let second = format!("{ET_SMTP_EXPN}\n{ET_LUA}\n");
         let import = compile_rulesets(
             [
                 ("smtp.rules".to_string(), first.as_str()),
@@ -3738,11 +3738,11 @@ mod tests {
 
     #[test]
     fn a_ruleset_report_serialises_flat_with_its_source() {
-        let import = compile_rulesets([("x.rules".to_string(), ET_FLOWBITS)], &vars());
+        let import = compile_rulesets([("x.rules".to_string(), ET_LUA)], &vars());
         let json = serde_json::to_value(&import.rulesets[0]).unwrap();
         assert_eq!(json["source"], "x.rules");
         assert_eq!(json["total"], 1);
-        assert_eq!(json["refused"][0]["keyword"], "flowbits");
+        assert_eq!(json["refused"][0]["keyword"], "lua");
     }
 
     #[test]

@@ -464,6 +464,11 @@ pub enum BitScope {
     IpSrc,
     IpDst,
     IpPair,
+    /// `xbits` with `track tx`: the bit lives on the application
+    /// transaction.
+    Transaction,
+    /// `xbits` without `track`: Suricata loads it and keeps the bit nowhere.
+    Untracked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -472,7 +477,7 @@ pub struct Bits {
     pub op: BitOp,
     pub scope: BitScope,
     pub names: Vec<String>,
-    /// `a|b` checks any; `a&b` checks all.
+    /// A test of `a|b`: any of the names, rather than the one bit.
     pub any: bool,
     pub expire: Option<u32>,
 }
@@ -531,6 +536,8 @@ pub struct Threshold {
     pub count: u32,
     pub seconds: u32,
     pub multiplier: Option<u32>,
+    /// `detection_filter` with `unique_on`: counts distinct ports.
+    pub unique_on: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -11,6 +11,7 @@ use ebpf_common::event::PacketEvent;
 
 use super::entity::{DomainMatchMode, IdsRule, SamplingMode, ThresholdType};
 use super::error::IdsError;
+use super::flow::{FlowTable, Packet};
 use super::prefilter::{Entry, Prefilter, needle};
 use super::sig::inspect::Program;
 use crate::common::entity::Protocol;
@@ -62,6 +63,9 @@ pub struct IdsEngine {
     prefilter: OnceLock<Arc<Prefilter>>,
     sampling: SamplingMode,
     threshold_tracker: Arc<Mutex<HashMap<(RuleId, u64), ThresholdState>>>,
+    /// What flows, hosts and pairs remember for the rules that read or
+    /// write it, locked only when such a rule matched.
+    flows: Arc<Mutex<FlowTable>>,
 }
 
 impl IdsEngine {
@@ -74,6 +78,7 @@ impl IdsEngine {
             prefilter: OnceLock::new(),
             sampling: SamplingMode::default(),
             threshold_tracker: Arc::new(Mutex::new(HashMap::new())),
+            flows: Arc::new(Mutex::new(FlowTable::default())),
         }
     }
 
@@ -108,6 +113,10 @@ impl IdsEngine {
         self.compiled_domain_patterns.push(domain_compiled);
         self.inspections.push(inspection);
         self.prefilter = OnceLock::new();
+        self.flows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .forget_filters();
         Ok(())
     }
 
@@ -123,6 +132,10 @@ impl IdsEngine {
         self.compiled_domain_patterns.remove(pos);
         self.inspections.remove(pos);
         self.prefilter = OnceLock::new();
+        self.flows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .forget_filters();
         Ok(())
     }
 
@@ -163,6 +176,10 @@ impl IdsEngine {
         self.compiled_domain_patterns = domain_compiled;
         self.inspections = inspections;
         self.prefilter = OnceLock::new();
+        self.flows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .forget_filters();
         self.threshold_tracker
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -355,7 +372,7 @@ impl IdsEngine {
                     }),
             ))
         });
-        prefilter
+        let matched = prefilter
             .candidates([event.dst_port, event.src_port], payload)
             .into_iter()
             .filter_map(|idx| {
@@ -378,7 +395,34 @@ impl IdsEngine {
                 };
                 decided.then_some((idx, rule))
             })
-            .collect()
+            .collect();
+        self.run_state(event, matched)
+    }
+
+    /// Run what the matched rules read and write outside the packet, in
+    /// the order Suricata runs them, and keep the rules that alert.
+    fn run_state<'a>(
+        &self,
+        event: &PacketEvent,
+        mut matched: Vec<(usize, &'a IdsRule)>,
+    ) -> Vec<(usize, &'a IdsRule)> {
+        let state = |idx: usize| {
+            self.inspections
+                .get(idx)
+                .and_then(Option::as_ref)
+                .and_then(|program| program.state())
+        };
+        if matched.iter().all(|(idx, _)| state(*idx).is_none()) {
+            return matched;
+        }
+        matched.sort_by_key(|(idx, _)| (state(*idx).map_or(3, |s| s.rank()), *idx));
+        let packet = Packet::of(event);
+        let mut flows = self.flows.lock().unwrap_or_else(PoisonError::into_inner);
+        flows.touch(&packet);
+        matched.retain(|(idx, _)| state(*idx).is_none_or(|s| s.run(&mut flows, &packet, *idx)));
+        drop(flows);
+        matched.sort_by_key(|(idx, _)| *idx);
+        matched
     }
 
     /// Check whether an alert for the matched rule should be emitted
