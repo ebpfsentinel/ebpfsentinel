@@ -198,6 +198,9 @@ struct Session {
     /// The rules that alerted on a transaction side: transaction, side,
     /// rule.
     alerted: HashSet<(u64, usize, usize)>,
+    /// The transaction sides inspected for the last time: transaction,
+    /// side.
+    closed: HashSet<(u64, usize)>,
 }
 
 impl Session {
@@ -360,6 +363,7 @@ impl FlowTable {
                 last: [None; 2],
                 txs: [Vec::new(), Vec::new()],
                 alerted: HashSet::new(),
+                closed: HashSet::new(),
             }
         });
         let side = usize::from((packet.src, packet.sport) != session.client);
@@ -391,7 +395,21 @@ impl FlowTable {
                     streams.inspect_next(other);
                 }
                 for tx in fed.txs {
-                    session.txs[tx.side].push(tx);
+                    if session.closed.contains(&(tx.id, tx.side)) {
+                        continue;
+                    }
+                    // A side standing as a whole is read on this packet when
+                    // it travels this way, and replaces the older one still
+                    // waiting.
+                    let queue = if tx.latest && tx.side == side {
+                        &mut txs
+                    } else {
+                        &mut session.txs[tx.side]
+                    };
+                    if tx.latest {
+                        queue.retain(|t| !(t.latest && t.id == tx.id));
+                    }
+                    queue.push(tx);
                 }
                 if segment.flags & (FIN | RST) != 0 {
                     announced |= app.close(side);
@@ -409,6 +427,11 @@ impl FlowTable {
         }
         seen.app.announced = announced;
         txs.extend(datagram_txs);
+        // A side's last state, inspected on this packet, is its last
+        // inspection.
+        for tx in txs.iter().filter(|t| t.last) {
+            session.closed.insert((tx.id, tx.side));
+        }
         Observation { seen, blocks, txs }
     }
 

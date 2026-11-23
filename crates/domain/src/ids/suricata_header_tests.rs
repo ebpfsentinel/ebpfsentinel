@@ -23,6 +23,12 @@ const STREAMS: &str = include_str!("../../tests/fixtures/suricata/stream-verdict
 const APPLAYER: &str = include_str!("../../tests/fixtures/suricata/applayer-verdicts.txt");
 const HTTP: &str = include_str!("../../tests/fixtures/suricata/http-verdicts.txt");
 const DNS: &str = include_str!("../../tests/fixtures/suricata/dns-verdicts.txt");
+const TLS: &str = include_str!("../../tests/fixtures/suricata/tls-verdicts.txt");
+
+/// The second the conversation fixtures' captures start at, which their
+/// packet times count from: the time Suricata read a certificate's validity
+/// against.
+const CAPTURE_EPOCH_NS: u64 = 1_700_000_000 * 1_000_000_000;
 
 /// The Ethernet header Suricata counts in a flow's bytes, as `skb->len`
 /// does where tc-ids reads it.
@@ -250,6 +256,11 @@ fn dns_rules_alert_on_the_packets_suricata_alerts_on() {
     replay(DNS, 60);
 }
 
+#[test]
+fn tls_rules_alert_on_the_packets_suricata_alerts_on() {
+    replay(TLS, 90);
+}
+
 /// Plays a fixture's conversations through the engine, packet by packet,
 /// then flushes every flow, and compares what alerted with what Suricata
 /// alerted on.
@@ -310,7 +321,7 @@ fn replay(fixture: &str, at_least: usize) {
     for (n, (ns, bytes, want)) in packets.iter().enumerate() {
         let decoded = IpPacket::decode(bytes).expect("the packet decodes");
         let mut header = event(&decoded);
-        header.timestamp_ns = *ns;
+        header.timestamp_ns = CAPTURE_EPOCH_NS + *ns;
         header.pkt_len = u32::try_from(bytes.len()).expect("a short packet") + ETHERNET;
         let mut got: Vec<u32> = engine
             .evaluate_packet(&header, bytes, None)

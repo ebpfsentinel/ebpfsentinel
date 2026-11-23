@@ -518,6 +518,8 @@ impl Http1 {
                 side: 1,
                 fields: Arc::new(fields),
                 payload: Arc::default(),
+                latest: false,
+                last: false,
             });
             return;
         }
@@ -582,6 +584,8 @@ impl Http1 {
                 side,
                 fields: Arc::new(dir.fields.clone()),
                 payload: Arc::default(),
+                latest: false,
+                last: false,
             });
             dir.state = State::Body(framing);
         } else {
@@ -707,6 +711,8 @@ impl Http1 {
             side,
             fields: Arc::new(fields),
             payload: Arc::default(),
+            latest: false,
+            last: false,
         });
         dir.state = State::Line;
     }

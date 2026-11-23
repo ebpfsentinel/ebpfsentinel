@@ -198,6 +198,8 @@ impl Dns {
             side,
             fields: Arc::new(parsed.fields(side)),
             payload: Arc::from(payload),
+            latest: false,
+            last: false,
         })
     }
 

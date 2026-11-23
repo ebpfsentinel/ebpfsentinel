@@ -27,7 +27,9 @@ use crate::ids::applayer::{AppProto, AppView};
 use crate::ids::flow::{Seen, State};
 use crate::ids::packet::{IpPacket, L4, opt};
 use crate::ids::suricata::{Compiled, Refused};
-use crate::ids::tx::{Fields, int_of};
+use crate::ids::tx::Fields;
+
+use super::field::{self, FieldCheck};
 
 /// A rule kept to the stream, by `tcp-stream` or `flow:only_stream`, may
 /// not read what only a packet has: a header field, a header buffer, a flow
@@ -127,28 +129,33 @@ const RESPONSE_ONLY: &[&str] = &[
     "http.response_body",
 ];
 
-/// Whether a buffer is one an HTTP or a DNS transaction fills.
+/// Whether a buffer is one an HTTP, DNS or TLS transaction fills.
 fn transaction_buffer(name: &str) -> bool {
-    name == "file.data" || sticky(name).is_some_and(|b| matches!(b.proto, "http" | "dns"))
+    name == "file.data" || sticky(name).is_some_and(|b| matches!(b.proto, "http" | "dns" | "tls"))
 }
 
-/// The integer fields of a DNS message a rule compares, each with the
-/// condition it puts on any of the field's values.
-fn transaction_fields(signature: &Signature) -> Compiled<Vec<(&'static str, IntMatch)>> {
+/// Whether a sticky buffer or a field keyword belongs to TLS.
+fn is_tls(name: &str) -> bool {
+    sticky(name).is_some_and(|b| b.proto == "tls")
+        || super::buffers::field(name).is_some_and(|f| f.proto == "tls")
+}
+
+/// A condition and the field it reads.
+type FieldOf = (&'static str, FieldCheck);
+
+/// The application fields a rule compares, each with the condition it
+/// puts on the field it reads, and the keywords that named them.
+fn transaction_fields(signature: &Signature) -> Compiled<(Vec<FieldOf>, Vec<&'static str>)> {
     let mut out = Vec::new();
+    let mut keywords = Vec::new();
     for check in &signature.checks {
         let Check::Field { keyword, argument } = check else {
             continue;
         };
-        let max = match *keyword {
-            "dns.opcode" | "dns.rcode" => u64::from(u8::MAX),
-            "dns.rrtype" => u64::from(u16::MAX),
-            other => return Err(refused(other, "is not run by the inspection engine")),
-        };
-        let condition = IntMatch::parse(argument, max).map_err(|e| refused(*keyword, e))?;
-        out.push((*keyword, condition));
+        out.push(field::compile(keyword, argument)?);
+        keywords.push(*keyword);
     }
-    Ok(out)
+    Ok((out, keywords))
 }
 
 /// The transaction sides a rule reading DNS buffers or fields is inspected
@@ -240,6 +247,112 @@ fn dns_transaction(
     }))
 }
 
+/// Buffers and fields Suricata reads on the client's side alone.
+const TLS_CLIENT_ONLY: &[&str] = &["tls.sni", "ja3.hash", "ja3.string", "ja4.hash"];
+
+/// Buffers and fields Suricata reads on the server's side alone.
+const TLS_SERVER_ONLY: &[&str] = &[
+    "ja3s.hash",
+    "ja3s.string",
+    "tls.cert_chain_len",
+    "tls_cert_expired",
+    "tls_cert_valid",
+    "tls_cert_notbefore",
+    "tls_cert_notafter",
+];
+
+/// The sides a rule reading TLS buffers or fields is inspected on. Suricata
+/// loads such a rule beside payload matches, which then read the side's
+/// records as they travelled; it refuses a client buffer (`tls.sni`, JA3,
+/// JA4) under `flow:to_client` or beside a server one (JA3S, the chain's
+/// length, the validity dates), a server one under `flow:to_server`, and a
+/// TLS buffer on another application protocol or on `tcp-pkt`.
+fn tls_transaction(
+    signature: &Signature,
+    lists: &[List],
+    headers: &[HeaderCheck],
+    names: &[&'static str],
+    keywords: &[&'static str],
+    first: &'static str,
+) -> Compiled<Option<[bool; 2]>> {
+    if let Some(other) = names.iter().chain(keywords).find(|n| !is_tls(n)) {
+        return Err(refused(
+            *other,
+            "is a buffer of another protocol beside a TLS one, which no transaction holds together",
+        ));
+    }
+    match &signature.header.proto {
+        RuleProto::App(name) if !matches!(name.as_str(), "tls" | "ssl") => {
+            return Err(refused(
+                first,
+                format!("is a TLS buffer, which Suricata refuses on {name}"),
+            ));
+        }
+        RuleProto::TcpPkt => {
+            return Err(refused(
+                first,
+                "is a TLS buffer, which Suricata refuses on tcp-pkt",
+            ));
+        }
+        RuleProto::App(_)
+        | RuleProto::Ip
+        | RuleProto::Ipv4
+        | RuleProto::Ipv6
+        | RuleProto::Tcp
+        | RuleProto::Udp => {}
+        _ => {
+            return Err(refused(
+                first,
+                "is read on TLS over TCP, not yet with this rule protocol",
+            ));
+        }
+    }
+    if lists
+        .iter()
+        .any(|l| matches!(l.source, Source::Sticky(name) if !transaction_buffer(name)))
+    {
+        return Err(refused(
+            first,
+            "is not yet read beside a buffer of another protocol",
+        ));
+    }
+    if !headers.is_empty() {
+        return Err(refused(
+            first,
+            "is not yet read beside a packet header keyword",
+        ));
+    }
+    let flow = &signature.flow;
+    let all = || names.iter().chain(keywords);
+    let client = all().find(|n| TLS_CLIENT_ONLY.contains(n));
+    let server = all().find(|n| TLS_SERVER_ONLY.contains(n));
+    if let (Some(_), Some(answer)) = (client, server) {
+        return Err(refused(
+            *answer,
+            "is read on the server's side and the rule names a client one, which Suricata refuses",
+        ));
+    }
+    if let (Some(name), true) = (client, flow.to_client) {
+        return Err(refused(
+            *name,
+            "is read on the client's side under flow:to_client, which Suricata refuses",
+        ));
+    }
+    if let (Some(name), true) = (server, flow.to_server) {
+        return Err(refused(
+            *name,
+            "is read on the server's side under flow:to_server, which Suricata refuses",
+        ));
+    }
+    Ok(Some(if client.is_some() || flow.to_server {
+        [true, false]
+    } else if server.is_some() || flow.to_client {
+        [false, true]
+    } else {
+        [true, true]
+    }))
+}
+
 /// The transaction sides a rule reading HTTP buffers is inspected on,
 /// request then response, or `None` for a rule reading none. Suricata
 /// refuses a rule mixing request and response buffers, a request buffer
@@ -250,7 +363,7 @@ fn transaction(
     signature: &Signature,
     lists: &[List],
     headers: &[HeaderCheck],
-    fields: &[(&'static str, IntMatch)],
+    keywords: &[&'static str],
     session: &mut Session,
 ) -> Compiled<Option<[bool; 2]>> {
     let names: Vec<&'static str> = lists
@@ -260,10 +373,13 @@ fn transaction(
             _ => None,
         })
         .collect();
-    let Some(first) = names.first().copied().or(fields.first().map(|f| f.0)) else {
+    let Some(first) = names.first().copied().or(keywords.first().copied()) else {
         return Ok(None);
     };
-    let dns = !fields.is_empty() || names.iter().any(|n| n.starts_with("dns."));
+    if names.iter().chain(keywords).any(|n| is_tls(n)) {
+        return tls_transaction(signature, lists, headers, &names, keywords, first);
+    }
+    let dns = !keywords.is_empty() || names.iter().any(|n| n.starts_with("dns."));
     if dns {
         return dns_transaction(signature, lists, headers, &names, first);
     }
@@ -367,8 +483,8 @@ pub struct Program {
     /// The transaction sides the rule is inspected on, request then
     /// response, for a rule reading HTTP or DNS buffers.
     tx: Option<[bool; 2]>,
-    /// The DNS integer fields the rule compares.
-    fields: Vec<(&'static str, IntMatch)>,
+    /// The application fields the rule compares, by the field each reads.
+    fields: Vec<FieldOf>,
 }
 
 /// Where a rule's payload matches run on a TCP connection whose streams are
@@ -885,8 +1001,8 @@ impl Program {
             .collect::<Compiled<Vec<_>>>()?;
         let mut session = Session::compile(signature, &lists)?;
         stream_alone(signature, &lists, &headers, &session)?;
-        let fields = transaction_fields(signature)?;
-        let tx = transaction(signature, &lists, &headers, &fields, &mut session)?;
+        let (fields, keywords) = transaction_fields(signature)?;
+        let tx = transaction(signature, &lists, &headers, &keywords, &mut session)?;
         let inspect = inspect(signature, &lists, &headers, &session, tx);
         Ok(Self {
             lists,
@@ -925,17 +1041,21 @@ impl Program {
     /// the request, its buffers read from `fields` and its payload matches
     /// from `payload`, the message as it travelled.
     #[must_use]
-    pub fn matches_transaction(&self, side: usize, fields: &Fields, payload: &[u8]) -> bool {
+    pub fn matches_transaction(
+        &self,
+        side: usize,
+        fields: &Fields,
+        payload: &[u8],
+        now: u64,
+    ) -> bool {
         if !self.tx.is_some_and(|sides| sides[side]) {
             return false;
         }
-        let holds = |name: &str, condition: &IntMatch| {
-            (0..)
-                .map_while(|i| fields.get(name, i))
-                .filter_map(int_of)
-                .any(|v| condition.matches(v))
-        };
-        if !self.fields.iter().all(|(name, c)| holds(name, c)) {
+        if !self
+            .fields
+            .iter()
+            .all(|(name, c)| c.holds(name, fields, now))
+        {
             return false;
         }
         let sticky = |name: &str, index: usize| fields.get(name, index);

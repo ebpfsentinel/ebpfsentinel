@@ -61,4 +61,13 @@ pub struct Ready {
     /// payload beside the transaction's buffers; empty where the protocol
     /// offers no such reading.
     pub payload: Arc<[u8]>,
+    /// Whether this side holds everything an earlier one of the same
+    /// transaction held, so that it takes that one's place while both wait
+    /// for inspection: the state of a protocol inspected as it stands
+    /// rather than message by message.
+    pub latest: bool,
+    /// Whether this side will hold nothing more: once inspected, a later
+    /// one of the same transaction is not, as an engine that stops
+    /// inspecting a side once its part of the exchange is over.
+    pub last: bool,
 }

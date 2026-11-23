@@ -32,6 +32,7 @@
 
 use super::dns::{self, Dns};
 use super::http1::{Http1, Ready};
+use super::tls::Tls;
 
 /// An application protocol the agent finds, or the verdict that none was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -207,6 +208,8 @@ pub struct AppLayer {
     http: Option<Box<Http1>>,
     /// The DNS parser, once the flow speaks it.
     dns: Option<Box<Dns>>,
+    /// The TLS parser, once the flow speaks it.
+    tls: Option<Box<Tls>>,
 }
 
 /// What the application layer says of one packet.
@@ -243,6 +246,7 @@ impl AppLayer {
             closed: false,
             http: None,
             dns: None,
+            tls: None,
         }
     }
 
@@ -353,6 +357,9 @@ impl AppLayer {
                 } else {
                     dns.stream(side, bytes)
                 }
+            }
+            Some(AppProto::Tls) if !self.udp => {
+                self.tls.get_or_insert_with(Box::default).feed(side, bytes)
             }
             _ => Vec::new(),
         }

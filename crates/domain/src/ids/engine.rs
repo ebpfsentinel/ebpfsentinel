@@ -612,7 +612,12 @@ impl IdsEngine {
             .filter_map(|idx| {
                 let (rule, program) = self.imported(idx, event, ports, seen)?;
                 (program.inspect() == Inspect::Transaction
-                    && program.matches_transaction(tx.side, &tx.fields, &tx.payload))
+                    && program.matches_transaction(
+                        tx.side,
+                        &tx.fields,
+                        &tx.payload,
+                        event.timestamp_ns / 1_000_000_000,
+                    ))
                 .then_some((idx, rule))
             })
             .collect();

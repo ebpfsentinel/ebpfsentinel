@@ -11,4 +11,5 @@ pub mod prefilter;
 pub mod sig;
 pub mod stream;
 pub mod suricata;
+pub mod tls;
 pub mod tx;
