@@ -15,6 +15,11 @@ use crate::ids::packet::IpPacket;
 use crate::ids::suricata::SuricataVars;
 
 const VERDICTS: &str = include_str!("../../tests/fixtures/suricata/header-verdicts.txt");
+const SESSIONS: &str = include_str!("../../tests/fixtures/suricata/session-verdicts.txt");
+
+/// The Ethernet header Suricata counts in a flow's bytes, as `skb->len`
+/// does where tc-ids reads it.
+const ETHERNET: u32 = 14;
 
 /// Packets whose IPv4 options Suricata judges malformed. It then drops the
 /// header's other fields too (`ip_proto` reads 0, `ttl` stops matching), and
@@ -145,6 +150,72 @@ fn header_rules_alert_on_the_packets_suricata_alerts_on() {
         skipped, MALFORMED,
         "only the named malformed packets are set aside"
     );
+    assert!(
+        wrong.is_empty(),
+        "differs from Suricata:\n{}",
+        wrong.join("\n")
+    );
+}
+
+#[test]
+fn session_rules_alert_on_the_packets_suricata_alerts_on() {
+    let vars = SuricataVars::default();
+    let mut rules: Vec<IdsRule> = Vec::new();
+    let mut packets: Vec<(u64, Vec<u8>, Vec<u32>)> = Vec::new();
+    for line in SESSIONS.lines() {
+        let mut fields = line.splitn(3, ' ');
+        let (Some(kind), Some(number), Some(rest)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        match kind {
+            "rule" => {
+                let sid: u32 = number.parse().expect("sid");
+                let mut compiled = compile_rule_admitting(&with_sid(rest, sid), &vars, true)
+                    .unwrap_or_else(|refused| {
+                        panic!(
+                            "sid {sid} loads in Suricata, refused here: {} {}",
+                            refused.keyword, refused.reason
+                        )
+                    });
+                rules.append(&mut compiled);
+            }
+            "packet" => {
+                let (bytes, sids) = rest.split_once(' ').expect("packet bytes then sids");
+                let sids = if sids == "-" {
+                    Vec::new()
+                } else {
+                    sids.split(',').map(|s| s.parse().expect("sid")).collect()
+                };
+                packets.push((number.parse().expect("time"), hex(bytes), sids));
+            }
+            _ => {}
+        }
+    }
+    assert!(packets.len() > 30, "the fixture holds the conversations");
+
+    let mut engine = IdsEngine::new();
+    engine
+        .reload(rules)
+        .expect("the engine loads the compiled rules");
+    let mut wrong = Vec::new();
+    for (n, (ns, bytes, sids)) in packets.iter().enumerate() {
+        let decoded = IpPacket::decode(bytes).expect("the packet decodes");
+        let mut header = event(&decoded);
+        header.timestamp_ns = *ns;
+        header.pkt_len = u32::try_from(bytes.len()).expect("a short packet") + ETHERNET;
+        let mut got: Vec<u32> = engine
+            .evaluate_packet(&header, bytes, None)
+            .into_iter()
+            .filter_map(|(_, rule)| rule.imported.as_ref().map(|i| i.sid))
+            .collect();
+        got.sort_unstable();
+        if &got != sids {
+            let extra: Vec<_> = got.iter().filter(|s| !sids.contains(s)).collect();
+            let missing: Vec<_> = sids.iter().filter(|s| !got.contains(s)).collect();
+            wrong.push(format!("packet {n}: extra {extra:?}, missing {missing:?}"));
+        }
+    }
     assert!(
         wrong.is_empty(),
         "differs from Suricata:\n{}",

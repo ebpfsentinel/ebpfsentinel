@@ -11,8 +11,8 @@ use ebpf_common::event::PacketEvent;
 
 use super::entity::{DomainMatchMode, IdsRule, SamplingMode, ThresholdType};
 use super::error::IdsError;
-use super::flow::{FlowTable, Packet};
-use super::packet::IpPacket;
+use super::flow::{FlowTable, Packet, Wire};
+use super::packet::{IpPacket, L4};
 use super::prefilter::{Entry, Prefilter, needle};
 
 use super::sig::inspect::Program;
@@ -377,7 +377,9 @@ impl IdsEngine {
                 let applies = rule.enabled
                     && match rule.imported.as_ref() {
                         Some(imported) if imported.scope.is_some() => {
-                            imported.header_matches(event, Some((event.src_port, event.dst_port)))
+                            imported.scope.as_ref().is_some_and(|s| !s.on_packet)
+                                && imported
+                                    .header_matches(event, Some((event.src_port, event.dst_port)))
                         }
                         imported => {
                             matches!(rule.protocol, Protocol::Tcp | Protocol::Any)
@@ -425,18 +427,35 @@ impl IdsEngine {
         let ports = packet.ports();
         let keys: Vec<u16> = ports.map_or_else(Vec::new, |(s, d)| vec![d, s]);
         let payload = packet.payload().unwrap_or_default();
+        let wire = Wire {
+            tcp_flags: match packet.l4 {
+                L4::Tcp(t) => Some(t.flags),
+                _ => None,
+            },
+            payload: packet.payload_len().unwrap_or(0) > 0,
+            frame_len: u64::from(event.pkt_len),
+        };
+        let seen = self
+            .flows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observe(&Packet::of(event), wire);
         let matched = self
             .prefilter()
             .candidates(&keys, payload)
             .into_iter()
             .filter_map(|idx| {
                 let rule = self.rules.get(idx)?;
-                let imported = rule.imported.as_ref().filter(|i| i.scope.is_some())?;
+                let imported = rule
+                    .imported
+                    .as_ref()
+                    .filter(|i| i.scope.as_ref().is_some_and(|s| s.on_packet))?;
                 if !rule.enabled || !imported.header_matches(event, ports) {
                     return None;
                 }
                 let program = self.inspections.get(idx)?.as_ref()?;
-                program.matches_packet(&packet).then_some((idx, rule))
+                (program.matches_session(&seen) && program.matches_packet(&packet))
+                    .then_some((idx, rule))
             })
             .collect();
         self.run_state(event, matched)

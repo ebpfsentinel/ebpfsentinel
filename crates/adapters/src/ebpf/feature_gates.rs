@@ -28,11 +28,12 @@
 
 use aya::maps::{Array, MapData};
 use ebpf_common::firewall::{
-    FW_EMPTY_AMP_PORTS, FW_EMPTY_HASH_5TUPLE, FW_EMPTY_HASH_PORT, FW_EMPTY_IDS_PATTERNS,
-    FW_EMPTY_IDS_SRC_PATTERNS, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_L7_PORTS, FW_EMPTY_LPM_V4,
-    FW_EMPTY_LPM_V6, FW_EMPTY_QOS_CLASSIFIERS, FW_EMPTY_RL_TIERS_V4, FW_EMPTY_RL_TIERS_V6,
-    FW_EMPTY_SRC_LIMITS, FW_EMPTY_TENANTS, FW_EMPTY_THREAT_IOCS_V4, FW_EMPTY_THREAT_IOCS_V6,
-    FW_EMPTY_THREAT_NETS_V4, FW_EMPTY_THREAT_NETS_V6, FW_EMPTY_ZONES,
+    FW_EMPTY_AMP_PORTS, FW_EMPTY_HASH_5TUPLE, FW_EMPTY_HASH_PORT, FW_EMPTY_IDS_CAPTURE_PORTS,
+    FW_EMPTY_IDS_CAPTURE_PROTOS, FW_EMPTY_IDS_PATTERNS, FW_EMPTY_IDS_SRC_PATTERNS,
+    FW_EMPTY_IFACE_GROUPS, FW_EMPTY_L7_PORTS, FW_EMPTY_LPM_V4, FW_EMPTY_LPM_V6,
+    FW_EMPTY_QOS_CLASSIFIERS, FW_EMPTY_RL_TIERS_V4, FW_EMPTY_RL_TIERS_V6, FW_EMPTY_SRC_LIMITS,
+    FW_EMPTY_TENANTS, FW_EMPTY_THREAT_IOCS_V4, FW_EMPTY_THREAT_IOCS_V6, FW_EMPTY_THREAT_NETS_V4,
+    FW_EMPTY_THREAT_NETS_V6, FW_EMPTY_ZONES,
 };
 use std::sync::{Mutex, OnceLock};
 use tracing::{debug, info};
@@ -86,9 +87,13 @@ pub enum Feature {
     ThreatNetsV4,
     /// The v6 range trie of the threat-intelligence slot in force.
     ThreatNetsV6,
+    /// `IDS_CAPTURE_PROTOS`, the protocols handed up whole for the IDS.
+    IdsCaptureProtos,
+    /// `IDS_CAPTURE_PORTS`, the protocol and port pairs handed up whole.
+    IdsCapturePorts,
 }
 
-const FEATURE_COUNT: usize = 22;
+const FEATURE_COUNT: usize = 24;
 
 impl Feature {
     const fn slot(self) -> usize {
@@ -115,6 +120,8 @@ impl Feature {
             Feature::QosClassifiers => 19,
             Feature::ThreatNetsV4 => 20,
             Feature::ThreatNetsV6 => 21,
+            Feature::IdsCaptureProtos => 22,
+            Feature::IdsCapturePorts => 23,
         }
     }
 }
@@ -212,6 +219,12 @@ impl EmptyFeatures {
         }
         if self.is_empty(Feature::ThreatNetsV6) {
             mask |= FW_EMPTY_THREAT_NETS_V6;
+        }
+        if self.is_empty(Feature::IdsCaptureProtos) {
+            mask |= FW_EMPTY_IDS_CAPTURE_PROTOS;
+        }
+        if self.is_empty(Feature::IdsCapturePorts) {
+            mask |= FW_EMPTY_IDS_CAPTURE_PORTS;
         }
         mask
     }
@@ -374,6 +387,8 @@ mod tests {
             (Feature::QosClassifiers, FW_EMPTY_QOS_CLASSIFIERS),
             (Feature::ThreatNetsV4, FW_EMPTY_THREAT_NETS_V4),
             (Feature::ThreatNetsV6, FW_EMPTY_THREAT_NETS_V6),
+            (Feature::IdsCaptureProtos, FW_EMPTY_IDS_CAPTURE_PROTOS),
+            (Feature::IdsCapturePorts, FW_EMPTY_IDS_CAPTURE_PORTS),
         ] {
             let mut features = EmptyFeatures::default();
             features.set(feature, true);
@@ -432,6 +447,8 @@ mod tests {
             Feature::QosClassifiers,
             Feature::ThreatNetsV4,
             Feature::ThreatNetsV6,
+            Feature::IdsCaptureProtos,
+            Feature::IdsCapturePorts,
         ] {
             let mut features = EmptyFeatures::default();
             features.set(feature, true);

@@ -1,4 +1,5 @@
 use domain::common::error::DomainError;
+use domain::ids::capture::CaptureSet;
 use ebpf_common::ids::{IdsPatternKey, IdsPatternValue, IdsSamplingConfig};
 
 /// Secondary port for IDS eBPF map operations.
@@ -41,6 +42,12 @@ pub trait IdsMapPort: Send + Sync {
     /// Write the kernel-side IDS sampling configuration to the
     /// `IDS_SAMPLING_CONFIG` Array map.
     fn set_sampling_config(&mut self, config: &IdsSamplingConfig) -> Result<(), DomainError>;
+
+    /// Replace what the kernel hands up whole for the rules decided on each
+    /// packet. Default no-op for backends without the capture tables.
+    fn set_capture(&mut self, _capture: &CaptureSet) -> Result<(), DomainError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

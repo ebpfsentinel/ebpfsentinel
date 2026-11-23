@@ -663,6 +663,9 @@ impl EventDispatcher {
             AgentEvent::Dns { header, .. } => {
                 header.src_addr[0] ^ header.src_addr[1] ^ header.src_addr[2] ^ header.src_addr[3]
             }
+            AgentEvent::Packet { header, .. } => {
+                header.src_addr[0] ^ header.src_addr[1] ^ header.src_addr[2] ^ header.src_addr[3]
+            }
             AgentEvent::Dlp(ev) => ev.pid ^ ev.tgid,
         };
         hash as usize % num_workers
@@ -674,6 +677,7 @@ impl EventDispatcher {
             AgentEvent::L4(pkt) => event_type_label(pkt.event_type),
             AgentEvent::L7 { .. } => "l7",
             AgentEvent::Dns { .. } => "dns",
+            AgentEvent::Packet { .. } => "packet",
             AgentEvent::Dlp(_) => "dlp",
         };
         match event {
@@ -684,6 +688,7 @@ impl EventDispatcher {
                 payload,
             } => self.process_l7_event(header, segment, &payload),
             AgentEvent::Dns { header, payload } => self.process_dns_event(header, &payload),
+            AgentEvent::Packet { header, bytes, .. } => self.process_ids_packet(&header, &bytes),
             AgentEvent::Dlp(event) => self.process_dlp_event(&event),
         }
         self.metrics
@@ -1029,6 +1034,34 @@ impl EventDispatcher {
             // The header the capture carries describes an L7 event: its
             // `rule_id` holds the captured length, and its type says L7. The
             // alert names an IDS rule, so it travels on an event that says so.
+            let event = PacketEvent {
+                event_type: EVENT_TYPE_IDS,
+                rule_id: idx as u32,
+                ..*header
+            };
+            self.metrics
+                .record_packet("ids", action_label(event.action));
+            self.report_ids_match(
+                &event,
+                &svc,
+                idx,
+                rule,
+                None,
+                src_country.as_deref(),
+                nth == 0,
+            );
+        }
+    }
+
+    /// Evaluate a packet the kernel handed up whole against the rules decided
+    /// on each packet, reporting each match as the payload path does.
+    fn process_ids_packet(&self, header: &PacketEvent, bytes: &[u8]) {
+        let svc = self.ids_service.load();
+        let src_country = svc.resolve_country(header.src_addr, header.is_ipv6());
+        let matches = svc.evaluate_packet(header, bytes, src_country.as_deref());
+        for (nth, (idx, rule)) in matches.into_iter().enumerate() {
+            // The capture's `rule_id` holds the bytes copied and its type says
+            // packet; the alert travels on an event naming the IDS rule.
             let event = PacketEvent {
                 event_type: EVENT_TYPE_IDS,
                 rule_id: idx as u32,
@@ -3086,6 +3119,54 @@ mod tests {
             }
             _ => panic!("expected AlertEvent::PacketSecurity from ratelimit"),
         }
+    }
+
+    // ── Packet dispatch tests ──────────────────────────────────────
+
+    /// An IPv4 ICMP message of `icmp_type` from 192.168.0.1 to 10.0.0.1.
+    fn icmp_packet(icmp_type: u8) -> Vec<u8> {
+        let mut bytes = vec![
+            0x45, 0, 0, 28, 0, 1, 0, 0, 64, 1, 0, 0, 192, 168, 0, 1, 10, 0, 0, 1,
+        ];
+        bytes.extend_from_slice(&[icmp_type, 0, 0, 0, 0, 7, 0, 1]);
+        bytes
+    }
+
+    fn packet_event(bytes: Vec<u8>) -> AgentEvent {
+        AgentEvent::Packet {
+            header: PacketEvent {
+                protocol: 1,
+                src_port: 0,
+                dst_port: 0,
+                ..make_event(ebpf_common::event::EVENT_TYPE_PACKET, 0)
+            },
+            capture: ebpf_common::event::PacketCapture {
+                wire_len: u32::try_from(bytes.len()).unwrap(),
+                _pad: 0,
+            },
+            bytes,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_captured_packet_is_judged_by_the_rules_read_on_the_packet() {
+        let rules = domain::ids::suricata::compile_rule(
+            "alert icmp any any -> any any (msg:\"ping\"; itype:8; sid:42;)",
+            &domain::ids::suricata::SuricataVars::default(),
+        )
+        .unwrap();
+        let ids = make_service_with_rules(rules);
+        let metrics = Arc::new(TestMetrics::new());
+        let (alert_tx, mut alert_rx) = mpsc::channel(10);
+        let dispatcher = make_dispatcher(Arc::clone(&ids), Arc::clone(&metrics), alert_tx);
+
+        dispatcher.dispatch_agent_event(packet_event(icmp_packet(0)));
+        assert!(alert_rx.try_recv().is_err());
+
+        dispatcher.dispatch_agent_event(packet_event(icmp_packet(8)));
+        let alert = unwrap_ids_alert(alert_rx.try_recv().unwrap());
+        assert_eq!(alert.rule_id.0, "suricata-42");
+        assert_eq!(alert.protocol, 1);
     }
 
     // ── L7 dispatch tests ──────────────────────────────────────────

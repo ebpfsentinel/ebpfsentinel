@@ -10,6 +10,19 @@ pub const EVENT_TYPE_DNS: u8 = 7;
 // 8 was the traffic shaper's per-packet event. The shaper reports through its
 // metrics map instead, and the number stays unassigned so a record from an
 // older kernel object can never be read as some other kind.
+/// A whole packet from its IP header on, captured by `tc-ids` for the rules
+/// decided on each packet. Followed by a [`PacketCapture`], then the bytes.
+pub const EVENT_TYPE_PACKET: u8 = 15;
+
+/// Bytes of a packet a capture record holds at most, from the IP header on:
+/// a full Ethernet frame's packet with room to spare. Longer packets, the
+/// aggregates the stack builds before segmentation, are cut there and the
+/// cut is counted.
+pub const MAX_PACKET_CAPTURE: usize = 2048;
+
+/// Small capture tier, for the packets that fit in it: most of them are a
+/// bare acknowledgement, a DNS query or an ICMP message.
+pub const SMALL_PACKET_CAPTURE: usize = 256;
 
 /// Maximum L7 payload bytes captured by eBPF and sent via RingBuf.
 ///
@@ -198,6 +211,23 @@ pub struct L7Segment {
 /// Bytes an [`L7Segment`] takes in an L7 record.
 pub const L7_SEGMENT_LEN: usize = core::mem::size_of::<L7Segment>();
 
+/// How much of the packet a capture record holds.
+///
+/// Written by `tc-ids` between the [`PacketEvent`] header and the bytes of
+/// every packet record. The header's `rule_id` carries the bytes copied, as
+/// it does on an L7 record; this says how many the packet had, so a reader
+/// can tell a cut packet from a short one.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PacketCapture {
+    /// Bytes from the IP header to the end of the packet.
+    pub wire_len: u32,
+    pub _pad: u32,
+}
+
+/// Bytes a [`PacketCapture`] takes in a packet record.
+pub const PACKET_CAPTURE_LEN: usize = core::mem::size_of::<PacketCapture>();
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +237,14 @@ mod tests {
         assert_eq!(L7_SEGMENT_LEN, 8);
         assert_eq!(core::mem::offset_of!(L7Segment, tcp_seq), 0);
         assert_eq!(core::mem::offset_of!(L7Segment, wire_len), 4);
+    }
+
+    #[test]
+    fn a_packet_capture_is_two_words_and_its_tiers_nest() {
+        assert_eq!(PACKET_CAPTURE_LEN, 8);
+        assert_eq!(core::mem::offset_of!(PacketCapture, wire_len), 0);
+        const { assert!(SMALL_PACKET_CAPTURE < MAX_PACKET_CAPTURE) };
+        assert_eq!(EVENT_TYPE_PACKET, 15);
     }
     use core::mem;
 
@@ -341,9 +379,9 @@ mod tests {
 
     #[test]
     fn event_type_constants_are_unique() {
-        // All EVENT_TYPE_* constants across all modules: event(0-7), ddos(10-13), lb(14).
-        // 8 is retired (the shaper's former per-packet event) and 9 is reserved.
-        let types: [u8; 13] = [
+        // All EVENT_TYPE_* constants across all modules: event(0-7), ddos(10-13), lb(14),
+        // packet(15). 8 is retired (the shaper's former per-packet event) and 9 is reserved.
+        let types: [u8; 14] = [
             0,  // EVENT_TYPE_FIREWALL
             1,  // EVENT_TYPE_IDS
             2,  // EVENT_TYPE_IPS
@@ -357,6 +395,7 @@ mod tests {
             12, // EVENT_TYPE_DDOS_AMP
             13, // EVENT_TYPE_DDOS_CONNTRACK
             14, // EVENT_TYPE_LB
+            15, // EVENT_TYPE_PACKET
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

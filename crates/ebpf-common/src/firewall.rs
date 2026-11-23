@@ -536,6 +536,12 @@ pub const FW_EMPTY_QOS_CLASSIFIERS: u32 = 1 << 16;
 pub const FW_EMPTY_THREAT_NETS_V4: u32 = 1 << 17;
 /// The active v6 threat-intelligence range trie holds no prefix.
 pub const FW_EMPTY_THREAT_NETS_V6: u32 = 1 << 18;
+/// No protocol is captured whole for the IDS, so the protocol table read
+/// every packet would make can only miss.
+pub const FW_EMPTY_IDS_CAPTURE_PROTOS: u32 = 1 << 19;
+/// `IDS_CAPTURE_PORTS` holds no port, so the two-ended port probe can only
+/// miss.
+pub const FW_EMPTY_IDS_CAPTURE_PORTS: u32 = 1 << 20;
 
 // ── Shadow rules ───────────────────────────────────────────────────
 

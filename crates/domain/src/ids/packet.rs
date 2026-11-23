@@ -40,6 +40,9 @@ pub struct IpPacket<'a> {
     /// after the extension headers.
     pub proto: u8,
     pub l4: L4<'a>,
+    /// Bytes the IP header declares past the end of what was handed over:
+    /// the kernel copies a bounded prefix of a long packet.
+    pub cut: usize,
 }
 
 /// The fields only an IPv4 header carries.
@@ -121,7 +124,8 @@ impl<'a> IpPacket<'a> {
         if ihl < 20 || bytes.len() < ihl {
             return None;
         }
-        let total = usize::from(be16(bytes, 2)?).clamp(ihl, bytes.len());
+        let declared = usize::from(be16(bytes, 2)?);
+        let total = declared.clamp(ihl, bytes.len());
         let word = be16(bytes, 6)?;
         let mut frag_bits = 0;
         if word & 0x8000 != 0 {
@@ -157,6 +161,7 @@ impl<'a> IpPacket<'a> {
             }),
             proto,
             l4,
+            cut: declared.saturating_sub(bytes.len()),
         })
     }
 
@@ -164,7 +169,8 @@ impl<'a> IpPacket<'a> {
         if bytes.len() < 40 {
             return None;
         }
-        let end = (40 + usize::from(be16(bytes, 4)?)).min(bytes.len());
+        let declared = 40 + usize::from(be16(bytes, 4)?);
+        let end = declared.min(bytes.len());
         let mut next = bytes[6];
         let mut at = 40;
         // Hop-by-hop, routing, authentication and destination options, each
@@ -199,6 +205,7 @@ impl<'a> IpPacket<'a> {
             v4: None,
             proto: next,
             l4,
+            cut: declared.saturating_sub(bytes.len()),
         })
     }
 
@@ -210,6 +217,13 @@ impl<'a> IpPacket<'a> {
             L4::Udp { sport, dport, .. } => Some((sport, dport)),
             L4::Icmp(_) | L4::None => None,
         }
+    }
+
+    /// How many bytes follow the transport header on the wire, the part the
+    /// kernel did not copy included; `None` where nothing was decoded.
+    #[must_use]
+    pub fn payload_len(&self) -> Option<usize> {
+        self.payload().map(|p| p.len() + self.cut)
     }
 
     /// What follows the transport header, `None` where nothing was decoded.
@@ -430,6 +444,20 @@ mod tests {
         assert_eq!(v4_options(&[7, 7, 5, 0, 0, 0, 0, 0]), opt::EOL);
         assert_eq!(v4_options(&[131, 3, 4, 0]), opt::LSRR | opt::EOL);
         assert_eq!(v4_options(&[1, 7, 7, 4, 0, 0, 0, 0]), opt::NOP | opt::RR);
+    }
+
+    #[test]
+    fn a_packet_cut_short_keeps_the_length_its_header_declares() {
+        // A UDP datagram of 3000 payload bytes of which the kernel copied the
+        // first 2048 bytes from the IP header on.
+        let mut bytes = vec![0x45, 0, 0x0b, 0xd4, 0, 1, 0, 0, 64, 17, 0, 0];
+        bytes.extend_from_slice(&[10, 0, 0, 1, 10, 0, 0, 2]);
+        bytes.extend_from_slice(&[0x30, 0x39, 0, 53, 0x0b, 0xc0, 0, 0]);
+        bytes.resize(2048, b'a');
+        let p = IpPacket::decode(&bytes).unwrap();
+        assert_eq!(p.payload().unwrap().len(), 2048 - 28);
+        assert_eq!(p.payload_len(), Some(3000));
+        assert_eq!(p.cut, 3028 - 2048);
     }
 
     #[test]

@@ -124,7 +124,10 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
         // the sending cgroup, which is counted separately from a tenant
         // resolved through the cgroup map, and the kernel's confirmation that
         // the flow behind a dropped packet was actually marked dying. The
-        // last one counts the packets of a connection an L7 rule refused.
+        // eighth counts the packets of a connection an L7 rule refused. The
+        // last three count the packets handed up whole for the rules decided
+        // on each packet, those the ring had no room for, and those cut at
+        // the record's size.
         "IDS_METRICS" => &[
             (0, "matched"),
             (1, "dropped"),
@@ -135,6 +138,9 @@ fn metric_labels(map_name: &str) -> &'static [(u32, &'static str)] {
             (6, "cgroup_attributed"),
             (7, "ct_kill_confirmed"),
             (8, "l7_flow_dropped"),
+            (9, "packets_captured"),
+            (10, "packets_lost"),
+            (11, "packets_truncated"),
         ],
         "THREATINTEL_METRICS" => &[
             (0, "matched"),

@@ -115,7 +115,7 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     KeywordSupport {
         keyword: "flow",
         support: Support::Compiled,
-        note: "`established`, `stateless` and the four direction words. A payload is only captured on an established connection, and direction is already the header's port side.",
+        note: "`established`, `not_established`, `stateless` and the four direction words. A rule read on every packet asks the session the agent keeps from them: the client sent the first packet, TCP is established after its handshake, another protocol once answered. A TCP rule read on the payload is captured only on an established connection, its direction the header's port side. `only_stream`, `no_stream`, `only_frag` and `no_frag` are refused.",
     },
     KeywordSupport {
         keyword: "content",
@@ -199,8 +199,8 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "dsize",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "byte_test",
@@ -299,43 +299,43 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "flow.age",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over every packet of the flow, which its counters count.",
+        support: Support::Compiled,
+        note: "Whole seconds: the packet's second minus the second the flow began, as Suricata counts it.",
     },
     KeywordSupport {
         keyword: "flow.pkts",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over every packet of the flow, which its counters count.",
+        support: Support::Compiled,
+        note: "Counted on every packet of the flow the kernel hands over, the packet judged included, bytes from the link layer; `either` holds when either direction's count does.",
     },
     KeywordSupport {
         keyword: "flow.pkts_toserver",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over every packet of the flow, which its counters count.",
+        support: Support::Compiled,
+        note: "Counted on every packet of the flow the kernel hands over, the packet judged included, bytes from the link layer; `either` holds when either direction's count does.",
     },
     KeywordSupport {
         keyword: "flow.pkts_toclient",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over every packet of the flow, which its counters count.",
+        support: Support::Compiled,
+        note: "Counted on every packet of the flow the kernel hands over, the packet judged included, bytes from the link layer; `either` holds when either direction's count does.",
     },
     KeywordSupport {
         keyword: "flow.bytes",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over every packet of the flow, which its counters count.",
+        support: Support::Compiled,
+        note: "Counted on every packet of the flow the kernel hands over, the packet judged included, bytes from the link layer; `either` holds when either direction's count does.",
     },
     KeywordSupport {
         keyword: "flow.bytes_toserver",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over every packet of the flow, which its counters count.",
+        support: Support::Compiled,
+        note: "Counted on every packet of the flow the kernel hands over, the packet judged included, bytes from the link layer; `either` holds when either direction's count does.",
     },
     KeywordSupport {
         keyword: "flow.bytes_toclient",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over every packet of the flow, which its counters count.",
+        support: Support::Compiled,
+        note: "Counted on every packet of the flow the kernel hands over, the packet judged included, bytes from the link layer; `either` holds when either direction's count does.",
     },
     KeywordSupport {
         keyword: "flow.elephant",
         support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over every packet of the flow, which its counters count.",
+        note: "Parsed and checked; refused until the agent measures a flow's rate the way Suricata decides an elephant.",
     },
     KeywordSupport {
         keyword: "stream_size",
@@ -369,123 +369,123 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "flags",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "tcp.flags",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "seq",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "tcp.seq",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "ack",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "tcp.ack",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "window",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "tcp.window",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "tcp.mss",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "tcp.wscale",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "ttl",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "id",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "tos",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "ipopts",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "fragbits",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "fragoffset",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "sameip",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "ip_proto",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "l3_proto",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "itype",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "icode",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "icmp_id",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "icmp_seq",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "icmpv6.mtu",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "vlan.id",
@@ -1669,33 +1669,33 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     },
     KeywordSupport {
         keyword: "ipv4.hdr",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "ipv6.hdr",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "tcp.hdr",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "udp.hdr",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "icmpv4.hdr",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "icmpv6.hdr",
-        support: Support::Pending,
-        note: "Parsed and checked; a rule carrying it is refused until the kernel hands over the packet header it reads.",
+        support: Support::Compiled,
+        note: "Read on every packet the kernel hands up for the rule's protocol and ports, headers included.",
     },
     KeywordSupport {
         keyword: "sctp.hdr",
@@ -2518,7 +2518,7 @@ pub fn compile_rule(text: &str, vars: &SuricataVars) -> Compiled<Vec<IdsRule>> {
 /// Compile one rule; with `pending`, a keyword the engine evaluates but the
 /// agent does not feed yet is compiled rather than refused, so a test can hold
 /// the evaluation to Suricata before the input reaches it.
-fn compile_rule_admitting(
+pub(crate) fn compile_rule_admitting(
     text: &str,
     vars: &SuricataVars,
     pending: bool,
@@ -2566,12 +2566,10 @@ fn compile_rule_admitting(
     let pattern = label(&signature);
     if !pending {
         // The header's own refusals first: they say what the rule is.
-        packet_scope(&signature.header)
-            .and_then(|_| fed_today(&signature.header, pattern.is_some()))
-            .map_err(|mut refused| {
-                refused.sid = Some(sid);
-                refused
-            })?;
+        packet_scope(&signature.header).map_err(|mut refused| {
+            refused.sid = Some(sid);
+            refused
+        })?;
     }
     let pattern = pattern.unwrap_or_default();
     let inspection = Inspection(std::sync::Arc::new(inspection));
@@ -2587,8 +2585,14 @@ fn compile_parts(
     pattern: &str,
     inspection: Inspection,
 ) -> Compiled<Vec<IdsRule>> {
-    let scope = packet_scope(&signature.header)?;
+    let mut scope = packet_scope(&signature.header)?;
     let body = compile_options(options)?;
+    scope.on_packet = !matches!(scope.proto, PacketProto::Tcp)
+        || inspection.0.reads_headers()
+        || inspection.0.checks_size()
+        || inspection.0.reads_session()
+        || pattern.is_empty()
+        || scope.index_ports(MAX_PORTS_PER_RULE).is_none();
     let protocol = match scope.proto {
         PacketProto::Ip => Protocol::Any,
         PacketProto::Tcp | PacketProto::TcpPkt => Protocol::Tcp,
@@ -2670,38 +2674,6 @@ fn label(signature: &super::sig::model::Signature) -> Option<String> {
 
 // ── Header ───────────────────────────────────────────────────────
 
-/// Refuse what the agent cannot hand a rule yet: it sees the payload of TCP
-/// segments on the ports it captures, so a rule must be on TCP, name at most
-/// [`MAX_PORTS_PER_RULE`] ports on one side, and read some content.
-fn fed_today(header: &super::sig::model::Header, has_content: bool) -> Compiled<()> {
-    use super::sig::model::RuleProto;
-    if !matches!(header.proto, RuleProto::Tcp | RuleProto::TcpPkt) {
-        return Err(Refused::new(
-            "protocol",
-            "is read on the whole packet, which the agent does not capture yet; only TCP payloads are",
-        ));
-    }
-    let listed = header
-        .dst_ports
-        .listed(MAX_PORTS_PER_RULE)
-        .or_else(|| header.src_ports.listed(MAX_PORTS_PER_RULE));
-    if listed.is_none() {
-        return Err(Refused::new(
-            "port",
-            format!(
-                "names no side with at most {MAX_PORTS_PER_RULE} ports, and a payload is captured only on the ports a rule lists"
-            ),
-        ));
-    }
-    if !has_content {
-        return Err(Refused::new(
-            "content",
-            "is missing, and a rule on the header alone needs the whole packet, which the agent does not capture yet",
-        ));
-    }
-    Ok(())
-}
-
 /// The packets a parsed header selects, or why the agent does not import it.
 fn packet_scope(header: &super::sig::model::Header) -> Compiled<PacketScope> {
     use super::sig::model::{Action, Direction, RuleProto};
@@ -2761,6 +2733,7 @@ fn packet_scope(header: &super::sig::model::Header) -> Compiled<PacketScope> {
         src_ports: header.src_ports.clone(),
         dst_ports: header.dst_ports.clone(),
         both_ways,
+        on_packet: false,
     })
 }
 
@@ -3092,14 +3065,8 @@ fn compile_options(options: &[(String, String)]) -> Compiled<Body> {
 fn check_flow(value: &str) -> Compiled<()> {
     for word in value.split(',').map(str::trim) {
         match word {
-            "established" | "stateless" | "to_server" | "from_client" | "to_client"
-            | "from_server" => {}
-            "not_established" => {
-                return Err(Refused::new(
-                    "flow",
-                    "'not_established' matches before a connection is up, and no payload is captured then",
-                ));
-            }
+            "established" | "not_established" | "stateless" | "to_server" | "from_client"
+            | "to_client" | "from_server" => {}
             other => {
                 return Err(Refused::new(
                     "flow",
@@ -3531,41 +3498,49 @@ mod tests {
     #[test]
     fn compiles_headers_on_every_protocol_port_set_and_direction() {
         let base = "(msg:\"x\"; content:\"abc\"; sid:1;)";
-        let headers = [
-            ("alert udp any any -> any 53", "protocol"),
-            ("alert icmp any any -> any any", "protocol"),
-            ("alert icmpv6 any any -> any any", "protocol"),
-            ("alert ip any any -> any any", "protocol"),
-            ("alert tcp-pkt any any -> any any", "port"),
-            ("alert tcp any any -> any !80", "port"),
-            ("alert tcp any any -> any 1:1024", "port"),
-            ("alert tcp any any -> any $SHELLCODE_PORTS", "port"),
-        ];
-        for (header, keyword) in headers {
-            let rule = format!("{header} {base}");
-            // The engine decides each of them on the whole packet...
-            assert!(
-                compile_rule_admitting(&rule, &vars(), true).is_ok(),
-                "{header}"
-            );
-            // ...and the agent refuses them until it captures that packet.
-            assert_eq!(refusal(&rule).keyword, keyword, "{header}");
-        }
+        let on_packet = |text: &str| {
+            let rules = compile(text);
+            assert_eq!(rules.len(), 1, "{text}");
+            rules[0]
+                .imported
+                .as_ref()
+                .and_then(|i| i.scope.as_ref())
+                .is_some_and(|s| s.on_packet)
+        };
+        // Decided on the whole packet the kernel hands up.
         for header in [
-            "alert tcp any 80 -> any 80",
-            "alert tcp any any <> any 80",
+            "alert udp any any -> any 53",
+            "alert icmp any any -> any any",
+            "alert icmpv6 any any -> any any",
+            "alert ip any any -> any any",
+            "alert tcp-pkt any any -> any any",
             "alert tcp-pkt any 1:16 -> any any",
+            "alert tcp any any -> any !80",
+            "alert tcp any any -> any 1:1024",
+            "alert tcp any any -> any $SHELLCODE_PORTS",
         ] {
-            assert_eq!(compile(&format!("{header} {base}")).len(), 1, "{header}");
+            assert!(on_packet(&format!("{header} {base}")), "{header}");
         }
-        let header_only = "alert ip any any -> any any (msg:\"x\"; ttl:1; sid:2;)";
-        assert!(compile_rule_admitting(header_only, &vars(), true).is_ok());
+        // Decided on the TCP payload of the ports the rule lists.
+        for header in ["alert tcp any 80 -> any 80", "alert tcp any any <> any 80"] {
+            assert!(!on_packet(&format!("{header} {base}")), "{header}");
+        }
+        // A rule on the header alone, or one reading a header field, is read
+        // on the packet whatever its protocol.
+        assert!(on_packet(
+            "alert ip any any -> any any (msg:\"x\"; ttl:1; sid:2;)"
+        ));
+        assert!(on_packet(
+            "alert tcp any any -> any 80 (msg:\"x\"; flags:S; content:\"abc\"; sid:3;)"
+        ));
+        assert!(on_packet(
+            "alert tcp any any -> any 80 (msg:\"x\"; flow:established; sid:4;)"
+        ));
     }
 
     #[test]
     fn refuses_options_outside_the_subset() {
         let cases = [
-            ("flow:established;", "content"),
             ("content:\"abcdef\"; depth:3;", "depth"),
             ("content:\"abc\"; http.uri;", "http.uri"),
             ("content:\"abc\"; http_uri;", "http_uri"),

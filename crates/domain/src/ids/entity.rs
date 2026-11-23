@@ -321,6 +321,10 @@ pub struct PacketScope {
     pub dst_ports: PortMatch,
     /// `<>`: the header holds with source and destination either way round.
     pub both_ways: bool,
+    /// Decided on each whole packet rather than on a TCP payload: any rule
+    /// off TCP, one reading a header field or buffer, one without content,
+    /// or one whose ports cannot be listed for the payload capture.
+    pub on_packet: bool,
 }
 
 impl PacketScope {

@@ -17,18 +17,20 @@ use aya_ebpf::{
 };
 use ebpf_common::{
     event::{
-        EVENT_TYPE_IDS, EVENT_TYPE_L7, FLAG_IPV6, L7Segment, MAX_L7_PAYLOAD, MAX_L7_PORTS,
-        PacketEvent, SMALL_L7_PAYLOAD,
+        EVENT_TYPE_IDS, EVENT_TYPE_L7, EVENT_TYPE_PACKET, FLAG_IPV6, L7Segment, MAX_L7_PAYLOAD,
+        MAX_L7_PORTS, MAX_PACKET_CAPTURE, PacketCapture, PacketEvent, SMALL_L7_PAYLOAD,
+        SMALL_PACKET_CAPTURE,
     },
     firewall::{
-        FW_EMPTY_IDS_PATTERNS, FW_EMPTY_IDS_SRC_PATTERNS, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_L7_PORTS,
+        FW_EMPTY_IDS_CAPTURE_PORTS, FW_EMPTY_IDS_CAPTURE_PROTOS, FW_EMPTY_IDS_PATTERNS, FW_EMPTY_IDS_SRC_PATTERNS, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_L7_PORTS,
         FW_EMPTY_TENANTS,
     },
     ids::{
         IDS_ACTION_DROP, IDS_METRIC_CGROUP_ATTRIBUTED, IDS_METRIC_CGROUP_TENANT_RESOLVED,
         IDS_METRIC_COUNT, IDS_METRIC_CT_KILL_CONFIRMED, IDS_METRIC_DROPPED, IDS_METRIC_ERRORS,
-        IDS_METRIC_EVENTS_DROPPED, IDS_METRIC_L7_FLOW_DROPPED, IDS_METRIC_MATCHED,
-        IDS_METRIC_TOTAL_SEEN, IDS_MIRROR_COPY_MARK, IDS_SAMPLING_RANDOM, IDS_SCOPE_WORKLOAD,
+        IDS_CAPTURE_PORT_ENTRIES, IDS_METRIC_EVENTS_DROPPED, IDS_METRIC_L7_FLOW_DROPPED,
+        IDS_METRIC_MATCHED, IDS_METRIC_PACKETS_CAPTURED, IDS_METRIC_PACKETS_LOST,
+        IDS_METRIC_PACKETS_TRUNCATED, IDS_METRIC_TOTAL_SEEN, IdsCaptureKey, IDS_MIRROR_COPY_MARK, IDS_SAMPLING_RANDOM, IDS_SCOPE_WORKLOAD,
         IDS_WORKLOAD_SCOPE_MAX_ENTRIES, IdsPatternKey, IdsPatternValue, IdsSamplingConfig,
         IdsWorkloadScopeKey, L7_DENIED_FLOWS_MAX_ENTRIES, L7FlowKey, L7FlowVerdict,
         WORKLOAD_LINK_MAX_ENTRIES, is_mirror_copy,
@@ -70,7 +72,7 @@ static IDS_PATTERNS: HashMap<IdsPatternKey, IdsPatternValue, 10240> = HashMap::n
 #[btf_map]
 static IDS_SRC_PATTERNS: HashMap<IdsPatternKey, IdsPatternValue, 10240> = HashMap::new();
 
-/// Per-CPU packet counters. Index: 0=matched, 1=dropped, 2=errors, 3=events_dropped, 4=total_seen, 5=cgroup_tenant_resolved, 6=cgroup_attributed, 7=ct_kill_confirmed.
+/// Per-CPU packet counters, indexed by the `IDS_METRIC_*` constants of `ebpf-common`.
 #[btf_map]
 static IDS_METRICS: PerCpuArray<u64, { IDS_METRIC_COUNT as usize }> = PerCpuArray::new();
 
@@ -208,6 +210,64 @@ fn l7_port_configured(gates: u32, src_port: u16, dst_port: u16) -> bool {
     unsafe { L7_PORTS.get(&dst_port) }.is_some() || unsafe { L7_PORTS.get(&src_port) }.is_some()
 }
 
+/// Protocols whose every packet is handed to userspace whole, indexed by
+/// protocol number: a rule decided on the packet names the protocol and no
+/// port. 0 is not captured, which is what an unwritten entry reads.
+#[btf_map]
+static IDS_CAPTURE_PROTOS: Array<u8, 256> = Array::new();
+
+/// Protocol and port pairs whose packets are handed to userspace whole when
+/// either end holds the port: a rule decided on the packet lists its ports.
+#[btf_map]
+static IDS_CAPTURE_PORTS: HashMap<IdsCaptureKey, u8, { IDS_CAPTURE_PORT_ENTRIES as usize }> =
+    HashMap::new();
+
+/// Whether a rule loaded in userspace is decided on this packet, so the
+/// packet goes up whole. Each table is skipped when userspace published it
+/// empty, so with no such rule the cost is the gate word already read.
+#[inline(always)]
+fn packet_captured(gates: u32, protocol: u8, src_port: u16, dst_port: u16) -> bool {
+    if !feature_empty(gates, FW_EMPTY_IDS_CAPTURE_PROTOS)
+        && IDS_CAPTURE_PROTOS
+            .get(u32::from(protocol))
+            .is_some_and(|hit| *hit != 0)
+    {
+        return true;
+    }
+    if feature_empty(gates, FW_EMPTY_IDS_CAPTURE_PORTS) {
+        return false;
+    }
+    let dst = IdsCaptureKey {
+        port: dst_port,
+        protocol,
+        _pad: 0,
+    };
+    let src = IdsCaptureKey {
+        port: src_port,
+        protocol,
+        _pad: 0,
+    };
+    unsafe { IDS_CAPTURE_PORTS.get(&dst) }.is_some()
+        || unsafe { IDS_CAPTURE_PORTS.get(&src) }.is_some()
+}
+
+/// Small packet record: header, capture lengths, and up to
+/// `SMALL_PACKET_CAPTURE` bytes from the IP header on.
+#[repr(C)]
+struct PacketEventSmall {
+    header: PacketEvent,
+    capture: PacketCapture,
+    bytes: [u8; SMALL_PACKET_CAPTURE],
+}
+
+/// Full packet record, up to `MAX_PACKET_CAPTURE` bytes from the IP header.
+#[repr(C)]
+struct PacketEventBuf {
+    header: PacketEvent,
+    capture: PacketCapture,
+    bytes: [u8; MAX_PACKET_CAPTURE],
+}
+
 /// Small L7 event buffer: `PacketEvent` header + `SMALL_L7_PAYLOAD` bytes
 /// of payload (512 B). Used when TCP payload ≤ 512 bytes - saves ~75%
 /// RingBuf space vs the full buffer.
@@ -252,6 +312,9 @@ const METRIC_CGROUP_ATTRIBUTED: u32 = IDS_METRIC_CGROUP_ATTRIBUTED;
 const METRIC_CT_KILL_CONFIRMED: u32 = IDS_METRIC_CT_KILL_CONFIRMED;
 /// A packet of a connection an L7 rule refused was shot.
 const METRIC_L7_FLOW_DROPPED: u32 = IDS_METRIC_L7_FLOW_DROPPED;
+const METRIC_PACKETS_CAPTURED: u32 = IDS_METRIC_PACKETS_CAPTURED;
+const METRIC_PACKETS_LOST: u32 = IDS_METRIC_PACKETS_LOST;
+const METRIC_PACKETS_TRUNCATED: u32 = IDS_METRIC_PACKETS_TRUNCATED;
 
 /// Returns `true` if the EVENTS RingBuf has backpressure (>75% full).
 #[inline(always)]
@@ -519,6 +582,9 @@ fn process_ids_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
     let src_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).src_addr });
     let dst_ip = u32_from_be_bytes(unsafe { (*ipv4hdr).dst_addr });
     let protocol = unsafe { (*ipv4hdr).proto() }.unwrap_or(IpProto::Reserved);
+    // The number as carried, which the enum loses for a protocol it does not
+    // name.
+    let protocol_number = unsafe { *ipv4hdr.cast::<u8>().add(9) };
 
     // ihl() returns the header length in bytes (already multiplied by 4)
     let ihl = unsafe { (*ipv4hdr).ihl() } as usize;
@@ -570,6 +636,10 @@ fn process_ids_v4(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
         // bpf_skb_pull_data is unnecessary and wastes ~1µs on
         // large packets. Removed in favour of direct load.
         emit_l7_event(ctx, &flow, l7_offset, tcp_seq(tcphdr));
+    }
+
+    if packet_captured(gates, protocol_number, src_port, dst_port) {
+        emit_packet(ctx, &flow, l3_offset, protocol_number);
     }
 
     // IDS pattern matching (key is port+protocol, no IP in key)
@@ -631,6 +701,10 @@ fn process_ids_v6(ctx: &TcContext, l3_offset: usize, vlan_id: u16, flags: u8) ->
         // bpf_skb_load_bytes handles fragments natively - no
         // linearization needed (see IPv4 path comment).
         emit_l7_event(ctx, &flow, l7_offset, tcp_seq(tcphdr));
+    }
+
+    if packet_captured(gates, next_hdr, src_port, dst_port) {
+        emit_packet(ctx, &flow, l3_offset, next_hdr);
     }
 
     // IDS pattern matching (key is port+protocol, same map for v4/v6)
@@ -1108,6 +1182,117 @@ fn emit_l7_full(
     } else {
         increment_metric(false, METRIC_EVENTS_DROPPED);
     }
+}
+
+/// Hand the packet up whole, from its IP header on, for the rules decided on
+/// each packet. A lost or cut packet is counted by reason, apart from lost
+/// alerts and lost payloads.
+#[inline(always)]
+fn emit_packet(ctx: &TcContext, flow: &FlowMeta, l3_offset: usize, protocol: u8) {
+    if trace::tc(ctx) {
+        return;
+    }
+    if ringbuf_has_backpressure() {
+        increment_metric(false, METRIC_PACKETS_LOST);
+        return;
+    }
+    let pkt_len = unsafe { skb_packet_size(raw_skb(ctx) as *mut _) }
+        .map_or(ctx.len() as usize, |total| total as usize);
+    let wire_len = pkt_len.saturating_sub(l3_offset);
+    if wire_len == 0 {
+        return;
+    }
+    let capture = PacketCapture {
+        wire_len: wire_len as u32,
+        _pad: 0,
+    };
+    let sent = if wire_len <= SMALL_PACKET_CAPTURE {
+        emit_packet_small(ctx, flow, l3_offset, wire_len, capture, protocol)
+    } else {
+        emit_packet_full(ctx, flow, l3_offset, wire_len, capture, protocol)
+    };
+    if sent {
+        increment_metric(false, METRIC_PACKETS_CAPTURED);
+        if wire_len > MAX_PACKET_CAPTURE {
+            increment_metric(false, METRIC_PACKETS_TRUNCATED);
+        }
+    }
+}
+
+/// Small packet record. Same loading discipline as `emit_l7_small`: the
+/// length clamped to `[1, CAP]` through a barrier, no memset, the entry
+/// discarded when the load fails.
+#[inline(always)]
+fn emit_packet_small(
+    ctx: &TcContext,
+    flow: &FlowMeta,
+    l3_offset: usize,
+    wire_len: usize,
+    capture: PacketCapture,
+    protocol: u8,
+) -> bool {
+    let to_load = opaque_usize(wire_len).clamp(1, SMALL_PACKET_CAPTURE);
+    let Some(mut entry) = EVENTS.reserve_untyped::<PacketEventSmall>(0) else {
+        increment_metric(false, METRIC_PACKETS_LOST);
+        return false;
+    };
+    let ptr = entry.as_mut_ptr();
+    let loaded = unsafe {
+        fill_l7_header(ctx, &mut (*ptr).header, flow, to_load as u32);
+        (*ptr).header.protocol = protocol;
+        (*ptr).header.event_type = EVENT_TYPE_PACKET;
+        (*ptr).capture = capture;
+        bpf_skb_load_bytes(
+            raw_skb(ctx) as *const _,
+            l3_offset as u32,
+            (*ptr).bytes.as_mut_ptr() as *mut _,
+            to_load as u32,
+        )
+    };
+    if loaded < 0 {
+        entry.discard(0);
+        increment_metric(false, METRIC_ERRORS);
+        return false;
+    }
+    entry.submit(submit_flags(avail_data(&EVENTS)));
+    true
+}
+
+/// Full packet record, cut at `MAX_PACKET_CAPTURE` bytes.
+#[inline(always)]
+fn emit_packet_full(
+    ctx: &TcContext,
+    flow: &FlowMeta,
+    l3_offset: usize,
+    wire_len: usize,
+    capture: PacketCapture,
+    protocol: u8,
+) -> bool {
+    let to_load = opaque_usize(wire_len).clamp(1, MAX_PACKET_CAPTURE);
+    let Some(mut entry) = EVENTS.reserve_untyped::<PacketEventBuf>(0) else {
+        increment_metric(false, METRIC_PACKETS_LOST);
+        return false;
+    };
+    let ptr = entry.as_mut_ptr();
+    let loaded = unsafe {
+        fill_l7_header(ctx, &mut (*ptr).header, flow, to_load as u32);
+        (*ptr).header.protocol = protocol;
+        (*ptr).header.event_type = EVENT_TYPE_PACKET;
+        (*ptr).capture = capture;
+        bpf_skb_load_bytes(
+            raw_skb(ctx) as *const _,
+            l3_offset as u32,
+            (*ptr).bytes.as_mut_ptr() as *mut _,
+            to_load as u32,
+        )
+    };
+    if loaded < 0 {
+        entry.discard(0);
+        increment_metric(false, METRIC_ERRORS);
+        return false;
+    }
+    entry.submit(submit_flags(avail_data(&EVENTS)));
+    true
 }
 
 /// Fill the L7 event header fields (shared by both tiers).

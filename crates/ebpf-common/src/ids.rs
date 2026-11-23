@@ -42,8 +42,30 @@ pub const IDS_METRIC_CT_KILL_CONFIRMED: u32 = 7;
 /// datapath. Counted apart from `IDS_METRIC_DROPPED`, which counts the
 /// packets an IDS pattern dropped, so each enforcement reads on its own.
 pub const IDS_METRIC_L7_FLOW_DROPPED: u32 = 8;
+/// Metric index: a packet captured whole for the rules decided on it.
+pub const IDS_METRIC_PACKETS_CAPTURED: u32 = 9;
+/// Metric index: a packet the capture tables asked for and the ring had no
+/// room for. Counted apart from `IDS_METRIC_EVENTS_DROPPED` so a lost packet
+/// is told from a lost alert.
+pub const IDS_METRIC_PACKETS_LOST: u32 = 10;
+/// Metric index: a captured packet longer than the record, cut at
+/// `MAX_PACKET_CAPTURE` bytes.
+pub const IDS_METRIC_PACKETS_TRUNCATED: u32 = 11;
 /// Total number of IDS metric slots (one past the last index).
-pub const IDS_METRIC_COUNT: u32 = 9;
+pub const IDS_METRIC_COUNT: u32 = 12;
+
+/// Entries the `IDS_CAPTURE_PORTS` table holds.
+pub const IDS_CAPTURE_PORT_ENTRIES: u32 = 4096;
+
+/// Key of the `IDS_CAPTURE_PORTS` table: a packet of this protocol with this
+/// port at either end is captured whole.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdsCaptureKey {
+    pub port: u16,
+    pub protocol: u8,
+    pub _pad: u8,
+}
 
 /// `skb->mark` of a forensics mirror copy.
 ///
@@ -224,6 +246,8 @@ unsafe impl aya::Pod for L7FlowVerdict {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for IdsPatternKey {}
 #[cfg(feature = "userspace")]
+unsafe impl aya::Pod for IdsCaptureKey {}
+#[cfg(feature = "userspace")]
 unsafe impl aya::Pod for IdsPatternValue {}
 #[cfg(feature = "userspace")]
 unsafe impl aya::Pod for IdsWorkloadScopeKey {}
@@ -255,6 +279,12 @@ mod tests {
         assert_eq!(back.src_addr, key.dst_addr);
         assert_eq!(back.dst_port, key.src_port);
         assert_eq!(back.reversed(), key);
+    }
+
+    #[test]
+    fn a_capture_key_is_one_word() {
+        assert_eq!(mem::size_of::<IdsCaptureKey>(), 4);
+        assert_eq!(mem::offset_of!(IdsCaptureKey, protocol), 2);
     }
 
     #[test]

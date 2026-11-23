@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use domain::common::entity::{DomainMode, RuleId};
 use domain::common::error::DomainError;
+use domain::ids::capture::CaptureSet;
 use domain::ids::engine::IdsEngine;
 use domain::ids::entity::{IdsRule, SamplingMode, ThresholdConfig};
 use domain::ids::suricata::RulesetImport;
@@ -445,6 +446,17 @@ impl IdsAppService {
             .evaluate_payload_with_context(event, payload, src_country)
     }
 
+    /// Evaluate a packet captured whole, from its IP header on, against the
+    /// rules decided on each packet.
+    pub fn evaluate_packet<'a>(
+        &'a self,
+        event: &PacketEvent,
+        bytes: &[u8],
+        src_country: Option<&str>,
+    ) -> Vec<(usize, &'a IdsRule)> {
+        self.engine.evaluate_packet(event, bytes, src_country)
+    }
+
     /// Return `true` if any loaded rule carries a content pattern, so the
     /// L7 path can skip the payload scan when none do.
     #[must_use]
@@ -586,6 +598,10 @@ impl IdsAppService {
         }
         if let Some(scope) = scope {
             scope.set_rules(scoped);
+        }
+        // What the rules decided on each packet need handed up whole.
+        if let Err(e) = map.set_capture(&CaptureSet::of(self.engine.rules())) {
+            tracing::warn!("failed to write the IDS packet capture tables: {e}");
         }
     }
 
@@ -1030,6 +1046,64 @@ mod tests {
         fn set_sampling_config(&mut self, _config: &IdsSamplingConfig) -> Result<(), DomainError> {
             Ok(())
         }
+    }
+
+    /// Keeps the last capture published, shared with the test.
+    struct CaptureRecorder(Arc<Mutex<Option<CaptureSet>>>);
+
+    impl IdsMapPort for CaptureRecorder {
+        fn insert_pattern(
+            &mut self,
+            _key: &IdsPatternKey,
+            _value: &ebpf_common::ids::IdsPatternValue,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn remove_pattern(&mut self, _key: &IdsPatternKey) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn clear_patterns(&mut self) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn pattern_count(&self) -> Result<usize, DomainError> {
+            Ok(0)
+        }
+        fn set_sampling_config(&mut self, _config: &IdsSamplingConfig) -> Result<(), DomainError> {
+            Ok(())
+        }
+        fn set_capture(&mut self, capture: &CaptureSet) -> Result<(), DomainError> {
+            *self.0.lock().unwrap() = Some(capture.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_kernel_captures_what_the_loaded_rules_read_on_the_packet() {
+        let vars = domain::ids::suricata::SuricataVars::default();
+        let rules: Vec<IdsRule> = [
+            "alert udp any any -> any 53 (msg:\"dns\"; content:\"abc\"; sid:1;)",
+            "alert icmp any any -> any any (msg:\"ping\"; itype:8; sid:2;)",
+            "alert tcp any any -> any 80 (msg:\"web\"; content:\"GET\"; sid:3;)",
+        ]
+        .iter()
+        .flat_map(|text| domain::ids::suricata::compile_rule(text, &vars).unwrap())
+        .collect();
+        let published = Arc::new(Mutex::new(None));
+        let mut svc = make_service();
+        svc.set_map_port(Box::new(CaptureRecorder(Arc::clone(&published))));
+        svc.reload_rules(rules).unwrap();
+
+        let capture = published.lock().unwrap().clone().unwrap();
+        // The payload rule on port 80 is fed by the TCP payload path, so it
+        // asks the kernel for nothing more.
+        assert_eq!(
+            capture.ports.into_iter().collect::<Vec<_>>(),
+            vec![(17, 53)]
+        );
+        assert_eq!(capture.protos.into_iter().collect::<Vec<_>>(), vec![1, 58]);
+
+        svc.reload_rules(Vec::new()).unwrap();
+        assert!(published.lock().unwrap().as_ref().unwrap().is_empty());
     }
 
     struct NoScopeMaps;

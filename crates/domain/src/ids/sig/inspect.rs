@@ -19,9 +19,10 @@ use sha2::{Digest, Sha256};
 use super::int::{IntMatch, IntOp};
 use super::model::{
     Base64Decode, Buffer, ByteOp, ByteRead, Check, Content, Endian, FastPattern, FloatMatch,
-    HeaderField, Match, MathOp, NumBase, Pcre, Signature, TcpFlags, TcpFlagsMode, Transform, Value,
+    FlowCounter, HeaderField, Match, MathOp, NumBase, Pcre, Signature, TcpFlags, TcpFlagsMode,
+    Transform, Value,
 };
-use crate::ids::flow::State;
+use crate::ids::flow::{Seen, State};
 use crate::ids::packet::{IpPacket, L4, opt};
 use crate::ids::suricata::{Compiled, Refused};
 
@@ -37,6 +38,60 @@ pub struct Program {
     slots: usize,
     fast: Option<Needle>,
     state: Option<State>,
+    session: Session,
+}
+
+/// What the rule asks of the flow's session: `flow` and its counters.
+#[derive(Debug, Default)]
+struct Session {
+    established: Option<bool>,
+    to_server: Option<bool>,
+    counters: Vec<(FlowCounter, IntMatch)>,
+}
+
+impl Session {
+    fn compile(signature: &Signature) -> Self {
+        let flow = &signature.flow;
+        Self {
+            established: if flow.established {
+                Some(true)
+            } else if flow.not_established {
+                Some(false)
+            } else {
+                None
+            },
+            to_server: if flow.to_server {
+                Some(true)
+            } else if flow.to_client {
+                Some(false)
+            } else {
+                None
+            },
+            counters: signature
+                .checks
+                .iter()
+                .filter_map(|check| match check {
+                    Check::Counter(counter, m) => Some((*counter, *m)),
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+
+    fn matches(&self, seen: &Seen) -> bool {
+        let either = |[a, b]: [u64; 2], m: IntMatch| m.matches(a) || m.matches(b);
+        self.established.is_none_or(|e| e == seen.established)
+            && self.to_server.is_none_or(|t| t == seen.to_server)
+            && self.counters.iter().all(|&(counter, m)| match counter {
+                FlowCounter::Age => m.matches(seen.age_secs),
+                FlowCounter::Pkts => either(seen.pkts, m),
+                FlowCounter::PktsToServer => m.matches(seen.pkts[0]),
+                FlowCounter::PktsToClient => m.matches(seen.pkts[1]),
+                FlowCounter::Bytes => either(seen.bytes, m),
+                FlowCounter::BytesToServer => m.matches(seen.bytes[0]),
+                FlowCounter::BytesToClient => m.matches(seen.bytes[1]),
+            })
+    }
 }
 
 /// Bytes every payload the program matches holds somewhere, so a payload
@@ -292,7 +347,7 @@ fn field_value(field: HeaderField, p: &IpPacket<'_>) -> Option<u64> {
         _ => None,
     };
     Some(match field {
-        HeaderField::Dsize => len_u64(p.payload()?.len()),
+        HeaderField::Dsize => len_u64(p.payload_len()?),
         HeaderField::Ttl => u64::from(p.ttl),
         HeaderField::IpId => u64::from(p.v4?.id),
         HeaderField::Tos => u64::from(p.v4?.tos),
@@ -389,7 +444,22 @@ impl Program {
             slots: names.len(),
             fast: fast_pattern(signature),
             state: State::compile(signature)?,
+            session: Session::compile(signature),
         })
+    }
+
+    /// Whether the flow's session, as it stands with the packet counted,
+    /// is the one the rule's `flow` and counters ask for.
+    #[must_use]
+    pub fn matches_session(&self, seen: &Seen) -> bool {
+        self.session.matches(seen)
+    }
+
+    /// Whether the rule asks of the session what only every packet of the
+    /// flow tells: a connection not yet up, or a counter.
+    #[must_use]
+    pub fn reads_session(&self) -> bool {
+        self.session.established == Some(false) || !self.session.counters.is_empty()
     }
 
     /// What the rule reads and writes outside the packet, `None` when it
@@ -446,6 +516,15 @@ impl Program {
         let packet = *packet;
         let sticky = move |name: &str| packet.header_buffer(name);
         self.run(packet.payload().unwrap_or_default(), &sticky)
+    }
+
+    /// Whether the program checks the payload size, which only the IP header
+    /// knows once the kernel has cut a long packet short.
+    #[must_use]
+    pub fn checks_size(&self) -> bool {
+        self.headers
+            .iter()
+            .any(|h| matches!(h, HeaderCheck::Int(HeaderField::Dsize, _)))
     }
 
     /// Whether the program checks anything in the packet headers beyond the

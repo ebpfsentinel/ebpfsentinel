@@ -15,6 +15,19 @@
 //!
 //! Time is the packet's timestamp, so a replayed capture ages as it did on
 //! the wire.
+//!
+//! A flow handed over packet by packet also keeps its session, for `flow`
+//! and its counters, held to Suricata by
+//! `tests/fixtures/suricata/session-verdicts.txt`: the client is whoever
+//! sent the flow's first packet; a TCP flow is established once its
+//! handshake has completed, from the packet after the final ACK, or from
+//! that ACK itself when it carries data, and stays so through its close; a
+//! TCP flow first seen without its SYN is never established; another
+//! protocol's flow is established from the first packet that answers it.
+//! Counters include the packet being judged, count bytes from the link
+//! layer, and `either` holds when either direction's count does. The age is
+//! the second of the packet minus the second the flow began. ICMP between
+//! two addresses is one flow, as Suricata keys it.
 
 use std::collections::{HashMap, HashSet};
 
@@ -70,6 +83,7 @@ pub struct Packet {
     flow: FlowKey,
     src: Addr,
     dst: Addr,
+    sport: u16,
     now: u64,
     timeout: u64,
 }
@@ -80,7 +94,12 @@ impl Packet {
         let v6 = event.is_ipv6();
         let src = (event.src_addr, v6);
         let dst = (event.dst_addr, v6);
-        let (low, high) = order((src, event.src_port), (dst, event.dst_port));
+        let (sport, dport) = if matches!(event.protocol, 1 | 58) {
+            (0, 0)
+        } else {
+            (event.src_port, event.dst_port)
+        };
+        let (low, high) = order((src, sport), (dst, dport));
         Self {
             flow: FlowKey {
                 proto: event.protocol,
@@ -89,6 +108,7 @@ impl Packet {
             },
             src,
             dst,
+            sport,
             now: event.timestamp_ns,
             timeout: if event.protocol == 6 {
                 TCP_TIMEOUT_NS
@@ -113,6 +133,71 @@ struct Flow {
     last: u64,
     bits: HashSet<String>,
     ints: HashMap<String, i64>,
+    session: Option<Session>,
+}
+
+const SYN: u8 = 0x02;
+const RST: u8 = 0x04;
+const ACK: u8 = 0x10;
+
+/// How far a TCP handshake has gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Handshake {
+    /// First seen without its SYN, or refused: never established.
+    Midstream,
+    SynSent,
+    SynReceived,
+    Established,
+}
+
+impl Handshake {
+    /// The handshake after a packet with `flags` from the client (side 0)
+    /// or the server (side 1).
+    const fn after(self, side: usize, flags: u8) -> Self {
+        let syn = flags & SYN != 0;
+        let ack = flags & ACK != 0;
+        match self {
+            Self::SynSent | Self::SynReceived if flags & RST != 0 => Self::Midstream,
+            Self::SynSent if side == 1 && syn && ack => Self::SynReceived,
+            Self::SynReceived if side == 0 && ack && !syn => Self::Established,
+            other => other,
+        }
+    }
+}
+
+/// What a flow handed over packet by packet knows of its session.
+#[derive(Debug, Clone, Copy)]
+struct Session {
+    client: (Addr, u16),
+    start_secs: u64,
+    pkts: [u64; 2],
+    bytes: [u64; 2],
+    handshake: Handshake,
+}
+
+/// What the packet itself tells its session.
+#[derive(Debug, Clone, Copy)]
+pub struct Wire {
+    /// The TCP flags, `None` for another protocol.
+    pub tcp_flags: Option<u8>,
+    /// Whether the packet carries a payload.
+    pub payload: bool,
+    /// The packet's length from the link layer.
+    pub frame_len: u64,
+}
+
+/// What the session says of one packet, the packet counted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Seen {
+    /// Whether the client sent it.
+    pub to_server: bool,
+    pub established: bool,
+    /// The packet's second minus the second the flow began.
+    pub age_secs: u64,
+    /// Packets towards the server, then towards the client.
+    pub pkts: [u64; 2],
+    /// Bytes towards the server, then towards the client.
+    pub bytes: [u64; 2],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -140,6 +225,40 @@ impl FlowTable {
                 *flow = Flow::default();
             }
             flow.last = flow.last.max(packet.now);
+        }
+    }
+
+    /// Count a packet handed over whole in its flow's session and say what
+    /// the session knows of it.
+    pub fn observe(&mut self, packet: &Packet, wire: Wire) -> Seen {
+        let flow = self.flow(packet);
+        let session = flow.session.get_or_insert(Session {
+            client: (packet.src, packet.sport),
+            start_secs: packet.now / NS,
+            pkts: [0; 2],
+            bytes: [0; 2],
+            handshake: match wire.tcp_flags {
+                Some(flags) if flags & (SYN | ACK) == SYN => Handshake::SynSent,
+                _ => Handshake::Midstream,
+            },
+        });
+        let side = usize::from((packet.src, packet.sport) != session.client);
+        session.pkts[side] = session.pkts[side].saturating_add(1);
+        session.bytes[side] = session.bytes[side].saturating_add(wire.frame_len);
+        let established = match wire.tcp_flags {
+            None => session.pkts.iter().all(|&n| n > 0),
+            Some(flags) => {
+                let before = session.handshake == Handshake::Established;
+                session.handshake = session.handshake.after(side, flags);
+                before || (session.handshake == Handshake::Established && wire.payload)
+            }
+        };
+        Seen {
+            to_server: side == 0,
+            established,
+            age_secs: (packet.now / NS).saturating_sub(session.start_secs),
+            pkts: session.pkts,
+            bytes: session.bytes,
         }
     }
 

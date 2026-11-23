@@ -4,7 +4,10 @@ use crate::ebpf::map_store::MapStore;
 use crate::ebpf::ringbuf_observer::{DrainTrigger, RingBufObserver};
 use aya::maps::{MapData, RingBuf};
 use domain::common::agent_event::AgentEvent;
-use ebpf_common::event::{EVENT_TYPE_L7, L7_SEGMENT_LEN, L7Segment, PacketEvent};
+use ebpf_common::event::{
+    EVENT_TYPE_L7, EVENT_TYPE_PACKET, L7_SEGMENT_LEN, L7Segment, PACKET_CAPTURE_LEN, PacketCapture,
+    PacketEvent,
+};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Interval, MissedTickBehavior};
@@ -204,6 +207,24 @@ fn decode_event(bytes: &[u8]) -> Option<AgentEvent> {
             segment: Some(segment),
             payload: raw[..real_len].to_vec(),
         })
+    } else if event.event_type == EVENT_TYPE_PACKET {
+        // A packet record shorter than its capture lengths is no packet: it
+        // is dropped rather than read as a bare L4 event of another kind.
+        if bytes.len() <= header_len + PACKET_CAPTURE_LEN {
+            return None;
+        }
+        // SAFETY: PacketCapture is #[repr(C)] with two u32 fields the kernel
+        // writes verbatim; the length is checked above.
+        let capture = unsafe {
+            std::ptr::read_unaligned(bytes[header_len..].as_ptr().cast::<PacketCapture>())
+        };
+        let raw = &bytes[header_len + PACKET_CAPTURE_LEN..];
+        let real_len = (event.rule_id as usize).min(raw.len());
+        Some(AgentEvent::Packet {
+            header: event,
+            capture,
+            bytes: raw[..real_len].to_vec(),
+        })
     } else {
         Some(AgentEvent::L4(event))
     }
@@ -367,6 +388,34 @@ mod tests {
             }
             _ => panic!("expected an L7 event"),
         }
+    }
+
+    #[test]
+    fn a_packet_record_carries_its_capture_and_is_trimmed_to_what_was_copied() {
+        let header_len = std::mem::size_of::<PacketEvent>();
+        let packet = [0x45u8, 0, 0, 28, 0, 1, 0, 0, 64, 1];
+        let mut bytes = vec![0u8; header_len];
+        bytes[45] = EVENT_TYPE_PACKET;
+        bytes[48..52].copy_from_slice(&(packet.len() as u32).to_ne_bytes());
+        bytes.extend_from_slice(&3000u32.to_ne_bytes()); // wire_len
+        bytes.extend_from_slice(&0u32.to_ne_bytes());
+        bytes.extend_from_slice(&packet);
+        bytes.extend_from_slice(&[0xEEu8; 256 - 10]);
+
+        match decode_event(&bytes) {
+            Some(AgentEvent::Packet { capture, bytes, .. }) => {
+                assert_eq!(capture.wire_len, 3000);
+                assert_eq!(bytes, packet, "trimmed, the ring's stale tail left out");
+            }
+            other => panic!("expected a packet event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_packet_record_without_its_capture_lengths_is_dropped() {
+        let mut bytes = vec![0u8; std::mem::size_of::<PacketEvent>() + PACKET_CAPTURE_LEN];
+        bytes[45] = EVENT_TYPE_PACKET;
+        assert!(decode_event(&bytes).is_none());
     }
 
     #[test]

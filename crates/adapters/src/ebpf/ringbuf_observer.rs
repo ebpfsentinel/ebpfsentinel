@@ -15,7 +15,7 @@ use ports::secondary::metrics_port::MetricsPort;
 pub fn event_timestamp_ns(event: &AgentEvent) -> u64 {
     match event {
         AgentEvent::L4(e) => e.timestamp_ns,
-        AgentEvent::L7 { header, .. } => header.timestamp_ns,
+        AgentEvent::L7 { header, .. } | AgentEvent::Packet { header, .. } => header.timestamp_ns,
         AgentEvent::Dns { header, .. } => header.timestamp_ns,
         AgentEvent::Dlp(e) => e.timestamp_ns,
     }
@@ -28,7 +28,9 @@ pub fn event_timestamp_ns(event: &AgentEvent) -> u64 {
 fn set_event_timestamp_ns(event: &mut AgentEvent, timestamp_ns: u64) {
     match event {
         AgentEvent::L4(e) => e.timestamp_ns = timestamp_ns,
-        AgentEvent::L7 { header, .. } => header.timestamp_ns = timestamp_ns,
+        AgentEvent::L7 { header, .. } | AgentEvent::Packet { header, .. } => {
+            header.timestamp_ns = timestamp_ns;
+        }
         AgentEvent::Dns { header, .. } => header.timestamp_ns = timestamp_ns,
         AgentEvent::Dlp(e) => e.timestamp_ns = timestamp_ns,
     }

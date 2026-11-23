@@ -2,7 +2,8 @@ use crate::ebpf::feature_gates::{self, Feature};
 use crate::ebpf::map_store::MapStore;
 use aya::maps::{Array, HashMap, MapData};
 use domain::common::error::DomainError;
-use ebpf_common::ids::{IdsPatternKey, IdsPatternValue, IdsSamplingConfig};
+use domain::ids::capture::CaptureSet;
+use ebpf_common::ids::{IdsCaptureKey, IdsPatternKey, IdsPatternValue, IdsSamplingConfig};
 use ports::secondary::ids_map_port::IdsMapPort;
 use tracing::info;
 
@@ -15,6 +16,8 @@ pub struct IdsMapManager {
     patterns: HashMap<MapData, IdsPatternKey, IdsPatternValue>,
     src_patterns: HashMap<MapData, IdsPatternKey, IdsPatternValue>,
     sampling_config: Array<MapData, IdsSamplingConfig>,
+    capture_protos: Array<MapData, u8>,
+    capture_ports: HashMap<MapData, IdsCaptureKey, u8>,
 }
 
 impl IdsMapManager {
@@ -36,6 +39,15 @@ impl IdsMapManager {
             .ok_or_else(|| anyhow::anyhow!("map 'IDS_SAMPLING_CONFIG' not found in eBPF object"))?;
         let sampling_config = Array::try_from(sampling_map)?;
 
+        let protos_map = ebpf
+            .take_map("IDS_CAPTURE_PROTOS")
+            .ok_or_else(|| anyhow::anyhow!("map 'IDS_CAPTURE_PROTOS' not found in eBPF object"))?;
+        let capture_protos = Array::try_from(protos_map)?;
+        let ports_map = ebpf
+            .take_map("IDS_CAPTURE_PORTS")
+            .ok_or_else(|| anyhow::anyhow!("map 'IDS_CAPTURE_PORTS' not found in eBPF object"))?;
+        let capture_ports: HashMap<MapData, IdsCaptureKey, u8> = HashMap::try_from(ports_map)?;
+
         // The two pattern maps are shared by pin, so a previous run's rules
         // can still be in them. Count what is actually there rather than
         // assuming a fresh map, because a gate published against an
@@ -45,12 +57,21 @@ impl IdsMapManager {
             Feature::IdsSrcPatterns,
             src_patterns.keys().next().is_none(),
         );
+        let protos_empty =
+            (0..256u32).all(|proto| capture_protos.get(&proto, 0).is_ok_and(|v| v == 0));
+        feature_gates::publish(Feature::IdsCaptureProtos, protos_empty);
+        feature_gates::publish(
+            Feature::IdsCapturePorts,
+            capture_ports.keys().next().is_none(),
+        );
 
         info!("IDS_PATTERNS, IDS_SRC_PATTERNS and IDS_SAMPLING_CONFIG maps acquired");
         Ok(Self {
             patterns,
             src_patterns,
             sampling_config,
+            capture_protos,
+            capture_ports,
         })
     }
 }
@@ -123,6 +144,51 @@ impl IdsMapPort for IdsMapManager {
         self.sampling_config.set(0, config, 0).map_err(|e| {
             DomainError::EngineError(format!("IDS_SAMPLING_CONFIG set failed: {e}"))
         })?;
+        Ok(())
+    }
+
+    fn set_capture(&mut self, capture: &CaptureSet) -> Result<(), DomainError> {
+        let failed = |what: &str, e: aya::maps::MapError| {
+            DomainError::EngineError(format!("IDS capture {what} failed: {e}"))
+        };
+        // Open both lookups before writing, and shut them only once the
+        // tables are as empty as the set: a gate is never behind its table.
+        feature_gates::publish(Feature::IdsCaptureProtos, false);
+        feature_gates::publish(Feature::IdsCapturePorts, false);
+        for proto in 0..=u8::MAX {
+            let wanted = u8::from(capture.protos.contains(&proto));
+            self.capture_protos
+                .set(u32::from(proto), &wanted, 0)
+                .map_err(|e| failed("protocol write", e))?;
+        }
+        let stale: Vec<IdsCaptureKey> = self
+            .capture_ports
+            .keys()
+            .filter_map(Result::ok)
+            .filter(|key| !capture.ports.contains(&(key.protocol, key.port)))
+            .collect();
+        for key in &stale {
+            self.capture_ports
+                .remove(key)
+                .map_err(|e| failed("port removal", e))?;
+        }
+        for &(protocol, port) in &capture.ports {
+            let key = IdsCaptureKey {
+                port,
+                protocol,
+                _pad: 0,
+            };
+            self.capture_ports
+                .insert(&key, &1, 0)
+                .map_err(|e| failed("port write", e))?;
+        }
+        feature_gates::publish(Feature::IdsCaptureProtos, capture.protos.is_empty());
+        feature_gates::publish(Feature::IdsCapturePorts, capture.ports.is_empty());
+        info!(
+            protocols = capture.protos.len(),
+            ports = capture.ports.len(),
+            "IDS packet capture tables written"
+        );
         Ok(())
     }
 }

@@ -176,14 +176,16 @@ fn the_prefilter_loses_no_match() {
             if bytes.is_empty() {
                 continue;
             }
-            let hit = engine
-                .evaluate_payload_with_context(&event, bytes, None)
-                .iter()
-                .any(|(_, rule)| {
-                    rule.imported
-                        .as_ref()
-                        .is_some_and(|i| i.sid.to_string() == case.sid)
-                });
+            // A rule read on the packet is handed the segment whole, its
+            // headers in front of the same payload.
+            let packet = tcp_segment(bytes);
+            let mut hits = engine.evaluate_payload_with_context(&event, bytes, None);
+            hits.extend(engine.evaluate_packet(&event, &packet, None));
+            let hit = hits.iter().any(|(_, rule)| {
+                rule.imported
+                    .as_ref()
+                    .is_some_and(|i| i.sid.to_string() == case.sid)
+            });
             if hit != *expected {
                 wrong.push(format!(
                     "{} payload {number}: expected {expected}",
@@ -198,4 +200,18 @@ fn the_prefilter_loses_no_match() {
         wrong.len(),
         wrong.join("\n")
     );
+}
+
+/// An IPv4 TCP segment from 10.0.0.1:40000 to 10.0.0.2:80, acknowledging and
+/// pushing `payload`.
+fn tcp_segment(payload: &[u8]) -> Vec<u8> {
+    let total = u16::try_from(40 + payload.len()).expect("a payload fits one packet");
+    let mut bytes = vec![0x45, 0];
+    bytes.extend_from_slice(&total.to_be_bytes());
+    bytes.extend_from_slice(&[0, 1, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2]);
+    bytes.extend_from_slice(&40000u16.to_be_bytes());
+    bytes.extend_from_slice(&80u16.to_be_bytes());
+    bytes.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 0x50, 0x18, 0xff, 0xff, 0, 0, 0, 0]);
+    bytes.extend_from_slice(payload);
+    bytes
 }
