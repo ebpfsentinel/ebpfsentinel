@@ -469,11 +469,17 @@ dependencies = [
 name = "ebpfsentinel-domain"
 version = "0.0.0-dev"
 dependencies = [
+ "aho-corasick",
  "ebpf-common",
+ "flate2",
  "hmac",
  "lru",
+ "md-5",
+ "memchr",
+ "pcre2",
  "regex",
  "serde",
+ "sha1",
  "sha2",
  "thiserror",
 ]
@@ -487,6 +493,7 @@ dependencies = [
  "ebpf-common",
  "ebpfsentinel-domain",
  "ebpfsentinel-warden",
+ "ebpfsentinel-warden-proto",
  "infrastructure",
  "libfuzzer-sys",
  "serde_json",
@@ -496,9 +503,12 @@ dependencies = [
 name = "ebpfsentinel-warden"
 version = "0.0.0-dev"
 dependencies = [
+ "ebpfsentinel-domain",
  "ebpfsentinel-warden-proto",
  "libc",
  "object",
+ "serde",
+ "serde_json",
  "sha2",
 ]
 
@@ -1320,6 +1330,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "md-5"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+dependencies = [
+ "cfg-if",
+ "digest",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1557,6 +1577,28 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link",
+]
+
+[[package]]
+name = "pcre2"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e970b0fcce0c7ee6ef662744ff711f21ccd6f11b7cf03cd187a80e89797fc67"
+dependencies = [
+ "libc",
+ "log",
+ "pcre2-sys",
+]
+
+[[package]]
+name = "pcre2-sys"
+version = "0.2.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18b9073c1a2549bd409bf4a32c94d903bb1a09bf845bc306ae148897fa0760a4"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
 ]
 
 [[package]]
@@ -2283,6 +2325,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
 name = "sha2"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2481,7 +2534,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
