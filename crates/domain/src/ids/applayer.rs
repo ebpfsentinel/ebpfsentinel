@@ -5,9 +5,14 @@
 //! acknowledges them, in order. The first bytes of each direction are
 //! compared with the protocols' opening patterns: a request method or an
 //! HTTP status line, a TLS record, an SSH banner, an SMTP greeting command,
-//! an FTP command or, on port 21, a reply code. DNS is the one protocol
-//! taken from the port, 53, over TCP and UDP alike. Bytes that are only the
-//! start of a pattern wait for more.
+//! an FTP command or, on port 21, a reply code, a DCE/RPC 5.0 header, an
+//! SMB header after its four-byte session header (session keepalives
+//! skipped in front of it on ports 139 and 445). Bytes that are only the
+//! start of a pattern wait for more. Some protocols are taken from the
+//! port when no pattern names another: DNS on 53, over TCP and UDP alike,
+//! RDP on 3389 when the bytes open a TPKT message, Telnet on 23 whatever
+//! they say. Over UDP elsewhere a first datagram that is a whole
+//! connectionless DCE/RPC request names DCE/RPC.
 //!
 //! Once one direction names the protocol it is the flow's, and the other
 //! direction takes it with its first bytes. A connection whose client sent
@@ -20,15 +25,26 @@
 //!
 //! - when the bytes that settle a direction arrive on a packet of that
 //!   direction (a datagram, the FIN that fails a connection), on it;
-//! - otherwise on the next packet that direction sends.
+//! - otherwise on the next packet that direction sends;
+//! - never for a direction that took the protocol with bytes its parser
+//!   refuses: an RDP direction not opening a TPKT message, a DCE/RPC one
+//!   not opening a version 5 header, an SMB one not opening a session
+//!   message.
+//!
+//! A rule naming DCE/RPC also reads SMB flows, which carry it.
 //!
 //! A protocol whose parser asks for it has its side's stream inspected on
 //! that side's next packet, without waiting for a chunk or a close: HTTP
 //! once a message's header is whole, TLS, SSH, SMTP and DNS with each
-//! piece of data. FTP does not ask.
+//! piece of data, RDP with each X.224 connection request and confirm,
+//! DCE/RPC with each bind and alter context, each request carrying stub
+//! data or followed by more bytes, and each bind acknowledgement from the
+//! server. FTP, SMB and Telnet do not ask, nor RDP once the connection
+//! moved to TLS.
 //!
 //! These rules are held to Suricata by
-//! `tests/fixtures/suricata/applayer-verdicts.txt`.
+//! `tests/fixtures/suricata/applayer-verdicts.txt` and
+//! `tests/fixtures/suricata/windows-verdicts.txt`.
 
 use super::dns::{self, Dns};
 use super::http1::{Http1, Ready};
@@ -43,6 +59,10 @@ pub enum AppProto {
     Smtp,
     Ftp,
     Dns,
+    Rdp,
+    Smb,
+    Dcerpc,
+    Telnet,
     /// Both directions spoke and neither named a protocol.
     Failed,
 }
@@ -59,9 +79,35 @@ impl AppProto {
             "smtp" => Self::Smtp,
             "ftp" => Self::Ftp,
             "dns" => Self::Dns,
+            "rdp" => Self::Rdp,
+            "smb" => Self::Smb,
+            "dcerpc" => Self::Dcerpc,
+            "telnet" => Self::Telnet,
             "failed" => Self::Failed,
             _ => return None,
         })
+    }
+
+    /// Whether a flow found as `got` answers to a rule naming `self`:
+    /// DCE/RPC is also spoken inside SMB, so a DCE/RPC rule reads an SMB
+    /// flow too.
+    #[must_use]
+    pub fn answers(self, got: Self) -> bool {
+        self == got || (self == Self::Dcerpc && got == Self::Smb)
+    }
+
+    /// Whether the protocol's parser takes a direction whose first bytes
+    /// are `head`, once the other direction named the protocol: a direction
+    /// it refuses takes the protocol without announcing it.
+    fn accepts(self, head: &[u8]) -> bool {
+        match self {
+            Self::Dcerpc => head.first() == Some(&5),
+            Self::Smb => head
+                .first()
+                .is_some_and(|b| *b == 0 || (0x81..=0x85).contains(b)),
+            Self::Rdp => head.first() == Some(&TPKT_VERSION),
+            _ => true,
+        }
     }
 
     /// Whether the protocol's parser has its side's stream inspected as
@@ -118,7 +164,38 @@ const PATTERNS: &[(Way, &[u8], AppProto)] = &[
     (Way::ToServer, b"PORT ", AppProto::Ftp),
     (Way::ToServer, b"AUTH ", AppProto::Ftp),
     (Way::ToServer, b"FEAT", AppProto::Ftp),
+    (Way::Both, b"\x05\x00", AppProto::Dcerpc),
 ];
+
+/// An SMB message opens with a session header, four bytes, then
+/// one of these; on the SMB ports, session keepalives before it are
+/// skipped.
+const SMB_MAGIC: [&[u8]; 3] = [b"\xffSMB", b"\xfeSMB", b"\xfdSMB"];
+
+/// A session service keepalive.
+const NBSS_KEEPALIVE: [u8; 4] = [0x85, 0, 0, 0];
+
+/// What an SMB opening says, keepalives skipped on the SMB ports.
+fn smb(head: &[u8], server_port: u16) -> Verdict {
+    let mut head = head;
+    while let Some(rest) = head
+        .strip_prefix(&NBSS_KEEPALIVE[..])
+        .filter(|_| matches!(server_port, 139 | 445))
+    {
+        head = rest;
+    }
+    match head.get(4..8) {
+        Some(magic) if SMB_MAGIC.contains(&magic) => Verdict::Found(AppProto::Smb),
+        Some(_) => Verdict::None,
+        None => Verdict::Wait,
+    }
+}
+
+/// A connectionless DCE/RPC request: version 4, packet type 0, and a whole
+/// 80-byte header.
+fn dcerpc_datagram(datagram: &[u8]) -> bool {
+    datagram.len() >= 80 && datagram.starts_with(&[4, 0])
+}
 
 /// What a direction's first bytes say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,10 +208,15 @@ enum Verdict {
 
 /// A UDP flow to port 53 is DNS when its first datagram parses as a DNS
 /// message, and has failed when it does not, as Suricata's probe decides.
+///
+/// Elsewhere a UDP flow is DCE/RPC when its first datagram is a
+/// connectionless request, on any port.
 fn detect_datagram(udp: bool, server_port: u16, datagram: &[u8]) -> Option<Verdict> {
-    (udp && server_port == 53).then(|| {
-        if dns::parse(datagram).is_some() {
+    udp.then(|| {
+        if server_port == 53 && dns::parse(datagram).is_some() {
             Verdict::Found(AppProto::Dns)
+        } else if server_port != 53 && dcerpc_datagram(datagram) {
+            Verdict::Found(AppProto::Dcerpc)
         } else {
             Verdict::None
         }
@@ -173,7 +255,153 @@ fn detect(side: usize, head: &[u8], server_port: u16, udp: bool) -> Verdict {
         }
         wait = true;
     }
-    if wait { Verdict::Wait } else { Verdict::None }
+    match smb(head, server_port) {
+        Verdict::Found(proto) => return Verdict::Found(proto),
+        Verdict::Wait => wait = true,
+        Verdict::None => {}
+    }
+    match server_port {
+        3389 if head.first() == Some(&TPKT_VERSION) => Verdict::Found(AppProto::Rdp),
+        23 if !head.is_empty() => Verdict::Found(AppProto::Telnet),
+        _ if wait => Verdict::Wait,
+        _ => Verdict::None,
+    }
+}
+
+/// The first byte of a TPKT header, which carries RDP's X.224 messages.
+const TPKT_VERSION: u8 = 3;
+
+/// Where a direction stands in the messages of a protocol whose parser
+/// asks for inspection only on some of them.
+#[derive(Debug, Clone, Default)]
+struct Framer {
+    /// The bytes of a message not yet whole.
+    pending: Vec<u8>,
+    /// The bytes stopped being messages of the protocol.
+    lost: bool,
+}
+
+impl Framer {
+    /// Take `bytes` and say whether a message they completed asks for its
+    /// side's stream to be inspected.
+    fn feed(&mut self, proto: AppProto, side: usize, bytes: &[u8]) -> bool {
+        if self.lost {
+            return false;
+        }
+        self.pending.extend_from_slice(bytes);
+        let mut asks = false;
+        let mut at = 0;
+        loop {
+            let rest = &self.pending[at..];
+            let step = match proto {
+                AppProto::Rdp => tpkt(rest),
+                AppProto::Dcerpc => dcerpc_pdu(rest, side == 1),
+                _ => Step::Lost,
+            };
+            match step {
+                Step::Whole { len, asks: a } => {
+                    asks |= a;
+                    at += len;
+                }
+                // A request whose header is all there is asks only when
+                // more bytes came with it.
+                Step::Bare { len } => {
+                    at += len;
+                    asks |= at < self.pending.len();
+                }
+                Step::More => break,
+                Step::Lost => {
+                    self.lost = true;
+                    self.pending = Vec::new();
+                    return asks;
+                }
+            }
+        }
+        self.pending.drain(..at);
+        asks
+    }
+}
+
+/// What the start of a direction's unread bytes holds.
+enum Step {
+    /// A whole message of `len` bytes, and whether it asks.
+    Whole { len: usize, asks: bool },
+    /// A whole DCE/RPC request of `len` bytes carrying no stub data.
+    Bare { len: usize },
+    /// The start of a message.
+    More,
+    /// Bytes that are no message of the protocol.
+    Lost,
+}
+
+/// A TPKT message: version 3, a reserved byte, a big-endian length counting
+/// the header. The X.224 connection request and confirm inside ask.
+fn tpkt(bytes: &[u8]) -> Step {
+    let Some(header) = bytes.get(..4) else {
+        return Step::More;
+    };
+    if header[0] != TPKT_VERSION {
+        return Step::Lost;
+    }
+    let len = usize::from(u16::from_be_bytes([header[2], header[3]]));
+    if len < 4 {
+        return Step::Lost;
+    }
+    if bytes.len() < len {
+        return Step::More;
+    }
+    // The X.224 code sits after its length indicator, in the high nibble.
+    let code = bytes[..len].get(5).map(|c| c & 0xf0);
+    Step::Whole {
+        len,
+        asks: matches!(code, Some(0xe0 | 0xd0)),
+    }
+}
+
+/// The 16 bytes every connection-oriented DCE/RPC message opens with.
+const DCERPC_HEADER: usize = 16;
+
+/// A request's header, the common one and its own eight bytes.
+const DCERPC_REQUEST_HEADER: usize = 24;
+
+/// A connection-oriented DCE/RPC message: version 5.0, its length at
+/// offset 8 in the byte order its data representation names. A bind or an
+/// alter context asks, a request asks when it carries stub data, a bind
+/// acknowledgement when the server sends it.
+fn dcerpc_pdu(bytes: &[u8], from_server: bool) -> Step {
+    let Some(header) = bytes.get(..DCERPC_HEADER) else {
+        return Step::More;
+    };
+    if header[..2] != [5, 0] {
+        return Step::Lost;
+    }
+    let little = header[4] & 0x10 != 0;
+    let pair = [header[8], header[9]];
+    let len = usize::from(if little {
+        u16::from_le_bytes(pair)
+    } else {
+        u16::from_be_bytes(pair)
+    });
+    if len < DCERPC_HEADER {
+        return Step::Lost;
+    }
+    if bytes.len() < len {
+        return Step::More;
+    }
+    match header[2] {
+        0 if len < DCERPC_REQUEST_HEADER => Step::Lost,
+        0 if len == DCERPC_REQUEST_HEADER => Step::Bare { len },
+        0 => Step::Whole {
+            len,
+            asks: len > DCERPC_REQUEST_HEADER,
+        },
+        11 | 14 => Step::Whole { len, asks: true },
+        12 => Step::Whole {
+            len,
+            asks: from_server,
+        },
+        _ => Step::Whole { len, asks: false },
+    }
 }
 
 /// One direction of the flow, client first.
@@ -188,6 +416,9 @@ struct Direction {
     announce: bool,
     /// The last bytes seen, to find a message header's end across packets.
     tail: Vec<u8>,
+    /// Where the direction stands in its protocol's messages, for a
+    /// protocol that asks for inspection only on some of them.
+    framer: Framer,
     /// Every byte the direction sent while its protocol is not named, for
     /// the protocol's parser once it is.
     raw: Vec<u8>,
@@ -268,12 +499,14 @@ impl AppLayer {
     }
 
     /// Settle `side` on `proto`, announced on the packet if it travels that
-    /// way, else on the next one that does.
-    fn settle(&mut self, side: usize, proto: AppProto, packet_side: usize) -> bool {
+    /// way, else on the next one that does, unless `quiet`.
+    fn settle(&mut self, side: usize, proto: AppProto, packet_side: usize, quiet: bool) -> bool {
         let dir = &mut self.dirs[side];
         dir.proto = Some(proto);
         dir.head = Vec::new();
-        if packet_side == side {
+        if quiet {
+            false
+        } else if packet_side == side {
             true
         } else {
             dir.announce = true;
@@ -299,9 +532,12 @@ impl AppLayer {
         if dir.proto.is_none() {
             let room = HEAD.saturating_sub(dir.head.len());
             dir.head.extend_from_slice(&bytes[..bytes.len().min(room)]);
-            let proto = match self.flow {
-                Some(AppProto::Failed) => None,
-                Some(known) => Some(known),
+            let udp = self.udp;
+            let head = &self.dirs[side].head;
+            let taken = |proto: AppProto| udp || proto.accepts(head);
+            let (proto, quiet) = match self.flow {
+                Some(AppProto::Failed) => (None, false),
+                Some(known) => (Some(known), !taken(known)),
                 None => {
                     match detect_datagram(self.udp, self.server_port, bytes).unwrap_or_else(|| {
                         detect(side, &self.dirs[side].head, self.server_port, self.udp)
@@ -311,21 +547,21 @@ impl AppLayer {
                             let other = &mut self.dirs[1 - side];
                             if other.proto.is_none() && other.fed > 0 {
                                 other.proto = Some(found);
+                                other.announce = self.udp || found.accepts(&other.head);
                                 other.head = Vec::new();
-                                other.announce = true;
                             }
-                            Some(found)
+                            (Some(found), false)
                         }
                         Verdict::Wait | Verdict::None if self.udp => {
                             self.flow.get_or_insert(AppProto::Failed);
-                            Some(AppProto::Failed)
+                            (Some(AppProto::Failed), false)
                         }
-                        Verdict::Wait | Verdict::None => None,
+                        Verdict::Wait | Verdict::None => (None, false),
                     }
                 }
             };
             if let Some(proto) = proto {
-                fed.announced = self.settle(side, proto, packet_side);
+                fed.announced = self.settle(side, proto, packet_side, quiet);
             }
         }
         if let Some(proto) = self.dirs[side].proto.filter(|p| p.triggers()) {
@@ -334,15 +570,30 @@ impl AppLayer {
         let keep = tail.len().saturating_sub(3);
         self.dirs[side].tail = tail.split_off(keep);
         if known {
+            fed.inspect |= self.frame(side, bytes);
             fed.txs = self.parse(side, bytes);
         }
         for d in 0..2 {
             if self.dirs[d].proto.is_some() && !self.dirs[d].raw.is_empty() {
                 let raw = std::mem::take(&mut self.dirs[d].raw);
+                let asks = self.frame(d, &raw);
+                fed.inspect |= asks && d == side;
                 fed.txs.extend(self.parse(d, &raw));
             }
         }
         fed
+    }
+
+    /// Follow a direction's messages, for a protocol that asks for
+    /// inspection on some of them, and say whether these bytes asked.
+    fn frame(&mut self, side: usize, bytes: &[u8]) -> bool {
+        let dir = &mut self.dirs[side];
+        match dir.proto {
+            Some(proto @ (AppProto::Rdp | AppProto::Dcerpc)) if !self.udp => {
+                dir.framer.feed(proto, side, bytes)
+            }
+            _ => false,
+        }
     }
 
     /// Hand a direction's bytes to its protocol's parser, if the agent has

@@ -2700,8 +2700,10 @@ fn packet_scope(header: &super::sig::model::Header) -> Compiled<PacketScope> {
             ));
         }
         RuleProto::App(name) => match crate::ids::applayer::AppProto::named(name) {
-            // DNS runs over UDP and TCP; the others over TCP.
-            Some(crate::ids::applayer::AppProto::Dns) => PacketProto::Ip,
+            // DNS and DCE/RPC run over UDP and TCP; the others over TCP.
+            Some(crate::ids::applayer::AppProto::Dns | crate::ids::applayer::AppProto::Dcerpc) => {
+                PacketProto::Ip
+            }
             Some(_) => PacketProto::Tcp,
             None => {
                 return Err(Refused::new(

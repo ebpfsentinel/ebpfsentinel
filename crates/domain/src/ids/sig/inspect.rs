@@ -546,9 +546,12 @@ impl ProtoCheck {
             ProtoMode::Original => &[None],
         };
         found.iter().any(|&got| match (self.negated, self.proto) {
-            (false, want) => got == want,
+            (false, want) => match (want, got) {
+                (Some(want), Some(got)) => want.answers(got),
+                (want, got) => want == got,
+            },
             // A negation holds only once a protocol is known, `failed` too.
-            (true, want) => got.is_some() && got != want,
+            (true, want) => got.is_some_and(|got| want.is_none_or(|want| !want.answers(got))),
         })
     }
 }
@@ -660,7 +663,9 @@ impl Session {
                         StreamSide::Either => m.matches(client) || m.matches(server),
                     })
                 }))
-            && self.alproto.is_none_or(|p| seen.app.flow == Some(p))
+            && self
+                .alproto
+                .is_none_or(|p| seen.app.flow.is_some_and(|got| p.answers(got)))
             && (!self.announced_only || seen.app.announced)
             && self.protocols.iter().all(|c| c.matches(seen))
     }
