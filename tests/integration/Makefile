@@ -60,6 +60,12 @@ test-vm: vagrant-up ## Run all suites inside the VM
 	cd $(VAGRANT_DIR) && vagrant ssh -c \
 		'cd /home/vagrant/ebpfsentinel/tests/integration && bash scripts/run-in-vm.sh --skip-build'
 
+TIERS ?= full,load
+
+.PHONY: test-kernel-matrix
+test-kernel-matrix: ## Run the agent on every kernel of kernels.toml: make test-kernel-matrix [TIERS=full,load] [KERNELS=6.12,7.3]
+	$(SCRIPT_DIR)/run-kernel-matrix.sh $(if $(KERNELS),--kernels $(KERNELS),--tiers $(TIERS))
+
 .PHONY: test-k8s
 test-k8s: ## Run K8s suite only (locally or in VM)
 	$(SCRIPT_DIR)/run-in-vm.sh --suite 10-kubernetes --skip-build

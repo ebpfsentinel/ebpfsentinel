@@ -1,0 +1,102 @@
+# Kernels the agents are run on, one entry per release (major.minor) from the
+# floor to the newest stable. A run boots the newest point release of each
+# that kernel.ubuntu.com/mainline built for amd64 (image and modules), resolved
+# when it runs by `scripts/check-kernel-matrix.py --resolve`, never written
+# here, and records the one it booted in the `running` column of matrix.md.
+# The agent VM boots it through the kernel-mainline provisioner (AGENT_KERNEL,
+# NODE_KERNEL in the enterprise Vagrantfile) and scripts/run-kernel-matrix.sh
+# runs the tier's lanes on it.
+#
+# A mainline build carries no vendor backport, so on these kernels a
+# capability's `since` in capabilities.json is exact: suite 86 holds every
+# capability the kernel alone decides to it under the `mainline-kernel` claim.
+# What a distribution kernel backports is the probe's business, never this
+# list's.
+#
+# Tiers:
+#   full     every lane: OSS local, 2VM and 3VM, enterprise node1 local and the
+#            multi-node lane. The floor, every longterm release above it and
+#            the newest stable.
+#   load     the in-kernel harness (every object through the verifier and
+#            BPF_PROG_TEST_RUN), the OSS datapath profile on the local lane and
+#            the enterprise local lane. Every other stable release in between.
+#   preview  the load tier on the release under development, booted on its
+#            newest candidate. Reported, never failing the run: a candidate
+#            is not a kernel a customer runs.
+#
+# scripts/check-kernel-matrix.py holds this file to the agent: `floor` equals
+# MIN_KERNEL_MAJOR.MIN_KERNEL_MINOR in crates/adapters/src/ebpf/kernel_probe.rs,
+# every release from it to the newest entry is listed once, the floor, the
+# newest stable and every `longterm = true` entry are `full`, and every `since` in
+# capabilities.json is a listed release. With --online it also fails on a
+# stable, longterm or mainline-candidate release kernel.org publishes that is
+# missing here, or on a release kernel.ubuntu.com has no amd64 build of.
+
+floor = "6.12"
+
+[[kernel]]
+version = "6.12"
+tier = "full"
+longterm = true
+why = "the floor, longterm"
+
+[[kernel]]
+version = "6.13"
+tier = "load"
+why = "first release past the floor: bpf_send_signal_task, immediate_signal"
+
+[[kernel]]
+version = "6.14"
+tier = "load"
+why = "stable, end of life"
+
+[[kernel]]
+version = "6.15"
+tier = "load"
+why = "stable, end of life"
+
+[[kernel]]
+version = "6.16"
+tier = "load"
+why = "stable, end of life"
+
+[[kernel]]
+version = "6.17"
+tier = "load"
+why = "stable, end of life"
+
+[[kernel]]
+version = "6.18"
+tier = "full"
+longterm = true
+why = "longterm"
+
+[[kernel]]
+version = "6.19"
+tier = "load"
+why = "stable, end of life"
+
+[[kernel]]
+version = "7.0"
+tier = "load"
+why = "stable, end of life; the 24.04 HWE line the agent VM boots by default"
+
+[[kernel]]
+version = "7.1"
+tier = "load"
+why = "stable, end of life"
+
+[[kernel]]
+version = "7.2"
+tier = "load"
+why = "stable, end of life"
+
+[[kernel]]
+version = "7.3"
+tier = "full"
+why = "newest stable"
+
+[[kernel]]
+version = "7.4"
+tier = "preview"
+why = "under development: its newest release candidate"

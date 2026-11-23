@@ -604,6 +604,55 @@ When `--mode both` (default), runs binary then Docker and prints a comparison ta
 
 **Requirements (host):** `vagrant`, `iperf3`, `ping`, `curl`, `jq`. Optional: `hping3` (sudo, for PPS/TCP latency), `hey` (API benchmarks).
 
+## Kernel Matrix
+
+The agent is run on every kernel release from the 6.12 floor to the newest
+stable, plus the release under development, each booted from its
+kernel.ubuntu.com mainline build. `kernels.toml` is the list: one entry per
+release as major.minor, with a tier. The point release a run boots is the
+newest one built for amd64 (the newest candidate for the release under
+development), resolved when the run starts by
+`scripts/check-kernel-matrix.py --resolve` and recorded in `matrix.md`.
+
+| Tier | Kernels | What runs |
+|---|---|---|
+| `full` | the floor, every longterm release, the newest stable | in-kernel harness, every local suite, the 2-VM and 3-VM lanes; enterprise node1 local lane and multi-node lane |
+| `load` | every other stable release in between | in-kernel harness, the datapath profile on the local lane; enterprise node1 local lane |
+| `preview` | the release under development, on its newest candidate | the load tier, reported, never failing the run |
+
+The in-kernel harness is the one `ebpf.yml` runs on a hosted runner: every
+object through the verifier and `BPF_PROG_TEST_RUN`, a denied packet through
+each step of a firewall reload, a trace touching no map, a signal to a task
+making no syscall. On a mainline build suite 86 also holds every capability the
+kernel alone decides to its `since` in `capabilities.json` (claim
+`mainline-kernel`), since no vendor backport moves it there.
+
+```bash
+# The recorded run: full and load tiers, one kernel after the other on one agent VM
+make test-kernel-matrix
+# A subset, or the release candidate alone
+make test-kernel-matrix KERNELS=6.12,7.3
+make test-kernel-matrix TIERS=preview
+# One kernel by hand
+cd vagrant && AGENT_KERNEL="$(../scripts/check-kernel-matrix.py --resolve 6.13)" vagrant provision agent --provision-with kernel-mainline
+# Back to the HWE kernel
+cd vagrant && vagrant provision agent --provision-with kernel-mainline
+# The enterprise agent on the same list
+../../../ebpfsentinel-enterprise/tests/integration/scripts/run-kernel-matrix.sh
+```
+
+Results land in `target/kernel-matrix/<date>/`: per kernel the guest summary,
+harness logs, TAP files and the `/api/v1/ebpf/kernel-features` answer, and
+`matrix.md`. The VMs are destroyed at the end.
+
+`scripts/check-kernel-matrix.py` holds the list to the agent (floor equal to
+`kernel_probe.rs`, no release missing, floor, longterm and newest stable in the
+full tier, every `since` a listed release) in `ci.yml`, and with `--online` to
+kernel.org and kernel.ubuntu.com in `kernel-matrix.yml`, which runs the matrix
+weekly on the vagrant runner. A new stable, longterm or candidate release fails
+the online check until it is listed; a new point release needs no edit, the
+next run boots it.
+
 ## Config Fixtures
 
 All fixtures use `__PLACEHOLDER__` tokens substituted at runtime:

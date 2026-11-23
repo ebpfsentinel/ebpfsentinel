@@ -32,9 +32,11 @@ claims:
   userns: "unprivileged user namespaces are not refused by AppArmor - every host provisioned by provision-datapath-host.sh"
   transit-3vm: "the 3-VM transit topology - run-in-3vm.sh"
   agent-build: "the release agent binary and its eBPF objects under target/ - the datapath lane, which downloads both build artifacts"
+  mainline-kernel: "the agent VM booted on a kernel.ubuntu.com mainline build of kernels.toml - scripts/run-kernel-matrix.sh"
   root: "the suites run as root - the datapath lane (sudo -E bats) and the agent VM (sudo bats)"
 
 lane:
+  - "the running kernel is not a kernel.ubuntu.com mainline build"
   - "the BPF LSM is not active on this host (lsm=bpf at boot)"
   - "the BPF LSM is not among this host's security modules"
   - "no openssl with X25519MLKEM768 on this host (provision the 3.5 build)"

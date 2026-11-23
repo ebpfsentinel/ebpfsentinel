@@ -15,6 +15,8 @@
 #     mount over /sys/kernel/security/lsm inside a private mount namespace,
 #     so the host keeps its own modules and the agent reads exactly what it
 #     reads in production.
+#   * On a kernel.ubuntu.com mainline build (the kernel matrix), every entry
+#     the kernel alone decides is active exactly from its `since` release.
 #
 # Requires: root, kernel >= 6.12, jq, unshare.
 
@@ -136,4 +138,64 @@ _inactive_in_log() {
     [ -n "$line" ]
     [ "$(echo "$line" | jq -r '.fields.cause // .cause')" = "lsm_inactive" ]
     [[ "$(echo "$line" | jq -r '.fields.hint // .hint')" == *"lsm="* ]]
+}
+
+# A kernel.ubuntu.com mainline build carries no vendor backport, so there the
+# release decides what the kernel alone offers: every entry asked of the kernel
+# itself (its BTF, a program it loads, its security modules) is active exactly
+# when the running release is at or above the entry's `since`, and the BPF LSM
+# is on (the agent VM boots with lsm=bpf). Entries decided by an attach depend
+# on the configuration and the deployment and are left to the first test. The
+# kernel matrix (scripts/run-kernel-matrix.sh) runs this on every release of
+# kernels.toml; on a distribution kernel a backport makes `since` a hint only,
+# which is why the claim is the matrix's alone.
+@test "on a mainline build, every kernel-decided entry is active exactly from its release" {
+    [ -r "$CATALOGUE" ] || soft_skip "no capabilities.json at $CATALOGUE"
+    local running
+    running="$(uname -r)"
+    [[ "$running" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+-[0-9]{6}(rc[0-9]+)?-generic$ ]] ||
+        lane_skip mainline-kernel "the running kernel is not a kernel.ubuntu.com mainline build"
+    local major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}"
+    grep -qw bpf /sys/kernel/security/lsm ||
+        lane_skip bpf-lsm "the BPF LSM is not among this host's security modules"
+
+    start_ebpf_agent "$PREPARED_CONFIG"
+    wait_for_ebpf_loaded 30 || {
+        tail -20 "$AGENT_LOG_FILE" >&2
+        return 1
+    }
+    local waited=0
+    until grep -q 'kernel capabilities above the floor' "$AGENT_LOG_FILE"; do
+        [ "$waited" -lt 60 ] || {
+            tail -20 "$AGENT_LOG_FILE" >&2
+            return 1
+        }
+        sleep 0.5
+        waited=$((waited + 1))
+    done
+
+    local body
+    body="$(api_get /api/v1/ebpf/kernel-features)"
+    _load_http_status
+    [ "$HTTP_STATUS" = "200" ]
+    if [ -n "${EBPFSENTINEL_KERNEL_MATRIX_OUT:-}" ]; then
+        mkdir -p "$EBPFSENTINEL_KERNEL_MATRIX_OUT"
+        echo "$body" >"${EBPFSENTINEL_KERNEL_MATRIX_OUT}/kernel-features.json"
+    fi
+
+    local wrong
+    wrong="$(jq -r --argjson major "$major" --argjson minor "$minor" --argjson answer "$body" '
+        ($answer.capabilities | map({(.id): .active}) | add) as $active
+        | .capabilities[]
+        | select(.probe != "attach_status")
+        | (.since | split(".") | map(tonumber)) as $since
+        | ($since <= [$major, $minor]) as $expected
+        | select($active[.id] != $expected)
+        | "\(.id): since \(.since), expected active=\($expected), answered active=\($active[.id])"
+    ' "$CATALOGUE")"
+    if [ -n "$wrong" ]; then
+        echo "on ${running}:" >&2
+        echo "$wrong" >&2
+        return 1
+    fi
 }

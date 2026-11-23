@@ -1,0 +1,122 @@
+name: Kernel Matrix
+
+# The agent run on every kernel from the 6.12 floor to the newest stable,
+# listed in tests/integration/kernels.toml.
+#
+#   list     on a hosted runner: the list held to the agent's floor and to
+#            kernel.org (a stable or longterm release missing from it fails),
+#            and every listed release built on kernel.ubuntu.com.
+#   matrix   on the [self-hosted, linux, vagrant] runner, one kernel after the
+#            other on one agent VM: the in-kernel harness and the local lane on
+#            every kernel, the 2-VM and transit lanes on the full tier; each
+#            release booted on its newest point release.
+#   preview  the release candidate, the same way, reported and never failing
+#            the run.
+#
+# Weekly, since a kernel release lands every nine weeks and a point release
+# changes no capability; workflow_dispatch runs it on demand, on a subset with
+# `kernels`. Until a vagrant runner is registered the two VM jobs queue, as the
+# nightly jobs of integration.yml do.
+
+on:
+  schedule:
+    - cron: "0 3 * * 6"
+  workflow_dispatch:
+    inputs:
+      kernels:
+        description: "Comma-separated releases of kernels.toml, as 6.12,7.3 (empty: full and load tiers)"
+        required: false
+        default: ""
+  pull_request:
+    paths:
+      - tests/integration/kernels.toml
+      - tests/integration/scripts/check-kernel-matrix.py
+      - crates/adapters/src/ebpf/kernel_probe.rs
+      - capabilities.json
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-matrix-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  list:
+    name: Kernel list against kernel.org and kernel.ubuntu.com
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Held to the agent's floor and to the published releases
+        run: python3 tests/integration/scripts/check-kernel-matrix.py --online
+
+  matrix:
+    name: Agent on every kernel
+    needs: list
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, linux, vagrant]
+    timeout-minutes: 1440
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run the matrix
+        env:
+          KERNELS: ${{ inputs.kernels }}
+        run: |
+          set -euo pipefail
+          if [ -n "${KERNELS:-}" ]; then
+            bash tests/integration/scripts/run-kernel-matrix.sh --kernels "$KERNELS" --out "$RUNNER_TEMP/kernel-matrix"
+          else
+            bash tests/integration/scripts/run-kernel-matrix.sh --tiers full,load --out "$RUNNER_TEMP/kernel-matrix"
+          fi
+
+      - name: Matrix in the run summary
+        if: always()
+        run: cat "$RUNNER_TEMP/kernel-matrix/matrix.md" >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernel-matrix
+          path: ${{ runner.temp }}/kernel-matrix
+          retention-days: 30
+
+      - name: Tear down VMs
+        if: always()
+        run: |
+          cd tests/integration/vagrant
+          VAGRANT_3VM=1 vagrant destroy -f agent attacker backend || true
+          vagrant destroy -f agent attacker || true
+
+  preview:
+    name: Agent on the release candidate
+    needs: [list, matrix]
+    if: always() && github.event_name != 'pull_request' && inputs.kernels == ''
+    runs-on: [self-hosted, linux, vagrant]
+    timeout-minutes: 240
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run the preview tier
+        run: bash tests/integration/scripts/run-kernel-matrix.sh --tiers preview --out "$RUNNER_TEMP/kernel-preview"
+
+      - name: Matrix in the run summary
+        if: always()
+        run: cat "$RUNNER_TEMP/kernel-preview/matrix.md" >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernel-preview
+          path: ${{ runner.temp }}/kernel-preview
+          retention-days: 30
+
+      - name: Tear down VMs
+        if: always()
+        run: |
+          cd tests/integration/vagrant
+          vagrant destroy -f agent attacker || true
