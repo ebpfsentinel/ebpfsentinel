@@ -536,8 +536,16 @@ pub struct Threshold {
     pub count: u32,
     pub seconds: u32,
     pub multiplier: Option<u32>,
-    /// `detection_filter` with `unique_on`: counts distinct ports.
-    pub unique_on: bool,
+    /// `detection_filter` with `unique_on`: counts distinct ports of
+    /// this side instead of matches.
+    pub unique_on: Option<PortSide>,
+}
+
+/// Which port of a packet a `unique_on` filter counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortSide {
+    Src,
+    Dst,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

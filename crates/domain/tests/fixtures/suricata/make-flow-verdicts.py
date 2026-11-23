@@ -12,6 +12,10 @@ Writes flow-verdicts.txt beside this script: each rule with `tcp` in place of
 load it, then one line per packet with its time, addresses, ports, payload
 and the sids Suricata alerted on it, so the test needs neither this script
 nor its parsing. Needs docker.
+
+`make-flow-verdicts.py unique` runs unique.cases instead and writes
+unique-verdicts.txt: `detection_filter` with `unique_on` came after Suricata 8,
+so those cases run on the development image pinned in UNIQUE_IMAGE.
 """
 
 import json
@@ -24,7 +28,9 @@ import tempfile
 from importlib import util
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-IMAGE = os.environ.get("SURICATA_IMAGE", "jasonish/suricata:8.0.8")
+NAME = sys.argv[1] if len(sys.argv) > 1 else "flow"
+UNIQUE_IMAGE = "jasonish/suricata@sha256:4250dd0cd6336789cc2022c28ec8ebb3bf182ff4b942a8adfe02255c0b2d8f50"
+IMAGE = os.environ.get("SURICATA_IMAGE", UNIQUE_IMAGE if NAME == "unique" else "jasonish/suricata:8.0.8")
 FIRST_SID = 3000
 EPOCH = 1_700_000_000
 
@@ -65,7 +71,7 @@ def frame(src, dst, sport, dport, seq, payload):
     return ether + ip + tcp + payload
 
 def main():
-    scenarios = read_cases(os.path.join(HERE, "flow.cases"))
+    scenarios = read_cases(os.path.join(HERE, f"{NAME}.cases"))
     rules, written, packets = [], [], []
     sid = FIRST_SID
     for n, scenario in enumerate(scenarios, start=1):
@@ -121,7 +127,7 @@ def main():
             ["docker", "run", "--rm", "--entrypoint", "suricata", IMAGE, "-V"],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
-    lines = [f"# {version}, run by make-flow-verdicts.py; do not edit by hand."]
+    lines = [f"# {version}, run by make-flow-verdicts.py {NAME}; do not edit by hand."]
     lines.append("# 'rule SID loaded|refused RULE', then 'packet NS SRC SPORT DST DPORT HEX SIDS'")
     lines.append("# per packet, NS its time in nanoseconds and SIDS the alerted rules or '-'.")
     for sid, rule in written:
@@ -131,7 +137,7 @@ def main():
         sids = sorted(alerts.get((s, sport, d, dport, count), ()))
         hit = ",".join(map(str, sids)) or "-"
         lines.append(f"packet {ns} {s} {sport} {d} {dport} {payload.hex()} {hit}")
-    with open(os.path.join(HERE, "flow-verdicts.txt"), "w", encoding="utf-8") as f:
+    with open(os.path.join(HERE, f"{NAME}-verdicts.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
 if __name__ == "__main__":

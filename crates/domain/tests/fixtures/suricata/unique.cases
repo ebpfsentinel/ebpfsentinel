@@ -1,0 +1,31 @@
+# detection_filter with unique_on, in the format of flow.cases: the window
+# counts each port once, and alerts once more distinct ports than its count
+# have been seen. make-flow-verdicts.py unique sends them to Suricata.
+
+scenario a filter on unique source ports counts each client port once
+> detection_filter:track by_dst, count 2, seconds 10, unique_on src_port; content:"UNIQ";
+  0 > "UNIQ"
+  1 > "UNIQ"
+  2 > c1 "UNIQ"
+  3 > c1 "UNIQ"
+  4 > c2 "UNIQ"
+  5 > c2 "UNIQ"
+  6 > c3 "UNIQ"
+  7 > "UNIQ"
+  20 > c4 "UNIQ"
+  21 > c5 "UNIQ"
+  22 > c6 "UNIQ"
+
+scenario a filter on unique destination ports counts the client ports a server answers
+< detection_filter:track by_src, count 1, seconds 10, unique_on dst_port; content:"BACK";
+  0 < "BACK"
+  1 < "BACK"
+  2 < c1 "BACK"
+  3 < c1 "BACK"
+  4 < c2 "BACK"
+
+scenario a filter without unique_on still counts every match
+> detection_filter:track by_dst, count 2, seconds 10; content:"PLAIN";
+  0 > "PLAIN"
+  1 > "PLAIN"
+  2 > "PLAIN"

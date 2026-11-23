@@ -295,7 +295,7 @@ pub const KEYWORDS: &[KeywordSupport] = &[
     KeywordSupport {
         keyword: "detection_filter",
         support: Support::Compiled,
-        note: "Alerts on every match past `count` in a window of `seconds` opened by the first match, tracked by source, destination, both, rule or flow. `unique_on` is refused.",
+        note: "Alerts on every match past `count` in a window of `seconds` opened by the first match, tracked by source, destination, both, rule or flow; with `unique_on`, past `count` distinct source or destination ports.",
     },
     KeywordSupport {
         keyword: "flow.age",

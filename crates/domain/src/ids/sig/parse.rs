@@ -12,9 +12,9 @@ use super::model::{
     APP_PROTOCOLS, Action, Base64Decode, BitOp, BitScope, Bits, Buffer, BufferList, ByteExtract,
     ByteJump, ByteMath, ByteOp, ByteRead, ByteTest, Capture, Check, Content, DatasetMatch,
     Direction, Endian, Entropy, FastPattern, FloatMatch, FlowCounter, FlowMatch, Flowint,
-    FlowintOp, Header, HeaderField, IsDataAt, Match, MathOp, NumBase, Pcre, PortMatch, ProtoMode,
-    RuleProto, Signature, StreamSide, Tag, TcpFlags, TcpFlagsMode, Threshold, ThresholdKind, Track,
-    Transform, Value,
+    FlowintOp, Header, HeaderField, IsDataAt, Match, MathOp, NumBase, Pcre, PortMatch, PortSide,
+    ProtoMode, RuleProto, Signature, StreamSide, Tag, TcpFlags, TcpFlagsMode, Threshold,
+    ThresholdKind, Track, Transform, Value,
 };
 use crate::ids::suricata::{
     Compiled, MAX_VARIABLE_DEPTH, Refused, SuricataVars, decode_content, parse_addresses,
@@ -2136,7 +2136,7 @@ fn parse_threshold(k: &str, value: &str) -> Compiled<Threshold> {
     let mut count = None;
     let mut seconds = None;
     let mut multiplier = None;
-    let mut unique_on = false;
+    let mut unique_on = None;
     for part in split_args(value) {
         let (name, arg) = part
             .split_once(' ')
@@ -2169,10 +2169,11 @@ fn parse_threshold(k: &str, value: &str) -> Compiled<Threshold> {
             "seconds" => seconds = Some(num()?),
             "multiplier" => multiplier = Some(num()?),
             "unique_on" if k == "detection_filter" => {
-                if !matches!(arg, "src_port" | "dst_port") {
-                    return Err(bad(k, format!("'{arg}' is neither src_port nor dst_port")));
-                }
-                unique_on = true;
+                unique_on = Some(match arg {
+                    "src_port" => PortSide::Src,
+                    "dst_port" => PortSide::Dst,
+                    _ => return Err(bad(k, format!("'{arg}' is neither src_port nor dst_port"))),
+                });
             }
             _ => return Err(bad(k, format!("'{name}' is not an option of it"))),
         }

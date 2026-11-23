@@ -1,7 +1,9 @@
 //! What flows, hosts and pairs remember, against a real Suricata: the
 //! packets of `fixtures/suricata/flow.cases`, replayed through one engine
 //! loaded with every rule, must raise on each packet the alerts
-//! `make-flow-verdicts.py` recorded Suricata raising on it.
+//! `make-flow-verdicts.py` recorded Suricata raising on it; the same for
+//! `unique.cases`, the `detection_filter` counts of distinct ports, which
+//! only Suricata's development branch reads.
 
 use std::net::Ipv4Addr;
 
@@ -10,6 +12,7 @@ use domain::ids::suricata::{SuricataVars, compile_ruleset};
 use ebpf_common::event::{EVENT_TYPE_IDS, PacketEvent};
 
 const VERDICTS: &str = include_str!("fixtures/suricata/flow-verdicts.txt");
+const UNIQUE: &str = include_str!("fixtures/suricata/unique-verdicts.txt");
 
 fn hex(text: &str) -> Vec<u8> {
     (0..text.len())
@@ -74,10 +77,19 @@ fn segment(event: &PacketEvent, payload: &[u8]) -> Vec<u8> {
 
 #[test]
 fn the_flow_table_remembers_what_suricata_remembers() {
+    replay(VERDICTS, 40);
+}
+
+#[test]
+fn a_filter_on_unique_ports_counts_each_port_once_as_suricata_does() {
+    replay(UNIQUE, 2);
+}
+
+fn replay(verdicts: &str, least: usize) {
     let mut rules = String::new();
     let mut loaded = 0;
     let mut packets = Vec::new();
-    for line in VERDICTS.lines() {
+    for line in verdicts.lines() {
         if line.starts_with('#') {
             continue;
         }
@@ -96,7 +108,7 @@ fn the_flow_table_remembers_what_suricata_remembers() {
             packets.push((event(&fields), hex(fields[5]), fields[6].to_string()));
         }
     }
-    assert!(loaded > 40, "the verdict file lost its rules");
+    assert!(loaded > least, "the verdict file lost its rules");
     let compiled = compile_ruleset(&rules, &SuricataVars::default());
     let refused: Vec<String> = compiled
         .report

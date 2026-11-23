@@ -1,0 +1,25 @@
+# This is Suricata version 9.0.0-dev (4badfd13f 2026-10-08), run by make-flow-verdicts.py unique; do not edit by hand.
+# 'rule SID loaded|refused RULE', then 'packet NS SRC SPORT DST DPORT HEX SIDS'
+# per packet, NS its time in nanoseconds and SIDS the alerted rules or '-'.
+rule 3000 loaded alert tcp any any -> any 21001 (msg:"case 3000"; detection_filter:track by_dst, count 2, seconds 10, unique_on src_port; content:"UNIQ"; sid:3000;)
+rule 3001 loaded alert tcp any 21002 -> any any (msg:"case 3001"; detection_filter:track by_src, count 1, seconds 10, unique_on dst_port; content:"BACK"; sid:3001;)
+rule 3002 loaded alert tcp any any -> any 21003 (msg:"case 3002"; detection_filter:track by_dst, count 2, seconds 10; content:"PLAIN"; sid:3002;)
+packet 10000000000000 10.1.0.1 40000 10.2.0.1 21001 554e4951 -
+packet 10001000000000 10.1.0.1 40000 10.2.0.1 21001 554e4951 -
+packet 10002000000000 10.1.0.1 40001 10.2.0.1 21001 554e4951 -
+packet 10003000000000 10.1.0.1 40001 10.2.0.1 21001 554e4951 -
+packet 10004000000000 10.1.0.1 40002 10.2.0.1 21001 554e4951 3000
+packet 10005000000000 10.1.0.1 40002 10.2.0.1 21001 554e4951 3000
+packet 10006000000000 10.1.0.1 40003 10.2.0.1 21001 554e4951 3000
+packet 10007000000000 10.1.0.1 40000 10.2.0.1 21001 554e4951 3000
+packet 10020000000000 10.1.0.1 40004 10.2.0.1 21001 554e4951 -
+packet 10021000000000 10.1.0.1 40005 10.2.0.1 21001 554e4951 -
+packet 10022000000000 10.1.0.1 40006 10.2.0.1 21001 554e4951 3000
+packet 20000000000000 10.2.0.2 21002 10.1.0.2 40000 4241434b -
+packet 20001000000000 10.2.0.2 21002 10.1.0.2 40000 4241434b -
+packet 20002000000000 10.2.0.2 21002 10.1.0.2 40001 4241434b 3001
+packet 20003000000000 10.2.0.2 21002 10.1.0.2 40001 4241434b 3001
+packet 20004000000000 10.2.0.2 21002 10.1.0.2 40002 4241434b 3001
+packet 30000000000000 10.1.0.3 40000 10.2.0.3 21003 504c41494e -
+packet 30001000000000 10.1.0.3 40000 10.2.0.3 21003 504c41494e -
+packet 30002000000000 10.1.0.3 40000 10.2.0.3 21003 504c41494e 3002

@@ -36,8 +36,8 @@ use ebpf_common::event::PacketEvent;
 use super::applayer::{AppLayer, AppView};
 use super::http1::Ready;
 use super::sig::model::{
-    BitOp, BitScope, Bits, Check, Flowint, FlowintOp, Signature, Threshold, ThresholdKind, Track,
-    Value,
+    BitOp, BitScope, Bits, Check, Flowint, FlowintOp, PortSide, Signature, Threshold,
+    ThresholdKind, Track, Value,
 };
 use super::stream::{Segment, Streams};
 use super::suricata::{Compiled, Refused};
@@ -87,6 +87,7 @@ pub struct Packet {
     src: Addr,
     dst: Addr,
     sport: u16,
+    dport: u16,
     now: u64,
     timeout: u64,
 }
@@ -112,6 +113,7 @@ impl Packet {
             src,
             dst,
             sport,
+            dport,
             now: event.timestamp_ns,
             timeout: if event.protocol == 6 {
                 TCP_TIMEOUT_NS
@@ -292,10 +294,14 @@ pub struct Observation {
     pub open: Vec<Ready>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Default)]
 struct Window {
     start: u64,
     count: u32,
+    /// The distinct ports a `unique_on` filter has seen in the window,
+    /// kept up to one past its count: past that every match alerts and
+    /// another port changes nothing.
+    ports: HashSet<u16>,
 }
 
 /// A side's transaction sides a stream window is read beside.
@@ -676,9 +682,9 @@ impl FlowTable {
                 self.filters.clear();
             }
         }
-        self.filters.entry(key).or_insert(Window {
+        self.filters.entry(key).or_insert_with(|| Window {
             start: now,
-            count: 0,
+            ..Window::default()
         })
     }
 }
@@ -754,6 +760,7 @@ struct Filter {
     track: Track,
     count: u32,
     seconds: u64,
+    unique_on: Option<PortSide>,
 }
 
 /// What one rule reads and writes outside the packet, ready to run.
@@ -777,7 +784,7 @@ impl State {
             tests: Vec::new(),
             writes: Vec::new(),
             noalert: signature.noalert,
-            filter: signature.detection_filter.map(filter).transpose()?,
+            filter: signature.detection_filter.map(filter),
         };
         for check in &signature.checks {
             match check {
@@ -912,27 +919,32 @@ impl State {
         if packet.now.saturating_sub(window.start) > f.seconds.saturating_mul(NS) {
             *window = Window {
                 start: packet.now,
-                count: 0,
+                ..Window::default()
             };
         }
-        window.count = window.count.saturating_add(1);
-        window.count > f.count
+        let Some(side) = f.unique_on else {
+            window.count = window.count.saturating_add(1);
+            return window.count > f.count;
+        };
+        let seen = u32::try_from(window.ports.len()).unwrap_or(u32::MAX);
+        if seen <= f.count {
+            window.ports.insert(match side {
+                PortSide::Src => packet.sport,
+                PortSide::Dst => packet.dport,
+            });
+        }
+        u32::try_from(window.ports.len()).unwrap_or(u32::MAX) > f.count
     }
 }
 
-fn filter(threshold: Threshold) -> Compiled<Filter> {
-    if threshold.unique_on {
-        return Err(Refused::new(
-            "detection_filter",
-            "with 'unique_on' counts distinct ports, which the engine does not count yet",
-        ));
-    }
+fn filter(threshold: Threshold) -> Filter {
     debug_assert_eq!(threshold.kind, ThresholdKind::Threshold);
-    Ok(Filter {
+    Filter {
         track: threshold.track,
         count: threshold.count,
         seconds: u64::from(threshold.seconds),
-    })
+        unique_on: threshold.unique_on,
+    }
 }
 
 fn host(place: Place, packet: &Packet) -> HostKey {
@@ -1094,10 +1106,6 @@ mod tests {
         assert!(untracked.reason.contains("nowhere"));
         let tx = state("xbits:set,a,track tx;").expect_err("refused");
         assert!(tx.reason.contains("transaction"));
-        let unique =
-            state("detection_filter:track by_src, count 1, seconds 5, unique_on dst_port;")
-                .expect_err("refused");
-        assert_eq!(unique.keyword, "detection_filter");
     }
 
     #[test]
