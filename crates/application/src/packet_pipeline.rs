@@ -4421,6 +4421,7 @@ mod tests {
             let mut svc = (**ti.load()).clone();
             svc.add_ioc(Ioc {
                 ip: src_ip,
+                prefix_len: None,
                 feed_id: "test-feed".to_string(),
                 confidence: 90,
                 threat_type: ThreatType::Malware,
@@ -4474,6 +4475,7 @@ mod tests {
             let mut svc = (**ti.load()).clone();
             svc.add_ioc(Ioc {
                 ip: src_ip,
+                prefix_len: None,
                 feed_id: "blocking-feed".to_string(),
                 confidence: 95,
                 threat_type: ThreatType::C2,

@@ -2,20 +2,25 @@
 #![no_main]
 
 use aya_ebpf::{
+    bindings::BPF_F_NO_PREALLOC,
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
-    btf_maps::{Array, LruHashMap, PerCpuArray, RingBuf, bloom_filter::BloomFilter},
+    btf_maps::{Array, HashMap, LpmTrie, PerCpuArray, RingBuf, lpm_trie::Key},
     macros::{btf_map, classifier},
     programs::TcContext,
 };
 use ebpf_common::{
     config_flags::ConfigFlags,
     event::{EVENT_TYPE_THREATINTEL, PacketEvent},
-    firewall::{FW_EMPTY_THREAT_IOCS_V4, FW_EMPTY_THREAT_IOCS_V6},
+    firewall::{
+        FW_EMPTY_THREAT_IOCS_V4, FW_EMPTY_THREAT_IOCS_V6, FW_EMPTY_THREAT_NETS_V4,
+        FW_EMPTY_THREAT_NETS_V6,
+    },
     threatintel::{
         THREATINTEL_ACTION_DROP, THREATINTEL_MAX_ENTRIES, THREATINTEL_METRIC_DROPPED,
         THREATINTEL_METRIC_ERRORS, THREATINTEL_METRIC_EVENTS_DROPPED, THREATINTEL_METRIC_MATCHED,
-        THREATINTEL_METRIC_TOTAL_SEEN, ThreatIntelKey, ThreatIntelKeyV6, ThreatIntelValue,
+        THREATINTEL_METRIC_TOTAL_SEEN, THREATINTEL_SLOT_B, ThreatIntelKey, ThreatIntelKeyV6,
+        ThreatIntelValue,
     },
 };
 use ebpf_helpers::net::{
@@ -32,87 +37,136 @@ use network_types::{
     udp::UdpHdr,
 };
 
-// ── Constants / types from ebpf-helpers ─────────────────────────────
-// Network constants, header structs, ptr_at, skip_ipv6_ext_headers,
-// byte helpers, and metric/ringbuf macros are imported from ebpf_helpers.
+// ── The indicator tables ────────────────────────────────────────────
+//
+// Two slots, A and B, each an address table and a range trie per family.
+// The datapath reads the slot `THREATINTEL_SLOT` names; a reload writes the
+// other one whole, flips the selector, then empties the one it left, so a
+// packet sees the old set or the new set and never a set half written.
+//
+// The address tables are plain hash maps, never LRU: a full table refuses an
+// insert, and userspace refuses a set larger than the table before writing
+// any of it, so an indicator is never evicted to make room for another. They
+// are created with `BPF_F_NO_PREALLOC`, as a trie always is, so an entry is
+// allocated when it is written: the second slot costs memory only while a
+// reload fills it, and a capacity sized for the feeds costs nothing until
+// they fill it.
 
-// ── Maps ────────────────────────────────────────────────────────────
+const ON_INSERT: usize = BPF_F_NO_PREALLOC as usize;
+const MAX: usize = THREATINTEL_MAX_ENTRIES as usize;
 
-/// Threat intel IOC lookup: IPv4 address → action + feed metadata.
-/// Supports 1M+ entries (NFR22). Uses `LruHashMap` so that when the map is
-/// full the least-recently-used entry is evicted instead of silently
-/// dropping new inserts.
+/// Which slot the datapath reads: `THREATINTEL_SLOT_A` (0) or
+/// `THREATINTEL_SLOT_B` (1). Unwritten, it reads slot A.
 #[btf_map]
-static THREATINTEL_IOCS: LruHashMap<
-    ThreatIntelKey,
-    ThreatIntelValue,
-    { THREATINTEL_MAX_ENTRIES as usize },
-> = LruHashMap::new();
+static THREATINTEL_SLOT: Array<u32, 1> = Array::new();
 
-/// Threat intel IOC lookup: IPv6 address → action + feed metadata.
-/// Uses `LruHashMap` for automatic LRU eviction on full maps.
+/// IPv4 address (host order) to action and feed, slot A.
 #[btf_map]
-static THREATINTEL_IOCS_V6: LruHashMap<
-    ThreatIntelKeyV6,
-    ThreatIntelValue,
-    { THREATINTEL_MAX_ENTRIES as usize },
-> = LruHashMap::new();
-
-/// Bloom filter pre-check for IPv4 IOCs (kernel 5.16+).
-/// Eliminates ~98% of HashMap lookups for non-matching packets.
+static THREATINTEL_IOCS_A: HashMap<ThreatIntelKey, ThreatIntelValue, MAX, ON_INSERT> =
+    HashMap::new();
+/// IPv4 address to action and feed, slot B.
 #[btf_map]
-static THREATINTEL_BLOOM_V4: BloomFilter<ThreatIntelKey, { THREATINTEL_MAX_ENTRIES as usize }> =
-    BloomFilter::new();
-
-/// Bloom filter pre-check for IPv6 IOCs (kernel 5.16+).
+static THREATINTEL_IOCS_B: HashMap<ThreatIntelKey, ThreatIntelValue, MAX, ON_INSERT> =
+    HashMap::new();
+/// IPv6 address to action and feed, slot A.
 #[btf_map]
-static THREATINTEL_BLOOM_V6: BloomFilter<ThreatIntelKeyV6, { THREATINTEL_MAX_ENTRIES as usize }> =
-    BloomFilter::new();
-
-/// The keys a bloom filter is probed with, held in a map value rather than
-/// on the stack.
-///
-/// `bpf_map_peek_elem` is declared as writing through its value argument,
-/// since a queue or a stack map hands an element back through it, while a
-/// bloom filter reads that argument. A verifier that tracks stack liveness
-/// therefore takes the store of a key nothing reads after the probe for a
-/// dead store, poisons the slot, and refuses the probe that reads it. A key
-/// in a map value is outside that analysis on every kernel.
-#[repr(C)]
-struct BloomProbe {
-    v4: ThreatIntelKey,
-    v6: ThreatIntelKeyV6,
-}
-
+static THREATINTEL_IOCS_V6_A: HashMap<ThreatIntelKeyV6, ThreatIntelValue, MAX, ON_INSERT> =
+    HashMap::new();
+/// IPv6 address to action and feed, slot B.
 #[btf_map]
-static BLOOM_PROBE: PerCpuArray<BloomProbe, 1> = PerCpuArray::new();
+static THREATINTEL_IOCS_V6_B: HashMap<ThreatIntelKeyV6, ThreatIntelValue, MAX, ON_INSERT> =
+    HashMap::new();
 
-/// Whether the IPv4 bloom filter may hold `key`. Without its scratch slot
-/// the answer is "maybe", so the hash map stays the one that decides.
+/// IPv4 range (network byte order) to action and feed, slot A.
+#[btf_map]
+static THREATINTEL_NETS_A: LpmTrie<[u8; 4], ThreatIntelValue, MAX> = LpmTrie::new();
+/// IPv4 range to action and feed, slot B.
+#[btf_map]
+static THREATINTEL_NETS_B: LpmTrie<[u8; 4], ThreatIntelValue, MAX> = LpmTrie::new();
+/// IPv6 range (network byte order) to action and feed, slot A.
+#[btf_map]
+static THREATINTEL_NETS_V6_A: LpmTrie<[u8; 16], ThreatIntelValue, MAX> = LpmTrie::new();
+/// IPv6 range to action and feed, slot B.
+#[btf_map]
+static THREATINTEL_NETS_V6_B: LpmTrie<[u8; 16], ThreatIntelValue, MAX> = LpmTrie::new();
+
 #[inline(always)]
-fn bloom_may_contain_v4(key: ThreatIntelKey) -> bool {
-    let Some(probe) = BLOOM_PROBE.get_ptr_mut(0) else {
-        return true;
-    };
-    // SAFETY: `probe` points at this CPU's slot of a per-CPU array, which
-    // nothing else touches while this program runs on the CPU.
-    unsafe {
-        (*probe).v4 = key;
-        THREATINTEL_BLOOM_V4.contains(&(*probe).v4).is_ok()
+fn reads_slot_b() -> bool {
+    match THREATINTEL_SLOT.get(0) {
+        Some(&slot) => slot == THREATINTEL_SLOT_B,
+        None => false,
     }
 }
 
-/// Whether the IPv6 bloom filter may hold `key`; see
-/// [`bloom_may_contain_v4`].
+/// The indicator deciding for one IPv4 address: the address itself when it
+/// is listed, otherwise the longest range holding it.
 #[inline(always)]
-fn bloom_may_contain_v6(key: ThreatIntelKeyV6) -> bool {
-    let Some(probe) = BLOOM_PROBE.get_ptr_mut(0) else {
-        return true;
-    };
-    // SAFETY: as in `bloom_may_contain_v4`.
-    unsafe {
-        (*probe).v6 = key;
-        THREATINTEL_BLOOM_V6.contains(&(*probe).v6).is_ok()
+fn lookup_v4(slot_b: bool, gates: u32, ip: u32) -> Option<ThreatIntelValue> {
+    if !feature_empty(gates, FW_EMPTY_THREAT_IOCS_V4) {
+        let key = ThreatIntelKey { ip };
+        let hit = if slot_b {
+            unsafe { THREATINTEL_IOCS_B.get(&key) }
+        } else {
+            unsafe { THREATINTEL_IOCS_A.get(&key) }
+        };
+        if let Some(v) = hit {
+            return Some(*v);
+        }
+    }
+    if !feature_empty(gates, FW_EMPTY_THREAT_NETS_V4) {
+        let key = Key::new(32, ip.to_be_bytes());
+        let hit = if slot_b {
+            THREATINTEL_NETS_B.get(&key)
+        } else {
+            THREATINTEL_NETS_A.get(&key)
+        };
+        if let Some(v) = hit {
+            return Some(*v);
+        }
+    }
+    None
+}
+
+/// The indicator deciding for one IPv6 address; see [`lookup_v4`].
+#[inline(always)]
+fn lookup_v6(slot_b: bool, gates: u32, addr: &[u8; 16]) -> Option<ThreatIntelValue> {
+    if !feature_empty(gates, FW_EMPTY_THREAT_IOCS_V6) {
+        let key = ThreatIntelKeyV6 {
+            ip: ipv6_addr_to_u32x4(addr),
+        };
+        let hit = if slot_b {
+            unsafe { THREATINTEL_IOCS_V6_B.get(&key) }
+        } else {
+            unsafe { THREATINTEL_IOCS_V6_A.get(&key) }
+        };
+        if let Some(v) = hit {
+            return Some(*v);
+        }
+    }
+    if !feature_empty(gates, FW_EMPTY_THREAT_NETS_V6) {
+        let key = Key::new(128, *addr);
+        let hit = if slot_b {
+            THREATINTEL_NETS_V6_B.get(&key)
+        } else {
+            THREATINTEL_NETS_V6_A.get(&key)
+        };
+        if let Some(v) = hit {
+            return Some(*v);
+        }
+    }
+    None
+}
+
+/// The stronger of the two ends' verdicts: a drop wins over an alert.
+#[inline(always)]
+fn stronger(
+    src: Option<ThreatIntelValue>,
+    dst: Option<ThreatIntelValue>,
+) -> Option<ThreatIntelValue> {
+    match (src, dst) {
+        (None, None) => None,
+        (Some(v), None) | (None, Some(v)) => Some(v),
+        (Some(s), Some(d)) => Some(if d.action > s.action { d } else { s }),
     }
 }
 
@@ -193,34 +247,39 @@ fn try_tc_threatintel(ctx: &TcContext) -> Result<i32, ()> {
         }
     }
 
-    // Neither set holds an indicator, so both bloom probes can only answer
-    // that this packet is not in a set that is empty. Nothing below this
-    // point would fire, including the parse.
+    // A table userspace left empty is not looked up, and when every table
+    // of both families is empty nothing below this point would fire,
+    // including the parse.
+    // The slot is read before the gates: a reload clears the gates of the
+    // tables it is about to fill before it flips the selector, and sets the
+    // ones its new slot left empty after, so a packet reading the new slot
+    // never finds a gate closed over a table holding indicators.
+    let slot_b = reads_slot_b();
     let gates = empty_features();
-    if feature_empty(gates, FW_EMPTY_THREAT_IOCS_V4)
-        && feature_empty(gates, FW_EMPTY_THREAT_IOCS_V6)
-    {
+    let v4_empty = feature_empty(gates, FW_EMPTY_THREAT_IOCS_V4)
+        && feature_empty(gates, FW_EMPTY_THREAT_NETS_V4);
+    let v6_empty = feature_empty(gates, FW_EMPTY_THREAT_IOCS_V6)
+        && feature_empty(gates, FW_EMPTY_THREAT_NETS_V6);
+    if v4_empty && v6_empty {
         trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
         return Ok(TC_ACT_OK);
     }
 
-    // The parse the chain already holds, or this program's own if it is
-    // first.
     let meta = pktmeta::resolve(ctx)?;
     let pkt_flags = meta.event_flags();
 
     if meta.is_ipv4() {
-        if feature_empty(gates, FW_EMPTY_THREAT_IOCS_V4) {
+        if v4_empty {
             trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
             return Ok(TC_ACT_OK);
         }
-        process_threatintel_v4(ctx, meta.l3(), meta.vlan_id, pkt_flags)
+        process_threatintel_v4(ctx, slot_b, gates, meta.l3(), meta.vlan_id, pkt_flags)
     } else if meta.is_ipv6() {
-        if feature_empty(gates, FW_EMPTY_THREAT_IOCS_V6) {
+        if v6_empty {
             trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
             return Ok(TC_ACT_OK);
         }
-        process_threatintel_v6(ctx, meta.l3(), meta.vlan_id, pkt_flags)
+        process_threatintel_v6(ctx, slot_b, gates, meta.l3(), meta.vlan_id, pkt_flags)
     } else {
         trace::tc_record(ctx, stage::THREATINTEL, reason::MALFORMED, 0, 0);
         Ok(TC_ACT_OK)
@@ -231,6 +290,8 @@ fn try_tc_threatintel(ctx: &TcContext) -> Result<i32, ()> {
 #[inline(always)]
 fn process_threatintel_v4(
     ctx: &TcContext,
+    slot_b: bool,
+    gates: u32,
     l3_offset: usize,
     vlan_id: u16,
     flags: u8,
@@ -263,51 +324,21 @@ fn process_threatintel_v4(
         _ => (0u16, 0u16),
     };
 
-    // IOC lookup: bloom filter pre-check avoids HashMap lookups for
-    // ~98% of non-matching packets (kernel 5.16+).
-    let src_key = ThreatIntelKey { ip: src_ip };
-    let dst_key = ThreatIntelKey { ip: dst_ip };
-
-    let src_maybe = bloom_may_contain_v4(src_key);
-    let dst_maybe = bloom_may_contain_v4(dst_key);
-
-    if !src_maybe && !dst_maybe {
+    // Source and destination: the address table, then the range trie, in
+    // the slot read above; the stronger action of the two wins.
+    let Some(matched) = stronger(
+        lookup_v4(slot_b, gates, src_ip),
+        lookup_v4(slot_b, gates, dst_ip),
+    ) else {
         trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
-        return Ok(TC_ACT_OK); // guaranteed no match
-    }
-
-    let src_match = if src_maybe {
-        unsafe { THREATINTEL_IOCS.get(&src_key) }
-    } else {
-        None
-    };
-    let dst_match = if dst_maybe {
-        unsafe { THREATINTEL_IOCS.get(&dst_key) }
-    } else {
-        None
-    };
-
-    let matched = match (src_match, dst_match) {
-        (None, None) => {
-            // bloom false positive
-            trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
-            return Ok(TC_ACT_OK);
-        }
-        (Some(v), None) | (None, Some(v)) => v,
-        (Some(s), Some(d)) => {
-            if d.action > s.action {
-                d
-            } else {
-                s
-            }
-        }
+        return Ok(TC_ACT_OK);
     };
 
     let src_addr = [src_ip, 0, 0, 0];
     let dst_addr = [dst_ip, 0, 0, 0];
     apply_threatintel_action(
         ctx,
-        matched,
+        &matched,
         &src_addr,
         &dst_addr,
         src_port,
@@ -322,13 +353,15 @@ fn process_threatintel_v4(
 #[inline(always)]
 fn process_threatintel_v6(
     ctx: &TcContext,
+    slot_b: bool,
+    gates: u32,
     l3_offset: usize,
     vlan_id: u16,
     flags: u8,
 ) -> Result<i32, ()> {
     let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(ctx, l3_offset)? };
-    let src_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).src_addr });
-    let dst_addr = ipv6_addr_to_u32x4(unsafe { &(*ipv6hdr).dst_addr });
+    let src_raw: [u8; 16] = unsafe { (*ipv6hdr).src_addr };
+    let dst_raw: [u8; 16] = unsafe { (*ipv6hdr).dst_addr };
     let raw_next_hdr = unsafe { (*ipv6hdr).next_hdr };
 
     // Skip IPv6 extension headers to find the actual L4 protocol.
@@ -353,46 +386,18 @@ fn process_threatintel_v6(
     };
 
     // IOC lookup: bloom filter pre-check for IPv6.
-    let src_key = ThreatIntelKeyV6 { ip: src_addr };
-    let dst_key = ThreatIntelKeyV6 { ip: dst_addr };
-
-    let src_maybe = bloom_may_contain_v6(src_key);
-    let dst_maybe = bloom_may_contain_v6(dst_key);
-
-    if !src_maybe && !dst_maybe {
+    let Some(matched) = stronger(
+        lookup_v6(slot_b, gates, &src_raw),
+        lookup_v6(slot_b, gates, &dst_raw),
+    ) else {
         trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
-        return Ok(TC_ACT_OK); // guaranteed no match
-    }
-
-    let src_match = if src_maybe {
-        unsafe { THREATINTEL_IOCS_V6.get(&src_key) }
-    } else {
-        None
-    };
-    let dst_match = if dst_maybe {
-        unsafe { THREATINTEL_IOCS_V6.get(&dst_key) }
-    } else {
-        None
+        return Ok(TC_ACT_OK);
     };
 
-    let matched = match (src_match, dst_match) {
-        (None, None) => {
-            // bloom false positive
-            trace::tc_record(ctx, stage::THREATINTEL, reason::DEFAULT, 0, 0);
-            return Ok(TC_ACT_OK);
-        }
-        (Some(v), None) | (None, Some(v)) => v,
-        (Some(s), Some(d)) => {
-            if d.action > s.action {
-                d
-            } else {
-                s
-            }
-        }
-    };
-
+    let src_addr = ipv6_addr_to_u32x4(&src_raw);
+    let dst_addr = ipv6_addr_to_u32x4(&dst_raw);
     apply_threatintel_action(
-        ctx, matched, &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
+        ctx, &matched, &src_addr, &dst_addr, src_port, dst_port, next_hdr, flags, vlan_id,
     )
 }
 

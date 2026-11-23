@@ -1,10 +1,9 @@
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use domain::common::error::DomainError;
 use domain::threatintel::crowdsec::{Decision, decisions_to_iocs};
 use domain::threatintel::entity::{
-    CtiDomain, CtiIndicators, CtiUrl, FeedConfig, FeedFormat, Ioc, ThreatType,
+    CtiDomain, CtiIndicators, CtiUrl, FeedConfig, FeedFormat, Ioc, ThreatType, parse_target,
 };
 use domain::threatintel::parser::{
     extract_domains_from_stix_pattern, extract_ips_from_stix_pattern,
@@ -227,10 +226,9 @@ fn parse_crowdsec_decisions(text: &str, config: &FeedConfig) -> Result<Vec<Ioc>,
             feed_id = %config.id,
             loaded = iocs.len(),
             not_ban = skips.not_ban,
-            ranges = skips.ranges,
             other_scope = skips.other_scope,
             unreadable = skips.unreadable,
-            "CrowdSec decisions left out: only a ban on one address is enforced"
+            "CrowdSec decisions left out: only a ban on an address or a range is enforced"
         );
     }
     Ok(iocs)
@@ -414,12 +412,13 @@ fn extract_stix_indicator(
     let pattern = obj.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
 
     // Extract IPs (bounded to max_iocs to cap memory)
-    for ip in extract_ips_from_stix_pattern(pattern) {
+    for (ip, prefix_len) in extract_ips_from_stix_pattern(pattern) {
         if result.iocs.len() >= config.max_iocs {
             break;
         }
         result.iocs.push(Ioc {
             ip,
+            prefix_len,
             feed_id: config.id.clone(),
             confidence,
             threat_type,
@@ -469,10 +468,11 @@ fn extract_stix_sco(
         "ipv4-addr" | "ipv6-addr" => {
             if result.iocs.len() < config.max_iocs
                 && let Some(value) = obj.get("value").and_then(|v| v.as_str())
-                && let Ok(ip) = value.parse::<IpAddr>()
+                && let Some((ip, prefix_len)) = parse_target(value)
             {
                 result.iocs.push(Ioc {
                     ip,
+                    prefix_len,
                     feed_id: config.id.clone(),
                     confidence: 50, // SCOs without relationship context are less reliable
                     threat_type: ThreatType::Other,
@@ -632,9 +632,8 @@ fn parse_json_feed(text: &str, config: &FeedConfig) -> Result<Vec<Ioc>, DomainEr
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let ip: IpAddr = match ip_str.parse() {
-            Ok(ip) => ip,
-            Err(_) => continue,
+        let Some((ip, prefix_len)) = parse_target(ip_str) else {
+            continue;
         };
 
         let confidence = mapping
@@ -653,6 +652,7 @@ fn parse_json_feed(text: &str, config: &FeedConfig) -> Result<Vec<Ioc>, DomainEr
 
         iocs.push(Ioc {
             ip,
+            prefix_len,
             feed_id: config.id.clone(),
             confidence,
             threat_type,
@@ -709,6 +709,7 @@ mod tests {
         ThreatIntelMetrics, ZoneMetrics,
     };
     use std::future::Future;
+    use std::net::IpAddr;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicU32, Ordering};
 

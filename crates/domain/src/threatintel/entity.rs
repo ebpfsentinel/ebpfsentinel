@@ -57,8 +57,14 @@ impl std::fmt::Display for ThreatType {
 /// A single indicator of compromise loaded from a threat intelligence feed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ioc {
-    /// The malicious IP address.
+    /// The malicious address, or the first address of the malicious
+    /// network when `prefix_len` is set.
     pub ip: IpAddr,
+    /// Length of the network prefix when the indicator is a range such as
+    /// `198.51.100.0/24`; `None` for one address. A prefix covering the whole
+    /// address is written as `None`, so one address has one spelling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_len: Option<u8>,
     /// Identifier of the feed that provided this IOC.
     pub feed_id: String,
     /// Confidence score from the originating feed (0-100).
@@ -80,8 +86,92 @@ impl Ioc {
         if self.feed_id.is_empty() {
             return Err("feed_id must not be empty");
         }
+        if let Some(len) = self.prefix_len {
+            if len == 0 {
+                return Err("a range of prefix length 0 covers every address");
+            }
+            if len >= address_bits(self.ip) {
+                return Err("prefix length must be shorter than the address");
+            }
+            if network_of(self.ip, len) != self.ip {
+                return Err("a range must be written as its first address");
+            }
+        }
         Ok(())
     }
+
+    /// Prefix length in bits, the full address length for one address.
+    #[must_use]
+    pub fn prefix(&self) -> u8 {
+        self.prefix_len.unwrap_or_else(|| address_bits(self.ip))
+    }
+
+    /// Whether the indicator is a range rather than one address.
+    #[must_use]
+    pub fn is_range(&self) -> bool {
+        self.prefix_len.is_some()
+    }
+
+    /// The indicator as it is written: `203.0.113.7` or `198.51.100.0/24`.
+    #[must_use]
+    pub fn target(&self) -> String {
+        match self.prefix_len {
+            Some(len) => format!("{}/{len}", self.ip),
+            None => self.ip.to_string(),
+        }
+    }
+}
+
+/// Bits in an address of `ip`'s family: 32 or 128.
+#[must_use]
+pub fn address_bits(ip: IpAddr) -> u8 {
+    if ip.is_ipv4() { 32 } else { 128 }
+}
+
+/// The first address of the `len`-bit network `ip` belongs to.
+#[must_use]
+pub fn network_of(ip: IpAddr, len: u8) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => {
+            let bits = u32::from(v4);
+            let mask = u32::MAX
+                .checked_shl(32 - u32::from(len.min(32)))
+                .unwrap_or(0);
+            IpAddr::V4((bits & mask).into())
+        }
+        IpAddr::V6(v6) => {
+            let bits = u128::from(v6);
+            let mask = u128::MAX
+                .checked_shl(128 - u32::from(len.min(128)))
+                .unwrap_or(0);
+            IpAddr::V6((bits & mask).into())
+        }
+    }
+}
+
+/// Read an indicator written as one address or as a range in CIDR notation.
+///
+/// Answers the first address and the prefix length, `None` for a single
+/// address (`/32` and `/128` included). Host bits set below the prefix are
+/// cleared, since `192.0.2.7/24` names the same network as `192.0.2.0/24`.
+/// A prefix of zero is refused: it covers every address, and a feed carrying
+/// one would block or flag all traffic.
+#[must_use]
+pub fn parse_target(s: &str) -> Option<(IpAddr, Option<u8>)> {
+    let s = s.trim();
+    let Some((addr, len)) = s.split_once('/') else {
+        return s.parse().ok().map(|ip| (ip, None));
+    };
+    let ip: IpAddr = addr.trim().parse().ok()?;
+    let len: u8 = len.trim().parse().ok()?;
+    let bits = address_bits(ip);
+    if len == 0 || len > bits {
+        return None;
+    }
+    if len == bits {
+        return Some((ip, None));
+    }
+    Some((network_of(ip, len), Some(len)))
 }
 
 // ── Threat intel alert ──────────────────────────────────────────────
@@ -495,6 +585,7 @@ mod tests {
     fn make_ioc() -> Ioc {
         Ioc {
             ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            prefix_len: None,
             feed_id: "feed-001".to_string(),
             confidence: 85,
             threat_type: ThreatType::C2,
@@ -788,5 +879,92 @@ mod tests {
             let back: FeedFormat = serde_json::from_str(&json).unwrap();
             assert_eq!(back, fmt);
         }
+    }
+
+    // ── Ranges ──────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_target_reads_an_address_and_a_range() {
+        assert_eq!(
+            parse_target("203.0.113.7"),
+            Some(("203.0.113.7".parse().unwrap(), None))
+        );
+        assert_eq!(
+            parse_target("198.51.100.0/24"),
+            Some(("198.51.100.0".parse().unwrap(), Some(24)))
+        );
+        assert_eq!(
+            parse_target("2001:db8::/32"),
+            Some(("2001:db8::".parse().unwrap(), Some(32)))
+        );
+    }
+
+    #[test]
+    fn parse_target_clears_host_bits() {
+        assert_eq!(
+            parse_target("192.0.2.77/24"),
+            Some(("192.0.2.0".parse().unwrap(), Some(24)))
+        );
+        assert_eq!(
+            parse_target("2001:db8::1/64"),
+            Some(("2001:db8::".parse().unwrap(), Some(64)))
+        );
+    }
+
+    #[test]
+    fn parse_target_writes_a_full_prefix_as_one_address() {
+        assert_eq!(
+            parse_target("192.0.2.1/32"),
+            Some(("192.0.2.1".parse().unwrap(), None))
+        );
+        assert_eq!(
+            parse_target("2001:db8::1/128"),
+            Some(("2001:db8::1".parse().unwrap(), None))
+        );
+    }
+
+    #[test]
+    fn parse_target_refuses_zero_and_oversized_prefixes() {
+        assert_eq!(parse_target("0.0.0.0/0"), None);
+        assert_eq!(parse_target("::/0"), None);
+        assert_eq!(parse_target("192.0.2.0/33"), None);
+        assert_eq!(parse_target("2001:db8::/129"), None);
+        assert_eq!(parse_target("192.0.2.0/x"), None);
+        assert_eq!(parse_target("not-an-ip/24"), None);
+    }
+
+    #[test]
+    fn validate_refuses_a_range_written_off_its_first_address() {
+        let mut ioc = make_ioc();
+        ioc.ip = "192.0.2.7".parse().unwrap();
+        ioc.prefix_len = Some(24);
+        assert!(ioc.validate().is_err());
+        ioc.ip = "192.0.2.0".parse().unwrap();
+        assert!(ioc.validate().is_ok());
+        ioc.prefix_len = Some(32);
+        assert!(ioc.validate().is_err());
+        ioc.prefix_len = Some(0);
+        assert!(ioc.validate().is_err());
+    }
+
+    #[test]
+    fn target_spells_a_range_in_cidr_notation() {
+        let mut ioc = make_ioc();
+        assert_eq!(ioc.target(), "10.0.0.1");
+        assert_eq!(ioc.prefix(), 32);
+        assert!(!ioc.is_range());
+        ioc.ip = "10.0.0.0".parse().unwrap();
+        ioc.prefix_len = Some(8);
+        assert_eq!(ioc.target(), "10.0.0.0/8");
+        assert_eq!(ioc.prefix(), 8);
+        assert!(ioc.is_range());
+    }
+
+    #[test]
+    fn a_stored_indicator_without_a_prefix_reads_as_one_address() {
+        let json = r#"{"ip":"10.0.0.1","feed_id":"f","confidence":50,"threat_type":"c2","last_seen":0,"source_feed":"f"}"#;
+        let ioc: Ioc = serde_json::from_str(json).unwrap();
+        assert_eq!(ioc.prefix_len, None);
+        assert!(!serde_json::to_string(&ioc).unwrap().contains("prefix_len"));
     }
 }

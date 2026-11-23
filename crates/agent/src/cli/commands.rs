@@ -752,7 +752,7 @@ pub async fn cmd_threatintel_iocs(client: &ApiClient, output: OutputFormat) -> R
     }
 
     let mut table = Table::new(&[
-        ("IP", Align::Left),
+        ("IP OR RANGE", Align::Left),
         ("FEED ID", Align::Left),
         ("CONF", Align::Right),
         ("THREAT TYPE", Align::Left),
@@ -3882,7 +3882,21 @@ pub async fn cmd_investigate(
 
     // IOC matches
     let iocs = iocs_res.ok().unwrap_or_default();
-    let matched_iocs: Vec<_> = iocs.iter().filter(|i| i.ip == target_str).collect();
+    // An indicator is an address or a CIDR range: the address under
+    // investigation matches a range holding it as well as itself.
+    let target_ip: Option<std::net::IpAddr> = target_str.parse().ok();
+    let matched_iocs: Vec<_> = iocs
+        .iter()
+        .filter(|i| {
+            i.ip == target_str
+                || match (target_ip, domain::threatintel::entity::parse_target(&i.ip)) {
+                    (Some(ip), Some((net, Some(len)))) => {
+                        domain::threatintel::entity::network_of(ip, len) == net
+                    }
+                    _ => false,
+                }
+        })
+        .collect();
 
     if output == OutputFormat::Json {
         let json = serde_json::json!({

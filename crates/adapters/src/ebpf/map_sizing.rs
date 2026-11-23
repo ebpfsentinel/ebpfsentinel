@@ -38,10 +38,14 @@ use infrastructure::config::{AgentConfig, NetworkPolicyMode};
 /// in is not an error: the plan is a lookup the loader consults, not a
 /// contract the object must honour.
 pub const SIZED_MAPS: &[(&str, &str)] = &[
-    ("THREATINTEL_IOCS", "threatintel.max_entries"),
-    ("THREATINTEL_IOCS_V6", "threatintel.max_entries"),
-    ("THREATINTEL_BLOOM_V4", "threatintel.max_entries"),
-    ("THREATINTEL_BLOOM_V6", "threatintel.max_entries"),
+    ("THREATINTEL_IOCS_A", "threatintel.max_entries"),
+    ("THREATINTEL_IOCS_B", "threatintel.max_entries"),
+    ("THREATINTEL_IOCS_V6_A", "threatintel.max_entries"),
+    ("THREATINTEL_IOCS_V6_B", "threatintel.max_entries"),
+    ("THREATINTEL_NETS_A", "threatintel.max_entries"),
+    ("THREATINTEL_NETS_B", "threatintel.max_entries"),
+    ("THREATINTEL_NETS_V6_A", "threatintel.max_entries"),
+    ("THREATINTEL_NETS_V6_B", "threatintel.max_entries"),
     ("RL_BUCKETS", "ratelimit.max_buckets"),
     ("SYN_RATE_TRACKER", "ddos.max_tracked_sources"),
     ("ICMP_RATE_BUCKETS", "ddos.max_tracked_sources"),
@@ -313,8 +317,8 @@ mod tests {
     #[test]
     fn the_default_plan_follows_the_configuration_defaults() {
         let p = plan();
-        assert_eq!(p.get("THREATINTEL_IOCS"), Some(4_096));
-        assert_eq!(p.get("THREATINTEL_BLOOM_V6"), Some(4_096));
+        assert_eq!(p.get("THREATINTEL_IOCS_A"), Some(4_096));
+        assert_eq!(p.get("THREATINTEL_NETS_V6_B"), Some(4_096));
         assert_eq!(p.get("RL_BUCKETS"), Some(65_536));
         assert_eq!(p.get("SYN_RATE_TRACKER"), Some(16_384));
         assert_eq!(p.get("FLOOD_COUNTERS"), Some(16_384));
@@ -419,7 +423,7 @@ mod tests {
         assert_eq!(p.get("RL_BUCKETS"), Some(2_048));
         assert_eq!(p.get("ICMP_RATE_BUCKETS"), Some(4_096));
         assert_eq!(p.get("CONN_TABLE"), Some(8_192));
-        assert_eq!(p.get("THREATINTEL_IOCS_V6"), Some(262_144));
+        assert_eq!(p.get("THREATINTEL_IOCS_V6_A"), Some(262_144));
     }
 
     fn load_balancer(yaml: &str) -> MapSizing {

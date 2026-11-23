@@ -1215,7 +1215,9 @@ pub async fn run(
     // ── 5d. Build threat intel service ────────────────────────────────
     let ti_mode = config.threatintel_mode()?;
     let ti_feeds = config.threatintel_feeds()?;
-    let ti_engine = ThreatIntelEngine::new(1_048_576);
+    // The engine holds what the kernel tables hold, so a feed set larger
+    // than them is refused in userspace, named, before a reload is tried.
+    let ti_engine = ThreatIntelEngine::new(config.threatintel.capacity() as usize);
     let mut ti_svc = ThreatIntelAppService::new(
         ti_engine,
         Arc::clone(&metrics) as Arc<dyn MetricsPort>,
@@ -2768,8 +2770,8 @@ pub async fn run(
                             metrics_readers.push(rdr);
                         }
                         if let Some(ti_mgr) = ti_mgr_opt {
-                            // Extract shared map handles before moving manager to service
-                            let (v4, v6, bv4, bv6) = ti_mgr.shared_handles();
+                            // The tables are shared before the manager moves into the service
+                            let ti_tables = ti_mgr.shared_tables();
                             {
                                 let mut svc = (**ti_svc.load()).clone();
                                 svc.set_map_port(Box::new(ti_mgr));
@@ -2778,7 +2780,7 @@ pub async fn run(
 
                             // Wire EbpfMapWriteAdapter to DNS blocklist service
                             if let Some(ref blocklist) = dns_blocklist_ref {
-                                let writer = Arc::new(EbpfMapWriteAdapter::new(v4, v6, bv4, bv6));
+                                let writer = Arc::new(EbpfMapWriteAdapter::new(ti_tables));
                                 blocklist.set_map_writer(
                             writer
                                 as Arc<dyn ports::secondary::ebpf_map_write_port::EbpfMapWritePort>,
@@ -6275,7 +6277,7 @@ pub fn try_load_tc_threatintel(
             Some(ti_mgr)
         }
         Err(e) => {
-            warn!("THREATINTEL_IOCS map not available: {e}");
+            warn!("threat intel tables not available: {e}");
             None
         }
     };

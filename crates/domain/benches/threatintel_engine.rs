@@ -11,6 +11,7 @@ use domain::threatintel::entity::{Ioc, ThreatType};
 fn make_ioc(i: u32) -> Ioc {
     Ioc {
         ip: IpAddr::V4(Ipv4Addr::from(i.to_be_bytes())),
+        prefix_len: None,
         feed_id: "bench-feed".to_string(),
         confidence: 80,
         threat_type: ThreatType::Malware,

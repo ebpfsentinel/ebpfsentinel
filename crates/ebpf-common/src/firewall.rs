@@ -516,10 +516,11 @@ pub const FW_EMPTY_IDS_SRC_PATTERNS: u32 = 1 << 12;
 /// No L7 service port is configured, so the two-ended port probe that decides
 /// whether to capture a payload can only miss.
 pub const FW_EMPTY_L7_PORTS: u32 = 1 << 13;
-/// The v4 threat-intelligence set holds no indicator, so the bloom probe the
-/// classifier runs on both addresses of every packet can only miss.
+/// The active v4 threat-intelligence address table holds no indicator, so
+/// the hash lookup the classifier runs on both addresses of every packet can
+/// only miss.
 pub const FW_EMPTY_THREAT_IOCS_V4: u32 = 1 << 14;
-/// The v6 threat-intelligence set holds no indicator.
+/// The active v6 threat-intelligence address table holds no indicator.
 pub const FW_EMPTY_THREAT_IOCS_V6: u32 = 1 << 15;
 /// `QOS_CLASSIFIERS` holds no rule, so the shaper's classification ladder can
 /// only miss. It is the widest lookup in the chain: the ladder walks a rule
@@ -530,6 +531,11 @@ pub const FW_EMPTY_THREAT_IOCS_V6: u32 = 1 << 15;
 /// match in that program fires either, so the gate also saves the
 /// interface-group read and the tenant resolution behind it.
 pub const FW_EMPTY_QOS_CLASSIFIERS: u32 = 1 << 16;
+/// The active v4 threat-intelligence range trie holds no prefix, so the
+/// longest-prefix lookup behind a missed address can only miss.
+pub const FW_EMPTY_THREAT_NETS_V4: u32 = 1 << 17;
+/// The active v6 threat-intelligence range trie holds no prefix.
+pub const FW_EMPTY_THREAT_NETS_V6: u32 = 1 << 18;
 
 // ── Shadow rules ───────────────────────────────────────────────────
 

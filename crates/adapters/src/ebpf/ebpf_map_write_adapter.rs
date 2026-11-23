@@ -1,42 +1,26 @@
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
 
-use crate::ebpf::feature_gates::{self, Feature};
-use aya::maps::{BloomFilter, HashMap, MapData};
+use crate::ebpf::threatintel_map_manager::SharedThreatIntelTables;
 use domain::common::error::DomainError;
-use ebpf_common::threatintel::{
-    THREATINTEL_ACTION_DROP, ThreatIntelKey, ThreatIntelKeyV6, ThreatIntelValue,
-};
+use ebpf_common::threatintel::{THREATINTEL_ACTION_DROP, ThreatIntelValue};
 use ports::secondary::ebpf_map_write_port::{EbpfMapWritePort, IocMetadata};
-use tracing::{info, warn};
+use tracing::info;
 
 /// Adapter implementing `EbpfMapWritePort` for dynamic eBPF map writes.
 ///
-/// Used by the DNS blocklist service to inject/remove IPs from the
-/// threat intelligence eBPF maps at runtime. Maps are shared with
-/// `ThreatIntelMapManager` via `Arc<Mutex<>>`.
+/// Used by the DNS blocklist service to inject and withdraw addresses in the
+/// threat intelligence tables at runtime. The tables are shared with
+/// `ThreatIntelMapManager`, which keeps the injected addresses apart from the
+/// feed set so a feed reload carries them over.
 pub struct EbpfMapWriteAdapter {
-    threatintel_v4: Arc<Mutex<HashMap<MapData, ThreatIntelKey, ThreatIntelValue>>>,
-    threatintel_v6: Option<Arc<Mutex<HashMap<MapData, ThreatIntelKeyV6, ThreatIntelValue>>>>,
-    bloom_v4: Option<Arc<Mutex<BloomFilter<MapData, ThreatIntelKey>>>>,
-    bloom_v6: Option<Arc<Mutex<BloomFilter<MapData, ThreatIntelKeyV6>>>>,
+    tables: SharedThreatIntelTables,
 }
 
 impl EbpfMapWriteAdapter {
-    /// Create a new adapter with shared access to the threat intel maps.
-    pub fn new(
-        threatintel_v4: Arc<Mutex<HashMap<MapData, ThreatIntelKey, ThreatIntelValue>>>,
-        threatintel_v6: Option<Arc<Mutex<HashMap<MapData, ThreatIntelKeyV6, ThreatIntelValue>>>>,
-        bloom_v4: Option<Arc<Mutex<BloomFilter<MapData, ThreatIntelKey>>>>,
-        bloom_v6: Option<Arc<Mutex<BloomFilter<MapData, ThreatIntelKeyV6>>>>,
-    ) -> Self {
+    /// Create a new adapter with shared access to the threat intel tables.
+    pub fn new(tables: SharedThreatIntelTables) -> Self {
         info!("EbpfMapWriteAdapter initialized");
-        Self {
-            threatintel_v4,
-            threatintel_v6,
-            bloom_v4,
-            bloom_v6,
-        }
+        Self { tables }
     }
 }
 
@@ -48,93 +32,20 @@ impl EbpfMapWritePort for EbpfMapWriteAdapter {
             confidence: metadata.confidence,
             threat_type: 0, // THREAT_TYPE_OTHER
         };
-
-        match ip {
-            IpAddr::V4(v4) => {
-                // This adapter writes the same sets the manager does, so it
-                // owes the same gate: open the probe before the insert, or the
-                // datapath skips an indicator this path has just added.
-                feature_gates::publish(Feature::ThreatIocsV4, false);
-                let key = ThreatIntelKey { ip: u32::from(v4) };
-                let mut map = self.threatintel_v4.lock().map_err(|e| {
-                    DomainError::EngineError(format!("threatintel V4 map lock poisoned: {e}"))
-                })?;
-                map.insert(&key, &value, 0).map_err(|e| {
-                    DomainError::EngineError(format!("threatintel V4 insert failed: {e}"))
-                })?;
-                // Best-effort bloom filter insert.
-                if let Some(ref bloom) = self.bloom_v4
-                    && let Ok(mut b) = bloom.lock()
-                {
-                    let _ = b.insert(&key, 0);
-                }
-            }
-            IpAddr::V6(v6) => {
-                let Some(ref v6_map) = self.threatintel_v6 else {
-                    warn!(ip = %ip, "V6 threatintel map not available, skipping inject");
-                    return Ok(());
-                };
-                feature_gates::publish(Feature::ThreatIocsV6, false);
-                let octets = v6.octets();
-                let key = ThreatIntelKeyV6 {
-                    ip: [
-                        u32::from_be_bytes([octets[0], octets[1], octets[2], octets[3]]),
-                        u32::from_be_bytes([octets[4], octets[5], octets[6], octets[7]]),
-                        u32::from_be_bytes([octets[8], octets[9], octets[10], octets[11]]),
-                        u32::from_be_bytes([octets[12], octets[13], octets[14], octets[15]]),
-                    ],
-                };
-                let mut map = v6_map.lock().map_err(|e| {
-                    DomainError::EngineError(format!("threatintel V6 map lock poisoned: {e}"))
-                })?;
-                map.insert(&key, &value, 0).map_err(|e| {
-                    DomainError::EngineError(format!("threatintel V6 insert failed: {e}"))
-                })?;
-                // Best-effort bloom filter insert.
-                if let Some(ref bloom) = self.bloom_v6
-                    && let Ok(mut b) = bloom.lock()
-                {
-                    let _ = b.insert(&key, 0);
-                }
-            }
-        }
-
-        Ok(())
+        self.tables
+            .lock()
+            .map_err(|e| {
+                DomainError::EngineError(format!("threat intel tables lock poisoned: {e}"))
+            })?
+            .inject(ip, value)
     }
 
     fn remove_threatintel_ip(&self, ip: IpAddr) -> Result<(), DomainError> {
-        match ip {
-            IpAddr::V4(v4) => {
-                let key = ThreatIntelKey { ip: u32::from(v4) };
-                let mut map = self.threatintel_v4.lock().map_err(|e| {
-                    DomainError::EngineError(format!("threatintel V4 map lock poisoned: {e}"))
-                })?;
-                map.remove(&key).map_err(|e| {
-                    DomainError::EngineError(format!("threatintel V4 remove failed: {e}"))
-                })?;
-            }
-            IpAddr::V6(v6) => {
-                let Some(ref v6_map) = self.threatintel_v6 else {
-                    return Ok(());
-                };
-                let octets = v6.octets();
-                let key = ThreatIntelKeyV6 {
-                    ip: [
-                        u32::from_be_bytes([octets[0], octets[1], octets[2], octets[3]]),
-                        u32::from_be_bytes([octets[4], octets[5], octets[6], octets[7]]),
-                        u32::from_be_bytes([octets[8], octets[9], octets[10], octets[11]]),
-                        u32::from_be_bytes([octets[12], octets[13], octets[14], octets[15]]),
-                    ],
-                };
-                let mut map = v6_map.lock().map_err(|e| {
-                    DomainError::EngineError(format!("threatintel V6 map lock poisoned: {e}"))
-                })?;
-                map.remove(&key).map_err(|e| {
-                    DomainError::EngineError(format!("threatintel V6 remove failed: {e}"))
-                })?;
-            }
-        }
-
-        Ok(())
+        self.tables
+            .lock()
+            .map_err(|e| {
+                DomainError::EngineError(format!("threat intel tables lock poisoned: {e}"))
+            })?
+            .withdraw(ip)
     }
 }

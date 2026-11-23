@@ -109,8 +109,8 @@ pub const NOT_FROZEN: &[(&str, &str)] = &[
         "the rule tables are rewritten on every reload and every rule API call",
     ),
     (
-        "THREATINTEL_IOCS",
-        "a feed refresh replaces the indicators without reloading the program",
+        "THREATINTEL_SLOT",
+        "a feed refresh writes the idle slot and flips the one the datapath reads",
     ),
     (
         "IPS_BLACKLIST",

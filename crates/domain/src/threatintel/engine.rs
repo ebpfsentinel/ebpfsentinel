@@ -1,24 +1,54 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 
 use crate::common::error::DomainError;
-use crate::threatintel::entity::Ioc;
+use crate::threatintel::entity::{Ioc, address_bits, network_of};
 use crate::threatintel::error::ThreatIntelError;
+
+/// An indicator's identity: its first address and its prefix length, the
+/// full address length for one address.
+type IocKey = (IpAddr, u8);
 
 /// Userspace threat intelligence engine.
 ///
-/// Stores IOCs in a `HashMap` keyed by IP address. Provides CRUD operations,
-/// deduplication (highest confidence wins), and capacity enforcement.
+/// Stores IOCs in a `HashMap` keyed by address and prefix length, so one
+/// address and the range around it are two entries. Provides CRUD
+/// operations, deduplication (highest confidence wins), capacity
+/// enforcement, and the lookup the datapath performs: the address itself
+/// first, then the longest range holding it.
 ///
 /// This engine is source-agnostic - it doesn't know about feed providers,
 /// only about validated IOC entries.
 #[derive(Clone)]
 pub struct ThreatIntelEngine {
-    iocs: HashMap<IpAddr, Ioc>,
+    iocs: HashMap<IocKey, Ioc>,
+    /// How many ranges of each prefix length are loaded, per family
+    /// (`false` for IPv4). A lookup probes only the lengths present.
+    range_lengths: BTreeMap<(bool, u8), usize>,
     max_capacity: usize,
     /// Per-country confidence adjustment (e.g. `{"RU": 10, "CN": 5}`).
     /// Positive values boost, negative values reduce. Clamped to 0-100.
     country_confidence_boost: HashMap<String, i8>,
+}
+
+fn key_of(ioc: &Ioc) -> IocKey {
+    (ioc.ip, ioc.prefix())
+}
+
+fn invalid(ioc: &Ioc, reason: &str) -> DomainError {
+    ThreatIntelError::InvalidIoc {
+        ip: ioc.target(),
+        reason: reason.to_string(),
+    }
+    .into()
+}
+
+fn count_ranges(iocs: &HashMap<IocKey, Ioc>) -> BTreeMap<(bool, u8), usize> {
+    let mut lengths = BTreeMap::new();
+    for ioc in iocs.values().filter(|i| i.is_range()) {
+        *lengths.entry((ioc.ip.is_ipv6(), ioc.prefix())).or_insert(0) += 1;
+    }
+    lengths
 }
 
 impl ThreatIntelEngine {
@@ -26,24 +56,22 @@ impl ThreatIntelEngine {
     pub fn new(max_capacity: usize) -> Self {
         Self {
             iocs: HashMap::new(),
+            range_lengths: BTreeMap::new(),
             max_capacity,
             country_confidence_boost: HashMap::new(),
         }
     }
 
-    /// Add an IOC. If the same IP already exists, keep the entry with
-    /// the highest confidence score (deduplication across feeds).
+    /// Add an IOC. If the same address or range already exists, keep the
+    /// entry with the highest confidence score (deduplication across feeds).
     pub fn add_ioc(&mut self, ioc: Ioc) -> Result<(), DomainError> {
-        ioc.validate()
-            .map_err(|reason| ThreatIntelError::InvalidIoc {
-                ip: ioc.ip.to_string(),
-                reason: reason.to_string(),
-            })?;
+        ioc.validate().map_err(|reason| invalid(&ioc, reason))?;
+        let key = key_of(&ioc);
 
-        // Dedup: if IP exists with lower confidence, replace it
-        if let Some(existing) = self.iocs.get(&ioc.ip) {
+        // Dedup: if the entry exists with lower confidence, replace it
+        if let Some(existing) = self.iocs.get(&key) {
             if ioc.confidence > existing.confidence {
-                self.iocs.insert(ioc.ip, ioc);
+                self.iocs.insert(key, ioc);
             }
             // If same or lower confidence, silently keep existing
             return Ok(());
@@ -57,13 +85,19 @@ impl ThreatIntelEngine {
             .into());
         }
 
-        self.iocs.insert(ioc.ip, ioc);
+        if ioc.is_range() {
+            *self
+                .range_lengths
+                .entry((ioc.ip.is_ipv6(), ioc.prefix()))
+                .or_insert(0) += 1;
+        }
+        self.iocs.insert(key, ioc);
         Ok(())
     }
 
-    /// Remove an IOC by IP address.
+    /// Remove the IOC naming exactly this address (not a range holding it).
     pub fn remove_ioc(&mut self, ip: &IpAddr) -> Result<(), DomainError> {
-        if self.iocs.remove(ip).is_none() {
+        if self.iocs.remove(&(*ip, address_bits(*ip))).is_none() {
             return Err(DomainError::RuleNotFound(format!("IOC {ip}")));
         }
         Ok(())
@@ -72,6 +106,7 @@ impl ThreatIntelEngine {
     /// Remove all IOCs.
     pub fn clear(&mut self) {
         self.iocs.clear();
+        self.range_lengths.clear();
     }
 
     /// Atomically replace all IOCs. Validates all entries first;
@@ -79,22 +114,19 @@ impl ThreatIntelEngine {
     pub fn reload(&mut self, iocs: Vec<Ioc>) -> Result<(), DomainError> {
         // Phase 1: validate all IOCs
         for ioc in &iocs {
-            ioc.validate()
-                .map_err(|reason| ThreatIntelError::InvalidIoc {
-                    ip: ioc.ip.to_string(),
-                    reason: reason.to_string(),
-                })?;
+            ioc.validate().map_err(|reason| invalid(ioc, reason))?;
         }
 
         // Phase 2: build new map with dedup
-        let mut new_map: HashMap<IpAddr, Ioc> = HashMap::with_capacity(iocs.len());
+        let mut new_map: HashMap<IocKey, Ioc> = HashMap::with_capacity(iocs.len());
         for ioc in iocs {
-            match new_map.get(&ioc.ip) {
+            let key = key_of(&ioc);
+            match new_map.get(&key) {
                 Some(existing) if existing.confidence >= ioc.confidence => {
                     // Keep existing (higher or equal confidence)
                 }
                 _ => {
-                    new_map.insert(ioc.ip, ioc);
+                    new_map.insert(key, ioc);
                 }
             }
         }
@@ -108,13 +140,23 @@ impl ThreatIntelEngine {
         }
 
         // Atomic swap
+        self.range_lengths = count_ranges(&new_map);
         self.iocs = new_map;
         Ok(())
     }
 
-    /// Lookup an IOC by IP address.
+    /// The indicator deciding for `ip`, as the datapath decides it: the
+    /// address itself when it is listed, otherwise the longest range
+    /// holding it.
     pub fn lookup(&self, ip: &IpAddr) -> Option<&Ioc> {
-        self.iocs.get(ip)
+        if let Some(ioc) = self.iocs.get(&(*ip, address_bits(*ip))) {
+            return Some(ioc);
+        }
+        let v6 = ip.is_ipv6();
+        self.range_lengths
+            .range((v6, 0)..=(v6, u8::MAX))
+            .rev()
+            .find_map(|(&(_, len), _)| self.iocs.get(&(network_of(*ip, len), len)))
     }
 
     /// Total number of loaded IOCs.
@@ -181,6 +223,7 @@ mod tests {
     fn ioc(ip: &str, feed: &str, confidence: u8) -> Ioc {
         Ioc {
             ip: ip.parse().unwrap(),
+            prefix_len: None,
             feed_id: feed.to_string(),
             confidence,
             threat_type: ThreatType::Malware,
@@ -315,6 +358,7 @@ mod tests {
 
         let invalid = Ioc {
             ip: "10.0.0.2".parse().unwrap(),
+            prefix_len: None,
             feed_id: String::new(), // invalid: empty feed_id
             confidence: 80,
             threat_type: ThreatType::C2,
@@ -366,6 +410,7 @@ mod tests {
         let mut engine = ThreatIntelEngine::new(100);
         let bad = Ioc {
             ip: "10.0.0.1".parse().unwrap(),
+            prefix_len: None,
             feed_id: String::new(),
             confidence: 80,
             threat_type: ThreatType::Other,
@@ -381,6 +426,7 @@ mod tests {
         let mut engine = ThreatIntelEngine::new(100);
         let bad = Ioc {
             ip: "10.0.0.1".parse().unwrap(),
+            prefix_len: None,
             feed_id: "f".to_string(),
             confidence: 150,
             threat_type: ThreatType::Other,
@@ -456,5 +502,94 @@ mod tests {
         let mut entry = ioc("10.0.0.1", "feed-a", 50);
         engine.apply_country_boost(&mut entry, Some("ru"));
         assert_eq!(entry.confidence, 60);
+    }
+
+    fn range(net: &str, feed: &str, confidence: u8) -> Ioc {
+        let (ip, prefix_len) = crate::threatintel::entity::parse_target(net).unwrap();
+        Ioc {
+            ip,
+            prefix_len,
+            ..ioc("0.0.0.0", feed, confidence)
+        }
+    }
+
+    #[test]
+    fn a_range_matches_every_address_it_holds() {
+        let mut engine = ThreatIntelEngine::new(100);
+        engine
+            .add_ioc(range("198.51.100.0/24", "drop", 90))
+            .unwrap();
+        for ip in ["198.51.100.0", "198.51.100.77", "198.51.100.255"] {
+            let found = engine.lookup(&ip.parse().unwrap()).unwrap();
+            assert_eq!(found.target(), "198.51.100.0/24", "{ip}");
+        }
+        assert!(engine.lookup(&"198.51.101.1".parse().unwrap()).is_none());
+        assert!(engine.lookup(&"2001:db8::1".parse().unwrap()).is_none());
+    }
+
+    #[test]
+    fn the_address_wins_over_a_range_then_the_longest_range() {
+        let mut engine = ThreatIntelEngine::new(100);
+        engine.add_ioc(range("10.0.0.0/8", "wide", 10)).unwrap();
+        engine.add_ioc(range("10.1.0.0/16", "narrow", 20)).unwrap();
+        engine.add_ioc(ioc("10.1.2.3", "host", 30)).unwrap();
+
+        let at = |ip: &str| engine.lookup(&ip.parse().unwrap()).unwrap().feed_id.clone();
+        assert_eq!(at("10.1.2.3"), "host");
+        assert_eq!(at("10.1.2.4"), "narrow");
+        assert_eq!(at("10.2.0.1"), "wide");
+    }
+
+    #[test]
+    fn an_ipv6_range_matches_by_prefix() {
+        let mut engine = ThreatIntelEngine::new(100);
+        engine.add_ioc(range("2001:db8::/32", "v6", 70)).unwrap();
+        assert!(
+            engine
+                .lookup(&"2001:db8:ffff::1".parse().unwrap())
+                .is_some()
+        );
+        assert!(engine.lookup(&"2001:db9::1".parse().unwrap()).is_none());
+        // An IPv4 range length never applies to an IPv6 address.
+        engine.add_ioc(range("32.0.0.0/8", "v4", 70)).unwrap();
+        assert!(engine.lookup(&"2001:db9::1".parse().unwrap()).is_none());
+    }
+
+    #[test]
+    fn a_range_and_its_first_address_are_two_entries() {
+        let mut engine = ThreatIntelEngine::new(100);
+        engine.add_ioc(range("192.0.2.0/24", "net", 50)).unwrap();
+        engine.add_ioc(ioc("192.0.2.0", "host", 50)).unwrap();
+        assert_eq!(engine.ioc_count(), 2);
+        engine.remove_ioc(&"192.0.2.0".parse().unwrap()).unwrap();
+        assert_eq!(engine.ioc_count(), 1);
+        assert_eq!(
+            engine
+                .lookup(&"192.0.2.0".parse().unwrap())
+                .unwrap()
+                .feed_id,
+            "net"
+        );
+    }
+
+    #[test]
+    fn reload_replaces_ranges_too() {
+        let mut engine = ThreatIntelEngine::new(100);
+        engine.add_ioc(range("192.0.2.0/24", "old", 50)).unwrap();
+        engine
+            .reload(vec![range("203.0.113.0/25", "new", 50)])
+            .unwrap();
+        assert!(engine.lookup(&"192.0.2.1".parse().unwrap()).is_none());
+        assert!(engine.lookup(&"203.0.113.1".parse().unwrap()).is_some());
+        assert!(engine.lookup(&"203.0.113.200".parse().unwrap()).is_none());
+    }
+
+    #[test]
+    fn a_range_off_its_first_address_is_refused() {
+        let mut engine = ThreatIntelEngine::new(100);
+        let mut bad = range("192.0.2.0/24", "f", 50);
+        bad.ip = "192.0.2.9".parse().unwrap();
+        assert!(engine.add_ioc(bad.clone()).is_err());
+        assert!(engine.reload(vec![bad]).is_err());
     }
 }

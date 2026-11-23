@@ -32,7 +32,7 @@ use ebpf_common::firewall::{
     FW_EMPTY_IDS_SRC_PATTERNS, FW_EMPTY_IFACE_GROUPS, FW_EMPTY_L7_PORTS, FW_EMPTY_LPM_V4,
     FW_EMPTY_LPM_V6, FW_EMPTY_QOS_CLASSIFIERS, FW_EMPTY_RL_TIERS_V4, FW_EMPTY_RL_TIERS_V6,
     FW_EMPTY_SRC_LIMITS, FW_EMPTY_TENANTS, FW_EMPTY_THREAT_IOCS_V4, FW_EMPTY_THREAT_IOCS_V6,
-    FW_EMPTY_ZONES,
+    FW_EMPTY_THREAT_NETS_V4, FW_EMPTY_THREAT_NETS_V6, FW_EMPTY_ZONES,
 };
 use std::sync::{Mutex, OnceLock};
 use tracing::{debug, info};
@@ -76,15 +76,19 @@ pub enum Feature {
     IdsSrcPatterns,
     /// `L7_PORTS`, the service ports whose payload is captured.
     L7Ports,
-    /// `THREATINTEL_IOCS` and the v4 bloom filter in front of it.
+    /// The v4 address table of the threat-intelligence slot in force.
     ThreatIocsV4,
-    /// `THREATINTEL_IOCS_V6` and the v6 bloom filter in front of it.
+    /// The v6 address table of the threat-intelligence slot in force.
     ThreatIocsV6,
     /// `QOS_CLASSIFIERS`, the shaper's rules.
     QosClassifiers,
+    /// The v4 range trie of the threat-intelligence slot in force.
+    ThreatNetsV4,
+    /// The v6 range trie of the threat-intelligence slot in force.
+    ThreatNetsV6,
 }
 
-const FEATURE_COUNT: usize = 20;
+const FEATURE_COUNT: usize = 22;
 
 impl Feature {
     const fn slot(self) -> usize {
@@ -109,6 +113,8 @@ impl Feature {
             Feature::ThreatIocsV4 => 17,
             Feature::ThreatIocsV6 => 18,
             Feature::QosClassifiers => 19,
+            Feature::ThreatNetsV4 => 20,
+            Feature::ThreatNetsV6 => 21,
         }
     }
 }
@@ -200,6 +206,12 @@ impl EmptyFeatures {
         }
         if self.is_empty(Feature::QosClassifiers) {
             mask |= FW_EMPTY_QOS_CLASSIFIERS;
+        }
+        if self.is_empty(Feature::ThreatNetsV4) {
+            mask |= FW_EMPTY_THREAT_NETS_V4;
+        }
+        if self.is_empty(Feature::ThreatNetsV6) {
+            mask |= FW_EMPTY_THREAT_NETS_V6;
         }
         mask
     }
@@ -360,6 +372,8 @@ mod tests {
             (Feature::ThreatIocsV4, FW_EMPTY_THREAT_IOCS_V4),
             (Feature::ThreatIocsV6, FW_EMPTY_THREAT_IOCS_V6),
             (Feature::QosClassifiers, FW_EMPTY_QOS_CLASSIFIERS),
+            (Feature::ThreatNetsV4, FW_EMPTY_THREAT_NETS_V4),
+            (Feature::ThreatNetsV6, FW_EMPTY_THREAT_NETS_V6),
         ] {
             let mut features = EmptyFeatures::default();
             features.set(feature, true);
@@ -416,6 +430,8 @@ mod tests {
             Feature::ThreatIocsV4,
             Feature::ThreatIocsV6,
             Feature::QosClassifiers,
+            Feature::ThreatNetsV4,
+            Feature::ThreatNetsV6,
         ] {
             let mut features = EmptyFeatures::default();
             features.set(feature, true);

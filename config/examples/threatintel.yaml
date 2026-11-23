@@ -3,9 +3,13 @@
 #
 # Integrates external OSINT feeds (IP blocklists, IOC databases) for
 # real-time traffic correlation. Feed data is loaded into eBPF maps
-# for wire-speed matching via a two-phase lookup:
-#   1. Bloom filter pre-check (O(1), zero false negatives)
-#   2. Full HashMap lookup only on Bloom filter hit
+# for wire-speed matching:
+#   1. Listed addresses: hash table, exact match
+#   2. Listed CIDR ranges: LPM trie, longest prefix wins
+# A refresh writes a second set of tables and switches the datapath to it
+# in one write, so a packet never sees a half-loaded feed. The tables hold
+# threatintel.max_entries each; a feed set larger than that is refused and
+# the set in force keeps matching. Nothing is evicted.
 #
 # Feeds are SOURCE-AGNOSTIC: any HTTP/HTTPS endpoint serving indicators
 # in plaintext, CSV, JSON, or STIX 2.1 works through field mappings -
@@ -78,9 +82,9 @@ threatintel:
   feeds:
     # ── Plaintext feeds ────────────────────────────────────────────
     #
-    # Format: one IP per line, comment lines skipped.
+    # Format: one address or CIDR range per line, comment lines skipped.
     # All IOCs receive confidence=100 (no confidence field).
-    # CIDR entries (containing "/") are skipped.
+    # A range (198.51.100.0/24) matches every address it holds.
 
     # Spamhaus DROP - well-known IP blocklist
     - id: spamhaus-drop
@@ -209,7 +213,7 @@ threatintel:
 # ── DNS Integration (cross-domain) ──────────────────────────────────
 #
 # When dns.blocklist blocks a domain, its resolved IPs are automatically
-# injected into the THREATINTEL_IOCS kernel map. This bridges domain-
+# injected into the threat intel kernel tables. This bridges domain-
 # level intelligence with IP-level kernel enforcement.
 #
 # Example: if *.malware-cdn.com resolves to 198.51.100.42, that IP is

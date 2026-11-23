@@ -1,5 +1,7 @@
 use crate::common::error::DomainError;
-use crate::threatintel::entity::{CtiIndicators, FeedConfig, FeedFormat, Ioc, ThreatType};
+use crate::threatintel::entity::{
+    CtiIndicators, FeedConfig, FeedFormat, Ioc, ThreatType, parse_target,
+};
 use std::net::IpAddr;
 
 /// Parse raw feed data into IOCs based on the feed configuration.
@@ -36,7 +38,7 @@ pub fn parse_feed(
     Ok(filtered)
 }
 
-/// Parse plaintext feed: one IP per line.
+/// Parse plaintext feed: one address or CIDR range per line.
 /// Lines starting with `comment_prefix` or empty lines are skipped.
 fn parse_plaintext(text: &str, config: &FeedConfig) -> Vec<Ioc> {
     let comment_prefix = config
@@ -61,14 +63,12 @@ fn parse_plaintext(text: &str, config: &FeedConfig) -> Vec<Ioc> {
         // Take only the first whitespace-separated token (some feeds have trailing comments)
         let token = trimmed.split_whitespace().next().unwrap_or(trimmed);
 
-        // Strip CIDR suffix if present (e.g. "1.2.3.0/24" → skip, we only handle host IPs)
-        if token.contains('/') {
-            continue;
-        }
-
-        if let Ok(ip) = token.parse::<IpAddr>() {
+        // One address or a range in CIDR notation, as Spamhaus DROP and the
+        // FireHOL lists write them.
+        if let Some((ip, prefix_len)) = parse_target(token) {
             iocs.push(Ioc {
                 ip,
+                prefix_len,
                 feed_id: config.id.clone(),
                 confidence: 100, // Plaintext feeds have no confidence; assume max
                 threat_type: ThreatType::Other,
@@ -120,9 +120,8 @@ fn parse_csv(text: &str, config: &FeedConfig) -> Vec<Ioc> {
             _ => continue,
         };
 
-        let ip: IpAddr = match ip_str.parse() {
-            Ok(ip) => ip,
-            Err(_) => continue,
+        let Some((ip, prefix_len)) = parse_target(ip_str) else {
+            continue;
         };
 
         // Resolve confidence
@@ -142,6 +141,7 @@ fn parse_csv(text: &str, config: &FeedConfig) -> Vec<Ioc> {
 
         iocs.push(Ioc {
             ip,
+            prefix_len,
             feed_id: config.id.clone(),
             confidence,
             threat_type,
@@ -236,12 +236,13 @@ pub fn parse_stix_feed(
 /// - `[ipv6-addr:value = '2001:db8::1']`
 /// - Compound patterns with AND/OR containing multiple IP comparisons
 ///
-/// Skips CIDR notation and unsupported pattern types.
-pub fn extract_ips_from_stix_pattern(pattern: &str) -> Vec<IpAddr> {
+/// A value in CIDR notation (`[ipv4-addr:value = '198.51.100.0/24']`, which
+/// STIX 2.1 allows for both address types) is a range: it comes back with
+/// its prefix length. Unsupported pattern types are skipped.
+pub fn extract_ips_from_stix_pattern(pattern: &str) -> Vec<(IpAddr, Option<u8>)> {
     extract_stix_pattern_values(pattern, &["ipv4-addr:value", "ipv6-addr:value"])
         .into_iter()
-        .filter(|v| !v.contains('/'))
-        .filter_map(|v| v.parse::<IpAddr>().ok())
+        .filter_map(parse_target)
         .collect()
 }
 
@@ -364,6 +365,7 @@ mod tests {
                 .map_or(ThreatType::Other, parse_threat_type);
             iocs.push(Ioc {
                 ip,
+                prefix_len: None,
                 feed_id: config.id.clone(),
                 confidence,
                 threat_type,
@@ -442,11 +444,14 @@ mod tests {
     }
 
     #[test]
-    fn plaintext_skips_cidr() {
-        let data = b"1.2.3.0/24\n5.6.7.8\n";
+    fn plaintext_reads_cidr_ranges() {
+        // Spamhaus DROP writes `net ; SBL id`, FireHOL one range per line.
+        let data = b"1.2.3.0/24 ; SBL123\n5.6.7.8\n2001:db8::/32\n0.0.0.0/0\n";
         let iocs = parse_feed(data, &plaintext_config(), no_json).unwrap();
-        assert_eq!(iocs.len(), 1);
-        assert_eq!(iocs[0].ip, "5.6.7.8".parse::<IpAddr>().unwrap());
+        assert_eq!(iocs.len(), 3);
+        assert_eq!(iocs[0].target(), "1.2.3.0/24");
+        assert_eq!(iocs[1].target(), "5.6.7.8");
+        assert_eq!(iocs[2].target(), "2001:db8::/32");
     }
 
     #[test]
@@ -593,13 +598,13 @@ mod tests {
     #[test]
     fn stix_pattern_single_ipv4() {
         let ips = extract_ips_from_stix_pattern("[ipv4-addr:value = '1.2.3.4']");
-        assert_eq!(ips, vec!["1.2.3.4".parse::<IpAddr>().unwrap()]);
+        assert_eq!(ips, vec![("1.2.3.4".parse::<IpAddr>().unwrap(), None)]);
     }
 
     #[test]
     fn stix_pattern_single_ipv6() {
         let ips = extract_ips_from_stix_pattern("[ipv6-addr:value = '2001:db8::1']");
-        assert_eq!(ips, vec!["2001:db8::1".parse::<IpAddr>().unwrap()]);
+        assert_eq!(ips, vec![("2001:db8::1".parse::<IpAddr>().unwrap(), None)]);
     }
 
     #[test]
@@ -619,9 +624,17 @@ mod tests {
     }
 
     #[test]
-    fn stix_pattern_cidr_skipped() {
+    fn stix_pattern_cidr_is_a_range() {
         let ips = extract_ips_from_stix_pattern("[ipv4-addr:value = '198.51.100.0/24']");
-        assert!(ips.is_empty());
+        assert_eq!(
+            ips,
+            vec![("198.51.100.0".parse::<IpAddr>().unwrap(), Some(24))]
+        );
+        let ips = extract_ips_from_stix_pattern("[ipv6-addr:value = '2001:db8::/48']");
+        assert_eq!(
+            ips,
+            vec![("2001:db8::".parse::<IpAddr>().unwrap(), Some(48))]
+        );
     }
 
     #[test]
@@ -727,6 +740,7 @@ mod tests {
                 iocs: vec![
                     Ioc {
                         ip: "1.2.3.4".parse().unwrap(),
+                        prefix_len: None,
                         feed_id: cfg.id.clone(),
                         confidence: 80,
                         threat_type: ThreatType::Malware,
@@ -735,6 +749,7 @@ mod tests {
                     },
                     Ioc {
                         ip: "5.6.7.8".parse().unwrap(),
+                        prefix_len: None,
                         feed_id: cfg.id.clone(),
                         confidence: 90,
                         threat_type: ThreatType::C2,
@@ -815,7 +830,7 @@ mod tests {
                 prop_assert_eq!(ips.len(), 1);
                 prop_assert_eq!(
                     ips[0],
-                    std::net::IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d))
+                    (std::net::IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d)), None)
                 );
             }
 

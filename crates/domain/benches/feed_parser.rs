@@ -47,6 +47,7 @@ fn bench_json_parser(text: &str, config: &FeedConfig) -> Result<Vec<Ioc>, Domain
             .map_or(ThreatType::Other, parse_threat_type);
         iocs.push(Ioc {
             ip,
+            prefix_len: None,
             feed_id: config.id.clone(),
             confidence,
             threat_type,

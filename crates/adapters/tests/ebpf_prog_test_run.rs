@@ -20,10 +20,12 @@ use adapters::ebpf::loader::EbpfLoader;
 use adapters::ebpf::prog_test_run::{
     self, TC_ACT_OK, TC_ACT_SHOT, XDP_ABORTED, XDP_DROP, XDP_PASS, XDP_REDIRECT, XDP_TX,
 };
-use aya::maps::{Array, BloomFilter, HashMap, MapData};
+use aya::maps::lpm_trie::Key;
+use aya::maps::{Array, HashMap, LpmTrie, MapData};
 use ebpf_common::config_flags::ConfigFlags;
 use ebpf_common::threatintel::{
-    THREATINTEL_ACTION_DROP, ThreatIntelKey, ThreatIntelKeyV6, ThreatIntelValue,
+    THREATINTEL_ACTION_DROP, THREATINTEL_SLOT_A, THREATINTEL_SLOT_B, ThreatIntelKey,
+    ThreatIntelKeyV6, ThreatIntelValue,
 };
 
 /// What a program is, for the purpose of reading its return value back.
@@ -300,11 +302,25 @@ enum Family {
     V6,
 }
 
-/// Load `tc-threatintel`, switch it on, write `10.0.0.1` or `fd00::1` as a
-/// blocking indicator into both the bloom filter and the table, and hand back
-/// the loaded object with the SYN from that address. `None` means the host
-/// cannot load it.
-fn threatintel_listing(family: Family) -> Option<(EbpfLoader, Vec<u8>)> {
+/// How the source of the test SYN is listed.
+#[derive(Debug, Clone, Copy)]
+enum Listing {
+    /// `10.0.0.1` or `fd00::1` in the address table.
+    Address,
+    /// `10.0.0.0/8` or `fd00::/8` in the range trie.
+    Range,
+}
+
+/// Load `tc-threatintel`, switch it on, list the SYN's source as a blocking
+/// indicator in `slot` (`'A'` or `'B'`) the way `listing` says, point the
+/// selector at `reads`, and hand back the loaded object with the SYN from that
+/// address. `None` means the host cannot load it.
+fn threatintel_listing(
+    family: Family,
+    listing: Listing,
+    slot: char,
+    reads: u32,
+) -> Option<(EbpfLoader, Vec<u8>)> {
     let dir = objects_dir();
     let bytes = std::fs::read(dir.join("tc-threatintel")).ok()?;
     let Ok(mut loaded) = EbpfLoader::load_unpinned(&bytes) else {
@@ -328,43 +344,60 @@ fn threatintel_listing(family: Family) -> Option<(EbpfLoader, Vec<u8>)> {
     };
     flags.set(0, &on, 0).expect("switch threat intelligence on");
 
+    let mut selector: Array<MapData, u32> = Array::try_from(
+        maps.take_map("THREATINTEL_SLOT")
+            .expect("THREATINTEL_SLOT map"),
+    )
+    .expect("selector typed");
+    selector.set(0, &reads, 0).expect("selector write");
+
     let block = ThreatIntelValue {
         action: THREATINTEL_ACTION_DROP,
         feed_id: 0,
         confidence: 100,
         threat_type: 0,
     };
-    let packet = match family {
-        Family::V4 => {
+    let packet = match (family, listing) {
+        (Family::V4, Listing::Address) => {
             let key = ThreatIntelKey {
                 ip: u32::from(std::net::Ipv4Addr::new(10, 0, 0, 1)),
             };
-            let mut bloom: BloomFilter<MapData, ThreatIntelKey> = BloomFilter::try_from(
-                maps.take_map("THREATINTEL_BLOOM_V4")
-                    .expect("THREATINTEL_BLOOM_V4 map"),
-            )
-            .expect("bloom typed");
-            bloom.insert(&key, 0).expect("bloom insert");
+            let name = format!("THREATINTEL_IOCS_{slot}");
             let mut iocs: HashMap<MapData, ThreatIntelKey, ThreatIntelValue> =
-                HashMap::try_from(maps.take_map("THREATINTEL_IOCS").expect("IOC map"))
-                    .expect("IOC map typed");
-            iocs.insert(&key, &block, 0).expect("IOC insert");
+                HashMap::try_from(maps.take_map(&name).expect("address table"))
+                    .expect("address table typed");
+            iocs.insert(&key, &block, 0).expect("address insert");
             tcp_syn()
         }
-        Family::V6 => {
+        (Family::V4, Listing::Range) => {
+            let name = format!("THREATINTEL_NETS_{slot}");
+            let mut nets: LpmTrie<MapData, [u8; 4], ThreatIntelValue> =
+                LpmTrie::try_from(maps.take_map(&name).expect("range trie"))
+                    .expect("range trie typed");
+            nets.insert(&Key::new(8, [10, 0, 0, 0]), &block, 0)
+                .expect("range insert");
+            tcp_syn()
+        }
+        (Family::V6, Listing::Address) => {
             let key = ThreatIntelKeyV6 {
                 ip: [0xfd00_0000, 0, 0, 1],
             };
-            let mut bloom: BloomFilter<MapData, ThreatIntelKeyV6> = BloomFilter::try_from(
-                maps.take_map("THREATINTEL_BLOOM_V6")
-                    .expect("THREATINTEL_BLOOM_V6 map"),
-            )
-            .expect("bloom typed");
-            bloom.insert(&key, 0).expect("bloom insert");
+            let name = format!("THREATINTEL_IOCS_V6_{slot}");
             let mut iocs: HashMap<MapData, ThreatIntelKeyV6, ThreatIntelValue> =
-                HashMap::try_from(maps.take_map("THREATINTEL_IOCS_V6").expect("IOC map"))
-                    .expect("IOC map typed");
-            iocs.insert(&key, &block, 0).expect("IOC insert");
+                HashMap::try_from(maps.take_map(&name).expect("address table"))
+                    .expect("address table typed");
+            iocs.insert(&key, &block, 0).expect("address insert");
+            tcp_syn_v6()
+        }
+        (Family::V6, Listing::Range) => {
+            let name = format!("THREATINTEL_NETS_V6_{slot}");
+            let mut nets: LpmTrie<MapData, [u8; 16], ThreatIntelValue> =
+                LpmTrie::try_from(maps.take_map(&name).expect("range trie"))
+                    .expect("range trie typed");
+            let mut net = [0u8; 16];
+            net[0] = 0xfd;
+            nets.insert(&Key::new(8, net), &block, 0)
+                .expect("range insert");
             tcp_syn_v6()
         }
     };
@@ -372,25 +405,54 @@ fn threatintel_listing(family: Family) -> Option<(EbpfLoader, Vec<u8>)> {
     Some((loaded, packet))
 }
 
-/// The bloom filter is probed before the table, so a probe the verifier
-/// accepts but that never answers "maybe" would let every listed address
-/// through while the program still loads.
+/// Run the listing's SYN through `tc_threatintel` and compare the verdict.
+fn assert_threatintel(family: Family, listing: Listing, slot: char, reads: u32, want: u32) {
+    let Some((loaded, packet)) = threatintel_listing(family, listing, slot, reads) else {
+        return;
+    };
+    let fd = loaded
+        .program_fd_owned("tc_threatintel")
+        .expect("tc_threatintel entry program");
+    match prog_test_run::run(borrow(&fd), &packet, 1) {
+        Ok(outcome) => assert_eq!(
+            outcome.retval, want,
+            "{family:?} {listing:?} in slot {slot}, selector {reads}"
+        ),
+        Err(e) if e.is_unavailable() => eprintln!("skipped: {e}"),
+        Err(e) => panic!("tc_threatintel could not be run: {e}"),
+    }
+}
+
 #[test]
 fn a_listed_source_is_dropped_by_threat_intelligence() {
     for family in [Family::V4, Family::V6] {
-        let Some((loaded, packet)) = threatintel_listing(family) else {
-            continue;
-        };
-        let fd = loaded
-            .program_fd_owned("tc_threatintel")
-            .expect("tc_threatintel entry program");
-        match prog_test_run::run(borrow(&fd), &packet, 1) {
-            Ok(outcome) => assert_eq!(
-                outcome.retval, TC_ACT_SHOT,
-                "{family:?}: a SYN from a blocking indicator must be dropped"
-            ),
-            Err(e) if e.is_unavailable() => eprintln!("skipped: {e}"),
-            Err(e) => panic!("tc_threatintel could not be run: {e}"),
+        assert_threatintel(
+            family,
+            Listing::Address,
+            'A',
+            THREATINTEL_SLOT_A,
+            TC_ACT_SHOT,
+        );
+    }
+}
+
+/// A feed's CIDR range is matched by longest prefix: an address inside it is
+/// dropped though it is listed nowhere on its own.
+#[test]
+fn a_source_inside_a_listed_range_is_dropped() {
+    for family in [Family::V4, Family::V6] {
+        assert_threatintel(family, Listing::Range, 'A', THREATINTEL_SLOT_A, TC_ACT_SHOT);
+    }
+}
+
+/// The datapath reads only the slot the selector names: a set written into
+/// the idle slot does nothing until the flip, and everything after it.
+#[test]
+fn only_the_slot_the_selector_names_is_read() {
+    for family in [Family::V4, Family::V6] {
+        for listing in [Listing::Address, Listing::Range] {
+            assert_threatintel(family, listing, 'B', THREATINTEL_SLOT_A, TC_ACT_OK);
+            assert_threatintel(family, listing, 'B', THREATINTEL_SLOT_B, TC_ACT_SHOT);
         }
     }
 }

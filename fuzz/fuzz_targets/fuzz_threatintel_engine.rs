@@ -33,6 +33,7 @@ fn ioc_from_bytes(chunk: &[u8]) -> Ioc {
 
     Ioc {
         ip,
+        prefix_len: None,
         feed_id: feed_id.clone(),
         confidence,
         threat_type,

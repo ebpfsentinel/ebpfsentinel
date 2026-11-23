@@ -18,13 +18,23 @@ pub const THREAT_TYPE_C2: u8 = 2;
 pub const THREAT_TYPE_SCANNER: u8 = 3;
 pub const THREAT_TYPE_SPAM: u8 = 4;
 
-/// Capacity the IOC tables and their bloom filters are declared with.
+/// Capacity the indicator tables are declared with.
 ///
-/// This is the object's default only: the loader sizes the four tables from
-/// `threatintel.max_entries`, or from the enabled feeds' `max_iocs` when it is
-/// absent, at every agent start (`adapters::ebpf::map_sizing`). A million
-/// slots here cost 168 MB of locked memory on an agent with no feed at all.
+/// This is the object's default only: the loader sizes the eight tables (an
+/// address table and a range trie per family, twice, for the slot the
+/// datapath reads and the one a reload writes) from
+/// `threatintel.max_entries`, or from the enabled feeds' `max_iocs` when it
+/// is absent, at every agent start (`adapters::ebpf::map_sizing`). Every one
+/// of them allocates an entry when it is written rather than when it is
+/// created, so a large capacity costs nothing until indicators fill it. A
+/// table is never evicted from: a reload that does not fit is refused and the
+/// set in force stays.
 pub const THREATINTEL_MAX_ENTRIES: u32 = 65_536;
+
+/// The datapath reads slot A of the indicator tables.
+pub const THREATINTEL_SLOT_A: u32 = 0;
+/// The datapath reads slot B of the indicator tables.
+pub const THREATINTEL_SLOT_B: u32 = 1;
 
 /// Metric indices for THREATINTEL_METRICS PerCpuArray.
 pub const THREATINTEL_METRIC_MATCHED: u32 = 0;
@@ -36,7 +46,7 @@ pub const THREATINTEL_METRIC_TOTAL_SEEN: u32 = 4;
 /// Total number of threat intel metric slots (one past the last index).
 pub const THREATINTEL_METRIC_COUNT: u32 = 5;
 
-/// Key for the `THREATINTEL_IOCS` `HashMap` (IPv4).
+/// Key for the `THREATINTEL_IOCS_A`/`_B` address tables (IPv4).
 /// Matches on a single IPv4 address (network byte-order u32).
 /// Size: 4 bytes.
 #[repr(C)]
@@ -45,7 +55,7 @@ pub struct ThreatIntelKey {
     pub ip: u32,
 }
 
-/// Key for the `THREATINTEL_IOCS_V6` `HashMap` (IPv6).
+/// Key for the `THREATINTEL_IOCS_V6_A`/`_B` address tables (IPv6).
 /// Matches on a single 128-bit IPv6 address.
 /// Size: 16 bytes (aligned to 4 bytes).
 #[repr(C)]
@@ -54,7 +64,7 @@ pub struct ThreatIntelKeyV6 {
     pub ip: [u32; 4],
 }
 
-/// Value for the THREATINTEL_IOCS HashMap.
+/// Value of every indicator table, address or range.
 /// Encodes the action, feed source, confidence, and threat category.
 /// Size: 4 bytes (aligned to 1 byte).
 #[repr(C)]

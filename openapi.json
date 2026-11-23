@@ -14888,7 +14888,8 @@
             "type": "string"
           },
           "ip": {
-            "type": "string"
+            "type": "string",
+            "description": "The listed address, or the listed range in CIDR notation."
           },
           "source_feed": {
             "type": "string"

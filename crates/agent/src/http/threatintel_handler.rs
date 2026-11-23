@@ -21,6 +21,7 @@ pub struct ThreatIntelStatusResponse {
 
 #[derive(Serialize, ToSchema)]
 pub struct IocResponse {
+    /// The listed address, or the listed range in CIDR notation.
     pub ip: String,
     pub feed_id: String,
     pub confidence: u8,
@@ -114,7 +115,7 @@ pub async fn list_iocs(State(state): State<Arc<AppState>>) -> Json<Vec<IocRespon
         .engine()
         .all_iocs()
         .map(|ioc| IocResponse {
-            ip: ioc.ip.to_string(),
+            ip: ioc.target(),
             feed_id: ioc.feed_id.clone(),
             confidence: ioc.confidence,
             threat_type: ioc.threat_type.to_string(),

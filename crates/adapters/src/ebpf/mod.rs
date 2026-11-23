@@ -159,7 +159,7 @@ pub use tenant_cgroup_map_manager::TenantCgroupMapManager;
 pub use tenant_ifindex_map_manager::TenantIfindexMapManager;
 pub use tenant_subnet_map_manager::TenantSubnetMapManager;
 pub use tenant_vlan_map_manager::TenantVlanMapManager;
-pub use threatintel_map_manager::ThreatIntelMapManager;
+pub use threatintel_map_manager::{SharedThreatIntelTables, ThreatIntelMapManager};
 pub use token_bootstrap::{
     BootstrapError, BpfLoadingHandle, BpfTokenPolicy, bootstrap as bootstrap_bpf,
     bootstrap_with_kernel,

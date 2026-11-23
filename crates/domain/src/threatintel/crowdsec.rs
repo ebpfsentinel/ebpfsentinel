@@ -12,7 +12,7 @@ use std::net::IpAddr;
 use crate::alert::entity::Alert;
 use crate::common::entity::DomainMode;
 
-use super::entity::{FeedConfig, Ioc, ThreatType};
+use super::entity::{FeedConfig, Ioc, ThreatType, parse_target};
 
 /// Feed identifier given to the decisions read from the local API.
 pub const CROWDSEC_FEED_ID: &str = "crowdsec";
@@ -46,8 +46,6 @@ pub struct Decision {
 pub struct DecisionSkips {
     /// Remedies other than a ban (a captcha has no meaning on a socket).
     pub not_ban: usize,
-    /// Ranges wider than one address: the indicator table holds addresses.
-    pub ranges: usize,
     /// Scopes that name no address at all (country, AS, username).
     pub other_scope: usize,
     /// Values that do not read as an address in their own scope.
@@ -58,7 +56,7 @@ impl DecisionSkips {
     /// Every decision that was not loaded.
     #[must_use]
     pub fn total(&self) -> usize {
-        self.not_ban + self.ranges + self.other_scope + self.unreadable
+        self.not_ban + self.other_scope + self.unreadable
     }
 }
 
@@ -82,23 +80,10 @@ pub fn scenario_threat_type(scenario: &str) -> ThreatType {
     }
 }
 
-/// Read a `Range` decision as one address, which it is only when its prefix
-/// covers the whole address.
-fn single_address_range(value: &str) -> Result<Option<IpAddr>, ()> {
-    let (addr, prefix) = value.split_once('/').ok_or(())?;
-    let ip: IpAddr = addr.trim().parse().map_err(|_| ())?;
-    let prefix: u8 = prefix.trim().parse().map_err(|_| ())?;
-    let full = if ip.is_ipv4() { 32 } else { 128 };
-    match prefix.cmp(&full) {
-        std::cmp::Ordering::Equal => Ok(Some(ip)),
-        std::cmp::Ordering::Less => Ok(None),
-        std::cmp::Ordering::Greater => Err(()),
-    }
-}
-
 /// Turn the decisions the local API returned into indicators for `feed`.
 ///
-/// A ban on one address is an indicator. Everything else is counted by reason
+/// A ban on one address or on a range is an indicator. Everything else is
+/// counted by reason
 /// and not loaded: the caller says how many were left out, so a decision that
 /// does not block here is never mistaken for one that does. The list is cut at
 /// the feed's `max_iocs`.
@@ -118,30 +103,21 @@ pub fn decisions_to_iocs(
             skips.not_ban += 1;
             continue;
         }
-        let ip = if d.scope.eq_ignore_ascii_case("ip") {
-            let Ok(ip) = d.value.trim().parse::<IpAddr>() else {
-                skips.unreadable += 1;
-                continue;
-            };
-            ip
+        let target = if d.scope.eq_ignore_ascii_case("ip") {
+            d.value.trim().parse::<IpAddr>().ok().map(|ip| (ip, None))
         } else if d.scope.eq_ignore_ascii_case("range") {
-            match single_address_range(&d.value) {
-                Ok(Some(ip)) => ip,
-                Ok(None) => {
-                    skips.ranges += 1;
-                    continue;
-                }
-                Err(()) => {
-                    skips.unreadable += 1;
-                    continue;
-                }
-            }
+            parse_target(&d.value)
         } else {
             skips.other_scope += 1;
             continue;
         };
+        let Some((ip, prefix_len)) = target else {
+            skips.unreadable += 1;
+            continue;
+        };
         iocs.push(Ioc {
             ip,
+            prefix_len,
             feed_id: feed.id.clone(),
             confidence: DECISION_CONFIDENCE,
             threat_type: scenario_threat_type(&d.scenario),
@@ -357,7 +333,6 @@ mod tests {
         let (iocs, skips) = decisions_to_iocs(
             &[
                 decision("Ip", "203.0.113.7", "captcha", "x"),
-                decision("Range", "203.0.113.0/24", "ban", "x"),
                 decision("Country", "FR", "ban", "x"),
                 decision("Ip", "not-an-address", "ban", "x"),
                 decision("Range", "203.0.113.0/40", "ban", "x"),
@@ -370,12 +345,27 @@ mod tests {
             skips,
             DecisionSkips {
                 not_ban: 1,
-                ranges: 1,
                 other_scope: 1,
                 unreadable: 2,
             }
         );
-        assert_eq!(skips.total(), 5);
+        assert_eq!(skips.total(), 4);
+    }
+
+    #[test]
+    fn a_banned_range_is_a_range_indicator() {
+        let (iocs, skips) = decisions_to_iocs(
+            &[
+                decision("Range", "203.0.113.0/24", "ban", "x"),
+                decision("Range", "198.51.100.9/32", "ban", "x"),
+                decision("Range", "2001:db8::/48", "ban", "x"),
+            ],
+            &feed(10),
+            0,
+        );
+        assert_eq!(skips.total(), 0);
+        let targets: Vec<String> = iocs.iter().map(Ioc::target).collect();
+        assert_eq!(targets, ["203.0.113.0/24", "198.51.100.9", "2001:db8::/48"]);
     }
 
     #[test]

@@ -226,9 +226,9 @@ impl ThreatIntelAppService {
             return;
         };
 
-        // The datapath matches against a partly written table for the whole
-        // of this call, so how long it took is the figure that says whether a
-        // feed has outgrown the host it is loaded on.
+        // The datapath keeps matching the previous set for the whole of this
+        // call, so how long it took is how stale a refresh can leave it, the
+        // figure that says whether a feed has outgrown the host.
         let started = std::time::Instant::now();
         let outcome = map.load_all_iocs(&iocs);
         let elapsed = started.elapsed();
@@ -304,6 +304,7 @@ mod tests {
     fn make_ioc(ip: &str) -> Ioc {
         Ioc {
             ip: ip.parse().unwrap(),
+            prefix_len: None,
             feed_id: "test-feed".to_string(),
             confidence: 80,
             threat_type: ThreatType::C2,
@@ -402,25 +403,6 @@ mod tests {
     }
 
     impl ThreatIntelMapPort for RecordingMapPort {
-        fn insert_ioc(
-            &mut self,
-            _key: &ebpf_common::threatintel::ThreatIntelKey,
-            _value: &ebpf_common::threatintel::ThreatIntelValue,
-        ) -> Result<(), DomainError> {
-            Ok(())
-        }
-
-        fn remove_ioc(
-            &mut self,
-            _key: &ebpf_common::threatintel::ThreatIntelKey,
-        ) -> Result<(), DomainError> {
-            Ok(())
-        }
-
-        fn clear_iocs(&mut self) -> Result<(), DomainError> {
-            Ok(())
-        }
-
         fn ioc_count(&self) -> Result<usize, DomainError> {
             Ok(self.loaded.lock().unwrap().len())
         }
@@ -428,7 +410,7 @@ mod tests {
         fn load_all_iocs(&mut self, iocs: &[(Ioc, DomainMode)]) -> Result<(), DomainError> {
             *self.loaded.lock().unwrap() = iocs
                 .iter()
-                .map(|(ioc, mode)| (ioc.ip.to_string(), *mode))
+                .map(|(ioc, mode)| (ioc.target(), *mode))
                 .collect();
             Ok(())
         }
